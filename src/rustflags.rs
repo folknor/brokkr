@@ -37,6 +37,210 @@
 
 use std::path::{Path, PathBuf};
 
+/// The environment Cargo receives, with the caller's explicit pairs taking
+/// precedence over brokkr's inherited process environment. A present empty
+/// value remains present: Cargo's config environment loader reads it instead
+/// of treating it as unset, though a setting's parser may reject that value.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EffectiveEnv<'a> {
+    overrides: &'a [(&'a str, &'a str)],
+}
+
+impl<'a> EffectiveEnv<'a> {
+    pub(crate) fn new(overrides: &'a [(&'a str, &'a str)]) -> Self {
+        Self { overrides }
+    }
+
+    /// The final value Cargo sees. The last explicit pair wins, followed by
+    /// the process environment when no pair sets this key.
+    pub(crate) fn get_os(self, key: &str) -> Option<std::ffi::OsString> {
+        self.overrides
+            .iter()
+            .rev()
+            .find(|(name, _)| *name == key)
+            .map(|(_, value)| std::ffi::OsString::from(*value))
+            .or_else(|| std::env::var_os(key))
+    }
+
+    pub(crate) fn contains(self, key: &str) -> bool {
+        self.get_os(key).is_some()
+    }
+
+    pub(crate) fn pairs(self) -> &'a [(&'a str, &'a str)] {
+        self.overrides
+    }
+
+    fn source(self, key: &str) -> Option<Source> {
+        self.get_os(key).map(|value| Source {
+            origin: SourceOrigin::Environment(value),
+            key: key.to_owned(),
+        })
+    }
+}
+
+/// Where a cargo setting came from, kept with the key for a precise refusal.
+#[derive(Debug, Clone)]
+pub(crate) struct Source {
+    pub(crate) origin: SourceOrigin,
+    pub(crate) key: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum SourceOrigin {
+    Environment(std::ffi::OsString),
+    Config(PathBuf),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ConfigEnvEntry {
+    pub(crate) key: String,
+    pub(crate) value: String,
+    /// `force = true`: overrides an inherited environment value; without it
+    /// the entry only fills a hole.
+    pub(crate) force: bool,
+}
+
+/// The cargo config facts shared by check's direct lanes, serial shim, and
+/// build concurrency decision. Paths are ordered from highest to lowest
+/// precedence, and each file is parsed once for this discovery.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CargoLaunchConfig {
+    pub(crate) runner: Option<Source>,
+    pub(crate) build_target: Option<Source>,
+    pub(crate) rustdoc: Option<Source>,
+    pub(crate) build_dir: bool,
+    pub(crate) env: Vec<ConfigEnvEntry>,
+}
+
+impl CargoLaunchConfig {
+    pub(crate) fn discover(root: &Path, env: EffectiveEnv<'_>) -> Self {
+        let files: Vec<(PathBuf, toml::Table)> = config_paths_under(root, env)
+            .into_iter()
+            .filter_map(|path| {
+                let text = std::fs::read_to_string(&path).ok()?;
+                let doc = text.parse::<toml::Table>().ok()?;
+                Some((path, doc))
+            })
+            .collect();
+
+        let host = host_triple();
+        let runner_var = host.as_deref().map(runner_env_var);
+        let runner = runner_var
+            .as_deref()
+            .and_then(|key| env.source(key))
+            .or_else(|| config_runner_source(&files, host.as_deref()));
+        let build_target = env
+            .source("CARGO_BUILD_TARGET")
+            .or_else(|| config_source(&files, "build", "target"));
+        let rustdoc = env
+            .source("RUSTDOC")
+            .or_else(|| env.source("CARGO_BUILD_RUSTDOC"))
+            .or_else(|| config_source(&files, "build", "rustdoc"));
+        let build_dir = env.contains("CARGO_BUILD_BUILD_DIR")
+            || files.iter().any(|(_, doc)| {
+                doc.get("build")
+                    .and_then(toml::Value::as_table)
+                    .is_some_and(|build| build.contains_key("build-dir"))
+            });
+        let config_env = files
+            .iter()
+            .flat_map(|(path, doc)| config_env_entries(path, doc))
+            .collect();
+
+        Self {
+            runner,
+            build_target,
+            rustdoc,
+            build_dir,
+            env: config_env,
+        }
+    }
+}
+
+/// Cargo's documented env spelling for `[target.<triple>].runner`.
+pub(crate) fn runner_env_var(triple: &str) -> String {
+    format!(
+        "CARGO_TARGET_{}_RUNNER",
+        triple.to_uppercase().replace('-', "_")
+    )
+}
+
+fn config_source(files: &[(PathBuf, toml::Table)], table: &str, key: &str) -> Option<Source> {
+    files.iter().find_map(|(path, doc)| {
+        doc.get(table)
+            .and_then(toml::Value::as_table)
+            .filter(|values| values.contains_key(key))
+            .map(|_| Source {
+                origin: SourceOrigin::Config(path.clone()),
+                key: format!("{table}.{key}"),
+            })
+    })
+}
+
+fn config_runner_source(files: &[(PathBuf, toml::Table)], host: Option<&str>) -> Option<Source> {
+    files.iter().find_map(|(path, doc)| {
+        let targets = doc.get("target")?.as_table()?;
+        targets.iter().find_map(|(selector, value)| {
+            let table = value.as_table()?;
+            if !table.contains_key("runner") {
+                return None;
+            }
+            let applies = if let Some(expr) = selector
+                .strip_prefix("cfg(")
+                .and_then(|s| s.strip_suffix(')'))
+            {
+                // Unknown -> true: replacing a runner that might apply is the
+                // destructive direction.
+                eval_cfg(expr) != Some(false)
+            } else {
+                host == Some(selector.as_str())
+            };
+            applies.then(|| Source {
+                origin: SourceOrigin::Config(path.clone()),
+                key: format!("target.{selector}.runner"),
+            })
+        })
+    })
+}
+
+fn config_env_entries(path: &Path, doc: &toml::Table) -> Vec<ConfigEnvEntry> {
+    let Some(entries) = doc.get("env").and_then(toml::Value::as_table) else {
+        return Vec::new();
+    };
+    // <dir>/.cargo/config.toml -> <dir>.
+    let anchor = path.parent().and_then(Path::parent);
+    entries
+        .iter()
+        .filter_map(|(key, value)| match value {
+            toml::Value::String(value) => Some(ConfigEnvEntry {
+                key: key.clone(),
+                value: value.clone(),
+                force: false,
+            }),
+            toml::Value::Table(table) => {
+                let value = table.get("value")?.as_str()?;
+                let relative = table
+                    .get("relative")
+                    .and_then(toml::Value::as_bool)
+                    .unwrap_or(false);
+                let value = match (relative, anchor) {
+                    (true, Some(dir)) => dir.join(value).display().to_string(),
+                    _ => value.to_owned(),
+                };
+                Some(ConfigEnvEntry {
+                    key: key.clone(),
+                    value,
+                    force: table
+                        .get("force")
+                        .and_then(toml::Value::as_bool)
+                        .unwrap_or(false),
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// The one place brokkr can add flags for this invocation without displacing
 /// the project's own. Determined by [`sink`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,14 +379,14 @@ fn toml_string(s: &str) -> String {
 /// the ancestor walk, then `$CARGO_HOME`. Order does not matter here - the
 /// question is only whether *any* of them contributes a matching target entry.
 pub(crate) fn config_paths(build_root: &Path) -> Vec<PathBuf> {
-    config_paths_under(build_root, &[])
+    config_paths_under(build_root, EffectiveEnv::new(&[]))
 }
 
 /// [`config_paths`] for a cargo launched with `env` over brokkr's own
 /// environment: a `CARGO_HOME` there moves the home cargo reads, so the chain
 /// must follow it (relative to `build_root`, where that cargo starts) or a
 /// runner or target configured in the other home goes unseen.
-pub(crate) fn config_paths_under(build_root: &Path, env: &[(&str, &str)]) -> Vec<PathBuf> {
+pub(crate) fn config_paths_under(build_root: &Path, env: EffectiveEnv<'_>) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for dir in build_root.ancestors() {
         push_config(&mut out, &dir.join(".cargo"));
@@ -190,14 +394,8 @@ pub(crate) fn config_paths_under(build_root: &Path, env: &[(&str, &str)]) -> Vec
     // The value cargo sees: the sweep's (even an empty one) over brokkr's own.
     // Then cargo's rule - empty means unset, so `$HOME/.cargo`, and a relative
     // value is taken against where that cargo starts.
-    let effective = env
-        .iter()
-        .rev()
-        .find(|(k, _)| *k == "CARGO_HOME")
-        .map(|(_, v)| (*v).to_owned())
-        .or_else(|| std::env::var("CARGO_HOME").ok());
-    let home = match effective.filter(|v| !v.is_empty()) {
-        Some(v) => Some(build_root.join(v)),
+    let home = match env.get_os("CARGO_HOME").filter(|v| !v.is_empty()) {
+        Some(v) => Some(build_root.join(PathBuf::from(v))),
         None => crate::user_dirs::home().map(|h| h.join(".cargo")),
     };
     if let Some(home) = home {

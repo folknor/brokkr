@@ -19,6 +19,7 @@ use serde::Deserialize;
 
 use super::{DiagKey, DiagSet, PinnableDisposition, Severity};
 use crate::error::DevError;
+use crate::lockfile::LockGuard;
 use crate::piners::registry::FilePin;
 use crate::preflight;
 
@@ -146,7 +147,13 @@ pub fn parse_lints(text: &str, origin: &Path) -> Result<LintsData, DevError> {
 
 impl LintRegistry {
     /// Load `lints.toml` and every sibling `<keyword>.toml` from `registry_dir`.
-    pub fn load(registry_dir: &Path) -> Result<Self, DevError> {
+    /// Requires the caller's lock so writers cannot replace files while this
+    /// snapshot is being assembled.
+    pub fn load(registry_dir: &Path, _lock: &LockGuard) -> Result<Self, DevError> {
+        Self::load_unlocked(registry_dir)
+    }
+
+    fn load_unlocked(registry_dir: &Path) -> Result<Self, DevError> {
         if !registry_dir.is_dir() {
             return Err(DevError::Config(format!(
                 "piners lint: registry directory not found: {}",
@@ -350,7 +357,7 @@ pine = { path = "lint/clean-01.pine", xxh128 = "bbb" }
         .unwrap();
         std::fs::write(dir.join("lex.toml"), "probes = [\"unterminated-01\"]\n").unwrap();
 
-        let r = LintRegistry::load(&dir).unwrap();
+        let r = LintRegistry::load_unlocked(&dir).unwrap();
         std::fs::remove_dir_all(&dir).ok();
 
         assert!(r.lints_text.contains("[probes.clean-01]"));

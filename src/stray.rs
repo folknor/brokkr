@@ -19,18 +19,83 @@
 //! is not itself part of the cargo family (`rust-analyzer`, a shell, an
 //! editor), so the report says who started it.
 //!
-//! Ownership - the question of which cargo is brokkr's own and therefore not a
-//! stray - is decided by two pids, this process and the verified lock holder,
-//! never by an ancestor being named `brokkr`; see [`Ownership`] for why a name
-//! is not enough. Signals are identity-checked against a recorded starttime,
-//! and a stray's descendant tree dies with it, stopping at anything brokkr owns.
+//! Both this reaper and the orphan reaper spare the same process-tree boundary:
+//! this process, its visible ancestors and its visible descendants. This
+//! reaper also protects a verified lock holder and its namespace. Ownership is
+//! decided by process identities, never by an ancestor being named `brokkr`;
+//! see [`Ownership`] for why a name is not enough. Signals are
+//! identity-checked against a recorded starttime, and a stray's descendant
+//! tree dies with it, stopping at anything brokkr owns.
 
 use std::collections::{HashMap, HashSet};
 
 use crate::error::DevError;
 use crate::output;
 
-/// One cargo-family process with no brokkr ancestor.
+/// The process-tree boundary every reaper must spare: this process, its
+/// visible ancestors, and its visible descendants. Both stray cleanup and
+/// orphan cleanup use this same set so one cannot kill a process the other
+/// considers part of the active brokkr invocation.
+///
+/// An ancestor Cargo can hold the target-dir lock, and killing it could free
+/// that lock for nested Cargo. It would also abort the Cargo operation that
+/// launched this brokkr, so the reapers preserve the invocation chain even if
+/// that leaves a recursive Cargo lock wait unresolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReaperExemptions {
+    pids: HashSet<u32>,
+}
+
+impl ReaperExemptions {
+    /// Build the shared self/ancestor/descendant exemption set from a process
+    /// table represented as `(pid, ppid)` pairs.
+    pub(crate) fn from_parent_pairs(
+        me: u32,
+        parent_pairs: impl IntoIterator<Item = (u32, u32)>,
+    ) -> Self {
+        let parents: HashMap<u32, u32> = parent_pairs.into_iter().collect();
+        let mut pids = HashSet::from([me]);
+
+        // The process and every visible ancestor are exempt. Bound the walk
+        // by the visited set against an inconsistent /proc snapshot or a
+        // reused PID.
+        let mut cursor = me;
+        while let Some(&parent) = parents.get(&cursor) {
+            if parent == 0 || parent == cursor || !pids.insert(parent) {
+                break;
+            }
+            cursor = parent;
+        }
+
+        // Walk children from `me`; the visited set makes even an inconsistent
+        // parent cycle finite and keeps this full-table scan linear.
+        let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (&pid, &parent) in &parents {
+            if parent != 0 && parent != pid {
+                children.entry(parent).or_default().push(pid);
+            }
+        }
+        let mut pending = vec![me];
+        while let Some(parent) = pending.pop() {
+            if let Some(descendants) = children.get(&parent) {
+                for &child in descendants {
+                    if pids.insert(child) {
+                        pending.push(child);
+                    }
+                }
+            }
+        }
+
+        Self { pids }
+    }
+
+    pub(crate) fn contains(&self, pid: u32) -> bool {
+        self.pids.contains(&pid)
+    }
+}
+
+/// One cargo-family process selected for cleanup outside brokkr's protected
+/// invocation and ownership trees.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stray {
     pub pid: u32,
@@ -96,7 +161,8 @@ pub fn is_cargo_family(comm: &str) -> bool {
         || comm.starts_with("brokkr-rustc")
 }
 
-/// Which process trees are brokkr's own work, and therefore not strays.
+/// The stray reaper's extra ownership proofs, beyond the shared process-tree
+/// boundary in [`ReaperExemptions`].
 ///
 /// Two PIDs, never a name. Ancestry by `comm` was the original rule and it is
 /// spoofable in the way that matters: any executable *named* `brokkr` exempted
@@ -133,8 +199,17 @@ struct Ownership {
 }
 
 impl Ownership {
-    /// Whether a PID marks the tree below it, and itself, as brokkr's own.
-    fn owns(&self, pid: u32) -> bool {
+    /// Whether a PID is protected by the shared process-tree rule or the
+    /// lock-holder / namespace ownership proof.
+    fn owns(&self, pid: u32, exemptions: &ReaperExemptions) -> bool {
+        exemptions.contains(pid) || self.owns_subtree_root(pid)
+    }
+
+    /// Whether this PID itself is brokkr, a separately verified lock holder,
+    /// or inside the verified holder namespace. Used while walking ancestry so
+    /// an ancestor protected by the shared policy does not also classify all
+    /// of its other branches as brokkr-owned.
+    fn owns_subtree_root(&self, pid: u32) -> bool {
         pid == self.me
             || self.holder == Some(pid)
             || self.foreign_ns.is_some_and(|ns| within_ns(pid, ns))
@@ -246,12 +321,16 @@ fn read_proc() -> HashMap<u32, ProcEntry> {
     table
 }
 
-/// Every cargo-family process not owned by brokkr, leaves first. Pure over the
-/// given table and ownership rule so the classification is unit-testable.
+/// Every unprotected cargo-family process, leaves first. Pure over the given
+/// table and ownership rule so the classification is unit-testable.
 fn classify(table: &HashMap<u32, ProcEntry>, ownership: Ownership) -> Vec<Stray> {
+    let exemptions = ReaperExemptions::from_parent_pairs(
+        ownership.me,
+        table.iter().map(|(&pid, entry)| (pid, entry.ppid)),
+    );
     let mut strays = Vec::new();
     for (&pid, entry) in table {
-        if !is_cargo_family(&entry.comm) || ownership.owns(pid) {
+        if !is_cargo_family(&entry.comm) || ownership.owns(pid, &exemptions) {
             continue;
         }
         let mut under_brokkr = false;
@@ -266,7 +345,7 @@ fn classify(table: &HashMap<u32, ProcEntry>, ownership: Ownership) -> Vec<Stray>
                 break;
             };
             depth += 1;
-            if ownership.owns(cursor) {
+            if ownership.owns_subtree_root(cursor) {
                 under_brokkr = true;
                 break;
             }
@@ -313,21 +392,22 @@ fn collect_descendants(
     pid: u32,
     depth: usize,
     ownership: &Ownership,
+    exemptions: &ReaperExemptions,
     seen: &mut HashSet<u32>,
     out: &mut Vec<(usize, u32, String)>,
 ) {
-    if depth > 64 {
+    if depth > 64 || ownership.owns(pid, exemptions) {
         return;
     }
     for (&child, entry) in table {
-        if entry.ppid != pid || child == pid || ownership.owns(child) {
+        if entry.ppid != pid || child == pid || ownership.owns(child, exemptions) {
             continue;
         }
         if !seen.insert(child) {
             continue;
         }
         out.push((depth + 1, child, entry.starttime.clone()));
-        collect_descendants(table, child, depth + 1, ownership, seen, out);
+        collect_descendants(table, child, depth + 1, ownership, exemptions, seen, out);
     }
 }
 
@@ -345,6 +425,10 @@ pub fn kill(strays: &[Stray]) -> (usize, usize) {
     // keeps the two coherent.
     let table = read_proc();
     let ownership = current_ownership();
+    let exemptions = ReaperExemptions::from_parent_pairs(
+        ownership.me,
+        table.iter().map(|(&pid, entry)| (pid, entry.ppid)),
+    );
 
     // Signal `pid` only if it is still the process whose starttime we recorded.
     // A bare PID is not an identity: between classification and the kill the
@@ -353,7 +437,7 @@ pub fn kill(strays: &[Stray]) -> (usize, usize) {
     let sigkill = |pid: u32, expect: &str| {
         // Every target, descendants and starters included, not just the
         // classified strays: an owned process is never signalled.
-        if expect.is_empty() || ownership.owns(pid) {
+        if expect.is_empty() || ownership.owns(pid, &exemptions) {
             return false;
         }
         match crate::lockfile::proc_starttime(pid) {
@@ -388,7 +472,15 @@ pub fn kill(strays: &[Stray]) -> (usize, usize) {
     let mut seen: HashSet<u32> = HashSet::new();
     let mut descendants: Vec<(usize, u32, String)> = Vec::new();
     for s in strays {
-        collect_descendants(&table, s.pid, 0, &ownership, &mut seen, &mut descendants);
+        collect_descendants(
+            &table,
+            s.pid,
+            0,
+            &ownership,
+            &exemptions,
+            &mut seen,
+            &mut descendants,
+        );
     }
     descendants.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     for (_, pid, starttime) in &descendants {
@@ -567,7 +659,8 @@ mod tests {
             holder: None,
             foreign_ns: Some(own),
         };
-        assert!(o.owns(me));
+        let exemptions = ReaperExemptions::from_parent_pairs(me, std::iter::empty());
+        assert!(o.owns(me, &exemptions));
     }
 
     fn foreign() -> Ownership {
@@ -642,14 +735,13 @@ mod tests {
         assert_eq!(unverifiable, vec![40, 30]);
     }
 
-    /// `cargo(stray) -> brokkr(us) -> cargo(ours)`: the classifier walking up
-    /// from the outer cargo cannot see us below it, so the outer cargo is a
-    /// stray. Expanding its descendants must not reach us or our work.
+    /// `cargo(caller) -> brokkr(us) -> cargo(ours)`: both caller and our work
+    /// are inside the shared self/ancestor/descendant exemption boundary.
     #[test]
-    fn descendant_expansion_never_crosses_into_brokkrs_own_subtree() {
+    fn stray_reaping_spares_our_ancestors_and_descendants() {
         let t = table(&[
             (1, 0, "systemd"),
-            (10, 1, "cargo"),   // the stray root
+            (10, 1, "cargo"),   // our caller
             (20, 10, "brokkr"), // us, launched from that cargo
             (30, 20, "cargo"),  // our own work
             (40, 30, "rustc"),
@@ -659,17 +751,21 @@ mod tests {
             holder: Some(20),
             foreign_ns: None,
         };
-        // The outer cargo is a stray; ours is not.
+        // Neither the caller Cargo nor our child Cargo is a stray.
         let pids: Vec<u32> = classify(&t, own).iter().map(|s| s.pid).collect();
-        assert_eq!(pids, vec![10]);
+        assert!(pids.is_empty());
 
+        let exemptions = ReaperExemptions::from_parent_pairs(
+            own.me,
+            t.iter().map(|(&pid, entry)| (pid, entry.ppid)),
+        );
         let mut seen = HashSet::new();
         let mut out = Vec::new();
-        collect_descendants(&t, 10, 0, &own, &mut seen, &mut out);
+        collect_descendants(&t, 10, 0, &own, &exemptions, &mut seen, &mut out);
         let reached: Vec<u32> = out.iter().map(|(_, pid, _)| *pid).collect();
         assert!(
             reached.is_empty(),
-            "expansion from a stray must stop at brokkr, not walk through it: {reached:?}"
+            "descendant expansion must stop at the shared exemption boundary: {reached:?}"
         );
     }
 
@@ -684,9 +780,13 @@ mod tests {
         ]);
         let mut seen = HashSet::new();
         let mut out = Vec::new();
+        let exemptions = ReaperExemptions::from_parent_pairs(
+            999_999,
+            t.iter().map(|(&pid, entry)| (pid, entry.ppid)),
+        );
         // Both roots cover 30; it must appear once.
-        collect_descendants(&t, 10, 0, &foreign(), &mut seen, &mut out);
-        collect_descendants(&t, 20, 0, &foreign(), &mut seen, &mut out);
+        collect_descendants(&t, 10, 0, &foreign(), &exemptions, &mut seen, &mut out);
+        collect_descendants(&t, 20, 0, &foreign(), &exemptions, &mut seen, &mut out);
         let mut pids: Vec<u32> = out.iter().map(|(_, pid, _)| *pid).collect();
         pids.sort_unstable();
         assert_eq!(pids, vec![20, 30]);

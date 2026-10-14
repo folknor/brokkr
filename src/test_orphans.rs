@@ -53,11 +53,12 @@
 //! orphaned test process as much as one left by a crash, and goes the same way.
 //!
 //! Exempt, whatever token they carry: this process, its ancestors and its
-//! descendants. The mark is inherited, so a brokkr started from inside a test
-//! carries the outer run's token in its own environment - and so does every
-//! non-test child it starts. If the outer brokkr is the one that died, the reap
-//! must not kill the brokkr running it, the orphaned test binary it is running
-//! under, or its own cargo.
+//! descendants. This is the same process-tree boundary used by the stray
+//! reaper ([`crate::stray::ReaperExemptions`]). The mark is inherited, so a
+//! brokkr started from inside a test carries the outer run's token in its own
+//! environment - and so does every non-test child it starts. If the outer
+//! brokkr is the one that died, the reap must not kill the brokkr running it,
+//! the orphaned test binary it is running under, or its own cargo.
 
 use std::collections::{HashMap, HashSet};
 use std::os::unix::io::AsRawFd;
@@ -329,35 +330,19 @@ fn read_table() -> HashMap<u32, ProcRow> {
     table
 }
 
-/// Whether `ancestor` appears on `pid`'s parent chain (not counting `pid`).
-fn has_ancestor(table: &HashMap<u32, ProcRow>, pid: u32, ancestor: u32) -> bool {
-    let mut cursor = pid;
-    // Bounded: a consistent snapshot has no parent cycle, but a pid reused
-    // mid-scan could fake one.
-    for _ in 0..256 {
-        let Some(row) = table.get(&cursor) else {
-            return false;
-        };
-        if row.ppid == ancestor {
-            return true;
-        }
-        if row.ppid == 0 || row.ppid == cursor {
-            return false;
-        }
-        cursor = row.ppid;
-    }
-    false
-}
-
 /// Every process carrying a dead token, excluding `me`, its ancestors and its
 /// descendants, newest first. Pure over the table so the selection is
 /// unit-testable.
 fn select(table: &HashMap<u32, ProcRow>, dead: &HashSet<String>, me: u32) -> Vec<Orphan> {
+    let exemptions = crate::stray::ReaperExemptions::from_parent_pairs(
+        me,
+        table.iter().map(|(&pid, row)| (pid, row.ppid)),
+    );
     let mut out: Vec<Orphan> = table
         .iter()
         .filter_map(|(&pid, row)| {
             let token = row.token.as_ref().filter(|t| dead.contains(*t))?;
-            if pid == me || has_ancestor(table, pid, me) || has_ancestor(table, me, pid) {
+            if exemptions.contains(pid) {
                 return None;
             }
             Some(Orphan {
@@ -433,7 +418,8 @@ fn reap_in(dir: &Path, me: u32) -> ReapReport {
     let tokens: HashSet<String> = dead.iter().map(|d| d.token.clone()).collect();
 
     let mut signalled: HashSet<u32> = HashSet::new();
-    let mut remaining = select(&read_table(), &tokens, me);
+    let mut table = read_table();
+    let mut remaining = select(&table, &tokens, me);
     for _ in 0..REAP_PASSES {
         if remaining.is_empty() {
             break;
@@ -448,13 +434,21 @@ fn reap_in(dir: &Path, me: u32) -> ReapReport {
             }
         }
         settle(&this_pass);
-        remaining = select(&read_table(), &tokens, me);
+        table = read_table();
+        remaining = select(&table, &tokens, me);
     }
-    // Whatever is still visible (a process stuck in uninterruptible sleep, a
-    // child forked after the last scan) keeps its token's file, and the next
-    // reap tries again.
+    // Any visible carrier keeps its token's file, including an exempt ancestor
+    // or descendant. It may leave this process tree after the current command;
+    // a later reap still needs the registration to find it. Only the reapable
+    // ones are reported as survivors: this process (which can carry an outer
+    // run's token itself) and its own tree are spared by design, not failures,
+    // and counting them printed a "still visible" line at every nested hold.
     report.survivors = remaining.len();
-    let alive: HashSet<&str> = remaining.iter().map(|o| o.token.as_str()).collect();
+    let alive: HashSet<&str> = table
+        .values()
+        .filter_map(|row| row.token.as_deref())
+        .filter(|token| tokens.contains(*token))
+        .collect();
     for run in &dead {
         if !alive.contains(run.token.as_str()) {
             drop(std::fs::remove_file(&run.path));

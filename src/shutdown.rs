@@ -12,7 +12,7 @@
 //! 2. A [`SigtermGuard`] is installed for the lifetime of each tracked-child
 //!    window - a sidecar run, a passthrough child, an orchestrator's whole
 //!    run, and the whole of `brokkr check` / `brokkr test` / `brokkr clippy`.
-//!    Its handler kills registered test groups, sets [`SHUTDOWN_REQUESTED`],
+//!    Its handler kills registered test groups, records a scoped request,
 //!    and nothing else - it must be async-signal-safe. Guards nest: only the
 //!    outermost installs and restores the dispositions, so an inner guard can
 //!    neither clear a pending request nor uncover the outer window. A
@@ -43,13 +43,171 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 
-static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// The shutdown protocol's complete state. The guard-scoped request is reset
+/// when the outermost guard leaves; a committed stop survives that transition.
+/// Exit cleanup is a terminal admission state: it permits the cleanup lock but
+/// still remembers any guard-scoped request until that guard leaves.
+#[repr(u8)]
+#[derive(Clone, Copy)]
+enum ShutdownState {
+    Running = 0,
+    Guarded = 1,
+    Requested = 2,
+    RequestPending = 3,
+    Committed = 4,
+    CommittedGuarded = 5,
+    CommittedRequested = 6,
+    CommittedRequestPending = 7,
+    ExitCleanup = 8,
+    ExitCleanupGuarded = 9,
+    ExitCleanupRequested = 10,
+    ExitCleanupRequestPending = 11,
+}
 
-/// Whether a [`SigtermGuard`] currently owns the SIGTERM/SIGINT dispositions,
-/// so a [`GroupReaper`] knows not to replace its handler.
-static GUARD_ACTIVE: AtomicBool = AtomicBool::new(false);
+impl ShutdownState {
+    fn decode(value: u8) -> Self {
+        match value {
+            1 => Self::Guarded,
+            2 => Self::Requested,
+            3 => Self::RequestPending,
+            4 => Self::Committed,
+            5 => Self::CommittedGuarded,
+            6 => Self::CommittedRequested,
+            7 => Self::CommittedRequestPending,
+            8 => Self::ExitCleanup,
+            9 => Self::ExitCleanupGuarded,
+            10 => Self::ExitCleanupRequested,
+            11 => Self::ExitCleanupRequestPending,
+            _ => Self::Running,
+        }
+    }
+
+    fn has_request(self) -> bool {
+        matches!(
+            self,
+            Self::Requested
+                | Self::RequestPending
+                | Self::CommittedRequested
+                | Self::CommittedRequestPending
+                | Self::ExitCleanupRequested
+                | Self::ExitCleanupRequestPending
+        )
+    }
+
+    fn guard_active(self) -> bool {
+        matches!(
+            self,
+            Self::Guarded
+                | Self::Requested
+                | Self::CommittedGuarded
+                | Self::CommittedRequested
+                | Self::ExitCleanupGuarded
+                | Self::ExitCleanupRequested
+        )
+    }
+
+    fn admits_new_work(self) -> bool {
+        !matches!(
+            self,
+            Self::Committed
+                | Self::CommittedGuarded
+                | Self::CommittedRequested
+                | Self::CommittedRequestPending
+        )
+    }
+
+    fn should_unwind(self) -> bool {
+        self.has_request()
+            || matches!(
+                self,
+                Self::Committed
+                    | Self::CommittedGuarded
+                    | Self::CommittedRequested
+                    | Self::CommittedRequestPending
+            )
+    }
+
+    fn enter_guard(self) -> Self {
+        match self {
+            Self::Committed | Self::CommittedRequestPending => Self::CommittedGuarded,
+            Self::ExitCleanup | Self::ExitCleanupRequestPending => Self::ExitCleanupGuarded,
+            Self::CommittedGuarded | Self::CommittedRequested => Self::CommittedGuarded,
+            Self::ExitCleanupGuarded | Self::ExitCleanupRequested => Self::ExitCleanupGuarded,
+            _ => Self::Guarded,
+        }
+    }
+
+    fn leave_guard(self) -> Self {
+        match self {
+            Self::Guarded | Self::Requested => Self::Running,
+            Self::CommittedGuarded | Self::CommittedRequested => Self::Committed,
+            Self::ExitCleanupGuarded | Self::ExitCleanupRequested => Self::ExitCleanup,
+            Self::Running | Self::RequestPending => self,
+            Self::Committed | Self::CommittedRequestPending => self,
+            Self::ExitCleanup | Self::ExitCleanupRequestPending => self,
+        }
+    }
+
+    fn request(self) -> Self {
+        match self {
+            Self::Running | Self::RequestPending => Self::RequestPending,
+            Self::Guarded | Self::Requested => Self::Requested,
+            Self::Committed | Self::CommittedRequestPending => Self::CommittedRequestPending,
+            Self::CommittedGuarded | Self::CommittedRequested => Self::CommittedRequested,
+            Self::ExitCleanup | Self::ExitCleanupRequestPending => Self::ExitCleanupRequestPending,
+            Self::ExitCleanupGuarded | Self::ExitCleanupRequested => Self::ExitCleanupRequested,
+        }
+    }
+
+    fn commit(self) -> Self {
+        match self {
+            Self::Running => Self::Committed,
+            Self::Guarded => Self::CommittedGuarded,
+            Self::Requested => Self::CommittedRequested,
+            Self::RequestPending => Self::CommittedRequestPending,
+            _ => self,
+        }
+    }
+
+    fn admit_exit_cleanup(self) -> Self {
+        match self {
+            Self::Running | Self::Committed => Self::ExitCleanup,
+            Self::Guarded | Self::CommittedGuarded => Self::ExitCleanupGuarded,
+            Self::Requested | Self::CommittedRequested => Self::ExitCleanupRequested,
+            Self::RequestPending | Self::CommittedRequestPending => Self::ExitCleanupRequestPending,
+            Self::ExitCleanup
+            | Self::ExitCleanupGuarded
+            | Self::ExitCleanupRequested
+            | Self::ExitCleanupRequestPending => self,
+        }
+    }
+}
+
+static STATE: AtomicU8 = AtomicU8::new(ShutdownState::Running as u8);
+
+fn current_state() -> ShutdownState {
+    ShutdownState::decode(STATE.load(Ordering::SeqCst))
+}
+
+/// Apply one state transition atomically, retrying if a signal handler or
+/// another thread changes the state between the load and compare-exchange.
+fn transition(update: fn(ShutdownState) -> ShutdownState) -> ShutdownState {
+    let mut current = STATE.load(Ordering::SeqCst);
+    loop {
+        let old = ShutdownState::decode(current);
+        let next = update(old);
+        match STATE.compare_exchange(current, next as u8, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return old,
+            Err(actual) => current = actual,
+        }
+    }
+}
+
+fn mark_requested() -> bool {
+    transition(ShutdownState::request).has_request()
+}
 
 /// How many [`SigtermGuard`]s are live. Only the transition 0 -> 1 installs
 /// the handlers (and clears a stale request); only 1 -> 0 restores the
@@ -127,41 +285,37 @@ fn terminal_foreground_pgrp() -> Option<libc::pid_t> {
     if fg < 0 { None } else { Some(fg) }
 }
 
-/// Set once a `brokkr kill` arriving over the lock socket has been accepted
-/// (`crate::lock_service`), and never cleared. Unlike [`SHUTDOWN_REQUESTED`],
-/// which each outermost [`SigtermGuard`] resets, an accepted stop must survive
-/// guard transitions: the requester was told the command is stopping, so a
-/// guard that drops without having polled the flag must not quietly forget it.
-/// [`is_shutdown_requested`] reports it, and lock acquisition and
-/// `lockfile::current_hold` refuse while it is set, so no new work is admitted.
-static STOP_COMMITTED: AtomicBool = AtomicBool::new(false);
-
-/// Commit this process to stopping. See [`STOP_COMMITTED`].
+/// Commit this process to stopping. Unlike a guard-scoped signal request, a
+/// committed stop survives guard transitions because the requester was told
+/// the command is stopping.
 pub fn commit_stop() {
-    STOP_COMMITTED.store(true, Ordering::SeqCst);
+    transition(ShutdownState::commit);
 }
 
-/// Whether [`commit_stop`] has run in this process and still bars new work.
-/// [`admit_exit_cleanup`] lifts the bar for the one thing a stopped command
-/// still does: its scratch cleanup on the way out.
-pub fn stop_committed() -> bool {
-    STOP_COMMITTED.load(Ordering::SeqCst) && !EXIT_CLEANUP.load(Ordering::SeqCst)
+/// Whether work may still be admitted under the current process state.
+/// [`admit_exit_cleanup`] lifts a committed stop's bar for the scratch cleanup
+/// on the way out.
+pub fn admits_new_work() -> bool {
+    current_state().admits_new_work()
 }
-
-static EXIT_CLEANUP: AtomicBool = AtomicBool::new(false);
 
 /// Called by `main`'s interrupt path immediately before the scratch cleanup,
 /// which takes the lock like any `brokkr clean`. Nothing but that cleanup and
 /// the process exit follow it.
 pub fn admit_exit_cleanup() {
-    EXIT_CLEANUP.store(true, Ordering::SeqCst);
+    transition(ShutdownState::admit_exit_cleanup);
 }
 
-/// Whether a shutdown has been requested via SIGTERM/SIGINT (or
-/// [`request_shutdown`]) since the outermost `SigtermGuard` was installed, or
-/// a stop was committed over the lock socket at any point.
+/// Whether the active operation should unwind for a signal request or a
+/// committed stop. A signal request remains guard-scoped; a committed stop
+/// remains effective until exit cleanup begins.
+pub fn should_unwind() -> bool {
+    current_state().should_unwind()
+}
+
+/// Compatibility name used by existing polling paths.
 pub fn is_shutdown_requested() -> bool {
-    SHUTDOWN_REQUESTED.load(Ordering::SeqCst) || stop_committed()
+    should_unwind()
 }
 
 /// Raise the shutdown flag from inside brokkr, exactly as a `brokkr kill`
@@ -171,7 +325,7 @@ pub fn is_shutdown_requested() -> bool {
 /// path (history, toolchain restore, lock release) instead of `exit`ing past
 /// them.
 pub fn request_shutdown() {
-    SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+    transition(ShutdownState::request);
 }
 
 extern "C" fn shutdown_handler(sig: libc::c_int) {
@@ -179,7 +333,7 @@ extern "C" fn shutdown_handler(sig: libc::c_int) {
     // a runner blocked in `wait()` never polls, and a test process has no
     // cooperative-shutdown contract to honour. See [`GroupReaper`].
     kill_registered_groups();
-    if SHUTDOWN_REQUESTED.swap(true, Ordering::SeqCst) {
+    if mark_requested() {
         // A request is already pending and brokkr is still here: whatever is
         // running is not polling the flag. The second Ctrl-C / `brokkr kill`
         // takes the default action, as it would with no guard at all.
@@ -193,8 +347,8 @@ extern "C" fn shutdown_handler(sig: libc::c_int) {
 
 fn set_handler(signum: libc::c_int, handler: libc::sighandler_t) {
     // SAFETY: `signal` with a plain function pointer is safe; the
-    // handler body only touches an AtomicBool which is itself
-    // async-signal-safe to write.
+    // handler body only updates the AtomicU8 shutdown state and calls
+    // async-signal-safe functions.
     unsafe {
         libc::signal(signum, handler);
     }
@@ -206,8 +360,8 @@ fn set_handler(signum: libc::c_int, handler: libc::sighandler_t) {
 /// SIGTERM covers `brokkr kill`. SIGINT covers terminal Ctrl-C: now that
 /// captured children spawn with `process_group(0)`, the terminal sends
 /// SIGINT only to brokkr's foreground PG (which excludes the child), so
-/// without this handler ctrl-C would orphan the child. The handler sets
-/// `SHUTDOWN_REQUESTED`; the captured runner's poll loop sees the flag
+/// without this handler ctrl-C would orphan the child. The handler records a
+/// guard-scoped request; the captured runner's poll loop sees it
 /// and forwards SIGTERM to the child PG before returning `Interrupted`.
 ///
 /// Scoped to windows whose waits poll the flag, so `brokkr kill` / ctrl-C
@@ -238,8 +392,7 @@ impl SigtermGuard {
     pub fn install() -> Self {
         let mut depth = guard_depth();
         if *depth == 0 {
-            SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
-            GUARD_ACTIVE.store(true, Ordering::SeqCst);
+            transition(ShutdownState::enter_guard);
             let h: libc::sighandler_t = shutdown_handler as *const () as usize;
             set_handler(libc::SIGTERM, h);
             set_handler(libc::SIGINT, h);
@@ -258,18 +411,14 @@ impl Drop for SigtermGuard {
             // is still its to act on.
             return;
         }
-        GUARD_ACTIVE.store(false, Ordering::SeqCst);
         set_handler(libc::SIGTERM, libc::SIG_DFL);
         set_handler(libc::SIGINT, libc::SIG_DFL);
+        transition(ShutdownState::leave_guard);
         // A test process group registered inside this guard's window must stay
         // covered once the guard's cooperative handler is gone.
         reinstall_reaper_if_needed();
-        // Reset the flag so a captured subprocess invoked AFTER this
-        // guard's scope (e.g. in main's cleanup path) doesn't see a
-        // sticky `true` left over from a SIGTERM/SIGINT that already
-        // fired and was handled. Without this, the captured runner's
-        // flag-poll loop would spuriously SIGTERM unrelated children.
-        SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
+        // `leave_guard` cleared a scoped request so a captured subprocess
+        // invoked after this window does not spuriously receive SIGTERM.
     }
 }
 
@@ -428,7 +577,7 @@ impl GroupReaper {
         });
         if slot.is_some() {
             state.live += 1;
-            if state.saved.is_none() && !GUARD_ACTIVE.load(Ordering::SeqCst) {
+            if state.saved.is_none() && !current_state().guard_active() {
                 install_reaper(&mut state);
             }
         }
@@ -443,7 +592,7 @@ impl Drop for GroupReaper {
         REAP_PGIDS[i].store(0, Ordering::SeqCst);
         state.live = state.live.saturating_sub(1);
         if state.live == 0 {
-            if GUARD_ACTIVE.load(Ordering::SeqCst) {
+            if current_state().guard_active() {
                 // The guard owns the dispositions now and restores the
                 // defaults itself when it drops.
                 state.saved = None;

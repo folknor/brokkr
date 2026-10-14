@@ -146,7 +146,10 @@ URL, requested ref (branch / tag / rev, or the default branch), and resolved
 commit SHA from the source fragment. JSON keeps the request in `requested_ref`
 and the lockfile pin in `resolved_rev`; for example, a manifest's
 `?rev=X#Y` is reported as `requested_ref: {"kind":"rev","value":"X"}`
-and `resolved_rev: "Y"`.
+and `resolved_rev: "Y"`. The earlier flat `rev`, `branch`, and `tag` fields
+remain in the event for existing NDJSON consumers; `rev` retains its former
+meaning of the resolved fragment, falling back to a requested `?rev=` when
+Cargo provides no fragment.
 
 ### path_dependency [v1]
 

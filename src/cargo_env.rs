@@ -271,7 +271,8 @@ fn config_conflict(
             .find(|n| table.contains_key(**n))
             .map(|n| (*n).to_owned())
     };
-    for path in crate::rustflags::config_paths_under(cwd, env) {
+    for path in crate::rustflags::config_paths_under(cwd, crate::rustflags::EffectiveEnv::new(env))
+    {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };

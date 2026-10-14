@@ -11,12 +11,12 @@ mod types;
 mod write;
 
 pub use format::{
-    DatasetMatcher, format_compare, format_details, format_single_result, format_table,
+    DatasetMatcher, format_compare_with_limit, format_details, format_single_result, format_table,
 };
 pub use hotpath::hotpath_data_from_json;
 pub use types::{
     Distribution, DistributionUs, HotpathData, HotpathFunction, HotpathThread, KvPair, KvValue,
-    PreviousRun, QueryFilter, RowFilters, RunRow, StoredRow,
+    PreviousRun, QueryFilter, RunRow, StoredRow,
 };
 
 /// Handle to the results database.

@@ -159,7 +159,9 @@ pub struct RunRow {
     pub cli_args: Option<String>,
     pub brokkr_args: Option<String>,
     pub project: String,
-    pub stop_marker: Option<String>,
+    /// Stop request and observed event as `(requested, fired)`, kept together
+    /// so the configured spelling cannot be mistaken for proof that it fired.
+    pub stop_marker: Option<(Option<String>, Option<String>)>,
     pub kv: Vec<KvPair>,
     /// Per-iteration wall times in execution order (index = `run_idx`), as
     /// measured by the `--bench N` loop. Empty for single-run modes and for
@@ -323,20 +325,6 @@ pub struct QueryFilter {
     /// missing-as-0 coercion - set the baseline explicitly).
     pub env: Vec<(String, String)>,
     pub limit: usize,
-}
-
-/// Filters that apply to a selected set of result rows, independent of how
-/// that set is selected (recent rows, a UUID prefix, or both sides of a
-/// comparison).
-#[derive(Default)]
-pub struct RowFilters<'a> {
-    pub command: Option<&'a str>,
-    pub mode: Option<&'a str>,
-    pub dataset: Option<&'a str>,
-    pub meta: &'a [(String, String)],
-    pub env: &'a [(String, String)],
-    pub grep: &'a [String],
-    pub grep_v: &'a [String],
 }
 
 // ---------------------------------------------------------------------------

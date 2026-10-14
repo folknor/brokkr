@@ -5,7 +5,9 @@ use super::table::{
     format_wall,
 };
 
-/// Format side-by-side comparison of two commits.
+/// Format side-by-side comparison of two commits, uncapped - the tests'
+/// shorthand for [`format_compare_with_limit`].
+#[cfg(test)]
 pub fn format_compare(
     commit_a: &str,
     rows_a: &[StoredRow],
@@ -14,7 +16,26 @@ pub fn format_compare(
     top: usize,
     matcher: &DatasetMatcher,
 ) -> String {
-    let pairs = build_comparison_pairs(rows_a, rows_b, matcher);
+    format_compare_with_limit(commit_a, rows_a, commit_b, rows_b, top, usize::MAX, matcher)
+}
+
+/// Format a comparison while capping the number of matched pairs shown.
+/// Pairing happens before the limit, so a row cap cannot remove one side of a
+/// pair and change the comparison result.
+pub fn format_compare_with_limit(
+    commit_a: &str,
+    rows_a: &[StoredRow],
+    commit_b: &str,
+    rows_b: &[StoredRow],
+    top: usize,
+    limit: usize,
+    matcher: &DatasetMatcher,
+) -> String {
+    let mut pairs = build_comparison_pairs(rows_a, rows_b, matcher);
+    // The cap defaults to 20, so say when it bit: a comparison that silently
+    // ends early reads as "these are all the commands that were measured".
+    let withheld = pairs.len().saturating_sub(limit);
+    pairs.truncate(limit);
     if pairs.is_empty() {
         return String::from("(no results)");
     }
@@ -54,6 +75,13 @@ pub fn format_compare(
             out.push('\n');
             out.push_str(&diff);
         }
+    }
+
+    if withheld > 0 {
+        out.push_str(&format!(
+            "\n({withheld} more pair{} not shown - raise --limit)\n",
+            if withheld == 1 { "" } else { "s" }
+        ));
     }
 
     if out.ends_with('\n') {

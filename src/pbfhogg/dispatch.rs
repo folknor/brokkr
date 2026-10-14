@@ -176,7 +176,9 @@ fn run_pbfhogg_dry_run(
     }
 
     output::dry_run_msg(&format!("{} args: {}", command.id(), args.join(" ")));
-    output::dry_run_msg(&format!("pbf: {}", cmd_ctx.pbf_path.display()));
+    if let Some(pbf_path) = &cmd_ctx.pbf_path {
+        output::dry_run_msg(&format!("pbf: {}", pbf_path.display()));
+    }
     if let Some(ref p) = cmd_ctx.osc_path {
         output::dry_run_msg(&format!("osc: {}", p.display()));
     }
@@ -419,10 +421,11 @@ fn result_input_metadata(
         }
         Ok((basenames.join(","), file_mb))
     } else {
-        Ok((
-            cmd_ctx.pbf_basename(),
-            resolve::file_size_mb(&cmd_ctx.pbf_path)?,
-        ))
+        let pbf_path = cmd_ctx
+            .pbf_path
+            .as_deref()
+            .ok_or_else(|| DevError::Config("PBF path is required but not set".into()))?;
+        Ok((cmd_ctx.pbf_basename()?, resolve::file_size_mb(pbf_path)?))
     }
 }
 
@@ -560,16 +563,19 @@ fn build_pbfhogg_context(
     // behavior preserved). Anything else → Named, validated.
     let snapshot_ref = resolve::SnapshotRef::from_opt(extra_params.snapshot.as_deref())?;
 
-    // Resolve PBF via the snapshot-aware resolver. For Base this is identical
-    // to the legacy `resolve_pbf_path`; for Named it reads the snapshot's
-    // pbf table.
-    let pbf_path = resolve::resolve_snapshot_pbf_path(
-        req.dataset,
-        &snapshot_ref,
-        req.variant,
-        paths,
-        req.project_root,
-    )?;
+    // Resolve only inputs this command consumes. In particular, merge-changes
+    // takes OSC files only; an absent or unregistered PBF must not block it.
+    let pbf_path = if command.input_kind() == InputKind::OscOnly {
+        None
+    } else {
+        Some(resolve::resolve_snapshot_pbf_path(
+            req.dataset,
+            &snapshot_ref,
+            req.variant,
+            paths,
+            req.project_root,
+        )?)
+    };
 
     // Resolve OSC path(s) if needed.
     //
@@ -610,7 +616,7 @@ fn build_pbfhogg_context(
         req,
         command,
         binary,
-        &pbf_path,
+        pbf_path.as_deref(),
         osc_path.as_deref(),
         single_osc_seq.as_deref(),
         &snapshot_ref,
@@ -651,7 +657,7 @@ fn resolve_merged_pbf(
     req: &MeasureRequest,
     command: &PbfhoggCommand,
     binary: &Path,
-    pbf_path: &Path,
+    pbf_path: Option<&Path>,
     osc_path: Option<&Path>,
     single_osc_seq: Option<&str>,
     snapshot_ref: &resolve::SnapshotRef,
@@ -662,6 +668,8 @@ fn resolve_merged_pbf(
     if command.input_kind() != InputKind::PbfAndMerged {
         return Ok(None);
     }
+    let pbf_path = pbf_path
+        .ok_or_else(|| DevError::Config("merged PBF requires a primary PBF file".into()))?;
     let osc = osc_path.ok_or_else(|| DevError::Config("merged PBF requires an OSC file".into()))?;
     let osc_seq_str = single_osc_seq
         .ok_or_else(|| DevError::Config("merged PBF requires a single OSC seq".into()))?;
@@ -760,7 +768,7 @@ fn build_diff_snapshots_context(
 
     Ok(CommandContext {
         binary: binary.to_path_buf(),
-        pbf_path: from_path,
+        pbf_path: Some(from_path),
         osc_path: None,
         osc_paths: Vec::new(),
         pbf_b_path: Some(to_path),

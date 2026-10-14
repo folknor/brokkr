@@ -8,7 +8,7 @@ use std::path::Path;
 use crate::db;
 use crate::error::DevError;
 use crate::output;
-use crate::request::SidecarQuery;
+use crate::request::{SidecarQuery, SidecarView};
 use crate::resolve::sidecar_db_path;
 use crate::sidecar_fmt::{
     apply_timeline_filter, parse_time_range, print_compare_timeline, print_counters,
@@ -56,48 +56,44 @@ pub(crate) fn cmd_sidecar(project_root: &Path, q: &SidecarQuery) -> Result<(), D
     // used to fail open (a bad condition printed every sample, an unknown
     // field silently vanished), which reads as a real answer.
     validate_timeline_args(q)?;
+    let view = q.view()?;
 
     let Some(sdb) = open_sidecar_db(project_root) else {
         output::result_msg("no sidecar.db found");
         return Ok(());
     };
 
-    // --compare A B takes a different path: no single UUID, two full timelines.
-    if let Some(ref uuids) = q.compare {
-        return run_compare(&sdb, uuids, q.human);
+    match view {
+        SidecarView::Compare { uuids: (a, b) } => run_compare(&sdb, a, b, q.human),
+        SidecarView::Summary { uuid } => {
+            let uuid = sdb.resolve_session(uuid)?;
+            run_phase_summary(&sdb, &uuid, q)
+        }
+        SidecarView::Samples { uuid } => {
+            let uuid = sdb.resolve_session(uuid)?;
+            run_samples(&sdb, &uuid, q)
+        }
+        SidecarView::Markers { uuid } => {
+            let uuid = sdb.resolve_session(uuid)?;
+            run_markers(&sdb, &uuid, q)
+        }
+        SidecarView::Durations { uuid } => {
+            let uuid = sdb.resolve_session(uuid)?;
+            run_durations(&sdb, &uuid, q)
+        }
+        SidecarView::Counters { uuid } => {
+            let uuid = sdb.resolve_session(uuid)?;
+            run_counters(&sdb, &uuid, q)
+        }
+        SidecarView::Stalls { uuid } => {
+            let uuid = sdb.resolve_session(uuid)?;
+            run_stalls(&sdb, &uuid, q)
+        }
+        SidecarView::Stat { uuid, field } => {
+            let uuid = sdb.resolve_session(uuid)?;
+            run_stat(&sdb, &uuid, field, q)
+        }
     }
-
-    // Clap's `required_unless_present = "compare"` guarantees query is set
-    // whenever we get here.
-    let uuid_prefix = q
-        .query
-        .clone()
-        .expect("clap required_unless_present guarantees query is set");
-    // Pin the prefix to one session up front: an ambiguous prefix is an
-    // error naming the candidates, never a merged timeline.
-    let uuid_prefix = sdb.resolve_session(&uuid_prefix)?;
-
-    if q.samples {
-        return run_samples(&sdb, &uuid_prefix, q);
-    }
-    if q.markers {
-        return run_markers(&sdb, &uuid_prefix, q);
-    }
-    if q.durations {
-        return run_durations(&sdb, &uuid_prefix, q);
-    }
-    if q.counters {
-        return run_counters(&sdb, &uuid_prefix, q);
-    }
-    if q.stalls {
-        return run_stalls(&sdb, &uuid_prefix, q);
-    }
-    if let Some(ref field) = q.stat {
-        return run_stat(&sdb, &uuid_prefix, field, q);
-    }
-
-    // Default view: per-phase summary (JSONL, or a fixed-width table with --human).
-    run_phase_summary(&sdb, &uuid_prefix, q)
 }
 
 fn run_phase_summary(
@@ -267,12 +263,13 @@ fn run_stat(
 
 fn run_compare(
     sdb: &db::sidecar::SidecarDb,
-    uuids: &[String],
+    uuid_a: &str,
+    uuid_b: &str,
     human: bool,
 ) -> Result<(), DevError> {
     // Each side must name exactly one session, as for a single-UUID view.
-    let resolved_a = sdb.resolve_session(&uuids[0])?;
-    let resolved_b = sdb.resolve_session(&uuids[1])?;
+    let resolved_a = sdb.resolve_session(uuid_a)?;
+    let resolved_b = sdb.resolve_session(uuid_b)?;
     let uuid_a = resolved_a.as_str();
     let uuid_b = resolved_b.as_str();
     let (best_a, _) = sdb.query_meta(uuid_a);

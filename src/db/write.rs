@@ -106,7 +106,12 @@ fn insert_inner(conn: &rusqlite::Connection, row: &RunRow, uuid: &str) -> Result
             uuid,
             row.cli_args,
             row.project,
-            row.stop_marker,
+            row.stop_marker
+                .as_ref()
+                .and_then(|(_, fired)| fired.as_deref()),
+            row.stop_marker
+                .as_ref()
+                .and_then(|(requested, _)| requested.as_deref()),
             row.brokkr_args,
         ],
     )?;

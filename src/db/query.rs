@@ -5,7 +5,7 @@ use super::like::{ESCAPE, contains_pattern, prefix_pattern, require_prefix};
 use super::schema::SELECT_COLS;
 use super::{
     Distribution, DistributionUs, HotpathData, HotpathFunction, HotpathThread, KvPair, KvValue,
-    PreviousRun, QueryFilter, RowFilters, StoredRow,
+    PreviousRun, QueryFilter, StoredRow,
 };
 use crate::error::DevError;
 
@@ -19,23 +19,42 @@ impl ResultsDb {
     /// The prefix matches literally (`_`/`%` are not wildcards), and an empty
     /// prefix is refused rather than matching every row.
     pub fn query_by_uuid(&self, prefix: &str) -> Result<Vec<StoredRow>, DevError> {
-        self.query_by_uuid_filtered(prefix, &RowFilters::default())
+        self.query_by_uuid_with_limit(prefix, &QueryFilter::default(), None)
     }
 
-    /// Query UUID-prefix matches narrowed by the same filters as [`Self::query`].
-    pub fn query_by_uuid_filtered(
+    /// Query UUID-prefix matches with the complete results filter, including
+    /// the row limit used by the other results views.
+    pub fn query_by_uuid_with_filter(
         &self,
         prefix: &str,
-        filters: &RowFilters<'_>,
+        filter: &QueryFilter,
+    ) -> Result<Vec<StoredRow>, DevError> {
+        if filter.commit.is_some() {
+            return Err(DevError::Config(
+                "--commit cannot be combined with a UUID lookup".into(),
+            ));
+        }
+        self.query_by_uuid_with_limit(prefix, filter, Some(filter.limit))
+    }
+
+    fn query_by_uuid_with_limit(
+        &self,
+        prefix: &str,
+        filter: &QueryFilter,
+        limit: Option<usize>,
     ) -> Result<Vec<StoredRow>, DevError> {
         require_prefix(prefix, "uuid")?;
         let mut clauses = vec![format!("uuid LIKE ?1 {ESCAPE}")];
         let mut params = vec![prefix_pattern(prefix)];
-        push_row_filter_clauses(&mut clauses, &mut params, filters);
-        let sql = format!(
+        push_row_filter_clauses(&mut clauses, &mut params, filter);
+        let mut sql = format!(
             "SELECT {SELECT_COLS} FROM runs WHERE {} ORDER BY id DESC",
             clauses.join(" AND ")
         );
+        if let Some(limit) = limit {
+            params.push(limit.to_string());
+            sql.push_str(&format!(" LIMIT ?{}", params.len()));
+        }
         let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
             .iter()
             .map(|p| p as &dyn rusqlite::types::ToSql)
@@ -387,16 +406,7 @@ fn build_query_sql(filter: &QueryFilter) -> (String, Vec<String>) {
         params.push(raw);
         clauses.push(commit_match_expr(params.len() - 1, params.len()));
     }
-    let row_filters = RowFilters {
-        command: filter.command.as_deref(),
-        mode: filter.mode.as_deref(),
-        dataset: filter.dataset.as_deref(),
-        meta: &filter.meta,
-        env: &filter.env,
-        grep: &filter.grep,
-        grep_v: &filter.grep_v,
-    };
-    push_row_filter_clauses(&mut clauses, &mut params, &row_filters);
+    push_row_filter_clauses(&mut clauses, &mut params, filter);
 
     let mut sql = format!("SELECT {SELECT_COLS} FROM runs");
     if !clauses.is_empty() {
@@ -416,28 +426,28 @@ fn build_query_sql(filter: &QueryFilter) -> (String, Vec<String>) {
 pub(super) fn push_row_filter_clauses(
     clauses: &mut Vec<String>,
     params: &mut Vec<String>,
-    filters: &RowFilters<'_>,
+    filters: &QueryFilter,
 ) {
-    if let Some(command) = filters.command {
+    if let Some(command) = filters.command.as_deref() {
         let in_command = contains_expr(params, "command", command);
         let in_mode = contains_expr(params, "mode", command);
         clauses.push(format!("({in_command} OR {in_mode})"));
     }
-    if let Some(mode) = filters.mode {
+    if let Some(mode) = filters.mode.as_deref() {
         clauses.push(contains_expr(params, "mode", mode));
     }
-    if let Some(dataset) = filters.dataset {
+    if let Some(dataset) = filters.dataset.as_deref() {
         clauses.push(contains_expr(params, "input_file", dataset));
     }
-    push_grep_clauses(clauses, params, filters.grep, filters.grep_v);
+    push_grep_clauses(clauses, params, &filters.grep, &filters.grep_v);
     // Metadata values are text-coalesced across run_kv's three value columns,
     // so numeric entries remain selectable through the same key=value form.
-    for (key, value) in filters.meta {
+    for (key, value) in &filters.meta {
         clauses.push(kv_equals_expr(params, &format!("meta.{key}"), value));
     }
     // Missing captured environment keys do not match; callers select an
     // explicit baseline value when they need to compare an off arm.
-    for (key, value) in filters.env {
+    for (key, value) in &filters.env {
         clauses.push(kv_equals_expr(params, &format!("env.{key}"), value));
     }
 }

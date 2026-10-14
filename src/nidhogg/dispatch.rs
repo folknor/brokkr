@@ -61,20 +61,13 @@ pub(crate) fn run_command(
 /// Nidhogg ingest: lightweight run mode (build, run once, print timing, no DB).
 fn run_nidhogg_ingest_run(req: &MeasureRequest) -> Result<(), DevError> {
     let feat_refs = req.feat_refs();
-    // Run mode never stores results, so dirty tree is always fine.
-    let ctx = BenchContext::new(
-        req.dev_config,
-        req.project,
-        req.project_root,
-        req.build_root,
+    let ctx = BenchContext::new_for_request(
+        req,
         Some("nidhogg"),
         &feat_refs,
         true,
         &format!("run {}", "nid-ingest"),
-        true,
-        req.stop_marker.map(str::to_owned),
-    )?
-    .with_request(req);
+    )?;
 
     let (pbf_path, _) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
@@ -113,19 +106,13 @@ fn run_nidhogg_ingest_bench(
     command: &crate::nidhogg::commands::NidhoggCommand,
 ) -> Result<(), DevError> {
     let feat_refs = req.feat_refs();
-    let ctx = BenchContext::new(
-        req.dev_config,
-        req.project,
-        req.project_root,
-        req.build_root,
+    let ctx = BenchContext::new_for_request(
+        req,
         Some("nidhogg"),
         &feat_refs,
         true,
         &format!("bench {}", command.id()),
-        req.force,
-        req.stop_marker.map(str::to_owned),
-    )?
-    .with_request(req);
+    )?;
 
     let (pbf_path, file_mb) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
@@ -207,19 +194,13 @@ fn run_nidhogg_hotpath(
     harness::hotpath_alloc_note(alloc);
 
     let hotpath_features = req.hotpath_features();
-    let ctx = BenchContext::new(
-        req.dev_config,
-        req.project,
-        req.project_root,
-        req.build_root,
+    let ctx = BenchContext::new_for_request(
+        req,
         Some("nidhogg"),
         &hotpath_features,
         true,
         &format!("hotpath {}", command.id()),
-        req.force,
-        req.stop_marker.map(str::to_owned),
-    )?
-    .with_request(req);
+    )?;
 
     let (pbf_path, file_mb) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;

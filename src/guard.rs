@@ -157,7 +157,7 @@ fn do_install(config_path: &std::path::Path) -> Result<(), DevError> {
         }
         Wrapper::OtherBrokkrGuard(other) => {
             return Err(DevError::Config(format!(
-                "{} already sets build.{WRAPPER_KEY} to a brokkr guard from another install ({}) - refusing to overwrite it",
+                "{} already sets build.{WRAPPER_KEY} to a brokkr guard from another install ({}) - remove it with `brokkr guard --remove` before installing this one",
                 config_path.display(),
                 other.display()
             )));
@@ -201,15 +201,13 @@ fn do_remove(config_path: &std::path::Path) -> Result<(), DevError> {
     let install_path = guard_bin_path()?;
     match classify_wrapper(Some(&existing), Some(&install_path)) {
         Wrapper::ThisInstall => {}
-        Wrapper::OtherBrokkrGuard(other) => {
-            return Err(DevError::Config(format!(
-                "build.{WRAPPER_KEY} = \"{existing}\" points to a brokkr guard from another install ({}) - refusing to remove it",
-                other.display()
-            )));
-        }
+        // Removing the Cargo setting does not modify the other install. An
+        // exact `brokkr-rustc-guard` executable name is enough to recognize
+        // this as a brokkr-owned setting, even when that install is gone.
+        Wrapper::OtherBrokkrGuard(_) => {}
         Wrapper::Foreign(wrapper) => {
             return Err(DevError::Config(format!(
-                "build.{WRAPPER_KEY} = \"{wrapper}\" is not this brokkr install's guard - refusing to remove a wrapper brokkr did not write"
+                "build.{WRAPPER_KEY} = \"{wrapper}\" is not a brokkr guard - refusing to remove a wrapper brokkr did not write"
             )));
         }
         Wrapper::None => unreachable!("a configured wrapper was just read"),
@@ -300,9 +298,8 @@ fn stale_warning() -> Option<String> {
     let update = if matches!(&ownership, Wrapper::ThisInstall) {
         format!("run `brokkr install` in the brokkr repo to update {wrapper}")
     } else {
-        format!(
-            "use the brokkr install that owns {wrapper} to remove it, then run `brokkr guard --install` here"
-        )
+        "run `brokkr guard --remove` to clear the other install's path, then `brokkr guard --install` here"
+            .to_owned()
     };
     match probe_guard(&wrapper) {
         GuardProbe::Current => None,
@@ -351,7 +348,7 @@ fn status(config_path: &std::path::Path) -> Result<(), DevError> {
                 config_path,
                 wrapper.as_ref(),
                 "a brokkr guard from another install is configured",
-                "use the brokkr install that owns this path to remove it, then run `brokkr guard --install` here",
+                "run `brokkr guard --remove` to clear the other install's path, then `brokkr guard --install` here",
             );
         }
         Wrapper::Foreign(wrapper) => {

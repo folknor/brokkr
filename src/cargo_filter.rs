@@ -29,6 +29,8 @@
 
 use std::path::Path;
 
+use crate::rustc_text::{self, BlockKind, Level};
+
 /// One parsed clippy diagnostic. [`parse_clippy`] returns these so callers
 /// can filter/partition by source path before formatting.
 pub struct ClippyDiagnostic {
@@ -89,8 +91,9 @@ impl ClippyDiagnostic {
 ///
 /// `parse_failed` means the parsed list cannot explain the failure, and each
 /// producer says when: the legacy text parser here sets it when cargo emitted
-/// `error:`/`warning:` markers but nothing was extracted, and callers print
-/// the raw output instead of the list; `check`'s JSON path sets it when a
+/// a well-formed `error:`/`warning:` header was present but no finding was
+/// extracted, and callers print the raw output instead of the list; `check`'s
+/// JSON path sets it when a
 /// failed run left no error-level diagnostic, and prints the captured streams
 /// after the list (`check_cmd::phase::clippy_parse_from_events`).
 pub struct ClippyParse {
@@ -101,34 +104,30 @@ pub struct ClippyParse {
 /// Parse cargo clippy text output into structured diagnostics.
 pub fn parse_clippy(output: &str) -> ClippyParse {
     let mut diagnostics: Vec<ClippyDiagnostic> = Vec::new();
-
-    let mut in_block = false;
-    let mut current_block: Vec<String> = Vec::new();
-    let mut current_is_error = false;
-
+    let mut saw_header = false;
+    let mut kept: Vec<&str> = Vec::new();
     for line in output.lines() {
-        if is_noise(line.trim_start()) || is_meta_noise(line) {
-            continue;
+        let kind = rustc_text::classify_line(line);
+        if matches!(
+            kind,
+            BlockKind::Finding | BlockKind::FailureSummary | BlockKind::CargoStatus
+        ) {
+            saw_header = true;
         }
-
-        let is_error_start = line.starts_with("error:") || line.starts_with("error[");
-        let is_warning_start = line.starts_with("warning:") || line.starts_with("warning[");
-
-        if is_error_start || is_warning_start {
-            if in_block && !current_block.is_empty() {
-                diagnostics.push(parse_block(&current_block, current_is_error));
-                current_block.clear();
-            }
-            current_is_error = is_error_start;
-            in_block = true;
-            current_block.push(line.to_string());
-        } else if in_block {
-            current_block.push(line.to_string());
+        if !matches!(
+            kind,
+            BlockKind::FailureSummary | BlockKind::CargoStatus | BlockKind::Progress
+        ) {
+            kept.push(line);
         }
     }
-
-    if in_block && !current_block.is_empty() {
-        diagnostics.push(parse_block(&current_block, current_is_error));
+    let filtered_output = kept.join("\n");
+    for block in rustc_text::rustc_blocks(&filtered_output) {
+        if rustc_text::classify_block(&block) != BlockKind::Finding {
+            continue;
+        }
+        let lines = block.text.lines().map(str::to_owned).collect::<Vec<_>>();
+        diagnostics.push(parse_block(&lines, block.level == Level::Error));
     }
 
     // Errors first, then warnings; each half keeps discovery order.
@@ -136,13 +135,7 @@ pub fn parse_clippy(output: &str) -> ClippyParse {
     let mut sorted = errors;
     sorted.extend(warnings);
 
-    let parse_failed = sorted.is_empty()
-        && output.lines().any(|l| {
-            l.starts_with("error:")
-                || l.starts_with("error[")
-                || l.starts_with("warning:")
-                || l.starts_with("warning[")
-        });
+    let parse_failed = sorted.is_empty() && saw_header;
 
     ClippyParse {
         diagnostics: sorted,
@@ -732,9 +725,18 @@ fn flush_parsed_failure(
 pub fn filter_test(stdout: &str, stderr: &str) -> String {
     // Compilation failure - no test results, just build errors.
     let has_test_result = stdout.lines().any(|l| l.starts_with("test result:"));
-    let has_compile_error = stderr.lines().any(|l| {
-        let t = l.trim_start();
-        t.starts_with("error[") || (t.starts_with("error:") && !t.contains("test run failed"))
+    let has_compile_error = rustc_text::rustc_blocks(stderr).iter().any(|block| {
+        block.level == Level::Error
+            && !block
+                .text
+                .lines()
+                .next()
+                .unwrap_or("")
+                .contains("test run failed")
+            && matches!(
+                rustc_text::classify_block(block),
+                BlockKind::Finding | BlockKind::FailureSummary
+            )
     });
 
     if !has_test_result && has_compile_error {
@@ -1037,31 +1039,7 @@ fn format_test_failures(parsed: &ParsedTestResults, stderr: &str) -> String {
 // --- helpers ---
 
 fn is_noise(trimmed: &str) -> bool {
-    trimmed.starts_with("Compiling")
-        || trimmed.starts_with("Checking")
-        || trimmed.starts_with("Downloading")
-        || trimmed.starts_with("Downloaded")
-        || trimmed.starts_with("Finished")
-        || trimmed.starts_with("Locking")
-        || trimmed.starts_with("Updating")
-}
-
-fn is_meta_noise(line: &str) -> bool {
-    // "warning: `crate` (lib) generated N warnings"
-    if line.starts_with("warning:") && line.contains("generated") && line.contains("warning") {
-        return true;
-    }
-    // "error: aborting …" / "error: could not compile …"
-    if (line.starts_with("error:") || line.starts_with("error["))
-        && (line.contains("aborting due to") || line.contains("could not compile"))
-    {
-        return true;
-    }
-    // "warning: build failed, waiting for other jobs to finish..."
-    if line.starts_with("warning:") && line.contains("build failed") {
-        return true;
-    }
-    false
+    rustc_text::classify_line(trimmed) == BlockKind::Progress
 }
 
 /// Extract the `-->` location from a block of diagnostic lines.

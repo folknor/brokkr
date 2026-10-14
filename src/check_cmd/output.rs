@@ -484,67 +484,50 @@ fn serial_shim_fallback(
         .iter()
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect();
-    let env_has = |key: &str| {
-        project_env.iter().any(|(name, _)| name == key) || sweep_env.contains_key(key)
-    };
+    let launch = crate::rustflags::CargoLaunchConfig::discover(
+        root,
+        crate::rustflags::EffectiveEnv::new(&cargo_env_refs),
+    );
     if forwarded.iter().any(|arg| {
         arg == "--config" || arg.starts_with("--config=") || arg == "--target" || arg.starts_with("--target=")
     }) {
         return Some("forwarded --config or --target".into());
     }
-    if std::env::var_os("CARGO_BUILD_TARGET").is_some() || env_has("CARGO_BUILD_TARGET") {
-        return Some("CARGO_BUILD_TARGET is set".into());
+    if let Some(target) = &launch.build_target {
+        return Some(match &target.origin {
+            crate::rustflags::SourceOrigin::Environment(_) => "CARGO_BUILD_TARGET is set".into(),
+            crate::rustflags::SourceOrigin::Config(path) => {
+                format!("{} sets build.target", path.display())
+            }
+        });
     }
-    if std::env::var_os("RUSTDOC").is_some()
-        || std::env::var_os("CARGO_BUILD_RUSTDOC").is_some()
-        || env_has("RUSTDOC")
-        || env_has("CARGO_BUILD_RUSTDOC")
-    {
-        return Some("rustdoc executable is configured".into());
+    if let Some(rustdoc) = &launch.rustdoc {
+        return Some(match &rustdoc.origin {
+            crate::rustflags::SourceOrigin::Environment(_) => {
+                "rustdoc executable is configured".into()
+            }
+            crate::rustflags::SourceOrigin::Config(path) => {
+                format!("{} sets build.rustdoc", path.display())
+            }
+        });
     }
     // The runner execs brokkr through `/proc/<pid>/exe` (see
     // `harness_shim::own_exe`), so only a missing `/proc` rules it out.
     if std::fs::metadata("/proc/self/exe").is_err() {
         return Some("/proc/self/exe is unreadable, so cargo cannot exec brokkr as the runner".into());
     }
-    let Some(host) = crate::rustflags::host_triple() else {
+    if crate::rustflags::host_triple().is_none() {
         return Some("host target could not be determined".into());
-    };
-    let runner_var = format!("CARGO_TARGET_{}_RUNNER", host.to_uppercase().replace('-', "_"));
-    if std::env::var_os(&runner_var).is_some() || env_has(&runner_var) {
-        return Some(format!("{runner_var} is set"));
     }
-    for path in crate::rustflags::config_paths_under(root, &cargo_env_refs) {
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(doc) = text.parse::<toml::Table>() else {
-            continue;
-        };
-        if let Some(build) = doc.get("build").and_then(toml::Value::as_table) {
-            if build.contains_key("target") {
-                return Some(format!("{} sets build.target", path.display()));
+    if let Some(runner) = &launch.runner {
+        return Some(match &runner.origin {
+            crate::rustflags::SourceOrigin::Environment(_) => {
+                format!("{} is set", runner.key)
             }
-            if build.contains_key("rustdoc") {
-                return Some(format!("{} sets build.rustdoc", path.display()));
+            crate::rustflags::SourceOrigin::Config(path) => {
+                format!("{} configures a target runner", path.display())
             }
-        }
-        if let Some(targets) = doc.get("target").and_then(toml::Value::as_table) {
-            for (selector, value) in targets {
-                if !value.as_table().is_some_and(|table| table.contains_key("runner")) {
-                    continue;
-                }
-                // An undecidable cfg counts as applying: overriding a real
-                // runner is the destructive direction.
-                let applies = selector
-                    .strip_prefix("cfg(")
-                    .and_then(|s| s.strip_suffix(')'))
-                    .map_or(selector == &host, |expr| crate::rustflags::eval_cfg(expr) != Some(false));
-                if applies {
-                    return Some(format!("{} configures a target runner", path.display()));
-                }
-            }
-        }
+        });
     }
     None
 }
@@ -1769,6 +1752,10 @@ error: could not compile `core` (lib) due to 1 previous error
             "warning: desktop: the build (x) generated output",
         ] {
             assert!(!is_cargo_status(warning), "{warning}");
+        }
+
+        fn is_cargo_status(line: &str) -> bool {
+            crate::rustc_text::classify_line(line) == crate::rustc_text::BlockKind::CargoStatus
         }
     }
 

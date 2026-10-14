@@ -36,7 +36,7 @@ use crate::output;
 use crate::profile::{self, DeclaredFilter, FilterKind, ResolvedSweep};
 use crate::project::Project;
 use crate::scope;
-use crate::script_check::Level;
+use crate::rustc_text::{self, Block, BlockKind, Level};
 use crate::test_runner::{self, LibtestOutcome};
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -2298,9 +2298,9 @@ fn report_script_stage(
 /// internals, only what it printed - so the rendering question is which part of
 /// it to show, not how much. Two paths:
 ///
-/// - `diagnostics = "rustc"` with at least one `error` block: the error blocks
-///   alone, with a trailer counting the warnings withheld. Measured on the
-///   consuming config (a `cargo doc --workspace` gate): 27 denied
+/// - `diagnostics = "rustc"` with at least one error finding: the error
+///   findings alone, with a trailer counting the warning findings withheld.
+///   Measured on the consuming config (a `cargo doc --workspace` gate): 27 denied
 ///   `broken-intra-doc-links` errors against several hundred
 ///   `private-intra-doc-links` warnings from every other crate - a 1:20
 ///   signal-to-noise ratio, with the signal uniformly at `error`. Printing the
@@ -2325,13 +2325,15 @@ fn append_script_failure(
         let stdout = String::from_utf8_lossy(&outcome.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&outcome.stderr).into_owned();
         let streams = [
-            ("stdout", crate::script_check::rustc_blocks(&stdout)),
-            ("stderr", crate::script_check::rustc_blocks(&stderr)),
+            ("stdout", rustc_text::rustc_blocks(&stdout)),
+            ("stderr", rustc_text::rustc_blocks(&stderr)),
         ];
-        if streams
-            .iter()
-            .any(|(_, blocks)| blocks.iter().any(|b| b.level == Level::Error))
-        {
+        if streams.iter().any(|(_, blocks)| {
+            blocks.iter().any(|b| {
+                b.level == Level::Error
+                    && rustc_text::classify_block(b) == BlockKind::Finding
+            })
+        }) {
             append_rustc_errors(msg, &streams);
             return;
         }
@@ -2340,18 +2342,27 @@ fn append_script_failure(
     append_captured_stream(msg, "stderr", &outcome.stderr);
 }
 
-/// Append every `error`-level block of a rustc-shaped failure, then one trailer
-/// counting the warnings that were not printed.
+/// Append every error finding of a rustc-shaped failure, then one trailer
+/// counting the warning findings that were not printed.
 ///
 /// The trailer exists because the omission is a choice brokkr made, not one the
 /// command made: a reader who sees only errors must be told the warnings were
 /// there, or a `warning:`-shaped cause reads as absent rather than withheld.
-fn append_rustc_errors(msg: &mut String, streams: &[(&str, Vec<crate::script_check::Block>)]) {
+fn append_rustc_errors(msg: &mut String, streams: &[(&str, Vec<Block>)]) {
     let mut warnings = 0usize;
     for (label, blocks) in streams {
-        let errors: Vec<&crate::script_check::Block> =
-            blocks.iter().filter(|b| b.level == Level::Error).collect();
-        warnings += blocks.iter().filter(|b| b.level == Level::Warning).count();
+        let errors: Vec<&Block> = blocks
+            .iter()
+            .filter(|b| {
+                b.level == Level::Error && rustc_text::classify_block(b) == BlockKind::Finding
+            })
+            .collect();
+        warnings += blocks
+            .iter()
+            .filter(|b| {
+                b.level == Level::Warning && rustc_text::classify_block(b) == BlockKind::Finding
+            })
+            .count();
         if errors.is_empty() {
             continue;
         }
@@ -2785,7 +2796,7 @@ fn attribute_manifest_lints(
     r: &SweepResult,
     info: &build::ProjectInfo,
 ) -> Vec<(usize, cargo_json::DiagnosticEvent)> {
-    let blocks = crate::script_check::rustc_blocks(&r.stderr);
+    let blocks = rustc_text::rustc_blocks(&r.stderr);
     let root_manifest = info.workspace_root.join("Cargo.toml");
     cargo_json::manifest_lints_by_block(&blocks)
         .into_iter()
@@ -3791,20 +3802,17 @@ fn listed_blocks(
 
 /// Whether a failed run's stderr holds an `error` block the list does not
 /// explain: anything but a listed manifest lint and cargo's own summaries of
-/// a failure reported elsewhere ([`is_failure_summary`]).
+/// a failure reported elsewhere (`rustc_text::BlockKind::FailureSummary`).
 fn has_unlisted_stderr_error(r: &SweepResult, keep: &dyn Fn(&cargo_json::DiagnosticEvent) -> bool) -> bool {
     let listed = listed_blocks(r, keep);
-    crate::script_check::rustc_blocks(&r.stderr)
+    rustc_text::rustc_blocks(&r.stderr)
         .iter()
         .enumerate()
-        .any(|(i, b)| b.level == Level::Error && !listed.contains(&i) && !is_failure_summary(&b.text))
-}
-
-/// cargo's closing lines for a failure it has already reported:
-/// `could not compile `x` (lib) due to N previous errors`, `build failed`.
-fn is_failure_summary(text: &str) -> bool {
-    let header = text.lines().next().unwrap_or("");
-    header.starts_with("error: could not compile ") || header == "error: build failed"
+        .any(|(i, b)| {
+            b.level == Level::Error
+                && !listed.contains(&i)
+                && rustc_text::classify_block(b) != BlockKind::FailureSummary
+        })
 }
 
 /// The captured streams of a failed cargo run whose failure the diagnostic
@@ -3835,7 +3843,7 @@ fn is_failure_summary(text: &str) -> bool {
 ///   With no `error` block, stderr is the evidence and prints verbatim.
 fn failed_run_streams(r: &SweepResult, keep: &dyn Fn(&cargo_json::DiagnosticEvent) -> bool) -> String {
     let mut out = String::new();
-    let blocks = crate::script_check::rustc_blocks(&r.stderr);
+    let blocks = rustc_text::rustc_blocks(&r.stderr);
     if blocks.iter().any(|b| b.level == Level::Error) {
         let listed = listed_blocks(r, keep);
         let mut withheld = 0usize;
@@ -3844,7 +3852,10 @@ fn failed_run_streams(r: &SweepResult, keep: &dyn Fn(&cargo_json::DiagnosticEven
                 Level::Error => !listed.contains(&i),
                 Level::Warning => {
                     let contained = is_self_contained(&block.text, true);
-                    if contained && !listed.contains(&i) && !is_cargo_status(&block.text) {
+                    if contained
+                        && !listed.contains(&i)
+                        && rustc_text::classify_block(block) != BlockKind::CargoStatus
+                    {
                         withheld += 1;
                     }
                     !contained
@@ -3913,27 +3924,13 @@ fn drop_build_directives(text: &str) -> String {
     out.trim_end().to_owned()
 }
 
-/// Whether a warning block is cargo's bookkeeping rather than a warning: a
-/// per-package tally (``warning: `pkg` (lib) generated 3 warnings (1
-/// duplicate)``, `... (run `cargo clippy --fix ...` to apply 2 suggestions)`)
-/// or the `build failed, waiting for other jobs to finish...` status.
-fn is_cargo_status(text: &str) -> bool {
-    let header = text.lines().next().unwrap_or("");
-    if header.starts_with("warning: build failed, waiting for other jobs") {
-        return true;
-    }
-    header.split_once(") generated ").is_some_and(|(_, rest)| {
-        let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-        digits > 0 && rest[digits..].starts_with(" warning")
-    })
-}
-
 /// Whether a stderr block holds nothing but its own diagnostic: every line
 /// (after the header, when `has_header`) blank, indented, a column-zero
 /// `help:`/`note:`/`= ` continuation, or a source-excerpt line whose line
 /// number reaches column zero (`150 | config = "0.15"`) - the lines rustc and
 /// cargo attach to a diagnostic. Text that fails this is something
-/// `rustc_blocks` merged into the block only because no header came between.
+/// `rustc_text::rustc_blocks` merged into the block only because no header came
+/// between.
 fn is_self_contained(text: &str, has_header: bool) -> bool {
     text.lines().skip(usize::from(has_header)).all(|l| {
         let after_number = l.trim_start_matches(|c: char| c.is_ascii_digit());

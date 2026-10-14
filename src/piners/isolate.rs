@@ -93,6 +93,26 @@ pub enum StopReason {
     HarnessFailure(String),
 }
 
+/// The policy result for one diagnostic harness invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttemptVerdict {
+    /// Every selected probe validly reported, the stream was whole, and the
+    /// harness ended with an accepted status.
+    Completed,
+    /// The attempt did not complete and has an attribution or protocol result.
+    Failed(Failure),
+    /// Diagnosis cannot continue because the harness reported its own error.
+    Stop(StopReason),
+}
+
+/// Classify one isolation attempt under the policy in the shared assessment.
+pub fn classify_attempt(assessment: &crate::piners::integrity::RunAssessment) -> AttemptVerdict {
+    match assessment.verdict(crate::piners::integrity::Policy::IsolationAttempt) {
+        crate::piners::integrity::Verdict::IsolationAttempt(verdict) => verdict,
+        _ => unreachable!("isolation policy returns an attempt verdict"),
+    }
+}
+
 impl StopReason {
     pub fn describe(&self) -> String {
         match self {

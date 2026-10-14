@@ -369,8 +369,9 @@ struct, no benchmark filters to reject. The corpus views:
   including count moves inside one tier, which the gate (tier against pin)
   cannot see; `--full` lists the unmoved probes too. A probe on one side only
   is classified, not dropped: `not selected` there, or `selected, no line`
-  (from the stored selection and `gate_miss`); a line the harness emitted
-  for a probe the run did not select is marked `(report-only)`. A line not
+  (from the stored selection and `gate_miss`). A legacy or malformed selector
+  is shown as `selection unknown`; a line the harness emitted for a probe the
+  run did not select is marked `(report-only)`. A line not
   carrying all three counts as numbers (a compile failure) reads `no counts`
   rather than a fall to zero, and a tier
   appearing or vanishing is a move. The `movement` column (`more divergent` /

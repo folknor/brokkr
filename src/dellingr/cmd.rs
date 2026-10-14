@@ -68,17 +68,7 @@ pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
         profile: "release",
     };
 
-    let ctx = BenchContext::with_build_config(
-        req.dev_config,
-        req.project,
-        req.project_root,
-        req.build_root,
-        &build_config,
-        "dellingr",
-        req.force,
-        req.stop_marker.map(str::to_owned),
-    )?
-    .with_request(req);
+    let ctx = BenchContext::with_build_config_for_request(req, &build_config, "dellingr")?;
 
     let scratch_dir = req.project_root.join(SCRATCH_REL);
     std::fs::create_dir_all(&scratch_dir)?;

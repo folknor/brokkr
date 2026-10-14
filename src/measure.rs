@@ -208,8 +208,8 @@ pub struct CommandParams {
 pub struct CommandContext {
     /// Path to the compiled binary.
     pub binary: PathBuf,
-    /// Resolved PBF file path.
-    pub pbf_path: PathBuf,
+    /// Resolved PBF file path, when this command consumes one.
+    pub pbf_path: Option<PathBuf>,
     /// Resolved OSC file path (when the command needs one).
     ///
     /// For commands that accept multiple OSCs (e.g. `merge-changes --osc-range`),
@@ -238,6 +238,8 @@ impl CommandContext {
     /// Get the PBF path as a UTF-8 string, or error.
     pub fn pbf_str(&self) -> Result<&str, DevError> {
         self.pbf_path
+            .as_deref()
+            .ok_or_else(|| DevError::Config("PBF path is required but not set".into()))?
             .to_str()
             .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))
     }
@@ -284,11 +286,15 @@ impl CommandContext {
     }
 
     /// PBF file basename (e.g. `"denmark-with-indexdata.osm.pbf"`).
-    pub fn pbf_basename(&self) -> String {
-        self.pbf_path
+    pub fn pbf_basename(&self) -> Result<String, DevError> {
+        let pbf_path = self
+            .pbf_path
+            .as_deref()
+            .ok_or_else(|| DevError::Config("PBF path is required but not set".into()))?;
+        Ok(pbf_path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or_default()
-            .to_owned()
+            .to_owned())
     }
 }

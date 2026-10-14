@@ -363,7 +363,13 @@ switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`.
   (`send_signal_pgrp`, so descendants are reaped too) the moment the marker
   lands. That SIGKILL is *not* treated as a failure - `stopped_by_marker`
   flags it and the run records normally, so you can bench one phase in
-  isolation.
+  isolation. The results row keeps the two facts apart: `stop_marker` is the
+  marker that actually fired (shown as `killed at "..."`), `stop_marker_requested`
+  the `--stop` spelling as given. A requested stop whose marker never appeared
+  leaves `stop_marker` empty - the child ran to its natural end. Rows recorded
+  before schema v20 only ever stored the request, so their `stop_marker` was
+  moved to `stop_marker_requested` and cleared: whether those stops fired is
+  unknown.
 - **Deadlines**: a caller may bound each child's wall time
   (`run_sidecar_with_deadline`, or a `sidecar::DeadlineScope` around code that
   reaches the sidecar through a capture helper). Past it the child's process

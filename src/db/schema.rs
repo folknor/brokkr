@@ -67,7 +67,10 @@ CREATE TABLE IF NOT EXISTS runs (
     cli_args        TEXT,
     metadata        TEXT,
     project         TEXT NOT NULL DEFAULT 'pbfhogg',
+    -- Marker that actually ended the child; NULL unless --stop fired.
     stop_marker     TEXT,
+    -- User's configured --stop spelling, retained separately from its outcome.
+    stop_marker_requested TEXT,
     -- Literal brokkr invocation (std::env::args joined). Parallel to
     -- cli_args which captures the subprocess invocation of the tool.
     -- Both are stored so queries can grep either the brokkr-level ask
@@ -157,12 +160,12 @@ INSERT INTO runs (\
     timestamp, hostname, [commit], subject, command, mode, \
     input_file, input_mb, elapsed_ms, elapsed_us, peak_rss_mb, cargo_features, cargo_profile, \
     kernel, cpu_governor, avail_memory_mb, storage_notes, uuid, \
-    cli_args, project, stop_marker, brokkr_args\
+    cli_args, project, stop_marker, stop_marker_requested, brokkr_args\
 ) VALUES (\
     datetime('now'), ?1, ?2, ?3, ?4, ?5, \
     ?6, ?7, ?8, ?9, ?10, ?11, \
     ?12, ?13, ?14, ?15, ?16, \
-    ?17, ?18, ?19, ?20, ?21\
+    ?17, ?18, ?19, ?20, ?21, ?22\
 )";
 
 // ---------------------------------------------------------------------------

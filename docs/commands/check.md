@@ -800,13 +800,22 @@ restarts it on demand; a shell or editor starter (a hand-typed `cargo`) is
 never signalled. Failure to read `/proc` reads as nothing found: the reap is on
 the way to the real work, never a gate on it.
 
-**Ownership is two pids, never a name.** The original rule exempted any process
-with a `brokkr` ancestor by `comm`, which made the exemption spoofable by naming
-*any* executable `brokkr` - a shell copied to that name exempted every cargo and
-rustc beneath it, with no reference to whether it held anything. The rule now
-exempts a tree whose ancestor is either **this process** (`std::process::id()`)
-or **the verified current lock holder** (checked through the lock file's
-starttime and boot-id tokens).
+**Both reapers spare the same process-tree boundary: this brokkr, its visible
+ancestors, and its visible descendants.** `ReaperExemptions` in `src/stray.rs`
+is also used by the orphan selector. A token-bearing ancestor of a live brokkr
+and a cargo process that launched it survive either reap. An ancestor Cargo
+can hold the target-dir lock, and killing it could release that lock for nested
+Cargo; it also SIGKILLs the Cargo operation that launched brokkr. The reapers
+preserve that caller, so recursive Cargo under a build script can remain
+blocked by its caller's target-dir lock.
+
+**Stray ownership adds verified identities, never a name.** The original rule
+exempted any process with a `brokkr` ancestor by `comm`, which made the
+exemption spoofable by naming *any* executable `brokkr` - a shell copied to
+that name exempted every cargo and rustc beneath it, with no reference to
+whether it held anything. Beyond the shared boundary, the stray reaper
+recognizes **the verified current lock holder** (checked through the lock
+file's starttime and boot-id tokens) and its owned subtree.
 
 A holder in **another PID namespace** (a sandboxed command, seen from the host)
 cannot be verified by pid at all, so its namespace stands in for it: while it
@@ -819,21 +828,19 @@ Without it, a hand-run `brokkr strays` on the host killed a sandboxed holder's
 own cargo.
 
 There is no name fallback. The case that argued for keeping one - never SIGKILL
-brokkr's own build - needs no lock file at all, because the reaper runs *inside*
-brokkr and can identify its own work by its own pid. A hold whose identity cannot
-be verified from this namespace therefore protects nothing beyond the reaping
-process itself; previously it fell back to the name, which let an executable
-called `brokkr` shield a foreign compiler from a drain that then expired for want
-of killing it.
+brokkr's own build - is covered by the shared boundary, and the reaper can
+identify its own process by pid. A hold whose identity cannot be verified from
+this namespace therefore protects nothing beyond that boundary; previously it
+fell back to the name, which let an executable called `brokkr` shield a foreign
+compiler from a drain that then expired for want of killing it.
 
-**The reap kills descendant trees, deepest first, and stops at anything brokkr
-owns.** Signalling only the classified pids left a hole: killing a cargo does not
-kill the rustc wrapper beneath it, so an already-admitted wrapper survived and
-went on to exec a compiler. Expansion must never cross into brokkr's own subtree,
-though - `cargo(stray) -> brokkr(holder) -> cargo(ours)` is an ordinary topology
-whenever brokkr is launched from a cargo, the classifier walking *up* from the
-outer cargo cannot see the holder below it, and expanding descendants from there
-reached brokkr itself. Owned pids are skipped and not recursed through.
+**The reap kills descendant trees, deepest first, and stops at exempt or owned
+processes.** Signalling only the classified pids left a hole: killing a cargo
+does not kill the rustc wrapper beneath it, so an already-admitted wrapper
+survived and went on to exec a compiler. The shared boundary prevents selecting
+the Cargo that launched this brokkr and stops expansion at brokkr's descendants.
+A hand-run reap can still encounter another verified holder below a stray Cargo;
+that holder and its subtree are skipped and not recursed through.
 
 **Every signal is identity-checked.** A `Stray` carries the `/proc` starttime
 recorded at classification, and the SIGKILL is sent only if that pid still has
@@ -893,12 +900,13 @@ Every failure is on the side of leaving processes alone: an unreadable
 directory, a missing file, a flock held by anyone, an environment that cannot be
 read (another user's process, or a test process that made itself
 non-dumpable - which the reap therefore misses rather than kills). The reaping
-brokkr exempts itself, its ancestors
-and its descendants whatever token they carry - the mark is inherited, so a
-brokkr started from inside a test carries the outer run's token, as does every
-non-test child it starts. Killing is after the fact, not at the moment brokkr
-dies: an orphan runs until the next locked brokkr command, which is also when
-the stray reap would clear the rustc and rustdoc left under the dead cargo.
+brokkr uses the same `ReaperExemptions` boundary as stray cleanup and spares
+itself, its ancestors and its descendants whatever token they carry. The mark
+is inherited, so a brokkr started from inside a test carries the outer run's
+token, as does every non-test child it starts. Killing is after the fact, not
+at the moment brokkr dies: an orphan runs until the next locked brokkr command,
+which is also when the stray reap would clear the rustc and rustdoc left under
+the dead cargo.
 `brokkr strays` does not list orphans; any locked brokkr command reaps them.
 Unit tests never register a token or run the host reap; the mechanism is
 exercised against a scratch directory and a child the test owns.
@@ -963,9 +971,13 @@ Acquisition, correspondingly, does this before the hold is usable:
    empty `auth` refuses, so nothing new is admitted while brokkr clears. That is
    the anti-starvation property, obtained from the publication order rather than
    from a separate intent flag a crashed writer could leave behind.
-2. Take the **exclusive** `compile.lock`, draining earlier leases. After 20s the
-   stray reap runs once, then the wait resumes; the whole drain is bounded at
-   120s.
+2. Take the **exclusive** `compile.lock`, draining earlier leases - those of
+   compilers admitted under an earlier hold and of compilers started while no
+   hold existed (an IDE check, a hand-typed `cargo`). After a short first
+   window of a few seconds the stray reap runs once, then the wait resumes; the
+   whole drain is bounded at 120s. The window is short because every compiler
+   still holding a lease at that point is a stray the post-hold reap would kill
+   anyway; waiting longer only stalls the acquisition.
 3. Mint the nonce and publish its hash *while still holding the exclusive
    lease*, so a guard paused before taking its share resumes, reads the new hash
    under its share, and cannot turn an earlier hold's nonce into an admitted
@@ -989,8 +1001,9 @@ In order: `BROKKR_CARGO` set passes, checked **before any lease** - a hatch that
 needs working lock infrastructure is useless exactly when it is needed. Then the
 lease is taken and the record read. Then the flock probe of `brokkr.lock` has the
 final word on whether a hold exists at all: not held passes, whatever the file
-says. Held plus an empty `auth` refuses (a hold is starting up). Held plus a
-non-empty `auth` admits only a matching capability.
+says, while carrying the shared lease through `exec` so a later hold drains
+this compilation. Held plus an empty `auth` refuses (a hold is starting up).
+Held plus a non-empty `auth` admits only a matching capability.
 
 The flock probe is last on purpose. Deciding from the record alone is a bug that
 cost a probe run to find: abnormal termination leaves metadata behind while the
@@ -1169,8 +1182,10 @@ briefly a known gap between the capability landing and the overrides landing.
 guard binary is missing); `--install` writes the config line, resolving the
 guard as the binary next to the running `brokkr` executable and refusing to
 overwrite a wrapper brokkr did not write (sccache, say - chaining wrappers
-is a human's decision); `--remove` unsets it, with the same
-refuse-if-foreign rule. Works with no `brokkr.toml`.
+is a human's decision); it also refuses to replace a guard from another brokkr
+install. `--remove` can unset another exact-name brokkr guard too, including
+one whose install is gone, but still refuses an unrelated wrapper. Works with
+no `brokkr.toml`.
 
 `scripts/guard-smoke.py` exercises the guard's decision paths against the real
 flock. `scripts/guard-decision-probe.py <guard-binary>` covers the capability

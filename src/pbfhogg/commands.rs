@@ -1132,7 +1132,7 @@ mod tests {
     fn test_ctx() -> CommandContext {
         CommandContext {
             binary: PathBuf::from("/usr/bin/pbfhogg"),
-            pbf_path: PathBuf::from("/data/denmark.osm.pbf"),
+            pbf_path: Some(PathBuf::from("/data/denmark.osm.pbf")),
             osc_path: Some(PathBuf::from("/data/denmark-4705.osc.gz")),
             osc_paths: vec![PathBuf::from("/data/denmark-4705.osc.gz")],
             pbf_b_path: Some(PathBuf::from("/data/scratch/merged.osm.pbf")),

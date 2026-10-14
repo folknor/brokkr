@@ -28,28 +28,34 @@ static SERIAL_BUILDS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 /// chain) holds intermediate artifacts that target dirs do not separate, so it
 /// forces one group.
 fn set_serial_builds(project_root: &Path, configured: bool, sweeps: &[ResolvedSweep]) {
-    let sweep_build_dir = sweeps.iter().any(|s| s.env.get("CARGO_BUILD_BUILD_DIR").is_some_and(|v| !v.is_empty()));
-    let serial = configured || sweep_build_dir || build_dir_configured(project_root);
+    let sweep_build_dir = sweeps.iter().any(|sweep| {
+        let env: Vec<(&str, &str)> = sweep
+            .env
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        build_dir_configured(
+            project_root,
+            crate::rustflags::EffectiveEnv::new(&env),
+        )
+    });
+    let default_build_dir = sweeps.is_empty()
+        && build_dir_configured(
+            project_root,
+            crate::rustflags::EffectiveEnv::new(&[]),
+        );
+    let serial = configured || sweep_build_dir || default_build_dir;
     if serial && !configured {
         output::detail("build phases: one cargo chain (a cargo build dir is configured)");
     }
     SERIAL_BUILDS.store(serial, std::sync::atomic::Ordering::Relaxed);
 }
 
-fn build_dir_configured(project_root: &Path) -> bool {
-    if std::env::var_os("CARGO_BUILD_BUILD_DIR").is_some_and(|v| !v.is_empty()) {
-        return true;
-    }
-    crate::rustflags::config_paths(project_root).iter().any(|path| {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|text| text.parse::<toml::Table>().ok())
-            .is_some_and(|doc| {
-                doc.get("build")
-                    .and_then(toml::Value::as_table)
-                    .is_some_and(|b| b.contains_key("build-dir"))
-            })
-    })
+fn build_dir_configured(
+    project_root: &Path,
+    env: crate::rustflags::EffectiveEnv<'_>,
+) -> bool {
+    crate::rustflags::CargoLaunchConfig::discover(project_root, env).build_dir
 }
 
 /// The directory a sweep's cargo invocations write: its isolated target dir,

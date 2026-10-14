@@ -42,6 +42,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::error::DevError;
+use crate::lockfile::LockGuard;
 use crate::preflight;
 
 /// File name of the canonical pin file inside the registry directory.
@@ -831,12 +832,22 @@ fn check_probe_config(
 impl Registry {
     /// Load `pins.toml` and every sibling `<keyword>.toml` from
     /// `registry_dir`. Does not touch the corpus; call
-    /// [`Registry::lint`] (and per-probe verification) for that.
+    /// [`Registry::lint`] (and per-probe verification) for that. Requires the
+    /// caller's lock so writers cannot replace files while this snapshot is
+    /// being assembled.
     ///
     /// `corpus_root` is needed for the one `[pending]` rule the file alone
     /// cannot settle: a pending path at or inside the registry dir names a
     /// probe discovery never walks into, so no reseed could ever pin it.
-    pub fn load(registry_dir: &Path, corpus_root: &Path) -> Result<Self, DevError> {
+    pub fn load(
+        registry_dir: &Path,
+        corpus_root: &Path,
+        _lock: &LockGuard,
+    ) -> Result<Self, DevError> {
+        Self::load_unlocked(registry_dir, corpus_root)
+    }
+
+    fn load_unlocked(registry_dir: &Path, corpus_root: &Path) -> Result<Self, DevError> {
         if !registry_dir.is_dir() {
             return Err(DevError::Config(format!(
                 "piners: registry directory not found: {}",
@@ -1584,7 +1595,7 @@ csv  = { path = "piners/beta-02/tv_trades.csv", xxh128 = "ddd" }
         .unwrap();
         std::fs::write(dir.join("ema.toml"), "probes = [\"alpha-01\"]\n").unwrap();
 
-        let r = Registry::load(&dir, dir.parent().unwrap()).unwrap();
+        let r = Registry::load_unlocked(&dir, dir.parent().unwrap()).unwrap();
 
         assert_eq!(r.pins.len(), 2);
         assert_eq!(r.pins["alpha-01"].pine.xxh128, "aaa");
@@ -1617,7 +1628,7 @@ csv  = { path = "piners/beta-02/tv_trades.csv", xxh128 = "ddd" }
              [probe_config.\"registry\"]\nfeed = \"f\"\n\n[pending]\nnew = \"registry/new\"\n",
         )
         .unwrap();
-        let err = Registry::load(&registry, &root).unwrap_err();
+        let err = Registry::load_unlocked(&registry, &root).unwrap_err();
         assert!(format!("{err:?}").contains("can never be pinned"));
     }
 

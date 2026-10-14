@@ -86,6 +86,14 @@ pub(crate) struct HarnessContext {
     pub(crate) harness: harness::BenchHarness,
 }
 
+/// Whether a measurement request may run against a dirty tree.
+///
+/// Run mode does not persist results, so it is safe regardless of the tree
+/// state. Stored measurement modes still require the explicit `--force` flag.
+fn dirty_tree_allowed(req: &crate::measure::MeasureRequest<'_>) -> bool {
+    req.force || matches!(req.mode, crate::measure::MeasureMode::Run)
+}
+
 /// Shared bootstrap step for both context constructors: resolve host paths
 /// and compute the effective build root + db root pair.
 fn resolve_bootstrap_paths<'a>(
@@ -101,6 +109,25 @@ fn resolve_bootstrap_paths<'a>(
 }
 
 impl HarnessContext {
+    /// Create a harness context using the dirty-tree policy for this request.
+    /// The policy must be applied before `BenchHarness` is constructed, since
+    /// its constructor performs the dirty-tree check.
+    pub(crate) fn new_for_request(
+        req: &crate::measure::MeasureRequest<'_>,
+        lock_command: &str,
+    ) -> Result<Self, DevError> {
+        Self::new(
+            req.dev_config,
+            req.project,
+            req.project_root,
+            req.build_root,
+            lock_command,
+            dirty_tree_allowed(req),
+            req.stop_marker.map(str::to_owned),
+        )
+        .map(|ctx| ctx.with_request(req))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         dev_config: &config::DevConfig,
@@ -161,6 +188,29 @@ pub(crate) struct BenchContext {
 }
 
 impl BenchContext {
+    /// Create a bench context using the dirty-tree policy for this request.
+    pub(crate) fn new_for_request(
+        req: &crate::measure::MeasureRequest<'_>,
+        package: Option<&str>,
+        features: &[&str],
+        default_features: bool,
+        lock_command: &str,
+    ) -> Result<Self, DevError> {
+        Self::new(
+            req.dev_config,
+            req.project,
+            req.project_root,
+            req.build_root,
+            package,
+            features,
+            default_features,
+            lock_command,
+            dirty_tree_allowed(req),
+            req.stop_marker.map(str::to_owned),
+        )
+        .map(|ctx| ctx.with_request(req))
+    }
+
     /// Create a new bench context.
     ///
     /// When `build_root` is `Some`, builds happen there (worktree) while data
@@ -251,6 +301,26 @@ impl BenchContext {
             harness,
             binary,
         })
+    }
+
+    /// As [`with_build_config`](Self::with_build_config), with dirty-tree
+    /// handling derived from the request's mode in one shared place.
+    pub(crate) fn with_build_config_for_request(
+        req: &crate::measure::MeasureRequest<'_>,
+        build_config: &build::BuildConfig,
+        lock_command: &str,
+    ) -> Result<Self, DevError> {
+        Self::with_build_config(
+            req.dev_config,
+            req.project,
+            req.project_root,
+            req.build_root,
+            build_config,
+            lock_command,
+            dirty_tree_allowed(req),
+            req.stop_marker.map(str::to_owned),
+        )
+        .map(|ctx| ctx.with_request(req))
     }
 
     /// Attach the brokkr invocation string and measurement mode from the

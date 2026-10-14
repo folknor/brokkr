@@ -201,11 +201,13 @@ fn format_source(p: &CargoPackage, workspace_set: &HashSet<&str>) -> String {
 }
 
 fn tildify(path: &str) -> String {
-    if let Some(home) = std::env::var_os("HOME")
-        && let Some(home_str) = home.to_str()
-        && let Some(rest) = path.strip_prefix(home_str)
+    if let Some(home) = crate::user_dirs::home()
+        && let Ok(rest) = Path::new(path).strip_prefix(&home)
     {
-        return format!("~{rest}");
+        if rest.as_os_str().is_empty() {
+            return "~".to_string();
+        }
+        return Path::new("~").join(rest).to_string_lossy().into_owned();
     }
     path.to_string()
 }

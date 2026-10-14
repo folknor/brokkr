@@ -269,8 +269,12 @@ pub fn compare_report(c: &Comparison, full: bool) -> String {
 
 /// `outcome/disposition`, marked when the run emitted the line unasked.
 fn side_label(s: &compare::Side) -> String {
-    let unselected = if s.selected { "" } else { " (report-only)" };
-    format!("{}/{}{unselected}", s.outcome, s.disposition)
+    let selection = match s.selection {
+        compare::Selection::Selected => "",
+        compare::Selection::NotSelected => " (report-only)",
+        compare::Selection::Unknown => " (selection unknown)",
+    };
+    format!("{}/{}{selection}", s.outcome, s.disposition)
 }
 
 fn compare_cells(d: &ProbeDelta) -> Vec<String> {
@@ -315,6 +319,7 @@ fn compare_cells(d: &ProbeDelta) -> Vec<String> {
                 Presence::Ran(s) => side_label(s),
                 Presence::NoLine => "selected, no line".to_owned(),
                 Presence::NotSelected => "not selected".to_owned(),
+                Presence::SelectionUnknown => "selection unknown".to_owned(),
             };
             vec![
                 d.probe.clone(),

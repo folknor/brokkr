@@ -23,8 +23,8 @@
 //! 3. `BROKKR_CARGO` set and non-empty - exec. The manual escape hatch.
 //! 4. Take a shared compile lease, read the published capability hash under
 //!    it, then probe the brokkr lock (`$HOME/.brokkr/brokkr.lock`) last:
-//!    not held - exec; held - exec only with a matching `BROKKR_HOLD_NONCE`,
-//!    refuse (exit 1) otherwise.
+//!    not held - exec while keeping the lease through the compiler; held -
+//!    exec only with a matching `BROKKR_HOLD_NONCE`, refuse (exit 1) otherwise.
 //!
 //! Fail-open everywhere except a demonstrably held flock: an unreadable
 //! `/proc`, an unset or empty `$HOME`, or a missing lock file all exec. The
@@ -119,7 +119,8 @@ fn main() {
 
     let lease = match decide() {
         Decision::Admitted(lease) => Some(lease),
-        Decision::Override | Decision::Idle => None,
+        Decision::Idle(lease) => Some(lease),
+        Decision::Override => None,
         Decision::Unleased(why) => {
             // Fail open, and say so. This execution is outside the exclusion
             // guarantee: brokkr may be measuring alongside it and cannot know.
@@ -463,8 +464,20 @@ enum Decision {
     Override,
     /// Leased and the capability matched the live hold.
     Admitted(Lease),
-    /// No hold is active.
-    Idle,
+    /// No hold is active; carry the lease into the compiler so a hold that
+    /// starts after this decision drains this compilation before protected work.
+    ///
+    /// Without it, a compiler that probed "not held" an instant before a hold
+    /// took the flock ran unleased through the drain, and the post-hold stray
+    /// scan misses it too when the exec lands after that scan - an unseen
+    /// compile beside a measurement. The cost is that every idle compile (an
+    /// IDE check) in flight at hold start now blocks the drain; the holder
+    /// bounds that by reaping strays after a short first window
+    /// (`DRAIN_REAP_AFTER` in `src/lockfile.rs`), and those compilers were
+    /// going to be reaped after the drain regardless. Leases only exist for
+    /// compiles that started before the hold: once the flock is held, a new
+    /// compile sees the hold and is refused or admitted by capability.
+    Idle(Lease),
     /// The lease could not be established at all. Fails open, and this
     /// execution is outside the exclusion guarantee.
     Unleased(&'static str),
@@ -501,7 +514,7 @@ fn decide() -> Decision {
     // record alone refused every compile on the machine until something
     // rewrote the file. A leftover record is inert; only a live flock is a hold.
     if !lock_is_held() {
-        return Decision::Idle;
+        return Decision::Idle(lease);
     }
 
     // A hold is active. An empty `auth` means it is still draining and admitting

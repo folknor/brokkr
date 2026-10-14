@@ -135,6 +135,10 @@ pub struct SidecarData {
     pub samples: Vec<Sample>,
     pub markers: Vec<Marker>,
     pub counters: Vec<Counter>,
+    /// Marker that actually ended the child, if a configured stop marker hit.
+    /// This is `None` when the child exited naturally, even if a stop was
+    /// requested.
+    pub fired_stop_marker: Option<String>,
     pub summary: SidecarSummary,
 }
 
@@ -717,32 +721,45 @@ fn unavailable_exit_status() -> ExitStatus {
     ExitStatus::from_raw(1 << 8)
 }
 
-/// Resolve a `--stop` spelling against a batch of freshly-drained
-/// markers. Returns the matched marker name when a hit lands, `None`
-/// otherwise. See the inline comment at the call site for the three
-/// accepted spellings.
-fn stop_match(stop: &str, recent: &[Marker]) -> Option<String> {
-    // `-FOO` → canonical `FOO_END`. No fallback - the sigil is
-    // explicit, so a mismatch is a mismatch.
-    if let Some(suffix) = stop.strip_prefix('-') {
-        let canonical = format!("{suffix}_END");
-        return recent
-            .iter()
-            .find(|m| m.name == canonical)
-            .map(|m| m.name.clone());
+/// A parsed `--stop` request. Resolve the spelling once before entering the
+/// sidecar loop, then compare each fresh marker batch against the stored names.
+enum StopSpec {
+    /// An explicit marker name, such as `FOO_END`.
+    Exact(String),
+    /// The span-close spelling `-FOO`, resolved to `FOO_END`.
+    SpanEnd(String),
+    /// A bare name such as `FOO`: prefer a verbatim marker, then `FOO_END`.
+    Lenient { exact: String, span_end: String },
+}
+
+impl StopSpec {
+    fn parse(raw: &str) -> Self {
+        if let Some(suffix) = raw.strip_prefix('-') {
+            return Self::SpanEnd(format!("{suffix}_END"));
+        }
+        if raw.ends_with("_END") {
+            return Self::Exact(raw.to_owned());
+        }
+        Self::Lenient {
+            exact: raw.to_owned(),
+            span_end: format!("{raw}_END"),
+        }
     }
-    // Verbatim first - preserves existing `--stop FOO_END` semantics.
-    if let Some(m) = recent.iter().find(|m| m.name == stop) {
-        return Some(m.name.clone());
+
+    /// Return the actual marker name that matched in this fresh batch.
+    fn matching_marker(&self, recent: &[Marker]) -> Option<String> {
+        match self {
+            Self::Exact(name) | Self::SpanEnd(name) => recent
+                .iter()
+                .find(|marker| marker.name == *name)
+                .map(|marker| marker.name.clone()),
+            Self::Lenient { exact, span_end } => recent
+                .iter()
+                .find(|marker| marker.name == *exact)
+                .or_else(|| recent.iter().find(|marker| marker.name == *span_end))
+                .map(|marker| marker.name.clone()),
+        }
     }
-    // Fallback: `--stop FOO` resolves to `FOO_END` for the common
-    // pbfhogg naming convention. The caller prints a notice so the
-    // resolved form is visible in the sidecar log line.
-    let canonical = format!("{stop}_END");
-    recent
-        .iter()
-        .find(|m| m.name == canonical)
-        .map(|m| m.name.clone())
 }
 
 thread_local! {
@@ -857,6 +874,9 @@ pub(crate) fn run_sidecar_with_deadline(
     #[allow(unused_assignments)] // initial None is never read; every branch assigns before use
     let mut child_elapsed: Option<Duration> = None;
     let mut stopped_by_marker = false;
+    let requested_stop = stop_marker.unwrap_or_default();
+    let stop_spec = stop_marker.map(StopSpec::parse);
+    let mut fired_stop_marker = None;
     let mut stopped_by_signal = false;
     let mut stopped_by_deadline = false;
 
@@ -890,13 +910,16 @@ pub(crate) fn run_sidecar_with_deadline(
         //                                           verbatim check fails; prints a
         //                                           one-line notice so the resolved
         //                                           form is visible.
-        if let Some(stop) = stop_marker {
-            let matched = stop_match(stop, &markers[marker_count_before..]);
+        if let Some(spec) = &stop_spec {
+            let matched = spec.matching_marker(&markers[marker_count_before..]);
             if let Some(matched_name) = matched {
-                let display = if matched_name == stop {
-                    format!("stop marker \"{stop}\" received, killing child")
+                fired_stop_marker = Some(matched_name.clone());
+                let display = if matched_name == requested_stop {
+                    format!("stop marker \"{requested_stop}\" received, killing child")
                 } else {
-                    format!("stop marker \"{stop}\" → \"{matched_name}\" received, killing child")
+                    format!(
+                        "stop marker \"{requested_stop}\" → \"{matched_name}\" received, killing child"
+                    )
                 };
                 output::sidecar_msg(&display);
                 // SIGKILL the whole process group (the captured runner
@@ -1007,6 +1030,7 @@ pub(crate) fn run_sidecar_with_deadline(
             samples,
             markers,
             counters,
+            fired_stop_marker,
             summary: SidecarSummary {
                 vm_hwm_kb: last_hwm,
                 sample_count: sample_idx,

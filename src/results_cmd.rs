@@ -10,7 +10,7 @@ use crate::db::DatasetMatcher;
 use crate::error::DevError;
 use crate::hotpath_fmt;
 use crate::output;
-use crate::request::ResultsQuery;
+use crate::request::{ResultsQuery, ResultsView};
 use crate::resolve::{results_db_path, sidecar_db_path};
 
 fn open_sidecar_db(project_root: &Path) -> Option<db::sidecar::SidecarDb> {
@@ -92,87 +92,68 @@ pub(crate) fn cmd_results(
     let results_db = db::ResultsDb::open(&db_path)?;
     let sidecar_db = open_sidecar_db(project_root);
 
-    // Parse these once so every results view receives the same row filters.
-    // The CLI validator guarantees `=`, but keep the split defensive.
-    let meta_pairs: Vec<(String, String)> = q
-        .meta
-        .iter()
-        .filter_map(|s| s.split_once('=').map(|(k, v)| (k.to_owned(), v.to_owned())))
-        .collect();
-    let env_pairs: Vec<(String, String)> = q
-        .env
-        .iter()
-        .filter_map(|s| s.split_once('=').map(|(k, v)| (k.to_owned(), v.to_owned())))
-        .collect();
-    let row_filters = db::RowFilters {
-        command: q.command.as_deref(),
-        mode: q.mode.as_deref(),
-        dataset: q.dataset.as_deref(),
-        meta: &meta_pairs,
-        env: &env_pairs,
-        grep: &q.grep,
-        grep_v: &q.grep_v,
-    };
-
-    if let Some(ref uuid_prefix) = q.query {
-        // Resolve sidecar latest-keys (e.g. "dirty") so the results DB
-        // lookup uses the actual UUID, not the alias.
-        let resolved_prefix = sidecar_db
-            .as_ref()
-            .map(|sdb| sdb.resolve_latest(uuid_prefix))
-            .unwrap_or_else(|| uuid_prefix.to_owned());
-        let rows = results_db.query_by_uuid_filtered(&resolved_prefix, &row_filters)?;
-        if rows.is_empty() {
-            // A supplied row filter may have excluded a real result row. Only
-            // call it sidecar-only when the UUID has no results row at all.
-            if !results_db.has_uuid_prefix(&resolved_prefix)? {
-                if let Some(ref sdb) = sidecar_db
-                    && sdb.has_data(uuid_prefix)
-                {
-                    output::result_msg(
-                        "sidecar-only run (no results DB entry - dirty tree or failed)",
-                    );
-                    output::result_msg(&format!(
-                        "use `brokkr sidecar {uuid_prefix}` (default phase summary; add --samples/--markers/--durations/--counters/--stat for raw views)",
-                    ));
+    match q.view()? {
+        ResultsView::Uuid {
+            prefix,
+            filter,
+            top,
+        } => {
+            // Resolve sidecar latest-keys (e.g. "dirty") so the results DB
+            // lookup uses the actual UUID, not the alias.
+            let resolved_prefix = sidecar_db
+                .as_ref()
+                .map(|sdb| sdb.resolve_latest(&prefix))
+                .unwrap_or_else(|| prefix.clone());
+            let rows = results_db.query_by_uuid_with_filter(&resolved_prefix, &filter)?;
+            if rows.is_empty() {
+                // A supplied row filter may have excluded a real result row. Only
+                // call it sidecar-only when the UUID has no results row at all.
+                if !results_db.has_uuid_prefix(&resolved_prefix)? {
+                    if let Some(ref sdb) = sidecar_db
+                        && sdb.has_data(&prefix)
+                    {
+                        output::result_msg(
+                            "sidecar-only run (no results DB entry - dirty tree or failed)",
+                        );
+                        output::result_msg(&format!(
+                            "use `brokkr sidecar {prefix}` (default phase summary; add --samples/--markers/--durations/--counters/--stat for raw views)",
+                        ));
+                    } else {
+                        output::result_msg("no matching results");
+                    }
                 } else {
                     output::result_msg("no matching results");
                 }
             } else {
-                output::result_msg("no matching results");
+                render_single_or_multi(&rows, sidecar_db.as_ref(), top, &matcher);
             }
-        } else {
-            render_single_or_multi(&rows, sidecar_db.as_ref(), q.top, &matcher);
         }
-        return Ok(());
-    }
-
-    if let Some(ref commits) = q.compare {
-        let commit_a = commits.first().map_or("", String::as_str);
-        let commit_b = commits.get(1).map_or("", String::as_str);
-        let (rows_a, rows_b) = results_db.query_compare(commit_a, commit_b, &row_filters)?;
-        let table = db::format_compare(commit_a, &rows_a, commit_b, &rows_b, q.top, &matcher);
-        println!("{table}");
-        return Ok(());
-    }
-
-    let filter = db::QueryFilter {
-        commit: q.commit.clone(),
-        command: q.command.clone(),
-        mode: q.mode.clone(),
-        dataset: q.dataset.clone(),
-        meta: meta_pairs,
-        env: env_pairs,
-        grep: q.grep.clone(),
-        grep_v: q.grep_v.clone(),
-        limit: q.limit,
-    };
-    let rows = results_db.query(&filter)?;
-    if rows.is_empty() {
-        output::result_msg("no matching results");
-    } else {
-        let table = db::format_table(&rows, &matcher);
-        println!("{table}");
+        ResultsView::Compare {
+            commits: (commit_a, commit_b),
+            filter,
+            top,
+        } => {
+            let (rows_a, rows_b) = results_db.query_compare(&commit_a, &commit_b, &filter)?;
+            let table = db::format_compare_with_limit(
+                &commit_a,
+                &rows_a,
+                &commit_b,
+                &rows_b,
+                top,
+                filter.limit,
+                &matcher,
+            );
+            println!("{table}");
+        }
+        ResultsView::Table { filter } => {
+            let rows = results_db.query(&filter)?;
+            if rows.is_empty() {
+                output::result_msg("no matching results");
+            } else {
+                let table = db::format_table(&rows, &matcher);
+                println!("{table}");
+            }
+        }
     }
 
     Ok(())

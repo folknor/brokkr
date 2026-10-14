@@ -295,7 +295,7 @@ impl BenchHarness {
             best.ok_or_else(|| DevError::Config("benchmark requires at least 1 run".into()))?;
         best.iterations = walls;
 
-        self.record_measured(config, &best, &all_or_none(walls_us))?;
+        self.record_measured(config, &best, &all_or_none(walls_us), None)?;
         Ok(best)
     }
 
@@ -381,7 +381,15 @@ impl BenchHarness {
         // the sentinel. exit_code is 0 since a failing run would have errored
         // out of the closure before reaching this point.
         let info = self.build_run_info(config, program, start_epoch, 0, Some(0));
-        let uuid = match self.record_measured(config, &best, &all_or_none(walls_us)) {
+        let fired_stop_marker = sidecar_runs
+            .get(best_run_idx)
+            .and_then(|data| data.fired_stop_marker.as_deref());
+        let uuid = match self.record_measured(
+            config,
+            &best,
+            &all_or_none(walls_us),
+            fired_stop_marker,
+        ) {
             Ok(uuid) => uuid,
             Err(e) => {
                 // The row is lost; the trajectory need not be.
@@ -567,7 +575,15 @@ impl BenchHarness {
         };
 
         let info = self.build_run_info(config, program, start_epoch, last_pid, Some(0));
-        let uuid = match self.record_measured(config, &bench_result, &walls_us) {
+        let fired_stop_marker = sidecar_runs
+            .get(best_run_idx)
+            .and_then(|data| data.fired_stop_marker.as_deref());
+        let uuid = match self.record_measured(
+            config,
+            &bench_result,
+            &walls_us,
+            fired_stop_marker,
+        ) {
             Ok(uuid) => uuid,
             Err(e) => {
                 // The row is lost; the trajectory need not be.
@@ -622,7 +638,7 @@ impl BenchHarness {
             hotpath: None,
         };
 
-        self.record_measured(config, &result, &samples_us)?;
+        self.record_measured(config, &result, &samples_us, None)?;
         Ok(result)
     }
 
@@ -784,7 +800,7 @@ impl BenchHarness {
         config: &BenchConfig,
         result: &BenchResult,
     ) -> Result<Option<String>, DevError> {
-        self.record_measured(config, result, &[])
+        self.record_measured(config, result, &[], None)
     }
 
     /// [`record_result`](Self::record_result) plus the per-iteration walls in
@@ -800,6 +816,7 @@ impl BenchHarness {
         config: &BenchConfig,
         result: &BenchResult,
         iterations_us: &[i64],
+        fired_stop_marker: Option<&str>,
     ) -> Result<Option<String>, DevError> {
         let mode = self.effective_mode(config);
         if !self.store_results {
@@ -807,7 +824,7 @@ impl BenchHarness {
             return Ok(None);
         }
         if self.git.is_clean {
-            let row = self.build_row(config, result, iterations_us);
+            let row = self.build_row(config, result, iterations_us, fired_stop_marker);
             let (uuid, short) = match self.db.insert(&row) {
                 Ok(pair) => pair,
                 Err(e) => {
@@ -876,7 +893,16 @@ impl BenchHarness {
         result: &BenchResult,
         pending: &PendingSidecar,
     ) -> Result<Option<String>, DevError> {
-        self.record_measured(config, result, &pending.iterations_us)
+        let fired_stop_marker = pending
+            .runs
+            .get(pending.best_run_idx)
+            .and_then(|data| data.fired_stop_marker.as_deref());
+        self.record_measured(
+            config,
+            result,
+            &pending.iterations_us,
+            fired_stop_marker,
+        )
     }
 
     /// Persist a deferred sidecar payload under the recorded UUID. Pass the
@@ -977,6 +1003,7 @@ impl BenchHarness {
         config: &BenchConfig,
         result: &BenchResult,
         iterations_us: &[i64],
+        fired_stop_marker: Option<&str>,
     ) -> RunRow {
         let mut kv = config.metadata.clone();
         // Sources are appended in increasing precedence - metadata, env
@@ -1036,7 +1063,14 @@ impl BenchHarness {
             cli_args: config.cli_args.clone(),
             brokkr_args,
             project: self.project.name().to_owned(),
-            stop_marker: self.stop_marker.clone(),
+            stop_marker: if self.stop_marker.is_some() || fired_stop_marker.is_some() {
+                Some((
+                    self.stop_marker.clone(),
+                    fired_stop_marker.map(str::to_owned),
+                ))
+            } else {
+                None
+            },
             kv,
             iterations: result.iterations.clone(),
             iterations_us: iterations_us.to_vec(),

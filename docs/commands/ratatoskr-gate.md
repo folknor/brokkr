@@ -199,6 +199,11 @@ Each metric sub-table accepts one or more of:
 Multiple rules on the same metric all apply (logical AND). All comparisons
 are scalar; no list/object diffing.
 
+Before building the harness, brokkr compiles the configured metric names
+into typed selectors and the configured rules into predicates. An unknown
+bare key, an empty `sidecar.` / `meta.` key, a non-scalar `equal` value, or
+a metric table with no effective predicate is rejected before build work.
+
 Every metric sub-table must set at least one of these; a table with none
 (or with only `equal_to_baseline = false`) is refused before anything is
 built. It would otherwise check nothing and report PASSED. Likewise a gate
@@ -210,15 +215,18 @@ Three namespaces:
 
 - **Bare keys** (fixed v1 set): `elapsed_ms`, `exit_code`, `success`.
   These map to top-level `gate_runs` columns. Adding bare keys is a
-  schema migration.
+  schema migration. Since the gate hook runs only after successful
+  iterations, `exit_code` is always `0` and `success` is always `1` for
+  rows it evaluates; predicates on them cannot detect benchmark failures.
 - `sidecar.<key>` - flat lookup into the sidecar JSON blob. Numeric
   scalars only.
 - `meta.<key>` - flat lookup into the `summary.json` ingestion blob.
   Numeric scalars only; string equality via `equal = "..."` is allowed.
 
 Quoted dotted keys in TOML (`"sidecar.rss_peak_kb"`) keep the namespace
-prefix readable. Missing keys at gate time are a hard error - never
-silently treated as zero.
+prefix readable. Selector syntax is checked before build; missing keys or
+non-scalar run data are hard errors at gate time - never silently treated
+as zero.
 
 ## CLI
 

@@ -51,7 +51,17 @@ fn resolve_entry_path<E: FileEntry>(
     origin: Option<&str>,
     project_root: &Path,
 ) -> Result<PathBuf, DevError> {
-    let entry = entries.get(key).ok_or_else(|| {
+    let entry = get_entry(entries, key, dataset, kind)?;
+    finalize_entry_path(entry, data_dir, kind, origin, project_root)
+}
+
+fn get_entry<'a, E>(
+    entries: &'a HashMap<String, E>,
+    key: &str,
+    dataset: &str,
+    kind: &str,
+) -> Result<&'a E, DevError> {
+    entries.get(key).ok_or_else(|| {
         let mut available: Vec<&str> = entries.keys().map(String::as_str).collect();
         available.sort();
         DevError::Config(format!(
@@ -62,8 +72,7 @@ fn resolve_entry_path<E: FileEntry>(
                 available.join(", ")
             }
         ))
-    })?;
-    finalize_entry_path(entry, data_dir, kind, origin, project_root)
+    })
 }
 
 /// Tail of `resolve_entry_path`: build the on-disk path, check existence,
@@ -126,6 +135,10 @@ fn resolve_default_entry_path<E: FileEntry>(
 }
 
 /// Look up a dataset by name, returning it and its origin.
+///
+/// This resolved table is authoritative for both paths and entry metadata.
+/// Callers that need a selected entry's flags should carry that entry from
+/// here instead of looking it up again through the raw project config.
 fn get_dataset<'a>(
     dataset: &str,
     paths: &'a config::ResolvedPaths,
@@ -151,6 +164,15 @@ fn get_dataset<'a>(
 pub(crate) enum SnapshotRef {
     Base,
     Named(String),
+}
+
+/// The selected PBF config entry and its validated on-disk path.
+///
+/// Keep file-specific assertions attached to the same entry the resolver
+/// checked, rather than looking them up again through the raw host config.
+pub(crate) struct ResolvedPbf<'a> {
+    pub(crate) path: PathBuf,
+    pub(crate) entry: &'a config::PbfEntry,
 }
 
 impl SnapshotRef {
@@ -211,8 +233,8 @@ fn dataset_data_dir(paths: &config::ResolvedPaths) -> &Path {
 
 /// Resolve a snapshot's PBF path for the given variant.
 ///
-/// `Base` dispatches to the legacy `resolve_pbf_path` (top-level `pbf.<variant>`).
-/// `Named(key)` looks up `dataset.snapshot.<key>.pbf.<variant>`.
+/// `Base` selects the top-level `pbf.<variant>` entry. `Named(key)` selects
+/// `dataset.snapshot.<key>.pbf.<variant>`.
 pub(crate) fn resolve_snapshot_pbf_path(
     dataset: &str,
     snapshot: &SnapshotRef,
@@ -220,10 +242,24 @@ pub(crate) fn resolve_snapshot_pbf_path(
     paths: &config::ResolvedPaths,
     project_root: &Path,
 ) -> Result<PathBuf, DevError> {
-    match snapshot {
-        SnapshotRef::Base => resolve_pbf_path(dataset, variant, paths, project_root),
+    Ok(resolve_snapshot_pbf_entry(dataset, snapshot, variant, paths, project_root)?.path)
+}
+
+/// Resolve a snapshot PBF and retain the exact entry that supplied its path.
+pub(crate) fn resolve_snapshot_pbf_entry<'a>(
+    dataset: &str,
+    snapshot: &SnapshotRef,
+    variant: &str,
+    paths: &'a config::ResolvedPaths,
+    project_root: &Path,
+) -> Result<ResolvedPbf<'a>, DevError> {
+    let ds = get_dataset(dataset, paths)?;
+    let (entry, kind) = match snapshot {
+        SnapshotRef::Base => (
+            get_entry(&ds.pbf, variant, dataset, "pbf variant")?,
+            "pbf variant".to_owned(),
+        ),
         SnapshotRef::Named(key) => {
-            let ds = get_dataset(dataset, paths)?;
             let snap = ds.snapshot.get(key).ok_or_else(|| {
                 let mut available: Vec<&str> = std::iter::once("base")
                     .chain(ds.snapshot.keys().map(String::as_str))
@@ -257,15 +293,30 @@ pub(crate) fn resolve_snapshot_pbf_path(
                      (which auto-generates pbf.indexed from pbf.raw)."
                 ))
             })?;
-            finalize_entry_path(
-                entry,
-                &paths.data_dir,
-                &format!("snapshot.{key}.pbf variant"),
-                ds.origin.as_deref(),
-                project_root,
-            )
+            (entry, format!("snapshot.{key}.pbf variant"))
         }
-    }
+    };
+    let path = finalize_entry_path(
+        entry,
+        &paths.data_dir,
+        &kind,
+        ds.origin.as_deref(),
+        project_root,
+    )?;
+    Ok(ResolvedPbf {
+        path,
+        entry,
+    })
+}
+
+/// Resolve the selected PBF entry from the host's resolved dataset table.
+pub(crate) fn resolve_pbf_entry<'a>(
+    dataset: &str,
+    variant: &str,
+    paths: &'a config::ResolvedPaths,
+    project_root: &Path,
+) -> Result<ResolvedPbf<'a>, DevError> {
+    resolve_snapshot_pbf_entry(dataset, &SnapshotRef::Base, variant, paths, project_root)
 }
 
 /// Resolve the PBF path from --dataset + --variant.
@@ -275,16 +326,7 @@ pub(crate) fn resolve_pbf_path(
     paths: &config::ResolvedPaths,
     project_root: &Path,
 ) -> Result<PathBuf, DevError> {
-    let ds = get_dataset(dataset, paths)?;
-    resolve_entry_path(
-        &ds.pbf,
-        variant,
-        dataset,
-        "pbf variant",
-        &paths.data_dir,
-        ds.origin.as_deref(),
-        project_root,
-    )
+    Ok(resolve_pbf_entry(dataset, variant, paths, project_root)?.path)
 }
 
 /// Resolve the OSC path from --dataset + --osc-seq.

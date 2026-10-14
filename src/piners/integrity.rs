@@ -18,13 +18,36 @@
 //! process termination, stream integrity, the contract
 //! (`crate::piners::contract`) and the exact selection reconciliation,
 //! built by [`assess`]. Ordinary runs, bless, measured iterations and isolation
-//! attempts each read it under their own, explicit acceptance policy.
+//! attempts each read it under their own, explicit acceptance policy through
+//! [`RunAssessment::verdict`].
 
 use std::collections::{BTreeSet, HashSet};
 
 use crate::output;
 use crate::piners::contract::{self, ContractAssessment};
 use crate::piners::report::{self, HarnessReport};
+
+/// The consumer-specific acceptance rule applied to one shared assessment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Policy {
+    /// Ordinary parity runs and bless, whose exit-1 rule depends on the gate.
+    Parity { exit1_explained: bool },
+    /// A measured iteration must exit zero and cannot include a harness abort.
+    Measured,
+    /// A diagnostic isolation attempt attributes failures to its subset.
+    IsolationAttempt,
+}
+
+/// The result of applying a policy to a [`RunAssessment`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// Empty reasons mean the harness side of a parity run is acceptable.
+    Parity { failure_reasons: Vec<String> },
+    /// `Ok(())` is a timing sample; `Err` describes why it is not.
+    Measured(Result<(), String>),
+    /// A diagnostic attempt's disposition, including whether diagnosis stops.
+    IsolationAttempt(crate::piners::isolate::AttemptVerdict),
+}
 
 /// One harness invocation, judged once.
 #[derive(Debug)]
@@ -117,10 +140,43 @@ impl RunAssessment {
         self.violations() + usize::from(self.output_cut)
     }
 
-    /// The ordinary-run (and bless) acceptance policy: every reason the
-    /// harness side fails, independent of the gate. Empty means acceptable.
-    /// `exit1_explained` is whether an exit of 1 is accounted for by breaks.
-    pub fn failure_reasons(&self, exit1_explained: bool) -> Vec<String> {
+    /// Apply one consumer's acceptance rule to this shared assessment.
+    pub fn verdict(&self, policy: Policy) -> Verdict {
+        match policy {
+            Policy::Parity { exit1_explained } => Verdict::Parity {
+                failure_reasons: self.parity_failure_reasons(exit1_explained),
+            },
+            Policy::Measured => Verdict::Measured(self.measured_failure()),
+            Policy::IsolationAttempt => {
+                use crate::piners::isolate::{AttemptVerdict, Failure, StopReason};
+
+                let verdict = if let Some(error) = &self.contract.run_error {
+                    AttemptVerdict::Stop(StopReason::HarnessFailure(error.render()))
+                } else if self.completed() {
+                    AttemptVerdict::Completed
+                } else if self.violations() > 0 || self.output_cut {
+                    let mut what = Vec::new();
+                    if self.rec.protocol_violations() > 0 {
+                        what.push(self.rec.summary());
+                    }
+                    what.extend(self.contract.violations.iter().cloned());
+                    if self.output_cut {
+                        what.push("stdout cut short".to_owned());
+                    }
+                    AttemptVerdict::Failed(Failure::ProtocolInvalid(what.join("; ")))
+                } else if !self.end.completed_status() {
+                    AttemptVerdict::Failed(Failure::Aborted)
+                } else {
+                    AttemptVerdict::Failed(Failure::Incomplete(self.rec.summary()))
+                };
+                Verdict::IsolationAttempt(verdict)
+            }
+        }
+    }
+
+    /// Parity and bless acceptance of the harness side, independent of the
+    /// per-probe gate. `exit1_explained` comes from that gate's pinned breaks.
+    fn parity_failure_reasons(&self, exit1_explained: bool) -> Vec<String> {
         let mut reasons = Vec::new();
         let rec = &self.rec;
         // A run_error fails the run unconditionally and stands first; its
@@ -182,6 +238,29 @@ impl RunAssessment {
             ));
         }
         reasons
+    }
+
+    /// Whether an iteration is a valid timing sample and, if not, why.
+    fn measured_failure(&self) -> Result<(), String> {
+        let aborts = self.harness_aborts();
+        if self.end == HarnessEnd::Code(0) && self.completed() && aborts.is_empty() {
+            return Ok(());
+        }
+        let why = match &self.contract.run_error {
+            Some(error) => error.render(),
+            None if !aborts.is_empty() => format!(
+                "harness_abort in the run ({}); a crashed probe is no timing sample",
+                aborts.join(", ")
+            ),
+            None if self.end != HarnessEnd::Code(0) => {
+                format!("harness {} ({})", self.end.describe(), self.rec.summary())
+            }
+            None => format!(
+                "harness exited 0 without reporting exactly its selection ({})",
+                self.rec.summary()
+            ),
+        };
+        Err(why)
     }
 
     /// The `[corpus]` lines naming what the assessment found beyond the
@@ -574,6 +653,14 @@ mod tests {
         v.iter().map(|s| (*s).to_owned()).collect()
     }
 
+    fn parity_reasons(a: &RunAssessment, exit1_explained: bool) -> Vec<String> {
+        let Verdict::Parity { failure_reasons } = a.verdict(Policy::Parity { exit1_explained })
+        else {
+            unreachable!("parity policy returns parity reasons")
+        };
+        failure_reasons
+    }
+
     #[test]
     fn reconciliation_separates_every_category() {
         let mut report = parse(
@@ -802,14 +889,14 @@ not json at all
         assert!(a.completed(), "{:?}", a.contract.violations);
         assert_eq!(a.harness_aborts(), vec!["a", "b"]);
         // Exit 1 explained by pinned breaks is acceptable.
-        assert!(a.failure_reasons(true).is_empty());
+        assert!(parity_reasons(&a, true).is_empty());
         // The same stream without its run_end does not complete.
         let cut = clean_stream(&["a"], "no_tv_data", 0)
             .replace(&format!("{{\"kind\":\"run_end\",{V1},\"exit\":0}}\n"), "");
         let a = assess(&ids(&["a"]), cut.as_bytes(), HarnessEnd::Code(0), false);
         assert!(!a.completed());
         assert!(
-            a.failure_reasons(false)
+            parity_reasons(&a, false)
                 .iter()
                 .any(|r| r == "1 contract violation")
         );
@@ -834,7 +921,7 @@ not json at all
              {{\"kind\":\"run_error\",{V1},\"stage\":\"feed_load\",\"feed\":\"eth\",\"error\":\"oom\"}}\n"
         );
         let a = assess(&ids(&["a", "b"]), nd.as_bytes(), HarnessEnd::Code(2), false);
-        let r = a.failure_reasons(false);
+        let r = parity_reasons(&a, false);
         assert_eq!(r[0], "run_error at stage feed_load (feed eth): oom");
         assert_eq!(
             r[1],

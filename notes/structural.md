@@ -145,6 +145,8 @@ At about 3100 lines:
 5. Three runners (`streaming_run_libtest`, `run_libtest_parallel`, `run_listing`).
 6. Reporting (`format_hung_test`, `is_bare_status_line` for test_cmd's condenser, `effective_test_threads`, `hash_file`).
 
+It also still spells `CARGO_TARGET_<HOST>_RUNNER` itself, the last copy outside `rustflags::CargoLaunchConfig`, which now owns the config chain and the runner lookup.
+
 Proposed: `test_runner/{events.rs, libtest_json.rs, deadline.rs, procgroup.rs, run.rs, hung.rs}`. `hash_file` is the plan's artifact identity, re-checked by the shim, and belongs with planning and accounting. `StrictPlan` is a planning artifact the runner merely consumes.
 
 ## STR-017 - The test runner reaches into process globals
@@ -177,7 +179,7 @@ Reported by: check-report.
 
 `cargo_json::DiagnosticEvent.level: String` is filtered by `matches!(level, "error" | "warning" | "error: internal compiler error")`, `is_error_level` re-decides with `starts_with("error")`, and `is_dependency_warning` uses `== "warning"`. `script_check::Level` is already an enum, yet `cargo_json::manifest_lint_header` converts it *back* into a `&'static str` to build a `DiagnosticEvent`. `event_to_clippy` renders `code` into `header = "error[{c}]"` and `location = "{f}:{l}:{c}"`. `clippy_sort_key` then recovers the code with `extract_lint_code` (a bracket scan) and the file, line and column with `parse_location` (`rsplitn(':')`). `ClippyDiagnostic::path` splits the location on the *first* `:`, so a path containing `:` is handled differently by the two. `ClippyDiagnostic.is_error` is set `true` unconditionally by `event_to_clippy` and carries nothing on the JSON path. `DiagKey(String, String, String)` builds dedupe identity from rendered header, rendered location and message.
 
-The readers of rustc and cargo text are in the wrong modules. `script_check::rustc_blocks`/`Level`/`Block` is the general rustc stderr splitter, yet it lives in the script-check module. `cargo_json` (a JSON parser) depends on `script_check` for it, and phase.rs calls it in four places for clippy stderr. `cargo_filter` carries a second block parser (`parse_clippy`), its own noise tables, the `ClippyDiagnostic` formatter primitive the JSON path also uses, and, unrelated to all that, the whole libtest output parser (`parse_test_output*`, `ParsedTestResults`, `Completeness`, panic collection, `filter_test`, linker-failure detail).
+The block splitter, header rule and noise classification now live in `src/rustc_text.rs`, shared by script_check, cargo_json, cargo_filter and phase.rs. `cargo_filter` still carries the `ClippyDiagnostic` formatter primitive the JSON path also uses and, unrelated to that, the whole libtest output parser (`parse_test_output*`, `ParsedTestResults`, `Completeness`, panic collection, `filter_test`, linker-failure detail).
 
 Proposed: one `Diagnostic { level: Level, code: Option<LintName>, message, site: Option<Site { file, line, col }>, detail, package: Option<PackageId> }`, produced by both the JSON reader and the manifest-lint reader and rendered exactly once at the edge, with sort and dedupe keys derived from fields. Modules: `src/rustc_text.rs` (block splitter, `Level`, block classification), `src/cargo_json.rs` (JSON messages to `Diagnostic`, with manifest lints read via `rustc_text`), and `src/diagnostic.rs` (the type, `Owner`, `LintName`, rendering). Libtest parsing moves to the test-execution side. `parse_clippy` retires entirely: the test build and the support pre-build run with `--message-format=json` (the serial lane already parses cargo JSON for executables in `build.rs`) and render through the clippy pipeline. The header's reason for keeping the text path ("not worth a second JSON pass") no longer holds once the formatter is shared.
 
@@ -267,7 +269,7 @@ Reported by: measurement.
 
 Reported by: measurement.
 
-`SidecarQuery { samples, markers, durations, counters, stalls: bool, stat: Option<String>, compare: Option<Vec<String>> }` "picks exactly one view" according to its doc, which is enforced only by clap and by the `if` order in `cmd_sidecar`. `ResultsQuery { query, commit, compare: Option<Vec<String>> }` indexes 0 and 1 with `map_or("")`, and `BenchArgs.compare: Option<Vec<String>>` is the same. Proposed: `enum SidecarView`, `enum ResultsView { One(RunRef), Compare(Rev, Rev), Table(Filter) }` and `(A, B)` tuples. That removes the unreachable branches and turns the dropped-filter defect (filed in `bugs.md`) into a compile error, because a view with no use for a filter would not carry one.
+Results and sidecar dispatch now use exhaustive view enums, every results view carries one `QueryFilter`, and compare operands are pairs after validation. Residue at the CLI and bootstrap boundary: `SidecarQuery` still carries bool view selectors, compare arguments still arrive as `Vec<String>`, and `BenchArgs.compare` is still a `Vec` (converting it needs `main_parts/bootstrap.rs` and `bench_cmd/mod.rs`).
 
 ## STR-034 - The measurement session: two contexts, a config struct with dead fallbacks, and positional bools
 

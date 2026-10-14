@@ -248,7 +248,7 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
 
     // Validate `--gate <name>` references a configured gate before
     // building/running anything - errors here cost nothing.
-    if let Some(name) = req.gate {
+    let gate_rules = if let Some(name) = req.gate {
         let gate = cfg.gate.get(name).ok_or_else(|| {
             DevError::Config(format!(
                 "sync: gate `{name}` not found in [ratatoskr.gate.*] of brokkr.toml"
@@ -261,8 +261,10 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
                  --as-baseline if you only want to record."
             )));
         }
-        gate_eval::validate_rules(name, gate)?;
-    }
+        Some(gate_eval::GateRules::compile(name, gate)?)
+    } else {
+        None
+    };
 
     let script_abs = Path::new(req.script).canonicalize().map_err(|e| {
         DevError::Config(format!("sync: canonicalize script: {e}"))
@@ -374,6 +376,7 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         &harness,
         fixture_name,
         debug,
+        gate_rules.as_ref(),
         // The frontmatter `ceiling:` (or discover's default) bounds each
         // measured iteration exactly as it bounds the unmeasured run: a
         // hung harness in a `--gate all` sweep otherwise held the global
@@ -479,6 +482,7 @@ fn bench_loop(
     harness: &BenchHarness,
     fixture_name: &str,
     debug: bool,
+    gate_rules: Option<&gate_eval::GateRules>,
     ceiling: Duration,
     phase_guard: &mut PhaseGuard,
 ) -> Result<(), DevError> {
@@ -758,11 +762,14 @@ fn bench_loop(
         best.run_idx + 1,
     ));
 
-    if let Some(gate_name) = req.gate {
+    // `run_sync_bench` compiles the rules whenever `req.gate` is set, so the
+    // pair is either both present or both absent.
+    if let (Some(gate_name), Some(rules)) = (req.gate, gate_rules) {
         run_gate_hook(&GateHookCtx {
             req,
             cfg,
             gate_name,
+            rules,
             project_root: req.project_root,
             script_abs,
             fixture_name,
@@ -788,6 +795,7 @@ struct GateHookCtx<'a> {
     req: &'a SyncBenchRequest<'a>,
     cfg: &'a RatatoskrConfig,
     gate_name: &'a str,
+    rules: &'a gate_eval::GateRules,
     project_root: &'a Path,
     script_abs: &'a Path,
     fixture_name: &'a str,
@@ -850,6 +858,9 @@ fn run_gate_hook(ctx: &GateHookCtx<'_>) -> Result<(), DevError> {
         fixture: ctx.fixture_name.to_owned(),
         profile: profile_name.into(),
         elapsed_ms: ctx.elapsed_ms,
+        // This hook runs only after every iteration exited successfully;
+        // failures return before gate recording. These two stored metrics
+        // are therefore constants for rows produced by this path.
         exit_code: 0,
         success: true,
         sidecar: serde_json::to_string(&sidecar_blob).unwrap_or_else(|_| "{}".into()),
@@ -878,7 +889,7 @@ fn run_gate_hook(ctx: &GateHookCtx<'_>) -> Result<(), DevError> {
     }
 
     if ctx.req.as_baseline {
-        warn_if_rebasing(ctx.gate_name, gate, &hostname);
+        warn_if_rebasing(ctx.gate_name, gate, ctx.rules, &hostname);
         output::ratatoskr_msg("--as-baseline: skipping evaluation. Add this line to brokkr.toml:");
         output::ratatoskr_msg(&format!(
             "    [ratatoskr.gate.{}.baseline]\n    {hostname} = \"{uuid}\"",
@@ -887,7 +898,15 @@ fn run_gate_hook(ctx: &GateHookCtx<'_>) -> Result<(), DevError> {
         return Ok(());
     }
 
-    evaluate_against_baseline(&db, &hostname, ctx.gate_name, gate, &row, &uuid)
+    evaluate_against_baseline(
+        &db,
+        &hostname,
+        ctx.gate_name,
+        gate,
+        ctx.rules,
+        &row,
+        &uuid,
+    )
 }
 
 /// Warn, on the `--as-baseline` path, when recording is a *rebase* rather
@@ -907,19 +926,17 @@ fn run_gate_hook(ctx: &GateHookCtx<'_>) -> Result<(), DevError> {
 /// tell that from an accident. The paste-line still has to be moved into
 /// `brokkr.toml` by hand, so the warning arrives before anything is
 /// actually rebased.
-fn warn_if_rebasing(gate_name: &str, gate: &GateConfig, hostname: &str) {
+fn warn_if_rebasing(
+    gate_name: &str,
+    gate: &GateConfig,
+    rules: &gate_eval::GateRules,
+    hostname: &str,
+) {
     let Some(pinned) = gate.baseline.get(hostname) else {
         return; // First baseline for this host: nothing to overwrite.
     };
 
-    let strict: Vec<&str> = gate
-        .metrics
-        .iter()
-        .filter(|(_, rule)| {
-            rule.max_delta == Some(0.0) || rule.equal_to_baseline == Some(true)
-        })
-        .map(|(name, _)| name.as_str())
-        .collect();
+    let strict = rules.no_drift_metrics();
 
     // Char-based, not a byte slice: the pin is hand-pasted TOML and may
     // hold a multi-byte character, which a byte slice would panic on.
@@ -1013,6 +1030,7 @@ fn evaluate_against_baseline(
     hostname: &str,
     gate_name: &str,
     gate: &GateConfig,
+    rules: &gate_eval::GateRules,
     current_row: &GateRow,
     current_uuid: &str,
 ) -> Result<(), DevError> {
@@ -1080,8 +1098,9 @@ fn evaluate_against_baseline(
     );
     let baseline_run = gate_eval::GateRun::from_entry(&baseline_entry)?;
 
-    let outcomes = gate_eval::evaluate(gate, &current_run, &baseline_run)?;
-    let (report, any_failed) = gate_eval::format_report(&outcomes);
+    let outcomes = rules.evaluate(&current_run, &baseline_run)?;
+    let verdict = gate_eval::GateVerdict::from_outcomes(outcomes);
+    let report = verdict.format_report();
     let label_suffix = gate
         .baseline_label
         .as_deref()
@@ -1090,7 +1109,7 @@ fn evaluate_against_baseline(
     output::ratatoskr_msg(&format!(
         "gate `{gate_name}` vs baseline {}{label_suffix} ({} rules):",
         &baseline_entry.uuid[..8.min(baseline_entry.uuid.len())],
-        outcomes.len(),
+        verdict.outcomes().len(),
     ));
     if baseline_entry.dirty {
         output::ratatoskr_msg(
@@ -1111,7 +1130,7 @@ fn evaluate_against_baseline(
             output::ratatoskr_msg(line);
         }
     }
-    if any_failed {
+    if !verdict.passed() {
         return Err(DevError::Config(format!(
             "gate `{gate_name}` FAILED: one or more rules breached"
         )));

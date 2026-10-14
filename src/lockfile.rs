@@ -368,7 +368,7 @@ pub fn acquire(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
 /// hold (like a nested [`acquire`]), so it cannot outlive or split it.
 pub fn current_hold() -> Option<LockGuard> {
     // A committed stop admits no further work under the hold it stopped.
-    if crate::shutdown::stop_committed() {
+    if !crate::shutdown::admits_new_work() {
         return None;
     }
     let path = lock_path().ok()?;
@@ -422,7 +422,7 @@ const HOST_EFFECTS: HoldEffects = HoldEffects {
 /// to stopping. Checked before re-entry, after the flock wait and after the
 /// drain, so no path into a hold can bypass an accepted `brokkr kill`.
 fn refuse_if_stopping() -> Result<(), DevError> {
-    if crate::shutdown::stop_committed() {
+    if !crate::shutdown::admits_new_work() {
         return Err(DevError::Interrupted);
     }
     Ok(())
@@ -648,7 +648,7 @@ fn wait_for_flock(fd: RawFd, inherited: Option<&str>) -> Result<(), DevError> {
                 crate::output::lock_msg(&hint);
             }
         }
-        if crate::shutdown::is_shutdown_requested() || crate::shutdown::stop_committed() {
+        if crate::shutdown::should_unwind() {
             return Err(DevError::Interrupted);
         }
         std::thread::sleep(LOCK_POLL);
@@ -1050,8 +1050,18 @@ pub fn compile_lock_path() -> Result<PathBuf, DevError> {
 /// drain before giving up. Split into two windows: after the first, the stray
 /// reaper runs once (a foreign compiler holding a lease is exactly what it
 /// exists to kill), then the wait resumes.
+///
+/// The first window is short on purpose. Compilers admitted while no hold
+/// existed (rust-analyzer's checks, a hand-typed `cargo build`) carry their
+/// lease through exec too (`src/bin/rustc_guard.rs`, `Decision::Idle`), so any
+/// IDE build in flight when a hold starts now blocks this drain. Every such
+/// compiler is a stray by construction - no brokkr is its ancestor, and the
+/// previous holder waited for its own cargo before releasing - and the
+/// post-hold reap (`stray::reap_after_lock`) would SIGKILL it moments after
+/// the drain anyway. Waiting longer only stalls the acquisition; the few
+/// seconds let a nearly-finished check end on its own rather than be killed.
 const DRAIN_BUDGET: Duration = Duration::from_secs(120);
-const DRAIN_REAP_AFTER: Duration = Duration::from_secs(20);
+const DRAIN_REAP_AFTER: Duration = Duration::from_secs(3);
 
 /// Wait for every participating compilation lease to be released, and return
 /// the exclusive descriptor that proves it.
@@ -1107,14 +1117,14 @@ fn drain_compile_leases() -> Result<OwnedFd, DevError> {
         if !announced {
             announced = true;
             crate::output::lock_msg(
-                "waiting for compilers started under the previous hold to finish - brokkr clears them before measuring",
+                "waiting for compilers started before this hold (an earlier hold's, or an IDE's) to finish - brokkr clears them before measuring",
             );
         }
         let waited = start.elapsed();
         if waited >= DRAIN_BUDGET {
             return Err(DevError::Lock(format!(
-                "compilation leases did not drain within {}s. A compiler admitted under an \
-                 earlier hold is still holding its lease, or a process that inherited its \
+                "compilation leases did not drain within {}s. A compiler started before this \
+                 hold is still holding its lease, or a process that inherited its \
                  descriptor is. This is not a transient busy signal - an unchanged blocker \
                  will fail every retry. `brokkr strays` shows what is running; \
                  `brokkr lock` shows the holder.",
@@ -1500,7 +1510,7 @@ fn shell_quote(s: &str) -> String {
 /// Percent-escape the three bytes that would break the line-oriented
 /// `key=value` format: `%` (the escape itself), `\n` (line injection) and
 /// `\r`. Everything else passes through, keeping the file human-readable.
-fn escape_value(s: &str) -> String {
+pub(crate) fn escape_value(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -1515,24 +1525,24 @@ fn escape_value(s: &str) -> String {
 
 /// Inverse of [`escape_value`]. Unknown or truncated escapes pass through
 /// literally - this decodes a display string, it must never fail.
-fn unescape_value(s: &str) -> String {
+pub(crate) fn unescape_value(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 3 <= bytes.len() {
-            match &s[i + 1..i + 3] {
-                "25" => {
+        if bytes[i] == b'%' {
+            match s.get(i + 1..i + 3) {
+                Some("25") => {
                     out.push('%');
                     i += 3;
                     continue;
                 }
-                "0A" => {
+                Some("0A") => {
                     out.push('\n');
                     i += 3;
                     continue;
                 }
-                "0D" => {
+                Some("0D") => {
                     out.push('\r');
                     i += 3;
                     continue;

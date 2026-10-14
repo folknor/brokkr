@@ -15,6 +15,9 @@ Bare `brokkr results` prints the last `-n` rows (default 20), newest first. No
 database yet reads as `no results yet (run a benchmark first)` rather than an
 error - not having measured anything is a normal state.
 
+`--limit N` caps rows in table and UUID-prefix views, and comparison pairs in
+`--compare` (default 20). Compare pairs are formed before the cap is applied.
+
 `--top N` caps the functions shown in hotpath reports (default 10, `0` = all).
 
 ## Precision

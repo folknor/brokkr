@@ -1,3 +1,6 @@
+use crate::db::QueryFilter;
+use crate::error::DevError;
+
 /// Query parameters for the `results` command.
 pub(crate) struct ResultsQuery {
     pub(crate) query: Option<String>,
@@ -23,6 +26,78 @@ pub(crate) struct ResultsQuery {
     pub(crate) grep_v: Vec<String>,
     pub(crate) limit: usize,
     pub(crate) top: usize,
+}
+
+/// The mutually exclusive result views after the CLI request has been
+/// validated and its row filters have been assembled once.
+pub(crate) enum ResultsView {
+    Table {
+        filter: QueryFilter,
+    },
+    Uuid {
+        prefix: String,
+        filter: QueryFilter,
+        top: usize,
+    },
+    Compare {
+        commits: (String, String),
+        filter: QueryFilter,
+        top: usize,
+    },
+}
+
+impl ResultsQuery {
+    pub(crate) fn view(&self) -> Result<ResultsView, DevError> {
+        let filter = QueryFilter {
+            commit: self.commit.clone(),
+            command: self.command.clone(),
+            mode: self.mode.clone(),
+            dataset: self.dataset.clone(),
+            meta: self
+                .meta
+                .iter()
+                .filter_map(|s| {
+                    s.split_once('=')
+                        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                })
+                .collect(),
+            env: self
+                .env
+                .iter()
+                .filter_map(|s| {
+                    s.split_once('=')
+                        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                })
+                .collect(),
+            grep: self.grep.clone(),
+            grep_v: self.grep_v.clone(),
+            limit: self.limit,
+        };
+
+        match (self.query.as_deref(), self.compare.as_deref()) {
+            (Some(prefix), None) if filter.commit.is_none() => Ok(ResultsView::Uuid {
+                prefix: prefix.to_owned(),
+                filter,
+                top: self.top,
+            }),
+            (None, Some(commits)) if filter.commit.is_none() => {
+                let [a, b] = commits else {
+                    return Err(DevError::Config(
+                        "--compare requires exactly two commits".into(),
+                    ));
+                };
+                Ok(ResultsView::Compare {
+                    commits: (a.clone(), b.clone()),
+                    filter,
+                    top: self.top,
+                })
+            }
+            (None, None) => Ok(ResultsView::Table { filter }),
+            _ => Err(DevError::Config(
+                "results accepts one of a UUID, --compare, or --commit".into(),
+            )),
+        }
+    }
 }
 
 /// Query parameters for the `corpus-results` command (piners only) - the
@@ -85,4 +160,52 @@ pub(crate) struct SidecarQuery {
     pub(crate) every: Option<usize>,
     pub(crate) head: Option<usize>,
     pub(crate) tail: Option<usize>,
+}
+
+/// One selected sidecar output. The query UUID and any stat field travel with
+/// their view, so dispatch cannot accidentally choose a result while dropping
+/// its selector.
+pub(crate) enum SidecarView<'a> {
+    Summary { uuid: &'a str },
+    Samples { uuid: &'a str },
+    Markers { uuid: &'a str },
+    Durations { uuid: &'a str },
+    Counters { uuid: &'a str },
+    Stalls { uuid: &'a str },
+    Stat { uuid: &'a str, field: &'a str },
+    Compare { uuids: (&'a str, &'a str) },
+}
+
+impl SidecarQuery {
+    pub(crate) fn view(&self) -> Result<SidecarView<'_>, DevError> {
+        if let Some(uuids) = self.compare.as_deref() {
+            let [a, b] = uuids else {
+                return Err(DevError::Config(
+                    "--compare requires exactly two UUIDs".into(),
+                ));
+            };
+            return Ok(SidecarView::Compare {
+                uuids: (a.as_str(), b.as_str()),
+            });
+        }
+
+        let uuid = self.query.as_deref().ok_or_else(|| {
+            DevError::Config("sidecar requires a UUID unless --compare is used".into())
+        })?;
+        Ok(if self.samples {
+            SidecarView::Samples { uuid }
+        } else if self.markers {
+            SidecarView::Markers { uuid }
+        } else if self.durations {
+            SidecarView::Durations { uuid }
+        } else if self.counters {
+            SidecarView::Counters { uuid }
+        } else if self.stalls {
+            SidecarView::Stalls { uuid }
+        } else if let Some(field) = self.stat.as_deref() {
+            SidecarView::Stat { uuid, field }
+        } else {
+            SidecarView::Summary { uuid }
+        })
+    }
 }

@@ -135,103 +135,11 @@ fn last_non_empty_line(text: &str) -> Option<&str> {
     text.lines().rev().find(|l| !l.trim().is_empty())
 }
 
-/// The severity of a rustc-shaped diagnostic block.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Level {
-    /// An `error:` / `error[CODE]:` block - the actionable class.
-    Error,
-    /// A `warning:` / `warning[CODE]:` block.
-    Warning,
-    /// Everything above the first header: cargo's progress lines, a banner, a
-    /// tool's own preamble. Kept as a block so no captured byte is silently
-    /// dropped from the counts.
-    Other,
-}
-
-/// One rustc-shaped diagnostic: a header line at column zero plus every line
-/// under it up to the next header. `text` retains the original line breaks and
-/// carries no trailing newline.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Block {
-    pub level: Level,
-    pub text: String,
-}
-
-/// Split rustc-shaped output into diagnostic blocks.
-///
-/// Only `error` and `warning` at **column zero** open a block. Two consequences,
-/// both deliberate:
-///
-/// - A column-zero `note:` or `help:` does not open one, so rustc's trailing
-///   notes stay attached to the diagnostic they explain rather than becoming
-///   orphan blocks that outnumber the errors.
-/// - An indented occurrence of the word never opens one, so source context
-///   quoting `error` (or a `--> path/error.rs` arrow) cannot forge a block.
-///
-/// For `script_check` this is a *renderer's* parse, reached only on a failure
-/// of an entry that declared `diagnostics = "rustc"`; its pass/fail decision
-/// stays [`evaluate`]'s sentinel match. Two other readers lean on it harder:
-/// `check`'s clippy phase finds cargo's manifest lints among these blocks
-/// (`cargo_json::manifest_lints_by_block`), and those DO fail the check - which is
-/// why that parser demands a lint identity rather than trusting a block's
-/// shape - and a failed cargo run's report withholds blocks by level
-/// (`check_cmd::phase::failed_run_streams`).
-pub fn rustc_blocks(text: &str) -> Vec<Block> {
-    let mut blocks: Vec<Block> = Vec::new();
-    for line in text.lines() {
-        match header_level(line) {
-            Some(level) => blocks.push(Block {
-                level,
-                text: line.to_owned(),
-            }),
-            None => match blocks.last_mut() {
-                Some(block) => {
-                    block.text.push('\n');
-                    block.text.push_str(line);
-                }
-                // Preamble before any header.
-                None => blocks.push(Block {
-                    level: Level::Other,
-                    text: line.to_owned(),
-                }),
-            },
-        }
-    }
-    blocks
-}
-
-/// The level `line` opens a block at, or `None` when it is a continuation.
-///
-/// Accepts both rustc header spellings - bare (`error: unused imports`) and
-/// coded (`error[E0432]: unresolved import`) - and requires the colon, so a
-/// prose line beginning with the word is not mistaken for a header.
-fn header_level(line: &str) -> Option<Level> {
-    // Column zero is the whole discriminator: rustc indents every continuation.
-    if line.starts_with(char::is_whitespace) {
-        return None;
-    }
-    for (word, level) in [("error", Level::Error), ("warning", Level::Warning)] {
-        let Some(rest) = line.strip_prefix(word) else {
-            continue;
-        };
-        if rest.starts_with(':') {
-            return Some(level);
-        }
-        // `error[E0432]:` - the code is bracketed, then the colon.
-        if let Some(after) = rest.strip_prefix('[')
-            && let Some(close) = after.find(']')
-            && after[close + 1..].starts_with(':')
-        {
-            return Some(level);
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{Level, evaluate, run_one, rustc_blocks};
+    use super::{evaluate, run_one};
     use crate::config::{Diagnostics, MatchMode, ScriptCheck, Stage, Stream};
+    use crate::rustc_text::{Level, rustc_blocks};
 
     /// A hung script fails as its own entry at its deadline - pipeline and all,
     /// since the shell runs in its own process group - instead of holding the

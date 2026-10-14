@@ -62,6 +62,17 @@ pub struct GitDependencyEvent {
     /// Resolved commit SHA from the source URL fragment.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolved_rev: Option<String>,
+    /// Compatibility field retained for existing NDJSON consumers. This has
+    /// the old `rev` meaning: the resolved fragment, falling back to a
+    /// requested `?rev=` when Cargo supplied no fragment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rev: Option<String>,
+    /// Compatibility field retained for existing NDJSON consumers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Compatibility field retained for existing NDJSON consumers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
 }
 
 /// A requested Git ref, distinct from the commit Cargo resolved.

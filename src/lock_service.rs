@@ -282,7 +282,10 @@ fn stop_reply(shared: &Shared) -> String {
     drop(live);
     match signal_error {
         None => "accepted\n".into(),
-        Some(e) => format!("accepted signal_error={}\n", escape(&e.to_string())),
+        Some(e) => format!(
+            "accepted signal_error={}\n",
+            crate::lockfile::escape_value(&e.to_string())
+        ),
     }
 }
 
@@ -296,7 +299,7 @@ fn status_reply(shared: &Shared) -> String {
     let mut field = |k: &str, v: &str| {
         out.push_str(k);
         out.push('=');
-        out.push_str(&escape(v));
+        out.push_str(&crate::lockfile::escape_value(v));
         out.push('\n');
     };
     field("project", &id.project);
@@ -406,20 +409,6 @@ fn write_all(mut stream: &UnixStream, mut bytes: &[u8], deadline: Instant) -> bo
     true
 }
 
-/// Percent-escape `%`, `\n` and `\r`, the bytes that would break the
-/// line-oriented reply.
-fn escape(s: &str) -> String {
-    s.replace('%', "%25")
-        .replace('\n', "%0A")
-        .replace('\r', "%0D")
-}
-
-fn unescape(s: &str) -> String {
-    s.replace("%0A", "\n")
-        .replace("%0D", "\r")
-        .replace("%25", "%")
-}
-
 // ---------------------------------------------------------------------------
 // Client side.
 // ---------------------------------------------------------------------------
@@ -513,11 +502,13 @@ fn parse_reply(text: &str) -> Reply {
         "ok" => Reply::Status(HolderStatus {
             fields: lines
                 .filter_map(|l| l.split_once('='))
-                .map(|(k, v)| (k.to_owned(), unescape(v)))
+                .map(|(k, v)| (k.to_owned(), crate::lockfile::unescape_value(v)))
                 .collect(),
         }),
         "accepted" => Reply::Accepted {
-            signal_error: head.split_once("signal_error=").map(|(_, e)| unescape(e)),
+            signal_error: head
+                .split_once("signal_error=")
+                .map(|(_, e)| crate::lockfile::unescape_value(e)),
         },
         "gone" => Reply::Gone,
         "busy" => Reply::Busy,

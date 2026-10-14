@@ -62,17 +62,7 @@ pub(crate) fn run(
         return Ok(());
     }
 
-    let ctx = BenchContext::with_build_config(
-        req.dev_config,
-        req.project,
-        req.project_root,
-        req.build_root,
-        &resolved.build,
-        "mogwai",
-        req.force,
-        req.stop_marker.map(str::to_owned),
-    )?
-    .with_request(req);
+    let ctx = BenchContext::with_build_config_for_request(req, &resolved.build, "mogwai")?;
 
     let binary_str = ctx.binary.display().to_string();
 

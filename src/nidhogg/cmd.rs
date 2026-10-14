@@ -4,7 +4,7 @@ use crate::build;
 use crate::config;
 use crate::context::{BenchContext, HarnessContext, bootstrap, bootstrap_config};
 use crate::error::DevError;
-use crate::measure::{MeasureMode, MeasureRequest};
+use crate::measure::MeasureRequest;
 use crate::output;
 use crate::preflight;
 use crate::project::{self, Project};
@@ -207,17 +207,7 @@ pub(crate) fn geocode(
 }
 
 pub(crate) fn bench_api(req: &MeasureRequest, query: Option<&str>) -> Result<(), DevError> {
-    let allow_dirty = req.force || matches!(req.mode, MeasureMode::Run);
-    let ctx = HarnessContext::new(
-        req.dev_config,
-        req.project,
-        req.project_root,
-        req.build_root,
-        "bench api",
-        allow_dirty,
-        req.stop_marker.map(str::to_owned),
-    )?
-    .with_request(req);
+    let ctx = HarnessContext::new_for_request(req, "bench api")?;
     let port = resolve_port(req.dev_config)?;
 
     // Resolve dataset PBF for metadata recording.
@@ -245,7 +235,6 @@ pub(crate) fn bench_tiles(
     tiles_variant: Option<&str>,
     uring: bool,
 ) -> Result<(), DevError> {
-    let allow_dirty = req.force || matches!(req.mode, MeasureMode::Run);
     if uring {
         preflight::run_preflight(&preflight::uring_checks())?;
     }
@@ -253,19 +242,8 @@ pub(crate) fn bench_tiles(
     if uring {
         all_features.push("linux-io-uring");
     }
-    let ctx = BenchContext::new(
-        req.dev_config,
-        req.project,
-        req.project_root,
-        req.build_root,
-        Some("nidhogg"),
-        &all_features,
-        true,
-        "bench tiles",
-        allow_dirty,
-        req.stop_marker.map(str::to_owned),
-    )?
-    .with_request(req);
+    let ctx =
+        BenchContext::new_for_request(req, Some("nidhogg"), &all_features, true, "bench tiles")?;
     let data_dir = resolve_nidhogg_data_dir(req.dataset, &ctx.paths)?;
     let port = resolve_port(req.dev_config)?;
 

@@ -10,16 +10,7 @@ use crate::project::{self, Project};
 use crate::resolve::{resolve_pbf_with_size, resolve_pmtiles_by_commit};
 
 pub(crate) fn bench_planetiler(req: &MeasureRequest) -> Result<(), DevError> {
-    let ctx = HarnessContext::new(
-        req.dev_config,
-        req.project,
-        req.project_root,
-        req.build_root,
-        "bench planetiler",
-        req.force,
-        req.stop_marker.map(str::to_owned),
-    )?
-    .with_request(req);
+    let ctx = HarnessContext::new_for_request(req, "bench planetiler")?;
     let (pbf_path, file_mb) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     super::bench_planetiler::run(
@@ -34,16 +25,7 @@ pub(crate) fn bench_planetiler(req: &MeasureRequest) -> Result<(), DevError> {
 }
 
 pub(crate) fn bench_tilemaker(req: &MeasureRequest) -> Result<(), DevError> {
-    let ctx = HarnessContext::new(
-        req.dev_config,
-        req.project,
-        req.project_root,
-        req.build_root,
-        "bench tilemaker",
-        req.force,
-        req.stop_marker.map(str::to_owned),
-    )?
-    .with_request(req);
+    let ctx = HarnessContext::new_for_request(req, "bench tilemaker")?;
     let (pbf_path, file_mb) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     super::bench_tilemaker::run(
@@ -58,29 +40,22 @@ pub(crate) fn bench_tilemaker(req: &MeasureRequest) -> Result<(), DevError> {
 }
 
 pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
-    let ctx = HarnessContext::new(
-        req.dev_config,
-        req.project,
-        req.project_root,
-        req.build_root,
-        "bench all",
-        req.force,
-        req.stop_marker.map(str::to_owned),
-    )?
-    .with_request(req);
-    let (pbf_path, file_mb) =
-        resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
+    let ctx = HarnessContext::new_for_request(req, "bench all")?;
+    // The input assertions come from the same resolved entry that supplied
+    // the path, not from a second lookup through the raw host config.
+    let pbf =
+        crate::resolve::resolve_pbf_entry(req.dataset, req.variant, &ctx.paths, req.project_root)?;
+    let file_mb = crate::resolve::file_size_mb(&pbf.path)?;
     // `bench all`'s self arm is a tilegen run and takes the same contract one
     // gets. It used to hardcode a bare PipelineOpts and lean on ocean
     // auto-detection, so what it measured depended on what was in data/.
     let tilegen = super::resolve_tilegen(req.dev_config, super::DEFAULT_TILEGEN)?;
-    let (locations_on_ways, force_sorted) =
-        super::input_assertions(req.dev_config, req.dataset, req.variant);
     let opts = super::PipelineOpts {
         tilegen,
-        locations_on_ways,
-        force_sorted,
+        locations_on_ways: pbf.entry.locations_on_ways,
+        force_sorted: pbf.entry.force_sorted,
     };
+    let pbf_path = pbf.path.clone();
     super::bench_all::run(
         &ctx.harness,
         &ctx.paths,

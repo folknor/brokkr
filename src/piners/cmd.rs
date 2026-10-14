@@ -53,8 +53,8 @@ use crate::lockfile::{self, LockContext, LockGuard};
 use crate::output;
 use crate::piners::contract::RunErrorRecord;
 use crate::piners::corpus_db::{CorpusDb, RunContext, RunRecord};
-use crate::piners::integrity::{self, HarnessEnd, Reconciliation, Trigger};
-use crate::piners::isolate::{self, AttemptOutcome, Failure, StopReason};
+use crate::piners::integrity::{self, HarnessEnd, Policy, Reconciliation, Trigger, Verdict};
+use crate::piners::isolate::{self, AttemptOutcome, StopReason};
 use crate::piners::manifest::Manifest;
 use crate::piners::registry::{self, Registry, VerifiedProbe};
 use crate::piners::report;
@@ -140,7 +140,7 @@ pub fn corpus(
 
     let registry_dir = project_root.join(cfg.registry_dir());
     let corpus_root = project_root.join(cfg.corpus_root());
-    let mut registry = Registry::load(&registry_dir, &corpus_root)?;
+    let mut registry = Registry::load(&registry_dir, &corpus_root, &lock)?;
     registry.lint()?;
 
     let sel_args = SelectArgs {
@@ -389,7 +389,10 @@ pub fn corpus(
     } else {
         crate::piners::gate::breaks_all_pinned(&ids, &registry, report)
     };
-    let mut harness_reasons = assessment.failure_reasons(exit1_explained);
+    let mut harness_reasons = match assessment.verdict(Policy::Parity { exit1_explained }) {
+        Verdict::Parity { failure_reasons } => failure_reasons,
+        _ => unreachable!("parity policy returns parity reasons"),
+    };
     if evidence_failed {
         harness_reasons.push(evidence_reason(&evidence_errors));
     }
@@ -669,7 +672,7 @@ impl AttemptEnv<'_> {
     /// Run one diagnostic attempt over `subset` in `<run dir>/attempt-<n>/`:
     /// its own manifest (built from the same verified probes), stdout,
     /// stderr and `BROKKR_HARNESS_ARTEFACT_DIR`. Judged by the same run
-    /// assessment as the original run; see [`classify_attempt`].
+    /// assessment as the original run; see [`isolate::classify_attempt`].
     fn run(&self, subset: &[String], n: usize) -> AttemptOutcome {
         if crate::shutdown::is_shutdown_requested() {
             return AttemptOutcome::Stop(StopReason::Interrupted);
@@ -741,10 +744,10 @@ impl AttemptEnv<'_> {
             end.short(),
             a.rec.summary()
         ));
-        match classify_attempt(&a) {
-            Err(stop) => AttemptOutcome::Stop(stop),
-            Ok(None) => AttemptOutcome::Completed,
-            Ok(Some(failure)) => AttemptOutcome::Failed {
+        match isolate::classify_attempt(&a) {
+            isolate::AttemptVerdict::Stop(stop) => AttemptOutcome::Stop(stop),
+            isolate::AttemptVerdict::Completed => AttemptOutcome::Completed,
+            isolate::AttemptVerdict::Failed(failure) => AttemptOutcome::Failed {
                 end,
                 failure,
                 stderr: String::from_utf8_lossy(&capture.captured.stderr).into_owned(),
@@ -752,40 +755,6 @@ impl AttemptEnv<'_> {
             },
         }
     }
-}
-
-/// How an attempt went, from its assessment. A `run_error` is the harness
-/// naming a failure of its own setup, not a failing subset: it stops
-/// diagnosis (`Err`). Otherwise `Ok(None)` is completed - every probe of the
-/// subset validly reported (a `harness_abort` counts: the harness already
-/// attributed that crash), no violation, an intact stream, exit 0/1 and,
-/// under the contract, its `run_end`. A broken report or cut stream is
-/// protocol-invalid whatever the exit, so a malformed stream is never
-/// mistaken for a crash; an abnormal end is an abort; a completed status
-/// that simply left probes unreported is incomplete. Only an abort is ever
-/// called one.
-fn classify_attempt(a: &integrity::RunAssessment) -> Result<Option<Failure>, StopReason> {
-    if let Some(e) = &a.contract.run_error {
-        return Err(StopReason::HarnessFailure(e.render()));
-    }
-    if a.completed() {
-        return Ok(None);
-    }
-    if a.violations() > 0 || a.output_cut {
-        let mut what = Vec::new();
-        if a.rec.protocol_violations() > 0 {
-            what.push(a.rec.summary());
-        }
-        what.extend(a.contract.violations.iter().cloned());
-        if a.output_cut {
-            what.push("stdout cut short".to_owned());
-        }
-        return Ok(Some(Failure::ProtocolInvalid(what.join("; "))));
-    }
-    if !a.end.completed_status() {
-        return Ok(Some(Failure::Aborted));
-    }
-    Ok(Some(Failure::Incomplete(a.rec.summary())))
 }
 
 /// Write captured streams into `dir` as `harness.stdout`/`harness.stderr`.
@@ -1202,7 +1171,12 @@ mod tests {
     }
 
     fn reasons(ids: &[&str], nd: &str, end: HarnessEnd, cut: bool, exit1: bool) -> Vec<String> {
-        assessed(ids, nd, end, cut).failure_reasons(exit1)
+        match assessed(ids, nd, end, cut).verdict(Policy::Parity {
+            exit1_explained: exit1,
+        }) {
+            Verdict::Parity { failure_reasons } => failure_reasons,
+            _ => unreachable!("parity policy returns parity reasons"),
+        }
     }
 
     const A_OK: &str =
@@ -1280,7 +1254,7 @@ mod tests {
         let a = assessed(&["a"], &nd, HarnessEnd::Code(0), false);
         assert!(stored_violations(&a, false) >= 1);
         assert!(
-            a.failure_reasons(false)
+            reasons(&["a"], &nd, HarnessEnd::Code(0), false, false)
                 .iter()
                 .any(|r| r.ends_with("contract violations") || r.ends_with("contract violation"))
         );
@@ -1314,21 +1288,28 @@ mod tests {
 
     #[test]
     fn attempts_tell_aborts_from_incomplete_and_protocol_invalid() {
-        let classify =
-            |ids: &[&str], nd: &str, end, cut| classify_attempt(&assessed(ids, nd, end, cut));
-        assert_eq!(classify(&["a"], A_OK, HarnessEnd::Code(0), false), Ok(None));
-        assert_eq!(classify(&["a"], A_OK, HarnessEnd::Code(1), false), Ok(None));
+        let classify = |ids: &[&str], nd: &str, end, cut| {
+            isolate::classify_attempt(&assessed(ids, nd, end, cut))
+        };
+        assert_eq!(
+            classify(&["a"], A_OK, HarnessEnd::Code(0), false),
+            isolate::AttemptVerdict::Completed
+        );
+        assert_eq!(
+            classify(&["a"], A_OK, HarnessEnd::Code(1), false),
+            isolate::AttemptVerdict::Completed
+        );
         assert_eq!(
             classify(&["a"], A_OK, HarnessEnd::Code(2), false),
-            Ok(Some(Failure::Aborted))
+            isolate::AttemptVerdict::Failed(isolate::Failure::Aborted)
         );
         assert_eq!(
             classify(&["a"], A_OK, HarnessEnd::Signal(11), false),
-            Ok(Some(Failure::Aborted))
+            isolate::AttemptVerdict::Failed(isolate::Failure::Aborted)
         );
         assert!(matches!(
             classify(&["a", "b"], A_OK, HarnessEnd::Code(0), false),
-            Ok(Some(Failure::Incomplete(_)))
+            isolate::AttemptVerdict::Failed(isolate::Failure::Incomplete(_))
         ));
         // Complete coverage with an extra line is not a completed attempt, and
         // a broken report is protocol-invalid even on an abnormal end - never
@@ -1336,28 +1317,29 @@ mod tests {
         let extra = format!("{A_OK}{{\"probe\":\"zz\",\"outcome\":\"no_tv_data\"}}\n");
         assert!(matches!(
             classify(&["a"], &extra, HarnessEnd::Code(0), false),
-            Ok(Some(Failure::ProtocolInvalid(_)))
+            isolate::AttemptVerdict::Failed(isolate::Failure::ProtocolInvalid(_))
         ));
         assert!(matches!(
             classify(&["a"], &extra, HarnessEnd::Signal(11), false),
-            Ok(Some(Failure::ProtocolInvalid(_)))
+            isolate::AttemptVerdict::Failed(isolate::Failure::ProtocolInvalid(_))
         ));
         assert!(matches!(
             classify(&["a"], A_OK, HarnessEnd::Code(0), true),
-            Ok(Some(Failure::ProtocolInvalid(w))) if w.contains("cut short")
+            isolate::AttemptVerdict::Failed(isolate::Failure::ProtocolInvalid(w))
+                if w.contains("cut short")
         ));
         // A harness_abort the harness attributed counts as a completed attempt.
         let crash = "{\"probe\":\"a\",\"outcome\":\"harness_abort\",\"error\":\"signal 11\"}\n";
         assert_eq!(
             classify(&["a"], crash, HarnessEnd::Code(1), false),
-            Ok(None)
+            isolate::AttemptVerdict::Completed
         );
         // A run_error stops diagnosis with the harness's own failure.
         let run_error =
             "{\"kind\":\"run_error\",\"version\":1,\"stage\":\"feed_load\",\"error\":\"oom\"}\n";
         assert_eq!(
             classify(&["a"], run_error, HarnessEnd::Code(2), false),
-            Err(StopReason::HarnessFailure(
+            isolate::AttemptVerdict::Stop(StopReason::HarnessFailure(
                 "run_error at stage feed_load: oom".to_owned()
             ))
         );

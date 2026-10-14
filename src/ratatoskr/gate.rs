@@ -1,9 +1,9 @@
 //! Sync-bench regression gate evaluation.
 //!
-//! See `docs/commands/ratatoskr-gate.md` for the design. This module is
-//! pure: it pulls scalar values out of two JSON-encoded `gate_runs` rows
-//! (current + baseline) according to the configured `MetricRule` set
-//! and reports per-rule pass/fail. Storage and CLI plumbing live in
+//! See `docs/commands/ratatoskr-gate.md` for the design. This module compiles
+//! configured rules into typed metric selectors and predicates, pulls scalar
+//! values out of two JSON-encoded `gate_runs` rows (current + baseline), and
+//! reports per-rule pass/fail. Storage and CLI plumbing live in
 //! `src/db/gate.rs` and `src/ratatoskr/sync.rs`.
 
 use std::fmt::Write;
@@ -23,89 +23,325 @@ pub struct RuleOutcome {
     pub detail: String,
 }
 
-/// Evaluate every rule under the given gate config against the current
-/// run + baseline. Returns one `RuleOutcome` per (metric, rule) pair.
-/// Metric lookup failures (missing key in JSON, bad scalar shape) are
-/// hard errors per the design - no silent zero-treatment.
+/// The validated, executable form of a gate's configured rules.
+///
+/// Build this before compiling or running the harness. It validates every
+/// metric selector and scalar `equal` value, and guarantees that each
+/// metric has at least one predicate. Execution and rebase warnings then
+/// consume this same representation.
+#[derive(Debug)]
+pub struct GateRules {
+    metrics: Vec<MetricPredicates>,
+}
+
+#[derive(Debug)]
+struct MetricPredicates {
+    name: String,
+    key: MetricKey,
+    predicates: Vec<Predicate>,
+}
+
+#[derive(Debug)]
+enum MetricKey {
+    ElapsedMs,
+    ExitCode,
+    Success,
+    Sidecar(String),
+    Meta(String),
+}
+
+#[derive(Clone, Debug)]
+enum Predicate {
+    Max(f64),
+    Min(f64),
+    MaxRelative(f64),
+    MinRelative(f64),
+    MaxDelta(f64),
+    Equal(Scalar),
+    EqualToBaseline,
+}
+
+impl GateRules {
+    pub fn compile(gate_name: &str, gate: &GateConfig) -> Result<Self, DevError> {
+        let mut metrics = Vec::with_capacity(gate.metrics.len());
+        for (name, rule) in &gate.metrics {
+            let key = MetricKey::parse(name)
+                .map_err(|reason| DevError::Config(format!("gate `{gate_name}`: {reason}")))?;
+            let predicates = compile_predicates(gate_name, name, rule)?;
+            if predicates.is_empty() {
+                return Err(DevError::Config(format!(
+                    "gate `{gate_name}`: no predicate set on metric `{name}` - a rule like that \
+                     checks nothing and passes. Give it at least one of max, min, max_relative, \
+                     min_relative, max_delta, equal, or equal_to_baseline = true."
+                )));
+            }
+            metrics.push(MetricPredicates {
+                name: name.clone(),
+                key,
+                predicates,
+            });
+        }
+        Ok(Self { metrics })
+    }
+
+    pub fn evaluate(
+        &self,
+        current: &GateRun,
+        baseline: &GateRun,
+    ) -> Result<Vec<RuleOutcome>, DevError> {
+        if self.metrics.is_empty() {
+            return Err(DevError::Config(
+                "gate has no metric rules to evaluate".into(),
+            ));
+        }
+        let mut outcomes = Vec::new();
+        for metric in &self.metrics {
+            let current_value = lookup_scalar(current, &metric.key)?;
+            let baseline_value = lookup_scalar(baseline, &metric.key)?;
+            for predicate in &metric.predicates {
+                outcomes.push(predicate.evaluate(&metric.name, &current_value, &baseline_value)?);
+            }
+        }
+        Ok(outcomes)
+    }
+
+    pub fn no_drift_metrics(&self) -> Vec<&str> {
+        self.metrics
+            .iter()
+            .filter(|metric| metric.predicates.iter().any(Predicate::admits_no_drift))
+            .map(|metric| metric.name.as_str())
+            .collect()
+    }
+}
+
+impl MetricKey {
+    fn parse(name: &str) -> Result<Self, String> {
+        if let Some(key) = name.strip_prefix("sidecar.") {
+            return if key.is_empty() {
+                Err("metric `sidecar.` has an empty key".into())
+            } else {
+                Ok(Self::Sidecar(key.to_owned()))
+            };
+        }
+        if let Some(key) = name.strip_prefix("meta.") {
+            return if key.is_empty() {
+                Err("metric `meta.` has an empty key".into())
+            } else {
+                Ok(Self::Meta(key.to_owned()))
+            };
+        }
+        match name {
+            "elapsed_ms" => Ok(Self::ElapsedMs),
+            "exit_code" => Ok(Self::ExitCode),
+            "success" => Ok(Self::Success),
+            other => Err(format!(
+                "unknown metric `{other}` (bare metrics are elapsed_ms, exit_code, success; \
+                 other values use `sidecar.<key>` or `meta.<key>`)."
+            )),
+        }
+    }
+}
+
+impl Predicate {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Max(_) => "max",
+            Self::Min(_) => "min",
+            Self::MaxRelative(_) => "max_relative",
+            Self::MinRelative(_) => "min_relative",
+            Self::MaxDelta(_) => "max_delta",
+            Self::Equal(_) => "equal",
+            Self::EqualToBaseline => "equal_to_baseline",
+        }
+    }
+
+    fn admits_no_drift(&self) -> bool {
+        match self {
+            Self::MaxDelta(delta) => *delta == 0.0,
+            Self::EqualToBaseline => true,
+            _ => false,
+        }
+    }
+
+    fn evaluate(
+        &self,
+        metric: &str,
+        current: &Scalar,
+        baseline: &Scalar,
+    ) -> Result<RuleOutcome, DevError> {
+        let rule = self.name();
+        match self {
+            Self::Max(cap) => check_num(metric, rule, current, |value| {
+                (
+                    value <= *cap,
+                    format!("current={} max={}", format_num(value), format_num(*cap)),
+                )
+            }),
+            Self::Min(floor) => check_num(metric, rule, current, |value| {
+                (
+                    value >= *floor,
+                    format!("current={} min={}", format_num(value), format_num(*floor)),
+                )
+            }),
+            Self::MaxRelative(factor) => {
+                let base = require_num(metric, rule, baseline, "baseline")?;
+                let bound = base * *factor;
+                check_num(metric, rule, current, |value| {
+                    (
+                        value <= bound,
+                        format!(
+                            "current={} bound={} (baseline={} * {})",
+                            format_num(value),
+                            format_num(bound),
+                            format_num(base),
+                            format_num(*factor)
+                        ),
+                    )
+                })
+            }
+            Self::MinRelative(factor) => {
+                let base = require_num(metric, rule, baseline, "baseline")?;
+                let bound = base * *factor;
+                check_num(metric, rule, current, |value| {
+                    (
+                        value >= bound,
+                        format!(
+                            "current={} bound={} (baseline={} * {})",
+                            format_num(value),
+                            format_num(bound),
+                            format_num(base),
+                            format_num(*factor)
+                        ),
+                    )
+                })
+            }
+            Self::MaxDelta(delta) => {
+                let base = require_num(metric, rule, baseline, "baseline")?;
+                check_num(metric, rule, current, |value| {
+                    let actual_delta = value - base;
+                    (
+                        actual_delta <= *delta,
+                        format!(
+                            "current={} baseline={} delta={} max_delta={}",
+                            format_num(value),
+                            format_num(base),
+                            format_num(actual_delta),
+                            format_num(*delta)
+                        ),
+                    )
+                })
+            }
+            Self::Equal(expected) => {
+                let pass = current == expected;
+                Ok(RuleOutcome {
+                    metric: metric.into(),
+                    rule: rule.into(),
+                    pass,
+                    detail: format!("current={} expected={}", current.fmt(), expected.fmt()),
+                })
+            }
+            Self::EqualToBaseline => {
+                let pass = current == baseline;
+                Ok(RuleOutcome {
+                    metric: metric.into(),
+                    rule: rule.into(),
+                    pass,
+                    detail: format!("current={} baseline={}", current.fmt(), baseline.fmt()),
+                })
+            }
+        }
+    }
+}
+
+fn compile_predicates(
+    gate_name: &str,
+    metric: &str,
+    rule: &MetricRule,
+) -> Result<Vec<Predicate>, DevError> {
+    let mut predicates = Vec::new();
+    if let Some(value) = rule.max {
+        predicates.push(Predicate::Max(value));
+    }
+    if let Some(value) = rule.min {
+        predicates.push(Predicate::Min(value));
+    }
+    if let Some(value) = rule.max_relative {
+        predicates.push(Predicate::MaxRelative(value));
+    }
+    if let Some(value) = rule.min_relative {
+        predicates.push(Predicate::MinRelative(value));
+    }
+    if let Some(value) = rule.max_delta {
+        predicates.push(Predicate::MaxDelta(value));
+    }
+    if let Some(value) = &rule.equal {
+        let value = toml_to_scalar(value).ok_or_else(|| {
+            DevError::Config(format!(
+                "gate `{gate_name}`: metric `{metric}` rule `equal`: value must be int/float/string/bool"
+            ))
+        })?;
+        predicates.push(Predicate::Equal(value));
+    }
+    // False adds no check. If it is the only configured value, GateRules::compile
+    // rejects the resulting empty predicate list.
+    if rule.equal_to_baseline == Some(true) {
+        predicates.push(Predicate::EqualToBaseline);
+    }
+    Ok(predicates)
+}
+
+/// Validate a configured gate before build work begins.
+pub fn validate_rules(gate_name: &str, gate: &GateConfig) -> Result<(), DevError> {
+    GateRules::compile(gate_name, gate).map(|_| ())
+}
+
+/// Evaluate a configured gate directly - the tests' shorthand. Runtime callers
+/// compile once with [`GateRules::compile`] and call [`GateRules::evaluate`].
+#[cfg(test)]
 pub fn evaluate(
     gate: &GateConfig,
     current: &GateRun,
     baseline: &GateRun,
 ) -> Result<Vec<RuleOutcome>, DevError> {
-    // Re-checked here, not only at the entry point: an evaluation that
-    // yields no outcome reports PASSED, so this is the last place a
-    // predicate-free rule can be stopped from passing silently.
-    validate_rules("<gate>", gate)?;
-    let mut out = Vec::new();
-    for (metric, rule) in &gate.metrics {
-        let current_v = lookup_scalar(current, metric)?;
-        let baseline_v = lookup_scalar(baseline, metric)?;
-        out.extend(evaluate_rule(metric, rule, &current_v, &baseline_v)?);
+    GateRules::compile("<gate>", gate)?.evaluate(current, baseline)
+}
+
+/// The complete caller-facing result of a gate evaluation.
+pub struct GateVerdict {
+    outcomes: Vec<RuleOutcome>,
+    passed: bool,
+}
+
+impl GateVerdict {
+    pub fn from_outcomes(outcomes: Vec<RuleOutcome>) -> Self {
+        let passed = !outcomes.is_empty() && outcomes.iter().all(|outcome| outcome.pass);
+        Self { outcomes, passed }
     }
-    Ok(out)
-}
 
-/// Refuse a metric table that carries no predicate.
-///
-/// Every predicate is optional in the schema, so `[...metrics.elapsed_ms]`
-/// with nothing under it - or with only `equal_to_baseline = false` -
-/// parses fine and then yields zero outcomes, which the report reads as
-/// PASSED. The non-empty-`metrics` refusal at the entry point cannot see
-/// this: the table is there, it just checks nothing. Called before
-/// anything is built, and again from [`evaluate`].
-pub fn validate_rules(gate_name: &str, gate: &GateConfig) -> Result<(), DevError> {
-    let empty: Vec<&str> = gate
-        .metrics
-        .iter()
-        .filter(|(_, rule)| predicate_count(rule) == 0)
-        .map(|(metric, _)| metric.as_str())
-        .collect();
-    if empty.is_empty() {
-        return Ok(());
+    pub fn outcomes(&self) -> &[RuleOutcome] {
+        &self.outcomes
     }
-    Err(DevError::Config(format!(
-        "gate `{gate_name}`: no predicate set on metric `{}` - a rule like that \
-         checks nothing and passes. Give each at least one of max, min, max_relative, \
-         min_relative, max_delta, equal, or equal_to_baseline = true.",
-        empty.join("`, `")
-    )))
-}
 
-/// How many predicates `rule` actually applies - the count of outcomes
-/// [`evaluate_rule`] will produce for it. `equal_to_baseline = false`
-/// applies nothing.
-fn predicate_count(rule: &MetricRule) -> usize {
-    [
-        rule.max.is_some(),
-        rule.min.is_some(),
-        rule.max_relative.is_some(),
-        rule.min_relative.is_some(),
-        rule.max_delta.is_some(),
-        rule.equal.is_some(),
-        rule.equal_to_baseline == Some(true),
-    ]
-    .into_iter()
-    .filter(|b| *b)
-    .count()
-}
+    pub fn passed(&self) -> bool {
+        self.passed
+    }
 
-/// Format a list of `RuleOutcome`s as one line each, prefixed with
-/// `OK` or `FAIL`. Returns `(report, any_failed)`.
-pub fn format_report(outcomes: &[RuleOutcome]) -> (String, bool) {
-    let mut s = String::new();
-    let mut any_failed = false;
-    for o in outcomes {
-        let tag = if o.pass { "OK  " } else { "FAIL" };
-        if !o.pass {
-            any_failed = true;
-        }
-        writeln!(s, "  [{tag}] {} :: {} ({})", o.metric, o.rule, o.detail)
+    pub fn format_report(&self) -> String {
+        let mut report = String::new();
+        for outcome in &self.outcomes {
+            let tag = if outcome.pass { "OK  " } else { "FAIL" };
+            writeln!(
+                report,
+                "  [{tag}] {} :: {} ({})",
+                outcome.metric, outcome.rule, outcome.detail
+            )
             .expect("writing to a String never fails");
+        }
+        if report.ends_with('\n') {
+            report.pop();
+        }
+        report
     }
-    if s.ends_with('\n') {
-        s.pop();
-    }
-    (s, any_failed)
 }
 
 // ---------------------------------------------------------------------------
@@ -197,21 +433,13 @@ fn format_num(n: f64) -> String {
     }
 }
 
-fn lookup_scalar(run: &GateRun, key: &str) -> Result<Scalar, DevError> {
-    if let Some(rest) = key.strip_prefix("sidecar.") {
-        return lookup_in_blob(&run.sidecar, rest, "sidecar");
-    }
-    if let Some(rest) = key.strip_prefix("meta.") {
-        return lookup_in_blob(&run.meta, rest, "meta");
-    }
+fn lookup_scalar(run: &GateRun, key: &MetricKey) -> Result<Scalar, DevError> {
     match key {
-        "elapsed_ms" => Ok(Scalar::Num(run.elapsed_ms as f64)),
-        "exit_code" => Ok(Scalar::Num(f64::from(run.exit_code))),
-        "success" => Ok(Scalar::Num(if run.success { 1.0 } else { 0.0 })),
-        other => Err(DevError::Config(format!(
-            "gate: unknown bare metric `{other}` (v1 set: elapsed_ms, exit_code, success). \
-             For other metrics use `sidecar.<key>` or `meta.<key>`."
-        ))),
+        MetricKey::ElapsedMs => Ok(Scalar::Num(run.elapsed_ms as f64)),
+        MetricKey::ExitCode => Ok(Scalar::Num(f64::from(run.exit_code))),
+        MetricKey::Success => Ok(Scalar::Num(if run.success { 1.0 } else { 0.0 })),
+        MetricKey::Sidecar(name) => lookup_in_blob(&run.sidecar, name, "sidecar"),
+        MetricKey::Meta(name) => lookup_in_blob(&run.meta, name, "meta"),
     }
 }
 
@@ -262,105 +490,6 @@ fn toml_to_scalar(v: &toml::Value) -> Option<Scalar> {
 // ---------------------------------------------------------------------------
 // Rule application
 // ---------------------------------------------------------------------------
-
-fn evaluate_rule(
-    metric: &str,
-    rule: &MetricRule,
-    current: &Scalar,
-    baseline: &Scalar,
-) -> Result<Vec<RuleOutcome>, DevError> {
-    let mut out = Vec::new();
-
-    if let Some(cap) = rule.max {
-        out.push(check_num(metric, "max", current, |c| {
-            (
-                c <= cap,
-                format!("current={} max={}", format_num(c), format_num(cap)),
-            )
-        })?);
-    }
-    if let Some(floor) = rule.min {
-        out.push(check_num(metric, "min", current, |c| {
-            (
-                c >= floor,
-                format!("current={} min={}", format_num(c), format_num(floor)),
-            )
-        })?);
-    }
-    if let Some(factor) = rule.max_relative {
-        let b = require_num(metric, "max_relative", baseline, "baseline")?;
-        let bound = b * factor;
-        out.push(check_num(metric, "max_relative", current, |c| {
-            (
-                c <= bound,
-                format!(
-                    "current={} bound={} (baseline={} * {})",
-                    format_num(c),
-                    format_num(bound),
-                    format_num(b),
-                    format_num(factor)
-                ),
-            )
-        })?);
-    }
-    if let Some(factor) = rule.min_relative {
-        let b = require_num(metric, "min_relative", baseline, "baseline")?;
-        let bound = b * factor;
-        out.push(check_num(metric, "min_relative", current, |c| {
-            (
-                c >= bound,
-                format!(
-                    "current={} bound={} (baseline={} * {})",
-                    format_num(c),
-                    format_num(bound),
-                    format_num(b),
-                    format_num(factor)
-                ),
-            )
-        })?);
-    }
-    if let Some(delta) = rule.max_delta {
-        let b = require_num(metric, "max_delta", baseline, "baseline")?;
-        out.push(check_num(metric, "max_delta", current, |c| {
-            let d = c - b;
-            (
-                d <= delta,
-                format!(
-                    "current={} baseline={} delta={} max_delta={}",
-                    format_num(c),
-                    format_num(b),
-                    format_num(d),
-                    format_num(delta)
-                ),
-            )
-        })?);
-    }
-    if let Some(ref expected) = rule.equal {
-        let want = toml_to_scalar(expected).ok_or_else(|| {
-            DevError::Config(format!(
-                "gate: metric `{metric}` rule `equal`: value must be int/float/string/bool"
-            ))
-        })?;
-        let pass = current == &want;
-        out.push(RuleOutcome {
-            metric: metric.into(),
-            rule: "equal".into(),
-            pass,
-            detail: format!("current={} expected={}", current.fmt(), want.fmt()),
-        });
-    }
-    if rule.equal_to_baseline == Some(true) {
-        let pass = current == baseline;
-        out.push(RuleOutcome {
-            metric: metric.into(),
-            rule: "equal_to_baseline".into(),
-            pass,
-            detail: format!("current={} baseline={}", current.fmt(), baseline.fmt()),
-        });
-    }
-
-    Ok(out)
-}
 
 fn check_num<F: FnOnce(f64) -> (bool, String)>(
     metric: &str,
@@ -517,6 +646,51 @@ mod tests {
         );
         let r = evaluate(&g, &cur, &base).unwrap();
         assert!(!r[0].pass);
+        let rules = GateRules::compile("g", &g).unwrap();
+        assert_eq!(rules.no_drift_metrics(), vec!["meta.requests"]);
+    }
+
+    #[test]
+    fn invalid_metric_keys_and_equal_values_fail_during_compilation() {
+        let g = gate_with(
+            "elapsed",
+            MetricRule {
+                max: Some(1.0),
+                ..Default::default()
+            },
+        );
+        assert!(
+            GateRules::compile("g", &g)
+                .unwrap_err()
+                .to_string()
+                .contains("unknown metric")
+        );
+
+        let g = gate_with(
+            "meta.correct",
+            MetricRule {
+                equal: Some(toml::Value::Array(Vec::new())),
+                ..Default::default()
+            },
+        );
+        assert!(
+            GateRules::compile("g", &g)
+                .unwrap_err()
+                .to_string()
+                .contains("must be int/float/string/bool")
+        );
+    }
+
+    #[test]
+    fn verdict_owns_pass_state_and_report() {
+        let verdict = GateVerdict::from_outcomes(vec![RuleOutcome {
+            metric: "elapsed_ms".into(),
+            rule: "max".into(),
+            pass: false,
+            detail: "current=12 max=10".into(),
+        }]);
+        assert!(!verdict.passed());
+        assert!(verdict.format_report().contains("[FAIL] elapsed_ms :: max"));
     }
 
     /// A metric table with no predicate used to produce zero outcomes and

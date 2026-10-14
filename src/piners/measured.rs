@@ -26,7 +26,7 @@ use crate::harness::{self, BenchConfig};
 use crate::measure::{MeasureMode, MeasureRequest};
 use crate::output;
 use crate::piners::cmd::CorpusArgs;
-use crate::piners::integrity::{self, HarnessEnd};
+use crate::piners::integrity::{self, HarnessEnd, Policy, Verdict};
 use crate::piners::manifest::Manifest;
 use crate::piners::registry::{self, Registry};
 use crate::piners::select::{self, SelectArgs};
@@ -74,7 +74,7 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
     // `BenchContext` acquires again below; acquisition is re-entrant within
     // the process, so the hold is one and spans both.
     let project_root_str = req.project_root.display().to_string();
-    let _lock = crate::lockfile::acquire(&crate::lockfile::LockContext {
+    let lock = crate::lockfile::acquire(&crate::lockfile::LockContext {
         project: "piners",
         command: lock_command,
         project_root: &project_root_str,
@@ -85,7 +85,7 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
     // conflicting flags).
     let registry_dir = req.project_root.join(cfg.registry_dir());
     let corpus_root = req.project_root.join(cfg.corpus_root());
-    let reg = Registry::load(&registry_dir, &corpus_root)?;
+    let reg = Registry::load(&registry_dir, &corpus_root, &lock)?;
     reg.lint()?;
     let sel = SelectArgs {
         keywords: args.keywords.clone(),
@@ -243,14 +243,10 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
     Ok(())
 }
 
-/// The measured-iteration acceptance policy over the shared assessment: the
-/// process exited 0 and the run completed (`RunAssessment::completed` - every
-/// selected probe validly reported, no protocol or contract violation, no
-/// `run_error`, and the `run_end` once the contract is observed). Exit 1 is a
-/// break, and a `harness_abort` run is no performance sample, so both fail
-/// too. On failure prints how it ended, the `run_error` when there is one,
-/// the reconciliation, the context and the whole stderr. No isolation on this
-/// path.
+/// The measured-iteration policy comes from the shared assessment: only an
+/// exit-0 completed run without a validly reported `harness_abort` is a sample.
+/// On failure prints the reconciliation, context and whole stderr. No
+/// isolation on this path.
 fn check_iteration(
     iteration: usize,
     ids: &[String],
@@ -259,26 +255,10 @@ fn check_iteration(
     stderr: &[u8],
 ) -> Result<(), DevError> {
     let a = integrity::assess(ids, stdout, end, false);
-    // No harness_abort, explicitly: a complete exit-0 stream carrying one (a
-    // legacy disposition-only stream, or a run_end that says 0) still timed
-    // a different workload.
-    let aborts = a.harness_aborts();
-    if end == HarnessEnd::Code(0) && a.completed() && aborts.is_empty() {
-        return Ok(());
-    }
-    let why = match &a.contract.run_error {
-        Some(e) => e.render(),
-        None if !aborts.is_empty() => format!(
-            "harness_abort in the run ({}); a crashed probe is no timing sample",
-            aborts.join(", ")
-        ),
-        None if end != HarnessEnd::Code(0) => {
-            format!("harness {} ({})", end.describe(), a.rec.summary())
-        }
-        None => format!(
-            "harness exited 0 without reporting exactly its selection ({})",
-            a.rec.summary()
-        ),
+    let why = match a.verdict(Policy::Measured) {
+        Verdict::Measured(Ok(())) => return Ok(()),
+        Verdict::Measured(Err(why)) => why,
+        _ => unreachable!("measured policy returns a measured verdict"),
     };
     output::corpus_msg(&format!("iteration {iteration}: {why}"));
     for line in a.detail_lines().into_iter().chain(a.context_lines()) {

@@ -117,7 +117,7 @@ pub fn lint_corpus(
     let _sigterm = crate::shutdown::SigtermGuard::install();
 
     let registry_dir = project_root.join(lint_cfg.registry_dir());
-    let mut registry = LintRegistry::load(&registry_dir)?;
+    let mut registry = LintRegistry::load(&registry_dir, &_lock)?;
     registry.lint()?;
 
     let sel = SelectArgs {
@@ -624,7 +624,12 @@ mod tests {
 
     fn loaded(dir: &Path, on_disk: &str) -> LintRegistry {
         std::fs::write(dir.join("lints.toml"), LOADED).unwrap();
-        let mut reg = LintRegistry::load(dir).unwrap();
+        let data = registry::parse_lints(LOADED, &dir.join("lints.toml")).unwrap();
+        let mut reg = LintRegistry {
+            pins: data.probes,
+            keywords: std::collections::BTreeMap::new(),
+            lints_text: LOADED.to_owned(),
+        };
         std::fs::write(dir.join("lints.toml"), on_disk).unwrap();
         reg.lints_text = LOADED.to_owned();
         reg

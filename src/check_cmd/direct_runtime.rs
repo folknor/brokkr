@@ -93,17 +93,6 @@ fn split_semver(version: &str) -> (String, String, String, String) {
     (next(), next(), next(), pre.to_owned())
 }
 
-/// One `[env]` entry from the cargo config chain, with the two modifiers that
-/// change its meaning.
-#[derive(Debug, Clone)]
-struct ConfigEnvEntry {
-    key: String,
-    value: String,
-    /// `force = true`: overrides an inherited environment value; without it
-    /// the entry only fills a hole.
-    force: bool,
-}
-
 /// The assembled per-sweep runtime: everything [`Self::envelope`] needs that
 /// does not vary per binary.
 #[derive(Debug)]
@@ -118,7 +107,7 @@ pub(crate) struct DirectRuntime {
     /// What `CARGO` is set to: the cargo executable this brokkr runs.
     cargo: String,
     /// `[env]` from the config chain, highest-precedence file first.
-    config_env: Vec<ConfigEnvEntry>,
+    config_env: Vec<crate::rustflags::ConfigEnvEntry>,
 }
 
 impl DirectRuntime {
@@ -130,13 +119,15 @@ impl DirectRuntime {
         index: BuildRuntimeIndex,
     ) -> Result<Self, DevError> {
         let linked_paths = index.all_linked_paths();
+        let effective_env = rustflags::EffectiveEnv::new(env_refs);
+        let cargo_config = rustflags::CargoLaunchConfig::discover(project_root, effective_env);
         Ok(Self {
             packages: workspace_pkg_meta(project_root)?,
             linked_paths,
             index,
             libdir: toolchain_libdir(project_root, env_refs)?,
-            cargo: cargo_program(project_root, env_refs),
-            config_env: cargo_config_env(project_root, env_refs),
+            cargo: cargo_program(project_root, effective_env),
+            config_env: cargo_config.env,
         })
     }
 
@@ -163,9 +154,7 @@ impl DirectRuntime {
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect();
-        let has = |env: &[(String, String)], key: &str| {
-            env.iter().any(|(k, _)| k == key) || std::env::var_os(key).is_some()
-        };
+        let effective_env = rustflags::EffectiveEnv::new(env_refs);
 
         // Cargo config [env]: force overrides, plain entries only fill holes -
         // cargo's own rule. First occurrence in the chain wins, and the chain
@@ -176,7 +165,7 @@ impl DirectRuntime {
                 continue;
             }
             applied.push(&entry.key);
-            if entry.force || !has(&env, &entry.key) {
+            if entry.force || !effective_env.contains(&entry.key) {
                 env.push((entry.key.clone(), entry.value.clone()));
             }
         }
@@ -292,13 +281,8 @@ fn join_dylib_path(search: Vec<String>, existing: Option<&str>) -> String {
 /// a toolchain file or a `RUSTUP_TOOLCHAIN` the build saw is the one named. An
 /// inherited `CARGO` is not trusted: it names whatever cargo launched brokkr,
 /// which is not the one brokkr runs.
-fn cargo_program(project_root: &Path, env: &[(&str, &str)]) -> String {
-    let path_var = env
-        .iter()
-        .rev()
-        .find(|(k, _)| *k == "PATH")
-        .map(|(_, v)| std::ffi::OsString::from(v))
-        .or_else(|| std::env::var_os("PATH"));
+fn cargo_program(project_root: &Path, env: rustflags::EffectiveEnv<'_>) -> String {
+    let path_var = env.get_os("PATH");
     // The search `Command` does: the first EXECUTABLE `cargo`, a relative
     // entry taken against where cargo is launched (`project_root`), and the
     // result made absolute - a harness runs from its package directory, where
@@ -315,7 +299,12 @@ fn cargo_program(project_root: &Path, env: &[(&str, &str)]) -> String {
     let rustup = hit.with_file_name("rustup");
     if is_rustup_proxy(&hit)
         && let Some(rustup) = rustup.to_str()
-        && let Ok(out) = output::run_captured_with_env(rustup, &["which", "cargo"], project_root, env)
+        && let Ok(out) = output::run_captured_with_env(
+            rustup,
+            &["which", "cargo"],
+            project_root,
+            env.pairs(),
+        )
         && out.status.success()
     {
         let resolved = String::from_utf8_lossy(&out.stdout).trim().to_owned();
@@ -415,62 +404,6 @@ fn workspace_pkg_meta(project_root: &Path) -> Result<HashMap<String, PkgRuntimeM
     Ok(out)
 }
 
-/// `[env]` entries from every cargo config file the build reads, ordered
-/// highest-precedence first (the deepest ancestor config outranks
-/// `$CARGO_HOME` - the order [`rustflags::config_paths`] already returns).
-///
-/// Cargo's `relative = true` resolves the value against the directory
-/// CONTAINING the `.cargo` directory the entry was read from.
-fn cargo_config_env(project_root: &Path, env: &[(&str, &str)]) -> Vec<ConfigEnvEntry> {
-    let mut out = Vec::new();
-    for path in rustflags::config_paths_under(project_root, env) {
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(doc) = text.parse::<toml::Table>() else {
-            continue;
-        };
-        let Some(env) = doc.get("env").and_then(toml::Value::as_table) else {
-            continue;
-        };
-        // <dir>/.cargo/config.toml -> <dir>.
-        let anchor = path.parent().and_then(Path::parent);
-        for (key, val) in env {
-            let entry = match val {
-                toml::Value::String(v) => ConfigEnvEntry {
-                    key: key.clone(),
-                    value: v.clone(),
-                    force: false,
-                },
-                toml::Value::Table(t) => {
-                    let Some(v) = t.get("value").and_then(toml::Value::as_str) else {
-                        continue;
-                    };
-                    let relative = t
-                        .get("relative")
-                        .and_then(toml::Value::as_bool)
-                        .unwrap_or(false);
-                    let value = match (relative, anchor) {
-                        (true, Some(dir)) => dir.join(v).display().to_string(),
-                        _ => v.to_owned(),
-                    };
-                    ConfigEnvEntry {
-                        key: key.clone(),
-                        value,
-                        force: t
-                            .get("force")
-                            .and_then(toml::Value::as_bool)
-                            .unwrap_or(false),
-                    }
-                }
-                _ => continue,
-            };
-            out.push(entry);
-        }
-    }
-    out
-}
-
 /// Refuse the direct-execution lane when a target runner is configured.
 ///
 /// Cargo may run test binaries through a wrapper (`[target.<triple>].runner`
@@ -500,83 +433,50 @@ pub(crate) fn refuse_configured_runner(
     project_root: &Path,
     env: &[(&str, &str)],
 ) -> Result<(), DevError> {
-    let effective = |key: &str| -> Option<String> {
-        env.iter()
-            .rev()
-            .find(|(k, _)| *k == key)
-            .map(|(_, v)| (*v).to_owned())
-            .or_else(|| std::env::var_os(key).map(|v| v.to_string_lossy().into_owned()))
-    };
-    if let Some(target) = effective("CARGO_BUILD_TARGET") {
+    // Cargo reads these env-backed settings even when empty: an empty target
+    // remains a configured target, and an empty runner is an invalid empty
+    // command. Direct execution must not bypass either Cargo behavior.
+    let launch = rustflags::CargoLaunchConfig::discover(
+        project_root,
+        rustflags::EffectiveEnv::new(env),
+    );
+    if let Some(target) = &launch.build_target {
+        let detail = match &target.origin {
+            rustflags::SourceOrigin::Environment(value) => {
+                format!("CARGO_BUILD_TARGET={} is set", value.to_string_lossy())
+            }
+            rustflags::SourceOrigin::Config(path) => {
+                format!("{} sets `build.target`", path.display())
+            }
+        };
         return Err(DevError::Config(format!(
-            "CARGO_BUILD_TARGET={target} is set: cargo builds the tests for that target, and \
+            "{detail}: cargo builds the tests for that target, and \
              brokkr executes prebuilt test binaries only for the host. Unset it for this run."
         )));
     }
-    for path in rustflags::config_paths_under(project_root, env) {
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(doc) = text.parse::<toml::Table>() else {
-            continue;
-        };
-        if doc.get("build").and_then(|b| b.get("target")).is_some() {
-            return Err(DevError::Config(format!(
-                "{} sets `build.target`: cargo builds the tests for that target, and brokkr \
-                 executes prebuilt test binaries only for the host.",
-                path.display()
-            )));
-        }
-    }
-    let triple = rustflags::host_triple();
-    if let Some(t) = &triple {
-        let var = format!(
-            "CARGO_TARGET_{}_RUNNER",
-            t.to_uppercase().replace('-', "_")
-        );
-        if effective(&var).is_some() {
-            return Err(DevError::Config(format!(
-                "{var} is set: cargo would run test binaries through that runner, and direct \
-                 execution would bypass it. Unset it, or drop `parallel` or \
-                 `isolation = \"process\"` from the [[check]] entry."
-            )));
-        }
-    }
-    for path in rustflags::config_paths_under(project_root, env) {
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(doc) = text.parse::<toml::Table>() else {
-            continue;
-        };
-        let Some(targets) = doc.get("target").and_then(toml::Value::as_table) else {
-            continue;
-        };
-        for (selector, table) in targets {
-            let Some(table) = table.as_table() else { continue };
-            if !table.contains_key("runner") {
-                continue;
-            }
-            let applies = if let Some(expr) = selector
-                .strip_prefix("cfg(")
-                .and_then(|s| s.strip_suffix(')'))
-            {
-                // Unknown -> Some(true): fail closed, see above.
-                rustflags::eval_cfg(expr) != Some(false)
-            } else {
-                triple.as_deref() == Some(selector.as_str())
-            };
-            if applies {
+    if let Some(runner) = &launch.runner {
+        let detail = match &runner.origin {
+            rustflags::SourceOrigin::Environment(_) => format!("{} is set", runner.key),
+            rustflags::SourceOrigin::Config(path) => {
+                let selector = runner
+                    .key
+                    .strip_prefix("target.")
+                    .and_then(|key| key.strip_suffix(".runner"))
+                    .unwrap_or("host");
                 return Err(DevError::Config(format!(
-                    "{} configures a runner for target `{}`: cargo would run test binaries \
+                    "{} configures a runner for target `{selector}`: cargo would run test binaries \
                      through it, and direct execution would bypass it. Remove the runner for \
                      this host, or drop `parallel` or `isolation = \"process\"` from the \
                      [[check]] entry.",
-                    path.display(),
-                    selector
+                    path.display()
                 )));
             }
-        }
+        };
+        return Err(DevError::Config(format!(
+            "{detail}: cargo would run test binaries through that runner, and direct \
+             execution would bypass it. Unset it, or drop `parallel` or \
+             `isolation = \"process\"` from the [[check]] entry."
+        )));
     }
     Ok(())
 }
@@ -782,12 +682,12 @@ mod direct_runtime_tests {
     fn config_env_respects_force_semantics() {
         let mut rt = runtime_with(BuildRuntimeIndex::default(), HashMap::new());
         rt.config_env = vec![
-            ConfigEnvEntry {
+            rustflags::ConfigEnvEntry {
                 key: "FIXTURE_ROOT".into(),
                 value: "/cfg/fixtures".into(),
                 force: false,
             },
-            ConfigEnvEntry {
+            rustflags::ConfigEnvEntry {
                 key: "FORCED".into(),
                 value: "cfg".into(),
                 force: true,

@@ -52,6 +52,7 @@ mod request;
 mod resolve;
 mod results_cmd;
 mod runnables;
+mod rustc_text;
 mod rustdoc_check;
 mod rustflags;
 mod scope;

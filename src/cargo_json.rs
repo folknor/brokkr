@@ -91,13 +91,18 @@ pub fn parse_cargo_diagnostics(stdout: &str) -> Vec<DiagnosticEvent> {
             .and_then(|s| s.as_array())
             .is_none_or(Vec::is_empty);
 
-        // Skip rustc/cargo summary + meta-noise diagnostics. The old text
-        // scraper filtered these (`cargo_filter::is_meta_noise`); the JSON
-        // path must do the same or the phantom, location-less messages inflate
-        // the lint count (3 lints reported as "4 errors"). A real lint/error
-        // always carries a primary span or a diagnostic code, so gating on
-        // `spans_empty && code.is_none()` cannot drop a genuine finding.
-        if is_summary_noise(&message, spans_empty, code.is_some()) {
+        // A location-less, uncoded summary is not a finding. Use the same
+        // classifier as the text readers so the JSON path cannot inflate the
+        // lint count with compiler and cargo bookkeeping.
+        if spans_empty
+            && code.is_none()
+            && matches!(
+                crate::rustc_text::classify_message(&level, &message),
+                crate::rustc_text::BlockKind::FailureSummary
+                    | crate::rustc_text::BlockKind::CargoStatus
+                    | crate::rustc_text::BlockKind::Progress
+            )
+        {
             continue;
         }
 
@@ -165,7 +170,7 @@ pub fn parse_cargo_diagnostics(stdout: &str) -> Vec<DiagnosticEvent> {
 
 /// Cargo's own manifest lints (`[lints.cargo]`: `unused_dependencies`,
 /// `unused_workspace_dependencies`, ...) among a run's stderr `blocks`
-/// (split by `script_check::rustc_blocks`), each with its block index - so a
+/// (split by `rustc_text::rustc_blocks`), each with its block index - so a
 /// renderer can tell which blocks a diagnostic list already carries.
 ///
 /// Cargo renders these as text on stderr even under `--message-format=json` -
@@ -191,7 +196,7 @@ pub fn parse_cargo_diagnostics(stdout: &str) -> Vec<DiagnosticEvent> {
 /// path-sourced packages that are not members. The path is as cargo printed
 /// it: relative to the workspace root, whatever directory cargo ran in.
 pub fn manifest_lints_by_block(
-    blocks: &[crate::script_check::Block],
+    blocks: &[crate::rustc_text::Block],
 ) -> Vec<(usize, DiagnosticEvent)> {
     struct Candidate<'a> {
         index: usize,
@@ -268,8 +273,8 @@ pub fn manifest_lints_by_block(
 
 /// The level and message of a block's header line (`warning: unused
 /// dependency `x``, `error[code]: ...`).
-fn manifest_lint_header(block: &crate::script_check::Block) -> Option<(&'static str, &str)> {
-    use crate::script_check::Level;
+fn manifest_lint_header(block: &crate::rustc_text::Block) -> Option<(&'static str, &str)> {
+    use crate::rustc_text::Level;
     let level = match block.level {
         Level::Error => "error",
         Level::Warning => "warning",
@@ -319,43 +324,6 @@ fn message_shape(message: &str) -> String {
         .join("``")
 }
 
-/// Classify a compiler-message as a rustc/cargo summary or meta-noise line
-/// that should not become a real diagnostic.
-///
-/// Ported from the text-scraper's `cargo_filter::is_meta_noise`. These
-/// messages arrive with no primary span and no diagnostic `code`, so the
-/// caller gates on `spans_empty && !has_code` before matching message shape -
-/// a genuine lint/error always carries a span or a code and is never dropped.
-/// Matching is on message *shape* (substring patterns), never exact strings,
-/// so `1 warning emitted` / `12 warnings emitted` / localized crate names all
-/// fall through.
-fn is_summary_noise(message: &str, spans_empty: bool, has_code: bool) -> bool {
-    if !spans_empty || has_code {
-        return false;
-    }
-    // "N warning(s) emitted"
-    if message.contains("emitted") && message.contains("warning") {
-        return true;
-    }
-    // "`crate` (lib) generated N warning(s)"
-    if message.contains("generated") && message.contains("warning") {
-        return true;
-    }
-    // "aborting due to N previous error(s)"
-    if message.contains("aborting due to") {
-        return true;
-    }
-    // "could not compile `crate` ..."
-    if message.contains("could not compile") {
-        return true;
-    }
-    // "build failed, waiting for other jobs to finish..."
-    if message.contains("build failed") {
-        return true;
-    }
-    false
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -363,7 +331,7 @@ mod tests {
 
     /// [`manifest_lints_by_block`] over a whole stderr, block indices dropped.
     fn parse_manifest_lints(stderr: &str) -> Vec<DiagnosticEvent> {
-        let blocks = crate::script_check::rustc_blocks(stderr);
+        let blocks = crate::rustc_text::rustc_blocks(stderr);
         manifest_lints_by_block(&blocks)
             .into_iter()
             .map(|(_, e)| e)

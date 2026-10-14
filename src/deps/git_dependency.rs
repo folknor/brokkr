@@ -20,6 +20,9 @@ pub fn run(metadata: &CargoMetadata) -> Vec<GitDependencyEvent> {
             url: parsed.url,
             requested_ref: parsed.requested_ref,
             resolved_rev: parsed.resolved_rev,
+            rev: parsed.rev,
+            branch: parsed.branch,
+            tag: parsed.tag,
         });
     }
     events.sort_by(|a, b| a.krate.cmp(&b.krate).then(a.version.cmp(&b.version)));
@@ -30,6 +33,9 @@ struct ParsedGitSource {
     url: String,
     requested_ref: GitRef,
     resolved_rev: Option<String>,
+    rev: Option<String>,
+    branch: Option<String>,
+    tag: Option<String>,
 }
 
 fn parse_git_source(source: &str) -> Option<ParsedGitSource> {
@@ -59,14 +65,21 @@ fn parse_git_source(source: &str) -> Option<ParsedGitSource> {
         }
     }
 
+    let requested_ref = tag
+        .as_ref()
+        .map(|tag| GitRef::Tag(tag.clone()))
+        .or_else(|| branch.as_ref().map(|branch| GitRef::Branch(branch.clone())))
+        .or_else(|| query_rev.as_ref().map(|rev| GitRef::Rev(rev.clone())))
+        .unwrap_or(GitRef::DefaultBranch);
+    let resolved_rev = fragment.map(str::to_string);
+    let rev = resolved_rev.clone().or_else(|| query_rev.clone());
     Some(ParsedGitSource {
         url: url.to_string(),
-        requested_ref: tag
-            .map(GitRef::Tag)
-            .or_else(|| branch.map(GitRef::Branch))
-            .or_else(|| query_rev.map(GitRef::Rev))
-            .unwrap_or(GitRef::DefaultBranch),
-        resolved_rev: fragment.map(str::to_string),
+        requested_ref,
+        resolved_rev,
+        rev,
+        branch,
+        tag,
     })
 }
 

@@ -1,7 +1,7 @@
 //! Comparison queries for the results database.
 
+use super::QueryFilter;
 use super::ResultsDb;
-use super::RowFilters;
 use super::like::require_prefix;
 use super::query::{
     commit_match_expr, load_children, push_row_filter_clauses, query_commit_filtered,
@@ -17,17 +17,24 @@ impl ResultsDb {
     /// Query two commits for side-by-side comparison. Each commit is matched
     /// by prefix. The supplied row filters narrow both sides equally.
     /// Loads kv + hotpath children for each row (needed for output_bytes and diffs).
+    /// `filter.limit` is retained for the caller to apply after pairing, so it
+    /// cannot cut one arm before its matching row is found.
     ///
     pub fn query_compare(
         &self,
         a: &str,
         b: &str,
-        filter: &RowFilters<'_>,
+        filter: &QueryFilter,
     ) -> Result<(Vec<super::StoredRow>, Vec<super::StoredRow>), DevError> {
         // Both commits are user-supplied prefixes: an empty one would pair
         // every row in the database against the other side.
         require_prefix(a, "commit")?;
         require_prefix(b, "commit")?;
+        if filter.commit.is_some() {
+            return Err(DevError::Config(
+                "--commit cannot be combined with --compare".into(),
+            ));
+        }
         let mut clauses = vec![commit_match_expr(1, 2)];
         let mut params: Vec<String> = Vec::new();
         // ?1/?2 are the commit bindings, filled per-call below.

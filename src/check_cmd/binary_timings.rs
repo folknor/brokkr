@@ -102,13 +102,26 @@ pub(crate) fn timings_load(state_root: &Path) -> Store {
 /// Merged rather than replaced so a sweep run under a narrowing filter does
 /// not discard the times of binaries it did not run this time.
 pub(crate) fn timings_record(state_root: &Path, sweep: &str, measured: &[(String, BinaryCost)]) {
-    if measured.is_empty() {
+    let mut store = timings_load(state_root);
+    // The old `<package>/<target>` identity cannot distinguish a library
+    // harness from a same-named bin or integration target. It is no longer
+    // consulted, so drop those stale cache keys on the next recording pass.
+    let mut pruned_legacy = false;
+    for entries in store.values_mut() {
+        entries.retain(|key, _| {
+            let keep = !is_legacy_timing_key(key);
+            pruned_legacy |= !keep;
+            keep
+        });
+    }
+    if measured.is_empty() && !pruned_legacy {
         return;
     }
-    let mut store = timings_load(state_root);
-    let entry = store.entry(sweep.to_owned()).or_default();
-    for (key, cost) in measured {
-        entry.insert(key.clone(), *cost);
+    if !measured.is_empty() {
+        let entry = store.entry(sweep.to_owned()).or_default();
+        for (key, cost) in measured {
+            entry.insert(key.clone(), *cost);
+        }
     }
 
     let path = store_path(state_root);
@@ -123,6 +136,11 @@ pub(crate) fn timings_record(state_root: &Path, sweep: &str, measured: &[(String
         // filesystem degrades the next run's allocation and nothing else.
         drop(std::fs::write(&path, text));
     }
+}
+
+fn is_legacy_timing_key(key: &str) -> bool {
+    key.rsplit_once('/')
+        .is_some_and(|(_, target)| !target.contains(':'))
 }
 
 /// The weight to allocate one binary's slots by: its measured seconds, or an

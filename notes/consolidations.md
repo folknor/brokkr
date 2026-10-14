@@ -51,18 +51,6 @@ Reported by: check-exec.
 
 Owner: an `ExecutionOutcome` reduced from the observation stream (suite open/closed, terminals per test, kills, stream ends, exit), produced by the runner or by a pure reducer shared with accounting, and returned in `LibtestRun`. One `fn lane_verdict(&ExecutionOutcome) -> Pass | Fail | Incomplete | BudgetBlown | Stopped`. The nextest lane maps `TestResult::TimedOut` into the same `BudgetBlown`. The reconstructed text becomes display-only, which is how the JSON reconstructor already describes itself.
 
-## CON-003 - "Is a target runner, foreign build target or rustdoc override configured?" and "what does cargo's config chain say?"
-
-Reported by: check-exec.
-
-The two answers to the first question (`output.rs::serial_shim_fallback`, `direct_runtime::refuse_configured_runner`) now read the same config chain and empty-value rule, but the cfg evaluation is still copy-pasted between them and `CARGO_TARGET_<HOST>_RUNNER` is still spelled with `format!` in three places. Beyond those two, the config chain is read by hand in `concurrency::build_dir_configured` (a fourth TOML read of the chain) and `direct_runtime::cargo_config_env` (a fifth). Owner: `CargoLaunchConfig::discover(root, env)` in `rustflags.rs`, which already owns the config chain and the cfg evaluator, returning `{ runner: Option<Source>, build_target: Option<Source>, rustdoc: Option<Source>, build_dir: bool, env: Vec<ConfigEnvEntry> }`. `serial_shim_fallback`, `refuse_configured_runner`, `build_dir_configured` and `cargo_config_env` would all read from it.
-
-## CON-004 - "What value will cargo see for this env var?"
-
-Reported by: check-exec.
-
-The rule "sweep env over process env" is computed separately by `envelope`'s `has`, `cargo_program` (PATH), `refuse_configured_runner::effective`, `serial_shim_fallback::env_has` (which checks whether the key is present, not its value) and `concurrency::set_serial_builds`. They disagree on whether an empty value counts. Owner: one `EffectiveEnv` type.
-
 ## CON-005 - "Is this lane cargo-threaded, and therefore unattributable?"
 
 Reported by: check-plan, check-exec.
@@ -125,24 +113,6 @@ Reported by: check-plan.
 
 `certifies == Some(Certifies::Complete)` is evaluated at about six runtime sites (`phase.rs` five times, `install_shape::install_feature_applies`) and about six parse sites. `LaneInputs.certifying` and `AccountingPlan.certifying` are bools derived from it. Each site encodes one obligation of the claim: refuse `-p`, refuse trailing args, enumerate the universe, run install-feature in gate mode, refuse unattributable lanes. The `reject_scoped_complete` doc already speaks of "the certifies permission table", but no table exists, only scattered comparisons. Owner: a `Claim` type with named obligation methods (`refuses_scoping()`, `enumerates_universe()`, `requires_attribution()`, `runs_install_feature(mode)`).
 
-## CON-012 - "Is this cargo/rustc summary line noise, not a finding?"
-
-Reported by: check-report.
-
-Sites:
-- `cargo_json::is_summary_noise`: substring matches on `emitted`+`warning`, `generated`+`warning`, `aborting due to`, `could not compile`, `build failed`.
-- `cargo_filter::is_noise`/`is_meta_noise`: the text-path original it was "ported from".
-- `phase::is_failure_summary`: prefix `error: could not compile ` or exact `error: build failed`.
-- `phase::is_cargo_status`: prefix `warning: build failed, waiting for other jobs`, or `) generated <digits> warning`.
-
-They already disagree in shape: one matches substrings, the others anchor on the header and require digits. Owner: one `rustc_text` module with a single `classify_block(&Block) -> BlockKind { Finding, FailureSummary, CargoStatus, Progress, ... }`, used both by the JSON-message filter (on the `message`) and by the stderr-block readers.
-
-## CON-013 - "Where does a rustc diagnostic block start?"
-
-Reported by: check-report.
-
-`script_check::header_level` accepts column-zero `error`/`warning` followed by `:` or a *closed* `[...]` and then `:`. `cargo_filter::parse_clippy` uses `starts_with("error:") || starts_with("error[")`, with no closing-bracket or colon check. `cargo_filter`'s `parse_failed` re-derives the predicate a third time, inline. A line like `error[oops` opens a block for one and not the other. Owner: one block splitter in the same `rustc_text` module as the noise classification.
-
 ## CON-014 - "Does this allow suppress this diagnostic?" and "which lint namespace is this name in?"
 
 Reported by: check-report, config-cli.
@@ -174,18 +144,6 @@ Reported by: check-report.
 Reported by: check-report.
 
 `run_clippy_phase` sets `multi = sweeps.len() > 1`, counting configured sweeps. `run_rustdoc_phase` sets `multi = results.len() > 1`, counting cargo runs, so a single package-mode sweep with two packages counts as multi. `sweep_tag`'s `active_sweep_count` is passed `results.len()` from `coverage_tag`, so `[both]` means "two cargo runs", not "two sweeps". `report_diagnostic_phase`'s green line deduplicates adjacent labels for its count. A possible bug, which the hunter did not verify by running: a single package-mode sweep prints `[both]`. Owner: the phase's selection knows the count of sweeps reached, so pass it in rather than re-deriving it from vectors of different granularity.
-
-## CON-020 - "Has a stop been requested?" - four atomics and hand-written formulas
-
-Reported by: process-control.
-
-`shutdown::is_shutdown_requested()` folds in `stop_committed()`. `lockfile::wait_for_flock` checks both (`is_shutdown_requested() || stop_committed()`), which is redundant and suggests the caller does not trust the fold. `current_hold` and `refuse_if_stopping` check `stop_committed()` alone. `EXIT_CLEANUP` silently lifts `stop_committed` but not `SHUTDOWN_REQUESTED`. Three atomics (`SHUTDOWN_REQUESTED`, `STOP_COMMITTED`, `EXIT_CLEANUP`) plus `GUARD_ACTIVE` encode one state machine, roughly `Running -> Requested -> Committed -> ExitCleanup`, and every query is a hand-written boolean formula over them. Owner: one `AtomicU8` state with named transitions and two named queries (`admits_new_work()`, `should_unwind()`). The difference between a guard-scoped request (reset when the guard exits) and a sticky commit is real and should stay, but as states rather than as independently reset flags.
-
-## CON-021 - The lock-file value escaping is implemented twice
-
-Reported by: process-control.
-
-`lock_service::escape`/`unescape` (chained `str::replace`) and `lockfile::escape_value`/`unescape_value` (a char-by-char scanner) are two implementations of the same `%25/%0A/%0D` encoding. They agree on every case the hunter traced, but only by construction, and a third escaped byte would have to be added twice. Owner: the lock-record module proposed in `structural.md`.
 
 ## CON-022 - "How does a named config entry shadow another of the same name?" - two layering implementations
 
@@ -232,7 +190,7 @@ Each command enum has both `id()` and `result_command()`, and they diverge: eliv
 
 Reported by: map-projects.
 
-One route is `ResolvedPaths.datasets` (`resolve.rs::get_dataset`, used by every resolver). The other is `elivagar::input_assertions`, which goes back to `dev_config.hosts[config::hostname()].datasets[..].pbf[variant]` and swallows every failure into `(false, false)`, as does `resolve_tilegen`'s re-resolution of the hostname. `input_assertions` returns `(bool, bool)` = `(locations_on_ways, force_sorted)`, so the two can be swapped silently. If `ResolvedPaths` ever differs from the raw host table (include composition, a defaults layer, the user layer), the PBF that was resolved and the PBF whose `locations_on_ways` is asserted can differ without anyone noticing. Owner: resolution returns the `PbfEntry` together with its path (`ResolvedPbf { path, entry }`), and `PipelineOpts` reads the assertions from that.
+`resolve_parts/schema.rs` now has a `ResolvedPbf` API returning the validated path with its selected entry. `elivagar::input_assertions` (in `elivagar/mod.rs`) still goes back to the raw host table and returns `(bool, bool)` = `(locations_on_ways, force_sorted)`, which can be swapped silently. Today both routes read the same host data (`resolve_paths` copies the selected host's datasets and `hostname()` is cached), so this is a divergence risk, not a live mismatch. `bench_all` now reads the assertions from the resolved entry. Residue: `Command::Tilegen` in `main_parts/bootstrap.rs` still calls `input_assertions`, because it builds `PipelineOpts` before `run_measured`, where no `ResolvedPaths` exist; moving it means building the opts inside `elivagar::dispatch` after context construction, after which the raw lookup can go.
 
 ## CON-028 - "Is this elivagar command external, buildable, hotpath-capable?" - answered three times
 
@@ -240,24 +198,14 @@ Reported by: map-projects.
 
 `ElivagarCommand` answers this through `is_external()`, `build_config() -> BuildKind::NoBuild` and `supports_hotpath()` (false exactly for the externals). Dispatch checks `is_external()` before the mode match. The `BuildKind::NoBuild` arms in `run_elivagar_run`/`run_elivagar_bench`/`run_elivagar_hotpath` repeat a "not supported" error that cannot be reached. `run_elivagar_external` needs `_ => unreachable!()` because the type does not encode the split. Owner: split the enum into `ElivagarCommand::{Built(BuiltCommand), External(ExternalTool)}`, with `BuildKind` the discriminant of `BuiltCommand` rather than a method.
 
-## CON-029 - "Is this harness run acceptable?" - three policies over `RunAssessment`, in three files
-
-Reported by: other-projects.
-
-- Parity: `assessment.failure_reasons(exit1_explained)` (in `integrity.rs`), with `exit1_explained` decided by `gate::breaks_all_pinned`/`gate::report_has_break`.
-- Measured: `measured.rs::check_iteration` (exit 0, `completed()`, no aborts).
-- Isolation: `cmd.rs::classify_attempt` (`run_error` stops it, `completed()` passes, violations or a cut mean protocol-invalid, an abnormal end means abort, anything else is incomplete).
-
-The policies differ on purpose. A harness_abort is a pinnable break for parity, a disqualifier for measurement, and "attributed, so completed" for isolation. That difference is the domain fact, and it is currently spread over three files with three message builders. `integrity.rs` claims to be "the one run assessment every consumer reads". Owner: `RunAssessment::verdict(Policy::{Parity { exit1_explained }, Measured, IsolationAttempt}) -> Verdict`. `classify_attempt` sits in `cmd.rs` but belongs beside `isolate.rs`'s `Failure`/`StopReason` types.
-
 ## CON-030 - "Are these two runs comparable?" - gate identity and piners context
 
 Reported by: other-projects.
 
-The ratatoskr gate's `evaluate_against_baseline` checks gate name, script, fixture, profile and features field by field. Each check is its own `if` with its own message, and features has a legacy `None` escape. piners compares through `corpus_db::compare::context_of` (its defaulting is filed in `bugs.md`). The core `brokkr results --compare` has its own pairing key. Each of these is a run-identity decision. Owner in this scope: `GateIdentity { gate, script, fixture, profile: CargoProfile, features: CanonicalFeatures }` with one `fn mismatch(&self, other) -> Option<Mismatch>`, replacing the five ifs and feeding a typed `Incomparable` gate verdict. The piners equivalent is a typed run context stored on the row.
+The ratatoskr gate's `evaluate_against_baseline` checks gate name, script, fixture, profile and features field by field. Each check is its own `if` with its own message, and features has a legacy `None` escape. piners already compares through a typed `RunContext` stored on the run row, and the core `brokkr results --compare` has its own pairing key. Owner for the ratatoskr residue: `GateIdentity { gate, script, fixture, profile: CargoProfile, features: CanonicalFeatures }` with one `fn mismatch(&self, other) -> Option<Mismatch>`, replacing the five ifs and feeding a typed `Incomparable` outcome into the new `GateVerdict`.
 
-## CON-031 - "A registry with writers is read only under the lock" - stated three times as a comment
+## CON-032 - piners `RunAssessment::verdict` takes a policy enum that every caller unpacks with `unreachable!`
 
-Reported by: other-projects.
+Reported by: the wave-3 reviewer, laterally.
 
-`corpus`, `lint_corpus` and `measured::run` each take the lock "before anything is read", each with the same paragraph-long justification. `measured.rs` then relies on re-entrancy, because `BenchContext` acquires the lock again. Owner: `Registry::load`/`LintRegistry::load` take a `&LockGuard`, which makes the rule structural instead of a comment.
+`RunAssessment::verdict(Policy)` returns a `Verdict` whose shape depends on the policy, so each caller (`piners/cmd.rs` twice, `measured.rs`, `isolate.rs`, the integrity tests) matches the one variant its policy can produce and `unreachable!`s the rest. Per-policy methods (`parity_verdict`, `measured_verdict`, `isolation_verdict`) each returning their own outcome type would let the compiler check what the convention now only promises.

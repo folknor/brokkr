@@ -283,7 +283,7 @@ pub fn run(
 
         let ctx = CommandContext {
             binary: binary.to_path_buf(),
-            pbf_path: pbf_path.to_path_buf(),
+            pbf_path: Some(pbf_path.to_path_buf()),
             osc_path: osc_pathbuf_for_ctx,
             osc_paths,
             pbf_b_path: merged_pbf.clone(),

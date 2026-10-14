@@ -1,7 +1,7 @@
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding new migrations.
-pub(super) const SCHEMA_VERSION: i64 = 19;
+pub(super) const SCHEMA_VERSION: i64 = 20;
 
 /// Run all pending migrations based on `PRAGMA user_version`.
 pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
@@ -79,6 +79,9 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError
     }
     if current < 19 {
         migrate_v18_to_v19(conn)?;
+    }
+    if current < 20 {
+        migrate_v19_to_v20(conn)?;
     }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -788,6 +791,27 @@ fn migrate_v18_to_v19(conn: &rusqlite::Connection) -> Result<(), DevError> {
     if has_table(conn, "run_iterations") && !has_column(conn, "run_iterations", "elapsed_us") {
         conn.execute_batch("ALTER TABLE run_iterations ADD COLUMN elapsed_us INTEGER")?;
     }
+    Ok(())
+}
+
+/// v19 -> v20: distinguish the requested stop spelling from a stop that fired.
+///
+/// Before v20, `stop_marker` held only the configured spelling, so historical
+/// rows cannot establish that the marker appeared. Preserve that spelling in
+/// `stop_marker_requested` and clear the event column rather than presenting
+/// old requests as successful stops.
+fn migrate_v19_to_v20(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    // A database that skipped the v9 -> v10 step has no event column to split.
+    migrate_v9_to_v10(conn)?;
+    if !has_column(conn, "runs", "stop_marker_requested") {
+        conn.execute_batch("ALTER TABLE runs ADD COLUMN stop_marker_requested TEXT")?;
+    }
+    conn.execute_batch(
+        "UPDATE runs \
+         SET stop_marker_requested = stop_marker \
+         WHERE stop_marker_requested IS NULL AND stop_marker IS NOT NULL; \
+         UPDATE runs SET stop_marker = NULL;",
+    )?;
     Ok(())
 }
 

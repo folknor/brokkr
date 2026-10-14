@@ -95,20 +95,13 @@ fn run_elivagar_run(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(
     match command.build_config() {
         BuildKind::MainBinary => {
             let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
-            // Run mode never stores results, so dirty tree is always fine.
-            let ctx = BenchContext::new(
-                req.dev_config,
-                req.project,
-                req.project_root,
-                req.build_root,
+            let ctx = BenchContext::new_for_request(
+                req,
                 command.package(),
                 &feat_refs,
                 true,
                 &format!("run {}", command.id()),
-                true,
-                req.stop_marker.map(str::to_owned),
-            )?
-            .with_request(req);
+            )?;
 
             let pbf_str = if command.needs_pbf() {
                 let (p, _) =
@@ -229,19 +222,13 @@ fn run_elivagar_bench(req: &MeasureRequest, command: &ElivagarCommand) -> Result
 /// `--locations-on-ways` flag lands in the subprocess argv when passed).
 fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(), DevError> {
     let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
-    let ctx = BenchContext::new(
-        req.dev_config,
-        req.project,
-        req.project_root,
-        req.build_root,
+    let ctx = BenchContext::new_for_request(
+        req,
         command.package(),
         &feat_refs,
         true,
         &format!("bench {}", command.id()),
-        req.force,
-        req.stop_marker.map(str::to_owned),
-    )?
-    .with_request(req);
+    )?;
 
     let (pbf_path, file_mb) = if command.needs_pbf() {
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?
@@ -320,16 +307,7 @@ fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Re
 fn run_elivagar_internal(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(), DevError> {
     use crate::context::HarnessContext;
 
-    let ctx = HarnessContext::new(
-        req.dev_config,
-        req.project,
-        req.project_root,
-        req.build_root,
-        &format!("bench {}", command.id()),
-        req.force,
-        req.stop_marker.map(str::to_owned),
-    )?
-    .with_request(req);
+    let ctx = HarnessContext::new_for_request(req, &format!("bench {}", command.id()))?;
 
     let build_root = req.build_root.unwrap_or(req.project_root);
     match command {
@@ -376,19 +354,13 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
         BuildKind::MainBinary => {
             // Tilegen: build main binary with hotpath features, resolve PBF, OOM check.
             let hotpath_features = req.hotpath_features();
-            let ctx = BenchContext::new(
-                req.dev_config,
-                req.project,
-                req.project_root,
-                req.build_root,
+            let ctx = BenchContext::new_for_request(
+                req,
                 command.package(),
                 &hotpath_features,
                 true,
                 &format!("hotpath {}", command.id()),
-                req.force,
-                req.stop_marker.map(str::to_owned),
-            )?
-            .with_request(req);
+            )?;
 
             let (pbf_path, file_mb) =
                 resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
@@ -457,16 +429,10 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
         }
         BuildKind::Example(example) => {
             // Micro-benchmarks: build example with hotpath feature.
-            let ctx = crate::context::HarnessContext::new(
-                req.dev_config,
-                req.project,
-                req.project_root,
-                req.build_root,
+            let ctx = crate::context::HarnessContext::new_for_request(
+                req,
                 &format!("hotpath {}", command.id()),
-                req.force,
-                req.stop_marker.map(str::to_owned),
-            )?
-            .with_request(req);
+            )?;
 
             let binary = crate::build::cargo_build(
                 &crate::build::BuildConfig {
@@ -673,35 +639,11 @@ fn prune_output_dir(output_dir: &std::path::Path, dataset: &str, variant: &str) 
     }
 }
 
-/// External tool dispatch (Planetiler, Tilemaker). Run mode reuses the same
-/// one-sample harness path while allowing dirty trees and suppressing storage.
+/// External tool dispatch (Planetiler, Tilemaker). Request-aware context
+/// construction applies the mode's dirty-tree policy for both run and bench.
 fn run_elivagar_external(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(), DevError> {
     match req.mode {
-        MeasureMode::Run => {
-            // These legacy handlers create their own harness and receive the
-            // dirty-tree allowance through the request. The harness sees the
-            // run mode via `with_request` and reports without persisting.
-            let run_req = MeasureRequest {
-                dev_config: req.dev_config,
-                project: req.project,
-                project_root: req.project_root,
-                build_root: req.build_root,
-                dataset: req.dataset,
-                variant: req.variant,
-                features: req.features,
-                force: true,
-                mode: req.mode,
-                brokkr_args: req.brokkr_args,
-                dry_run: req.dry_run,
-                stop_marker: req.stop_marker,
-            };
-            match command {
-                ElivagarCommand::Planetiler => elivagar::cmd::bench_planetiler(&run_req),
-                ElivagarCommand::Tilemaker => elivagar::cmd::bench_tilemaker(&run_req),
-                _ => unreachable!(),
-            }
-        }
-        MeasureMode::Bench { .. } => match command {
+        MeasureMode::Run | MeasureMode::Bench { .. } => match command {
             ElivagarCommand::Planetiler => elivagar::cmd::bench_planetiler(req),
             ElivagarCommand::Tilemaker => elivagar::cmd::bench_tilemaker(req),
             _ => unreachable!(),

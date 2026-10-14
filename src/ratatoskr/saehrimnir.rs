@@ -17,7 +17,7 @@
 //! model, and signal handling; brokkr only orchestrates.
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -590,9 +590,11 @@ pub fn endpoint_env_pairs(cfg: &RatatoskrConfig, endpoints: &Endpoints) -> Vec<(
 /// file exists, and refuse if both do (the user almost certainly has a
 /// stale copy in the wrong format).
 pub fn resolve_fixture(fixtures_dir: &Path, name: &str) -> Result<PathBuf, DevError> {
+    validate_fixture_name(name)?;
+
     if name.ends_with(".toml") || name.ends_with(".lua") {
         let path = fixtures_dir.join(name);
-        return if path.exists() {
+        return if fixture_is_inside(fixtures_dir, &path)? {
             Ok(path)
         } else {
             Err(DevError::Config(format!(
@@ -603,7 +605,10 @@ pub fn resolve_fixture(fixtures_dir: &Path, name: &str) -> Result<PathBuf, DevEr
     }
     let toml_path = fixtures_dir.join(format!("{name}.toml"));
     let lua_path = fixtures_dir.join(format!("{name}.lua"));
-    match (toml_path.exists(), lua_path.exists()) {
+    match (
+        fixture_is_inside(fixtures_dir, &toml_path)?,
+        fixture_is_inside(fixtures_dir, &lua_path)?,
+    ) {
         (true, true) => Err(DevError::Config(format!(
             "fixture {name:?} ambiguous - both {} and {} exist. \
              Disambiguate by writing the fixture name with its extension \
@@ -619,6 +624,39 @@ pub fn resolve_fixture(fixtures_dir: &Path, name: &str) -> Result<PathBuf, DevEr
             lua_path.display()
         ))),
     }
+}
+
+fn validate_fixture_name(name: &str) -> Result<(), DevError> {
+    let mut components = Path::new(name).components();
+    let single_normal_component = matches!(components.next(), Some(Component::Normal(_)))
+        && components.next().is_none()
+        && !name.contains('/')
+        && !name.contains('\\');
+    if !single_normal_component {
+        return Err(DevError::Config(format!(
+            "invalid fixture name {name:?}: expected a single name inside the configured fixtures directory"
+        )));
+    }
+    Ok(())
+}
+
+/// Existing fixture files must resolve below the configured directory.
+/// This also rejects a one-component name whose file is a symlink out of
+/// the fixture tree.
+fn fixture_is_inside(fixtures_dir: &Path, candidate: &Path) -> Result<bool, DevError> {
+    if !candidate.exists() {
+        return Ok(false);
+    }
+    let root = fixtures_dir.canonicalize().map_err(DevError::Io)?;
+    let resolved = candidate.canonicalize().map_err(DevError::Io)?;
+    if !resolved.starts_with(&root) {
+        return Err(DevError::Config(format!(
+            "fixture path {} resolves outside the configured fixtures directory {}",
+            candidate.display(),
+            fixtures_dir.display()
+        )));
+    }
+    Ok(true)
 }
 
 /// Poll for the readiness sentinel while keeping the child alive.
@@ -767,7 +805,7 @@ pub fn wait_with_deadline(
 // ---------------------------------------------------------------------------
 // Signal handling for mock-serve. Scoped via RAII guard so non-mock-serve
 // code keeps its default SIGINT/SIGTERM behaviour. Separate atomic from
-// `crate::shutdown::SHUTDOWN_REQUESTED` so the global `brokkr kill` flow
+// `crate::shutdown`'s state machine so the global `brokkr kill` flow
 // (which expects a sidecar polling that flag) and this command don't
 // interfere with each other.
 // ---------------------------------------------------------------------------
@@ -967,6 +1005,44 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("not found"), "got: {msg}");
         assert!(msg.contains("ghost"), "got: {msg}");
+    }
+
+    #[test]
+    fn resolve_fixture_rejects_names_outside_the_fixture_directory() {
+        let dir = fixture_tmpdir("invalid_names");
+        let absolute = dir
+            .canonicalize()
+            .unwrap()
+            .join("outside.toml")
+            .display()
+            .to_string();
+        for name in [
+            "../outside",
+            "nested/fixture",
+            "..\\outside",
+            absolute.as_str(),
+        ] {
+            let err = resolve_fixture(&dir, name).unwrap_err();
+            assert!(
+                err.to_string().contains("invalid fixture name"),
+                "got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_fixture_rejects_symlinks_outside_the_fixture_directory() {
+        let dir = fixture_tmpdir("symlink_escape");
+        let outside = fixture_tmpdir("symlink_target").join("secret.toml");
+        std::fs::write(&outside, "").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("external.toml")).unwrap();
+
+        let err = resolve_fixture(&dir, "external.toml").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("outside the configured fixtures directory"),
+            "got: {err}"
+        );
     }
 
     #[test]

@@ -10,7 +10,8 @@
 //!
 //! - A probe missing from one side is classified, not dropped: the run's
 //!   stored selection (`selector.ids`) and `gate_miss` say whether it was not
-//!   selected or was selected and emitted nothing - which is itself a result.
+//!   selected or was selected and emitted nothing. Legacy or malformed
+//!   selectors stay explicitly unknown.
 //! - Counts are projected as 0 when the harness line carried none (a compile
 //!   failure has no trade counts). Such a side is shown as `no counts` rather
 //!   than as a fall to zero, which would read as a divergence improvement.
@@ -35,9 +36,9 @@ use crate::error::DevError;
 /// One probe's line in one run, as the comparison needs it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Side {
-    /// Whether the run selected the probe; `false` is a report-only line
-    /// (the harness emitted it unasked), which the gate never judged.
-    pub selected: bool,
+    /// Whether the run selected the probe. `NotSelected` is a report-only
+    /// line (the harness emitted it unasked), which the gate never judged.
+    pub selection: Selection,
     pub outcome: String,
     pub disposition: String,
     pub count_tier: Option<String>,
@@ -50,6 +51,14 @@ pub struct Side {
     pub tv_only: i64,
 }
 
+/// What the stored run can establish about a probe's selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Selection {
+    Selected,
+    NotSelected,
+    Unknown,
+}
+
 /// Where a probe stands in one run.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Presence {
@@ -58,6 +67,8 @@ pub enum Presence {
     NoLine,
     /// Not part of that run's selection.
     NotSelected,
+    /// The selector is legacy or malformed, so selection cannot be recovered.
+    SelectionUnknown,
 }
 
 /// A probe that differs between the two runs (or, under `--full`, any probe).
@@ -89,15 +100,23 @@ impl CorpusDb {
     pub fn compare_runs(&self, a: i64, b: i64) -> Result<Comparison, DevError> {
         let run_a = self.run(a)?.ok_or_else(|| no_run(a))?;
         let run_b = self.run(b)?.ok_or_else(|| no_run(b))?;
-        let side_a = self.presence_map(&run_a)?;
-        let side_b = self.presence_map(&run_b)?;
+        let selected_a = selected_ids(&run_a.selector);
+        let selected_b = selected_ids(&run_b.selector);
+        let side_a = self.presence_map(&run_a, selected_a.as_deref())?;
+        let side_b = self.presence_map(&run_b, selected_b.as_deref())?;
         let ids: BTreeSet<&String> = side_a.keys().chain(side_b.keys()).collect();
         let probes = ids
             .into_iter()
             .map(|id| ProbeDelta {
                 probe: id.clone(),
-                a: side_a.get(id).cloned().unwrap_or(Presence::NotSelected),
-                b: side_b.get(id).cloned().unwrap_or(Presence::NotSelected),
+                a: side_a
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| missing_presence(selected_a.as_deref(), id)),
+                b: side_b
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| missing_presence(selected_b.as_deref(), id)),
             })
             .collect();
         Ok(Comparison {
@@ -108,9 +127,13 @@ impl CorpusDb {
     }
 
     /// Every probe the run selected or emitted, with what it emitted.
-    fn presence_map(&self, run: &RunRow) -> Result<BTreeMap<String, Presence>, DevError> {
+    fn presence_map(
+        &self,
+        run: &RunRow,
+        selector_ids: Option<&[String]>,
+    ) -> Result<BTreeMap<String, Presence>, DevError> {
         let mut out: BTreeMap<String, Presence> = BTreeMap::new();
-        let mut selected: BTreeSet<String> = selected_ids(&run.selector).into_iter().collect();
+        let mut selected: BTreeSet<String> = selector_ids.into_iter().flatten().cloned().collect();
         for miss in self.gate_misses_for_run(run.run_id)? {
             selected.insert(miss.probe);
         }
@@ -134,7 +157,13 @@ impl CorpusDb {
             Ok((
                 probe.clone(),
                 Side {
-                    selected: selected.contains(&probe),
+                    selection: if selected.contains(&probe) {
+                        Selection::Selected
+                    } else if selector_ids.is_some() {
+                        Selection::NotSelected
+                    } else {
+                        Selection::Unknown
+                    },
                     outcome: r.get::<_, Option<String>>("outcome")?.unwrap_or_default(),
                     disposition: r.get("disposition")?,
                     count_tier: r.get("count_tier")?,
@@ -153,6 +182,17 @@ impl CorpusDb {
     }
 }
 
+fn missing_presence(selector_ids: Option<&[String]>, probe: &str) -> Presence {
+    let Some(ids) = selector_ids else {
+        return Presence::SelectionUnknown;
+    };
+    if ids.iter().any(|id| id == probe) {
+        Presence::NoLine
+    } else {
+        Presence::NotSelected
+    }
+}
+
 fn no_run(id: i64) -> DevError {
     DevError::Config(format!(
         "corpus-results --compare: no run {id} in runs.db (bare `brokkr corpus-results` lists \
@@ -160,19 +200,14 @@ fn no_run(id: i64) -> DevError {
     ))
 }
 
-/// The resolved ids a run's stored selector names; none for an unparsable or
-/// pre-`ids` selector.
-fn selected_ids(selector: &str) -> Vec<String> {
-    serde_json::from_str::<Value>(selector)
-        .ok()
-        .and_then(|v| v.get("ids").and_then(Value::as_array).cloned())
-        .map(|ids| {
-            ids.iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
+/// The resolved ids a run's stored selector names; `None` for an
+/// unparsable, malformed, or pre-`ids` selector.
+fn selected_ids(selector: &str) -> Option<Vec<String>> {
+    let value = serde_json::from_str::<Value>(selector).ok()?;
+    let ids = value.get("ids")?.as_array()?;
+    ids.iter()
+        .map(|id| id.as_str().map(str::to_owned))
+        .collect()
 }
 
 /// Which way a probe's counts moved, as a heuristic for comparable parity
@@ -216,12 +251,16 @@ mod tests {
 
     fn record(db: &CorpusDb, ids: &[&str], nd: &str, misses: &[&str]) -> i64 {
         let selector = serde_json::json!({ "ids": ids, "debug": true }).to_string();
+        record_with_selector(db, &selector, nd, misses)
+    }
+
+    fn record_with_selector(db: &CorpusDb, selector: &str, nd: &str, misses: &[&str]) -> i64 {
         let run = RunRecord {
             run_id: None,
             started_at: None,
             commit_sha: Some("0123456789abcdef0123456789abcdef01234567"),
             dirty: Some(false),
-            selector: &selector,
+            selector,
             context: None,
             gated: true,
             result: "pass",
@@ -350,6 +389,31 @@ mod tests {
     }
 
     #[test]
+    fn legacy_and_malformed_selectors_remain_unknown() {
+        let db = CorpusDb::open_in_memory().unwrap();
+        let known = record(&db, &["p"], &line("p", "exact", 1, 0, 0), &[]);
+        let legacy =
+            record_with_selector(&db, r#"{"all":true}"#, &line("q", "exact", 1, 0, 0), &[]);
+        let malformed = record_with_selector(&db, r#"{"ids":["p",false]}"#, "", &[]);
+
+        let legacy_comparison = db.compare_runs(known, legacy).unwrap();
+        let by: BTreeMap<&str, &ProbeDelta> = legacy_comparison
+            .probes
+            .iter()
+            .map(|delta| (delta.probe.as_str(), delta))
+            .collect();
+        assert_eq!(by["p"].b, Presence::SelectionUnknown);
+        let Presence::Ran(q) = &by["q"].b else {
+            panic!("q was emitted")
+        };
+        assert_eq!(q.selection, Selection::Unknown);
+        assert!(compare_report(&legacy_comparison, false).contains("selection unknown"));
+
+        let malformed_comparison = db.compare_runs(known, malformed).unwrap();
+        assert_eq!(malformed_comparison.probes[0].b, Presence::SelectionUnknown);
+    }
+
+    #[test]
     fn a_line_without_counts_is_not_a_fall_to_zero() {
         let db = CorpusDb::open_in_memory().unwrap();
         let a = record(&db, &["p"], &line("p", "near", 10, 3, 3), &[]);
@@ -371,7 +435,7 @@ mod tests {
     #[test]
     fn opposing_unmatched_moves_are_mixed_not_cancelled() {
         let side = |o, t| Side {
-            selected: true,
+            selection: Selection::Selected,
             outcome: "parity".into(),
             disposition: "accepted".into(),
             count_tier: None,
@@ -412,7 +476,7 @@ mod tests {
         let Presence::Ran(qb) = &by["q"].b else {
             panic!("q ran")
         };
-        assert!(!qb.selected);
+        assert_eq!(qb.selection, Selection::NotSelected);
     }
 
     #[test]
