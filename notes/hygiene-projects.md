@@ -25,23 +25,21 @@ Reported by: pbfhogg-nidhogg.
 
 `commands.rs::GETID_BENCH_IDS` and `verify_getid_removeid.rs::IDS` identical; `INSPECT_ALL_TAGS_MIN_COUNT` is a constant but `bench_blob_filter.rs` spells `"999999999"`; `"Sort.Type_then_ID"` three times in `verify.rs`; the nidhogg highway filter list six times (`client.rs` ×5, `query.rs::FALLBACK_QUERY`); `"planet.openstreetmap.org"` three times in `download_core.rs`.
 
-## PRJ-003 - Multi-extract geometry and scratch output names duplicated
-
-Reported by: pbfhogg-nidhogg.
-
-Strip geometry and config JSON duplicated verbatim between `commands.rs` (`MultiExtract`) and `verify_multi_extract.rs`. `"multi-extract"` and `geocode-{dataset}` are each spelled in `output_kind`, `build_body` and `cleanup_output`; `OutputKind::ScratchDir("multi-extract")` claims a `-{dataset}` suffix never used, forcing a special case in `cleanup_output`. nidhogg spells `bench-`, `run-`, `hotpath-ingest-output` inline while the dead `scratch_output_dir()` lists only the first.
-
 ## PRJ-004 - Extract strategy → flags mapping has four copies
 
 Reported by: pbfhogg-nidhogg.
 
 `commands.rs` (`Extract` and `MultiExtract`), `bench_extract.rs::strategy_args`, `verify_extract.rs`. Diverged: `commands.rs` emits `-b=<bbox>`, `bench_extract` `-b <bbox>`, so rows under the same `extract` command never pair (BUG-049). `bench_extract.rs` also duplicates the `extract-*` presets in `bench_commands` (hard-coded bbox) with different argv; `suite pbfhogg` runs both, producing two extract row families that can never pair.
 
+Design hunt (map-projects): the strategy-to-flag mapping is also in `verify_multi_extract` (always `--simple`); `main.rs` fans out both `extract` and `multi-extract` and `bench_extract::run` fans out again by string, with `bench_extract::ALL_STRATEGIES` a separate `&[&str]`. `ensure_merged_pbf` spells `["apply-changes", pbf, osc, "-o", out]` apart from `PbfhoggCommand::ApplyChanges`, dropping `--locations-on-ways`, `-j`, `--compression` and the I/O flags, so the merged B-side for `diff` is built under different settings from an `apply-changes` bench (perhaps intended, but a second argv for one subcommand). The `--io-uring` support list exists as `supports_io_uring()` and again as prose in `resolve_io_flags` ("only apply-changes, sort, cat-dedupe, diff-osc, repack, degrade"), neither tied to pbfhogg's clap. Appending the I/O args plus `--compression` is copy-pasted in `run_pbfhogg_dry_run`, `run_pbfhogg_run`, `run_wallclock_core` and `run_pbfhogg_hotpath`, so dry-run shows bench argv even under `--hotpath`, and the hotpath "legacy" `--compression zlib` default is decided inside `build_body` by peeking at `ctx.params.compression` because the append happens elsewhere. Proposed: `ExtractStrategy::flag() -> Option<&str>` plus a bbox type's `to_pbfhogg_arg()`, `bench_extract` building `PbfhoggCommand::Extract` values rather than its own argv (one fan-out), the io-uring prose derived by iterating a variant catalogue, and I/O mode plus compression appended inside `build_args`, so dry-run shows the real argv by construction.
+
 ## PRJ-005 - bbox parsing re-implemented
 
 Reported by: pbfhogg-nidhogg.
 
 `resolve_bbox`/`validate_bbox` own validation; four other places re-parse: `commands.rs` MultiExtract, `verify_multi_extract.rs`, `nidhogg/client.rs::shrink_bbox`, `bbox_to_api` (no numeric check). `bench_all.rs` reads `ds.bbox` raw, unvalidated.
+
+Design hunt (map-projects): the bbox travels as `String` from config (`Dataset.bbox: Option<String>`) through `resolve_bbox` into `CommandContext.bbox: Option<String>`; the parsers differ in checks - `validate_bbox` (count, f64, no finiteness), `multi_extract_plan` (count, f64, finite), `verify_multi_extract::run` (count, f64, no finiteness), `shrink_bbox` (count, f64), `bbox_to_api` (count only, then a lon/lat swap by index on raw strings, so `default_api_query` can send malformed JSON to the server). The axis order `lon_min,lat_min,lon_max,lat_max` is restated in comments at each site. Proposed: `Bbox { min_lon, min_lat, max_lon, max_lat }` parsed once at config load and once for `--bbox` via a clap value parser, owning `strips(n)`, `shrink_quarter()`, `to_nidhogg_api()` and `to_pbfhogg_arg()` (the `-b=<bbox>` spelling), keeping the original text for `cli_args` fidelity or defining one canonical render.
 
 ## PRJ-006 - Two compression validators that disagree
 
@@ -63,11 +61,15 @@ Reported by: pbfhogg-nidhogg.
 
 `SUITE_EXTRACT_BBOX` (Copenhagen, `bench_commands.rs`), `GEOCODE_TEST_QUERIES` (Danish cities), `query.rs::FALLBACK_QUERY` (Copenhagen bbox), the GETID IDs ("known to exist in Denmark PBFs"). On another dataset the extract suite measures near-empty work and getid verify diffs two empty outputs. `osc.rs`'s doc sizes input by "the Denmark daily diff" (PRJ-017).
 
+Design hunt (map-projects): `TimeFilter` hard-codes `2024-01-01T00:00:00Z`, so as planet data ages the selected fraction changes and rows are comparable across time only by accident. Rows from different datasets under the same `cli_args` measure different work when GETID IDs are missing; recording the hit count as a metadata observation would make that visible.
+
 ## PRJ-009 - Dataset registry writers and naming conventions
 
 Reported by: pbfhogg-nidhogg.
 
 `download_core.rs` has seven `brokkr.toml` appenders and two line-based rewriters, each calling `project_root.join("brokkr.toml")` and hand-formatting TOML without escaping; the repo already has a comment-preserving `toml_edit` pattern (`guard.rs`, `piners/pins_write.rs`). `{key}-{date}.osm.pbf` and `-with-indexdata.osm.pbf` spelled at five sites (`raw_pbf_path`, `indexed_pbf_path`, `run_as_snapshot`, `run_refresh`, `promote_snapshot`). `download_core.rs` hand-rolls `days_to_civil`/`civil_to_days` and `SystemTime::now()` while `header.rs` uses libc `gmtime` for "what is today". Atomicity: BUG-081.
+
+Design hunt (map-projects): three calendar implementations and four string formats - `download_core::today` + `days_to_civil` (Hinnant forward); `download_modes::civil_to_days`, `unix_to_yyyymmdd`, `iso_date_to_yyyymmdd`, `snapshot_key_to_iso_date`, `iso_date_today`, `iso_date_parse_unix`; `tools::parse_http_date` (an inline Hinnant inverse whose comment cites `pbfhogg::download::days_to_civil`); `header.rs` with libc `gmtime_r`. Proposed: a `CivilDate { y, m, d }` in one shared module (it is not pbfhogg-specific) with `from_unix`, `to_unix`, `yyyymmdd()`, `iso()`, `parse_yyyymmdd`, `parse_iso`, `parse_http`, so snapshot keys, `download_date` and Last-Modified comparisons stop each re-deriving the date. A day-range defect in one of the copies is filed in `bugs.md`.
 
 ## PRJ-010 - pbfhogg parsers, labels and helpers with several owners
 
@@ -86,6 +88,8 @@ Reported by: pbfhogg-nidhogg.
 
 `nidhogg serve` turns a data_dir resolution error into "tiles-only" via `.ok()`; `bench_all` finds its OSC via `get_default_osc_entry`, which returns `None` when more than one OSC is configured (then prints "skipped, no osc file") and bypasses the hash verification `resolve_*` performs (as does `get_pbf_entry` for raw); `cli_adapter.rs` `CatTypeFilter::parse(s).ok()` turns a bad value into an unfiltered `cat`; `tags-filter --input-kind` compared as a string (`== Some("osc")`); `Extract`/`MultiExtract` `--strategy` is a `String` compared to `"all"` and parsed late (`DiffFormat` shows the `ValueEnum` pattern).
 
+Design hunt (map-projects, config-cli): the bad `cat --type` value is safe today only because clap's `value_parser = ["way", "relation"]` gives the same answer as `CatTypeFilter::parse` - two lists of allowed values with nothing linking them; `inspect --type` travels as a raw `String` all the way into argv (`PbfhoggCommand::Inspect.type_filter`); `--index-type` is a `String` forwarded verbatim. The `--strategy all` sentinel, `Suite.name` (`"pbfhogg" | "elivagar" | "nidhogg"` with a hand-written "expected:" list) and `Sync --gate` compared to `GATE_ALL` are the same pattern. Proposed: `clap::ValueEnum` on the enums themselves (as `DiffFormat` already is) and `StrategySel { All, One(ExtractStrategy) }`, parsed before anything is built.
+
 ## PRJ-012 - pbfhogg/nidhogg policy invented per call site
 
 Reported by: pbfhogg-nidhogg.
@@ -96,6 +100,8 @@ Reported by: pbfhogg-nidhogg.
 - Ambient dependencies: `SystemTime::now()` in `download_core::today`; env `PORT`; host tools `curl`, `which`, `pkill`, `chmod`, `osmium` on PATH.
 - `nidhogg/bench_tiles.rs` calls `crate::ratatoskr::process::send_signal` (PLT-010).
 - Lock labels: PLT-034. Merged-PBF cache key: BUG-080. `cat --type`: BUG-086.
+
+Design hunt (map-projects): "exactly one -> pick it; zero -> error; many -> error naming the flag" is implemented in `resolve_default_entry_path` and again inline in `resolve_single_osc` (which needs the key back and copies the logic, its sorted "available" list and `where_clause` match - built twice in `resolve_osc_range` too); `get_default_osc_entry` is a third version returning `None` on ambiguity. The snapshot-not-found error with its sorted `base`-plus-keys list is built twice (`snapshot_osc_map`, `resolve_snapshot_pbf_path`). Almost every failure in the resolvers is `DevError::Config(String)` (unknown dataset, missing variant, missing file, ambiguous default) or `Preflight(vec![String])` (hash mismatch), so a caller cannot tell "not downloaded" from "misconfigured" from "corrupt". Proposed: one `select_one(map, key: Option<K>, ctx) -> Result<(K, &E), ResolveError>`, and `ResolveError::{UnknownDataset, MissingEntry { kind, key, available }, FileMissing { path }, HashMismatch { path, expected, actual, origin }, Ambiguous { kind, available, flag }}` with one renderer, letting `download` offer "missing file -> fetch it".
 
 ## PRJ-013 - pbfhogg/nidhogg errors and silent fallbacks
 
@@ -155,6 +161,8 @@ Reported by: elivagar.
 
 `"tilegen_tmp"` in `commands.rs`, `bench_self.rs`, `dispatch.rs` (wipe guard) and comments (clean mislabel: BUG-035); `"bench-self-output.pmtiles"` three times; the hotpath cleanup deletes `hotpath-{alloc-}output.pmtiles`, a name no argv builder produces (dead). Retention pruners: PLT-020.
 
+Design hunt (map-projects): `run_elivagar_hotpath` removes `hotpath-{alloc-}output.pmtiles` while `ElivagarCommand::build_args` always writes `bench-self-output.pmtiles`, and the hotpath path also deletes the tilegen output where run and bench archive it via `rename_elivagar_output` - deleting may be intended, but nothing names the policy. `<data>/tilegen_tmp` is built independently in `elivagar/commands.rs::build_args`, `elivagar/dispatch.rs::rename_elivagar_output` (the "output dir coincides with tmp" guard) and `main_parts/commands.rs` (clean), and documented in `config_parts/schema.rs`; `bench-self-output.pmtiles` is spelled twice inside `commands.rs` (`output_files`, `build_args`). Proposed: one `elivagar::paths::tilegen_tmp(data_dir)`, ideally on elivagar's `ResolvedPaths`.
+
 ## PRJ-021 - elivagar corpus layout and vocabulary are strings
 
 Reported by: elivagar.
@@ -186,6 +194,8 @@ Reported by: elivagar.
 
 Tilegen string knobs (`tile_format`, `tile_compression`, `compress_sort_chunks`, budgets, `compression_level` 0-10) aren't validated at load; a typo surfaces inside elivagar after a release build. `style.toml` and `manifest.toml` lack `deny_unknown_fields` (a typo'd paint key or `layer` for `layers` is ignored yet changes the style hash). `OUTPUT_RETENTION`, `DIFF_CAP = 100`, `RESIDUAL_CANDIDATES = 8`, `KD_TREE_THRESHOLD`, the overlay panel limit 24 and the Planetiler heap formula have no config surface or index. The docs recommend sibling `[<host>.tilegen.*]` blocks for A/B arms, but `DEFAULT_TILEGEN` has no selector, so a sibling block is config nothing can run.
 
+Design hunt (map-projects, config-cli): these are forwarded verbatim, consistent with "brokkr interprets none of this", but the budget strings are sizes, so a typo surfaces only when elivagar rejects the argv after a build; a validated `ByteSize` with a `Display` round trip costs nothing and gives a config-load error, and `tile_format`/`tile_compression` are closed sets. The hunter marks this borderline - a deliberate choice to challenge rather than a defect.
+
 ## PRJ-025 - elivagar output
 
 Reported by: elivagar.
@@ -213,6 +223,8 @@ Reported by: elivagar.
 - Build feature sets differ for the same binary: `verify` host features, inspect/diag/svg/ocean-build none, `bench_all` `paths.features`, dispatch `req.features`; alternating commands forces rebuilds.
 - `bootstrap(None)` vs `bootstrap(Some(build_root))` chosen per command; `project::require` runs after the lock is taken.
 - `svg`/`diag` (shelling out to elivagar) overlap the native `pmtiles-corpus render`/`rings`; the hunter leaves keeping both to the user.
+
+Design hunt (map-projects, deps-misc): `src/pmtiles.rs` (868 lines) hand-parses headers, varints, directories and Hilbert tile ids (`tile_id_to_zxy`) while `elivagar/eliv.rs` re-exports the linked elivagar crate's `pmtiles_reader` and `tile_id_to_zxy`, and `corpus/mutate.rs` has a third `read_varint`; decoding the spec in two places is a drift hazard (compression-code naming, run-length handling, leaf directories). If elivagar is always linked, `pmtiles-stats` and nidhogg's `sample_tile_coords` should read through `eliv` and `pmtiles.rs` can mostly go; if the link is meant to be optional, that boundary should be stated and `eliv` should be the crate's only consumer. Either way `pmtiles.rs` is project code at top level and belongs under a shared map-data module or behind `eliv.rs`.
 
 ## PRJ-029 - Stale claims in elivagar docs and help
 
@@ -244,6 +256,8 @@ Nine protocols in: `Endpoints` fields, `parse_sentinel`'s nine locals, its match
 
 Enforcement proposed: a `Protocol` enum carrying name, scheme and config key; `Endpoints` as `[u16; N]`; config as a map keyed by protocol; exhaustive matches.
 
+Design hunt (config-cli): on the config side, adding a protocol means a new `RatatoskrConfig.test_endpoint_env_*` field, a new parser line and a new consumer branch; proposed `BTreeMap<Protocol, EnvName>` with `Protocol` the enum the sync code also uses.
+
 ## PRJ-033 - ratatoskr paths and harness env have several owners
 
 Reported by: ratatoskr, piners.
@@ -258,11 +272,12 @@ Reported by: ratatoskr.
 
 - Messages: "no `[ratatoskr]` section" three copies; "no `[ratatoskr.harness]`" four, worded two ways; "sæhrimnir binary not found" four copies with three remedies (`cargo build --release` in sæhrimnir's repo, while the real config points at `~/.cargo/bin/saehrimnir`, a `cargo install` layout). `run_sync_bench` repeats `validate_sync_config` inline.
 - Checked at use: a gate named `all` refused only in `run_sync_bench`, once per gate in a sweep; a `--gate <typo>` checked after `with_worktree` cut the `--commit` worktree; `fixtures_dir`/`mock_server_binary` existence per command; service cohorts check keys exist but not fixture names (a typo'd fixture fails mid-soak after the build); `service <SCRIPT>` doesn't check mock config before building though `service --all` does; sync --all validates per script after the build; the gate sweep validates up front. Hunter: all belongs in one pass at `parse_ratatoskr`.
-- Frontmatter (`discover.rs`): `expected: ignore` → Pass; `ceiling: 5y` → 60s; `preserve_data_dir: maybe` → default; unknown `fixtures:` ignored (runs with no mock, no warning). The test `malformed_ceiling_falls_back_to_default` locks this in.
 - Build roots differ: `sync --bench` builds in the cwd when `brokkr.toml` is one level up; smoke/all and service build in `project_root`.
 - The config in use hard-codes `mock_server_binary = "/home/folk/.cargo/bin/saehrimnir"`.
 
 Enforcement proposed: reject unknown/unparseable frontmatter keys; parse-time refusals for rule shape, a gate named `all`, and baseline UUID format.
+
+Design hunt (other-projects): `ScriptInfo` is one struct for two script kinds - `fixture`/`protocol` are "sync-only, service scripts leave None" - so a sync script with no fixture gets all the way to `resolve_info` before it is refused; proposed `ScriptInfo { common, kind: Service | Sync { fixture, protocol } }`. `list_smoke::select_cohort` filters `s.expected.as_str() != "ignored"` on a value that is already the `Expected` enum, while `service_suite` compares the enum; `Ignored` only excludes from selection, so the variant is really `Skip`. Frontmatter typo handling is filed in `bugs.md`.
 
 ## PRJ-035 - ratatoskr timing constants and small helpers duplicated
 
@@ -294,6 +309,8 @@ Reported by: ratatoskr.
 
 Every one of the 17 gates in ratatoskr's config has `success equal = 1` and `exit_code equal = 0` (34 rules); the gate hook runs only after every iteration succeeded and the row hard-codes `exit_code: 0, success: true`, so these bare metrics are constants. `MetricRule.equal_to_baseline: Option<bool>` - `false` means nothing. Empty-predicate rules: BUG-072. Profile check: BUG-068.
 
+Design hunt (other-projects): `MetricRule` has seven independent options (`max`, `min`, `max_relative`, `min_relative`, `max_delta`, `equal`, `equal_to_baseline`); `gate::predicate_count` re-lists all seven to decide "does this rule check anything", and its doc says it must equal "the count of outcomes `evaluate_rule` will produce" - a second list held in step only by care - and `warn_if_rebasing` is a third site picking out "strict" predicates (`max_delta == Some(0.0) || equal_to_baseline == Some(true)`). `equal`'s value-type check (`toml_to_scalar` returning `None`) is a run-time error after the bench ran. `gate::format_report` returns `(String, bool)`, the verdict coming back as a side output of formatting. Proposed: deserialize into `Vec<Predicate>` with `enum Predicate { Max(f64), Min(f64), MaxRelative(f64), MinRelative(f64), MaxDelta(f64), Equal(Scalar), EqualToBaseline }`, so an empty rule is a deserialization error, `predicate_count` disappears and `Predicate::admits_no_drift()` owns strictness; bare-metric names and the `sidecar.`/`meta.` namespaces as a parsed `MetricKey` validated before the build; the verdict computed by a caller-facing gate-verdict type from the outcomes.
+
 ## PRJ-040 - Stale claims in ratatoskr code and docs
 
 Reported by: ratatoskr.
@@ -320,6 +337,8 @@ Reported by: ratatoskr.
 
 `pid_is_alive`, `wait_for_sentinel`, `SentinelOutcome` are test-only, hidden by `#[allow(dead_code)]`; `send_signal`, `send_signal_pgrp`, `snapshot_proc` carry the same stale allow though used. `write_run_toml`'s `mock_dir` is an unused placeholder (`let _mock_dir_anchor = mock_dir; // future`). `cmd.rs` and `sync.rs` are `include!` shims; `service_suite.rs` depends on imports declared in `service_test.rs` and can't carry `//!` docs; file names (`service_test`, `service_suite`, `list_smoke`, `bench_gate`) are the retired command names; `src/ratatoskr_sync/` isn't a module. Request structs would remove the `too_many_arguments`/`too_many_lines` waivers (PLT-002).
 
+Design hunt (other-projects): the hunter reads the shims as a way under the `wc` 800-line threshold without deciding boundaries; the spliced files leak private items across what look like file boundaries, and the directory tree misdescribes the module tree. Proposed: `ratatoskr::service::{single, suite, list}` and `ratatoskr::sync::{list, smoke, all, bench, gate_hook}`, with `ratatoskr_sync/` moved under `ratatoskr/sync/`; `bench_gate.rs` alone (1643 lines) holds cohort selection, the bench loop, the gate hook, baseline lookup, identity checks and sidecar-to-JSON projection - at least three modules.
+
 ## PRJ-043 - piners registry names, paths and vocabulary have several owners
 
 Reported by: piners.
@@ -332,11 +351,15 @@ Reported by: piners.
 
 Enforcement proposed: text rules for file names and env literals; a serde enum for dispositions.
 
+Design hunt (other-projects): the corpus vocabulary is `report::PARITY_TIERS` (4), `report::NON_PARITY_OUTCOMES` (5), `report::HARNESS_ABORT`, `registry::DISPOSITION_LABELS` (9, documented as "must equal PARITY_TIERS followed by NON_PARITY_OUTCOMES; a test holds them together") and `gate::BREAK_DISPOSITIONS` (3); `corpus_query::shown_by_default` compares a DB string and `Pin::expected` is `Option<String>` - the textbook pairwise-agreement case. Proposed: `enum Disposition { Parity(Tier), CompileFail, RuntimeFail, NoTvData, NoOverlap, HarnessAbort }` with `enum Tier { ByteExact, Accepted, ActionableDrift, CountDivergent }`, `Disposition::parse(outcome, tier)` as the single validator (today's `valid_label`), `is_break()` and `is_crash()` replacing the lists, and `Pin::expected: Option<Disposition>` deserialized directly so `registry.lint()`'s `bad_expected` check disappears into serde; the DB keeps the `as_str` spelling. The raw-outcome abort check and the unpinnable lint dispositions are filed in `bugs.md`.
+
 ## PRJ-044 - piners has two registry stacks copied almost line for line
 
 Reported by: piners.
 
 `Registry::load`/`lint` vs `LintRegistry::load`/`lint`; `select.rs` vs `lint/select.rs` ("mirrors"); `pins_write.rs` vs `lints_write.rs` (`set_value`, `sync_opt`, `sort_fields`, `rank`, `set_block_prefix`, `pin_value`, `parse_value`, `toml_str` - a third copy is `rustflags::toml_string`); reseed diff/carry-forward; `grid` in `corpus_db/format.rs` and `lint/db.rs`. Bless is implemented twice with different rules (BUG-090). Directory walks differ: corpus reseed `file_type()` (no symlink follow), lint reseed `is_dir()` (follows; a symlink loop recurses). `lint/cmd.rs` rebuilds a `HarnessConfig` by hand from `LintConfig`'s package/binary/features/debug fields; the config could embed `HarnessConfig`. Hunter's recommendation: a single generic registry, selector, writer and run store with a per-corpus pin type - a rewrite with real payoff.
+
+Design hunt (other-projects): the run verdict is decided in both `piners/cmd.rs::corpus` and `piners/lint/cmd.rs::lint_corpus` - `gate_blocks = !args.bless && !args.no_gate && <deviations>`, a separate `gated = !args.no_gate && !args.bless` for the DB row (four sites for one fact), `run_pass`, the `fail_reason` precedence chain, the `"pass"`/`"fail"` string, the bless short-circuit and its "tool/harness failed: nothing blessed" exit, the final `PASS`/`FAIL` line and `ExitCode(1)`. The run mode is spread over `reseed`, `reanchor`, `bless`, `verify_only` and `no_gate` bools held exclusive by clap `conflicts_with` and "dispatch-rejected" comments. `RunRecord::result: &str` and `RunMeta::result: &str` are documented as `"pass"`/`"fail"` but also receive `"error"` and `"interrupted"`, with `fail_reason: Option<String>` beside them admitting pass-with-reason and fail-without. Inside `cmd.rs` (1295 lines), `classify_attempt`, `store_attempt_streams`, `AttemptEnv` and `diagnose` are isolation machinery belonging in `isolate.rs`, and `reserve_run_id`/`record_unfinished` belong in `corpus_db`. `registry.rs` (1885 lines) holds schema, loading, keyword index, lint, feed groups, harness-file pins and xxh128 verification, with `cmd.rs::verify_selected_feeds` a third piece of verification outside it; `report.rs` (1412 lines) mixes NDJSON parsing, the disposition vocabulary, aggregation and terminal rendering. Proposed: `enum CorpusMode { Verify, Run { gate: Enforce | ReportOnly }, Bless, Reseed, Reanchor }`, `enum RunResult { Pass, Fail(Reason), Error(Reason), Interrupted }`, one `RunVerdict::decide(integrity_failures, gate_deviations, mode)` with one test table, a `corpus_engine` with a `Subject` trait (select/verify/execute/classify) giving both commands one protocol implementation, `registry::{schema, load, lint, verify}`, and rendering in its own file.
 
 ## PRJ-045 - piners query commands diverge
 
@@ -396,7 +419,9 @@ Reported by: piners.
 
 Reported by: small-benches.
 
-`open_db`, `format_pct`, `print_table_header`, prefix-matching `resolve_fixture`/`resolve_snapshot`, `print_run_summary`, `format_status_columns` and the approve clean-tree check are cloned; the two `db.rs` differ only in column names. Sluggrs fixed the `FAIL_THRESHOLD (FAIL_THRESHOLD)` double status (its comment describes it); litehtml `format_status_columns` still has `s => format!(" ({s})")`. `sluggrs_msg` wraps nothing. Hunter's view: one `visual/` module generic over subject, with a structural rule that `sluggrs` doesn't import `crate::litehtml`.
+`open_db`, `format_pct`, `print_table_header`, prefix-matching `resolve_fixture`/`resolve_snapshot`, `print_run_summary`, `format_status_columns` and the approve clean-tree check are cloned; the two `db.rs` differ only in column names. `sluggrs_msg` wraps nothing. Hunter's view: one `visual/` module generic over subject, with a structural rule that `sluggrs` doesn't import `crate::litehtml`.
+
+Design hunt (other-projects): both also have `cmd.rs` with `test`/`list`/`approve`/`report`/`status`, `print_X_status`, `db.rs` with the same three tables and `map_*` row mappers, and `generate_run_id`; `sluggrs` already imports `crate::litehtml::compare`, so the shared core is filed under one of its two clients, and the shared `visual` CLI command refuses litehtml-only flags in sluggrs by hand. Proposed: `src/visual/{engine, compare, db, status}` owning the run loop, the status tally, the approval/ratchet policy and the DB, with a `Subject` trait (`render`, `reference`, `scores`) - litehtml rendering through the pipeline and scoring against a Chrome capture on pixel and element metrics, sluggrs rendering a snapshot and scoring against `approved.png` on pixels only - and per-project flags (`--suite`, `--recapture`) in the subject's argument type so the refusal is structural. The double-status defect that shows the copies drifting is filed in `bugs.md`.
 
 ## PRJ-054 - Three inline-tag lists disagree
 
@@ -416,17 +441,23 @@ Reported by: small-benches.
 - `snapshots/*/approved.png` built in `sluggrs/cmd.rs` and excluded by literal pathspec in `git.rs::check_clean` (PLT-017).
 - The mode-to-features rule (`uses_hotpath` + `if uses_hotpath { hotpath_features } else { features }`) is copied into sluggrs, dellingr and mogwai; the dellingr doc says restating feature names "would only create a way for them to disagree", but the selection logic is restated; only mogwai dedups (`hotpath,hotpath`), and recorded `cargo_features` order differs between mogwai and the others. Proposed: `MeasureRequest::build_features(registered)`.
 
+Design hunt (other-projects): `piners/measured.rs` re-derives `alloc` from a match on `req.mode`, ignores `req.features` (CLI `-F`), pushing only the hotpath feature onto `[piners.harness] features`, and uses `hotpath_feature(alloc)` alone rather than `hotpath_features()`; whether that is intended is stated nowhere. Each of the four files then chooses `run_hotpath` + `run_hotpath_capture` or `run_external`, the `harness::hotpath_feature(...)` label, `hotpath_alloc_note` and a scratch dir - the same ~40-line decision four times. Proposed: the mode question on `MeasureMode` (`fn instruments(&self)`) and a core `run_measured_target(ctx, config, argv, env)` the four adapters call.
+
 ## PRJ-056 - litehtml/sluggrs configuration is untyped and undocumented
 
 Reported by: small-benches.
 
 `LitehtmlConfig.mode` and `LitehtmlFixture.expected` are free `String`s compared at use (`"ahem"`, `"fail"`), so `"Ahem"`/`"failure"` silently select the other behaviour (serde enums proposed). No config-time check for duplicate fixture/snapshot ids (`fixture_by_id` takes the first) or ids containing `/` or `..` (joined into `fixtures/<id>`). `FUZZ_THRESHOLD`, `POS_TOLERANCE`, `SIZE_TOLERANCE`, `ZERO_HEIGHT`, `REGRESSION_TOLERANCE`, `OFFENDER_PRINT_LIMIT` are scattered with no injection. `[litehtml]` and `[sluggrs]` are documented nowhere: `brokkr.toml.md` points `[litehtml]` to `litehtml.md`, which points back ("See `docs/brokkr.toml.md` for full schema"); `waive_element_threshold`, per-fixture `mode`/`viewport_width`/thresholds, `notes` and the whole `[sluggrs]` schema lack docs. `scripts_dir()` uses `env!("CARGO_MANIFEST_DIR")`, so the installed binary depends on the source checkout existing where it was built; `pnpm install` (not `--frozen-lockfile`) writes into brokkr's tree from any litehtml project, and deps install only when `node_modules` is missing, so a `package.json` bump never re-installs.
 
+Design hunt (other-projects): `CAPTURE_JS` is a 90-line Puppeteer script embedded as a Rust string in `litehtml/cmd.rs`, written to `.brokkr/capture.js` per run and run with `NODE_PATH = $(npm root -g)`, while `prepare.js`/`smoke.js` live under `scripts/litehtml-prepare/` with a `package.json` and pnpm lockfile, so the two resolve puppeteer and cheerio through two package managers and scopes and the Chrome version behind reference captures is pinned by no lockfile. Proposed: `capture.js` beside `prepare.js` under one `package.json` (puppeteer pinned there), all scripts `include_str!`'d and materialized with their `node_modules` into a brokkr-owned cache dir (XDG data, keyed by the lockfile hash) rather than the source tree.
+
 ## PRJ-057 - Visual status and exit policy invented per project
 
 Reported by: small-benches.
 
 Exit policy lives in positional `counts: [u32; 4]` arrays with different index meanings per project; `NoBaseline` is a failure in litehtml (the `_` arm) and not in sluggrs (`Status::is_failure()` proposed). Status is stored as TEXT and matched back as literals (`"PASS"`, `"NO_BASELINE"`) with no `FromStr`; an unknown value falls through silently. `determine_status` takes seven positional args including two adjacent `Option<f64>` approvals that can be swapped silently (a struct proposed). The child cwd differs: sluggrs hotpath `build_root`, dellingr and mogwai `project_root`. `latest_result_for_*` orders by `datetime('now')` (one-second resolution; same-second runs ambiguous).
+
+Design hunt (other-projects): the exit rule fails on indices 1 and 3 in litehtml and 1 and 2 in sluggrs (same meaning, different indices); both bucket "everything else" with `_ => counts[1] += 1`, so a future litehtml path producing `NoBaseline` would fail the run, which `Status::NoBaseline`'s own doc says must never happen. The "improved" threshold `0.5` is hard-coded in both status renderers (the value of `compare::REGRESSION_TOLERANCE` but not that constant), as is the 0.05 "no visible delta" cutoff. "Approval record exists but the baseline artefact is gone means ERROR, not NO_BASELINE / not recapture" is decided separately in `litehtml::run_fixture` (Chrome reference) and `sluggrs::run_snapshot` (`approved.png`). `sluggrs approve` compares `r.status == Status::Error.as_str()` and both `format_status_columns` match on `"PASS"`/`"NO_BASELINE"` literals. Proposed: a `StatusTally` keyed by `compare::Status` (plus the `unexpected_pass` refinement), `Status::parse` with `ResultRow::status: Status`, and `Status` owning `fails_run()`, `annotation(current, approval)` and the tolerance constants, with one status renderer for both projects.
 
 ## PRJ-058 - Visual failures don't say why
 

@@ -19,6 +19,8 @@ Reported by: config-cli-bootstrap, test-execution, measurement-storage, ratatosk
 
 Enforcement proposed: a `StateDir` type with named accessors (and per-project layout types), held by a textlint rule forbidding `".brokkr` / `join(".brokkr")` outside it.
 
+Design hunt (process-control, measurement, other-projects): `$HOME/.brokkr` is also built independently in `lockfile::lock_path`, `lock_service::socket_dir`, `hold::cargo_config_overrides`, `test_orphans::runs_dir`, `worktree.rs`, `test_runner/harness_shim.rs` and twice in the guard; the empty-`$HOME` consequence is filed in `bugs.md`. The harness derives `db_dir.join("results.db")`/`.join("sidecar.db")` from its own `db_root.unwrap_or(project_root)` while readers use `resolve::results_db_path`/`sidecar_db_path`, and `bench_cmd::bench_home` is a third private derivation of `.brokkr/<x>`; they agree because `db_root` is always the project root. `brokkr clean` re-encodes each project's layout separately (sweep directories under `.brokkr/ratatoskr` but keep files, because `gate.db` lives there; sweep `.brokkr/piners/corpus` run dirs but not `runs.db`). Proposed owners: `user_dirs::brokkr_state_dir()` with typed accessors for the per-user state, store paths as methods on a `ProjectRoot` type, and a `Layout` exported by each project module (artefact roots, plus measurement stores marked permanent) that `clean` iterates.
+
 ## PLT-002 - brokkr enforces very little of its own convention on itself
 
 Reported by: every hunter (check-core, process-control, config-cli-bootstrap, measurement-storage, pbfhogg-nidhogg, ratatoskr, piners, small-benches).
@@ -32,7 +34,6 @@ Hunters' collective view: nearly every consolidation across all four hygiene fil
 Reported by: config-cli-bootstrap, measurement-storage, process-control, convention-engines.
 
 - `XDG_CONFIG_HOME`: `config_parts/user.rs::user_config_path`. `XDG_DATA_HOME`: `history.rs::db_path` (`var`), `history_cmd::record_history` (restates the rule as a precondition using `var_os`; disagrees on non-UTF-8), `format_sidecar.rs::sidecar_backup_dir`. None treats empty as unset (BUG-032).
-- `$HOME/.brokkr`: `lockfile::lock_path` (`var("HOME")`, errors on unset/non-UTF-8), `hold::cargo_config_overrides` (`var`), `rustc_guard::brokkr_dir` and `lock_is_held` (a second copy in the same file, `var_os`). Empty `HOME` gives a relative `.brokkr/brokkr.lock` in brokkr's cwd and in rustc's cwd for the guard, so the two sides lock different files; nothing rejects empty.
 - `HOME` also in `guard`, `deps/focus::tildify`; `CARGO_HOME` → `$HOME/.cargo` in `bench_cmd/stamp`, `rustflags::config_paths`, `guard` (three times; see BUG-024).
 
 Enforcement proposed: one `dirs` module plus `disallowed-methods` on `std::env::var`/`var_os` elsewhere (or a textlint ban on `env::var("XDG_`). `rustc_guard` is a separate bin and may need a documented copy (see PLT-011).
@@ -72,6 +73,8 @@ Reported by: process-control, config-cli-bootstrap, ratatoskr, pbfhogg-nidhogg, 
 
 Enforcement proposed: `clippy.toml` `disallowed-methods = ["std::process::Command::new"]` with `#[allow]` only at the choke-point module.
 
+Design hunt (process-control): the spawn sequence `cargo_env::apply` -> `oom::protect_child` -> (`die_with_parent`) -> (`test_orphans::stamp`) -> `hold::stamp` ("last, so nothing displaces it") is written out at `output.rs` three times (captured, sidecar, passthrough runners), `test_runner.rs` once (with the two extra steps), `ratatoskr/saehrimnir.rs`, `nidhogg/server.rs` and `nidhogg/bench_tiles.rs` (`hold::stamp` only), and `hold::cargo_config_overrides` (capability, rustc-info cache and orphan token for nextest - a second encoding of the same env policy in TOML). Whether the three project sites also need `protect_child`, `die_with_parent` or the orphan token is decided independently at each one. `oom::protect_child` does the opposite of its name: it sets `oom_score_adj = 1000`, making the child the OOM killer's preferred victim, to protect the desktop. Proposed: a `spawn::ChildPolicy` (or a `BrokkrCommand` builder) with named profiles - `Cargo`, `TestProcess`, `Service`, `Plain` - applying every step in the one correct order, able to `render_env() -> Vec<(&str, String)>` so `cargo_config_overrides` serialises the policy rather than re-listing it; `hold`, `test_orphans`, `oom` and the death-signal piece of `shutdown` each export a step and are never called from call sites. A caller-chosen `Cargo` profile also replaces `cargo_env::apply`'s `file_name() == "cargo"` sniff.
+
 ## PLT-007 - Errors lose their subject or carry the wrong class
 
 Reported by: config-cli-bootstrap, convention-engines, measurement-storage, ratatoskr, pbfhogg-nidhogg, elivagar, check-core.
@@ -86,6 +89,8 @@ Reported by: config-cli-bootstrap, convention-engines, measurement-storage, rata
 - UTF-8 path helpers: five variants with messages that disagree, some not naming the path (PRJ-010).
 
 Enforcement proposed: remove the blanket `From<io::Error>` to force context; a `Spawn` variant (BUG-036).
+
+Design hunt (config-cli, measurement, other-projects): `DevError` is mostly `Variant(String)`, and `Config` is used for everything not obviously something else ("cannot determine current directory", "--dry-run is not yet supported", "'visual' is only available for ...", "internal error: a pre-detection command reached project dispatch", "run count must be >= 1", argument conflicts clap could not express), so a caller cannot tell a malformed `brokkr.toml` from a wrong-project invocation from a dispatch-ordering bug. Proposed split: `Config` (file), `Usage`, `WrongProject { command, expected, current }` (one rendering for `project::require`, the four "only available for litehtml/sluggrs" messages and `cmd_pmtiles_stats`), `Internal`. `already_printed()` keys off `Reported` and `CargoEnv` while `Refused` renders bare but is "first print": a rendering policy encoded three ways (variant choice, `Display` arm, `already_printed`) that wants one method returning `AlreadyPrinted | Bare | Prefixed(category)`. Measurement: a missing self-reported `elapsed_ms` in `parse_kv_stderr` is `Config` with a 500-char stderr preview (a target contract violation, not config); `run_variants` ends with `Reported("N of M variants failed: ...")`, the failed names existing only in the string; `SidecarDb::resolve_session` ambiguity is `Config` with the candidates formatted in. ratatoskr's gate returns `Config("gate ... FAILED")` for a breached rule, so a regression, a misconfigured gate and an identity refusal ("incomparable") share a variant and an exit code, and `--gate all`'s cohort loop cannot tell them apart; proposed `GateVerdict { Passed, Breached(Vec<RuleOutcome>), Incomparable(Mismatch) }` with a distinct exit for `Breached`.
 
 ## PLT-008 - Errors swallowed into defaults (platform code)
 
@@ -110,11 +115,15 @@ Reported by: test-execution, process-control, ratatoskr, measurement-storage, co
 
 Enforcement proposed: move `process.rs` to a shared module; textlint ban on `crate::ratatoskr` outside `src/ratatoskr*` (also covers piners' `crate::ratatoskr::build`, PRJ-051).
 
+Design hunt (process-control, measurement, other-projects): a process identity (pid, starttime token, boot id, sometimes a namespace pair) is spelled `(u32, String)` throughout - `LockState::child`/`mocks`, `LockInfo { pid, starttime: String, boot_id: String, pid_ns: String, time_ns: String }`, `stray::Stray`/`ProcEntry`, `test_orphans::ProcRow`/`Orphan`, `shutdown::descendants -> Vec<(u32, String)>`, `commands.rs::KillTarget`, nidhogg's pid record. An empty `String` means "unreadable, fail closed" and every consumer must remember `starttime.is_empty()`; `test_orphans::select` parses it back to `u64` with `unwrap_or(0)` to sort; namespace inodes are re-parsed in `foreign_holder_ns` and stringified again in `shares_namespaces`. The hunter counts seven `/proc/<pid>/stat` parsers (`lockfile::proc_starttime`, `lockfile::self_starttime`, `lock_service::self_cpu_secs`, `shutdown::proc_ppid_and_starttime`, `stray::read_proc`, `test_orphans::read_table`, `test_orphans::is_running`) plus the guard's, and four starttime-to-time conversions (`commands.rs::proc_start_epoch`, `lockfile::process_uptime_str`, `lock_service::self_cpu_secs`, the watchdog's), each re-reading `_SC_CLK_TCK`. "Do the recorded numbers mean anything here, and is the pid still that process?" is `shares_namespaces` then `verify_identity` at `stray::current_ownership`, `lock` printing, `print_holder_status`, `cmd_kill` and `kill_graceful`; `hard_kill(info: &LockInfo)` accepts an unverified record and its safety rests on the comment "Callers have checked `shares_namespaces`". Three reapers plus `hard_kill` decide "which processes may brokkr kill" differently (exemptions, identity check, `kill(pid)` against pidfd); the verified-SIGKILL primitive is written three times and none of the reapers uses the pidfd path, which closes the recycle window; the ancestor disagreement is filed in `bugs.md`. Proposed: `src/process/` with `Pid(NonZeroU32)`, `StartTicks(u64)`, `BootId`, `NsInode(u64)`, `ProcIdentity { pid, start }`, `HostScope { boot, pid_ns, time_ns }`, one `ProcStat::read(pid)` and one `ProcTable::snapshot()`; `LockInfo::in_this_namespace() -> Option<LocalHolder>` and `LocalHolder::verify() -> Option<VerifiedProcess>` (carrying the pidfd), so `hard_kill(LocalHolder)` and `kill_descendants(&VerifiedProcess)` cannot be called on the wrong thing; one `Exemptions` type and one pidfd-based `kill_verified(&ProcIdentity) -> Delivery`, leaving `stray`, `test_orphans` and `kill_descendants` as selection rules. Measurement and other-projects add that `output.rs` (3 sites) and `sidecar.rs` (3 sites) call `crate::ratatoskr::process::send_signal_pgrp`, and that ratatoskr's raw-pid `send_signal` is the unverified sibling of the identity-checked pidfd path; `process.rs` belongs in that shared module.
+
 ## PLT-011 - Lock-protocol literals are copied across the bin boundary
 
 Reported by: process-control.
 
 `rustc_guard.rs` hand-spells `"BROKKR_HOLD_NONCE"`, `"BROKKR_COMPILE_LEASE"`, `"BROKKR_CARGO"`, `".brokkr"`, `"brokkr.lock"`, `"compile.lock"`, the `auth=` key, `auth_hash`, and handshake `protocol=1`, pairing with `hold.rs` constants, `lockfile.rs` paths and `guard::GUARD_PROTOCOL`. The stated reason ("no lib target") doesn't force the copy: a `#[path = "../lock_protocol.rs"] mod protocol;` included by both bins would share them. Hunter's further suggestion: `BROKKR_LONG_VERSION` applies to both bins, so the guard could print its build hash for an exact comparison, replacing the hand-bumped protocol number. `guard::probe_guard` uses `Duration::from_secs(3)` and the literal `"within 3s"`.
+
+Design hunt (process-control): none of these copies is tested pairwise, and `hold.rs` carries a comment block explaining why `BROKKR_CARGO` cannot be a shared constant. The hunter's `src/protocol.rs`, included by the guard via `#[path]` and dependency-free apart from `libc` and `xxhash`, would hold the paths, env names, the token types and `AuthHash`, the shared held-probe, `read_auth`/the lock-record decoder for `auth`, `GUARD_PROTOCOL` with the handshake line format (printed by one side, parsed by the other) and the compile-lease open/flock; the guard keeps `classify`, `Decision` and `main`, and every "keep them edited together" comment becomes a compile error. The held-probe disagreement this would also fix is filed in `bugs.md`.
 
 ## PLT-012 - `SigtermGuard` is not re-entrant; interrupt policy differs per caller
 
@@ -124,17 +133,23 @@ Reported by: process-control, ratatoskr.
 
 Enforcement proposed: a refcounted guard; a signature like `Isolation::Pg(&SigtermGuard)`.
 
+Design hunt (process-control): `shutdown.rs` mixes three jobs - signal dispositions and the stop state (`SigtermGuard`, `STOP_COMMITTED`, `EXIT_CLEANUP`); the test-group reaper table (`GroupReaper`, `REAP_PGIDS`) and `die_with_parent`, which are test-runner containment (the latter a pre-exec spawn step); and `/proc` tree walking and killing (`descendants`, `kill_descendants`, `isolate_process_group`). `GroupReaper` coordinates with `SigtermGuard` through `GUARD_ACTIVE` because both install handlers for the same signals. Proposed: one module owning SIGINT/SIGTERM dispositions - a single handler that kills registered groups, then sets the flag or re-raises depending on whether a guard window is open - removing `reinstall_reaper_if_needed` and the saved dispositions; the tree walking moves to the shared process module.
+
 ## PLT-013 - Hold-scoped state lives in process globals
 
 Reported by: process-control.
 
 `CAPABILITY`, `DISABLE_DIR`, `HELD`, `SHUTDOWN_REQUESTED` are process statics; production and tests share every global (BUG-027). Re-entrant acquire keeps the outer hold's toolchain arm and context, so a `with_worktree` re-arm under an already-held lock would silently not disable the worktree's pin (latent, undetected). Drain constants (`DRAIN_BUDGET`, `DRAIN_REAP_AFTER`) have no injection point, so a drain test waits 20s or 120s. `toolchain::DisabledToolchain::activate` is `pub` but reached only via `activate_for_lock` and tests; making it private would enforce "only via the lock". Hunter's view: capability, toolchain arm and signal state belong on the hold (`LockInner`).
 
+Design hunt (process-control): `toolchain::DISABLE_DIR` is a parameter of the acquisition smuggled through a global; `with_worktree` disarms and re-arms it around its acquire (`arm` returns the previous value and the caller must restore it), and `restore_armed` is a second copy of the restore rule. Proposed: `LockContext` (or `AcquireOptions`) carries `disable_toolchain_in: Option<&Path>`, the `--commit` path passes its worktree path explicitly, and the watchdog backstop reads the path from the live `LockInner` via `current_hold()`.
+
 ## PLT-014 - Reserved env vars are documented, not enforced
 
 Reported by: process-control.
 
 check.md says `BROKKR_HOLD_NONCE`, `BROKKR_COMPILE_LEASE` and `CARGO_CACHE_RUSTC_INFO` must never appear in a `[[check]] env` block; `RESERVED_SWEEP_ENV` holds only `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `CARGO_TARGET_DIR`. Appending `hold::CAPABILITY_ENV`, `LEASE_MARKER_ENV`, `RUSTC_INFO_CACHE_ENV` enforces it in one line.
+
+Design hunt (check-report): `rustflags::sink`'s soundness argument ("process env plus `sweep_sets_rustflags` is the whole set of ways source 1/2 can be live") depends on independent reserved-name lists - `RESERVED_SWEEP_ENV` (parser.rs, `[[check]]` env and profile env) and the `[cargo_env]` name refusal ("belongs to brokkr, cargo, rustc or the loader"). If `[cargo_env]` ever admitted `RUSTFLAGS`, every `--config` injection would become silently inert. Proposed: one `reserved_cargo_env(name) -> bool` both validators call, cited by `sink`'s doc.
 
 ## PLT-015 - `cargo metadata` is spawned and deserialized many times
 
@@ -147,6 +162,8 @@ Reported by: convention-engines, check-core, process-control.
 
 Enforcement proposed: one metadata module computed once per run, plus a textlint ban on a `"metadata"` argv outside it.
 
+Design hunt (check-plan, deps-misc): at least three `cargo metadata` snapshots per `check` answer slices of "what is this workspace" with independent derivations - `build::project_info(..).bare_selection_is_whole_workspace` (promotion eligibility, doc-carrier check), `features::WorkspaceFeatures::default_members`/`member_names` (with its own older-cargo fallback), `DocFacts` in prepare - plus `test_cmd::focused::eligibility` re-reading manifests for `harness = false`. Each loader also decides `--locked` (only `deps` passes it), `--no-deps`, platform filtering, failure reporting and what "workspace member" means; `deps` loads the resolving metadata twice (unfiltered and host-filtered, the latter a subgraph computable from the former). The hunter traces the dependency-kind, package-identity, table-walk and blame duplication to there being no cargo-model layer at all. Proposed: `src/cargo/` with `metadata.rs` (typed schema, `load(root, Query { deps, platform, locked })`, one memoised snapshot per invocation per query - generalising check's `FeatureOracle` into a `WorkspaceSnapshot` owning members, default members, targets/doctest facts and harness flags), `graph.rs` (indexed ids, membership, source kind `Registry | Git | Path | Member`, kind-filtered adjacency, host filtering), `manifest_walk.rs` and `rustc.rs`. Then `dependency_rules.rs` becomes a check phase over the graph (it sits at top level today), and `publish_cycle` becomes a pure `fn cycles(&Graph) -> Vec<Cycle>` both commands call - today `deps::publication_cycles`, `PUBLISH_CYCLE_CAVEAT` and `publish_cycle_lines` are re-exported for `check`, a check phase reaching into a command's private module.
+
 ## PLT-016 - Git invocations and the tracked-file walk have many owners
 
 Reported by: convention-engines, process-control, config-cli-bootstrap.
@@ -154,6 +171,8 @@ Reported by: convention-engines, process-control, config-cli-bootstrap.
 `gremlins::tracked_files` is the file list for header, textlint and manifest (which is why they import `gremlins`); `scope.rs` has its own `git_paths`/`ls-files`; `wc::rust_files` duplicates gremlins' `git ls-files` byte for byte. One `check` can run `git ls-files` up to five times, and the walks treat non-UTF-8 paths oppositely (VAL-040). "Run git, trim stdout" helpers: `worktree::run_git`, `worktree_record::is_dirty`, `bench_cmd::git` (via `output`), `git.rs` (three), `scope.rs`, `wc.rs`, `gremlins.rs`, with differing error variants (`Subprocess`/`Build`/`Io`).
 
 Enforcement proposed: one corpus module computed once per run and passed to every engine; a rule forbidding engines from spawning `git`.
+
+Design hunt (check-report, deps-misc): `gremlins`, `header`, `textlint` and `manifest` each call `gremlins::tracked_files` and `read_in_scope` on their own, so the project's file universe and read policy are owned by gremlins, which the others import for it; `scope` runs two or three more git commands, and `scope::unstaged_files` returns `Option<HashSet<PathBuf>>` with `None` meaning "not a repo" while `scope::Dirt` models that properly. `wc.rs` additionally skips unreadable files silently. Proposed: a `TreeSnapshot`/`GitView` (tracked plus untracked paths, the unstaged set, dirt) built once per `check` in its own module, handed to every convention phase, with file contents read once and shared, one unreadable-path policy (fail closed), and the four scanners run in one pass; `scope::prioritize` becomes a method on it and `wc` uses the same walk. The gremlins non-UTF-8 gap is filed in `bugs.md`.
 
 ## PLT-017 - "Dirty tree" has several definitions
 
@@ -163,11 +182,15 @@ Reported by: process-control, measurement-storage, small-benches.
 
 Enforcement proposed: one definition parameterised by question ("honest commit" vs "would deletion destroy work").
 
+Design hunt (measurement, deps-misc, check-report): `git::has_uncommitted` (the run-record rule, used by piners) excludes only `.brokkr/` and the moved toolchain file; `bench_cmd::is_dirty` asks the harness's question ("may this measurement be filed under this commit?") and disagrees with it, so a markdown edit refuses `brokkr bench` but not `brokkr <cmd> --bench`; `worktree::is_pristine` hard-codes `"rust-toolchain"`/`"rust-toolchain.toml"` while `has_uncommitted` iterates `crate::toolchain::FILES`. `scope::dirt` reads repo-wide status from the project root while the other walks are root-relative (`--relative`/cwd), so in a repo whose `brokkr.toml` sits in a subdirectory, dirt elsewhere in the repo disables the prose shortcut. `git.rs` holds policy that is not git: `check_clean`'s exemption list (markdown, `brokkr.toml`, `approved.png`) is measurement policy and project knowledge, `include_exclusions` re-composes the whole config from inside a git helper, and `has_uncommitted`/`toolchain_exclusions` know `toolchain`'s file naming. Proposed: one `TreeState` parsed from a single porcelain call with entries classified once (source, prose, brokkr-store, toolchain-moved, config, approved baseline), and named policies `for_measurement()`, `for_record()`, `for_reuse()`, `for_deletion()`; `git.rs` stays mechanism, and `toolchain` answers "which paths have I moved aside" itself. The bench refusal on a clean `disable_toolchain` checkout is filed in `bugs.md`.
+
 ## PLT-018 - Host triple and `rustc -vV` are parsed in several places
 
 Reported by: convention-engines, process-control.
 
 `deps::host_triple` (fallible, cwd `"."` not project root), `rustflags::host_triple` (`OnceLock`, raw `Command`, cwd; can report a different toolchain's host), `bench_cmd/stamp.rs::rustc_version` (in `build_root`). Enforcement proposed: one owner; textlint forbidding `"-vV"` elsewhere.
+
+Design hunt (deps-misc): all three run the `rustc` on `PATH` from an arbitrary cwd, not the one rustup would pick for the project, so on a pinned project the triple and the bench stamp's version can describe a different compiler than the build uses. Proposed: one `rustc -vV` parse, `RustcInfo { host, release, commit_hash }`, which `deps` and the stamp both read.
 
 ## PLT-019 - Build profile is a bare string or bool
 
@@ -176,6 +199,8 @@ Reported by: process-control, ratatoskr, test-execution, piners.
 `BuildConfig.profile: &'static str` spelled `"release"` in ~14 struct literals and four near-identical constructors; `resolve_existing_binary` uses it as a directory name, so `"dev"` (from `for_harness(debug=true)`) looks in `target/dev/` (latent; only caller builds release) and it ignores the worktree target-dir override. ratatoskr has three spellings for one `debug: bool` (`"dev"` in `ratatoskr/build.rs` and `for_harness`, `"debug"` in the gate row, hard-coded `Release` in results.db); `CargoProfile` has no dev variant (BUG-047). `test_cmd` uses a bool (VAL-005). The `ratatoskr/build.rs` header says it is ratatoskr-only, reads `[ratatoskr.harness]` and defaults to release; piners and lint call it with debug defaults.
 
 Enforcement proposed: one enum with `dir()`, `cargo_flag()`, `as_label()`.
+
+Design hunt (config-cli, other-projects, measurement): `profile_override(debug, release) -> Option<bool>` (`Some(true)` = dev) is used by `test`, `service`, `sync`, `corpus`, `lint-corpus`; `run`/`install` take `debug: bool, release: bool` raw and resolve them a third way in `runnables`; `HarnessConfig::debug: Option<bool>`; `bench_gate.rs` stores `"debug" | "release"` in `gate.db`; dellingr and mogwai set `BuildConfig::profile: "release"` and separately `BenchConfig::cargo_profile: CargoProfile::Release` - two fields for one fact - while `piners/measured.rs` already uses `CargoProfile::for_debug(debug)`. "Which cargo profile does this harness build use?" has nine sites and three defaults: `piners/cmd.rs` (override, else `[piners.harness] debug`, else debug), `piners/lint/cmd.rs` (override, else `[piners.lint] debug`, else debug), `piners/measured.rs` (override, else release, deliberately ignoring config), `corpus_db/compare.rs::context_of` (missing reads as debug), `ratatoskr/service_test.rs`, `service_suite.rs`, `list_smoke.rs` twice and `bench_gate.rs` (override, else `[ratatoskr.harness] debug`, else release), dellingr/mogwai/sluggrs hotpath (always release). `crate::ratatoskr::build::build_for_harness` is piners' build entry point too; its doc and log text are written for `[ratatoskr.harness]` and state a release default piners does not use, and `config::HarnessConfig` is shared, with `lint/cmd.rs` synthesizing one from `LintConfig` fields. The recorded profile (`BenchConfig.cargo_profile`) is set by about 30 writer sites, almost all as a literal `CargoProfile::Release`, independent of what `BuildConfig` actually built. Proposed: `CargoProfile` everywhere, a flattened clap `ProfileArgs { --debug | --release }` resolved once into `ProfileChoice { Explicit(CargoProfile), Default }`, one `fn resolve_profile(surface: HarnessSurface, cli, cfg) -> CargoProfile` where `HarnessSurface` (Parity/Lint/Measured/Service/Sync) states its default and whether config is consulted, `build_for_harness`/`HarnessBuild` in `crate::build`, and `cargo_build` returning `BuiltArtifact { path, profile, features, target }` so the harness stamps rows from the artifact and writers stop naming profiles.
 
 ## PLT-020 - `clean` breaks its constructed-name rule and misses brokkr's own leftovers
 
@@ -191,6 +216,8 @@ Reported by: config-cli-bootstrap, elivagar, pbfhogg-nidhogg, ratatoskr, piners,
 
 Enforcement proposed: layout types that clean asks for removable names (with a test that clean spares `layout.gate_db()`), one `Project::scratch_rel()` read by writers and clean.
 
+Design hunt (map-projects, config-cli): `elivagar/dispatch.rs::prune_output_dir` (`OUTPUT_RETENTION = 5` per dataset and variant, after each tilegen) and `main_parts/commands.rs::clean_archives` (`--keep`, default 2) share only `pmtiles_archive_matches`, so the newest-first ordering, the mtime fallback and the window are decided twice; `OUTPUT_RETENTION`'s doc still says `<dataset>-<commit>.pmtiles` (variant missing). The archive store as a whole is filed in `structural.md`. `clean` branching on every project inside `main_parts/commands.rs` is the hunter's reason for per-project `fn clean_targets(&ResolvedPaths) -> Vec<CleanTarget>` contributed by each project module.
+
 ## PLT-021 - `brokkr.toml` is parsed three to five times per invocation
 
 Reported by: config-cli-bootstrap, process-control.
@@ -198,6 +225,8 @@ Reported by: config-cli-bootstrap, process-control.
 Call sites: `parse_cli`, the `disable_dir` peek, per-command `detect_optional()`, `project::detect()`, `record_history` at exit (after a run that may last 25 minutes), `bench_cmd` internally. Each reloads the user layer and re-runs `Box::leak` for `Other`. `project::detect` ("read and parsed exactly once") and `Project::Other` ("leaked once at startup") are false today. `worktree_keep(&config::hostname()?)` and the `cwd != project_root` → `parent_build_root` derivation repeat three times in `bootstrap.rs`, though `Detection.build_root` carries the value; `bench` with no config silently uses `DEFAULT_KEEP`.
 
 Enforcement proposed: detect once in `main` and thread a `Detection`; a `OnceLock` cache in `project` makes a second parse impossible.
+
+Design hunt (config-cli): the three fallibility policies on one file - `parse_cli` swallows errors, `Man` swallows errors, everything else propagates - and the toolchain arming reads a different parse than the command later uses (harmless while the file does not change mid-run). The `Interrupted` path in `main` calls `detect()` once more, and each call also re-runs `cargo_env::install`. `hosts: HashMap<String, HostConfig>` is looked up by `config::hostname()` at each consumer (`worktree_keep(&config::hostname()?)` four times in `bootstrap.rs`). Proposed: detect once in `main` as `Result<Option<Detection>, DevError>`, hand it to help filtering, toolchain arming and dispatch, with each command's descriptor saying whether an `Err` is fatal for it, and resolve "this host's config" once at detection into `Detection.host`.
 
 ## PLT-022 - The top-level config key universe has three owners
 
@@ -207,6 +236,8 @@ Reported by: config-cli-bootstrap.
 
 Enforcement proposed: one `SECTIONS: &[(&str, parser)]` table driving parsing and the host skip, plus a doc-parity test (or the doc stops restating it).
 
+Design hunt (config-cli): nothing rejects an unrecognised top-level key - section structs use `deny_unknown_fields`, but a typo'd table name (`[lint]`, `[[checks]]`, `[gremlin]`, `[[script_checks]]`) parses clean and switches the feature off. The user-wide layer rejects every key outside its allow-list with a comment that a silently ignored typo "would mean a typo quietly switches off every rule the user wrote"; the hunter says the argument applies with more force to the project file. Hostname tables are what make this non-trivial: any unknown key is a candidate hostname, and the hunter asks someone to check whether `parse_hosts` treats every unrecognised table as a host (so `[lint]` becomes a host named "lint" with no error). Proposed: a known-key set plus a rule that a host table's keys must be host-section keys, or explicit `[host.<name>]` tables.
+
 ## PLT-023 - "Which command runs in which project" has two owners
 
 Reported by: config-cli-bootstrap, small-benches, elivagar.
@@ -215,6 +246,8 @@ Reported by: config-cli-bootstrap, small-benches, elivagar.
 
 Enforcement proposed: make `TABLE` the gate in dispatch and delete per-handler checks; test sortedness and uniqueness.
 
+Design hunt (config-cli): the answerers are five plus one - `TABLE`; handler `project::require` calls (`corpus`, `sync`, `service`, `hotpath`, `lint-*`, `verify` subcommands, `suite <name>`, inside pbfhogg/elivagar/nidhogg dispatch); five hand-written `match project { Litehtml => .., Sluggrs => .., other => Err(..) }` copies in `Visual`, `List`, `Report`, `VisualStatus`, `cmd_approve`, each with its own message; `cmd_pmtiles_stats`'s `matches!`; the `/// [pbfhogg]`-style prefixes on 85 doc comments in `cli/schema.rs`, which are what `--help` prints; and `man::TOPICS` visibility, which for `results`/`visual`/`hotpath` "mirrors the subcommand's own visibility" by hand. `require_labels_are_real_commands` validates only that a label names a command. Disagreements to look for: `hotpath` is `Only(Sluggrs)` and required in the handler while `generic-hotpath` is `Any` with no gate; `Prepare`/`HtmlExtract`/`Outline` have no handler-side gate in `bootstrap.rs` (`Prepare` checks only for a `[litehtml]` section). Proposed owner: a per-command descriptor reached through an exhaustive match (filed in `structural.md`), the gate run once in dispatch, and the help filter, help prefix and `man` topic visibility all reading it.
+
 ## PLT-024 - Project name ↔ variant mapping is duplicated
 
 Reported by: config-cli-bootstrap, ratatoskr, pbfhogg-nidhogg.
@@ -222,6 +255,8 @@ Reported by: config-cli-bootstrap, ratatoskr, pbfhogg-nidhogg.
 `config::load`'s string match and `Project::name()`; hand-written `Project` lists in tests miss `Saehrimnir` and `Mogwai`. Literal project names instead of `Project::name()`: ratatoskr `LockContext { project: "ratatoskr", ... }` at six sites, `list_smoke`, pbfhogg `VerifyHarness` (`"pbfhogg"`), measurement's legacy default `'pbfhogg'` (MEA-005). `Project::cli_package()` owns package names yet they are restated (PRJ-001).
 
 Enforcement proposed: `Project::ALL` and a round-trip test.
+
+Design hunt (config-cli): `config::load` leaks the TOML string to get `Project::Other(&'static str)`, and `man` dispatch uses `Project::Other("")` to mean "no project detected", which is not a project; visibility rules compare by discriminant so the payload never matters. Proposed: `Project::Other(Box<str>)` (or an interned `ProjectName`), drop `Copy`, make "no project" `Option<Project>` at every site (`acquire_cmd_lock_opt` already takes one; `man` should too), and put `FromStr` beside `name()` on `Project`, or derive both from one `const BUILTINS: &[(&str, Project)]`.
 
 ## PLT-025 - Configuration is validated at use instead of at load (platform config)
 
@@ -245,6 +280,8 @@ Reported by: config-cli-bootstrap, measurement-storage, pbfhogg-nidhogg.
 
 Enforcement proposed: clap value parsers returning typed values, an `ArgGroup`, `value_parser!(usize).range(1..)`, `NonZeroUsize`.
 
+Design hunt (config-cli): `ModeArgs` holds three independent `Option<usize>`s; `resolve_mode` counts them for exclusivity and rejects `runs: 0` after the fact, and `ModeArgs::is_measured` is a second reading of the same fields. A clap `ArgGroup` with a `NonZeroUsize` value parser makes `resolve_mode` infallible and `MeasureMode` the only reading.
+
 ## PLT-027 - Default dataset/variant literals and "no dataset" spellings
 
 Reported by: config-cli-bootstrap, pbfhogg-nidhogg, elivagar, small-benches.
@@ -253,6 +290,8 @@ Reported by: config-cli-bootstrap, pbfhogg-nidhogg, elivagar, small-benches.
 
 Enforcement proposed: a per-host `default_dataset` or one const; `Option<&str>`; textlint on `default_value = "denmark"` in `src/cli/**`.
 
+Design hunt (config-cli, map-projects): the dellingr arm's comment states a policy (empty, "so nothing invented lands in the DB") that the sluggrs hotpath arm violates with `"n/a"`, and both spellings land in the `dataset` column that `brokkr results --dataset` and `--compare` pairing read. `PbfArgs.variant`/`VerifyPbfArgs.variant` are free strings whose doc says "(raw, indexed, locations)". `resolve.rs` passes `dataset: &str, variant: &str, seq: &str` side by side in nearly every signature, and swapping any two compiles. The OSC sequence is numeric but keyed as `String`: `max_osc_seq` parses keys with `parse::<u64>().ok()` (silently dropping non-numeric keys), `resolve_osc_range` parses `LO..HI` and formats back to strings to look up, `download_core` builds keys with `seq.to_string()`, and `--osc-range` travels as a `String` in `CommandParams`. `"base"` is spelled in `SnapshotRef::parse`, `config::validate_snapshot_key` and `pbfhogg/dispatch.rs::resolve_merged_pbf`. Variant names `"raw"`/`"indexed"` carry meaning: `promote_artifact` routes `degrade --strip-indexdata` to `"raw"` and everything else to `"indexed"`, `download_core::has_existing_pbf`/`raw_pbf_path`/`indexed_pbf_path` prefer `"raw"`, the snapshot error suggestion falls back to `"raw"`. Proposed: `Option<DatasetRef { dataset: DatasetName, variant: VariantName }>` with `None` the only "no dataset" and the DB layer owning its rendering; `OscSeq(u64)` map keys parsed at config load and `--osc-range` as `RangeInclusive<OscSeq>` from a clap value parser; a `SnapshotKey` newtype with `SnapshotRef::cache_token()` owning `"base"`; a `PbfVariant` with `RAW`/`INDEXED` constructors and an open `Other(String)`.
+
 ## PLT-028 - Exit codes have no table
 
 Reported by: config-cli-bootstrap, check-core, elivagar, piners.
@@ -260,6 +299,8 @@ Reported by: config-cli-bootstrap, check-core, elivagar, piners.
 1, 3 (regress/corpus stale), 10 (partial), 124 (`WATCHDOG_EXIT_CODE`, the only named one), 130 (literal twice in `main`), 2/127 in `rustc_guard`; corpus 2 collides with clap's usage error (BUG-061); piners' harness 0/1/2 contract exists only as a `match` in `cmd.rs` and prose. Passthrough child codes are forwarded verbatim via `ExitCode(out.code)`, so a child exiting 10, 124 or 130 reads as partial, watchdog or interrupt. Check's verdict table: VAL-004.
 
 Enforcement proposed: an `exit` module with named constants and remapping of child codes.
+
+Design hunt (config-cli): "which exit status does this outcome map to" is answered in `main`, in check's watchdog path and in elivagar's `operational` wrapper (`INCOMPLETE_EXIT`), and `main` itself computes `exit_code` from `result` for history and then matches `result` again for `process::exit` - the same three arms held in step by adjacency. Proposed: a typed `Outcome`/`ExitStatus` (`Ok`, `Failed`, `Incomplete`, `TimedOut`, `Interrupted`, `Child(i32)`) owned by `error.rs`, with one `fn exit_status(&Result<..>)` used for both.
 
 ## PLT-029 - Platform tunables live where first needed, with no index
 
@@ -273,17 +314,23 @@ Reported by: config-cli-bootstrap, elivagar.
 
 curl has three call shapes (`run_curl`, `download_file`, `head_url`) with no retry or checksum (and no timeout: BUG-017). JDK, planetiler, tilemaker and shortbread are "latest"/HEAD and unpinned, so comparison baselines drift silently; tilemaker does a network `git pull` every run. PATH lookup via `which` is re-implemented in `preflight::check_binary`, `tools::check_curl`, `tools::check_build_tool`, elivagar `check_unzip` ×2 and `check_ogr2ogr`. `tools::ensure_osmosis(workspace_root)` carries `#[allow(unused_variables)]`.
 
+Design hunt (map-projects): `tools::run_curl` (with `CURL_STALL_ARGS`) and `nidhogg::client::run_curl_body` (`-sS --fail-with-body --max-time 30`) differ deliberately in timeouts, but "how a curl failure becomes a `DevError`" is decided twice, and `health_check` builds a third command line. `tools.rs` mixes four jobs: external-tool provisioning (JDK, Planetiler, Osmosis, Tilemaker, shortbread), HTTP primitives (`run_curl`, `download_file`, `head_url`/`HeadResponse`, `parse_http_date`), checksums (`sha256_file`, `fetch_verified`) and build-tool probes. Proposed: one `http` module with request options, dates to a shared calendar module, and provisioning under a `baselines/` module the elivagar and pbfhogg layers share.
+
 ## PLT-031 - Assorted duplicated platform constants
 
 Reported by: config-cli-bootstrap.
 
 `rustflags-` prefix in `commands.rs` and `check_cmd/output.rs`; CPU fallback 4 in `tools.rs` and `cpu_topology.rs`; `/proc/version` parsing in `env.rs` and `history_cmd.rs`; io_uring kernel params in `env::check_uring_blocked` and `preflight::uring_checks` (env's doc claims "checks the same"; env never reports the 16 MB memlock bar); `wc`'s default 800 restated in its help doc comment and CLAUDE.md.
 
+Design hunt (measurement): host conditions are collected twice - `env::collect` (results rows: kernel, governor, memory) and `history_cmd` (reads `/proc/version` itself, `env::read_memory`, `git::collect` for dirty). One `HostSnapshot` type for both.
+
 ## PLT-032 - Build-path rules written per call site
 
 Reported by: process-control.
 
 The worktree `CARGO_TARGET_DIR` isolation rule is in `build::cargo_build_observed` and `bench_cmd::cargo_bench` only; `docs/commands/bench.md` calls it "the same rule every other brokkr build path applies". `build::project_info` for a worktree runs metadata without the override, so `ResolvedPaths.target_dir` names the shared target dir. `pbfhogg/bench_all.rs` hand-rolls `cargo build --release --message-format=json` + `find_executable` instead of `cargo_build`. `find_executable`'s doc says it "falls back to the last executable"; the code errors on more than one. `cfg!(windows)` in `resolve_existing_binary` is dead (Linux-only crate).
+
+Design hunt (measurement): `build::cargo_build_locked` and `bench_cmd::cargo_bench` each repeat the isolation with near-identical comments explaining that forgetting it measures the wrong commit's binary under the right name; `build::resolve_existing_binary` does not apply it at all; any future cargo invocation must remember. Proposed owner: a `BuildRoot` type whose `cargo_command()` sets `CARGO_TARGET_DIR` for the worktree variant, so a spawn cannot forget.
 
 ## PLT-033 - `cmd_install` duplicates `install_bin_targets`
 
@@ -295,7 +342,7 @@ It copies the logic and the error string ("in the same words"); the doc says the
 
 Reported by: process-control, pbfhogg-nidhogg, config-cli-bootstrap.
 
-`bench_cmd` says `project_root` is "the project root everywhere else"; run, install, deps, clippy and fmt pass `build_root`, check passes `state_root`. `acquire_cmd_lock(..., "run")` is used for `passthrough`. pbfhogg labels bench mode `"run {id}"`; nidhogg uses `"bench nid-ingest"`, a hand-typed `"run nid-ingest"`, and `"hotpath …"`. Literal project names: PLT-024.
+`acquire_cmd_lock(..., "run")` is used for `passthrough`. pbfhogg labels bench mode `"run {id}"`; nidhogg uses `"bench nid-ingest"`, a hand-typed `"run nid-ingest"`, and `"hotpath …"`. Literal project names: PLT-024.
 
 ## PLT-035 - `RUN_VALUE_FLAGS` is maintained by hand
 

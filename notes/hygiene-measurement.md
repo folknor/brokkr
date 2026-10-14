@@ -19,6 +19,8 @@ Reported by: measurement-storage, ratatoskr, elivagar.
 
 Hunter's recommendation (measurement-storage): rewrite as a single `Measurement` that owns the loop, FIFO, lock/child pid, typed `MeasureMode`, `NonZero` runs, the clock and the sidecar lifecycle; each path plugs in only its per-iteration timing strategy.
 
+Design hunt (measurement): the per-loop decisions are failure classification, best-of-N (`pick_best` + `bench_ordering_key` in three loops, a hand-written `us < best` in `run_external_inner`, kept "consistent" by comments), `best_run_idx` for the sidecar, the `measure_start_epoch` stamp (two loops call `mark_measure_start`, three set it inline, the foreign loop calls a hook), where a failed iteration's sidecar goes (`store_sidecar(None, ..).ok()` six times), and how row and sidecar are committed (three record-then-store blocks with the same "row is lost; trajectory need not be" fallback, plus a deferred `PendingSidecar`/`record_with_pending`/`commit_sidecar` protocol a caller must follow by hand). `run_hotpath` parks failed captures in a thread-local (`FAILED_CAPTURE`) because the closure contract cannot return them, while the external loops have the data directly. Consistency between loops is pinned per loop by tests in `harness_mod/tests.rs`, which is `include!`d into the same namespace so tests reach private helpers. Proposed: one `MeasurementLoop` parameterised by `WallSource { External, SelfReported, Closure, MarkerSpan }` and sidecar on/off, returning `Measurement { iterations: Vec<Iteration { wall, ending, sidecar, stderr }>, winner }`; recording is a separate `harness.record(measurement, post)` that always does row-then-sidecar with the dirty fallback, so the deferred-commit protocol and the thread-local parking slot disappear (a failed iteration is a value in the list) and ratatoskr plugs in as `MarkerSpan` instead of borrowing private hooks; one loop test suite replaces the per-loop pins.
+
 ## MEA-002 - `BROKKR_MARKER_FIFO` is spelled in four places and across a repo boundary
 
 Reported by: measurement-storage.
@@ -35,6 +37,8 @@ Mode strings `"bench"`/`"hotpath"`/`"alloc"` live in `MeasureRequest::mode_label
 
 Enforcement proposed: the harness takes `MeasureMode`; `NonZeroUsize` in `MeasureMode` and `BenchConfig.runs`.
 
+Design hunt (measurement, other-projects): after the request the mode becomes `Option<String>` (`with_measure_mode(req.mode_label())`), stored on `BenchHarness.measure_mode`, cloned into `RunRow.mode` and `RunInfo.mode`; `BenchConfig.mode` is a dead fallback (`effective_mode` = harness or config; every writer sets `None`; its doc admits it caused two bugs); the DB tests insert `"mmap"`, `"zlib"`, `"release"` into the column; a `HarnessContext` built without `with_request` silently writes `mode = NULL`. `hotpath_feature(alloc: bool)`, `hotpath_alloc_note(alloc: bool)`, `MeasureRequest::is_alloc()` and `hotpath_features()` are called by pbfhogg, elivagar, nidhogg, dellingr, mogwai, sluggrs, piners and main_parts, each computing `alloc` itself, and several use `hotpath_feature(alloc)` as a label, conflating feature name and recorded mode. Proposed: `enum RecordedMode { Bench, Hotpath, Alloc }` via `MeasureMode::recorded()`, a non-optional harness field, `NonZeroUsize` runs, and a `ProfiledMode { Hotpath, Alloc }` with `.feature()`, `.label()`, `.note()` owned by `measure.rs`; delete `BenchConfig.mode` and `BenchConfig.brokkr_args`.
+
 ## MEA-004 - UUID generation and short-UUID slicing are duplicated
 
 Reported by: measurement-storage, small-benches.
@@ -43,11 +47,15 @@ UUIDv4: `db::types::generate_uuid`, an inline `/dev/urandom` block in `store_sid
 
 Enforcement proposed: textlint banning `"/dev/urandom"` outside `db/types.rs` and `hold.rs`.
 
+Design hunt (measurement): run ids, sidecar `dirty` aliases and uuid prefixes all travel as `&str`. Proposed: a `RunId` minted once with `.short()`, and `RunRef { Prefix | Alias }` resolved once per command (the resolution question is filed in `consolidations.md`).
+
 ## MEA-005 - Small store helpers and clocks copied
 
 Reported by: measurement-storage, piners, ratatoskr.
 
 `percentile` copied into `sidecar_fmt::print_field_stat` ("same as harness::percentile", unheld); legacy project default `'pbfhogg'` twice (schema `DEFAULT`, `map_stored_row`); `has_table` in `migrate.rs`, `gate.rs` and three more across the repo (piners), `has_column` twice (including twice inside `run_sidecar_migrations`), `as_i64` twice; wall-clock-to-epoch three ways (`wall_clock_epoch`, `gate::unix_now`, SQLite `datetime('now')`), and `prev.gap_seconds` subtracts a Rust clock from an SQLite timestamp; the piners stores use `datetime('now')` and the lint store a hand-rolled `now_rfc3339`.
+
+Design hunt (measurement): `db/format/details.rs` hides `project` when it equals the literal `"pbfhogg"` - a display default tied to one project in the shared formatter.
 
 ## MEA-006 - Each sidecar sample field is spelled in about seven places
 
@@ -63,6 +71,8 @@ Reported by: measurement-storage.
 
 compare `{meta, env, prev}`, single/details `{meta, threads}`, `load_children` `{env}`. `threads.*` show up as `counters:` noise on hotpath pairs; compare's `env.` exclusion is dead because env was already stripped.
 
+Design hunt (measurement): `KvPair.key: String` carries five classes as prefixes - `meta.*`, `env.*`, `prev.*`, `threads.*`, bare runtime counters - plus `peak_rss_kb`, which `build_row` promotes to a column and removes; `db::write::insert_hotpath` writes `threads.*` `OR IGNORE` so stderr wins; `ratatoskr/gate.rs`, `ratatoskr_sync/bench_gate.rs`, `db/migrate.rs` and `config_parts/parser.rs` each format or strip `meta.`/`env.` themselves. So "counter" means different things to compare (counts `threads.*`) and single/details (counts `prev.*`). Proposed: a `KvClass` classifier in `db/types.rs` used once at load and once at write, with `StoredRow` carrying `meta`, `env` (already done as `captured_env`), `predecessor: Option<PreviousRun>`, `thread_summary` and `counters`, `RunRow` taking the same split, and prefixing happening only in `db::write`.
+
 ## MEA-008 - Invocation argv is stored as a string and re-parsed with different rules
 
 Reported by: measurement-storage, config-cli-bootstrap.
@@ -70,6 +80,8 @@ Reported by: measurement-storage, config-cli-bootstrap.
 `normalize_brokkr_args` and `format_brokkr_args_summary` re-parse tokens with different rules from a string `format_cli_args` cannot round-trip (it quotes only spaces). History stores argv joined unquoted; `capture_brokkr_args` shell-quotes. Pairing failures: BUG-049.
 
 Enforcement proposed: store argv as a JSON array.
+
+Design hunt (measurement): `db/format/compare.rs::normalize_brokkr_args` is a second CLI grammar, with hand-kept knowledge of `--commit`, `--verbose`/`-v`, `--bench/--hotpath/--alloc [N]` and `=N`, which must agree with clap and nothing checks; a value that happens to be `--commit` eats the next token. Proposed root fix: record the arm structurally at write time - the harness knows the measure mode, the commit and the runs count - as an `arm_key` (normalized argv minus provenance flags) computed from the parsed `Cli`, not from the joined string, and pair on it.
 
 ## MEA-009 - The sidecar-view hint is hand-written three times
 
@@ -89,6 +101,8 @@ Reported by: measurement-storage, piners, ratatoskr.
 
 Each `ResultsDb::open`/`SidecarDb::open` runs migrations, `CREATE`, and an unconditional `user_version = N`, so read-only commands (`results`, `sidecar`, `invalidate`) migrate and write without the lock, and a DB from a newer brokkr is silently downgraded. Same for `gate.db`. piners' stores open `READ_ONLY` for queries (a better policy already in the tree, though with its own problem: BUG-093). No store sets `busy_timeout`, relying on rusqlite's implicit default unstated. `results.db` version writers: BUG-101.
 
+Design hunt (measurement): each store does its own open - `ResultsDb::open`, `SidecarDb::open`, `GateDb::open`, `HistoryDb::open_typed`, `litehtml/db.rs`, `sluggrs/db.rs`, `piners/lint/db.rs`, `piners/corpus_db` - each with its own WAL pragma, migration runner and `user_version` stamp; only history sets a `busy_timeout`. `results.db` has three schema owners (`ResultsDb`, litehtml `MechanicalDb`, sluggrs) sharing one `user_version`, and the migrate tests carry regression cases for litehtml having stamped it. Proposed: a `Store` trait or helper owning open, pragmas, busy timeout and versioned migrations, one `user_version` owner per file, and litehtml and sluggrs in their own files rather than guests in `results.db`.
+
 ## MEA-012 - Harness output channels
 
 Reported by: measurement-storage.
@@ -101,17 +115,23 @@ Reported by: measurement-storage, ratatoskr.
 
 `store_sidecar(...).ok()` on interrupt and failure paths; `query_meta` falls back to `(0,1)`, `query_run_info`/`has_data`/`resolve_latest` to defaults; `open_sidecar_db(...).ok()` in `results_cmd` and `sidecar_cmd`, so a corrupt or locked DB reports "no sidecar.db found"; the v3→v4 sidecar migration ignores all `ALTER` errors, not just duplicate-column; `previous_run_kv` drops lookup errors by design and reports nothing. ratatoskr's gate: `serde_json::to_string(..).unwrap_or_else(|_| "{}")` then parsed back with `unwrap_or_default()` in `evaluate_against_baseline`; `missing_baseline_error` queries use `unwrap_or_default()`/`unwrap_or(0)`.
 
+Design hunt (other-projects): `bench_gate.rs`'s round trip means a serialization failure becomes an empty map and the run then fails with "missing `sidecar.x`", blaming the data rather than the encoder, though `GateRun::from_parts` exists to skip the round trip. Proposed: keep the `Map`s in the in-memory row and serialize only at the DB edge.
+
 ## MEA-014 - Row provenance precedence is decided per writer
 
 Reported by: measurement-storage.
 
 `cargo_profile` is spelled at each writer while `cargo_features` has a harness default. Precedence disagrees: features config-over-harness; mode/brokkr_args harness-over-config; the `with_brokkr_args` doc claims config wins. See BUG-041, BUG-047.
 
+Design hunt (measurement): `BuildConfig.profile: &'static str` (`"release"`/`"dev"`) while `CargoProfile` exists; the `CargoProfile::Dev` doc records the drift this already caused ("older dev rows in those series carry the wrong profile"). Features likewise: `BenchContext::with_build_config` joins `build_config.features` into the harness default, `BenchConfig.cargo_features` can override it, and `HarnessContext` (no build) leaves it unset. Proposed: `cargo_build` returns `BuiltArtifact { path, profile: CargoProfile, features: FeatureSet, target: TargetKind }`, the harness takes the artifact (or an explicit `ExternalBuild::{Java, CMake}`) and stamps the row from it, and writers stop naming profiles.
+
 ## MEA-015 - Store mechanics invented per site
 
 Reported by: measurement-storage.
 
 `insert` uses hand-written `BEGIN`/`COMMIT` strings (a failed `COMMIT` leaves the transaction open) while `delete` uses `unchecked_transaction`. Two ms-rounding policies (floor in `elapsed_to_ms`, nearest in `us_to_ms`; BUG-048). The compare pair key is a tab-joined string split back apart; `pair_key_tabs_in_values_still_bleed` documents the resulting bug instead of fixing it - a tuple key would make it unrepresentable.
+
+Design hunt (measurement): wall time is a pair of integers held in step by comments - `BenchResult { elapsed_ms: i64, elapsed_us: Option<i64> }`, `RunRow`/`StoredRow` (the same pair), `Distribution { min_ms.. max_ms, us: Option<DistributionUs> }`, and `iterations: Vec<i64>` beside `iterations_us: Vec<i64>` - each with a doc saying "the ms value is the us value rounded, never treat them as independent". Enforcement is scattered over `us_to_ms`/`elapsed_to_ms`, `all_or_none` (loop side), the `len() == len()` check in `db::write::insert_timings`, `bench_ordering_key` (`elapsed_us.unwrap_or(ms * 1000)`), `ms_value`, and `format_ms_or_dash`/`format_wall`. The hunter reads the harness paths as rounding to nearest today, and reports one live disagreement: `sidecar::run_sidecar_with_deadline` computes `SidecarSummary.wall_time_ms` with `as_millis()` (floor), so the sidecar's stored wall and the results row's wall for one run can differ by a millisecond in the flattering direction (the earlier hygiene account places the floor in `elapsed_to_ms`; the two readings disagree on where it is). Proposed: `enum Wall { Micros(i64), LegacyMillis(i64) }` with a derived nearest `.ms()` and `.ordering_key()`, `Distribution` holding `Wall`s, iterations as one `Vec<Wall>`, the DB splitting and re-joining the two columns at its boundary, and `all_or_none` as a constructor on the iteration list.
 
 ## MEA-016 - Measurement resources grow without bound
 
@@ -159,6 +179,8 @@ Reported by: measurement-storage.
 - Migration v7→v8 creates tables v8→v9 drops.
 - The whole v0→v18 migration chain (~2,000 lines incl. tests) is dead only if no `results.db` below v18 still exists; the hunter could not verify that from this repo (checking `user_version` on every host's databases would settle it).
 - `#[allow(dead_code)]` on `StoredRow` and `GateEntry` hides which fields are unused.
+
+Design hunt (other-projects): the artefact retention decision is split - `keep_on_success` is fixed at allocation, ratatoskr's `PreserveDataDir::OnSuccessToo` frontmatter is folded into that bool by each caller, and piners decides "keep despite success because diagnosis ran" by calling `finalize_failure` on a run that did not fail. Proposed: `Retention { OnFailure, Always }` plus `finalize(Outcome::{Success, Failure, KeepEvidence})`, and either removing `armed` or making `Drop` do something observable (log that the dir was kept unfinalized).
 
 ## MEA-021 - The gate store (`db/gate.rs`)
 

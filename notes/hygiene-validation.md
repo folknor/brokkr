@@ -27,6 +27,8 @@ Reported by: check-core.
 
 Enforcement proposed: a `Phase` enum with `as_str`/`label`/`ceiling`; tests parsing check.md's ceilings table and `failed_phase` list against it.
 
+Design hunt (check-plan, check-exec, check-report, process-control): further sites - `PROSE_PHASES` (phase.rs), `failing_phase: Option<&'static str>`, `PHASE_CLOCK`/`current_phase`, `phase == "rustdoc"` branches inside `report_diagnostic_phase` (to pick the cargo subcommand word) and `report_stale_sited_allows` (to pick the lint namespace it judges), `CheckSelections::build`'s `skip: &dyn Fn(&str) -> bool` called with `skip("clippy")`, `skip("rustdoc")`, `skip("install_feature")` while a `SelectionPhase` enum already exists, and `cargo_env::FAILED` storing the phase as a string from `current_phase()`. A `begin_phase` literal can report a `failed_phase` that is not in `PHASE_NAMES`; nothing checks the literals against the list, and the `prepare` phase was itself added after `phase_ceiling`'s match. Per-phase facts live in five files: name, skippable, prose-reading, ceiling, group (convention or build), cargo subcommand, and which lint namespace it judges. Proposed: `enum Phase` covering every phase (incl. install_feature, prepare, coverage) with `as_str()` (the `--json`/config spelling, plus `FromStr` for `skip_phases`, parsed at config load), `ceiling()`, `skippable()`, `reads_prose()`, `group()` and, for the diagnostic phases, `cargo_verb()`/`judges_lint(&LintName)`; `PHASE_NAMES` becomes `Phase::ALL`, `failing_phase` and `PHASE_CLOCK` hold a `Phase`, and `CheckSummary.failed_phase` serializes it.
+
 ## VAL-003 - Failure sentinels and tool labels are strings matched by content
 
 Reported by: check-core, test-execution.
@@ -37,6 +39,8 @@ Reported by: check-core, test-execution.
 
 Enforcement proposed: typed variants; text filters take a tool-label parameter and return `Option` (as `format_clippy_multi` does).
 
+Design hunt (check-report): "already reported" travels as message text - `already_reported` converts `DevError::Build(m) if m == TESTS_FAILED` into `Reported`, `record_phase_stop` matches `Build(m) if m == TESTS_FAILED`, `cmd_clippy` matches `Reported(m) if m == CLIPPY_FAILED`; every other phase invents its own `Reported("gremlins found")`, `"header check failed"`, `"textlint failed"`, `"manifest check failed"`, `"cargo_env failed"`, `"{phase} failed"`. The test phase returns `Build` (meaning "not yet printed") for a failure that was printed, then patches it. Proposed: phases return `Result<(), PhaseFailure>` with `Findings { phase }` (detail printed), `Error(DevError)` (not printed) or `Stopped`, converted to `DevError` once at `cmd_check`. The text path's summary line reads `cargo clippy: N errors, M warnings` when rendering a failed `cargo test` build (`output.rs` `filter_clippy_in_tree` on the test build's stderr, `test_cmd`) - operator text naming the wrong command; the earlier hygiene account says that output is relabelled with `replacen`, so the two readings disagree on whether the relabel reaches every path.
+
 ## VAL-004 - `check`'s verdict, exit code and JSON `certifies` are spelled inline per arm
 
 Reported by: check-core.
@@ -44,6 +48,8 @@ Reported by: check-core.
 Each `finish_check` arm spells verdict word, exit code (0/10/1) and `certifies` string; the `CheckSummary` doc, `finish_check` doc and check.md restate the pairing; `schema: 1` is a literal; `Certifies` → string is a hand-written match instead of `Serialize`. `finish_check`'s verdict/certifies/exit mapping is untested (VAL-021). See PLT-028 for the repo-wide exit-code table.
 
 Enforcement proposed: a `Verdict` enum carrying word, JSON and exit code.
+
+Design hunt (check-report): `finish_check` picks `("passed"|"complete"|"partial", ..., Ok|Err(ExitCode(10)))` in one match and `"stopped by its time ceiling"|"interrupted"|"failed"` plus `ExitCode(124)|Interrupted|ExitCode(1)` in another, while the `--json` trailer gets `"failed"` for all three failure shapes; `emit_json_summary` maps `Certifies` to `"complete"/"partial"` independently. `TerminationSummary.kind` is a `String` from `TerminationCause::as_str()`, and `scope` is a `String` holding a phase name or the literal `"run"`. `CheckSummary.scope: Option<&str>` is only ever `"prose_only"`, and `package: Option<&str>` is a comma-joined `-p` list ("so the field stays a string"). Proposed: `enum Verdict { Passed { prose_only }, Complete, Partial { narrowed }, Failed(FailureKind /* Error | Deadline | Interrupt */) }` with `word()`, `json_word()`, `exit()`; `TerminationSummary { kind: TerminationCause, scope: Scope /* Run | Phase(Phase) */ }` serialized by serde; the doc table becomes the `exit()` match.
 
 ## VAL-005 - A sweep's cargo selection argv is built by several independent builders
 
@@ -56,11 +62,15 @@ Reported by: check-core, test-execution.
 
 Enforcement proposed: one `selection(sweep, scope, Purpose)` / `LibtestInvocation` builder carrying profile, pin, allows and selection, with a test asserting every call site's argv contains its output.
 
+Design hunt (check-plan): `coverage.rs`'s `shape_selection_args`/`shape_enumeration_args` assemble cargo argv (profile, unification, run args, allows) as a second assembly point beside the lanes', each piece justified by a comment saying it is "the same as the lane". Proposed: the argv for "build this lane's shape" is one function on the `ResolutionRun` plus planned sweep, used by both the lane prebuild and the universe enumeration.
+
 ## VAL-006 - Feature args and `ResolvedSweep` construction are repeated
 
 Reported by: check-core.
 
 Feature args are built in `CheckEntry::cargo_feature_args`, the ad-hoc branch of `decide_active_sweeps`, and `build_clippy_sweep`. `sweep_from_check_entry` and `build_resolved_sweep` each list all 25 fields (with a duplicated `lib_only` comment); three more partial constructors use `..Default::default()`.
+
+Design hunt (check-plan): `FeatureConfig::configured_key` and `argv_with` are both the identity rendering, and `Attempt.features` ("described features") is a third rendering filtered by "carried in at least one run". The "described" form is what announcements print while `cargo_args` is what runs; the hunter asks the reporting side to check that no path prints `configured_key` where a run dropped tokens.
 
 ## VAL-007 - Cargo/libtest argv classification is re-implemented per lane
 
@@ -71,6 +81,8 @@ Reported by: check-core, test-execution.
 - `--format` refusal: output.rs checks both spellings on the final argv; `direct_libtest_args` catches `--format` not `--format=`; nextest refuses all libtest args.
 
 Enforcement proposed: one `CargoArgv` classifier type with a shared selector table and test.
+
+Design hunt (check-exec): the runner has two preconditions - `--format json -Z unstable-options` on every lane, `--test-threads=1` on the serial runner - and enforces only the second, by scanning argv (`enforce_single_threaded`). Every caller builds the argv by hand: `check_cmd/output.rs` pushes json then calls `reject_format_override` (both spellings); `parallel::direct_libtest_args` pushes json and refuses only an exact `--format`, safe today only because user args precede brokkr's json and libtest takes the last occurrence; `test_cmd::direct_libtest_args` is a hard-coded array; `isolate.rs` and the discovery args in `focused.rs`. The package-selector set is written twice and differs (`narrows_selection`: `-p | --package | --exclude`; `reject_forwarded_selectors` adds `--workspace`), both also remembering the attached `-pfoo` form, and `output.rs`'s `serial_shim_fallback` has its own `--config`/`--target` scan. Proposed: a `LibtestInvocation { filters, exact, include_ignored, nocapture, threads: One | N(u32) | Default, passthrough }` that the runner renders itself, format flags always last, refusing passthrough tokens containing `--format` or `--test-threads` at construction - which also lets the serial/parallel runner choice be typed rather than re-derived from argv - and one `ForwardedCargoArgs::parse` yielding typed groups (`package_selectors`, `target_selectors`, `config`, `target`, `manifest_path`, `target_dir`, `no_run`, `rest`), living with selection rather than in `parallel.rs`.
 
 ## VAL-008 - libtest `--list` parsing, loader paths and cwd fallback have multiple owners
 
@@ -99,6 +111,8 @@ Reported by: test-execution, check-core.
 
 Enforcement proposed: name `MAX_TEST_TIMEOUT` and use it in the parser; format messages from constants; a unit test asserting `check.md` (which is `include_str!`'d) states `TEST_TIMEOUT.as_secs()`.
 
+Design hunt (check-exec): the "(1800s)" timeout messages in `output.rs` and `parallel.rs` are user-facing verdicts that cannot occur under `check` or `test`. The whole ceiling hierarchy - per-test 20s, idle 300s, wall 1800s, phase 5/15/2 min, run 25 min, nextest's synthesized slow-timeout, the listing deadline (`TEST_TIMEOUT` in `binaries.rs` and `focused.rs`), the prebuild deadline (`IDLE_TIMEOUT` in `test_cmd`) - is spread over `test_runner.rs`, `watchdog.rs`, `nextest_lane.rs`, `binaries.rs`, `focused.rs` and `test_cmd.rs`, and nothing states or checks that the inner bounds sit below the outer ones. Proposed: one `ceilings.rs` table holding every bound with its role, plus a const assertion for the ordering.
+
 ## VAL-011 - Check/test tunables have no index and no injection point
 
 Reported by: check-core, test-execution, config-cli-bootstrap.
@@ -107,6 +121,8 @@ Reported by: check-core, test-execution, config-cli-bootstrap.
 - `fire()` calls `process::exit`, so no test proves a ceiling fires and `phase_ceiling` can't be shortened for a test.
 - `cpu_topology::CPU_ROOT` is hard-coded, so `physical_cores` is untestable; the count ignores affinity and cgroup cpusets, so in a restricted container the default budget exceeds usable CPUs.
 - `ParallelBinaries::resolved_budget` claims `brokkr env` "reports the same figure" and that it is "resolved at config load"; `env` shows `cache_domain_cores()` without the `_or_default` fallback ("not detected" while the lane runs at `available_parallelism` or 4), and it is called from `profile.rs`. The same doc still describes the replaced claim rule ("A binary claims `min(its test count, budget)` slots").
+
+Design hunt (check-exec): `cpu_topology` reads only cpu0's L3 domain, so on a heterogeneous or asymmetric part the default budget is cpu0's island, not the smallest island.
 
 ## VAL-012 - `NEXTEST_ENGINE_VERSION` is a hand copy of Cargo.toml
 
@@ -119,6 +135,8 @@ Reported by: test-execution.
 Reported by: test-execution.
 
 `streaming_run_libtest` and `run_libtest_parallel` share the tracker but differ in: wall clock (watchdog `wall` vs `try_wait`), whether a wall kill snapshots `/proc` (serial yes, parallel no), cancellation (abort and shutdown checks only in parallel), `build_elapsed` tracking (serial only), and the timeout message. Hunter's view: one runner taking `Ceilings`, an optional abort flag and a program.
+
+Design hunt (check-exec): the two runners share about 80% of their body (spawn group, `GroupReaper`, the stdout JSON drain, the stderr drain, tracker, watchdog thread, `join_drains`, buffer clones). Further accidental differences: parallel emits `ObsEvent::Exited` and serial never does, even for `Launch::Direct` (test_cmd's direct runs), so accounting sees no exit for those; parallel hard-codes `Leader::TestBinary` (the consequence is filed in `bugs.md`); serial returns `in_flight` and parallel does not. `ParallelWait::Exited { timed_out: bool, cancelled: bool }` holds two bools exclusive by construction (`cancelled && !overtime`), with `ParallelRun.timed_out` and `ListingRun.timed_out` repeating the bool; both parallel callers pass `|_| {}` for `forward_stdout_line`/`on_build_finished`, so the signature is shaped for the other runner. Proposed: one `run_libtest(Launch, LibtestInvocation, Ceilings, Observe, abort: Option<&AtomicBool>, callbacks)`, with the shim allowed only for `Launch::Cargo` and the watchdog chosen by thread mode; cargo-threaded parallelism stops being a separate code path (it is a run whose per-test clock ages many in-flight tests, which `TestTracker` already supports), and the exit shape is one enum (`Natural | Wall | Cancelled`).
 
 ## VAL-014 - nextest engine setup is copied twice and has diverged
 
@@ -232,6 +250,8 @@ Test execution:
 - "must not set `--format` … on a parallel lane" - applies to every lane; "Serial vs parallel" says the serial lane "attribut[es] a stall … from libtest's sequential output"; repeats the stale selector rationale.
 - Says whole-sweep ceilings (30 min) back up and stop the run; unreachable inside `check` (VAL-010).
 
+Design hunt (check-plan, check-exec): `phase.rs::reject_extra_args_complete` says "the plan takes each lane's selection from the sweep's own filters alone, without [forwarded args]", but `prepare::lane_filter_args` does fold forwarded libtest args into the listing (the refusal is still right, since cargo-side forwarded args are not folded, but the stated reason is partly stale). `binary_timings.rs` opens with "Per-binary wall times", while the file's whole argument is that it stores serial cost and not wall time.
+
 ## VAL-026 - Misattached doc comments and stale naming in check core
 
 Reported by: check-core.
@@ -284,11 +304,15 @@ Reported by: convention-engines.
 
 Enforcement proposed: a serde enum on a shared metadata type; one table-name constant; one manifest reader. See PLT-015 for the metadata deserializers.
 
+Design hunt (deps-misc): `[[dependency_rule]] kinds` arrives from config as `Vec<String>` and is validated only when the phase runs, though `dependency_rules.rs` already has a real `DependencyKind` enum (`Normal/Dev/Build/Unknown`) and its own private `CargoMetadata`; `publish_cycle.rs`'s `rank()` runs over its string constants and serialises into `CycleEdge.kind`. Proposed: `DependencyKind` in a shared cargo-model module, deserialised directly by serde (`rename_all = "lowercase"`, `null` -> Normal), used by every phase and parsed at config load for `kinds`; publish-cycle's "dev, but versioned" refinement as its own type (`PublishedEdge { Normal, Build, DevVersioned }`) built from `(DependencyKind, req)`. On table names: `manifest::is_dependency_table_name` also recurses into any child table, including `[package.metadata.*]`, where a third-party tool table named `dependencies` would be linted as real; `declared_deps` skips `workspace`; `workspace_dep::collect_from` recurses only into `target`. An adapter-group crate can therefore be depended on through an underscore table without a violation. Proposed: one `ManifestDeps` walker yielding `(table_path, kind, target_cfg, key, real_name, spec)` for both, also used for `manifest.rs`'s `[workspace.dependencies]` shape check.
+
 ## VAL-031 - Dependency-graph traversal is written twice
 
 Reported by: convention-engines.
 
 "Reverse Normal-edge adjacency plus BFS to the workspace" in `duplicate_version::run`/`via_workspace` and `focus::emit_traces`/`chains_to_workspace`, kept in step by a comment in `focus.rs`. `workspace_set` construction repeats in six phase files. Enforcement proposed: methods on `CargoMetadata`.
+
+Design hunt (deps-misc): phases key maps by `&str` id, `&str` name and a formatted `"{name} {version}"` label, in parallel `HashMap`s rebuilt per phase (`id_to_label`, `id_to_name`, `workspace_set` in `duplicate_version`, `focus`, `native_code`; `workspace_set`/`member_ids` in every phase). `VersionPin.picked_by` mixes `"<name> (direct)"` for members and `"name version"` for others in one `Vec<String>`, so a JSON consumer must parse prose. `path_dependency` decides "path dep" as `source.is_none() && !member` and `git_dependency` decides "git" by `source.starts_with("git+")` - one source classification computed per phase. Proposed: a `PackageId` newtype and an indexed `Graph` built once per metadata load exposing `is_member(id)`, `name(id)`, `label(id)`, `normal_parents(id)` and a source kind (`Registry | Git | Path | Member`); `picked_by` as `Vec<Picker { name, version: Option, direct: bool }>`.
 
 ## VAL-032 - `TEXTLINT_PRESET_FIELDS` mirrors `TextlintRule` by hand
 
@@ -301,6 +325,8 @@ A hand-written list of 16 names in `parser.rs` mirroring `TextlintRule` minus 3;
 Reported by: convention-engines.
 
 `deps::run` has a literal `phases_run` list of 8 names and a hand-written `findings` sum; `deps.md`'s "adding a phase" recipe mentions neither. `phases_run` includes outdated and stale even when ccu was skipped ("ran 8 phases" false then). `ccu::PHASES[1]` is never read. `STALE_DAYS`/`ABANDONED_DAYS` are restated as "~8 months / ~2 years" in the `StaleEvent` doc and `deps.md` (approximate; no divergence). Enforcement proposed: build both from a phase table.
+
+Design hunt (deps-misc): `ToolMissingEvent.phase` is `PHASES[0]` = `"outdated"` though the event covers both phases, and the gating-versus-informational classification lives only in the `findings` addition expression and the comment above it. `OutdatedComplete` is a marker event that exists only because "ran with zero results" cannot be expressed, and the renderer's shape (match into ten vectors, then render each section) is why it is needed. Proposed: a `Phase` enum with `gating()`, each phase returning `PhaseOutcome { phase, events, ran: Ran | Skipped(reason) }`, so `phases_run`, `findings`, the exit code, `OutdatedComplete` and `ToolMissing` are all derived and a `--json` caller can branch on "skipped" per phase; the renderer moves to `render.rs` with a `Render` impl per event type, and event types live beside their phases.
 
 ## VAL-034 - The displayed cargo argv is a second copy of the real one
 
@@ -315,6 +341,8 @@ Reported by: convention-engines, config-cli-bootstrap, check-core.
 Textlint regexes, `region`, `join_wrapped_use` conflicts and zero-line windows are checked only in `textlint::compile`; dependency_rule `kinds` ("Validated when the phase runs"); `version_align.granularity` (inside `manifest::scan`); every header/manifest glob. A typo surfaces mid-run after earlier phases, never if the phase is skipped by `skip_phases` or the markdown-only shortcut, and under `--textlint NAME` only selected rules compile. `region`, `kinds`, `granularity` are `String`s while `MatchMode`/`Stream`/`Stage` are serde enums. `brokkr.toml.md` claims the `join_wrapped_use`+`except` error is "rejected at load time" (false).
 
 Enforcement proposed: serde enums and compiling every rule in the parser.
+
+Design hunt (check-report, deps-misc): `globs::build_set` is called at scan time by header, textlint and manifest, so an invalid glob in `brokkr.toml` is a phase failure mid-run rather than a config-load error; proposed to compile globs in the parser and store `GlobSet`s. `version_align.granularity` is validated in `manifest::scan` (`"" | "major" | "minor"`), defaulted again in `check_version_align` (`"" -> "minor"`) and re-compared in `version_key` (`== "major"`, else minor) - an `enum Granularity` at load. `lex::Region::parse` is a config parser living in the lexer; the config layer should deserialize `Region` directly.
 
 ## VAL-036 - Convention-engine tunables have no config surface or injection point
 
@@ -344,6 +372,8 @@ Reported by: convention-engines.
 
 `header::current_year_is_sane` reads the wall clock and asserts `2024..2100`; `header::scan` has no test. No test covers the git-backed scan entry points (gremlins, header, textlint, manifest `scan`), so globs/`exclude`/walk wiring is untested. Nothing asserts every `GREMLINS` entry has a `replacement()` arm (they match today). No `TEXTLINT_PRESET_FIELDS` parity test (VAL-032). `gates_or_together_any_hit_suppresses` and check.md ("Multiple gates AND together") describe the same behaviour with opposite words.
 
+Design hunt (check-report): `header::current_utc_year` (libc `gmtime`) is called per run inside the phase; the year is exactly the kind of input a test would want injected.
+
 ## VAL-040 - Convention-engine guards that fail open
 
 Reported by: convention-engines.
@@ -353,7 +383,6 @@ Reported by: convention-engines.
 - `version_align`: `find_dep_version` finds no version for `{ workspace = true }`, so the check does nothing in inheriting members.
 - Entries that match nothing are silent: gremlins `exclude`, textlint `exclude`, header `exempt`, manifest `exclude`/`shape_exclude`, `workspace_dep_ignore`, dependency_rule `except` - inconsistent with the parser's "dead preset config is an error" rule.
 - Textlint's file count aggregates across rules, so one rule's dead `paths` is hidden whenever another matches (docs promise "a shrinking count" gives it away); header and manifest have no count, so a `[header].paths` matching nothing is green.
-- `gremlins::tracked_files` drops non-UTF-8 paths silently; `scope::classify_status` treats the same case as "cannot vouch" (fail-closed).
 
 ## VAL-041 - Stale claims in convention-engine and deps code/docs
 
