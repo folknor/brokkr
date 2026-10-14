@@ -254,7 +254,9 @@ impl CommandContext {
     /// Get all OSC paths as UTF-8 strings, or error if none set.
     pub fn osc_strs(&self) -> Result<Vec<&str>, DevError> {
         if self.osc_paths.is_empty() {
-            return Err(DevError::Config("OSC paths are required but not set".into()));
+            return Err(DevError::Config(
+                "OSC paths are required but not set".into(),
+            ));
         }
         self.osc_paths
             .iter()

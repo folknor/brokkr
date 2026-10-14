@@ -8,9 +8,7 @@ use crate::measure::MeasureRequest;
 use crate::output;
 use crate::preflight;
 use crate::project::{self, Project};
-use crate::resolve::{
-    self, resolve_bbox, resolve_default_osc_path, resolve_pbf_with_size,
-};
+use crate::resolve::{self, resolve_bbox, resolve_default_osc_path, resolve_pbf_with_size};
 use crate::tools;
 
 /// Resolve a verify subcommand's input PBF: prefer `--input <PATH>`
@@ -38,12 +36,9 @@ fn resolve_verify_input(
         } else {
             project_root.join(p)
         };
-        let canonical = abs.canonicalize().map_err(|e| {
-            DevError::Config(format!(
-                "--input {p}: {e}",
-                p = p.display()
-            ))
-        })?;
+        let canonical = abs
+            .canonicalize()
+            .map_err(|e| DevError::Config(format!("--input {p}: {e}", p = p.display())))?;
         return Ok(canonical);
     }
     // `--snapshot base` / omitted → primary data (identical to the legacy
@@ -189,7 +184,8 @@ pub(crate) fn bench_read(
         &feat_refs,
         true,
         "bench read",
-        req.force,        req.stop_marker.map(str::to_owned),
+        req.force,
+        req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
     let (pbf_path, file_mb) = resolve_read_pbf_with_size(req, snapshot, &ctx.paths)?;
@@ -224,7 +220,8 @@ pub(crate) fn bench_write(req: &MeasureRequest, compression_str: &str) -> Result
         &feat_refs,
         true,
         "bench write",
-        req.force,        req.stop_marker.map(str::to_owned),
+        req.force,
+        req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
     let (pbf_path, file_mb) =
@@ -282,7 +279,8 @@ pub(crate) fn bench_merge(
         &all_features,
         true,
         "bench merge",
-        req.force,        req.stop_marker.map(str::to_owned),
+        req.force,
+        req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
     let (pbf_path, file_mb) =
@@ -320,7 +318,8 @@ pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
         req.project_root,
         req.build_root,
         "bench all",
-        req.force,        req.stop_marker.map(str::to_owned),
+        req.force,
+        req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
     let (pbf_path, file_mb) =
@@ -428,7 +427,11 @@ pub(crate) fn verify(
     // to cross-validate against, so we refuse the flag up-front rather than let
     // the check report a false failure. Enriched-output correctness is covered
     // inside pbfhogg's own suite (oracle roundtrip + backend parity).
-    if let VerifyCommand::AddLocationsToWays { inject_prepass: true, .. } = &verify {
+    if let VerifyCommand::AddLocationsToWays {
+        inject_prepass: true,
+        ..
+    } = &verify
+    {
         output::verify_msg(
             "add-locations-to-ways --inject-prepass emits osmium-incompatible wire \
              extensions (BlobHeader field 5 > 127 bytes; libosmium 2.23 issue 405); \
@@ -483,11 +486,7 @@ pub(crate) fn verify(
             let bbox = resolve_bbox(bbox.as_deref(), &pbf.dataset, &paths)?;
             super::verify_extract::run(&harness, &pbf_path, &bbox, pbf.direct_io)
         }
-        VerifyCommand::MultiExtract {
-            pbf,
-            bbox,
-            regions,
-        } => {
+        VerifyCommand::MultiExtract { pbf, bbox, regions } => {
             let pbf_path = resolve_verify_input(
                 pbf.input.as_deref(),
                 &pbf.dataset,
@@ -521,7 +520,11 @@ pub(crate) fn verify(
             )?;
             super::verify_getid_removeid::run(&harness, &pbf_path, pbf.direct_io)
         }
-        VerifyCommand::AddLocationsToWays { pbf, mode, inject_prepass: _ } => {
+        VerifyCommand::AddLocationsToWays {
+            pbf,
+            mode,
+            inject_prepass: _,
+        } => {
             let pbf_path = resolve_verify_input(
                 pbf.input.as_deref(),
                 &pbf.dataset,
@@ -610,13 +613,7 @@ pub(crate) fn verify(
                 &paths,
                 project_root,
             )?;
-            super::verify_renumber::run(
-                &harness,
-                &pbf_path,
-                &dataset,
-                start_id.as_deref(),
-                verbose,
-            )
+            super::verify_renumber::run(&harness, &pbf_path, &dataset, start_id.as_deref(), verbose)
         }
         VerifyCommand::Diff {
             dataset,

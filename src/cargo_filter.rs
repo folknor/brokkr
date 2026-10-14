@@ -132,8 +132,7 @@ pub fn parse_clippy(output: &str) -> ClippyParse {
     }
 
     // Errors first, then warnings; each half keeps discovery order.
-    let (errors, warnings): (Vec<_>, Vec<_>) =
-        diagnostics.into_iter().partition(|d| d.is_error);
+    let (errors, warnings): (Vec<_>, Vec<_>) = diagnostics.into_iter().partition(|d| d.is_error);
     let mut sorted = errors;
     sorted.extend(warnings);
 
@@ -316,10 +315,7 @@ fn judge_completeness(started: usize, summarised: usize) -> Completeness {
 /// message are only recoverable from there. The `failures:` name list
 /// on stdout still vets which panics belong to actual failures.
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)] // state-machine parser - splitting hurts clarity
-pub fn parse_test_output_with_stderr(
-    lines: &[&str],
-    stderr_lines: &[&str],
-) -> ParsedTestResults {
+pub fn parse_test_output_with_stderr(lines: &[&str], stderr_lines: &[&str]) -> ParsedTestResults {
     let mut failures: Vec<ParsedTestFailure> = Vec::new();
     let mut summary_lines: Vec<String> = Vec::new();
     let mut in_failure_detail = false;
@@ -647,7 +643,11 @@ impl InlinePanicCollector {
             .filter_map(|n| self.panics.iter().rfind(|p| &p.name == n).cloned())
             .map(|p| ParsedTestFailure { verdict: true, ..p })
             .collect();
-        if vetted.is_empty() { self.panics } else { vetted }
+        if vetted.is_empty() {
+            self.panics
+        } else {
+            vetted
+        }
     }
 }
 
@@ -820,7 +820,9 @@ fn harness_crashes(stdout: &str, stderr: &str) -> Vec<String> {
     let mut out: Vec<String> = stderr
         .lines()
         .filter_map(|l| {
-            let rest = l.trim_start().strip_prefix("process didn't exit successfully: `")?;
+            let rest = l
+                .trim_start()
+                .strip_prefix("process didn't exit successfully: `")?;
             let (cmd, tail) = rest.split_once('`')?;
             let signal = tail.trim().strip_prefix("(signal: ")?.strip_suffix(')')?;
             let mut words = cmd.split_whitespace();
@@ -891,10 +893,7 @@ fn linker_failure_detail(stderr: &str) -> Option<String> {
         return None;
     }
 
-    let mut out: Vec<String> = undefined
-        .iter()
-        .map(|t| format!("  linker: {t}"))
-        .collect();
+    let mut out: Vec<String> = undefined.iter().map(|t| format!("  linker: {t}")).collect();
 
     // `error: could not compile `pkg` (lib test)` names the crate whose
     // build cache is suspect; its symbols are `pkg`-with-underscores paths.
@@ -1049,10 +1048,7 @@ fn is_noise(trimmed: &str) -> bool {
 
 fn is_meta_noise(line: &str) -> bool {
     // "warning: `crate` (lib) generated N warnings"
-    if line.starts_with("warning:")
-        && line.contains("generated")
-        && line.contains("warning")
-    {
+    if line.starts_with("warning:") && line.contains("generated") && line.contains("warning") {
         return true;
     }
     // "error: aborting …" / "error: could not compile …"
@@ -1108,13 +1104,12 @@ fn extract_rule_from_notes(block: &[String]) -> Option<String> {
 fn parse_header(line: &str) -> (String, String) {
     // error[CODE]: message
     if (line.starts_with("error[") || line.starts_with("warning["))
-        && let Some(bracket_end) = line.find(']') {
-            let prefix = &line[..bracket_end + 1];
-            let message = line[bracket_end + 1..]
-                .trim_start_matches(':')
-                .trim();
-            return (prefix.to_string(), message.to_string());
-        }
+        && let Some(bracket_end) = line.find(']')
+    {
+        let prefix = &line[..bracket_end + 1];
+        let message = line[bracket_end + 1..].trim_start_matches(':').trim();
+        return (prefix.to_string(), message.to_string());
+    }
 
     // "warning: message [rule]" or "error: message"
     let (level, rest) = if let Some(rest) = line.strip_prefix("error: ") {
@@ -1128,11 +1123,12 @@ fn parse_header(line: &str) -> (String, String) {
     // Check for trailing [rule].
     if let Some(bracket_start) = rest.rfind('[')
         && let Some(bracket_end) = rest.rfind(']')
-            && bracket_end > bracket_start {
-                let rule = &rest[bracket_start + 1..bracket_end];
-                let message = rest[..bracket_start].trim();
-                return (format!("{level}[{rule}]"), message.to_string());
-            }
+        && bracket_end > bracket_start
+    {
+        let rule = &rest[bracket_start + 1..bracket_end];
+        let message = rest[..bracket_start].trim();
+        return (format!("{level}[{rule}]"), message.to_string());
+    }
 
     (level.to_string(), rest.to_string())
 }
@@ -1257,8 +1253,7 @@ warning: /home/me/proj/Cargo.toml: `lints.clippy.map-entry` is deprecated
 warning: unused variable: `x`
  --> src/a.rs:1:9
 ";
-        let filtered =
-            filter_clippy_in_tree(output, Some(Path::new("/home/me/proj")));
+        let filtered = filter_clippy_in_tree(output, Some(Path::new("/home/me/proj")));
         assert!(!filtered.contains("/elsewhere/"));
         assert!(filtered.contains("/home/me/proj/Cargo.toml"));
         assert!(filtered.contains("unused variable"));
@@ -1267,7 +1262,8 @@ warning: unused variable: `x`
 
     #[test]
     fn foreign_manifest_warnings_only_dropped_when_scoped() {
-        let output = "warning: /elsewhere/iced/Cargo.toml: `lints.clippy.map-entry` is deprecated\n";
+        let output =
+            "warning: /elsewhere/iced/Cargo.toml: `lints.clippy.map-entry` is deprecated\n";
         assert!(filter_clippy(output).contains("/elsewhere/"));
         assert_eq!(
             filter_clippy_in_tree(output, Some(Path::new("/home/me/proj"))),
@@ -1312,7 +1308,10 @@ error: linking with `cc` failed: exit status: 1
 error: could not compile `mycrate` (bin \"mycrate\") due to 1 previous error
 ";
         let result = filter_test("", stderr);
-        assert!(result.contains("undefined reference to `sqlite3_open'"), "got: {result}");
+        assert!(
+            result.contains("undefined reference to `sqlite3_open'"),
+            "got: {result}"
+        );
         assert!(!result.contains("brokkr clean"), "got: {result}");
     }
 
@@ -1342,10 +1341,15 @@ warning: `pbfhogg` (lib) generated 1 warning
 error: aborting due to 1 previous error
 ";
         let result = filter_clippy(output);
-        assert!(result.starts_with("cargo clippy: 1 errors, 1 warnings"), "got: {result}");
+        assert!(
+            result.starts_with("cargo clippy: 1 errors, 1 warnings"),
+            "got: {result}"
+        );
         // Error line: one-liner with code, location, message, and type detail.
         assert!(
-            result.contains("error[E0308] src/foo.rs:20:5 mismatched types - expected `i32`, found `&str`"),
+            result.contains(
+                "error[E0308] src/foo.rs:20:5 mismatched types - expected `i32`, found `&str`"
+            ),
             "got: {result}"
         );
         // Warning line: one-liner with rule, location, message.
@@ -1374,7 +1378,10 @@ error[E0308]: mismatched types
         let result = filter_clippy(output);
         let error_pos = result.find("error[E0308]").unwrap();
         let warning_pos = result.find("warning[unused_variables]").unwrap();
-        assert!(error_pos < warning_pos, "errors should come before warnings: {result}");
+        assert!(
+            error_pos < warning_pos,
+            "errors should come before warnings: {result}"
+        );
     }
 
     #[test]
@@ -1400,8 +1407,15 @@ warning: this could be simplified [clippy::needless_return]
         let result = filter_clippy(output);
         assert!(result.contains("0 errors, 4 warnings"), "got: {result}");
         // Each warning is its own line - no grouping.
-        assert_eq!(result.matches("warning[unused_variables]").count(), 3, "got: {result}");
-        assert!(result.contains("warning[clippy::needless_return]"), "got: {result}");
+        assert_eq!(
+            result.matches("warning[unused_variables]").count(),
+            3,
+            "got: {result}"
+        );
+        assert!(
+            result.contains("warning[clippy::needless_return]"),
+            "got: {result}"
+        );
     }
 
     #[test]
@@ -1541,7 +1555,10 @@ test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
         assert!(result.contains("1 failure"), "got: {result}");
         assert!(result.contains("FAILED foo::test_b"), "got: {result}");
         // Should be one line per failure, not multi-line.
-        let failure_lines: Vec<&str> = result.lines().filter(|l| l.starts_with("  FAILED")).collect();
+        let failure_lines: Vec<&str> = result
+            .lines()
+            .filter(|l| l.starts_with("  FAILED"))
+            .collect();
         assert_eq!(failure_lines.len(), 1, "got: {result}");
     }
 
@@ -1552,8 +1569,15 @@ test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
     fn a_truncated_stream_is_incomplete_not_an_empty_run() {
         let lines = ["", "running 3 tests", "test a::one ... ok"];
         let parsed = parse_test_output(&lines);
-        assert!(!parsed.is_complete(), "a suite with no summary is not complete");
-        assert_eq!(parsed.accounted(), 0, "nothing was reported, so nothing is accounted");
+        assert!(
+            !parsed.is_complete(),
+            "a suite with no summary is not complete"
+        );
+        assert_eq!(
+            parsed.accounted(),
+            0,
+            "nothing was reported, so nothing is accounted"
+        );
         match &parsed.completeness {
             Completeness::Incomplete { reason } => {
                 assert!(reason.contains("announced"), "{reason}");
@@ -1572,7 +1596,10 @@ test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
             "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
         ];
         let parsed = parse_test_output(&lines);
-        assert!(!parsed.is_complete(), "a summary with no suite start describes no run");
+        assert!(
+            !parsed.is_complete(),
+            "a summary with no suite start describes no run"
+        );
     }
 
     /// Silence is not agreement. No suite announced and none summarised is what
@@ -1675,7 +1702,10 @@ expected panic, caught fine
         let stderr_lines: Vec<&str> = stderr.lines().collect();
         let parsed = parse_test_output_with_stderr(&stdout_lines, &stderr_lines);
         assert_eq!(parsed.failed, 0);
-        assert!(parsed.failures.is_empty(), "caught panic misread as failure");
+        assert!(
+            parsed.failures.is_empty(),
+            "caught panic misread as failure"
+        );
     }
 
     #[test]
@@ -1867,7 +1897,9 @@ error: could not compile `pbfhogg` (test) due to 1 previous error
         assert!(result.contains("cargo test:"), "got: {result}");
         assert!(result.contains("1 errors"), "got: {result}");
         assert!(
-            result.contains("error[E0425] tests/foo.rs:3:13 cannot find value `missing_symbol` in this scope"),
+            result.contains(
+                "error[E0425] tests/foo.rs:3:13 cannot find value `missing_symbol` in this scope"
+            ),
             "got: {result}"
         );
         assert!(!result.contains("could not compile"), "got: {result}");
@@ -1899,12 +1931,21 @@ Caused by:
         let result = filter_test(stdout, stderr);
         assert!(result.contains("461 passed"), "got: {result}");
         assert!(result.contains("exited non-zero"), "got: {result}");
-        assert!(result.contains("panic in a destructor during cleanup"), "got: {result}");
-        assert!(result.contains("-p piners-vm --test compiler"), "got: {result}");
+        assert!(
+            result.contains("panic in a destructor during cleanup"),
+            "got: {result}"
+        );
+        assert!(
+            result.contains("-p piners-vm --test compiler"),
+            "got: {result}"
+        );
         assert!(result.contains("SIGABRT"), "got: {result}");
         // Build/progress chatter is stripped from the surfaced excerpt.
         assert!(!result.contains("Compiling piners-vm"), "got: {result}");
-        assert!(!result.contains("Running tests/compiler.rs"), "got: {result}");
+        assert!(
+            !result.contains("Running tests/compiler.rs"),
+            "got: {result}"
+        );
     }
 
     #[test]
@@ -1939,7 +1980,10 @@ warning: unused variable: `x` [unused_variables]
         // Errors come first.
         assert!(parsed.diagnostics[0].is_error);
         assert_eq!(parsed.diagnostics[0].header, "error[E0308]");
-        assert_eq!(parsed.diagnostics[0].location.as_deref(), Some("src/foo.rs:20:5"));
+        assert_eq!(
+            parsed.diagnostics[0].location.as_deref(),
+            Some("src/foo.rs:20:5")
+        );
         assert_eq!(parsed.diagnostics[0].message, "mismatched types");
         assert!(!parsed.diagnostics[1].is_error);
         assert_eq!(parsed.diagnostics[1].header, "warning[unused_variables]");
@@ -2108,8 +2152,14 @@ Caused by:
   process didn't exit successfully: `/t/debug/deps/c_fail-99aa x` (exit status: 101)
 ";
         let out = filter_test(stdout, stderr);
-        assert!(out.contains("CRASHED a_crash (signal: 6, SIGABRT: process abort signal)"), "{out}");
-        assert!(!out.contains("CRASHED c_fail"), "an exit status is not a crash: {out}");
+        assert!(
+            out.contains("CRASHED a_crash (signal: 6, SIGABRT: process abort signal)"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("CRASHED c_fail"),
+            "an exit status is not a crash: {out}"
+        );
         assert!(out.contains("last test seen starting: b_aborts"), "{out}");
     }
 

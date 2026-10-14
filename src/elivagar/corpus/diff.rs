@@ -121,7 +121,10 @@ pub fn zoom_delta_lines(committed: &[ZoomDigest], current: &[ZoomDigest]) -> Vec
 }
 
 #[must_use]
-pub fn bucket_delta_lines(committed: &[BucketDigest], current: &[BucketDigest]) -> (u64, Vec<String>) {
+pub fn bucket_delta_lines(
+    committed: &[BucketDigest],
+    current: &[BucketDigest],
+) -> (u64, Vec<String>) {
     let cmap: BTreeMap<(u8, u64), &BucketDigest> =
         committed.iter().map(|b| ((b.z, b.cell), b)).collect();
     let nmap: BTreeMap<(u8, u64), &BucketDigest> =
@@ -147,7 +150,10 @@ pub fn bucket_delta_lines(committed: &[BucketDigest], current: &[BucketDigest]) 
         }
     }
     if changed > out.len() as u64 {
-        out.push(format!("(+{} more changed buckets)", changed - out.len() as u64));
+        out.push(format!(
+            "(+{} more changed buckets)",
+            changed - out.len() as u64
+        ));
     }
     (changed, out)
 }
@@ -192,22 +198,52 @@ mod tests {
     #[test]
     fn zoom_delta_flags_hash_change_and_count_change() {
         let committed = vec![
-            ZoomDigest { z: 3, tiles: 10, hash: 0x1 },
-            ZoomDigest { z: 4, tiles: 20, hash: 0x2 },
+            ZoomDigest {
+                z: 3,
+                tiles: 10,
+                hash: 0x1,
+            },
+            ZoomDigest {
+                z: 4,
+                tiles: 20,
+                hash: 0x2,
+            },
         ];
         let current = vec![
-            ZoomDigest { z: 3, tiles: 10, hash: 0x9 }, // same count, hash changed
-            ZoomDigest { z: 4, tiles: 21, hash: 0x2 }, // count changed
+            ZoomDigest {
+                z: 3,
+                tiles: 10,
+                hash: 0x9,
+            }, // same count, hash changed
+            ZoomDigest {
+                z: 4,
+                tiles: 21,
+                hash: 0x2,
+            }, // count changed
         ];
         let lines = zoom_delta_lines(&committed, &current);
-        assert!(lines.iter().any(|l| l.contains("zoom 3") && l.contains("hash-changed")));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("zoom 3") && l.contains("hash-changed"))
+        );
         assert!(lines.iter().any(|l| l.contains("zoom 4 tiles 20->21")));
     }
 
     #[test]
     fn bucket_delta_counts_changed_cells() {
-        let committed = vec![BucketDigest { z: 8, cell: xy_to_tile_id(7, 1, 1), tiles: 5, hash: 0x1 }];
-        let current = vec![BucketDigest { z: 8, cell: xy_to_tile_id(7, 1, 1), tiles: 5, hash: 0x2 }];
+        let committed = vec![BucketDigest {
+            z: 8,
+            cell: xy_to_tile_id(7, 1, 1),
+            tiles: 5,
+            hash: 0x1,
+        }];
+        let current = vec![BucketDigest {
+            z: 8,
+            cell: xy_to_tile_id(7, 1, 1),
+            tiles: 5,
+            hash: 0x2,
+        }];
         let (changed, lines) = bucket_delta_lines(&committed, &current);
         assert_eq!(changed, 1);
         assert!(lines.iter().any(|l| l.starts_with("bucket z=8")));

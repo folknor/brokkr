@@ -211,7 +211,10 @@ first), per-db `PRAGMA user_version` migrations, WAL - mirroring `src/db`
   describes the whole invocation; a toolchain file the lock moved aside is
   judged by its moved bytes against `HEAD`'s; each `NULL` when unknown,
   never a guessed clean), `selector` (JSON: resolved ids + raw flags, forwarded
-  harness flags, and the build profile as `debug`), `gated` (neither
+  harness flags, and the build profile as `debug`), dedicated `debug` and
+  `harness_args` columns (v9: typed execution context for `--compare`; older
+  selectors backfill them only when their JSON types are valid, otherwise
+  context remains unknown), `gated` (neither
   `--no-gate` nor `--bless`), `result` (`pass`/`fail`, or `interrupted`/
   `error` for a run that ended before its output could be ingested),
   `fail_reason`, `harness_exit_code`,
@@ -377,7 +380,8 @@ struct, no benchmark filters to reject. The corpus views:
   window also lowers `matched`, and raw unmatched counts include the boundary
   artifacts the label discounts. Both run headers (start, commit) are printed,
   with a note when the runs differ in build profile or forwarded harness
-  flags. Either id missing is an error. Informational: exits 0. This was the
+  flags; if either row lacks typed context, it says comparability cannot be
+  established. Either id missing is an error. Informational: exits 0. This was the
   `--sql` query every round reached for.
 - `brokkr corpus-results --sql "<SELECT...>"` - read-only escape hatch, for the genuinely
   ad-hoc query no view covers. The standing rule: when an ad-hoc query recurs,

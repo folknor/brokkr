@@ -19,10 +19,10 @@
 
 pub mod canonical;
 pub mod contract;
-#[cfg(test)]
-pub(crate) mod fixture;
 pub mod diff;
 pub mod digest;
+#[cfg(test)]
+pub(crate) mod fixture;
 pub mod manifest;
 pub mod mutate;
 pub mod render;
@@ -113,7 +113,12 @@ fn refused((outcome, report): (Outcome, CheckReport)) -> Gate {
 fn baseline_material<T>(what: &str, read: io::Result<T>) -> io::Result<Result<T, String>> {
     match read {
         Ok(v) => Ok(Ok(v)),
-        Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::InvalidData) => {
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::InvalidData
+            ) =>
+        {
             Ok(Err(format!("{what}: {e}")))
         }
         Err(e) => Err(e),
@@ -183,8 +188,8 @@ pub fn compute(archive: &ArchiveView, mode: DigestMode) -> io::Result<(Digest, V
         let end = at + u64::from(r.run_length);
         while at < end {
             let n = end.min(next_zoom_boundary(at));
-            let length = u32::try_from(n - at)
-                .map_err(|_| digest::invalid("tile run exceeds u32"))?;
+            let length =
+                u32::try_from(n - at).map_err(|_| digest::invalid("tile run exceeds u32"))?;
             if let Some(last) = leaves.last_mut()
                 && last.tile_id + u64::from(last.run_length) == at
                 && last.hash == semantic
@@ -215,7 +220,8 @@ pub fn compute(archive: &ArchiveView, mode: DigestMode) -> io::Result<(Digest, V
 /// Parse the committed `contract.json`. A malformed committed contract is a
 /// BASELINE problem (exit 3), so the error string is surfaced as such.
 fn contract_from_file(path: &Path) -> io::Result<Result<ContractDoc, String>> {
-    let text = match baseline_material("committed corpus contract", std::fs::read_to_string(path))? {
+    let text = match baseline_material("committed corpus contract", std::fs::read_to_string(path))?
+    {
         Ok(t) => t,
         Err(msg) => return Ok(Err(msg)),
     };
@@ -449,7 +455,7 @@ fn svg_staleness(
         .and_then(serde_json::Value::as_str);
     let Some(recorded) = recorded else {
         return Ok(Ok(vec![
-            "contract records no style hash - run render-manifest".to_string()
+            "contract records no style hash - run render-manifest".to_string(),
         ]));
     };
     // The canonical style is corpus-global, one per corpus root
@@ -464,7 +470,7 @@ fn svg_staleness(
     };
     if recorded != style.hash_hex() {
         return Ok(Ok(vec![
-            "style hash differs from contract - run render-manifest".to_string()
+            "style hash differs from contract - run render-manifest".to_string(),
         ]));
     }
     let manifest = match baseline_material("corpus manifest", manifest::load(&manifest_path))? {
@@ -708,7 +714,8 @@ pub fn bless(
             return Ok(archive_refused("candidate build is dirty: elivagar"));
         }
         Some(serde_json::Value::Bool(false)) => {}
-        _ => warnings.push("elivagar build dirty flag is null/absent: reproducibility unproven".to_string()),
+        _ => warnings
+            .push("elivagar build dirty flag is null/absent: reproducibility unproven".to_string()),
     }
     if contract
         .input
@@ -802,7 +809,11 @@ pub fn bless(
             message: format!(
                 "blessed {} tiles ({})",
                 d.tiles,
-                if mode == DigestMode::Leaves { "leaves" } else { "buckets" }
+                if mode == DigestMode::Leaves {
+                    "leaves"
+                } else {
+                    "buckets"
+                }
             ),
             warnings,
             ..Default::default()
@@ -815,7 +826,7 @@ mod recorded_style_path_tests {
     //! `contract.json` is committed, so the style record must be corpus-relative
     //! whatever absolute path the caller handed in.
 
-    use super::{recorded_style_path, Path};
+    use super::{Path, recorded_style_path};
 
     #[test]
     fn canonical_style_records_relative() {
@@ -887,7 +898,11 @@ mod baseline_verdict_tests {
         intact_baseline(&dir.path);
         std::fs::remove_file(dir.path.join("leaves")).unwrap();
         assert_eq!(verdict(&dir.path), Outcome::BaselineTrouble);
-        std::fs::write(dir.path.join("leaves"), "elivagar-corpus-leaves v1\nnot a row\n").unwrap();
+        std::fs::write(
+            dir.path.join("leaves"),
+            "elivagar-corpus-leaves v1\nnot a row\n",
+        )
+        .unwrap();
         assert_eq!(verdict(&dir.path), Outcome::BaselineTrouble);
     }
 

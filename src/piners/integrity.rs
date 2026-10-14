@@ -62,7 +62,14 @@ pub fn assess(ids: &[String], stdout: &[u8], end: HarnessEnd, output_cut: bool) 
     let duplicates = report.take_duplicates();
     let rec = Reconciliation::reconcile(ids, &report, duplicates);
     let contract = contract::assess_contract(&report, ids, end);
-    RunAssessment { end, output_cut, report, rec, contract, truncated_tail }
+    RunAssessment {
+        end,
+        output_cut,
+        report,
+        rec,
+        contract,
+        truncated_tail,
+    }
 }
 
 impl RunAssessment {
@@ -90,7 +97,14 @@ impl RunAssessment {
             .report
             .probes
             .iter()
-            .filter(|p| p.outcome == report::HARNESS_ABORT && self.rec.valid.contains(&p.probe))
+            // `rec.valid` is built through `valid_disposition()` and excludes
+            // ids tainted by any invalid occurrence. Keep the same validator
+            // at this classification site so a raw outcome never counts as
+            // an abort on its own.
+            .filter(|p| {
+                p.valid_disposition() == Some(report::HARNESS_ABORT)
+                    && self.rec.valid.contains(&p.probe)
+            })
             .map(|p| p.probe.as_str())
             .collect();
         ids.sort_unstable();
@@ -134,7 +148,9 @@ impl RunAssessment {
             other => reasons.push(abnormal_reason(other, rec)),
         }
         if self.output_cut {
-            reasons.push("harness output did not close after exit (stdout may be truncated)".to_owned());
+            reasons.push(
+                "harness output did not close after exit (stdout may be truncated)".to_owned(),
+            );
         }
         // An abnormal end or a run_error already counted what went unreported.
         if !rec.complete()
@@ -151,13 +167,19 @@ impl RunAssessment {
             reasons.push(output::count(rec.invalid.len(), "invalid harness record"));
         }
         if !rec.duplicates.is_empty() {
-            reasons.push(output::count(rec.duplicates.len(), "repeated harness record"));
+            reasons.push(output::count(
+                rec.duplicates.len(),
+                "repeated harness record",
+            ));
         }
         if !rec.extras.is_empty() {
             reasons.push(output::count(rec.extras.len(), "report-only extra record"));
         }
         if !self.contract.violations.is_empty() {
-            reasons.push(output::count(self.contract.violations.len(), "contract violation"));
+            reasons.push(output::count(
+                self.contract.violations.len(),
+                "contract violation",
+            ));
         }
         reasons
     }
@@ -211,9 +233,18 @@ impl RunAssessment {
 /// after reporting all N` - the short form stored as the fail reason.
 pub fn abnormal_reason(end: HarnessEnd, rec: &Reconciliation) -> String {
     if rec.complete() {
-        format!("harness {} after reporting all {}", end.describe(), rec.selected)
+        format!(
+            "harness {} after reporting all {}",
+            end.describe(),
+            rec.selected
+        )
     } else {
-        format!("harness {} before reporting {} of {}", end.describe(), rec.unscored(), rec.selected)
+        format!(
+            "harness {} before reporting {} of {}",
+            end.describe(),
+            rec.unscored(),
+            rec.selected
+        )
     }
 }
 
@@ -303,7 +334,10 @@ impl Reconciliation {
     /// an invalid record), in selection order. What the isolation pass
     /// bisects.
     pub fn unreported(&self, ids: &[String]) -> Vec<String> {
-        ids.iter().filter(|id| !self.valid.contains(*id)).cloned().collect()
+        ids.iter()
+            .filter(|id| !self.valid.contains(*id))
+            .cloned()
+            .collect()
     }
 
     /// Every selected probe has a valid disposition.
@@ -351,11 +385,22 @@ impl Reconciliation {
         const MAX_LISTED: usize = 20;
         let mut lines = Vec::new();
         if !self.missing.is_empty() {
-            let shown: Vec<&str> =
-                self.missing.iter().take(MAX_LISTED).map(String::as_str).collect();
+            let shown: Vec<&str> = self
+                .missing
+                .iter()
+                .take(MAX_LISTED)
+                .map(String::as_str)
+                .collect();
             let more = self.missing.len().saturating_sub(MAX_LISTED);
-            let tail = if more > 0 { format!(" (and {more} more)") } else { String::new() };
-            lines.push(format!("missing (selected, no record): {}{tail}", shown.join(", ")));
+            let tail = if more > 0 {
+                format!(" (and {more} more)")
+            } else {
+                String::new()
+            };
+            lines.push(format!(
+                "missing (selected, no record): {}{tail}",
+                shown.join(", ")
+            ));
         }
         for i in &self.invalid {
             lines.push(format!("invalid record: {i}"));
@@ -550,7 +595,11 @@ not json at all
         // `e` has no record at all; `b` and `d` have invalid ones.
         assert_eq!(r.missing, ids(&["e"]));
         assert_eq!(r.invalid.len(), 3, "{:?}", r.invalid);
-        assert!(r.invalid[0].starts_with("b (outcome 'parity' with tier ''"), "{:?}", r.invalid);
+        assert!(
+            r.invalid[0].starts_with("b (outcome 'parity' with tier ''"),
+            "{:?}",
+            r.invalid
+        );
         assert!(r.invalid[1].starts_with("d (unparsable"));
         assert!(r.invalid[2].starts_with("not JSON"));
         assert_eq!(r.duplicates.len(), 1);
@@ -590,7 +639,10 @@ not json at all
         assert_eq!(r.valid.len(), 1);
         assert_eq!(r.extras, ids(&["zz"]));
         assert_eq!(r.protocol_violations(), 1);
-        assert_eq!(r.summary(), "1 selected, 1 scored, 0 missing, 1 report-only extra");
+        assert_eq!(
+            r.summary(),
+            "1 selected, 1 scored, 0 missing, 1 report-only extra"
+        );
     }
 
     #[test]
@@ -599,14 +651,21 @@ not json at all
         assert_eq!(r.summary(), "2 selected, 0 scored, 2 missing");
         assert_eq!(r.protocol_violations(), 0);
         let lines = r.detail_lines();
-        assert_eq!(lines, vec!["missing (selected, no record): a, b".to_owned()]);
+        assert_eq!(
+            lines,
+            vec!["missing (selected, no record): a, b".to_owned()]
+        );
     }
 
     #[test]
     fn the_missing_list_is_capped_with_a_count() {
         let sel: Vec<String> = (0..25).map(|i| format!("p{i}")).collect();
         let r = Reconciliation::reconcile(&sel, &parse(b""), Vec::new());
-        assert!(r.detail_lines()[0].ends_with("(and 5 more)"), "{:?}", r.detail_lines());
+        assert!(
+            r.detail_lines()[0].ends_with("(and 5 more)"),
+            "{:?}",
+            r.detail_lines()
+        );
     }
 
     fn incomplete() -> Reconciliation {
@@ -624,20 +683,56 @@ not json at all
     #[test]
     fn isolation_triggers_only_on_an_abnormal_end_with_unreported_probes() {
         let inc = incomplete();
-        assert_eq!(isolation_trigger(HarnessEnd::Code(2), &inc, false, false), Trigger::Isolate);
-        assert_eq!(isolation_trigger(HarnessEnd::Code(101), &inc, false, false), Trigger::Isolate);
-        assert_eq!(isolation_trigger(HarnessEnd::Signal(11), &inc, false, false), Trigger::Isolate);
-        assert_eq!(isolation_trigger(HarnessEnd::Code(-1), &inc, false, false), Trigger::Isolate);
+        assert_eq!(
+            isolation_trigger(HarnessEnd::Code(2), &inc, false, false),
+            Trigger::Isolate
+        );
+        assert_eq!(
+            isolation_trigger(HarnessEnd::Code(101), &inc, false, false),
+            Trigger::Isolate
+        );
+        assert_eq!(
+            isolation_trigger(HarnessEnd::Signal(11), &inc, false, false),
+            Trigger::Isolate
+        );
+        assert_eq!(
+            isolation_trigger(HarnessEnd::Code(-1), &inc, false, false),
+            Trigger::Isolate
+        );
         // Completed statuses never isolate, even when probes are missing.
-        assert_eq!(isolation_trigger(HarnessEnd::Code(0), &inc, false, false), Trigger::CompletedStatus);
-        assert_eq!(isolation_trigger(HarnessEnd::Code(1), &inc, false, false), Trigger::CompletedStatus);
-        assert_eq!(isolation_trigger(HarnessEnd::Interrupted, &inc, false, false), Trigger::Interrupted);
-        assert_eq!(isolation_trigger(HarnessEnd::SpawnFailed, &inc, false, false), Trigger::SpawnFailed);
-        assert_eq!(isolation_trigger(HarnessEnd::Backstop, &inc, false, false), Trigger::Backstop);
-        assert_eq!(isolation_trigger(HarnessEnd::Code(2), &inc, false, true), Trigger::Disabled);
+        assert_eq!(
+            isolation_trigger(HarnessEnd::Code(0), &inc, false, false),
+            Trigger::CompletedStatus
+        );
+        assert_eq!(
+            isolation_trigger(HarnessEnd::Code(1), &inc, false, false),
+            Trigger::CompletedStatus
+        );
+        assert_eq!(
+            isolation_trigger(HarnessEnd::Interrupted, &inc, false, false),
+            Trigger::Interrupted
+        );
+        assert_eq!(
+            isolation_trigger(HarnessEnd::SpawnFailed, &inc, false, false),
+            Trigger::SpawnFailed
+        );
+        assert_eq!(
+            isolation_trigger(HarnessEnd::Backstop, &inc, false, false),
+            Trigger::Backstop
+        );
+        assert_eq!(
+            isolation_trigger(HarnessEnd::Code(2), &inc, false, true),
+            Trigger::Disabled
+        );
         // A run_error is the harness naming its own failure: never bisected.
-        assert_eq!(isolation_trigger(HarnessEnd::Code(2), &inc, true, false), Trigger::RunError);
-        assert_eq!(isolation_trigger(HarnessEnd::Interrupted, &inc, true, false), Trigger::Interrupted);
+        assert_eq!(
+            isolation_trigger(HarnessEnd::Code(2), &inc, true, false),
+            Trigger::RunError
+        );
+        assert_eq!(
+            isolation_trigger(HarnessEnd::Interrupted, &inc, true, false),
+            Trigger::Interrupted
+        );
         // A teardown crash after complete reporting has nothing to bisect.
         assert_eq!(
             isolation_trigger(HarnessEnd::Signal(6), &complete(), false, false),
@@ -656,7 +751,10 @@ not json at all
             "harness killed by signal 11 before reporting 2 of 2"
         );
         let after = abnormal_end_line(HarnessEnd::Signal(6), &complete());
-        assert!(after.starts_with("harness killed by signal 6 after reporting all 1 selected"), "{after}");
+        assert!(
+            after.starts_with("harness killed by signal 6 after reporting all 1 selected"),
+            "{after}"
+        );
         assert!(after.contains("teardown"));
     }
 
@@ -665,7 +763,10 @@ not json at all
         use std::os::unix::process::ExitStatusExt;
         let killed = std::process::ExitStatus::from_raw(9);
         assert_eq!(HarnessEnd::from_status(&killed, true), HarnessEnd::Backstop);
-        assert_eq!(HarnessEnd::from_status(&killed, false), HarnessEnd::Signal(9));
+        assert_eq!(
+            HarnessEnd::from_status(&killed, false),
+            HarnessEnd::Signal(9)
+        );
         let two = std::process::ExitStatus::from_raw(2 << 8);
         assert_eq!(HarnessEnd::from_status(&two, false), HarnessEnd::Code(2));
     }
@@ -673,11 +774,18 @@ not json at all
     const V1: &str = "\"version\":1";
 
     fn clean_stream(probes: &[&str], outcome: &str, code: i32) -> String {
-        let mut s = format!("{{\"kind\":\"run_start\",{V1}}}\n{{\"kind\":\"setup_complete\",{V1}}}\n");
+        let mut s =
+            format!("{{\"kind\":\"run_start\",{V1}}}\n{{\"kind\":\"setup_complete\",{V1}}}\n");
         for p in probes {
-            s.push_str(&format!("{{\"kind\":\"probe_start\",{V1},\"probe\":\"{p}\"}}\n"));
-            s.push_str(&format!("{{\"probe\":\"{p}\",\"outcome\":\"{outcome}\"}}\n"));
-            s.push_str(&format!("{{\"kind\":\"probe_end\",{V1},\"probe\":\"{p}\"}}\n"));
+            s.push_str(&format!(
+                "{{\"kind\":\"probe_start\",{V1},\"probe\":\"{p}\"}}\n"
+            ));
+            s.push_str(&format!(
+                "{{\"probe\":\"{p}\",\"outcome\":\"{outcome}\"}}\n"
+            ));
+            s.push_str(&format!(
+                "{{\"kind\":\"probe_end\",{V1},\"probe\":\"{p}\"}}\n"
+            ));
         }
         s.push_str(&format!("{{\"kind\":\"run_end\",{V1},\"exit\":{code}}}\n"));
         s
@@ -685,16 +793,37 @@ not json at all
 
     #[test]
     fn a_clean_contract_stream_completes_and_a_harness_abort_counts() {
-        let a = assess(&ids(&["a", "b"]), clean_stream(&["a", "b"], "harness_abort", 1).as_bytes(), HarnessEnd::Code(1), false);
+        let a = assess(
+            &ids(&["a", "b"]),
+            clean_stream(&["a", "b"], "harness_abort", 1).as_bytes(),
+            HarnessEnd::Code(1),
+            false,
+        );
         assert!(a.completed(), "{:?}", a.contract.violations);
         assert_eq!(a.harness_aborts(), vec!["a", "b"]);
         // Exit 1 explained by pinned breaks is acceptable.
         assert!(a.failure_reasons(true).is_empty());
         // The same stream without its run_end does not complete.
-        let cut = clean_stream(&["a"], "no_tv_data", 0).replace(&format!("{{\"kind\":\"run_end\",{V1},\"exit\":0}}\n"), "");
+        let cut = clean_stream(&["a"], "no_tv_data", 0)
+            .replace(&format!("{{\"kind\":\"run_end\",{V1},\"exit\":0}}\n"), "");
         let a = assess(&ids(&["a"]), cut.as_bytes(), HarnessEnd::Code(0), false);
         assert!(!a.completed());
-        assert!(a.failure_reasons(false).iter().any(|r| r == "1 contract violation"));
+        assert!(
+            a.failure_reasons(false)
+                .iter()
+                .any(|r| r == "1 contract violation")
+        );
+    }
+
+    #[test]
+    fn malformed_harness_abort_is_not_scored_as_an_abort() {
+        let stream = clean_stream(&["a"], "harness_abort", 1).replace(
+            r#""outcome":"harness_abort""#,
+            r#""outcome":"harness_abort","acceptance":{"tier":"accepted"}"#,
+        );
+        let a = assess(&ids(&["a"]), stream.as_bytes(), HarnessEnd::Code(1), false);
+        assert!(a.rec.valid.is_empty());
+        assert!(a.harness_aborts().is_empty());
     }
 
     #[test]
@@ -707,7 +836,10 @@ not json at all
         let a = assess(&ids(&["a", "b"]), nd.as_bytes(), HarnessEnd::Code(2), false);
         let r = a.failure_reasons(false);
         assert_eq!(r[0], "run_error at stage feed_load (feed eth): oom");
-        assert_eq!(r[1], "2 of 2 selected probes unfinished (the run_error ended the run)");
+        assert_eq!(
+            r[1],
+            "2 of 2 selected probes unfinished (the run_error ended the run)"
+        );
         // Unfinished work is not a protocol violation, nor a second abnormal-exit reason.
         assert_eq!(r.len(), 2, "{r:?}");
         assert_eq!(a.violations(), 0);
@@ -716,18 +848,37 @@ not json at all
 
     #[test]
     fn a_fragment_cut_by_a_signal_is_context_not_a_violation() {
-        let nd = format!("{{\"kind\":\"run_start\",{V1}}}\n{{\"kind\":\"setup_complete\",{V1}}}\n{{\"kind\":\"probe_start\",{V1},\"probe\":\"a\"}}\n{{\"probe\":\"a\",\"outc");
+        let nd = format!(
+            "{{\"kind\":\"run_start\",{V1}}}\n{{\"kind\":\"setup_complete\",{V1}}}\n{{\"kind\":\"probe_start\",{V1},\"probe\":\"a\"}}\n{{\"probe\":\"a\",\"outc"
+        );
         let a = assess(&ids(&["a"]), nd.as_bytes(), HarnessEnd::Signal(9), false);
-        assert_eq!(a.violations(), 0, "{:?} {:?}", a.rec.invalid, a.contract.violations);
+        assert_eq!(
+            a.violations(),
+            0,
+            "{:?} {:?}",
+            a.rec.invalid,
+            a.contract.violations
+        );
         let ctx = a.context_lines();
-        assert!(ctx.iter().any(|l| l == "started, no end observed: a"), "{ctx:?}");
-        assert!(ctx.iter().any(|l| l.starts_with("final line cut off")), "{ctx:?}");
+        assert!(
+            ctx.iter().any(|l| l == "started, no end observed: a"),
+            "{ctx:?}"
+        );
+        assert!(
+            ctx.iter().any(|l| l.starts_with("final line cut off")),
+            "{ctx:?}"
+        );
         // On a clean exit the same fragment is an invalid record.
         let a = assess(&ids(&["a"]), nd.as_bytes(), HarnessEnd::Code(0), false);
         assert_eq!(a.rec.invalid.len(), 1);
         // Complete JSON with invalid fields, unterminated, on an abnormal
         // end, is not a fragment: it stays an invalid record.
-        let a = assess(&ids(&["a"]), b"{\"probe\":\"a\"}", HarnessEnd::Code(2), false);
+        let a = assess(
+            &ids(&["a"]),
+            b"{\"probe\":\"a\"}",
+            HarnessEnd::Code(2),
+            false,
+        );
         assert_eq!(a.rec.invalid.len(), 1, "{:?}", a.truncated_tail);
         assert!(a.truncated_tail.is_none());
     }
@@ -755,7 +906,9 @@ not json at all
             assert!(a.rec.valid.is_empty(), "{extra}");
             assert_eq!(a.rec.invalid.len(), 1, "{extra}");
             assert!(
-                a.rec.invalid[0].contains(&format!("its disposition field {shown} contradicts the derived label \"accepted\"")),
+                a.rec.invalid[0].contains(&format!(
+                    "its disposition field {shown} contradicts the derived label \"accepted\""
+                )),
                 "{extra}: {:?}",
                 a.rec.invalid
             );
@@ -764,7 +917,12 @@ not json at all
         // An invalid outcome/tier stays invalid even when the field agrees
         // with the derived fallback.
         let nd = "{\"probe\":\"a\",\"outcome\":\"parity\",\"disposition\":\"parity\"}\n";
-        assert!(assess(&sel, nd.as_bytes(), HarnessEnd::Code(0), false).rec.valid.is_empty());
+        assert!(
+            assess(&sel, nd.as_bytes(), HarnessEnd::Code(0), false)
+                .rec
+                .valid
+                .is_empty()
+        );
     }
 
     #[test]
@@ -784,7 +942,10 @@ not json at all
         let sel = ids(&["a"]);
         let a_ok = "{\"probe\":\"a\",\"outcome\":\"no_tv_data\"}\n";
         // Unparsable, and parseable but contradictory: both invalid plus extra.
-        for bad in ["{\"probe\":\"zz\"}\n", "{\"probe\":\"zz\",\"outcome\":\"no_tv_data\",\"disposition\":\"x\"}\n"] {
+        for bad in [
+            "{\"probe\":\"zz\"}\n",
+            "{\"probe\":\"zz\",\"outcome\":\"no_tv_data\",\"disposition\":\"x\"}\n",
+        ] {
             let nd = format!("{a_ok}{bad}");
             let a = assess(&sel, nd.as_bytes(), HarnessEnd::Code(0), false);
             assert_eq!(a.rec.invalid.len(), 1, "{bad}");
@@ -794,9 +955,18 @@ not json at all
 
     #[test]
     fn no_contract_is_said_and_keeps_the_old_rules() {
-        let a = assess(&ids(&["a"]), b"{\"probe\":\"a\",\"outcome\":\"no_tv_data\"}\n", HarnessEnd::Code(0), false);
+        let a = assess(
+            &ids(&["a"]),
+            b"{\"probe\":\"a\",\"outcome\":\"no_tv_data\"}\n",
+            HarnessEnd::Code(0),
+            false,
+        );
         assert!(a.completed());
-        assert!(a.detail_lines().iter().any(|l| l.starts_with("no contract observed")));
+        assert!(
+            a.detail_lines()
+                .iter()
+                .any(|l| l.starts_with("no contract observed"))
+        );
         assert!(!a.detail_lines().iter().any(|l| l.contains("old harness")));
     }
 }

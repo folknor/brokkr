@@ -10,7 +10,7 @@
 //! outside a target region, so a textlint `pattern` can be scoped to match only
 //! in code, only in string literals, or only in comments.
 
-use rustc_lexer::{tokenize, LiteralKind, TokenKind};
+use rustc_lexer::{LiteralKind, TokenKind, tokenize};
 
 /// Which lexical region a byte belongs to. Numeric literals, identifiers,
 /// punctuation and whitespace are all [`Region::Code`]; only *textual* literals

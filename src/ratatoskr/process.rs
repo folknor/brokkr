@@ -65,8 +65,8 @@ pub fn send_signal(pid: u32, signum: i32) -> Result<(), DevError> {
 /// cooperative SIGTERM, `--hard`, `MockServer::shutdown`).
 #[allow(dead_code)]
 pub fn send_signal_pgrp(pid: u32, signum: i32) -> Result<(), DevError> {
-    let signed = i32::try_from(pid)
-        .map_err(|_| DevError::Build(format!("pid {pid} does not fit pid_t")))?;
+    let signed =
+        i32::try_from(pid).map_err(|_| DevError::Build(format!("pid {pid} does not fit pid_t")))?;
     // SAFETY: `kill(-pgid, sig)` is async-signal-safe and takes plain
     // integers. PIDs in the valid kernel range fit in i32 (kernel.pid_max
     // < 2^22), and we just type-checked.
@@ -125,10 +125,7 @@ pub enum SentinelOutcome {
 /// the inotify-less polling implementation. inotify support could be
 /// layered later if a class of tests benefits from sub-50ms latency.
 #[allow(dead_code)]
-pub fn wait_for_sentinel(
-    path: &Path,
-    backstop: Duration,
-) -> Result<SentinelOutcome, DevError> {
+pub fn wait_for_sentinel(path: &Path, backstop: Duration) -> Result<SentinelOutcome, DevError> {
     let deadline = Instant::now() + backstop;
     loop {
         if path.exists() {
@@ -175,12 +172,9 @@ pub fn snapshot_proc(pid: u32, out_dir: &Path) -> Result<(), DevError> {
         let src = Path::new("/proc").join(pid.to_string()).join(probe);
         let body = match fs::read(&src) {
             Ok(bytes) => bytes,
-            Err(err) => format!(
-                "[brokkr] could not read {}: {}\n",
-                src.display(),
-                err
-            )
-            .into_bytes(),
+            Err(err) => {
+                format!("[brokkr] could not read {}: {}\n", src.display(), err).into_bytes()
+            }
         };
         let dst = out_dir.join(format!("proc-{probe}.txt"));
         fs::write(&dst, body)?;

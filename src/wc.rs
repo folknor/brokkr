@@ -5,7 +5,6 @@
 //! excluded) and prints those over the threshold, largest first.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::error::DevError;
 use crate::output;
@@ -50,7 +49,10 @@ pub fn run(project_root: &Path, threshold: usize) -> Result<(), DevError> {
     for e in &entries {
         println!("{:>width$}  {}", e.lines, e.path.display());
     }
-    output::wc_msg(&format!("{} over {threshold} lines", output::count(entries.len(), "file")));
+    output::wc_msg(&format!(
+        "{} over {threshold} lines",
+        output::count(entries.len(), "file")
+    ));
 
     Ok(())
 }
@@ -70,32 +72,10 @@ fn count_digits(n: usize) -> usize {
 
 /// Tracked + untracked-not-ignored `.rs` files, via `git ls-files`.
 fn rust_files(project_root: &Path) -> Result<Vec<PathBuf>, DevError> {
-    let output = Command::new("git")
-        .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
-        .current_dir(project_root)
-        .output()
-        .map_err(|error| DevError::Spawn { program: "git ls-files".into(), error })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        return Err(DevError::Subprocess {
-            program: "git ls-files".into(),
-            code: output.status.code(),
-            stderr,
-        });
-    }
-    let mut files = Vec::new();
-    for raw in output.stdout.split(|b| *b == 0) {
-        if raw.is_empty() {
-            continue;
-        }
-        if let Ok(s) = std::str::from_utf8(raw) {
-            let path = PathBuf::from(s);
-            if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-                files.push(path);
-            }
-        }
-    }
-    Ok(files)
+    Ok(crate::gremlins::tracked_files(project_root)?
+        .into_iter()
+        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("rs"))
+        .collect())
 }
 
 #[cfg(test)]

@@ -90,7 +90,10 @@ fn main() {
 
     let semver = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_owned());
 
-    println!("cargo:rustc-env=BROKKR_LONG_VERSION={semver} ({hash} {})", build_time());
+    println!(
+        "cargo:rustc-env=BROKKR_LONG_VERSION={semver} ({hash} {})",
+        build_time()
+    );
 
     // Rerun triggers. The git files are located by asking git rather than
     // assuming `.git/` is a directory beside this script: in a linked worktree
@@ -130,7 +133,14 @@ fn main() {
         }
         rerun_if_exists(&common.join("packed-refs"));
     }
-    for input in ["src", "docs", "scripts", "build.rs", "Cargo.toml", "Cargo.lock"] {
+    for input in [
+        "src",
+        "docs",
+        "scripts",
+        "build.rs",
+        "Cargo.toml",
+        "Cargo.lock",
+    ] {
         rerun_if_exists(Path::new(input));
     }
 }

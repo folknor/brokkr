@@ -155,7 +155,8 @@ pub fn run(args: &BenchArgs) -> Result<(), DevError> {
     // directory above it.
     let parent_build_root = (build_root != project_root).then_some(build_root.as_path());
     // Worktree, toolchain and target-dir narration is run-log only.
-    let _log = crate::check_cmd::RunLog::begin(&project_root, crate::check_cmd::run_log_kind::BENCH);
+    let _log =
+        crate::check_cmd::RunLog::begin(&project_root, crate::check_cmd::run_log_kind::BENCH);
     with_worktree(
         project,
         &project_root,
@@ -281,7 +282,9 @@ fn resolve_stored_baseline(home: &Path, build_root: &Path, name: &str) -> Result
     let legacy: Vec<String> = stored_baseline_names(home)
         .into_iter()
         .filter(|n| {
-            n.len() >= 4 && n.bytes().all(|b| b.is_ascii_hexdigit()) && commit.full.starts_with(n.as_str())
+            n.len() >= 4
+                && n.bytes().all(|b| b.is_ascii_hexdigit())
+                && commit.full.starts_with(n.as_str())
         })
         .collect();
     match legacy.as_slice() {
@@ -346,8 +349,9 @@ fn check_environments(home: &Path, a: &str, b: &str, lenient: bool) -> Result<()
         return Ok(());
     }
 
-    let mut lines =
-        vec![format!("'{a}' and '{b}' were measured under different conditions:")];
+    let mut lines = vec![format!(
+        "'{a}' and '{b}' were measured under different conditions:"
+    )];
     for (field, mine, theirs) in &diffs {
         lines.push(format!("  {field}: {a}={mine} / {b}={theirs}"));
     }
@@ -406,22 +410,18 @@ fn resolve_baseline_name(build_root: &Path, args: &BenchArgs) -> Result<String, 
     Ok(short)
 }
 
-/// True when the tree has uncommitted tracked changes or untracked files.
+/// True when the tree has uncommitted changes outside `.brokkr/`.
+///
+/// The shared git helper excludes `.brokkr/`, so saved benchmark baselines
+/// never make a later run look dirty, and judges a toolchain file the lock
+/// moved aside by its moved bytes.
 fn is_dirty(build_root: &Path) -> Result<bool, DevError> {
-    Ok(!git(build_root, &["status", "--porcelain"])?.is_empty())
-}
-
-fn git(dir: &Path, args: &[&str]) -> Result<String, DevError> {
-    let captured = output::run_captured("git", args, dir)?;
-    if !captured.status.success() {
-        let stderr = String::from_utf8_lossy(&captured.stderr);
-        return Err(DevError::Subprocess {
-            program: format!("git {}", args.join(" ")),
-            code: captured.status.code(),
-            stderr: stderr.trim().to_owned(),
-        });
-    }
-    Ok(String::from_utf8_lossy(&captured.stdout).trim().to_owned())
+    crate::git::has_uncommitted(build_root).ok_or_else(|| {
+        DevError::Preflight(vec![format!(
+            "could not determine git status for {}",
+            build_root.display()
+        )])
+    })
 }
 
 /// Print the recorded baselines and the environment each was taken under.
@@ -488,8 +488,8 @@ fn cargo_bench(
     // artifact a later commit built, so cargo calls it fresh, skips the rebuild,
     // and the run measures the wrong commit's code under the right commit's
     // baseline name. It reports success, and the number looks entirely ordinary.
-    let target_dir = crate::worktree::isolated_target_dir(build_root)
-        .map(|dir| dir.display().to_string());
+    let target_dir =
+        crate::worktree::isolated_target_dir(build_root).map(|dir| dir.display().to_string());
     if let Some(dir) = &target_dir {
         output::detail(&format!("isolating worktree build target dir -> {dir}"));
     }
@@ -506,5 +506,8 @@ fn cargo_bench(
     }
     // Cargo and criterion printed their own diagnostics; echoing the exit code
     // back as `cargo bench exited with code N` under `[error]` added nothing.
-    Err(DevError::Reported(format!("cargo bench failed (exit code {})", out.code)))
+    Err(DevError::Reported(format!(
+        "cargo bench failed (exit code {})",
+        out.code
+    )))
 }

@@ -2,14 +2,63 @@
 //!
 //! Inputs are each validator's parse *result*: `Ok(set)` of normalized
 //! diagnostics or `Err(reason)` when the tool produced no parsable output.
-//! The disposition is the gated unit ([`super::DISPOSITION_LABELS`]); the
-//! [`Signature`] refines a `divergent` outcome for the breakdown but is never
-//! gated - mirroring how `corpus` gates the tier and keeps `count_tier`
-//! diagnostic.
+//! The three agreement outcomes are pinnable; tool failures are typed
+//! separately and cannot satisfy a pin. A divergence signature is carried by
+//! the `Divergent` variant instead of an optional side field.
 
 use std::collections::BTreeSet;
 
-use super::DiagSet;
+use super::{DiagSet, PinnableDisposition};
+
+/// Which validator failed to produce a comparable diagnostic set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Validator {
+    Piners,
+    PineLint,
+}
+
+/// The classified result for one probe. Only the three agreement states are
+/// pinnable; a validator failure carries its source and cannot accidentally
+/// compare equal to a registry expectation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LintDisposition {
+    AgreeClean,
+    AgreeFlagged,
+    Divergent(Signature),
+    ToolError(Validator),
+}
+
+impl LintDisposition {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AgreeClean => "agree_clean",
+            Self::AgreeFlagged => "agree_flagged",
+            Self::Divergent(_) => "divergent",
+            Self::ToolError(Validator::Piners) => "piners_error",
+            Self::ToolError(Validator::PineLint) => "lint_error",
+        }
+    }
+
+    pub fn pinnable(self) -> Option<PinnableDisposition> {
+        match self {
+            Self::AgreeClean => Some(PinnableDisposition::AgreeClean),
+            Self::AgreeFlagged => Some(PinnableDisposition::AgreeFlagged),
+            Self::Divergent(_) => Some(PinnableDisposition::Divergent),
+            Self::ToolError(_) => None,
+        }
+    }
+
+    pub fn signature(self) -> Option<Signature> {
+        match self {
+            Self::Divergent(signature) => Some(signature),
+            Self::AgreeClean | Self::AgreeFlagged | Self::ToolError(_) => None,
+        }
+    }
+
+    pub fn is_tool_error(self) -> bool {
+        matches!(self, Self::ToolError(_))
+    }
+}
 
 /// How a `divergent` probe's two diagnostic sets disagree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,13 +86,10 @@ impl Signature {
     }
 }
 
-/// The classified result for one probe.
+/// The classified result and diagnostic details for one probe.
 #[derive(Debug, Clone)]
 pub struct LintOutcome {
-    /// The gated disposition label (one of [`super::DISPOSITION_LABELS`]).
-    pub disposition: &'static str,
-    /// Divergence breakdown; `Some` only when `disposition == "divergent"`.
-    pub signature: Option<Signature>,
+    pub disposition: LintDisposition,
     /// Count of piners diagnostics (error+warning), 0 on a piners error.
     pub piners_count: usize,
     /// Count of pine-lint diagnostics (error+warning), 0 on a lint error.
@@ -58,32 +104,29 @@ pub struct LintOutcome {
 pub fn classify(piners: Result<&DiagSet, &str>, lint: Result<&DiagSet, &str>) -> LintOutcome {
     match (piners, lint) {
         (Err(e), _) => LintOutcome {
-            disposition: "piners_error",
-            signature: None,
+            disposition: LintDisposition::ToolError(Validator::Piners),
             piners_count: 0,
             lint_count: lint.map(BTreeSet::len).unwrap_or(0),
             error: Some(e.to_owned()),
         },
         (_, Err(e)) => LintOutcome {
-            disposition: "lint_error",
-            signature: None,
+            disposition: LintDisposition::ToolError(Validator::PineLint),
             piners_count: piners.map(BTreeSet::len).unwrap_or(0),
             lint_count: 0,
             error: Some(e.to_owned()),
         },
         (Ok(p), Ok(l)) => {
-            let (disposition, signature) = if p == l {
+            let disposition = if p == l {
                 if p.is_empty() {
-                    ("agree_clean", None)
+                    LintDisposition::AgreeClean
                 } else {
-                    ("agree_flagged", None)
+                    LintDisposition::AgreeFlagged
                 }
             } else {
-                ("divergent", Some(signature(p, l)))
+                LintDisposition::Divergent(signature(p, l))
             };
             LintOutcome {
                 disposition,
-                signature,
                 piners_count: p.len(),
                 lint_count: l.len(),
                 error: None,
@@ -129,15 +172,15 @@ mod tests {
     #[test]
     fn both_empty_is_agree_clean() {
         let out = classify(Ok(&DiagSet::new()), Ok(&DiagSet::new()));
-        assert_eq!(out.disposition, "agree_clean");
-        assert!(out.signature.is_none());
+        assert_eq!(out.disposition, LintDisposition::AgreeClean);
+        assert_eq!(out.disposition.signature(), None);
     }
 
     #[test]
     fn identical_nonempty_is_agree_flagged() {
         let s = set(&[(3, 5, Severity::Error)]);
         let out = classify(Ok(&s), Ok(&s));
-        assert_eq!(out.disposition, "agree_flagged");
+        assert_eq!(out.disposition, LintDisposition::AgreeFlagged);
     }
 
     #[test]
@@ -145,8 +188,10 @@ mod tests {
         let p = set(&[(3, 5, Severity::Error), (4, 1, Severity::Warning)]);
         let l = set(&[(3, 5, Severity::Error)]);
         let out = classify(Ok(&p), Ok(&l));
-        assert_eq!(out.disposition, "divergent");
-        assert_eq!(out.signature, Some(Signature::PinersOnly));
+        assert_eq!(
+            out.disposition,
+            LintDisposition::Divergent(Signature::PinersOnly)
+        );
     }
 
     #[test]
@@ -154,7 +199,7 @@ mod tests {
         let p = set(&[(3, 5, Severity::Error)]);
         let l = set(&[(3, 5, Severity::Error), (4, 1, Severity::Warning)]);
         let out = classify(Ok(&p), Ok(&l));
-        assert_eq!(out.signature, Some(Signature::LintOnly));
+        assert_eq!(out.disposition.signature(), Some(Signature::LintOnly));
     }
 
     #[test]
@@ -162,7 +207,10 @@ mod tests {
         let p = set(&[(3, 5, Severity::Error)]);
         let l = set(&[(3, 5, Severity::Warning)]);
         let out = classify(Ok(&p), Ok(&l));
-        assert_eq!(out.signature, Some(Signature::SeverityMismatch));
+        assert_eq!(
+            out.disposition.signature(),
+            Some(Signature::SeverityMismatch)
+        );
     }
 
     #[test]
@@ -170,14 +218,17 @@ mod tests {
         let p = set(&[(3, 5, Severity::Error)]);
         let l = set(&[(9, 2, Severity::Error)]);
         let out = classify(Ok(&p), Ok(&l));
-        assert_eq!(out.signature, Some(Signature::Mixed));
+        assert_eq!(out.disposition.signature(), Some(Signature::Mixed));
     }
 
     #[test]
     fn piners_error_takes_precedence() {
         let l = set(&[(3, 5, Severity::Error)]);
         let out = classify(Err("boom"), Ok(&l));
-        assert_eq!(out.disposition, "piners_error");
+        assert_eq!(
+            out.disposition,
+            LintDisposition::ToolError(Validator::Piners)
+        );
         assert_eq!(out.error.as_deref(), Some("boom"));
         assert_eq!(out.lint_count, 1);
     }
@@ -186,7 +237,10 @@ mod tests {
     fn lint_error_when_piners_ok() {
         let p = set(&[(3, 5, Severity::Error)]);
         let out = classify(Ok(&p), Err("no json"));
-        assert_eq!(out.disposition, "lint_error");
+        assert_eq!(
+            out.disposition,
+            LintDisposition::ToolError(Validator::PineLint)
+        );
         assert_eq!(out.piners_count, 1);
     }
 }

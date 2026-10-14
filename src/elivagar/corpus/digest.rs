@@ -196,7 +196,12 @@ pub fn digest_text(d: &Digest) -> String {
         d.tiles, d.entries, d.unique
     ));
     for z in &d.zooms {
-        out.push_str(&format!("zoom {} tiles {} hash {}\n", z.z, z.tiles, hex(z.hash)));
+        out.push_str(&format!(
+            "zoom {} tiles {} hash {}\n",
+            z.z,
+            z.tiles,
+            hex(z.hash)
+        ));
     }
     for b in &d.buckets {
         let (cz, x, y) = tile_id_to_zxy(b.cell);
@@ -273,10 +278,14 @@ fn parse_baseline_text(text: &str) -> io::Result<Baseline> {
                 };
             }
             Some("root") => {
-                root = Some(parse_hex(p.get(1).ok_or_else(|| invalid("root missing hash"))?)?);
+                root = Some(parse_hex(
+                    p.get(1).ok_or_else(|| invalid("root missing hash"))?,
+                )?);
             }
             Some("broot") => {
-                broot = Some(parse_hex(p.get(1).ok_or_else(|| invalid("broot missing hash"))?)?);
+                broot = Some(parse_hex(
+                    p.get(1).ok_or_else(|| invalid("broot missing hash"))?,
+                )?);
             }
             Some("tiles") => {
                 let t = parse_u64(p.get(1).copied())?;
@@ -296,7 +305,12 @@ fn parse_baseline_text(text: &str) -> io::Result<Baseline> {
                 let cell = parse_cell(strip(p.get(2).copied(), "cell=").as_deref())?;
                 let tiles = parse_u64(strip(p.get(3).copied(), "tiles=").as_deref())?;
                 let hash = parse_hex(p.get(5).ok_or_else(|| invalid("bucket missing hash"))?)?;
-                buckets.push(BucketDigest { z, cell, tiles, hash });
+                buckets.push(BucketDigest {
+                    z,
+                    cell,
+                    tiles,
+                    hash,
+                });
             }
             Some("") | None => {}
             Some(other) => return Err(invalid(format!("unrecognized digest line: {other}"))),
@@ -346,9 +360,7 @@ fn parse_leaves_text(text: &str) -> io::Result<Vec<LeafRun>> {
         // A leaf run is a span WITHIN one zoom (see `compute`), so a committed
         // run that crosses its zoom's end is damage - and left unchecked it
         // hands `fold_leaves` a per-tile loop of up to u32::MAX iterations.
-        if run_length == 0
-            || tile_id + u64::from(run_length) > next_zoom_boundary(tile_id)
-        {
+        if run_length == 0 || tile_id + u64::from(run_length) > next_zoom_boundary(tile_id) {
             return Err(invalid("leaf run length out of range for its zoom"));
         }
         out.push(LeafRun {
@@ -409,7 +421,9 @@ fn zooms_equal(a: &[ZoomDigest], b: &[ZoomDigest]) -> bool {
 // ---------------------------------------------------------------------------
 
 fn strip(token: Option<&str>, prefix: &str) -> Option<String> {
-    token.and_then(|t| t.strip_prefix(prefix)).map(str::to_string)
+    token
+        .and_then(|t| t.strip_prefix(prefix))
+        .map(str::to_string)
 }
 fn parse_u64(token: Option<&str>) -> io::Result<u64> {
     token
@@ -427,7 +441,9 @@ fn parse_u32(token: Option<&str>) -> io::Result<u32> {
         .ok_or_else(|| invalid("expected coordinate field"))
 }
 fn parse_cell(token: Option<&str>) -> io::Result<u64> {
-    let mut parts = token.ok_or_else(|| invalid("bucket cell missing"))?.split('/');
+    let mut parts = token
+        .ok_or_else(|| invalid("bucket cell missing"))?
+        .split('/');
     let z: u8 = parts
         .next()
         .and_then(|t| t.parse().ok())

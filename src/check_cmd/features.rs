@@ -203,6 +203,9 @@ mod features {
         ws: &WorkspaceFeatures,
     ) -> Projected {
         let Some(selected) = selected.iter().map(|n| ws.member(n)).collect::<Option<Vec<_>>>() else {
+            // An invalid `-p` selection has no workspace package set to
+            // project against. Preserve the tokens so Cargo can reject the
+            // selection, and do not announce unverified feature drops.
             return Projected::identity(tokens);
         };
         let mut out = Projected::default();

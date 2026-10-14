@@ -94,13 +94,8 @@ pub fn run(
         comparand.display()
     ));
 
-    let report = engine::regress(
-        current,
-        comparand,
-        &cfg,
-        super::eliv::Strictness::Strict,
-    )
-    .map_err(|e| failed(&format!("regress failed: {e}")))?;
+    let report = engine::regress(current, comparand, &cfg, super::eliv::Strictness::Strict)
+        .map_err(|e| failed(&format!("regress failed: {e}")))?;
     let passed = report.passed(&cfg);
 
     if json {

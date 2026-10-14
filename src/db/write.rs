@@ -42,16 +42,32 @@ impl ResultsDb {
         let pattern = prefix_pattern(uuid_prefix);
         let tx = self.conn.unchecked_transaction()?;
         let ids: Vec<i64> = {
-            let mut stmt = tx.prepare(&format!("SELECT id FROM runs WHERE uuid LIKE ?1 {ESCAPE}"))?;
+            let mut stmt =
+                tx.prepare(&format!("SELECT id FROM runs WHERE uuid LIKE ?1 {ESCAPE}"))?;
             let rows = stmt.query_map(rusqlite::params![pattern], |row| row.get::<_, i64>(0))?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
         for id in &ids {
-            tx.execute("DELETE FROM run_distribution WHERE run_id = ?1", rusqlite::params![id])?;
-            tx.execute("DELETE FROM run_iterations WHERE run_id = ?1", rusqlite::params![id])?;
-            tx.execute("DELETE FROM run_kv WHERE run_id = ?1", rusqlite::params![id])?;
-            tx.execute("DELETE FROM hotpath_functions WHERE run_id = ?1", rusqlite::params![id])?;
-            tx.execute("DELETE FROM hotpath_threads WHERE run_id = ?1", rusqlite::params![id])?;
+            tx.execute(
+                "DELETE FROM run_distribution WHERE run_id = ?1",
+                rusqlite::params![id],
+            )?;
+            tx.execute(
+                "DELETE FROM run_iterations WHERE run_id = ?1",
+                rusqlite::params![id],
+            )?;
+            tx.execute(
+                "DELETE FROM run_kv WHERE run_id = ?1",
+                rusqlite::params![id],
+            )?;
+            tx.execute(
+                "DELETE FROM hotpath_functions WHERE run_id = ?1",
+                rusqlite::params![id],
+            )?;
+            tx.execute(
+                "DELETE FROM hotpath_threads WHERE run_id = ?1",
+                rusqlite::params![id],
+            )?;
         }
         let removed = tx.execute(
             &format!("DELETE FROM runs WHERE uuid LIKE ?1 {ESCAPE}"),
@@ -161,7 +177,11 @@ fn insert_timings(conn: &rusqlite::Connection, run_id: i64, row: &RunRow) -> Res
 }
 
 /// The hotpath child rows, plus the thread summary into `run_kv`.
-fn insert_hotpath(conn: &rusqlite::Connection, run_id: i64, hp: &HotpathData) -> Result<(), DevError> {
+fn insert_hotpath(
+    conn: &rusqlite::Connection,
+    run_id: i64,
+    hp: &HotpathData,
+) -> Result<(), DevError> {
     for func in &hp.functions {
         conn.execute(
             "INSERT INTO hotpath_functions \
@@ -380,7 +400,11 @@ mod tests {
 
     fn kv_text(db: &ResultsDb, short: &str, key: &str) -> String {
         let rows = db.query_by_uuid(short).expect("query");
-        let pair = rows[0].kv.iter().find(|p| p.key == key).expect("key present");
+        let pair = rows[0]
+            .kv
+            .iter()
+            .find(|p| p.key == key)
+            .expect("key present");
         pair.value.to_string()
     }
 
@@ -392,7 +416,10 @@ mod tests {
         let db_path = crate::test_scratch::scratch("db-write", "kv_last_wins").join("t.db");
         let db = ResultsDb::open(&db_path).expect("open");
         let row = kv_row(
-            vec![KvPair::text("meta.cache", "harness"), KvPair::int("meta.cache", 7)],
+            vec![
+                KvPair::text("meta.cache", "harness"),
+                KvPair::int("meta.cache", 7),
+            ],
             None,
         );
         let (_, short) = db.insert(&row).expect("insert");
@@ -434,7 +461,11 @@ mod tests {
         let db = ResultsDb::open(&db_path).expect("open");
         let (_, short) = db.insert(&kv_row(Vec::new(), None)).expect("insert");
         assert!(db.delete_by_uuid_prefix("").is_err());
-        assert_eq!(db.query_by_uuid(&short).expect("query").len(), 1, "nothing deleted");
+        assert_eq!(
+            db.query_by_uuid(&short).expect("query").len(),
+            1,
+            "nothing deleted"
+        );
         assert_eq!(db.delete_by_uuid_prefix(&short).expect("delete"), 1);
     }
 

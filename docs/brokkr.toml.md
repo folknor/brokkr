@@ -616,7 +616,14 @@ diagnostics = "opaque"  # opaque | rustc                  (default: opaque)
   check mark) would trip the gremlin scan on `brokkr.toml` itself.
 - `match` - `exact` (whole trimmed output equals `expect`), `last-line` (last
   non-empty line equals `expect`; the default), or `contains` (substring).
-- `stream` - `stdout` (default), `stderr`, or `both` (concatenated).
+- `stream` - `stdout` (default), `stderr`, or `both`. `both` concatenates the
+  separately captured streams as stdout, a newline, then stderr; it cannot
+  preserve their original write order. `exact` compares that full combined
+  text after trimming, so it can match a stderr-only sentinel or an expected
+  value containing both streams. `last-line` uses the last non-empty line of
+  that concatenation, which comes from stderr whenever stderr has a non-empty
+  line. If the sentinel must follow actual print order, redirect both streams
+  into one stream in the command (for example, `2>&1`) and select that stream.
 - `stage` - where in the check pipeline the entry runs (below).
 - `diagnostics` - the output shape a **failure** is rendered against (below).
 

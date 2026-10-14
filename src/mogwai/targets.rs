@@ -100,9 +100,7 @@ pub(crate) fn format_index(cfg: &MogwaiConfig) -> String {
     let mut out = String::new();
 
     match cfg.bin_target() {
-        Some(bin) => out.push_str(&format!(
-            "  CLI      brokkr mogwai -- <args>   ({bin})\n"
-        )),
+        Some(bin) => out.push_str(&format!("  CLI      brokkr mogwai -- <args>   ({bin})\n")),
         None => out.push_str("  CLI      unavailable - [mogwai] names no package or bin\n"),
     }
 
@@ -172,12 +170,15 @@ mod tests {
     #[test]
     fn a_target_resolves_to_its_example_and_features() {
         let dir = tmpdir("a_target_resolves_to_its_example_and_features");
-        let cfg = config_with(&dir, &format!(
-            "{BASE}[mogwai.targets.screen_projection]\n\
+        let cfg = config_with(
+            &dir,
+            &format!(
+                "{BASE}[mogwai.targets.screen_projection]\n\
              package = \"mogwai-lab\"\n\
              example = \"screen_projection_bench\"\n\
              features = [\"hotpath\"]\n"
-        ));
+            ),
+        );
         let resolved = resolve(config(&cfg).unwrap(), Some("screen_projection"), &[]).unwrap();
         assert_eq!(resolved.name, "screen_projection");
         assert_eq!(resolved.build.package.as_deref(), Some("mogwai-lab"));
@@ -193,10 +194,13 @@ mod tests {
     #[test]
     fn call_site_features_append_to_the_registered_ones() {
         let dir = tmpdir("call_site_features_append_to_the_registered_ones");
-        let cfg = config_with(&dir, &format!(
-            "{BASE}[mogwai.targets.walk]\nexample = \"arrival_walk_bench\"\n\
+        let cfg = config_with(
+            &dir,
+            &format!(
+                "{BASE}[mogwai.targets.walk]\nexample = \"arrival_walk_bench\"\n\
              features = [\"hotpath\"]\n"
-        ));
+            ),
+        );
         let extra = vec![String::from("hotpath-alloc")];
         let resolved = resolve(config(&cfg).unwrap(), Some("walk"), &extra).unwrap();
         assert_eq!(resolved.build.features, vec!["hotpath", "hotpath-alloc"]);
@@ -207,10 +211,13 @@ mod tests {
         // `--hotpath` asks for the feature the target already registers, which
         // is the common case rather than an edge one.
         let dir = tmpdir("a_feature_already_registered_is_not_repeated");
-        let cfg = config_with(&dir, &format!(
-            "{BASE}[mogwai.targets.walk]\nexample = \"arrival_walk_bench\"\n\
+        let cfg = config_with(
+            &dir,
+            &format!(
+                "{BASE}[mogwai.targets.walk]\nexample = \"arrival_walk_bench\"\n\
              features = [\"hotpath\"]\n"
-        ));
+            ),
+        );
         let extra = vec![String::from("hotpath")];
         let resolved = resolve(config(&cfg).unwrap(), Some("walk"), &extra).unwrap();
         assert_eq!(resolved.build.features, vec!["hotpath"]);
@@ -219,9 +226,10 @@ mod tests {
     #[test]
     fn a_target_without_a_package_falls_back_to_the_mogwai_one() {
         let dir = tmpdir("a_target_without_a_package_falls_back_to_the_mogwai_one");
-        let cfg = config_with(&dir, &format!(
-            "{BASE}[mogwai.targets.walk]\nexample = \"arrival_walk_bench\"\n"
-        ));
+        let cfg = config_with(
+            &dir,
+            &format!("{BASE}[mogwai.targets.walk]\nexample = \"arrival_walk_bench\"\n"),
+        );
         let resolved = resolve(config(&cfg).unwrap(), Some("walk"), &[]).unwrap();
         assert_eq!(resolved.build.package.as_deref(), Some("mogwai-cli"));
     }
@@ -229,9 +237,10 @@ mod tests {
     #[test]
     fn an_unknown_target_lists_the_registered_ones_and_the_cli_form() {
         let dir = tmpdir("an_unknown_target_lists_the_registered_ones_and_the_cli_form");
-        let cfg = config_with(&dir, &format!(
-            "{BASE}[mogwai.targets.walk]\nexample = \"arrival_walk_bench\"\n"
-        ));
+        let cfg = config_with(
+            &dir,
+            &format!("{BASE}[mogwai.targets.walk]\nexample = \"arrival_walk_bench\"\n"),
+        );
         let err = resolve(config(&cfg).unwrap(), Some("nope"), &[]).unwrap_err();
         let DevError::Config(msg) = err else {
             panic!("expected DevError::Config, got {err:?}");
@@ -245,10 +254,13 @@ mod tests {
     #[test]
     fn the_index_names_the_cli_form_and_every_target() {
         let dir = tmpdir("the_index_names_the_cli_form_and_every_target");
-        let cfg = config_with(&dir, &format!(
-            "{BASE}[mogwai.targets.walk]\nexample = \"arrival_walk_bench\"\n\
+        let cfg = config_with(
+            &dir,
+            &format!(
+                "{BASE}[mogwai.targets.walk]\nexample = \"arrival_walk_bench\"\n\
              features = [\"hotpath\"]\n"
-        ));
+            ),
+        );
         let index = format_index(config(&cfg).unwrap());
         // The CLI surface is not in the registry, so the index has to say it
         // exists or it looks unavailable.

@@ -406,7 +406,10 @@ fn polygon_hole_escaping_its_outer_is_structural_not_tolerance() {
     let outer = &[(0, 0), (100, 0), (100, 100), (0, 100), (0, 0)][..];
     let hole_inside = &[(99, 50), (89, 50), (89, 60), (99, 60), (99, 50)][..];
     let hole_escaped = &[(101, 50), (91, 50), (91, 60), (101, 60), (101, 50)][..];
-    write_archive(&current, vec![(0, 0, 0, polygon_tile(&[outer, hole_inside]))]);
+    write_archive(
+        &current,
+        vec![(0, 0, 0, polygon_tile(&[outer, hole_inside]))],
+    );
     write_archive(
         &baseline,
         vec![(0, 0, 0, polygon_tile(&[outer, hole_escaped]))],

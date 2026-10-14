@@ -198,7 +198,13 @@ const ERROR_BODY_PREVIEW: usize = 300;
 /// carries that line plus a preview of the response body `--fail-with-body`
 /// kept, so an HTTP 500's explanation survives.
 fn run_curl_body(request_args: &[&str]) -> Result<String, DevError> {
-    let mut args = vec!["-sS", "--compressed", "--fail-with-body", "--max-time", "30"];
+    let mut args = vec![
+        "-sS",
+        "--compressed",
+        "--fail-with-body",
+        "--max-time",
+        "30",
+    ];
     args.extend_from_slice(request_args);
     let output = Command::new("curl")
         .args(&args)

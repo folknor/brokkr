@@ -27,9 +27,9 @@
 //!    refuse (exit 1) otherwise.
 //!
 //! Fail-open everywhere except a demonstrably held flock: an unreadable
-//! `/proc`, a missing `$HOME`, a missing lock file all exec. The guard is a
-//! benchmark-hygiene fence, not a security boundary - a wrong refusal breaks
-//! someone's build, a wrong pass costs one reap cycle.
+//! `/proc`, an unset or empty `$HOME`, or a missing lock file all exec. The
+//! guard is a benchmark-hygiene fence, not a security boundary - a wrong
+//! refusal breaks someone's build, a wrong pass costs one reap cycle.
 //!
 //! Self-contained: no clap, no history row, no brokkr crate (the package has
 //! no lib target). The `/proc` stat parse mirrors `src/stray.rs`.
@@ -38,11 +38,39 @@ use std::os::unix::io::RawFd;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
+mod lock_probe {
+    include!("../lock_probe.rs");
+}
+
+/// The two per-user lock paths, by the same rule as the main crate's
+/// `user_dirs` (an unset or empty `$HOME` has no directory). Written out here
+/// because this bin links nothing from the brokkr crate, and `user_dirs.rs`
+/// carries inner docs and crate-relative tests that `include!` cannot take.
+mod user_dirs {
+    use std::path::PathBuf;
+
+    fn brokkr_state_dir() -> Option<PathBuf> {
+        std::env::var_os("HOME")
+            .filter(|home| !home.is_empty())
+            .map(|home| PathBuf::from(home).join(".brokkr"))
+    }
+
+    pub(super) fn lock_file() -> Option<PathBuf> {
+        brokkr_state_dir().map(|dir| dir.join("brokkr.lock"))
+    }
+
+    pub(super) fn compile_lock() -> Option<PathBuf> {
+        brokkr_state_dir().map(|dir| dir.join("compile.lock"))
+    }
+}
+
 fn main() {
     let mut args = std::env::args_os();
     let _self = args.next();
     let Some(real) = args.next() else {
-        eprintln!("brokkr-rustc-guard: no wrapped command given (cargo invokes this as `guard <rustc> <args...>`)");
+        eprintln!(
+            "brokkr-rustc-guard: no wrapped command given (cargo invokes this as `guard <rustc> <args...>`)"
+        );
         std::process::exit(2);
     };
     let rest: Vec<std::ffi::OsString> = args.collect();
@@ -82,7 +110,10 @@ fn main() {
         let mut cmd = Command::new(&real);
         cmd.args(&rest);
         let err = cmd.exec();
-        eprintln!("brokkr-rustc-guard: exec {} failed: {err}", real.to_string_lossy());
+        eprintln!(
+            "brokkr-rustc-guard: exec {} failed: {err}",
+            real.to_string_lossy()
+        );
         std::process::exit(127);
     }
 
@@ -112,7 +143,8 @@ fn main() {
             // replayed: the reader of the cached copy sees no hold and no way
             // this text should apply, and this line is their explanation.
             if rest.iter().any(|a| {
-                a.to_str().is_some_and(|s| s == "--print" || s.starts_with("--print="))
+                a.to_str()
+                    .is_some_and(|s| s == "--print" || s.starts_with("--print="))
             }) {
                 eprintln!(
                     "brokkr-rustc-guard: note: cargo may cache this refusal in \
@@ -137,13 +169,11 @@ fn main() {
         lease.leak();
     }
     let err = cmd.exec();
-    eprintln!("brokkr-rustc-guard: exec {} failed: {err}", real.to_string_lossy());
+    eprintln!(
+        "brokkr-rustc-guard: exec {} failed: {err}",
+        real.to_string_lossy()
+    );
     std::process::exit(127);
-}
-
-/// `$HOME/.brokkr`, the one directory both locks live in.
-fn brokkr_dir() -> Option<std::path::PathBuf> {
-    Some(std::path::PathBuf::from(std::env::var_os("HOME")?).join(".brokkr"))
 }
 
 /// The published capability hash for the live hold, or `None` when the lock file
@@ -154,7 +184,7 @@ fn brokkr_dir() -> Option<std::path::PathBuf> {
 /// format: identity and `auth` are emitted first and byte-identical across a
 /// holder's rewrites, so a torn read cannot blend two holders' capabilities.
 fn read_auth() -> Option<String> {
-    let text = std::fs::read_to_string(brokkr_dir()?.join("brokkr.lock")).ok()?;
+    let text = std::fs::read_to_string(user_dirs::lock_file()?).ok()?;
     for line in text.lines() {
         if let Some(v) = line.strip_prefix("auth=") {
             return Some(v.trim().to_owned());
@@ -191,7 +221,7 @@ impl Lease {
     /// this execution will not participate in the protocol, and the caller
     /// fails open: see [`decide`].
     fn take() -> Option<Self> {
-        let path = brokkr_dir()?.join("compile.lock");
+        let path = user_dirs::compile_lock()?;
         // Created if absent, and never unlinked or replaced by anyone: the
         // drain's proof is an exclusive flock on this *inode*, so a fresh inode
         // at the same path would split the exclusion in two.
@@ -341,7 +371,9 @@ fn classify(args: &[std::ffi::OsString]) -> Invocation {
     // least one actually requests the version.
     let version_flag = |s: &str| matches!(s, "-vV" | "-V" | "--version");
     if strs.iter().any(|s| version_flag(s))
-        && strs.iter().all(|s| version_flag(s) || matches!(*s, "-v" | "--verbose"))
+        && strs
+            .iter()
+            .all(|s| version_flag(s) || matches!(*s, "-v" | "--verbose"))
     {
         return Invocation::Query;
     }
@@ -416,9 +448,7 @@ fn classify(args: &[std::ffi::OsString]) -> Invocation {
     }
 
     let inputs_ok = positionals == 0 || (positionals == 1 && stdin_input);
-    if inputs_ok
-        && !prints.is_empty()
-        && prints.iter().all(|p| EARLY_PRINTS.contains(&p.as_str()))
+    if inputs_ok && !prints.is_empty() && prints.iter().all(|p| EARLY_PRINTS.contains(&p.as_str()))
     {
         return Invocation::Query;
     }
@@ -507,40 +537,35 @@ fn decide() -> Decision {
 // is always held. The inherited capability answers the same question without
 // asking the kernel to describe the process tree.
 
-/// Probe the brokkr lock without taking it: a non-blocking *shared* flock on
+/// Probe for the exclusive brokkr hold with a non-blocking *shared* flock on
 /// `$HOME/.brokkr/brokkr.lock`. Shared, so concurrent guard probes never
 /// conflict with each other, only with brokkr's exclusive hold; non-blocking,
 /// so the probe conflicts rather than queues. The fd drops (and any
 /// momentary shared hold releases) before the caller execs. A missing file
-/// or unset `$HOME` reads as not held.
+/// or unset/empty `$HOME` reads as not held.
 fn lock_is_held() -> bool {
-    let Some(home) = std::env::var_os("HOME") else {
+    let Some(path) = user_dirs::lock_file() else {
         return false;
     };
-    let path = std::path::PathBuf::from(home).join(".brokkr").join("brokkr.lock");
     let Ok(file) = std::fs::File::open(&path) else {
         return false;
     };
     use std::os::fd::AsRawFd;
-    // SAFETY: flock on an fd owned by `file`, which outlives the call.
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) };
-    if rc == 0 {
-        // Shared lock granted, so no exclusive holder. The momentary hold
-        // releases when `file` drops, before the caller execs.
-        return false;
+    // The same shared probe as `lockfile::status`: a status query can hold a
+    // compatible shared lock but can never make this guard mistake an idle
+    // interval for a live brokkr hold.
+    match lock_probe::try_shared(file.as_raw_fd()) {
+        Ok(acquired) => !acquired,
+        // Only EWOULDBLOCK demonstrates a conflicting owner. Every other
+        // flock failure says nothing about whether brokkr is running, and this
+        // guard fails open when lock infrastructure cannot answer.
+        Err(_) => false,
     }
-    // Only EWOULDBLOCK demonstrates a conflicting owner. Every other flock
-    // failure - EINTR, ENOLCK, EBADF - says nothing about whether brokkr is
-    // running, and treating them as "held" inverts this guard's stated
-    // fail-open policy: a kernel out of lock records would refuse every
-    // compile on the machine. Fail open and let the stray reaper catch what
-    // slips.
-    std::io::Error::last_os_error().raw_os_error() == Some(libc::EWOULDBLOCK)
 }
 
 #[cfg(test)]
 mod classify_tests {
-    use super::{classify, Invocation};
+    use super::{Invocation, classify};
 
     fn args(list: &[&str]) -> Vec<std::ffi::OsString> {
         list.iter().map(std::ffi::OsString::from).collect()
@@ -549,7 +574,10 @@ mod classify_tests {
     #[test]
     fn version_probe_is_a_query() {
         assert_eq!(classify(&args(&["-vV"])), Invocation::Query);
-        assert_eq!(classify(&args(&["--version", "--verbose"])), Invocation::Query);
+        assert_eq!(
+            classify(&args(&["--version", "--verbose"])),
+            Invocation::Query
+        );
         // Verbosity alone requests nothing.
         assert_eq!(classify(&args(&["-v"])), Invocation::Compile);
     }
@@ -583,7 +611,12 @@ mod classify_tests {
             Invocation::Query
         );
         assert_eq!(
-            classify(&args(&["--print=target-spec-json", "-Zunstable-options", "--target", "x86_64-unknown-linux-gnu"])),
+            classify(&args(&[
+                "--print=target-spec-json",
+                "-Zunstable-options",
+                "--target",
+                "x86_64-unknown-linux-gnu"
+            ])),
             Invocation::Query
         );
     }
@@ -591,31 +624,64 @@ mod classify_tests {
     #[test]
     fn compilation_continuing_prints_stay_gated() {
         // rustc services these by compiling first; they are not queries.
-        assert_eq!(classify(&args(&["main.rs", "--print=link-args"])), Invocation::Compile);
         assert_eq!(
-            classify(&args(&["-", "--crate-type=staticlib", "--print=native-static-libs"])),
+            classify(&args(&["main.rs", "--print=link-args"])),
+            Invocation::Compile
+        );
+        assert_eq!(
+            classify(&args(&[
+                "-",
+                "--crate-type=staticlib",
+                "--print=native-static-libs"
+            ])),
             Invocation::Compile
         );
         // Unknown print names fail closed.
-        assert_eq!(classify(&args(&["--print=whatever-new-mode"])), Invocation::Compile);
+        assert_eq!(
+            classify(&args(&["--print=whatever-new-mode"])),
+            Invocation::Compile
+        );
     }
 
     #[test]
     fn real_compiles_are_never_queries() {
         assert_eq!(
-            classify(&args(&["--crate-name", "foo", "src/lib.rs", "--emit=dep-info,metadata"])),
+            classify(&args(&[
+                "--crate-name",
+                "foo",
+                "src/lib.rs",
+                "--emit=dep-info,metadata"
+            ])),
             Invocation::Compile
         );
         // A source file alongside an early print is still an input.
-        assert_eq!(classify(&args(&["src/lib.rs", "--print=cfg"])), Invocation::Compile);
+        assert_eq!(
+            classify(&args(&["src/lib.rs", "--print=cfg"])),
+            Invocation::Compile
+        );
         // Output requests, argfiles and unknown options fail closed.
-        assert_eq!(classify(&args(&["--print=cfg", "--out-dir", "x"])), Invocation::Compile);
-        assert_eq!(classify(&args(&["@args.txt", "--print=cfg"])), Invocation::Compile);
-        assert_eq!(classify(&args(&["--print=cfg", "--mystery-flag"])), Invocation::Compile);
+        assert_eq!(
+            classify(&args(&["--print=cfg", "--out-dir", "x"])),
+            Invocation::Compile
+        );
+        assert_eq!(
+            classify(&args(&["@args.txt", "--print=cfg"])),
+            Invocation::Compile
+        );
+        assert_eq!(
+            classify(&args(&["--print=cfg", "--mystery-flag"])),
+            Invocation::Compile
+        );
         // Positionals after `--` are inputs.
-        assert_eq!(classify(&args(&["--print=cfg", "--", "lib.rs"])), Invocation::Compile);
+        assert_eq!(
+            classify(&args(&["--print=cfg", "--", "lib.rs"])),
+            Invocation::Compile
+        );
         // No print request at all: nothing was asked, assume the worst.
-        assert_eq!(classify(&args(&["--crate-name", "foo"])), Invocation::Compile);
+        assert_eq!(
+            classify(&args(&["--crate-name", "foo"])),
+            Invocation::Compile
+        );
     }
 
     #[test]

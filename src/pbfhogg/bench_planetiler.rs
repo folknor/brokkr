@@ -129,7 +129,10 @@ pub fn run(
     let variant_names: Vec<&str> = results.iter().map(|r| r.mode.as_str()).collect();
 
     crate::harness::run_variants("mode", &variant_names, |mode| {
-        let result = results.iter().find(|r| r.mode == mode).expect("mode exists in results");
+        let result = results
+            .iter()
+            .find(|r| r.mode == mode)
+            .expect("mode exists in results");
 
         let config = BenchConfig {
             // Planetiler emits multiple mode results per Java subprocess
@@ -149,15 +152,17 @@ pub fn run(
             metadata: vec![KvPair::int("meta.heap_mb", heap_mb)],
         };
 
-        harness.run_internal(&config, |_| {
-            Ok(BenchResult {
-                elapsed_ms: result.elapsed_ms,
-                elapsed_us: None,
-                kv: result.kv.clone(),
-                iterations: Vec::new(),
-                distribution: None,
-                hotpath: None,
+        harness
+            .run_internal(&config, |_| {
+                Ok(BenchResult {
+                    elapsed_ms: result.elapsed_ms,
+                    elapsed_us: None,
+                    kv: result.kv.clone(),
+                    iterations: Vec::new(),
+                    distribution: None,
+                    hotpath: None,
+                })
             })
-        }).map(|_| ())
+            .map(|_| ())
     })
 }

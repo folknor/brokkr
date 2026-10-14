@@ -244,8 +244,7 @@ fn record<'a>(
 /// already in `deps`, so naming that command here would be noise. The
 /// `check` phase appends its own pointer to `deps` instead - that is the
 /// investigative command, and a `check` reader is one step further away.
-pub const INVENTORY_CAVEAT: &str =
-    "this inventory may be partial - cycles sharing a member can surface one at a time, so re-run after each fix rather than scoping the fix to what is listed here";
+pub const INVENTORY_CAVEAT: &str = "this inventory may be partial - cycles sharing a member can surface one at a time, so re-run after each fix rather than scoping the fix to what is listed here";
 
 /// Render one cycle as the chain line, followed by the one-line fix for
 /// each versioned dev-dep edge - that edge is removable without

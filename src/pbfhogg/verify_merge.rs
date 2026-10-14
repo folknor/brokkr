@@ -344,10 +344,7 @@ fn print_id_sample(kind: &str, ids: &[i64]) {
     } else {
         String::new()
     };
-    let list = shown
-        .map(i64::to_string)
-        .collect::<Vec<_>>()
-        .join(", ");
+    let list = shown.map(i64::to_string).collect::<Vec<_>>().join(", ");
     verify_msg(&format!("    {kind}: {list}{suffix}"));
 }
 
@@ -374,8 +371,14 @@ fn classify_diff(delta: &OscDiff, applied: &OscDiff, report: &mut MergeDiffRepor
         &mut report.osmium_only_unexplained.relations,
     );
 
-    report.pbfhogg_only.nodes.extend(delta.deleted_nodes.iter().copied());
-    report.pbfhogg_only.ways.extend(delta.deleted_ways.iter().copied());
+    report
+        .pbfhogg_only
+        .nodes
+        .extend(delta.deleted_nodes.iter().copied());
+    report
+        .pbfhogg_only
+        .ways
+        .extend(delta.deleted_ways.iter().copied());
     report
         .pbfhogg_only
         .relations
@@ -454,7 +457,12 @@ mod tests {
         let mut unexplained = Vec::new();
         let osmium_only = s(&[1, 2, 3, 4]);
         let applied_deletes = s(&[1, 3]);
-        classify_osmium_only(&osmium_only, &applied_deletes, &mut explained, &mut unexplained);
+        classify_osmium_only(
+            &osmium_only,
+            &applied_deletes,
+            &mut explained,
+            &mut unexplained,
+        );
         assert_eq!(explained, vec![1, 3]);
         assert_eq!(unexplained, vec![2, 4]);
     }

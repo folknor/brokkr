@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use super::{is_disposition, DiagKey, DiagSet, Severity, DISPOSITION_LABELS};
+use super::{DiagKey, DiagSet, PinnableDisposition, Severity};
 use crate::error::DevError;
 use crate::piners::registry::FilePin;
 use crate::preflight;
@@ -61,7 +61,7 @@ pub struct LintPin {
     /// The blessed `(piners <-> pine-lint)` disposition. `None` = never
     /// blessed: a hard "must bless" gate failure, not a silent pass.
     #[serde(default)]
-    pub expected: Option<String>,
+    pub expected: Option<PinnableDisposition>,
     /// The diagnostic scope (`validators::Scope::label`) `expected` was
     /// blessed under. `None` = the default scope. A disposition is a function
     /// of the scope (`--warnings` can turn `agree_clean` into `divergent`), so
@@ -140,7 +140,8 @@ pub struct LintRegistry {
 /// Parse `lints.toml` text in hand (the comment-preserving writer keeps the
 /// raw text around).
 pub fn parse_lints(text: &str, origin: &Path) -> Result<LintsData, DevError> {
-    toml::from_str(text).map_err(|e| DevError::Config(format!("piners lint: {}: {e}", origin.display())))
+    toml::from_str(text)
+        .map_err(|e| DevError::Config(format!("piners lint: {}: {e}", origin.display())))
 }
 
 impl LintRegistry {
@@ -195,8 +196,8 @@ impl LintRegistry {
         })
     }
 
-    /// Structural lint: every keyword id must be pinned, every `expected`
-    /// must be a known disposition label.
+    /// Structural lint: every keyword id must be pinned. Deserialization
+    /// restricts `expected` to the pinnable disposition enum.
     pub fn lint(&self) -> Result<(), DevError> {
         let mut dangling = Vec::new();
         for (keyword, ids) in &self.keywords {
@@ -206,14 +207,6 @@ impl LintRegistry {
                 }
             }
         }
-        let mut bad_expected = Vec::new();
-        for (id, pin) in &self.pins {
-            if let Some(exp) = &pin.expected
-                && !is_disposition(exp)
-            {
-                bad_expected.push(format!("{id} -> expected = \"{exp}\""));
-            }
-        }
         let mut errs = Vec::new();
         if !dangling.is_empty() {
             errs.push(format!(
@@ -221,17 +214,13 @@ impl LintRegistry {
                 dangling.join("\n  ")
             ));
         }
-        if !bad_expected.is_empty() {
-            errs.push(format!(
-                "pin(s) carry an unknown `expected` label (must be one of {}):\n  {}",
-                DISPOSITION_LABELS.join(", "),
-                bad_expected.join("\n  ")
-            ));
-        }
         if errs.is_empty() {
             Ok(())
         } else {
-            Err(DevError::Config(format!("piners lint: {}", errs.join("\n"))))
+            Err(DevError::Config(format!(
+                "piners lint: {}",
+                errs.join("\n")
+            )))
         }
     }
 
@@ -280,7 +269,10 @@ mod tests {
         }
         let mut keywords = BTreeMap::new();
         for (k, ids) in keyword_ids {
-            keywords.insert((*k).to_owned(), ids.iter().map(|s| (*s).to_owned()).collect());
+            keywords.insert(
+                (*k).to_owned(),
+                ids.iter().map(|s| (*s).to_owned()).collect(),
+            );
         }
         LintRegistry {
             pins,
@@ -302,10 +294,14 @@ mod tests {
     }
 
     #[test]
-    fn lint_fails_on_unknown_expected() {
-        let mut r = registry_with(&[], &["a"]);
-        r.pins.get_mut("a").unwrap().expected = Some("bogus".to_owned());
-        assert!(format!("{:?}", r.lint().unwrap_err()).contains("bogus"));
+    fn registry_rejects_validator_errors_as_expected_dispositions() {
+        for label in ["piners_error", "lint_error"] {
+            let text = format!(
+                "[probes.a]\nexpected = \"{label}\"\npine = {{ path = \"lint/a.pine\", xxh128 = \"00\" }}\n"
+            );
+            let error = parse_lints(&text, Path::new("lints.toml")).unwrap_err();
+            assert!(format!("{error:?}").contains(label));
+        }
     }
 
     #[test]
@@ -360,7 +356,10 @@ pine = { path = "lint/clean-01.pine", xxh128 = "bbb" }
         assert!(r.lints_text.contains("[probes.clean-01]"));
         assert_eq!(r.pins.len(), 2);
         assert_eq!(r.pins["unterminated-01"].pine.xxh128, "aaa");
-        assert_eq!(r.pins["unterminated-01"].expected.as_deref(), Some("agree_flagged"));
+        assert_eq!(
+            r.pins["unterminated-01"].expected,
+            Some(PinnableDisposition::AgreeFlagged)
+        );
         assert!(r.pins["unterminated-01"].tv_anchor().is_some());
         assert!(r.pins["clean-01"].tv_anchor().is_none());
         assert_eq!(r.keywords["lex"], vec!["unterminated-01".to_owned()]);

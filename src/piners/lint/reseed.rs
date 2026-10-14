@@ -199,7 +199,7 @@ fn stamp_one(id: &str, abs: &Path, corpus_root: &Path) -> Result<LintPin, DevErr
 fn carry_preserved(new: &mut BTreeMap<String, LintPin>, old: &BTreeMap<String, LintPin>) {
     for (id, pin) in new.iter_mut() {
         if let Some(prev) = old.get(id) {
-            pin.expected = prev.expected.clone();
+            pin.expected = prev.expected;
             pin.expected_scope = prev.expected_scope.clone();
             pin.tv_anchored_at = prev.tv_anchored_at.clone();
             pin.tv_scope = prev.tv_scope.clone();
@@ -227,6 +227,7 @@ fn diff(old: &BTreeMap<String, LintPin>, new: &BTreeMap<String, LintPin>) -> (us
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use crate::piners::lint::PinnableDisposition;
 
     #[test]
     fn discover_finds_pine_by_stem_and_errors_on_collision() {
@@ -252,7 +253,7 @@ mod tests {
     fn carry_preserved_keeps_expected_and_anchor() {
         let mut old = BTreeMap::new();
         let mut blessed = LintPin {
-            expected: Some("agree_flagged".to_owned()),
+            expected: Some(PinnableDisposition::AgreeFlagged),
             expected_scope: Some("errors+warnings/syntax".to_owned()),
             tv_anchored_at: Some("2026-06-22T00:00:00Z".to_owned()),
             tv_scope: None,
@@ -280,8 +281,11 @@ mod tests {
 
         carry_preserved(&mut new, &old);
         let kept = &new["keep"];
-        assert_eq!(kept.expected.as_deref(), Some("agree_flagged"));
-        assert_eq!(kept.expected_scope.as_deref(), Some("errors+warnings/syntax"));
+        assert_eq!(kept.expected, Some(PinnableDisposition::AgreeFlagged));
+        assert_eq!(
+            kept.expected_scope.as_deref(),
+            Some("errors+warnings/syntax")
+        );
         assert_eq!(kept.tv.len(), 1);
         assert_eq!(kept.pine.xxh128, "new"); // content still refreshed
     }

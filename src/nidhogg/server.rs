@@ -100,12 +100,10 @@ pub fn serve(
         .stdin(Stdio::null());
     // Every child of a hold carries its capability: see `crate::hold`.
     crate::hold::stamp(&mut cmd);
-    let mut child = cmd
-        .spawn()
-        .map_err(|error| DevError::Spawn {
-            program: binary.display().to_string(),
-            error,
-        })?;
+    let mut child = cmd.spawn().map_err(|error| DevError::Spawn {
+        program: binary.display().to_string(),
+        error,
+    })?;
 
     let pid = child.id();
 
@@ -394,10 +392,7 @@ mod tests {
 
     #[test]
     fn empty_or_zero_fields_are_rejected() {
-        assert_eq!(
-            ServerRecord::parse("pid=0\nstarttime=1\nboot_id=x\n"),
-            None
-        );
+        assert_eq!(ServerRecord::parse("pid=0\nstarttime=1\nboot_id=x\n"), None);
         assert_eq!(ServerRecord::parse("pid=5\nstarttime=\nboot_id=x\n"), None);
     }
 

@@ -201,6 +201,7 @@ pub(crate) struct NextestPrepared {
     target_runner: TargetRunner,
     double_spawn: DoubleSpawnInfo,
     version_env_vars: VersionEnvVars,
+    per_test_timeout: std::time::Duration,
     /// nextest binary id -> unit, through the artifact index: how the engine's
     /// events are attributed.
     by_id: HashMap<String, BinaryUnit>,
@@ -606,6 +607,7 @@ pub(crate) fn assemble_nextest_lane(
         target_runner,
         double_spawn,
         version_env_vars,
+        per_test_timeout: ceiling,
         by_id,
     });
     Ok(prepared)
@@ -639,9 +641,9 @@ fn cancel_cause(reason: Option<CancelReason>) -> TerminationCause {
     }
 }
 
-/// Run one prepared `harness = "nextest"` sweep. Returns `Ok(false)` when the
-/// run failed, having already reported it. An `Err` leaving this lane carries
-/// its whole diagnostic in the message; `run_test_phase`'s caller voices it.
+/// Run one prepared `harness = "nextest"` sweep. Returns `Ok(false)` for an
+/// ordinary failed test run. A per-test timeout is an `Err` so the phase
+/// records and reports the run-wide stop rather than an ordinary red sweep.
 fn run_nextest_sweep(
     sweep: &ResolvedSweep,
     attempt: &Attempt,
@@ -682,17 +684,16 @@ fn run_nextest_engine(
     // Fail-fast, and this is a trade rather than a preference.
     //
     // Every other brokkr lane enumerates all failures in one run (the libtest
-    // lanes' `--no-fail-fast`), and `MaxFail::All` did that here. But in this
-    // engine a timeout is delivered as a failed test, and `MaxFail::All` means
-    // "run everything regardless of failures" - so a test that blew its 20s cap
-    // was terminated while the run carried on through every remaining test,
-    // returning an ordinary red sweep at the end. The contract says a blown
-    // budget stops brokkr, and the engine offers no way to cancel on a timeout
-    // without cancelling on a failure.
+    // lanes' `--no-fail-fast`). But in this engine a timeout is delivered as a
+    // failed test, and `MaxFail::All` means "run everything regardless of
+    // failures" - so it would run later tests after one exceeded its cap. The
+    // engine offers no way to cancel on a timeout without cancelling on an
+    // ordinary failure too.
     //
     // So this lane stops at the first failure of any kind. The cost is real: a
-    // nextest sweep no longer lists every failing test in one run. The cap is not
-    // negotiable and the failure list is, so the cap wins.
+    // nextest sweep no longer lists every failing test in one run. A timeout's
+    // typed terminal event is promoted to a run-stopping error below; the cap is
+    // not negotiable and the failure list is, so the cap wins.
     // `Immediate`, not `Wait`: once the lane is stopping, tests still running are
     // signalled rather than allowed to finish. Waiting would let a sibling keep
     // burning wall time after brokkr has already decided the run is over.
@@ -751,6 +752,8 @@ fn run_nextest_engine(
     // `RunFinished` event, which every completed run emits once.
     let mut finished: Option<RunStats> = None;
     let mut cancelling = false;
+    let mut lane_cancel_cause = None;
+    let mut timed_out_test: Option<(String, Option<BinaryUnit>)> = None;
     let outcome = runner.try_execute(|event| {
         // Recorded BEFORE the reporter sees it: a reporter that fails must not
         // take the evidence with it.
@@ -763,20 +766,34 @@ fn run_nextest_engine(
                 ),
                 TestEventKind::TestFinished { test_instance, run_statuses, .. } => {
                     let result = engine_result(&run_statuses.last_status().result, cancelling);
+                    let unit_id = test_instance.binary_id.to_string();
+                    let test_name = test_instance.test_name.to_string();
+                    if result == TestResult::TimedOut {
+                        let unit = np.by_id.get(&unit_id).cloned();
+                        if timed_out_test.is_none() {
+                            timed_out_test = Some((test_name.clone(), unit.clone()));
+                        }
+                        // Keep the timeout charge on its binary: test names
+                        // can repeat in another target in the same lane.
+                        tap.record(JournalRecord::Terminated(Termination {
+                            scope: TerminationScope::Lane,
+                            lane: Some(tap.lane()),
+                            stream: None,
+                            cause: TerminationCause::PerTestDeadline,
+                            test: Some(test_name.clone()),
+                            charged: unit.map(|unit| ChargedTo { resolution: None, unit }),
+                        }));
+                    }
                     observe(
-                        test_instance.binary_id.to_string(),
-                        ObsEvent::Finished { name: test_instance.test_name.to_string(), result },
+                        unit_id,
+                        ObsEvent::Finished { name: test_name, result },
                     );
                 }
                 TestEventKind::RunBeginCancel { current_stats, .. }
                 | TestEventKind::RunBeginKill { current_stats, .. } => {
                     if !cancelling {
                         cancelling = true;
-                        tap.terminate(
-                            TerminationScope::Lane,
-                            cancel_cause(current_stats.cancel_reason),
-                            None,
-                        );
+                        lane_cancel_cause = Some(cancel_cause(current_stats.cancel_reason));
                     }
                 }
                 TestEventKind::RunFinished { run_stats: RunFinishedStats::Single(s), .. } => {
@@ -790,12 +807,29 @@ fn run_nextest_engine(
     // `Reporter::finish` is infallible and returns only `ReporterStats`, which
     // this lane does not use.
     let _ = reporter.finish();
+    // A timeout's per-test termination is recorded at its terminal event and
+    // takes precedence over the engine's ensuing fail-fast cancellation.
+    if timed_out_test.is_none()
+        && let Some(cause) = lane_cancel_cause
+    {
+        tap.terminate(TerminationScope::Lane, cause, None);
+    }
     tap.record(JournalRecord::Observed {
         lane: tap.lane(),
         stream,
         origin: StreamOrigin::Unattributed { detail: "the engine lane's stream".into() },
         event: ObsEvent::StreamEnded { end: crate::test_runner::StreamEnd::Eof },
     });
+    if let Some((test, unit)) = timed_out_test {
+        let test = unit.map_or(test.clone(), |unit| format!("{}::{test}", unit.package));
+        output::error(&format!(
+            "test `{test}` exceeded its {}s budget in sweep '{label}' - stopping",
+            np.per_test_timeout.as_secs(),
+        ));
+        return Err(DevError::Reported(format!(
+            "sweep '{label}' exceeded its per-test budget - stopping"
+        )));
+    }
     let outcome = match outcome {
         Ok(o) => o,
         Err(e) => {
@@ -1138,10 +1172,13 @@ mod nextest_lane_tests {
         assert_eq!(prepared.resolutions[0].binaries[0].selected, ["fast", "slow"]);
         let np = prepared.nextest.as_ref().expect("an engine lane");
         let tap = LaneTap::new(0);
-        let passed = run_nextest_engine("engine", Some(1), np, &tap).unwrap();
-        assert!(!passed);
-        // The engine's cancellation after the timeout was recorded on the tap.
-        assert!(tap.decisive_termination().is_some(), "the fail-fast stop was recorded");
+        let timed_out = run_nextest_engine("engine", Some(1), np, &tap).unwrap_err();
+        assert!(matches!(timed_out, DevError::Reported(_)));
+        assert_eq!(
+            tap.decisive_termination().map(|t| t.cause),
+            Some(TerminationCause::PerTestDeadline),
+            "the timeout, rather than its ensuing fail-fast cancellation, decides the run",
+        );
 
         // A selection that never reaches the slow test finishes clean.
         let fast = ResolvedSweep { name_filters: vec!["fast".into()], ..sweep.clone() };

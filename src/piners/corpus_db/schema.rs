@@ -73,7 +73,11 @@ impl Projection {
             format!("CASE WHEN json_type(raw_json, '{p}') IN ({types}) THEN {then} END")
         };
         let count = |p: &str| {
-            when(p, "'integer', 'real'", format!("MIN({}, 9223372036854775807)", at(p)))
+            when(
+                p,
+                "'integer', 'real'",
+                format!("MIN({}, 9223372036854775807)", at(p)),
+            )
         };
         match self {
             Projection::Text(p) => when(p, "'text'", at(p)),
@@ -85,7 +89,11 @@ impl Projection {
             Projection::CountOr0(p) => format!("COALESCE({}, 0)", count(p)),
             Projection::Failing => format!(
                 "COALESCE({}, '[]')",
-                when("$.acceptance.failing", "'array'", at("$.acceptance.failing"))
+                when(
+                    "$.acceptance.failing",
+                    "'array'",
+                    at("$.acceptance.failing")
+                )
             ),
             Projection::Breaches => format!(
                 "CASE WHEN json_type(raw_json, '$.signature') = 'object' THEN COALESCE({}, 0) END",
@@ -129,30 +137,69 @@ const PROJECTIONS: [(&str, Projection); 39] = [
     ("p90_pnl", Projection::Real("$.acceptance.p90.pnl")),
     ("sig_domain", Projection::NonEmpty("$.signature.domain")),
     ("sig_leg", Projection::NonEmpty("$.signature.leg")),
-    ("sig_dimension", Projection::NonEmpty("$.signature.dimension")),
+    (
+        "sig_dimension",
+        Projection::NonEmpty("$.signature.dimension"),
+    ),
     ("sig_detail", Projection::NonEmpty("$.signature.detail")),
     ("sig_breaches", Projection::Breaches),
     ("error", Projection::Text("$.error")),
     ("runtime_ms", Projection::Real("$.runtime_ms")),
     ("boundary_anchor", Projection::Text("$.boundary_anchor")),
-    ("anchor_consumed", Projection::Flag("$.boundary_rules.start_anchor_consumed")),
-    ("rule_start_ours", Projection::Count("$.boundary_rules.start_ours")),
-    ("rule_tail_ours", Projection::Count("$.boundary_rules.tail_ours")),
-    ("rule_start_tv", Projection::Count("$.boundary_rules.start_tv")),
+    (
+        "anchor_consumed",
+        Projection::Flag("$.boundary_rules.start_anchor_consumed"),
+    ),
+    (
+        "rule_start_ours",
+        Projection::Count("$.boundary_rules.start_ours"),
+    ),
+    (
+        "rule_tail_ours",
+        Projection::Count("$.boundary_rules.tail_ours"),
+    ),
+    (
+        "rule_start_tv",
+        Projection::Count("$.boundary_rules.start_tv"),
+    ),
     ("rule_end_tv", Projection::Count("$.boundary_rules.end_tv")),
     ("clipped_ours", Projection::Count("$.clipped_ours")),
     ("clipped_tv", Projection::Count("$.clipped_tv")),
-    ("history_prefix_bars", Projection::Count("$.history_prefix_bars")),
+    (
+        "history_prefix_bars",
+        Projection::Count("$.history_prefix_bars"),
+    ),
     ("oracle_trimmed", Projection::Count("$.oracle_trimmed")),
     ("oracle_realtime", Projection::Count("$.oracle_realtime")),
-    ("ts_entry_considered", Projection::Count("$.ts_shift.entry_considered")),
-    ("ts_entry_shifted", Projection::Count("$.ts_shift.entry_shifted")),
-    ("ts_entry_share_pct", Projection::Real("$.ts_shift.entry_share_pct")),
-    ("ts_exit_considered", Projection::Count("$.ts_shift.exit_considered")),
-    ("ts_exit_shifted", Projection::Count("$.ts_shift.exit_shifted")),
-    ("ts_exit_share_pct", Projection::Real("$.ts_shift.exit_share_pct")),
+    (
+        "ts_entry_considered",
+        Projection::Count("$.ts_shift.entry_considered"),
+    ),
+    (
+        "ts_entry_shifted",
+        Projection::Count("$.ts_shift.entry_shifted"),
+    ),
+    (
+        "ts_entry_share_pct",
+        Projection::Real("$.ts_shift.entry_share_pct"),
+    ),
+    (
+        "ts_exit_considered",
+        Projection::Count("$.ts_shift.exit_considered"),
+    ),
+    (
+        "ts_exit_shifted",
+        Projection::Count("$.ts_shift.exit_shifted"),
+    ),
+    (
+        "ts_exit_share_pct",
+        Projection::Real("$.ts_shift.exit_share_pct"),
+    ),
     ("window_sensitive", Projection::Array("$.window_sensitive")),
-    ("dynamic_builtin_calls", Projection::Count("$.dynamic_builtin_calls")),
+    (
+        "dynamic_builtin_calls",
+        Projection::Count("$.dynamic_builtin_calls"),
+    ),
 ];
 
 /// The `disposition` DDL under `name` - `disposition` itself, or the v5
@@ -161,7 +208,11 @@ pub(super) fn disposition_ddl(name: &str) -> String {
     let projections: Vec<String> = PROJECTIONS
         .iter()
         .map(|(col, p)| {
-            format!("    {col} {} GENERATED ALWAYS AS ({}) VIRTUAL", p.sql_type(), p.sql())
+            format!(
+                "    {col} {} GENERATED ALWAYS AS ({}) VIRTUAL",
+                p.sql_type(),
+                p.sql()
+            )
         })
         .collect();
     format!(
@@ -197,7 +248,9 @@ CREATE TABLE IF NOT EXISTS run (
     dirty             INTEGER,
     protocol_violations INTEGER,
     diagnosis         TEXT,
-    run_error         TEXT
+    run_error         TEXT,
+    debug             INTEGER,
+    harness_args      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_run_started ON run(started_at);
 

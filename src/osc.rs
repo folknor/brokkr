@@ -69,11 +69,13 @@ impl OscDiff {
 /// the create/modify/delete sections). Plain `GzDecoder` stops silently at the
 /// first member boundary and would yield a truncated-but-valid-looking OSC.
 pub fn parse_osc_file(path: &Path) -> Result<OscDiff, DevError> {
-    let bytes = std::fs::read(path).map_err(|e| {
-        DevError::Verify(format!("cannot open OSC {}: {e}", path.display()))
-    })?;
+    let bytes = std::fs::read(path)
+        .map_err(|e| DevError::Verify(format!("cannot open OSC {}: {e}", path.display())))?;
     parse_osc_text(&decode_osc_bytes(&bytes, path)?).map_err(|why| {
-        DevError::Verify(format!("{} is not a complete OSC document: {why}", path.display()))
+        DevError::Verify(format!(
+            "{} is not a complete OSC document: {why}",
+            path.display()
+        ))
     })
 }
 
@@ -83,9 +85,11 @@ pub fn parse_osc_file(path: &Path) -> Result<OscDiff, DevError> {
 fn decode_osc_bytes(bytes: &[u8], path: &Path) -> Result<String, DevError> {
     if bytes.starts_with(&[0x1f, 0x8b]) {
         let mut s = String::new();
-        MultiGzDecoder::new(bytes).read_to_string(&mut s).map_err(|e| {
-            DevError::Verify(format!("cannot decompress OSC {}: {e}", path.display()))
-        })?;
+        MultiGzDecoder::new(bytes)
+            .read_to_string(&mut s)
+            .map_err(|e| {
+                DevError::Verify(format!("cannot decompress OSC {}: {e}", path.display()))
+            })?;
         Ok(s)
     } else {
         String::from_utf8(bytes.to_vec()).map_err(|e| {
@@ -186,7 +190,11 @@ pub fn parse_osc_text(text: &str) -> Result<OscDiff, String> {
 
         match root {
             Root::Before if name == "osmChange" => {
-                root = if self_closing { Root::Closed } else { Root::Open };
+                root = if self_closing {
+                    Root::Closed
+                } else {
+                    Root::Open
+                };
                 continue;
             }
             Root::Before => {
@@ -220,9 +228,7 @@ pub fn parse_osc_text(text: &str) -> Result<OscDiff, String> {
 
 fn split_tag_name(tag: &str) -> (&str, &str) {
     let s = tag.trim_start();
-    let split = s
-        .find(|c: char| c.is_ascii_whitespace())
-        .unwrap_or(s.len());
+    let split = s.find(|c: char| c.is_ascii_whitespace()).unwrap_or(s.len());
     (&s[..split], s[split..].trim_start())
 }
 
@@ -341,13 +347,31 @@ mod tests {
     #[test]
     fn parses_basic_sections() {
         let diff = parse_osc_text(SAMPLE).unwrap();
-        assert_eq!(diff.created_nodes.iter().copied().collect::<Vec<_>>(), vec![100]);
-        assert_eq!(diff.created_ways.iter().copied().collect::<Vec<_>>(), vec![200]);
+        assert_eq!(
+            diff.created_nodes.iter().copied().collect::<Vec<_>>(),
+            vec![100]
+        );
+        assert_eq!(
+            diff.created_ways.iter().copied().collect::<Vec<_>>(),
+            vec![200]
+        );
         assert!(diff.created_relations.is_empty());
-        assert_eq!(diff.modified_nodes.iter().copied().collect::<Vec<_>>(), vec![300]);
-        assert_eq!(diff.deleted_nodes.iter().copied().collect::<Vec<_>>(), vec![400]);
-        assert_eq!(diff.deleted_ways.iter().copied().collect::<Vec<_>>(), vec![500]);
-        assert_eq!(diff.deleted_relations.iter().copied().collect::<Vec<_>>(), vec![600]);
+        assert_eq!(
+            diff.modified_nodes.iter().copied().collect::<Vec<_>>(),
+            vec![300]
+        );
+        assert_eq!(
+            diff.deleted_nodes.iter().copied().collect::<Vec<_>>(),
+            vec![400]
+        );
+        assert_eq!(
+            diff.deleted_ways.iter().copied().collect::<Vec<_>>(),
+            vec![500]
+        );
+        assert_eq!(
+            diff.deleted_relations.iter().copied().collect::<Vec<_>>(),
+            vec![600]
+        );
     }
 
     #[test]
@@ -365,20 +389,31 @@ mod tests {
             e.finish().unwrap()
         };
         let mut multi = gz(r#"<osmChange><create><node id="1" version="1"/></create>"#);
-        multi.extend(gz(r#"<delete><way id="2" version="3"/></delete></osmChange>"#));
+        multi.extend(gz(
+            r#"<delete><way id="2" version="3"/></delete></osmChange>"#,
+        ));
         assert_eq!(&multi[..2], &[0x1f, 0x8b], "gzip magic");
 
         // Detected as gzip by magic even with a bare `.osc` name (the bug).
         let text = decode_osc_bytes(&multi, Path::new("pbfhogg-vs-osmium.osc")).unwrap();
-        assert!(text.contains(r#"node id="1""#), "first member missing: {text}");
+        assert!(
+            text.contains(r#"node id="1""#),
+            "first member missing: {text}"
+        );
         assert!(
             text.contains(r#"way id="2""#),
             "second member missing - GzDecoder truncation? {text}"
         );
 
         let diff = parse_osc_text(&text).unwrap();
-        assert_eq!(diff.created_nodes.iter().copied().collect::<Vec<_>>(), vec![1]);
-        assert_eq!(diff.deleted_ways.iter().copied().collect::<Vec<_>>(), vec![2]);
+        assert_eq!(
+            diff.created_nodes.iter().copied().collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert_eq!(
+            diff.deleted_ways.iter().copied().collect::<Vec<_>>(),
+            vec![2]
+        );
     }
 
     #[test]
@@ -391,8 +426,14 @@ mod tests {
     fn handles_self_closing_elements() {
         let xml = r#"<osmChange><delete><node id="1" version="1"/><way id="2" version="1"/></delete></osmChange>"#;
         let diff = parse_osc_text(xml).unwrap();
-        assert_eq!(diff.deleted_nodes.iter().copied().collect::<Vec<_>>(), vec![1]);
-        assert_eq!(diff.deleted_ways.iter().copied().collect::<Vec<_>>(), vec![2]);
+        assert_eq!(
+            diff.deleted_nodes.iter().copied().collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert_eq!(
+            diff.deleted_ways.iter().copied().collect::<Vec<_>>(),
+            vec![2]
+        );
     }
 
     #[test]
@@ -401,7 +442,10 @@ mod tests {
   <way id="42" version="1"><nd ref="100"/><nd ref="200"/></way>
 </create></osmChange>"#;
         let diff = parse_osc_text(xml).unwrap();
-        assert_eq!(diff.created_ways.iter().copied().collect::<Vec<_>>(), vec![42]);
+        assert_eq!(
+            diff.created_ways.iter().copied().collect::<Vec<_>>(),
+            vec![42]
+        );
     }
 
     #[test]
@@ -413,8 +457,14 @@ mod tests {
 <delete><way id="2" version="1"/></delete>
 </osmChange>"#;
         let diff = parse_osc_text(xml).unwrap();
-        assert_eq!(diff.deleted_nodes.iter().copied().collect::<Vec<_>>(), vec![1]);
-        assert_eq!(diff.deleted_ways.iter().copied().collect::<Vec<_>>(), vec![2]);
+        assert_eq!(
+            diff.deleted_nodes.iter().copied().collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert_eq!(
+            diff.deleted_ways.iter().copied().collect::<Vec<_>>(),
+            vec![2]
+        );
     }
 
     #[test]
@@ -424,7 +474,10 @@ mod tests {
 <delete><node id="1" version="1"/></delete>
 </osmChange>"#;
         let diff = parse_osc_text(xml).unwrap();
-        assert_eq!(diff.deleted_nodes.iter().copied().collect::<Vec<_>>(), vec![1]);
+        assert_eq!(
+            diff.deleted_nodes.iter().copied().collect::<Vec<_>>(),
+            vec![1]
+        );
     }
 
     #[test]
@@ -433,7 +486,10 @@ mod tests {
 <!DOCTYPE osmChange>
 <osmChange><delete><node id="7" version="1"/></delete></osmChange>"#;
         let diff = parse_osc_text(xml).unwrap();
-        assert_eq!(diff.deleted_nodes.iter().copied().collect::<Vec<_>>(), vec![7]);
+        assert_eq!(
+            diff.deleted_nodes.iter().copied().collect::<Vec<_>>(),
+            vec![7]
+        );
     }
 
     #[test]
@@ -449,7 +505,10 @@ mod tests {
     fn handles_single_quoted_id() {
         let xml = "<osmChange><delete><node id='1' version='1'/></delete></osmChange>";
         let diff = parse_osc_text(xml).unwrap();
-        assert_eq!(diff.deleted_nodes.iter().copied().collect::<Vec<_>>(), vec![1]);
+        assert_eq!(
+            diff.deleted_nodes.iter().copied().collect::<Vec<_>>(),
+            vec![1]
+        );
     }
 
     #[test]
@@ -463,7 +522,10 @@ mod tests {
         let diff = parse_osc_text(xml).unwrap();
         assert!(diff.created_nodes.is_empty());
         assert!(diff.modified_nodes.is_empty());
-        assert_eq!(diff.deleted_nodes.iter().copied().collect::<Vec<_>>(), vec![2]);
+        assert_eq!(
+            diff.deleted_nodes.iter().copied().collect::<Vec<_>>(),
+            vec![2]
+        );
     }
 
     #[test]
@@ -476,10 +538,16 @@ mod tests {
 
     #[test]
     fn empty_osmchange_yields_empty_diff() {
-        assert!(parse_osc_text("<osmChange></osmChange>").unwrap().is_empty());
-        assert!(parse_osc_text(r#"<?xml version="1.0"?><osmChange version="0.6"/>"#)
-            .unwrap()
-            .is_empty());
+        assert!(
+            parse_osc_text("<osmChange></osmChange>")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            parse_osc_text(r#"<?xml version="1.0"?><osmChange version="0.6"/>"#)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

@@ -143,10 +143,12 @@ fn prepare_feature(feature: &eliv::DetailFeature) -> PreparedFeature {
 
     let attrs_digest = detail_attrs_hash(&attrs);
     let geometry_digest = detail_geometry_hash(feature.geom_type, &components);
-    let bbox = components.iter().fold(Bbox::empty(), |mut bbox, component| {
-        bbox.include_bbox(component.bbox);
-        bbox
-    });
+    let bbox = components
+        .iter()
+        .fold(Bbox::empty(), |mut bbox, component| {
+            bbox.include_bbox(component.bbox);
+            bbox
+        });
     let structure = feature_structure(&components);
     PreparedFeature {
         id: feature.id,

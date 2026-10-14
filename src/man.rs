@@ -289,7 +289,10 @@ pub fn run(
             })?);
         }
         for hit in sections::merge(hits) {
-            write_stdout(&render::render(&found.content[hit.start..hit.end], no_color()));
+            write_stdout(&render::render(
+                &found.content[hit.start..hit.end],
+                no_color(),
+            ));
         }
         return Ok(());
     }
@@ -383,7 +386,10 @@ mod tests {
         ] {
             let names: Vec<&str> = visible(project).iter().map(|t| t.name).collect();
             for expected in ["check", "clippy", "deps", "config", "measure", "run"] {
-                assert!(names.contains(&expected), "`{expected}` missing in {project}");
+                assert!(
+                    names.contains(&expected),
+                    "`{expected}` missing in {project}"
+                );
             }
         }
     }
@@ -421,7 +427,12 @@ mod tests {
             slugs.sort_unstable();
             let before = slugs.len();
             slugs.dedup();
-            assert_eq!(before, slugs.len(), "duplicate section slug in `{}`", topic.name);
+            assert_eq!(
+                before,
+                slugs.len(),
+                "duplicate section slug in `{}`",
+                topic.name
+            );
         }
     }
 

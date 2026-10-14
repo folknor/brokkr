@@ -305,7 +305,11 @@ pub fn run(
 /// sweep whose `packages` list leaves the package out, one that excludes it by
 /// `test_exclude_packages`, and one that would run exactly what an earlier
 /// sweep runs.
-fn sweep_plan_line(sweeps: &[ResolvedSweep], selection: &check_cmd::PhaseSelection, pkg: &str) -> String {
+fn sweep_plan_line(
+    sweeps: &[ResolvedSweep],
+    selection: &check_cmd::PhaseSelection,
+    pkg: &str,
+) -> String {
     let mut eligible: Vec<&str> = Vec::new();
     let mut not_listed: Vec<&str> = Vec::new();
     let mut excluded: Vec<&str> = Vec::new();
@@ -334,7 +338,10 @@ fn sweep_plan_line(sweeps: &[ResolvedSweep], selection: &check_cmd::PhaseSelecti
         out.push(format!("not this package: {}", not_listed.join(", ")));
     }
     if !excluded.is_empty() {
-        out.push(format!("excluded by test_exclude_packages: {}", excluded.join(", ")));
+        out.push(format!(
+            "excluded by test_exclude_packages: {}",
+            excluded.join(", ")
+        ));
     }
     if !deduped.is_empty() {
         out.push(format!("deduped: {}", deduped.join(", ")));
@@ -354,7 +361,9 @@ fn exclusion_rule(notes: &[check_cmd::AdmissionNote]) -> Option<check_cmd::Admis
 /// The lone-sweep SKIP line's wording for an exclusion.
 fn exclusion_describe(notes: &[check_cmd::AdmissionNote]) -> &'static str {
     match exclusion_rule(notes) {
-        Some(check_cmd::AdmissionRule::TestExcluded) => "package excluded from this sweep (test_exclude_packages)",
+        Some(check_cmd::AdmissionRule::TestExcluded) => {
+            "package excluded from this sweep (test_exclude_packages)"
+        }
         _ => "package not in this sweep's packages list",
     }
 }
@@ -402,10 +411,18 @@ fn prepare_sweep<'s>(
     let debug = resolve_debug(profile_override, cx.test_cfg, sweep.profile);
     let profile_dir = if debug { "debug" } else { "release" };
 
-    let (env_owned, allow_args) =
-        sweep_env(sweep, cx.project, project_root, cx.target_dir, profile_dir, cx.allow_flags);
-    let env_refs: Vec<(&str, &str)> =
-        env_owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let (env_owned, allow_args) = sweep_env(
+        sweep,
+        cx.project,
+        project_root,
+        cx.target_dir,
+        profile_dir,
+        cx.allow_flags,
+    );
+    let env_refs: Vec<(&str, &str)> = env_owned
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
 
     // Pre-build any binary packages declared by this sweep. Skipped
     // when build_packages is empty (fallback path). Failure here
@@ -423,7 +440,13 @@ fn prepare_sweep<'s>(
     // cannot see doctests. Every other sweep prebuilds, has each harness
     // list itself, and runs only the harnesses holding a match - see
     // `plan_focused`.
-    let shape = BuildShape { sweep, allow_args: &allow_args, run: single_run(sweep, attempt)?, jobs: cx.jobs, debug };
+    let shape = BuildShape {
+        sweep,
+        allow_args: &allow_args,
+        run: single_run(sweep, attempt)?,
+        jobs: cx.jobs,
+        debug,
+    };
     let (focused, runtime_fingerprint) = if sweep.doc_only {
         if timeout.is_some() {
             return Err(doc_only_timeout_refusal(sweep));
@@ -432,11 +455,22 @@ fn prepare_sweep<'s>(
     } else {
         // Lines that belong to one sweep say which, when several run.
         let label = cx.multi.then_some(sweep.label.as_str());
-        let Some((binaries, index)) = prebuild_targets(&shape, &env_refs, project_root, false, label)? else {
+        let Some((binaries, index)) =
+            prebuild_targets(&shape, &env_refs, project_root, false, label)?
+        else {
             return Ok(SweepOutcome::Done(RunReport::bare(Outcome::BuildFailed)));
         };
         let fingerprint = index.fingerprint()?;
-        let plan = plan_focused(&shape, name, timeout.is_some(), &binaries, index, &env_refs, project_root, label)?;
+        let plan = plan_focused(
+            &shape,
+            name,
+            timeout.is_some(),
+            &binaries,
+            index,
+            &env_refs,
+            project_root,
+            label,
+        )?;
         (Some(plan), fingerprint)
     };
     // Hashed after every build the sweep did: the pre-builds can be re-uplifted
@@ -473,7 +507,11 @@ struct SweepContext<'a> {
     timeout: Option<u64>,
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::cognitive_complexity)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::cognitive_complexity
+)]
 fn run_sweeps(
     dev_config: &DevConfig,
     project: Project,
@@ -502,10 +540,16 @@ fn run_sweeps(
     // Each sweep's features are projected onto the one package: a token only
     // another of the sweep's packages routes is dropped, and said so.
     let oracle = check_cmd::FeatureOracle::at(project_root);
-    let selection = check_cmd::PhaseSelection::for_brokkr_test(&sweeps, &pkg, source, &debug_of, &oracle)?;
+    let selection =
+        check_cmd::PhaseSelection::for_brokkr_test(&sweeps, &pkg, source, &debug_of, &oracle)?;
     check_cmd::announce_feature_drops(&sweeps, &[&selection]);
     // A deduped sweep is not a sweep this run goes through.
-    let multi = selection.entries().iter().filter(|e| !matches!(e, LaneEntry::Deduped(_))).count() > 1;
+    let multi = selection
+        .entries()
+        .iter()
+        .filter(|e| !matches!(e, LaneEntry::Deduped(_)))
+        .count()
+        > 1;
 
     // `brokkr test` defaults to `cargo test --release` (debug=false ->
     // <target>/release); the dev profile flips both the cargo invocation
@@ -558,13 +602,18 @@ fn run_sweeps(
             // sweep has no plan line, so it says so here.
             LaneEntry::Excluded(e) => {
                 if !multi {
-                    println!("[test]    SKIP {pkg}::{name} - {}", exclusion_describe(e.notes()));
+                    println!(
+                        "[test]    SKIP {pkg}::{name} - {}",
+                        exclusion_describe(e.notes())
+                    );
                 }
                 reports.push(RunReport::bare(Outcome::NoMatch));
                 continue;
             }
             // Runs what an earlier sweep runs: named on the plan line, not run.
-            LaneEntry::Deduped(_) | LaneEntry::Disabled(_) | LaneEntry::NotApplicable(_) => continue,
+            LaneEntry::Deduped(_) | LaneEntry::Disabled(_) | LaneEntry::NotApplicable(_) => {
+                continue;
+            }
         };
         match prepare_sweep(sweep, attempt, &cx)? {
             SweepOutcome::Ready(r) => ready.push(*r),
@@ -574,11 +623,21 @@ fn run_sweeps(
 
     let inventory = TestInventory::open(&ready, &cx, repeat);
     let mut notes: Vec<NoMatchNote> = Vec::new();
-    let ran = run_ready(&ready, &cx, repeat, ceiling, inventory.as_ref(), &mut reports, &mut notes);
+    let ran = run_ready(
+        &ready,
+        &cx,
+        repeat,
+        ceiling,
+        inventory.as_ref(),
+        &mut reports,
+        &mut notes,
+    );
 
     // The journal says the run is over, however it ended; then what it left
     // unresolved is read back from disk.
-    let continuation = inventory.map(TestInventory::close).and_then(|i| i.continuation());
+    let continuation = inventory
+        .map(TestInventory::close)
+        .and_then(|i| i.continuation());
     if let Some(c) = &continuation {
         output::error(&check_cmd::render_continuation(c).join("\n"));
     }
@@ -587,9 +646,15 @@ fn run_sweeps(
     // A sweep that found no match is news only beside a sweep that did: then
     // "feature-gated out of this sweep" is real information. When none matched,
     // the closing error says it once.
-    if reports.iter().any(|r| matches!(r.outcome, Outcome::Pass | Outcome::Fail)) {
+    if reports
+        .iter()
+        .any(|r| matches!(r.outcome, Outcome::Pass | Outcome::Fail))
+    {
         for note in &notes {
-            println!("[test]    SKIP {pkg}::{name} [{}] - {}", note.label, note.detail);
+            println!(
+                "[test]    SKIP {pkg}::{name} [{}] - {}",
+                note.label, note.detail
+            );
         }
     }
 
@@ -613,7 +678,10 @@ struct NoMatchNote {
 impl NoMatchNote {
     fn of(r: &ReadySweep<'_>) -> Self {
         let what = match &r.focused {
-            Some(f) => format!("no test matched in any of {}", output::count(f.searched, "searched harness")),
+            Some(f) => format!(
+                "no test matched in any of {}",
+                output::count(f.searched, "searched harness")
+            ),
             None => "no doctest matched".to_owned(),
         };
         Self {
@@ -712,7 +780,11 @@ fn run_ready(
                 return Err(e);
             }
         };
-        let env_refs: Vec<(&str, &str)> = r.env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let env_refs: Vec<(&str, &str)> = r
+            .env
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
         let plan = SweepPlan {
             shape: BuildShape {
                 sweep: r.sweep,
@@ -741,8 +813,13 @@ fn run_ready(
             }
             let result = run_iteration(&plan, n, tap.as_ref());
             if let Some(tap) = &tap {
-                let passed = result.as_ref().is_ok_and(|r| r.outcome != Outcome::Fail && !r.timed_out);
-                tap.record(check_cmd::JournalRecord::LaneFinished { lane: tap.lane(), passed });
+                let passed = result
+                    .as_ref()
+                    .is_ok_and(|r| r.outcome != Outcome::Fail && !r.timed_out);
+                tap.record(check_cmd::JournalRecord::LaneFinished {
+                    lane: tap.lane(),
+                    passed,
+                });
             }
             let stop = |e: DevError| {
                 if let Some(tap) = &tap {
@@ -813,7 +890,10 @@ fn settle_sweep<'s>(
     if let Some(inv) = inventory {
         for n in 1..=repeat {
             let tap = inv.tap(sweep_index, n);
-            tap.record(check_cmd::JournalRecord::LaneSuperseded { lane: tap.lane(), reason: reason.clone() });
+            tap.record(check_cmd::JournalRecord::LaneSuperseded {
+                lane: tap.lane(),
+                reason: reason.clone(),
+            });
         }
     }
     // On the console: it explains the second build narration that follows and
@@ -822,19 +902,35 @@ fn settle_sweep<'s>(
         "test {}: {reason}; the sweep runs what it builds now, and its inventory is unavailable",
         prepared.sweep.label
     ));
-    Ok(match prepare_sweep(prepared.sweep, &prepared.attempt, cx)? {
-        SweepOutcome::Ready(f) => Settled::Rebuilt(f),
-        SweepOutcome::Done(report) => Settled::Failed(report),
-    })
+    Ok(
+        match prepare_sweep(prepared.sweep, &prepared.attempt, cx)? {
+            SweepOutcome::Ready(f) => Settled::Rebuilt(f),
+            SweepOutcome::Done(report) => Settled::Failed(report),
+        },
+    )
 }
 
 /// The sweep's support builds and test build, again, held to the prepared
 /// record. `Ok(None)` is a build that failed (already reported).
-fn recheck_sweep(prepared: &ReadySweep<'_>, cx: &SweepContext<'_>) -> Result<Option<Vec<String>>, DevError> {
-    let env_refs: Vec<(&str, &str)> = prepared.env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+fn recheck_sweep(
+    prepared: &ReadySweep<'_>,
+    cx: &SweepContext<'_>,
+) -> Result<Option<Vec<String>>, DevError> {
+    let env_refs: Vec<(&str, &str)> = prepared
+        .env
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
     let mut support: Vec<check_cmd::SupportArtifact> = Vec::new();
     for req in prepared.attempt.support() {
-        match run_pre_build(cx.project_root, prepared.sweep, req, &env_refs, &prepared.allow_args, prepared.debug)? {
+        match run_pre_build(
+            cx.project_root,
+            prepared.sweep,
+            req,
+            &env_refs,
+            &prepared.allow_args,
+            prepared.debug,
+        )? {
             Some(artifacts) => support.extend(artifacts),
             None => return Ok(None),
         }
@@ -846,7 +942,11 @@ fn recheck_sweep(prepared: &ReadySweep<'_>, cx: &SweepContext<'_>) -> Result<Opt
         jobs: cx.jobs,
         debug: prepared.debug,
     };
-    sweep_drift(prepared, |_| prebuild_targets(&shape, &env_refs, cx.project_root, true, None), &support)
+    sweep_drift(
+        prepared,
+        |_| prebuild_targets(&shape, &env_refs, cx.project_root, true, None),
+        &support,
+    )
 }
 
 /// Every way a rebuild differs from the prepared sweep: a harness gone or
@@ -856,11 +956,20 @@ fn recheck_sweep(prepared: &ReadySweep<'_>, cx: &SweepContext<'_>) -> Result<Opt
 /// harnesses to rebuild; its support binaries are still held to the record.
 fn sweep_drift(
     prepared: &ReadySweep<'_>,
-    build: impl FnMut(usize) -> Result<Option<(Vec<check_cmd::TestBinary>, check_cmd::BuildRuntimeIndex)>, DevError>,
+    build: impl FnMut(
+        usize,
+    ) -> Result<
+        Option<(Vec<check_cmd::TestBinary>, check_cmd::BuildRuntimeIndex)>,
+        DevError,
+    >,
     support: &[check_cmd::SupportArtifact],
 ) -> Result<Option<Vec<String>>, DevError> {
     let (artifacts, runtime, resolutions) = match &prepared.focused {
-        Some(f) => (f.artifacts.clone(), Some(&prepared.runtime_fingerprint), vec![None]),
+        Some(f) => (
+            f.artifacts.clone(),
+            Some(&prepared.runtime_fingerprint),
+            vec![None],
+        ),
         None => (Vec::new(), None, Vec::new()),
     };
     let check = check_cmd::DriftCheck {
@@ -917,7 +1026,11 @@ impl TestInventory {
                     paths.plan.display(),
                     paths.journal.display()
                 ));
-                Some(Self { plan, journal: paths.journal, first_lane })
+                Some(Self {
+                    plan,
+                    journal: paths.journal,
+                    first_lane,
+                })
             }
             Err(e) => {
                 output::error(&format!("test: the run's record could not be opened: {e}"));
@@ -935,7 +1048,10 @@ impl TestInventory {
     /// The journal's closing line: the run is over.
     fn close(self) -> ClosedInventory {
         check_cmd::journal_close();
-        ClosedInventory { plan: self.plan, journal: self.journal }
+        ClosedInventory {
+            plan: self.plan,
+            journal: self.journal,
+        }
     }
 }
 
@@ -959,7 +1075,10 @@ fn test_lane_record(r: &ReadySweep<'_>, lane: usize, label: String) -> check_cmd
     let shape = check_cmd::shape_id(r.sweep);
     let Some(focused) = &r.focused else {
         // Doctests are not enumerable: the lane exists, expecting nothing.
-        return LaneRecord { prepared: true, ..LaneRecord::empty(lane, label, LaneKind::DocOnly, shape) };
+        return LaneRecord {
+            prepared: true,
+            ..LaneRecord::empty(lane, label, LaneKind::DocOnly, shape)
+        };
     };
     let mut rec = LaneRecord::empty(lane, label, LaneKind::Serial, shape.clone());
     rec.prepared = true;
@@ -999,6 +1118,7 @@ struct SweepPlan<'a> {
 
 /// Run iteration `n` of a sweep and report it, printing its footers. `tap` is
 /// the iteration's lane in the run's journal.
+#[allow(clippy::too_many_lines)] // linear: run, account, report, footers
 fn run_iteration(
     plan: &SweepPlan<'_>,
     n: u32,
@@ -1007,9 +1127,16 @@ fn run_iteration(
     let (pkg, name, repeat) = (plan.shape.pkg(), plan.name, plan.repeat);
     let tag = |target: Option<&str>| {
         let quals: Vec<&str> = plan.sweep_label.into_iter().chain(target).collect();
-        let quals =
-            if quals.is_empty() { String::new() } else { format!(" [{}]", quals.join(", ")) };
-        let run = if repeat > 1 { format!(" run {n}/{repeat}") } else { String::new() };
+        let quals = if quals.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", quals.join(", "))
+        };
+        let run = if repeat > 1 {
+            format!(" run {n}/{repeat}")
+        } else {
+            String::new()
+        };
         format!("{pkg}::{name}{quals}{run}")
     };
     // Under `-N`, the invocation and build-time framing is identical every
@@ -1023,7 +1150,12 @@ fn run_iteration(
         let s = &plan.shape;
         let args = test_argv(s, name);
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let invocation = format!("cargo {} (sweep: {}; cwd {})", arg_refs.join(" "), s.sweep.label, plan.project_root.display());
+        let invocation = format!(
+            "cargo {} (sweep: {}; cwd {})",
+            arg_refs.join(" "),
+            s.sweep.label,
+            plan.project_root.display()
+        );
         if announce {
             output::detail(&invocation);
         }
@@ -1046,7 +1178,8 @@ fn run_iteration(
             },
             plan.repeat_state,
             n > 1,
-        ).inspect_err(|_| show_failed_invocation(plan, &invocation))?;
+        )
+        .inspect_err(|_| show_failed_invocation(plan, &invocation))?;
         show_reproduction(plan, &invocation, &report);
         return Ok(report);
     };
@@ -1069,12 +1202,21 @@ fn run_iteration(
         // under the envelope's cwd, and this is the one place it is named.
         // It goes to the run log; the console shows it only for a harness
         // that fails, where it is the reproduction line.
-        let invocation = format!("{} {} (cwd {})", run.program, arg_refs.join(" "), run.cwd.display());
+        let invocation = format!(
+            "{} {} (cwd {})",
+            run.program,
+            arg_refs.join(" "),
+            run.cwd.display()
+        );
         if announce {
             output::detail(&invocation);
         }
         let test_tag = |test: &str, wall: &str| lone_test_tag(plan, &run.label, n, test, wall);
-        let env: Vec<(&str, &str)> = run.env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let env: Vec<(&str, &str)> = run
+            .env
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
         // The harness's stream is this binary's, and under `--timeout` this
         // one test's: what lets a kill or a crash be charged to it.
         let observe = tap.map_or_else(test_runner::Observe::default, |tap| {
@@ -1083,10 +1225,15 @@ fn run_iteration(
                 unit: run.unit.clone(),
                 one_test: plan.exact.clone(),
             };
-            test_runner::Observe { sink: Some(tap.sink(move |_| origin.clone(), false)), ..Default::default() }
+            test_runner::Observe {
+                sink: Some(tap.sink(move |_| origin.clone(), false)),
+                ..Default::default()
+            }
         });
         let report = run_one(
-            test_runner::Launch::Direct { program: &run.program },
+            test_runner::Launch::Direct {
+                program: &run.program,
+            },
             &arg_refs,
             &run.cwd,
             plan.state_root,
@@ -1103,7 +1250,8 @@ fn run_iteration(
             },
             plan.repeat_state,
             n > 1,
-        ).inspect_err(|_| show_failed_invocation(plan, &invocation))?;
+        )
+        .inspect_err(|_| show_failed_invocation(plan, &invocation))?;
         show_reproduction(plan, &invocation, &report);
         // A blown budget stops everything, the remaining harnesses included.
         let stop = report.timed_out;
@@ -1135,10 +1283,25 @@ fn show_failed_invocation(plan: &SweepPlan<'_>, invocation: &str) {
 /// rewriting that tag. The filter joins the wall time when it differs.
 fn lone_test_tag(plan: &SweepPlan<'_>, harness: &str, n: u32, test: &str, wall: &str) -> String {
     let (pkg, name, repeat) = (plan.shape.pkg(), plan.name, plan.repeat);
-    let quals: Vec<&str> = plan.sweep_label.into_iter().chain(std::iter::once(harness)).collect();
-    let run_n = if repeat > 1 { format!(" run {n}/{repeat}") } else { String::new() };
-    let filter = if test == name { String::new() } else { format!("; filter: {name}") };
-    format!("{pkg}::{test} [{}]{run_n} ({wall}{filter})", quals.join(", "))
+    let quals: Vec<&str> = plan
+        .sweep_label
+        .into_iter()
+        .chain(std::iter::once(harness))
+        .collect();
+    let run_n = if repeat > 1 {
+        format!(" run {n}/{repeat}")
+    } else {
+        String::new()
+    };
+    let filter = if test == name {
+        String::new()
+    } else {
+        format!("; filter: {name}")
+    };
+    format!(
+        "{pkg}::{test} [{}]{run_n} ({wall}{filter})",
+        quals.join(", ")
+    )
 }
 
 /// One sweep's focused run: the harnesses holding a match, ready to execute.
@@ -1194,7 +1357,7 @@ struct HarnessRun {
 /// listed (benchmarks included, since `cargo test` runs them): a `<NAME>`
 /// matching every test of the package is refused, and under `--timeout` a
 /// `<NAME>` matching more than one (harness, test) is.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn plan_focused(
     shape: &BuildShape<'_>,
     name: &str,
@@ -1221,9 +1384,14 @@ fn plan_focused(
     }
     let mut listed: Vec<(&check_cmd::TestBinary, Vec<String>)> = Vec::new();
     for b in &split.eligible {
-        let names = focused::discover(b, &runtime, env, project_root).inspect_err(|_| {
-            output::error(&format!("test {}: discovery failed for {}", shape.sweep.label, b.label()));
-        })?
+        let names = focused::discover(b, &runtime, env, project_root)
+            .inspect_err(|_| {
+                output::error(&format!(
+                    "test {}: discovery failed for {}",
+                    shape.sweep.label,
+                    b.label()
+                ));
+            })?
             .into_iter()
             .map(|l| l.name)
             .collect();
@@ -1247,8 +1415,10 @@ fn plan_focused(
     let hits: Vec<(&check_cmd::TestBinary, Vec<String>)> = listed
         .into_iter()
         .filter_map(|(b, names)| {
-            let m: Vec<String> =
-                names.into_iter().filter(|t| focused::matches(t, name, false)).collect();
+            let m: Vec<String> = names
+                .into_iter()
+                .filter(|t| focused::matches(t, name, false))
+                .collect();
             (!m.is_empty()).then_some((b, m))
         })
         .collect();
@@ -1276,7 +1446,11 @@ fn plan_focused(
     let mut runs = Vec::with_capacity(hits.len());
     for (b, m) in &hits {
         let (cwd, envelope) = runtime.envelope(b, env)?;
-        let cwd = if cwd.as_os_str() == "." { project_root.to_path_buf() } else { cwd };
+        let cwd = if cwd.as_os_str() == "." {
+            project_root.to_path_buf()
+        } else {
+            cwd
+        };
         runs.push(HarnessRun {
             label: b.label(),
             program: b.executable.clone(),
@@ -1309,7 +1483,12 @@ fn plan_focused(
             hash,
         });
     }
-    Ok(FocusedPlan { runs, searched, exact, artifacts })
+    Ok(FocusedPlan {
+        runs,
+        searched,
+        exact,
+        artifacts,
+    })
 }
 
 /// `<label>: ` when several sweeps run (a line that belongs to one of them says
@@ -1446,12 +1625,16 @@ fn run_pre_build(
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     // The command goes to the run log on success; a build that fails or errors
     // out names what it ran on the console, beside its diagnostics.
-    let captured = cargo_with_deadline(&arg_refs, project_root, env, "sweep pre-build").inspect_err(|_| {
-        output::run_msg(&line);
-    })?;
+    let captured = cargo_with_deadline(&arg_refs, project_root, env, "sweep pre-build")
+        .inspect_err(|_| {
+            output::run_msg(&line);
+        })?;
 
     if captured.status.success() {
-        return Ok(Some(check_cmd::support_artifacts(&String::from_utf8_lossy(&captured.stdout), package)));
+        return Ok(Some(check_cmd::support_artifacts(
+            &String::from_utf8_lossy(&captured.stdout),
+            package,
+        )));
     }
     output::run_msg(&line);
 
@@ -1465,10 +1648,7 @@ fn run_pre_build(
     if !filtered.is_empty() {
         output::error(&filtered);
     }
-    println!(
-        "[test]    BUILD FAILED {package} (sweep: {})",
-        sweep.label
-    );
+    println!("[test]    BUILD FAILED {package} (sweep: {})", sweep.label);
     Ok(None)
 }
 
@@ -1546,7 +1726,10 @@ fn pre_build_argv(
     // support executables the run's inventory hashes, while compiler
     // diagnostics are still rendered as text on stderr for the failure path.
     // The message format does not enter cargo's fingerprint.
-    let mut args: Vec<String> = vec!["build".into(), "--message-format=json-render-diagnostics".into()];
+    let mut args: Vec<String> = vec![
+        "build".into(),
+        "--message-format=json-render-diagnostics".into(),
+    ];
     args.extend(sweep.unification_args());
     args.extend(allow_args.iter().cloned());
     if !debug {
@@ -1563,7 +1746,10 @@ fn pre_build_argv(
 /// The one request a `brokkr test` sweep runs as. The resolved package always
 /// overrides the sweep's selection, so there is exactly one resolution under
 /// every unification mode (package mode over one package is one run).
-fn single_run<'a>(sweep: &ResolvedSweep, attempt: &'a check_cmd::Attempt) -> Result<&'a check_cmd::ResolutionRun, DevError> {
+fn single_run<'a>(
+    sweep: &ResolvedSweep,
+    attempt: &'a check_cmd::Attempt,
+) -> Result<&'a check_cmd::ResolutionRun, DevError> {
     match attempt.runs() {
         [one] => Ok(one),
         runs => Err(DevError::Build(format!(
@@ -1591,7 +1777,11 @@ struct BuildShape<'a> {
 impl BuildShape<'_> {
     /// The one package this run tests, for messages.
     fn pkg(&self) -> &str {
-        self.run.selection.packages().and_then(<[String]>::first).map_or("", String::as_str)
+        self.run
+            .selection
+            .packages()
+            .and_then(<[String]>::first)
+            .map_or("", String::as_str)
     }
 }
 
@@ -1629,8 +1819,14 @@ fn cargo_head(shape: &BuildShape<'_>, leading: &[&str]) -> Vec<String> {
 /// newly fail the build. `json-render-diagnostics` keeps the artifact records
 /// on stdout for the listing while compiler errors stay readable on stderr.
 fn prebuild_argv(shape: &BuildShape<'_>) -> Vec<String> {
-    let mut args =
-        cargo_head(shape, &["test", "--no-run", "--message-format=json-render-diagnostics"]);
+    let mut args = cargo_head(
+        shape,
+        &[
+            "test",
+            "--no-run",
+            "--message-format=json-render-diagnostics",
+        ],
+    );
     args.push("--tests".into());
     args
 }
@@ -1665,16 +1861,27 @@ fn prebuild_targets(
     label: Option<&str>,
 ) -> Result<Option<(Vec<check_cmd::TestBinary>, check_cmd::BuildRuntimeIndex)>, DevError> {
     let args = prebuild_argv(shape);
-    output::detail(&format!("cargo {} (sweep: {})", args.join(" "), shape.sweep.label));
+    output::detail(&format!(
+        "cargo {} (sweep: {})",
+        args.join(" "),
+        shape.sweep.label
+    ));
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let started = std::time::Instant::now();
     // The command is routine on success and goes to the run log; a build that
     // fails or errors out names what it ran on the console, beside its
     // diagnostics - the rule `brokkr check` follows.
-    let announce = || output::run_msg(&format!("cargo {} (sweep: {})", args.join(" "), shape.sweep.label));
-    let captured = cargo_with_deadline(&arg_refs, project_root, env, "test build").inspect_err(|_| {
-        announce();
-    })?;
+    let announce = || {
+        output::run_msg(&format!(
+            "cargo {} (sweep: {})",
+            args.join(" "),
+            shape.sweep.label
+        ));
+    };
+    let captured =
+        cargo_with_deadline(&arg_refs, project_root, env, "test build").inspect_err(|_| {
+            announce();
+        })?;
     if !captured.status.success() {
         announce();
         let stderr = String::from_utf8_lossy(&captured.stderr);
@@ -1684,7 +1891,8 @@ fn prebuild_targets(
         }
         println!(
             "[test]    BUILD FAILED {} (sweep: {})",
-            shape.pkg(), shape.sweep.label
+            shape.pkg(),
+            shape.sweep.label
         );
         return Ok(None);
     }
@@ -1890,7 +2098,12 @@ fn resolve_package_spec(
     )))
 }
 
-fn aggregate_exit(outcomes: &[Outcome], pkg: &str, name: &str, searched: &Searched) -> Result<(), DevError> {
+fn aggregate_exit(
+    outcomes: &[Outcome],
+    pkg: &str,
+    name: &str,
+    searched: &Searched,
+) -> Result<(), DevError> {
     let test_failed = outcomes.contains(&Outcome::Fail);
     let build_failed = outcomes.contains(&Outcome::BuildFailed);
     // `Reported`: every FAIL and BUILD FAILED already printed its footer, so
@@ -2000,7 +2213,7 @@ fn select_sweep(
 /// that is flushed once the outcome is known - and dropped entirely when
 /// the failure set was already shown by an earlier run, leaving
 /// just the footer.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn run_one(
     launch: test_runner::Launch<'_>,
     args: &[&str],
@@ -2050,15 +2263,17 @@ fn run_one(
     let has_test_result = stdout_lines.iter().any(|l| l.starts_with("test result:"));
     // Only cargo compiles; a directly run harness printing `error: ...` is a
     // test talking, never a build failure.
-    let has_compile_error =
-        !direct && stderr_lines.iter().any(|l| stderr_indicates_compile_error(l));
+    let has_compile_error = !direct
+        && stderr_lines
+            .iter()
+            .any(|l| stderr_indicates_compile_error(l));
 
     // Display the test-runtime wall: total minus the cargo build phase
     // (which the `[test] test binaries built in ...s` line already
     // surfaces). Falls back to total if cargo never reported `Finished`.
-    let test_wall = run
-        .build_elapsed
-        .map_or(run.captured.elapsed, |b| run.captured.elapsed.saturating_sub(b));
+    let test_wall = run.build_elapsed.map_or(run.captured.elapsed, |b| {
+        run.captured.elapsed.saturating_sub(b)
+    });
     let wall = format!("{:.2}s", test_wall.as_secs_f64());
 
     if let LibtestOutcome::HungTest(hung) = &run.outcome {
@@ -2071,7 +2286,12 @@ fn run_one(
         // decided to show.
         let first = repeat_state.first_sighting("build failed");
         flush_sink(sink, !first);
-        return Ok(report_build_failure(tag, &wall, first, stderr_text.as_ref()));
+        return Ok(report_build_failure(
+            tag,
+            &wall,
+            first,
+            stderr_text.as_ref(),
+        ));
     }
 
     // Every failure this harness reported, not the first: the footer is how a
@@ -2117,7 +2337,11 @@ fn run_one(
         let first = repeat_state.first_sighting(&failure_set_key(&failures));
         flush_sink(sink, !first);
         print_fail_footer(tag, shape.test_tag, &wall, &failures);
-        return Ok(RunReport { outcome: Outcome::Fail, timed_out: false, failures });
+        return Ok(RunReport {
+            outcome: Outcome::Fail,
+            timed_out: false,
+            failures,
+        });
     }
 
     if let Some(want) = shape.expected
@@ -2179,7 +2403,11 @@ fn run_one(
 /// verdict alone decides.
 fn failure_kind(f: &cargo_filter::ParsedTestFailure, listed: Option<&[String]>) -> FailureKind {
     let selectable = listed.is_none_or(|l| l.contains(&f.name));
-    if f.verdict && selectable { FailureKind::Test } else { FailureKind::Harness }
+    if f.verdict && selectable {
+        FailureKind::Test
+    } else {
+        FailureKind::Harness
+    }
 }
 
 /// Report a run the watchdog killed for blowing its budget. The hang's
@@ -2199,12 +2427,21 @@ fn report_hung(
     }
     let secs = hung.ceiling.as_secs();
     if let Some(test_tag) = hung_test_tag(shape, hung) {
-        println!("[test]    FAIL {} - hung test exceeded {secs}s", test_tag(&hung.test, wall));
+        println!(
+            "[test]    FAIL {} - hung test exceeded {secs}s",
+            test_tag(&hung.test, wall)
+        );
     } else {
-        println!("[test]    FAIL {} ({wall}) - hung test exceeded {secs}s", shape.tag);
+        println!(
+            "[test]    FAIL {} ({wall}) - hung test exceeded {secs}s",
+            shape.tag
+        );
     }
     std::io::stdout().flush().ok();
-    RunReport::timed_out(shape.target, format!("hung test exceeded {}s", hung.ceiling.as_secs()))
+    RunReport::timed_out(
+        shape.target,
+        format!("hung test exceeded {}s", hung.ceiling.as_secs()),
+    )
 }
 
 /// The footer tag renderer a hung test leads with, when its name is a verified
@@ -2217,7 +2454,11 @@ fn report_hung(
 fn hung_test_tag<'a>(shape: &OneRun<'a>, hung: &test_runner::HungTest) -> Option<&'a TestTag<'a>> {
     let one_test = matches!(shape.ceilings.shape, test_runner::WallShape::OneTest { .. });
     let charged = matches!(hung.reason, test_runner::TimeoutReason::PerTest { .. });
-    if one_test && charged { shape.test_tag } else { None }
+    if one_test && charged {
+        shape.test_tag
+    } else {
+        None
+    }
 }
 
 /// The verdict for a directly run harness whose run does not account for
@@ -2245,7 +2486,11 @@ fn disagrees_with_discovery(
     let failure = discovery_mismatch(target, want, got);
     println!("[test]    FAIL {tag} ({wall}) - {}", failure.describe());
     std::io::stdout().flush().ok();
-    Some(RunReport { outcome: Outcome::Fail, timed_out: false, failures: vec![failure] })
+    Some(RunReport {
+        outcome: Outcome::Fail,
+        timed_out: false,
+        failures: vec![failure],
+    })
 }
 
 /// The failure a harness files when its run accounts for `got` tests where
@@ -2300,12 +2545,7 @@ fn ceilings_for(exact: &Option<String>, ceiling: Duration) -> test_runner::Ceili
 /// Report a run that failed to build. Compile errors are identical across `-N`
 /// repeats by construction (same source, same flags), so the block prints once
 /// and later repeats collapse to the footer.
-fn report_build_failure(
-    tag: &str,
-    wall: &str,
-    first: bool,
-    stderr_text: &str,
-) -> RunReport {
+fn report_build_failure(tag: &str, wall: &str, first: bool, stderr_text: &str) -> RunReport {
     if first {
         let filtered = cargo_filter::filter_test_build_failure(stderr_text);
         if !filtered.is_empty() {
@@ -2432,12 +2672,7 @@ fn describe_harness_status(status: &std::process::ExitStatus) -> String {
 /// user's filter: that is the identity a reader acts on. Only when it is the
 /// sole failure - a test failure beside a harness failure keeps the
 /// filter-led form, since the harness failure has no test name to lead with.
-fn print_fail_footer(
-    tag: &str,
-    test_tag: Option<&TestTag<'_>>,
-    wall: &str,
-    failures: &[Failure],
-) {
+fn print_fail_footer(tag: &str, test_tag: Option<&TestTag<'_>>, wall: &str, failures: &[Failure]) {
     if let [only] = failures
         && only.kind == FailureKind::Test
         && let Some(test_tag) = test_tag
@@ -2452,7 +2687,10 @@ fn print_fail_footer(
     } else if let [only] = failures {
         println!("[test]    FAIL {tag} ({wall}) - {}", only.describe());
     } else {
-        println!("[test]    FAIL {tag} ({wall}) - {} failures:", failures.len());
+        println!(
+            "[test]    FAIL {tag} ({wall}) - {} failures:",
+            failures.len()
+        );
         for f in failures {
             println!("[test]      {}", f.describe());
         }
@@ -2468,7 +2706,10 @@ fn flush_sink(sink: Option<LineSink>, suppress: bool) {
     if suppress {
         return;
     }
-    let lines = s.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default();
+    let lines = s
+        .lock()
+        .map(|mut v| std::mem::take(&mut *v))
+        .unwrap_or_default();
     if lines.is_empty() {
         return;
     }
@@ -2719,11 +2960,7 @@ fn keep_stderr_compile_line(line: &str, in_block: &mut bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::panic
-    )]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use crate::config::{CheckEntry, SweepProfile, TestConfig};
 
@@ -2825,7 +3062,11 @@ mod tests {
     }
 
     fn report(outcome: Outcome, failures: Vec<Failure>) -> RunReport {
-        RunReport { outcome, timed_out: false, failures }
+        RunReport {
+            outcome,
+            timed_out: false,
+            failures,
+        }
     }
 
     #[test]
@@ -2842,8 +3083,14 @@ mod tests {
         ];
         let lines = format_repeat_summary(&reports);
         assert_eq!(lines[0], "[test]    summary: 5 runs - 2 PASS, 3 FAIL");
-        assert_eq!(lines[1], "[test]      2x [test:t] flaky: rolled 0 @ src/a.rs:7:9");
-        assert_eq!(lines[2], "[test]      1x [test:t] flaky: boom @ src/b.rs:1:1");
+        assert_eq!(
+            lines[1],
+            "[test]      2x [test:t] flaky: rolled 0 @ src/a.rs:7:9"
+        );
+        assert_eq!(
+            lines[2],
+            "[test]      1x [test:t] flaky: boom @ src/b.rs:1:1"
+        );
         assert_eq!(lines.len(), 3);
     }
 
@@ -2863,7 +3110,10 @@ mod tests {
         let lines = format_repeat_summary(&reports);
         assert_eq!(lines[1], "[test]      1x [lib:p] a: x @ src/a.rs:1:1");
         assert_eq!(lines[2], "[test]      2x [lib:p] a: x @ src/a.rs:1:1");
-        assert_eq!(lines[3], "[test]         + [test:cli] b: y @ tests/cli.rs:2:2");
+        assert_eq!(
+            lines[3],
+            "[test]         + [test:cli] b: y @ tests/cli.rs:2:2"
+        );
         assert_eq!(lines.len(), 4);
     }
 
@@ -2873,7 +3123,10 @@ mod tests {
         let lib = failure("lib:p", "tests::works", None, Some("src/lib.rs:9:9"));
         let cli = failure("test:cli", "tests::works", None, Some("src/lib.rs:9:9"));
         assert_ne!(lib.key(), cli.key());
-        assert_ne!(failure_set_key(std::slice::from_ref(&lib)), failure_set_key(&[lib, cli]));
+        assert_ne!(
+            failure_set_key(std::slice::from_ref(&lib)),
+            failure_set_key(&[lib, cli])
+        );
     }
 
     /// A sweep's iteration fails if any harness failed, and is a SKIP only when
@@ -2893,7 +3146,11 @@ mod tests {
             report(Outcome::Fail, vec![failure("test:b", "y", None, None)]),
         ]);
         assert!(merged.outcome == Outcome::Fail);
-        assert_eq!(merged.failures.len(), 2, "every harness's failures survive the merge");
+        assert_eq!(
+            merged.failures.len(),
+            2,
+            "every harness's failures survive the merge"
+        );
         let merged = RunReport::merge(vec![report(Outcome::NoMatch, vec![])]);
         assert!(merged.outcome == Outcome::NoMatch);
         assert!(RunReport::merge(Vec::new()).outcome == Outcome::NoMatch);
@@ -2912,14 +3169,28 @@ mod tests {
             "Caused by:",
             "  process didn't exit successfully: `/t/deps/cli-1 x` (signal: 6, SIGABRT: process abort signal)",
         ];
-        let f =
-            harness_failure("test:cli", &status, false, &stderr, &["cli::overflows".to_owned()]);
-        assert_eq!(f.what, "test harness failed (signal: 6, SIGABRT: process abort signal)");
+        let f = harness_failure(
+            "test:cli",
+            &status,
+            false,
+            &stderr,
+            &["cli::overflows".to_owned()],
+        );
+        assert_eq!(
+            f.what,
+            "test harness failed (signal: 6, SIGABRT: process abort signal)"
+        );
         let msg = f.msg.expect("a suspect");
-        assert!(msg.contains("cli::overflows") && msg.contains("suspect"), "{msg}");
+        assert!(
+            msg.contains("cli::overflows") && msg.contains("suspect"),
+            "{msg}"
+        );
 
         let bare = harness_failure("test:cli", &status, false, &[], &[]);
-        assert_eq!(bare.what, "test harness failed (cargo exited with code 101)");
+        assert_eq!(
+            bare.what,
+            "test harness failed (cargo exited with code 101)"
+        );
         assert!(bare.msg.is_none(), "no start seen, no suspect");
     }
 
@@ -2952,11 +3223,24 @@ mod tests {
     fn the_prebuild_selects_the_test_targets() {
         let sweep = ResolvedSweep::default();
         let run = one_package(&sweep, "pkg");
-        let shape = BuildShape { sweep: &sweep, allow_args: &[], run: &run, jobs: None, debug: true };
+        let shape = BuildShape {
+            sweep: &sweep,
+            allow_args: &[],
+            run: &run,
+            jobs: None,
+            debug: true,
+        };
         let pre = prebuild_argv(&shape);
         assert_eq!(
             pre,
-            ["test", "--no-run", "--message-format=json-render-diagnostics", "-p", "pkg", "--tests"]
+            [
+                "test",
+                "--no-run",
+                "--message-format=json-render-diagnostics",
+                "-p",
+                "pkg",
+                "--tests"
+            ]
         );
     }
 
@@ -2985,9 +3269,18 @@ mod tests {
     /// The doc-only run is `cargo test --doc NAME` with the same libtest half.
     #[test]
     fn the_doc_only_run_shares_the_libtest_half() {
-        let sweep = ResolvedSweep { doc_only: true, ..ResolvedSweep::default() };
+        let sweep = ResolvedSweep {
+            doc_only: true,
+            ..ResolvedSweep::default()
+        };
         let one = one_package(&sweep, "pkg");
-        let shape = BuildShape { sweep: &sweep, allow_args: &[], run: &one, jobs: None, debug: true };
+        let shape = BuildShape {
+            sweep: &sweep,
+            allow_args: &[],
+            run: &one,
+            jobs: None,
+            debug: true,
+        };
         let run = test_argv(&shape, "x");
         let sep = run.iter().position(|a| a == "--").expect("separator");
         assert_eq!(&run[..sep], ["test", "-p", "pkg", "--doc", "x"]);
@@ -3071,7 +3364,9 @@ mod tests {
     fn stdout_filter_keeps_test_output() {
         assert!(keep_stdout_line("hello from test"));
         assert!(keep_stdout_line(""));
-        assert!(keep_stdout_line("thread 'foo' panicked at tests/bar.rs:10:5:"));
+        assert!(keep_stdout_line(
+            "thread 'foo' panicked at tests/bar.rs:10:5:"
+        ));
         assert!(keep_stdout_line("assertion `left == right` failed"));
         assert!(keep_stdout_line("failures:"));
         assert!(keep_stdout_line("---- foo stdout ----"));
@@ -3151,7 +3446,10 @@ mod tests {
             &mut in_block
         ));
         assert!(in_block);
-        assert!(!keep_stderr_compile_line("  --> src/lib.rs:10:5", &mut in_block));
+        assert!(!keep_stderr_compile_line(
+            "  --> src/lib.rs:10:5",
+            &mut in_block
+        ));
         assert!(!keep_stderr_compile_line("   |", &mut in_block));
         assert!(!keep_stderr_compile_line("10 | let x = 1;", &mut in_block));
         assert!(!keep_stderr_compile_line(
@@ -3173,7 +3471,10 @@ mod tests {
             &mut in_block
         ));
         assert!(in_block);
-        assert!(!keep_stderr_compile_line("  --> src/lib.rs:1:1", &mut in_block));
+        assert!(!keep_stderr_compile_line(
+            "  --> src/lib.rs:1:1",
+            &mut in_block
+        ));
         assert!(!keep_stderr_compile_line("", &mut in_block));
         assert!(!in_block);
         // `error:` (no brackets) also triggers the block.
@@ -3329,7 +3630,12 @@ lanes = ["tier1", "serial"]
         assert_eq!(sweeps.len(), 2);
         assert_eq!(sweeps[0].label, "tier1/all");
         assert_eq!(sweeps[1].label, "serial/all");
-        assert_eq!(resolve_sweeps(Some(&test_cfg), &entries, None).unwrap().len(), 2);
+        assert_eq!(
+            resolve_sweeps(Some(&test_cfg), &entries, None)
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[test]
@@ -3368,13 +3674,19 @@ lanes = ["tier1", "serial"]
         // `-p PKG NAME` finds its test.
         let excludes = ResolvedSweep {
             label: "tier1/all".into(),
-            features: crate::profile::FeatureConfig { tokens: vec!["a".into()], ..Default::default() },
+            features: crate::profile::FeatureConfig {
+                tokens: vec!["a".into()],
+                ..Default::default()
+            },
             test_exclude_packages: vec!["pkg-x".into()],
             ..Default::default()
         };
         let permits = ResolvedSweep {
             label: "serial/all".into(),
-            features: crate::profile::FeatureConfig { tokens: vec!["a".into()], ..Default::default() },
+            features: crate::profile::FeatureConfig {
+                tokens: vec!["a".into()],
+                ..Default::default()
+            },
             test_exclude_packages: Vec::new(),
             ..Default::default()
         };
@@ -3390,8 +3702,15 @@ lanes = ["tier1", "serial"]
     /// doctests.
     #[test]
     fn a_doctest_twin_is_not_collapsed_onto_its_sibling() {
-        let lib = ResolvedSweep { label: "default".into(), ..Default::default() };
-        let twin = ResolvedSweep { label: "doctests".into(), doc_only: true, ..Default::default() };
+        let lib = ResolvedSweep {
+            label: "default".into(),
+            ..Default::default()
+        };
+        let twin = ResolvedSweep {
+            label: "doctests".into(),
+            doc_only: true,
+            ..Default::default()
+        };
         let sweeps = vec![lib, twin];
         assert_eq!(attempted(&sweeps, "pkg"), vec!["default", "doctests"]);
     }
@@ -3421,7 +3740,10 @@ env = { BROKKR_TEST_PLATFORM = "1", FOO = "bar" }
         let sweeps = decide_sweeps(Some(&test_cfg), &entries).unwrap();
         assert_eq!(sweeps.len(), 1);
         assert_eq!(
-            sweeps[0].env.get("BROKKR_TEST_PLATFORM").map(String::as_str),
+            sweeps[0]
+                .env
+                .get("BROKKR_TEST_PLATFORM")
+                .map(String::as_str),
             Some("1")
         );
         assert_eq!(sweeps[0].env.get("FOO").map(String::as_str), Some("bar"));
@@ -3476,10 +3798,16 @@ include_ignored = false
             "run_prep_e",
         ]);
         for broad in ["_", "e", ""] {
-            assert!(matches_whole_suite(&listed, broad), "{broad:?} matches every test");
+            assert!(
+                matches_whole_suite(&listed, broad),
+                "{broad:?} matches every test"
+            );
         }
         for narrow in ["::", "tests::", "market::", "run_prep_e", "nothing"] {
-            assert!(!matches_whole_suite(&listed, narrow), "{narrow:?} is a selection");
+            assert!(
+                !matches_whole_suite(&listed, narrow),
+                "{narrow:?} is a selection"
+            );
         }
     }
 
@@ -3490,7 +3818,10 @@ include_ignored = false
         let listed = names(&["a::x", "a::y", "a::z", "a::w"]);
         assert!(listed.len() < WHOLE_SUITE_FLOOR);
         assert!(!matches_whole_suite(&listed, "a::"));
-        assert!(!matches_whole_suite(&[], "anything"), "an empty package matches nothing");
+        assert!(
+            !matches_whole_suite(&[], "anything"),
+            "an empty package matches nothing"
+        );
     }
 
     /// The pre-build compiles the lane like the test run does: the pinned
@@ -3505,25 +3836,53 @@ include_ignored = false
             effective_unification: EffectiveUnification::Pinned(CargoUnification::Package),
             ..ResolvedSweep::default()
         };
-        let allow = vec!["--config".to_owned(), "build.rustflags=[\"-A\",\"x\"]".to_owned()];
-        let args = pre_build_argv(&sweep, &support_for(&sweep, "daemon", "daemon"), &allow, false);
+        let allow = vec![
+            "--config".to_owned(),
+            "build.rustflags=[\"-A\",\"x\"]".to_owned(),
+        ];
+        let args = pre_build_argv(
+            &sweep,
+            &support_for(&sweep, "daemon", "daemon"),
+            &allow,
+            false,
+        );
         assert!(
-            args.iter().any(|a| a == "resolver.feature-unification=\"package\""),
+            args.iter()
+                .any(|a| a == "resolver.feature-unification=\"package\""),
             "{args:?}"
         );
-        assert!(args.iter().any(|a| a == "build.rustflags=[\"-A\",\"x\"]"), "{args:?}");
+        assert!(
+            args.iter().any(|a| a == "build.rustflags=[\"-A\",\"x\"]"),
+            "{args:?}"
+        );
         assert!(args.iter().any(|a| a == "--release"), "{args:?}");
 
         // An unpinned sweep with no allows stays byte-identical to before.
         let plain_sweep = ResolvedSweep::default();
-        let plain = pre_build_argv(&plain_sweep, &support_for(&plain_sweep, "core", "bin"), &[], true);
-        assert_eq!(plain, ["build", "--message-format=json-render-diagnostics", "-p", "bin"]);
+        let plain = pre_build_argv(
+            &plain_sweep,
+            &support_for(&plain_sweep, "core", "bin"),
+            &[],
+            true,
+        );
+        assert_eq!(
+            plain,
+            [
+                "build",
+                "--message-format=json-render-diagnostics",
+                "-p",
+                "bin"
+            ]
+        );
     }
 
     /// The support request the run's selection plans for `support` when
     /// `brokkr test -p pkg` runs `sweep` with `support` as a build package.
     fn support_for(sweep: &ResolvedSweep, pkg: &str, support: &str) -> check_cmd::SupportRequest {
-        let with = ResolvedSweep { build_packages: vec![support.to_owned()], ..sweep.clone() };
+        let with = ResolvedSweep {
+            build_packages: vec![support.to_owned()],
+            ..sweep.clone()
+        };
         let sel = selection_for(std::slice::from_ref(&with), pkg);
         sel.attempt(0).unwrap().support()[0].clone()
     }
@@ -3536,7 +3895,11 @@ include_ignored = false
         let ws = check_cmd::feature_fixture::piners();
         let sweep = ResolvedSweep {
             label: "piners".into(),
-            packages: vec!["piners-vm".into(), "piners-strategy".into(), "piners-harness".into()],
+            packages: vec![
+                "piners-vm".into(),
+                "piners-strategy".into(),
+                "piners-harness".into(),
+            ],
             build_packages: vec!["piners-runner".into()],
             features: crate::profile::FeatureConfig {
                 tokens: vec![
@@ -3558,18 +3921,33 @@ include_ignored = false
         .unwrap();
         let attempt = sel.attempt(0).unwrap();
         let run = single_run(&sweep, attempt).unwrap();
-        let shape = BuildShape { sweep: &sweep, allow_args: &[], run, jobs: None, debug: true };
+        let shape = BuildShape {
+            sweep: &sweep,
+            allow_args: &[],
+            run,
+            jobs: None,
+            debug: true,
+        };
         let pre = prebuild_argv(&shape);
         assert!(
-            pre.windows(2).any(|w| w == ["--features", "piners-vm/opcode-counts,piners-strategy/hotpath"]),
+            pre.windows(2).any(|w| w
+                == [
+                    "--features",
+                    "piners-vm/opcode-counts,piners-strategy/hotpath"
+                ]),
             "{pre:?}"
         );
         let support = pre_build_argv(&sweep, &attempt.support()[0], &[], true);
         assert!(
-            support.windows(2).any(|w| w == ["--features", "piners-vm/opcode-counts"]),
+            support
+                .windows(2)
+                .any(|w| w == ["--features", "piners-vm/opcode-counts"]),
             "{support:?}"
         );
-        assert!(support.ends_with(&["-p".to_owned(), "piners-runner".to_owned()]), "{support:?}");
+        assert!(
+            support.ends_with(&["-p".to_owned(), "piners-runner".to_owned()]),
+            "{support:?}"
+        );
     }
 
     fn ready_sweep<'s>(
@@ -3578,7 +3956,10 @@ include_ignored = false
         support: &[check_cmd::SupportArtifact],
     ) -> ReadySweep<'s> {
         let hash = test_runner::hash_file(Path::new(&harness.executable)).unwrap();
-        let attempt = selection_for(std::slice::from_ref(sweep), "core").attempt(0).unwrap().clone();
+        let attempt = selection_for(std::slice::from_ref(sweep), "core")
+            .attempt(0)
+            .unwrap()
+            .clone();
         ReadySweep {
             sweep,
             attempt,
@@ -3598,7 +3979,9 @@ include_ignored = false
             }),
             exact: None,
             support_fingerprint: check_cmd::support_fingerprint(support).unwrap(),
-            runtime_fingerprint: check_cmd::BuildRuntimeIndex::default().fingerprint().unwrap(),
+            runtime_fingerprint: check_cmd::BuildRuntimeIndex::default()
+                .fingerprint()
+                .unwrap(),
         }
     }
 
@@ -3625,33 +4008,71 @@ include_ignored = false
         }];
         let sweep = ResolvedSweep::default();
         let prepared = ready_sweep(&sweep, &harness, &support);
-        let rebuild = |_: usize| Ok(Some((vec![harness.clone()], check_cmd::BuildRuntimeIndex::default())));
+        let rebuild = |_: usize| {
+            Ok(Some((
+                vec![harness.clone()],
+                check_cmd::BuildRuntimeIndex::default(),
+            )))
+        };
 
-        assert!(sweep_drift(&prepared, rebuild, &support).unwrap().unwrap().is_empty(), "an untouched sweep");
+        assert!(
+            sweep_drift(&prepared, rebuild, &support)
+                .unwrap()
+                .unwrap()
+                .is_empty(),
+            "an untouched sweep"
+        );
 
         // The second sweep's build re-uplifted the shared support binary.
         std::fs::write(&server, b"second sweep's server").unwrap();
         let drift = sweep_drift(&prepared, rebuild, &support).unwrap().unwrap();
-        assert!(drift.iter().any(|d| d.contains("support build")), "{drift:?}");
+        assert!(
+            drift.iter().any(|d| d.contains("support build")),
+            "{drift:?}"
+        );
         // Rebuilding restores it, and the sweep verifies again.
         std::fs::write(&server, b"first sweep's server").unwrap();
-        assert!(sweep_drift(&prepared, rebuild, &support).unwrap().unwrap().is_empty());
+        assert!(
+            sweep_drift(&prepared, rebuild, &support)
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
 
         // A harness rebuilt with other content.
         std::fs::write(&harness_path, b"another sweep's suite").unwrap();
         let drift = sweep_drift(&prepared, rebuild, &support).unwrap().unwrap();
-        assert!(drift.iter().any(|d| d.contains("rebuilt with different content")), "{drift:?}");
+        assert!(
+            drift
+                .iter()
+                .any(|d| d.contains("rebuilt with different content")),
+            "{drift:?}"
+        );
 
         // A rebuild that fails is not drift, it is a failed build.
-        assert!(sweep_drift(&prepared, |_| Ok(None), &support).unwrap().is_none());
+        assert!(
+            sweep_drift(&prepared, |_| Ok(None), &support)
+                .unwrap()
+                .is_none()
+        );
 
         // A doc-only sweep has no harness to rebuild but still has its support.
         std::fs::write(&harness_path, b"suite").unwrap();
         let mut doc = ready_sweep(&sweep, &harness, &support);
         doc.focused = None;
-        assert!(sweep_drift(&doc, |_| Ok(None), &support).unwrap().unwrap().is_empty());
+        assert!(
+            sweep_drift(&doc, |_| Ok(None), &support)
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
         std::fs::write(&server, b"second sweep's server").unwrap();
-        assert!(!sweep_drift(&doc, |_| Ok(None), &support).unwrap().unwrap().is_empty());
+        assert!(
+            !sweep_drift(&doc, |_| Ok(None), &support)
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// Wiring: `run_ready` itself rebuilds and re-verifies each sweep BEFORE
@@ -3675,7 +4096,11 @@ include_ignored = false
             target: "server".into(),
             executable: server.to_string_lossy().into_owned(),
         }];
-        let sweep = ResolvedSweep { label: "docs".into(), doc_only: true, ..ResolvedSweep::default() };
+        let sweep = ResolvedSweep {
+            label: "docs".into(),
+            doc_only: true,
+            ..ResolvedSweep::default()
+        };
         let mut harness = check_cmd::test_binary_for_tests("core", "test", "suite");
         harness.executable = server.to_string_lossy().into_owned();
         let mut prepared = ready_sweep(&sweep, &harness, &support);
@@ -3696,10 +4121,21 @@ include_ignored = false
         };
         let mut reports = Vec::new();
         let mut notes = Vec::new();
-        let err = run_ready(std::slice::from_ref(&prepared), &cx, 1, Duration::from_secs(20), None, &mut reports, &mut notes)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("doc-only sweep 'docs'"), "the drifted sweep was re-prepared, not run: {err}");
+        let err = run_ready(
+            std::slice::from_ref(&prepared),
+            &cx,
+            1,
+            Duration::from_secs(20),
+            None,
+            &mut reports,
+            &mut notes,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("doc-only sweep 'docs'"),
+            "the drifted sweep was re-prepared, not run: {err}"
+        );
         assert!(reports.is_empty());
     }
 
@@ -3712,14 +4148,14 @@ include_ignored = false
         // --release (Some(false)) beats `[test] debug = true`.
         assert!(!resolve_debug(Some(false), Some(&debug_cfg), None));
         // --debug (Some(true)) holds even when config says release.
-        assert!(resolve_debug(Some(true), Some(&TestConfig::default()), None));
-        // The CLI also beats a sweep's own pinned profile - the
-        // per-invocation answer is the most specific one there is.
         assert!(resolve_debug(
             Some(true),
-            None,
-            Some(SweepProfile::Release)
+            Some(&TestConfig::default()),
+            None
         ));
+        // The CLI also beats a sweep's own pinned profile - the
+        // per-invocation answer is the most specific one there is.
+        assert!(resolve_debug(Some(true), None, Some(SweepProfile::Release)));
         assert!(!resolve_debug(Some(false), None, Some(SweepProfile::Dev)));
     }
 
@@ -3781,10 +4217,12 @@ include_ignored = false
 
     #[test]
     fn the_no_match_error_names_what_was_searched() {
-        let message = |searched: &Searched| match aggregate_exit(&[Outcome::NoMatch], "pkg", "abc", searched) {
-            Err(DevError::Reported(m)) => m,
-            other => panic!("expected a Reported error, got {other:?}"),
-        };
+        let message =
+            |searched: &Searched| match aggregate_exit(&[Outcome::NoMatch], "pkg", "abc", searched)
+            {
+                Err(DevError::Reported(m)) => m,
+                other => panic!("expected a Reported error, got {other:?}"),
+            };
         let two = Searched {
             harnesses: 44,
             doc_only: 0,
@@ -3794,16 +4232,36 @@ include_ignored = false
             message(&two),
             "no test matches `abc` in pkg (44 harnesses searched in default and strategy-features)"
         );
-        let three = Searched { labels: vec!["a".into(), "b".into(), "c".into()], ..two };
+        let three = Searched {
+            labels: vec!["a".into(), "b".into(), "c".into()],
+            ..two
+        };
         assert!(message(&three).ends_with("(44 harnesses searched in a, b and c)"));
         // A single sweep has no plan line, so its search must name it too.
-        let one = Searched { harnesses: 1, doc_only: 0, labels: vec!["default".into()] };
-        assert_eq!(message(&one), "no test matches `abc` in pkg (1 harness searched in default)");
+        let one = Searched {
+            harnesses: 1,
+            doc_only: 0,
+            labels: vec!["default".into()],
+        };
+        assert_eq!(
+            message(&one),
+            "no test matches `abc` in pkg (1 harness searched in default)"
+        );
         // A doc-only sweep searches doctests, not countable harnesses.
-        let doc = Searched { harnesses: 0, doc_only: 1, labels: vec!["docs".into()] };
-        assert_eq!(message(&doc), "no test matches `abc` in pkg (doctests searched in docs)");
+        let doc = Searched {
+            harnesses: 0,
+            doc_only: 1,
+            labels: vec!["docs".into()],
+        };
+        assert_eq!(
+            message(&doc),
+            "no test matches `abc` in pkg (doctests searched in docs)"
+        );
         // A lone sweep scoped out of the package searched nothing, and said why itself.
-        assert_eq!(message(&Searched::default()), "no test matches `abc` in pkg");
+        assert_eq!(
+            message(&Searched::default()),
+            "no test matches `abc` in pkg"
+        );
     }
 
     #[test]
@@ -3812,7 +4270,13 @@ include_ignored = false
         let sweep = ResolvedSweep::default();
         let run = one_package(&sweep, "pkg");
         let plan = SweepPlan {
-            shape: BuildShape { sweep: &sweep, allow_args: &[], run: &run, jobs: None, debug: true },
+            shape: BuildShape {
+                sweep: &sweep,
+                allow_args: &[],
+                run: &run,
+                jobs: None,
+                debug: true,
+            },
             name: "n",
             focused: None,
             exact: None,
@@ -3829,11 +4293,24 @@ include_ignored = false
         show_reproduction(&plan, "bin args (cwd .)", &RunReport::bare(Outcome::Pass));
         assert!(state.first_hint("bin args (cwd .)"), "a pass left no mark");
         show_reproduction(&plan, "other args (cwd .)", &RunReport::bare(Outcome::Fail));
-        assert!(!state.first_hint("other args (cwd .)"), "a failure printed (and was recorded)");
-        show_reproduction(&plan, "cargo test --doc", &RunReport::bare(Outcome::BuildFailed));
-        assert!(!state.first_hint("cargo test --doc"), "a doc-only build failure printed its command");
+        assert!(
+            !state.first_hint("other args (cwd .)"),
+            "a failure printed (and was recorded)"
+        );
+        show_reproduction(
+            &plan,
+            "cargo test --doc",
+            &RunReport::bare(Outcome::BuildFailed),
+        );
+        assert!(
+            !state.first_hint("cargo test --doc"),
+            "a doc-only build failure printed its command"
+        );
         show_failed_invocation(&plan, "missing-bin args (cwd .)");
-        assert!(!state.first_hint("missing-bin args (cwd .)"), "a runner error printed its command");
+        assert!(
+            !state.first_hint("missing-bin args (cwd .)"),
+            "a runner error printed its command"
+        );
     }
 
     #[test]
@@ -3852,7 +4329,9 @@ include_ignored = false
             observe: test_runner::Observe::default(),
         };
         let mut hung = HungTest {
-            reason: TimeoutReason::PerTest { name: "tests::hang".into() },
+            reason: TimeoutReason::PerTest {
+                name: "tests::hang".into(),
+            },
             test: "tests::hang".into(),
             elapsed: Duration::from_secs(20),
             ceiling: Duration::from_secs(20),
@@ -3871,24 +4350,38 @@ include_ignored = false
             Some("pkg::tests::hang (20.00s)".into())
         );
         shape.ceilings = Ceilings::shared_harness();
-        assert!(hung_test_tag(&shape, &hung).is_none(), "a suspect is not a verified name");
+        assert!(
+            hung_test_tag(&shape, &hung).is_none(),
+            "a suspect is not a verified name"
+        );
         shape.ceilings = Ceilings::one_test(Duration::from_secs(20), "tests::hang");
-        hung.reason = TimeoutReason::SweepWall { blamed: vec!["tests::hang".into()] };
+        hung.reason = TimeoutReason::SweepWall {
+            blamed: vec!["tests::hang".into()],
+        };
         assert!(hung_test_tag(&shape, &hung).is_none());
         hung.reason = TimeoutReason::Idle;
         assert!(hung_test_tag(&shape, &hung).is_none());
-        hung.reason = TimeoutReason::PerTest { name: "tests::hang".into() };
+        hung.reason = TimeoutReason::PerTest {
+            name: "tests::hang".into(),
+        };
         shape.test_tag = None;
-        assert!(hung_test_tag(&shape, &hung).is_none(), "no renderer in a doc-only run");
+        assert!(
+            hung_test_tag(&shape, &hung).is_none(),
+            "no renderer in a doc-only run"
+        );
     }
 
     #[test]
     fn aggregate_exit_label_names_what_failed() {
-        let label = |outcomes: &[Outcome]| match aggregate_exit(outcomes, "f", "n", &Searched::default()) {
-            Err(DevError::Reported(label)) => label,
-            other => panic!("expected a Reported error, got {other:?}"),
-        };
-        assert_eq!(label(&[Outcome::Pass, Outcome::BuildFailed]), "build failed");
+        let label =
+            |outcomes: &[Outcome]| match aggregate_exit(outcomes, "f", "n", &Searched::default()) {
+                Err(DevError::Reported(label)) => label,
+                other => panic!("expected a Reported error, got {other:?}"),
+            };
+        assert_eq!(
+            label(&[Outcome::Pass, Outcome::BuildFailed]),
+            "build failed"
+        );
         assert_eq!(label(&[Outcome::Fail, Outcome::NoMatch]), "test failed");
         assert_eq!(
             label(&[Outcome::Fail, Outcome::BuildFailed]),
@@ -3955,14 +4448,24 @@ include_ignored = false
             packages: vec!["nautilus-core".into(), "nautilus-hyperliquid".into()],
             ..Default::default()
         };
-        assert_eq!(attempted(std::slice::from_ref(&sweep), "nautilus-hyperliquid").len(), 1);
+        assert_eq!(
+            attempted(std::slice::from_ref(&sweep), "nautilus-hyperliquid").len(),
+            1
+        );
     }
 
     #[test]
     fn the_plan_line_keeps_the_two_scope_reasons_apart() {
         let sweeps = vec![
-            ResolvedSweep { label: "default".into(), ..Default::default() },
-            ResolvedSweep { label: "vm".into(), packages: vec!["other".into()], ..Default::default() },
+            ResolvedSweep {
+                label: "default".into(),
+                ..Default::default()
+            },
+            ResolvedSweep {
+                label: "vm".into(),
+                packages: vec!["other".into()],
+                ..Default::default()
+            },
             ResolvedSweep {
                 label: "ffi".into(),
                 test_exclude_packages: vec!["pkg".into()],

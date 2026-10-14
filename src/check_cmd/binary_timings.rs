@@ -76,9 +76,9 @@ pub(crate) struct BinaryCost {
     pub(crate) slowest: f64,
 }
 
-/// `[[check]] entry name -> binary label -> cost`. The entry name, not the
-/// lane-qualified sweep label: `default` and `tier1/default` run the same
-/// binaries, and keying by label made every profile re-pay the warm-up.
+/// `[[check]] entry name -> package/kind:target identity -> cost`. The entry
+/// name, not the lane-qualified sweep label: `default` and `tier1/default` run
+/// the same binaries, and keying by label made every profile re-pay the warm-up.
 type Store = BTreeMap<String, BTreeMap<String, BinaryCost>>;
 
 fn store_path(state_root: &Path) -> std::path::PathBuf {
@@ -107,8 +107,8 @@ pub(crate) fn timings_record(state_root: &Path, sweep: &str, measured: &[(String
     }
     let mut store = timings_load(state_root);
     let entry = store.entry(sweep.to_owned()).or_default();
-    for (label, cost) in measured {
-        entry.insert(label.clone(), *cost);
+    for (key, cost) in measured {
+        entry.insert(key.clone(), *cost);
     }
 
     let path = store_path(state_root);

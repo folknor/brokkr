@@ -93,8 +93,8 @@ fn physical_cores(logical: &BTreeSet<u32>) -> usize {
         let Some(core) = read_trimmed(&topo.join("core_id")) else {
             continue;
         };
-        let package = read_trimmed(&topo.join("physical_package_id"))
-            .unwrap_or_else(|| "0".to_owned());
+        let package =
+            read_trimmed(&topo.join("physical_package_id")).unwrap_or_else(|| "0".to_owned());
         cores.insert((package, core));
     }
     cores.len()
@@ -132,9 +132,8 @@ pub(crate) fn cache_domain_cores() -> Option<usize> {
 /// part - accepted because a default that is too high is a slow test run,
 /// while a default of zero is no test run at all.
 pub(crate) fn cache_domain_cores_or_default() -> u32 {
-    let n = cache_domain_cores().unwrap_or_else(|| {
-        std::thread::available_parallelism().map_or(4, std::num::NonZero::get)
-    });
+    let n = cache_domain_cores()
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, std::num::NonZero::get));
     u32::try_from(n).unwrap_or(u32::MAX).max(1)
 }
 
@@ -177,12 +176,18 @@ mod cpu_topology_tests {
         assert!(parse_cpu_list("").is_empty());
         assert!(parse_cpu_list("garbage").is_empty());
         assert_eq!(parse_cpu_list("3-1"), BTreeSet::new());
-        assert_eq!(parse_cpu_list("0-1,junk,4"), [0, 1, 4].into_iter().collect());
+        assert_eq!(
+            parse_cpu_list("0-1,junk,4"),
+            [0, 1, 4].into_iter().collect()
+        );
     }
 
     #[test]
     fn the_label_follows_the_vendor_and_falls_back_neutrally() {
-        assert_eq!(domain_label("AMD Ryzen 5 5600G with Radeon Graphics"), "CCX/CCD");
+        assert_eq!(
+            domain_label("AMD Ryzen 5 5600G with Radeon Graphics"),
+            "CCX/CCD"
+        );
         assert_eq!(domain_label("AMD EPYC 7763 64-Core Processor"), "CCX/CCD");
         assert_eq!(domain_label("Intel(R) Xeon(R) Gold 6248"), "die");
         assert_eq!(domain_label("Apple M2"), "L3 domain");

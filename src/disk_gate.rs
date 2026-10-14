@@ -46,7 +46,10 @@ pub(crate) fn check(ctx: &LockContext<'_>) -> Result<(), DevError> {
         return Ok(());
     }
     let cargo_target_dir = std::env::var_os("CARGO_TARGET_DIR").filter(|d| !d.is_empty());
-    check_paths(&candidates(Path::new(ctx.project_root), cargo_target_dir.as_deref()))
+    check_paths(&candidates(
+        Path::new(ctx.project_root),
+        cargo_target_dir.as_deref(),
+    ))
 }
 
 /// The gate over an explicit list of `(label, path)`s, deduplicated by mount.
@@ -88,7 +91,10 @@ pub(crate) fn check_paths(paths: &[(&str, PathBuf)]) -> Result<(), DevError> {
 }
 
 /// The paths whose filesystems the gate probes, in report order.
-fn candidates(root: &Path, cargo_target_dir: Option<&std::ffi::OsStr>) -> Vec<(&'static str, PathBuf)> {
+fn candidates(
+    root: &Path,
+    cargo_target_dir: Option<&std::ffi::OsStr>,
+) -> Vec<(&'static str, PathBuf)> {
     let mut out = vec![("target", root.join("target"))];
     if let Some(dir) = cargo_target_dir {
         out.push(("CARGO_TARGET_DIR", root.join(dir)));

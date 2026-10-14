@@ -226,7 +226,11 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
 
     findings.record(
         "ways only",
-        compare_count("ways only", pbfhogg_ways_only(&pbf_counts), osm_counts.nodes_in_ways),
+        compare_count(
+            "ways only",
+            pbfhogg_ways_only(&pbf_counts),
+            osm_counts.nodes_in_ways,
+        ),
     );
 
     // --- With relations ---

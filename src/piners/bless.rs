@@ -91,7 +91,10 @@ pub fn apply(
             why.push(format!("no disposition for {}", missing.join(", ")));
         }
         if !rejected.is_empty() {
-            why.push(format!("unstampable disposition for {}", rejected.join(", ")));
+            why.push(format!(
+                "unstampable disposition for {}",
+                rejected.join(", ")
+            ));
         }
         if !unpinned.is_empty() {
             why.push(format!("internal: not pinned: {}", unpinned.join(", ")));
@@ -106,7 +109,8 @@ pub fn apply(
     let mut blessed = 0usize;
     let mut changed = 0usize;
     for id in scope_ids {
-        let (Some((_, Some(disp))), Some(pin)) = (actual.get(id.as_str()), registry.pins.get_mut(id))
+        let (Some((_, Some(disp))), Some(pin)) =
+            (actual.get(id.as_str()), registry.pins.get_mut(id))
         else {
             continue; // unreachable: validated above
         };
@@ -180,11 +184,20 @@ mod tests {
         );
 
         let mut reg = registry_of(pins);
-        apply(&pins_path, &mut reg, &rep, &["a".to_owned(), "b".to_owned()]).unwrap();
+        apply(
+            &pins_path,
+            &mut reg,
+            &rep,
+            &["a".to_owned(), "b".to_owned()],
+        )
+        .unwrap();
 
         assert_eq!(reg.pins["a"].expected.as_deref(), Some("count_divergent"));
         assert_eq!(reg.pins["b"].expected.as_deref(), Some("compile_fail"));
-        assert_eq!(reg.pins["untouched"].expected.as_deref(), Some("byte_exact"));
+        assert_eq!(
+            reg.pins["untouched"].expected.as_deref(),
+            Some("byte_exact")
+        );
     }
 
     #[test]
@@ -199,7 +212,13 @@ mod tests {
         reg.pins_text = LOADED.to_owned();
         // `a` reported, `b` did not: nothing may be stamped, `a` included.
         let rep = report(r#"{"probe":"a","outcome":"parity","acceptance":{"tier":"byte_exact"}}"#);
-        let err = apply(&pins_path, &mut reg, &rep, &["a".to_owned(), "b".to_owned()]).unwrap_err();
+        let err = apply(
+            &pins_path,
+            &mut reg,
+            &rep,
+            &["a".to_owned(), "b".to_owned()],
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("nothing blessed"), "{msg}");
         assert!(msg.contains("no disposition for b"), "{msg}");
@@ -220,22 +239,52 @@ mod tests {
         let rep = report(
             "{\"probe\":\"a\",\"outcome\":\"no_tv_data\"}\n{\"probe\":\"b\",\"outcome\":\"parity\"}",
         );
-        let err = apply(&pins_path, &mut reg, &rep, &["a".to_owned(), "b".to_owned()]).unwrap_err();
-        assert!(err.to_string().contains("unstampable disposition for b (parity)"), "{err}");
+        let err = apply(
+            &pins_path,
+            &mut reg,
+            &rep,
+            &["a".to_owned(), "b".to_owned()],
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unstampable disposition for b (parity)"),
+            "{err}"
+        );
         assert_eq!(reg.pins["a"].expected, None);
         // A tier posing as an outcome derives a pinnable-looking label and is
         // still refused.
         let rep = report(
             "{\"probe\":\"a\",\"outcome\":\"accepted\"}\n{\"probe\":\"b\",\"outcome\":\"no_tv_data\"}",
         );
-        let err = apply(&pins_path, &mut reg, &rep, &["a".to_owned(), "b".to_owned()]).unwrap_err();
-        assert!(err.to_string().contains("unstampable disposition for a (accepted)"), "{err}");
+        let err = apply(
+            &pins_path,
+            &mut reg,
+            &rep,
+            &["a".to_owned(), "b".to_owned()],
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unstampable disposition for a (accepted)"),
+            "{err}"
+        );
         // A record whose own disposition field contradicts it is unstampable too.
         let rep = report(
             "{\"probe\":\"a\",\"outcome\":\"no_tv_data\",\"disposition\":\"no_overlap\"}\n{\"probe\":\"b\",\"outcome\":\"no_tv_data\"}",
         );
-        let err = apply(&pins_path, &mut reg, &rep, &["a".to_owned(), "b".to_owned()]).unwrap_err();
-        assert!(err.to_string().contains("unstampable disposition for a (no_tv_data)"), "{err}");
+        let err = apply(
+            &pins_path,
+            &mut reg,
+            &rep,
+            &["a".to_owned(), "b".to_owned()],
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unstampable disposition for a (no_tv_data)"),
+            "{err}"
+        );
         assert_eq!(reg.pins["a"].expected, None);
         assert_eq!(reg.pins["a"].expected, None);
         assert_eq!(std::fs::read_to_string(&pins_path).unwrap(), LOADED);

@@ -21,6 +21,48 @@ pub(crate) fn home() -> Option<PathBuf> {
     non_empty_var("HOME").map(PathBuf::from)
 }
 
+/// The per-user directory for brokkr state that must be shared across
+/// projects and survive reboots. An unset or empty `HOME` has no cwd-relative
+/// fallback, since that would split global coordination by working directory.
+pub(crate) fn brokkr_state_dir() -> Option<PathBuf> {
+    home().map(|home| home.join(".brokkr"))
+}
+
+/// The global brokkr lock file.
+pub(crate) fn lock_file() -> Option<PathBuf> {
+    brokkr_state_dir().map(|dir| dir.join("brokkr.lock"))
+}
+
+/// The lock shared by rustc compilers and drained exclusively by a fresh hold.
+pub(crate) fn compile_lock() -> Option<PathBuf> {
+    brokkr_state_dir().map(|dir| dir.join("compile.lock"))
+}
+
+/// The control-socket directory for live lock acquisitions.
+pub(crate) fn socket_dir() -> Option<PathBuf> {
+    brokkr_state_dir().map(|dir| dir.join("lock"))
+}
+
+/// Liveness files used to identify orphaned test processes.
+pub(crate) fn test_runs_dir() -> Option<PathBuf> {
+    brokkr_state_dir().map(|dir| dir.join("test-runs"))
+}
+
+/// The cargo config that carries the live hold's nextest environment.
+pub(crate) fn nextest_env() -> Option<PathBuf> {
+    brokkr_state_dir().map(|dir| dir.join("nextest-env.toml"))
+}
+
+/// Private state for isolated harness and rustdoc output.
+pub(crate) fn harness_dir() -> Option<PathBuf> {
+    brokkr_state_dir().map(|dir| dir.join("harness"))
+}
+
+/// Persistent cargo worktrees shared by every project for this user.
+pub(crate) fn worktrees() -> Option<PathBuf> {
+    brokkr_state_dir().map(|dir| dir.join("worktrees"))
+}
+
 /// An XDG base directory: `$<var>` when it is set to an absolute path,
 /// otherwise `$HOME/<fallback>`.
 ///
@@ -33,7 +75,11 @@ fn xdg_dir(var: &str, fallback: &[&str]) -> Option<PathBuf> {
 
 /// [`xdg_dir`]'s rule over explicit inputs, so it is testable without
 /// mutating the process environment.
-fn resolve_xdg(value: Option<OsString>, home: Option<PathBuf>, fallback: &[&str]) -> Option<PathBuf> {
+fn resolve_xdg(
+    value: Option<OsString>,
+    home: Option<PathBuf>,
+    fallback: &[&str],
+) -> Option<PathBuf> {
     if let Some(v) = value.filter(|v| !v.is_empty()) {
         let path = PathBuf::from(v);
         if path.is_absolute() {
@@ -108,8 +154,14 @@ mod tests {
         let want = Some(PathBuf::from("/home/u/.local/share"));
         let fallback = [".local", "share"];
         assert_eq!(resolve_xdg(None, home.clone(), &fallback), want);
-        assert_eq!(resolve_xdg(Some(OsString::new()), home.clone(), &fallback), want);
-        assert_eq!(resolve_xdg(Some("rel/dir".into()), home.clone(), &fallback), want);
+        assert_eq!(
+            resolve_xdg(Some(OsString::new()), home.clone(), &fallback),
+            want
+        );
+        assert_eq!(
+            resolve_xdg(Some("rel/dir".into()), home.clone(), &fallback),
+            want
+        );
         assert_eq!(
             resolve_xdg(Some("/xdg/data".into()), home, &fallback),
             Some(PathBuf::from("/xdg/data"))

@@ -22,7 +22,10 @@ use std::process::Command;
 /// every error as a candidate.
 pub fn unstaged_files(project_root: &Path) -> Option<HashSet<PathBuf>> {
     let modified = git_paths(project_root, &["diff", "--name-only", "--relative", "-z"])?;
-    let untracked = git_paths(project_root, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    let untracked = git_paths(
+        project_root,
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+    )?;
     Some(modified.into_iter().chain(untracked).collect())
 }
 
@@ -34,15 +37,20 @@ fn git_paths(project_root: &Path, args: &[&str]) -> Option<Vec<PathBuf>> {
         .output()
         .ok()
         .filter(|o| o.status.success())?;
-    Some(
-        output
-            .stdout
-            .split(|b| *b == 0)
-            .filter(|raw| !raw.is_empty())
-            .filter_map(|raw| std::str::from_utf8(raw).ok())
-            .map(PathBuf::from)
-            .collect(),
-    )
+    let mut paths = Vec::new();
+    for raw in output
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|raw| !raw.is_empty())
+    {
+        let Ok(path) = std::str::from_utf8(raw) else {
+            // No partial changed-path set is trustworthy. `None` makes
+            // callers prioritize every candidate as potentially unstaged.
+            return None;
+        };
+        paths.push(PathBuf::from(path));
+    }
+    Some(paths)
 }
 
 /// What kind of work is uncommitted in the working tree.
@@ -81,12 +89,7 @@ const PROSE_EXTENSIONS: [&str; 2] = ["md", "markdown"];
 /// how the code builds, and an untracked `.rs` file certainly can.
 pub fn dirt(project_root: &Path) -> Dirt {
     let Some(output) = Command::new("git")
-        .args([
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=all",
-        ])
+        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
         .current_dir(project_root)
         .output()
         .ok()
@@ -150,16 +153,14 @@ fn classify_status(stdout: &[u8]) -> Dirt {
 /// edited is the one to fix first - then every other item; each group keeps
 /// its input order. `unstaged = None` (no git) leaves the order unchanged.
 /// Nothing is ever dropped.
-pub fn prioritize<T, F>(
-    items: Vec<T>,
-    get_path: F,
-    unstaged: Option<&HashSet<PathBuf>>,
-) -> Vec<T>
+pub fn prioritize<T, F>(items: Vec<T>, get_path: F, unstaged: Option<&HashSet<PathBuf>>) -> Vec<T>
 where
     F: Fn(&T) -> &Path,
 {
     let (in_unstaged, elsewhere): (Vec<T>, Vec<T>) = match unstaged {
-        Some(set) => items.into_iter().partition(|item| set.contains(get_path(item))),
+        Some(set) => items
+            .into_iter()
+            .partition(|item| set.contains(get_path(item))),
         None => (Vec::new(), items),
     };
     in_unstaged.into_iter().chain(elsewhere).collect()

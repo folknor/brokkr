@@ -1,7 +1,8 @@
 //! Crash-safe replacement of a file: small hand-curated ones (`brokkr.toml`,
-//! piners' `pins.toml`/`lints.toml`, the corpus digest, the hash cache) through
-//! [`replace`], and streamed ones too large to hold in memory (tool and dataset
-//! downloads) through [`Staged`].
+//! piners' `pins.toml`/`lints.toml`, the corpus digest, the hash cache and the
+//! cargo config edited by `brokkr guard`) through [`replace`], and streamed
+//! ones too large to hold in memory (tool and dataset downloads) through
+//! [`Staged`].
 //!
 //! A plain `std::fs::write` truncates first and fills second, so a kill (or a
 //! full disk) between the two leaves a truncated file no later run can load.
@@ -170,7 +171,12 @@ mod tests {
 
         replace(&link, b"new\n").unwrap();
 
-        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert_eq!(std::fs::read_to_string(&real).unwrap(), "new\n");
     }
 

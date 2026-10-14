@@ -17,7 +17,16 @@ pub fn run(pmtiles_path: &Path, build_root: &Path, z: u8, x: u32, y: u32) -> Res
     let x_str = x.to_string();
     let y_str = y.to_string();
 
-    let args = ["diag", &pmtiles_str, "-z", &z_str, "-x", &x_str, "-y", &y_str];
+    let args = [
+        "diag",
+        &pmtiles_str,
+        "-z",
+        &z_str,
+        "-x",
+        &x_str,
+        "-y",
+        &y_str,
+    ];
     let captured = output::run_captured(&binary_str, &args, build_root)?;
 
     let stdout = String::from_utf8_lossy(&captured.stdout);

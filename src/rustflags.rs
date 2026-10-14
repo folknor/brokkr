@@ -242,7 +242,10 @@ fn target_rustflags_match(doc: &toml::Table, triple: Option<&str>) -> Option<boo
         if !has_flags {
             continue;
         }
-        let matches = match selector.strip_prefix("cfg(").and_then(|s| s.strip_suffix(')')) {
+        let matches = match selector
+            .strip_prefix("cfg(")
+            .and_then(|s| s.strip_suffix(')'))
+        {
             Some(expr) => eval_cfg(expr),
             None => triple.map(|t| t == selector),
         };
@@ -281,7 +284,10 @@ pub(crate) fn host_triple() -> Option<String> {
     static CACHE: OnceLock<Option<String>> = OnceLock::new();
     CACHE
         .get_or_init(|| {
-            let out = std::process::Command::new("rustc").arg("-vV").output().ok()?;
+            let out = std::process::Command::new("rustc")
+                .arg("-vV")
+                .output()
+                .ok()?;
             if !out.status.success() {
                 return None;
             }
@@ -369,7 +375,11 @@ fn cfg_key(key: &str) -> Option<String> {
         "target_family" => std::env::consts::FAMILY.to_string(),
         "target_pointer_width" => usize::BITS.to_string(),
         "target_endian" => {
-            if cfg!(target_endian = "little") { "little".into() } else { "big".into() }
+            if cfg!(target_endian = "little") {
+                "little".into()
+            } else {
+                "big".into()
+            }
         }
         "target_env" => triple_field(2)?,
         "target_vendor" => triple_field(1)?,
@@ -420,14 +430,19 @@ mod tests {
     fn cfg_matches_host_os() {
         let os = std::env::consts::OS;
         assert_eq!(eval_cfg(&format!("target_os = \"{os}\"")), Some(true));
-        assert_eq!(eval_cfg("target_os = \"definitely-not-an-os\""), Some(false));
+        assert_eq!(
+            eval_cfg("target_os = \"definitely-not-an-os\""),
+            Some(false)
+        );
     }
 
     #[test]
     fn cfg_nested_combinators() {
         let os = std::env::consts::OS;
         assert_eq!(
-            eval_cfg(&format!("all(not(target_os = \"nope\"), any(target_os = \"{os}\"))")),
+            eval_cfg(&format!(
+                "all(not(target_os = \"nope\"), any(target_os = \"{os}\"))"
+            )),
             Some(true)
         );
     }

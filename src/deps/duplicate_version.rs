@@ -119,7 +119,10 @@ fn picked_by(
             let name = id_to_name.get(pid).copied().unwrap_or("");
             format!("{name} (direct)")
         } else {
-            id_to_label.get(pid).cloned().unwrap_or_else(|| pid.to_string())
+            id_to_label
+                .get(pid)
+                .cloned()
+                .unwrap_or_else(|| pid.to_string())
         };
         blame.insert(label);
     }

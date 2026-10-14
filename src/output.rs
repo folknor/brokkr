@@ -2,8 +2,8 @@ use std::path::Path;
 use std::process::Command;
 use std::process::ExitStatus;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use std::time::Instant;
 
@@ -55,12 +55,16 @@ static VERIFY_BUFFER: Mutex<Option<Vec<String>>> = Mutex::new(None);
 
 /// Start capturing `verify_msg` detail into the buffer (drops any prior).
 pub fn verify_buffer_begin() {
-    *VERIFY_BUFFER.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Vec::new());
+    *VERIFY_BUFFER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Vec::new());
 }
 
 /// Stop capturing and discard the buffered detail (the pass path).
 pub fn verify_buffer_discard() {
-    *VERIFY_BUFFER.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    *VERIFY_BUFFER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
 }
 
 /// Stop capturing and print the buffered detail (the fail path).
@@ -92,7 +96,10 @@ struct Renderer {
     drawn: bool,
 }
 
-static RENDER: Mutex<Renderer> = Mutex::new(Renderer { status: None, drawn: false });
+static RENDER: Mutex<Renderer> = Mutex::new(Renderer {
+    status: None,
+    drawn: false,
+});
 static RUN_LOG: Mutex<Option<std::fs::File>> = Mutex::new(None);
 static STATUS_ENABLED: AtomicBool = AtomicBool::new(false);
 
@@ -105,11 +112,16 @@ const STATUS_WIDTH: usize = 100;
 /// [`detail`] line, is appended and flushed as it happens, so a run the
 /// watchdog kills still leaves everything up to the kill on disk.
 pub fn open_run_log(file: std::fs::File) {
-    *RUN_LOG.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(file);
+    *RUN_LOG
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(file);
 }
 
 pub fn close_run_log() {
-    RUN_LOG.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+    RUN_LOG
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
 }
 
 /// Turn the status line on when stdout is a terminal. Off otherwise: a pipe or
@@ -121,7 +133,9 @@ pub fn enable_status_line() {
 
 /// Clear any drawn status line and stop drawing one.
 pub fn disable_status_line() {
-    let mut r = RENDER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut r = RENDER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     r.status = None;
     render(&mut r, Stream::Out, "");
     STATUS_ENABLED.store(false, Ordering::Relaxed);
@@ -133,8 +147,13 @@ pub fn status(msg: &str) {
     if !STATUS_ENABLED.load(Ordering::Relaxed) {
         return;
     }
-    let line: String = format!("[....]    {msg}").chars().take(STATUS_WIDTH).collect();
-    let mut r = RENDER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let line: String = format!("[....]    {msg}")
+        .chars()
+        .take(STATUS_WIDTH)
+        .collect();
+    let mut r = RENDER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     r.status = Some(line);
     render(&mut r, Stream::Out, "");
 }
@@ -186,7 +205,11 @@ fn log_write(text: &str, forced: bool) {
     let guard = if forced {
         lock_patiently(&RUN_LOG)
     } else {
-        Some(RUN_LOG.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+        Some(
+            RUN_LOG
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     };
     if let Some(mut guard) = guard
         && let Some(file) = guard.as_mut()
@@ -253,7 +276,9 @@ fn render(r: &mut Renderer, stream: Stream, text: &str) {
 /// The whole block goes out under one renderer hold, so nothing can split it.
 fn emit_text(stream: Stream, text: &str) {
     log_write(text, false);
-    let mut r = RENDER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut r = RENDER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     render(&mut r, stream, text);
 }
 
@@ -428,7 +453,9 @@ thread_local! {
 pub fn capture_errors<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
     let outer = HELD_ERRORS.with(|h| h.borrow_mut().replace(Vec::new()));
     let out = f();
-    let held = HELD_ERRORS.with(|h| std::mem::replace(&mut *h.borrow_mut(), outer)).unwrap_or_default();
+    let held = HELD_ERRORS
+        .with(|h| std::mem::replace(&mut *h.borrow_mut(), outer))
+        .unwrap_or_default();
     (out, held)
 }
 
@@ -439,7 +466,10 @@ pub fn error(msg: &str) {
         return;
     }
     let held = HELD_ERRORS.with(|h| {
-        h.borrow_mut().as_mut().map(|v| v.push(msg.to_owned())).is_some()
+        h.borrow_mut()
+            .as_mut()
+            .map(|v| v.push(msg.to_owned()))
+            .is_some()
     });
     if !held {
         emit("[error]   ", msg);
@@ -497,7 +527,10 @@ mod count_tests {
         assert_eq!(super::tag_prefix("[download]"), "[download] ");
         assert_eq!(super::tag_prefix("[ratatoskr]"), "[ratatoskr] ");
         assert_eq!(super::tag_prefix("[dry-run]"), "[dry-run] ");
-        assert_eq!(super::prefixed(&super::tag_prefix("[lock]"), "a\nb"), "[lock]    a\n[lock]    b\n");
+        assert_eq!(
+            super::prefixed(&super::tag_prefix("[lock]"), "a\nb"),
+            "[lock]    a\n[lock]    b\n"
+        );
     }
 }
 
@@ -600,15 +633,8 @@ pub fn run_captured_with_env(
     // poll covers cargo build / cargo metadata too. `Duration::MAX`
     // disables the deadline branch in practice (kernel pid lifetime is
     // measured in hours, this in eons).
-    let dc = run_captured_with_env_and_deadline(
-        program,
-        args,
-        cwd,
-        env,
-        Duration::MAX,
-        None,
-        false,
-    )?;
+    let dc =
+        run_captured_with_env_and_deadline(program, args, cwd, env, Duration::MAX, None, false)?;
     Ok(dc.captured)
 }
 
@@ -670,7 +696,15 @@ pub fn run_captured_with_env_and_deadline(
     on_spawn: Option<&dyn Fn(u32)>,
     isolate_pg: bool,
 ) -> Result<DeadlineCapture, DevError> {
-    run_captured_limited(program, args, cwd, env, Limit::Wall(deadline), on_spawn, isolate_pg)
+    run_captured_limited(
+        program,
+        args,
+        cwd,
+        env,
+        Limit::Wall(deadline),
+        on_spawn,
+        isolate_pg,
+    )
 }
 
 /// As [`run_captured_with_env_and_deadline`], but the limit is on
@@ -707,7 +741,11 @@ enum Limit {
 /// The bytes land in a shared buffer rather than the thread's return value,
 /// and the read polls rather than blocks, so [`settle_drains`] can stop a drain
 /// that will never reach EOF, join it, and keep what it already read.
-fn drain_stamped<R>(pipe: R, start: Instant, last_output_ms: std::sync::Arc<std::sync::atomic::AtomicU64>) -> Drain
+fn drain_stamped<R>(
+    pipe: R,
+    start: Instant,
+    last_output_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
+) -> Drain
 where
     R: std::io::Read + std::os::fd::AsRawFd + Send + 'static,
 {
@@ -717,7 +755,8 @@ where
     let handle = std::thread::spawn(move || {
         let mut reader = pipe;
         let mut chunk = [0u8; 8192];
-        while let Some(n) = crate::test_runner::read_unless_cancelled(&mut reader, &mut chunk, &cancel_t)
+        while let Some(n) =
+            crate::test_runner::read_unless_cancelled(&mut reader, &mut chunk, &cancel_t)
         {
             if let Ok(mut b) = buf_t.lock() {
                 b.extend_from_slice(chunk.get(..n).unwrap_or_default());
@@ -729,7 +768,11 @@ where
         // still holding the other end gets EPIPE rather than an unbounded
         // reader behind it.
     });
-    Drain { buf, cancel, handle }
+    Drain {
+        buf,
+        cancel,
+        handle,
+    }
 }
 
 /// One output drain: the buffer it fills, its stop switch, and its thread.
@@ -827,8 +870,14 @@ fn run_captured_limited(
     // Milliseconds since `start` at which the last output chunk arrived - the
     // idle clock's reference. Written by both drain threads.
     let last_output_ms = Arc::new(AtomicU64::new(0));
-    let stdout_thread = child.stdout.take().map(|p| drain_stamped(p, start, Arc::clone(&last_output_ms)));
-    let stderr_thread = child.stderr.take().map(|p| drain_stamped(p, start, Arc::clone(&last_output_ms)));
+    let stdout_thread = child
+        .stdout
+        .take()
+        .map(|p| drain_stamped(p, start, Arc::clone(&last_output_ms)));
+    let stderr_thread = child
+        .stderr
+        .take()
+        .map(|p| drain_stamped(p, start, Arc::clone(&last_output_ms)));
     let expired = || match limit {
         Limit::Wall(deadline) => start.elapsed() >= deadline,
         Limit::Idle(idle) => {
@@ -1139,14 +1188,20 @@ mod tests {
         let idle = Duration::from_millis(600);
         let chatty = run_captured_with_idle_deadline(
             "sh",
-            &["-c", "for i in 1 2 3 4 5 6 7 8; do echo $i; sleep 0.2; done"],
+            &[
+                "-c",
+                "for i in 1 2 3 4 5 6 7 8; do echo $i; sleep 0.2; done",
+            ],
             cwd(),
             &[],
             idle,
             true,
         )
         .unwrap();
-        assert!(!chatty.killed_on_deadline, "progress must keep resetting the clock");
+        assert!(
+            !chatty.killed_on_deadline,
+            "progress must keep resetting the clock"
+        );
         assert!(chatty.captured.status.success());
         assert!(chatty.captured.elapsed > idle);
 
@@ -1161,14 +1216,24 @@ mod tests {
         .unwrap();
         assert!(quiet.killed_on_deadline);
         assert!(quiet.captured.elapsed < Duration::from_secs(10));
-        assert_eq!(String::from_utf8_lossy(&quiet.captured.stdout).trim(), "start");
+        assert_eq!(
+            String::from_utf8_lossy(&quiet.captured.stdout).trim(),
+            "start"
+        );
     }
 
     #[test]
     fn deadline_lets_short_runs_finish_normally() {
-        let result =
-            run_captured_with_env_and_deadline("/bin/true", &[], cwd(), &[], Duration::from_secs(5), None, false)
-                .unwrap();
+        let result = run_captured_with_env_and_deadline(
+            "/bin/true",
+            &[],
+            cwd(),
+            &[],
+            Duration::from_secs(5),
+            None,
+            false,
+        )
+        .unwrap();
         assert!(!result.killed_on_deadline);
         assert!(result.captured.status.success());
         assert_eq!(result.captured.status.code(), Some(0));
@@ -1247,4 +1312,3 @@ mod capture_tests {
         assert!(nothing.is_empty());
     }
 }
-

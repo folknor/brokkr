@@ -45,7 +45,7 @@ Reported by: check-exec.
 - `output.rs`, serial and cargo-threaded: `timed_out` -> `Err(Reported)`; `hung` -> `Err(Reported)`; `!status.success()` -> `Ok(false)`; then completeness from `cargo_filter::parse_test_output` over the reconstructed text.
 - `parallel::report_runs`: the same intent, rebuilt per binary, with its own `Incomplete` check that re-parses reconstructed text, and `passed` counted from the tracker's `completed` rather than libtest's summary.
 - `test_cmd::run_one`: a third parse (`parse_test_output_with_stderr`), a `starts_with("test result:")` sniff, a discovery-count comparison, and its own `stop_for_budget`.
-- `nextest_lane::run_nextest_engine`: a timed-out test becomes an ordinary red sweep. This already disagrees with the stop contract (filed in `bugs.md`).
+- `nextest_lane::run_nextest_engine`: maps a timed-out terminal event to its own per-test stop and error.
 
 `accounting.rs` meanwhile reconciles the same runs from the typed `ObsEvent` stream. So one verdict has two independent evidence bases: reconstructed human text plus exit status for the lane's pass or fail, and typed observations for the audit. They can disagree. Today libtest emits JSON, brokkr renders it into libtest's human format, and `cargo_filter` parses that format back. The hunter calls this round trip the structural core of the problem, and says it survives only because the parsers predate the JSON lane. Related: `nextest_lane` always records `StreamEnded { Eof }` with `Unattributed { "the engine lane's stream" }`, including after an engine error, so its "Eof" is asserted rather than observed. `DevError::Reported("... exceeded its time budget ... - stopping")` is built in three places (`output.rs` twice, `parallel::report_runs`) plus `test_cmd::stop_for_budget`. A caller such as the `--json` trailer or the exit-code mapper cannot tell "budget blown, stop" from any other reported error without reading the message.
 
@@ -55,7 +55,7 @@ Owner: an `ExecutionOutcome` reduced from the observation stream (suite open/clo
 
 Reported by: check-exec.
 
-The two answers to the first question disagree in a way that is a live bypass (filed in `bugs.md`). Beyond those two, the config chain is read by hand in `concurrency::build_dir_configured` (a fourth TOML read of the chain) and `direct_runtime::cargo_config_env` (a fifth). Owner: `CargoLaunchConfig::discover(root, env)` in `rustflags.rs`, which already owns the config chain and the cfg evaluator, returning `{ runner: Option<Source>, build_target: Option<Source>, rustdoc: Option<Source>, build_dir: bool, env: Vec<ConfigEnvEntry> }`. `serial_shim_fallback`, `refuse_configured_runner`, `build_dir_configured` and `cargo_config_env` would all read from it.
+The two answers to the first question (`output.rs::serial_shim_fallback`, `direct_runtime::refuse_configured_runner`) now read the same config chain and empty-value rule, but the cfg evaluation is still copy-pasted between them and `CARGO_TARGET_<HOST>_RUNNER` is still spelled with `format!` in three places. Beyond those two, the config chain is read by hand in `concurrency::build_dir_configured` (a fourth TOML read of the chain) and `direct_runtime::cargo_config_env` (a fifth). Owner: `CargoLaunchConfig::discover(root, env)` in `rustflags.rs`, which already owns the config chain and the cfg evaluator, returning `{ runner: Option<Source>, build_target: Option<Source>, rustdoc: Option<Source>, build_dir: bool, env: Vec<ConfigEnvEntry> }`. `serial_shim_fallback`, `refuse_configured_runner`, `build_dir_configured` and `cargo_config_env` would all read from it.
 
 ## CON-004 - "What value will cargo see for this env var?"
 
@@ -174,12 +174,6 @@ Reported by: check-report.
 Reported by: check-report.
 
 `run_clippy_phase` sets `multi = sweeps.len() > 1`, counting configured sweeps. `run_rustdoc_phase` sets `multi = results.len() > 1`, counting cargo runs, so a single package-mode sweep with two packages counts as multi. `sweep_tag`'s `active_sweep_count` is passed `results.len()` from `coverage_tag`, so `[both]` means "two cargo runs", not "two sweeps". `report_diagnostic_phase`'s green line deduplicates adjacent labels for its count. A possible bug, which the hunter did not verify by running: a single package-mode sweep prints `[both]`. Owner: the phase's selection knows the count of sweeps reached, so pass it in rather than re-deriving it from vectors of different granularity.
-
-## CON-019 - "Is this rustc-wrapper ours?"
-
-Reported by: process-control.
-
-`guard.rs::do_install` compares the configured wrapper with the exact resolved path, while `do_remove`, `stale_warning` and `status` use `ends_with(GUARD_BIN)`. A wrapper at `/opt/x/brokkr-rustc-guard` from another install is "ours" for removal and "not ours" for install, which then refuses to overwrite it. Owner: one `fn classify_wrapper(&str) -> Wrapper { ThisInstall, OtherBrokkrGuard(Path), Foreign(String), None }`.
 
 ## CON-020 - "Has a stop been requested?" - four atomics and hand-written formulas
 

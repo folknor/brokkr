@@ -64,7 +64,11 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
         )
     })?;
 
-    let lock_command = if alloc { "corpus --alloc" } else { "corpus --hotpath" };
+    let lock_command = if alloc {
+        "corpus --alloc"
+    } else {
+        "corpus --hotpath"
+    };
     // Locked before the registry is read, as the parity path is (see
     // `cmd.rs`): verification must judge the pins and bytes the run uses.
     // `BenchContext` acquires again below; acquisition is re-entrant within
@@ -99,9 +103,17 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
     let mut verified = Vec::with_capacity(ids.len());
     for id in &ids {
         let (pin, config) = reg.pins.get(id).zip(reg.config(id)).ok_or_else(|| {
-            DevError::Config(format!("piners: internal: selected id '{id}' absent from pins"))
+            DevError::Config(format!(
+                "piners: internal: selected id '{id}' absent from pins"
+            ))
         })?;
-        verified.push(registry::verify_probe(id, pin, config, &corpus_root, req.project_root)?);
+        verified.push(registry::verify_probe(
+            id,
+            pin,
+            config,
+            &corpus_root,
+            req.project_root,
+        )?);
     }
     crate::piners::cmd::verify_selected_feeds(&ids, &reg, &corpus_root, req.project_root)?;
     registry::verify_harness_files(&reg, &corpus_root, req.project_root)?;
@@ -129,7 +141,8 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
         req.build_root,
         &build_cfg,
         lock_command,
-        req.force,        req.stop_marker.map(str::to_owned),
+        req.force,
+        req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
 
@@ -262,7 +275,10 @@ fn check_iteration(
         None if end != HarnessEnd::Code(0) => {
             format!("harness {} ({})", end.describe(), a.rec.summary())
         }
-        None => format!("harness exited 0 without reporting exactly its selection ({})", a.rec.summary()),
+        None => format!(
+            "harness exited 0 without reporting exactly its selection ({})",
+            a.rec.summary()
+        ),
     };
     output::corpus_msg(&format!("iteration {iteration}: {why}"));
     for line in a.detail_lines().into_iter().chain(a.context_lines()) {
@@ -329,7 +345,9 @@ mod tests {
         let nd = "{\"kind\":\"run_error\",\"version\":1,\"stage\":\"feed_load\",\"feed\":\"eth\",\"role\":\"base\",\"error\":\"no such file\"}\n";
         let err = check_iteration(3, &ids(), HarnessEnd::Code(2), nd.as_bytes(), b"").unwrap_err();
         assert!(
-            err.to_string().contains("iteration 3: run_error at stage feed_load (feed eth, role base): no such file"),
+            err.to_string().contains(
+                "iteration 3: run_error at stage feed_load (feed eth, role base): no such file"
+            ),
             "{err}"
         );
     }
@@ -345,14 +363,21 @@ mod tests {
             "{{\"kind\":\"probe_start\",{v},\"probe\":\"a\"}}\n{crash}{{\"kind\":\"probe_end\",{v},\"probe\":\"a\"}}\n{{\"kind\":\"run_end\",{v},\"exit\":0}}\n"
         );
         let err = check_iteration(0, &ids(), OK, nd.as_bytes(), b"").unwrap_err();
-        assert!(err.to_string().contains("harness_abort in the run"), "{err}");
+        assert!(
+            err.to_string().contains("harness_abort in the run"),
+            "{err}"
+        );
     }
 
     #[test]
     fn a_backstop_kill_after_a_run_error_is_not_a_contract_violation() {
         let nd = "{\"kind\":\"run_start\",\"version\":1}\n{\"kind\":\"run_error\",\"version\":1,\"stage\":\"x\",\"error\":\"y\"}\n";
         let a = integrity::assess(&ids(), nd.as_bytes(), HarnessEnd::Backstop, false);
-        assert!(a.contract.violations.is_empty(), "{:?}", a.contract.violations);
+        assert!(
+            a.contract.violations.is_empty(),
+            "{:?}",
+            a.contract.violations
+        );
         // The same SIGKILL read as spontaneous would be one.
         let a = integrity::assess(&ids(), nd.as_bytes(), HarnessEnd::Signal(9), false);
         assert!(!a.contract.violations.is_empty());
@@ -362,10 +387,18 @@ mod tests {
     fn a_failed_status_is_read_before_it_is_rejected() {
         // Exit 1 with a complete stream (a harness_abort) is still no sample.
         let crash = "{\"probe\":\"a\",\"outcome\":\"harness_abort\",\"error\":\"signal 11\"}\n";
-        let err = check_iteration(0, &ids(), HarnessEnd::Code(1), crash.as_bytes(), b"").unwrap_err();
-        assert!(err.to_string().contains("harness_abort in the run (a)"), "{err}");
+        let err =
+            check_iteration(0, &ids(), HarnessEnd::Code(1), crash.as_bytes(), b"").unwrap_err();
+        assert!(
+            err.to_string().contains("harness_abort in the run (a)"),
+            "{err}"
+        );
         // A signal names itself and what was reported.
         let err = check_iteration(0, &ids(), HarnessEnd::Signal(9), b"", b"").unwrap_err();
-        assert!(err.to_string().contains("killed by signal 9 (1 selected, 0 scored, 1 missing)"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("killed by signal 9 (1 selected, 0 scored, 1 missing)"),
+            "{err}"
+        );
     }
 }

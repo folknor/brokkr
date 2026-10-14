@@ -315,7 +315,8 @@ struct LayoutElement {
 /// a substring probe for `head[` also matched every `thead[N]`, silently
 /// dropping whole table-header subtrees from scoring.
 fn is_head_path(path: &str) -> bool {
-    path.split('>').any(|seg| seg == "head" || seg.starts_with("head["))
+    path.split('>')
+        .any(|seg| seg == "head" || seg.starts_with("head["))
 }
 
 /// The element's tag: the dumped `tag` when present, else derived from
@@ -353,10 +354,39 @@ fn is_br(el: &LayoutElement) -> bool {
 fn is_inline_tag(tag: &str) -> bool {
     matches!(
         tag,
-        "span" | "a" | "strong" | "em" | "b" | "i" | "u" | "small" | "big" | "sub" | "sup"
-            | "code" | "kbd" | "samp" | "var" | "cite" | "abbr" | "mark" | "del" | "ins" | "s"
-            | "q" | "dfn" | "ruby" | "rt" | "rp" | "bdi" | "bdo" | "wbr" | "time" | "data"
-            | "output" | "font"
+        "span"
+            | "a"
+            | "strong"
+            | "em"
+            | "b"
+            | "i"
+            | "u"
+            | "small"
+            | "big"
+            | "sub"
+            | "sup"
+            | "code"
+            | "kbd"
+            | "samp"
+            | "var"
+            | "cite"
+            | "abbr"
+            | "mark"
+            | "del"
+            | "ins"
+            | "s"
+            | "q"
+            | "dfn"
+            | "ruby"
+            | "rt"
+            | "rp"
+            | "bdi"
+            | "bdo"
+            | "wbr"
+            | "time"
+            | "data"
+            | "output"
+            | "font"
     )
 }
 
@@ -484,9 +514,8 @@ fn geometry_deltas(
     pipeline_by_path: &HashMap<&str, &LayoutElement>,
 ) -> GeometryDeltas {
     let parent_path = ref_el.path.rsplit_once('>').map(|(parent, _)| parent);
-    let frame = parent_path.and_then(|pp| {
-        Some((*reference_by_path.get(pp)?, *pipeline_by_path.get(pp)?))
-    });
+    let frame =
+        parent_path.and_then(|pp| Some((*reference_by_path.get(pp)?, *pipeline_by_path.get(pp)?)));
 
     let (dx, dy) = match frame {
         Some((ref_parent, pipe_parent)) => (
@@ -785,7 +814,10 @@ mod tests {
 
     #[test]
     fn leaf_tag_falls_back_to_path() {
-        assert_eq!(leaf_tag(&el("html>body[0]>span[2]", 0.0, 0.0, 0.0, 0.0)), "span");
+        assert_eq!(
+            leaf_tag(&el("html>body[0]>span[2]", 0.0, 0.0, 0.0, 0.0)),
+            "span"
+        );
         assert_eq!(leaf_tag(&el("html", 0.0, 0.0, 0.0, 0.0)), "html");
         let mut tagged = el("html>body[0]>span[2]", 0.0, 0.0, 0.0, 0.0);
         tagged.tag = Some("a".into());
@@ -846,19 +878,43 @@ mod tests {
     #[test]
     fn determine_status_element_regression() {
         // Pixels fine, element match dropped below the approved value.
-        let s = determine_status(1.0, Some(88.0), 10.0, Some(80.0), false, Some(1.0), Some(95.0));
+        let s = determine_status(
+            1.0,
+            Some(88.0),
+            10.0,
+            Some(80.0),
+            false,
+            Some(1.0),
+            Some(95.0),
+        );
         assert_eq!(s.as_str(), "REGRESSION");
     }
 
     #[test]
     fn determine_status_element_within_ratchet_tolerance() {
-        let s = determine_status(1.0, Some(94.8), 10.0, Some(80.0), false, Some(1.0), Some(95.0));
+        let s = determine_status(
+            1.0,
+            Some(94.8),
+            10.0,
+            Some(80.0),
+            false,
+            Some(1.0),
+            Some(95.0),
+        );
         assert_eq!(s.as_str(), "PASS");
     }
 
     #[test]
     fn determine_status_element_improvement_passes() {
-        let s = determine_status(1.0, Some(97.0), 10.0, Some(80.0), false, Some(1.0), Some(95.0));
+        let s = determine_status(
+            1.0,
+            Some(97.0),
+            10.0,
+            Some(80.0),
+            false,
+            Some(1.0),
+            Some(95.0),
+        );
         assert_eq!(s.as_str(), "PASS");
     }
 
@@ -876,5 +932,4 @@ mod tests {
             to_rgba(&gray, png::ColorType::Grayscale, png::BitDepth::Eight).expect("convert");
         assert_eq!(rgba, vec![128, 128, 128, 255, 64, 64, 64, 255]);
     }
-
 }

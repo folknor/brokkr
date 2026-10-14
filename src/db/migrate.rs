@@ -1473,11 +1473,9 @@ mod tests {
         // measurement mode.
         let row_of = |id: i64| -> (String, Option<String>) {
             db.conn
-                .query_row(
-                    "SELECT command, mode FROM runs WHERE id = ?1",
-                    [id],
-                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
-                )
+                .query_row("SELECT command, mode FROM runs WHERE id = ?1", [id], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+                })
                 .unwrap()
         };
 
@@ -1504,7 +1502,10 @@ mod tests {
         // v11→v12 splits `hotpath X` out; v12→v13 strips `hotpath ` and
         // sets variant to `hotpath` or `alloc`. v14→v15 collapses the
         // `inspect-tags` preset on row 8 down to `inspect`.
-        assert_eq!(row_of(7), ("apply-changes-zlib".into(), Some("hotpath".into())));
+        assert_eq!(
+            row_of(7),
+            ("apply-changes-zlib".into(), Some("hotpath".into()))
+        );
         assert_eq!(row_of(8), ("inspect".into(), Some("alloc".into())));
 
         // Row 9: `bench commands` / `inspect` → `bench inspect` / NULL →
@@ -1552,21 +1553,13 @@ mod tests {
             // 3. Multiple + suffixes: only the first + splits the command.
             conn.execute(
                 V3_INSERT,
-                rusqlite::params![
-                    "bench commands",
-                    "apply-changes+direct-io+zstd1",
-                    "pbfhogg"
-                ],
+                rusqlite::params!["bench commands", "apply-changes+direct-io+zstd1", "pbfhogg"],
             )
             .unwrap();
             // 4. Range suffix.
             conn.execute(
                 V3_INSERT,
-                rusqlite::params![
-                    "bench commands",
-                    "merge-changes+range-4914-4920",
-                    "pbfhogg"
-                ],
+                rusqlite::params!["bench commands", "merge-changes+range-4914-4920", "pbfhogg"],
             )
             .unwrap();
             // 5. Legacy diff-snapshots with `-from-to-to` trailer (no +):
@@ -1614,11 +1607,7 @@ mod tests {
             // 11. pbfhogg hotpath with `/alloc` and io/extra suffix.
             conn.execute(
                 V3_INSERT,
-                rusqlite::params![
-                    "hotpath",
-                    "apply-changes/alloc+direct-io+zstd1",
-                    "pbfhogg"
-                ],
+                rusqlite::params!["hotpath", "apply-changes/alloc+direct-io+zstd1", "pbfhogg"],
             )
             .unwrap();
             // 12. Non-pbfhogg hotpath row - untouched.
@@ -1639,11 +1628,9 @@ mod tests {
 
         let row_of = |id: i64| -> (String, Option<String>) {
             db.conn
-                .query_row(
-                    "SELECT command, mode FROM runs WHERE id = ?1",
-                    [id],
-                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
-                )
+                .query_row("SELECT command, mode FROM runs WHERE id = ?1", [id], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+                })
                 .unwrap()
         };
 
@@ -1665,10 +1652,7 @@ mod tests {
         // marker - v14→v15 collapses preset name to `inspect`.
         assert_eq!(row_of(8), ("inspect".into(), Some("hotpath".into())));
         assert_eq!(row_of(9), ("inspect".into(), Some("alloc".into())));
-        assert_eq!(
-            row_of(10),
-            ("apply-changes".into(), Some("hotpath".into()))
-        );
+        assert_eq!(row_of(10), ("apply-changes".into(), Some("hotpath".into())));
         assert_eq!(row_of(11), ("apply-changes".into(), Some("alloc".into())));
         assert_eq!(row_of(12), ("tilegen".into(), Some("alloc".into())));
 
@@ -1713,11 +1697,7 @@ mod tests {
             // Post-v12 bench row with NULL variant.
             conn.execute(
                 V3_INSERT,
-                rusqlite::params![
-                    "bench inspect",
-                    rusqlite::types::Null,
-                    "pbfhogg"
-                ],
+                rusqlite::params!["bench inspect", rusqlite::types::Null, "pbfhogg"],
             )
             .unwrap();
             // Post-v12 pbfhogg hotpath row (non-alloc).
@@ -1729,11 +1709,7 @@ mod tests {
             // Post-v12 pbfhogg hotpath row with alloc marker.
             conn.execute(
                 V3_INSERT,
-                rusqlite::params![
-                    "hotpath apply-changes",
-                    "alloc+direct-io",
-                    "pbfhogg"
-                ],
+                rusqlite::params!["hotpath apply-changes", "alloc+direct-io", "pbfhogg"],
             )
             .unwrap();
             // Elivagar hotpath (pre-split - still has the id in variant
@@ -1791,11 +1767,9 @@ mod tests {
 
         let row_of = |id: i64| -> (String, Option<String>) {
             db.conn
-                .query_row(
-                    "SELECT command, mode FROM runs WHERE id = ?1",
-                    [id],
-                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
-                )
+                .query_row("SELECT command, mode FROM runs WHERE id = ?1", [id], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+                })
                 .unwrap()
         };
 
@@ -1804,10 +1778,7 @@ mod tests {
             ("add-locations-to-ways".into(), Some("bench".into()))
         );
         assert_eq!(row_of(2), ("inspect".into(), Some("bench".into())));
-        assert_eq!(
-            row_of(3),
-            ("apply-changes".into(), Some("hotpath".into()))
-        );
+        assert_eq!(row_of(3), ("apply-changes".into(), Some("hotpath".into())));
         assert_eq!(row_of(4), ("apply-changes".into(), Some("alloc".into())));
         assert_eq!(row_of(5), ("tilegen".into(), Some("alloc".into())));
         assert_eq!(row_of(6), ("pmtiles".into(), Some("hotpath".into())));
@@ -1860,7 +1831,8 @@ mod tests {
             .unwrap();
             // Post-v13 row shape: command = bare id, variant = measurement
             // mode (this is what v13 produces and v14 inherits).
-            conn.execute_batch("ALTER TABLE runs ADD COLUMN brokkr_args TEXT").unwrap();
+            conn.execute_batch("ALTER TABLE runs ADD COLUMN brokkr_args TEXT")
+                .unwrap();
             conn.pragma_update(None, "user_version", 13).unwrap();
 
             conn.execute(
@@ -1921,7 +1893,8 @@ mod tests {
                  )",
             )
             .unwrap();
-            conn.execute_batch("ALTER TABLE runs ADD COLUMN brokkr_args TEXT").unwrap();
+            conn.execute_batch("ALTER TABLE runs ADD COLUMN brokkr_args TEXT")
+                .unwrap();
             // The test fixture predates the variant→mode rename: use the
             // old schema name, the v13→v14 migration will rename it.
             conn.pragma_update(None, "user_version", 13).unwrap();
@@ -1946,9 +1919,9 @@ mod tests {
                 ("inspect-tags", "inspect"),
                 ("inspect-tags-way", "inspect"),
                 ("diff-osc", "diff"),
-                ("sort", "sort"),      // untouched
-                ("getid", "getid"),    // already consolidated
-                ("inspect", "inspect"),// already consolidated
+                ("sort", "sort"),       // untouched
+                ("getid", "getid"),     // already consolidated
+                ("inspect", "inspect"), // already consolidated
             ];
             for (old, _) in preset_rows {
                 conn.execute(V3_INSERT, rusqlite::params![old, "bench", "pbfhogg"])
@@ -1973,9 +1946,26 @@ mod tests {
             .filter_map(Result::ok)
             .collect();
         let expected: Vec<&str> = vec![
-            "cat", "cat", "cat", "cat", "extract", "extract", "extract", "tags-filter",
-            "tags-filter", "tags-filter", "tags-filter", "getid", "getid", "inspect", "inspect",
-            "inspect", "diff", "sort", "getid", "inspect",
+            "cat",
+            "cat",
+            "cat",
+            "cat",
+            "extract",
+            "extract",
+            "extract",
+            "tags-filter",
+            "tags-filter",
+            "tags-filter",
+            "tags-filter",
+            "getid",
+            "getid",
+            "inspect",
+            "inspect",
+            "inspect",
+            "diff",
+            "sort",
+            "getid",
+            "inspect",
         ];
         assert_eq!(commands, expected);
 
@@ -2154,8 +2144,14 @@ mod tests {
 
         let rows = db.query_by_uuid("oldrow01").unwrap();
         assert_eq!(rows.len(), 1);
-        let dist = rows[0].distribution.as_ref().expect("distribution survives");
-        assert_eq!((dist.min_ms, dist.p50_ms, dist.p95_ms, dist.max_ms), (0, 0, 1, 2));
+        let dist = rows[0]
+            .distribution
+            .as_ref()
+            .expect("distribution survives");
+        assert_eq!(
+            (dist.min_ms, dist.p50_ms, dist.p95_ms, dist.max_ms),
+            (0, 0, 1, 2)
+        );
         assert_eq!(dist.us, None, "an old row must not invent microseconds");
         assert_eq!(rows[0].iterations, vec![0, 2, 1]);
         assert!(rows[0].iterations_us.is_empty());

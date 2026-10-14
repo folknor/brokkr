@@ -112,7 +112,10 @@ mod tests {
         let s = now_rfc3339();
         let b = s.as_bytes();
         assert_eq!(s.len(), 20, "{s}");
-        assert_eq!((b[4], b[7], b[10], b[13], b[16], b[19]), (b'-', b'-', b'T', b':', b':', b'Z'));
+        assert_eq!(
+            (b[4], b[7], b[10], b[13], b[16], b[19]),
+            (b'-', b'-', b'T', b':', b':', b'Z')
+        );
     }
 
     #[test]
@@ -120,6 +123,9 @@ mod tests {
         let s = now_sqlite_utc();
         let b = s.as_bytes();
         assert_eq!(s.len(), 19, "{s}");
-        assert_eq!((b[4], b[7], b[10], b[13], b[16]), (b'-', b'-', b' ', b':', b':'));
+        assert_eq!(
+            (b[4], b[7], b[10], b[13], b[16]),
+            (b'-', b'-', b' ', b':', b':')
+        );
     }
 }

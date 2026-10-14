@@ -85,8 +85,9 @@ pub fn mutate(
     writer.set_metadata_verbatim(archive.metadata()?);
     for run in archive.read_all_runs()? {
         let is_target = op != MutationOp::Regzip
-            && target_id
-                .is_some_and(|id| id >= run.tile_id && id < run.tile_id + u64::from(run.run_length));
+            && target_id.is_some_and(|id| {
+                id >= run.tile_id && id < run.tile_id + u64::from(run.run_length)
+            });
         if is_target {
             found = true;
             let id = target_id.expect("checked above");
@@ -119,7 +120,13 @@ pub fn mutate(
             let recompressed = regzip(raw)?;
             writer.add_run(run.tile_id, run.run_length, &recompressed)?;
         } else {
-            copy_run(&mut writer, &archive, run, run.tile_id, u64::from(run.run_length))?;
+            copy_run(
+                &mut writer,
+                &archive,
+                run,
+                run.tile_id,
+                u64::from(run.run_length),
+            )?;
         }
     }
     if !found {
@@ -139,8 +146,8 @@ fn copy_run(
     length: u64,
 ) -> io::Result<()> {
     if length != 0 {
-        let length =
-            u32::try_from(length).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "run too long"))?;
+        let length = u32::try_from(length)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "run too long"))?;
         writer.add_run(
             tile_id,
             length,
@@ -171,16 +178,19 @@ struct Field {
 fn read_varint(input: &[u8], at: &mut usize) -> io::Result<u64> {
     let mut value = 0u64;
     for shift in (0..64).step_by(7) {
-        let byte = *input
-            .get(*at)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "truncated protobuf varint"))?;
+        let byte = *input.get(*at).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::UnexpectedEof, "truncated protobuf varint")
+        })?;
         *at += 1;
         value |= u64::from(byte & 0x7f) << shift;
         if byte & 0x80 == 0 {
             return Ok(value);
         }
     }
-    Err(io::Error::new(io::ErrorKind::InvalidData, "protobuf varint overflows u64"))
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "protobuf varint overflows u64",
+    ))
 }
 
 fn fields(input: &[u8]) -> io::Result<Vec<Field>> {
@@ -211,7 +221,11 @@ fn fields(input: &[u8]) -> io::Result<Vec<Field>> {
                 ));
             }
         };
-        out.push(Field { number, wire, value });
+        out.push(Field {
+            number,
+            wire,
+            value,
+        });
     }
     Ok(out)
 }
@@ -231,7 +245,10 @@ fn take(input: &[u8], at: &mut usize, n: usize) -> io::Result<Vec<u8>> {
 fn encode_fields(fields: &[Field]) -> Vec<u8> {
     let mut out = Vec::new();
     for field in fields {
-        encode_varint(&mut out, u64::from(field.number) << 3 | u64::from(field.wire));
+        encode_varint(
+            &mut out,
+            u64::from(field.number) << 3 | u64::from(field.wire),
+        );
         if field.wire == 2 {
             encode_varint(&mut out, field.value.len() as u64);
         }
@@ -251,7 +268,10 @@ fn mutate_payload(raw: &[u8], op: MutationOp) -> io::Result<Vec<u8>> {
     let mut layer_fields = fields(&layer.value)?;
     match op {
         MutationOp::LayerVersion => {
-            if let Some(version) = layer_fields.iter_mut().find(|f| f.number == 15 && f.wire == 0) {
+            if let Some(version) = layer_fields
+                .iter_mut()
+                .find(|f| f.number == 15 && f.wire == 0)
+            {
                 version.value = vec![3];
             } else {
                 layer_fields.push(Field {
@@ -282,7 +302,9 @@ fn mutate_payload(raw: &[u8], op: MutationOp) -> io::Result<Vec<u8>> {
             let geometry = feature_fields
                 .iter_mut()
                 .find(|f| f.number == 4 && f.wire == 2)
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "feature has no geometry"))?;
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "feature has no geometry")
+                })?;
             geometry.value = nudge_geometry(&geometry.value)?;
             feature.value = encode_fields(&feature_fields);
         }
@@ -301,19 +323,23 @@ fn nudge_geometry(input: &[u8]) -> io::Result<Vec<u8>> {
         let command = read_varint(input, &mut at)?;
         if command & 7 == 1 && command >> 3 != 0 {
             let parameter = read_varint(input, &mut at)?;
-            let magnitude = i64::try_from(parameter >> 1)
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "geometry delta too large"))?;
+            let magnitude = i64::try_from(parameter >> 1).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "geometry delta too large")
+            })?;
             let delta = if parameter & 1 == 0 {
                 magnitude
             } else {
                 -magnitude - 1
             };
-            let changed_delta = delta
-                .checked_add(1)
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "geometry delta overflow"))?;
+            let changed_delta = delta.checked_add(1).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "geometry delta overflow")
+            })?;
             let changed = if changed_delta >= 0 {
                 u64::try_from(changed_delta).map_err(|_| {
-                    io::Error::new(io::ErrorKind::InvalidData, "geometry delta conversion failed")
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "geometry delta conversion failed",
+                    )
                 })? * 2
             } else {
                 changed_delta.unsigned_abs() * 2 - 1
@@ -344,7 +370,10 @@ fn nudge_geometry(input: &[u8]) -> io::Result<Vec<u8>> {
             read_varint(input, &mut at)?;
         }
     }
-    Err(io::Error::new(io::ErrorKind::InvalidData, "geometry has no MoveTo"))
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "geometry has no MoveTo",
+    ))
 }
 
 #[cfg(test)]
@@ -368,23 +397,51 @@ mod calibration {
     use super::super::super::eliv::{
         ArchiveView, PmtilesConfig, PmtilesWriter, tile_id_to_zxy, xy_to_tile_id,
     };
-    use super::super::digest::{DigestMode, LeafRun};
     use super::super::compute;
+    use super::super::digest::{DigestMode, LeafRun};
     use super::{Field, MutationOp, encode_fields, mutate};
 
     fn fixture_payload() -> Vec<u8> {
         // One point feature: geometry MoveTo(1) at (0,0); extent 4096, version 2.
         let feature = encode_fields(&[
-            Field { number: 3, wire: 0, value: vec![1] },
-            Field { number: 4, wire: 2, value: vec![9, 0, 0] },
+            Field {
+                number: 3,
+                wire: 0,
+                value: vec![1],
+            },
+            Field {
+                number: 4,
+                wire: 2,
+                value: vec![9, 0, 0],
+            },
         ]);
         let layer = encode_fields(&[
-            Field { number: 1, wire: 2, value: b"test".to_vec() },
-            Field { number: 2, wire: 2, value: feature },
-            Field { number: 5, wire: 0, value: vec![0x80, 0x20] },
-            Field { number: 15, wire: 0, value: vec![2] },
+            Field {
+                number: 1,
+                wire: 2,
+                value: b"test".to_vec(),
+            },
+            Field {
+                number: 2,
+                wire: 2,
+                value: feature,
+            },
+            Field {
+                number: 5,
+                wire: 0,
+                value: vec![0x80, 0x20],
+            },
+            Field {
+                number: 15,
+                wire: 0,
+                value: vec![2],
+            },
         ]);
-        let tile = encode_fields(&[Field { number: 3, wire: 2, value: layer }]);
+        let tile = encode_fields(&[Field {
+            number: 3,
+            wire: 2,
+            value: layer,
+        }]);
         let mut gzip = GzEncoder::new(Vec::new(), Compression::new(6));
         gzip.write_all(&tile).unwrap();
         gzip.finish().unwrap()
@@ -409,7 +466,8 @@ mod calibration {
         leaves
             .iter()
             .flat_map(|leaf| {
-                (leaf.tile_id..leaf.tile_id + u64::from(leaf.run_length)).map(move |id| (id, leaf.hash))
+                (leaf.tile_id..leaf.tile_id + u64::from(leaf.run_length))
+                    .map(move |id| (id, leaf.hash))
             })
             .collect()
     }
@@ -432,14 +490,25 @@ mod calibration {
             let output = dir.join(format!("{name}.pmtiles"));
             mutate(&input, &output, Some(tile_id_to_zxy(target)), op).unwrap();
             let after = ArchiveView::open(&output).unwrap();
-            assert_eq!(after.metadata().unwrap(), before_meta, "{name} metadata changed");
+            assert_eq!(
+                after.metadata().unwrap(),
+                before_meta,
+                "{name} metadata changed"
+            );
             let (digest, leaves) = compute(&after, DigestMode::Leaves).unwrap();
-            assert_ne!(digest.root, before_digest.root, "{name} did not FIRE (digest unchanged)");
+            assert_ne!(
+                digest.root, before_digest.root,
+                "{name} did not FIRE (digest unchanged)"
+            );
             let old = leaf_hashes(&before_leaves);
             let new = leaf_hashes(&leaves);
             for (&id, &hash) in &old {
                 if id != target {
-                    assert_eq!(new.get(&id), Some(&hash), "{name} changed non-target tile {id}");
+                    assert_eq!(
+                        new.get(&id),
+                        Some(&hash),
+                        "{name} changed non-target tile {id}"
+                    );
                 }
             }
         }
@@ -452,7 +521,11 @@ mod calibration {
         assert_eq!(after.metadata().unwrap(), before_meta);
         assert_eq!(digest.root, before_digest.root, "regzip changed the digest");
         assert_eq!(leaves, before_leaves, "regzip changed the leaves");
-        assert_ne!(fs::read(&input).unwrap(), fs::read(&output).unwrap(), "regzip left bytes unchanged");
+        assert_ne!(
+            fs::read(&input).unwrap(),
+            fs::read(&output).unwrap(),
+            "regzip left bytes unchanged"
+        );
         // `scratch` removes the directory on drop.
     }
 }

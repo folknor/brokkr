@@ -16,7 +16,8 @@ pub(crate) fn bench_planetiler(req: &MeasureRequest) -> Result<(), DevError> {
         req.project_root,
         req.build_root,
         "bench planetiler",
-        req.force,        req.stop_marker.map(str::to_owned),
+        req.force,
+        req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
     let (pbf_path, file_mb) =
@@ -39,7 +40,8 @@ pub(crate) fn bench_tilemaker(req: &MeasureRequest) -> Result<(), DevError> {
         req.project_root,
         req.build_root,
         "bench tilemaker",
-        req.force,        req.stop_marker.map(str::to_owned),
+        req.force,
+        req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
     let (pbf_path, file_mb) =
@@ -62,7 +64,8 @@ pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
         req.project_root,
         req.build_root,
         "bench all",
-        req.force,        req.stop_marker.map(str::to_owned),
+        req.force,
+        req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
     let (pbf_path, file_mb) =
@@ -142,7 +145,8 @@ pub(crate) fn verify(
     project::require(project, Project::Elivagar, "verify")?;
     let pi = bootstrap(Some(build_root))?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let pmtiles_path = resolve_pmtiles_by_commit(dataset, variant, commit, file, &paths, build_root)?;
+    let pmtiles_path =
+        resolve_pmtiles_by_commit(dataset, variant, commit, file, &paths, build_root)?;
     super::verify::run(
         &pmtiles_path,
         build_root,
@@ -166,7 +170,8 @@ pub(crate) fn inspect(
     project::require(project, Project::Elivagar, "pmtiles-inspect")?;
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let pmtiles_path = resolve_pmtiles_by_commit(dataset, variant, commit, file, &paths, build_root)?;
+    let pmtiles_path =
+        resolve_pmtiles_by_commit(dataset, variant, commit, file, &paths, build_root)?;
     super::inspect::run(&pmtiles_path, build_root)
 }
 
@@ -187,7 +192,8 @@ pub(crate) fn diag(
     project::require(project, Project::Elivagar, "diag")?;
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let pmtiles_path = resolve_pmtiles_by_commit(dataset, variant, commit, file, &paths, build_root)?;
+    let pmtiles_path =
+        resolve_pmtiles_by_commit(dataset, variant, commit, file, &paths, build_root)?;
     super::diag::run(&pmtiles_path, build_root, z, x, y)
 }
 
@@ -212,7 +218,8 @@ pub(crate) fn svg(
     project::require(project, Project::Elivagar, "svg")?;
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let pmtiles_path = resolve_pmtiles_by_commit(dataset, variant, commit, file, &paths, build_root)?;
+    let pmtiles_path =
+        resolve_pmtiles_by_commit(dataset, variant, commit, file, &paths, build_root)?;
     super::svg::run(
         &pmtiles_path,
         build_root,
@@ -374,8 +381,8 @@ pub(crate) fn corpus(
     match cmd {
         PmtilesCorpusCommand::Check { archive, corpus } => {
             let path = resolve(archive)?;
-            let (outcome, report) = gate::check(&path, &corpus_dir(archive, corpus))
-                .map_err(DevError::Io)?;
+            let (outcome, report) =
+                gate::check(&path, &corpus_dir(archive, corpus)).map_err(DevError::Io)?;
             emit_corpus(outcome, &report)
         }
         PmtilesCorpusCommand::Bless {
@@ -398,8 +405,8 @@ pub(crate) fn corpus(
             let path = resolve(archive)?;
             let dir = corpus_dir(archive, corpus);
             let style_path = style.clone().unwrap_or_else(|| style_default(&dir));
-            let (outcome, report) = gate::render_manifest(&path, &dir, &style_path)
-                .map_err(DevError::Io)?;
+            let (outcome, report) =
+                gate::render_manifest(&path, &dir, &style_path).map_err(DevError::Io)?;
             emit_corpus(outcome, &report)
         }
         PmtilesCorpusCommand::Render {
@@ -454,9 +461,10 @@ pub(crate) fn corpus(
                     // after the input file instead.
                     let stem = match &archive.variant {
                         Some(v) => format!("{}-{v}", archive.dataset),
-                        None => path
-                            .file_stem()
-                            .map_or_else(|| "file".to_owned(), |s| s.to_string_lossy().into_owned()),
+                        None => path.file_stem().map_or_else(
+                            || "file".to_owned(),
+                            |s| s.to_string_lossy().into_owned(),
+                        ),
                     };
                     dir.join(format!("{stem}-{op}.pmtiles"))
                 }
@@ -470,7 +478,10 @@ pub(crate) fn corpus(
 }
 
 /// Print a corpus report and translate the verdict into the process exit code.
-fn emit_corpus(outcome: super::corpus::Outcome, report: &super::corpus::CheckReport) -> Result<(), DevError> {
+fn emit_corpus(
+    outcome: super::corpus::Outcome,
+    report: &super::corpus::CheckReport,
+) -> Result<(), DevError> {
     use super::corpus::Outcome;
     for w in &report.warnings {
         crate::output::warn(w);

@@ -33,7 +33,10 @@ pub fn format_one(v: &ManifestViolation) -> String {
 /// (so `[target.'cfg(unix)'.dependencies]` is covered alongside the top-level
 /// three and `[workspace.dependencies]`).
 fn is_dependency_table_name(name: &str) -> bool {
-    matches!(name, "dependencies" | "dev-dependencies" | "build-dependencies")
+    matches!(
+        name,
+        "dependencies" | "dev-dependencies" | "build-dependencies"
+    )
 }
 
 /// Whether the leading decoration of a key contains a blank line - i.e. the key
@@ -58,10 +61,7 @@ fn starts_new_group(prefix: &str) -> bool {
 
 /// Scan every tracked manifest matching the config's globs and run the enabled
 /// checks, newest concern first in declaration order.
-pub fn scan(
-    project_root: &Path,
-    cfg: &ManifestConfig,
-) -> Result<Vec<ManifestViolation>, DevError> {
+pub fn scan(project_root: &Path, cfg: &ManifestConfig) -> Result<Vec<ManifestViolation>, DevError> {
     let default_paths = [String::from("**/Cargo.toml")];
     let path_globs = if cfg.paths.is_empty() {
         &default_paths[..]
@@ -256,7 +256,10 @@ fn version_key(req: &str, granularity: &str) -> Option<String> {
         .chars()
         .take_while(char::is_ascii_digit)
         .collect();
-    Some(format!("{major}.{}", if minor.is_empty() { "0" } else { &minor }))
+    Some(format!(
+        "{major}.{}",
+        if minor.is_empty() { "0" } else { &minor }
+    ))
 }
 
 /// The version requirement of a dependency item - a bare `"1.2"` string or the
@@ -330,7 +333,9 @@ fn check_cargo_machete(rel: &Path, doc: &DocumentMut, out: &mut Vec<ManifestViol
             out.push(ManifestViolation {
                 file: rel.to_path_buf(),
                 rule: "cargo-machete-ignored",
-                message: format!("cargo-machete `ignored` names `{entry}`, not a declared dependency"),
+                message: format!(
+                    "cargo-machete `ignored` names `{entry}`, not a declared dependency"
+                ),
             });
         }
     }
@@ -344,7 +349,11 @@ fn check_version_align(
     out: &mut Vec<ManifestViolation>,
 ) {
     for g in groups {
-        let gran = if g.granularity.is_empty() { "minor" } else { &g.granularity };
+        let gran = if g.granularity.is_empty() {
+            "minor"
+        } else {
+            &g.granularity
+        };
         let found: Vec<(String, String)> = g
             .crates
             .iter()
@@ -749,7 +758,10 @@ mod tests {
         // Not excluded: both fire.
         let full = run_doc_shape(&cfg, src, false);
         assert!(full.iter().any(|(r, _)| *r == "section-order"), "{full:?}");
-        assert!(full.iter().any(|(r, _)| *r == "sort-dependencies"), "{full:?}");
+        assert!(
+            full.iter().any(|(r, _)| *r == "sort-dependencies"),
+            "{full:?}"
+        );
     }
 
     #[test]
@@ -925,8 +937,14 @@ mod tests {
         let core_bad = "[package]\nname = \"nautilus-core\"\n\n\
                         [dependencies]\ndydx-proto = { workspace = true }\n";
         let manifests = vec![
-            (PathBuf::from("Cargo.toml"), root.parse::<DocumentMut>().unwrap()),
-            (PathBuf::from("a/Cargo.toml"), core_bad.parse::<DocumentMut>().unwrap()),
+            (
+                PathBuf::from("Cargo.toml"),
+                root.parse::<DocumentMut>().unwrap(),
+            ),
+            (
+                PathBuf::from("a/Cargo.toml"),
+                core_bad.parse::<DocumentMut>().unwrap(),
+            ),
         ];
         let mut out = Vec::new();
         if let Some(ag) = &cfg.adapter_group {
@@ -940,8 +958,14 @@ mod tests {
         let other = "[package]\nname = \"nautilus-adapter-x\"\n\n\
                      [dependencies]\ndydx-proto = { workspace = true }\n";
         let manifests2 = vec![
-            (PathBuf::from("Cargo.toml"), root.parse::<DocumentMut>().unwrap()),
-            (PathBuf::from("x/Cargo.toml"), other.parse::<DocumentMut>().unwrap()),
+            (
+                PathBuf::from("Cargo.toml"),
+                root.parse::<DocumentMut>().unwrap(),
+            ),
+            (
+                PathBuf::from("x/Cargo.toml"),
+                other.parse::<DocumentMut>().unwrap(),
+            ),
         ];
         let mut out2 = Vec::new();
         check_adapter_group(&manifests2, cfg.adapter_group.as_ref().unwrap(), &mut out2);
@@ -966,8 +990,10 @@ mod tests {
                     [dependencies]\nserde = \"1\"\n\n\
                     [workspace]\nmembers = [\"a\"]\n\n[workspace.dependencies]\n\
                     serde = \"1\"\n\n# Adapter dependencies\ndydx-proto = \"1\"\n";
-        let manifests =
-            vec![(PathBuf::from("Cargo.toml"), root.parse::<DocumentMut>().unwrap())];
+        let manifests = vec![(
+            PathBuf::from("Cargo.toml"),
+            root.parse::<DocumentMut>().unwrap(),
+        )];
         let mut out = Vec::new();
         check_adapter_group(&manifests, cfg.adapter_group.as_ref().unwrap(), &mut out);
         assert!(out.is_empty(), "{out:?}");

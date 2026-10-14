@@ -98,6 +98,10 @@ tv = [ { line = 4, col = 8, severity = "error" } ]
 `expected_scope`/`tv_scope` are written only for a non-default scope, so a
 corpus blessed and anchored with the default flags carries neither.
 
+Only `agree_clean`, `agree_flagged` and `divergent` can be pinned in
+`expected`. `piners_error` and `lint_error` describe validator failures, so
+the registry rejects them instead of allowing an expectation no run can meet.
+
 `path` is relative to the registry's snippet tree; `xxh128` is brokkr's
 standard file hash (`preflight::compute_xxh128`), verified before any run.
 `<keyword>.toml` files are pure selection groupings (`probes = ["id", ..]`),

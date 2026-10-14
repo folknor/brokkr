@@ -251,12 +251,10 @@ impl MockServer {
         }
         // Every child of a hold carries its capability: see `crate::hold`.
         crate::hold::stamp(&mut cmd);
-        let mut child = cmd
-            .spawn()
-            .map_err(|error| DevError::Spawn {
-                program: binary.display().to_string(),
-                error,
-            })?;
+        let mut child = cmd.spawn().map_err(|error| DevError::Spawn {
+            program: binary.display().to_string(),
+            error,
+        })?;
         let pid = child.id();
         if let Some(cb) = on_spawn {
             cb(pid);
@@ -394,11 +392,7 @@ pub fn run_mock_serve(req: &MockServeRequest<'_>) -> Result<(), DevError> {
         req.project_root,
         "mock_server_binary",
     )?;
-    let fixtures_dir = require_path(
-        &req.config.fixtures_dir,
-        req.project_root,
-        "fixtures_dir",
-    )?;
+    let fixtures_dir = require_path(&req.config.fixtures_dir, req.project_root, "fixtures_dir")?;
     let fixture_path = resolve_fixture(&fixtures_dir, req.fixture)?;
 
     let project_root_str = req.project_root.display().to_string();
@@ -448,7 +442,12 @@ pub fn run_mock_serve(req: &MockServeRequest<'_>) -> Result<(), DevError> {
     use std::os::unix::process::CommandExt;
     const MOCK_SERVE_ISOLATE_PG: bool = true;
     let mut child = Command::new(&binary)
-        .args(["--fixture", &fixture_str, "--readiness-file", &readiness_str])
+        .args([
+            "--fixture",
+            &fixture_str,
+            "--readiness-file",
+            &readiness_str,
+        ])
         .stdin(Stdio::null())
         // Inherit stdout/stderr so the user sees sæhrimnir's logs live.
         // Capture-and-replay would obscure timing for a foreground tool.
@@ -470,8 +469,12 @@ pub fn run_mock_serve(req: &MockServeRequest<'_>) -> Result<(), DevError> {
             // child make `brokkr kill` hang here either. SIGTERM, give
             // SHUTDOWN_BUDGET, then SIGKILL via wait_with_deadline.
             kill_for_shutdown(child_pid, libc::SIGTERM, MOCK_SERVE_ISOLATE_PG);
-            let _outcome =
-                wait_with_deadline(&mut child, child_pid, SHUTDOWN_BUDGET, MOCK_SERVE_ISOLATE_PG);
+            let _outcome = wait_with_deadline(
+                &mut child,
+                child_pid,
+                SHUTDOWN_BUDGET,
+                MOCK_SERVE_ISOLATE_PG,
+            );
             return Err(e);
         }
     };
@@ -544,19 +547,34 @@ pub fn endpoint_env_pairs(cfg: &RatatoskrConfig, endpoints: &Endpoints) -> Vec<(
         out.push((name.clone(), format!("127.0.0.1:{}", endpoints.smtp)));
     }
     if let Some(name) = &cfg.test_endpoint_env_graph {
-        out.push((name.clone(), format!("http://127.0.0.1:{}", endpoints.graph)));
+        out.push((
+            name.clone(),
+            format!("http://127.0.0.1:{}", endpoints.graph),
+        ));
     }
     if let Some(name) = &cfg.test_endpoint_env_gmail {
-        out.push((name.clone(), format!("http://127.0.0.1:{}", endpoints.gmail)));
+        out.push((
+            name.clone(),
+            format!("http://127.0.0.1:{}", endpoints.gmail),
+        ));
     }
     if let Some(name) = &cfg.test_endpoint_env_caldav {
-        out.push((name.clone(), format!("http://127.0.0.1:{}", endpoints.caldav)));
+        out.push((
+            name.clone(),
+            format!("http://127.0.0.1:{}", endpoints.caldav),
+        ));
     }
     if let Some(name) = &cfg.test_endpoint_env_carddav {
-        out.push((name.clone(), format!("http://127.0.0.1:{}", endpoints.carddav)));
+        out.push((
+            name.clone(),
+            format!("http://127.0.0.1:{}", endpoints.carddav),
+        ));
     }
     if let Some(name) = &cfg.test_endpoint_env_people {
-        out.push((name.clone(), format!("http://127.0.0.1:{}", endpoints.people)));
+        out.push((
+            name.clone(),
+            format!("http://127.0.0.1:{}", endpoints.people),
+        ));
     }
     if let Some(name) = &cfg.test_endpoint_env_gcal {
         out.push((name.clone(), format!("http://127.0.0.1:{}", endpoints.gcal)));
@@ -618,7 +636,12 @@ pub fn wait_for_endpoints(
     readiness: &Path,
     budget: Duration,
 ) -> Result<Endpoints, DevError> {
-    wait_for_endpoints_inner(child, readiness, budget, &crate::shutdown::is_shutdown_requested)
+    wait_for_endpoints_inner(
+        child,
+        readiness,
+        budget,
+        &crate::shutdown::is_shutdown_requested,
+    )
 }
 
 /// As [`wait_for_endpoints`], but also polls a caller-supplied signal
@@ -815,7 +838,8 @@ mod tests {
 
     #[test]
     fn tolerates_blank_lines_and_arbitrary_order() {
-        let text = "\nGMAIL 5\n\nCALDAV 6\nGRAPH 4\nJMAP 1\nIMAP 2\nSMTP 3\nCARDDAV 9\nPEOPLE 7\nGCAL 8\n";
+        let text =
+            "\nGMAIL 5\n\nCALDAV 6\nGRAPH 4\nJMAP 1\nIMAP 2\nSMTP 3\nCARDDAV 9\nPEOPLE 7\nGCAL 8\n";
         let ep = parse_sentinel(text).unwrap();
         assert_eq!(ep.jmap, 1);
         assert_eq!(ep.imap, 2);

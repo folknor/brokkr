@@ -18,7 +18,8 @@ use std::path::Path;
 use rusqlite::params;
 
 use crate::error::DevError;
-use crate::piners::lint::ProbeResult;
+use crate::piners::lint::diff::Signature;
+use crate::piners::lint::{PinnableDisposition, ProbeResult};
 
 /// Current schema version. Increment when adding a migration in [`run_migrations`].
 const SCHEMA_VERSION: i64 = 1;
@@ -148,9 +149,9 @@ impl LintDb {
                 params![
                     run_id,
                     p.probe,
-                    p.disposition,
-                    p.signature,
-                    p.expected,
+                    p.disposition.as_str(),
+                    p.disposition.signature().map(Signature::as_str),
+                    p.expected.map(PinnableDisposition::as_str),
                     i64::from(p.gate_ok),
                     as_i64(p.piners_count),
                     as_i64(p.lint_count),
@@ -167,9 +168,9 @@ impl LintDb {
 
     /// The newest run `id`, or `None` if the DB has no runs.
     pub fn latest_run_id(&self) -> Result<Option<i64>, DevError> {
-        let id = self
-            .conn
-            .query_row("SELECT MAX(id) FROM run", [], |r| r.get::<_, Option<i64>>(0))?;
+        let id = self.conn.query_row("SELECT MAX(id) FROM run", [], |r| {
+            r.get::<_, Option<i64>>(0)
+        })?;
         Ok(id)
     }
 
@@ -184,15 +185,28 @@ impl LintDb {
                 r.get::<_, i64>("id")?.to_string(),
                 r.get::<_, String>("started_at")?,
                 r.get::<_, String>("result")?,
-                if r.get::<_, i64>("gated")? != 0 { "yes".to_owned() } else { "no".to_owned() },
+                if r.get::<_, i64>("gated")? != 0 {
+                    "yes".to_owned()
+                } else {
+                    "no".to_owned()
+                },
                 r.get::<_, i64>("probe_count")?.to_string(),
-                r.get::<_, Option<String>>("fail_reason")?.unwrap_or_default(),
+                r.get::<_, Option<String>>("fail_reason")?
+                    .unwrap_or_default(),
                 r.get::<_, String>("selector")?,
             ])
         })?;
         let cells = rows.collect::<Result<Vec<_>, _>>()?;
         Ok(grid(
-            &["run", "started_at", "result", "gated", "probes", "reason", "selector"],
+            &[
+                "run",
+                "started_at",
+                "result",
+                "gated",
+                "probes",
+                "reason",
+                "selector",
+            ],
             &cells,
         ))
     }
@@ -233,8 +247,16 @@ impl LintDb {
         let cells: Vec<Vec<String>> = shown.iter().map(|d| d.cells()).collect();
         let mut out = grid(
             &[
-                "probe", "disposition", "signature", "expected", "gate", "piners",
-                "lint", "tv_anchored", "tv_div", "error",
+                "probe",
+                "disposition",
+                "signature",
+                "expected",
+                "gate",
+                "piners",
+                "lint",
+                "tv_anchored",
+                "tv_div",
+                "error",
             ],
             &cells,
         );
@@ -276,7 +298,11 @@ impl DispRow {
             self.disposition.clone(),
             dash(&self.signature),
             dash(&self.expected),
-            if self.gate_ok { "ok".to_owned() } else { "DEVIATES".to_owned() },
+            if self.gate_ok {
+                "ok".to_owned()
+            } else {
+                "DEVIATES".to_owned()
+            },
             self.piners_count.to_string(),
             self.lint_count.to_string(),
             dash(&self.tv_anchored_at),
@@ -353,13 +379,21 @@ fn grid(headers: &[&str], rows: &[Vec<String>]) -> String {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use crate::piners::lint::diff::{LintDisposition, Validator};
 
     fn probe(name: &str, disposition: &str, gate_ok: bool) -> ProbeResult {
+        let disposition = match disposition {
+            "agree_clean" => LintDisposition::AgreeClean,
+            "agree_flagged" => LintDisposition::AgreeFlagged,
+            "divergent" => LintDisposition::Divergent(Signature::PinersOnly),
+            "piners_error" => LintDisposition::ToolError(Validator::Piners),
+            "lint_error" => LintDisposition::ToolError(Validator::PineLint),
+            _ => panic!("unknown test disposition"),
+        };
         ProbeResult {
             probe: name.to_owned(),
-            disposition: disposition.to_owned(),
-            signature: None,
-            expected: Some(disposition.to_owned()),
+            disposition,
+            expected: disposition.pinnable(),
             gate_ok,
             piners_count: 2,
             lint_count: 2,
@@ -381,11 +415,7 @@ mod tests {
         let probes = vec![
             probe("agree_one", "agree_clean", true),
             probe("agree_two", "agree_flagged", true),
-            ProbeResult {
-                signature: Some("piners_only".to_owned()),
-                gate_ok: false,
-                ..probe("diverge_one", "divergent", false)
-            },
+            probe("diverge_one", "divergent", false),
         ];
         let meta = RunMeta {
             // Fixed timestamp - the store never reads a clock.

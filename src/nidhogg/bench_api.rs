@@ -39,7 +39,10 @@ pub fn run(
     let variant_names: Vec<&str> = filtered.iter().map(|(name, _)| name.as_str()).collect();
 
     crate::harness::run_variants("query", &variant_names, |name| {
-        let (_, body) = filtered.iter().find(|(n, _)| n == name).expect("variant exists in filtered list");
+        let (_, body) = filtered
+            .iter()
+            .find(|(n, _)| n == name)
+            .expect("variant exists in filtered list");
 
         // Warmup: one request, discard result.
         run_curl_timed(&url, body)?;
@@ -217,8 +220,8 @@ fn parse_response_stats(stdout: &str) -> Result<(u64, usize), String> {
     let download_bytes: u64 = size_str
         .parse()
         .map_err(|_| format!("size_download not a number: '{size_str}'"))?;
-    let val: serde_json::Value = serde_json::from_str(json_body)
-        .map_err(|e| format!("response is not JSON: {e}"))?;
+    let val: serde_json::Value =
+        serde_json::from_str(json_body).map_err(|e| format!("response is not JSON: {e}"))?;
     let count = val
         .get("elements")
         .and_then(serde_json::Value::as_array)

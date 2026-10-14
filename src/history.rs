@@ -351,7 +351,11 @@ pub fn format_detail(entry: &HistoryEntry) -> String {
     fields.push(("exit_status", entry.exit_status.to_string()));
     fields.push(("hostname", entry.hostname.clone()));
     if let Some(ref c) = entry.commit_hash {
-        let dirty = if entry.dirty == Some(true) { " (dirty)" } else { "" };
+        let dirty = if entry.dirty == Some(true) {
+            " (dirty)"
+        } else {
+            ""
+        };
         fields.push(("commit", format!("{c}{dirty}")));
     }
     if let Some(ref k) = entry.kernel {
@@ -379,7 +383,11 @@ pub fn format_history(entries: &[HistoryEntry]) -> String {
 
     // The id leads each line: it is what `brokkr history <id>` takes, and
     // nothing else in the listing identifies a row.
-    let id_width = entries.iter().map(|e| e.id.to_string().len()).max().unwrap_or(1);
+    let id_width = entries
+        .iter()
+        .map(|e| e.id.to_string().len())
+        .max()
+        .unwrap_or(1);
     let mut lines = Vec::with_capacity(entries.len());
     for entry in entries {
         let project = entry.project.as_deref().unwrap_or("-");
@@ -445,8 +453,9 @@ fn db_path() -> Result<PathBuf, DevError> {
 /// repeat it. A store stamped newer than this binary is left alone - its
 /// table is a superset this binary's inserts still fit.
 fn run_migrations(conn: &Connection) -> Result<(), StoreError> {
-    let read_version =
-        |conn: &Connection| conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0));
+    let read_version = |conn: &Connection| {
+        conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+    };
     if read_version(conn)? >= SCHEMA_VERSION && has_table(conn, "history") {
         return Ok(());
     }
@@ -513,7 +522,10 @@ mod tests {
         assert!(io(std::io::ErrorKind::ReadOnlyFilesystem).is_environmental());
         assert!(!io(std::io::ErrorKind::NotFound).is_environmental());
         let sqlite = |code| {
-            StoreError::Sqlite(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None))
+            StoreError::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                None,
+            ))
         };
         assert!(sqlite(rusqlite::ffi::SQLITE_READONLY).is_environmental());
         assert!(sqlite(rusqlite::ffi::SQLITE_CANTOPEN).is_environmental());
@@ -526,7 +538,9 @@ mod tests {
         run_migrations(&conn).unwrap();
         assert!(has_table(&conn, "history"));
         run_migrations(&conn).unwrap();
-        let v: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        let v: i64 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
         assert_eq!(v, SCHEMA_VERSION);
     }
 
@@ -677,7 +691,12 @@ mod tests {
             limit: 25,
             ..Default::default()
         };
-        let mut got: Vec<String> = db.query(&filter).unwrap().into_iter().map(|e| e.command).collect();
+        let mut got: Vec<String> = db
+            .query(&filter)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.command)
+            .collect();
         got.sort();
         assert_eq!(got, vec!["before", "on"]);
 
@@ -686,7 +705,12 @@ mod tests {
             limit: 25,
             ..Default::default()
         };
-        let got: Vec<String> = db.query(&filter).unwrap().into_iter().map(|e| e.command).collect();
+        let got: Vec<String> = db
+            .query(&filter)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.command)
+            .collect();
         assert_eq!(got, vec!["before"]);
     }
 

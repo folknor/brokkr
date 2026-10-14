@@ -4276,6 +4276,9 @@ fn run_test_phase(
             Ok(false) => Some(DevError::Build(TESTS_FAILED.into())),
             Err(e) => Some(e),
         };
+        // Every failed lane ends this loop; even an ordinary nextest `Ok(false)`
+        // does not advance to another sweep. Timeouts return `Err` so their
+        // per-test stop reason survives instead of becoming a generic red run.
         if let Some(e) = failed {
             output::error(&format!(
                 "test {}: {}",

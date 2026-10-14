@@ -63,7 +63,10 @@ pub fn run(metadata: &CargoMetadata) -> Vec<NativeDependencyEvent> {
     let mut compiles: HashMap<&str, BTreeSet<&str>> = HashMap::new();
     for node in &metadata.resolve.nodes {
         for d in &node.deps {
-            let is_build = d.dep_kinds.iter().any(|dk| dk.kind.as_deref() == Some("build"));
+            let is_build = d
+                .dep_kinds
+                .iter()
+                .any(|dk| dk.kind.as_deref() == Some("build"));
             if !is_build {
                 continue;
             }

@@ -477,6 +477,13 @@ fn serial_shim_fallback(
     project_env: &[(String, String)],
     sweep_env: &std::collections::BTreeMap<String, String>,
 ) -> Option<String> {
+    // Cargo sees this merged environment. In particular, a sweep CARGO_HOME
+    // changes the config chain the shim must inspect before replacing a runner.
+    let cargo_env = merged_env(sweep_env, project_env);
+    let cargo_env_refs: Vec<(&str, &str)> = cargo_env
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
     let env_has = |key: &str| {
         project_env.iter().any(|(name, _)| name == key) || sweep_env.contains_key(key)
     };
@@ -507,7 +514,7 @@ fn serial_shim_fallback(
     if std::env::var_os(&runner_var).is_some() || env_has(&runner_var) {
         return Some(format!("{runner_var} is set"));
     }
-    for path in crate::rustflags::config_paths(root) {
+    for path in crate::rustflags::config_paths_under(root, &cargo_env_refs) {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -912,6 +919,7 @@ fn run_one_test_sweep(
     let (captured, hung, timed_out, completed) = if parallel {
         let run = test_runner::run_libtest_parallel(
             "cargo",
+            test_runner::Leader::Cargo,
             &arg_refs,
             project_root,
             state_root,

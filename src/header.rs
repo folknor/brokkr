@@ -24,7 +24,10 @@ pub struct HeaderViolation {
 
 /// `` file: missing or stale header (expected `<pattern>`) ``.
 pub fn format_one(v: &HeaderViolation, expected: &str) -> String {
-    format!("{}: missing or stale header (expected `{expected}`)", v.file.display())
+    format!(
+        "{}: missing or stale header (expected `{expected}`)",
+        v.file.display()
+    )
 }
 
 /// The current year in UTC, via libc `gmtime` (no date-crate dependency).
@@ -104,7 +107,10 @@ mod tests {
             "Copyright (C) 2015-2026"
         );
         // No placeholder is a valid (static) header requirement.
-        assert_eq!(expand("SPDX-License-Identifier: MIT", 2026), "SPDX-License-Identifier: MIT");
+        assert_eq!(
+            expand("SPDX-License-Identifier: MIT", 2026),
+            "SPDX-License-Identifier: MIT"
+        );
     }
 
     #[test]

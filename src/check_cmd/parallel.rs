@@ -98,6 +98,10 @@ use crate::test_runner::{effective_test_threads, HungTest};
 struct BinaryRun {
     /// `<package>/<target>`, the label a failure is reported under.
     label: String,
+    /// `<package>/<kind>:<target>`, the identity used by the timing cache.
+    /// The report label intentionally stays shorter, but cache identity must
+    /// distinguish same-named targets of different kinds.
+    timing_key: String,
     /// The copy-pasteable cargo line, reprinted on failure.
     command: String,
     captured: CapturedOutput,
@@ -119,6 +123,7 @@ impl BinaryRun {
     fn skipped_after_abort(binary: &TestBinary) -> Self {
         Self {
             label: format!("{}/{}", binary.package, binary.target),
+            timing_key: binary_timing_key(binary),
             command: String::new(),
             captured: CapturedOutput {
                 status: std::process::ExitStatus::default(),
@@ -402,6 +407,13 @@ fn binary_selector(binary: &TestBinary) -> Vec<String> {
     args
 }
 
+/// Stable timing-cache identity for one planning unit. Keep it separate from
+/// the shorter failure label: a package can have a bin target and an
+/// integration-test target with the same name.
+fn binary_timing_key(binary: &TestBinary) -> String {
+    format!("{}/{}", binary.package, binary.label())
+}
+
 /// The cargo target selector for one test harness of a known package.
 ///
 /// The four named kinds select themselves (an example or bench only reaches
@@ -591,6 +603,7 @@ fn run_one_binary(
     let started = Instant::now();
     let run_result = test_runner::run_libtest_parallel(
         &binary.executable,
+        test_runner::Leader::TestBinary,
         &arg_refs,
         &cwd,
         state_root,
@@ -615,6 +628,7 @@ fn run_one_binary(
     };
     Ok(BinaryRun {
         label: format!("{}/{}", binary.package, binary.target),
+        timing_key: binary_timing_key(binary),
         command: repro_cargo_line(
             sweep,
             binary,
@@ -706,8 +720,7 @@ fn run_parallel_sweep(
     // minutes after plain check had converged on the identical entry).
     let history = timings_load(state_root);
     let recorded = history.get(&sweep.entry_name);
-    let label_of = |b: &TestBinary| format!("{}/{}", b.package, b.target);
-    let cost_of = |b: &TestBinary| recorded.and_then(|m| m.get(&label_of(b))).copied();
+    let cost_of = |b: &TestBinary| recorded.and_then(|m| m.get(&binary_timing_key(b))).copied();
     let known: Vec<(f64, u32)> = counted
         .iter()
         .filter_map(|(b, c)| {
@@ -849,6 +862,9 @@ fn run_parallel_sweep(
     let measured: Vec<(String, BinaryCost)> = runs
         .iter()
         .filter_map(|r| r.as_ref().ok())
+        // A queued binary skipped after a sibling timeout has no observation;
+        // do not replace its previous measurement with a fabricated zero.
+        .filter(|r| !r.skipped)
         .map(|r| {
             // Serial cost, not `r.elapsed`: the sum of a binary's own tests
             // does not move when its allocation moves, and wall time does.
@@ -858,7 +874,7 @@ fn run_parallel_sweep(
                 .iter()
                 .map(|(_, d)| d.as_secs_f64())
                 .fold(0.0_f64, f64::max);
-            (r.label.clone(), BinaryCost { serial, slowest })
+            (r.timing_key.clone(), BinaryCost { serial, slowest })
         })
         .collect();
     timings_record(state_root, &sweep.entry_name, &measured);

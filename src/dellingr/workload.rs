@@ -165,11 +165,14 @@ mod tests {
         let root = tmpdir("ok");
         let digest = src_digest(&root);
         write_workload(&root, "examples/fields/read.lua", SRC);
-        let cfg = config_with(&root, &format!(
-            "project = \"dellingr\"\n\n[dellingr]\nexample = \"hotpath\"\n\n\
+        let cfg = config_with(
+            &root,
+            &format!(
+                "project = \"dellingr\"\n\n[dellingr]\nexample = \"hotpath\"\n\n\
              [dellingr.workloads.read]\nfile = \"examples/fields/read.lua\"\n\
              xxh128 = \"{digest}\"\n"
-        ));
+            ),
+        );
 
         let resolved = resolve(&cfg, &root, "read", false).unwrap();
         assert_eq!(resolved.name, "read");
@@ -182,13 +185,16 @@ mod tests {
         let digest = src_digest(&root);
         write_workload(&root, "bench/read.lua", SRC);
         write_workload(&root, "examples/fields/read.lua", SRC);
-        let cfg = config_with(&root, &format!(
-            "project = \"dellingr\"\n\n[dellingr]\nexample = \"hotpath\"\n\n\
+        let cfg = config_with(
+            &root,
+            &format!(
+                "project = \"dellingr\"\n\n[dellingr]\nexample = \"hotpath\"\n\n\
              [dellingr.workloads.read]\nfile = \"bench/read.lua\"\n\
              xxh128 = \"{digest}\"\n\
              hotpath_file = \"examples/fields/read.lua\"\n\
              hotpath_xxh128 = \"{digest}\"\n"
-        ));
+            ),
+        );
 
         let bench = resolve(&cfg, &root, "read", false).unwrap();
         assert_eq!(bench.path, root.join("bench/read.lua"));
@@ -201,11 +207,14 @@ mod tests {
         let root = tmpdir("hp_missing");
         let digest = src_digest(&root);
         write_workload(&root, "bench/read.lua", SRC);
-        let cfg = config_with(&root, &format!(
-            "project = \"dellingr\"\n\n[dellingr]\nexample = \"hotpath\"\n\n\
+        let cfg = config_with(
+            &root,
+            &format!(
+                "project = \"dellingr\"\n\n[dellingr]\nexample = \"hotpath\"\n\n\
              [dellingr.workloads.read]\nfile = \"bench/read.lua\"\n\
              xxh128 = \"{digest}\"\n"
-        ));
+            ),
+        );
 
         assert!(resolve(&cfg, &root, "read", false).is_ok());
         let err = resolve(&cfg, &root, "read", true).unwrap_err();
@@ -245,13 +254,16 @@ mod tests {
         let digest = src_digest(&root);
         write_workload(&root, "bench/read.lua", SRC);
         write_workload(&root, "examples/fields/read.lua", "-- retuned\n");
-        let cfg = config_with(&root, &format!(
-            "project = \"dellingr\"\n\n[dellingr]\nexample = \"hotpath\"\n\n\
+        let cfg = config_with(
+            &root,
+            &format!(
+                "project = \"dellingr\"\n\n[dellingr]\nexample = \"hotpath\"\n\n\
              [dellingr.workloads.read]\nfile = \"bench/read.lua\"\n\
              xxh128 = \"{digest}\"\n\
              hotpath_file = \"examples/fields/read.lua\"\n\
              hotpath_xxh128 = \"{digest}\"\n"
-        ));
+            ),
+        );
 
         // The bench side is untouched and still resolves.
         assert!(resolve(&cfg, &root, "read", false).is_ok());
@@ -274,10 +286,13 @@ mod tests {
         // Registered with SRC's digest, but the file on disk says otherwise -
         // exactly the silent-history-poisoning case the pin exists to catch.
         write_workload(&root, "w.lua", "-- retuned\n");
-        let cfg = config_with(&root, &format!(
-            "project = \"dellingr\"\n\n[dellingr]\nexample = \"hotpath\"\n\n\
+        let cfg = config_with(
+            &root,
+            &format!(
+                "project = \"dellingr\"\n\n[dellingr]\nexample = \"hotpath\"\n\n\
              [dellingr.workloads.w]\nfile = \"w.lua\"\nxxh128 = \"{digest}\"\n"
-        ));
+            ),
+        );
 
         let err = resolve(&cfg, &root, "w", false).unwrap_err();
         let DevError::Preflight(msgs) = err else {

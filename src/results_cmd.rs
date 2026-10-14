@@ -34,9 +34,7 @@ fn render_single_or_multi(
     top: usize,
     matcher: &DatasetMatcher,
 ) {
-    let has_sidecar = |uuid: &str| {
-        sidecar_db.is_some_and(|sdb| sdb.has_data(uuid))
-    };
+    let has_sidecar = |uuid: &str| sidecar_db.is_some_and(|sdb| sdb.has_data(uuid));
 
     if rows.len() == 1 {
         let row = &rows[0];
@@ -94,6 +92,28 @@ pub(crate) fn cmd_results(
     let results_db = db::ResultsDb::open(&db_path)?;
     let sidecar_db = open_sidecar_db(project_root);
 
+    // Parse these once so every results view receives the same row filters.
+    // The CLI validator guarantees `=`, but keep the split defensive.
+    let meta_pairs: Vec<(String, String)> = q
+        .meta
+        .iter()
+        .filter_map(|s| s.split_once('=').map(|(k, v)| (k.to_owned(), v.to_owned())))
+        .collect();
+    let env_pairs: Vec<(String, String)> = q
+        .env
+        .iter()
+        .filter_map(|s| s.split_once('=').map(|(k, v)| (k.to_owned(), v.to_owned())))
+        .collect();
+    let row_filters = db::RowFilters {
+        command: q.command.as_deref(),
+        mode: q.mode.as_deref(),
+        dataset: q.dataset.as_deref(),
+        meta: &meta_pairs,
+        env: &env_pairs,
+        grep: &q.grep,
+        grep_v: &q.grep_v,
+    };
+
     if let Some(ref uuid_prefix) = q.query {
         // Resolve sidecar latest-keys (e.g. "dirty") so the results DB
         // lookup uses the actual UUID, not the alias.
@@ -101,16 +121,23 @@ pub(crate) fn cmd_results(
             .as_ref()
             .map(|sdb| sdb.resolve_latest(uuid_prefix))
             .unwrap_or_else(|| uuid_prefix.to_owned());
-        let rows = results_db.query_by_uuid(&resolved_prefix)?;
+        let rows = results_db.query_by_uuid_filtered(&resolved_prefix, &row_filters)?;
         if rows.is_empty() {
-            // No results DB entry - check if sidecar data exists (dirty/failed run).
-            if let Some(ref sdb) = sidecar_db
-                && sdb.has_data(uuid_prefix)
-            {
-                output::result_msg("sidecar-only run (no results DB entry - dirty tree or failed)");
-                output::result_msg(&format!(
-                    "use `brokkr sidecar {uuid_prefix}` (default phase summary; add --samples/--markers/--durations/--counters/--stat for raw views)",
-                ));
+            // A supplied row filter may have excluded a real result row. Only
+            // call it sidecar-only when the UUID has no results row at all.
+            if !results_db.has_uuid_prefix(&resolved_prefix)? {
+                if let Some(ref sdb) = sidecar_db
+                    && sdb.has_data(uuid_prefix)
+                {
+                    output::result_msg(
+                        "sidecar-only run (no results DB entry - dirty tree or failed)",
+                    );
+                    output::result_msg(&format!(
+                        "use `brokkr sidecar {uuid_prefix}` (default phase summary; add --samples/--markers/--durations/--counters/--stat for raw views)",
+                    ));
+                } else {
+                    output::result_msg("no matching results");
+                }
             } else {
                 output::result_msg("no matching results");
             }
@@ -123,36 +150,11 @@ pub(crate) fn cmd_results(
     if let Some(ref commits) = q.compare {
         let commit_a = commits.first().map_or("", String::as_str);
         let commit_b = commits.get(1).map_or("", String::as_str);
-        let (rows_a, rows_b) = results_db.query_compare(
-            commit_a,
-            commit_b,
-            &db::CompareFilter {
-                command: q.command.as_deref(),
-                mode: q.mode.as_deref(),
-                dataset: q.dataset.as_deref(),
-                grep: &q.grep,
-                grep_v: &q.grep_v,
-            },
-        )?;
+        let (rows_a, rows_b) = results_db.query_compare(commit_a, commit_b, &row_filters)?;
         let table = db::format_compare(commit_a, &rows_a, commit_b, &rows_b, q.top, &matcher);
         println!("{table}");
         return Ok(());
     }
-
-
-    // Parse --meta KEY=VALUE strings into (key, value) pairs. The CLI
-    // validator already guarantees each entry contains '=', so split_once
-    // can't fail here, but we still defensively pattern-match.
-    let meta_pairs: Vec<(String, String)> = q
-        .meta
-        .iter()
-        .filter_map(|s| s.split_once('=').map(|(k, v)| (k.to_owned(), v.to_owned())))
-        .collect();
-    let env_pairs: Vec<(String, String)> = q
-        .env
-        .iter()
-        .filter_map(|s| s.split_once('=').map(|(k, v)| (k.to_owned(), v.to_owned())))
-        .collect();
 
     let filter = db::QueryFilter {
         commit: q.commit.clone(),

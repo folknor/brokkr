@@ -98,19 +98,42 @@ pub(crate) enum KillCause {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub(crate) enum ObsEvent {
-    SuiteStarted { test_count: u64 },
-    SuiteFinished { passed: u64, failed: u64, ignored: u64 },
-    Started { name: String },
-    Finished { name: String, result: TestResult },
+    SuiteStarted {
+        test_count: u64,
+    },
+    SuiteFinished {
+        passed: u64,
+        failed: u64,
+        ignored: u64,
+    },
+    Started {
+        name: String,
+    },
+    Finished {
+        name: String,
+        result: TestResult,
+    },
     /// libtest's `test/timeout`: a test past libtest's own 60s warning. Not a
     /// terminal record - the test is still running.
-    SlowWarning { name: String },
-    StreamEnded { end: StreamEnd },
+    SlowWarning {
+        name: String,
+    },
+    StreamEnded {
+        end: StreamEnd,
+    },
     /// A directly launched process's exit status.
-    Exited { code: Option<i32>, signal: Option<i32> },
-    Killed { cause: KillCause, test: Option<String> },
+    Exited {
+        code: Option<i32>,
+        signal: Option<i32>,
+    },
+    Killed {
+        cause: KillCause,
+        test: Option<String>,
+    },
     /// The shim could not authenticate or attribute a harness.
-    AttributionError { detail: String },
+    AttributionError {
+        detail: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -141,11 +164,19 @@ pub(crate) struct StreamTap {
 
 impl StreamTap {
     pub(crate) fn new(sink: &ObservationSink, source: StreamSource) -> Self {
-        Self { sink: Arc::clone(sink), stream: next_stream_id(), source }
+        Self {
+            sink: Arc::clone(sink),
+            stream: next_stream_id(),
+            source,
+        }
     }
 
     pub(crate) fn emit(&self, event: ObsEvent) {
-        (self.sink)(Observation { stream: self.stream, source: self.source.clone(), event });
+        (self.sink)(Observation {
+            stream: self.stream,
+            source: self.source.clone(),
+            event,
+        });
     }
 }
 
@@ -325,7 +356,11 @@ impl Ceilings {
 
     /// A shared harness with a caller-chosen per-test ceiling for blame.
     pub(crate) fn shared_harness_with(per_test: Duration) -> Self {
-        Self { per_test, wall: Some(SWEEP_WALL_TIMEOUT), shape: WallShape::SharedHarness }
+        Self {
+            per_test,
+            wall: Some(SWEEP_WALL_TIMEOUT),
+            shape: WallShape::SharedHarness,
+        }
     }
 
     /// One process running exactly one test, named by the caller.
@@ -583,7 +618,10 @@ impl TestTracker {
             .current
             .is_empty()
             .then(|| IDLE_TIMEOUT.saturating_sub(self.idle_since.elapsed()));
-        [oldest_in_flight, no_progress, idle].into_iter().flatten().min()
+        [oldest_in_flight, no_progress, idle]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// What has blown its budget, if anything.
@@ -686,9 +724,14 @@ where
     // Created before the spawn: an isolated harness's reconstructed text lands
     // in the same buffer the shared stream does.
     let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
-    let primary = obs.sink.as_ref().map(|s| StreamTap::new(s, StreamSource::Process));
+    let primary = obs
+        .sink
+        .as_ref()
+        .map(|s| StreamTap::new(s, StreamSource::Process));
     let session = shim
-        .then(|| harness_shim::Session::new(Arc::clone(&stdout_buf), obs.sink.clone(), strict.clone()))
+        .then(|| {
+            harness_shim::Session::new(Arc::clone(&stdout_buf), obs.sink.clone(), strict.clone())
+        })
         .transpose()?;
     let runner_env;
     let socket_env;
@@ -706,8 +749,15 @@ where
         // Cargo splits a string-form runner on whitespace and strips no
         // quotes; `own_exe` is a `/proc` path that cannot contain any.
         runner_env = (
-            format!("CARGO_TARGET_{}_RUNNER", host.to_uppercase().replace('-', "_")),
-            format!("{} {}", harness_shim::own_exe().display(), harness_shim::RUNNER_ARG),
+            format!(
+                "CARGO_TARGET_{}_RUNNER",
+                host.to_uppercase().replace('-', "_")
+            ),
+            format!(
+                "{} {}",
+                harness_shim::own_exe().display(),
+                harness_shim::RUNNER_ARG
+            ),
         );
         socket_env = session.socket();
         rustdoc_env = session.rustdoc();
@@ -716,16 +766,23 @@ where
         cargo_env.push(("RUSTDOC", &rustdoc_env));
     }
     let (mut child, leader) = match launch {
-        Launch::Cargo => (spawn_cargo_process_group(args, cwd, &cargo_env)?, Leader::Cargo),
-        Launch::Direct { program } => {
-            (spawn_process_group(program, args, cwd, &cargo_env)?, Leader::TestBinary)
-        }
+        Launch::Cargo => (
+            spawn_cargo_process_group(args, cwd, &cargo_env)?,
+            Leader::Cargo,
+        ),
+        Launch::Direct { program } => (
+            spawn_process_group(program, args, cwd, &cargo_env)?,
+            Leader::TestBinary,
+        ),
     };
     let cargo_pid = child.id();
     if let Some(session) = &session {
         session.set_cargo_pid(cargo_pid);
     }
-    let acceptor = session.as_ref().map(harness_shim::Session::run_acceptor).transpose()?;
+    let acceptor = session
+        .as_ref()
+        .map(harness_shim::Session::run_acceptor)
+        .transpose()?;
     // Ctrl-C / `brokkr kill` take this group down with brokkr. Released right
     // after the leader is reaped. See `shutdown::GroupReaper`.
     let reaper = crate::shutdown::GroupReaper::register(cargo_pid);
@@ -788,7 +845,15 @@ where
     // An isolated run ages every harness's tracker, plus a run-level idle
     // clock for the gaps between them; see `harness_shim::Session::watchdog`.
     let watchdog_thread = if let Some(session) = &session {
-        session.watchdog(state_root_t, cargo_pid, tracker_t, hung_t, &ceilings, start, primary.clone())
+        session.watchdog(
+            state_root_t,
+            cargo_pid,
+            tracker_t,
+            hung_t,
+            &ceilings,
+            start,
+            primary.clone(),
+        )
     } else {
         let primary_w = primary.clone();
         thread::spawn(move || {
@@ -838,7 +903,10 @@ where
     // the sink, and the stop is what explains its missing terminals.
     if crate::shutdown::is_shutdown_requested() {
         if let Some(tap) = &primary {
-            tap.emit(ObsEvent::Killed { cause: KillCause::Stopped, test: None });
+            tap.emit(ObsEvent::Killed {
+                cause: KillCause::Stopped,
+                test: None,
+            });
         }
         return Err(DevError::Interrupted);
     }
@@ -917,6 +985,11 @@ pub(crate) struct ParallelRun {
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn run_libtest_parallel<Out, Err, Fin>(
     program: &str,
+    // What `program` is: `Cargo` when it is cargo (the hung harness is its
+    // child), `TestBinary` when a prebuilt test binary is executed directly
+    // (its children are the tests' own subprocesses). Decides which process
+    // the hang snapshot examines.
+    leader: Leader,
     args: &[&str],
     cwd: &Path,
     state_root: &Path,
@@ -1004,11 +1077,15 @@ where
         watchdog_loop(
             state_root_t,
             cargo_pid,
-            Leader::TestBinary,
+            leader,
             tracker_w,
             done_w,
             hung_w,
-            Ceilings { per_test: per_test_timeout, wall: None, shape: WallShape::SharedHarness },
+            Ceilings {
+                per_test: per_test_timeout,
+                wall: None,
+                shape: WallShape::SharedHarness,
+            },
             start,
             primary_w,
         );
@@ -1018,8 +1095,12 @@ where
     // The kill is recorded as what it was, before the stream end it caused.
     if let Some(tap) = &primary {
         let cause = match &waited {
-            Ok(ParallelWait::Exited { timed_out: true, .. }) => Some(KillCause::Wall),
-            Ok(ParallelWait::Exited { cancelled: true, .. }) => Some(KillCause::Cancelled),
+            Ok(ParallelWait::Exited {
+                timed_out: true, ..
+            }) => Some(KillCause::Wall),
+            Ok(ParallelWait::Exited {
+                cancelled: true, ..
+            }) => Some(KillCause::Cancelled),
             Ok(ParallelWait::Interrupted) => Some(KillCause::Stopped),
             _ => None,
         };
@@ -1038,12 +1119,17 @@ where
     // A lane-wide cancellation was reported on the stream above, as what it
     // was; nothing in the exit status could say it.
     let (status, timed_out) = match waited? {
-        ParallelWait::Exited { status, timed_out, .. } => (status, timed_out),
+        ParallelWait::Exited {
+            status, timed_out, ..
+        } => (status, timed_out),
         ParallelWait::Interrupted => return Err(DevError::Interrupted),
     };
     if let Some(tap) = &primary {
         use std::os::unix::process::ExitStatusExt;
-        tap.emit(ObsEvent::Exited { code: status.code(), signal: status.signal() });
+        tap.emit(ObsEvent::Exited {
+            code: status.code(),
+            signal: status.signal(),
+        });
     }
 
     let elapsed = start.elapsed();
@@ -1075,7 +1161,11 @@ where
 enum ParallelWait {
     /// The leader exited, on its own or killed by the backstop (`timed_out`)
     /// or a lane-wide abort (`cancelled`).
-    Exited { status: std::process::ExitStatus, timed_out: bool, cancelled: bool },
+    Exited {
+        status: std::process::ExitStatus,
+        timed_out: bool,
+        cancelled: bool,
+    },
     /// A cooperative shutdown (`brokkr kill`, Ctrl-C, the `check` watchdog):
     /// the group was killed and reaped, and the run is not a verdict.
     Interrupted,
@@ -1105,7 +1195,11 @@ fn wait_parallel(
                 if crate::shutdown::is_shutdown_requested() {
                     return Ok(ParallelWait::Interrupted);
                 }
-                return Ok(ParallelWait::Exited { status, timed_out: false, cancelled: false });
+                return Ok(ParallelWait::Exited {
+                    status,
+                    timed_out: false,
+                    cancelled: false,
+                });
             }
             Ok(None) => {
                 let overtime = start.elapsed() >= timeout;
@@ -1153,7 +1247,10 @@ fn drain_libtest_json<R, F>(
     R: Read + std::os::fd::AsRawFd,
     F: FnMut(&str),
 {
-    let mut recon = JsonReconstructor { tap, ..JsonReconstructor::default() };
+    let mut recon = JsonReconstructor {
+        tap,
+        ..JsonReconstructor::default()
+    };
     let emit = |out: &[String], buf: &Mutex<Vec<u8>>, forward_line: &mut F| {
         for text in out {
             if let Ok(mut b) = buf.lock() {
@@ -1306,7 +1403,11 @@ impl JsonReconstructor {
         let kind = val.get("type").and_then(Value::as_str).unwrap_or("");
         let event = val.get("event").and_then(Value::as_str).unwrap_or("");
         // Output that ran into the event keeps its own line, verbatim and first.
-        let mut out = if prefix.is_empty() { Vec::new() } else { vec![prefix.to_owned()] };
+        let mut out = if prefix.is_empty() {
+            Vec::new()
+        } else {
+            vec![prefix.to_owned()]
+        };
         out.extend(self.observe_event(kind, event, &val, tracker));
         out
     }
@@ -1350,13 +1451,16 @@ impl JsonReconstructor {
                     if let Ok(mut t) = tracker.lock() {
                         t.observe_start(name.to_owned());
                     }
-                    self.report(ObsEvent::Started { name: name.to_owned() });
+                    self.report(ObsEvent::Started {
+                        name: name.to_owned(),
+                    });
                 }
                 Vec::new()
             }
             ("test", "ok") => {
                 let name = self.finish(val, tracker, TestResult::Ok);
-                name.map(|n| vec![format!("test {n} ... ok")]).unwrap_or_default()
+                name.map(|n| vec![format!("test {n} ... ok")])
+                    .unwrap_or_default()
             }
             ("test", "ignored") => {
                 // Not a run: see `TestTracker::observe_result`.
@@ -1368,10 +1472,7 @@ impl JsonReconstructor {
                 let Some(name) = self.finish(val, tracker, TestResult::Failed) else {
                     return Vec::new();
                 };
-                let captured = val
-                    .get("stdout")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
+                let captured = val.get("stdout").and_then(Value::as_str).map(str::to_owned);
                 self.failures.push((name.clone(), captured));
                 vec![format!("test {name} ... FAILED")]
             }
@@ -1381,7 +1482,9 @@ impl JsonReconstructor {
             // budget that was not enforced, which accounting must see.
             ("test", "timeout") => {
                 if let Some(name) = val.get("name").and_then(Value::as_str) {
-                    self.report(ObsEvent::SlowWarning { name: name.to_owned() });
+                    self.report(ObsEvent::SlowWarning {
+                        name: name.to_owned(),
+                    });
                 }
                 Vec::new()
             }
@@ -1397,12 +1500,20 @@ impl JsonReconstructor {
 
     /// Clear a completed test from the tracker, report its terminal record and
     /// return its name. An ignored result does not count as completed.
-    fn finish(&self, val: &Value, tracker: &Mutex<TestTracker>, result: TestResult) -> Option<String> {
+    fn finish(
+        &self,
+        val: &Value,
+        tracker: &Mutex<TestTracker>,
+        result: TestResult,
+    ) -> Option<String> {
         let name = val.get("name").and_then(Value::as_str)?.to_owned();
         if let Ok(mut t) = tracker.lock() {
             t.observe_result(&name, result != TestResult::Ignored);
         }
-        self.report(ObsEvent::Finished { name: name.clone(), result });
+        self.report(ObsEvent::Finished {
+            name: name.clone(),
+            result,
+        });
         Some(name)
     }
 
@@ -1496,7 +1607,10 @@ pub(crate) fn run_listing(
     let (out_buf, out_thread) = drain_to_buffer(stdout_pipe, Arc::clone(&cancel));
     let (err_buf, err_thread) = drain_to_buffer(stderr_pipe, Arc::clone(&cancel));
 
-    let spawn_err = |error: std::io::Error| DevError::Spawn { program: program.into(), error };
+    let spawn_err = |error: std::io::Error| DevError::Spawn {
+        program: program.into(),
+        error,
+    };
     let mut timed_out = false;
     let status = loop {
         match child.try_wait() {
@@ -1530,7 +1644,13 @@ pub(crate) fn run_listing(
         return Err(DevError::Interrupted);
     }
     let take = |b: &Arc<Mutex<Vec<u8>>>| b.lock().map(|v| v.clone()).unwrap_or_default();
-    Ok(ListingRun { status, stdout: take(&out_buf), stderr: take(&err_buf), timed_out, unsettled })
+    Ok(ListingRun {
+        status,
+        stdout: take(&out_buf),
+        stderr: take(&err_buf),
+        timed_out,
+        unsettled,
+    })
 }
 
 /// Read `pipe` into a shared buffer on a new thread until EOF or `cancel`.
@@ -1669,7 +1789,8 @@ fn drain_stderr<F, G>(
                     line.pop();
                 }
                 let text = String::from_utf8_lossy(&line).into_owned();
-                if on_build_finished.is_some() && is_cargo_finished_line(&text)
+                if on_build_finished.is_some()
+                    && is_cargo_finished_line(&text)
                     && let Some(cb) = on_build_finished.take()
                 {
                     cb(start.elapsed());
@@ -1713,7 +1834,11 @@ pub(crate) fn read_chunk<R: Read + std::os::fd::AsRawFd>(
         if cancel.load(Ordering::Acquire) {
             return Chunk::Cancelled;
         }
-        let mut pfd = libc::pollfd { fd: pipe.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        let mut pfd = libc::pollfd {
+            fd: pipe.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
         // SAFETY: one valid pollfd for an fd we own, for the call's duration.
         let ready = unsafe { libc::poll(&mut pfd, 1, 100) };
         if ready == 0 {
@@ -1801,11 +1926,7 @@ pub(crate) fn is_bare_status_line(line: &str) -> bool {
     // libtest timing suffix: `<0.001s>`.
     match parts.next() {
         None => true,
-        Some(tail) => {
-            parts.next().is_none()
-                && tail.starts_with('<')
-                && tail.ends_with("s>")
-        }
+        Some(tail) => parts.next().is_none() && tail.starts_with('<') && tail.ends_with("s>"),
     }
 }
 
@@ -1886,11 +2007,7 @@ fn watchdog_loop_with_timing(
             .ok()
             .and_then(|t| t.next_deadline(timeout))
             .into_iter()
-            .chain(
-                ceilings
-                    .wall
-                    .map(|w| w.saturating_sub(started.elapsed())),
-            )
+            .chain(ceilings.wall.map(|w| w.saturating_sub(started.elapsed())))
             .min();
         thread::sleep(until_deadline.map_or(poll, |d| d.min(poll)));
         if done.load(Ordering::SeqCst) {
@@ -2028,15 +2145,12 @@ fn capture_hung_test(
     // config-dir `project_root` (`state_root`), not the code tree cargo runs
     // in - the two differ when brokkr.toml is one level above a foreign
     // checkout, and the foreign repo must stay clean.
-    let snapshot_dir = state_root
-        .join(".brokkr")
-        .join("test-hung")
-        .join(format!(
-            "{}-{}-{}",
-            unix_secs(),
-            cargo_pid,
-            sanitize_path_component(test)
-        ));
+    let snapshot_dir = state_root.join(".brokkr").join("test-hung").join(format!(
+        "{}-{}-{}",
+        unix_secs(),
+        cargo_pid,
+        sanitize_path_component(test)
+    ));
 
     let mut snapshot_error = None;
     if let Err(err) = fs::create_dir_all(&snapshot_dir) {
@@ -2214,7 +2328,11 @@ pub(crate) fn format_hung_test(hung: &HungTest, cwd: &Path) -> String {
     // (the usual case), so say it once; both appear only when they differ.
     let (ran, limit) = (hung.elapsed.as_secs(), hung.ceiling.as_secs());
     let timing = |what: &str| {
-        if ran == limit { format!("exceeded the {limit}s {what}") } else { format!("ran {ran}s, past the {limit}s {what}") }
+        if ran == limit {
+            format!("exceeded the {limit}s {what}")
+        } else {
+            format!("ran {ran}s, past the {limit}s {what}")
+        }
     };
 
     // What each clock means is in `brokkr man check` (the time ceilings); the
@@ -2226,7 +2344,10 @@ pub(crate) fn format_hung_test(hung: &HungTest, cwd: &Path) -> String {
         // reported as context, explicitly unverified.
         let context = match blamed.as_slice() {
             [] => "no test was in flight".to_owned(),
-            names => format!("in flight when it expired (unverified): {}", names.join(", ")),
+            names => format!(
+                "in flight when it expired (unverified): {}",
+                names.join(", ")
+            ),
         };
         let run = if ran == limit {
             format!("the run exceeded its {limit}s wall deadline")
@@ -2238,7 +2359,11 @@ pub(crate) fn format_hung_test(hung: &HungTest, cwd: &Path) -> String {
         format!(
             "no test in flight for {ran}s ({}) - cargo wedged before the first test or after the last; \
              a build-directory lock held by another cargo (rust-analyzer) looks exactly like this",
-            if ran == limit { "the idle ceiling".to_owned() } else { format!("past the {limit}s idle ceiling") },
+            if ran == limit {
+                "the idle ceiling".to_owned()
+            } else {
+                format!("past the {limit}s idle ceiling")
+            },
         )
     } else {
         format!("test {} {}", hung.test, timing("per-test timeout"))
@@ -2270,7 +2395,8 @@ fn enforce_single_threaded(args: &[&str]) -> Result<(), DevError> {
             "libtest watchdog requires --test-threads=1, got --test-threads={n}"
         ))),
         None => Err(DevError::Config(
-            "libtest watchdog requires --test-threads=1, but no --test-threads flag was passed".into(),
+            "libtest watchdog requires --test-threads=1, but no --test-threads flag was passed"
+                .into(),
         )),
     }
 }
@@ -2306,11 +2432,7 @@ fn parse_thread_count(value: &str) -> Result<u32, DevError> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::expect_used,
-        clippy::panic,
-        clippy::unwrap_used
-    )]
+    #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
     use super::*;
     use std::process::{Command, Stdio};
@@ -2338,27 +2460,69 @@ mod tests {
     #[test]
     fn the_hung_test_report_is_terse() {
         let cwd = Path::new("/");
-        let on_time = format_hung_test(&hung(TimeoutReason::PerTest { name: "t::x".into() }, 20, 20), cwd);
-        assert!(on_time.starts_with("test t::x exceeded the 20s per-test timeout\n"), "{on_time}");
-        assert!(!on_time.contains("wchan") && !on_time.contains("stack"), "{on_time}");
+        let on_time = format_hung_test(
+            &hung(
+                TimeoutReason::PerTest {
+                    name: "t::x".into(),
+                },
+                20,
+                20,
+            ),
+            cwd,
+        );
+        assert!(
+            on_time.starts_with("test t::x exceeded the 20s per-test timeout\n"),
+            "{on_time}"
+        );
+        assert!(
+            !on_time.contains("wchan") && !on_time.contains("stack"),
+            "{on_time}"
+        );
         assert!(!on_time.contains("build time excluded"), "{on_time}");
 
-        let late = format_hung_test(&hung(TimeoutReason::PerTest { name: "t::x".into() }, 23, 20), cwd);
-        assert!(late.starts_with("test t::x ran 23s, past the 20s per-test timeout\n"), "{late}");
+        let late = format_hung_test(
+            &hung(
+                TimeoutReason::PerTest {
+                    name: "t::x".into(),
+                },
+                23,
+                20,
+            ),
+            cwd,
+        );
+        assert!(
+            late.starts_with("test t::x ran 23s, past the 20s per-test timeout\n"),
+            "{late}"
+        );
 
         let mut with_wchan = hung(TimeoutReason::Idle, 300, 300);
         with_wchan.wchan = Some("futex_wait".into());
         let idle = format_hung_test(&with_wchan, cwd);
-        assert!(idle.starts_with("no test in flight for 300s (the idle ceiling) - "), "{idle}");
+        assert!(
+            idle.starts_with("no test in flight for 300s (the idle ceiling) - "),
+            "{idle}"
+        );
         assert!(idle.contains("/proc/9/wchan: futex_wait"), "{idle}");
         assert!(!idle.contains("/stack"), "{idle}");
 
         let wall = format_hung_test(
-            &hung(TimeoutReason::SweepWall { blamed: vec!["a".into()] }, 1800, 1800),
+            &hung(
+                TimeoutReason::SweepWall {
+                    blamed: vec!["a".into()],
+                },
+                1800,
+                1800,
+            ),
             cwd,
         );
-        assert!(wall.starts_with("the run exceeded its 1800s wall deadline and was killed\n"), "{wall}");
-        assert!(wall.contains("in flight when it expired (unverified): a"), "{wall}");
+        assert!(
+            wall.starts_with("the run exceeded its 1800s wall deadline and was killed\n"),
+            "{wall}"
+        );
+        assert!(
+            wall.contains("in flight when it expired (unverified): a"),
+            "{wall}"
+        );
     }
 
     /// A child that exits while a background process it started still holds
@@ -2380,11 +2544,18 @@ mod tests {
         let drain = thread::spawn(move || drain_libtest_json(pipe, &b, &t, &c, None, |_| {}));
         child.wait().expect("sh exits");
         let started = Instant::now();
-        assert!(join_drains(vec![drain], &cancel), "the leaked holder kept the pipe open");
+        assert!(
+            join_drains(vec![drain], &cancel),
+            "the leaked holder kept the pipe open"
+        );
         assert!(started.elapsed() < DRAIN_GRACE + Duration::from_secs(2));
         let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
         assert!(text.contains("captured"), "{text}");
-        if let Some(pid) = text.lines().next().and_then(|l| l.trim().parse::<i32>().ok()) {
+        if let Some(pid) = text
+            .lines()
+            .next()
+            .and_then(|l| l.trim().parse::<i32>().ok())
+        {
             // SAFETY: the sleep this test started; ESRCH is fine.
             unsafe { libc::kill(pid, libc::SIGKILL) };
         }
@@ -2430,7 +2601,11 @@ mod tests {
     fn a_cancelled_drain_is_told_apart_from_an_eof() {
         let (end, text) = drained_end("sleep 15 & echo $!; echo captured");
         assert_eq!(end, Some(StreamEnd::Cancelled), "{text}");
-        if let Some(pid) = text.lines().next().and_then(|l| l.trim().parse::<i32>().ok()) {
+        if let Some(pid) = text
+            .lines()
+            .next()
+            .and_then(|l| l.trim().parse::<i32>().ok())
+        {
             // SAFETY: the sleep this test started; ESRCH is fine.
             unsafe { libc::kill(pid, libc::SIGKILL) };
         }
@@ -2459,17 +2634,38 @@ mod tests {
         ] {
             recon.observe(ev, &tracker);
         }
-        let events: Vec<ObsEvent> = seen.lock().unwrap().iter().map(|o| o.event.clone()).collect();
+        let events: Vec<ObsEvent> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|o| o.event.clone())
+            .collect();
         assert_eq!(
             events,
             vec![
                 ObsEvent::SuiteStarted { test_count: 2 },
-                ObsEvent::Started { name: "a::one".into() },
-                ObsEvent::SlowWarning { name: "a::one".into() },
-                ObsEvent::Finished { name: "a::one".into(), result: TestResult::Ok },
-                ObsEvent::Started { name: "a::two".into() },
-                ObsEvent::Finished { name: "a::two".into(), result: TestResult::Failed },
-                ObsEvent::SuiteFinished { passed: 1, failed: 1, ignored: 0 },
+                ObsEvent::Started {
+                    name: "a::one".into()
+                },
+                ObsEvent::SlowWarning {
+                    name: "a::one".into()
+                },
+                ObsEvent::Finished {
+                    name: "a::one".into(),
+                    result: TestResult::Ok
+                },
+                ObsEvent::Started {
+                    name: "a::two".into()
+                },
+                ObsEvent::Finished {
+                    name: "a::two".into(),
+                    result: TestResult::Failed
+                },
+                ObsEvent::SuiteFinished {
+                    passed: 1,
+                    failed: 1,
+                    ignored: 0
+                },
             ]
         );
     }
@@ -2552,7 +2748,10 @@ mod tests {
         let long_ago = Instant::now()
             .checked_sub(IDLE_TIMEOUT + Duration::from_secs(1))
             .unwrap_or_else(Instant::now);
-        let mut tracker = TestTracker { idle_since: long_ago, ..TestTracker::default() };
+        let mut tracker = TestTracker {
+            idle_since: long_ago,
+            ..TestTracker::default()
+        };
         let (name, elapsed) = tracker.timed_out(TEST_TIMEOUT).expect("idle wedge");
         assert_eq!(name, IDLE_WEDGE);
         assert!(elapsed >= IDLE_TIMEOUT);
@@ -2561,7 +2760,10 @@ mod tests {
         tracker.observe_start("a::fast".to_owned());
         assert!(tracker.timed_out(TEST_TIMEOUT).is_none());
         tracker.observe_result("a::fast", true);
-        assert!(tracker.timed_out(TEST_TIMEOUT).is_none(), "idle window restarts at the result");
+        assert!(
+            tracker.timed_out(TEST_TIMEOUT).is_none(),
+            "idle window restarts at the result"
+        );
     }
 
     /// The wall deadline must fire with an entirely empty tracker: no announced
@@ -2611,7 +2813,11 @@ mod tests {
         );
         child.wait().ok();
 
-        let hung = hung.lock().unwrap().clone().expect("wall deadline must produce a verdict");
+        let hung = hung
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("wall deadline must produce a verdict");
         assert_eq!(hung.test, WALL_WEDGE, "the wall deadline names no offender");
         assert_eq!(hung.ceiling, Duration::from_millis(40));
         assert!(
@@ -2653,9 +2859,14 @@ mod tests {
 
         // And before any suite announces itself there is no test to bill, so the
         // per-test cap must NOT fire - that window belongs to the idle ceiling.
-        let fresh = TestTracker { last_progress: long_ago, ..TestTracker::default() };
+        let fresh = TestTracker {
+            last_progress: long_ago,
+            ..TestTracker::default()
+        };
         assert!(
-            fresh.timed_out(TEST_TIMEOUT).is_none_or(|(n, _)| n == IDLE_WEDGE),
+            fresh
+                .timed_out(TEST_TIMEOUT)
+                .is_none_or(|(n, _)| n == IDLE_WEDGE),
             "before execution begins only the idle ceiling applies"
         );
     }
@@ -2669,7 +2880,9 @@ mod tests {
         tracker.observe_suite_start();
         tracker.observe_suite_end();
         tracker.last_progress = Instant::now() - TEST_TIMEOUT;
-        let (name, _) = tracker.timed_out(TEST_TIMEOUT).expect("live process remains bounded");
+        let (name, _) = tracker
+            .timed_out(TEST_TIMEOUT)
+            .expect("live process remains bounded");
         assert_eq!(name, NO_COMPLETION);
     }
 
@@ -2776,10 +2989,16 @@ mod tests {
         );
         child.wait().ok();
 
-        let hung = hung.lock().unwrap().clone().expect("the per-test cap must fire");
+        let hung = hung
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the per-test cap must fire");
         assert_eq!(
             hung.reason,
-            TimeoutReason::PerTest { name: "a::apparently_overdue".to_owned() },
+            TimeoutReason::PerTest {
+                name: "a::apparently_overdue".to_owned()
+            },
             "the cap names the test that burned the budget"
         );
         assert_eq!(hung.ceiling, Duration::from_millis(10));
@@ -2876,9 +3095,18 @@ mod tests {
         let children = wait_for_direct_children(leader);
         assert!(!children.is_empty(), "shell did not spawn sleep child");
 
-        let reason = TimeoutReason::PerTest { name: "direct::hangs".to_owned() };
+        let reason = TimeoutReason::PerTest {
+            name: "direct::hangs".to_owned(),
+        };
         let tick = Duration::from_millis(1);
-        let direct = capture_hung_test(&root, leader, Leader::TestBinary, reason.clone(), tick, tick);
+        let direct = capture_hung_test(
+            &root,
+            leader,
+            Leader::TestBinary,
+            reason.clone(),
+            tick,
+            tick,
+        );
         let cargo = capture_hung_test(&root, leader, Leader::Cargo, reason, tick, tick);
         kill_process_group(leader).ok();
         child.wait().ok();
@@ -2897,8 +3125,7 @@ mod tests {
         for ev in events {
             lines.extend(recon.observe(ev, &tracker));
         }
-        let mut in_flight: Vec<String> =
-            tracker.lock().unwrap().current.keys().cloned().collect();
+        let mut in_flight: Vec<String> = tracker.lock().unwrap().current.keys().cloned().collect();
         in_flight.sort();
         (lines, in_flight)
     }
@@ -2918,7 +3145,10 @@ mod tests {
             r#"breadcrumb{"type":"test","name":"a::one","event":"ok"}"#,
             r#"{"type":"suite","event":"ok","passed":1,"failed":0,"ignored":0,"measured":0,"filtered_out":0,"exec_time":0.01}"#,
         ]);
-        assert!(in_flight.is_empty(), "the glued terminal event must clear the tracker");
+        assert!(
+            in_flight.is_empty(),
+            "the glued terminal event must clear the tracker"
+        );
         assert!(
             lines.iter().any(|l| l == "breadcrumb"),
             "the test's own output must survive verbatim: {lines:?}"
@@ -2938,7 +3168,10 @@ mod tests {
             r#"{"type":"test","event":"started","name":"a::one"}"#,
             r#"{"cfg":"mine"}{"type":"test","name":"a::one","event":"ok"}"#,
         ]);
-        assert!(in_flight.is_empty(), "the real event must still be consumed");
+        assert!(
+            in_flight.is_empty(),
+            "the real event must still be consumed"
+        );
         assert!(
             lines.iter().any(|l| l == r#"{"cfg":"mine"}"#),
             "the test's JSON-shaped output must survive verbatim: {lines:?}"
@@ -2962,7 +3195,10 @@ mod tests {
             vec!["a::one"],
             "no impostor may clear a test from the tracker"
         );
-        assert!(lines.iter().any(|l| l.contains("compiler-artifact")), "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("compiler-artifact")),
+            "{lines:?}"
+        );
         assert!(lines.iter().any(|l| l.contains("telemetry")), "{lines:?}");
     }
 

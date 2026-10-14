@@ -81,10 +81,7 @@ pub fn discover(build_root: &Path) -> Result<Vec<BenchTarget>, DevError> {
 /// A name matching several targets is an error naming all of them rather than
 /// a silent pick: which package a bench lands in decides what gets linked with
 /// it, so guessing here is exactly the wrong move.
-pub fn resolve<'a>(
-    targets: &'a [BenchTarget],
-    wanted: &str,
-) -> Result<&'a BenchTarget, DevError> {
+pub fn resolve<'a>(targets: &'a [BenchTarget], wanted: &str) -> Result<&'a BenchTarget, DevError> {
     let matches: Vec<&BenchTarget> = targets.iter().filter(|t| t.name == wanted).collect();
     match matches.as_slice() {
         [] => Err(DevError::Refused(format!(

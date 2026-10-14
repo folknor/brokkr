@@ -97,7 +97,9 @@ static CAPABILITY: Mutex<Option<String>> = Mutex::new(None);
 /// section is a single clone; failing closed here would mean refusing to stamp,
 /// which turns into the guard refusing brokkr's own compiles.
 fn slot() -> std::sync::MutexGuard<'static, Option<String>> {
-    CAPABILITY.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    CAPABILITY
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Publish the capability for a newly acquired hold, replacing any previous
@@ -194,11 +196,13 @@ pub fn cargo_config_overrides() -> std::io::Result<Vec<String>> {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
 
-    let home = std::env::var("HOME")
-        .map_err(|_| std::io::Error::other("$HOME is not set - cannot place the nextest env config"))?;
-    let dir = std::path::PathBuf::from(home).join(".brokkr");
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join("nextest-env.toml");
+    let path = crate::user_dirs::nextest_env().ok_or_else(|| {
+        std::io::Error::other("$HOME is not set or is empty - cannot place the nextest env config")
+    })?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("cannot resolve the nextest env config directory"))?;
+    std::fs::create_dir_all(dir)?;
 
     let mut contents = String::from("[env]\n");
     contents.push_str(&format!(
@@ -228,9 +232,9 @@ pub fn cargo_config_overrides() -> std::io::Result<Vec<String>> {
         .mode(0o600)
         .open(&path)?;
     // `mode` only applies at creation; tighten a pre-existing file too.
-    file.set_permissions(<std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(
-        0o600,
-    ))?;
+    file.set_permissions(
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+    )?;
     file.write_all(contents.as_bytes())?;
 
     Ok(vec![path.to_string_lossy().into_owned()])

@@ -358,11 +358,10 @@ fn spawn_server(
         .stdin(Stdio::null());
     // Every child of a hold carries its capability: see `crate::hold`.
     crate::hold::stamp(&mut cmd);
-    cmd.spawn()
-        .map_err(|error| DevError::Spawn {
-            program: binary.display().to_string(),
-            error,
-        })
+    cmd.spawn().map_err(|error| DevError::Spawn {
+        program: binary.display().to_string(),
+        error,
+    })
 }
 
 /// Ceiling on one tile request. The server is a child brokkr spawned under

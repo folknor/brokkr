@@ -50,7 +50,13 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<Findings, 
     // stats on stderr, which we capture separately below.
     let captured = harness.run_tool(
         "osmium",
-        &["diff", "--suppress-common", &pbf_str, &new_pbf_str, "--summary"],
+        &[
+            "diff",
+            "--suppress-common",
+            &pbf_str,
+            &new_pbf_str,
+            "--summary",
+        ],
     )?;
 
     fs::write(outdir.join("osmium-diff.txt"), &captured.stdout)?;
@@ -74,7 +80,10 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<Findings, 
     // are structurally unequal even when the tools agree. The gate below is
     // a per-class comparison of the two summaries instead.
     verify_msg("=== output line counts (informational) ===");
-    verify_msg(&format!("  pbfhogg: {} lines", pbfhogg_diff.lines().count()));
+    verify_msg(&format!(
+        "  pbfhogg: {} lines",
+        pbfhogg_diff.lines().count()
+    ));
     verify_msg(&format!("  osmium:  {} lines", osmium_diff.lines().count()));
 
     // compare_diff_classes reports every failure as an `Err`.
@@ -220,8 +229,10 @@ mod tests {
     #[test]
     fn denmark_numbers_reconcile() {
         // The documented decomposition: D=14 on both sides.
-        let (created, modified, deleted) =
-            parse_pbfhogg_diff_summary("10321 differences: 5589 created, 3489 modified, 1243 deleted (0 common)").unwrap();
+        let (created, modified, deleted) = parse_pbfhogg_diff_summary(
+            "10321 differences: 5589 created, 3489 modified, 1243 deleted (0 common)",
+        )
+        .unwrap();
         let (left, right) =
             parse_osmium_diff_summary("Summary: left=4746 right=9092 same=0 different=0").unwrap();
         let d_left = i128::from(left) - i128::from(deleted) - i128::from(modified);

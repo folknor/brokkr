@@ -63,7 +63,10 @@ pub fn parse_cargo_diagnostics(stdout: &str) -> Vec<DiagnosticEvent> {
         // try `rustc --explain E0027`") and could emit bare `note`/`help`;
         // `check` counts every diagnostic it keeps as an error, so those would
         // surface as phantom errors.
-        if !matches!(level.as_str(), "error" | "warning" | "error: internal compiler error") {
+        if !matches!(
+            level.as_str(),
+            "error" | "warning" | "error: internal compiler error"
+        ) {
             continue;
         }
 
@@ -102,11 +105,17 @@ pub fn parse_cargo_diagnostics(stdout: &str) -> Vec<DiagnosticEvent> {
         let primary_span = msg
             .get("spans")
             .and_then(|s| s.as_array())
-            .and_then(|spans| spans.iter().find(|s| s.get("is_primary") == Some(&serde_json::Value::Bool(true))));
+            .and_then(|spans| {
+                spans
+                    .iter()
+                    .find(|s| s.get("is_primary") == Some(&serde_json::Value::Bool(true)))
+            });
 
         let (file, line_start, col_start, primary_label) = match primary_span {
             Some(span) => (
-                span.get("file_name").and_then(|v| v.as_str()).map(std::string::ToString::to_string),
+                span.get("file_name")
+                    .and_then(|v| v.as_str())
+                    .map(std::string::ToString::to_string),
                 span.get("line_start").and_then(serde_json::Value::as_u64),
                 span.get("column_start").and_then(serde_json::Value::as_u64),
                 span.get("label")
@@ -181,7 +190,9 @@ pub fn parse_cargo_diagnostics(stdout: &str) -> Vec<DiagnosticEvent> {
 /// (`attribute_manifest_lints`), since cargo's parsing lints also cover
 /// path-sourced packages that are not members. The path is as cargo printed
 /// it: relative to the workspace root, whatever directory cargo ran in.
-pub fn manifest_lints_by_block(blocks: &[crate::script_check::Block]) -> Vec<(usize, DiagnosticEvent)> {
+pub fn manifest_lints_by_block(
+    blocks: &[crate::script_check::Block],
+) -> Vec<(usize, DiagnosticEvent)> {
     struct Candidate<'a> {
         index: usize,
         level: &'static str,
@@ -217,7 +228,10 @@ pub fn manifest_lints_by_block(blocks: &[crate::script_check::Block]) -> Vec<(us
         std::collections::HashMap::new();
     for c in &candidates {
         if let Some(code) = &c.code {
-            named.entry((c.file, c.shape.as_str())).or_default().insert(code.as_str());
+            named
+                .entry((c.file, c.shape.as_str()))
+                .or_default()
+                .insert(code.as_str());
         }
     }
 
@@ -270,7 +284,10 @@ fn manifest_lint_header(block: &crate::script_check::Block) -> Option<(&'static 
 /// `Cargo.toml`: `path:line:col`, or a bare `path` - cargo falls back to the
 /// manifest alone when it has no span for the offending entry.
 fn manifest_lint_location(text: &str) -> Option<(&str, Option<u64>, Option<u64>)> {
-    let arrow = text.lines().find_map(|l| l.trim_start().strip_prefix("--> "))?.trim_end();
+    let arrow = text
+        .lines()
+        .find_map(|l| l.trim_start().strip_prefix("--> "))?
+        .trim_end();
     let mut parts = arrow.rsplitn(3, ':');
     let spanned = match (parts.next(), parts.next(), parts.next()) {
         (Some(col), Some(line), Some(file)) => match (line.parse().ok(), col.parse().ok()) {
@@ -341,20 +358,25 @@ fn is_summary_noise(message: &str, spans_empty: bool, has_code: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::panic
-    )]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
 
     /// [`manifest_lints_by_block`] over a whole stderr, block indices dropped.
     fn parse_manifest_lints(stderr: &str) -> Vec<DiagnosticEvent> {
         let blocks = crate::script_check::rustc_blocks(stderr);
-        manifest_lints_by_block(&blocks).into_iter().map(|(_, e)| e).collect()
+        manifest_lints_by_block(&blocks)
+            .into_iter()
+            .map(|(_, e)| e)
+            .collect()
     }
 
-    fn sample_compiler_message(level: &str, code: &str, message: &str, file: &str, line: u64) -> String {
+    fn sample_compiler_message(
+        level: &str,
+        code: &str,
+        message: &str,
+        file: &str,
+        line: u64,
+    ) -> String {
         format!(
             r#"{{"reason":"compiler-message","message":{{"rendered":"rendered text","level":"{level}","code":{{"code":"{code}"}},"message":"{message}","spans":[{{"file_name":"{file}","line_start":{line},"column_start":5,"line_end":{line},"column_end":10,"is_primary":true}}],"children":[{{"level":"help","message":"try this","spans":[]}}]}}}}"#
         )
@@ -365,7 +387,10 @@ mod tests {
         let input = r#"{"reason":"compiler-message","message":{"level":"error","code":{"code":"E0308"},"message":"mismatched types","spans":[{"file_name":"src/foo.rs","line_start":20,"column_start":5,"line_end":20,"column_end":10,"is_primary":true,"label":"expected `i32`, found `&str`"}],"children":[],"rendered":"rendered"}}"#;
         let events = parse_cargo_diagnostics(input);
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].primary_label.as_deref(), Some("expected `i32`, found `&str`"));
+        assert_eq!(
+            events[0].primary_label.as_deref(),
+            Some("expected `i32`, found `&str`")
+        );
     }
 
     #[test]
@@ -385,7 +410,8 @@ mod tests {
 
     #[test]
     fn parse_single_error() {
-        let input = sample_compiler_message("error", "E0425", "cannot find value", "src/main.rs", 10);
+        let input =
+            sample_compiler_message("error", "E0425", "cannot find value", "src/main.rs", 10);
         let events = parse_cargo_diagnostics(&input);
         assert_eq!(events.len(), 1);
         let d = &events[0];
@@ -416,7 +442,13 @@ mod tests {
     #[test]
     fn real_clippy_warning_produces_one_diagnostic() {
         // A genuine lint: has both spans and a code -> must survive.
-        let input = sample_compiler_message("warning", "clippy::needless_return", "unneeded return statement", "src/a.rs", 7);
+        let input = sample_compiler_message(
+            "warning",
+            "clippy::needless_return",
+            "unneeded return statement",
+            "src/a.rs",
+            7,
+        );
         let events = parse_cargo_diagnostics(&input);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].code.as_deref(), Some("clippy::needless_return"));
@@ -428,7 +460,11 @@ mod tests {
         // rustc's "N warnings emitted": empty spans, null code -> zero diagnostics.
         let input = r#"{"reason":"compiler-message","message":{"level":"warning","code":null,"message":"2 warnings emitted","spans":[],"children":[],"rendered":"warning: 2 warnings emitted"}}"#;
         let events = parse_cargo_diagnostics(input);
-        assert!(events.is_empty(), "expected the summary line to be filtered, got {} event(s)", events.len());
+        assert!(
+            events.is_empty(),
+            "expected the summary line to be filtered, got {} event(s)",
+            events.len()
+        );
     }
 
     #[test]
@@ -436,14 +472,25 @@ mod tests {
         // cargo's per-crate roll-up: "`crate` (lib) generated N warnings".
         let input = r#"{"reason":"compiler-message","message":{"level":"warning","code":null,"message":"`brokkr` (lib) generated 3 warnings","spans":[],"children":[],"rendered":"warning: `brokkr` (lib) generated 3 warnings"}}"#;
         let events = parse_cargo_diagnostics(input);
-        assert!(events.is_empty(), "expected the generated-warnings roll-up to be filtered, got {} event(s)", events.len());
+        assert!(
+            events.is_empty(),
+            "expected the generated-warnings roll-up to be filtered, got {} event(s)",
+            events.len()
+        );
     }
 
     #[test]
     fn multiple_diagnostics() {
-        let mut input = sample_compiler_message("error", "E0308", "mismatched types", "src/a.rs", 1);
+        let mut input =
+            sample_compiler_message("error", "E0308", "mismatched types", "src/a.rs", 1);
         input.push('\n');
-        input.push_str(&sample_compiler_message("warning", "unused_variables", "unused var", "src/b.rs", 2));
+        input.push_str(&sample_compiler_message(
+            "warning",
+            "unused_variables",
+            "unused var",
+            "src/b.rs",
+            2,
+        ));
         let events = parse_cargo_diagnostics(&input);
         assert_eq!(events.len(), 2);
     }
@@ -581,7 +628,14 @@ warning: odd entry `z`
   --> c/Cargo.toml:3:1
 ";
         let got: Vec<String> = codes(stderr).into_iter().map(|(m, _)| m).collect();
-        assert_eq!(got, ["unused dependency `anyhow`", "odd entry `x`", "odd entry `y`"]);
+        assert_eq!(
+            got,
+            [
+                "unused dependency `anyhow`",
+                "odd entry `x`",
+                "odd entry `y`"
+            ]
+        );
     }
 
     /// Cargo falls back to the manifest alone when it has no span.

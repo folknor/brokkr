@@ -60,9 +60,11 @@ pub(crate) fn cmd_invalidate(
             format!("commit prefix '{c}'")
         }
         // Clap's required_unless_present guarantees one of the two is set.
-        (None, None) => return Err(DevError::Config(
-            "invalidate: supply a UUID prefix or --commit <hash>".into(),
-        )),
+        (None, None) => {
+            return Err(DevError::Config(
+                "invalidate: supply a UUID prefix or --commit <hash>".into(),
+            ));
+        }
     };
 
     if targets.is_empty() {
@@ -153,24 +155,21 @@ fn preview(
     sdb: Option<&db::sidecar::SidecarDb>,
     descriptor: &str,
 ) {
-    output::result_msg(&format!(
-        "{} UUID(s) match {descriptor}:",
-        uuids.len(),
-    ));
+    output::result_msg(&format!("{} UUID(s) match {descriptor}:", uuids.len(),));
     for uuid in uuids {
         let short = &uuid[..8.min(uuid.len())];
-        let results_row = rdb.and_then(|db| {
-            db.query_by_uuid(uuid)
-                .ok()
-                .and_then(|mut v| v.pop())
-        });
+        let results_row = rdb.and_then(|db| db.query_by_uuid(uuid).ok().and_then(|mut v| v.pop()));
         let sidecar_present = sdb.is_some_and(|db| db.has_data(uuid));
         let detail = match results_row {
             Some(row) => format!(
                 "{} {} {} (elapsed {}ms)",
                 row.commit.chars().take(8).collect::<String>(),
                 row.command,
-                if row.mode.is_empty() { "-" } else { row.mode.as_str() },
+                if row.mode.is_empty() {
+                    "-"
+                } else {
+                    row.mode.as_str()
+                },
                 row.elapsed_ms,
             ),
             None => String::from("(sidecar-only, no results row)"),

@@ -485,7 +485,10 @@ impl FileStamp {
     }
 
     fn render(&self) -> String {
-        format!("{}\t{}\t{}\t{}", self.mtime_ns, self.ctime_ns, self.ino, self.size)
+        format!(
+            "{}\t{}\t{}\t{}",
+            self.mtime_ns, self.ctime_ns, self.ino, self.size
+        )
     }
 }
 
@@ -540,7 +543,11 @@ impl HashCache {
     fn load(project_root: &Path) -> Self {
         let dir = project_root.join(".brokkr");
         let entries = read_cache_file(&dir.join("hash_cache"));
-        Self { dir, entries, updates: Vec::new() }
+        Self {
+            dir,
+            entries,
+            updates: Vec::new(),
+        }
     }
 
     fn lookup(&self, key: &str, stamp: FileStamp) -> Option<String> {
@@ -633,7 +640,11 @@ mod hash_cache_tests {
         // still leave the stamp unchanged, so nothing may be recorded yet.
         let hex = cached_xxh128(&file, &root).unwrap();
         assert_eq!(hex, compute_xxh128(&file).unwrap());
-        assert!(!cache_text(&root).contains("f.bin"), "{}", cache_text(&root));
+        assert!(
+            !cache_text(&root).contains("f.bin"),
+            "{}",
+            cache_text(&root)
+        );
     }
 
     #[test]
@@ -680,7 +691,10 @@ mod hash_cache_tests {
         cache.record(cache_key(&kept).unwrap(), old(&kept), "bb");
         cache.save();
         let text = cache_text(&root);
-        assert!(text.contains("kept.bin") && !text.contains("gone.bin"), "{text}");
+        assert!(
+            text.contains("kept.bin") && !text.contains("gone.bin"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -690,7 +704,15 @@ mod hash_cache_tests {
         assert!(parse_cache_line("/a\t1\t2\t3\t4\tdeadbeef\textra").is_none());
         let (key, stamp, hex) = parse_cache_line("/a\t1\t2\t3\t4\tdeadbeef").unwrap();
         assert_eq!((key.as_str(), hex.as_str()), ("/a", "deadbeef"));
-        assert_eq!(stamp, FileStamp { mtime_ns: 1, ctime_ns: 2, ino: 3, size: 4 });
+        assert_eq!(
+            stamp,
+            FileStamp {
+                mtime_ns: 1,
+                ctime_ns: 2,
+                ino: 3,
+                size: 4
+            }
+        );
     }
 }
 

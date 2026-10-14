@@ -229,7 +229,9 @@ pub struct SigtermGuard {
 }
 
 fn guard_depth() -> std::sync::MutexGuard<'static, usize> {
-    GUARD_DEPTH.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    GUARD_DEPTH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl SigtermGuard {
@@ -324,10 +326,15 @@ struct ReapState {
     saved: Option<[libc::sighandler_t; 2]>,
 }
 
-static REAP_STATE: Mutex<ReapState> = Mutex::new(ReapState { live: 0, saved: None });
+static REAP_STATE: Mutex<ReapState> = Mutex::new(ReapState {
+    live: 0,
+    saved: None,
+});
 
 fn reap_state() -> std::sync::MutexGuard<'static, ReapState> {
-    REAP_STATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    REAP_STATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// SIGKILL every registered group. Async-signal-safe.
@@ -466,9 +473,7 @@ pub fn die_with_parent(cmd: &mut std::process::Command) {
     // prctl and getppid are both raw syscalls.
     unsafe {
         cmd.pre_exec(move || {
-            if libc::prctl(libc::PR_SET_PDEATHSIG, sig, 0, 0, 0) == 0
-                && libc::getppid() != parent
-            {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, sig, 0, 0, 0) == 0 && libc::getppid() != parent {
                 // The parent died before the death signal was armed, so it
                 // will never fire: refuse to run an orphan.
                 return Err(std::io::Error::other("parent exited before exec"));
@@ -498,7 +503,11 @@ pub fn descendants(root: u32) -> Vec<(u32, String)> {
         return Vec::new();
     };
     for entry in entries.flatten() {
-        let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
             continue;
         };
         if let Some((ppid, starttime)) = proc_ppid_and_starttime(pid) {
@@ -599,7 +608,12 @@ mod tests {
         // An id no live test will ever register, so a concurrent test's own
         // registrations cannot confuse the count.
         let pgid: i32 = 0x3fff_fff1;
-        let count = || REAP_PGIDS.iter().filter(|s| s.load(Ordering::SeqCst) == pgid).count();
+        let count = || {
+            REAP_PGIDS
+                .iter()
+                .filter(|s| s.load(Ordering::SeqCst) == pgid)
+                .count()
+        };
         {
             let _r = GroupReaper::register(u32::try_from(pgid).unwrap());
             assert_eq!(count(), 1);

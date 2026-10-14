@@ -172,9 +172,8 @@ impl Manifest {
 
     /// Serialize to pretty JSON and write to `path`.
     pub fn write(&self, path: &Path) -> Result<(), DevError> {
-        let json = serde_json::to_string_pretty(self).map_err(|e| {
-            DevError::Config(format!("piners: failed to serialize manifest: {e}"))
-        })?;
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| DevError::Config(format!("piners: failed to serialize manifest: {e}")))?;
         std::fs::write(path, json).map_err(DevError::Io)?;
         Ok(())
     }
@@ -232,7 +231,10 @@ mod tests {
         let p = &m.probes[0];
         assert_eq!(p.probe, "probe-01");
         assert_eq!(p.probe_dir, PathBuf::from("validation/probe-01"));
-        assert_eq!(p.pine.path, PathBuf::from("validation/probe-01/strategy.pine"));
+        assert_eq!(
+            p.pine.path,
+            PathBuf::from("validation/probe-01/strategy.pine")
+        );
         assert_eq!(p.keywords, vec!["k".to_owned()]);
         assert_eq!(p.feed, None);
         assert!(m.feeds.is_empty());

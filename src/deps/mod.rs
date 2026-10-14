@@ -56,16 +56,26 @@ pub struct GitDependencyEvent {
     pub version: String,
     /// Repo URL with the `git+` prefix stripped.
     pub url: String,
-    /// Resolved commit SHA (from the source URL fragment, the lockfile's
-    /// pinned commit).
+    /// Ref requested by the manifest, or the default branch when no ref was
+    /// specified.
+    pub requested_ref: GitRef,
+    /// Resolved commit SHA from the source URL fragment.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub rev: Option<String>,
-    /// Branch name if the manifest requested a branch.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub branch: Option<String>,
-    /// Tag name if the manifest requested a tag.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tag: Option<String>,
+    pub resolved_rev: Option<String>,
+}
+
+/// A requested Git ref, distinct from the commit Cargo resolved.
+#[derive(Serialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum GitRef {
+    /// A branch name from `?branch=...`.
+    Branch(String),
+    /// A tag name from `?tag=...`.
+    Tag(String),
+    /// A revision from `?rev=...`.
+    Rev(String),
+    /// No branch, tag, or revision was specified.
+    DefaultBranch,
 }
 
 #[derive(Serialize)]
@@ -521,16 +531,52 @@ fn render_text(events: &[DepsEvent]) {
     });
 
     render_dup_section(&dups);
-    render_section(&gits, "git dependency", "git dependencies", "", render_git_text);
-    render_section(&paths, "path dependency", "path dependencies", "outside workspace", render_path_text);
-    render_section(&cycles, "cargo publication cycle", "cargo publication cycles", "", render_cycle_text);
+    render_section(
+        &gits,
+        "git dependency",
+        "git dependencies",
+        "",
+        render_git_text,
+    );
+    render_section(
+        &paths,
+        "path dependency",
+        "path dependencies",
+        "outside workspace",
+        render_path_text,
+    );
+    render_section(
+        &cycles,
+        "cargo publication cycle",
+        "cargo publication cycles",
+        "",
+        render_cycle_text,
+    );
     if !cycles.is_empty() {
         output::deps_msg(&format!("  {}", publish_cycle::INVENTORY_CAVEAT));
     }
-    render_section(&ws, "unused workspace dependency", "unused workspace dependencies", "not inherited by any member", render_ws_text);
-    render_section(&native, "dependency with native code", "dependencies with native code", "", render_native_text);
+    render_section(
+        &ws,
+        "unused workspace dependency",
+        "unused workspace dependencies",
+        "not inherited by any member",
+        render_ws_text,
+    );
+    render_section(
+        &native,
+        "dependency with native code",
+        "dependencies with native code",
+        "",
+        render_native_text,
+    );
     render_outdated_section(&outdated, outdated_ran);
-    render_section(&stale, "stale dependency", "stale dependencies", "", render_stale_text);
+    render_section(
+        &stale,
+        "stale dependency",
+        "stale dependencies",
+        "",
+        render_stale_text,
+    );
 
     for tool_missing in &missing {
         output::deps_msg(&format!(
@@ -558,10 +604,7 @@ fn render_dup_section(items: &[&DuplicateVersionEvent]) {
         return;
     }
     let noun = if items.len() == 1 { "crate" } else { "crates" };
-    output::deps_msg(&format!(
-        "{} {noun} with multiple versions:",
-        items.len()
-    ));
+    output::deps_msg(&format!("{} {noun} with multiple versions:", items.len()));
     for item in items {
         render_duplicate_text(item);
     }
@@ -589,13 +632,7 @@ fn render_outdated_section(items: &[&OutdatedEvent], outdated_ran: bool) {
     }
 }
 
-fn render_section<T>(
-    items: &[&T],
-    singular: &str,
-    plural: &str,
-    suffix: &str,
-    render_one: fn(&T),
-) {
+fn render_section<T>(items: &[&T], singular: &str, plural: &str, suffix: &str, render_one: fn(&T)) {
     if items.is_empty() {
         return;
     }
@@ -624,23 +661,25 @@ fn render_duplicate_text(dup: &DuplicateVersionEvent) {
         } else {
             format!("  [via {}]", pin.via_workspace.join(", "))
         };
-        output::deps_msg(&format!(
-            "    {}  picked by {picked}{suffix}",
-            pin.version
-        ));
+        output::deps_msg(&format!("    {}  picked by {picked}{suffix}", pin.version));
     }
 }
 
 fn render_git_text(git: &GitDependencyEvent) {
-    let ref_part = match (&git.tag, &git.branch, &git.rev) {
-        (Some(t), _, _) => format!("tag={t}"),
-        (_, Some(b), _) => format!("branch={b}"),
-        (_, _, Some(r)) => format!("rev={r}"),
-        _ => "(default branch)".to_string(),
+    let ref_part = match &git.requested_ref {
+        GitRef::Branch(branch) => format!("branch={branch}"),
+        GitRef::Tag(tag) => format!("tag={tag}"),
+        GitRef::Rev(rev) => format!("rev={rev}"),
+        GitRef::DefaultBranch => "default branch".to_string(),
     };
+    let resolved = git
+        .resolved_rev
+        .as_deref()
+        .map(|rev| format!(" # {rev}"))
+        .unwrap_or_default();
     output::deps_msg(&format!(
-        "  {} {}  {} @ {}",
-        git.krate, git.version, git.url, ref_part
+        "  {} {}  {} @ {}{}",
+        git.krate, git.version, git.url, ref_part, resolved
     ));
 }
 
@@ -674,7 +713,12 @@ fn render_native_text(n: &NativeDependencyEvent) {
     if let Some(lib) = &n.links {
         parts.push(format!("links {lib}"));
     }
-    output::deps_msg(&format!("  {} {}  {}", n.krate, n.version, parts.join(" + ")));
+    output::deps_msg(&format!(
+        "  {} {}  {}",
+        n.krate,
+        n.version,
+        parts.join(" + ")
+    ));
 }
 
 fn render_outdated_text(o: &OutdatedEvent) {
@@ -738,4 +782,3 @@ mod tests {
         assert_eq!(human_age(800), "2y2mo");
     }
 }
-

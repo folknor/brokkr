@@ -54,7 +54,9 @@ fn invoked_command() -> String {
 }
 
 fn command_from_args(args: impl Iterator<Item = String>) -> String {
-    args.into_iter().find(|a| !a.starts_with('-')).unwrap_or_else(|| "brokkr".to_owned())
+    args.into_iter()
+        .find(|a| !a.starts_with('-'))
+        .unwrap_or_else(|| "brokkr".to_owned())
 }
 
 /// Resolve project info (target_dir) using cargo metadata.
@@ -388,8 +390,16 @@ mod invoked_command_tests {
 
     #[test]
     fn the_first_non_flag_argument_names_the_command() {
-        let args = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>().into_iter();
-        assert_eq!(command_from_args(args(&["--quiet", "bench", "--commit", "abc"])), "bench");
+        let args = |v: &[&str]| {
+            v.iter()
+                .map(|s| (*s).to_owned())
+                .collect::<Vec<_>>()
+                .into_iter()
+        };
+        assert_eq!(
+            command_from_args(args(&["--quiet", "bench", "--commit", "abc"])),
+            "bench"
+        );
         assert_eq!(command_from_args(args(&["--help"])), "brokkr");
     }
 }

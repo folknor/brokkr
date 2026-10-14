@@ -101,9 +101,9 @@ pub struct Service {
 
 /// `~/.brokkr/lock`, created 0700.
 fn socket_dir() -> Result<PathBuf, DevError> {
-    let home = std::env::var("HOME")
-        .map_err(|_| DevError::Lock("$HOME is not set - cannot place the lock socket".into()))?;
-    let dir = PathBuf::from(home).join(".brokkr").join("lock");
+    let dir = crate::user_dirs::socket_dir().ok_or_else(|| {
+        DevError::Lock("$HOME is not set or is empty - cannot place the lock socket".into())
+    })?;
     std::fs::create_dir_all(&dir)?;
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
     Ok(dir)
@@ -113,7 +113,10 @@ fn socket_dir() -> Result<PathBuf, DevError> {
 /// digits. Socket paths are only ever derived from an id that passes this,
 /// never from path text read out of the lock file.
 pub fn valid_id(id: &str) -> bool {
-    id.len() == 32 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    id.len() == 32
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// A fresh public acquisition id. A separate draw from the capability nonce.
@@ -132,7 +135,9 @@ fn socket_path(dir: &Path, id: &str) -> PathBuf {
 pub fn sweep_leftovers() {
     use std::os::unix::fs::FileTypeExt;
     let Ok(dir) = socket_dir() else { return };
-    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(id) = name.to_str().and_then(|n| n.strip_suffix(".sock")) else {
@@ -157,15 +162,19 @@ impl Service {
         let path = socket_path(&socket_dir()?, id);
         // `bind` refuses an existing path; a collision on a fresh 128-bit id is
         // a bug, not something to unlink over.
-        let listener = UnixListener::bind(&path)
-            .map_err(|e| DevError::Lock(format!("cannot bind lock socket {}: {e}", path.display())))?;
+        let listener = UnixListener::bind(&path).map_err(|e| {
+            DevError::Lock(format!("cannot bind lock socket {}: {e}", path.display()))
+        })?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).ok();
         listener.set_nonblocking(true)?;
         let shared = Arc::new(Shared {
             id: id.to_owned(),
             live: Mutex::new(true),
             identity,
-            snapshot: Mutex::new(Snapshot { draining: true, ..Snapshot::default() }),
+            snapshot: Mutex::new(Snapshot {
+                draining: true,
+                ..Snapshot::default()
+            }),
             started: Instant::now(),
         });
         let serving = Arc::clone(&shared);
@@ -174,7 +183,9 @@ impl Service {
             .spawn(move || serve(&listener, &serving));
         if let Err(e) = spawned {
             std::fs::remove_file(&path).ok();
-            return Err(DevError::Lock(format!("cannot start the lock service thread: {e}")));
+            return Err(DevError::Lock(format!(
+                "cannot start the lock service thread: {e}"
+            )));
         }
         Ok(Self { shared, path })
     }
@@ -201,7 +212,10 @@ impl Drop for Service {
 }
 
 fn is_live(shared: &Shared) -> bool {
-    *shared.live.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    *shared
+        .live
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// The service loop. Exits as soon as `live` is false; owns the listener, so
@@ -254,7 +268,10 @@ fn respond(line: &str, shared: &Shared) -> String {
 }
 
 fn stop_reply(shared: &Shared) -> String {
-    let live = shared.live.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let live = shared
+        .live
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if !*live {
         return "gone\n".into();
     }
@@ -291,13 +308,22 @@ fn status_reply(shared: &Shared) -> String {
     field("codex_thread", &id.codex_thread);
     field("codex_session", &id.codex_session);
     field("held_secs", &shared.started.elapsed().as_secs().to_string());
-    field("cpu_secs", &self_cpu_secs().map(|s| s.to_string()).unwrap_or_default());
+    field(
+        "cpu_secs",
+        &self_cpu_secs().map(|s| s.to_string()).unwrap_or_default(),
+    );
     field("rss_kb", &rss_kb.map(|v| v.to_string()).unwrap_or_default());
-    field("threads", &threads.map(|v| v.to_string()).unwrap_or_default());
+    field(
+        "threads",
+        &threads.map(|v| v.to_string()).unwrap_or_default(),
+    );
     field("draining", if snapshot.draining { "1" } else { "0" });
     field(
         "progress",
-        &snapshot.progress.map(|(r, t)| format!("{r}/{t}")).unwrap_or_default(),
+        &snapshot
+            .progress
+            .map(|(r, t)| format!("{r}/{t}"))
+            .unwrap_or_default(),
     );
     field("child", if snapshot.has_child { "1" } else { "0" });
     field("mocks", &snapshot.mocks.to_string());
@@ -324,7 +350,10 @@ fn self_status() -> (Option<u64>, Option<u64>) {
 /// User plus system CPU seconds of this process (`utime` + `stime`).
 fn self_cpu_secs() -> Option<u64> {
     let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
-    let post: Vec<&str> = stat.get(stat.rfind(')')? + 2..)?.split_whitespace().collect();
+    let post: Vec<&str> = stat
+        .get(stat.rfind(')')? + 2..)?
+        .split_whitespace()
+        .collect();
     let utime: u64 = post.get(11)?.parse().ok()?;
     let stime: u64 = post.get(12)?.parse().ok()?;
     // SAFETY: sysconf takes no pointers.
@@ -380,11 +409,15 @@ fn write_all(mut stream: &UnixStream, mut bytes: &[u8], deadline: Instant) -> bo
 /// Percent-escape `%`, `\n` and `\r`, the bytes that would break the
 /// line-oriented reply.
 fn escape(s: &str) -> String {
-    s.replace('%', "%25").replace('\n', "%0A").replace('\r', "%0D")
+    s.replace('%', "%25")
+        .replace('\n', "%0A")
+        .replace('\r', "%0D")
 }
 
 fn unescape(s: &str) -> String {
-    s.replace("%0A", "\n").replace("%0D", "\r").replace("%25", "%")
+    s.replace("%0A", "\n")
+        .replace("%0D", "\r")
+        .replace("%25", "%")
 }
 
 // ---------------------------------------------------------------------------
@@ -398,7 +431,10 @@ pub struct HolderStatus {
 
 impl HolderStatus {
     pub fn get(&self, key: &str) -> &str {
-        self.fields.iter().find(|(k, _)| k == key).map_or("", |(_, v)| v.as_str())
+        self.fields
+            .iter()
+            .find(|(k, _)| k == key)
+            .map_or("", |(_, v)| v.as_str())
     }
 }
 
@@ -407,7 +443,9 @@ pub enum Reply {
     Status(HolderStatus),
     /// A stop was committed. `signal_error` is set when the holder's
     /// self-`SIGTERM` failed; the sticky stop flag is set regardless.
-    Accepted { signal_error: Option<String> },
+    Accepted {
+        signal_error: Option<String>,
+    },
     /// The id is not this holder's live acquisition (it released, or the
     /// metadata is stale).
     Gone,
@@ -479,9 +517,7 @@ fn parse_reply(text: &str) -> Reply {
                 .collect(),
         }),
         "accepted" => Reply::Accepted {
-            signal_error: head
-                .split_once("signal_error=")
-                .map(|(_, e)| unescape(e)),
+            signal_error: head.split_once("signal_error=").map(|(_, e)| unescape(e)),
         },
         "gone" => Reply::Gone,
         "busy" => Reply::Busy,
@@ -511,7 +547,10 @@ mod tests {
         assert_eq!(s.get("args"), "a\nb%");
         assert_eq!(s.get("mocks"), "2");
         assert_eq!(s.get("absent"), "");
-        assert!(matches!(parse_reply("accepted\n"), Reply::Accepted { signal_error: None }));
+        assert!(matches!(
+            parse_reply("accepted\n"),
+            Reply::Accepted { signal_error: None }
+        ));
         assert!(matches!(
             parse_reply("accepted signal_error=EPERM\n"),
             Reply::Accepted { signal_error: Some(e) } if e == "EPERM"
@@ -528,10 +567,21 @@ mod tests {
     #[test]
     fn service_answers_status_and_stops_answering_after_drop() {
         let id = mint_id().unwrap();
-        let identity = Identity { project: "p".into(), args: "x y".into(), ..Identity::default() };
+        let identity = Identity {
+            project: "p".into(),
+            args: "x y".into(),
+            ..Identity::default()
+        };
         let service = Service::start(&id, identity).unwrap();
-        service.update(Snapshot { draining: false, progress: Some((2, 5)), has_child: true, mocks: 1 });
-        let Reply::Status(s) = request(&id, "status") else { panic!("status") };
+        service.update(Snapshot {
+            draining: false,
+            progress: Some((2, 5)),
+            has_child: true,
+            mocks: 1,
+        });
+        let Reply::Status(s) = request(&id, "status") else {
+            panic!("status")
+        };
         assert_eq!(s.get("project"), "p");
         assert_eq!(s.get("args"), "x y");
         assert_eq!(s.get("progress"), "2/5");
@@ -539,6 +589,9 @@ mod tests {
         let other = mint_id().unwrap();
         assert!(matches!(request(&other, "status"), Reply::NoAnswer(_)));
         drop(service);
-        assert!(matches!(request(&id, "status"), Reply::NoAnswer(_) | Reply::Gone));
+        assert!(matches!(
+            request(&id, "status"),
+            Reply::NoAnswer(_) | Reply::Gone
+        ));
     }
 }

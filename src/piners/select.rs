@@ -248,7 +248,8 @@ mod tests {
     fn a_pending_probe_is_skipped_by_a_keyword_and_refused_by_name() {
         let mut reg = registry();
         reg.pending.insert("d".to_owned(), PathBuf::from("p/d"));
-        reg.keywords.insert("z".to_owned(), vec!["a".to_owned(), "d".to_owned()]);
+        reg.keywords
+            .insert("z".to_owned(), vec!["a".to_owned(), "d".to_owned()]);
         reg.keywords.insert("only".to_owned(), vec!["d".to_owned()]);
         let kw = |k: &str| SelectArgs {
             keywords: vec![k.to_owned()],

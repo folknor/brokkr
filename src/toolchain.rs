@@ -155,6 +155,10 @@ impl DisabledToolchain {
                 if aside.exists() {
                     std::fs::remove_file(&aside).ok();
                 }
+                // This same-directory rename hides the intact toolchain pin
+                // for the locked window and is reversed by Drop. Atomic file
+                // replacement changes bytes at a stable path; this operation
+                // must preserve the original and make that path absent.
                 std::fs::rename(&orig, &aside).map_err(|e| {
                     DevError::Config(format!(
                         "disable_toolchain: cannot move {} aside: {e}",
@@ -250,7 +254,10 @@ mod tests {
             assert!(!dir.join("rust-toolchain.toml").exists());
             assert!(!dir.join("rust-toolchain").exists());
         }
-        assert_eq!(fs::read_to_string(dir.join("rust-toolchain.toml")).unwrap(), "a");
+        assert_eq!(
+            fs::read_to_string(dir.join("rust-toolchain.toml")).unwrap(),
+            "a"
+        );
         assert_eq!(fs::read_to_string(dir.join("rust-toolchain")).unwrap(), "b");
     }
 

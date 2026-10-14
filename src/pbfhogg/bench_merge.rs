@@ -73,7 +73,9 @@ pub fn run(
             metadata: vec![],
         };
 
-        harness.run_external_with_kv(&config, binary, &bench_args, project_root).map(|_| ())
+        harness
+            .run_external_with_kv(&config, binary, &bench_args, project_root)
+            .map(|_| ())
     });
 
     // Clean up

@@ -46,12 +46,22 @@ pub fn run(
     match mode {
         AltwMode::All => run_all(harness, &outdir, &pbf_str, &osmium_out, direct_io),
         AltwMode::Hash => run_single(harness, &outdir, &pbf_str, &osmium_out, None, direct_io),
-        AltwMode::Sparse => {
-            run_single(harness, &outdir, &pbf_str, &osmium_out, Some("sparse"), direct_io)
-        }
-        AltwMode::Dense => {
-            run_single(harness, &outdir, &pbf_str, &osmium_out, Some("dense"), direct_io)
-        }
+        AltwMode::Sparse => run_single(
+            harness,
+            &outdir,
+            &pbf_str,
+            &osmium_out,
+            Some("sparse"),
+            direct_io,
+        ),
+        AltwMode::Dense => run_single(
+            harness,
+            &outdir,
+            &pbf_str,
+            &osmium_out,
+            Some("dense"),
+            direct_io,
+        ),
         AltwMode::External => run_single(
             harness,
             &outdir,
@@ -117,11 +127,19 @@ fn run_single(
     let out_path = outdir.join(&filename);
 
     let captured = run_pbfhogg_mode(harness, pbf_str, &out_path, index_type, direct_io)?;
-    harness.check_exit(&captured, &format!("pbfhogg add-locations-to-ways ({label})"))?;
+    harness.check_exit(
+        &captured,
+        &format!("pbfhogg add-locations-to-ways ({label})"),
+    )?;
     harness.print_inspect(&format!("pbfhogg ({label})"), &out_path)?;
     findings.record(
         &format!("{label} vs osmium diff"),
-        report_diff(harness, osmium_out, &out_path, &format!("{label} vs osmium"))?,
+        report_diff(
+            harness,
+            osmium_out,
+            &out_path,
+            &format!("{label} vs osmium"),
+        )?,
     );
     findings.record(
         &format!("{label} sort feature"),
@@ -159,7 +177,12 @@ fn run_optional_variant(
     if result.status.success() {
         findings.record(
             &format!("hash vs {index_type} diff"),
-            report_diff(harness, hash_out, &out_path, &format!("hash vs {index_type}"))?,
+            report_diff(
+                harness,
+                hash_out,
+                &out_path,
+                &format!("hash vs {index_type}"),
+            )?,
         );
     } else {
         let stderr = String::from_utf8_lossy(&result.stderr);

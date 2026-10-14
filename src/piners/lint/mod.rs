@@ -23,6 +23,28 @@ pub mod validators;
 
 use std::collections::BTreeSet;
 
+use serde::Deserialize;
+
+/// The dispositions a lint pin may accept. Validator failures are run
+/// failures, not states of a snippet, so they are intentionally absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PinnableDisposition {
+    AgreeClean,
+    AgreeFlagged,
+    Divergent,
+}
+
+impl PinnableDisposition {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AgreeClean => "agree_clean",
+            Self::AgreeFlagged => "agree_flagged",
+            Self::Divergent => "divergent",
+        }
+    }
+}
+
 /// The two gated diagnostic severities. piners also emits `hint`, but
 /// pine-lint has no counterpart, so hints are dropped before the diff
 /// (informational only - never a `piners_only` divergence).
@@ -57,37 +79,18 @@ pub struct DiagKey {
 /// rendering are deterministic.
 pub type DiagSet = BTreeSet<DiagKey>;
 
-/// The canonical per-probe disposition labels, the unit the gate compares.
-/// `divergent` is gated coarsely; its [`Signature`](diff::Signature) is diagnostic detail
-/// (rendered + stored, never gated) the same way `corpus`'s `count_tier`
-/// stays out of the gate.
-pub const DISPOSITION_LABELS: [&str; 5] = [
-    "agree_clean",
-    "agree_flagged",
-    "divergent",
-    "piners_error",
-    "lint_error",
-];
-
-/// True if `label` is one of [`DISPOSITION_LABELS`].
-pub fn is_disposition(label: &str) -> bool {
-    DISPOSITION_LABELS.contains(&label)
-}
-
-/// One probe's fully-resolved result for a run: the classified disposition,
-/// the gate verdict against its pin, the raw diagnostic counts, and the TV
-/// anchor relationship. The single unit `cmd` builds, the run store
+/// One probe's fully-resolved result for a run: its typed disposition, the
+/// gate verdict against its pin, raw diagnostic counts, and TV anchor
+/// relationship. The single unit `cmd` builds, the run store
 /// ([`db`]) ingests, and `lint-results` renders.
 #[derive(Debug, Clone)]
 pub struct ProbeResult {
     pub probe: String,
-    /// Gated disposition label (one of [`DISPOSITION_LABELS`]).
-    pub disposition: String,
-    /// Divergence breakdown (`piners_only`/`lint_only`/`severity_mismatch`/
-    /// `mixed`); `None` unless `disposition == "divergent"`.
-    pub signature: Option<String>,
+    /// Classified validator result. The variant carries a divergence
+    /// signature or identifies which validator failed.
+    pub disposition: diff::LintDisposition,
     /// The pinned `expected` at run time; `None` = never blessed.
-    pub expected: Option<String>,
+    pub expected: Option<PinnableDisposition>,
     /// Whether the actual disposition satisfied the pin.
     pub gate_ok: bool,
     /// Count of piners diagnostics (error+warning).

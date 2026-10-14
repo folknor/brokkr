@@ -125,10 +125,7 @@ pub(crate) fn run(
         return Ok(());
     }
 
-    output::bench_msg(&format!(
-        "mogwai {}: {} run(s)",
-        resolved.name, config.runs
-    ));
+    output::bench_msg(&format!("mogwai {}: {} run(s)", resolved.name, config.runs));
 
     // External wall-clock, with the stderr counters that ride along for free.
     // Phase decomposition is the sidecar's job, not a second definition of

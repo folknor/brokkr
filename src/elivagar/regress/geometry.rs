@@ -11,8 +11,8 @@
 //! Ported verbatim from elivagar's shed `regress.rs` (commit `0129ef3~1`),
 //! retyped onto `prepared`'s augmented components.
 
-use super::prepared::{PreparedComponent, PreparedFeature};
 use super::super::eliv::CanonRingRole;
+use super::prepared::{PreparedComponent, PreparedFeature};
 
 // ---------------------------------------------------------------------------
 // Bounding boxes
@@ -219,10 +219,7 @@ pub(crate) fn feature_distance(current: &PreparedFeature, baseline: &PreparedFea
 /// ring `i`. Callers pair components structurally first, so the positional zip
 /// is meaningful: `classify_detail_components` rejects a ring-count or
 /// ring-role difference as structural before this is consulted for a verdict.
-pub(crate) fn component_distance(
-    current: &PreparedComponent,
-    baseline: &PreparedComponent,
-) -> i32 {
+pub(crate) fn component_distance(current: &PreparedComponent, baseline: &PreparedComponent) -> i32 {
     current
         .rings
         .iter()

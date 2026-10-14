@@ -55,9 +55,6 @@ use std::process::Command;
 use crate::error::DevError;
 use crate::output;
 
-/// The container under `~/.brokkr` every worktree lives in.
-const CONTAINER: &str = "worktrees";
-
 /// The slot entry linking to the worktree's isolated target dir.
 const TARGET_LINK: &str = ".brokkr-target";
 
@@ -72,9 +69,11 @@ pub const LEGACY_PREFIX: &str = ".brokkr-worktree-";
 
 /// `~/.brokkr/worktrees`.
 fn container() -> Result<PathBuf, DevError> {
-    let home = std::env::var("HOME")
-        .map_err(|_| DevError::Config("$HOME is not set - cannot locate the worktree container".into()))?;
-    Ok(PathBuf::from(home).join(".brokkr").join(CONTAINER))
+    crate::user_dirs::worktrees().ok_or_else(|| {
+        DevError::Config(
+            "$HOME is not set or is empty - cannot locate the worktree container".into(),
+        )
+    })
 }
 
 /// The checkout's directory name (`piners`).
@@ -178,8 +177,10 @@ impl Worktree {
         // The slot name is the fixed-width abbreviation, so the same commit
         // names the same worktree whatever width (or ref) it was asked for by,
         // and however large the repo has grown since.
-        let crate::git::CommitId { full: full_hash, short } =
-            crate::git::resolve_commit(git_root, commit_ref)?;
+        let crate::git::CommitId {
+            full: full_hash,
+            short,
+        } = crate::git::resolve_commit(git_root, commit_ref)?;
         let subject = run_git(git_root, &["log", "-1", "--format=%s", &full_hash])?;
 
         let slot = checkout_dir(git_root)?.join(&short);
@@ -270,11 +271,12 @@ fn furnish(git_root: &Path, slot: &Path, checkout: &Path) -> Result<(), DevError
     if target_link.symlink_metadata().is_err() {
         let info = crate::build::project_info(Some(git_root))?;
         let base = std::fs::canonicalize(&info.target_dir).unwrap_or(info.target_dir);
-        let (Some(key), Some(short)) = (
-            slot.parent().and_then(Path::file_name),
-            slot.file_name(),
-        ) else {
-            return Err(DevError::Config(format!("bad worktree slot {}", slot.display())));
+        let (Some(key), Some(short)) = (slot.parent().and_then(Path::file_name), slot.file_name())
+        else {
+            return Err(DevError::Config(format!(
+                "bad worktree slot {}",
+                slot.display()
+            )));
         };
         let dir = base.join(TARGET_SUBDIR).join(key).join(short);
         std::fs::create_dir_all(&dir)?;
@@ -412,7 +414,9 @@ fn escape_of(manifest_dir: &Path, dep: &str) -> Escape {
     }
     match parts.iter().take_while(|p| *p == "..").count() {
         0 => Escape::Inside,
-        1 => parts.get(1).map_or(Escape::TooFar, |name| Escape::Sibling(name.clone())),
+        1 => parts
+            .get(1)
+            .map_or(Escape::TooFar, |name| Escape::Sibling(name.clone())),
         _ => Escape::TooFar,
     }
 }
@@ -500,7 +504,10 @@ pub fn purge_all(git_root: &Path) -> Result<usize, DevError> {
         removed += 1;
     }
     for path in list_legacy(git_root)? {
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("(unnamed)");
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("(unnamed)");
         output::run_msg(&format!("removing legacy worktree {name}"));
         remove_checkout(git_root, &path)?;
         removed += 1;
@@ -521,7 +528,8 @@ pub fn purge_all(git_root: &Path) -> Result<usize, DevError> {
 /// link and its destination left alone.
 pub fn remove_one(git_root: &Path, slot: &Path) -> Result<(), DevError> {
     if let Ok(dest) = std::fs::read_link(slot.join(TARGET_LINK))
-        && let (Some(key), Some(short)) = (slot.parent().and_then(Path::file_name), slot.file_name())
+        && let (Some(key), Some(short)) =
+            (slot.parent().and_then(Path::file_name), slot.file_name())
         && dest.ends_with(Path::new(TARGET_SUBDIR).join(key).join(short))
         && dest.exists()
     {
@@ -567,7 +575,10 @@ fn remove_checkout(git_root: &Path, path: &Path) -> Result<(), DevError> {
         };
         return Err(DevError::Io(std::io::Error::new(
             e.kind(),
-            format!("cannot remove worktree at {}: {e}{git_note}", path.display()),
+            format!(
+                "cannot remove worktree at {}: {e}{git_note}",
+                path.display()
+            ),
         )));
     }
     drop(run_git(git_root, &["worktree", "prune"]));
@@ -630,7 +641,10 @@ fn run_git(cwd: &Path, args: &[&str]) -> Result<String, DevError> {
         .args(args)
         .current_dir(cwd)
         .output()
-        .map_err(|error| DevError::Spawn { program: "git".into(), error })?;
+        .map_err(|error| DevError::Spawn {
+            program: "git".into(),
+            error,
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -663,8 +677,14 @@ mod tests {
         // `foo` and `foo-bar` share a parent under the config-one-level-up
         // layout; a bare prefix test would let `foo` purge these.
         let prefix = legacy_prefix(Path::new("/src/foo"));
-        assert!(!is_worktree_name(&prefix, ".brokkr-worktree-foo-bar-1a2b3c4"));
-        assert!(!is_worktree_name(&prefix, ".brokkr-worktree-foo-beef-1a2b3c4"));
+        assert!(!is_worktree_name(
+            &prefix,
+            ".brokkr-worktree-foo-bar-1a2b3c4"
+        ));
+        assert!(!is_worktree_name(
+            &prefix,
+            ".brokkr-worktree-foo-beef-1a2b3c4"
+        ));
     }
 
     #[test]
@@ -678,7 +698,10 @@ mod tests {
     fn path_deps_resolve_lexically_against_the_manifest_dir() {
         let root = Path::new("");
         assert_eq!(escape_of(root, "crates/x"), Escape::Inside);
-        assert_eq!(escape_of(root, "../pbfhogg"), Escape::Sibling("pbfhogg".into()));
+        assert_eq!(
+            escape_of(root, "../pbfhogg"),
+            Escape::Sibling("pbfhogg".into())
+        );
         assert_eq!(
             escape_of(root, "../pbfhogg/crates/core"),
             Escape::Sibling("pbfhogg".into())
@@ -686,7 +709,10 @@ mod tests {
         // A member crate two deep climbing three levels lands one level out.
         let member = Path::new("crates/x");
         assert_eq!(escape_of(member, "../y"), Escape::Inside);
-        assert_eq!(escape_of(member, "../../../pbfhogg"), Escape::Sibling("pbfhogg".into()));
+        assert_eq!(
+            escape_of(member, "../../../pbfhogg"),
+            Escape::Sibling("pbfhogg".into())
+        );
         assert_eq!(escape_of(root, "../../far"), Escape::TooFar);
         assert_eq!(escape_of(root, ".."), Escape::TooFar);
         assert_eq!(escape_of(root, "/abs/dep"), Escape::Inside);

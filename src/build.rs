@@ -203,7 +203,11 @@ pub fn project_info(cwd: Option<&Path>) -> Result<ProjectInfo, DevError> {
             .get("workspace_default_members")
             .or_else(|| val.get("workspace_members"))
             .and_then(serde_json::Value::as_array)
-            .map(|ids| ids.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
             .unwrap_or_default(),
         workspace_root: PathBuf::from(extract_string(&val, "workspace_root")?),
         member_manifests: member_manifests(&val),
@@ -408,8 +412,8 @@ fn cargo_build_locked(
     // trees apart; the env var overrides any inherited `build.target-dir`.
     // That dir sits under the live project's target, on its disk (`worktree`'s
     // module doc).
-    let target_override = crate::worktree::isolated_target_dir(project_root)
-        .map(|dir| dir.display().to_string());
+    let target_override =
+        crate::worktree::isolated_target_dir(project_root).map(|dir| dir.display().to_string());
     let env: Vec<(&str, &str)> = match target_override.as_deref() {
         Some(dir) => {
             output::detail_or_console(&format!("isolating worktree build target dir -> {dir}"));
@@ -419,8 +423,14 @@ fn cargo_build_locked(
     };
 
     let start = Instant::now();
-    let captured =
-        output::run_captured_observed("cargo", &arg_refs, project_root, &env, on_spawn, isolate_pg)?;
+    let captured = output::run_captured_observed(
+        "cargo",
+        &arg_refs,
+        project_root,
+        &env,
+        on_spawn,
+        isolate_pg,
+    )?;
     let elapsed = start.elapsed();
 
     if !captured.status.success() {
@@ -708,7 +718,8 @@ fn rendered_diagnostics(stdout: &[u8]) -> Vec<(bool, String)> {
             continue;
         };
         if let Some(rendered) = message.get("rendered").and_then(serde_json::Value::as_str) {
-            let is_warning = message.get("level").and_then(serde_json::Value::as_str) == Some("warning");
+            let is_warning =
+                message.get("level").and_then(serde_json::Value::as_str) == Some("warning");
             // rendered already ends with newline; trim to avoid double-spacing
             out.push((is_warning, rendered.trim_end().to_owned()));
         }
@@ -748,8 +759,12 @@ mod failure_report_tests {
 
     #[test]
     fn stderr_keeps_the_cause_and_drops_progress_lines() {
-        let stderr = b"   Compiling foo v0.1.0\nerror: failed to parse manifest\n    Finished dev\n";
-        assert_eq!(filtered_build_stderr(stderr), "error: failed to parse manifest");
+        let stderr =
+            b"   Compiling foo v0.1.0\nerror: failed to parse manifest\n    Finished dev\n";
+        assert_eq!(
+            filtered_build_stderr(stderr),
+            "error: failed to parse manifest"
+        );
     }
 
     #[test]
@@ -766,7 +781,13 @@ mod failure_report_tests {
             "not json\n",
         );
         let d = rendered_diagnostics(stdout.as_bytes());
-        assert_eq!(d, vec![(true, "warning: w".to_owned()), (false, "error: e".to_owned())]);
+        assert_eq!(
+            d,
+            vec![
+                (true, "warning: w".to_owned()),
+                (false, "error: e".to_owned())
+            ]
+        );
     }
 }
 

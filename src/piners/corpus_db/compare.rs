@@ -28,6 +28,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::Value;
 
 use super::CorpusDb;
+use super::ingest::RunContext;
 use super::query::RunRow;
 use crate::error::DevError;
 
@@ -165,7 +166,12 @@ fn selected_ids(selector: &str) -> Vec<String> {
     serde_json::from_str::<Value>(selector)
         .ok()
         .and_then(|v| v.get("ids").and_then(Value::as_array).cloned())
-        .map(|ids| ids.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+        .map(|ids| {
+            ids.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -192,17 +198,10 @@ pub fn direction(a: &Side, b: &Side) -> Option<&'static str> {
     }
 }
 
-/// The run-context facts that make two runs incomparable when they differ:
-/// the build profile and the forwarded harness flags, read off the selector.
-pub fn context_of(selector: &str) -> (bool, Vec<String>) {
-    let v = serde_json::from_str::<Value>(selector).unwrap_or(Value::Null);
-    let debug = v.get("debug").and_then(Value::as_bool).unwrap_or(true);
-    let args = v
-        .get("harness_args")
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect())
-        .unwrap_or_default();
-    (debug, args)
+/// The execution context a run row can establish. Legacy or malformed rows
+/// remain unknown rather than receiving the parity command's debug default.
+pub fn context_of(run: &RunRow) -> Option<&RunContext> {
+    run.context.as_ref()
 }
 
 #[cfg(test)]
@@ -211,7 +210,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::piners::corpus_db::RunRecord;
+    use crate::piners::corpus_db::{RunContext, RunRecord, compare_report};
     use crate::piners::gate::GateDiff;
     use crate::piners::report::parse;
 
@@ -223,6 +222,7 @@ mod tests {
             commit_sha: Some("0123456789abcdef0123456789abcdef01234567"),
             dirty: Some(false),
             selector: &selector,
+            context: None,
             gated: true,
             result: "pass",
             fail_reason: None,
@@ -240,7 +240,8 @@ mod tests {
                 actual: None,
             })
             .collect();
-        db.record_run(&run, &parse(nd.as_bytes()), &BTreeMap::new(), &diffs).unwrap()
+        db.record_run(&run, &parse(nd.as_bytes()), &BTreeMap::new(), &diffs)
+            .unwrap()
     }
 
     fn line(probe: &str, tier: &str, m: i64, o: i64, t: i64) -> String {
@@ -250,11 +251,75 @@ mod tests {
         )
     }
 
+    fn contextual_record(db: &CorpusDb, context: &RunContext) -> i64 {
+        let selector = r#"{"ids":["p"],"debug":true,"harness_args":[]}"#;
+        let run = RunRecord {
+            run_id: None,
+            started_at: None,
+            commit_sha: None,
+            dirty: None,
+            selector,
+            context: Some(context),
+            gated: true,
+            result: "pass",
+            fail_reason: None,
+            harness_exit_code: Some(0),
+            stderr: "",
+            wall_ms: None,
+            protocol_violations: Some(0),
+            run_error: None,
+        };
+        db.record_run(
+            &run,
+            &parse(line("p", "exact", 1, 0, 0).as_bytes()),
+            &BTreeMap::new(),
+            &[],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn compare_reads_the_typed_context_and_marks_legacy_context_unknown() {
+        let db = CorpusDb::open_in_memory().unwrap();
+        let debug = RunContext {
+            debug: true,
+            harness_args: Vec::new(),
+        };
+        let release = RunContext {
+            debug: false,
+            harness_args: vec!["--scan".to_owned()],
+        };
+        let a = contextual_record(&db, &debug);
+        let b = contextual_record(&db, &release);
+        let rendered = compare_report(&db.compare_runs(a, b).unwrap(), false);
+        assert!(
+            rendered.contains("A: debug, B: release -- --scan"),
+            "{rendered}"
+        );
+
+        let legacy = record(&db, &["p"], &line("p", "exact", 1, 0, 0), &[]);
+        let rendered = compare_report(&db.compare_runs(a, legacy).unwrap(), false);
+        assert!(
+            rendered.contains("context unknown for at least one run"),
+            "{rendered}"
+        );
+    }
+
     #[test]
     fn a_count_move_inside_one_tier_is_reported() {
         let db = CorpusDb::open_in_memory().unwrap();
-        let a = record(&db, &["p", "q"], &(line("p", "near", 100, 2, 1) + &line("q", "exact", 5, 0, 0)), &[]);
-        let b = record(&db, &["p", "q"], &(line("p", "near", 97, 4, 1) + &line("q", "exact", 5, 0, 0)), &[]);
+        let a = record(
+            &db,
+            &["p", "q"],
+            &(line("p", "near", 100, 2, 1) + &line("q", "exact", 5, 0, 0)),
+            &[],
+        );
+        let b = record(
+            &db,
+            &["p", "q"],
+            &(line("p", "near", 97, 4, 1) + &line("q", "exact", 5, 0, 0)),
+            &[],
+        );
         let c = db.compare_runs(a, b).unwrap();
         let moved: Vec<&ProbeDelta> = c.probes.iter().filter(|d| d.moved()).collect();
         assert_eq!(moved.len(), 1);
@@ -268,11 +333,17 @@ mod tests {
     #[test]
     fn a_missing_side_is_classified_not_dropped() {
         let db = CorpusDb::open_in_memory().unwrap();
-        let a = record(&db, &["p", "q"], &(line("p", "exact", 1, 0, 0) + &line("q", "exact", 1, 0, 0)), &[]);
+        let a = record(
+            &db,
+            &["p", "q"],
+            &(line("p", "exact", 1, 0, 0) + &line("q", "exact", 1, 0, 0)),
+            &[],
+        );
         // q selected but emitted nothing; r new to B; p not selected in B.
         let b = record(&db, &["q", "r"], &line("r", "exact", 1, 0, 0), &["q"]);
         let c = db.compare_runs(a, b).unwrap();
-        let by: BTreeMap<&str, &ProbeDelta> = c.probes.iter().map(|d| (d.probe.as_str(), d)).collect();
+        let by: BTreeMap<&str, &ProbeDelta> =
+            c.probes.iter().map(|d| (d.probe.as_str(), d)).collect();
         assert_eq!(by["p"].b, Presence::NotSelected);
         assert_eq!(by["q"].b, Presence::NoLine);
         assert_eq!(by["r"].a, Presence::NotSelected);
@@ -311,7 +382,10 @@ mod tests {
         };
         assert_eq!(direction(&side(10, 10), &side(15, 5)), Some("mixed"));
         assert_eq!(direction(&side(10, 10), &side(16, 5)), Some("mixed"));
-        assert_eq!(direction(&side(10, 10), &side(10, 12)), Some("more divergent"));
+        assert_eq!(
+            direction(&side(10, 10), &side(10, 12)),
+            Some("more divergent")
+        );
     }
 
     #[test]
@@ -329,10 +403,15 @@ mod tests {
             &[],
         );
         let c = db.compare_runs(a, b).unwrap();
-        let by: BTreeMap<&str, &ProbeDelta> = c.probes.iter().map(|d| (d.probe.as_str(), d)).collect();
-        let Presence::Ran(pb) = &by["p"].b else { panic!("p ran") };
+        let by: BTreeMap<&str, &ProbeDelta> =
+            c.probes.iter().map(|d| (d.probe.as_str(), d)).collect();
+        let Presence::Ran(pb) = &by["p"].b else {
+            panic!("p ran")
+        };
         assert!(!pb.has_counts);
-        let Presence::Ran(qb) = &by["q"].b else { panic!("q ran") };
+        let Presence::Ran(qb) = &by["q"].b else {
+            panic!("q ran")
+        };
         assert!(!qb.selected);
     }
 

@@ -89,7 +89,7 @@ pub fn collect(paths: &ResolvedPaths, project: Project, project_root: &Path) -> 
         io_uring_status: read_io_uring_status(),
         drives: collect_drives(paths),
         storage: collect_storage(paths),
-        tools: collect_tools(project),
+        tools: collect_tools(project, project_root),
         datasets: check_datasets(&paths.datasets, &paths.data_dir, project_root),
         user_config: collect_user_config(),
     }
@@ -365,7 +365,11 @@ fn parse_cpuinfo(content: &str) -> (String, Option<u32>, Option<u32>) {
         }
     }
     let threads = (threads > 0).then_some(threads);
-    (model.unwrap_or_else(|| "unknown".to_owned()), cores, threads)
+    (
+        model.unwrap_or_else(|| "unknown".to_owned()),
+        cores,
+        threads,
+    )
 }
 
 /// Read the hardware min/max frequency range, e.g. "0.6-5.0 GHz".
@@ -709,7 +713,7 @@ pub(crate) fn format_bytes(b: u64) -> String {
 // Tools
 // ---------------------------------------------------------------------------
 
-fn collect_tools(project: Project) -> Vec<(String, String)> {
+fn collect_tools(project: Project, project_root: &Path) -> Vec<(String, String)> {
     let mut tools = vec![(
         "cargo".to_owned(),
         read_tool_version("cargo", &["--version"]),
@@ -744,7 +748,7 @@ fn collect_tools(project: Project) -> Vec<(String, String)> {
         | Project::Other(_) => {}
     }
 
-    tools.push((project.name().to_owned(), read_git_rev()));
+    tools.push((project.name().to_owned(), read_git_rev(project_root)));
 
     tools
 }
@@ -776,9 +780,10 @@ fn extract_version_from_stdout(stdout: &[u8]) -> String {
 }
 
 /// Get the current git short rev for the project.
-fn read_git_rev() -> String {
+fn read_git_rev(project_root: &Path) -> String {
     let output = match Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
+        .args(["rev-parse", "HEAD"])
+        .current_dir(project_root)
         .output()
     {
         Ok(o) => o,
@@ -789,7 +794,8 @@ fn read_git_rev() -> String {
         return "unknown".to_owned();
     }
 
-    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    let full = String::from_utf8_lossy(&output.stdout);
+    crate::git::short_of(full.trim())
 }
 
 // ---------------------------------------------------------------------------

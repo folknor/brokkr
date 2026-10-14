@@ -84,7 +84,12 @@ pub(crate) fn sections(markdown: &str) -> Vec<Section> {
             } else {
                 format!("{parent}-{slug}")
             };
-            Section { level, slug, start, end }
+            Section {
+                level,
+                slug,
+                start,
+                end,
+            }
         })
         .collect()
 }
@@ -110,7 +115,9 @@ fn parse_heading(line: &str) -> Option<(u8, String)> {
 /// is dropped: the section on `[[script_check]]` is addressed as
 /// `script_check`, not `script_check-array`, because nobody looking it up is
 /// thinking about whether the TOML spelling is an array or a table.
-const SHAPE_WORDS: &[&str] = &["section", "array", "entries", "entry", "blocks", "block", "phase"];
+const SHAPE_WORDS: &[&str] = &[
+    "section", "array", "entries", "entry", "blocks", "block", "phase",
+];
 
 /// Heading text -> slug: alphanumerics and `_` survive (so `script_check` and
 /// `allow_exact` stay typeable as themselves), every other run of characters
@@ -177,7 +184,8 @@ pub(crate) fn find<'a>(sections: &'a [Section], query: &str) -> Result<&'a Secti
             [] => continue,
             [only] => return Ok(only),
             several => {
-                let tops: Vec<&Section> = several.iter().copied().filter(|s| s.level == 2).collect();
+                let tops: Vec<&Section> =
+                    several.iter().copied().filter(|s| s.level == 2).collect();
                 if let [only] = tops.as_slice() {
                     return Ok(only);
                 }
@@ -252,7 +260,10 @@ tail
     fn slugs_keep_underscores_and_collapse_the_rest() {
         assert_eq!(slugify("`[[script_check]]` array"), "script_check");
         assert_eq!(slugify("`[clippy] allow_exact`"), "clippy-allow_exact");
-        assert_eq!(slugify("`certifies` and exit codes"), "certifies-and-exit-codes");
+        assert_eq!(
+            slugify("`certifies` and exit codes"),
+            "certifies-and-exit-codes"
+        );
     }
 
     /// The shape word is the last token or it is part of the subject - a
@@ -262,7 +273,10 @@ tail
     fn shape_words_and_parenthesised_tails_drop() {
         assert_eq!(slugify("`[gremlins]` section"), "gremlins");
         assert_eq!(slugify("`coverage` phase (complete profiles)"), "coverage");
-        assert_eq!(slugify("Per-sweep log lines (collapsed by default)"), "per-sweep-log-lines");
+        assert_eq!(
+            slugify("Per-sweep log lines (collapsed by default)"),
+            "per-sweep-log-lines"
+        );
         assert_eq!(slugify("Doctests"), "doctests");
         assert_eq!(slugify("`stage`"), "stage");
     }
@@ -302,7 +316,10 @@ tail
     fn prefix_and_substring_both_resolve() {
         let secs = sections(DOC);
         assert_eq!(find(&secs, "script").unwrap().slug, "script_check");
-        assert_eq!(find(&secs, "log lines").unwrap().slug, "per-sweep-log-lines");
+        assert_eq!(
+            find(&secs, "log lines").unwrap().slug,
+            "per-sweep-log-lines"
+        );
     }
 
     /// The point of qualifying a subsection: `stage` is what the heading says,
@@ -310,7 +327,10 @@ tail
     #[test]
     fn a_subsection_is_reachable_through_its_parent_or_its_own_name() {
         let secs = sections(DOC);
-        assert_eq!(find(&secs, "script_check-stage").unwrap().slug, "script_check-stage");
+        assert_eq!(
+            find(&secs, "script_check-stage").unwrap().slug,
+            "script_check-stage"
+        );
         assert_eq!(find(&secs, "stage").unwrap().slug, "script_check-stage");
     }
 

@@ -320,7 +320,10 @@ fn run_snapshot(
         }
         Err(e) => {
             // Say why: a bare ERROR row left the decode failure unexplained.
-            sluggrs_msg(&format!("  ERROR: {} (pixel comparison failed: {e})", snapshot.id));
+            sluggrs_msg(&format!(
+                "  ERROR: {} (pixel comparison failed: {e})",
+                snapshot.id
+            ));
             (None, compare::Status::Error)
         }
     };

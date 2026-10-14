@@ -273,12 +273,18 @@ fn evaluate_rule(
 
     if let Some(cap) = rule.max {
         out.push(check_num(metric, "max", current, |c| {
-            (c <= cap, format!("current={} max={}", format_num(c), format_num(cap)))
+            (
+                c <= cap,
+                format!("current={} max={}", format_num(c), format_num(cap)),
+            )
         })?);
     }
     if let Some(floor) = rule.min {
         out.push(check_num(metric, "min", current, |c| {
-            (c >= floor, format!("current={} min={}", format_num(c), format_num(floor)))
+            (
+                c >= floor,
+                format!("current={} min={}", format_num(c), format_num(floor)),
+            )
         })?);
     }
     if let Some(factor) = rule.max_relative {
@@ -287,7 +293,13 @@ fn evaluate_rule(
         out.push(check_num(metric, "max_relative", current, |c| {
             (
                 c <= bound,
-                format!("current={} bound={} (baseline={} * {})", format_num(c), format_num(bound), format_num(b), format_num(factor)),
+                format!(
+                    "current={} bound={} (baseline={} * {})",
+                    format_num(c),
+                    format_num(bound),
+                    format_num(b),
+                    format_num(factor)
+                ),
             )
         })?);
     }
@@ -297,7 +309,13 @@ fn evaluate_rule(
         out.push(check_num(metric, "min_relative", current, |c| {
             (
                 c >= bound,
-                format!("current={} bound={} (baseline={} * {})", format_num(c), format_num(bound), format_num(b), format_num(factor)),
+                format!(
+                    "current={} bound={} (baseline={} * {})",
+                    format_num(c),
+                    format_num(bound),
+                    format_num(b),
+                    format_num(factor)
+                ),
             )
         })?);
     }
@@ -307,7 +325,13 @@ fn evaluate_rule(
             let d = c - b;
             (
                 d <= delta,
-                format!("current={} baseline={} delta={} max_delta={}", format_num(c), format_num(b), format_num(d), format_num(delta)),
+                format!(
+                    "current={} baseline={} delta={} max_delta={}",
+                    format_num(c),
+                    format_num(b),
+                    format_num(d),
+                    format_num(delta)
+                ),
             )
         })?);
     }
@@ -395,7 +419,10 @@ mod tests {
         let base = run(700, "{}", "{}");
         let g = gate_with(
             "elapsed_ms",
-            MetricRule { max: Some(1000.0), ..Default::default() },
+            MetricRule {
+                max: Some(1000.0),
+                ..Default::default()
+            },
         );
         let r = evaluate(&g, &cur, &base).unwrap();
         assert_eq!(r.len(), 1);
@@ -403,7 +430,10 @@ mod tests {
 
         let g = gate_with(
             "elapsed_ms",
-            MetricRule { max: Some(500.0), ..Default::default() },
+            MetricRule {
+                max: Some(500.0),
+                ..Default::default()
+            },
         );
         let r = evaluate(&g, &cur, &base).unwrap();
         assert!(!r[0].pass);
@@ -415,7 +445,10 @@ mod tests {
         let base = run(700, "{}", "{}");
         let g = gate_with(
             "elapsed_ms",
-            MetricRule { max_relative: Some(1.10), ..Default::default() },
+            MetricRule {
+                max_relative: Some(1.10),
+                ..Default::default()
+            },
         );
         let r = evaluate(&g, &cur, &base).unwrap();
         assert!(r[0].pass, "770 <= 700*1.10=770: pass on the boundary");
@@ -431,7 +464,10 @@ mod tests {
         let base = run(0, "{}", r#"{"correct":1,"messages":1000}"#);
         let g = gate_with(
             "meta.correct",
-            MetricRule { equal: Some(toml::Value::Integer(1)), ..Default::default() },
+            MetricRule {
+                equal: Some(toml::Value::Integer(1)),
+                ..Default::default()
+            },
         );
         let r = evaluate(&g, &cur, &base).unwrap();
         assert!(r[0].pass);
@@ -443,7 +479,10 @@ mod tests {
         let base = run(0, "{}", r#"{"messages":1000}"#);
         let g = gate_with(
             "meta.messages",
-            MetricRule { equal_to_baseline: Some(true), ..Default::default() },
+            MetricRule {
+                equal_to_baseline: Some(true),
+                ..Default::default()
+            },
         );
         let r = evaluate(&g, &cur, &base).unwrap();
         assert!(!r[0].pass);
@@ -455,7 +494,10 @@ mod tests {
         let base = run(0, "{}", "{}");
         let g = gate_with(
             "meta.never_set",
-            MetricRule { max: Some(1.0), ..Default::default() },
+            MetricRule {
+                max: Some(1.0),
+                ..Default::default()
+            },
         );
         let err = evaluate(&g, &cur, &base).unwrap_err();
         let msg = format!("{err:?}");
@@ -468,7 +510,10 @@ mod tests {
         let base = run(0, "{}", r#"{"requests":12}"#);
         let g = gate_with(
             "meta.requests",
-            MetricRule { max_delta: Some(0.0), ..Default::default() },
+            MetricRule {
+                max_delta: Some(0.0),
+                ..Default::default()
+            },
         );
         let r = evaluate(&g, &cur, &base).unwrap();
         assert!(!r[0].pass);
@@ -490,12 +535,18 @@ mod tests {
     fn equal_to_baseline_false_alone_is_refused() {
         let g = gate_with(
             "meta.messages",
-            MetricRule { equal_to_baseline: Some(false), ..Default::default() },
+            MetricRule {
+                equal_to_baseline: Some(false),
+                ..Default::default()
+            },
         );
         assert!(validate_rules("g", &g).is_err());
         let g = gate_with(
             "meta.messages",
-            MetricRule { equal_to_baseline: Some(true), ..Default::default() },
+            MetricRule {
+                equal_to_baseline: Some(true),
+                ..Default::default()
+            },
         );
         validate_rules("g", &g).unwrap();
     }

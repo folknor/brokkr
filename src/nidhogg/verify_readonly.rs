@@ -282,7 +282,11 @@ mod tests {
     use super::*;
 
     fn mode_of(path: &Path) -> u32 {
-        std::fs::symlink_metadata(path).unwrap().permissions().mode() & MODE_BITS
+        std::fs::symlink_metadata(path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & MODE_BITS
     }
 
     fn set_mode(path: &Path, mode: u32) {
@@ -307,7 +311,12 @@ mod tests {
 
         let mut guard = ReadOnlyGuard::apply(&root).unwrap();
         for p in [&root, &sub, &writable, &readonly] {
-            assert_eq!(mode_of(p) & OWNER_WRITE, 0, "{} still owner-writable", p.display());
+            assert_eq!(
+                mode_of(p) & OWNER_WRITE,
+                0,
+                "{} still owner-writable",
+                p.display()
+            );
         }
         guard.restore().unwrap();
         drop(guard);

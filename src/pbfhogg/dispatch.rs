@@ -71,7 +71,7 @@ pub(crate) fn run_command_with_params(
     // brokkr.toml state before triggering the cargo build. Without this
     // pre-flight, a 30s+ run can complete and then error at registration
     // because the operator forgot `--replace-snapshot`.
-    preflight_as_snapshot(req, extra_params)?;
+    preflight_as_snapshot(command, req, extra_params)?;
 
     if req.dry_run {
         return run_pbfhogg_dry_run(req, command, osc_seq, extra_params);
@@ -91,6 +91,7 @@ pub(crate) fn run_command_with_params(
 /// valid snapshot key and either unused or `--replace-snapshot` was passed.
 /// No-op when `as_snapshot` is unset.
 fn preflight_as_snapshot(
+    command: &PbfhoggCommand,
     req: &MeasureRequest,
     extra_params: &CommandParams,
 ) -> Result<(), DevError> {
@@ -98,9 +99,10 @@ fn preflight_as_snapshot(
         return Ok(());
     };
 
+    require_snapshot_output(command)?;
+
     let pi = crate::context::bootstrap(req.build_root)?;
-    let paths =
-        crate::context::bootstrap_config(req.dev_config, req.project_root, &pi.target_dir)?;
+    let paths = crate::context::bootstrap_config(req.dev_config, req.project_root, &pi.target_dir)?;
 
     crate::pbfhogg::download::preflight_snapshot_collision(
         snap_key,
@@ -108,6 +110,18 @@ fn preflight_as_snapshot(
         req.dataset,
         paths.datasets.get(req.dataset),
     )
+}
+
+/// Snapshot registration accepts a produced PBF file, not an empty path, an
+/// OSC stream, or a directory output.
+fn require_snapshot_output(command: &PbfhoggCommand) -> Result<(), DevError> {
+    if !matches!(command.output_kind(), OutputKind::ScratchPbf) {
+        return Err(DevError::Config(format!(
+            "--as-snapshot requires a PBF-producing command; '{}' does not produce a PBF file",
+            command.id(),
+        )));
+    }
+    Ok(())
 }
 
 /// Dry-run mode: validate argv, config, and path resolution without building
@@ -139,11 +153,10 @@ fn run_pbfhogg_dry_run(
     // doesn't touch it; `build_args(_, Hotpath)` uses it only as a leading
     // argv[0] string. Use the brokkr binary's own path so any accidental
     // stat still succeeds.
-    let fake_binary = std::env::current_exe()
-        .unwrap_or_else(|_| req.project_root.join("brokkr.toml"));
+    let fake_binary =
+        std::env::current_exe().unwrap_or_else(|_| req.project_root.join("brokkr.toml"));
 
-    let cmd_ctx =
-        build_pbfhogg_context(req, command, osc_seq, &fake_binary, &paths, extra_params)?;
+    let cmd_ctx = build_pbfhogg_context(req, command, osc_seq, &fake_binary, &paths, extra_params)?;
 
     // Construct the wall-clock arg vector (catches any build_args failures,
     // e.g. missing bbox for extract, missing osc for merge).
@@ -171,8 +184,14 @@ fn run_pbfhogg_dry_run(
         output::dry_run_msg(&format!(
             "osc range: {} files ({} .. {})",
             cmd_ctx.osc_paths.len(),
-            cmd_ctx.osc_paths.first().map_or(String::new(), |p| p.display().to_string()),
-            cmd_ctx.osc_paths.last().map_or(String::new(), |p| p.display().to_string()),
+            cmd_ctx
+                .osc_paths
+                .first()
+                .map_or(String::new(), |p| p.display().to_string()),
+            cmd_ctx
+                .osc_paths
+                .last()
+                .map_or(String::new(), |p| p.display().to_string()),
         ));
     }
     if let Some(ref p) = cmd_ctx.pbf_b_path {
@@ -207,7 +226,8 @@ fn run_pbfhogg_run(
         &feat_refs,
         true,
         &format!("run {}", command.id()),
-        true,        req.stop_marker.map(str::to_owned),
+        true,
+        req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
 
@@ -230,12 +250,18 @@ fn run_pbfhogg_run(
     let out = output::run_passthrough_timed(&binary_str, &arg_refs, Some(ctx.harness.lock()))?;
 
     if out.code != 0 && !command.ok_exit_codes().contains(&out.code) {
-        cleanup_output(command, &cmd_ctx, ArgMode::Bench);
+        cleanup_output(command, &cmd_ctx, ArgMode::Bench)?;
         return Err(DevError::ExitCode(out.code));
     }
 
-    promote_artifact(command, &cmd_ctx, ArgMode::Bench, &ctx.paths, req.project_root)?;
-    cleanup_output(command, &cmd_ctx, ArgMode::Bench);
+    promote_artifact(
+        command,
+        &cmd_ctx,
+        ArgMode::Bench,
+        &ctx.paths,
+        req.project_root,
+    )?;
+    cleanup_output(command, &cmd_ctx, ArgMode::Bench)?;
 
     let ms = crate::duration_ms(out.elapsed);
     output::run_msg(&format!("elapsed={ms}ms"));
@@ -264,7 +290,8 @@ fn run_pbfhogg_wallclock(
         &feat_refs,
         true,
         &format!("run {}", command.id()),
-        req.force,        req.stop_marker.map(str::to_owned),
+        req.force,
+        req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
 
@@ -283,8 +310,14 @@ fn run_pbfhogg_wallclock(
         true,
     )?;
 
-    promote_artifact(command, &cmd_ctx, ArgMode::Bench, &ctx.paths, req.project_root)?;
-    cleanup_output(command, &cmd_ctx, ArgMode::Bench);
+    promote_artifact(
+        command,
+        &cmd_ctx,
+        ArgMode::Bench,
+        &ctx.paths,
+        req.project_root,
+    )?;
+    cleanup_output(command, &cmd_ctx, ArgMode::Bench)?;
     Ok(())
 }
 
@@ -318,8 +351,7 @@ pub(crate) fn run_wallclock_core(
     }
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
-    let file_mb = resolve::file_size_mb(&cmd_ctx.pbf_path)?;
-    let basename = cmd_ctx.pbf_basename();
+    let (basename, file_mb) = result_input_metadata(command, cmd_ctx)?;
 
     let config = BenchConfig {
         command: command.result_command(),
@@ -352,6 +384,46 @@ pub(crate) fn run_wallclock_core(
         command.ok_exit_codes(),
     )?;
     Ok(())
+}
+
+/// Select and account for the physical inputs represented by the result row.
+/// Most commands use one PBF; `merge-changes` consumes its resolved OSC file
+/// or files.
+fn result_input_metadata(
+    command: &PbfhoggCommand,
+    cmd_ctx: &CommandContext,
+) -> Result<(String, f64), DevError> {
+    if command.input_kind() == InputKind::OscOnly {
+        let input_paths: Vec<&Path> = if cmd_ctx.osc_paths.is_empty() {
+            vec![
+                cmd_ctx
+                    .osc_path
+                    .as_deref()
+                    .ok_or_else(|| DevError::Config("OSC path is required but not set".into()))?,
+            ]
+        } else {
+            cmd_ctx
+                .osc_paths
+                .iter()
+                .map(std::path::PathBuf::as_path)
+                .collect()
+        };
+        let mut file_mb = 0.0;
+        let mut basenames = Vec::with_capacity(input_paths.len());
+        for path in input_paths {
+            file_mb += resolve::file_size_mb(path)?;
+            basenames.push(path.file_name().map_or_else(
+                || path.display().to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            ));
+        }
+        Ok((basenames.join(","), file_mb))
+    } else {
+        Ok((
+            cmd_ctx.pbf_basename(),
+            resolve::file_size_mb(&cmd_ctx.pbf_path)?,
+        ))
+    }
 }
 
 /// Hotpath/alloc mode: build with hotpath feature, run via run_hotpath_capture.
@@ -390,16 +462,15 @@ fn run_pbfhogg_hotpath(
             command.id(),
             if alloc { "alloc" } else { "hotpath" }
         ),
-        req.force,        req.stop_marker.map(str::to_owned),
+        req.force,
+        req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
 
     let cmd_ctx =
         build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths, extra_params)?;
 
-    // Read input file size from the resolved PBF in cmd_ctx - correct for both
-    // legacy commands and DiffSnapshots (which resolves a snapshot's PBF).
-    let file_mb = resolve::file_size_mb(&cmd_ctx.pbf_path)?;
+    let (basename, file_mb) = result_input_metadata(command, &cmd_ctx)?;
 
     let mut hotpath_args = command.build_args(&cmd_ctx, ArgMode::Hotpath)?;
     command.prepare_scratch(&cmd_ctx)?;
@@ -414,7 +485,6 @@ fn run_pbfhogg_hotpath(
     output::detail(&format!("{} {feature}", command.id()));
     harness::hotpath_alloc_note(alloc);
 
-    let basename = cmd_ctx.pbf_basename();
     let subprocess_args: Vec<&str> = hotpath_args[1..].iter().map(String::as_str).collect();
 
     // Metadata is reserved for runtime observations post-v13 (cache state,
@@ -458,8 +528,14 @@ fn run_pbfhogg_hotpath(
         Ok((result, sidecar))
     })?;
 
-    promote_artifact(command, &cmd_ctx, ArgMode::Hotpath, &ctx.paths, req.project_root)?;
-    cleanup_output(command, &cmd_ctx, ArgMode::Hotpath);
+    promote_artifact(
+        command,
+        &cmd_ctx,
+        ArgMode::Hotpath,
+        &ctx.paths,
+        req.project_root,
+    )?;
+    cleanup_output(command, &cmd_ctx, ArgMode::Hotpath)?;
 
     Ok(())
 }
@@ -586,8 +662,7 @@ fn resolve_merged_pbf(
     if command.input_kind() != InputKind::PbfAndMerged {
         return Ok(None);
     }
-    let osc = osc_path
-        .ok_or_else(|| DevError::Config("merged PBF requires an OSC file".into()))?;
+    let osc = osc_path.ok_or_else(|| DevError::Config("merged PBF requires an OSC file".into()))?;
     let osc_seq_str = single_osc_seq
         .ok_or_else(|| DevError::Config("merged PBF requires a single OSC seq".into()))?;
     // Snapshot key for the cache key. Different snapshots produce different
@@ -644,12 +719,14 @@ fn build_diff_snapshots_context(
     paths: &config::ResolvedPaths,
     extra_params: &CommandParams,
 ) -> Result<CommandContext, DevError> {
-    let from_str = extra_params.from_snapshot.as_deref().ok_or_else(|| {
-        DevError::Config("diff-snapshots requires --from".into())
-    })?;
-    let to_str = extra_params.to_snapshot.as_deref().ok_or_else(|| {
-        DevError::Config("diff-snapshots requires --to".into())
-    })?;
+    let from_str = extra_params
+        .from_snapshot
+        .as_deref()
+        .ok_or_else(|| DevError::Config("diff-snapshots requires --from".into()))?;
+    let to_str = extra_params
+        .to_snapshot
+        .as_deref()
+        .ok_or_else(|| DevError::Config("diff-snapshots requires --to".into()))?;
 
     let from_ref = resolve::SnapshotRef::parse(from_str)?;
     let to_ref = resolve::SnapshotRef::parse(to_str)?;
@@ -713,9 +790,13 @@ fn promote_artifact(
         return Ok(());
     };
 
-    let scratch_pbf = crate::pbfhogg::commands::scratch_output_path(ctx, command, mode);
+    require_snapshot_output(command)?;
+    let scratch_pbf = crate::pbfhogg::commands::scratch_output_path(ctx, command, mode)?;
     let target_variant = match command {
-        PbfhoggCommand::Degrade { strip_indexdata: true, .. } => "raw",
+        PbfhoggCommand::Degrade {
+            strip_indexdata: true,
+            ..
+        } => "raw",
         _ => "indexed",
     };
     let dataset = paths.datasets.get(&ctx.dataset);
@@ -737,27 +818,29 @@ pub(crate) fn cleanup_output(
     command: &PbfhoggCommand,
     ctx: &CommandContext,
     mode: ArgMode,
-) {
-    // Multi-extract has custom cleanup: output dir + config JSON.
-    if matches!(command, PbfhoggCommand::MultiExtract { .. }) {
-        std::fs::remove_dir_all(ctx.scratch_dir.join("multi-extract")).ok();
-        std::fs::remove_file(ctx.scratch_dir.join("multi-extract-config.json")).ok();
-        return;
-    }
-
+) -> Result<(), DevError> {
     match command.output_kind() {
         OutputKind::ScratchPbf | OutputKind::ScratchOsc => {
             std::fs::remove_file(crate::pbfhogg::commands::scratch_output_path(
                 ctx, command, mode,
-            ))
+            )?)
             .ok();
         }
-        OutputKind::ScratchDir(dir_name) => {
-            let path = ctx.scratch_dir.join(format!("{dir_name}-{}", ctx.dataset));
-            std::fs::remove_dir_all(path).ok();
+        OutputKind::ScratchDir { .. } => {
+            std::fs::remove_dir_all(crate::pbfhogg::commands::scratch_output_path(
+                ctx, command, mode,
+            )?)
+            .ok();
         }
         OutputKind::None => {}
     }
+    if matches!(command, PbfhoggCommand::MultiExtract { .. }) {
+        std::fs::remove_file(crate::pbfhogg::commands::multi_extract_config_path(
+            &ctx.scratch_dir,
+        ))
+        .ok();
+    }
+    Ok(())
 }
 
 /// State of the merged-PBF cache after `ensure_merged_pbf` returns.
@@ -827,9 +910,8 @@ pub(crate) fn ensure_merged_pbf(
         output::bench_msg(&format!(
             "force-rebuilding merged PBF (cache nuked by measured mode): {merged_name}"
         ));
-        std::fs::remove_file(&merged_path).map_err(|e| {
-            DevError::Config(format!("failed to remove cached merged PBF: {e}"))
-        })?;
+        std::fs::remove_file(&merged_path)
+            .map_err(|e| DevError::Config(format!("failed to remove cached merged PBF: {e}")))?;
     }
 
     if merged_path.exists() {

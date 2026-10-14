@@ -79,11 +79,7 @@ impl ArtefactDir {
     /// a config error rather than silently mangled - the test_id is
     /// almost always derived from a script filename, and a malformed
     /// one points at a real bug upstream.
-    pub fn allocate(
-        parent: &Path,
-        test_id: &str,
-        keep_on_success: bool,
-    ) -> Result<Self, DevError> {
+    pub fn allocate(parent: &Path, test_id: &str, keep_on_success: bool) -> Result<Self, DevError> {
         validate_test_id(test_id)?;
 
         let test_dir = parent.join(test_id);
@@ -91,7 +87,9 @@ impl ArtefactDir {
 
         let n = highest_run_number(&test_dir)?
             .checked_add(1)
-            .ok_or_else(|| DevError::Config(format!("{}: run numbers exhausted", test_dir.display())))?;
+            .ok_or_else(|| {
+                DevError::Config(format!("{}: run numbers exhausted", test_dir.display()))
+            })?;
         Self::create(&test_dir, n, keep_on_success)
     }
 
@@ -108,7 +106,9 @@ impl ArtefactDir {
     ) -> Result<Self, DevError> {
         validate_test_id(test_id)?;
         if n < 1 {
-            return Err(DevError::Config(format!("artefact run number must be positive (got {n})")));
+            return Err(DevError::Config(format!(
+                "artefact run number must be positive (got {n})"
+            )));
         }
         let test_dir = parent.join(test_id);
         fs::create_dir_all(&test_dir)?;
@@ -182,10 +182,7 @@ fn validate_test_id(test_id: &str) -> Result<(), DevError> {
             "artefact test_id must not start with '.' (got {test_id:?})"
         )));
     }
-    if test_id.contains('/')
-        || test_id.contains('\\')
-        || test_id.contains('\0')
-    {
+    if test_id.contains('/') || test_id.contains('\\') || test_id.contains('\0') {
         return Err(DevError::Config(format!(
             "artefact test_id must be a single path component, no separators (got {test_id:?})"
         )));
@@ -327,7 +324,15 @@ mod tests {
     #[test]
     fn rejects_separators_and_traversal() {
         let parent = tmpdir("artefacts_validate");
-        for bad in ["", ".", "..", ".hidden", "with/slash", "with\\back", "with\0null"] {
+        for bad in [
+            "",
+            ".",
+            "..",
+            ".hidden",
+            "with/slash",
+            "with\\back",
+            "with\0null",
+        ] {
             let result = ArtefactDir::allocate(&parent, bad, false);
             assert!(
                 matches!(result, Err(DevError::Config(_))),

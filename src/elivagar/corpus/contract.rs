@@ -143,7 +143,10 @@ mod tests {
 
     #[test]
     fn extract_contract_names_every_no_contract_case() {
-        assert!(matches!(extract_contract("not json"), ContractState::Invalid));
+        assert!(matches!(
+            extract_contract("not json"),
+            ContractState::Invalid
+        ));
         assert!(matches!(extract_contract("{}"), ContractState::Absent));
         assert!(matches!(
             extract_contract(r#"{"elivagar": 7}"#),

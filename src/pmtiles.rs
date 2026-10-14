@@ -304,8 +304,8 @@ impl ZoomStats {
 /// script could not tell a stats run from a failed one).
 #[allow(clippy::too_many_lines)]
 pub fn run(path: &str) -> Result<(), DevError> {
-    let (header, all_entries) = read_all_entries(Path::new(path))
-        .map_err(|e| DevError::Config(format!("{path}: {e}")))?;
+    let (header, all_entries) =
+        read_all_entries(Path::new(path)).map_err(|e| DevError::Config(format!("{path}: {e}")))?;
 
     // Compute per-zoom statistics.
     let mut zoom_stats: HashMap<u8, ZoomStats> = HashMap::new();
@@ -508,11 +508,14 @@ fn read_range(file: &mut File, offset: u64, length: u64) -> Result<Vec<u8>, DevE
     let in_bounds = offset
         .checked_add(length)
         .is_some_and(|end| end <= file_len);
-    let len = usize::try_from(length).ok().filter(|_| in_bounds).ok_or_else(|| {
-        corrupt(&format!(
-            "range {offset}+{length} exceeds the file's {file_len} bytes"
-        ))
-    })?;
+    let len = usize::try_from(length)
+        .ok()
+        .filter(|_| in_bounds)
+        .ok_or_else(|| {
+            corrupt(&format!(
+                "range {offset}+{length} exceeds the file's {file_len} bytes"
+            ))
+        })?;
     file.seek(SeekFrom::Start(offset))?;
     let mut buf = vec![0u8; len];
     file.read_exact(&mut buf)?;

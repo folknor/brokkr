@@ -244,7 +244,8 @@ fn migrate(conn: &Connection) -> Result<(), DevError> {
 }
 
 fn has_column(conn: &Connection, table: &str, column: &str) -> bool {
-    conn.prepare(&format!("SELECT {column} FROM {table} LIMIT 0")).is_ok()
+    conn.prepare(&format!("SELECT {column} FROM {table} LIMIT 0"))
+        .is_ok()
 }
 
 #[cfg(test)]

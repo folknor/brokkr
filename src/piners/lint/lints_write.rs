@@ -68,9 +68,12 @@ fn sync_section(
         parent.set_implicit(true);
         doc.insert(name, Item::Table(parent));
     }
-    let parent = doc.get_mut(name).and_then(Item::as_table_mut).ok_or_else(|| {
-        DevError::Config(format!("piners lint: lints.toml: [{name}] is not a table"))
-    })?;
+    let parent = doc
+        .get_mut(name)
+        .and_then(Item::as_table_mut)
+        .ok_or_else(|| {
+            DevError::Config(format!("piners lint: lints.toml: [{name}] is not a table"))
+        })?;
     let stale: Vec<String> = parent
         .iter()
         .map(|(k, _)| k.to_owned())
@@ -85,11 +88,14 @@ fn sync_section(
             fresh.decor_mut().set_prefix("\n");
             parent.insert(key, Item::Table(fresh));
         }
-        let table = parent.get_mut(key).and_then(Item::as_table_mut).ok_or_else(|| {
-            DevError::Config(format!(
-                "piners lint: lints.toml: [{name}.{key}] is not a table"
-            ))
-        })?;
+        let table = parent
+            .get_mut(key)
+            .and_then(Item::as_table_mut)
+            .ok_or_else(|| {
+                DevError::Config(format!(
+                    "piners lint: lints.toml: [{name}.{key}] is not a table"
+                ))
+            })?;
         fill(table, entry)?;
     }
     Ok(())
@@ -97,7 +103,11 @@ fn sync_section(
 
 /// Stamp a `[probes.<id>]` entry's fields in place.
 fn fill_probe(table: &mut Table, pin: &LintPin) -> Result<(), DevError> {
-    sync_opt(table, "expected", pin.expected.as_deref().map(Value::from));
+    sync_opt(
+        table,
+        "expected",
+        pin.expected.map(|expected| Value::from(expected.as_str())),
+    );
     sync_opt(
         table,
         "expected_scope",
@@ -268,7 +278,7 @@ mod tests {
     fn fresh_render_is_canonical_and_round_trips() {
         let mut probes = BTreeMap::new();
         let alpha = LintPin {
-            expected: Some("agree_flagged".to_owned()),
+            expected: Some(crate::piners::lint::PinnableDisposition::AgreeFlagged),
             expected_scope: None,
             tv_anchored_at: Some("2026-06-22T14:03:00Z".to_owned()),
             tv_scope: Some("errors+warnings/syntax".to_owned()),
@@ -288,7 +298,7 @@ mod tests {
         };
         probes.insert("unterminated-01".to_owned(), alpha);
         let mut beta = pin("clean-01", "bb");
-        beta.expected = Some("agree_clean".to_owned());
+        beta.expected = Some(crate::piners::lint::PinnableDisposition::AgreeClean);
         probes.insert("clean-01".to_owned(), beta);
 
         let text = render_lints(None, &probes).unwrap();
@@ -296,7 +306,8 @@ mod tests {
         // No leading blank line; probes in BTreeMap order; blank between blocks.
         assert!(text.starts_with("[probes.clean-01]"));
         assert!(
-            text.find("[probes.clean-01]").unwrap() < text.find("[probes.unterminated-01]").unwrap()
+            text.find("[probes.clean-01]").unwrap()
+                < text.find("[probes.unterminated-01]").unwrap()
         );
         assert!(text.contains("\n\n[probes.unterminated-01]"));
         // Contract fields precede the volatile hash.
@@ -306,7 +317,10 @@ mod tests {
 
         let data = reparse(&text);
         let a = &data.probes["unterminated-01"];
-        assert_eq!(a.expected.as_deref(), Some("agree_flagged"));
+        assert_eq!(
+            a.expected,
+            Some(crate::piners::lint::PinnableDisposition::AgreeFlagged)
+        );
         assert_eq!(a.tv_anchored_at.as_deref(), Some("2026-06-22T14:03:00Z"));
         assert_eq!(a.tv_scope.as_deref(), Some("errors+warnings/syntax"));
         assert_eq!(a.expected_scope, None);
@@ -314,7 +328,10 @@ mod tests {
         assert_eq!(a.tv[0].col, Some(8));
         assert_eq!(a.tv[1].col, None);
         assert_eq!(a.pine.xxh128, "aa");
-        assert_eq!(data.probes["clean-01"].expected.as_deref(), Some("agree_clean"));
+        assert_eq!(
+            data.probes["clean-01"].expected,
+            Some(crate::piners::lint::PinnableDisposition::AgreeClean)
+        );
     }
 
     const COMMENTED: &str = "\
@@ -333,7 +350,7 @@ pine = { path = \"lint/zulu-09.pine\", xxh128 = \"zz\" }
     fn restamp_preserves_comments_and_updates_values() {
         let mut probes = BTreeMap::new();
         let mut alpha = pin("alpha-01", "a-new"); // hash bumped by a reseed
-        alpha.expected = Some("agree_flagged".to_owned());
+        alpha.expected = Some(crate::piners::lint::PinnableDisposition::AgreeFlagged);
         probes.insert("alpha-01".to_owned(), alpha);
         probes.insert("mid-05".to_owned(), pin("mid-05", "mm")); // newly discovered
         // zulu-09 vanished from the corpus.

@@ -77,17 +77,28 @@ static FAILED: Mutex<Option<(String, Option<&'static str>)>> = Mutex::new(None);
 /// Install the project's `[cargo_env]` entries. Called by project detection;
 /// detection of one checkout installs the same entries however often it runs.
 pub fn install(entries: &BTreeMap<String, String>) {
-    let mut reg = REGISTRY.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    *reg = entries.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let mut reg = REGISTRY
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *reg = entries
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
 }
 
 fn snapshot() -> Vec<(String, String)> {
-    REGISTRY.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    REGISTRY
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
 }
 
 /// The phase a recorded failure happened in, if one is recorded.
 pub fn failure() -> Option<(String, Option<&'static str>)> {
-    FAILED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    FAILED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
 }
 
 /// The command's result with any recorded failure folded in: a run that
@@ -170,7 +181,9 @@ const REPORTED: &str = "cargo_env failed";
 /// the error cannot lose it and one that reports it cannot repeat it - and
 /// return the error for this spawn.
 fn record(message: String) -> DevError {
-    let mut failed = FAILED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut failed = FAILED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if failed.is_none() {
         output::error(&format!("cargo_env: {message}"));
         *failed = Some((message, crate::check_cmd::current_phase()));
@@ -183,8 +196,22 @@ fn fmt_ms(d: Duration) -> String {
 }
 
 /// Subcommands that run no build script, and so get no evaluation.
-const NO_BUILD: &[&str] =
-    &["metadata", "clean", "tree", "locate-project", "pkgid", "version", "help", "fmt", "search", "owner", "login", "logout", "read-manifest", "verify-project"];
+const NO_BUILD: &[&str] = &[
+    "metadata",
+    "clean",
+    "tree",
+    "locate-project",
+    "pkgid",
+    "version",
+    "help",
+    "fmt",
+    "search",
+    "owner",
+    "login",
+    "logout",
+    "read-manifest",
+    "verify-project",
+];
 
 /// Cargo's global options that take a value as the next argument.
 const GLOBAL_WITH_VALUE: &[&str] = &["--config", "-Z", "-C", "--color", "--explain"];
@@ -231,14 +258,26 @@ fn needs_evaluation(args: &[&str]) -> bool {
 
 /// A cargo config `[env]` entry naming a configured variable, in the chain
 /// this invocation reads or a `--config` it was given.
-fn config_conflict(names: &[&str], cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Option<String> {
+fn config_conflict(
+    names: &[&str],
+    cwd: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> Option<String> {
     let names_in = |doc: &toml::Table| -> Option<String> {
         let table = doc.get("env")?.as_table()?;
-        names.iter().find(|n| table.contains_key(**n)).map(|n| (*n).to_owned())
+        names
+            .iter()
+            .find(|n| table.contains_key(**n))
+            .map(|n| (*n).to_owned())
     };
     for path in crate::rustflags::config_paths_under(cwd, env) {
-        let Ok(text) = std::fs::read_to_string(&path) else { continue };
-        let Ok(doc) = text.parse::<toml::Table>() else { continue };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(doc) = text.parse::<toml::Table>() else {
+            continue;
+        };
         if let Some(name) = names_in(&doc) {
             return Some(conflict_message(&name, &path.display().to_string()));
         }
@@ -257,11 +296,16 @@ fn config_conflict(names: &[&str], cwd: &Path, args: &[&str], env: &[(&str, &str
         if let Some(v) = value {
             let file = cwd.join(v);
             if file.is_file() {
-                let doc = std::fs::read_to_string(&file).ok().and_then(|t| t.parse::<toml::Table>().ok());
+                let doc = std::fs::read_to_string(&file)
+                    .ok()
+                    .and_then(|t| t.parse::<toml::Table>().ok());
                 if let Some(name) = doc.as_ref().and_then(names_in) {
                     return Some(conflict_message(&name, &file.display().to_string()));
                 }
-            } else if let Some(name) = names.iter().find(|n| v.trim_start().starts_with(&format!("env.{n}"))) {
+            } else if let Some(name) = names
+                .iter()
+                .find(|n| v.trim_start().starts_with(&format!("env.{n}")))
+            {
                 return Some(conflict_message(name, &format!("--config {v}")));
             }
         }
@@ -326,7 +370,13 @@ fn kill_group(pgid: u32) {
 }
 
 /// Run one entry's command and return its value.
-fn evaluate(command: &str, cwd: &Path, env: &[(&str, &str)], names: &[&str]) -> Result<String, Failure> {
+#[allow(clippy::too_many_lines)] // spawn, bounded drain, then each failure shape in turn
+fn evaluate(
+    command: &str,
+    cwd: &Path,
+    env: &[(&str, &str)],
+    names: &[&str],
+) -> Result<String, Failure> {
     use std::os::unix::process::CommandExt;
 
     let mut cmd = Command::new("sh");
@@ -343,12 +393,16 @@ fn evaluate(command: &str, cwd: &Path, env: &[(&str, &str)], names: &[&str]) -> 
         cmd.env_remove(n);
     }
     crate::hold::stamp(&mut cmd);
-    let mut child = cmd.spawn().map_err(|e| Failure::Failed(format!("could not be started: {e}")))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| Failure::Failed(format!("could not be started: {e}")))?;
     let pgid = child.id();
     let (Some(out_pipe), Some(err_pipe)) = (child.stdout.take(), child.stderr.take()) else {
         kill_group(pgid);
         child.wait().ok();
-        return Err(Failure::Failed("could not be read (no output pipes)".into()));
+        return Err(Failure::Failed(
+            "could not be read (no output pipes)".into(),
+        ));
     };
     let out = drain(out_pipe, STDOUT_LIMIT);
     let err = drain(err_pipe, STDERR_LIMIT);
@@ -384,12 +438,18 @@ fn evaluate(command: &str, cwd: &Path, env: &[(&str, &str)], names: &[&str]) -> 
 
     let stderr_text = match err.recv_timeout(DRAIN_GRACE) {
         Ok(Drained::Done(b)) => printable(&b),
-        Ok(Drained::Overflow(b)) => format!("{} [stderr cut at {STDERR_LIMIT} bytes]", printable(&b)),
+        Ok(Drained::Overflow(b)) => {
+            format!("{} [stderr cut at {STDERR_LIMIT} bytes]", printable(&b))
+        }
         Ok(Drained::Error(e)) => format!("[stderr could not be read: {e}]"),
         Err(_) => "[stderr did not close]".to_owned(),
     };
     let with_stderr = |why: String| {
-        if stderr_text.trim().is_empty() { why } else { format!("{why}; stderr:\n{}", stderr_text.trim_end()) }
+        if stderr_text.trim().is_empty() {
+            why
+        } else {
+            format!("{why}; stderr:\n{}", stderr_text.trim_end())
+        }
     };
     if let Some(why) = stopped {
         return Err(Failure::Failed(with_stderr(why.to_owned())));
@@ -397,10 +457,20 @@ fn evaluate(command: &str, cwd: &Path, env: &[(&str, &str)], names: &[&str]) -> 
     let stdout = match out.recv_timeout(DRAIN_GRACE) {
         Ok(Drained::Done(b)) => b,
         Ok(Drained::Overflow(_)) => {
-            return Err(Failure::Failed(with_stderr(format!("printed more than {STDOUT_LIMIT} bytes"))));
+            return Err(Failure::Failed(with_stderr(format!(
+                "printed more than {STDOUT_LIMIT} bytes"
+            ))));
         }
-        Ok(Drained::Error(e)) => return Err(Failure::Failed(with_stderr(format!("output could not be read: {e}")))),
-        Err(_) => return Err(Failure::Failed(with_stderr("output did not close after it exited".into()))),
+        Ok(Drained::Error(e)) => {
+            return Err(Failure::Failed(with_stderr(format!(
+                "output could not be read: {e}"
+            ))));
+        }
+        Err(_) => {
+            return Err(Failure::Failed(with_stderr(
+                "output did not close after it exited".into(),
+            )));
+        }
     };
     match status {
         Some(s) if s.success() => {}
@@ -408,7 +478,9 @@ fn evaluate(command: &str, cwd: &Path, env: &[(&str, &str)], names: &[&str]) -> 
         None => return Err(Failure::Failed(with_stderr("did not finish".into()))),
     }
     let Ok(text) = String::from_utf8(stdout) else {
-        return Err(Failure::Failed(with_stderr("printed something that is not UTF-8".into())));
+        return Err(Failure::Failed(with_stderr(
+            "printed something that is not UTF-8".into(),
+        )));
     };
     let value = text.trim();
     if value.is_empty() {
@@ -416,7 +488,8 @@ fn evaluate(command: &str, cwd: &Path, env: &[(&str, &str)], names: &[&str]) -> 
     }
     if value.chars().any(char::is_control) {
         return Err(Failure::Failed(with_stderr(
-            "printed more than one line, or a control character - the value must be one line".into(),
+            "printed more than one line, or a control character - the value must be one line"
+                .into(),
         )));
     }
     Ok(value.to_owned())
@@ -427,7 +500,13 @@ fn evaluate(command: &str, cwd: &Path, env: &[(&str, &str)], names: &[&str]) -> 
 fn printable(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes)
         .chars()
-        .map(|c| if c.is_control() && c != '\n' && c != '\t' { '?' } else { c })
+        .map(|c| {
+            if c.is_control() && c != '\n' && c != '\t' {
+                '?'
+            } else {
+                c
+            }
+        })
         .collect()
 }
 
@@ -442,7 +521,12 @@ mod tests {
         assert!(needs_evaluation(&["build", "-p", "x"]));
         assert!(needs_evaluation(&["+nightly", "clippy", "--all-targets"]));
         assert!(needs_evaluation(&["--config", "x=1", "test"]));
-        assert!(!needs_evaluation(&["metadata", "--no-deps", "--format-version", "1"]));
+        assert!(!needs_evaluation(&[
+            "metadata",
+            "--no-deps",
+            "--format-version",
+            "1"
+        ]));
         assert!(!needs_evaluation(&["--config", "x=1", "metadata"]));
         assert!(!needs_evaluation(&["clean", "-p", "x"]));
         assert!(!needs_evaluation(&["--version"]));
@@ -458,7 +542,12 @@ mod tests {
     #[test]
     fn a_value_is_one_trimmed_line() {
         let dir = crate::test_scratch::scratch("cargo_env", "value");
-        assert_eq!(evaluate("printf '  abc123 \\n'", &dir, &[], &[]).ok().unwrap(), "abc123");
+        assert_eq!(
+            evaluate("printf '  abc123 \\n'", &dir, &[], &[])
+                .ok()
+                .unwrap(),
+            "abc123"
+        );
         let fails = |cmd: &str| match evaluate(cmd, &dir, &[], &[]) {
             Err(Failure::Failed(why)) => why,
             _ => panic!("{cmd} should fail"),
@@ -472,15 +561,36 @@ mod tests {
     #[test]
     fn the_evaluator_never_sees_a_configured_name() {
         let dir = crate::test_scratch::scratch("cargo_env", "names");
-        let got = evaluate("printf '%s' \"${FX_ID:-unset}\"", &dir, &[("FX_ID", "stale")], &["FX_ID"]);
+        let got = evaluate(
+            "printf '%s' \"${FX_ID:-unset}\"",
+            &dir,
+            &[("FX_ID", "stale")],
+            &["FX_ID"],
+        );
         assert_eq!(got.ok().unwrap(), "unset");
     }
 
     #[test]
     fn a_cargo_config_env_entry_conflicts() {
         let dir = crate::test_scratch::scratch("cargo_env", "conflict");
-        assert!(config_conflict(&["FX_ID"], &dir, &["--config", "env.FX_ID=\"x\"", "build"], &[]).is_some());
-        assert!(config_conflict(&["FX_ID"], &dir, &["--config", "env.OTHER=\"x\"", "build"], &[]).is_none());
+        assert!(
+            config_conflict(
+                &["FX_ID"],
+                &dir,
+                &["--config", "env.FX_ID=\"x\"", "build"],
+                &[]
+            )
+            .is_some()
+        );
+        assert!(
+            config_conflict(
+                &["FX_ID"],
+                &dir,
+                &["--config", "env.OTHER=\"x\"", "build"],
+                &[]
+            )
+            .is_none()
+        );
         std::fs::create_dir_all(dir.join(".cargo")).unwrap();
         std::fs::write(dir.join(".cargo/config.toml"), "[env]\nFX_ID = \"x\"\n").unwrap();
         assert!(config_conflict(&["FX_ID"], &dir, &["build"], &[]).is_some());

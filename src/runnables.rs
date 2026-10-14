@@ -213,7 +213,11 @@ fn resolve_target<'a>(
             let matches: Vec<&Runnable> = runnables.iter().filter(|r| r.name == n).collect();
             match matches.as_slice() {
                 [] => {
-                    let origin = if name.is_none() { " ([bin] default)" } else { "" };
+                    let origin = if name.is_none() {
+                        " ([bin] default)"
+                    } else {
+                        ""
+                    };
                     return Err(DevError::Refused(format!(
                         "no bin or example target named '{n}'{origin}; bare \
                          `brokkr run` lists what exists"
@@ -330,7 +334,11 @@ pub fn cmd_run_commit(
         features: feat.features.to_vec(),
         default_features: !feat.no_default,
         all_features: feat.all,
-        profile: if resolve_debug(cfg, debug, release) { "dev" } else { "release" },
+        profile: if resolve_debug(cfg, debug, release) {
+            "dev"
+        } else {
+            "release"
+        },
     };
     let exe = crate::build::cargo_build(&build, worktree)?;
     let exe_str = exe.display().to_string();
@@ -426,12 +434,11 @@ pub fn cmd_install(
                 [] => {
                     return Err(DevError::Refused(
                         "no bin targets in this workspace - nothing to install".into(),
-                    ))
+                    ));
                 }
                 [_] => pkgs,
                 many => {
-                    let mut msg =
-                        format!("{} packages carry bin targets:\n", many.len());
+                    let mut msg = format!("{} packages carry bin targets:\n", many.len());
                     for r in many {
                         msg.push_str(&format!("  {}\n", r.package));
                     }
@@ -524,7 +531,15 @@ mod tests {
 
     #[test]
     fn named_run_is_untouched() {
-        let argv = ["brokkr", "run", "--release", "bench", "--", "--threads", "1"];
+        let argv = [
+            "brokkr",
+            "run",
+            "--release",
+            "bench",
+            "--",
+            "--threads",
+            "1",
+        ];
         assert_eq!(rewrite(&argv), argv.to_vec());
     }
 
@@ -547,8 +562,12 @@ mod tests {
     #[test]
     fn commit_value_does_not_end_the_scan() {
         assert_eq!(
-            rewrite(&["brokkr", "run", "--commit", "a5cc1f8", "--", "--preset", "mtf"]),
-            vec!["brokkr", "run", "--commit", "a5cc1f8", NO_NAME, "--preset", "mtf"]
+            rewrite(&[
+                "brokkr", "run", "--commit", "a5cc1f8", "--", "--preset", "mtf"
+            ]),
+            vec![
+                "brokkr", "run", "--commit", "a5cc1f8", NO_NAME, "--preset", "mtf"
+            ]
         );
     }
 

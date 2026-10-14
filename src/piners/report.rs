@@ -155,14 +155,24 @@ where
 }
 
 /// The acceptance tiers a `parity` outcome may carry.
-pub const PARITY_TIERS: [&str; 4] = ["byte_exact", "accepted", "actionable_drift", "count_divergent"];
+pub const PARITY_TIERS: [&str; 4] = [
+    "byte_exact",
+    "accepted",
+    "actionable_drift",
+    "count_divergent",
+];
 
 /// The outcomes other than `parity`; each is its own gate label and carries
 /// no acceptance tier. `harness_abort` is the harness supervisor's verdict on
 /// a probe process that died or replied with no complete record set: a
 /// break, pinnable like `runtime_fail`.
-pub const NON_PARITY_OUTCOMES: [&str; 5] =
-    ["compile_fail", "runtime_fail", "no_tv_data", "no_overlap", "harness_abort"];
+pub const NON_PARITY_OUTCOMES: [&str; 5] = [
+    "compile_fail",
+    "runtime_fail",
+    "no_tv_data",
+    "no_overlap",
+    "harness_abort",
+];
 
 /// The crash label. Its lines stay visible even when pinned, and a run that
 /// carries one is no performance sample.
@@ -453,7 +463,10 @@ impl HarnessReport {
     /// collapsed. Such a probe is never scored and never satisfies a pin,
     /// whatever its retained line says.
     pub fn tainted(&self) -> HashSet<&str> {
-        self.invalid.iter().filter_map(|r| r.probe.as_deref()).collect()
+        self.invalid
+            .iter()
+            .filter_map(|r| r.probe.as_deref())
+            .collect()
     }
 
     /// Collapse repeated records to the last one emitted, returning a
@@ -599,7 +612,12 @@ pub fn parse(stdout: &[u8]) -> HarnessReport {
             && CONTRACT_KINDS.contains(&kind)
         {
             let kind = kind.to_owned();
-            report.contract.push(ContractLine { line: position, physical, kind, value });
+            report.contract.push(ContractLine {
+                line: position,
+                physical,
+                kind,
+                value,
+            });
             continue;
         }
 
@@ -702,8 +720,11 @@ fn clip(line: &str) -> String {
 pub fn summarize(probes: &[ProbeLine]) -> Summary {
     let mut s = Summary::default();
     for p in probes {
-        match p.outcome.as_str() {
-            "parity" => {
+        // The summary normally receives the reconciliation's scored set.
+        // Keep its classification tied to the record validator as well, so
+        // malformed raw outcomes cannot enter a disposition total directly.
+        match (p.outcome.as_str(), p.valid_disposition()) {
+            ("parity", Some(_)) => {
                 s.parity += 1;
                 match p.count_tier.as_deref() {
                     Some("exact") => s.exact += 1,
@@ -721,11 +742,11 @@ pub fn summarize(probes: &[ProbeLine]) -> Summary {
                     }
                 }
             }
-            "compile_fail" => s.compile_fail += 1,
-            "runtime_fail" => s.runtime_fail += 1,
-            "no_tv_data" => s.no_tv_data += 1,
-            "no_overlap" => s.no_overlap += 1,
-            HARNESS_ABORT => s.harness_abort += 1,
+            (_, Some("compile_fail")) => s.compile_fail += 1,
+            (_, Some("runtime_fail")) => s.runtime_fail += 1,
+            (_, Some("no_tv_data")) => s.no_tv_data += 1,
+            (_, Some("no_overlap")) => s.no_overlap += 1,
+            (_, Some(HARNESS_ABORT)) => s.harness_abort += 1,
             _ => s.other += 1,
         }
         // Window-boundary discounting is orthogonal to outcome: tally it for
@@ -830,9 +851,22 @@ struct RenderPlan<'a> {
 
 impl<'a> RenderPlan<'a> {
     fn new(report: &'a HarnessReport, scored: &HashSet<&str>, deviating: &HashSet<&str>) -> Self {
-        let mut plan = RenderPlan { shown: Vec::new(), hidden: 0, scored: Vec::new() };
-        for p in report.probes.iter().filter(|p| scored.contains(p.probe.as_str())) {
-            if deviating.contains(p.probe.as_str()) || p.outcome == HARNESS_ABORT {
+        let mut plan = RenderPlan {
+            shown: Vec::new(),
+            hidden: 0,
+            scored: Vec::new(),
+        };
+        for p in report
+            .probes
+            .iter()
+            .filter(|p| scored.contains(p.probe.as_str()))
+        {
+            // Production supplies the reconciliation's valid selected ids,
+            // which already excludes malformed records. Recheck the shared
+            // validator here so the special crash display cannot key off a
+            // raw outcome if that caller contract ever changes.
+            if deviating.contains(p.probe.as_str()) || p.valid_disposition() == Some(HARNESS_ABORT)
+            {
                 plan.shown.push(p);
             } else {
                 plan.hidden += 1;
@@ -889,8 +923,14 @@ pub fn render(
     if summary.boundary_probes > 0 {
         output::corpus_msg(&format!(
             "boundary artifacts: {}, {} discounted (effective parity scored on the interior)",
-            output::count(usize::try_from(summary.boundary_probes).unwrap_or(usize::MAX), "probe"),
-            output::count(usize::try_from(summary.boundary_trades).unwrap_or(usize::MAX), "trade")
+            output::count(
+                usize::try_from(summary.boundary_probes).unwrap_or(usize::MAX),
+                "probe"
+            ),
+            output::count(
+                usize::try_from(summary.boundary_trades).unwrap_or(usize::MAX),
+                "trade"
+            )
         ));
     }
 
@@ -993,9 +1033,8 @@ fn format_summary(s: &Summary, reconciliation: &str) -> String {
 /// Assert at compile time that brokkr models every disposition label the
 /// gate can pin: the four acceptance tiers plus the five non-parity
 /// outcomes. If `registry` grows a label, the summary tally above must too.
-const _: () = assert!(
-    registry::DISPOSITION_LABELS.len() == PARITY_TIERS.len() + NON_PARITY_OUTCOMES.len()
-);
+const _: () =
+    assert!(registry::DISPOSITION_LABELS.len() == PARITY_TIERS.len() + NON_PARITY_OUTCOMES.len());
 
 #[cfg(test)]
 mod tests {
@@ -1011,7 +1050,10 @@ mod tests {
 "#;
         let r = parse(nd);
         assert_eq!(r.probes.len(), 3); // legacy summary line skipped
-        assert_eq!(r.probes[1].signature.as_ref().unwrap().dimension, "exit_price");
+        assert_eq!(
+            r.probes[1].signature.as_ref().unwrap().dimension,
+            "exit_price"
+        );
         assert_eq!(r.probes[1].dense_na_sites[0].name, "strategy.exit");
         assert_eq!(r.probes[2].error.as_deref(), Some("unexpected token"));
     }
@@ -1106,7 +1148,10 @@ mod tests {
         assert_eq!(r.probes.len(), 1); // only the disposition line
         assert_eq!(r.probes[0].probe, "p1");
         assert_eq!(r.trade_diffs.len(), 2); // both drill-down records collected
-        assert_eq!(r.trade_diffs[0].tv_exit_signal.as_deref(), Some("mid-bar stop"));
+        assert_eq!(
+            r.trade_diffs[0].tv_exit_signal.as_deref(),
+            Some("mid-bar stop")
+        );
         assert_eq!(r.trade_diffs[1].our_index, 2);
         assert!(r.trade_diffs[1].tv_pnl.is_none()); // omitted leg -> None
         assert!(r.trade_diffs[1].entry_price_delta.is_none());
@@ -1126,7 +1171,10 @@ mod tests {
         );
         assert_eq!((r.probes[0].ours_only, r.probes[0].boundary_ours), (2, 2));
         assert_eq!((r.probes[0].tv_only, r.probes[0].boundary_tv), (1, 1));
-        assert_eq!((r.probes[0].effective_ours(), r.probes[0].effective_tv()), (0, 0));
+        assert_eq!(
+            (r.probes[0].effective_ours(), r.probes[0].effective_tv()),
+            (0, 0)
+        );
         assert!(r.probes[0].has_boundary_discount());
         // Absent fields default to 0 -> no discount, effective == raw.
         assert!(!r.probes[1].has_boundary_discount());
@@ -1249,7 +1297,11 @@ mod tests {
         assert_eq!(r.probes.len(), 1);
         assert_eq!(r.invalid.len(), 3);
         assert_eq!(r.invalid[0].probe, None);
-        assert!(r.invalid[0].reason.starts_with("not JSON"), "{:?}", r.invalid[0]);
+        assert!(
+            r.invalid[0].reason.starts_with("not JSON"),
+            "{:?}",
+            r.invalid[0]
+        );
         assert!(r.invalid[0].reason.contains("panicked"));
         assert_eq!(r.invalid[1].probe.as_deref(), Some("a"));
         // A disposition line with no probe id cannot be attributed.
@@ -1275,7 +1327,11 @@ mod tests {
     fn harness_abort_is_a_valid_label_and_the_lists_match_the_registry() {
         assert_eq!(valid_label("harness_abort", None), Some("harness_abort"));
         assert_eq!(valid_label("harness_abort", Some("accepted")), None);
-        let joined: Vec<&str> = PARITY_TIERS.iter().chain(NON_PARITY_OUTCOMES.iter()).copied().collect();
+        let joined: Vec<&str> = PARITY_TIERS
+            .iter()
+            .chain(NON_PARITY_OUTCOMES.iter())
+            .copied()
+            .collect();
         assert_eq!(joined, registry::DISPOSITION_LABELS.to_vec());
     }
 
@@ -1288,9 +1344,16 @@ mod tests {
 {\"kind\":\"future\",\"x\":1}\n\
 {\"kind\":\"run_end\",\"version\":\"1\",\"exit\":1}",
         );
-        let kinds: Vec<(&str, usize)> = r.contract.iter().map(|c| (c.kind.as_str(), c.line)).collect();
+        let kinds: Vec<(&str, usize)> = r
+            .contract
+            .iter()
+            .map(|c| (c.kind.as_str(), c.line))
+            .collect();
         // A missing or malformed version is still recognised; the unknown kind is not.
-        assert_eq!(kinds, vec![("setup_stage", 1), ("probe_start", 2), ("run_end", 5)]);
+        assert_eq!(
+            kinds,
+            vec![("setup_stage", 1), ("probe_start", 2), ("run_end", 5)]
+        );
         assert_eq!(r.probes[0].line, 3);
         assert_eq!(r.last_line, Some(5));
         assert!(r.unterminated);
@@ -1312,14 +1375,25 @@ mod tests {
         // is not a summary either - it is an unparsable disposition.
         assert_eq!(r.invalid.len(), 2, "{:?}", r.invalid);
         assert_eq!(r.invalid[0].probe.as_deref(), Some("a"));
-        assert!(r.invalid[1].reason.starts_with("unparsable disposition line"));
+        assert!(
+            r.invalid[1]
+                .reason
+                .starts_with("unparsable disposition line")
+        );
     }
 
     #[test]
     fn run_start_is_recognised_with_its_physical_line() {
         let r = parse(b"\n{\"kind\":\"run_start\",\"version\":1}\n");
         assert_eq!(r.contract.len(), 1);
-        assert_eq!((r.contract[0].kind.as_str(), r.contract[0].line, r.contract[0].physical), ("run_start", 1, 2));
+        assert_eq!(
+            (
+                r.contract[0].kind.as_str(),
+                r.contract[0].line,
+                r.contract[0].physical
+            ),
+            ("run_start", 1, 2)
+        );
     }
 
     #[test]
@@ -1366,7 +1440,29 @@ mod tests {
         assert_eq!(s.harness_abort, 1);
         assert!(format_summary(&s, "x").contains("harness_abort=1"));
         // Breakdown examples sort by id whatever the arrival order.
-        assert_eq!(root_cause_breakdown(&r.probes)[0].examples, vec!["b".to_owned(), "m".to_owned()]);
+        assert_eq!(
+            root_cause_breakdown(&r.probes)[0].examples,
+            vec!["b".to_owned(), "m".to_owned()]
+        );
+    }
+
+    #[test]
+    fn malformed_harness_abort_does_not_enter_the_summary_total() {
+        let r =
+            parse(br#"{"probe":"a","outcome":"harness_abort","acceptance":{"tier":"accepted"}}"#);
+        let summary = summarize(&r.probes);
+        assert_eq!(summary.harness_abort, 0);
+        assert_eq!(summary.other, 1);
+    }
+
+    #[test]
+    fn malformed_harness_abort_is_not_specially_rendered() {
+        let r =
+            parse(br#"{"probe":"a","outcome":"harness_abort","acceptance":{"tier":"accepted"}}"#);
+        let scored: HashSet<&str> = ["a"].into_iter().collect();
+        let plan = RenderPlan::new(&r, &scored, &HashSet::new());
+        assert!(plan.shown.is_empty());
+        assert_eq!(plan.hidden, 1);
     }
 
     #[test]
@@ -1394,7 +1490,10 @@ mod tests {
     #[test]
     fn summary_leads_with_the_reconciliation_not_a_bare_total() {
         let line = format_summary(&Summary::default(), "850 selected, 0 scored, 850 missing");
-        assert!(line.starts_with("summary: 850 selected, 0 scored, 850 missing; 0 parity"), "{line}");
+        assert!(
+            line.starts_with("summary: 850 selected, 0 scored, 850 missing; 0 parity"),
+            "{line}"
+        );
         assert!(!line.contains("total"), "{line}");
     }
 

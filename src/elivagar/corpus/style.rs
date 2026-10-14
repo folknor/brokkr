@@ -171,7 +171,10 @@ mod tests {
             "background = \"#fff\"\n[[layer]]\nname = \"boundaries\"\nstroke_width = \"1\"\n[[layer.match]]\nkey = \"admin_level\"\nvalue = 2\nstroke_width = \"2\"\n",
         );
         let attrs = vec![(Arc::from("admin_level"), DetailAttr::Int(2))];
-        assert_eq!(s.resolve("boundaries", &attrs).stroke_width.as_deref(), Some("2"));
+        assert_eq!(
+            s.resolve("boundaries", &attrs).stroke_width.as_deref(),
+            Some("2")
+        );
     }
 
     #[test]

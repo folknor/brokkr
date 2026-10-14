@@ -118,13 +118,12 @@ impl VerifyHarness {
         let b_str = b.display().to_string();
         let captured = self.run_pbfhogg(&["diff", "--suppress-common", &a_str, &b_str])?;
         let stdout = String::from_utf8_lossy(&captured.stdout);
-        let verdict = diff_verdict(captured.status.code(), &stdout).map_err(|why| {
-            DevError::Subprocess {
+        let verdict =
+            diff_verdict(captured.status.code(), &stdout).map_err(|why| DevError::Subprocess {
                 program: format!("pbfhogg diff ({why})"),
                 code: captured.status.code(),
                 stderr: String::from_utf8_lossy(&captured.stderr).into_owned(),
-            }
-        })?;
+            })?;
         if verdict == Verdict::Fail {
             for line in stdout.lines() {
                 output::verify_msg(line);
@@ -539,7 +538,10 @@ mod tests {
         f.record("diff", Verdict::Pass);
         f.record("sort order", Verdict::Fail);
         f.fail("complement");
-        assert_eq!(f.failures, vec!["sort order".to_owned(), "complement".to_owned()]);
+        assert_eq!(
+            f.failures,
+            vec!["sort order".to_owned(), "complement".to_owned()]
+        );
         let err = f.into_check_result("sort").unwrap_err().to_string();
         assert!(err.contains("sort order"), "got: {err}");
         assert!(err.contains("complement"), "got: {err}");

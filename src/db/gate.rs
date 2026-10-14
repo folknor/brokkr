@@ -413,10 +413,16 @@ mod tests {
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
         let db = GateDb { conn };
-        let legacy = db.lookup_baseline("legacy1", "host-a", "current").unwrap().unwrap();
+        let legacy = db
+            .lookup_baseline("legacy1", "host-a", "current")
+            .unwrap()
+            .unwrap();
         assert_eq!(legacy.features, None);
         let uuid = db.insert(&sample_row()).unwrap();
-        let fresh = db.lookup_baseline(&uuid, "host-a", "current").unwrap().unwrap();
+        let fresh = db
+            .lookup_baseline(&uuid, "host-a", "current")
+            .unwrap()
+            .unwrap();
         assert_eq!(fresh.features.as_deref(), Some("fast-sync"));
     }
 
@@ -457,7 +463,10 @@ mod tests {
     fn insert_then_lookup_by_full_uuid() {
         let db = open_mem();
         let uuid = db.insert(&sample_row()).unwrap();
-        let entry = db.lookup_baseline(&uuid, "host-a", "current").unwrap().unwrap();
+        let entry = db
+            .lookup_baseline(&uuid, "host-a", "current")
+            .unwrap()
+            .unwrap();
         assert_eq!(entry.gate_name, "jmap_small");
         assert_eq!(entry.meta, r#"{"correct":1}"#);
     }
@@ -467,7 +476,10 @@ mod tests {
         let db = open_mem();
         let uuid = db.insert(&sample_row()).unwrap();
         let prefix = &uuid[..8];
-        let entry = db.lookup_baseline(prefix, "host-a", "current").unwrap().unwrap();
+        let entry = db
+            .lookup_baseline(prefix, "host-a", "current")
+            .unwrap()
+            .unwrap();
         assert_eq!(entry.uuid, uuid);
     }
 
@@ -476,7 +488,11 @@ mod tests {
         let db = open_mem();
         let uuid = db.insert(&sample_row()).unwrap();
         // Same UUID, wrong host => not found.
-        assert!(db.lookup_baseline(&uuid, "host-b", "current").unwrap().is_none());
+        assert!(
+            db.lookup_baseline(&uuid, "host-b", "current")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -494,11 +510,22 @@ mod tests {
     fn lookup_never_matches_the_current_run() {
         let db = open_mem();
         insert_with_uuid(&db, "aaaa1111");
-        assert!(db.lookup_baseline("aaaa", "host-a", "aaaa1111").unwrap().is_none());
-        assert!(db.lookup_baseline("aaaa1111", "host-a", "aaaa1111").unwrap().is_none());
+        assert!(
+            db.lookup_baseline("aaaa", "host-a", "aaaa1111")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.lookup_baseline("aaaa1111", "host-a", "aaaa1111")
+                .unwrap()
+                .is_none()
+        );
         // With a real baseline beside it, the prefix resolves to that one.
         insert_with_uuid(&db, "aaaa2222");
-        let entry = db.lookup_baseline("aaaa", "host-a", "aaaa1111").unwrap().unwrap();
+        let entry = db
+            .lookup_baseline("aaaa", "host-a", "aaaa1111")
+            .unwrap()
+            .unwrap();
         assert_eq!(entry.uuid, "aaaa2222");
     }
 
@@ -510,9 +537,15 @@ mod tests {
         let err = db.lookup_baseline("bbbb", "host-a", "current").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("ambiguous"), "got: {msg}");
-        assert!(msg.contains("bbbb1111") && msg.contains("bbbb2222"), "got: {msg}");
+        assert!(
+            msg.contains("bbbb1111") && msg.contains("bbbb2222"),
+            "got: {msg}"
+        );
         // A longer pin disambiguates.
-        let entry = db.lookup_baseline("bbbb2", "host-a", "current").unwrap().unwrap();
+        let entry = db
+            .lookup_baseline("bbbb2", "host-a", "current")
+            .unwrap()
+            .unwrap();
         assert_eq!(entry.uuid, "bbbb2222");
     }
 
@@ -521,7 +554,10 @@ mod tests {
         let db = open_mem();
         insert_with_uuid(&db, "cccc");
         insert_with_uuid(&db, "cccc9999");
-        let entry = db.lookup_baseline("cccc", "host-a", "current").unwrap().unwrap();
+        let entry = db
+            .lookup_baseline("cccc", "host-a", "current")
+            .unwrap()
+            .unwrap();
         assert_eq!(entry.uuid, "cccc");
     }
 
@@ -529,8 +565,16 @@ mod tests {
     fn like_wildcards_are_literal() {
         let db = open_mem();
         insert_with_uuid(&db, "dddd1111");
-        assert!(db.lookup_baseline("%", "host-a", "current").unwrap().is_none());
-        assert!(db.lookup_baseline("d_dd", "host-a", "current").unwrap().is_none());
+        assert!(
+            db.lookup_baseline("%", "host-a", "current")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.lookup_baseline("d_dd", "host-a", "current")
+                .unwrap()
+                .is_none()
+        );
         assert!(db.hosts_with_uuid("%").unwrap().is_empty());
     }
 
@@ -540,7 +584,11 @@ mod tests {
         let uuid = db.insert(&sample_row()).unwrap();
         // The row is on host-a; asking from host-b's perspective, the
         // lookup fails but the UUID is still locatable.
-        assert!(db.lookup_baseline(&uuid, "host-b", "current").unwrap().is_none());
+        assert!(
+            db.lookup_baseline(&uuid, "host-b", "current")
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(db.hosts_with_uuid(&uuid).unwrap(), vec!["host-a"]);
         assert!(db.hosts_with_uuid("deadbeef").unwrap().is_empty());
     }

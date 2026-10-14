@@ -76,10 +76,10 @@ fn replacement(c: char, allow: &CodepointSet) -> Option<&'static str> {
     }
     Some(match c {
         // Zero-width / invisible / bidi / control noise → delete
-        '\u{0003}' | '\u{000B}' | '\u{200B}' | '\u{200C}' | '\u{200D}'
-        | '\u{2060}' | '\u{FEFF}' | '\u{00AD}' | '\u{200E}' | '\u{200F}'
-        | '\u{202A}' | '\u{202B}' | '\u{202C}' | '\u{202D}' | '\u{202E}'
-        | '\u{2066}' | '\u{2067}' | '\u{2068}' | '\u{2069}' | '\u{FFFC}' => "",
+        '\u{0003}' | '\u{000B}' | '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}'
+        | '\u{FEFF}' | '\u{00AD}' | '\u{200E}' | '\u{200F}' | '\u{202A}' | '\u{202B}'
+        | '\u{202C}' | '\u{202D}' | '\u{202E}' | '\u{2066}' | '\u{2067}' | '\u{2068}'
+        | '\u{2069}' | '\u{FFFC}' => "",
         // Non-breaking spaces → regular space
         '\u{00A0}' | '\u{202F}' => " ",
         // Line / paragraph separators → newline
@@ -113,9 +113,9 @@ fn replacement(c: char, allow: &CodepointSet) -> Option<&'static str> {
         '\u{277E}' | '\u{2788}' | '\u{2792}' => "9",
         '\u{277F}' | '\u{2789}' | '\u{2793}' => "10",
         // Heavy math signs -> the ASCII operator they depict.
-        '\u{2795}' => "+",  // heavy plus
-        '\u{2796}' => "-",  // heavy minus
-        '\u{2797}' => "/",  // heavy division
+        '\u{2795}' => "+", // heavy plus
+        '\u{2796}' => "-", // heavy minus
+        '\u{2797}' => "/", // heavy division
         // Colored circles used as calendar legend, not status.
         '\u{1F535}' => "(blue)",
         '\u{1F7E2}' => "(green)",
@@ -493,10 +493,19 @@ fn is_scannable(rel: &Path) -> bool {
 /// Tracked plus untracked-not-ignored files, via `git ls-files`.
 pub(crate) fn tracked_files(project_root: &Path) -> Result<Vec<PathBuf>, DevError> {
     let output = Command::new("git")
-        .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
+        .args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ])
         .current_dir(project_root)
         .output()
-        .map_err(|error| DevError::Spawn { program: "git ls-files".into(), error })?;
+        .map_err(|error| DevError::Spawn {
+            program: "git ls-files".into(),
+            error,
+        })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         return Err(DevError::Subprocess {
@@ -510,9 +519,16 @@ pub(crate) fn tracked_files(project_root: &Path) -> Result<Vec<PathBuf>, DevErro
         if raw.is_empty() {
             continue;
         }
-        if let Ok(s) = std::str::from_utf8(raw) {
-            files.push(PathBuf::from(s));
-        }
+        let s = std::str::from_utf8(raw).map_err(|_| {
+            // The shared scanners cannot safely classify or report a path
+            // they cannot represent. Refuse the walk instead of silently
+            // omitting a possibly scannable file.
+            DevError::Verify(format!(
+                "git ls-files returned a non-UTF-8 path ({}); refusing to skip it",
+                raw.escape_ascii(),
+            ))
+        })?;
+        files.push(PathBuf::from(s));
     }
     Ok(files)
 }
@@ -624,7 +640,11 @@ mod tests {
         std::fs::create_dir_all(&as_dir).unwrap();
         assert!(read_in_scope(&as_dir, Path::new("odd.md")).is_err());
         let gone = dir.join("gone.md");
-        assert!(read_in_scope(&gone, Path::new("gone.md")).unwrap().is_none());
+        assert!(
+            read_in_scope(&gone, Path::new("gone.md"))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -680,9 +700,7 @@ mod tests {
 
     #[test]
     fn fix_content_rewrites_known_gremlins() {
-        let (fixed, count) = fix_str(
-            "x\u{2014}y \u{201C}hi\u{201D} \u{00A0}end\u{200B}\n",
-        );
+        let (fixed, count) = fix_str("x\u{2014}y \u{201C}hi\u{201D} \u{00A0}end\u{200B}\n");
         assert_eq!(count, 5);
         assert_eq!(fixed, "x-y \"hi\"  end\n");
     }
@@ -702,8 +720,7 @@ mod tests {
 
     #[test]
     fn fix_content_maps_calendar_circles() {
-        let (fixed, count) =
-            fix_str("\u{1F535}\u{1F7E2}\u{1F7E1}\u{1F534}\n");
+        let (fixed, count) = fix_str("\u{1F535}\u{1F7E2}\u{1F7E1}\u{1F534}\n");
         assert_eq!(count, 4);
         assert_eq!(fixed, "(blue)(green)(yellow)(red)\n");
     }
@@ -834,7 +851,10 @@ mod tests {
         // A U+2028 line separator transliterates to a newline. The edited line
         // before it is rstripped; the following UNEDITED line keeps its trailing
         // whitespace (no leak of line_edited across the injected boundary).
-        assert_eq!(fix_str("foo   \u{2028}clean   \n"), ("foo\nclean   \n".to_owned(), 1));
+        assert_eq!(
+            fix_str("foo   \u{2028}clean   \n"),
+            ("foo\nclean   \n".to_owned(), 1)
+        );
     }
 
     #[test]
@@ -887,7 +907,13 @@ mod tests {
             ranges: Vec::new(),
         };
         let mut out = Vec::new();
-        scan_content(Path::new("t.rs"), "non\u{2011}break\n", &mut out, &allow, &ban);
+        scan_content(
+            Path::new("t.rs"),
+            "non\u{2011}break\n",
+            &mut out,
+            &allow,
+            &ban,
+        );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].codepoint, 0x2011);
         assert_eq!(out[0].name, BANNED_BY_CONFIG);

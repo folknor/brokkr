@@ -67,11 +67,7 @@ use crate::preflight;
 const PINS_FILE: &str = "pins.toml";
 
 /// Entry point for `brokkr corpus --reseed`.
-pub fn run(
-    project_root: &Path,
-    cfg: &PinersConfig,
-    args: &CorpusArgs,
-) -> Result<(), DevError> {
+pub fn run(project_root: &Path, cfg: &PinersConfig, args: &CorpusArgs) -> Result<(), DevError> {
     if !args.keywords.is_empty() {
         return Err(DevError::Config(
             "corpus --reseed: --keyword is not supported (keywords reference \
@@ -107,7 +103,13 @@ pub fn run(
     } else {
         None
     };
-    let plan = plan(existing_text.as_deref(), &pins_path, &corpus_root, &registry_dir, args)?;
+    let plan = plan(
+        existing_text.as_deref(),
+        &pins_path,
+        &corpus_root,
+        &registry_dir,
+        args,
+    )?;
 
     std::fs::create_dir_all(&registry_dir).map_err(DevError::Io)?;
     registry_io::write_atomic(&pins_path, &plan.text)?;
@@ -181,7 +183,10 @@ fn plan(
     let completing: Vec<&String> = if args.all {
         existing.pending.keys().collect()
     } else {
-        args.probe.iter().filter(|id| existing.pending.contains_key(*id)).collect()
+        args.probe
+            .iter()
+            .filter(|id| existing.pending.contains_key(*id))
+            .collect()
     };
     for id in completing {
         let registered = &existing.pending[id];
@@ -630,14 +635,23 @@ bar_budget = 20200
         // pinned probe yet. That is the loader's rule, and the reseed that
         // adds the probe is what satisfies it.
         assert!(registry::parse_pins(&with_old, &pins_path).is_err());
-        let p = plan(Some(&with_old), &pins_path, &root, &registry, &args_probe(&["live-01"]))
-            .unwrap();
+        let p = plan(
+            Some(&with_old),
+            &pins_path,
+            &root,
+            &registry,
+            &args_probe(&["live-01"]),
+        )
+        .unwrap();
         assert_eq!((p.diff.added, p.diff.changed, p.diff.removed), (1, 0, 0));
         let facts = live_facts(&p.text, &pins_path);
         assert_eq!(facts.feed.as_deref(), Some("eth-15m-live"));
         assert_eq!(facts.bar_budget, Some(20200));
         // The declarations were not rewritten.
-        assert!(p.text.contains("[probe_config.\"piners/live-01\"]\nfeed = \"eth-15m-live\""));
+        assert!(
+            p.text
+                .contains("[probe_config.\"piners/live-01\"]\nfeed = \"eth-15m-live\"")
+        );
         assert!(!p.text.contains("\n\n\n"), "stray blank line:\n{}", p.text);
     }
 
@@ -656,15 +670,27 @@ bar_budget = 20200
         // The file as written loads: both declarations govern a pending probe.
         registry::parse_pins(&declared, &pins_path).unwrap();
 
-        let first =
-            plan(Some(&declared), &pins_path, &root, &registry, &args_probe(&["live-01"])).unwrap();
+        let first = plan(
+            Some(&declared),
+            &pins_path,
+            &root,
+            &registry,
+            &args_probe(&["live-01"]),
+        )
+        .unwrap();
         let data = registry::parse_pins(&first.text, &pins_path).unwrap();
         assert!(data.probes.contains_key("live-01"));
         assert!(!data.pending.contains_key("live-01"));
         assert_eq!(data.pending["live-02"], PathBuf::from("piners/live-02"));
 
-        let second =
-            plan(Some(&first.text), &pins_path, &root, &registry, &args_probe(&["live-02"])).unwrap();
+        let second = plan(
+            Some(&first.text),
+            &pins_path,
+            &root,
+            &registry,
+            &args_probe(&["live-02"]),
+        )
+        .unwrap();
         let data = registry::parse_pins(&second.text, &pins_path).unwrap();
         assert!(data.pending.is_empty());
         assert!(!second.text.contains("[pending]"));
@@ -674,8 +700,14 @@ bar_budget = 20200
     fn a_pending_entry_at_the_wrong_path_or_absent_is_refused() {
         let (root, registry, pins_path) = declared_tree("pending_wrong_path");
         let wrong = format!("{DECLARED}\n[pending]\nlive-01 = \"other/live-01\"\n");
-        let err = plan(Some(&wrong), &pins_path, &root, &registry, &args_probe(&["live-01"]))
-            .unwrap_err();
+        let err = plan(
+            Some(&wrong),
+            &pins_path,
+            &root,
+            &registry,
+            &args_probe(&["live-01"]),
+        )
+        .unwrap_err();
         assert!(format!("{err:?}").contains("was found at piners/live-01"));
         // --all refuses a registration with nothing on disk.
         let absent = format!("{DECLARED}\n[pending]\nghost = \"piners/ghost\"\n");
@@ -694,15 +726,32 @@ bar_budget = 20200
         );
         // The capture is re-taken: new oracle bytes, same declared feed.
         std::fs::write(root.join("piners/live-01/tv_trades.csv"), b"a,b\n9,9\n").unwrap();
-        let again =
-            plan(Some(&blessed), &pins_path, &root, &registry, &args_probe(&["live-01"])).unwrap();
-        assert_eq!((again.diff.added, again.diff.changed, again.diff.removed), (0, 1, 0));
+        let again = plan(
+            Some(&blessed),
+            &pins_path,
+            &root,
+            &registry,
+            &args_probe(&["live-01"]),
+        )
+        .unwrap();
+        assert_eq!(
+            (again.diff.added, again.diff.changed, again.diff.removed),
+            (0, 1, 0)
+        );
         let facts = live_facts(&again.text, &pins_path);
         assert_eq!(facts.feed.as_deref(), Some("eth-15m-live"));
         let data = registry::parse_pins(&again.text, &pins_path).unwrap();
         assert_eq!(data.probes["live-01"].expected.as_deref(), Some("accepted"));
-        assert!(!first.text.contains("\n\n\n"), "stray blank line:\n{}", first.text);
-        assert!(!again.text.contains("\n\n\n"), "stray blank line:\n{}", again.text);
+        assert!(
+            !first.text.contains("\n\n\n"),
+            "stray blank line:\n{}",
+            first.text
+        );
+        assert!(
+            !again.text.contains("\n\n\n"),
+            "stray blank line:\n{}",
+            again.text
+        );
     }
 
     #[test]
@@ -745,10 +794,7 @@ bar_budget = 20200
         let found = discover(&root, &registry).unwrap();
 
         let ids: Vec<&str> = found.probes.keys().map(String::as_str).collect();
-        assert_eq!(
-            ids,
-            vec!["01-trend", "alpha-01", "ha-close-01", "sym-eth"]
-        );
+        assert_eq!(ids, vec!["01-trend", "alpha-01", "ha-close-01", "sym-eth"]);
         assert_eq!(
             found.probes["01-trend"],
             PathBuf::from("vendor/bench-assets/strategies/01-trend")
@@ -853,8 +899,14 @@ bar_budget = 20200
         // The capture is redone with tvr: the CSV goes, a record arrives.
         std::fs::remove_file(dir.join("tv_trades.csv")).unwrap();
         std::fs::write(dir.join("tv_record.json"), b"{}\n").unwrap();
-        let p = plan(Some(&blessed), &pins_path, &root, &registry, &args_probe(&["alpha"]))
-            .unwrap();
+        let p = plan(
+            Some(&blessed),
+            &pins_path,
+            &root,
+            &registry,
+            &args_probe(&["alpha"]),
+        )
+        .unwrap();
 
         assert_eq!((p.diff.added, p.diff.changed, p.diff.removed), (0, 1, 0));
         assert_eq!(p.diff.oracle_switched, vec!["alpha".to_owned()]);
@@ -867,11 +919,16 @@ bar_budget = 20200
 
         // A CSV timezone declared for the probe is now dead beside the
         // record, so the reseed refuses until the declaration goes too.
-        let with_tz = format!(
-            "[probe_config.\"piners/alpha\"]\ntv_trades_csv_tz = \"utc\"\n\n{blessed}"
-        );
-        let err = plan(Some(&with_tz), &pins_path, &root, &registry, &args_probe(&["alpha"]))
-            .unwrap_err();
+        let with_tz =
+            format!("[probe_config.\"piners/alpha\"]\ntv_trades_csv_tz = \"utc\"\n\n{blessed}");
+        let err = plan(
+            Some(&with_tz),
+            &pins_path,
+            &root,
+            &registry,
+            &args_probe(&["alpha"]),
+        )
+        .unwrap_err();
         assert!(format!("{err:?}").contains("resolves `tv_trades_csv_tz`"));
     }
 
@@ -900,9 +957,13 @@ bar_budget = 20200
         let dir = root.join("piners/selftest");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("strategy.pine"), b"//@version=6\n").unwrap();
-        let err = plan(None, &registry.join("pins.toml"), &root, &registry, &args_probe(&[
-            "selftest",
-        ]))
+        let err = plan(
+            None,
+            &registry.join("pins.toml"),
+            &root,
+            &registry,
+            &args_probe(&["selftest"]),
+        )
         .unwrap_err();
         let msg = format!("{err:?}");
         assert!(msg.contains("has strategy.pine but no oracle"));
@@ -979,8 +1040,11 @@ bar_budget = 20200
     fn restamp_feeds_rehashes_a_single_base_group() {
         let root = crate::test_scratch::scratch("piners_reseed", "restamp_base");
         std::fs::create_dir_all(root.join("data")).unwrap();
-        std::fs::write(root.join("data/ohlcv_1m.csv"), b"timestamp,o,h,l,c,v\n1,2,3,4,5,6\n")
-            .unwrap();
+        std::fs::write(
+            root.join("data/ohlcv_1m.csv"),
+            b"timestamp,o,h,l,c,v\n1,2,3,4,5,6\n",
+        )
+        .unwrap();
 
         let mut feeds = BTreeMap::new();
         feeds.insert(

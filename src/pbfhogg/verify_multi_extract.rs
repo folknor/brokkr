@@ -90,69 +90,28 @@ pub fn run(
         ));
     }
 
-    // Parse bbox.
-    let parts: Vec<f64> = bbox
-        .split(',')
-        .map(|s| s.trim().parse::<f64>())
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| DevError::Config(format!("invalid bbox: {e}")))?;
-    if parts.len() != 4 {
-        return Err(DevError::Config(format!(
-            "bbox must have 4 values, got {}",
-            parts.len()
-        )));
-    }
-    let (min_lon, min_lat, max_lon, max_lat) = (parts[0], parts[1], parts[2], parts[3]);
-    let strip_width = (max_lon - min_lon) / regions as f64;
-
-    // Build strip bboxes.
-    let mut strips: Vec<(f64, f64, f64, f64)> = Vec::new();
-    for i in 0..regions {
-        let s_min = min_lon + strip_width * i as f64;
-        let s_max = if i + 1 == regions {
-            max_lon
-        } else {
-            min_lon + strip_width * (i + 1) as f64
-        };
-        strips.push((s_min, min_lat, s_max, max_lat));
-    }
-
+    let strips = super::commands::multi_extract_strips(bbox, regions)?;
     let outdir = harness.subdir("multi-extract")?;
     let pbf_str = pbf.display().to_string();
 
-    verify_msg(&format!(
-        "=== verify multi-extract ({regions} regions) ==="
-    ));
+    verify_msg(&format!("=== verify multi-extract ({regions} regions) ==="));
 
     // --- Single-pass multi-extract via --config ---
     let multi_dir = outdir.join("multi");
     std::fs::create_dir_all(&multi_dir)?;
-
-    let mut extracts = Vec::new();
-    for (i, (s_min, s_min_lat, s_max, s_max_lat)) in strips.iter().enumerate() {
-        extracts.push(format!(
-            r#"    {{ "output": "strip-{i}.osm.pbf", "bbox": [{s_min}, {s_min_lat}, {s_max}, {s_max_lat}] }}"#
-        ));
-    }
-    let config_json = format!(
-        "{{\n  \"directory\": \"{}\",\n  \"extracts\": [\n{}\n  ]\n}}",
-        multi_dir.display(),
-        extracts.join(",\n"),
-    );
-    let config_path = outdir.join("multi-extract-config.json");
-    std::fs::write(&config_path, &config_json)?;
+    let config_json = super::commands::multi_extract_config(&multi_dir, &strips)?;
+    let config_path = super::commands::multi_extract_config_path(&outdir);
+    std::fs::write(&config_path, config_json)?;
 
     verify_msg("  running single-pass multi-extract...");
+    let config_path_str = config_path.display().to_string();
     let mut multi_args = vec![
         "extract",
         &pbf_str,
         "--config",
-        &config_path.display().to_string(),
+        &config_path_str,
         "--simple",
     ];
-    // Need to hold the string alive for the borrow.
-    let config_path_str = config_path.display().to_string();
-    multi_args = vec!["extract", &pbf_str, "--config", &config_path_str, "--simple"];
     if direct_io {
         multi_args.push("--direct-io");
     }
@@ -164,7 +123,7 @@ pub fn run(
     std::fs::create_dir_all(&seq_dir)?;
 
     verify_msg("  running sequential extracts...");
-    for (i, (s_min, s_min_lat, s_max, s_max_lat)) in strips.iter().enumerate() {
+    for (i, [s_min, s_min_lat, s_max, s_max_lat]) in strips.iter().enumerate() {
         let seq_out = seq_dir.join(format!("strip-{i}.osm.pbf"));
         let seq_out_str = seq_out.display().to_string();
         let bbox_flag = format!("-b={s_min},{s_min_lat},{s_max},{s_max_lat}");
@@ -205,7 +164,9 @@ pub fn run(
                 multi_counts.nodes, multi_counts.ways, multi_counts.relations
             ));
         } else {
-            findings.fail(format!("strip-{i} element counts differ from sequential extract"));
+            findings.fail(format!(
+                "strip-{i} element counts differ from sequential extract"
+            ));
             verify_msg(&format!("  strip-{i}: FAIL"));
             if !nodes_ok {
                 verify_msg(&format!(

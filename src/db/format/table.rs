@@ -276,17 +276,11 @@ fn append_table_header(out: &mut String, w: &TableWidths) {
     )
     .expect("write to String is infallible");
     if w.env > 0 {
-        write!(out, "  {:<env_w$}", "env", env_w = w.env)
-            .expect("write to String is infallible");
+        write!(out, "  {:<env_w$}", "env", env_w = w.env).expect("write to String is infallible");
     }
 }
 
-fn append_table_row(
-    out: &mut String,
-    row: &StoredRow,
-    w: &TableWidths,
-    matcher: &DatasetMatcher,
-) {
+fn append_table_row(out: &mut String, row: &StoredRow, w: &TableWidths, matcher: &DatasetMatcher) {
     use std::fmt::Write;
     let uuid_short = short_uuid(&row.uuid);
     let elapsed_str = format_wall(row.elapsed_ms, row.elapsed_us);
@@ -315,8 +309,7 @@ fn append_table_row(
     .expect("write to String is infallible");
     if w.env > 0 {
         let env_str = format_env_summary(&row.captured_env);
-        write!(out, "  {env_str:<env_w$}", env_w = w.env)
-            .expect("write to String is infallible");
+        write!(out, "  {env_str:<env_w$}", env_w = w.env).expect("write to String is infallible");
     }
 }
 
@@ -484,7 +477,8 @@ mod tests {
     #[test]
     fn format_input_dataset_prefix_dated() {
         // Convention filename: <dataset>-<date>-<seq>-<variant>.osm
-        let result = format_input_with_empty("europe-20260301-seq4714-with-indexdata.osm", Some(35262.0));
+        let result =
+            format_input_with_empty("europe-20260301-seq4714-with-indexdata.osm", Some(35262.0));
         assert_eq!(result, "europe (35262 MB)");
     }
 

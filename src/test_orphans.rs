@@ -70,9 +70,6 @@ use crate::output;
 /// The environment variable carrying the owning brokkr's token.
 pub const MARKER_ENV: &str = "BROKKR_TEST_RUN";
 
-/// `~/.brokkr/<DIR_NAME>/`: one liveness file per brokkr that ran tests.
-const DIR_NAME: &str = "test-runs";
-
 /// A registered, flocked liveness file.
 const LIVE_EXT: &str = "lock";
 
@@ -105,8 +102,7 @@ struct Registration {
 static REGISTRATION: OnceLock<Option<Registration>> = OnceLock::new();
 
 fn runs_dir() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".brokkr").join(DIR_NAME))
+    crate::user_dirs::test_runs_dir()
 }
 
 /// This process's token, registering it on first use. `None` when registration
@@ -123,7 +119,7 @@ pub fn marker() -> Option<&'static str> {
     REGISTRATION
         .get_or_init(|| {
             let result = runs_dir()
-                .ok_or_else(|| std::io::Error::other("$HOME is not set"))
+                .ok_or_else(|| std::io::Error::other("$HOME is not set or is empty"))
                 .and_then(|dir| register_in(&dir));
             match result {
                 Ok(reg) => Some(reg),
@@ -173,7 +169,10 @@ fn register_in(dir: &Path) -> std::io::Result<Registration> {
         drop(std::fs::remove_file(&pending));
         return Err(e);
     }
-    Ok(Registration { token, _flock: file })
+    Ok(Registration {
+        token,
+        _flock: file,
+    })
 }
 
 /// Non-blocking exclusive flock. `true` when taken.
@@ -186,7 +185,9 @@ fn try_flock(file: &std::fs::File) -> bool {
 /// Whether `s` is a token [`register_in`] could have minted: 32 lowercase hex
 /// characters. Anything else in the directory is not ours to judge.
 fn is_token(s: &str) -> bool {
-    s.len() == 32 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    s.len() == 32
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// A registration whose owner is dead: its flock is now held by the reaper,
@@ -215,9 +216,15 @@ fn claim_dead(dir: &Path) -> Vec<DeadRun> {
         let path = entry.path();
         match ext {
             LIVE_EXT => {
-                let Ok(file) = std::fs::File::open(&path) else { continue };
+                let Ok(file) = std::fs::File::open(&path) else {
+                    continue;
+                };
                 if try_flock(&file) {
-                    dead.push(DeadRun { token: stem.to_owned(), path, _flock: file });
+                    dead.push(DeadRun {
+                        token: stem.to_owned(),
+                        path,
+                        _flock: file,
+                    });
                 }
             }
             PENDING_EXT => {
@@ -280,7 +287,11 @@ fn read_table() -> HashMap<u32, ProcRow> {
         return table;
     };
     for entry in entries.flatten() {
-        let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
             continue;
         };
         let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
@@ -293,7 +304,11 @@ fn read_table() -> HashMap<u32, ProcRow> {
             continue;
         };
         let comm = stat.get(open + 1..close).unwrap_or_default().to_owned();
-        let post: Vec<&str> = stat.get(close + 2..).unwrap_or_default().split_whitespace().collect();
+        let post: Vec<&str> = stat
+            .get(close + 2..)
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect();
         let Some(ppid) = post.get(1).and_then(|p| p.parse().ok()) else {
             continue;
         };
@@ -301,7 +316,15 @@ fn read_table() -> HashMap<u32, ProcRow> {
         let token = std::fs::read(format!("/proc/{pid}/environ"))
             .ok()
             .and_then(|env| marker_in_environ(&env));
-        table.insert(pid, ProcRow { ppid, comm, starttime, token });
+        table.insert(
+            pid,
+            ProcRow {
+                ppid,
+                comm,
+                starttime,
+                token,
+            },
+        );
     }
     table
 }
@@ -312,7 +335,9 @@ fn has_ancestor(table: &HashMap<u32, ProcRow>, pid: u32, ancestor: u32) -> bool 
     // Bounded: a consistent snapshot has no parent cycle, but a pid reused
     // mid-scan could fake one.
     for _ in 0..256 {
-        let Some(row) = table.get(&cursor) else { return false };
+        let Some(row) = table.get(&cursor) else {
+            return false;
+        };
         if row.ppid == ancestor {
             return true;
         }
@@ -355,9 +380,7 @@ fn select(table: &HashMap<u32, ProcRow>, dead: &HashSet<String>, me: u32) -> Vec
 
 /// SIGKILL `pid` if it still has the starttime it was selected with.
 fn sigkill_verified(pid: u32, starttime: &str) -> bool {
-    if starttime.is_empty()
-        || crate::lockfile::proc_starttime(pid).as_deref() != Some(starttime)
-    {
+    if starttime.is_empty() || crate::lockfile::proc_starttime(pid).as_deref() != Some(starttime) {
         return false;
     }
     // SAFETY: identity re-verified immediately above; ESRCH is benign, and the
@@ -451,7 +474,13 @@ fn reap_line(report: &ReapReport) -> String {
     }
     let comms: Vec<String> = comms
         .iter()
-        .map(|(c, n)| if *n > 1 { format!("{c} x{n}") } else { (*c).to_owned() })
+        .map(|(c, n)| {
+            if *n > 1 {
+                format!("{c} x{n}")
+            } else {
+                (*c).to_owned()
+            }
+        })
         .collect();
     let mut line = format!(
         "SIGKILL sent to {} ({}) that outlived the brokkr run that started them",
@@ -511,7 +540,10 @@ mod tests {
     fn the_marker_is_read_from_a_raw_environ_block() {
         let env = b"PATH=/bin\0BROKKR_TEST_RUN=abc\0BROKKR_TEST_RUN=later\0HOME=/h\0";
         assert_eq!(marker_in_environ(env).as_deref(), Some("abc"));
-        assert_eq!(marker_in_environ(b"PATH=/bin\0NOT_BROKKR_TEST_RUN=x\0"), None);
+        assert_eq!(
+            marker_in_environ(b"PATH=/bin\0NOT_BROKKR_TEST_RUN=x\0"),
+            None
+        );
         // A prefix of the name is not the name.
         assert_eq!(marker_in_environ(b"BROKKR_TEST_RUNNER=x\0"), None);
         assert_eq!(marker_in_environ(b""), None);
@@ -538,7 +570,10 @@ mod tests {
             (61, row(60, "cargo", 610, Some(LIVE))),
             (62, row(61, "other_test-9a", 620, Some(LIVE))),
         ]);
-        let picked: Vec<u32> = select(&table, &dead_set(), 999_999).iter().map(|o| o.pid).collect();
+        let picked: Vec<u32> = select(&table, &dead_set(), 999_999)
+            .iter()
+            .map(|o| o.pid)
+            .collect();
         assert_eq!(picked, vec![51, 50]);
     }
 
@@ -553,10 +588,13 @@ mod tests {
             (1, row(0, "systemd", 1, None)),
             (50, row(1, "my_crate-3f2a", 500, Some(DEAD))), // our orphaned parent
             (me, row(50, "brokkr", 700, Some(DEAD))),       // us
-            (71, row(me, "cargo", 710, Some(DEAD))),         // our own build
-            (80, row(1, "sibling_test", 800, Some(DEAD))),   // a real orphan
+            (71, row(me, "cargo", 710, Some(DEAD))),        // our own build
+            (80, row(1, "sibling_test", 800, Some(DEAD))),  // a real orphan
         ]);
-        let picked: Vec<u32> = select(&table, &dead_set(), me).iter().map(|o| o.pid).collect();
+        let picked: Vec<u32> = select(&table, &dead_set(), me)
+            .iter()
+            .map(|o| o.pid)
+            .collect();
         assert_eq!(picked, vec![80]);
     }
 
@@ -578,7 +616,11 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         };
         let tokens: Vec<&str> = dead.iter().map(|d| d.token.as_str()).collect();
-        assert_eq!(tokens, vec![gone_token.as_str()], "only the dropped registration is dead");
+        assert_eq!(
+            tokens,
+            vec![gone_token.as_str()],
+            "only the dropped registration is dead"
+        );
         assert!(dir.join(format!("{}.{LIVE_EXT}", live.token)).exists());
         assert!(
             !dir.join(format!("{}.{PENDING_EXT}", live.token)).exists(),
@@ -594,7 +636,10 @@ mod tests {
         let foreign = dir.join("notes.lock");
         std::fs::write(&foreign, "").unwrap();
         assert!(claim_dead(&dir).is_empty());
-        assert!(pending.exists(), "a pending file inside its grace period is a registration in flight");
+        assert!(
+            pending.exists(),
+            "a pending file inside its grace period is a registration in flight"
+        );
         assert!(foreign.exists());
     }
 
@@ -653,7 +698,11 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         };
         let status = child.wait().unwrap();
-        assert_eq!(report.killed, vec!["sleep".to_owned()], "signalled once, counted once");
+        assert_eq!(
+            report.killed,
+            vec!["sleep".to_owned()],
+            "signalled once, counted once"
+        );
         assert!(!status.success(), "the carrier must have been killed");
         // `child` is a zombie until `wait` above, and a zombie's environ reads
         // empty, so the reap saw no survivor and removed the file.

@@ -37,7 +37,12 @@ pub enum AttemptOutcome {
     Completed,
     /// The subset did not complete; `failure` says how. `end` is how the
     /// harness ended.
-    Failed { end: HarnessEnd, failure: Failure, stderr: String, dir: PathBuf },
+    Failed {
+        end: HarnessEnd,
+        failure: Failure,
+        stderr: String,
+        dir: PathBuf,
+    },
     /// Diagnosis cannot continue; the subset is unresolved, never blamed.
     Stop(StopReason),
 }
@@ -166,7 +171,10 @@ pub fn bisect(
     unreported: Vec<String>,
     mut run: impl FnMut(&[String], usize) -> AttemptOutcome,
 ) -> Diagnosis {
-    let mut d = Diagnosis { bisected: unreported.clone(), ..Diagnosis::default() };
+    let mut d = Diagnosis {
+        bisected: unreported.clone(),
+        ..Diagnosis::default()
+    };
     if unreported.is_empty() {
         return d;
     }
@@ -226,10 +234,21 @@ fn examine(
             }
             true
         }
-        AttemptOutcome::Failed { end, failure, stderr, dir } => {
+        AttemptOutcome::Failed {
+            end,
+            failure,
+            stderr,
+            dir,
+        } => {
             if subset.len() == 1 {
                 d.singletons_tested += 1;
-                d.failing.push(Singleton { probe: subset[0].clone(), end, failure, stderr, dir });
+                d.failing.push(Singleton {
+                    probe: subset[0].clone(),
+                    end,
+                    failure,
+                    stderr,
+                    dir,
+                });
             } else {
                 queue.push_back((subset, failure));
             }
@@ -261,7 +280,11 @@ impl Diagnosis {
 
         // Only spontaneous aborts count here: a singleton that exited 0/1
         // without a valid or protocol-clean report did not abort.
-        let aborts = self.failing.iter().filter(|s| s.failure == Failure::Aborted).count();
+        let aborts = self
+            .failing
+            .iter()
+            .filter(|s| s.failure == Failure::Aborted)
+            .count();
         if self.singletons_tested >= 2 && aborts == self.singletons_tested {
             out.push(format!("every tested singleton aborts ({aborts})"));
         }
@@ -275,7 +298,12 @@ impl Diagnosis {
         }
         for (stderr, members) in &groups {
             for s in members {
-                out.push(format!("probe {} ({}; artefacts {})", singleton_line(s), s.end.short(), s.dir.display()));
+                out.push(format!(
+                    "probe {} ({}; artefacts {})",
+                    singleton_line(s),
+                    s.end.short(),
+                    s.dir.display()
+                ));
             }
             let whose = if members.len() == 1 {
                 format!("stderr of {} run alone", members[0].probe)
@@ -292,9 +320,15 @@ impl Diagnosis {
         for nr in &self.not_reproduced {
             let what = failure_noun(&nr.failure);
             if nr.set.len() == 1 {
-                out.push(format!("probe {} completed when run alone ({what} did not reproduce)", nr.set[0]));
+                out.push(format!(
+                    "probe {} completed when run alone ({what} did not reproduce)",
+                    nr.set[0]
+                ));
             } else {
-                out.push(format!("{what} did not reproduce in either half of {{{}}}", nr.set.join(", ")));
+                out.push(format!(
+                    "{what} did not reproduce in either half of {{{}}}",
+                    nr.set.join(", ")
+                ));
             }
         }
         if let Some(reason) = &self.stopped {
@@ -325,7 +359,10 @@ impl Diagnosis {
         for (kind, label) in [
             ("aborts", "aborts when run alone"),
             ("incomplete", "no valid disposition when run alone"),
-            ("protocol-invalid", "broke the report protocol when run alone"),
+            (
+                "protocol-invalid",
+                "broke the report protocol when run alone",
+            ),
         ] {
             let named: Vec<String> = self
                 .failing
@@ -351,7 +388,10 @@ impl Diagnosis {
         }
         // A stop that carries a message keeps it in the note.
         if let Some(reason) = &self.stopped
-            && !matches!(reason, StopReason::Cap | StopReason::Deadline | StopReason::Interrupted)
+            && !matches!(
+                reason,
+                StopReason::Cap | StopReason::Deadline | StopReason::Interrupted
+            )
         {
             out.push_str(&format!("; {}", reason.describe()));
         }
@@ -366,10 +406,16 @@ fn singleton_line(s: &Singleton) -> String {
     match &s.failure {
         Failure::Aborted => format!("{} aborts when run alone", s.probe),
         Failure::Incomplete(why) => {
-            format!("{} reported no valid disposition when run alone ({why})", s.probe)
+            format!(
+                "{} reported no valid disposition when run alone ({why})",
+                s.probe
+            )
         }
         Failure::ProtocolInvalid(why) => {
-            format!("{} broke the report protocol when run alone ({why})", s.probe)
+            format!(
+                "{} broke the report protocol when run alone ({why})",
+                s.probe
+            )
         }
     }
 }
@@ -430,8 +476,16 @@ mod tests {
         // log2(16) levels, two attempts each.
         assert_eq!(d.attempts, 8);
         let lines = d.lines();
-        assert!(lines.iter().any(|l| l.starts_with("probe p11 aborts when run alone (exit 2;")), "{lines:?}");
-        assert!(lines.iter().any(|l| l == "stderr of p11 run alone:"), "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("probe p11 aborts when run alone (exit 2;")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l == "stderr of p11 run alone:"),
+            "{lines:?}"
+        );
         assert!(lines.iter().any(|l| l == "  boom"), "{lines:?}");
         assert!(!lines.iter().any(|l| l.contains("every tested singleton")));
     }
@@ -456,10 +510,18 @@ mod tests {
         };
         let d = bisect(ids(4), &mut run);
         assert!(d.failing.is_empty());
-        assert_eq!(d.not_reproduced, vec![NotReproduced { set: ids(4), failure: Failure::Aborted }]);
+        assert_eq!(
+            d.not_reproduced,
+            vec![NotReproduced {
+                set: ids(4),
+                failure: Failure::Aborted
+            }]
+        );
         let lines = d.lines();
         assert!(
-            lines.iter().any(|l| l == "abort did not reproduce in either half of {p0, p1, p2, p3}"),
+            lines
+                .iter()
+                .any(|l| l == "abort did not reproduce in either half of {p0, p1, p2, p3}"),
             "{lines:?}"
         );
     }
@@ -470,11 +532,24 @@ mod tests {
         assert_eq!(d.singletons_tested, 4);
         assert_eq!(d.failing.len(), 4);
         let lines = d.lines();
-        assert!(lines.iter().any(|l| l == "every tested singleton aborts (4)"), "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "every tested singleton aborts (4)"),
+            "{lines:?}"
+        );
         assert!(!lines.iter().any(|l| l.contains("shared")), "{lines:?}");
         // Identical stderr printed once, attributed to all four.
-        assert_eq!(lines.iter().filter(|l| *l == "  no feed").count(), 1, "{lines:?}");
-        assert!(lines.iter().any(|l| l == "stderr (identical for 4 singletons):"));
+        assert_eq!(
+            lines.iter().filter(|l| *l == "  no feed").count(),
+            1,
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "stderr (identical for 4 singletons):")
+        );
     }
 
     #[test]
@@ -482,24 +557,42 @@ mod tests {
         let d = bisect(ids(1), |_, n| failed(HarnessEnd::Signal(6), "abort", n));
         assert_eq!(d.attempts, 1);
         assert_eq!(d.failing[0].probe, "p0");
-        assert!(d.lines().iter().any(|l| l.starts_with("probe p0 aborts when run alone (signal 6;")));
+        assert!(
+            d.lines()
+                .iter()
+                .any(|l| l.starts_with("probe p0 aborts when run alone (signal 6;"))
+        );
         let ok = bisect(ids(1), |_, _| AttemptOutcome::Completed);
-        assert!(ok.lines().iter().any(|l| l == "probe p0 completed when run alone (abort did not reproduce)"));
+        assert!(
+            ok.lines()
+                .iter()
+                .any(|l| l == "probe p0 completed when run alone (abort did not reproduce)")
+        );
     }
 
     #[test]
     fn a_singleton_that_exits_clean_without_reporting_is_not_called_an_abort() {
         let d = bisect(ids(1), |_, n| {
-            failed_with(HarnessEnd::Code(0), Failure::Incomplete("1 selected, 0 scored".to_owned()), "", n)
+            failed_with(
+                HarnessEnd::Code(0),
+                Failure::Incomplete("1 selected, 0 scored".to_owned()),
+                "",
+                n,
+            )
         });
         let lines = d.lines();
         assert!(
-            lines.iter().any(|l| l.starts_with("probe p0 reported no valid disposition when run alone")),
+            lines
+                .iter()
+                .any(|l| l.starts_with("probe p0 reported no valid disposition when run alone")),
             "{lines:?}"
         );
         assert!(!lines.iter().any(|l| l.contains("aborts")), "{lines:?}");
         let note = d.note(std::path::Path::new("run-1"));
-        assert!(note.contains("; no valid disposition when run alone: p0 (exit 0)"), "{note}");
+        assert!(
+            note.contains("; no valid disposition when run alone: p0 (exit 0)"),
+            "{note}"
+        );
         assert!(!note.contains("aborts"), "{note}");
     }
 
@@ -510,22 +603,54 @@ mod tests {
             if subset[0] == "p0" {
                 failed(HarnessEnd::Signal(11), "segv", n)
             } else {
-                failed_with(HarnessEnd::Code(0), Failure::ProtocolInvalid("1 report-only extra".to_owned()), "", n)
+                failed_with(
+                    HarnessEnd::Code(0),
+                    Failure::ProtocolInvalid("1 report-only extra".to_owned()),
+                    "",
+                    n,
+                )
             }
         });
         assert_eq!(d.singletons_tested, 2);
         let lines = d.lines();
-        assert!(!lines.iter().any(|l| l.contains("every tested singleton")), "{lines:?}");
-        assert!(lines.iter().any(|l| l.starts_with("probe p0 aborts when run alone (signal 11;")));
-        assert!(lines.iter().any(|l| l.starts_with("probe p1 broke the report protocol when run alone")));
+        assert!(
+            !lines.iter().any(|l| l.contains("every tested singleton")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("probe p0 aborts when run alone (signal 11;"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("probe p1 broke the report protocol when run alone"))
+        );
         let note = d.note(std::path::Path::new("run-1"));
-        assert!(note.contains("; aborts when run alone: p0 (signal 11)"), "{note}");
-        assert!(note.contains("; broke the report protocol when run alone: p1 (exit 0)"), "{note}");
+        assert!(
+            note.contains("; aborts when run alone: p0 (signal 11)"),
+            "{note}"
+        );
+        assert!(
+            note.contains("; broke the report protocol when run alone: p1 (exit 0)"),
+            "{note}"
+        );
         // Every singleton exiting 0 without a report is not "every ... aborts".
         let all_incomplete = bisect(ids(2), |_, n| {
-            failed_with(HarnessEnd::Code(0), Failure::Incomplete(String::new()), "", n)
+            failed_with(
+                HarnessEnd::Code(0),
+                Failure::Incomplete(String::new()),
+                "",
+                n,
+            )
         });
-        assert!(!all_incomplete.lines().iter().any(|l| l.contains("every tested singleton")));
+        assert!(
+            !all_incomplete
+                .lines()
+                .iter()
+                .any(|l| l.contains("every tested singleton"))
+        );
     }
 
     #[test]
@@ -533,22 +658,34 @@ mod tests {
         let mut calls = 0;
         let d = bisect(ids(4), |_, _| {
             calls += 1;
-            AttemptOutcome::Stop(StopReason::HarnessFailure("run_error at stage feed_load: oom".to_owned()))
+            AttemptOutcome::Stop(StopReason::HarnessFailure(
+                "run_error at stage feed_load: oom".to_owned(),
+            ))
         });
         assert_eq!(calls, 1);
         assert!(d.failing.is_empty());
         let note = d.note(std::path::Path::new("r"));
-        assert!(note.starts_with("isolation stopped on a harness run_error"), "{note}");
+        assert!(
+            note.starts_with("isolation stopped on a harness run_error"),
+            "{note}"
+        );
         assert!(note.contains("run_error at stage feed_load: oom"), "{note}");
         assert!(!d.lines().iter().any(|l| l.contains("aborts")));
     }
 
     #[test]
     fn evidence_storage_failure_stops_with_its_reason() {
-        let d = bisect(ids(4), |_, _| AttemptOutcome::Stop(StopReason::EvidenceStorage("disk full".to_owned())));
+        let d = bisect(ids(4), |_, _| {
+            AttemptOutcome::Stop(StopReason::EvidenceStorage("disk full".to_owned()))
+        });
         assert!(d.failing.is_empty());
-        assert!(d.lines().iter().any(|l| l == "isolation stopped: an attempt's evidence could not be stored: disk full"));
-        assert!(d.note(std::path::Path::new("r")).starts_with("isolation stopped on an evidence-storage failure"));
+        assert!(d.lines().iter().any(
+            |l| l == "isolation stopped: an attempt's evidence could not be stored: disk full"
+        ));
+        assert!(
+            d.note(std::path::Path::new("r"))
+                .starts_with("isolation stopped on an evidence-storage failure")
+        );
     }
 
     #[test]
@@ -560,7 +697,10 @@ mod tests {
         assert_eq!(d.stopped, Some(StopReason::Cap));
         assert!(!d.unresolved.is_empty());
         let lines = d.lines();
-        assert!(lines.iter().any(|l| l.contains("64-attempt cap")), "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("64-attempt cap")),
+            "{lines:?}"
+        );
         assert!(lines.iter().any(|l| l.starts_with("  unresolved: {")));
     }
 
@@ -569,7 +709,11 @@ mod tests {
         let mut calls = 0;
         let d = bisect(ids(8), |_, n| {
             calls += 1;
-            if n == 2 { AttemptOutcome::Stop(StopReason::Deadline) } else { failed(HarnessEnd::Code(2), "x", n) }
+            if n == 2 {
+                AttemptOutcome::Stop(StopReason::Deadline)
+            } else {
+                failed(HarnessEnd::Code(2), "x", n)
+            }
         });
         // Attempt 1 (first half) failed, attempt 2 hit the deadline; nothing more ran.
         assert_eq!(calls, 2);
@@ -578,7 +722,10 @@ mod tests {
         // The deadline half is unresolved; the failed half queued for splitting
         // is unresolved too.
         assert_eq!(d.unresolved.len(), 2, "{:?}", d.unresolved);
-        assert!(d.note(std::path::Path::new("run-1")).starts_with("isolation stopped at the deadline after 2 attempts"));
+        assert!(
+            d.note(std::path::Path::new("run-1"))
+                .starts_with("isolation stopped at the deadline after 2 attempts")
+        );
     }
 
     #[test]

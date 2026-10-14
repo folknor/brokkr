@@ -55,8 +55,14 @@ pub fn supported(project_root: &Path, env: &[(String, String)]) -> bool {
             .map(|(_, v)| v.clone())
             .or_else(|| std::env::var("RUSTDOC").ok())
             .unwrap_or_else(|| "rustdoc".into());
-        crate::output::run_captured(&program, &["-Z", "unstable-options", "--help"], project_root)
-            .is_ok_and(|out| out.status.success() && help_lists_check(&String::from_utf8_lossy(&out.stdout)))
+        crate::output::run_captured(
+            &program,
+            &["-Z", "unstable-options", "--help"],
+            project_root,
+        )
+        .is_ok_and(|out| {
+            out.status.success() && help_lists_check(&String::from_utf8_lossy(&out.stdout))
+        })
     })
 }
 
@@ -85,13 +91,26 @@ fn place_with(env: &[(String, String)], process: impl Fn(&str) -> Option<String>
             .or_else(|| process(key))
     };
     if let Some(old) = lookup("CARGO_ENCODED_RUSTDOCFLAGS") {
-        return Placement::Env { key: "CARGO_ENCODED_RUSTDOCFLAGS", value: append(&old, '\u{1f}') };
+        return Placement::Env {
+            key: "CARGO_ENCODED_RUSTDOCFLAGS",
+            value: append(&old, '\u{1f}'),
+        };
     }
     if let Some(old) = lookup("RUSTDOCFLAGS") {
-        return Placement::Env { key: "RUSTDOCFLAGS", value: append(&old, ' ') };
+        return Placement::Env {
+            key: "RUSTDOCFLAGS",
+            value: append(&old, ' '),
+        };
     }
-    let list = FLAGS.iter().map(|f| format!("\"{f}\"")).collect::<Vec<_>>().join(",");
-    Placement::Config(vec!["--config".into(), format!("build.rustdocflags=[{list}]")])
+    let list = FLAGS
+        .iter()
+        .map(|f| format!("\"{f}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    Placement::Config(vec![
+        "--config".into(),
+        format!("build.rustdocflags=[{list}]"),
+    ])
 }
 
 /// Make each doc unit the run just documented look up to date to cargo.
@@ -154,8 +173,14 @@ fn documented_targets(stdout: &str) -> Vec<String> {
         {
             continue;
         }
-        let doc = v.get("target").and_then(|t| t.get("doc")).and_then(serde_json::Value::as_bool);
-        let name = v.get("target").and_then(|t| t.get("name")).and_then(serde_json::Value::as_str);
+        let doc = v
+            .get("target")
+            .and_then(|t| t.get("doc"))
+            .and_then(serde_json::Value::as_bool);
+        let name = v
+            .get("target")
+            .and_then(|t| t.get("name"))
+            .and_then(serde_json::Value::as_str);
         let rmeta = v
             .get("filenames")
             .and_then(serde_json::Value::as_array)
@@ -188,8 +213,12 @@ mod tests {
 
     #[test]
     fn help_matches_check_but_not_its_prefixed_siblings() {
-        assert!(help_lists_check("        --check         Run rustdoc checks\n"));
-        assert!(!help_lists_check("        --check-cfg     pass a --check-cfg to rustc\n"));
+        assert!(help_lists_check(
+            "        --check         Run rustdoc checks\n"
+        ));
+        assert!(!help_lists_check(
+            "        --check-cfg     pass a --check-cfg to rustc\n"
+        ));
         assert!(!help_lists_check("        --check-theme FILES\n"));
     }
 
@@ -210,7 +239,10 @@ mod tests {
             "\n",
             "not json\n",
         );
-        assert_eq!(documented_targets(stdout), vec!["brokkr-rustc-guard".to_owned()]);
+        assert_eq!(
+            documented_targets(stdout),
+            vec!["brokkr-rustc-guard".to_owned()]
+        );
     }
 
     #[test]
@@ -229,7 +261,10 @@ mod tests {
         let env = vec![("RUSTDOCFLAGS".to_owned(), "--cfg docsrs".to_owned())];
         assert_eq!(
             place_with(&env, none),
-            Placement::Env { key: "RUSTDOCFLAGS", value: "--cfg docsrs -Zunstable-options --check".into() }
+            Placement::Env {
+                key: "RUSTDOCFLAGS",
+                value: "--cfg docsrs -Zunstable-options --check".into()
+            }
         );
     }
 
@@ -238,14 +273,18 @@ mod tests {
         let env = vec![("RUSTDOCFLAGS".to_owned(), String::new())];
         assert_eq!(
             place_with(&env, none),
-            Placement::Env { key: "RUSTDOCFLAGS", value: "-Zunstable-options --check".into() }
+            Placement::Env {
+                key: "RUSTDOCFLAGS",
+                value: "-Zunstable-options --check".into()
+            }
         );
     }
 
     #[test]
     fn encoded_outranks_plain_across_sources() {
         let env = vec![("RUSTDOCFLAGS".to_owned(), "-Dwarnings".to_owned())];
-        let process = |k: &str| (k == "CARGO_ENCODED_RUSTDOCFLAGS").then(|| "--cfg\u{1f}x".to_owned());
+        let process =
+            |k: &str| (k == "CARGO_ENCODED_RUSTDOCFLAGS").then(|| "--cfg\u{1f}x".to_owned());
         assert_eq!(
             place_with(&env, process),
             Placement::Env {

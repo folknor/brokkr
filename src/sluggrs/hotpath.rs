@@ -79,7 +79,10 @@ fn feature_summary(req: &MeasureRequest) -> String {
     } else if req.features.is_empty() {
         "no hotpath features".to_owned()
     } else {
-        format!("--features {} (no hotpath features)", req.features.join(","))
+        format!(
+            "--features {} (no hotpath features)",
+            req.features.join(",")
+        )
     }
 }
 

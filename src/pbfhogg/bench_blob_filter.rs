@@ -81,7 +81,11 @@ pub fn run(
 
     let variant_names: Vec<String> = COMMANDS
         .iter()
-        .flat_map(|cmd| variants.iter().map(move |(label, ..)| format!("{cmd}+{label}")))
+        .flat_map(|cmd| {
+            variants
+                .iter()
+                .map(move |(label, ..)| format!("{cmd}+{label}"))
+        })
         .collect();
     let variant_refs: Vec<&str> = variant_names.iter().map(String::as_str).collect();
 
@@ -118,7 +122,9 @@ pub fn run(
             metadata: vec![],
         };
 
-        harness.run_external(&config, binary, &args_refs, project_root).map(|_| ())
+        harness
+            .run_external(&config, binary, &args_refs, project_root)
+            .map(|_| ())
     });
 
     std::fs::remove_file(&output_path).ok();

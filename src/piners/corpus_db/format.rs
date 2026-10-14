@@ -9,8 +9,7 @@ use serde_json::Value;
 
 use super::compare::{self, Comparison, Presence, ProbeDelta};
 use super::query::{
-    DispositionRow, GateMissRow, RawTable, RunRow, RuntimeRow, ShiftCensus, TradeDiffRow,
-    TrendRow,
+    DispositionRow, GateMissRow, RawTable, RunRow, RuntimeRow, ShiftCensus, TradeDiffRow, TrendRow,
 };
 
 /// Render a header + rows as a left-aligned, space-padded grid. Empty rows
@@ -148,7 +147,11 @@ pub fn runs_table(rows: &[RunRow]) -> String {
                 r.started_at.clone(),
                 commit_cell(r),
                 r.result.clone(),
-                if r.gated { "yes".to_owned() } else { "no".to_owned() },
+                if r.gated {
+                    "yes".to_owned()
+                } else {
+                    "no".to_owned()
+                },
                 r.probe_count.to_string(),
                 fi(r.harness_exit_code),
                 r.fail_reason.clone().unwrap_or_default(),
@@ -158,7 +161,14 @@ pub fn runs_table(rows: &[RunRow]) -> String {
         .collect();
     grid(
         &[
-            "run", "started_at", "commit", "result", "gated", "probes", "exit", "reason",
+            "run",
+            "started_at",
+            "commit",
+            "result",
+            "gated",
+            "probes",
+            "exit",
+            "reason",
             "selector",
         ],
         &cells,
@@ -199,38 +209,60 @@ pub fn run_header(r: &RunRow) -> String {
 /// lists the probes that did not move.
 pub fn compare_report(c: &Comparison, full: bool) -> String {
     let mut out = String::new();
-    out.push_str(&format!("A: {}\nB: {}\n", run_header(&c.run_a), run_header(&c.run_b)));
-    let ctx_a = compare::context_of(&c.run_a.selector);
-    let ctx_b = compare::context_of(&c.run_b.selector);
-    if ctx_a != ctx_b {
-        let show = |(debug, args): &(bool, Vec<String>)| {
-            let profile = if *debug { "debug" } else { "release" };
-            if args.is_empty() {
-                profile.to_owned()
-            } else {
-                format!("{profile} -- {}", args.join(" "))
-            }
-        };
-        out.push_str(&format!(
-            "note: the runs differ in execution context (A: {}, B: {}) - counts may not be \
-             comparable\n",
-            show(&ctx_a),
-            show(&ctx_b)
-        ));
+    out.push_str(&format!(
+        "A: {}\nB: {}\n",
+        run_header(&c.run_a),
+        run_header(&c.run_b)
+    ));
+    let ctx_a = compare::context_of(&c.run_a);
+    let ctx_b = compare::context_of(&c.run_b);
+    let show = |context: &super::ingest::RunContext| {
+        let profile = if context.debug { "debug" } else { "release" };
+        if context.harness_args.is_empty() {
+            profile.to_owned()
+        } else {
+            format!("{profile} -- {}", context.harness_args.join(" "))
+        }
+    };
+    match (ctx_a, ctx_b) {
+        (Some(a), Some(b)) if a != b => {
+            out.push_str(&format!(
+                "note: the runs differ in execution context (A: {}, B: {}) - counts may not be \
+                 comparable\n",
+                show(a),
+                show(b)
+            ));
+        }
+        (None, _) | (_, None) => out.push_str(
+            "note: context unknown for at least one run; comparability cannot be established\n",
+        ),
+        _ => {}
     }
 
     let shown: Vec<&ProbeDelta> = c.probes.iter().filter(|d| full || d.moved()).collect();
     let cells: Vec<Vec<String>> = shown.iter().map(|d| compare_cells(d)).collect();
     out.push('\n');
     out.push_str(&grid(
-        &["probe", "tier", "outcome/disposition", "matched", "ours", "tv", "movement"],
+        &[
+            "probe",
+            "tier",
+            "outcome/disposition",
+            "matched",
+            "ours",
+            "tv",
+            "movement",
+        ],
         &cells,
     ));
     let moved = c.probes.iter().filter(|d| d.moved()).count();
     out.push_str(&format!(
         "\n\n{moved} of {} moved{}",
         crate::output::count(c.probes.len(), "probe"),
-        if full || moved == c.probes.len() { "" } else { " (pass --full to list the rest)" }
+        if full || moved == c.probes.len() {
+            ""
+        } else {
+            " (pass --full to list the rest)"
+        }
     ));
     out
 }
@@ -244,14 +276,22 @@ fn side_label(s: &compare::Side) -> String {
 fn compare_cells(d: &ProbeDelta) -> Vec<String> {
     let arrow = |a: String, b: String| if a == b { a } else { format!("{a} -> {b}") };
     let count = |a: i64, b: i64| {
-        if a == b { a.to_string() } else { format!("{a} -> {b} ({:+})", b - a) }
+        if a == b {
+            a.to_string()
+        } else {
+            format!("{a} -> {b} ({:+})", b - a)
+        }
     };
     match (&d.a, &d.b) {
         (Presence::Ran(a), Presence::Ran(b)) => {
             let label = side_label;
             let counts = a.has_counts && b.has_counts;
             let side_counts = |s: &compare::Side, v: i64| {
-                if s.has_counts { v.to_string() } else { "no counts".to_owned() }
+                if s.has_counts {
+                    v.to_string()
+                } else {
+                    "no counts".to_owned()
+                }
             };
             let cell = |va: i64, vb: i64| {
                 if counts {
@@ -304,7 +344,11 @@ pub fn dispositions_table(rows: &[DispositionRow]) -> String {
                 d.outcome.clone(),
                 d.disposition.clone(),
                 fs(&d.expected),
-                if d.gate_ok { "ok".to_owned() } else { "DEVIATES".to_owned() },
+                if d.gate_ok {
+                    "ok".to_owned()
+                } else {
+                    "DEVIATES".to_owned()
+                },
                 d.matched.to_string(),
                 d.ours_only.to_string(),
                 d.tv_only.to_string(),
@@ -321,8 +365,22 @@ pub fn dispositions_table(rows: &[DispositionRow]) -> String {
         .collect();
     grid(
         &[
-            "probe", "outcome", "disposition", "expected", "gate", "matched", "ours", "tv",
-            "b_ours", "b_tv", "count_tier", "p90_en", "p90_ex", "p90_pnl", "signature", "error",
+            "probe",
+            "outcome",
+            "disposition",
+            "expected",
+            "gate",
+            "matched",
+            "ours",
+            "tv",
+            "b_ours",
+            "b_tv",
+            "count_tier",
+            "p90_en",
+            "p90_ex",
+            "p90_pnl",
+            "signature",
+            "error",
         ],
         &cells,
     )
@@ -359,8 +417,17 @@ pub fn trade_diffs_table(rows: &[TradeDiffRow]) -> String {
         .collect();
     grid(
         &[
-            "our#", "tv#", "side", "Δentry_ts", "Δexit_ts", "Δentry_px", "Δexit_px", "our_qty",
-            "tv_qty", "our_pnl", "tv_pnl",
+            "our#",
+            "tv#",
+            "side",
+            "Δentry_ts",
+            "Δexit_ts",
+            "Δentry_px",
+            "Δexit_px",
+            "our_qty",
+            "tv_qty",
+            "our_pnl",
+            "tv_pnl",
         ],
         &cells,
     )
@@ -394,13 +461,23 @@ pub fn trend_table(rows: &[TrendRow]) -> String {
     let cells: Vec<Vec<String>> = rows
         .iter()
         .map(|t| {
-            let retained = |cell: String| if t.from_harness { cell } else { "n/r".to_owned() };
+            let retained = |cell: String| {
+                if t.from_harness {
+                    cell
+                } else {
+                    "n/r".to_owned()
+                }
+            };
             vec![
                 t.run_id.to_string(),
                 t.started_at.clone(),
                 t.disposition.clone(),
                 fs(&t.count_tier),
-                if t.gate_ok { "ok".to_owned() } else { "DEVIATES".to_owned() },
+                if t.gate_ok {
+                    "ok".to_owned()
+                } else {
+                    "DEVIATES".to_owned()
+                },
                 t.matched.to_string(),
                 t.ours_only.to_string(),
                 t.tv_only.to_string(),
@@ -415,8 +492,20 @@ pub fn trend_table(rows: &[TrendRow]) -> String {
         .collect();
     grid(
         &[
-            "run", "started_at", "disposition", "count_tier", "gate", "matched", "ours", "tv", "b_ours",
-            "b_tv", "p90_ex", "anchor", "ts_entry", "ts_exit",
+            "run",
+            "started_at",
+            "disposition",
+            "count_tier",
+            "gate",
+            "matched",
+            "ours",
+            "tv",
+            "b_ours",
+            "b_tv",
+            "p90_ex",
+            "anchor",
+            "ts_entry",
+            "ts_exit",
         ],
         &cells,
     )
@@ -460,7 +549,13 @@ pub fn raw_records(t: &RawTable) -> String {
 pub fn runtimes_table(rows: &[RuntimeRow]) -> String {
     let cells: Vec<Vec<String>> = rows
         .iter()
-        .map(|r| vec![r.probe.clone(), format!("{:.0}", r.runtime_ms), r.run_id.to_string()])
+        .map(|r| {
+            vec![
+                r.probe.clone(),
+                format!("{:.0}", r.runtime_ms),
+                r.run_id.to_string(),
+            ]
+        })
         .collect();
     let mut out = grid(&["probe", "runtime_ms", "run"], &cells);
     if !rows.is_empty() {
@@ -489,7 +584,8 @@ mod tests {
         let kw = r#"{"all":false,"bless":false,"ids":["a"],"keywords":["magnifier","bracket"],"probe":[]}"#;
         assert_eq!(fmt_selector(kw), "kw=magnifier,bracket");
         // Current shape: probe is an array (repeatable `--probe`).
-        let probe = r#"{"all":false,"bless":false,"ids":["x","y"],"keywords":[],"probe":["x","y"]}"#;
+        let probe =
+            r#"{"all":false,"bless":false,"ids":["x","y"],"keywords":[],"probe":["x","y"]}"#;
         assert_eq!(fmt_selector(probe), "probe=x,y");
     }
 

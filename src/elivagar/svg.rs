@@ -33,7 +33,17 @@ pub fn run(
     let output_str = output_path.map(|p| p.display().to_string());
 
     let mut args: Vec<&str> = vec![
-        "svg", &pmtiles_str, "-z", &z_str, "-x", &x_str, "-y", &y_str, "-W", &width_str, "-H",
+        "svg",
+        &pmtiles_str,
+        "-z",
+        &z_str,
+        "-x",
+        &x_str,
+        "-y",
+        &y_str,
+        "-W",
+        &width_str,
+        "-H",
         &height_str,
     ];
     if let Some(l) = layers {

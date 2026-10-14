@@ -20,7 +20,7 @@
 //! different wrapper already configured (sccache, say) is reported, never
 //! overwritten - chaining wrappers is a decision for a human.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::error::DevError;
 use crate::output;
@@ -43,7 +43,9 @@ const GUARD_PROTOCOL: u32 = 1;
 /// `brokkr guard [--install|--remove]`: bare shows status.
 pub fn cmd_guard(install: bool, remove: bool) -> Result<(), DevError> {
     if install && remove {
-        return Err(DevError::Config("--install and --remove are mutually exclusive".into()));
+        return Err(DevError::Config(
+            "--install and --remove are mutually exclusive".into(),
+        ));
     }
     let config_path = cargo_config_path()?;
     if install {
@@ -59,10 +61,14 @@ pub fn cmd_guard(install: bool, remove: bool) -> Result<(), DevError> {
 /// guessed: `cargo install` puts both bins in one directory, and a dev-tree
 /// brokkr finds its dev-tree guard the same way.
 fn guard_bin_path() -> Result<PathBuf, DevError> {
-    let exe = std::env::current_exe()
-        .map_err(|e| DevError::Config(format!("cannot resolve the running brokkr executable: {e}")))?;
+    let exe = std::env::current_exe().map_err(|e| {
+        DevError::Config(format!("cannot resolve the running brokkr executable: {e}"))
+    })?;
     let Some(dir) = exe.parent() else {
-        return Err(DevError::Config(format!("{} has no parent directory", exe.display())));
+        return Err(DevError::Config(format!(
+            "{} has no parent directory",
+            exe.display()
+        )));
     };
     Ok(dir.join(GUARD_BIN))
 }
@@ -77,7 +83,9 @@ fn guard_bin_path() -> Result<PathBuf, DevError> {
 /// neither-exists case, where a fresh install should create the modern name).
 fn cargo_config_path() -> Result<PathBuf, DevError> {
     let cargo_home = crate::user_dirs::cargo_home().ok_or_else(|| {
-        DevError::Config("neither $CARGO_HOME nor $HOME is set - cannot locate the cargo config".into())
+        DevError::Config(
+            "neither $CARGO_HOME nor $HOME is set - cannot locate the cargo config".into(),
+        )
     })?;
     Ok(crate::user_dirs::cargo_config_file(&cargo_home)
         .unwrap_or_else(|| cargo_home.join("config.toml")))
@@ -87,7 +95,12 @@ fn load_doc(path: &std::path::Path) -> Result<toml_edit::DocumentMut, DevError> 
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(DevError::Config(format!("cannot read {}: {e}", path.display()))),
+        Err(e) => {
+            return Err(DevError::Config(format!(
+                "cannot read {}: {e}",
+                path.display()
+            )));
+        }
     };
     text.parse()
         .map_err(|e| DevError::Config(format!("cannot parse {}: {e}", path.display())))
@@ -95,7 +108,36 @@ fn load_doc(path: &std::path::Path) -> Result<toml_edit::DocumentMut, DevError> 
 
 /// The configured `build.rustc-wrapper`, if any.
 fn configured_wrapper(doc: &toml_edit::DocumentMut) -> Option<String> {
-    doc.get("build")?.get(WRAPPER_KEY)?.as_str().map(str::to_owned)
+    doc.get("build")?
+        .get(WRAPPER_KEY)?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// How the configured wrapper relates to this brokkr installation.
+enum Wrapper {
+    None,
+    ThisInstall,
+    OtherBrokkrGuard(PathBuf),
+    Foreign(String),
+}
+
+/// Classify the wrapper by exact path for this install and exact executable
+/// name for other brokkr installs. A suffix match also accepts unrelated
+/// names such as `not-brokkr-rustc-guard` and is not ownership evidence.
+fn classify_wrapper(wrapper: Option<&str>, install_path: Option<&Path>) -> Wrapper {
+    let Some(wrapper) = wrapper else {
+        return Wrapper::None;
+    };
+    let path = PathBuf::from(wrapper);
+    if install_path.is_some_and(|installed| installed.to_string_lossy().as_ref() == wrapper) {
+        return Wrapper::ThisInstall;
+    }
+    if install_path.is_some() && path.file_name() == Some(std::ffi::OsStr::new(GUARD_BIN)) {
+        Wrapper::OtherBrokkrGuard(path)
+    } else {
+        Wrapper::Foreign(wrapper.to_owned())
+    }
 }
 
 fn do_install(config_path: &std::path::Path) -> Result<(), DevError> {
@@ -107,16 +149,26 @@ fn do_install(config_path: &std::path::Path) -> Result<(), DevError> {
         )));
     }
     let mut doc = load_doc(config_path)?;
-    if let Some(existing) = configured_wrapper(&doc) {
-        if existing == guard.display().to_string() {
+    match classify_wrapper(configured_wrapper(&doc).as_deref(), Some(&guard)) {
+        Wrapper::ThisInstall => {
             // `status` reports "guard installed: ..." - one line, not two.
             status(config_path)?;
             return Ok(());
         }
-        return Err(DevError::Config(format!(
-            "{} already sets build.{WRAPPER_KEY} = \"{existing}\" - refusing to overwrite a wrapper brokkr did not write",
-            config_path.display()
-        )));
+        Wrapper::OtherBrokkrGuard(other) => {
+            return Err(DevError::Config(format!(
+                "{} already sets build.{WRAPPER_KEY} to a brokkr guard from another install ({}) - refusing to overwrite it",
+                config_path.display(),
+                other.display()
+            )));
+        }
+        Wrapper::Foreign(existing) => {
+            return Err(DevError::Config(format!(
+                "{} already sets build.{WRAPPER_KEY} = \"{existing}\" - refusing to overwrite a wrapper brokkr did not write",
+                config_path.display()
+            )));
+        }
+        Wrapper::None => {}
     }
     if doc.get("build").is_none() {
         doc["build"] = toml_edit::Item::Table(toml_edit::Table::new());
@@ -125,22 +177,42 @@ fn do_install(config_path: &std::path::Path) -> Result<(), DevError> {
     if let Some(dir) = config_path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(config_path, doc.to_string())?;
-    output::guard_msg(&format!("build.{WRAPPER_KEY} = \"{}\" written to {}", guard.display(), config_path.display()));
-    output::guard_msg("every cargo this user runs now routes rustc through the guard; the wrapper change invalidates cargo's fingerprint, so the next build in each target dir is a full rebuild (once)");
+    crate::atomic_write::replace(config_path, doc.to_string().as_bytes())?;
+    output::guard_msg(&format!(
+        "build.{WRAPPER_KEY} = \"{}\" written to {}",
+        guard.display(),
+        config_path.display()
+    ));
+    output::guard_msg(
+        "every cargo this user runs now routes rustc through the guard; the wrapper change invalidates cargo's fingerprint, so the next build in each target dir is a full rebuild (once)",
+    );
     Ok(())
 }
 
 fn do_remove(config_path: &std::path::Path) -> Result<(), DevError> {
     let mut doc = load_doc(config_path)?;
     let Some(existing) = configured_wrapper(&doc) else {
-        output::guard_msg(&format!("no build.{WRAPPER_KEY} in {} - nothing to remove", config_path.display()));
+        output::guard_msg(&format!(
+            "no build.{WRAPPER_KEY} in {} - nothing to remove",
+            config_path.display()
+        ));
         return Ok(());
     };
-    if !existing.ends_with(GUARD_BIN) {
-        return Err(DevError::Config(format!(
-            "build.{WRAPPER_KEY} = \"{existing}\" is not the brokkr guard - refusing to remove a wrapper brokkr did not write"
-        )));
+    let install_path = guard_bin_path()?;
+    match classify_wrapper(Some(&existing), Some(&install_path)) {
+        Wrapper::ThisInstall => {}
+        Wrapper::OtherBrokkrGuard(other) => {
+            return Err(DevError::Config(format!(
+                "build.{WRAPPER_KEY} = \"{existing}\" points to a brokkr guard from another install ({}) - refusing to remove it",
+                other.display()
+            )));
+        }
+        Wrapper::Foreign(wrapper) => {
+            return Err(DevError::Config(format!(
+                "build.{WRAPPER_KEY} = \"{wrapper}\" is not this brokkr install's guard - refusing to remove a wrapper brokkr did not write"
+            )));
+        }
+        Wrapper::None => unreachable!("a configured wrapper was just read"),
     }
     if let Some(build) = doc.get_mut("build").and_then(toml_edit::Item::as_table_mut) {
         build.remove(WRAPPER_KEY);
@@ -148,8 +220,11 @@ fn do_remove(config_path: &std::path::Path) -> Result<(), DevError> {
             doc.as_table_mut().remove("build");
         }
     }
-    std::fs::write(config_path, doc.to_string())?;
-    output::guard_msg(&format!("build.{WRAPPER_KEY} removed from {}", config_path.display()));
+    crate::atomic_write::replace(config_path, doc.to_string().as_bytes())?;
+    output::guard_msg(&format!(
+        "build.{WRAPPER_KEY} removed from {}",
+        config_path.display()
+    ));
     Ok(())
 }
 
@@ -194,7 +269,9 @@ fn probe_guard(wrapper: &str) -> GuardProbe {
         .and_then(|rest| rest.split_whitespace().next())
         .and_then(|n| n.parse::<u32>().ok())
     else {
-        return GuardProbe::Stale("does not speak the handshake (predates it, or is not the guard)".into());
+        return GuardProbe::Stale(
+            "does not speak the handshake (predates it, or is not the guard)".into(),
+        );
     };
     if proto == GUARD_PROTOCOL {
         GuardProbe::Current
@@ -211,18 +288,30 @@ fn stale_warning() -> Option<String> {
     let config_path = cargo_config_path().ok()?;
     let doc = load_doc(&config_path).ok()?;
     let wrapper = configured_wrapper(&doc)?;
-    if !wrapper.ends_with(GUARD_BIN) {
+    let install_path = guard_bin_path().ok();
+    let ownership = classify_wrapper(Some(&wrapper), install_path.as_deref());
+    let belongs_to_brokkr = matches!(
+        &ownership,
+        Wrapper::ThisInstall | Wrapper::OtherBrokkrGuard(_)
+    );
+    if !belongs_to_brokkr {
         return None;
     }
+    let update = if matches!(&ownership, Wrapper::ThisInstall) {
+        format!("run `brokkr install` in the brokkr repo to update {wrapper}")
+    } else {
+        format!(
+            "use the brokkr install that owns {wrapper} to remove it, then run `brokkr guard --install` here"
+        )
+    };
     match probe_guard(&wrapper) {
         GuardProbe::Current => None,
         GuardProbe::Mismatch(proto) => Some(format!(
             "the enrolled rustc guard speaks protocol {proto}, this brokkr expects {GUARD_PROTOCOL} - \
-             run `brokkr install` in the brokkr repo to update {wrapper}"
+             {update}"
         )),
         GuardProbe::Stale(why) => Some(format!(
-            "the enrolled rustc guard {wrapper} {why} - it predates this brokkr; \
-             run `brokkr install` in the brokkr repo to update it"
+            "the enrolled rustc guard {wrapper} {why} - it predates this brokkr; {update}"
         )),
     }
 }
@@ -243,32 +332,61 @@ pub fn warn_if_guard_stale() {
 
 fn status(config_path: &std::path::Path) -> Result<(), DevError> {
     let doc = load_doc(config_path)?;
-    match configured_wrapper(&doc) {
-        Some(w) if w.ends_with(GUARD_BIN) => {
-            let exists = PathBuf::from(&w).exists();
-            output::guard_msg(&format!("guard installed: build.{WRAPPER_KEY} = \"{w}\" in {}", config_path.display()));
-            if !exists {
-                output::warn("the configured guard binary does not exist - cargo will fail until `brokkr install` restores it or `brokkr guard --remove` unsets it");
-            } else {
-                match probe_guard(&w) {
-                    GuardProbe::Current => {
-                        output::guard_msg(&format!("guard protocol {GUARD_PROTOCOL}: current"));
-                    }
-                    GuardProbe::Mismatch(proto) => output::warn(&format!(
-                        "guard speaks protocol {proto}, this brokkr expects {GUARD_PROTOCOL} - run `brokkr install` in the brokkr repo"
-                    )),
-                    GuardProbe::Stale(why) => output::warn(&format!(
-                        "guard {why} - run `brokkr install` in the brokkr repo"
-                    )),
-                }
+    let configured = configured_wrapper(&doc);
+    let install_path = guard_bin_path().ok();
+    match classify_wrapper(configured.as_deref(), install_path.as_deref()) {
+        Wrapper::ThisInstall => {
+            if let Some(wrapper) = configured.as_deref() {
+                report_configured_guard(
+                    config_path,
+                    wrapper,
+                    "guard installed",
+                    "run `brokkr install` in the brokkr repo to update it",
+                );
             }
         }
-        Some(w) => {
-            output::guard_msg(&format!("a different wrapper is configured: build.{WRAPPER_KEY} = \"{w}\" - the guard is NOT active"));
+        Wrapper::OtherBrokkrGuard(path) => {
+            let wrapper = path.to_string_lossy();
+            report_configured_guard(
+                config_path,
+                wrapper.as_ref(),
+                "a brokkr guard from another install is configured",
+                "use the brokkr install that owns this path to remove it, then run `brokkr guard --install` here",
+            );
         }
-        None => {
-            output::guard_msg(&format!("guard not installed (no build.{WRAPPER_KEY} in {}) - `brokkr guard --install` enrolls it", config_path.display()));
+        Wrapper::Foreign(wrapper) => {
+            output::guard_msg(&format!(
+                "a different wrapper is configured: build.{WRAPPER_KEY} = \"{wrapper}\" - the guard is NOT active"
+            ));
+        }
+        Wrapper::None => {
+            output::guard_msg(&format!(
+                "guard not installed (no build.{WRAPPER_KEY} in {}) - `brokkr guard --install` enrolls it",
+                config_path.display()
+            ));
         }
     }
     Ok(())
+}
+
+fn report_configured_guard(config_path: &Path, wrapper: &str, heading: &str, update: &str) {
+    output::guard_msg(&format!(
+        "{heading}: build.{WRAPPER_KEY} = \"{wrapper}\" in {}",
+        config_path.display()
+    ));
+    if !PathBuf::from(wrapper).exists() {
+        output::warn(
+            "the configured guard binary does not exist - cargo will fail until the owning install restores it or `brokkr guard --remove` unsets it",
+        );
+        return;
+    }
+    match probe_guard(wrapper) {
+        GuardProbe::Current => {
+            output::guard_msg(&format!("guard protocol {GUARD_PROTOCOL}: current"));
+        }
+        GuardProbe::Mismatch(proto) => output::warn(&format!(
+            "guard speaks protocol {proto}, this brokkr expects {GUARD_PROTOCOL} - {update}"
+        )),
+        GuardProbe::Stale(why) => output::warn(&format!("guard {why} - {update}")),
+    }
 }

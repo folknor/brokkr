@@ -272,7 +272,11 @@ mod tests {
 
     #[test]
     fn piners_clean_report_is_empty() {
-        assert!(parse_piners(br#"{"ok":true,"diagnostics":[]}"#, ALL).unwrap().is_empty());
+        assert!(
+            parse_piners(br#"{"ok":true,"diagnostics":[]}"#, ALL)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -359,7 +363,11 @@ mod tests {
     #[test]
     fn pine_lint_success_with_no_diagnostics_is_clean() {
         // success=true with neither `result` nor top-level arrays => clean.
-        assert!(parse_pine_lint(br#"{"success":true}"#, ALL).unwrap().is_empty());
+        assert!(
+            parse_pine_lint(br#"{"success":true}"#, ALL)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -367,13 +375,24 @@ mod tests {
         let labels = [
             ERR_SYNTAX.label(),
             ALL.label(),
-            Scope { include_warnings: true, syntax_only: true }.label(),
-            Scope { include_warnings: false, syntax_only: false }.label(),
+            Scope {
+                include_warnings: true,
+                syntax_only: true,
+            }
+            .label(),
+            Scope {
+                include_warnings: false,
+                syntax_only: false,
+            }
+            .label(),
         ];
         let unique: std::collections::BTreeSet<_> = labels.iter().collect();
         assert_eq!(unique.len(), 4);
         assert_eq!(ERR_SYNTAX.recorded_label(), None);
-        assert_eq!(ALL.recorded_label().as_deref(), Some("errors+warnings/all-stages"));
+        assert_eq!(
+            ALL.recorded_label().as_deref(),
+            Some("errors+warnings/all-stages")
+        );
         // An absent recorded scope is the default one.
         assert!(ERR_SYNTAX.matches_recorded(None));
         assert!(!ALL.matches_recorded(None));

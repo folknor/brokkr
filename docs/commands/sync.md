@@ -65,6 +65,8 @@ parse top-of-file frontmatter (`description`, `expected`, `fixture`,
 `protocol`, `ceiling`, `preserve_data_dir`), print a sorted table. Empty-state
 output names the expected directory and notes that the cohort may not have
 landed yet. Pure brokkr - no sæhrimnir or harness-binary spawn.
+Invalid values for recognized fields fail discovery with the script path and
+frontmatter line; the fixture key is singular.
 
 ## `sync --all [--filter SUB] [--include-ignored]` - run the cohort
 

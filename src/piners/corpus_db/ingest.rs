@@ -20,6 +20,15 @@ use crate::error::DevError;
 use crate::piners::gate::GateDiff;
 use crate::piners::report::{HarnessReport, ProbeLine, TradeDiffLine};
 
+/// Execution context resolved before building/running the corpus harness.
+/// The same values are stored in dedicated run columns so comparisons do not
+/// infer them from selector presentation JSON.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunContext {
+    pub debug: bool,
+    pub harness_args: Vec<String>,
+}
+
 /// The run-envelope fields that aren't derivable from the parsed report.
 pub struct RunRecord<'a> {
     /// The id the run was allocated under the lock (its artefact dir is
@@ -38,6 +47,9 @@ pub struct RunRecord<'a> {
     pub dirty: Option<bool>,
     /// JSON describing what was selected (resolved ids + raw flags).
     pub selector: &'a str,
+    /// Resolved profile and forwarded harness flags. `None` marks a legacy
+    /// or synthetic row whose execution context is unknown.
+    pub context: Option<&'a RunContext>,
     /// Was the per-probe gate enforced (`!--no-gate`)?
     pub gated: bool,
     /// `"pass"` or `"fail"`.
@@ -123,11 +135,18 @@ fn record_inner(
     expected: &BTreeMap<String, Option<String>>,
     gate_diffs: &[GateDiff],
 ) -> Result<i64, DevError> {
+    let context = run.context;
+    let debug = context.map(|context| i64::from(context.debug));
+    let harness_args = context
+        .map(|context| serde_json::to_string(&context.harness_args))
+        .transpose()
+        .map_err(|e| DevError::Database(format!("serializing run harness args: {e}")))?;
     conn.execute(
         "INSERT INTO run \
          (run_id, started_at, selector, gated, result, fail_reason, harness_exit_code, \
-          probe_count, harness_stderr, wall_ms, commit_sha, dirty, protocol_violations, run_error) \
-         VALUES (?9, COALESCE(?10, datetime('now')), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?11, ?12, ?13, ?14)",
+          probe_count, harness_stderr, wall_ms, commit_sha, dirty, protocol_violations, run_error, \
+          debug, harness_args) \
+         VALUES (?9, COALESCE(?10, datetime('now')), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             run.selector,
             i64::from(run.gated),
@@ -143,6 +162,8 @@ fn record_inner(
             run.dirty.map(i64::from),
             run.protocol_violations,
             run.run_error,
+            debug,
+            harness_args,
         ],
     )?;
     let run_id = conn.last_insert_rowid();
@@ -158,13 +179,22 @@ fn record_inner(
     for p in &report.probes {
         let gate_ok = !deviating.contains(p.probe.as_str());
         insert_disposition(conn, run_id, p, expected, gate_ok).map_err(|e| {
-            DevError::Database(format!("storing the disposition of probe '{}': {e}", p.probe))
+            DevError::Database(format!(
+                "storing the disposition of probe '{}': {e}",
+                p.probe
+            ))
         })?;
         for site in &p.dense_na_sites {
             conn.execute(
                 "INSERT INTO dense_na_site (run_id, probe, name, call_site, na_count) \
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![run_id, p.probe, site.name, site.call_site, as_i64(site.na_count)],
+                params![
+                    run_id,
+                    p.probe,
+                    site.name,
+                    site.call_site,
+                    as_i64(site.na_count)
+                ],
             )?;
         }
     }
@@ -312,6 +342,7 @@ mod tests {
             commit_sha: None,
             dirty: None,
             selector: r#"{"keywords":["magnifier"]}"#,
+            context: None,
             gated: true,
             result: "fail",
             fail_reason: Some("1 gate deviation(s)"),
@@ -321,7 +352,9 @@ mod tests {
             protocol_violations: Some(0),
             run_error: None,
         };
-        let run_id = db.record_run(&run, &report, &expected, &gate_diffs).unwrap();
+        let run_id = db
+            .record_run(&run, &report, &expected, &gate_diffs)
+            .unwrap();
         assert_eq!(run_id, 1);
 
         // Run envelope.
@@ -363,6 +396,35 @@ mod tests {
     }
 
     #[test]
+    fn typed_execution_context_roundtrips_independently_of_selector_json() {
+        let db = CorpusDb::open_in_memory().unwrap();
+        let context = RunContext {
+            debug: false,
+            harness_args: vec!["--scan-signal-extra".to_owned()],
+        };
+        let run = RunRecord {
+            run_id: Some(1),
+            started_at: None,
+            commit_sha: None,
+            dirty: None,
+            selector: "not-json",
+            context: Some(&context),
+            gated: true,
+            result: "pass",
+            fail_reason: None,
+            harness_exit_code: Some(0),
+            stderr: "",
+            wall_ms: None,
+            protocol_violations: Some(0),
+            run_error: None,
+        };
+        db.record_run(&run, &parse(b""), &BTreeMap::new(), &[])
+            .unwrap();
+
+        assert_eq!(db.run(1).unwrap().unwrap().context, Some(context));
+    }
+
+    #[test]
     fn a_field_brokkr_never_modelled_is_stored_and_projected() {
         // The harness adds diagnostics brokkr has no struct field for; the
         // record keeps them, and the named ones read back as columns.
@@ -377,6 +439,7 @@ mod tests {
             commit_sha: None,
             dirty: None,
             selector: "{}",
+            context: None,
             gated: true,
             result: "pass",
             fail_reason: None,
@@ -386,8 +449,13 @@ mod tests {
             protocol_violations: Some(0),
             run_error: None,
         };
-        db.record_run(&run, &report, &expected_map(&[("p1", Some("accepted"))]), &[])
-            .unwrap();
+        db.record_run(
+            &run,
+            &report,
+            &expected_map(&[("p1", Some("accepted"))]),
+            &[],
+        )
+        .unwrap();
         let t = db
             .raw_sql(
                 "SELECT boundary_anchor, anchor_consumed, rule_start_tv, ts_entry_share_pct, \
@@ -421,6 +489,7 @@ mod tests {
             commit_sha: None,
             dirty: None,
             selector: "{}",
+            context: None,
             gated: true,
             result: "fail",
             fail_reason: Some("1 gate deviation(s)"),
@@ -430,8 +499,15 @@ mod tests {
             protocol_violations: Some(0),
             run_error: None,
         };
-        let run_id = db.record_run(&run, &report, &expected, &gate_diffs).unwrap();
-        assert!(!db.disposition_for_probe(run_id, "p1").unwrap().unwrap().gate_ok);
+        let run_id = db
+            .record_run(&run, &report, &expected, &gate_diffs)
+            .unwrap();
+        assert!(
+            !db.disposition_for_probe(run_id, "p1")
+                .unwrap()
+                .unwrap()
+                .gate_ok
+        );
         let stray = db.disposition_for_probe(run_id, "stray").unwrap().unwrap();
         assert!(stray.gate_ok);
         assert_eq!(stray.expected, None);
@@ -447,6 +523,7 @@ mod tests {
             commit_sha: None,
             dirty: None,
             selector: "{}",
+            context: None,
             gated: true,
             result: "fail",
             fail_reason: Some("run_error at stage feed_load (feed eth, role base): oom"),
@@ -456,11 +533,17 @@ mod tests {
             protocol_violations: Some(0),
             run_error: Some(json),
         };
-        db.record_run(&run, &parse(b""), &BTreeMap::new(), &[]).unwrap();
+        db.record_run(&run, &parse(b""), &BTreeMap::new(), &[])
+            .unwrap();
         let row = db.run(3).unwrap().unwrap();
-        let rec = crate::piners::contract::RunErrorRecord::from_json(row.run_error.as_deref().unwrap()).unwrap();
+        let rec =
+            crate::piners::contract::RunErrorRecord::from_json(row.run_error.as_deref().unwrap())
+                .unwrap();
         assert_eq!(rec.role.as_deref(), Some("base"));
-        assert_eq!(rec.render(), "run_error at stage feed_load (feed eth, role base): oom");
+        assert_eq!(
+            rec.render(),
+            "run_error at stage feed_load (feed eth, role base): oom"
+        );
     }
 
     #[test]
@@ -472,6 +555,7 @@ mod tests {
             commit_sha: None,
             dirty: None,
             selector: "{}",
+            context: None,
             gated: true,
             result: "fail",
             fail_reason: Some("harness exited 2 before reporting 3 of 3"),
@@ -481,12 +565,16 @@ mod tests {
             protocol_violations: Some(0),
             run_error: None,
         };
-        db.record_run(&run, &parse(b""), &BTreeMap::new(), &[]).unwrap();
+        db.record_run(&run, &parse(b""), &BTreeMap::new(), &[])
+            .unwrap();
         db.append_diagnosis(7, "first").unwrap();
         db.append_diagnosis(7, "second").unwrap();
         let row = db.run(7).unwrap().unwrap();
         assert_eq!(row.diagnosis.as_deref(), Some("first\nsecond"));
-        assert_eq!(row.fail_reason.as_deref(), Some("harness exited 2 before reporting 3 of 3"));
+        assert_eq!(
+            row.fail_reason.as_deref(),
+            Some("harness exited 2 before reporting 3 of 3")
+        );
         assert_eq!(row.result, "fail");
         assert!(db.append_diagnosis(8, "x").is_err());
     }

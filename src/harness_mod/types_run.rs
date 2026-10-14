@@ -126,6 +126,10 @@ pub struct BenchHarness {
     /// once per harness via `with_measure_mode`. The single source of a
     /// run's mode; read only through [`Self::effective_mode`].
     measure_mode: Option<String>,
+    /// Whether measurements from this harness are persisted. A request in
+    /// run mode calls `with_measure_mode(None)`: it still reports the timing,
+    /// but must not write either results or sidecar rows.
+    store_results: bool,
     /// Env var snapshot captured at `with_request` time. Merged into
     /// every row's kv via `build_row` as `env.<NAME>` entries - lets
     /// env-gated code paths (A/B feature flags set from the shell) be
@@ -218,6 +222,7 @@ impl BenchHarness {
             stop_marker,
             brokkr_args: None,
             measure_mode: None,
+            store_results: true,
             env_kv: Vec::new(),
             measure_start_epoch: std::cell::Cell::new(0),
         })
@@ -243,8 +248,10 @@ impl BenchHarness {
 
     /// Set the measurement mode string (`"bench"`, `"hotpath"`, `"alloc"`).
     /// This takes precedence over `BenchConfig.mode`, so individual
-    /// writers don't have to supply it.
+    /// writers don't have to supply it. `None` denotes run mode: report
+    /// measurements without persisting result or sidecar records.
     pub fn with_measure_mode(mut self, mode: Option<&str>) -> Self {
+        self.store_results = mode.is_some();
         self.measure_mode = mode.map(str::to_owned);
         self
     }
@@ -795,6 +802,10 @@ impl BenchHarness {
         iterations_us: &[i64],
     ) -> Result<Option<String>, DevError> {
         let mode = self.effective_mode(config);
+        if !self.store_results {
+            force_emit_result_lines(config, mode.as_deref(), result, &self.git);
+            return Ok(None);
+        }
         if self.git.is_clean {
             let row = self.build_row(config, result, iterations_us);
             let (uuid, short) = match self.db.insert(&row) {
@@ -899,6 +910,10 @@ impl BenchHarness {
         best_run_idx: usize,
         run_info: Option<&crate::db::sidecar::RunInfo>,
     ) -> Result<(), DevError> {
+        if !self.store_results {
+            return Ok(());
+        }
+
         let sidecar_db_path = self.db_dir.join("sidecar.db");
         let sidecar_db = crate::db::sidecar::SidecarDb::open(&sidecar_db_path)?;
 

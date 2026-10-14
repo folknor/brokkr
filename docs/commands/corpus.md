@@ -282,8 +282,9 @@ invocation, after `--manifest <path>`:
 The allowlist-friendly replacement for env-var-prefixed invocations
 (`PINERS_CORPUS_*=1 brokkr corpus ...`), whose shifting prefixes defeat
 command approval. Works for parity and measured runs. Forwarded flags
-are part of the run's identity: recorded in the run row's selector
-(runs.db; `corpus-results` renders them as `probe=x -- --flag`) and in
+are part of the run's identity: recorded in the run row's selector and its
+typed `debug`/`harness_args` context columns (runs.db;
+`corpus-results` renders them as `probe=x -- --flag`) and in
 `cli_args` (results.db). Conflicts with `--verify-only`/`--reseed` (no
 harness runs) and `--bless` (pins must record default-behavior
 dispositions only). The gate stays active - pair with `--no-gate` when

@@ -167,9 +167,7 @@ struct RowData {
 fn collect_counters(kv: &[KvPair]) -> std::collections::BTreeMap<String, String> {
     kv.iter()
         .filter(|p| {
-            !p.key.starts_with("meta.")
-                && !p.key.starts_with("env.")
-                && !p.key.starts_with("prev.")
+            !p.key.starts_with("meta.") && !p.key.starts_with("env.") && !p.key.starts_with("prev.")
         })
         .map(|p| (p.key.clone(), p.value.to_string()))
         .collect()
@@ -367,8 +365,7 @@ fn format_env_diff(
     if a == b {
         return None;
     }
-    let mut keys: std::collections::BTreeSet<&str> =
-        a.keys().map(String::as_str).collect();
+    let mut keys: std::collections::BTreeSet<&str> = a.keys().map(String::as_str).collect();
     keys.extend(b.keys().map(String::as_str));
     let mut parts: Vec<String> = Vec::new();
     for key in keys {
@@ -906,9 +903,9 @@ mod tests {
         clippy::let_underscore_must_use,
         clippy::useless_vec
     )]
-    use super::*;
     use super::super::super::KvPair;
     use super::super::super::StoredRow;
+    use super::*;
 
     // -----------------------------------------------------------------------
     // Helper: build a StoredRow with sensible defaults, overriding key fields
@@ -1091,9 +1088,7 @@ mod tests {
             plain
         );
         // Only argv[0]: a path later in the line is an argument.
-        assert!(
-            normalize_brokkr_args("brokkr read --pbf data/dk.pbf").contains("data/dk.pbf")
-        );
+        assert!(normalize_brokkr_args("brokkr read --pbf data/dk.pbf").contains("data/dk.pbf"));
     }
 
     #[test]
@@ -1108,7 +1103,11 @@ mod tests {
         b.brokkr_args = String::from("brokkr hotpath --bench 1");
 
         let pairs = build_comparison_pairs(&[a], &[b], &DatasetMatcher::empty());
-        assert_eq!(pairs.len(), 1, "retro and current rows should form one pair");
+        assert_eq!(
+            pairs.len(),
+            1,
+            "retro and current rows should form one pair"
+        );
         assert_eq!(pairs[0].a_ms, Some(300));
         assert_eq!(pairs[0].b_ms, Some(280));
     }
@@ -1298,7 +1297,8 @@ mod tests {
     fn counter_diff_reports_every_counter_that_moved() {
         let a = counters(&[("parents", "100"), ("cells_evaluated", "5000")]);
         let b = counters(&[("parents", "100"), ("cells_evaluated", "4000")]);
-        let out = format_counter_diff(&a, &b).expect("a moved counter is the context for the delta");
+        let out =
+            format_counter_diff(&a, &b).expect("a moved counter is the context for the delta");
         assert!(out.contains("cells_evaluated 5000 -> 4000"), "{out}");
         // Unmoved counters are not news; listing them would bury the one that
         // moved.

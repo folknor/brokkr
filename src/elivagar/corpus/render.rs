@@ -95,7 +95,11 @@ fn decode_render_layer(data: &[u8]) -> Result<RenderLayer, String> {
 pub fn classify_rings(rings: &[Vec<(i32, i32)>]) -> (Vec<Vec<usize>>, u32) {
     if rings.len() <= 1 {
         return (
-            if rings.is_empty() { Vec::new() } else { vec![vec![0]] },
+            if rings.is_empty() {
+                Vec::new()
+            } else {
+                vec![vec![0]]
+            },
             0,
         );
     }
@@ -172,7 +176,12 @@ pub fn render_svg(
         .iter()
         .filter(|l| layers.is_none_or(|wanted| wanted.iter().any(|name| name == l.name.as_ref())))
         .collect();
-    refs.sort_by_key(|l| (style.position(&l.name).unwrap_or(usize::MAX), l.name.as_ref()));
+    refs.sort_by_key(|l| {
+        (
+            style.position(&l.name).unwrap_or(usize::MAX),
+            l.name.as_ref(),
+        )
+    });
     let mut warnings = Vec::new();
     for layer in refs {
         if layer.extent == 0 || 4096 % layer.extent != 0 {
@@ -242,7 +251,13 @@ fn emit_feature(out: &mut Vec<u8>, layer: &str, i: usize, f: &RenderFeature, pai
             let mut s = format!(
                 "    <path id=\"{id}\" d=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{}\"",
                 xml_attr(&path_data(&paths, false)),
-                xml_attr(paint.stroke.as_deref().or(paint.fill.as_deref()).unwrap_or("#ff00ff")),
+                xml_attr(
+                    paint
+                        .stroke
+                        .as_deref()
+                        .or(paint.fill.as_deref())
+                        .unwrap_or("#ff00ff")
+                ),
                 xml_attr(paint.stroke_width.as_deref().unwrap_or("1"))
             );
             if let Some(v) = &paint.stroke_dasharray {
@@ -459,11 +474,16 @@ fn unzigzag(value: u32) -> i32 {
 
 #[must_use]
 pub fn xml_text(value: &str) -> String {
-    value.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 #[must_use]
 pub fn xml_attr(value: &str) -> String {
-    xml_text(value).replace('"', "&quot;").replace('\'', "&apos;")
+    xml_text(value)
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 #[cfg(test)]

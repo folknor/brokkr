@@ -4,7 +4,7 @@ use crate::build;
 use crate::config;
 use crate::context::{BenchContext, HarnessContext, bootstrap, bootstrap_config};
 use crate::error::DevError;
-use crate::measure::MeasureRequest;
+use crate::measure::{MeasureMode, MeasureRequest};
 use crate::output;
 use crate::preflight;
 use crate::project::{self, Project};
@@ -104,9 +104,7 @@ fn resolve_serve_tiles(
         Some(v) if v.contains('/') || v.ends_with(".pmtiles") => {
             let p = std::path::Path::new(v);
             if !p.exists() {
-                return Err(DevError::Config(format!(
-                    "tiles file not found: {v}"
-                )));
+                return Err(DevError::Config(format!("tiles file not found: {v}")));
             }
             Ok(Some(v.to_owned()))
         }
@@ -122,8 +120,7 @@ fn resolve_serve_tiles(
             if !has_pmtiles {
                 return Ok(None);
             }
-            let path =
-                resolve::resolve_default_pmtiles_path(dataset, paths, project_root)?;
+            let path = resolve::resolve_default_pmtiles_path(dataset, paths, project_root)?;
             Ok(Some(path.display().to_string()))
         }
     }
@@ -210,13 +207,15 @@ pub(crate) fn geocode(
 }
 
 pub(crate) fn bench_api(req: &MeasureRequest, query: Option<&str>) -> Result<(), DevError> {
+    let allow_dirty = req.force || matches!(req.mode, MeasureMode::Run);
     let ctx = HarnessContext::new(
         req.dev_config,
         req.project,
         req.project_root,
         req.build_root,
         "bench api",
-        req.force,        req.stop_marker.map(str::to_owned),
+        allow_dirty,
+        req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
     let port = resolve_port(req.dev_config)?;
@@ -241,12 +240,12 @@ pub(crate) fn bench_api(req: &MeasureRequest, query: Option<&str>) -> Result<(),
     )
 }
 
-
 pub(crate) fn bench_tiles(
     req: &MeasureRequest,
     tiles_variant: Option<&str>,
     uring: bool,
 ) -> Result<(), DevError> {
+    let allow_dirty = req.force || matches!(req.mode, MeasureMode::Run);
     if uring {
         preflight::run_preflight(&preflight::uring_checks())?;
     }
@@ -263,7 +262,8 @@ pub(crate) fn bench_tiles(
         &all_features,
         true,
         "bench tiles",
-        req.force,        req.stop_marker.map(str::to_owned),
+        allow_dirty,
+        req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
     let data_dir = resolve_nidhogg_data_dir(req.dataset, &ctx.paths)?;
@@ -360,4 +360,3 @@ pub(crate) fn verify_readonly(
     let bbox = resolve_bbox(None, dataset, &paths)?;
     super::verify_readonly::run(&binary, &data_dir_str, port, project_root, &bbox)
 }
-

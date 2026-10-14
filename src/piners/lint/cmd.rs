@@ -26,9 +26,9 @@ use crate::piners::lint::db::{LintDb, RunMeta};
 use crate::piners::lint::diff::classify;
 use crate::piners::lint::registry::{self, LintPin, LintRegistry, TvDiag};
 use crate::piners::lint::select::{self, SelectArgs};
-use crate::piners::lint::{self, validators, DiagSet, ProbeResult};
-use crate::piners::time::now_rfc3339;
+use crate::piners::lint::{self, DiagSet, ProbeResult, validators};
 use crate::piners::registry_io;
+use crate::piners::time::now_rfc3339;
 use crate::ratatoskr::build;
 use crate::resolve::lint_runs_db_path;
 
@@ -48,16 +48,6 @@ const OFFLINE_DEADLINE: Duration = Duration::from_secs(60);
 /// call goes over the network to TradingView, so a stalled connection is the
 /// expected failure; it is reported per probe like any transport failure.
 const TV_DEADLINE: Duration = Duration::from_secs(30);
-
-/// Dispositions that mean a tool produced no comparable output. They describe
-/// the tooling, not the snippet: a run carrying one fails whatever the pin
-/// says, and `--bless` never stamps one (with `pine-lint` missing, every
-/// probe is `lint_error`, and blessing that would pin the outage).
-const TOOL_ERROR_DISPOSITIONS: [&str; 2] = ["piners_error", "lint_error"];
-
-fn is_tool_error(disposition: &str) -> bool {
-    TOOL_ERROR_DISPOSITIONS.contains(&disposition)
-}
 
 /// Flags lifted off the `LintCorpus` CLI command.
 #[derive(Debug, Default)]
@@ -117,7 +107,11 @@ pub fn lint_corpus(
     let project_root_str = project_root.display().to_string();
     let _lock = lockfile::acquire(&LockContext {
         project: "piners",
-        command: if args.reanchor { "lint-reanchor" } else { "lint-corpus" },
+        command: if args.reanchor {
+            "lint-reanchor"
+        } else {
+            "lint-corpus"
+        },
         project_root: &project_root_str,
     })?;
     let _sigterm = crate::shutdown::SigtermGuard::install();
@@ -145,7 +139,9 @@ pub fn lint_corpus(
     let mut abs_paths: BTreeMap<String, String> = BTreeMap::new();
     for id in &ids {
         let pin = registry.pins.get(id).ok_or_else(|| {
-            DevError::Config(format!("piners lint: internal: selected id '{id}' absent from pins"))
+            DevError::Config(format!(
+                "piners lint: internal: selected id '{id}' absent from pins"
+            ))
         })?;
         let abs = registry::verify_probe(id, pin, &corpus_root, project_root)?;
         abs_paths.insert(id.clone(), abs.display().to_string());
@@ -161,26 +157,27 @@ pub fn lint_corpus(
 
     // A captured subprocess run, PID-tracked so `brokkr kill` reaches it, and
     // killed at `deadline` (reported as an error naming the limit).
-    let run = |program: &str, argv: &[&str], deadline: Duration| -> Result<CapturedOutput, DevError> {
-        let r = output::run_captured_with_env_and_deadline(
-            program,
-            argv,
-            project_root,
-            &[],
-            deadline,
-            Some(&|pid| _lock.set_child_pid(pid)),
-            false,
-        );
-        _lock.clear_child_pid();
-        let r = r?;
-        if r.killed_on_deadline {
-            return Err(DevError::Verify(format!(
-                "{program} did not finish within {}s and was killed",
-                deadline.as_secs()
-            )));
-        }
-        Ok(r.captured)
-    };
+    let run =
+        |program: &str, argv: &[&str], deadline: Duration| -> Result<CapturedOutput, DevError> {
+            let r = output::run_captured_with_env_and_deadline(
+                program,
+                argv,
+                project_root,
+                &[],
+                deadline,
+                Some(&|pid| _lock.set_child_pid(pid)),
+                false,
+            );
+            _lock.clear_child_pid();
+            let r = r?;
+            if r.killed_on_deadline {
+                return Err(DevError::Verify(format!(
+                    "{program} did not finish within {}s and was killed",
+                    deadline.as_secs()
+                )));
+            }
+            Ok(r.captured)
+        };
 
     let scope = validators::Scope {
         include_warnings: args.warnings,
@@ -241,7 +238,11 @@ pub fn lint_corpus(
         let abs = &abs_paths[id];
         let pin = &registry.pins[id];
 
-        let piners_set = match run(&validator, &[&subcommand, "--format", "json", abs], OFFLINE_DEADLINE) {
+        let piners_set = match run(
+            &validator,
+            &[&subcommand, "--format", "json", abs],
+            OFFLINE_DEADLINE,
+        ) {
             Ok(cap) => validators::parse_piners(&cap.stdout, scope),
             Err(e) => Err(format!("piners validate failed: {e}")),
         };
@@ -254,17 +255,23 @@ pub fn lint_corpus(
             piners_set.as_ref().map_err(String::as_str),
             lint_set.as_ref().map_err(String::as_str),
         );
-        results.push(build_result(id, pin, &outcome, piners_set.as_ref().ok(), scope));
+        results.push(build_result(
+            id,
+            pin,
+            &outcome,
+            piners_set.as_ref().ok(),
+            scope,
+        ));
     }
 
     render(&results, &registry, args.no_gate, scope);
 
     // Persist the run before any registry mutation. A tool error fails the
     // run whatever the pin says: it describes the tooling, not the snippet
-    // (see TOOL_ERROR_DISPOSITIONS), so it is never a state a pin can accept.
+    // (its typed disposition is never a state a pin can accept).
     let tool_errors: Vec<&str> = results
         .iter()
-        .filter(|r| is_tool_error(&r.disposition))
+        .filter(|r| r.disposition.is_tool_error())
         .map(|r| r.probe.as_str())
         .collect();
     let tool_error = !tool_errors.is_empty();
@@ -305,18 +312,16 @@ pub fn lint_corpus(
         let mut changed = 0usize;
         write_registry(&registry_dir, &mut registry, true, |pins| {
             for r in &results {
-                if is_tool_error(&r.disposition) || !lint::is_disposition(&r.disposition) {
+                let Some(expected) = r.disposition.pinnable() else {
                     continue;
-                }
+                };
                 let Some(pin) = pins.get_mut(&r.probe) else {
                     continue; // unreachable: results come from the loaded pins being edited
                 };
                 blessed += 1;
-                if pin.expected.as_deref() != Some(r.disposition.as_str())
-                    || pin.expected_scope != recorded_scope
-                {
+                if pin.expected != Some(expected) || pin.expected_scope != recorded_scope {
                     changed += 1;
-                    pin.expected = Some(r.disposition.clone());
+                    pin.expected = Some(expected);
                     pin.expected_scope = recorded_scope.clone();
                 }
             }
@@ -363,9 +368,9 @@ fn build_result(
     piners_set: Option<&DiagSet>,
     scope: validators::Scope,
 ) -> ProbeResult {
-    let disposition = outcome.disposition.to_owned();
-    let expected = pin.expected.clone();
-    let gate_ok = expected.as_deref() == Some(disposition.as_str())
+    let disposition = outcome.disposition;
+    let expected = pin.expected;
+    let gate_ok = expected.is_some_and(|expected| disposition.pinnable() == Some(expected))
         && scope.matches_recorded(pin.expected_scope.as_deref());
     let anchor = pin
         .tv_anchor()
@@ -377,7 +382,6 @@ fn build_result(
     ProbeResult {
         probe: id.to_owned(),
         disposition,
-        signature: outcome.signature.map(|s| s.as_str().to_owned()),
         expected,
         gate_ok,
         piners_count: outcome.piners_count,
@@ -482,7 +486,10 @@ fn write_registry(
 ) -> Result<(), DevError> {
     let path = registry_dir.join("lints.toml");
     let on_disk = std::fs::read_to_string(&path).map_err(|e| {
-        DevError::Config(format!("piners lint: failed to re-read {}: {e}", path.display()))
+        DevError::Config(format!(
+            "piners lint: failed to re-read {}: {e}",
+            path.display()
+        ))
     })?;
     if on_disk != registry.lints_text {
         let tail = if run_recorded {
@@ -536,20 +543,29 @@ fn render(
         let pin = registry.pins.get(&r.probe);
         let blessed_scope = pin.and_then(|p| p.expected_scope.as_deref());
         let line = match (&r.expected, r.error.as_deref()) {
-            (_, Some(err)) => format!("{}: {} ({err})", r.probe, r.disposition),
-            (None, None) => format!("{}: not blessed (got {}) - run --bless", r.probe, r.disposition),
+            (_, Some(err)) => format!("{}: {} ({err})", r.probe, r.disposition.as_str()),
+            (None, None) => format!(
+                "{}: not blessed (got {}) - run --bless",
+                r.probe,
+                r.disposition.as_str()
+            ),
             (Some(_), None) if !scope.matches_recorded(blessed_scope) => format!(
                 "{}: blessed under scope {}, this run is {} - rerun with the flags it \
                  was blessed under, or re-bless (got {})",
                 r.probe,
                 blessed_scope.unwrap_or(validators::DEFAULT_SCOPE_LABEL),
                 scope.label(),
-                r.disposition
+                r.disposition.as_str()
             ),
-            (Some(exp), None) if *exp == r.disposition => {
-                format!("{}: {}", r.probe, r.disposition)
+            (Some(exp), None) if exp.as_str() == r.disposition.as_str() => {
+                format!("{}: {}", r.probe, r.disposition.as_str())
             }
-            (Some(exp), None) => format!("{}: expected {exp}, got {}", r.probe, r.disposition),
+            (Some(exp), None) => format!(
+                "{}: expected {}, got {}",
+                r.probe,
+                exp.as_str(),
+                r.disposition.as_str()
+            ),
         };
         output::lint_msg(&format!("  {line}"));
     }
@@ -560,7 +576,10 @@ fn render(
         ));
     }
 
-    let tv_div = results.iter().filter(|r| r.tv_divergent == Some(true)).count();
+    let tv_div = results
+        .iter()
+        .filter(|r| r.tv_divergent == Some(true))
+        .count();
     if tv_div > 0 {
         output::lint_msg(&format!(
             "TV advisory: {} diverging from their TV anchor (re-investigate or --reanchor)",
@@ -600,7 +619,8 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
-    const LOADED: &str = "# keep me\n[probes.a]\npine = { path = \"lint/a.pine\", xxh128 = \"00\" }\n";
+    const LOADED: &str =
+        "# keep me\n[probes.a]\npine = { path = \"lint/a.pine\", xxh128 = \"00\" }\n";
 
     fn loaded(dir: &Path, on_disk: &str) -> LintRegistry {
         std::fs::write(dir.join("lints.toml"), LOADED).unwrap();
@@ -615,20 +635,26 @@ mod tests {
         let dir = crate::test_scratch::scratch("piners_lint_cmd", "write_unchanged");
         let mut reg = loaded(&dir, LOADED);
         write_registry(&dir, &mut reg, true, |pins| {
-            pins.get_mut("a").unwrap().expected = Some("agree_clean".to_owned());
+            pins.get_mut("a").unwrap().expected = Some(lint::PinnableDisposition::AgreeClean);
         })
         .unwrap();
 
         let written = std::fs::read_to_string(dir.join("lints.toml")).unwrap();
         assert!(written.contains("# keep me"));
         let data = registry::parse_lints(&written, &dir).unwrap();
-        assert_eq!(data.probes["a"].expected.as_deref(), Some("agree_clean"));
+        assert_eq!(
+            data.probes["a"].expected,
+            Some(lint::PinnableDisposition::AgreeClean)
+        );
         assert_eq!(reg.lints_text, written);
-        assert_eq!(reg.pins["a"].expected.as_deref(), Some("agree_clean"));
+        assert_eq!(
+            reg.pins["a"].expected,
+            Some(lint::PinnableDisposition::AgreeClean)
+        );
 
         // A second write in the same process compares against the first.
         write_registry(&dir, &mut reg, true, |pins| {
-            pins.get_mut("a").unwrap().expected = Some("divergent".to_owned());
+            pins.get_mut("a").unwrap().expected = Some(lint::PinnableDisposition::Divergent);
         })
         .unwrap();
         let again = std::fs::read_to_string(dir.join("lints.toml")).unwrap();
@@ -641,14 +667,17 @@ mod tests {
         let edited = LOADED.replace("lint/a.pine", "lint/b.pine");
         let mut reg = loaded(&dir, &edited);
         let err = write_registry(&dir, &mut reg, true, |pins| {
-            pins.get_mut("a").unwrap().expected = Some("agree_clean".to_owned());
+            pins.get_mut("a").unwrap().expected = Some(lint::PinnableDisposition::AgreeClean);
         })
         .unwrap_err();
 
         let msg = format!("{err:?}");
         assert!(msg.contains("changed during the run"), "{msg}");
         assert!(msg.contains("lints.toml"), "{msg}");
-        assert_eq!(std::fs::read_to_string(dir.join("lints.toml")).unwrap(), edited);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("lints.toml")).unwrap(),
+            edited
+        );
         assert_eq!(reg.lints_text, LOADED);
         assert!(reg.pins["a"].expected.is_none());
     }

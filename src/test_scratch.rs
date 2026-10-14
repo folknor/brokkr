@@ -113,7 +113,8 @@ pub(crate) fn scratch_path(module: &str, name: &str) -> PathBuf {
 /// rename files in it. Hold it for the whole test, and restore what you found.
 pub(crate) fn process_global_lock() -> std::sync::MutexGuard<'static, ()> {
     static SEQ: Mutex<()> = Mutex::new(());
-    SEQ.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    SEQ.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]

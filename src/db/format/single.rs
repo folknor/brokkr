@@ -144,7 +144,11 @@ fn format_elapsed_with_iterations(row: &StoredRow) -> String {
         return best;
     }
     let walls: Vec<String> = if row.iterations_us.len() == row.iterations.len() {
-        row.iterations_us.iter().copied().map(format_us_as_ms).collect()
+        row.iterations_us
+            .iter()
+            .copied()
+            .map(format_us_as_ms)
+            .collect()
     } else {
         row.iterations.iter().map(i64::to_string).collect()
     };
@@ -177,7 +181,10 @@ fn host_fields(row: &StoredRow) -> Vec<(String, String)> {
             fields.push(("cargo".into(), prof.as_str().to_owned()));
         }
         (Some(prof), feats) => {
-            fields.push(("cargo".into(), format!("{}, features: {feats}", prof.as_str())));
+            fields.push((
+                "cargo".into(),
+                format!("{}, features: {feats}", prof.as_str()),
+            ));
         }
         (None, "") => {}
         (None, feats) => {

@@ -5,6 +5,10 @@ use std::time::{Duration, Instant};
 
 use crate::error::DevError;
 
+mod lock_probe {
+    include!("lock_probe.rs");
+}
+
 /// Mutable lock-file state - maintained while brokkr holds the lock so
 /// `brokkr lock` (from another invocation) can see the current child PID
 /// and bench-run progress.
@@ -174,7 +178,8 @@ static HELD: Mutex<Vec<Weak<LockInner>>> = Mutex::new(Vec::new());
 /// inner value is strictly safer than skipping the re-entry check (which
 /// would send a nested acquire into the flock self-deadlock).
 fn held_registry() -> std::sync::MutexGuard<'static, Vec<Weak<LockInner>>> {
-    HELD.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    HELD.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl LockGuard {
@@ -297,16 +302,19 @@ pub struct LockInfo {
 /// holder keeps its flock on a now-nameless inode while the next invocation
 /// creates a fresh file and locks that instead. `~/.brokkr/` is not swept.
 ///
-/// `$HOME` is the one input, and it is per-user by construction, which is what
-/// keeps the file writable and the lock scoped to the user whose builds it
-/// serialises. If `$HOME` is unset there is no defensible default, so this
-/// errors rather than inventing one.
+/// A non-empty `$HOME` is the one input, and it is per-user by construction,
+/// which is what keeps the file writable and the lock scoped to the user whose
+/// builds it serialises. If `$HOME` is unset or empty there is no defensible
+/// default, so this errors rather than inventing a cwd-relative one.
 fn lock_path() -> Result<PathBuf, DevError> {
-    let home = std::env::var("HOME")
-        .map_err(|_| DevError::Lock("$HOME is not set - cannot locate the brokkr lock".into()))?;
-    let dir = PathBuf::from(home).join(".brokkr");
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir.join("brokkr.lock"))
+    let path = crate::user_dirs::lock_file().ok_or_else(|| {
+        DevError::Lock("$HOME is not set or is empty - cannot locate the brokkr lock".into())
+    })?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| DevError::Lock("cannot resolve the brokkr lock directory".into()))?;
+    std::fs::create_dir_all(dir)?;
+    Ok(path)
 }
 
 /// Acquire an exclusive lock on the global lock file, blocking until free.
@@ -489,7 +497,10 @@ fn acquire_at(
     let fd = open_lock_file(&c_path)?;
 
     let owned = unsafe { OwnedFd::from_raw_fd(fd) };
-    wait_for_flock(owned.as_raw_fd(), crate::hold::inherited_capability_hash().as_deref())?;
+    wait_for_flock(
+        owned.as_raw_fd(),
+        crate::hold::inherited_capability_hash().as_deref(),
+    )?;
     // A stop accepted while this thread waited on the flock.
     refuse_if_stopping()?;
     // The control socket exists before the drain, so a hold that is clearing
@@ -503,11 +514,17 @@ fn acquire_at(
             DevError::Lock("could not read /dev/urandom to mint a lock acquisition id".into())
         })?;
         let identity = identity_of(ctx);
-        Some((id.clone(), crate::lock_service::Service::start(&id, identity)?))
+        Some((
+            id.clone(),
+            crate::lock_service::Service::start(&id, identity)?,
+        ))
     } else {
         None
     };
-    let acq_id = service.as_ref().map(|(id, _)| id.clone()).unwrap_or_default();
+    let acq_id = service
+        .as_ref()
+        .map(|(id, _)| id.clone())
+        .unwrap_or_default();
     let service = service.map(|(_, s)| s);
     // The free-space gate. After the flock, not before: the wait may have been
     // behind a `brokkr clean` that freed the space, or a build that used it.
@@ -519,8 +536,11 @@ fn acquire_at(
     // releasing `brokkr.lock`, and we never reach protected work - measuring
     // alongside a compiler we failed to clear is the one outcome worse than not
     // measuring at all.
-    let Authorized { state, nonce, toolchain } =
-        drain_and_authorize(owned.as_raw_fd(), ctx, effects, &acq_id)?;
+    let Authorized {
+        state,
+        nonce,
+        toolchain,
+    } = drain_and_authorize(owned.as_raw_fd(), ctx, effects, &acq_id)?;
     // A stop accepted during the drain: never authorise work after it.
     // `toolchain` drops here, restoring the moved-aside toolchain.
     refuse_if_stopping()?;
@@ -584,6 +604,9 @@ const LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 fn wait_for_flock(fd: RawFd, inherited: Option<&str>) -> Result<(), DevError> {
     let mut announced = false;
     loop {
+        // This is acquisition, not observation: it must establish exclusive
+        // ownership. The shared probe used by status and the rustc guard would
+        // allow two brokkr commands to proceed together.
         let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
         if ret == 0 {
             if announced {
@@ -646,11 +669,12 @@ fn nested_refusal(holder: &LockInfo) -> String {
 
 /// Check the global lock status. Returns `None` if no lock is held.
 ///
-/// The flock is the sole authority on held/not-held: the non-blocking probe
-/// either succeeds (no holder - a dead process cannot retain a flock, so a
-/// leftover file with no flock is simply not held) or fails (a live process
-/// holds it). There is deliberately no PID-liveness fallback and no
-/// stale-file deletion: the recorded PID is namespace-local, so "that PID
+/// The flock is the sole authority on held/not-held: the non-blocking shared
+/// probe succeeds unless a live exclusive brokkr hold conflicts with it. Other
+/// observers can share the probe, and a dead process cannot retain a flock, so
+/// a leftover file without an exclusive holder is simply not held. There is
+/// deliberately no PID-liveness fallback and no stale-file deletion: the
+/// recorded PID is namespace-local, so "that PID
 /// looks dead from here" can only mean the PID is untrustworthy from this
 /// namespace, never that the lock is stale - and deleting the path while the
 /// old inode is flocked would let the next acquirer lock a *fresh* inode,
@@ -665,23 +689,21 @@ pub fn status() -> Result<Option<LockInfo>, DevError> {
     let c_path = path_to_cstring(&path)?;
     let fd = open_lock_file(&c_path)?;
 
-    // Try to acquire - if we succeed, no one holds it.
-    let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-
-    if ret == 0 {
-        // We got the lock → no one was holding it. Release and close.
-        // SAFETY: valid fd from open_lock_file, unique ownership.
-        let _close = unsafe { OwnedFd::from_raw_fd(fd) };
-        return Ok(None);
-    }
-
-    // Only contention means held. Any other flock failure is infrastructure,
-    // and reporting it as a holder would invent one.
-    let err = std::io::Error::last_os_error();
-    if err.raw_os_error() != Some(libc::EWOULDBLOCK) {
-        // SAFETY: valid fd from open_lock_file, unique ownership.
-        let _close = unsafe { OwnedFd::from_raw_fd(fd) };
-        return Err(DevError::Lock(format!("could not probe the lock: {err}")));
+    // Shared probes conflict only with a real exclusive holder, so a status
+    // query cannot briefly become the exclusive holder and make the rustc
+    // guard refuse an otherwise idle compile.
+    match lock_probe::try_shared(fd) {
+        Ok(true) => {
+            // SAFETY: valid fd from open_lock_file, unique ownership.
+            let _close = unsafe { OwnedFd::from_raw_fd(fd) };
+            return Ok(None);
+        }
+        Ok(false) => {}
+        Err(err) => {
+            // SAFETY: valid fd from open_lock_file, unique ownership.
+            let _close = unsafe { OwnedFd::from_raw_fd(fd) };
+            return Err(DevError::Lock(format!("could not probe the lock: {err}")));
+        }
     }
 
     // Someone holds it. Read the contents.
@@ -1016,7 +1038,11 @@ fn open_lock_file(c_path: &std::ffi::CString) -> Result<RawFd, DevError> {
 /// that an exclusive flock was obtained on *this inode*, so a fresh inode at
 /// the same path would silently split the exclusion in two.
 pub fn compile_lock_path() -> Result<PathBuf, DevError> {
-    Ok(lock_path()?.with_file_name("compile.lock"))
+    // `lock_path` first: it creates the shared directory and owns the error.
+    lock_path()?;
+    crate::user_dirs::compile_lock().ok_or_else(|| {
+        DevError::Lock("$HOME is not set or is empty - cannot locate the compile lock".into())
+    })
 }
 
 /// How long a fresh acquisition will wait for earlier compilation leases to
@@ -1147,8 +1173,9 @@ fn drain_and_authorize(
     })?;
     state.auth = crate::hold::auth_hash(&nonce);
     state.draining = false;
-    rewrite_from_state(fd, &state)
-        .map_err(|e| DevError::Lock(format!("failed to publish the compilation capability: {e}")))?;
+    rewrite_from_state(fd, &state).map_err(|e| {
+        DevError::Lock(format!("failed to publish the compilation capability: {e}"))
+    })?;
 
     // Activate the armed toolchain-disable here: after the drain, so the
     // moved-aside window never spans a wait on other processes, and *before*
@@ -1161,7 +1188,11 @@ fn drain_and_authorize(
     let toolchain = (effects.toolchain)()?;
 
     drop(compile_lease);
-    Ok(Authorized { state, nonce, toolchain })
+    Ok(Authorized {
+        state,
+        nonce,
+        toolchain,
+    })
 }
 
 /// A drained, authorized hold, ready for its [`LockInner`] to take ownership.
@@ -1419,13 +1450,7 @@ fn rewrite_from_state(fd: RawFd, state: &LockState) -> std::io::Result<()> {
     }
     let mut written = 0usize;
     while written < bytes.len() {
-        let n = unsafe {
-            libc::write(
-                fd,
-                bytes[written..].as_ptr().cast(),
-                bytes.len() - written,
-            )
-        };
+        let n = unsafe { libc::write(fd, bytes[written..].as_ptr().cast(), bytes.len() - written) };
         if n < 0 {
             let err = std::io::Error::last_os_error();
             if err.raw_os_error() == Some(libc::EINTR) {
@@ -1603,9 +1628,9 @@ fn parse_lock_contents(text: &str) -> Option<LockInfo> {
             Some((p.trim().parse().ok()?, st.trim().to_owned()))
         })
         .collect();
-    let progress = raw("progress").split_once('/').and_then(|(r, t)| {
-        Some((r.parse::<u32>().ok()?, t.parse::<u32>().ok()?))
-    });
+    let progress = raw("progress")
+        .split_once('/')
+        .and_then(|(r, t)| Some((r.parse::<u32>().ok()?, t.parse::<u32>().ok()?)));
 
     Some(LockInfo {
         pid,
@@ -1681,7 +1706,11 @@ mod tests {
     /// process stands in for another process: flock locks are per open file
     /// description, so the two contend exactly as two processes would.
     fn foreign_holder(path: &Path, auth: &str) -> OwnedFd {
-        std::fs::write(path, format!("pid=1\nproject=outer\ncommand=run\nauth={auth}\n")).unwrap();
+        std::fs::write(
+            path,
+            format!("pid=1\nproject=outer\ncommand=run\nauth={auth}\n"),
+        )
+        .unwrap();
         let fd = open_lock_file(&path_to_cstring(path).unwrap()).unwrap();
         assert_eq!(unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) }, 0);
         unsafe { OwnedFd::from_raw_fd(fd) }
@@ -1701,9 +1730,17 @@ mod tests {
         let _holder = foreign_holder(&path, "abc123");
         let me = waiter(&path);
         let started = std::time::Instant::now();
-        let err = wait_for_flock(me.as_raw_fd(), Some("abc123")).unwrap_err().to_string();
-        assert!(err.contains("your own ancestor") && err.contains("brokkr run"), "{err}");
-        assert!(started.elapsed() < LOCK_POLL, "refused without a poll's sleep");
+        let err = wait_for_flock(me.as_raw_fd(), Some("abc123"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("your own ancestor") && err.contains("brokkr run"),
+            "{err}"
+        );
+        assert!(
+            started.elapsed() < LOCK_POLL,
+            "refused without a poll's sleep"
+        );
     }
 
     // A different hold - an unrelated holder, or a later hold after the one
@@ -1760,9 +1797,15 @@ mod tests {
             command: "check",
             project_root: "/r",
         };
-        let refusing = HoldEffects { disk_gate: refuse, ..INERT };
+        let refusing = HoldEffects {
+            disk_gate: refuse,
+            ..INERT
+        };
         assert!(acquire_at(&path, &ctx, &refusing).is_err());
-        assert!(!flock_is_held(&path), "a refused hold must not keep the flock");
+        assert!(
+            !flock_is_held(&path),
+            "a refused hold must not keep the flock"
+        );
         let guard = acquire_at(&path, &ctx, &INERT).unwrap();
         drop(guard);
     }
@@ -1777,15 +1820,26 @@ mod tests {
         fn count() {
             RUNS.fetch_add(1, Ordering::SeqCst);
         }
-        let counting = HoldEffects { after_fresh_hold: count, ..INERT };
+        let counting = HoldEffects {
+            after_fresh_hold: count,
+            ..INERT
+        };
         let path = tmp_lock("fresh-hook.lock");
         let outer = acquire_at(&path, &ctx(), &counting).unwrap();
         let nested = acquire_at(&path, &ctx(), &counting).unwrap();
-        assert_eq!(RUNS.load(Ordering::SeqCst), 1, "nested acquire must not re-run the hook");
+        assert_eq!(
+            RUNS.load(Ordering::SeqCst),
+            1,
+            "nested acquire must not re-run the hook"
+        );
         drop(nested);
         drop(outer);
         let _again = acquire_at(&path, &ctx(), &counting).unwrap();
-        assert_eq!(RUNS.load(Ordering::SeqCst), 2, "a new fresh hold runs it again");
+        assert_eq!(
+            RUNS.load(Ordering::SeqCst),
+            2,
+            "a new fresh hold runs it again"
+        );
     }
 
     /// A test hold neither installs nor clears the process-global capability:

@@ -25,7 +25,7 @@ pub use format::{
     compare_report, dispositions_table, gate_misses_block, raw_records, raw_table, run_header,
     runs_table, runtimes_table, trade_diffs_table, trend_table,
 };
-pub use ingest::RunRecord;
+pub use ingest::{RunContext, RunRecord};
 pub use query::{Shaped, resolve_columns};
 
 /// Handle to the corpus runs database.

@@ -94,10 +94,7 @@ fn collect_from(value: &toml::Value, out: &mut BTreeSet<String>) {
     };
     for (key, val) in table {
         match key.as_str() {
-            "dependencies"
-            | "dev-dependencies"
-            | "build-dependencies"
-            | "dev_dependencies"
+            "dependencies" | "dev-dependencies" | "build-dependencies" | "dev_dependencies"
             | "build_dependencies" => {
                 if let Some(deps) = val.as_table() {
                     for (name, spec) in deps {
@@ -123,10 +120,16 @@ fn collect_from(value: &toml::Value, out: &mut BTreeSet<String>) {
 
 fn parse(manifest: &Path) -> Result<toml::Value, DevError> {
     let text = std::fs::read_to_string(manifest).map_err(|e| {
-        DevError::Config(format!("workspace_dep: cannot read {}: {e}", manifest.display()))
+        DevError::Config(format!(
+            "workspace_dep: cannot read {}: {e}",
+            manifest.display()
+        ))
     })?;
     toml::from_str(&text).map_err(|e| {
-        DevError::Config(format!("workspace_dep: cannot parse {}: {e}", manifest.display()))
+        DevError::Config(format!(
+            "workspace_dep: cannot parse {}: {e}",
+            manifest.display()
+        ))
     })
 }
 
@@ -209,7 +212,11 @@ libc = { workspace = true }\n";
         // Before: the member's `serde = { workspace = true }` was lost with
         // the parse failure, and `serde` came back as "unused".
         let dir = crate::test_scratch::scratch("workspace_dep", "bad_member");
-        std::fs::write(dir.join("Cargo.toml"), "[workspace.dependencies]\nserde = \"1\"\n").unwrap();
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[workspace.dependencies]\nserde = \"1\"\n",
+        )
+        .unwrap();
         let member = dir.join("member.toml");
         std::fs::write(&member, "[dependencies]\nserde = { workspace = true\n").unwrap();
         assert!(run(&metadata_for(&dir, &member), &[]).is_err());

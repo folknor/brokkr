@@ -30,15 +30,19 @@ pub enum InputKind {
 }
 
 /// What output a command produces.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputKind {
     /// Writes a scratch `.osm.pbf` file.
     ScratchPbf,
     /// Writes a scratch `.osc.gz` file.
     ScratchOsc,
-    /// Writes to a scratch directory. The payload is the directory name stem
-    /// (e.g. `"geocode"`) - suffixed with the dataset at resolution time.
-    ScratchDir(&'static str),
+    /// Writes to a scratch directory. `dataset_suffix` distinguishes output
+    /// directories such as `geocode-<dataset>` from fixed paths such as
+    /// multi-extract's `multi-extract`.
+    ScratchDir {
+        name: &'static str,
+        dataset_suffix: bool,
+    },
     /// No output file (read-only / stdout-only commands).
     None,
 }
@@ -138,9 +142,7 @@ impl ExtractStrategy {
 /// Some entries may not exist in very small test datasets - the pbfhogg
 /// binary tolerates missing IDs without erroring.
 const GETID_BENCH_IDS: &[&str] = &[
-    "n115722", "n115723", "n115724",
-    "w2080", "w2081", "w2082",
-    "r174", "r213", "r339",
+    "n115722", "n115723", "n115724", "w2080", "w2081", "w2082", "r174", "r213", "r339",
 ];
 
 /// Subset of `GETID_BENCH_IDS` used by the `getparents` preset - fewer
@@ -183,7 +185,9 @@ pub enum PbfhoggCommand {
     /// `check --ids`. `full` adds `--full` - per-type duplicate-ID detection
     /// via RoaringTreemap sets, in addition to the streaming monotonicity /
     /// type-order checks.
-    CheckIds { full: bool },
+    CheckIds {
+        full: bool,
+    },
     Sort,
     /// Unified `cat` - all flags orthogonal:
     ///   - `type_filter` → `--type way|relation` (restricts output to one
@@ -239,14 +243,18 @@ pub enum PbfhoggCommand {
     TimeFilter,
     /// Unified `diff`. `format` selects summary (`Default`) or OSC-format
     /// output. Reuses `DiffFormat` with `DiffSnapshots`.
-    Diff { format: DiffFormat },
+    Diff {
+        format: DiffFormat,
+    },
 
     /// Two-snapshot diff: compares two PBFs from different point-in-time
     /// snapshots of the same dataset (e.g. `planet-20260223` vs
     /// `planet-20260411`). Unlike `Diff`, neither side is derived from
     /// `apply-changes` - both come from independent snapshot resolution.
     /// The format flag selects between summary diff and OSC-format diff.
-    DiffSnapshots { format: DiffFormat },
+    DiffSnapshots {
+        format: DiffFormat,
+    },
 
     /// `repack` - re-encode a PBF with a configurable elements-per-blob
     /// cap. `elements_per_blob = None` defers to pbfhogg's default (8000);
@@ -270,7 +278,9 @@ pub enum PbfhoggCommand {
     BuildGeocodeIndex,
 
     // -- Multi-variant benchmarks --
-    Extract { strategy: ExtractStrategy },
+    Extract {
+        strategy: ExtractStrategy,
+    },
 
     /// Multi-extract: N-region extract benchmark. `strategy` picks the
     /// pbfhogg extract strategy (`Simple` → `--simple`, `Smart` → `--smart`,
@@ -312,7 +322,10 @@ impl PbfhoggCommand {
     /// What inputs this command requires.
     pub fn input_kind(&self) -> InputKind {
         match self {
-            Self::TagsFilter { input_kind_osc: true, .. } => InputKind::PbfAndOsc,
+            Self::TagsFilter {
+                input_kind_osc: true,
+                ..
+            } => InputKind::PbfAndOsc,
             Self::MergeChanges { .. } => InputKind::OscOnly,
             Self::ApplyChanges => InputKind::PbfAndOsc,
             Self::Diff { .. } => InputKind::PbfAndMerged,
@@ -332,18 +345,35 @@ impl PbfhoggCommand {
             Self::Inspect { .. }
             | Self::CheckRefs
             | Self::CheckIds { .. }
-            | Self::Diff { format: DiffFormat::Default }
-            | Self::DiffSnapshots { format: DiffFormat::Default } => OutputKind::None,
+            | Self::Diff {
+                format: DiffFormat::Default,
+            }
+            | Self::DiffSnapshots {
+                format: DiffFormat::Default,
+            } => OutputKind::None,
 
             // OSC output (includes OSC-format diff and diff-snapshots).
-            Self::TagsFilter { input_kind_osc: true, .. }
+            Self::TagsFilter {
+                input_kind_osc: true,
+                ..
+            }
             | Self::MergeChanges { .. }
-            | Self::Diff { format: DiffFormat::Osc }
-            | Self::DiffSnapshots { format: DiffFormat::Osc } => OutputKind::ScratchOsc,
+            | Self::Diff {
+                format: DiffFormat::Osc,
+            }
+            | Self::DiffSnapshots {
+                format: DiffFormat::Osc,
+            } => OutputKind::ScratchOsc,
 
             // Directory output.
-            Self::BuildGeocodeIndex => OutputKind::ScratchDir("geocode"),
-            Self::MultiExtract { .. } => OutputKind::ScratchDir("multi-extract"),
+            Self::BuildGeocodeIndex => OutputKind::ScratchDir {
+                name: "geocode",
+                dataset_suffix: true,
+            },
+            Self::MultiExtract { .. } => OutputKind::ScratchDir {
+                name: "multi-extract",
+                dataset_suffix: false,
+            },
 
             // Everything else writes a scratch PBF.
             _ => OutputKind::ScratchPbf,
@@ -365,7 +395,9 @@ impl PbfhoggCommand {
             self,
             Self::ApplyChanges
                 | Self::Sort
-                | Self::Diff { format: DiffFormat::Osc }
+                | Self::Diff {
+                    format: DiffFormat::Osc
+                }
                 | Self::Cat { dedupe: true, .. }
                 | Self::Repack { .. }
                 | Self::Degrade { .. }
@@ -459,11 +491,7 @@ impl PbfhoggCommand {
     /// A few commands have small argv differences between modes - those are
     /// called out inline.
     #[allow(clippy::too_many_lines)]
-    pub fn build_args(
-        &self,
-        ctx: &CommandContext,
-        mode: ArgMode,
-    ) -> Result<Vec<String>, DevError> {
+    pub fn build_args(&self, ctx: &CommandContext, mode: ArgMode) -> Result<Vec<String>, DevError> {
         let mut prefix: Vec<String> = Vec::new();
         if mode == ArgMode::Hotpath {
             prefix.push(ctx.binary_str()?.to_owned());
@@ -475,11 +503,7 @@ impl PbfhoggCommand {
 
     /// Build the body of the argument vector (no binary prefix).
     #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
-    fn build_body(
-        &self,
-        ctx: &CommandContext,
-        mode: ArgMode,
-    ) -> Result<Vec<String>, DevError> {
+    fn build_body(&self, ctx: &CommandContext, mode: ArgMode) -> Result<Vec<String>, DevError> {
         match self {
             // -----------------------------------------------------------------
             // Tool CLI commands (26 from bench_commands.rs)
@@ -535,7 +559,7 @@ impl PbfhoggCommand {
                 Ok(args)
             }
             Self::Sort => {
-                let output = scratch_output_path(ctx, self, mode);
+                let output = scratch_output_path(ctx, self, mode)?;
                 Ok(vec![
                     "sort".into(),
                     ctx.pbf_str()?.into(),
@@ -548,7 +572,7 @@ impl PbfhoggCommand {
                 dedupe,
                 clean,
             } => {
-                let output = scratch_output_path(ctx, self, mode);
+                let output = scratch_output_path(ctx, self, mode)?;
                 let pbf = ctx.pbf_str()?;
                 let mut args: Vec<String> = vec!["cat".into()];
                 if *dedupe {
@@ -583,7 +607,7 @@ impl PbfhoggCommand {
                 remove_tags,
                 input_kind_osc,
             } => {
-                let output = scratch_output_path(ctx, self, mode);
+                let output = scratch_output_path(ctx, self, mode)?;
                 let mut args: Vec<String> = vec!["tags-filter".into()];
                 if *input_kind_osc {
                     args.push("--input-kind".into());
@@ -621,7 +645,7 @@ impl PbfhoggCommand {
                 add_referenced,
                 invert,
             } => {
-                let output = scratch_output_path(ctx, self, mode);
+                let output = scratch_output_path(ctx, self, mode)?;
                 let mut args: Vec<String> = vec!["getid".into()];
                 if *invert {
                     args.push("--invert".into());
@@ -638,7 +662,7 @@ impl PbfhoggCommand {
                 Ok(args)
             }
             Self::Getparents => {
-                let output = scratch_output_path(ctx, self, mode);
+                let output = scratch_output_path(ctx, self, mode)?;
                 let mut args: Vec<String> = vec!["getparents".into(), ctx.pbf_str()?.into()];
                 for id in GETPARENTS_BENCH_IDS {
                     args.push((*id).into());
@@ -648,7 +672,7 @@ impl PbfhoggCommand {
                 Ok(args)
             }
             Self::Renumber => {
-                let output = scratch_output_path(ctx, self, mode);
+                let output = scratch_output_path(ctx, self, mode)?;
                 Ok(vec![
                     "renumber".into(),
                     ctx.pbf_str()?.into(),
@@ -657,7 +681,7 @@ impl PbfhoggCommand {
                 ])
             }
             Self::MergeChanges { simplify } => {
-                let output = scratch_output_path(ctx, self, mode);
+                let output = scratch_output_path(ctx, self, mode)?;
                 let oscs = ctx.osc_strs()?;
                 let mut args = vec!["merge-changes".into()];
                 for o in oscs {
@@ -671,13 +695,9 @@ impl PbfhoggCommand {
                 Ok(args)
             }
             Self::ApplyChanges => {
-                let output = scratch_output_path(ctx, self, mode);
+                let output = scratch_output_path(ctx, self, mode)?;
                 let osc = ctx.osc_str()?;
-                let mut args = vec![
-                    "apply-changes".into(),
-                    ctx.pbf_str()?.into(),
-                    osc.into(),
-                ];
+                let mut args = vec!["apply-changes".into(), ctx.pbf_str()?.into(), osc.into()];
                 if ctx.params.locations_on_ways {
                     args.push("--locations-on-ways".into());
                 }
@@ -699,7 +719,7 @@ impl PbfhoggCommand {
                 Ok(args)
             }
             Self::AddLocationsToWays => {
-                let output = scratch_output_path(ctx, self, mode);
+                let output = scratch_output_path(ctx, self, mode)?;
                 let mut args = vec![
                     "add-locations-to-ways".into(),
                     ctx.pbf_str()?.into(),
@@ -719,7 +739,7 @@ impl PbfhoggCommand {
                 Ok(args)
             }
             Self::TimeFilter => {
-                let output = scratch_output_path(ctx, self, mode);
+                let output = scratch_output_path(ctx, self, mode)?;
                 Ok(vec![
                     "time-filter".into(),
                     ctx.pbf_str()?.into(),
@@ -732,14 +752,11 @@ impl PbfhoggCommand {
                 let merged = ctx.pbf_b_str()?;
                 let pbf = ctx.pbf_str()?;
                 let mut args = match format {
-                    DiffFormat::Default => vec![
-                        "diff".into(),
-                        pbf.into(),
-                        merged.into(),
-                        "-c".into(),
-                    ],
+                    DiffFormat::Default => {
+                        vec!["diff".into(), pbf.into(), merged.into(), "-c".into()]
+                    }
                     DiffFormat::Osc => {
-                        let output = scratch_output_path(ctx, self, mode);
+                        let output = scratch_output_path(ctx, self, mode)?;
                         vec![
                             "diff".into(),
                             "--format".into(),
@@ -763,14 +780,9 @@ impl PbfhoggCommand {
                 let from = ctx.pbf_str()?;
                 let to = ctx.pbf_b_str()?;
                 let mut args = match format {
-                    DiffFormat::Default => vec![
-                        "diff".into(),
-                        from.into(),
-                        to.into(),
-                        "-c".into(),
-                    ],
+                    DiffFormat::Default => vec!["diff".into(), from.into(), to.into(), "-c".into()],
                     DiffFormat::Osc => {
-                        let output = scratch_output_path(ctx, self, mode);
+                        let output = scratch_output_path(ctx, self, mode)?;
                         vec![
                             "diff".into(),
                             "--format".into(),
@@ -793,7 +805,7 @@ impl PbfhoggCommand {
                 elements_per_blob,
                 force,
             } => {
-                let output = scratch_output_path(ctx, self, mode);
+                let output = scratch_output_path(ctx, self, mode)?;
                 let mut args = vec![
                     "repack".into(),
                     ctx.pbf_str()?.into(),
@@ -814,7 +826,7 @@ impl PbfhoggCommand {
                 strip_locations,
                 strip_indexdata,
             } => {
-                let output = scratch_output_path(ctx, self, mode);
+                let output = scratch_output_path(ctx, self, mode)?;
                 let mut args = vec![
                     "degrade".into(),
                     ctx.pbf_str()?.into(),
@@ -837,15 +849,12 @@ impl PbfhoggCommand {
             // Standalone commands
             // -----------------------------------------------------------------
             Self::BuildGeocodeIndex => {
-                let output_dir = ctx.scratch_dir.join(format!("geocode-{}", ctx.dataset));
-                let output_dir_str = output_dir.to_str().ok_or_else(|| {
-                    DevError::Config("geocode output dir path is not valid UTF-8".into())
-                })?;
+                let output_dir = scratch_output_path(ctx, self, mode)?;
                 Ok(vec![
                     "build-geocode-index".into(),
                     ctx.pbf_str()?.into(),
                     "--output-dir".into(),
-                    output_dir_str.into(),
+                    path_to_string(&output_dir)?,
                     "--force".into(),
                 ])
             }
@@ -858,7 +867,8 @@ impl PbfhoggCommand {
                 // NOT write it: build_args is also dry-run's validator, and
                 // dry-run must not touch the filesystem. The real run paths
                 // call `prepare_scratch` to materialise it.
-                let plan = multi_extract_plan(ctx, *regions)?;
+                let output_dir = scratch_output_path(ctx, self, mode)?;
+                let plan = multi_extract_plan(ctx, output_dir, *regions)?;
                 let config_path = plan.config_path;
 
                 let mut args: Vec<String> = vec![
@@ -887,7 +897,7 @@ impl PbfhoggCommand {
                     .bbox
                     .as_deref()
                     .ok_or_else(|| DevError::Config("extract requires a bbox".into()))?;
-                let output = scratch_output_path(ctx, self, mode);
+                let output = scratch_output_path(ctx, self, mode)?;
                 let output_str = path_to_string(&output)?;
                 match strategy {
                     ExtractStrategy::Simple => Ok(vec![
@@ -929,7 +939,8 @@ impl PbfhoggCommand {
         let Self::MultiExtract { regions, .. } = self else {
             return Ok(());
         };
-        let plan = multi_extract_plan(ctx, *regions)?;
+        let output_dir = scratch_output_path(ctx, self, ArgMode::Bench)?;
+        let plan = multi_extract_plan(ctx, output_dir, *regions)?;
         std::fs::create_dir_all(&plan.output_dir)?;
         std::fs::write(&plan.config_path, plan.config_json)?;
         Ok(())
@@ -948,17 +959,35 @@ struct MultiExtractPlan {
 /// Splits the bbox into `regions` equal-width longitude strips. The JSON is
 /// built with `serde_json` so the output directory path is escaped properly
 /// (it used to be spliced in with `display()`, which broke on a `"` or `\`).
+fn multi_extract_plan(
+    ctx: &CommandContext,
+    output_dir: PathBuf,
+    regions: usize,
+) -> Result<MultiExtractPlan, DevError> {
+    let bbox = ctx
+        .bbox
+        .as_deref()
+        .ok_or_else(|| DevError::Config("multi-extract requires a bbox".into()))?;
+    let strips = multi_extract_strips(bbox, regions)?;
+    let config_json = multi_extract_config(&output_dir, &strips)?;
+    Ok(MultiExtractPlan {
+        output_dir,
+        config_path: multi_extract_config_path(&ctx.scratch_dir),
+        config_json,
+    })
+}
+
+/// Compute the shared multi-extract strips from a bbox.
 #[allow(clippy::cast_precision_loss)]
-fn multi_extract_plan(ctx: &CommandContext, regions: usize) -> Result<MultiExtractPlan, DevError> {
+pub(crate) fn multi_extract_strips(
+    bbox_str: &str,
+    regions: usize,
+) -> Result<Vec<[f64; 4]>, DevError> {
     if regions == 0 {
         return Err(DevError::Config(
             "multi-extract requires at least 1 region".into(),
         ));
     }
-    let bbox_str = ctx
-        .bbox
-        .as_deref()
-        .ok_or_else(|| DevError::Config("multi-extract requires a bbox".into()))?;
     let parts: Vec<f64> = bbox_str
         .split(',')
         .map(|s| s.trim().parse::<f64>())
@@ -977,11 +1006,8 @@ fn multi_extract_plan(ctx: &CommandContext, regions: usize) -> Result<MultiExtra
     }
     let (min_lon, min_lat, max_lon, max_lat) = (parts[0], parts[1], parts[2], parts[3]);
 
-    let output_dir = ctx.scratch_dir.join("multi-extract");
-    let output_dir_str = path_to_string(&output_dir)?;
-
     let strip_width = (max_lon - min_lon) / regions as f64;
-    let extracts: Vec<serde_json::Value> = (0..regions)
+    Ok((0..regions)
         .map(|i| {
             let strip_min = min_lon + strip_width * i as f64;
             let strip_max = if i + 1 == regions {
@@ -989,9 +1015,30 @@ fn multi_extract_plan(ctx: &CommandContext, regions: usize) -> Result<MultiExtra
             } else {
                 min_lon + strip_width * (i + 1) as f64
             };
+            [strip_min, min_lat, strip_max, max_lat]
+        })
+        .collect())
+}
+
+/// Encode shared multi-extract strips for a resolved output path. Both the
+/// measured command and `verify multi-extract` use serde_json for escaping.
+pub(crate) fn multi_extract_config(
+    output_dir: &Path,
+    strips: &[[f64; 4]],
+) -> Result<String, DevError> {
+    if strips.is_empty() {
+        return Err(DevError::Config(
+            "multi-extract requires at least 1 region".into(),
+        ));
+    }
+    let output_dir_str = path_to_string(output_dir)?;
+    let extracts: Vec<serde_json::Value> = strips
+        .iter()
+        .enumerate()
+        .map(|(i, bbox)| {
             serde_json::json!({
                 "output": format!("strip-{i}.osm.pbf"),
-                "bbox": [strip_min, min_lat, strip_max, max_lat],
+                "bbox": bbox,
             })
         })
         .collect();
@@ -1002,11 +1049,12 @@ fn multi_extract_plan(ctx: &CommandContext, regions: usize) -> Result<MultiExtra
     let config_json = serde_json::to_string_pretty(&config)
         .map_err(|e| DevError::Config(format!("failed to encode multi-extract config: {e}")))?;
 
-    Ok(MultiExtractPlan {
-        output_dir,
-        config_path: ctx.scratch_dir.join("multi-extract-config.json"),
-        config_json,
-    })
+    Ok(config_json)
+}
+
+/// Stable config filename shared by measured multi-extract and verification.
+pub(crate) fn multi_extract_config_path(scratch_dir: &Path) -> PathBuf {
+    scratch_dir.join("multi-extract-config.json")
 }
 
 // ---------------------------------------------------------------------------
@@ -1028,21 +1076,31 @@ pub(crate) fn scratch_output_path(
     ctx: &CommandContext,
     cmd: &PbfhoggCommand,
     mode: ArgMode,
-) -> PathBuf {
+) -> Result<PathBuf, DevError> {
     let name = cmd.id();
     let prefix = mode.scratch_prefix();
-    match cmd.output_kind() {
+    Ok(match cmd.output_kind() {
         OutputKind::ScratchPbf => ctx
             .scratch_dir
             .join(format!("{prefix}-{name}-output.osm.pbf")),
         OutputKind::ScratchOsc => ctx
             .scratch_dir
             .join(format!("{prefix}-{name}-output.osc.gz")),
-        OutputKind::ScratchDir(dir_name) => {
-            ctx.scratch_dir.join(format!("{dir_name}-{}", ctx.dataset))
+        OutputKind::ScratchDir {
+            name,
+            dataset_suffix: true,
+        } => ctx.scratch_dir.join(format!("{name}-{}", ctx.dataset)),
+        OutputKind::ScratchDir {
+            name,
+            dataset_suffix: false,
+        } => ctx.scratch_dir.join(name),
+        OutputKind::None => {
+            return Err(DevError::Config(format!(
+                "command '{}' does not produce a scratch output",
+                cmd.id()
+            )));
         }
-        OutputKind::None => PathBuf::new(), // Should not be used.
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1492,8 +1550,7 @@ mod tests {
     #[test]
     fn multi_extract_build_args_writes_nothing() {
         let mut ctx = test_ctx();
-        ctx.scratch_dir =
-            crate::test_scratch::scratch("pbfhogg-commands", "multi_extract_pure");
+        ctx.scratch_dir = crate::test_scratch::scratch("pbfhogg-commands", "multi_extract_pure");
         let cmd = PbfhoggCommand::MultiExtract {
             regions: 3,
             strategy: ExtractStrategy::Simple,
@@ -1515,7 +1572,16 @@ mod tests {
     fn multi_extract_config_escapes_the_directory() {
         let mut ctx = test_ctx();
         ctx.scratch_dir = PathBuf::from("/data/odd \"quoted\\\" dir");
-        let plan = multi_extract_plan(&ctx, 1).unwrap();
+        let output_dir = scratch_output_path(
+            &ctx,
+            &PbfhoggCommand::MultiExtract {
+                regions: 1,
+                strategy: ExtractStrategy::Simple,
+            },
+            ArgMode::Bench,
+        )
+        .unwrap();
+        let plan = multi_extract_plan(&ctx, output_dir, 1).unwrap();
         let json: serde_json::Value = serde_json::from_str(&plan.config_json).unwrap();
         assert_eq!(
             json["directory"].as_str().unwrap(),

@@ -528,7 +528,13 @@ pub(crate) fn test(
 fn print_run_summary(counts: &[u32; 5]) -> Result<(), DevError> {
     output::litehtml_msg(&format!("  {}", "\u{2500}".repeat(60)));
 
-    let labels = ["passed", "failed", "expected fail", "error", "unexpected pass"];
+    let labels = [
+        "passed",
+        "failed",
+        "expected fail",
+        "error",
+        "unexpected pass",
+    ];
     let parts: Vec<String> = counts
         .iter()
         .zip(labels.iter())
@@ -926,7 +932,10 @@ fn format_status_columns(
                 String::new()
             }
         }
-        s => format!(" ({s})"),
+        // Keep the status in its own column. Extra text is an annotation,
+        // never another copy of a non-PASS status.
+        "NO_BASELINE" => " (run `brokkr approve`)".into(),
+        _ => String::new(),
     };
 
     (px, delta, extra)

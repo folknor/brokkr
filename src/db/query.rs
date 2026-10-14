@@ -4,8 +4,8 @@ use super::ResultsDb;
 use super::like::{ESCAPE, contains_pattern, prefix_pattern, require_prefix};
 use super::schema::SELECT_COLS;
 use super::{
-    Distribution, DistributionUs, HotpathData, HotpathFunction, HotpathThread, KvPair, KvValue, PreviousRun,
-    QueryFilter, StoredRow,
+    Distribution, DistributionUs, HotpathData, HotpathFunction, HotpathThread, KvPair, KvValue,
+    PreviousRun, QueryFilter, RowFilters, StoredRow,
 };
 use crate::error::DevError;
 
@@ -19,17 +19,45 @@ impl ResultsDb {
     /// The prefix matches literally (`_`/`%` are not wildcards), and an empty
     /// prefix is refused rather than matching every row.
     pub fn query_by_uuid(&self, prefix: &str) -> Result<Vec<StoredRow>, DevError> {
+        self.query_by_uuid_filtered(prefix, &RowFilters::default())
+    }
+
+    /// Query UUID-prefix matches narrowed by the same filters as [`Self::query`].
+    pub fn query_by_uuid_filtered(
+        &self,
+        prefix: &str,
+        filters: &RowFilters<'_>,
+    ) -> Result<Vec<StoredRow>, DevError> {
         require_prefix(prefix, "uuid")?;
+        let mut clauses = vec![format!("uuid LIKE ?1 {ESCAPE}")];
+        let mut params = vec![prefix_pattern(prefix)];
+        push_row_filter_clauses(&mut clauses, &mut params, filters);
         let sql = format!(
-            "SELECT {SELECT_COLS} FROM runs WHERE uuid LIKE ?1 {ESCAPE} ORDER BY id DESC"
+            "SELECT {SELECT_COLS} FROM runs WHERE {} ORDER BY id DESC",
+            clauses.join(" AND ")
         );
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
+            .iter()
+            .map(|p| p as &dyn rusqlite::types::ToSql)
+            .collect();
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params![prefix_pattern(prefix)], map_stored_row)?;
+        let rows = stmt.query_map(param_refs.as_slice(), map_stored_row)?;
         let mut result = collect_rows(rows)?;
         for row in &mut result {
             load_children(&self.conn, row)?;
         }
         Ok(result)
+    }
+
+    /// Whether any stored results row has this UUID prefix, without loading
+    /// the row's child data.
+    pub fn has_uuid_prefix(&self, prefix: &str) -> Result<bool, DevError> {
+        require_prefix(prefix, "uuid")?;
+        Ok(self.conn.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM runs WHERE uuid LIKE ?1 {ESCAPE})"),
+            rusqlite::params![prefix_pattern(prefix)],
+            |row| row.get(0),
+        )?)
     }
 
     /// The most recently recorded run in this database, or `None` when it is
@@ -359,34 +387,16 @@ fn build_query_sql(filter: &QueryFilter) -> (String, Vec<String>) {
         params.push(raw);
         clauses.push(commit_match_expr(params.len() - 1, params.len()));
     }
-    if let Some(ref cmd) = filter.command {
-        let in_command = contains_expr(&mut params, "command", cmd);
-        let in_mode = contains_expr(&mut params, "mode", cmd);
-        clauses.push(format!("({in_command} OR {in_mode})"));
-    }
-    if let Some(ref v) = filter.mode {
-        clauses.push(contains_expr(&mut params, "mode", v));
-    }
-    if let Some(ref d) = filter.dataset {
-        clauses.push(contains_expr(&mut params, "input_file", d));
-    }
-    push_grep_clauses(&mut clauses, &mut params, &filter.grep, &filter.grep_v);
-    // Metadata filters: each becomes an EXISTS subquery against run_kv. The
-    // user passes key without the `meta.` prefix (e.g. `--meta format=osc`),
-    // and we look up `key = 'meta.<key>'` in run_kv. Rows missing the key are
-    // excluded (no row matches => EXISTS is false). Multiple filters AND.
-    for (key, value) in &filter.meta {
-        let expr = kv_equals_expr(&mut params, &format!("meta.{key}"), value);
-        clauses.push(expr);
-    }
-    // Env filters: like meta but keyed under `env.<NAME>`. No missing-as-0
-    // coercion - rows without the key are excluded. Explicit baseline runs
-    // (`PBFHOGG_USE_NEW_PATH=0 brokkr ...`) are the intended way to record
-    // "off" rather than relying on implicit absence.
-    for (key, value) in &filter.env {
-        let expr = kv_equals_expr(&mut params, &format!("env.{key}"), value);
-        clauses.push(expr);
-    }
+    let row_filters = RowFilters {
+        command: filter.command.as_deref(),
+        mode: filter.mode.as_deref(),
+        dataset: filter.dataset.as_deref(),
+        meta: &filter.meta,
+        env: &filter.env,
+        grep: &filter.grep,
+        grep_v: &filter.grep_v,
+    };
+    push_row_filter_clauses(&mut clauses, &mut params, &row_filters);
 
     let mut sql = format!("SELECT {SELECT_COLS} FROM runs");
     if !clauses.is_empty() {
@@ -399,6 +409,37 @@ fn build_query_sql(filter: &QueryFilter) -> (String, Vec<String>) {
     sql.push_str(&format!(" ORDER BY id DESC LIMIT ?{}", params.len()));
 
     (sql, params)
+}
+
+/// Append every user-facing row filter in one place so UUID lookup, recent-row
+/// queries, and commit comparisons cannot silently diverge.
+pub(super) fn push_row_filter_clauses(
+    clauses: &mut Vec<String>,
+    params: &mut Vec<String>,
+    filters: &RowFilters<'_>,
+) {
+    if let Some(command) = filters.command {
+        let in_command = contains_expr(params, "command", command);
+        let in_mode = contains_expr(params, "mode", command);
+        clauses.push(format!("({in_command} OR {in_mode})"));
+    }
+    if let Some(mode) = filters.mode {
+        clauses.push(contains_expr(params, "mode", mode));
+    }
+    if let Some(dataset) = filters.dataset {
+        clauses.push(contains_expr(params, "input_file", dataset));
+    }
+    push_grep_clauses(clauses, params, filters.grep, filters.grep_v);
+    // Metadata values are text-coalesced across run_kv's three value columns,
+    // so numeric entries remain selectable through the same key=value form.
+    for (key, value) in filters.meta {
+        clauses.push(kv_equals_expr(params, &format!("meta.{key}"), value));
+    }
+    // Missing captured environment keys do not match; callers select an
+    // explicit baseline value when they need to compare an off arm.
+    for (key, value) in filters.env {
+        clauses.push(kv_equals_expr(params, &format!("env.{key}"), value));
+    }
 }
 
 fn load_distribution(
@@ -649,8 +690,14 @@ mod tests {
         let (sql, params) = build_query_sql(&filter);
 
         assert!(sql.contains("WHERE"));
-        assert!(sql.contains("[commit] LIKE ?1 ESCAPE"), "commit pattern should be ?1");
-        assert!(sql.contains("substr(?2, 1, length([commit]))"), "raw commit should be ?2");
+        assert!(
+            sql.contains("[commit] LIKE ?1 ESCAPE"),
+            "commit pattern should be ?1"
+        );
+        assert!(
+            sql.contains("substr(?2, 1, length([commit]))"),
+            "raw commit should be ?2"
+        );
         assert!(
             sql.contains("command LIKE ?3 ESCAPE"),
             "command should be ?3 contains"
@@ -700,17 +747,29 @@ mod tests {
         let matches = |stored: &str, query: &str| -> bool {
             let (pattern, raw) = commit_params(query);
             conn.query_row(
-                &format!("SELECT {} FROM (SELECT ?3 AS [commit])", commit_match_expr(1, 2)),
+                &format!(
+                    "SELECT {} FROM (SELECT ?3 AS [commit])",
+                    commit_match_expr(1, 2)
+                ),
                 rusqlite::params![pattern, raw, stored],
                 |r| r.get::<_, bool>(0),
             )
             .unwrap()
         };
-        assert!(matches("abc1234", "abc1234def0"), "longer query finds shorter row");
-        assert!(matches("abc1234def", "abc12"), "shorter query finds longer row");
+        assert!(
+            matches("abc1234", "abc1234def0"),
+            "longer query finds shorter row"
+        );
+        assert!(
+            matches("abc1234def", "abc12"),
+            "shorter query finds longer row"
+        );
         assert!(matches("abc1234", "ABC1234"), "case-insensitive");
         assert!(!matches("abc1234", "abd1234def"));
-        assert!(!matches("abc", "abcdef1234"), "under 4 digits never matches in reverse");
+        assert!(
+            !matches("abc", "abcdef1234"),
+            "under 4 digits never matches in reverse"
+        );
         assert!(!matches("", "abcdef1234"));
     }
 
@@ -1044,7 +1103,8 @@ mod tests {
         // even if the command column doesn't match.
         db.insert(&make_row("bench apply-changes", "direct-io+zstd1"))
             .unwrap();
-        db.insert(&make_row("bench apply-changes", "direct-io")).unwrap();
+        db.insert(&make_row("bench apply-changes", "direct-io"))
+            .unwrap();
         let rows = db
             .query(&QueryFilter {
                 commit: None,
@@ -1672,9 +1732,12 @@ mod tests {
     fn meta_and_env_filters_match_numeric_values() {
         let db_path = crate::test_scratch::scratch("db-query", "meta_filter_numeric").join("t.db");
         let db = ResultsDb::open(&db_path).expect("open");
-        db.insert(&plain_row("read", vec![KvPair::int("meta.threads", 8)])).unwrap();
-        db.insert(&plain_row("read", vec![KvPair::int("meta.threads", 4)])).unwrap();
-        db.insert(&plain_row("read", vec![KvPair::real("env.RATIO", 1.5)])).unwrap();
+        db.insert(&plain_row("read", vec![KvPair::int("meta.threads", 8)]))
+            .unwrap();
+        db.insert(&plain_row("read", vec![KvPair::int("meta.threads", 4)]))
+            .unwrap();
+        db.insert(&plain_row("read", vec![KvPair::real("env.RATIO", 1.5)]))
+            .unwrap();
 
         let rows = db
             .query(&QueryFilter {
@@ -1683,7 +1746,11 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        assert_eq!(rows.len(), 1, "an Int meta value must be matchable by --meta");
+        assert_eq!(
+            rows.len(),
+            1,
+            "an Int meta value must be matchable by --meta"
+        );
 
         let rows = db
             .query(&QueryFilter {
@@ -1697,8 +1764,7 @@ mod tests {
 
     #[test]
     fn command_filter_underscore_is_literal() {
-        let db_path =
-            crate::test_scratch::scratch("db-query", "underscore_literal").join("t.db");
+        let db_path = crate::test_scratch::scratch("db-query", "underscore_literal").join("t.db");
         let db = ResultsDb::open(&db_path).expect("open");
         db.insert(&plain_row("tags-filter", vec![])).unwrap();
         db.insert(&plain_row("tags_filter", vec![])).unwrap();
@@ -1719,6 +1785,9 @@ mod tests {
         let db_path = crate::test_scratch::scratch("db-query", "uuid_empty").join("t.db");
         let db = ResultsDb::open(&db_path).expect("open");
         db.insert(&plain_row("read", vec![])).unwrap();
-        assert!(db.query_by_uuid("").is_err(), "an empty prefix must not match every row");
+        assert!(
+            db.query_by_uuid("").is_err(),
+            "an empty prefix must not match every row"
+        );
     }
 }

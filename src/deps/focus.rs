@@ -14,17 +14,11 @@
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::Path;
 
-use super::{
-    load_metadata, load_metadata_host_filtered, CargoMetadata, CargoPackage,
-};
+use super::{CargoMetadata, CargoPackage, load_metadata, load_metadata_host_filtered};
 use crate::error::DevError;
 use crate::output;
 
-pub(super) fn run_focus(
-    project_root: &Path,
-    spec: &str,
-    json: bool,
-) -> Result<(), DevError> {
+pub(super) fn run_focus(project_root: &Path, spec: &str, json: bool) -> Result<(), DevError> {
     let (name, version) = parse_spec(spec);
     let host_md = load_metadata_host_filtered(project_root)?;
 
@@ -34,9 +28,7 @@ pub(super) fn run_focus(
 
     let unfiltered = load_metadata(project_root)?;
     if has_exact_match(&unfiltered, name, version) {
-        let note = format!(
-            "{spec}: not in host-filtered graph; showing all-target chains"
-        );
+        let note = format!("{spec}: not in host-filtered graph; showing all-target chains");
         return emit_traces(
             &unfiltered,
             &exact_predicate(name, version),
@@ -49,8 +41,7 @@ pub(super) fn run_focus(
     // Honours the optional `@version` suffix if the user supplied one.
     let needle = name.to_ascii_lowercase();
     let predicate: Box<dyn Fn(&CargoPackage) -> bool> = Box::new(move |p| {
-        p.name.to_ascii_lowercase().contains(&needle)
-            && version.is_none_or(|v| p.version == v)
+        p.name.to_ascii_lowercase().contains(&needle) && version.is_none_or(|v| p.version == v)
     });
     let match_count = unfiltered.packages.iter().filter(|p| predicate(p)).count();
     if match_count == 0 {
@@ -71,11 +62,7 @@ fn emit_traces(
     prefix_note: Option<&str>,
     json: bool,
 ) -> Result<(), DevError> {
-    let workspace_set: HashSet<&str> = md
-        .workspace_members
-        .iter()
-        .map(String::as_str)
-        .collect();
+    let workspace_set: HashSet<&str> = md.workspace_members.iter().map(String::as_str).collect();
     let id_to_label: HashMap<&str, String> = md
         .packages
         .iter()
@@ -97,8 +84,7 @@ fn emit_traces(
         }
     }
 
-    let mut targets: Vec<&CargoPackage> =
-        md.packages.iter().filter(|p| predicate(p)).collect();
+    let mut targets: Vec<&CargoPackage> = md.packages.iter().filter(|p| predicate(p)).collect();
     targets.sort_by(|a, b| a.name.cmp(&b.name).then(a.version.cmp(&b.version)));
 
     let traces: Vec<ChainTrace> = targets
@@ -175,9 +161,9 @@ fn parse_spec(spec: &str) -> (&str, Option<&str>) {
 }
 
 fn has_exact_match(md: &CargoMetadata, name: &str, version: Option<&str>) -> bool {
-    md.packages.iter().any(|p| {
-        p.name == name && version.is_none_or(|v| p.version == v)
-    })
+    md.packages
+        .iter()
+        .any(|p| p.name == name && version.is_none_or(|v| p.version == v))
 }
 
 fn exact_predicate<'a>(
@@ -278,7 +264,10 @@ fn chains_to_workspace(
 }
 
 fn label(id: &str, id_to_label: &HashMap<&str, String>) -> String {
-    id_to_label.get(id).cloned().unwrap_or_else(|| id.to_string())
+    id_to_label
+        .get(id)
+        .cloned()
+        .unwrap_or_else(|| id.to_string())
 }
 
 #[cfg(test)]
@@ -302,11 +291,23 @@ mod tests {
     fn format_source_normalises_both_registry_protocols() {
         let ws = HashSet::new();
         let label = |s| format_source(&pkg(Some(s)), &ws);
-        assert_eq!(label("registry+https://github.com/rust-lang/crates.io-index"), "crates.io");
+        assert_eq!(
+            label("registry+https://github.com/rust-lang/crates.io-index"),
+            "crates.io"
+        );
         assert_eq!(label("sparse+https://index.crates.io/"), "crates.io");
-        assert_eq!(label("registry+https://example.com/index"), "registry=https://example.com/index");
-        assert_eq!(label("sparse+https://example.com/index/"), "registry=https://example.com/index/");
-        assert_eq!(label("git+https://example.com/r#abc"), "git+https://example.com/r#abc");
+        assert_eq!(
+            label("registry+https://example.com/index"),
+            "registry=https://example.com/index"
+        );
+        assert_eq!(
+            label("sparse+https://example.com/index/"),
+            "registry=https://example.com/index/"
+        );
+        assert_eq!(
+            label("git+https://example.com/r#abc"),
+            "git+https://example.com/r#abc"
+        );
         assert_eq!(format_source(&pkg(None), &ws), "path");
     }
 }

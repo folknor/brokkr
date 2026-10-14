@@ -164,9 +164,11 @@ fn lane_inventory(plan: &AccountingPlan, recon: &Reconciliation) -> Vec<LaneInve
         .collect()
 }
 
-/// The tests a lane without an inventory blamed when it was stopped: the
-/// per-test cap names a suspect on a shared stream. Named with no binary,
-/// never turned into an execution.
+/// The tests a lane without a complete inventory blamed when it was stopped:
+/// the per-test cap names a suspect on an unattributed stream. A partial lane
+/// contributes only uncharged terminations, since an attributed termination
+/// already belongs to an execution. Named with no binary, never turned into
+/// an execution.
 fn suspects(plan: &AccountingPlan, recon: &Reconciliation, records: &[JournalRecord]) -> Vec<SuspectOut> {
     let blind: BTreeSet<usize> = plan
         .lanes
@@ -179,7 +181,9 @@ fn suspects(plan: &AccountingPlan, recon: &Reconciliation, records: &[JournalRec
     for r in records {
         let JournalRecord::Terminated(t) = r else { continue };
         let (Some(lane), Some(test)) = (t.lane, &t.test) else { continue };
-        if !blind.contains(&lane) {
+        let partial_unattributed = t.charged.is_none()
+            && plan.lane(lane).is_some_and(|l| !l.unlisted.is_empty());
+        if !blind.contains(&lane) && !partial_unattributed {
             continue;
         }
         let label = plan.lane(lane).map_or_else(|| format!("lane {lane}"), |l| l.label.clone());
@@ -466,6 +470,51 @@ mod continuation_tests {
         assert!(text.contains("suspect"), "{text}");
         assert!(text.contains(CONTINUATION_STATEMENT), "{text}");
         assert!(text.contains("missing evidence is not proof of non-execution"), "{text}");
+    }
+
+    /// A partial lane can also stop in an unenumerable binary. Its shared
+    /// stream names a suspect, but cannot identify a binary or an execution.
+    #[test]
+    fn a_partial_lane_reports_unattributed_termination_suspects() {
+        let mut l = LaneRecord::empty(0, "default".into(), LaneKind::Serial, "s".into());
+        l.unlisted = vec![("crate-a::custom".into(), "no libtest listing".into())];
+        let p = plan_of(vec![l]);
+        let records = vec![JournalRecord::Terminated(Termination {
+            scope: TerminationScope::Stream,
+            lane: Some(0),
+            stream: Some(7),
+            cause: TerminationCause::PerTestDeadline,
+            test: Some("suite::hung".into()),
+            charged: None,
+        })];
+        let recon = reconcile(&p, &records, false, Vec::new());
+        let report = build_continuation(&p, &recon, &records).unwrap();
+        assert!(report.candidates.is_empty());
+        assert_eq!(report.inventory.lanes[0].availability, "partial");
+        assert_eq!(report.inventory.suspects.len(), 1);
+        assert_eq!(report.inventory.suspects[0].test, "suite::hung");
+        let text = render_continuation(&report).join("\n");
+        assert!(text.contains("suspect      suite::hung"), "{text}");
+    }
+
+    /// A partial inventory must not repeat an attributed execution as a
+    /// binary-less suspect.
+    #[test]
+    fn a_partial_lane_does_not_repeat_a_charged_termination_as_a_suspect() {
+        let u = unit("integration");
+        let mut l = lane(0, "default", LaneKind::Serial, &[(&u, "suite::hung")]);
+        l.unlisted = vec![("crate-a::custom".into(), "no libtest listing".into())];
+        let p = plan_of(vec![l]);
+        let records = vec![JournalRecord::Terminated(Termination {
+            scope: TerminationScope::Stream,
+            lane: Some(0),
+            stream: Some(7),
+            cause: TerminationCause::PerTestDeadline,
+            test: Some("suite::hung".into()),
+            charged: Some(ChargedTo { resolution: None, unit: u }),
+        })];
+        let recon = reconcile(&p, &records, false, Vec::new());
+        assert!(suspects(&p, &recon, &records).is_empty());
     }
 
     /// Validation case: the same test selected by two lanes is two candidates.

@@ -615,12 +615,8 @@ fn parse_http_date(s: &str) -> Result<i64, String> {
         return Err(format!("bad time: '{}'", parts[4]));
     }
     let hour: i64 = time_parts[0].parse().map_err(|e| format!("hour: {e}"))?;
-    let minute: i64 = time_parts[1]
-        .parse()
-        .map_err(|e| format!("minute: {e}"))?;
-    let second: i64 = time_parts[2]
-        .parse()
-        .map_err(|e| format!("second: {e}"))?;
+    let minute: i64 = time_parts[1].parse().map_err(|e| format!("minute: {e}"))?;
+    let second: i64 = time_parts[2].parse().map_err(|e| format!("second: {e}"))?;
 
     // Convert (Y, M, D) to days since 1970-01-01 using Howard Hinnant's
     // algorithm - same one used by `pbfhogg::download::days_to_civil` in

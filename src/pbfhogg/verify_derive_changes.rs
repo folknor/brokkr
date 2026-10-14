@@ -129,7 +129,11 @@ pub fn run(
     for (label, a, b) in [
         ("pbfhogg roundtrip vs new", &rt_pbfhogg, &new_pbf),
         ("osmium roundtrip vs new", &rt_osmium, &new_pbf),
-        ("pbfhogg roundtrip vs osmium roundtrip", &rt_pbfhogg, &rt_osmium),
+        (
+            "pbfhogg roundtrip vs osmium roundtrip",
+            &rt_pbfhogg,
+            &rt_osmium,
+        ),
     ] {
         verify_msg(&format!("=== diff: {label} ==="));
         let diff = harness.diff_pbfs(a, b)?;

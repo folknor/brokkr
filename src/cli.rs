@@ -41,7 +41,10 @@ mod visibility_tests {
             .map(|s| s.get_name().to_owned())
             .filter(|name| !TABLE.iter().any(|(n, _)| n == name))
             .collect();
-        assert!(missing.is_empty(), "subcommands absent from TABLE: {missing:?}");
+        assert!(
+            missing.is_empty(),
+            "subcommands absent from TABLE: {missing:?}"
+        );
     }
 
     /// And nothing in the table may name a subcommand that no longer exists -
@@ -55,7 +58,10 @@ mod visibility_tests {
             .map(|(n, _)| *n)
             .filter(|n| !names.contains(n))
             .collect();
-        assert!(stale.is_empty(), "TABLE names no longer in Command: {stale:?}");
+        assert!(
+            stale.is_empty(),
+            "TABLE names no longer in Command: {stale:?}"
+        );
     }
 
     /// The project-agnostic commands must survive in every project, including

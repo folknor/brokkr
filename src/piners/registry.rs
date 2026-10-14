@@ -503,7 +503,11 @@ pub fn parse_pins(text: &str, origin: &Path) -> Result<PinsData, DevError> {
     let mut problems = check_pins(&data.probes);
     problems.extend(check_harness_files(&data.harness_files));
     problems.extend(check_pending(&data.pending, &data.probes));
-    problems.extend(check_probe_config(&data.probe_config, &data.probes, &data.pending));
+    problems.extend(check_probe_config(
+        &data.probe_config,
+        &data.probes,
+        &data.pending,
+    ));
     if !problems.is_empty() {
         return Err(DevError::Config(format!(
             "piners: {}: invalid registry:\n  {}",
@@ -519,8 +523,7 @@ pub fn parse_pins(text: &str, origin: &Path) -> Result<PinsData, DevError> {
 /// broke a rule is repaired by the regen instead of blocking it. The
 /// regenerated text still goes through [`parse_pins`] before it is written.
 pub fn parse_pins_unchecked(text: &str, origin: &Path) -> Result<PinsData, DevError> {
-    toml::from_str(text)
-        .map_err(|e| DevError::Config(format!("piners: {}: {e}", origin.display())))
+    toml::from_str(text).map_err(|e| DevError::Config(format!("piners: {}: {e}", origin.display())))
 }
 
 /// The structural rules every pin obeys: at least one oracle, a probe dir
@@ -545,9 +548,8 @@ fn check_pins(probes: &BTreeMap<String, Pin>) -> Vec<String> {
                 _ => None,
             })
             .collect();
-        let below_root = plain.is_some_and(|parts| {
-            !parts.is_empty() && parts.join("/") == dir.to_string_lossy()
-        });
+        let below_root = plain
+            .is_some_and(|parts| !parts.is_empty() && parts.join("/") == dir.to_string_lossy());
         if !below_root {
             // Pin paths are relative to the corpus root and name a directory
             // below it: reseed never discovers a probe anywhere else, and no
@@ -626,9 +628,15 @@ fn check_harness_files(files: &BTreeMap<String, HarnessFile>) -> Vec<String> {
 /// That the path lies outside the registry dir, and that the probe is
 /// actually on disk, are the reseed's to check - it is the one place that
 /// walks the corpus, and it refuses a pending entry it cannot find.
-fn check_pending(pending: &BTreeMap<String, PathBuf>, probes: &BTreeMap<String, Pin>) -> Vec<String> {
+fn check_pending(
+    pending: &BTreeMap<String, PathBuf>,
+    probes: &BTreeMap<String, Pin>,
+) -> Vec<String> {
     let mut problems = Vec::new();
-    let mut dirs: Vec<(&str, &Path)> = probes.iter().map(|(id, p)| (id.as_str(), p.probe_dir())).collect();
+    let mut dirs: Vec<(&str, &Path)> = probes
+        .iter()
+        .map(|(id, p)| (id.as_str(), p.probe_dir()))
+        .collect();
     for (id, path) in pending {
         let parts: Option<Vec<String>> = path
             .components()
@@ -838,7 +846,10 @@ impl Registry {
 
         let pins_path = registry_dir.join(PINS_FILE);
         let pins_text = std::fs::read_to_string(&pins_path).map_err(|e| {
-            DevError::Config(format!("piners: failed to read {}: {e}", pins_path.display()))
+            DevError::Config(format!(
+                "piners: failed to read {}: {e}",
+                pins_path.display()
+            ))
         })?;
         let data = parse_pins(&pins_text, &pins_path)?;
         check_pending_location(&data.pending, &pins_path, registry_dir, corpus_root)?;
@@ -865,9 +876,8 @@ impl Registry {
                     path.display()
                 ))
             })?;
-            let kw: KeywordFile = toml::from_str(&text).map_err(|e| {
-                DevError::Config(format!("piners: {}: {e}", path.display()))
-            })?;
+            let kw: KeywordFile = toml::from_str(&text)
+                .map_err(|e| DevError::Config(format!("piners: {}: {e}", path.display())))?;
             keywords.insert(stem.to_owned(), kw.probes);
         }
 
@@ -1179,11 +1189,15 @@ mod tests {
         assert!(msg.contains("/c/data/feed.csv"), "{msg}");
         // The LFS refusal named the path only; it gains the origin.
         let lfs = DevError::Preflight(vec!["piners: /c/data/feed.csv is a pointer".to_owned()]);
-        let DevError::Preflight(m) = with_origin(lfs, origin, path) else { panic!() };
+        let DevError::Preflight(m) = with_origin(lfs, origin, path) else {
+            panic!()
+        };
         assert!(m[0].ends_with("origin: feed group 'eth' (base)"), "{m:?}");
         // A message already carrying the origin is not doubled.
         let has = DevError::Preflight(vec![format!("mismatch\n  origin: {origin}")]);
-        let DevError::Preflight(m) = with_origin(has, origin, path) else { panic!() };
+        let DevError::Preflight(m) = with_origin(has, origin, path) else {
+            panic!()
+        };
         assert_eq!(m[0].matches("origin:").count(), 1);
     }
 
@@ -1323,7 +1337,10 @@ mod tests {
         let onefold = resolve(&config, Path::new("vendor/bench/strategies/onefold"));
         assert_eq!(onefold.ohlcv_start_ms, None);
         assert_eq!(onefold.bar_budget, Some(54000));
-        assert_eq!(resolve(&config, Path::new("elsewhere/p")), ProbeConfig::default());
+        assert_eq!(
+            resolve(&config, Path::new("elsewhere/p")),
+            ProbeConfig::default()
+        );
     }
 
     #[test]
@@ -1357,13 +1374,17 @@ mod tests {
             config.insert(bad.to_owned(), feed_decl("f"));
             let problems = check_probe_config(&config, &pins, &BTreeMap::new());
             assert!(
-                problems.iter().any(|p| p.contains("relative directory path")),
+                problems
+                    .iter()
+                    .any(|p| p.contains("relative directory path")),
                 "{bad:?} accepted: {problems:?}"
             );
         }
         let mut config = BTreeMap::new();
         config.insert("p".to_owned(), ProbeConfig::default());
-        assert!(check_probe_config(&config, &pins, &BTreeMap::new())[0].contains("declares no field"));
+        assert!(
+            check_probe_config(&config, &pins, &BTreeMap::new())[0].contains("declares no field")
+        );
     }
 
     #[test]
@@ -1394,24 +1415,40 @@ csv = { path = \"p/old/tv_trades.csv\", xxh128 = \"bb\" }
     fn a_pending_entry_reseed_could_never_complete_is_refused() {
         let pin = |dir: &str| {
             Pin::new(
-                FilePin { path: PathBuf::from(format!("{dir}/strategy.pine")), xxh128: "aa".into() },
-                FilePin { path: PathBuf::from(format!("{dir}/tv_trades.csv")), xxh128: "bb".into() },
+                FilePin {
+                    path: PathBuf::from(format!("{dir}/strategy.pine")),
+                    xxh128: "aa".into(),
+                },
+                FilePin {
+                    path: PathBuf::from(format!("{dir}/tv_trades.csv")),
+                    xxh128: "bb".into(),
+                },
             )
         };
         let mut probes = BTreeMap::new();
         probes.insert("old".to_owned(), pin("p/old"));
         let check = |entries: &[(&str, &str)]| {
-            let pending: BTreeMap<String, PathBuf> =
-                entries.iter().map(|(k, v)| ((*k).to_owned(), PathBuf::from(v))).collect();
+            let pending: BTreeMap<String, PathBuf> = entries
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), PathBuf::from(v)))
+                .collect();
             check_pending(&pending, &probes)
         };
         assert!(check(&[("new", "p/new")]).is_empty());
         assert!(check(&[("other", "p/new")])[0].contains("must be the directory's name"));
         assert!(check(&[("x", ".hidden/x")])[0].contains("none starting with `.`"));
         assert!(check(&[("x", "p/../x")])[0].contains("plain relative components"));
-        assert!(check(&[("old", "q/old")]).iter().any(|p| p.contains("already pinned")));
+        assert!(
+            check(&[("old", "q/old")])
+                .iter()
+                .any(|p| p.contains("already pinned"))
+        );
         assert!(check(&[("inner", "p/old/inner")])[0].contains("nests with"));
-        assert!(check(&[("a", "p/a"), ("b", "p/a/b")]).iter().any(|p| p.contains("nests with")));
+        assert!(
+            check(&[("a", "p/a"), ("b", "p/a/b")])
+                .iter()
+                .any(|p| p.contains("nests with"))
+        );
     }
 
     #[test]
@@ -1441,8 +1478,16 @@ csv = { path = \"p/old/tv_trades.csv\", xxh128 = \"bb\" }
         config.insert("q".to_owned(), feed_decl("f"));
         let problems = check_probe_config(&config, &pins, &BTreeMap::new());
         assert_eq!(problems.len(), 2, "{problems:?}");
-        assert!(problems.iter().any(|p| p.contains("\"p\"]: `bar_budget` governs no")));
-        assert!(problems.iter().any(|p| p.contains("\"q\"]: `feed` governs no")));
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("\"p\"]: `bar_budget` governs no"))
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("\"q\"]: `feed` governs no"))
+        );
     }
 
     #[test]
@@ -1453,7 +1498,11 @@ csv = { path = \"p/old/tv_trades.csv\", xxh128 = \"bb\" }
         // A family-level copy is as stale-prone as an exact-dir one.
         config.insert("p/fam".to_owned(), feed_decl("f"));
         let problems = check_probe_config(&config, &pins, &BTreeMap::new());
-        assert!(problems.iter().any(|p| p.contains("\"p/fam\"]: `feed` restates")));
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("\"p/fam\"]: `feed` restates"))
+        );
         // An explicit value where the ancestor declares none is not a
         // restatement, even when it equals the harness default.
         let mut config = BTreeMap::new();
@@ -1735,7 +1784,11 @@ pine = { path = "p/bare/strategy.pine", xxh128 = "aa" }
         assert_eq!(verify_harness_files(&registry, &root, &root).unwrap(), 1);
 
         // An edit the pin does not know about is refused before any run.
-        std::fs::write(root.join(&facts.path), b"[probes.x]\ncapture_origin_ms = 1\n").unwrap();
+        std::fs::write(
+            root.join(&facts.path),
+            b"[probes.x]\ncapture_origin_ms = 1\n",
+        )
+        .unwrap();
         let err = verify_harness_files(&registry, &root, &root).unwrap_err();
         assert!(format!("{err:?}").contains("harness file 'probe-facts'"));
     }
@@ -1881,5 +1934,4 @@ csv = { path = "p/old/tv_trades.csv", xxh128 = "bb" }
         let err = r.lint().unwrap_err();
         assert!(format!("{err:?}").contains("totally-bogus"));
     }
-
 }

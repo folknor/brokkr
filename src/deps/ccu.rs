@@ -129,8 +129,8 @@ fn try_run(project_root: &Path) -> Result<Vec<DepsEvent>, String> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: CcuOutput = serde_json::from_str(&stdout)
-        .map_err(|e| format!("could not parse --json output: {e}"))?;
+    let parsed: CcuOutput =
+        serde_json::from_str(&stdout).map_err(|e| format!("could not parse --json output: {e}"))?;
     if parsed.schema_version != SUPPORTED_SCHEMA {
         return Err(format!(
             "schema_version={} but brokkr expects {SUPPORTED_SCHEMA}",

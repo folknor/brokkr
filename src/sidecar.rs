@@ -30,6 +30,9 @@
 //! deadlock when the child fills the OS pipe buffer (~64 KiB), we take
 //! ownership of the pipe handles and drain them in background threads while
 //! the sidecar loop samples `/proc` and checks `try_wait()`.
+//! After the child exits, drains get a bounded grace period to reach EOF. If
+//! a descendant still holds a pipe open, capture is stopped and its end is
+//! closed so the sidecar cannot hang waiting for that descendant.
 //!
 //! # Timing
 //!
@@ -44,6 +47,8 @@ use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::error::DevError;
@@ -627,18 +632,89 @@ fn monotonic_ns() -> i64 {
 // Sidecar loop
 // ---------------------------------------------------------------------------
 
-/// Drain a pipe handle to completion in a thread.
+/// Drain a pipe handle in a cancellable thread.
 ///
 /// Used to prevent deadlock: the child's stdout/stderr must be drained
 /// concurrently with the sidecar sampling loop, otherwise the child blocks
-/// once the OS pipe buffer (~64 KiB) fills.
-fn drain_pipe(pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
-    std::thread::spawn(move || {
-        let mut buf = Vec::new();
+/// once the OS pipe buffer (~64 KiB) fills. Polling reads let the caller stop
+/// a drain if a descendant keeps the pipe open after the child exits.
+fn drain_pipe(pipe: impl Read + std::os::fd::AsRawFd + Send + 'static) -> PipeDrain {
+    let buf = Arc::new(Mutex::new(Vec::new()));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (buf_t, cancel_t) = (Arc::clone(&buf), Arc::clone(&cancel));
+    let handle = std::thread::spawn(move || {
         let mut reader = pipe;
-        drop(reader.read_to_end(&mut buf));
-        buf
-    })
+        let mut chunk = [0u8; 8192];
+        while let Some(n) =
+            crate::test_runner::read_unless_cancelled(&mut reader, &mut chunk, &cancel_t)
+        {
+            if let Ok(mut b) = buf_t.lock() {
+                b.extend_from_slice(&chunk[..n]);
+            }
+        }
+        // Closing our end makes a surviving writer see EPIPE rather than
+        // leaving an unbounded reader behind the completed run.
+    });
+    PipeDrain {
+        buf,
+        cancel,
+        handle,
+    }
+}
+
+/// One sidecar output drain: captured bytes, its stop switch, and its thread.
+struct PipeDrain {
+    buf: Arc<Mutex<Vec<u8>>>,
+    cancel: Arc<AtomicBool>,
+    handle: std::thread::JoinHandle<()>,
+}
+
+/// How long a child's output pipes get to close after the child exits.
+const DRAIN_SETTLE: Duration = Duration::from_secs(2);
+
+/// Wait up to [`DRAIN_SETTLE`] for all output pipes to reach EOF, then stop
+/// and join any remaining drains while preserving stdout/stderr positions.
+fn settle_drains(drains: Vec<Option<PipeDrain>>, run: usize) -> Vec<Vec<u8>> {
+    let until = Instant::now() + DRAIN_SETTLE;
+    while Instant::now() < until
+        && !drains
+            .iter()
+            .flatten()
+            .all(|drain| drain.handle.is_finished())
+    {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let cut = drains
+        .iter()
+        .flatten()
+        .any(|drain| !drain.handle.is_finished());
+    if cut {
+        output::sidecar_msg(&format!(
+            "run {run}: child exited but an output pipe stayed open for {}s; capture stopped \
+             there (a descendant may still hold the pipe)",
+            DRAIN_SETTLE.as_secs()
+        ));
+    }
+    drains
+        .into_iter()
+        .map(|drain| {
+            let Some(drain) = drain else {
+                return Vec::new();
+            };
+            drain.cancel.store(true, Ordering::Release);
+            drain.handle.join().ok();
+            drain.buf.lock().map(|b| b.clone()).unwrap_or_default()
+        })
+        .collect()
+}
+
+/// Represent an unavailable wait result as failure; the default Unix
+/// `ExitStatus` is exit 0 and would silently record this run as successful.
+fn unavailable_exit_status() -> ExitStatus {
+    use std::os::unix::process::ExitStatusExt;
+
+    // Unix wait status encoding for a normal exit with code 1.
+    ExitStatus::from_raw(1 << 8)
 }
 
 /// Resolve a `--stop` spelling against a batch of freshly-drained
@@ -769,7 +845,10 @@ pub(crate) fn run_sidecar_with_deadline(
 
     // Ephemeral: the run log keeps it, the console does not (the run number
     // is shown one-indexed, like the harness's own `run i/n` line).
-    output::detail(&format!("sidecar attached to pid {pid}, run {}", run_idx + 1));
+    output::detail(&format!(
+        "sidecar attached to pid {pid}, run {}",
+        run_idx + 1
+    ));
 
     // The exit status and elapsed time, captured at the moment try_wait
     // detects exit (not after the loop finishes). This avoids including
@@ -812,17 +891,12 @@ pub(crate) fn run_sidecar_with_deadline(
         //                                           one-line notice so the resolved
         //                                           form is visible.
         if let Some(stop) = stop_marker {
-            let matched = stop_match(
-                stop,
-                &markers[marker_count_before..],
-            );
+            let matched = stop_match(stop, &markers[marker_count_before..]);
             if let Some(matched_name) = matched {
                 let display = if matched_name == stop {
                     format!("stop marker \"{stop}\" received, killing child")
                 } else {
-                    format!(
-                        "stop marker \"{stop}\" → \"{matched_name}\" received, killing child"
-                    )
+                    format!("stop marker \"{stop}\" → \"{matched_name}\" received, killing child")
                 };
                 output::sidecar_msg(&display);
                 // SIGKILL the whole process group (the captured runner
@@ -891,23 +965,22 @@ pub(crate) fn run_sidecar_with_deadline(
     // Final drain - markers/counters may have arrived between last sample and exit.
     fifo.drain(&mut markers, &mut marker_idx, &mut counters);
 
-    // Join pipe drain threads. These complete quickly once the child exits
-    // since the pipe write ends are closed.
-    let stdout = stdout_thread
-        .map(|t| t.join().unwrap_or_default())
-        .unwrap_or_default();
-    let stderr = stderr_thread
-        .map(|t| t.join().unwrap_or_default())
-        .unwrap_or_default();
+    // Settle both streams against one shared grace period. A descendant that
+    // inherited either pipe must not keep the sidecar blocked after exit.
+    let mut outputs = settle_drains(vec![stdout_thread, stderr_thread], run_idx + 1).into_iter();
+    let stdout = outputs.next().unwrap_or_default();
+    let stderr = outputs.next().unwrap_or_default();
 
     // Fall back to wait() if try_wait() never saw the exit (shouldn't happen,
     // but defensive). This is safe because the pipe drain threads have already
     // joined, so wait_with_output() won't deadlock.
     let exit_status = exit_status.unwrap_or_else(|| {
         child_elapsed = Some(start.elapsed());
-        child.wait().unwrap_or_else(|_| {
-            // Process already reaped - synthesize a failure status.
-            std::process::ExitStatus::default()
+        child.wait().unwrap_or_else(|error| {
+            output::sidecar_msg(&format!(
+                "could not collect child exit status: {error}; recording a failure status"
+            ));
+            unavailable_exit_status()
         })
     });
 

@@ -647,11 +647,12 @@ snapshot directory. The three clocks mean:
   flag within one watchdog poll and kills its own process group. Binaries never
   started are reported as skipped.
 - **The nextest lane** no longer enumerates every failure in one run. In that
-  engine a timeout arrives as a failed test, and `MaxFail::All` means "run
-  everything regardless of failures", so a test that blew its cap was terminated
-  while the run carried on to the end. There is no way to cancel on a timeout
-  without cancelling on a failure, so the lane is fail-fast with
-  `TerminateMode::Immediate`. The cap is not negotiable and the failure list is.
+  engine a timeout arrives as a failed test, so `MaxFail::All` would keep running
+  later tests after the cap. There is no way to cancel on a timeout without
+  cancelling on a failure, so the lane uses `MaxFail::Count { max_fail: 1,
+  terminate: Immediate }`. Brokkr recognizes a timed-out terminal event as a
+  per-test stop and ends the test phase; ordinary failures still use the same
+  fail-fast lane behavior. The cap is not negotiable and the failure list is.
   Its `grace-period` is also `0s`: a grace period SIGTERMs at the ceiling and only
   SIGKILLs afterwards, which lets a test that blocks SIGTERM outlive its budget.
 
@@ -2809,7 +2810,9 @@ execution is invented for it, and the only test names it can offer are the
 suspects its shared stream blamed at a stop - listed as such, with no binary.
 A binary that answers no libtest `--list` is kept as
 **unenumerable** with the reason: its lane's inventory is `partial` and the
-tests in it are outside the inventory the way doctests are.
+tests in it are outside the inventory the way doctests are. If an unlisted
+binary's shared stream names a test at a stop, that name is reported under the
+partial lane as a suspect, with no binary, just as for an unavailable lane.
 
 Which binaries preparation executes with `--list` follows what listed them
 before preparation existed. The parallel, isolated and nextest lanes, a

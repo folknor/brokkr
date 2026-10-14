@@ -84,7 +84,12 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
     for (kind, orig, sel, inv) in [
         ("nodes", original.nodes, selected.nodes, inverted.nodes),
         ("ways", original.ways, selected.ways, inverted.ways),
-        ("relations", original.relations, selected.relations, inverted.relations),
+        (
+            "relations",
+            original.relations,
+            selected.relations,
+            inverted.relations,
+        ),
     ] {
         let verdict = complement_verdict(orig, sel, inv);
         if verdict.is_pass() {

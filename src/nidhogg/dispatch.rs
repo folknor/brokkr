@@ -30,18 +30,21 @@ pub(crate) fn run_command(
     match req.mode {
         MeasureMode::Run => match command {
             NidhoggCommand::Ingest => run_nidhogg_ingest_run(req),
-            // Api/Tiles have no lightweight run mode - fall through to bench.
+            // Reuse the specialized measurement lifecycle for one sample;
+            // the run-mode harness reports it without persisting a result.
             NidhoggCommand::Api { query } => nidhogg::cmd::bench_api(req, query.as_deref()),
-            NidhoggCommand::Tiles { tiles_variant, uring } => {
-                nidhogg::cmd::bench_tiles(req, tiles_variant.as_deref(), *uring)
-            }
+            NidhoggCommand::Tiles {
+                tiles_variant,
+                uring,
+            } => nidhogg::cmd::bench_tiles(req, tiles_variant.as_deref(), *uring),
         },
         MeasureMode::Bench { .. } => match command {
             NidhoggCommand::Ingest => run_nidhogg_ingest_bench(req, command),
             NidhoggCommand::Api { query } => nidhogg::cmd::bench_api(req, query.as_deref()),
-            NidhoggCommand::Tiles { tiles_variant, uring } => {
-                nidhogg::cmd::bench_tiles(req, tiles_variant.as_deref(), *uring)
-            }
+            NidhoggCommand::Tiles {
+                tiles_variant,
+                uring,
+            } => nidhogg::cmd::bench_tiles(req, tiles_variant.as_deref(), *uring),
         },
         MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. } => {
             if !command.supports_hotpath() {
@@ -68,7 +71,8 @@ fn run_nidhogg_ingest_run(req: &MeasureRequest) -> Result<(), DevError> {
         &feat_refs,
         true,
         &format!("run {}", "nid-ingest"),
-        true,        req.stop_marker.map(str::to_owned),
+        true,
+        req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
 
@@ -118,7 +122,8 @@ fn run_nidhogg_ingest_bench(
         &feat_refs,
         true,
         &format!("bench {}", command.id()),
-        req.force,        req.stop_marker.map(str::to_owned),
+        req.force,
+        req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
 
@@ -211,7 +216,8 @@ fn run_nidhogg_hotpath(
         &hotpath_features,
         true,
         &format!("hotpath {}", command.id()),
-        req.force,        req.stop_marker.map(str::to_owned),
+        req.force,
+        req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
 

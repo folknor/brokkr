@@ -271,7 +271,10 @@ pub fn run(
         }
 
         let osc_pathbuf_for_ctx = osc_pathbuf.clone();
-        let osc_paths = osc_pathbuf_for_ctx.clone().map(|p| vec![p]).unwrap_or_default();
+        let osc_paths = osc_pathbuf_for_ctx
+            .clone()
+            .map(|p| vec![p])
+            .unwrap_or_default();
         let bbox = if matches!(cmd, PbfhoggCommand::Extract { .. }) {
             Some(SUITE_EXTRACT_BBOX.into())
         } else {
@@ -305,7 +308,7 @@ pub fn run(
             &cmd,
             &ctx,
             crate::pbfhogg::commands::ArgMode::Bench,
-        );
+        )?;
         Ok(())
     })
 }

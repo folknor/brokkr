@@ -40,9 +40,15 @@ pub fn resolve_commit(repo: &Path, rev: &str) -> Result<CommitId, DevError> {
         .args(["rev-parse", "--verify", "--quiet", &spec])
         .current_dir(repo)
         .output()
-        .map_err(|error| DevError::Spawn { program: "git".to_owned(), error })?;
+        .map_err(|error| DevError::Spawn {
+            program: "git".to_owned(),
+            error,
+        })?;
     if !output.status.success() {
-        return Err(DevError::Config(format!("{rev:?} does not name a commit in {}", repo.display())));
+        return Err(DevError::Config(format!(
+            "{rev:?} does not name a commit in {}",
+            repo.display()
+        )));
     }
     let full = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     let short = short_of(&full);
@@ -157,7 +163,10 @@ fn read_commit_hash(workspace_root: &Path) -> Result<String, DevError> {
         .args(["rev-parse", "HEAD"])
         .current_dir(workspace_root)
         .output()
-        .map_err(|error| DevError::Spawn { program: "git".to_owned(), error })?;
+        .map_err(|error| DevError::Spawn {
+            program: "git".to_owned(),
+            error,
+        })?;
 
     if !output.status.success() {
         return Err(DevError::Subprocess {
@@ -175,7 +184,10 @@ fn read_commit_subject(workspace_root: &Path) -> Result<String, DevError> {
         .args(["log", "-1", "--format=%s"])
         .current_dir(workspace_root)
         .output()
-        .map_err(|error| DevError::Spawn { program: "git".to_owned(), error })?;
+        .map_err(|error| DevError::Spawn {
+            program: "git".to_owned(),
+            error,
+        })?;
 
     if !output.status.success() {
         return Err(DevError::Subprocess {

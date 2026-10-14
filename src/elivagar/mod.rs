@@ -15,9 +15,9 @@ pub mod compare_tiles;
 pub mod corpus;
 pub mod diag;
 pub mod dispatch;
-pub mod eliv;
 pub mod download_natural_earth;
 pub mod download_ocean;
+pub mod eliv;
 pub mod inspect;
 pub mod ocean_build;
 pub mod regress;
@@ -214,7 +214,11 @@ pub fn resolve_tilegen<'a>(
 /// know which variant it was about to be run against, re-coupling the two axes
 /// this config separates. An unknown dataset/variant yields `(false, false)`;
 /// PBF resolution reports that properly and this is not the place for it.
-pub fn input_assertions(dev_config: &config::DevConfig, dataset: &str, variant: &str) -> (bool, bool) {
+pub fn input_assertions(
+    dev_config: &config::DevConfig,
+    dataset: &str,
+    variant: &str,
+) -> (bool, bool) {
     let Ok(host) = config::hostname() else {
         return (false, false);
     };

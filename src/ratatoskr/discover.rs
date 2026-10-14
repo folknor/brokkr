@@ -14,11 +14,12 @@
 //!   backstop enforced by brokkr around the whole run. Bare numbers are
 //!   read as seconds. Omitted scripts use [`DEFAULT_CEILING`].
 //! - `preserve_data_dir = on_success_too` - keep the artefact dir even
-//!   when the run succeeds (failures are always preserved). Other values
-//!   are ignored, equivalent to omitting the field.
+//!   when the run succeeds (failures are always preserved).
 //!
-//! Unknown keys are ignored rather than rejected so scripts can carry
-//! their own annotations without breaking discovery.
+//! Unknown annotation keys are ignored rather than rejected so scripts can
+//! carry their own notes without breaking discovery. The likely misspelling
+//! `fixtures` is rejected in favor of `fixture`. Invalid values for recognized
+//! keys fail discovery with the script path and line number.
 //!
 //! ```lua
 //! -- description: Verify the Service exits with code 73 when the keyfile is missing
@@ -154,7 +155,7 @@ pub fn discover_at(root: &Path) -> Result<Vec<ScriptInfo>, DevError> {
 /// stem is a reasonable fallback.
 pub fn parse_script(path: &Path, display_name: &str) -> Result<ScriptInfo, DevError> {
     let body = fs::read_to_string(path)?;
-    Ok(build_info(display_name, path.to_path_buf(), &body))
+    build_info(display_name, path.to_path_buf(), &body)
 }
 
 fn walk(root: &Path, dir: &Path, out: &mut Vec<ScriptInfo>) -> Result<(), DevError> {
@@ -182,7 +183,7 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<ScriptInfo>) -> Result<(), DevErr
             continue;
         };
         let body = fs::read_to_string(&path)?;
-        out.push(build_info(&name, path, &body));
+        out.push(build_info(&name, path, &body)?);
     }
     Ok(())
 }
@@ -207,9 +208,10 @@ fn display_name_for(root: &Path, path: &Path) -> Option<String> {
     Some(parts.join("/"))
 }
 
-fn build_info(name: &str, path: PathBuf, body: &str) -> ScriptInfo {
-    let parsed = parse_frontmatter(body);
-    ScriptInfo {
+fn build_info(name: &str, path: PathBuf, body: &str) -> Result<ScriptInfo, DevError> {
+    let parsed = parse_frontmatter(body)
+        .map_err(|error| DevError::Config(format!("{}: {error}", path.display())))?;
+    Ok(ScriptInfo {
         name: name.to_owned(),
         path,
         description: parsed.description,
@@ -218,7 +220,7 @@ fn build_info(name: &str, path: PathBuf, body: &str) -> ScriptInfo {
         preserve_data_dir: parsed.preserve_data_dir.unwrap_or_default(),
         fixture: parsed.fixture,
         protocol: parsed.protocol,
-    }
+    })
 }
 
 #[derive(Debug, Default)]
@@ -235,9 +237,10 @@ struct ParsedFrontmatter {
 /// first non-comment / non-blank line. Whitespace around the `--` and
 /// around the `:` is tolerated. The first occurrence of each key wins;
 /// later occurrences are ignored.
-fn parse_frontmatter(body: &str) -> ParsedFrontmatter {
+fn parse_frontmatter(body: &str) -> Result<ParsedFrontmatter, String> {
     let mut out = ParsedFrontmatter::default();
-    for line in body.lines() {
+    for (line_index, line) in body.lines().enumerate() {
+        let line_number = line_index + 1;
         let trimmed = line.trim_start();
         if trimmed.is_empty() {
             // blank line within or after the frontmatter is fine - keep going
@@ -257,22 +260,49 @@ fn parse_frontmatter(body: &str) -> ParsedFrontmatter {
                 out.description = Some(value.to_owned());
             }
             "expected" if out.expected.is_none() => {
-                if let Some(parsed) = Expected::parse(value) {
-                    out.expected = Some(parsed);
-                }
+                out.expected = Some(Expected::parse(value).ok_or_else(|| {
+                    invalid_frontmatter_value(line_number, "expected", value, "pass or ignored")
+                })?);
             }
             "ceiling" if out.ceiling.is_none() => {
-                if let Some(parsed) = parse_duration(value) {
-                    out.ceiling = Some(parsed);
-                }
+                out.ceiling = Some(parse_duration(value).ok_or_else(|| {
+                    invalid_frontmatter_value(
+                        line_number,
+                        "ceiling",
+                        value,
+                        "a positive duration such as 60s, 5m, or 90",
+                    )
+                })?);
             }
             "preserve_data_dir" if out.preserve_data_dir.is_none() => {
-                if let Some(parsed) = PreserveDataDir::parse(value) {
-                    out.preserve_data_dir = Some(parsed);
-                }
+                out.preserve_data_dir = Some(PreserveDataDir::parse(value).ok_or_else(|| {
+                    invalid_frontmatter_value(
+                        line_number,
+                        "preserve_data_dir",
+                        value,
+                        "on_success_too",
+                    )
+                })?);
             }
-            "fixture" if out.fixture.is_none() && !value.is_empty() => {
+            "fixture" if out.fixture.is_none() => {
+                if value.is_empty() {
+                    return Err(invalid_frontmatter_value(
+                        line_number,
+                        "fixture",
+                        value,
+                        "a non-empty fixture name",
+                    ));
+                }
+                // The fixture directory comes from project config, so runners
+                // validate this opaque name with `resolve_fixture`.
                 out.fixture = Some(value.to_owned());
+            }
+            // `fixtures` is a common spelling error for this functional key.
+            // Other unknown keys remain available for script annotations.
+            "fixtures" => {
+                return Err(format!(
+                    "frontmatter line {line_number}: unknown key `fixtures`; use `fixture` to select one mock fixture"
+                ));
             }
             "protocol" if out.protocol.is_none() && !value.is_empty() => {
                 out.protocol = Some(value.to_owned());
@@ -280,7 +310,11 @@ fn parse_frontmatter(body: &str) -> ParsedFrontmatter {
             _ => {}
         }
     }
-    out
+    Ok(out)
+}
+
+fn invalid_frontmatter_value(line: usize, key: &str, value: &str, expected: &str) -> String {
+    format!("frontmatter line {line}: invalid `{key}` value {value:?}; expected {expected}")
 }
 
 /// Parse a duration spelled in the brokkr/architecture style: a positive
@@ -293,6 +327,9 @@ fn parse_duration(value: &str) -> Option<Duration> {
     }
     let (num_part, unit) = split_unit(value);
     let n: u64 = num_part.parse().ok()?;
+    if n == 0 {
+        return None;
+    }
     match unit {
         "" | "s" => Some(Duration::from_secs(n)),
         "ms" => Some(Duration::from_millis(n)),
@@ -488,19 +525,31 @@ mod tests {
     }
 
     #[test]
-    fn malformed_ceiling_falls_back_to_default() {
-        let root = tmpdir("ceiling_malformed");
-        write_script(&root, "garbage", "-- ceiling: not-a-number\n");
-        write_script(&root, "negative", "-- ceiling: -5s\n");
-        write_script(&root, "weird_unit", "-- ceiling: 5y\n");
-        let scripts = discover(&root).unwrap();
-        for s in &scripts {
-            assert_eq!(
-                s.ceiling, DEFAULT_CEILING,
-                "{} should fall back to default",
-                s.name
-            );
+    fn invalid_known_frontmatter_values_fail_with_line() {
+        let cases = [
+            ("-- expected: ignore\n", "expected"),
+            ("-- ceiling: not-a-number\n", "ceiling"),
+            ("-- ceiling: -5s\n", "ceiling"),
+            ("-- ceiling: 0s\n", "ceiling"),
+            ("-- ceiling: 5y\n", "ceiling"),
+            ("-- preserve_data_dir: maybe\n", "preserve_data_dir"),
+            ("-- fixture: \n", "fixture"),
+            ("-- fixtures: jmap-small\n", "fixtures"),
+        ];
+        for (body, key) in cases {
+            let error = parse_frontmatter(body).expect_err("malformed frontmatter is rejected");
+            assert!(error.contains("frontmatter line 1"), "got: {error}");
+            assert!(error.contains(key), "got: {error}");
         }
+    }
+
+    #[test]
+    fn discovery_reports_invalid_frontmatter_path() {
+        let root = tmpdir("frontmatter_path_error");
+        write_script(&root, "bad", "-- expected: ignore\n");
+        let error = discover(&root).unwrap_err().to_string();
+        assert!(error.contains("bad.lua"), "got: {error}");
+        assert!(error.contains("frontmatter line 1"), "got: {error}");
     }
 
     #[test]
@@ -508,7 +557,6 @@ mod tests {
         let root = tmpdir("preserve");
         write_script(&root, "soaky", "-- preserve_data_dir: on_success_too\n");
         write_script(&root, "default", "");
-        write_script(&root, "weird", "-- preserve_data_dir: maybe\n");
         let scripts = discover(&root).unwrap();
         let by_name = |n: &str| {
             scripts
@@ -519,7 +567,6 @@ mod tests {
         };
         assert_eq!(by_name("soaky"), PreserveDataDir::OnSuccessToo);
         assert_eq!(by_name("default"), PreserveDataDir::OnFailureOnly);
-        assert_eq!(by_name("weird"), PreserveDataDir::OnFailureOnly);
     }
 
     #[test]

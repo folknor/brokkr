@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::time::Instant;
 
-use super::verify::{run_check, VerifyHarness};
+use super::verify::{VerifyHarness, run_check};
 use super::{
     verify_add_locations, verify_cat, verify_check_refs, verify_derive_changes, verify_diff,
     verify_extract, verify_getid_removeid, verify_merge, verify_multi_extract, verify_renumber,
@@ -56,20 +56,27 @@ pub fn run(
     let mut skipped: u32 = 0;
 
     // 1. sort
-    tally(&mut counts, &run_check("sort", verbose, || {
-        verify_sort::run(harness, pbf, direct_io)
-    }));
+    tally(
+        &mut counts,
+        &run_check("sort", verbose, || {
+            verify_sort::run(harness, pbf, direct_io)
+        }),
+    );
 
     // 2. cat
-    tally(&mut counts, &run_check("cat", verbose, || {
-        verify_cat::run(harness, pbf, direct_io)
-    }));
+    tally(
+        &mut counts,
+        &run_check("cat", verbose, || verify_cat::run(harness, pbf, direct_io)),
+    );
 
     // 3. extract
     if let Some(b) = bbox {
-        tally(&mut counts, &run_check("extract", verbose, || {
-            verify_extract::run(harness, pbf, b, direct_io)
-        }));
+        tally(
+            &mut counts,
+            &run_check("extract", verbose, || {
+                verify_extract::run(harness, pbf, b, direct_io)
+            }),
+        );
     } else {
         verify_summary(&format!("extract: {NO_BBOX}"));
         skipped += 1;
@@ -77,33 +84,48 @@ pub fn run(
 
     // 3b. multi-extract
     if let Some(b) = bbox {
-        tally(&mut counts, &run_check("multi-extract", verbose, || {
-            verify_multi_extract::run(harness, pbf, b, 5, direct_io)
-        }));
+        tally(
+            &mut counts,
+            &run_check("multi-extract", verbose, || {
+                verify_multi_extract::run(harness, pbf, b, 5, direct_io)
+            }),
+        );
     } else {
         verify_summary(&format!("multi-extract: {NO_BBOX}"));
         skipped += 1;
     }
 
     // 4. tags-filter
-    tally(&mut counts, &run_check("tags-filter", verbose, || {
-        verify_tags_filter::run(harness, pbf, direct_io)
-    }));
+    tally(
+        &mut counts,
+        &run_check("tags-filter", verbose, || {
+            verify_tags_filter::run(harness, pbf, direct_io)
+        }),
+    );
 
     // 5. getid-removeid
-    tally(&mut counts, &run_check("getid-removeid", verbose, || {
-        verify_getid_removeid::run(harness, pbf, direct_io)
-    }));
+    tally(
+        &mut counts,
+        &run_check("getid-removeid", verbose, || {
+            verify_getid_removeid::run(harness, pbf, direct_io)
+        }),
+    );
 
     // 6. add-locations-to-ways
-    tally(&mut counts, &run_check("add-locations-to-ways", verbose, || {
-        verify_add_locations::run(harness, pbf, crate::cli::AltwMode::All, direct_io)
-    }));
+    tally(
+        &mut counts,
+        &run_check("add-locations-to-ways", verbose, || {
+            verify_add_locations::run(harness, pbf, crate::cli::AltwMode::All, direct_io)
+        }),
+    );
 
     // 7. check-refs
-    tally(&mut counts, &run_check("check-refs", verbose, || {
-        verify_check_refs::run(harness, pbf, direct_io)
-    }));
+    tally(
+        &mut counts,
+        &run_check("check-refs", verbose, || {
+            verify_check_refs::run(harness, pbf, direct_io)
+        }),
+    );
 
     // 8. apply-changes
     if let Some(osc_path) = osc {
@@ -118,9 +140,12 @@ pub fn run(
                 None
             }
         };
-        tally(&mut counts, &run_check("apply-changes", verbose, || {
-            verify_merge::run(harness, pbf, osc_path, osmosis.as_ref(), direct_io)
-        }));
+        tally(
+            &mut counts,
+            &run_check("apply-changes", verbose, || {
+                verify_merge::run(harness, pbf, osc_path, osmosis.as_ref(), direct_io)
+            }),
+        );
     } else {
         verify_summary(&format!("apply-changes: {NO_OSC}"));
         skipped += 1;
@@ -128,24 +153,31 @@ pub fn run(
 
     // 9. diff --format osc
     if let Some(osc_path) = osc {
-        tally(&mut counts, &run_check("diff --format osc", verbose, || {
-            verify_derive_changes::run(harness, pbf, osc_path, direct_io)
-        }));
+        tally(
+            &mut counts,
+            &run_check("diff --format osc", verbose, || {
+                verify_derive_changes::run(harness, pbf, osc_path, direct_io)
+            }),
+        );
     } else {
         verify_summary(&format!("diff --format osc: {NO_OSC}"));
         skipped += 1;
     }
 
     // 10. renumber
-    tally(&mut counts, &run_check("renumber", verbose, || {
-        verify_renumber::run(harness, pbf, dataset, None, false)
-    }));
+    tally(
+        &mut counts,
+        &run_check("renumber", verbose, || {
+            verify_renumber::run(harness, pbf, dataset, None, false)
+        }),
+    );
 
     // 11. diff
     if let Some(osc_path) = osc {
-        tally(&mut counts, &run_check("diff", verbose, || {
-            verify_diff::run(harness, pbf, osc_path)
-        }));
+        tally(
+            &mut counts,
+            &run_check("diff", verbose, || verify_diff::run(harness, pbf, osc_path)),
+        );
     } else {
         verify_summary(&format!("diff: {NO_OSC}"));
         skipped += 1;

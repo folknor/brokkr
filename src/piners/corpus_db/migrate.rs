@@ -12,10 +12,12 @@
 //! adds `run.protocol_violations` (the report-integrity count) and
 //! `run.diagnosis` (the isolation pass's note,
 //! written after the run row); version 8 adds `run.run_error`, the harness's
-//! `run_error` record stored whole as JSON. On a fresh database
-//! the schema DDL in `schema.rs` creates the current tables (columns
-//! included) and stamps the version, so the migration steps below only run for
-//! an older db on disk. The `has_table` helper lives here so a future column
+//! `run_error` record stored whole as JSON; version 9 adds typed
+//! `run.debug` and `run.harness_args` columns for execution context, backfilled
+//! from selector fields only when each has the expected JSON type; incomplete
+//! context stays unknown. On a fresh database the schema DDL in `schema.rs`
+//! creates the current tables (columns included) and stamps the version, so
+//! the migration steps below only run for an older db on disk. The `has_table` helper lives here so a future column
 //! add stays a localized change, exactly as in `ResultsDb`.
 
 use rusqlite::params;
@@ -25,7 +27,7 @@ use super::schema::disposition_ddl;
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding a migration below.
-pub(super) const SCHEMA_VERSION: i64 = 8;
+pub(super) const SCHEMA_VERSION: i64 = 9;
 
 /// Run all pending migrations based on `PRAGMA user_version`. On a fresh
 /// database the schema DDL in `schema.rs` creates the current tables and
@@ -175,7 +177,66 @@ fn migrate_from(conn: &rusqlite::Connection, current: i64) -> Result<(), DevErro
         conn.execute("ALTER TABLE run ADD COLUMN run_error TEXT", [])?;
     }
 
+    // v8 -> v9: execution context used by parity comparison. Older selectors
+    // are a source only when each field parses with its exact type; missing or
+    // malformed values remain NULL and cannot imply comparability.
+    if current < 9 {
+        if !has_column(conn, "run", "debug") {
+            conn.execute("ALTER TABLE run ADD COLUMN debug INTEGER", [])?;
+        }
+        if !has_column(conn, "run", "harness_args") {
+            conn.execute("ALTER TABLE run ADD COLUMN harness_args TEXT", [])?;
+        }
+        backfill_run_context(conn)?;
+    }
+
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    Ok(())
+}
+
+/// Recover execution context from older selector records only when each field
+/// has the expected JSON type. Missing or malformed values stay unknown.
+fn backfill_run_context(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    let rows = {
+        let mut stmt = conn.prepare("SELECT run_id, selector FROM run")?;
+        let mapped = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>("run_id")?,
+                row.get::<_, String>("selector")?,
+            ))
+        })?;
+        mapped.collect::<Result<Vec<_>, _>>()?
+    };
+    for (run_id, selector) in rows {
+        let Ok(value) = serde_json::from_str::<Value>(&selector) else {
+            continue;
+        };
+        let Some(object) = value.as_object() else {
+            continue;
+        };
+        let debug = object.get("debug").and_then(Value::as_bool).map(i64::from);
+        let args = object
+            .get("harness_args")
+            .and_then(Value::as_array)
+            .and_then(|array| {
+                array
+                    .iter()
+                    .map(Value::as_str)
+                    .map(|arg| arg.map(str::to_owned))
+                    .collect::<Option<Vec<_>>>()
+            });
+        let harness_args = args
+            .map(|args| serde_json::to_string(&args))
+            .transpose()
+            .map_err(|e| DevError::Database(format!("serializing legacy harness args: {e}")))?;
+        if debug.is_some() || harness_args.is_some() {
+            conn.execute(
+                "UPDATE run SET debug = COALESCE(debug, ?2), \
+                 harness_args = COALESCE(harness_args, ?3) WHERE run_id = ?1",
+                params![run_id, debug, harness_args],
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -274,8 +335,17 @@ fn reconstruct(row: &rusqlite::Row<'_>) -> Result<String, DevError> {
     let real = |c: &str| row.get::<_, Option<f64>>(c);
     let mut rec = Map::new();
     rec.insert("probe".into(), Value::from(row.get::<_, String>("probe")?));
-    rec.insert("outcome".into(), Value::from(row.get::<_, String>("outcome")?));
-    for c in ["matched", "ours_only", "tv_only", "boundary_ours", "boundary_tv"] {
+    rec.insert(
+        "outcome".into(),
+        Value::from(row.get::<_, String>("outcome")?),
+    );
+    for c in [
+        "matched",
+        "ours_only",
+        "tv_only",
+        "boundary_ours",
+        "boundary_tv",
+    ] {
         rec.insert(c.into(), Value::from(row.get::<_, i64>(c)?));
     }
     if let Some(v) = text("count_tier")? {
@@ -284,13 +354,19 @@ fn reconstruct(row: &rusqlite::Row<'_>) -> Result<String, DevError> {
 
     let failing_text: String = row.get("acc_failing")?;
     let failing: Value = serde_json::from_str(&failing_text).map_err(|e| {
-        DevError::Database(format!("corpus runs.db v5 migration: acc_failing is not JSON: {e}"))
+        DevError::Database(format!(
+            "corpus runs.db v5 migration: acc_failing is not JSON: {e}"
+        ))
     })?;
     let (tier, profile) = (text("acc_tier")?, text("acc_profile")?);
-    let p90: Vec<(&str, f64)> = [("entry", "p90_entry"), ("exit", "p90_exit"), ("pnl", "p90_pnl")]
-        .into_iter()
-        .filter_map(|(k, c)| real(c).transpose().map(|v| v.map(|v| (k, v))))
-        .collect::<Result<_, _>>()?;
+    let p90: Vec<(&str, f64)> = [
+        ("entry", "p90_entry"),
+        ("exit", "p90_exit"),
+        ("pnl", "p90_pnl"),
+    ]
+    .into_iter()
+    .filter_map(|(k, c)| real(c).transpose().map(|v| v.map(|v| (k, v))))
+    .collect::<Result<_, _>>()?;
     let has_failing = failing.as_array().is_some_and(|a| !a.is_empty());
     if tier.is_some() || profile.is_some() || has_failing || !p90.is_empty() {
         let mut acc = Map::new();
@@ -304,8 +380,10 @@ fn reconstruct(row: &rusqlite::Row<'_>) -> Result<String, DevError> {
             acc.insert("failing".into(), failing);
         }
         if !p90.is_empty() {
-            let members: Map<String, Value> =
-                p90.into_iter().map(|(k, v)| (k.to_owned(), Value::from(v))).collect();
+            let members: Map<String, Value> = p90
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), Value::from(v)))
+                .collect();
             acc.insert("p90".into(), Value::Object(members));
         }
         rec.insert("acceptance".into(), Value::Object(acc));
@@ -393,7 +471,7 @@ mod tests {
         assert!(!has_column(&conn, "disposition", "boundary_ours"));
 
         run_migrations(&conn).unwrap();
-        // Every step v1 -> v5 runs when starting from v1.
+        // Every migration through the current schema runs when starting from v1.
         assert!(has_column(&conn, "disposition", "raw_json"));
         assert!(has_column(&conn, "disposition", "runtime_ms"));
         assert!(has_column(&conn, "disposition", "boundary_ours"));
@@ -411,6 +489,40 @@ mod tests {
         // would also prevent a duplicate ALTER).
         run_migrations(&conn).unwrap();
         assert!(has_column(&conn, "disposition", "boundary_ours"));
+    }
+
+    #[test]
+    fn legacy_context_backfill_keeps_missing_or_mistyped_fields_unknown() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE run (run_id INTEGER PRIMARY KEY, selector TEXT NOT NULL, \
+             debug INTEGER, harness_args TEXT);
+             INSERT INTO run (run_id, selector) VALUES
+                 (1, '{\"debug\":false,\"harness_args\":[\"--scan\"]}'),
+                 (2, '{\"harness_args\":[]}'),
+                 (3, '{\"debug\":true,\"harness_args\":[3]}'),
+                 (4, 'not-json');",
+        )
+        .unwrap();
+
+        backfill_run_context(&conn).unwrap();
+
+        let rows: Vec<(i64, Option<i64>, Option<String>)> = conn
+            .prepare("SELECT run_id, debug, harness_args FROM run ORDER BY run_id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (1, Some(0), Some("[\"--scan\"]".to_owned())),
+                (2, None, Some("[]".to_owned())),
+                (3, Some(1), None),
+                (4, None, None),
+            ]
+        );
     }
 
     #[test]
@@ -495,7 +607,14 @@ mod tests {
 
         run_migrations(&conn).unwrap();
 
-        type Migrated = (String, String, Option<f64>, Option<i64>, String, Option<String>);
+        type Migrated = (
+            String,
+            String,
+            Option<f64>,
+            Option<i64>,
+            String,
+            Option<String>,
+        );
         let rows: Vec<Migrated> = conn
             .prepare(
                 "SELECT probe, acc_failing, p90_exit, sig_breaches, raw_source, boundary_anchor \
@@ -503,7 +622,14 @@ mod tests {
             )
             .unwrap()
             .query_map([], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
             })
             .unwrap()
             .collect::<Result<_, _>>()
@@ -564,14 +690,17 @@ mod tests {
             .unwrap();
         assert_eq!(version, 1);
         // Foreign-key enforcement is restored after the attempt.
-        let fk: i64 = conn.pragma_query_value(None, "foreign_keys", |r| r.get(0)).unwrap();
+        let fk: i64 = conn
+            .pragma_query_value(None, "foreign_keys", |r| r.get(0))
+            .unwrap();
         assert_eq!(fk, 1);
     }
 
     #[test]
     fn a_store_from_a_newer_brokkr_is_refused_not_stamped_down() {
         let conn = v4_store();
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1).unwrap();
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+            .unwrap();
         let err = run_migrations(&conn).unwrap_err();
         assert!(format!("{err:?}").contains("written by a newer brokkr"));
         assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION + 1);

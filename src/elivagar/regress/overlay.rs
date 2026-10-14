@@ -271,7 +271,9 @@ pub(crate) fn dump_overlays(
             if usize::try_from(written).unwrap_or(usize::MAX) >= max {
                 break 'ranges;
             }
-            let read = |view: &ArchiveView, runs: &[super::super::eliv::RawDirEntry]| -> io::Result<Vec<u8>> {
+            let read = |view: &ArchiveView,
+                        runs: &[super::super::eliv::RawDirEntry]|
+             -> io::Result<Vec<u8>> {
                 match find_entry(runs, tile_id) {
                     Some(entry) => gzip_decompress(view.raw_blob_at(entry.offset, entry.length)?),
                     None => Ok(Vec::new()),

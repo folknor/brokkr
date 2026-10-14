@@ -376,26 +376,46 @@ fn snapshot_key_to_iso_date(key: &str) -> Option<String> {
     let y: i32 = key[..4].parse().ok()?;
     let m: u32 = key[4..6].parse().ok()?;
     let d: u32 = key[6..8].parse().ok()?;
-    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+    if !is_valid_gregorian_date(y, m, d) {
         return None;
     }
     Some(format!("{y:04}-{m:02}-{d:02}"))
 }
 
+/// Whether a date exists in the proleptic Gregorian calendar.
+fn is_valid_gregorian_date(year: i32, month: u32, day: u32) -> bool {
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=days_in_month).contains(&day)
+}
+
 /// Convert a `YYYY-MM-DD` `download_date` string into `YYYYMMDD`. Returns
 /// `None` if the input doesn't match the expected format.
 fn iso_date_to_yyyymmdd(s: &str) -> Option<String> {
-    if s.len() != 10 || s.as_bytes()[4] != b'-' || s.as_bytes()[7] != b'-' {
+    let bytes = s.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
         return None;
     }
-    let y = &s[..4];
-    let m = &s[5..7];
-    let d = &s[8..10];
+    let y = s.get(..4)?;
+    let m = s.get(5..7)?;
+    let d = s.get(8..10)?;
     if y.bytes().all(|b| b.is_ascii_digit())
         && m.bytes().all(|b| b.is_ascii_digit())
         && d.bytes().all(|b| b.is_ascii_digit())
     {
-        Some(format!("{y}{m}{d}"))
+        let year = y.parse().ok()?;
+        let month = m.parse().ok()?;
+        let day = d.parse().ok()?;
+        if is_valid_gregorian_date(year, month, day) {
+            Some(format!("{year:04}{month:02}{day:02}"))
+        } else {
+            None
+        }
     } else {
         None
     }
@@ -639,7 +659,7 @@ fn iso_date_parse_unix(s: &str) -> Option<i64> {
 /// Convert (year, month, day) → days since 1970-01-01. Inverse of
 /// `days_to_civil` from earlier in this file.
 fn civil_to_days(y: i32, m: u32, d: u32) -> Option<i64> {
-    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+    if !is_valid_gregorian_date(y, m, d) {
         return None;
     }
     let y = y as i64;

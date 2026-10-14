@@ -5,7 +5,7 @@
 //! The query string carries what the manifest asked for; the fragment is
 //! always the actual resolved commit.
 
-use super::{CargoMetadata, GitDependencyEvent};
+use super::{CargoMetadata, GitDependencyEvent, GitRef};
 
 pub fn run(metadata: &CargoMetadata) -> Vec<GitDependencyEvent> {
     let mut events = Vec::new();
@@ -18,9 +18,8 @@ pub fn run(metadata: &CargoMetadata) -> Vec<GitDependencyEvent> {
             krate: pkg.name.clone(),
             version: pkg.version.clone(),
             url: parsed.url,
-            rev: parsed.rev,
-            branch: parsed.branch,
-            tag: parsed.tag,
+            requested_ref: parsed.requested_ref,
+            resolved_rev: parsed.resolved_rev,
         });
     }
     events.sort_by(|a, b| a.krate.cmp(&b.krate).then(a.version.cmp(&b.version)));
@@ -29,9 +28,8 @@ pub fn run(metadata: &CargoMetadata) -> Vec<GitDependencyEvent> {
 
 struct ParsedGitSource {
     url: String,
-    rev: Option<String>,
-    branch: Option<String>,
-    tag: Option<String>,
+    requested_ref: GitRef,
+    resolved_rev: Option<String>,
 }
 
 fn parse_git_source(source: &str) -> Option<ParsedGitSource> {
@@ -63,9 +61,12 @@ fn parse_git_source(source: &str) -> Option<ParsedGitSource> {
 
     Some(ParsedGitSource {
         url: url.to_string(),
-        rev: fragment.map(str::to_string).or(query_rev),
-        branch,
-        tag,
+        requested_ref: tag
+            .map(GitRef::Tag)
+            .or_else(|| branch.map(GitRef::Branch))
+            .or_else(|| query_rev.map(GitRef::Rev))
+            .unwrap_or(GitRef::DefaultBranch),
+        resolved_rev: fragment.map(str::to_string),
     })
 }
 
@@ -75,42 +76,35 @@ mod tests {
 
     #[test]
     fn parses_rev_pin() {
-        let p = parse_git_source(
-            "git+https://github.com/iced-rs/winit.git?rev=05b8ff17#05b8ff17",
-        )
-        .expect("parses");
+        let p = parse_git_source("git+https://github.com/iced-rs/winit.git?rev=requested#resolved")
+            .expect("parses");
         assert_eq!(p.url, "https://github.com/iced-rs/winit.git");
-        assert_eq!(p.rev.as_deref(), Some("05b8ff17"));
-        assert!(p.branch.is_none());
-        assert!(p.tag.is_none());
+        assert!(matches!(&p.requested_ref, GitRef::Rev(rev) if rev == "requested"));
+        assert_eq!(p.resolved_rev.as_deref(), Some("resolved"));
     }
 
     #[test]
     fn parses_branch() {
-        let p = parse_git_source(
-            "git+https://github.com/foo/bar?branch=main#deadbeef",
-        )
-        .expect("parses");
+        let p = parse_git_source("git+https://github.com/foo/bar?branch=main#deadbeef")
+            .expect("parses");
         assert_eq!(p.url, "https://github.com/foo/bar");
-        assert_eq!(p.branch.as_deref(), Some("main"));
-        assert_eq!(p.rev.as_deref(), Some("deadbeef"));
+        assert!(matches!(&p.requested_ref, GitRef::Branch(branch) if branch == "main"));
+        assert_eq!(p.resolved_rev.as_deref(), Some("deadbeef"));
     }
 
     #[test]
     fn parses_tag() {
-        let p = parse_git_source("git+https://github.com/foo/bar?tag=v1.0#abc")
-            .expect("parses");
-        assert_eq!(p.tag.as_deref(), Some("v1.0"));
-        assert_eq!(p.rev.as_deref(), Some("abc"));
+        let p = parse_git_source("git+https://github.com/foo/bar?tag=v1.0#abc").expect("parses");
+        assert!(matches!(&p.requested_ref, GitRef::Tag(tag) if tag == "v1.0"));
+        assert_eq!(p.resolved_rev.as_deref(), Some("abc"));
     }
 
     #[test]
     fn parses_default_branch() {
         let p = parse_git_source("git+https://github.com/foo/bar#abc").expect("parses");
         assert_eq!(p.url, "https://github.com/foo/bar");
-        assert!(p.branch.is_none());
-        assert!(p.tag.is_none());
-        assert_eq!(p.rev.as_deref(), Some("abc"));
+        assert!(matches!(&p.requested_ref, GitRef::DefaultBranch));
+        assert_eq!(p.resolved_rev.as_deref(), Some("abc"));
     }
 
     #[test]

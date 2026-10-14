@@ -47,9 +47,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::{
-    Ceilings, HungTest, IDLE_TIMEOUT, JsonReconstructor, ObsEvent, ObservationSink,
-    StreamEnd, StreamSource, StreamTap, StrictPlan, TestTracker, TimeoutReason, WATCHDOG_POLL,
-    hash_file, kill_of,
+    Ceilings, HungTest, IDLE_TIMEOUT, JsonReconstructor, ObsEvent, ObservationSink, StreamEnd,
+    StreamSource, StreamTap, StrictPlan, TestTracker, TimeoutReason, WATCHDOG_POLL, hash_file,
+    kill_of,
 };
 use crate::error::DevError;
 
@@ -156,9 +156,9 @@ impl Session {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         // Beside the other per-run state in ~/.brokkr, and short enough for a
         // unix socket path.
-        let base = std::env::var_os("HOME")
-            .map(|h| PathBuf::from(h).join(".brokkr").join("harness"))
-            .ok_or_else(|| DevError::Config("$HOME is not set; no place for the harness socket".into()))?;
+        let base = crate::user_dirs::harness_dir().ok_or_else(|| {
+            DevError::Config("$HOME is not set or is empty; no place for the harness socket".into())
+        })?;
         fs::create_dir_all(&base).map_err(DevError::Io)?;
         let dir = base.join(format!(
             "{}-{}-{}",
@@ -204,7 +204,11 @@ impl Session {
     pub(super) fn finish(&self) {
         self.done.store(true, Ordering::Release);
         self.stop_watchdog();
-        let drains = self.drains.lock().map(|mut d| std::mem::take(&mut *d)).unwrap_or_default();
+        let drains = self
+            .drains
+            .lock()
+            .map(|mut d| std::mem::take(&mut *d))
+            .unwrap_or_default();
         for d in drains {
             d.join().ok();
         }
@@ -366,15 +370,14 @@ impl Session {
                         let (cause, test) = kill_of(&reason);
                         tap.emit(ObsEvent::Killed { cause, test });
                     }
-                    let report =
-                        super::capture_hung_test(
-                            &state_root,
-                            cargo_pid,
-                            super::Leader::Cargo,
-                            reason,
-                            elapsed,
-                            ceiling,
-                        );
+                    let report = super::capture_hung_test(
+                        &state_root,
+                        cargo_pid,
+                        super::Leader::Cargo,
+                        reason,
+                        elapsed,
+                        ceiling,
+                    );
                     if let Ok(mut slot) = hung.lock() {
                         *slot = Some(report);
                     }
@@ -515,7 +518,9 @@ fn accept_one(stream: &UnixStream, s: &Shared<'_>) -> Result<(), Refusal> {
     // A pidfd names this exact process, so PID reuse cannot retire or revive
     // its tracker. The second parent check closes the connect/open race.
     if pidfd_exited(&pidfd) || proc_parent(pid)? != root {
-        return Err(Refusal::Unexpected(io::Error::other("runner exited before handshake")));
+        return Err(Refusal::Unexpected(io::Error::other(
+            "runner exited before handshake",
+        )));
     }
     let identity = (
         pid,
@@ -527,7 +532,9 @@ fn accept_one(stream: &UnixStream, s: &Shared<'_>) -> Result<(), Refusal> {
         .map_err(|_| io::Error::other("seen mutex poisoned"))?
         .insert(identity);
     if !fresh {
-        return Err(Refusal::Unexpected(io::Error::other("second connection from one runner")));
+        return Err(Refusal::Unexpected(io::Error::other(
+            "second connection from one runner",
+        )));
     }
     let (reader, writer) = pipe()?;
     send_verdict(stream, ACCEPT, Some(writer.as_raw_fd()))?;
@@ -546,8 +553,7 @@ fn accept_one(stream: &UnixStream, s: &Shared<'_>) -> Result<(), Refusal> {
         });
     let stdout = Arc::clone(s.stdout);
     let done = Arc::clone(s.done);
-    let handle =
-        thread::spawn(move || drain_harness(reader, &stdout, &tracker, &eof, &done, tap));
+    let handle = thread::spawn(move || drain_harness(reader, &stdout, &tracker, &eof, &done, tap));
     if let Ok(mut d) = s.drains.lock() {
         d.push(handle);
     }
@@ -570,7 +576,10 @@ fn drain_harness(
     tap: Option<StreamTap>,
 ) {
     let mut reader = fs::File::from(reader);
-    let mut recon = JsonReconstructor { tap, ..JsonReconstructor::default() };
+    let mut recon = JsonReconstructor {
+        tap,
+        ..JsonReconstructor::default()
+    };
     let mut pending = Vec::new();
     let mut block: Vec<String> = Vec::new();
     let mut bytes = [0_u8; 4096];
@@ -636,7 +645,10 @@ fn render_line(
 /// harness's own output, so it is printed as a suspect line and nothing more.
 /// Its passed count is zero - the dead suite's passes never reached a summary -
 /// which only matters on a run that is red anyway.
-fn close_unfinished_suite(recon: &mut JsonReconstructor, tracker: &Mutex<TestTracker>) -> Vec<String> {
+fn close_unfinished_suite(
+    recon: &mut JsonReconstructor,
+    tracker: &Mutex<TestTracker>,
+) -> Vec<String> {
     let Ok(t) = tracker.lock() else {
         return Vec::new();
     };
@@ -768,7 +780,8 @@ fn send_verdict(stream: &UnixStream, verdict: u8, fd: Option<RawFd>) -> io::Resu
 /// (length-prefixed, raw bytes - a path need not be UTF-8 on the wire, though
 /// the parent attributes only paths that are).
 fn send_hello(stream: &UnixStream, role: u8, executable: &[u8]) -> io::Result<()> {
-    let len = u32::try_from(executable.len()).map_err(|_| io::Error::other("executable path too long"))?;
+    let len = u32::try_from(executable.len())
+        .map_err(|_| io::Error::other("executable path too long"))?;
     let mut message = Vec::with_capacity(5 + executable.len());
     message.push(role);
     message.extend_from_slice(&len.to_le_bytes());
@@ -784,12 +797,15 @@ fn recv_hello(stream: &UnixStream) -> io::Result<(u8, String)> {
     (&*stream).read_exact(&mut head)?;
     let len = u32::from_le_bytes([head[1], head[2], head[3], head[4]]);
     if len > 64 * 1024 {
-        return Err(io::Error::other(format!("handshake claims a {len}-byte path")));
+        return Err(io::Error::other(format!(
+            "handshake claims a {len}-byte path"
+        )));
     }
     let mut path = vec![0_u8; len as usize];
     (&*stream).read_exact(&mut path)?;
     stream.set_read_timeout(None)?;
-    let path = String::from_utf8(path).map_err(|_| io::Error::other("handshake path is not UTF-8"))?;
+    let path =
+        String::from_utf8(path).map_err(|_| io::Error::other("handshake path is not UTF-8"))?;
     Ok((head[0], path))
 }
 
@@ -916,9 +932,13 @@ fn run_shim(role: u8, args: &[std::ffi::OsString], handshake: bool) -> io::Error
     // What steers cargo and rustdoc at this run's shim goes no further than
     // the program cargo meant to run: a test that runs cargo or rustdoc gets
     // the toolchain's own.
-    cmd.env_remove(SOCKET_ENV).env_remove(STRICT_ENV).env_remove("RUSTDOC");
+    cmd.env_remove(SOCKET_ENV)
+        .env_remove(STRICT_ENV)
+        .env_remove("RUSTDOC");
     for (key, value) in std::env::vars_os() {
-        let is_runner = key.to_str().is_some_and(|k| k.starts_with("CARGO_TARGET_") && k.ends_with("_RUNNER"));
+        let is_runner = key
+            .to_str()
+            .is_some_and(|k| k.starts_with("CARGO_TARGET_") && k.ends_with("_RUNNER"));
         if is_runner && value.to_string_lossy().contains(RUNNER_ARG) {
             cmd.env_remove(key);
         }
@@ -970,7 +990,10 @@ mod tests {
     fn a_passthrough_verdict_carries_no_pipe() {
         let (a, b) = UnixStream::pair().expect("socket pair");
         send_verdict(&a, PASSTHROUGH, None).expect("send");
-        assert!(matches!(recv_verdict(&b).expect("recv"), Verdict::Passthrough));
+        assert!(matches!(
+            recv_verdict(&b).expect("recv"),
+            Verdict::Passthrough
+        ));
         send_verdict(&a, REFUSE, None).expect("send");
         assert!(matches!(recv_verdict(&b).expect("recv"), Verdict::Refuse));
     }
@@ -1011,7 +1034,10 @@ mod tests {
             Arc::new(Mutex::new(Vec::new())),
             Arc::new(AtomicBool::new(false)),
             StrictPlan {
-                known: known.iter().map(|(p, h)| ((*p).to_owned(), (*h).to_owned())).collect(),
+                known: known
+                    .iter()
+                    .map(|(p, h)| ((*p).to_owned(), (*h).to_owned()))
+                    .collect(),
                 rustdoc,
             },
         )
@@ -1045,7 +1071,8 @@ mod tests {
     /// than left to run on the shared stream.
     #[test]
     fn a_failed_handshake_on_a_strict_session_is_refused_and_recorded() {
-        let (pid, seen, harnesses, drains, stdout, done, plan) = strict_parts(&[("/planned", "0")], false);
+        let (pid, seen, harnesses, drains, stdout, done, plan) =
+            strict_parts(&[("/planned", "0")], false);
         let (sink, observed) = collecting_sink();
         let shared = Shared {
             cargo_pid: &pid,
@@ -1064,10 +1091,15 @@ mod tests {
             panic!("a bad handshake is refused");
         };
         refuse(&parent, refusal, &shared);
-        assert!(matches!(recv_verdict(&shim).expect("verdict"), Verdict::Refuse));
+        assert!(matches!(
+            recv_verdict(&shim).expect("verdict"),
+            Verdict::Refuse
+        ));
         let events = observed.lock().expect("observed");
         assert!(
-            events.iter().any(|o| matches!(o.event, ObsEvent::AttributionError { .. })),
+            events
+                .iter()
+                .any(|o| matches!(o.event, ObsEvent::AttributionError { .. })),
             "the refusal is recorded as an attribution error"
         );
     }
@@ -1096,7 +1128,10 @@ mod tests {
             panic!("an unplanned executable is refused");
         };
         refuse(&parent, refusal, &shared);
-        assert!(matches!(recv_verdict(&shim).expect("verdict"), Verdict::Refuse));
+        assert!(matches!(
+            recv_verdict(&shim).expect("verdict"),
+            Verdict::Refuse
+        ));
         assert!(observed.lock().expect("observed").iter().any(|o| matches!(
             &o.event,
             ObsEvent::AttributionError { detail } if detail.contains("/elsewhere")
@@ -1104,8 +1139,14 @@ mod tests {
 
         let (parent, shim) = UnixStream::pair().expect("socket pair");
         send_hello(&shim, ROLE_HARNESS, path.as_bytes()).expect("send");
-        assert!(accept_one(&parent, &shared).is_ok(), "a planned harness is accepted");
-        assert!(matches!(recv_verdict(&shim).expect("verdict"), Verdict::Accept(_)));
+        assert!(
+            accept_one(&parent, &shared).is_ok(),
+            "a planned harness is accepted"
+        );
+        assert!(matches!(
+            recv_verdict(&shim).expect("verdict"),
+            Verdict::Accept(_)
+        ));
         release(&done, &drains);
     }
 
@@ -1135,7 +1176,10 @@ mod tests {
             panic!("a rebuilt harness is refused");
         };
         refuse(&parent, refusal, &shared);
-        assert!(matches!(recv_verdict(&shim).expect("verdict"), Verdict::Refuse));
+        assert!(matches!(
+            recv_verdict(&shim).expect("verdict"),
+            Verdict::Refuse
+        ));
         assert!(observed.lock().expect("observed").iter().any(|o| matches!(
             &o.event,
             ObsEvent::AttributionError { detail } if detail.contains("rebuilt")
@@ -1163,15 +1207,24 @@ mod tests {
             send_hello(&shim, ROLE_RUSTDOC, b"rustdoc").expect("send");
             let accepted = accept_one(&parent, &shared);
             if carrier {
-                assert!(accepted.is_ok(), "the planned carrier's rustdoc is accepted");
-                assert!(matches!(recv_verdict(&shim).expect("verdict"), Verdict::Accept(_)));
+                assert!(
+                    accepted.is_ok(),
+                    "the planned carrier's rustdoc is accepted"
+                );
+                assert!(matches!(
+                    recv_verdict(&shim).expect("verdict"),
+                    Verdict::Accept(_)
+                ));
                 release(&done, &drains);
             } else {
                 let Err(refusal) = accepted else {
                     panic!("a rustdoc with no planned carrier is refused");
                 };
                 refuse(&parent, refusal, &shared);
-                assert!(matches!(recv_verdict(&shim).expect("verdict"), Verdict::Refuse));
+                assert!(matches!(
+                    recv_verdict(&shim).expect("verdict"),
+                    Verdict::Refuse
+                ));
                 assert!(observed.lock().expect("observed").iter().any(|o| matches!(
                     &o.event,
                     ObsEvent::AttributionError { detail } if detail.contains("doctest carrier")
@@ -1197,15 +1250,32 @@ mod tests {
         }
         let closing = close_unfinished_suite(&mut recon, &tracker);
         let text = closing.join("\n");
-        assert!(text.contains("suspect") && text.contains("a::aborts"), "{text}");
-        assert!(text.contains("    a::fails"), "the real failure is on the roster: {text}");
-        assert!(!text.contains("    a::aborts"), "the suspect is not on the roster: {text}");
-        assert!(closing.last().is_some_and(|l| l.starts_with("test result: FAILED.")), "{text}");
+        assert!(
+            text.contains("suspect") && text.contains("a::aborts"),
+            "{text}"
+        );
+        assert!(
+            text.contains("    a::fails"),
+            "the real failure is on the roster: {text}"
+        );
+        assert!(
+            !text.contains("    a::aborts"),
+            "the suspect is not on the roster: {text}"
+        );
+        assert!(
+            closing
+                .last()
+                .is_some_and(|l| l.starts_with("test result: FAILED.")),
+            "{text}"
+        );
 
         // A suite that summarised is left alone.
         let closed = Mutex::new(TestTracker::default());
         let mut recon = JsonReconstructor::default();
-        recon.observe(r#"{"type":"suite","event":"started","test_count":0}"#, &closed);
+        recon.observe(
+            r#"{"type":"suite","event":"started","test_count":0}"#,
+            &closed,
+        );
         recon.observe(
             r#"{"type":"suite","event":"ok","passed":0,"failed":0,"ignored":0,"measured":0,"filtered_out":0,"exec_time":0.0}"#,
             &closed,

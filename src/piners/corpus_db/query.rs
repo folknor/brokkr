@@ -11,6 +11,7 @@
 use rusqlite::Row;
 
 use super::CorpusDb;
+use super::ingest::RunContext;
 use crate::error::DevError;
 
 /// One row of the recent-runs table.
@@ -30,6 +31,9 @@ pub struct RunRow {
     pub diagnosis: Option<String>,
     /// The harness's `run_error` record as stored JSON (v8).
     pub run_error: Option<String>,
+    /// Fully typed execution context. `None` means a legacy or malformed
+    /// row cannot establish comparability.
+    pub context: Option<RunContext>,
 }
 
 /// One per-probe disposition row (the rendered subset of the column set).
@@ -132,6 +136,19 @@ fn clamp(limit: usize) -> i64 {
 }
 
 fn run_row(row: &Row<'_>) -> rusqlite::Result<RunRow> {
+    let debug = row.get::<_, Option<i64>>("debug")?;
+    let args = row.get::<_, Option<String>>("harness_args")?;
+    let context = match (debug, args) {
+        (Some(debug), Some(args)) if matches!(debug, 0 | 1) => {
+            serde_json::from_str::<Vec<String>>(&args)
+                .ok()
+                .map(|harness_args| RunContext {
+                    debug: debug != 0,
+                    harness_args,
+                })
+        }
+        _ => None,
+    };
     Ok(RunRow {
         run_id: row.get("run_id")?,
         started_at: row.get("started_at")?,
@@ -145,12 +162,13 @@ fn run_row(row: &Row<'_>) -> rusqlite::Result<RunRow> {
         dirty: row.get::<_, Option<i64>>("dirty")?.map(|v| v != 0),
         diagnosis: row.get("diagnosis")?,
         run_error: row.get("run_error")?,
+        context,
     })
 }
 
 const RUN_COLS: &str = "\
 run_id, started_at, selector, gated, result, fail_reason, harness_exit_code, probe_count, \
-commit_sha, dirty, diagnosis, run_error";
+commit_sha, dirty, diagnosis, run_error, debug, harness_args";
 
 fn disposition_row(row: &Row<'_>) -> rusqlite::Result<DispositionRow> {
     Ok(DispositionRow {
@@ -467,9 +485,8 @@ impl CorpusDb {
 
     /// All disposition rows for a run, by probe.
     pub fn dispositions_for_run(&self, run_id: i64) -> Result<Vec<DispositionRow>, DevError> {
-        let sql = format!(
-            "SELECT {DISPOSITION_COLS} FROM disposition WHERE run_id = ?1 ORDER BY probe"
-        );
+        let sql =
+            format!("SELECT {DISPOSITION_COLS} FROM disposition WHERE run_id = ?1 ORDER BY probe");
         let mut stmt = self.conn().prepare(&sql)?;
         let rows = stmt.query_map([run_id], disposition_row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -481,9 +498,8 @@ impl CorpusDb {
         run_id: i64,
         probe: &str,
     ) -> Result<Option<DispositionRow>, DevError> {
-        let sql = format!(
-            "SELECT {DISPOSITION_COLS} FROM disposition WHERE run_id = ?1 AND probe = ?2"
-        );
+        let sql =
+            format!("SELECT {DISPOSITION_COLS} FROM disposition WHERE run_id = ?1 AND probe = ?2");
         let mut stmt = self.conn().prepare(&sql)?;
         let mut rows = stmt.query_map(rusqlite::params![run_id, probe], disposition_row)?;
         match rows.next() {
@@ -639,8 +655,12 @@ impl CorpusDb {
         sql.push_str(" ORDER BY runtime_ms DESC");
         let mut stmt = self.conn().prepare(&sql)?;
         let rows = match over_ms {
-            Some(ms) => stmt.query_map([ms], runtime_row)?.collect::<Result<Vec<_>, _>>()?,
-            None => stmt.query_map([], runtime_row)?.collect::<Result<Vec<_>, _>>()?,
+            Some(ms) => stmt
+                .query_map([ms], runtime_row)?
+                .collect::<Result<Vec<_>, _>>()?,
+            None => stmt
+                .query_map([], runtime_row)?
+                .collect::<Result<Vec<_>, _>>()?,
         };
         Ok(rows)
     }
@@ -737,6 +757,7 @@ mod tests {
             commit_sha: None,
             dirty: None,
             selector,
+            context: None,
             gated: true,
             result,
             fail_reason: None,
@@ -764,7 +785,10 @@ mod tests {
 
     #[test]
     fn resolve_columns_all_is_every_column() {
-        assert_eq!(resolve_columns(Shaped::Diffs, &owned(&["all"])).unwrap(), owned(TRADE_DIFF_COLUMNS));
+        assert_eq!(
+            resolve_columns(Shaped::Diffs, &owned(&["all"])).unwrap(),
+            owned(TRADE_DIFF_COLUMNS)
+        );
     }
 
     #[test]
@@ -811,18 +835,28 @@ mod tests {
 {"probe":"b","outcome":"parity","acceptance":{"tier":"byte_exact"},"ts_shift":{"entry_considered":9,"entry_shifted":0,"entry_share_pct":0.0,"exit_considered":9,"exit_shifted":0,"exit_share_pct":0.0}}
 "#,
         );
-        let cols = resolve_columns(Shaped::Dispositions, &owned(&["probe", "boundary_anchor"]))
-            .unwrap();
+        let cols =
+            resolve_columns(Shaped::Dispositions, &owned(&["probe", "boundary_anchor"])).unwrap();
         let t = db
-            .shaped(Shaped::Dispositions, 1, &[], &cols, Some("ts_entry_share_pct >= 50"))
+            .shaped(
+                Shaped::Dispositions,
+                1,
+                &[],
+                &cols,
+                Some("ts_entry_share_pct >= 50"),
+            )
             .unwrap();
         assert_eq!(t.rows, vec![vec!["a".to_owned(), "carry_tv".to_owned()]]);
         let err = resolve_columns(Shaped::Dispositions, &owned(&["our_qty"])).unwrap_err();
-        assert!(err.to_string().contains("unknown disposition column 'our_qty'"));
+        assert!(
+            err.to_string()
+                .contains("unknown disposition column 'our_qty'")
+        );
         // The canned views' old `tier` header sent agents here first.
         let err = resolve_columns(Shaped::Dispositions, &owned(&["tier"])).unwrap_err();
         assert!(
-            err.to_string().contains("Did you mean: disposition, count_tier, acc_tier?"),
+            err.to_string()
+                .contains("Did you mean: disposition, count_tier, acc_tier?"),
             "{err}"
         );
     }

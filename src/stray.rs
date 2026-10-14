@@ -184,7 +184,11 @@ fn current_ownership() -> Ownership {
         .then_some(info.pid)
     });
     let foreign_ns = info.as_ref().and_then(crate::lockfile::foreign_holder_ns);
-    Ownership { me: std::process::id(), holder, foreign_ns }
+    Ownership {
+        me: std::process::id(),
+        holder,
+        foreign_ns,
+    }
 }
 
 struct ProcEntry {
@@ -200,7 +204,11 @@ fn read_proc() -> HashMap<u32, ProcEntry> {
         return table;
     };
     for entry in entries.flatten() {
-        let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
             continue;
         };
         let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
@@ -209,19 +217,31 @@ fn read_proc() -> HashMap<u32, ProcEntry> {
         // `comm` sits in parentheses and may contain spaces or parentheses
         // itself, so split at the LAST `)`; ppid is the second field after it.
         let Some(open) = stat.find('(') else { continue };
-        let Some(close) = stat.rfind(')') else { continue };
+        let Some(close) = stat.rfind(')') else {
+            continue;
+        };
         let comm = stat[open + 1..close].to_owned();
         let post: Vec<&str> = stat[close + 2..].split_whitespace().collect();
         // Post-comm field 0 is state, 1 is ppid; starttime is field 22 of the
         // whole line, which is index 19 here. Same indexing as
         // `lockfile::proc_starttime`, and read from the *same* line as ppid so
         // the pair is coherent.
-        let Some(ppid) = post.first().and_then(|_| post.get(1)).and_then(|p| p.parse().ok())
+        let Some(ppid) = post
+            .first()
+            .and_then(|_| post.get(1))
+            .and_then(|p| p.parse().ok())
         else {
             continue;
         };
         let starttime = post.get(19).map(|s| (*s).to_owned()).unwrap_or_default();
-        table.insert(pid, ProcEntry { ppid, comm, starttime });
+        table.insert(
+            pid,
+            ProcEntry {
+                ppid,
+                comm,
+                starttime,
+            },
+        );
     }
     table
 }
@@ -242,7 +262,9 @@ fn classify(table: &HashMap<u32, ProcEntry>, ownership: Ownership) -> Vec<Stray>
         // Bounded walk: a `/proc` snapshot can contain a ppid cycle only if
         // the table is inconsistent, but a bound costs nothing.
         for _ in 0..256 {
-            let Some(parent) = table.get(&cursor) else { break };
+            let Some(parent) = table.get(&cursor) else {
+                break;
+            };
             depth += 1;
             if ownership.owns(cursor) {
                 under_brokkr = true;
@@ -374,21 +396,28 @@ pub fn kill(strays: &[Stray]) -> (usize, usize) {
             sigkill(*pid, starttime);
         }
     }
-    let killed = strays.iter().filter(|s| sigkill(s.pid, &s.starttime)).count();
+    let killed = strays
+        .iter()
+        .filter(|s| sigkill(s.pid, &s.starttime))
+        .count();
     let starters = starters_to_kill(strays)
         .into_iter()
-        .filter(|(pid, _)| {
-            table.get(pid).is_some_and(|e| sigkill(*pid, &e.starttime))
-        })
+        .filter(|(pid, _)| table.get(pid).is_some_and(|e| sigkill(*pid, &e.starttime)))
         .count();
     (killed, starters)
 }
 
 /// The `SIGKILL sent to …` line.
 fn killed_line(killed: usize, starters: usize) -> String {
-    let mut line = format!("SIGKILL sent to {}", output::count(killed, "stray cargo process"));
+    let mut line = format!(
+        "SIGKILL sent to {}",
+        output::count(killed, "stray cargo process")
+    );
     if starters > 0 {
-        line.push_str(&format!(" and {} (it would only re-run the cargo)", output::count(starters, "rust-analyzer")));
+        line.push_str(&format!(
+            " and {} (it would only re-run the cargo)",
+            output::count(starters, "rust-analyzer")
+        ));
     }
     line
 }
@@ -409,7 +438,13 @@ fn reap_line(strays: &[Stray], killed: usize, starters: usize) -> String {
     }
     let comms: Vec<String> = comms
         .iter()
-        .map(|(c, n)| if *n > 1 { format!("{c} x{n}") } else { (*c).to_owned() })
+        .map(|(c, n)| {
+            if *n > 1 {
+                format!("{c} x{n}")
+            } else {
+                (*c).to_owned()
+            }
+        })
         .collect();
     let mut by: Vec<&str> = Vec::new();
     for s in strays {
@@ -425,7 +460,10 @@ fn reap_line(strays: &[Stray], killed: usize, starters: usize) -> String {
         by.join(", "),
     );
     if starters > 0 {
-        line.push_str(&format!(" and to {}", output::count(starters, "rust-analyzer")));
+        line.push_str(&format!(
+            " and to {}",
+            output::count(starters, "rust-analyzer")
+        ));
     }
     line
 }
@@ -486,7 +524,9 @@ pub fn cmd_strays(kill_them: bool) -> Result<(), DevError> {
         let (killed, starters) = kill(&strays);
         output::strays_msg(&killed_line(killed, starters));
     } else {
-        output::strays_msg("`brokkr strays --kill` sends SIGKILL; every locked brokkr command does so on its own once it holds the lock (`brokkr man check strays`)");
+        output::strays_msg(
+            "`brokkr strays --kill` sends SIGKILL; every locked brokkr command does so on its own once it holds the lock (`brokkr man check strays`)",
+        );
     }
     Ok(())
 }
@@ -522,20 +562,54 @@ mod tests {
         let own = crate::lockfile::ns_inode("/proc/self/ns/pid").unwrap();
         assert!(within_ns(me, own));
         assert!(!within_ns(me, own.wrapping_add(1)));
-        let o = Ownership { me: 1, holder: None, foreign_ns: Some(own) };
+        let o = Ownership {
+            me: 1,
+            holder: None,
+            foreign_ns: Some(own),
+        };
         assert!(o.owns(me));
     }
 
     fn foreign() -> Ownership {
-        Ownership { me: 999_999, holder: None, foreign_ns: None }
+        Ownership {
+            me: 999_999,
+            holder: None,
+            foreign_ns: None,
+        }
     }
 
     #[test]
     fn cargo_under_the_holder_is_not_a_stray() {
-        let t = table(&[(1, 0, "systemd"), (10, 1, "zsh"), (20, 10, "brokkr"), (30, 20, "cargo"), (40, 30, "rustc")]);
-        assert!(classify(&t, Ownership { me: 999_999, holder: Some(20), foreign_ns: None }).is_empty());
+        let t = table(&[
+            (1, 0, "systemd"),
+            (10, 1, "zsh"),
+            (20, 10, "brokkr"),
+            (30, 20, "cargo"),
+            (40, 30, "rustc"),
+        ]);
+        assert!(
+            classify(
+                &t,
+                Ownership {
+                    me: 999_999,
+                    holder: Some(20),
+                    foreign_ns: None
+                }
+            )
+            .is_empty()
+        );
         // And when the holder *is* this process.
-        assert!(classify(&t, Ownership { me: 20, holder: Some(20), foreign_ns: None }).is_empty());
+        assert!(
+            classify(
+                &t,
+                Ownership {
+                    me: 20,
+                    holder: Some(20),
+                    foreign_ns: None
+                }
+            )
+            .is_empty()
+        );
     }
 
     /// The impersonation the `comm` rule could not see: a shell copied to a file
@@ -554,10 +628,17 @@ mod tests {
         ]);
         let pids: Vec<u32> = classify(&t, foreign()).iter().map(|s| s.pid).collect();
         assert_eq!(pids, vec![40, 30]);
-        let unverifiable: Vec<u32> = classify(&t, Ownership { me: 999_999, holder: None, foreign_ns: None })
-            .iter()
-            .map(|s| s.pid)
-            .collect();
+        let unverifiable: Vec<u32> = classify(
+            &t,
+            Ownership {
+                me: 999_999,
+                holder: None,
+                foreign_ns: None,
+            },
+        )
+        .iter()
+        .map(|s| s.pid)
+        .collect();
         assert_eq!(unverifiable, vec![40, 30]);
     }
 
@@ -573,7 +654,11 @@ mod tests {
             (30, 20, "cargo"),  // our own work
             (40, 30, "rustc"),
         ]);
-        let own = Ownership { me: 20, holder: Some(20), foreign_ns: None };
+        let own = Ownership {
+            me: 20,
+            holder: Some(20),
+            foreign_ns: None,
+        };
         // The outer cargo is a stray; ours is not.
         let pids: Vec<u32> = classify(&t, own).iter().map(|s| s.pid).collect();
         assert_eq!(pids, vec![10]);
@@ -611,10 +696,17 @@ mod tests {
     /// against.
     #[test]
     fn strays_record_the_identity_token_for_their_pid() {
-        let t = table(&[(1, 0, "systemd"), (10, 1, "rust-analyzer"), (20, 10, "cargo")]);
+        let t = table(&[
+            (1, 0, "systemd"),
+            (10, 1, "rust-analyzer"),
+            (20, 10, "cargo"),
+        ]);
         let strays = classify(&t, foreign());
         assert_eq!(strays.len(), 1);
-        assert_eq!(strays[0].starttime, "2000", "the token must come from the same /proc read");
+        assert_eq!(
+            strays[0].starttime, "2000",
+            "the token must come from the same /proc read"
+        );
     }
 
     /// A guard that outlives the cargo above it is itself reapable now.
@@ -638,7 +730,12 @@ mod tests {
         let strays = classify(&t, foreign());
         let pids: Vec<u32> = strays.iter().map(|s| s.pid).collect();
         assert_eq!(pids, vec![30, 31, 20]);
-        assert!(strays.iter().all(|s| s.started_by == "rust-analyzer (pid 10)"), "{strays:?}");
+        assert!(
+            strays
+                .iter()
+                .all(|s| s.started_by == "rust-analyzer (pid 10)"),
+            "{strays:?}"
+        );
     }
 
     #[test]
@@ -661,7 +758,10 @@ mod tests {
             (21, 11, "cargo"),
         ]);
         let strays = classify(&t, foreign());
-        let starters: Vec<u32> = starters_to_kill(&strays).into_iter().map(|(pid, _)| pid).collect();
+        let starters: Vec<u32> = starters_to_kill(&strays)
+            .into_iter()
+            .map(|(pid, _)| pid)
+            .collect();
         assert_eq!(starters, vec![10]);
     }
 

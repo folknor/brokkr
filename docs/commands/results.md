@@ -69,6 +69,9 @@ where one arm is defined by an unset variable, record an explicit baseline
 value (`=0`) on the off runs rather than relying on absence - or use
 `--grep-v`, below, which can express absence.
 
+These row filters also narrow UUID lookups and apply to both sides of
+`--compare`; the commit prefixes select the comparison axis.
+
 ## `--grep` / `--grep-v`
 
 Substring match against the run's **invocation**, which spans three sources at
@@ -101,6 +104,8 @@ immediately before it - the neighbouring run is often the explanation for an
 outlier. A distribution row (nidhogg `api`) also gets its `samples`, `min`,
 `p50`, `p95` and `max`.
 
+Any supplied row filters still apply to the UUID matches.
+
 A prefix matching several rows falls back to the table plus per-row details.
 An empty prefix is refused rather than matching every row.
 
@@ -125,6 +130,9 @@ pair when
 agree. `brokkr_args` is in the key deliberately: arm-defining flags like
 `--direct-io` must never collapse two different measurements into one averaged
 row.
+
+The command, mode, dataset, metadata, env, and invocation filters above apply
+to both commit result sets before pairing.
 
 But the tokens that name provenance or presentation rather than the arm are
 **normalized before the comparison** (`normalize_brokkr_args` in

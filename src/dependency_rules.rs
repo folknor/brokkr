@@ -96,10 +96,7 @@ struct CargoDependency {
     optional: bool,
 }
 
-pub fn check(
-    project_root: &Path,
-    rules: &[DependencyRule],
-) -> Result<DependencyReport, DevError> {
+pub fn check(project_root: &Path, rules: &[DependencyRule]) -> Result<DependencyReport, DevError> {
     let captured = output::run_captured(
         "cargo",
         &["metadata", "--format-version", "1", "--no-deps"],
@@ -161,7 +158,10 @@ pub fn check_metadata(
                 return Err(DevError::Config(format!(
                     "[[dependency_rule]]{}: unknown kind {k:?} in `kinds`; \
                      expected \"normal\", \"dev\", or \"build\"",
-                    rule.name.as_deref().map(|n| format!(" {n:?}")).unwrap_or_default(),
+                    rule.name
+                        .as_deref()
+                        .map(|n| format!(" {n:?}"))
+                        .unwrap_or_default(),
                 )));
             };
             kinds.push(kind);
@@ -361,7 +361,10 @@ mod tests {
             kinds: Vec::new(),
             optional: None,
         }];
-        assert_eq!(check_metadata(metadata(), &rules).unwrap().violations.len(), 1);
+        assert_eq!(
+            check_metadata(metadata(), &rules).unwrap().violations.len(),
+            1
+        );
 
         let excepted = vec![DependencyRule {
             name: None,
@@ -372,7 +375,12 @@ mod tests {
             kinds: Vec::new(),
             optional: None,
         }];
-        assert!(check_metadata(metadata(), &excepted).unwrap().violations.is_empty());
+        assert!(
+            check_metadata(metadata(), &excepted)
+                .unwrap()
+                .violations
+                .is_empty()
+        );
     }
 
     /// Build an `app` rule forbidding `to`, scoped by `kinds` / `optional`.
@@ -393,10 +401,21 @@ mod tests {
         // `service-state` is a dev-dependency of `app`; `kinds = ["normal"]`
         // means the dev-dep is fine, while a normal dep (`db`) still trips.
         let dev = vec![app_rule("service-state", vec!["normal".into()], None)];
-        assert!(check_metadata(metadata(), &dev).unwrap().violations.is_empty());
+        assert!(
+            check_metadata(metadata(), &dev)
+                .unwrap()
+                .violations
+                .is_empty()
+        );
 
         let normal = vec![app_rule("db", vec!["normal".into()], None)];
-        assert_eq!(check_metadata(metadata(), &normal).unwrap().violations.len(), 1);
+        assert_eq!(
+            check_metadata(metadata(), &normal)
+                .unwrap()
+                .violations
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -404,10 +423,18 @@ mod tests {
         // The inverse scope: `kinds = ["dev"]` catches `service-state` (dev)
         // but not `db` (normal).
         let dev = vec![app_rule("service-state", vec!["dev".into()], None)];
-        assert_eq!(check_metadata(metadata(), &dev).unwrap().violations.len(), 1);
+        assert_eq!(
+            check_metadata(metadata(), &dev).unwrap().violations.len(),
+            1
+        );
 
         let normal = vec![app_rule("db", vec!["dev".into()], None)];
-        assert!(check_metadata(metadata(), &normal).unwrap().violations.is_empty());
+        assert!(
+            check_metadata(metadata(), &normal)
+                .unwrap()
+                .violations
+                .is_empty()
+        );
     }
 
     #[test]
@@ -419,7 +446,12 @@ mod tests {
         assert_eq!(check_metadata(metadata(), &db).unwrap().violations.len(), 1);
 
         let svc = vec![app_rule("service-state", Vec::new(), Some(false))];
-        assert!(check_metadata(metadata(), &svc).unwrap().violations.is_empty());
+        assert!(
+            check_metadata(metadata(), &svc)
+                .unwrap()
+                .violations
+                .is_empty()
+        );
     }
 
     /// Build an allow-list rule over `from`.
@@ -452,24 +484,40 @@ mod tests {
     fn allow_is_judged_by_real_name_not_rename() {
         // Listing the rename key does not permit the renamed package.
         let rules = vec![allow_rule(&["app"], &["db", "service_state"], Vec::new())];
-        assert_eq!(check_metadata(metadata(), &rules).unwrap().violations.len(), 1);
+        assert_eq!(
+            check_metadata(metadata(), &rules).unwrap().violations.len(),
+            1
+        );
     }
 
     #[test]
     fn allow_scoped_by_kinds_leaves_dev_deps_unconstrained() {
         let rules = vec![allow_rule(&["app"], &["db"], vec!["normal".into()])];
-        assert!(check_metadata(metadata(), &rules).unwrap().violations.is_empty());
+        assert!(
+            check_metadata(metadata(), &rules)
+                .unwrap()
+                .violations
+                .is_empty()
+        );
     }
 
     #[test]
     fn allow_empty_list_and_unused_entries() {
         // `allow = []` means no dependencies at all: both of `app`'s edges trip.
         let none = vec![allow_rule(&["app"], &[], Vec::new())];
-        assert_eq!(check_metadata(metadata(), &none).unwrap().violations.len(), 2);
+        assert_eq!(
+            check_metadata(metadata(), &none).unwrap().violations.len(),
+            2
+        );
 
         // An entry nothing depends on is not an error; leaves pass trivially.
         let unused = vec![allow_rule(&["db", "service-state"], &["libc"], Vec::new())];
-        assert!(check_metadata(metadata(), &unused).unwrap().violations.is_empty());
+        assert!(
+            check_metadata(metadata(), &unused)
+                .unwrap()
+                .violations
+                .is_empty()
+        );
     }
 
     #[test]
@@ -478,7 +526,12 @@ mod tests {
             except: vec!["app".into()],
             ..allow_rule(&["*"], &[], Vec::new())
         }];
-        assert!(check_metadata(metadata(), &rules).unwrap().violations.is_empty());
+        assert!(
+            check_metadata(metadata(), &rules)
+                .unwrap()
+                .violations
+                .is_empty()
+        );
     }
 
     #[test]

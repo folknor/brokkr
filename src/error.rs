@@ -93,7 +93,9 @@ impl fmt::Display for DevError {
                     Some(c) => write!(f, " exited with code {c}")?,
                     // The constructor named the signal: its sentence is the
                     // whole account ("X killed by signal 9 (SIGKILL - ...)").
-                    None if stderr.starts_with("killed by signal") => return write!(f, " {stderr}"),
+                    None if stderr.starts_with("killed by signal") => {
+                        return write!(f, " {stderr}");
+                    }
                     None => write!(f, " ended without an exit code")?,
                 }
                 if !stderr.is_empty() {
@@ -200,22 +202,35 @@ mod tests {
             code: None,
             stderr: "killed by signal 9 (SIGKILL - possible OOM kill)".into(),
         };
-        assert_eq!(e.to_string(), "x killed by signal 9 (SIGKILL - possible OOM kill)");
+        assert_eq!(
+            e.to_string(),
+            "x killed by signal 9 (SIGKILL - possible OOM kill)"
+        );
     }
 
     #[test]
     fn no_exit_code_and_no_signal_sentence_still_says_so() {
-        let e = DevError::Subprocess { program: "x".into(), code: None, stderr: String::new() };
+        let e = DevError::Subprocess {
+            program: "x".into(),
+            code: None,
+            stderr: String::new(),
+        };
         assert_eq!(e.to_string(), "x ended without an exit code");
     }
 
     #[test]
     fn refused_renders_its_message_alone() {
-        assert_eq!(DevError::Refused("no bench targets".into()).to_string(), "no bench targets");
+        assert_eq!(
+            DevError::Refused("no bench targets".into()).to_string(),
+            "no bench targets"
+        );
     }
 
     #[test]
     fn reported_renders_its_label_alone() {
-        assert_eq!(DevError::Reported("tests failed".into()).to_string(), "tests failed");
+        assert_eq!(
+            DevError::Reported("tests failed".into()).to_string(),
+            "tests failed"
+        );
     }
 }

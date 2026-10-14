@@ -324,6 +324,7 @@ fn run_one_isolated_test(
     let sink = tap.sink(move |_| sink_origin.clone(), false);
     let run = test_runner::run_libtest_parallel(
         &case.binary.executable,
+        test_runner::Leader::TestBinary,
         &args,
         &cwd,
         state_root,

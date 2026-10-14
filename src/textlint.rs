@@ -87,16 +87,23 @@ fn cap(s: &str) -> String {
     s.chars().take(DISPLAY_CAP).collect()
 }
 
+#[allow(clippy::too_many_lines)] // one pass compiling every optional pattern of a rule
 fn compile(rules: &[TextlintRule]) -> Result<Vec<Compiled>, DevError> {
     let mut out = Vec::with_capacity(rules.len());
     for rule in rules {
         let pattern = Regex::new(&rule.pattern).map_err(|e| {
-            DevError::Config(format!("[[textlint]] {:?}: invalid pattern: {e}", rule.name))
+            DevError::Config(format!(
+                "[[textlint]] {:?}: invalid pattern: {e}",
+                rule.name
+            ))
         })?;
         let mut except = Vec::with_capacity(rule.except.len());
         for ex in &rule.except {
             except.push(Regex::new(ex).map_err(|e| {
-                DevError::Config(format!("[[textlint]] {:?}: invalid except pattern: {e}", rule.name))
+                DevError::Config(format!(
+                    "[[textlint]] {:?}: invalid except pattern: {e}",
+                    rule.name
+                ))
             })?);
         }
         // A `join_wrapped_use` rule matches only reconstructed `use ...;`
@@ -137,11 +144,16 @@ fn compile(rules: &[TextlintRule]) -> Result<Vec<Compiled>, DevError> {
             )));
         }
         let paths = globs::build_set(&rule.paths, &format!("[[textlint]] {:?} paths", rule.name))?;
-        let exclude =
-            globs::build_set(&rule.exclude, &format!("[[textlint]] {:?} exclude", rule.name))?;
+        let exclude = globs::build_set(
+            &rule.exclude,
+            &format!("[[textlint]] {:?} exclude", rule.name),
+        )?;
         let skip_after = match &rule.skip_after {
             Some(p) => Some(Regex::new(p).map_err(|e| {
-                DevError::Config(format!("[[textlint]] {:?}: invalid skip_after pattern: {e}", rule.name))
+                DevError::Config(format!(
+                    "[[textlint]] {:?}: invalid skip_after pattern: {e}",
+                    rule.name
+                ))
             })?),
             None => None,
         };
@@ -225,7 +237,10 @@ fn compile_window(
             "[[textlint]] {rule_name:?}: invalid {field} pattern: {e}"
         ))
     })?;
-    Ok(Some(Window { lines: win.lines, re }))
+    Ok(Some(Window {
+        lines: win.lines,
+        re,
+    }))
 }
 
 /// The name of a line/region predicate that is incoherent with
@@ -519,8 +534,14 @@ fn context_suppresses(
     above_anchor: usize,
     below_anchor: usize,
 ) -> bool {
-    let above = |w: &Option<Window>| w.as_ref().is_some_and(|w| window_hit(w, lines, above_anchor, true));
-    let below = |w: &Option<Window>| w.as_ref().is_some_and(|w| window_hit(w, lines, below_anchor, false));
+    let above = |w: &Option<Window>| {
+        w.as_ref()
+            .is_some_and(|w| window_hit(w, lines, above_anchor, true))
+    };
+    let below = |w: &Option<Window>| {
+        w.as_ref()
+            .is_some_and(|w| window_hit(w, lines, below_anchor, false))
+    };
     above(&rule.except_above)
         || above(&rule.require_above)
         || below(&rule.except_below)
@@ -657,19 +678,28 @@ mod tests {
     }
 
     fn win(lines: usize, pattern: &str) -> crate::config::ContextWindow {
-        crate::config::ContextWindow { lines, pattern: pattern.into() }
+        crate::config::ContextWindow {
+            lines,
+            pattern: pattern.into(),
+        }
     }
 
     #[test]
     fn forbids_a_pattern() {
-        assert_eq!(run(rule("todo!"), "let x = 1;\ntodo!();\n"), vec![(2, "r".into())]);
+        assert_eq!(
+            run(rule("todo!"), "let x = 1;\ntodo!();\n"),
+            vec![(2, "r".into())]
+        );
     }
 
     #[test]
     fn leading_bom_does_not_mis_anchor_line_one() {
         // A file starting with U+FEFF must not shift line 1's first character:
         // a `^use ` rule fires on line 1. Before the BOM strip it silently missed.
-        assert_eq!(run(rule("^use "), "\u{FEFF}use foo;\n"), vec![(1, "r".into())]);
+        assert_eq!(
+            run(rule("^use "), "\u{FEFF}use foo;\n"),
+            vec![(1, "r".into())]
+        );
     }
 
     #[test]
@@ -711,11 +741,17 @@ mod tests {
         // A pathological `w.lines` must saturate, not overflow (debug panic) or
         // wrap into an out-of-bounds slice (release panic). Anchor is line 0 of
         // a 3-line file, so the below window would run off the end.
-        let w = Window { lines: usize::MAX, re: Regex::new("x").unwrap() };
+        let w = Window {
+            lines: usize::MAX,
+            re: Regex::new("x").unwrap(),
+        };
         let lines = ["a", "b", "c"];
         // No match below -> false, but crucially: no panic.
         assert!(!window_hit(&w, &lines, 0, false));
-        let hit = Window { lines: usize::MAX, re: Regex::new("c").unwrap() };
+        let hit = Window {
+            lines: usize::MAX,
+            re: Regex::new("c").unwrap(),
+        };
         assert!(window_hit(&hit, &lines, 0, false));
     }
 
@@ -749,7 +785,10 @@ mod tests {
         // A normal source file is scanned; the style-guide docs are excused.
         assert!(applies(c, Path::new("crates/core/src/lib.rs")));
         assert!(!applies(c, Path::new("crates/core/src/ANYHOW.rs")));
-        assert!(!applies(c, Path::new("crates/core/docs/anyhow_style_guide.rs")));
+        assert!(!applies(
+            c,
+            Path::new("crates/core/docs/anyhow_style_guide.rs")
+        ));
         // Outside `paths` entirely -> not applicable regardless of exclude.
         assert!(!applies(c, Path::new("examples/demo.rs")));
     }
@@ -817,7 +856,8 @@ mod tests {
         // The seam-correct call on line 1 with the tokio::net import only *below*
         // it (inside a test module) is not armed -> no violation. The whole-file
         // variant would wrongly flag it.
-        let src = "let s = TcpStream::connect(addr);\nmod tests {\n    use tokio::net::TcpListener;\n}\n";
+        let src =
+            "let s = TcpStream::connect(addr);\nmod tests {\n    use tokio::net::TcpListener;\n}\n";
         assert!(run(r.clone(), src).is_empty());
         // The whole-file (position-blind) variant does flag it.
         let mut blind = r.clone();
@@ -922,7 +962,10 @@ mod tests {
 
     #[test]
     fn toml_section_parses_single_and_array_headers() {
-        assert_eq!(toml_section("[dependencies]").as_deref(), Some("dependencies"));
+        assert_eq!(
+            toml_section("[dependencies]").as_deref(),
+            Some("dependencies")
+        );
         assert_eq!(toml_section("[[bin]]").as_deref(), Some("bin"));
         assert_eq!(toml_section("tokio = \"1\""), None);
         // A trailing `# comment` after the closing `]` is ignored.

@@ -92,7 +92,9 @@ pub fn run(
             metadata: vec![],
         };
 
-        harness.run_external(&config, binary, &args_refs, project_root).map(|_| ())
+        harness
+            .run_external(&config, binary, &args_refs, project_root)
+            .map(|_| ())
     });
 
     std::fs::remove_file(&output_path).ok();

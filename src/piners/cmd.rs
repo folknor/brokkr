@@ -52,7 +52,7 @@ use crate::error::DevError;
 use crate::lockfile::{self, LockContext, LockGuard};
 use crate::output;
 use crate::piners::contract::RunErrorRecord;
-use crate::piners::corpus_db::{CorpusDb, RunRecord};
+use crate::piners::corpus_db::{CorpusDb, RunContext, RunRecord};
 use crate::piners::integrity::{self, HarnessEnd, Reconciliation, Trigger};
 use crate::piners::isolate::{self, AttemptOutcome, Failure, StopReason};
 use crate::piners::manifest::Manifest;
@@ -159,10 +159,22 @@ pub fn corpus(
     ));
     let mut verified = Vec::with_capacity(ids.len());
     for id in &ids {
-        let (pin, config) = registry.pins.get(id).zip(registry.config(id)).ok_or_else(|| {
-            DevError::Config(format!("piners: internal: selected id '{id}' absent from pins"))
-        })?;
-        verified.push(registry::verify_probe(id, pin, config, &corpus_root, project_root)?);
+        let (pin, config) = registry
+            .pins
+            .get(id)
+            .zip(registry.config(id))
+            .ok_or_else(|| {
+                DevError::Config(format!(
+                    "piners: internal: selected id '{id}' absent from pins"
+                ))
+            })?;
+        verified.push(registry::verify_probe(
+            id,
+            pin,
+            config,
+            &corpus_root,
+            project_root,
+        )?);
     }
     let feed_count = verify_selected_feeds(&ids, &registry, &corpus_root, project_root)?;
     let file_count = registry::verify_harness_files(&registry, &corpus_root, project_root)?;
@@ -190,12 +202,13 @@ pub fn corpus(
 
     // Default profile is debug: parity is opt-level-independent, and the
     // debug build keeps the edit/run loop inside the cache-warm window.
-    let debug = args.profile_override.unwrap_or_else(|| {
-        cfg.harness
-            .as_ref()
-            .and_then(|h| h.debug)
-            .unwrap_or(true)
-    });
+    let debug = args
+        .profile_override
+        .unwrap_or_else(|| cfg.harness.as_ref().and_then(|h| h.debug).unwrap_or(true));
+    let context = RunContext {
+        debug,
+        harness_args: args.harness_args.clone(),
+    };
     // Bring the run store to this binary's schema before anything is built or
     // run: a store that refuses to migrate would otherwise be found only at
     // ingest - after the whole harness run it was meant to keep.
@@ -211,7 +224,7 @@ pub fn corpus(
     let built = build::build_for_harness(
         project_root,
         harness_cfg,
-        debug,
+        context.debug,
         Some(&|pid| lock.set_child_pid(pid)),
         Some(&|| lock.clear_child_pid()),
         true,
@@ -228,21 +241,33 @@ pub fn corpus(
     // leaves its dir, which holds the number until a clean removes it).
     let artefact_parent = project_root.join(ARTEFACT_PARENT);
     let run_id = reserve_run_id(&corpus_db_path, &artefact_parent.join(ARTEFACT_TEST_ID))?;
-    let artefacts =
-        ArtefactDir::allocate_at(&artefact_parent, ARTEFACT_TEST_ID, run_id, args.keep_artefacts)?;
+    let artefacts = ArtefactDir::allocate_at(
+        &artefact_parent,
+        ARTEFACT_TEST_ID,
+        run_id,
+        args.keep_artefacts,
+    )?;
     output::corpus_msg(&format!("run {run_id} -> {}", artefacts.path().display()));
-    let selector = selector_json(args, &ids, debug);
+    let selector = selector_json(args, &ids, &context);
     let envelope = Envelope {
         run_id,
         start: &start,
         selector: &selector,
+        context: &context,
         gated: !args.no_gate && !args.bless,
     };
 
     let manifest_path = artefacts.path().join("manifest.json");
     let manifest = Manifest::build(&corpus_root, &verified, &registry);
     if let Err(e) = manifest.write(&manifest_path) {
-        return Err(record_unfinished(&corpus_db_path, &envelope, artefacts, e, "error", None));
+        return Err(record_unfinished(
+            &corpus_db_path,
+            &envelope,
+            artefacts,
+            e,
+            "error",
+            None,
+        ));
     }
     output::corpus_msg(&format!(
         "manifest: {} -> {}",
@@ -262,11 +287,11 @@ pub fn corpus(
     ];
 
     let mut harness_argv: Vec<&str> = vec!["--manifest", &manifest_str];
-    harness_argv.extend(args.harness_args.iter().map(String::as_str));
-    if !args.harness_args.is_empty() {
+    harness_argv.extend(context.harness_args.iter().map(String::as_str));
+    if !context.harness_args.is_empty() {
         output::corpus_msg(&format!(
             "forwarding to harness: {}",
-            args.harness_args.join(" ")
+            context.harness_args.join(" ")
         ));
     }
 
@@ -286,7 +311,10 @@ pub fn corpus(
         Err(DevError::Interrupted) => {
             lock.clear_child_pid();
             // A requested stop is never diagnosed: the user asked brokkr to stop.
-            output::corpus_msg(&format!("harness {}; nothing scored, no isolation", HarnessEnd::Interrupted.describe()));
+            output::corpus_msg(&format!(
+                "harness {}; nothing scored, no isolation",
+                HarnessEnd::Interrupted.describe()
+            ));
             return Err(record_unfinished(
                 &corpus_db_path,
                 &envelope,
@@ -300,7 +328,10 @@ pub fn corpus(
             lock.clear_child_pid();
             let msg = format!("failed to spawn {}: {e}\n", built.binary.display());
             std::fs::write(artefacts.path().join("spawn-error.txt"), &msg).ok();
-            output::corpus_msg(&format!("harness {}: {e}", HarnessEnd::SpawnFailed.describe()));
+            output::corpus_msg(&format!(
+                "harness {}: {e}",
+                HarnessEnd::SpawnFailed.describe()
+            ));
             // Recorded so it surfaces in `brokkr corpus-results`; the dir is
             // still preserved - a spawn failure is exactly when on-disk
             // forensics matter most, and the row is a convenience index.
@@ -415,7 +446,11 @@ pub fn corpus(
         .collect();
     // The run_error is stored whole, as structured JSON, in the run's own
     // transaction; `fail_reason` above is its readable projection.
-    let run_error_json = assessment.contract.run_error.as_ref().map(RunErrorRecord::to_json);
+    let run_error_json = assessment
+        .contract
+        .run_error
+        .as_ref()
+        .map(RunErrorRecord::to_json);
     let record = envelope.record(
         if run_pass { "pass" } else { "fail" },
         fail_reason.as_deref(),
@@ -454,9 +489,12 @@ pub fn corpus(
     if evidence_failed {
         let note = evidence_note(trigger == Trigger::Isolate, &evidence_errors);
         output::corpus_msg(&note);
-        let stored = CorpusDb::open(&corpus_db_path).and_then(|db| db.append_diagnosis(run_id, &note));
+        let stored =
+            CorpusDb::open(&corpus_db_path).and_then(|db| db.append_diagnosis(run_id, &note));
         if let Err(e) = stored {
-            output::warn(&format!("run {run_id}: the evidence-storage failure could not be recorded: {e}"));
+            output::warn(&format!(
+                "run {run_id}: the evidence-storage failure could not be recorded: {e}"
+            ));
         }
     }
     let diagnosis = match trigger {
@@ -468,13 +506,18 @@ pub fn corpus(
                 verified: &verified,
                 registry: &registry,
                 binary: &binary_str,
-                harness_args: &args.harness_args,
+                harness_args: &context.harness_args,
                 bin_dir: &bin_dir_str,
                 project_root,
                 lock: &lock,
                 launched,
             };
-            Some(diagnose(&attempts, rec.unreported(&ids), &corpus_db_path, run_id))
+            Some(diagnose(
+                &attempts,
+                rec.unreported(&ids),
+                &corpus_db_path,
+                run_id,
+            ))
         }
         Trigger::Disabled => {
             output::corpus_msg("isolation skipped (--no-isolate)");
@@ -496,12 +539,18 @@ pub fn corpus(
     // written, keep it too and say which evidence it lacks.
     let finish = |artefacts: ArtefactDir| -> Result<(), DevError> {
         if evidence_failed {
-            output::corpus_msg(&preserved_incomplete_line(artefacts.path(), &evidence_errors));
+            output::corpus_msg(&preserved_incomplete_line(
+                artefacts.path(),
+                &evidence_errors,
+            ));
             crate::artefacts::emit_clean_hint(output::corpus_msg);
             artefacts.finalize_failure();
             Ok(())
         } else if diagnosis.is_some() {
-            output::corpus_msg(&format!("artefacts preserved: {}", artefacts.path().display()));
+            output::corpus_msg(&format!(
+                "artefacts preserved: {}",
+                artefacts.path().display()
+            ));
             crate::artefacts::emit_clean_hint(output::corpus_msg);
             artefacts.finalize_failure();
             Ok(())
@@ -577,7 +626,9 @@ fn diagnose(
     let stored = CorpusDb::open(db_path)
         .and_then(|db| db.append_diagnosis(run_id, &d.note(attempts.run_dir)));
     if let Err(e) = stored {
-        output::warn(&format!("run {run_id}: the diagnosis could not be recorded: {e}"));
+        output::warn(&format!(
+            "run {run_id}: the diagnosis could not be recorded: {e}"
+        ));
     }
     d
 }
@@ -632,11 +683,17 @@ impl AttemptEnv<'_> {
         let dir = self.run_dir.join(format!("attempt-{n}"));
         let manifest_path = dir.join("manifest.json");
         let wanted: HashSet<&str> = subset.iter().map(String::as_str).collect();
-        let probes: Vec<VerifiedProbe> =
-            self.verified.iter().filter(|v| wanted.contains(v.id.as_str())).cloned().collect();
-        let prepared = std::fs::create_dir_all(&dir).map_err(DevError::Io).and_then(|()| {
-            Manifest::build(self.corpus_root, &probes, self.registry).write(&manifest_path)
-        });
+        let probes: Vec<VerifiedProbe> = self
+            .verified
+            .iter()
+            .filter(|v| wanted.contains(v.id.as_str()))
+            .cloned()
+            .collect();
+        let prepared = std::fs::create_dir_all(&dir)
+            .map_err(DevError::Io)
+            .and_then(|()| {
+                Manifest::build(self.corpus_root, &probes, self.registry).write(&manifest_path)
+            });
         if let Err(e) = prepared {
             return AttemptOutcome::Stop(StopReason::Setup(format!("{}: {e}", dir.display())));
         }
@@ -825,15 +882,16 @@ pub(crate) fn verify_selected_feeds(
 /// plus the raw selection flags - enough to group by and to reproduce.
 /// Forwarded harness flags and the build profile are part of the run's
 /// identity (both change what the harness does and how long it takes), so
-/// they persist here too.
-fn selector_json(args: &CorpusArgs, ids: &[String], debug: bool) -> String {
+/// they remain in this selection record too; `RunContext` also stores them in
+/// dedicated columns for strict comparison.
+fn selector_json(args: &CorpusArgs, ids: &[String], context: &RunContext) -> String {
     serde_json::json!({
         "all": args.all,
         "keywords": args.keywords,
         "probe": args.probe,
         "bless": args.bless,
-        "harness_args": args.harness_args,
-        "debug": debug,
+        "harness_args": &context.harness_args,
+        "debug": context.debug,
         "ids": ids,
     })
     .to_string()
@@ -854,7 +912,9 @@ impl RunStart {
     pub(crate) fn capture(project_root: &Path) -> Self {
         Self {
             started_at: crate::piners::time::now_sqlite_utc(),
-            commit_sha: crate::git::resolve_commit(project_root, "HEAD").ok().map(|c| c.full),
+            commit_sha: crate::git::resolve_commit(project_root, "HEAD")
+                .ok()
+                .map(|c| c.full),
             dirty: crate::git::has_uncommitted(project_root),
         }
     }
@@ -866,14 +926,14 @@ struct Envelope<'a> {
     run_id: i64,
     start: &'a RunStart,
     selector: &'a str,
+    context: &'a RunContext,
     gated: bool,
 }
 
 /// The integrity fields a run row stores beside its result: the violation
 /// count and the structured `run_error`. Both `None` for
 /// a run that produced no report.
-#[derive(Default)]
-#[derive(Clone, Copy)]
+#[derive(Default, Clone, Copy)]
 struct StoredIntegrity<'a> {
     protocol_violations: Option<i64>,
     run_error: Option<&'a str>,
@@ -895,6 +955,7 @@ impl<'a> Envelope<'a> {
             commit_sha: self.start.commit_sha.as_deref(),
             dirty: self.start.dirty,
             selector: self.selector,
+            context: Some(self.context),
             gated: self.gated,
             result,
             fail_reason,
@@ -912,7 +973,9 @@ impl<'a> Envelope<'a> {
 /// take the same number between this read and the dir's creation.
 fn reserve_run_id(db_path: &Path, run_dirs: &Path) -> Result<i64, DevError> {
     let stored = if db_path.exists() {
-        CorpusDb::open_readonly(db_path)?.latest_run_id()?.unwrap_or(0)
+        CorpusDb::open_readonly(db_path)?
+            .latest_run_id()?
+            .unwrap_or(0)
     } else {
         0
     };
@@ -944,15 +1007,31 @@ fn record_unfinished(
     };
     let stderr = detail.map_or("", |(_, stderr)| stderr);
     // Never ran -> no measured wall, no exit code.
-    let record = envelope.record(result, Some(&reason), None, stderr, None, StoredIntegrity::default());
-    if let Err(e) = ingest_run(db_path, &record, &report::HarnessReport::default(), &BTreeMap::new(), &[]) {
+    let record = envelope.record(
+        result,
+        Some(&reason),
+        None,
+        stderr,
+        None,
+        StoredIntegrity::default(),
+    );
+    if let Err(e) = ingest_run(
+        db_path,
+        &record,
+        &report::HarnessReport::default(),
+        &BTreeMap::new(),
+        &[],
+    ) {
         output::warn(&format!(
             "run {} could not be recorded in {}: {e}",
             envelope.run_id,
             db_path.display()
         ));
     }
-    output::corpus_msg(&format!("artefacts preserved: {}", artefacts.path().display()));
+    output::corpus_msg(&format!(
+        "artefacts preserved: {}",
+        artefacts.path().display()
+    ));
     crate::artefacts::emit_clean_hint(output::corpus_msg);
     artefacts.finalize_failure();
     original
@@ -992,6 +1071,7 @@ mod tests {
             commit_sha: None,
             dirty: None,
             selector: "{}",
+            context: None,
             gated: true,
             result,
             fail_reason: None,
@@ -1007,8 +1087,13 @@ mod tests {
     fn store_run(db_path: &Path, run_id: i64) {
         let db = CorpusDb::open(db_path).unwrap();
         let rec = record_with_id(run_id, "pass");
-        db.record_run(&rec, &report::HarnessReport::default(), &BTreeMap::new(), &[])
-            .unwrap();
+        db.record_run(
+            &rec,
+            &report::HarnessReport::default(),
+            &BTreeMap::new(),
+            &[],
+        )
+        .unwrap();
     }
 
     fn start() -> RunStart {
@@ -1077,13 +1162,21 @@ mod tests {
     #[test]
     fn envelope_record_carries_the_run_identity() {
         let start = start();
+        let context = RunContext {
+            debug: true,
+            harness_args: vec!["--flag".to_owned()],
+        };
         let envelope = Envelope {
             run_id: 17,
             start: &start,
             selector: r#"{"all":true}"#,
+            context: &context,
             gated: false,
         };
-        let integrity = StoredIntegrity { protocol_violations: Some(3), run_error: Some("{}") };
+        let integrity = StoredIntegrity {
+            protocol_violations: Some(3),
+            run_error: Some("{}"),
+        };
         let rec = envelope.record("fail", Some("why"), Some(2), "err", Some(1.5), integrity);
         assert_eq!(rec.protocol_violations, Some(3));
         assert_eq!(rec.run_error, Some("{}"));
@@ -1092,6 +1185,7 @@ mod tests {
         assert_eq!(rec.commit_sha, Some("abc123"));
         assert_eq!(rec.dirty, Some(true));
         assert_eq!(rec.selector, r#"{"all":true}"#);
+        assert_eq!(rec.context, Some(&context));
         assert!(!rec.gated);
         assert_eq!(rec.result, "fail");
         assert_eq!(rec.fail_reason, Some("why"));
@@ -1111,21 +1205,31 @@ mod tests {
         assessed(ids, nd, end, cut).failure_reasons(exit1)
     }
 
-    const A_OK: &str = "{\"probe\":\"a\",\"outcome\":\"parity\",\"acceptance\":{\"tier\":\"accepted\"}}\n";
+    const A_OK: &str =
+        "{\"probe\":\"a\",\"outcome\":\"parity\",\"acceptance\":{\"tier\":\"accepted\"}}\n";
 
     #[test]
     fn a_clean_exit_with_a_missing_probe_fails() {
         let r = reasons(&["a", "b"], A_OK, HarnessEnd::Code(0), false, false);
-        assert_eq!(r, vec!["1 of 2 selected probes without a valid disposition".to_owned()]);
+        assert_eq!(
+            r,
+            vec!["1 of 2 selected probes without a valid disposition".to_owned()]
+        );
         assert!(reasons(&["a"], A_OK, HarnessEnd::Code(0), false, false).is_empty());
     }
 
     #[test]
     fn an_abnormal_end_names_how_much_went_unreported() {
         let r = reasons(&["a", "b", "c"], A_OK, HarnessEnd::Code(2), false, false);
-        assert_eq!(r, vec!["harness exited 2 before reporting 2 of 3".to_owned()]);
+        assert_eq!(
+            r,
+            vec!["harness exited 2 before reporting 2 of 3".to_owned()]
+        );
         let r = reasons(&["a"], A_OK, HarnessEnd::Signal(11), false, false);
-        assert_eq!(r, vec!["harness killed by signal 11 after reporting all 1".to_owned()]);
+        assert_eq!(
+            r,
+            vec!["harness killed by signal 11 after reporting all 1".to_owned()]
+        );
     }
 
     #[test]
@@ -1145,8 +1249,14 @@ mod tests {
     #[test]
     fn exit_one_needs_explaining_and_a_cut_output_fails() {
         assert!(reasons(&["a"], A_OK, HarnessEnd::Code(1), false, true).is_empty());
-        assert_eq!(reasons(&["a"], A_OK, HarnessEnd::Code(1), false, false), vec!["parity breaks".to_owned()]);
-        assert_eq!(reasons(&["a"], A_OK, HarnessEnd::Code(0), true, false).len(), 1);
+        assert_eq!(
+            reasons(&["a"], A_OK, HarnessEnd::Code(1), false, false),
+            vec!["parity breaks".to_owned()]
+        );
+        assert_eq!(
+            reasons(&["a"], A_OK, HarnessEnd::Code(0), true, false).len(),
+            1
+        );
         let backstop = reasons(&["a", "b"], A_OK, HarnessEnd::Backstop, false, false);
         assert_eq!(backstop.len(), 2, "{backstop:?}");
     }
@@ -1169,7 +1279,11 @@ mod tests {
         );
         let a = assessed(&["a"], &nd, HarnessEnd::Code(0), false);
         assert!(stored_violations(&a, false) >= 1);
-        assert!(a.failure_reasons(false).iter().any(|r| r.ends_with("contract violations") || r.ends_with("contract violation")));
+        assert!(
+            a.failure_reasons(false)
+                .iter()
+                .any(|r| r.ends_with("contract violations") || r.ends_with("contract violation"))
+        );
     }
 
     #[test]
@@ -1181,24 +1295,37 @@ mod tests {
         let errors = store_streams(&gone, b"out", b"err");
         assert_eq!(errors.len(), 2, "{errors:?}");
         assert!(errors[0].contains("harness.stdout") && errors[1].contains("harness.stderr"));
-        assert_eq!(stored_violations(&assessed(&["a"], A_OK, HarnessEnd::Code(0), false), true), 1);
+        assert_eq!(
+            stored_violations(&assessed(&["a"], A_OK, HarnessEnd::Code(0), false), true),
+            1
+        );
         assert!(evidence_reason(&errors).starts_with("evidence storage failed: "));
-        assert!(evidence_note(true, &errors)
-            .starts_with("isolation stopped before its first attempt on an evidence-storage failure: "));
+        assert!(evidence_note(true, &errors).starts_with(
+            "isolation stopped before its first attempt on an evidence-storage failure: "
+        ));
         let line = preserved_incomplete_line(&gone, &errors[1..]);
         assert!(
-            line.starts_with("artefacts preserved with incomplete evidence (failed: harness.stderr): "),
+            line.starts_with(
+                "artefacts preserved with incomplete evidence (failed: harness.stderr): "
+            ),
             "{line}"
         );
     }
 
     #[test]
     fn attempts_tell_aborts_from_incomplete_and_protocol_invalid() {
-        let classify = |ids: &[&str], nd: &str, end, cut| classify_attempt(&assessed(ids, nd, end, cut));
+        let classify =
+            |ids: &[&str], nd: &str, end, cut| classify_attempt(&assessed(ids, nd, end, cut));
         assert_eq!(classify(&["a"], A_OK, HarnessEnd::Code(0), false), Ok(None));
         assert_eq!(classify(&["a"], A_OK, HarnessEnd::Code(1), false), Ok(None));
-        assert_eq!(classify(&["a"], A_OK, HarnessEnd::Code(2), false), Ok(Some(Failure::Aborted)));
-        assert_eq!(classify(&["a"], A_OK, HarnessEnd::Signal(11), false), Ok(Some(Failure::Aborted)));
+        assert_eq!(
+            classify(&["a"], A_OK, HarnessEnd::Code(2), false),
+            Ok(Some(Failure::Aborted))
+        );
+        assert_eq!(
+            classify(&["a"], A_OK, HarnessEnd::Signal(11), false),
+            Ok(Some(Failure::Aborted))
+        );
         assert!(matches!(
             classify(&["a", "b"], A_OK, HarnessEnd::Code(0), false),
             Ok(Some(Failure::Incomplete(_)))
@@ -1207,20 +1334,32 @@ mod tests {
         // a broken report is protocol-invalid even on an abnormal end - never
         // classified as a crash first.
         let extra = format!("{A_OK}{{\"probe\":\"zz\",\"outcome\":\"no_tv_data\"}}\n");
-        assert!(matches!(classify(&["a"], &extra, HarnessEnd::Code(0), false), Ok(Some(Failure::ProtocolInvalid(_)))));
-        assert!(matches!(classify(&["a"], &extra, HarnessEnd::Signal(11), false), Ok(Some(Failure::ProtocolInvalid(_)))));
+        assert!(matches!(
+            classify(&["a"], &extra, HarnessEnd::Code(0), false),
+            Ok(Some(Failure::ProtocolInvalid(_)))
+        ));
+        assert!(matches!(
+            classify(&["a"], &extra, HarnessEnd::Signal(11), false),
+            Ok(Some(Failure::ProtocolInvalid(_)))
+        ));
         assert!(matches!(
             classify(&["a"], A_OK, HarnessEnd::Code(0), true),
             Ok(Some(Failure::ProtocolInvalid(w))) if w.contains("cut short")
         ));
         // A harness_abort the harness attributed counts as a completed attempt.
         let crash = "{\"probe\":\"a\",\"outcome\":\"harness_abort\",\"error\":\"signal 11\"}\n";
-        assert_eq!(classify(&["a"], crash, HarnessEnd::Code(1), false), Ok(None));
+        assert_eq!(
+            classify(&["a"], crash, HarnessEnd::Code(1), false),
+            Ok(None)
+        );
         // A run_error stops diagnosis with the harness's own failure.
-        let run_error = "{\"kind\":\"run_error\",\"version\":1,\"stage\":\"feed_load\",\"error\":\"oom\"}\n";
+        let run_error =
+            "{\"kind\":\"run_error\",\"version\":1,\"stage\":\"feed_load\",\"error\":\"oom\"}\n";
         assert_eq!(
             classify(&["a"], run_error, HarnessEnd::Code(2), false),
-            Err(StopReason::HarnessFailure("run_error at stage feed_load: oom".to_owned()))
+            Err(StopReason::HarnessFailure(
+                "run_error at stage feed_load: oom".to_owned()
+            ))
         );
     }
 
@@ -1251,7 +1390,17 @@ mod tests {
         fs::write(&sentinel, "evidence").unwrap();
 
         let start = start();
-        let envelope = Envelope { run_id: 4, start: &start, selector: "{}", gated: true };
+        let context = RunContext {
+            debug: true,
+            harness_args: Vec::new(),
+        };
+        let envelope = Envelope {
+            run_id: 4,
+            start: &start,
+            selector: "{}",
+            context: &context,
+            gated: true,
+        };
         let err = record_unfinished(
             &db_path,
             &envelope,
@@ -1260,7 +1409,10 @@ mod tests {
             "error",
             None,
         );
-        assert!(matches!(&err, DevError::Config(m) if m == "sentinel-error"), "{err:?}");
+        assert!(
+            matches!(&err, DevError::Config(m) if m == "sentinel-error"),
+            "{err:?}"
+        );
         assert!(sentinel.exists(), "preserved dir lost its contents");
     }
 
@@ -1274,7 +1426,17 @@ mod tests {
         fs::write(dir.join("manifest.json"), "{}").unwrap();
 
         let start = start();
-        let envelope = Envelope { run_id: 6, start: &start, selector: "{}", gated: true };
+        let context = RunContext {
+            debug: true,
+            harness_args: Vec::new(),
+        };
+        let envelope = Envelope {
+            run_id: 6,
+            start: &start,
+            selector: "{}",
+            context: &context,
+            gated: true,
+        };
         let err = record_unfinished(
             &db_path,
             &envelope,
@@ -1283,7 +1445,10 @@ mod tests {
             "fail",
             Some(("harness failed to spawn", "boom")),
         );
-        assert!(matches!(&err, DevError::Config(m) if m == "sentinel-error"), "{err:?}");
+        assert!(
+            matches!(&err, DevError::Config(m) if m == "sentinel-error"),
+            "{err:?}"
+        );
 
         let db = CorpusDb::open_readonly(&db_path).unwrap();
         let row = db.run(6).unwrap().unwrap();

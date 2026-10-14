@@ -191,10 +191,15 @@ fn render_probe(db: &CorpusDb, run_id: i64, probe: &str) -> Result<(), DevError>
     match db.disposition_for_probe(run_id, probe)? {
         Some(d) => {
             println!("{}", corpus_db::run_header(&run));
-            println!("{}", corpus_db::dispositions_table(std::slice::from_ref(&d)));
+            println!(
+                "{}",
+                corpus_db::dispositions_table(std::slice::from_ref(&d))
+            );
             let diffs = db.trade_diffs_for_probe(run_id, probe)?;
             if diffs.is_empty() {
-                output::result_msg("(no trade_diff rows - probe was byte-exact or divergence-free)");
+                output::result_msg(
+                    "(no trade_diff rows - probe was byte-exact or divergence-free)",
+                );
             } else {
                 println!("\ntrade_diff:");
                 println!("{}", corpus_db::trade_diffs_table(&diffs));
@@ -246,7 +251,11 @@ fn render_run_detail(db: &CorpusDb, run_id: i64, full: bool) -> Result<(), DevEr
         let shown: Vec<DispositionRow> = if full {
             disps
         } else {
-            disps.iter().filter(|d| shown_by_default(d)).cloned().collect()
+            disps
+                .iter()
+                .filter(|d| shown_by_default(d))
+                .cloned()
+                .collect()
         };
         let hidden = total - shown.len();
         if shown.is_empty() {

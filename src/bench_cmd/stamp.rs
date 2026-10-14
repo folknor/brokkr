@@ -287,7 +287,16 @@ mod tests {
         // An absolute label is the sharp case: `Path::join` replaces the base
         // rather than extending it, so this would write outside `.brokkr`
         // entirely rather than producing a mangled name inside it.
-        for bad in ["", ".", "..", "../escape", "/tmp/absolute", "a/b", "a\\b", ".hidden"] {
+        for bad in [
+            "",
+            ".",
+            "..",
+            "../escape",
+            "/tmp/absolute",
+            "a/b",
+            "a\\b",
+            ".hidden",
+        ] {
             assert!(
                 super::validate_label(bad).is_err(),
                 "expected {bad:?} to be rejected"

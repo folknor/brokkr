@@ -48,7 +48,9 @@ Recognised fields:
 - `protocol` - informational; sæhrimnir binds all five protocol
   listeners regardless of this value.
 
-Unknown fields are ignored so scripts can carry their own annotations.
+Unknown annotation fields are ignored. The likely misspelling `fixtures` is
+rejected in favor of the singular `fixture` key. Invalid values for recognized
+fields fail discovery with the script path and frontmatter line.
 Empty-state output names the expected directory. Nested cohort dirs (`t1/`,
 `extract/`, etc.) are picked up automatically; the displayed name is the path
 relative to the script root, minus `.lua`.

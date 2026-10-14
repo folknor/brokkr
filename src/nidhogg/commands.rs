@@ -120,11 +120,7 @@ impl NidhoggCommand {
     /// output directory for ingested data.
     pub fn build_args(&self, pbf_str: &str, output_dir: &str) -> Result<Vec<String>, DevError> {
         match self {
-            Self::Ingest => Ok(vec![
-                "ingest".into(),
-                pbf_str.into(),
-                output_dir.into(),
-            ]),
+            Self::Ingest => Ok(vec!["ingest".into(), pbf_str.into(), output_dir.into()]),
             _ => Err(DevError::Config(format!(
                 "build_args not supported for nidhogg command '{}'",
                 self.id(),
@@ -215,10 +211,7 @@ mod tests {
 
     #[test]
     fn result_command_labels() {
-        assert_eq!(
-            NidhoggCommand::Api { query: None }.result_command(),
-            "api"
-        );
+        assert_eq!(NidhoggCommand::Api { query: None }.result_command(), "api");
         assert_eq!(NidhoggCommand::Ingest.result_command(), "ingest");
         assert_eq!(
             NidhoggCommand::Tiles {

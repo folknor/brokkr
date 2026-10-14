@@ -483,7 +483,9 @@ fn streaming_feature_hash(
                 let bytes = cursor
                     .read_len_delimited()
                     .map_err(|error| format!("read feature geometry: {error}"))?;
-                geometry.get_or_insert_with(Vec::new).extend_from_slice(bytes);
+                geometry
+                    .get_or_insert_with(Vec::new)
+                    .extend_from_slice(bytes);
             }
             _ => return Err(format!("unknown feature field {field}")),
         }
@@ -605,10 +607,16 @@ fn next_geometry_point(
     context: &str,
 ) -> Result<(i32, i32), String> {
     *x = x
-        .checked_add(unzigzag(read_geometry_varint(cursor, &format!("{context} x"))?))
+        .checked_add(unzigzag(read_geometry_varint(
+            cursor,
+            &format!("{context} x"),
+        )?))
         .ok_or_else(|| format!("{context} x overflows i32"))?;
     *y = y
-        .checked_add(unzigzag(read_geometry_varint(cursor, &format!("{context} y"))?))
+        .checked_add(unzigzag(read_geometry_varint(
+            cursor,
+            &format!("{context} y"),
+        )?))
         .ok_or_else(|| format!("{context} y overflows i32"))?;
     Ok((*x, *y))
 }
@@ -657,7 +665,12 @@ fn streaming_lines(data: &[u8]) -> Result<Vec<u128>, String> {
                 }
                 for index in 0..count {
                     let mut ring = StreamingRing::new();
-                    ring.point(next_geometry_point(&mut cursor, &mut x, &mut y, "line MoveTo")?);
+                    ring.point(next_geometry_point(
+                        &mut cursor,
+                        &mut x,
+                        &mut y,
+                        "line MoveTo",
+                    )?);
                     if index == 0 {
                         path = Some(ring);
                     } else {
@@ -675,7 +688,12 @@ fn streaming_lines(data: &[u8]) -> Result<Vec<u128>, String> {
                     .as_mut()
                     .ok_or_else(|| "line LineTo without MoveTo".to_string())?;
                 for _ in 0..count {
-                    path.point(next_geometry_point(&mut cursor, &mut x, &mut y, "line LineTo")?);
+                    path.point(next_geometry_point(
+                        &mut cursor,
+                        &mut x,
+                        &mut y,
+                        "line LineTo",
+                    )?);
                 }
             }
             (7, _) => {}
@@ -728,7 +746,12 @@ fn streaming_polygons(data: &[u8]) -> Result<Vec<u128>, String> {
                         add_ring(ring, &mut component, &mut components);
                     }
                     let mut next = StreamingRing::new();
-                    next.point(next_geometry_point(&mut cursor, &mut x, &mut y, "polygon MoveTo")?);
+                    next.point(next_geometry_point(
+                        &mut cursor,
+                        &mut x,
+                        &mut y,
+                        "polygon MoveTo",
+                    )?);
                     ring = Some(next);
                 }
             }
@@ -737,7 +760,12 @@ fn streaming_polygons(data: &[u8]) -> Result<Vec<u128>, String> {
                     .as_mut()
                     .ok_or_else(|| "polygon LineTo without MoveTo".to_string())?;
                 for _ in 0..count {
-                    ring.point(next_geometry_point(&mut cursor, &mut x, &mut y, "polygon LineTo")?);
+                    ring.point(next_geometry_point(
+                        &mut cursor,
+                        &mut x,
+                        &mut y,
+                        "polygon LineTo",
+                    )?);
                 }
             }
             (7, _) => {
@@ -775,7 +803,11 @@ fn streaming_polygons(data: &[u8]) -> Result<Vec<u128>, String> {
 // production encoder is designed never to emit.
 // ---------------------------------------------------------------------------
 #[cfg(test)]
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::unwrap_used)]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::unwrap_used
+)]
 mod equivalence {
     use protohoggr::{encode_bytes_field_always, encode_varint_field_always};
 
@@ -783,10 +815,10 @@ mod equivalence {
 
     use super::super::super::eliv::Strictness;
     use super::super::fixture::{
-        GeomType, Value, command, duplicate_name_layers_tile, encode_linestring, encode_tile,
-        float_attr_tile, line_tile, multiline_tile, point_tile, polygon_tile, raw_geometry_tile,
-        repeated_feature_tile, split_geometry_tile, split_tags_tile, two_named_layers_tile,
-        versioned_layer_tile, zigzag, Feature, LayerBuilder,
+        Feature, GeomType, LayerBuilder, Value, command, duplicate_name_layers_tile,
+        encode_linestring, encode_tile, float_attr_tile, line_tile, multiline_tile, point_tile,
+        polygon_tile, raw_geometry_tile, repeated_feature_tile, split_geometry_tile,
+        split_tags_tile, two_named_layers_tile, versioned_layer_tile, zigzag,
     };
     use super::streaming_tile_hash;
 
@@ -798,14 +830,19 @@ mod equivalence {
         streaming_tile_hash(bytes)
     }
     fn detail(bytes: &[u8]) -> Result<u128, String> {
-        Ok(super::detail_tile_hash(&decode_detail_tile(bytes, Strictness::Strict)?))
+        Ok(super::detail_tile_hash(&decode_detail_tile(
+            bytes,
+            Strictness::Strict,
+        )?))
     }
 
     /// Both hashes must agree AND deliver the expected verdict: agreement alone
     /// would let correlated mistakes pass.
     fn assert_fingerprint_verdict(left: &[u8], right: &[u8], expect_equal: bool) {
-        let detail_equal = detail(left).expect("decode left") == detail(right).expect("decode right");
-        let streaming_equal = stream(left).expect("hash left") == stream(right).expect("hash right");
+        let detail_equal =
+            detail(left).expect("decode left") == detail(right).expect("decode right");
+        let streaming_equal =
+            stream(left).expect("hash left") == stream(right).expect("hash right");
         assert_eq!(detail_equal, expect_equal, "detail verdict");
         assert_eq!(streaming_equal, expect_equal, "streaming verdict");
     }
@@ -817,7 +854,11 @@ mod equivalence {
         let first = &[(0, 0), (10, 10)][..];
         let second = &[(20, 20), (30, 30)][..];
         // Multiline order across components is erased by both hashes.
-        assert_fingerprint_verdict(&multiline_tile(&[first, second]), &multiline_tile(&[second, first]), true);
+        assert_fingerprint_verdict(
+            &multiline_tile(&[first, second]),
+            &multiline_tile(&[second, first]),
+            true,
+        );
 
         let outer = &[(0, 0), (100, 0), (100, 100), (0, 100), (0, 0)][..];
         let rotated = &[(100, 0), (100, 100), (0, 100), (0, 0), (100, 0)][..];
@@ -838,7 +879,11 @@ mod equivalence {
         );
 
         // Multipoint order stays semantic in both hashes.
-        assert_fingerprint_verdict(&point_tile(&[(0, 0), (10, 10)]), &point_tile(&[(10, 10), (0, 0)]), false);
+        assert_fingerprint_verdict(
+            &point_tile(&[(0, 0), (10, 10)]),
+            &point_tile(&[(10, 10), (0, 0)]),
+            false,
+        );
 
         // A repeated-count line MoveTo splits identically in both decoders.
         let mut repeated = Vec::new();
@@ -866,9 +911,17 @@ mod equivalence {
         let second = &[(20, 20), (30, 30)][..];
 
         // Distinct layer names: encoding order is erased by both hashes.
-        assert_fingerprint_verdict(&two_named_layers_tile(false), &two_named_layers_tile(true), true);
+        assert_fingerprint_verdict(
+            &two_named_layers_tile(false),
+            &two_named_layers_tile(true),
+            true,
+        );
         // Duplicate layer names: stable sort binds encounter order; swap differs.
-        assert_fingerprint_verdict(&duplicate_name_layers_tile(false), &duplicate_name_layers_tile(true), false);
+        assert_fingerprint_verdict(
+            &duplicate_name_layers_tile(false),
+            &duplicate_name_layers_tile(true),
+            false,
+        );
         // Feature multiplicity differs as multisets.
         assert_fingerprint_verdict(
             &repeated_feature_tile(&[first, first, second]),
@@ -876,8 +929,16 @@ mod equivalence {
             false,
         );
         // Attribute values are bit-exact: float vs double, and signed zeros.
-        assert_fingerprint_verdict(&float_attr_tile(Value::Float(1.0)), &float_attr_tile(Value::Double(1.0)), false);
-        assert_fingerprint_verdict(&float_attr_tile(Value::Float(0.0)), &float_attr_tile(Value::Float(-0.0)), false);
+        assert_fingerprint_verdict(
+            &float_attr_tile(Value::Float(1.0)),
+            &float_attr_tile(Value::Double(1.0)),
+            false,
+        );
+        assert_fingerprint_verdict(
+            &float_attr_tile(Value::Float(0.0)),
+            &float_attr_tile(Value::Float(-0.0)),
+            false,
+        );
 
         // Attribute order within a feature is erased by both hashes.
         fn attrs_tile(reverse: bool) -> Vec<u8> {
@@ -917,7 +978,12 @@ mod equivalence {
             for (id, coords) in order {
                 let mut geometry = Vec::new();
                 encode_linestring(&mut geometry, coords);
-                layer.add_feature(Feature { id, geom_type: GeomType::LineString, geometry, tags: vec![(key, value)] });
+                layer.add_feature(Feature {
+                    id,
+                    geom_type: GeomType::LineString,
+                    geometry,
+                    tags: vec![(key, value)],
+                });
             }
             encode_tile(&[&layer])
         }
@@ -930,9 +996,21 @@ mod equivalence {
 
     #[test]
     fn layer_version_is_semantic_with_default_one() {
-        assert_fingerprint_verdict(&versioned_layer_tile(Some(2)), &versioned_layer_tile(Some(3)), false);
-        assert_fingerprint_verdict(&versioned_layer_tile(None), &versioned_layer_tile(Some(1)), true);
-        assert_fingerprint_verdict(&versioned_layer_tile(None), &versioned_layer_tile(Some(2)), false);
+        assert_fingerprint_verdict(
+            &versioned_layer_tile(Some(2)),
+            &versioned_layer_tile(Some(3)),
+            false,
+        );
+        assert_fingerprint_verdict(
+            &versioned_layer_tile(None),
+            &versioned_layer_tile(Some(1)),
+            true,
+        );
+        assert_fingerprint_verdict(
+            &versioned_layer_tile(None),
+            &versioned_layer_tile(Some(2)),
+            false,
+        );
     }
 
     #[test]
@@ -965,7 +1043,10 @@ mod equivalence {
         };
         for level in 0..=3 {
             let tile = level_tile(level);
-            assert!(stream(&tile).is_err(), "streaming must reject unknown field at level {level}");
+            assert!(
+                stream(&tile).is_err(),
+                "streaming must reject unknown field at level {level}"
+            );
             assert!(
                 decode_detail_tile(&tile, Strictness::Strict).is_err(),
                 "detail decoder must reject unknown field at level {level}"
@@ -987,6 +1068,10 @@ mod equivalence {
             &split_geometry_tile(&[&head, &tail]),
             true,
         );
-        assert_fingerprint_verdict(&split_tags_tile(&[&[0, 0, 1, 1]]), &split_tags_tile(&[&[0, 0], &[1, 1]]), true);
+        assert_fingerprint_verdict(
+            &split_tags_tile(&[&[0, 0, 1, 1]]),
+            &split_tags_tile(&[&[0, 0], &[1, 1]]),
+            true,
+        );
     }
 }

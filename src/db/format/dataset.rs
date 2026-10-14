@@ -137,14 +137,20 @@ mod tests {
     #[test]
     fn unknown_filename_falls_back_to_first_dash() {
         let m = matcher();
-        assert_eq!(m.short_name("switzerland-20260225-seq4707.osm.pbf"), "switzerland");
+        assert_eq!(
+            m.short_name("switzerland-20260225-seq4707.osm.pbf"),
+            "switzerland"
+        );
     }
 
     #[test]
     fn empty_and_pathy_inputs() {
         let m = matcher();
         assert_eq!(m.short_name(""), "");
-        assert_eq!(m.short_name("data/inputs/europe-20260301.osm.pbf"), "europe");
+        assert_eq!(
+            m.short_name("data/inputs/europe-20260301.osm.pbf"),
+            "europe"
+        );
         assert_eq!(m.short_name("rawfile"), "rawfile");
     }
 

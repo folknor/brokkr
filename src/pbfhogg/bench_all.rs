@@ -337,7 +337,10 @@ fn run_osmpbf_baseline(
     let variant_names: Vec<&str> = variant_data.iter().map(|(v, ..)| v.as_str()).collect();
 
     crate::harness::run_variants("baseline", &variant_names, |variant| {
-        let (_, elapsed_ms, kv) = variant_data.iter().find(|(v, ..)| v == variant).expect("variant exists in variant_data");
+        let (_, elapsed_ms, kv) = variant_data
+            .iter()
+            .find(|(v, ..)| v == variant)
+            .expect("variant exists in variant_data");
 
         let config = BenchConfig {
             // `baseline-<tool>/<op>` - each external baseline is its own
@@ -355,16 +358,18 @@ fn run_osmpbf_baseline(
             metadata: vec![],
         };
 
-        harness.run_internal(&config, |_i| {
-            Ok(BenchResult {
-                elapsed_ms: *elapsed_ms,
-                elapsed_us: None,
-                kv: kv.clone(),
-                iterations: Vec::new(),
-                distribution: None,
-                hotpath: None,
+        harness
+            .run_internal(&config, |_i| {
+                Ok(BenchResult {
+                    elapsed_ms: *elapsed_ms,
+                    elapsed_us: None,
+                    kv: kv.clone(),
+                    iterations: Vec::new(),
+                    distribution: None,
+                    hotpath: None,
+                })
             })
-        }).map(|_| ())
+            .map(|_| ())
     })
 }
 
@@ -528,6 +533,9 @@ mod skip_on_error_tests {
 
     #[test]
     fn a_shutdown_still_ends_the_suite() {
-        assert!(matches!(skip_on_error("x", Err(DevError::Interrupted)), Err(DevError::Interrupted)));
+        assert!(matches!(
+            skip_on_error("x", Err(DevError::Interrupted)),
+            Err(DevError::Interrupted)
+        ));
     }
 }

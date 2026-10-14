@@ -453,7 +453,11 @@ impl SidecarDb {
                 const SHOWN: usize = 10;
                 let listed: Vec<&str> = many.iter().take(SHOWN).map(String::as_str).collect();
                 let more = many.len().saturating_sub(SHOWN);
-                let tail = if more > 0 { format!(", and {more} more") } else { String::new() };
+                let tail = if more > 0 {
+                    format!(", and {more} more")
+                } else {
+                    String::new()
+                };
                 Err(DevError::Config(format!(
                     "uuid prefix '{uuid_prefix}' is ambiguous - it matches {} sidecar sessions: {}{tail}",
                     many.len(),
@@ -721,11 +725,9 @@ impl SidecarDb {
 /// The destination is opened in DELETE journal mode (no WAL side files),
 /// so the backup is a single restorable file. Returns `Ok(())` on success.
 pub fn backup_to_path(src: &Path, dst: &Path) -> Result<(), DevError> {
-    let src_conn = rusqlite::Connection::open_with_flags(
-        src,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .map_err(|e| DevError::Database(format!("backup: open source: {e}")))?;
+    let src_conn =
+        rusqlite::Connection::open_with_flags(src, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| DevError::Database(format!("backup: open source: {e}")))?;
 
     let mut dst_conn = rusqlite::Connection::open(dst)
         .map_err(|e| DevError::Database(format!("backup: open dest: {e}")))?;
@@ -834,9 +836,14 @@ mod tests {
         insert_session(&db, "abc111", "A");
         insert_session(&db, "abc222", "B");
 
-        let err = db.query_markers("abc", None).expect_err("ambiguous prefix must fail");
+        let err = db
+            .query_markers("abc", None)
+            .expect_err("ambiguous prefix must fail");
         let msg = err.to_string();
-        assert!(msg.contains("abc111") && msg.contains("abc222"), "lists candidates: {msg}");
+        assert!(
+            msg.contains("abc111") && msg.contains("abc222"),
+            "lists candidates: {msg}"
+        );
 
         let markers = db.query_markers("abc1", None).unwrap();
         assert_eq!(markers.len(), 1);
@@ -852,8 +859,14 @@ mod tests {
 
         assert!(db.resolve_session("").is_err());
         assert!(db.delete_by_uuid_prefix("").is_err());
-        assert!(db.uuids_matching_prefix("a_c").unwrap().is_empty(), "_ is literal");
-        assert!(db.uuids_matching_prefix("%").unwrap().is_empty(), "% is literal");
+        assert!(
+            db.uuids_matching_prefix("a_c").unwrap().is_empty(),
+            "_ is literal"
+        );
+        assert!(
+            db.uuids_matching_prefix("%").unwrap().is_empty(),
+            "% is literal"
+        );
         assert_eq!(db.delete_by_uuid_prefix("abc111").unwrap(), 1);
     }
 
@@ -870,11 +883,9 @@ mod tests {
         assert!(!dir.join("backup.db-wal").exists());
 
         // Verify expected data.
-        let conn = rusqlite::Connection::open_with_flags(
-            &dst,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .unwrap();
+        let conn =
+            rusqlite::Connection::open_with_flags(&dst, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sidecar_markers WHERE result_uuid = 'test-uuid'",
@@ -894,11 +905,9 @@ mod tests {
         let dst = dir.join("backup-reader.db");
 
         // Open a reader connection that stays alive during backup.
-        let _reader = rusqlite::Connection::open_with_flags(
-            &src,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .unwrap();
+        let _reader =
+            rusqlite::Connection::open_with_flags(&src, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
 
         // Write more data while the reader is open.
         {
@@ -916,15 +925,11 @@ mod tests {
         }
 
         // Verify backup has both rows.
-        let conn = rusqlite::Connection::open_with_flags(
-            &dst,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .unwrap();
+        let conn =
+            rusqlite::Connection::open_with_flags(&dst, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM sidecar_markers", [], |row| {
-                row.get(0)
-            })
+            .query_row("SELECT COUNT(*) FROM sidecar_markers", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 2);
 
@@ -956,15 +961,11 @@ mod tests {
         backup_to_path(&src, &dst).unwrap();
 
         // Verify the backup has both rows.
-        let conn = rusqlite::Connection::open_with_flags(
-            &dst,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .unwrap();
+        let conn =
+            rusqlite::Connection::open_with_flags(&dst, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM sidecar_markers", [], |row| {
-                row.get(0)
-            })
+            .query_row("SELECT COUNT(*) FROM sidecar_markers", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 2);
 

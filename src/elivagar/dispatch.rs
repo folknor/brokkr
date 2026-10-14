@@ -16,10 +16,7 @@ use crate::resolve::resolve_pbf_with_size;
 /// Handles run, bench, hotpath, and alloc for any elivagar command.
 /// External commands (Planetiler, Tilemaker) delegate to old handlers for
 /// bench mode but do not support run/hotpath/alloc.
-pub(crate) fn run_command(
-    req: &MeasureRequest,
-    command: &ElivagarCommand,
-) -> Result<(), DevError> {
+pub(crate) fn run_command(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(), DevError> {
     project::require(req.project, Project::Elivagar, command.id())?;
 
     if req.dry_run {
@@ -55,8 +52,7 @@ pub(crate) fn run_command(
 fn run_elivagar_dry_run(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(), DevError> {
     // Resolve host paths without building (cargo metadata only, no compile).
     let pi = crate::context::bootstrap(req.build_root)?;
-    let paths =
-        crate::context::bootstrap_config(req.dev_config, req.project_root, &pi.target_dir)?;
+    let paths = crate::context::bootstrap_config(req.dev_config, req.project_root, &pi.target_dir)?;
 
     // Resolve + report the input PBF for commands that need one.
     let pbf_str = if command.needs_pbf() {
@@ -109,7 +105,8 @@ fn run_elivagar_run(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(
                 &feat_refs,
                 true,
                 &format!("run {}", command.id()),
-                true,                req.stop_marker.map(str::to_owned),
+                true,
+                req.stop_marker.map(str::to_owned),
             )?
             .with_request(req);
 
@@ -241,7 +238,8 @@ fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Re
         &feat_refs,
         true,
         &format!("bench {}", command.id()),
-        req.force,        req.stop_marker.map(str::to_owned),
+        req.force,
+        req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
 
@@ -328,7 +326,8 @@ fn run_elivagar_internal(req: &MeasureRequest, command: &ElivagarCommand) -> Res
         req.project_root,
         req.build_root,
         &format!("bench {}", command.id()),
-        req.force,        req.stop_marker.map(str::to_owned),
+        req.force,
+        req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
 
@@ -386,7 +385,8 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
                 &hotpath_features,
                 true,
                 &format!("hotpath {}", command.id()),
-                req.force,                req.stop_marker.map(str::to_owned),
+                req.force,
+                req.stop_marker.map(str::to_owned),
             )?
             .with_request(req);
 
@@ -463,7 +463,8 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
                 req.project_root,
                 req.build_root,
                 &format!("hotpath {}", command.id()),
-                req.force,                req.stop_marker.map(str::to_owned),
+                req.force,
+                req.stop_marker.map(str::to_owned),
             )?
             .with_request(req);
 
@@ -606,7 +607,8 @@ fn rename_elivagar_output(
             e.kind(),
             format!(
                 "failed to create output dir {}: {e}; output left in {}",
-                output_dir.display(), scratch_dir.display(),
+                output_dir.display(),
+                scratch_dir.display(),
             ),
         ))
     })?;
@@ -624,7 +626,8 @@ fn rename_elivagar_output(
                 e.kind(),
                 format!(
                     "failed to move {} to {}: {e}; output left in place",
-                    path.display(), dest.display(),
+                    path.display(),
+                    dest.display(),
                 ),
             ))
         })?;
@@ -670,10 +673,35 @@ fn prune_output_dir(output_dir: &std::path::Path, dataset: &str, variant: &str) 
     }
 }
 
-/// External tool dispatch (Planetiler, Tilemaker). Only bench mode is supported.
+/// External tool dispatch (Planetiler, Tilemaker). Run mode reuses the same
+/// one-sample harness path while allowing dirty trees and suppressing storage.
 fn run_elivagar_external(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(), DevError> {
     match req.mode {
-        MeasureMode::Run | MeasureMode::Bench { .. } => match command {
+        MeasureMode::Run => {
+            // These legacy handlers create their own harness and receive the
+            // dirty-tree allowance through the request. The harness sees the
+            // run mode via `with_request` and reports without persisting.
+            let run_req = MeasureRequest {
+                dev_config: req.dev_config,
+                project: req.project,
+                project_root: req.project_root,
+                build_root: req.build_root,
+                dataset: req.dataset,
+                variant: req.variant,
+                features: req.features,
+                force: true,
+                mode: req.mode,
+                brokkr_args: req.brokkr_args,
+                dry_run: req.dry_run,
+                stop_marker: req.stop_marker,
+            };
+            match command {
+                ElivagarCommand::Planetiler => elivagar::cmd::bench_planetiler(&run_req),
+                ElivagarCommand::Tilemaker => elivagar::cmd::bench_tilemaker(&run_req),
+                _ => unreachable!(),
+            }
+        }
+        MeasureMode::Bench { .. } => match command {
             ElivagarCommand::Planetiler => elivagar::cmd::bench_planetiler(req),
             ElivagarCommand::Tilemaker => elivagar::cmd::bench_tilemaker(req),
             _ => unreachable!(),

@@ -325,6 +325,20 @@ pub struct QueryFilter {
     pub limit: usize,
 }
 
+/// Filters that apply to a selected set of result rows, independent of how
+/// that set is selected (recent rows, a UUID prefix, or both sides of a
+/// comparison).
+#[derive(Default)]
+pub struct RowFilters<'a> {
+    pub command: Option<&'a str>,
+    pub mode: Option<&'a str>,
+    pub dataset: Option<&'a str>,
+    pub meta: &'a [(String, String)],
+    pub env: &'a [(String, String)],
+    pub grep: &'a [String],
+    pub grep_v: &'a [String],
+}
+
 // ---------------------------------------------------------------------------
 // UUID helpers
 // ---------------------------------------------------------------------------
@@ -441,10 +455,8 @@ mod tests {
         // glibc accepts `dirty_decay_ms:0,narenas:1` syntax.
         let row_one_comma_value =
             stored_row_with_env(&[("MALLOC_CONF", "dirty_decay_ms:0,narenas:1")]);
-        let row_two_vars_collision = stored_row_with_env(&[
-            ("MALLOC_CONF", "dirty_decay_ms:0"),
-            ("narenas:1", ""),
-        ]);
+        let row_two_vars_collision =
+            stored_row_with_env(&[("MALLOC_CONF", "dirty_decay_ms:0"), ("narenas:1", "")]);
         assert_ne!(
             row_one_comma_value.env_fingerprint(),
             row_two_vars_collision.env_fingerprint()

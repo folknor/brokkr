@@ -24,8 +24,8 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use super::eliv::{ArchiveView, BlobRef, Strictness, decode_detail_tile, gzip_decompress};
 use super::eliv::tile_id_to_zxy;
+use super::eliv::{ArchiveView, BlobRef, Strictness, decode_detail_tile, gzip_decompress};
 use crate::error::DevError;
 use crate::output;
 
@@ -191,7 +191,10 @@ pub fn run(file_a: &str, file_b: &str, sample: Option<usize>) -> Result<(), DevE
     }
 
     println!("\n=== Grand totals (all sampled tiles) ===\n");
-    println!("{:24} {name_a:>10} {name_b:>10} {:>8} {:>10} {:>10}", "layer", "diff", "verts_A", "verts_B");
+    println!(
+        "{:24} {name_a:>10} {name_b:>10} {:>8} {:>10} {:>10}",
+        "layer", "diff", "verts_A", "verts_B"
+    );
     println!("{}", "-".repeat(78));
     let mut total_a = LayerTally::default();
     let mut total_b = LayerTally::default();
@@ -281,7 +284,9 @@ fn compare_zoom(
         }
     }
     if decoded == 0 {
-        output::bench_msg(&format!("z{z:2}: {errors} read errors, 0 decoded - skipping"));
+        output::bench_msg(&format!(
+            "z{z:2}: {errors} read errors, 0 decoded - skipping"
+        ));
         return (BTreeMap::new(), BTreeMap::new());
     }
 

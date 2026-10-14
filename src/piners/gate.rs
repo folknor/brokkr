@@ -50,7 +50,10 @@ pub fn evaluate(ids: &[String], registry: &Registry, report: &HarnessReport) -> 
             let got = match p.valid_disposition() {
                 None => format!("invalid ({})", p.disposition()),
                 Some(_) if tainted.contains(p.probe.as_str()) => {
-                    format!("invalid (an occurrence was invalid; last {})", p.disposition())
+                    format!(
+                        "invalid (an occurrence was invalid; last {})",
+                        p.disposition()
+                    )
                 }
                 Some(label) => label.to_owned(),
             };
@@ -85,7 +88,8 @@ pub fn report_has_break(report: &HarnessReport) -> bool {
     let tainted = report.tainted();
     report.probes.iter().any(|p| {
         !tainted.contains(p.probe.as_str())
-            && p.valid_disposition().is_some_and(|d| BREAK_DISPOSITIONS.contains(&d))
+            && p.valid_disposition()
+                .is_some_and(|d| BREAK_DISPOSITIONS.contains(&d))
     })
 }
 
@@ -103,14 +107,20 @@ pub fn breaks_all_pinned(ids: &[String], registry: &Registry, report: &HarnessRe
     let tainted = report.tainted();
     let mut any = false;
     for p in &report.probes {
-        let Some(disp) = p.valid_disposition().filter(|d| BREAK_DISPOSITIONS.contains(d)) else {
+        let Some(disp) = p
+            .valid_disposition()
+            .filter(|d| BREAK_DISPOSITIONS.contains(d))
+        else {
             continue;
         };
         any = true;
         // A probe with an invalid occurrence explains nothing.
         let pinned = !tainted.contains(p.probe.as_str())
             && selected.contains(p.probe.as_str())
-            && registry.pins.get(&p.probe).and_then(|pin| pin.expected.as_deref())
+            && registry
+                .pins
+                .get(&p.probe)
+                .and_then(|pin| pin.expected.as_deref())
                 == Some(disp);
         if !pinned {
             return false;
@@ -124,10 +134,16 @@ pub fn render_diffs(diffs: &[GateDiff]) {
     for d in diffs {
         let detail = match (&d.expected, &d.actual) {
             (None, Some(a)) => {
-                format!("{}: not blessed (got {a}) - run `brokkr corpus --bless`", d.probe)
+                format!(
+                    "{}: not blessed (got {a}) - run `brokkr corpus --bless`",
+                    d.probe
+                )
             }
             (Some(e), None) => {
-                format!("{}: expected {e}, but harness emitted no disposition", d.probe)
+                format!(
+                    "{}: expected {e}, but harness emitted no disposition",
+                    d.probe
+                )
             }
             (Some(e), Some(a)) => format!("{}: expected {e}, got {a}", d.probe),
             (None, None) => format!("{}: not blessed and no disposition emitted", d.probe),
@@ -265,7 +281,13 @@ mod tests {
         let reg = registry(&[("a", Some("compile_fail"))]);
         let diffs = evaluate(&ids, &reg, &rep);
         assert_eq!(diffs.len(), 1);
-        assert!(diffs[0].actual.as_deref().unwrap().starts_with("invalid (an occurrence was invalid"));
+        assert!(
+            diffs[0]
+                .actual
+                .as_deref()
+                .unwrap()
+                .starts_with("invalid (an occurrence was invalid")
+        );
         assert!(!report_has_break(&rep));
         assert!(!breaks_all_pinned(&ids, &reg, &rep));
         // The stored verdict follows: ingest marks the row gate_ok = 0.
@@ -277,6 +299,7 @@ mod tests {
             commit_sha: None,
             dirty: None,
             selector: "{}",
+            context: None,
             gated: true,
             result: "fail",
             fail_reason: None,
@@ -287,15 +310,23 @@ mod tests {
             run_error: None,
         };
         let expected: BTreeMap<String, Option<String>> =
-            [("a".to_owned(), Some("compile_fail".to_owned()))].into_iter().collect();
+            [("a".to_owned(), Some("compile_fail".to_owned()))]
+                .into_iter()
+                .collect();
         let run_id = db.record_run(&run, &rep, &expected, &diffs).unwrap();
-        assert!(!db.disposition_for_probe(run_id, "a").unwrap().unwrap().gate_ok);
+        assert!(
+            !db.disposition_for_probe(run_id, "a")
+                .unwrap()
+                .unwrap()
+                .gate_ok
+        );
     }
 
     #[test]
     fn a_pinned_harness_abort_passes_and_explains_exit_one() {
         let reg = registry(&[("a", Some("harness_abort"))]);
-        let rep = report(r#"{"probe":"a","outcome":"harness_abort","error":"killed by signal 11"}"#);
+        let rep =
+            report(r#"{"probe":"a","outcome":"harness_abort","error":"killed by signal 11"}"#);
         let ids = ["a".to_owned()];
         assert!(evaluate(&ids, &reg, &rep).is_empty());
         assert!(report_has_break(&rep));

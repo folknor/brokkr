@@ -112,9 +112,7 @@ pub(crate) fn print_run_info(sdb: &db::sidecar::SidecarDb, uuid_prefix: &str) {
                         eprintln!("[sidecar] current binary xxh128: match");
                     } else {
                         let current_short = &current_hash[..12.min(current_hash.len())];
-                        eprintln!(
-                            "[error]   current binary differs (xxh128: {current_short}...)"
-                        );
+                        eprintln!("[error]   current binary differs (xxh128: {current_short}...)");
                     }
                 }
                 Err(_) => {
@@ -488,7 +486,10 @@ pub(crate) fn sidecar_marker_json(m: &sidecar::Marker) -> String {
     #[allow(clippy::cast_precision_loss)]
     let t_sec = m.timestamp_us as f64 / 1_000_000.0;
     let name = serde_json::Value::String(m.name.clone());
-    format!("{{\"i\":{},\"t\":{t_sec:.3},\"name\":{name}}}", m.marker_idx)
+    format!(
+        "{{\"i\":{},\"t\":{t_sec:.3},\"name\":{name}}}",
+        m.marker_idx
+    )
 }
 
 /// Print per-phase summary table from sidecar samples and markers.
@@ -697,12 +698,7 @@ fn print_phase_summary_human(summaries: &[PhaseSummary], clk_tck: i64) {
         let kernel_cores = avg_cores_str(s.stime_delta_jiffies, s.sample_span_us, clk_tck);
         println!(
             "{:<24}   user={user_cores} kern={kernel_cores} majflt={} minflt={} vol_cs={} nonvol_cs={} peak_threads={}",
-            "",
-            s.majflt_delta,
-            s.minflt_delta,
-            s.vol_cs_delta,
-            s.nonvol_cs_delta,
-            s.peak_threads,
+            "", s.majflt_delta, s.minflt_delta, s.vol_cs_delta, s.nonvol_cs_delta, s.peak_threads,
         );
     }
 }
@@ -791,11 +787,7 @@ fn print_phase_summary_jsonl(
 /// `run_idx` - so under `--run all` an ordinary once-per-run phase appears N
 /// times, looks like a high-frequency event, and would be aggregated into a
 /// single row, destroying exactly the per-run timings that view exists to show.
-pub(crate) fn print_marker_durations(
-    markers: &[sidecar::Marker],
-    human: bool,
-    collapse: bool,
-) {
+pub(crate) fn print_marker_durations(markers: &[sidecar::Marker], human: bool, collapse: bool) {
     // Build a map of base_name -> (start_us, end_us).
     let mut pairs: Vec<(String, i64, Option<i64>)> = Vec::new();
 
@@ -1345,7 +1337,11 @@ fn build_phases(
     let mut phases = Vec::new();
     if markers.is_empty() {
         if let (Some(first), Some(last)) = (samples.first(), samples.last()) {
-            phases.push(("(all)".to_owned(), first.timestamp_us, last.timestamp_us + 1));
+            phases.push((
+                "(all)".to_owned(),
+                first.timestamp_us,
+                last.timestamp_us + 1,
+            ));
         }
         return phases;
     }
@@ -1476,7 +1472,6 @@ pub(crate) fn print_counters(counters: &[sidecar::Counter], human: bool) {
     }
 }
 
-
 #[cfg(test)]
 mod timeline_arg_tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -1517,7 +1512,10 @@ mod timeline_arg_tests {
     fn field_list_matches_accessor() {
         let s = zero_sample();
         for f in SAMPLE_FIELDS {
-            assert!(sample_field_value(&s, f).is_some(), "{f} listed but not answered");
+            assert!(
+                sample_field_value(&s, f).is_some(),
+                "{f} listed but not answered"
+            );
         }
         assert!(sample_field_value(&s, "nope").is_none());
     }
@@ -1526,7 +1524,10 @@ mod timeline_arg_tests {
     fn where_rejects_malformed_and_unknown() {
         assert!(parse_where_cond("majflt>0").is_ok());
         assert!(parse_where_cond("majflt").is_err(), "no operator");
-        assert!(parse_where_cond("majflt>x").is_err(), "non-integer threshold");
+        assert!(
+            parse_where_cond("majflt>x").is_err(),
+            "non-integer threshold"
+        );
         assert!(parse_where_cond("majflts>0").is_err(), "unknown field");
     }
 
@@ -1541,7 +1542,10 @@ mod timeline_arg_tests {
         let v: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
         assert_eq!(v["name"], m.name.as_str());
         assert_eq!(v["i"], 3);
-        assert!(line.contains("\"t\":1.500"), "t keeps three decimals: {line}");
+        assert!(
+            line.contains("\"t\":1.500"),
+            "t keeps three decimals: {line}"
+        );
     }
 }
 
@@ -1551,7 +1555,11 @@ mod stall_tests {
     use super::*;
 
     fn counter(name: &str, value: i64) -> sidecar::Counter {
-        sidecar::Counter { timestamp_us: 0, name: name.to_owned(), value }
+        sidecar::Counter {
+            timestamp_us: 0,
+            name: name.to_owned(),
+            value,
+        }
     }
 
     #[test]

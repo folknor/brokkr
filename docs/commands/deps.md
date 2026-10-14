@@ -142,8 +142,11 @@ is gated behind exact lookup failing.
 ### git_dependency [v1]
 
 Any package with `source = "git+..."`. Emits `GitDependency` with the repo
-URL, resolved commit SHA (from the source fragment), and the requested ref
-(branch / tag / rev) if the manifest specified one.
+URL, requested ref (branch / tag / rev, or the default branch), and resolved
+commit SHA from the source fragment. JSON keeps the request in `requested_ref`
+and the lockfile pin in `resolved_rev`; for example, a manifest's
+`?rev=X#Y` is reported as `requested_ref: {"kind":"rev","value":"X"}`
+and `resolved_rev: "Y"`.
 
 ### path_dependency [v1]
 

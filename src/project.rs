@@ -282,8 +282,14 @@ mod tests {
                 }
             }
         }
-        assert!(seen > 0, "found no literal require labels - the scan is broken");
-        assert!(bad.is_empty(), "require labels naming no subcommand: {bad:#?}");
+        assert!(
+            seen > 0,
+            "found no literal require labels - the scan is broken"
+        );
+        assert!(
+            bad.is_empty(),
+            "require labels naming no subcommand: {bad:#?}"
+        );
     }
 
     #[test]

@@ -110,6 +110,11 @@ pub fn evaluate(
         Stream::Stdout => String::from_utf8_lossy(stdout).into_owned(),
         Stream::Stderr => String::from_utf8_lossy(stderr).into_owned(),
         Stream::Both => {
+            // The streams are captured separately, so their original write
+            // order is unavailable. Define `both` as stdout, then a newline,
+            // then stderr; exact can match either stream alone (after trim)
+            // or the combined text, while last-line uses stderr's final
+            // non-empty line when stderr has one.
             let mut s = String::from_utf8_lossy(stdout).into_owned();
             s.push('\n');
             s.push_str(&String::from_utf8_lossy(stderr));
@@ -225,7 +230,7 @@ fn header_level(line: &str) -> Option<Level> {
 
 #[cfg(test)]
 mod tests {
-    use super::{evaluate, run_one, rustc_blocks, Level};
+    use super::{Level, evaluate, run_one, rustc_blocks};
     use crate::config::{Diagnostics, MatchMode, ScriptCheck, Stage, Stream};
 
     /// A hung script fails as its own entry at its deadline - pipeline and all,
@@ -380,8 +385,20 @@ errors are bad prose
     #[test]
     fn stream_selects_the_right_source() {
         // Sentinel only on stderr: stdout matching fails, stderr succeeds.
-        assert!(!evaluate("done", MatchMode::LastLine, Stream::Stdout, b"", b"done\n"));
-        assert!(evaluate("done", MatchMode::LastLine, Stream::Stderr, b"", b"done\n"));
+        assert!(!evaluate(
+            "done",
+            MatchMode::LastLine,
+            Stream::Stdout,
+            b"",
+            b"done\n"
+        ));
+        assert!(evaluate(
+            "done",
+            MatchMode::LastLine,
+            Stream::Stderr,
+            b"",
+            b"done\n"
+        ));
         // `both` concatenates stdout then stderr, so a stderr verdict is the
         // combined last line.
         assert!(evaluate(
@@ -396,8 +413,26 @@ errors are bad prose
     #[test]
     fn empty_output_never_matches_a_sentinel() {
         // A check stubbed to exit 0 with no output must not pass.
-        assert!(!evaluate("done", MatchMode::LastLine, Stream::Stdout, b"", b""));
-        assert!(!evaluate("done", MatchMode::Exact, Stream::Stdout, b"", b""));
-        assert!(!evaluate("done", MatchMode::Contains, Stream::Stdout, b"", b""));
+        assert!(!evaluate(
+            "done",
+            MatchMode::LastLine,
+            Stream::Stdout,
+            b"",
+            b""
+        ));
+        assert!(!evaluate(
+            "done",
+            MatchMode::Exact,
+            Stream::Stdout,
+            b"",
+            b""
+        ));
+        assert!(!evaluate(
+            "done",
+            MatchMode::Contains,
+            Stream::Stdout,
+            b"",
+            b""
+        ));
     }
 }

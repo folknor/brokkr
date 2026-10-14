@@ -14,12 +14,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::config::ParallelBinaries;
 use crate::config::{
     CargoUnification, CheckEntry, EffectiveUnification, FeatureUnification, Harness, Isolation,
-    ProfileDef,
-    QualifiedSkip, SkipSpec, SweepProfile, TestConfig,
+    ProfileDef, QualifiedSkip, SkipSpec, SweepProfile, TestConfig,
 };
-use crate::config::ParallelBinaries;
 use crate::error::DevError;
 
 /// One sweep to execute, after profile resolution + check-entry lookup.
@@ -189,7 +188,12 @@ impl FeatureConfig {
 
     /// Features the invocation named itself: never projected.
     pub fn explicit(features: &[String], no_default_features: bool, all_features: bool) -> Self {
-        Self { tokens: Self::split(features), no_default_features, all_features, invocation_explicit: true }
+        Self {
+            tokens: Self::split(features),
+            no_default_features,
+            all_features,
+            invocation_explicit: true,
+        }
     }
 
     /// The cargo argv for this configuration with `tokens` as the feature
@@ -264,7 +268,11 @@ impl DeclaredFilter {
     /// How the dead-filter report names it.
     pub fn label(&self) -> String {
         match &self.package {
-            Some(pkg) => format!("{} \"{}\" (package {pkg})", self.kind.as_str(), self.pattern),
+            Some(pkg) => format!(
+                "{} \"{}\" (package {pkg})",
+                self.kind.as_str(),
+                self.pattern
+            ),
             None => format!("{} \"{}\"", self.kind.as_str(), self.pattern),
         }
     }
@@ -558,12 +566,9 @@ fn resolve_single(
     // the process-isolated path, and the nextest lane (whose filterset
     // translation carries the package scope natively). A shared-process
     // libtest run has neither.
-    if out
-        .iter()
-        .any(|s| {
-            !s.qualified_skips.is_empty() && !s.process_isolation && s.harness != Harness::Nextest
-        })
-    {
+    if out.iter().any(|s| {
+        !s.qualified_skips.is_empty() && !s.process_isolation && s.harness != Harness::Nextest
+    }) {
         return Err(DevError::Config(format!(
             "[test.profiles.{name}] has package-qualified skip entries; these \
              filter the enumerated set and require `isolation = \"process\"` \
@@ -631,9 +636,9 @@ fn collect_extends_chain<'a>(
                 seen.iter().cloned().collect::<Vec<_>>().join(" -> ")
             )));
         }
-        let (key, def) = profiles.get_key_value(&cur).ok_or_else(|| {
-            DevError::Config(format!("[test.profiles.{cur}] is not defined"))
-        })?;
+        let (key, def) = profiles
+            .get_key_value(&cur)
+            .ok_or_else(|| DevError::Config(format!("[test.profiles.{cur}] is not defined")))?;
         chain.push((key.as_str(), def));
         match &def.extends {
             Some(parent) => cur = parent.clone(),
@@ -1061,7 +1066,10 @@ skip = [{ package = "a", pattern = "slow" }]
         // A pinned selected/workspace sweep resolves what ambient already
         // resolves in any given repo, so splitting the cache buys nothing.
         for mode in [CargoUnification::Selected, CargoUnification::Workspace] {
-            assert_eq!(shape_target_key(&[], EffectiveUnification::Pinned(mode)), None);
+            assert_eq!(
+                shape_target_key(&[], EffectiveUnification::Pinned(mode)),
+                None
+            );
         }
         // Package mode isolates even with no rustflags: it resolves a
         // different graph and would otherwise thrash against every ordinary
@@ -1073,10 +1081,7 @@ skip = [{ package = "a", pattern = "slow" }]
         // is re-derived by this feature.
         let flags = vec!["--cfg".to_owned(), "madsim".to_owned()];
         let plain = shape_target_key(&flags, EffectiveUnification::Ambient).unwrap();
-        assert_eq!(
-            plain,
-            crate::config::rustflags_target_key(&flags).unwrap()
-        );
+        assert_eq!(plain, crate::config::rustflags_target_key(&flags).unwrap());
         // ...and the two inputs compose rather than colliding: a package-mode
         // sweep carrying the same flags gets its own dir, not the plain one.
         assert_ne!(shape_target_key(&flags, pkg).unwrap(), plain);
@@ -1097,9 +1102,7 @@ skip = [{ package = "a", pattern = "slow" }]
         // Env does: HIGH_PRECISION=1 on one sweep and not another makes two
         // otherwise-identical sweeps cache-incompatible.
         let mut env_sweep = plain.clone();
-        env_sweep
-            .env
-            .insert("HIGH_PRECISION".into(), "1".into());
+        env_sweep.env.insert("HIGH_PRECISION".into(), "1".into());
         assert_ne!(plain.build_shape_key(), env_sweep.build_shape_key());
     }
 
@@ -1404,11 +1407,17 @@ env = { BROKKR_TEST_PLATFORM = "1" }
         // libtest_args (consumers apply their own thread policy).
         assert_eq!(r[0].test_threads, Some(1));
         assert!(
-            !r[0].libtest_args.iter().any(|a| a.starts_with("--test-threads")),
+            !r[0]
+                .libtest_args
+                .iter()
+                .any(|a| a.starts_with("--test-threads")),
             "test_threads must not be pushed into libtest_args: {:?}",
             r[0].libtest_args
         );
-        assert_eq!(r[0].env.get("BROKKR_TEST_PLATFORM").map(String::as_str), Some("1"));
+        assert_eq!(
+            r[0].env.get("BROKKR_TEST_PLATFORM").map(String::as_str),
+            Some("1")
+        );
     }
 
     #[test]
@@ -1430,7 +1439,10 @@ env = { SHARED = "profile", ONLY_PROFILE = "1" }
         assert_eq!(r[0].packages, vec!["nautilus-core", "nautilus-common"]);
         // Entry env present, profile-only env present, and the entry wins the
         // `SHARED` collision.
-        assert_eq!(r[0].env.get("HIGH_PRECISION").map(String::as_str), Some("1"));
+        assert_eq!(
+            r[0].env.get("HIGH_PRECISION").map(String::as_str),
+            Some("1")
+        );
         assert_eq!(r[0].env.get("ONLY_PROFILE").map(String::as_str), Some("1"));
         assert_eq!(r[0].env.get("SHARED").map(String::as_str), Some("entry"));
     }
@@ -1483,7 +1495,12 @@ test_threads = 8
         );
         let r = resolve(&cfg, &checks, "fast").unwrap();
         assert_eq!(r[0].test_threads, Some(8));
-        assert!(!r[0].libtest_args.iter().any(|a| a.starts_with("--test-threads")));
+        assert!(
+            !r[0]
+                .libtest_args
+                .iter()
+                .any(|a| a.starts_with("--test-threads"))
+        );
     }
 
     #[test]
@@ -1582,7 +1599,10 @@ tests = ["cli_x"]
         assert_eq!(r[0].cargo_test_filters, vec!["--test", "cli_x"]);
         assert!(r[0].libtest_args.contains(&"--include-ignored".into()));
         assert_eq!(
-            r[0].libtest_args.iter().filter(|s| s.as_str() == "a::").count(),
+            r[0].libtest_args
+                .iter()
+                .filter(|s| s.as_str() == "a::")
+                .count(),
             1
         );
     }
@@ -1601,7 +1621,10 @@ tests = ["cli_x"]
         assert_eq!(cfg.configured_key(), vec!["--features", "a,b,c,d/e"]);
         let adhoc = FeatureConfig::explicit(&["x".into()], true, false);
         assert!(adhoc.invocation_explicit);
-        assert_eq!(adhoc.configured_key(), vec!["--no-default-features", "--features", "x"]);
+        assert_eq!(
+            adhoc.configured_key(),
+            vec!["--no-default-features", "--features", "x"]
+        );
     }
 
     #[test]

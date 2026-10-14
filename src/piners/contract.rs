@@ -155,7 +155,10 @@ impl ContractAssessment {
     /// said as context, and never as still running once setup completed.
     pub fn stage_context(&self) -> Option<String> {
         match (&self.last_stage, self.setup_complete) {
-            (Some(s), false) => Some(format!("last setup stage seen (context only): {}", s.render())),
+            (Some(s), false) => Some(format!(
+                "last setup stage seen (context only): {}",
+                s.render()
+            )),
             (Some(s), true) => Some(format!(
                 "setup completed (last setup stage was {}); probes were running",
                 s.render()
@@ -189,8 +192,17 @@ impl Breaches {
             .map(|(kind, mut items)| {
                 items.sort();
                 let more = items.len().saturating_sub(MAX_LISTED);
-                let shown = items.iter().take(MAX_LISTED).cloned().collect::<Vec<_>>().join(", ");
-                let tail = if more > 0 { format!(" (and {more} more)") } else { String::new() };
+                let shown = items
+                    .iter()
+                    .take(MAX_LISTED)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let tail = if more > 0 {
+                    format!(" (and {more} more)")
+                } else {
+                    String::new()
+                };
                 format!("{kind}: {shown}{tail}")
             })
             .collect()
@@ -201,8 +213,15 @@ impl Breaches {
 /// how the process ended. Dispositions are read from `report.probes` (already
 /// collapsed to one per id) with their stream positions.
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)] // one pass over the stream, then the end-of-stream rules
-pub fn assess_contract(report: &HarnessReport, selected: &[String], end: HarnessEnd) -> ContractAssessment {
-    let mut a = ContractAssessment { observed: !report.contract.is_empty(), ..Default::default() };
+pub fn assess_contract(
+    report: &HarnessReport,
+    selected: &[String],
+    end: HarnessEnd,
+) -> ContractAssessment {
+    let mut a = ContractAssessment {
+        observed: !report.contract.is_empty(),
+        ..Default::default()
+    };
     if !a.observed {
         return a;
     }
@@ -213,9 +232,16 @@ pub fn assess_contract(report: &HarnessReport, selected: &[String], end: Harness
     // a blank line). Counted before version validation, so a bad-version
     // start is present - it gets its version defect below, never "no
     // run_start" - and a second start beside it is still a duplicate.
-    let starts: Vec<&ContractLine> = report.contract.iter().filter(|c| c.kind == "run_start").collect();
+    let starts: Vec<&ContractLine> = report
+        .contract
+        .iter()
+        .filter(|c| c.kind == "run_start")
+        .collect();
     match starts.first() {
-        None => b.add("no run_start (it must be the first line of stdout)", "missing"),
+        None => b.add(
+            "no run_start (it must be the first line of stdout)",
+            "missing",
+        ),
         Some(first) if first.physical != 1 => b.add(
             "run_start is not the first line of stdout",
             format!("physical line {}", first.physical),
@@ -223,7 +249,10 @@ pub fn assess_contract(report: &HarnessReport, selected: &[String], end: Harness
         Some(_) => {}
     }
     if starts.len() > 1 {
-        b.add("duplicate run_start", format!("{} run_start lines", starts.len()));
+        b.add(
+            "duplicate run_start",
+            format!("{} run_start lines", starts.len()),
+        );
     }
     let mut life: BTreeMap<String, Life> = BTreeMap::new();
     let mut run_end_line: Option<usize> = None;
@@ -231,7 +260,10 @@ pub fn assess_contract(report: &HarnessReport, selected: &[String], end: Harness
 
     for c in &report.contract {
         if let Err(why) = check_version(c) {
-            b.add("contract line with a bad version", format!("{} at line {} ({why})", c.kind, c.line));
+            b.add(
+                "contract line with a bad version",
+                format!("{} at line {} ({why})", c.kind, c.line),
+            );
             continue;
         }
         match c.kind.as_str() {
@@ -239,8 +271,16 @@ pub fn assess_contract(report: &HarnessReport, selected: &[String], end: Harness
                 Some(stage) => {
                     a.last_stage = Some(StageInfo {
                         stage: stage.to_owned(),
-                        feed: c.value.get("feed").and_then(Value::as_str).map(str::to_owned),
-                        path: c.value.get("path").and_then(Value::as_str).map(str::to_owned),
+                        feed: c
+                            .value
+                            .get("feed")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        path: c
+                            .value
+                            .get("path")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
                     });
                 }
                 None => b.add("malformed setup_stage", format!("line {}", c.line)),
@@ -248,7 +288,10 @@ pub fn assess_contract(report: &HarnessReport, selected: &[String], end: Harness
             "setup_complete" => a.setup_complete = true,
             "probe_start" | "probe_end" => {
                 let Some(probe) = c.value.get("probe").and_then(Value::as_str) else {
-                    b.add("lifecycle line with no probe", format!("{} at line {}", c.kind, c.line));
+                    b.add(
+                        "lifecycle line with no probe",
+                        format!("{} at line {}", c.kind, c.line),
+                    );
                     continue;
                 };
                 if !selected.contains(probe) {
@@ -260,8 +303,12 @@ pub fn assess_contract(report: &HarnessReport, selected: &[String], end: Harness
                     ("probe_start", None) => {
                         life.insert(probe.to_owned(), Life::Started(c.line));
                     }
-                    ("probe_start", Some(Life::Started(_))) => b.add("duplicate probe_start", probe),
-                    ("probe_start", Some(Life::Ended(..))) => b.add("probe_start after its probe_end", probe),
+                    ("probe_start", Some(Life::Started(_))) => {
+                        b.add("duplicate probe_start", probe);
+                    }
+                    ("probe_start", Some(Life::Ended(..))) => {
+                        b.add("probe_start after its probe_end", probe);
+                    }
                     ("probe_end", None) => b.add("probe_end without probe_start", probe),
                     ("probe_end", Some(Life::Started(s))) => {
                         life.insert(probe.to_owned(), Life::Ended(s, c.line));
@@ -270,13 +317,25 @@ pub fn assess_contract(report: &HarnessReport, selected: &[String], end: Harness
                 }
             }
             "run_end" => {
-                let exit = c.value.get("exit").and_then(Value::as_i64).filter(|e| *e == 0 || *e == 1);
+                let exit = c
+                    .value
+                    .get("exit")
+                    .and_then(Value::as_i64)
+                    .filter(|e| *e == 0 || *e == 1);
                 match exit {
                     None => b.add(
                         "run_end exit not integer 0 or 1",
-                        format!("line {} ({})", c.line, c.value.get("exit").map_or("absent".to_owned(), Value::to_string)),
+                        format!(
+                            "line {} ({})",
+                            c.line,
+                            c.value
+                                .get("exit")
+                                .map_or("absent".to_owned(), Value::to_string)
+                        ),
                     ),
-                    Some(_) if run_end_line.is_some() => b.add("second run_end", format!("line {}", c.line)),
+                    Some(_) if run_end_line.is_some() => {
+                        b.add("second run_end", format!("line {}", c.line));
+                    }
                     Some(e) => {
                         a.run_end = Some(e);
                         run_end_line = Some(c.line);
@@ -285,7 +344,9 @@ pub fn assess_contract(report: &HarnessReport, selected: &[String], end: Harness
             }
             "run_error" => match RunErrorRecord::from_value(&c.value) {
                 Err(why) => b.add("malformed run_error", format!("line {} ({why})", c.line)),
-                Ok(_) if run_error_line.is_some() => b.add("second run_error", format!("line {}", c.line)),
+                Ok(_) if run_error_line.is_some() => {
+                    b.add("second run_error", format!("line {}", c.line));
+                }
                 Ok(rec) => {
                     a.run_error = Some(rec);
                     run_error_line = Some(c.line);
@@ -300,14 +361,20 @@ pub fn assess_contract(report: &HarnessReport, selected: &[String], end: Harness
     if let Some(l) = run_end_line
         && last > l
     {
-        b.add("records after run_end (it must be last)", format!("{} line(s)", last - l));
+        b.add(
+            "records after run_end (it must be last)",
+            format!("{} line(s)", last - l),
+        );
     }
     // Nothing follows a run_error either - unknown kinds included, since
     // the position counts every non-blank line.
     if let Some(l) = run_error_line
         && last > l
     {
-        b.add("records after run_error (it must be last)", format!("{} line(s)", last - l));
+        b.add(
+            "records after run_error (it must be last)",
+            format!("{} line(s)", last - l),
+        );
     }
     if run_end_line.is_some() && run_error_line.is_some() {
         b.add("run_end and run_error in one stream", "both present");
@@ -318,30 +385,46 @@ pub fn assess_contract(report: &HarnessReport, selected: &[String], end: Harness
     if let Some(e) = a.run_end
         && end != HarnessEnd::Code(i32::try_from(e).unwrap_or(-1))
     {
-        b.add("run_end disagrees with the process exit", format!("run_end {e}, process {}", end.short()));
+        b.add(
+            "run_end disagrees with the process exit",
+            format!("run_end {e}, process {}", end.short()),
+        );
     }
     if a.run_error.is_some() && end != HarnessEnd::Code(2) && !brokkr_killed {
-        b.add("run_error without process exit 2", format!("process {}", end.short()));
+        b.add(
+            "run_error without process exit 2",
+            format!("process {}", end.short()),
+        );
     }
     if a.run_end.is_none()
         && a.run_error.is_none()
         && let HarnessEnd::Code(c) = end
     {
-        b.add("process exited with neither run_end nor run_error", format!("exit {c}"));
+        b.add(
+            "process exited with neither run_end nor run_error",
+            format!("exit {c}"),
+        );
     }
 
     // A completion claim requires every selected probe's full lifecycle.
     if a.run_end.is_some() && a.run_error.is_none() {
-        let disp: BTreeMap<&str, usize> =
-            report.probes.iter().map(|p| (p.probe.as_str(), p.line)).collect();
+        let disp: BTreeMap<&str, usize> = report
+            .probes
+            .iter()
+            .map(|p| (p.probe.as_str(), p.line))
+            .collect();
         let mut ids: Vec<&&str> = selected.iter().collect();
         ids.sort();
         for id in ids {
             let id: &str = id;
             match (life.get(id), disp.get(id)) {
                 (None, _) => b.add("run_end claims completion, but no probe_start for", id),
-                (Some(Life::Started(_)), _) => b.add("run_end claims completion, but no probe_end for", id),
-                (Some(Life::Ended(..)), None) => b.add("run_end claims completion, but no disposition for", id),
+                (Some(Life::Started(_)), _) => {
+                    b.add("run_end claims completion, but no probe_end for", id);
+                }
+                (Some(Life::Ended(..)), None) => {
+                    b.add("run_end claims completion, but no disposition for", id);
+                }
                 (Some(Life::Ended(s, e)), Some(d)) if !(s < d && d < e) => {
                     b.add("disposition outside its probe_start..probe_end", id);
                 }
@@ -438,7 +521,9 @@ mod tests {
             let a = assess(&nd, &["a"], HarnessEnd::Signal(9));
             assert!(a.observed);
             assert!(
-                a.violations.iter().any(|l| l.starts_with("contract line with a bad version")),
+                a.violations
+                    .iter()
+                    .any(|l| l.starts_with("contract line with a bad version")),
                 "{v}: {:?}",
                 a.violations
             );
@@ -473,19 +558,28 @@ mod tests {
         nd.push_str("{\"kind\":\"future\",\"x\":1}\n");
         let a = assess(&nd, &["a"], HarnessEnd::Code(2));
         assert!(
-            a.violations.iter().any(|l| l == "records after run_error (it must be last): 1 line(s)"),
+            a.violations
+                .iter()
+                .any(|l| l == "records after run_error (it must be last): 1 line(s)"),
             "{:?}",
             a.violations
         );
         // A run_error that is last is clean.
         let last = start() + &line("run_error", ",\"stage\":\"feed_load\",\"error\":\"x\"");
-        assert!(assess(&last, &["a"], HarnessEnd::Code(2)).violations.is_empty());
+        assert!(
+            assess(&last, &["a"], HarnessEnd::Code(2))
+                .violations
+                .is_empty()
+        );
     }
 
     #[test]
     fn anything_after_run_end_is_a_violation_run_error_included() {
         let mut nd = clean(&["a"], 0);
-        nd.push_str(&line("run_error", ",\"stage\":\"supervisor\",\"error\":\"x\""));
+        nd.push_str(&line(
+            "run_error",
+            ",\"stage\":\"supervisor\",\"error\":\"x\"",
+        ));
         let a = assess(&nd, &["a"], HarnessEnd::Code(2));
         let v = a.violations.join("\n");
         assert!(v.contains("records after run_end"), "{v}");
@@ -495,10 +589,20 @@ mod tests {
     #[test]
     fn run_end_must_be_0_or_1_once_and_match_the_exit() {
         let a = assess(&clean(&["a"], 1), &["a"], HarnessEnd::Code(0));
-        assert!(a.violations.iter().any(|l| l.starts_with("run_end disagrees")), "{:?}", a.violations);
+        assert!(
+            a.violations
+                .iter()
+                .any(|l| l.starts_with("run_end disagrees")),
+            "{:?}",
+            a.violations
+        );
         let bad = clean(&["a"], 0).replace("\"exit\":0", "\"exit\":2");
         let a = assess(&bad, &["a"], HarnessEnd::Code(2));
-        assert!(a.violations.iter().any(|l| l.starts_with("run_end exit not integer 0 or 1")));
+        assert!(
+            a.violations
+                .iter()
+                .any(|l| l.starts_with("run_end exit not integer 0 or 1"))
+        );
         let twice = format!("{}{}", clean(&["a"], 0), line("run_end", ",\"exit\":0"));
         let a = assess(&twice, &["a"], HarnessEnd::Code(0));
         assert!(a.violations.iter().any(|l| l.starts_with("second run_end")));
@@ -507,7 +611,10 @@ mod tests {
     #[test]
     fn run_error_is_parsed_rendered_and_must_mean_exit_2() {
         let mut nd = start();
-        nd.push_str(&line("setup_stage", ",\"stage\":\"feed_load\",\"feed\":\"eth\""));
+        nd.push_str(&line(
+            "setup_stage",
+            ",\"stage\":\"feed_load\",\"feed\":\"eth\"",
+        ));
         nd.push_str(&line(
             "run_error",
             ",\"stage\":\"feed_load\",\"feed\":\"eth\",\"role\":\"base\",\"path\":\"/c/f.csv\",\"error\":\"no such file\"",
@@ -521,7 +628,10 @@ mod tests {
         );
         assert_eq!(RunErrorRecord::from_json(&rec.to_json()), Some(rec.clone()));
         // Stored whole: kind, version, explicit nulls and unknown fields.
-        let odd = line("run_error", ",\"stage\":\"s\",\"feed\":null,\"error\":\"e\",\"hint\":{\"x\":1}");
+        let odd = line(
+            "run_error",
+            ",\"stage\":\"s\",\"feed\":null,\"error\":\"e\",\"hint\":{\"x\":1}",
+        );
         let a = assess(&odd, &["a"], HarnessEnd::Code(2));
         let stored: Value = serde_json::from_str(&a.run_error.unwrap().to_json()).unwrap();
         assert_eq!(stored["kind"], "run_error");
@@ -530,13 +640,32 @@ mod tests {
         assert_eq!(stored["hint"]["x"], 1);
         // Any exit but 2 is a violation, unless brokkr killed the harness.
         let a = assess(&nd, &["a"], HarnessEnd::Code(0));
-        assert!(a.violations.iter().any(|l| l.starts_with("run_error without process exit 2")));
-        assert!(assess(&nd, &["a"], HarnessEnd::Backstop).violations.is_empty());
-        assert!(assess(&nd, &["a"], HarnessEnd::Interrupted).violations.is_empty());
+        assert!(
+            a.violations
+                .iter()
+                .any(|l| l.starts_with("run_error without process exit 2"))
+        );
+        assert!(
+            assess(&nd, &["a"], HarnessEnd::Backstop)
+                .violations
+                .is_empty()
+        );
+        assert!(
+            assess(&nd, &["a"], HarnessEnd::Interrupted)
+                .violations
+                .is_empty()
+        );
         // A second run_error is a violation.
-        let twice = format!("{nd}{}", line("run_error", ",\"stage\":\"x\",\"error\":\"y\""));
+        let twice = format!(
+            "{nd}{}",
+            line("run_error", ",\"stage\":\"x\",\"error\":\"y\"")
+        );
         let a = assess(&twice, &["a"], HarnessEnd::Code(2));
-        assert!(a.violations.iter().any(|l| l.starts_with("second run_error")));
+        assert!(
+            a.violations
+                .iter()
+                .any(|l| l.starts_with("second run_error"))
+        );
     }
 
     #[test]
@@ -545,11 +674,18 @@ mod tests {
         nd.push_str(&line("setup_complete", ""));
         nd.push_str(&line("probe_start", ",\"probe\":\"a\""));
         let a = assess(&nd, &["a", "b"], HarnessEnd::Code(0));
-        assert!(a.violations.iter().any(|l| l.starts_with("process exited with neither")));
+        assert!(
+            a.violations
+                .iter()
+                .any(|l| l.starts_with("process exited with neither"))
+        );
         let a = assess(&nd, &["a", "b"], HarnessEnd::Signal(9));
         assert!(a.violations.is_empty(), "{:?}", a.violations);
         assert_eq!(a.outstanding, ids(&["a"]));
-        assert_eq!(a.stage_context().unwrap(), "setup completed; probes were running");
+        assert_eq!(
+            a.stage_context().unwrap(),
+            "setup completed; probes were running"
+        );
     }
 
     #[test]
@@ -560,29 +696,60 @@ mod tests {
         nd.push_str(&line("run_end", ",\"exit\":0"));
         let a = assess(&nd, &["a", "b"], HarnessEnd::Code(0));
         let v = a.violations.join("\n");
-        assert!(v.contains("disposition outside its probe_start..probe_end: a"), "{v}");
-        assert!(v.contains("run_end claims completion, but no probe_start for: b"), "{v}");
+        assert!(
+            v.contains("disposition outside its probe_start..probe_end: a"),
+            "{v}"
+        );
+        assert!(
+            v.contains("run_end claims completion, but no probe_start for: b"),
+            "{v}"
+        );
     }
 
     #[test]
     fn a_contract_stream_without_run_start_is_rejected() {
         let nd = clean(&["a"], 0).replacen(&start(), "", 1);
         let a = assess(&nd, &["a"], HarnessEnd::Code(0));
-        assert_eq!(a.violations, vec!["no run_start (it must be the first line of stdout): missing".to_owned()]);
+        assert_eq!(
+            a.violations,
+            vec!["no run_start (it must be the first line of stdout): missing".to_owned()]
+        );
         // Dispositions only: no contract observed, so no run_start needed.
-        assert!(assess(&disp("a"), &["a"], HarnessEnd::Code(0)).violations.is_empty());
+        assert!(
+            assess(&disp("a"), &["a"], HarnessEnd::Code(0))
+                .violations
+                .is_empty()
+        );
     }
 
     #[test]
     fn run_start_must_be_physical_line_one() {
         // A leading blank line.
-        let a = assess(&format!("\n{}", clean(&["a"], 0)), &["a"], HarnessEnd::Code(0));
-        assert_eq!(a.violations, vec!["run_start is not the first line of stdout: physical line 2".to_owned()]);
+        let a = assess(
+            &format!("\n{}", clean(&["a"], 0)),
+            &["a"],
+            HarnessEnd::Code(0),
+        );
+        assert_eq!(
+            a.violations,
+            vec!["run_start is not the first line of stdout: physical line 2".to_owned()]
+        );
         // After a disposition, a summary, an unknown kind or an invalid line.
-        for before in [disp("zz"), "{\"summary\":true}\n".to_owned(), "{\"kind\":\"future\"}\n".to_owned(), "garbage\n".to_owned()] {
-            let a = assess(&format!("{before}{}", clean(&["a"], 0)), &["a"], HarnessEnd::Code(0));
+        for before in [
+            disp("zz"),
+            "{\"summary\":true}\n".to_owned(),
+            "{\"kind\":\"future\"}\n".to_owned(),
+            "garbage\n".to_owned(),
+        ] {
+            let a = assess(
+                &format!("{before}{}", clean(&["a"], 0)),
+                &["a"],
+                HarnessEnd::Code(0),
+            );
             assert!(
-                a.violations.iter().any(|l| l.starts_with("run_start is not the first line of stdout")),
+                a.violations
+                    .iter()
+                    .any(|l| l.starts_with("run_start is not the first line of stdout")),
                 "{before}: {:?}",
                 a.violations
             );
@@ -591,10 +758,16 @@ mod tests {
 
     #[test]
     fn a_bad_version_start_is_present_and_still_counts_as_a_duplicate() {
-        let nd = format!("{{\"kind\":\"run_start\",\"version\":2}}\n{}", clean(&["a"], 0));
+        let nd = format!(
+            "{{\"kind\":\"run_start\",\"version\":2}}\n{}",
+            clean(&["a"], 0)
+        );
         let a = assess(&nd, &["a"], HarnessEnd::Code(0));
         let v = a.violations.join("\n");
-        assert!(v.contains("contract line with a bad version: run_start at line 1 (unsupported: 2)"), "{v}");
+        assert!(
+            v.contains("contract line with a bad version: run_start at line 1 (unsupported: 2)"),
+            "{v}"
+        );
         assert!(v.contains("duplicate run_start: 2 run_start lines"), "{v}");
         assert!(!v.contains("no run_start"), "{v}");
         // Alone, a bad-version start gives its version defect, not "no run_start".
@@ -607,20 +780,31 @@ mod tests {
     #[test]
     fn a_lone_run_start_is_contract_bearing() {
         // Killed (spontaneously or by brokkr) with no terminal: incomplete, not a violation.
-        for end in [HarnessEnd::Signal(9), HarnessEnd::Backstop, HarnessEnd::Interrupted] {
+        for end in [
+            HarnessEnd::Signal(9),
+            HarnessEnd::Backstop,
+            HarnessEnd::Interrupted,
+        ] {
             let a = assess(&start(), &["a"], end);
             assert!(a.observed);
             assert!(a.violations.is_empty(), "{end:?}: {:?}", a.violations);
         }
         // A natural exit with no terminal record is the existing violation.
         let a = assess(&start(), &["a"], HarnessEnd::Code(0));
-        assert!(a.violations.iter().any(|l| l.starts_with("process exited with neither")));
+        assert!(
+            a.violations
+                .iter()
+                .any(|l| l.starts_with("process exited with neither"))
+        );
     }
 
     #[test]
     fn the_stage_is_context_until_setup_completes() {
         let nd = line("setup_stage", ",\"stage\":\"feed_load\",\"feed\":\"eth\"");
         let a = assess(&nd, &["a"], HarnessEnd::Signal(9));
-        assert_eq!(a.stage_context().unwrap(), "last setup stage seen (context only): feed_load (feed eth)");
+        assert_eq!(
+            a.stage_context().unwrap(),
+            "last setup stage seen (context only): feed_load (feed eth)"
+        );
     }
 }

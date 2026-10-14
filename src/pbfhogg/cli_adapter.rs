@@ -51,21 +51,40 @@ impl Command {
                     params,
                 ))
             }
-            Self::CheckRefs { mode, pbf, snapshot } => {
+            Self::CheckRefs {
+                mode,
+                pbf,
+                snapshot,
+            } => {
                 let params = CommandParams {
                     snapshot: snapshot.clone(),
                     ..Default::default()
                 };
                 Some((mode, pbf, PbfhoggCommand::CheckRefs, None, params))
             }
-            Self::CheckIds { mode, pbf, full, snapshot } => {
+            Self::CheckIds {
+                mode,
+                pbf,
+                full,
+                snapshot,
+            } => {
                 let params = CommandParams {
                     snapshot: snapshot.clone(),
                     ..Default::default()
                 };
-                Some((mode, pbf, PbfhoggCommand::CheckIds { full: *full }, None, params))
+                Some((
+                    mode,
+                    pbf,
+                    PbfhoggCommand::CheckIds { full: *full },
+                    None,
+                    params,
+                ))
             }
-            Self::Sort { mode, pbf, snapshot } => {
+            Self::Sort {
+                mode,
+                pbf,
+                snapshot,
+            } => {
                 let params = CommandParams {
                     snapshot: snapshot.clone(),
                     ..Default::default()
@@ -156,14 +175,22 @@ impl Command {
                     params,
                 ))
             }
-            Self::Getparents { mode, pbf, snapshot } => {
+            Self::Getparents {
+                mode,
+                pbf,
+                snapshot,
+            } => {
                 let params = CommandParams {
                     snapshot: snapshot.clone(),
                     ..Default::default()
                 };
                 Some((mode, pbf, PbfhoggCommand::Getparents, None, params))
             }
-            Self::Renumber { mode, pbf, snapshot } => {
+            Self::Renumber {
+                mode,
+                pbf,
+                snapshot,
+            } => {
                 let params = CommandParams {
                     snapshot: snapshot.clone(),
                     ..Default::default()
@@ -174,14 +201,22 @@ impl Command {
             // three runs ("all"). The fan-out happens in `main.rs`, same as
             // `extract --strategy all`, so this adapter no longer handles it.
             Self::MultiExtract { .. } => None,
-            Self::TimeFilter { mode, pbf, snapshot } => {
+            Self::TimeFilter {
+                mode,
+                pbf,
+                snapshot,
+            } => {
                 let params = CommandParams {
                     snapshot: snapshot.clone(),
                     ..Default::default()
                 };
                 Some((mode, pbf, PbfhoggCommand::TimeFilter, None, params))
             }
-            Self::BuildGeocodeIndex { mode, pbf, snapshot } => {
+            Self::BuildGeocodeIndex {
+                mode,
+                pbf,
+                snapshot,
+            } => {
                 let params = CommandParams {
                     snapshot: snapshot.clone(),
                     ..Default::default()
@@ -206,7 +241,9 @@ impl Command {
                 Some((
                     mode,
                     pbf,
-                    PbfhoggCommand::MergeChanges { simplify: *simplify },
+                    PbfhoggCommand::MergeChanges {
+                        simplify: *simplify,
+                    },
                     osc_seq.as_deref(),
                     params,
                 ))

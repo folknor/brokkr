@@ -70,10 +70,19 @@ mod tests {
     #[test]
     fn underscore_and_percent_are_literal() {
         assert!(matches("tags_filter", &contains_pattern("s_f")));
-        assert!(!matches("tags-filter", &contains_pattern("s_f")), "_ must not be a wildcard");
+        assert!(
+            !matches("tags-filter", &contains_pattern("s_f")),
+            "_ must not be a wildcard"
+        );
         assert!(matches("50%off", &prefix_pattern("50%")));
-        assert!(!matches("500off", &prefix_pattern("50%")), "% must not be a wildcard");
-        assert!(matches("a\\b", &prefix_pattern("a\\")), "the escape char itself is literal");
+        assert!(
+            !matches("500off", &prefix_pattern("50%")),
+            "% must not be a wildcard"
+        );
+        assert!(
+            matches("a\\b", &prefix_pattern("a\\")),
+            "the escape char itself is literal"
+        );
     }
 
     #[test]

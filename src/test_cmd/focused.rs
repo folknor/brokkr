@@ -65,7 +65,10 @@ impl ManifestHarness {
             .and_then(toml::Value::as_str)
             .unwrap_or_default()
             .to_owned();
-        let mut out = Self { lib_disabled: doc.get("lib").is_some_and(off), disabled: Vec::new() };
+        let mut out = Self {
+            lib_disabled: doc.get("lib").is_some_and(off),
+            disabled: Vec::new(),
+        };
         for kind in ["bin", "test", "bench", "example"] {
             let Some(entries) = doc.get(kind).and_then(toml::Value::as_array) else {
                 continue;
@@ -86,7 +89,10 @@ impl ManifestHarness {
     fn excludes(&self, binary: &TestBinary) -> bool {
         match binary.selector_kind() {
             "lib" => self.lib_disabled,
-            kind => self.disabled.iter().any(|(k, n)| k == kind && *n == binary.target),
+            kind => self
+                .disabled
+                .iter()
+                .any(|(k, n)| k == kind && *n == binary.target),
         }
     }
 }
@@ -102,7 +108,10 @@ pub(crate) struct Eligibility<'a> {
 /// it: an excluded one is never executed for that.
 pub(crate) fn eligibility(binaries: &[TestBinary]) -> Result<Eligibility<'_>, DevError> {
     let mut manifests: HashMap<PathBuf, ManifestHarness> = HashMap::new();
-    let mut out = Eligibility { eligible: Vec::new(), excluded: Vec::new() };
+    let mut out = Eligibility {
+        eligible: Vec::new(),
+        excluded: Vec::new(),
+    };
     for b in binaries {
         let path = b.manifest_dir.join("Cargo.toml");
         if !manifests.contains_key(&path) {
@@ -113,9 +122,8 @@ pub(crate) fn eligibility(binaries: &[TestBinary]) -> Result<Eligibility<'_>, De
                     b.label()
                 ))
             })?;
-            let parsed = ManifestHarness::parse(&text).map_err(|e| {
-                DevError::Config(format!("cannot parse {}: {e}", path.display()))
-            })?;
+            let parsed = ManifestHarness::parse(&text)
+                .map_err(|e| DevError::Config(format!("cannot parse {}: {e}", path.display())))?;
             manifests.insert(path.clone(), parsed);
         }
         if manifests.get(&path).is_some_and(|m| m.excludes(b)) {
@@ -140,17 +148,29 @@ pub(super) fn discover(
     project_root: &Path,
 ) -> Result<Vec<Listed>, DevError> {
     let (cwd, envelope) = runtime.envelope(binary, env)?;
-    let cwd = if cwd.as_os_str() == "." { project_root.to_path_buf() } else { cwd };
-    let env_pairs: Vec<(&str, &str)> =
-        envelope.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    let command = format!("{} {} (cwd {})", binary.executable, DISCOVERY_ARGS.join(" "), cwd.display());
+    let cwd = if cwd.as_os_str() == "." {
+        project_root.to_path_buf()
+    } else {
+        cwd
+    };
+    let env_pairs: Vec<(&str, &str)> = envelope
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let command = format!(
+        "{} {} (cwd {})",
+        binary.executable,
+        DISCOVERY_ARGS.join(" "),
+        cwd.display()
+    );
     let run = test_runner::run_listing(
         &binary.executable,
         &DISCOVERY_ARGS,
         &cwd,
         &env_pairs,
         test_runner::TEST_TIMEOUT,
-    ).inspect_err(|_| crate::output::run_msg(&command))?;
+    )
+    .inspect_err(|_| crate::output::run_msg(&command))?;
     let fail = |why: String| {
         let stderr = String::from_utf8_lossy(&run.stderr);
         DevError::Build(format!(
@@ -176,7 +196,10 @@ pub(super) fn discover(
         ));
     }
     if !run.status.success() {
-        return Err(fail(format!("the listing exited unsuccessfully ({})", run.status)));
+        return Err(fail(format!(
+            "the listing exited unsuccessfully ({})",
+            run.status
+        )));
     }
     let stdout = std::str::from_utf8(&run.stdout)
         .map_err(|_| fail("the listing was not valid UTF-8".into()))?;
@@ -223,7 +246,9 @@ fn parse_discovery(stdout: &str) -> Result<Vec<Listed>, String> {
                 } else {
                     benches += 1;
                 }
-                entries.push(Listed { name: name.to_owned() });
+                entries.push(Listed {
+                    name: name.to_owned(),
+                });
             }
             ("suite", "completed") => {
                 if !started || completed {
@@ -249,9 +274,11 @@ fn parse_discovery(stdout: &str) -> Result<Vec<Listed>, String> {
         }
     }
     if !started {
-        return Err("it produced no libtest discovery output - not a libtest harness, or a \
+        return Err(
+            "it produced no libtest discovery output - not a libtest harness, or a \
                     custom one that ignores `--list --format json`"
-            .into());
+                .into(),
+        );
     }
     if !completed {
         return Err("the discovery sequence never completed - the listing was cut short".into());
@@ -262,7 +289,11 @@ fn parse_discovery(stdout: &str) -> Result<Vec<Listed>, String> {
 /// libtest's filter rule: the full name contains the filter, or equals it
 /// under `--exact`.
 pub(super) fn matches(name: &str, filter: &str, exact: bool) -> bool {
-    if exact { name == filter } else { name.contains(filter) }
+    if exact {
+        name == filter
+    } else {
+        name.contains(filter)
+    }
 }
 
 #[cfg(test)]
@@ -298,32 +329,56 @@ mod tests {
             &entry("benchmark", "b::bench", false),
             &close(2, 1, 1),
         ]);
-        let names: Vec<String> = parse_discovery(&s).unwrap().into_iter().map(|l| l.name).collect();
+        let names: Vec<String> = parse_discovery(&s)
+            .unwrap()
+            .into_iter()
+            .map(|l| l.name)
+            .collect();
         assert_eq!(names, vec!["a::one", "a::two", "b::bench"]);
     }
 
     // An empty harness is a real, empty listing - bracketed and counted.
     #[test]
     fn an_empty_listing_is_still_a_listing() {
-        assert_eq!(parse_discovery(&stream(&[OPEN, &close(0, 0, 0)])).unwrap(), Vec::new());
+        assert_eq!(
+            parse_discovery(&stream(&[OPEN, &close(0, 0, 0)])).unwrap(),
+            Vec::new()
+        );
     }
 
     // The cases terse output cannot tell apart from a smaller real listing.
     #[test]
     fn silence_truncation_and_miscounts_are_errors_not_empty_listings() {
-        assert!(parse_discovery("").unwrap_err().contains("no libtest discovery output"));
+        assert!(
+            parse_discovery("")
+                .unwrap_err()
+                .contains("no libtest discovery output")
+        );
         assert!(parse_discovery("my own harness ran\n").is_err());
         let truncated = stream(&[OPEN, &entry("test", "a::one", false)]);
-        assert!(parse_discovery(&truncated).unwrap_err().contains("never completed"));
+        assert!(
+            parse_discovery(&truncated)
+                .unwrap_err()
+                .contains("never completed")
+        );
         let miscounted = stream(&[OPEN, &entry("test", "a::one", false), &close(2, 0, 0)]);
-        assert!(parse_discovery(&miscounted).unwrap_err().contains("disagree"));
+        assert!(
+            parse_discovery(&miscounted)
+                .unwrap_err()
+                .contains("disagree")
+        );
     }
 
     // A static constructor printing to stdout does not invalidate a listing
     // whose bracket and counts are intact.
     #[test]
     fn constructor_noise_around_a_complete_listing_is_passed_over() {
-        let s = stream(&["logger initialised", OPEN, &entry("test", "a::one", false), &close(1, 0, 0)]);
+        let s = stream(&[
+            "logger initialised",
+            OPEN,
+            &entry("test", "a::one", false),
+            &close(1, 0, 0),
+        ]);
         assert_eq!(parse_discovery(&s).unwrap().len(), 1);
     }
 
@@ -362,8 +417,14 @@ harness = false
         .unwrap();
         assert!(m.excludes(&binary("rlib", "pkg")), "[lib] harness = false");
         assert!(m.excludes(&binary("test", "ui")));
-        assert!(!m.excludes(&binary("test", "integration")), "harness defaults to true");
-        assert!(m.excludes(&binary("bin", "pkg")), "an unnamed [[bin]] is named for the package");
+        assert!(
+            !m.excludes(&binary("test", "integration")),
+            "harness defaults to true"
+        );
+        assert!(
+            m.excludes(&binary("bin", "pkg")),
+            "an unnamed [[bin]] is named for the package"
+        );
         // A same-named target of another kind is a different target.
         assert!(!m.excludes(&binary("example", "ui")));
     }

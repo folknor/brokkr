@@ -505,8 +505,7 @@ pub(crate) fn refuse_configured_runner(
             .rev()
             .find(|(k, _)| *k == key)
             .map(|(_, v)| (*v).to_owned())
-            .or_else(|| std::env::var(key).ok())
-            .filter(|v| !v.is_empty())
+            .or_else(|| std::env::var_os(key).map(|v| v.to_string_lossy().into_owned()))
     };
     if let Some(target) = effective("CARGO_BUILD_TARGET") {
         return Err(DevError::Config(format!(

@@ -52,6 +52,8 @@ pub fn run(
             metadata: vec![],
         };
 
-        harness.run_external(&config, &binary, &args, project_root).map(|_| ())
+        harness
+            .run_external(&config, &binary, &args, project_root)
+            .map(|_| ())
     })
 }

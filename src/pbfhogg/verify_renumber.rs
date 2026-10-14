@@ -199,13 +199,8 @@ pub fn run(
     let pbfhogg_out_str = pbfhogg_out.display().to_string();
 
     // --- osmium renumber ------------------------------------------------
-    let mut osmium_args: Vec<&str> = vec![
-        "renumber",
-        &pbf_str,
-        "-o",
-        &osmium_out_str,
-        "--overwrite",
-    ];
+    let mut osmium_args: Vec<&str> =
+        vec!["renumber", &pbf_str, "-o", &osmium_out_str, "--overwrite"];
     if let Some(sid) = start_id {
         osmium_args.push("--start-id");
         osmium_args.push(sid);
@@ -221,12 +216,7 @@ pub fn run(
     ));
 
     // --- pbfhogg renumber -----------------------------------------------
-    let mut pbfhogg_args: Vec<&str> = vec![
-        "renumber",
-        &pbf_str,
-        "-o",
-        &pbfhogg_out_str,
-    ];
+    let mut pbfhogg_args: Vec<&str> = vec!["renumber", &pbf_str, "-o", &pbfhogg_out_str];
     if let Some(sid) = start_id {
         pbfhogg_args.push("--start-id");
         pbfhogg_args.push(sid);
@@ -243,14 +233,8 @@ pub fn run(
 
     // --- pbfhogg diff (summary + context + verbose) ---------------------
     // diff exits non-zero when mismatches exist, so do not check_exit.
-    let captured = harness.run_pbfhogg(&[
-        "diff",
-        "-s",
-        "-c",
-        "-v",
-        &osmium_out_str,
-        &pbfhogg_out_str,
-    ])?;
+    let captured =
+        harness.run_pbfhogg(&["diff", "-s", "-c", "-v", &osmium_out_str, &pbfhogg_out_str])?;
     let stdout = String::from_utf8_lossy(&captured.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&captured.stderr).into_owned();
     fs::write(&diff_log, format!("{stdout}{stderr}"))?;
@@ -328,7 +312,11 @@ pub fn run(
     }
 
     // --- Pass/fail decision ---------------------------------------------
-    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     let threshold = ((total_relations as f64) * 0.10) as u64;
 
     let fail_reason: Option<String> = if summary.left != summary.right {
