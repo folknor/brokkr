@@ -33,9 +33,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::DevError;
-
-/// Refuse below this share of a filesystem's size available.
-pub(crate) const MIN_FREE_PERCENT: u64 = 5;
+use crate::host::storage::{MIN_FREE_PERCENT, is_low, percent};
 
 /// The host gate, run on every fresh lock hold. The command's spec decides
 /// whether it is gated at all (`clean` and `env` are not); the build root is
@@ -102,19 +100,6 @@ fn candidates(
         out.push(("CARGO_TARGET_DIR", build_root.join(dir)));
     }
     out
-}
-
-/// True when `free` is below [`MIN_FREE_PERCENT`] of `total`. A zero total
-/// means the size could not be read, which fails open. Shared with `brokkr
-/// env`, which flags a storage row by the same rule.
-pub(crate) fn is_low(free: u64, total: u64) -> bool {
-    total > 0 && u128::from(free) * 100 < u128::from(total) * u128::from(MIN_FREE_PERCENT)
-}
-
-/// `free` as a percentage of a nonzero `total`, for display.
-#[allow(clippy::cast_precision_loss)] // a display percentage
-pub(crate) fn percent(free: u64, total: u64) -> f64 {
-    free as f64 * 100.0 / total as f64
 }
 
 #[cfg(test)]

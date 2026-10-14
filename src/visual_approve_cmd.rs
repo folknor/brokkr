@@ -1,14 +1,12 @@
 //! Visual baseline approval.
-use crate::{
-    config::project_config::ProjectConfig, error::DevError, litehtml, project::Project, sluggrs,
-};
+use crate::{config::project_config::ProjectConfig, error::DevError, litehtml, sluggrs};
 use std::path::Path;
 
 pub(crate) fn cmd_approve(
     project_config: &ProjectConfig,
-    project: Project,
     project_root: &Path,
     build_root: &Path,
+    included_config_files: &[std::path::PathBuf],
     fixture: Vec<String>,
     all: bool,
 ) -> Result<(), DevError> {
@@ -33,7 +31,7 @@ pub(crate) fn cmd_approve(
                 fixture
             };
             for id in &ids {
-                litehtml::cmd::approve(project, project_root, build_root, cfg, id)?;
+                litehtml::cmd::approve(project_root, build_root, included_config_files, cfg, id)?;
             }
             Ok(())
         }
@@ -44,7 +42,7 @@ pub(crate) fn cmd_approve(
                 fixture
             };
             for id in &ids {
-                sluggrs::cmd::approve(project, project_root, build_root, cfg, id)?;
+                sluggrs::cmd::approve(project_root, build_root, included_config_files, cfg, id)?;
             }
             Ok(())
         }

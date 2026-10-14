@@ -7,19 +7,18 @@ use crate::config;
 use crate::context::{MeasurementSession, bootstrap, bootstrap_config};
 use crate::error::DevError;
 use crate::measure::MeasureRequest;
-use crate::project::{self, Project};
 
 pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
     let ctx = MeasurementSession::new_for_request(req)?;
     // The input assertions come from the same resolved entry that supplied
     // the path, not from a second lookup through the raw host config.
-    let pbf = crate::resolve::resolve_pbf_entry(
+    let pbf = crate::datasets::resolve::resolve_pbf_entry(
         req.dataset,
         req.variant,
         &ctx.paths,
         req.project_root.as_path(),
     )?;
-    let file_mb = crate::resolve::file_size_mb(&pbf.path)?;
+    let file_mb = crate::datasets::resolve::file_size_mb(&pbf.path)?;
     // `bench all`'s self arm is a tilegen run and takes the same contract one
     // gets. It used to hardcode a bare PipelineOpts and lean on ocean
     // auto-detection, so what it measured depended on what was in data/.
@@ -42,22 +41,18 @@ pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
 /// `brokkr compare-tiles` - the lenient per-layer census. Native since the
 /// corpus redesign, so it needs no build and no lock.
 pub(crate) fn compare_tiles(
-    project: Project,
     file_a: &str,
     file_b: &str,
     sample: Option<usize>,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Elivagar, "compare-tiles")?;
     super::compare_tiles::run(file_a, file_b, sample)
 }
 
 pub(crate) fn download_ocean(
     dev_config: &config::DevConfig,
-    project: Project,
     project_root: &crate::project::ProjectRoot,
     build_root: &crate::project::BuildRoot,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Elivagar, "download-ocean")?;
     let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
     super::download_ocean::run(&paths.data_dir)
@@ -65,11 +60,9 @@ pub(crate) fn download_ocean(
 
 pub(crate) fn download_natural_earth(
     dev_config: &config::DevConfig,
-    project: Project,
     project_root: &crate::project::ProjectRoot,
     build_root: &crate::project::BuildRoot,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Elivagar, "download-natural-earth")?;
     let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
     super::download_natural_earth::run(&paths.data_dir)
@@ -78,9 +71,9 @@ pub(crate) fn download_natural_earth(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn verify(
     dev_config: &config::DevConfig,
-    project: Project,
     project_root: &crate::project::ProjectRoot,
     build_root: &crate::project::BuildRoot,
+    included_config_files: &[PathBuf],
     dataset: &str,
     variant: &str,
     commit: Option<&str>,
@@ -89,12 +82,18 @@ pub(crate) fn verify(
     geometry_stats: bool,
     unique_payloads: bool,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Elivagar, "verify")?;
     let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
     let build_root = build_root.as_path();
     let pmtiles_path = ArchiveStore::new(paths.output_dir.as_path())
-        .resolve(dataset, variant, commit, file, build_root)?
+        .resolve(
+            dataset,
+            variant,
+            commit,
+            file,
+            build_root,
+            included_config_files,
+        )?
         .path;
     super::verify::run(
         &pmtiles_path,
@@ -108,20 +107,26 @@ pub(crate) fn verify(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn inspect(
     dev_config: &config::DevConfig,
-    project: Project,
     project_root: &crate::project::ProjectRoot,
     build_root: &crate::project::BuildRoot,
+    included_config_files: &[PathBuf],
     dataset: &str,
     variant: &str,
     commit: Option<&str>,
     file: Option<&str>,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Elivagar, "pmtiles-inspect")?;
     let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
     let build_root = build_root.as_path();
     let pmtiles_path = ArchiveStore::new(paths.output_dir.as_path())
-        .resolve(dataset, variant, commit, file, build_root)?
+        .resolve(
+            dataset,
+            variant,
+            commit,
+            file,
+            build_root,
+            included_config_files,
+        )?
         .path;
     super::inspect::run(&pmtiles_path, build_root, &paths.features)
 }
@@ -129,9 +134,9 @@ pub(crate) fn inspect(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn diag(
     dev_config: &config::DevConfig,
-    project: Project,
     project_root: &crate::project::ProjectRoot,
     build_root: &crate::project::BuildRoot,
+    included_config_files: &[PathBuf],
     dataset: &str,
     variant: &str,
     commit: Option<&str>,
@@ -140,12 +145,18 @@ pub(crate) fn diag(
     x: u32,
     y: u32,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Elivagar, "diag")?;
     let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
     let build_root = build_root.as_path();
     let pmtiles_path = ArchiveStore::new(paths.output_dir.as_path())
-        .resolve(dataset, variant, commit, file, build_root)?
+        .resolve(
+            dataset,
+            variant,
+            commit,
+            file,
+            build_root,
+            included_config_files,
+        )?
         .path;
     super::diag::run(&pmtiles_path, build_root, &paths.features, z, x, y)
 }
@@ -153,9 +164,9 @@ pub(crate) fn diag(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn svg(
     dev_config: &config::DevConfig,
-    project: Project,
     project_root: &crate::project::ProjectRoot,
     build_root: &crate::project::BuildRoot,
+    included_config_files: &[PathBuf],
     dataset: &str,
     variant: &str,
     commit: Option<&str>,
@@ -168,12 +179,18 @@ pub(crate) fn svg(
     layers: Option<&str>,
     output_path: Option<&Path>,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Elivagar, "svg")?;
     let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
     let build_root = build_root.as_path();
     let pmtiles_path = ArchiveStore::new(paths.output_dir.as_path())
-        .resolve(dataset, variant, commit, file, build_root)?
+        .resolve(
+            dataset,
+            variant,
+            commit,
+            file,
+            build_root,
+            included_config_files,
+        )?
         .path;
     super::svg::run(
         &pmtiles_path,
@@ -201,9 +218,9 @@ pub(crate) fn svg(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn regress(
     dev_config: &config::DevConfig,
-    project: Project,
     project_root: &crate::project::ProjectRoot,
     build_root: &crate::project::BuildRoot,
+    included_config_files: &[PathBuf],
     dataset: &str,
     variant: &str,
     commit: Option<&str>,
@@ -218,12 +235,18 @@ pub(crate) fn regress(
     overlay_max: Option<usize>,
     json: bool,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Elivagar, "regress")?;
     let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
     let build_root = build_root.as_path();
     let current = ArchiveStore::new(paths.output_dir.as_path())
-        .resolve(dataset, variant, commit, file, build_root)?
+        .resolve(
+            dataset,
+            variant,
+            commit,
+            file,
+            build_root,
+            included_config_files,
+        )?
         .path;
     // The comparand is one of the two --against* flags (clap's required
     // ArgGroup guarantees exactly one is present). An explicit path is checked
@@ -244,7 +267,14 @@ pub(crate) fn regress(
         }
         None => {
             ArchiveStore::new(paths.output_dir.as_path())
-                .resolve(dataset, against_variant, against_commit, None, build_root)?
+                .resolve(
+                    dataset,
+                    against_variant,
+                    against_commit,
+                    None,
+                    build_root,
+                    included_config_files,
+                )?
                 .path
         }
     };
@@ -297,14 +327,13 @@ where
 #[allow(clippy::too_many_lines)]
 pub(crate) fn corpus(
     dev_config: &config::DevConfig,
-    project: Project,
     project_root: &crate::project::ProjectRoot,
     build_root: &crate::project::BuildRoot,
+    included_config_files: &[PathBuf],
     cmd: &PmtilesCorpusCommand,
 ) -> Result<(), DevError> {
     use super::corpus as gate;
 
-    project::require(project, Project::Elivagar, "pmtiles-corpus")?;
     let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
     let build_root = build_root.as_path();
@@ -320,6 +349,7 @@ pub(crate) fn corpus(
                 a.commit.as_deref(),
                 a.file.as_deref(),
                 build_root,
+                included_config_files,
             )?
             .path)
     };

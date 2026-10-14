@@ -15,9 +15,9 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use crate::datasets::Bbox;
 use crate::error::DevError;
 use crate::output;
-use crate::resolve::Bbox;
 use crate::shutdown::{self, SigtermGuard};
 
 /// The owner-write bit - the one bit the shell script's `chmod -R u-w`

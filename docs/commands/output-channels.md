@@ -21,7 +21,7 @@ binary itself never knows what mode it runs under. This file is the map.
 
 Both live under the project root's `.brokkr/` (never a `--commit` worktree's)
 and are resolved identically for every project by `BenchHarness::new_with_lock`
-(`src/harness_mod/types_run.rs`), which reads git provenance from the build root.
+(`src/measure.rs`), which reads git provenance from the build root.
 See `docs/commands/measure.md` for the sidecar's sampling/marker protocol.
 
 What brokkr itself prints around a measured run (the `run i/n` line, the
@@ -53,7 +53,7 @@ A running binary can hand data to brokkr three ways:
    the terminal) or captured (drained into a buffer and dropped). Never
    parsed, never stored.
 2. **stderr `key=value` lines** - structured metrics, parsed by
-   `parse_kv_lines` (`src/harness_mod/format_sidecar.rs`) on both external
+   `parse_kv_lines` (`src/measure/kv.rs`) on both external
    paths. The timing contract below applies to the kv harness path only; the
    `run_external_ok` path keeps every pair, `elapsed_ms` included, as an
    ordinary counter beside its own wall-clock. On the kv path a `elapsed_ms=` (or its alias `total_ms=`) line is **mandatory** on that
@@ -77,7 +77,7 @@ A running binary can hand data to brokkr three ways:
 
 ## Derived fields on the `[result]` line
 
-`format_result_line` (`src/harness_mod/format_sidecar.rs`) adds fields brokkr
+`format_result_line` (`src/measure/record.rs`) adds fields brokkr
 computes itself, on top of the raw kv pairs:
 
 - `read_mbs` - appears whenever the input size is known (`config.input_mb`,

@@ -34,8 +34,8 @@ use crate::error::DevError;
 use crate::output;
 use crate::piners::corpus_db::query::DispositionRow;
 use crate::piners::corpus_db::{self, CorpusDb, Shaped};
+use crate::piners::db_paths::corpus_runs_db_path;
 use crate::request::CorpusQuery;
-use crate::resolve::corpus_runs_db_path;
 
 pub fn cmd(project_root: &Path, q: &CorpusQuery) -> Result<(), DevError> {
     validate_query(q)?;

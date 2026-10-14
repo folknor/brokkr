@@ -12,7 +12,7 @@
 /// always tests in the dev profile) and `brokkr test --debug`,
 /// `"release"` for the default `brokkr test` invocation.
 pub(crate) fn build_test_env(
-    project: Option<Project>,
+    project: Option<&Project>,
     target_dir: &Path,
     profile_dir: &str,
 ) -> Vec<(String, String)> {
@@ -118,7 +118,7 @@ pub(crate) fn sweep_cargo_env(
 /// selects the cargo args it must pass alongside these.
 pub(crate) fn sweep_runtime_env(
     sweep: &PlannedSweep,
-    project: Option<Project>,
+    project: Option<&Project>,
     meta_target_dir: &Path,
     profile_dir: &str,
     allow_flags: &[String],

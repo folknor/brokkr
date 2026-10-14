@@ -165,7 +165,7 @@ pub(crate) fn cmd_check(
     // per-phase datum the `--json` summary carries.
     let mut failing_phase: Option<Phase> = None;
     let background = BackgroundScripts::start(project_root, script_checks, skip(Phase::ScriptCheck));
-    let mut run_phases = || -> Result<(), PhaseFailure> {
+    let run_phases = || -> Result<(), PhaseFailure> {
         run_convention_phases(
             &ConventionPhaseArgs {
                 project_root,
@@ -853,7 +853,7 @@ fn run_build_phases(
             let lanes = prepared.as_ref().map(|p| &p.prep.lanes);
             test_failure = run_test_phase(
                 &TestPhaseArgs {
-                    project: a.project,
+                    project: a.project.clone(),
                     project_root: a.project_root,
                     state_root: a.state_root,
                     sweeps: a.active_sweeps,
@@ -907,7 +907,7 @@ fn run_prepare_phase(a: &BuildPhaseArgs<'_>, certifying: bool) -> Result<Prepare
     let target_dir = info.target_dir;
     let allow_flags = crate::config::check::test_phase_allow_flags(a.lints);
     let inputs = LaneInputs {
-        project: a.project,
+        project: a.project.clone(),
         project_root: a.project_root,
         state_root: a.state_root,
         target_dir: &target_dir,

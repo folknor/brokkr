@@ -99,12 +99,13 @@ message = "query the toolchain through crate::cargo::rustc::load, not a fresh ru
 name = "elivagar-crates-through-the-seam"
 pattern = '(?:^|[^:\w])(?:elivagar|protohoggr)::'
 paths = ["src/**/*.rs"]
-exclude = ["src/elivagar/eliv.rs", "src/main.rs", "src/main_parts/bootstrap.rs", "src/verify_cmd.rs"]
+exclude = ["src/elivagar/eliv.rs", "src/main.rs", "src/main_parts/bootstrap.rs", "src/main_parts/dispatch.rs", "src/verify_cmd.rs"]
 region = "code"
 message = "reach the elivagar and protohoggr crates through src/elivagar/eliv.rs"
 
-# The probe builds this tree's guard and gives each invocation a private HOME
-# and private lock files. It does not touch the live lock or need `brokkr install`.
+# The probe builds this tree's guard in its own persistent target dir and gives
+# each invocation a private HOME and private lock files. It does not touch the
+# live lock or need `brokkr install`.
 [[script_check]]
 name = "rustc-guard-decision-probe"
 command = "python3 scripts/guard-decision-probe.py"

@@ -213,7 +213,7 @@ was no `--file` escape hatch to reach an archive that isn't dataset output
 (the world artifact `data/ocean-tiles.pmtiles` is exactly that case). It also
 sat under the `Command::Verify` worktree wrapper, where `--commit` meant
 "rebuild that binary" rather than "open that archive". `run()` in
-`src/main_parts/bootstrap.rs` now dispatches this one variant *before*
+`src/main_parts/dispatch.rs` now dispatches this one variant *before*
 `with_worktree` and rejects the outer `brokkr verify --commit` with a message
 pointing at the subcommand flag; the rest of `VerifyCommand` (pbfhogg's
 cross-validators, which genuinely do compare a historical binary against a

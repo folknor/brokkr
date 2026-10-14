@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::build::{self, BuildConfig};
+use crate::build::{self, BuildConfig, CargoProfile};
 use crate::config::HarnessConfig;
 use crate::error::DevError;
 
@@ -38,7 +38,7 @@ pub struct HarnessBuild {
 pub fn build_for_harness(
     project_root: &Path,
     harness_cfg: &HarnessConfig,
-    debug: bool,
+    profile: CargoProfile,
     on_spawn: Option<&dyn Fn(u32)>,
     on_done: Option<&dyn Fn()>,
     isolation: crate::shutdown::ChildIsolation<'_>,
@@ -47,7 +47,7 @@ pub fn build_for_harness(
 
     // No announcement of its own: the `[build]` lines cargo_build prints
     // already name the package, features and profile.
-    let cfg = BuildConfig::for_harness(harness_cfg, debug);
+    let cfg = BuildConfig::for_harness_with_profile(harness_cfg, profile);
     let result = build::cargo_build_observed(&cfg, project_root, on_spawn, isolation);
     if let Some(cb) = on_done {
         cb();

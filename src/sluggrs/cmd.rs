@@ -1,6 +1,5 @@
 //! Command dispatch for sluggrs visual snapshot testing.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::build;
@@ -9,7 +8,6 @@ use crate::config::project_config::sluggrs::{SluggrsConfig, SluggrsSnapshot};
 use crate::error::DevError;
 use crate::git;
 use crate::output;
-use crate::project::{self, Project};
 use crate::visual::engine::{self, Subject, SubjectItem, SummaryOptions};
 use crate::visual::{compare, status};
 
@@ -26,20 +24,6 @@ fn open_db_read_only(project_root: &Path) -> Result<SnapshotDb, DevError> {
 struct SnapshotOutcome {
     pixel_diff_pct: Option<f64>,
     status: status::Status,
-}
-
-fn validate_config(config: &SluggrsConfig) -> Result<(), DevError> {
-    let mut ids = HashSet::new();
-    for snapshot in &config.snapshots {
-        compare::validate_artifact_id(&snapshot.id, "snapshot")?;
-        if !ids.insert(snapshot.id.as_str()) {
-            return Err(DevError::Config(format!(
-                "duplicate sluggrs snapshot ID {:?}",
-                snapshot.id
-            )));
-        }
-    }
-    Ok(())
 }
 
 impl SubjectItem for SluggrsSnapshot {
@@ -457,17 +441,14 @@ impl Subject for SnapshotRunner<'_> {
 /// the code tree cargo and git run in - they differ only under the
 /// one-level-up layout.
 pub(crate) fn test(
-    project: Project,
     project_root: &Path,
     build_root: &Path,
+    included_config_files: &[PathBuf],
     sluggrs_config: &SluggrsConfig,
     args: &VisualArgs,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Sluggrs, "visual")?;
-    validate_config(sluggrs_config)?;
-
     let db = open_db(project_root)?;
-    let git_info = git::collect(build_root)?;
+    let git_info = git::collect_with_config_paths(build_root, included_config_files)?;
     let snapshots = resolve_snapshots(sluggrs_config, args.fixture.as_deref(), args.all)?;
 
     let binary = build_snapshot_binary(build_root)?;
@@ -503,14 +484,7 @@ pub(crate) fn test(
 // List command
 // ---------------------------------------------------------------------------
 
-pub(crate) fn list(
-    project: Project,
-    project_root: &Path,
-    sluggrs_config: &SluggrsConfig,
-) -> Result<(), DevError> {
-    project::require(project, Project::Sluggrs, "list")?;
-    validate_config(sluggrs_config)?;
-
+pub(crate) fn list(project_root: &Path, sluggrs_config: &SluggrsConfig) -> Result<(), DevError> {
     let db = open_db_read_only(project_root)?;
 
     output::sluggrs_msg(&format!(
@@ -540,16 +514,13 @@ pub(crate) fn list(
 /// `build_root` is the code tree whose cleanliness and commit the approval
 /// is pinned to; `project_root` holds the snapshots and the visual store.
 pub(crate) fn approve(
-    project: Project,
     project_root: &Path,
     build_root: &Path,
+    included_config_files: &[PathBuf],
     sluggrs_config: &SluggrsConfig,
     snapshot_id: &str,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Sluggrs, "approve")?;
-    validate_config(sluggrs_config)?;
-
-    let git_info = engine::collect_clean_approval("sluggrs", build_root)?;
+    let git_info = engine::collect_clean_approval("sluggrs", build_root, included_config_files)?;
 
     let db = open_db(project_root)?;
     let snapshot = resolve_snapshot(sluggrs_config, snapshot_id)?;
@@ -605,14 +576,7 @@ pub(crate) fn approve(
 // Status command
 // ---------------------------------------------------------------------------
 
-pub(crate) fn status(
-    project: Project,
-    project_root: &Path,
-    sluggrs_config: &SluggrsConfig,
-) -> Result<(), DevError> {
-    project::require(project, Project::Sluggrs, "visual-status")?;
-    validate_config(sluggrs_config)?;
-
+pub(crate) fn status(project_root: &Path, sluggrs_config: &SluggrsConfig) -> Result<(), DevError> {
     let db = open_db_read_only(project_root)?;
     let approvals = db.all_approvals()?;
 
@@ -663,9 +627,7 @@ fn print_snapshot_status(
 // Report command
 // ---------------------------------------------------------------------------
 
-pub(crate) fn report(project: Project, project_root: &Path, run_id: &str) -> Result<(), DevError> {
-    project::require(project, Project::Sluggrs, "report")?;
-
+pub(crate) fn report(project_root: &Path, run_id: &str) -> Result<(), DevError> {
     let db = open_db_read_only(project_root)?;
     let results = db.run_results(run_id)?;
 

@@ -163,19 +163,11 @@ impl BuildConfig {
     }
 
     /// Build config for an external harness crate described by a `[*.harness]`
-    /// block (`package` + optional `binary`/`features`). `debug` selects the
-    /// dev profile, otherwise release. Shared by
-    /// [`crate::ratatoskr::build::build_for_harness`] and the measured corpus
-    /// path (which appends the hotpath feature to the returned config before
-    /// building) - both build the same engine, so the config mapping lives once
-    /// here rather than being duplicated per caller.
-    pub fn for_harness(harness_cfg: &crate::config::HarnessConfig, debug: bool) -> Self {
-        Self::for_harness_with_profile(harness_cfg, CargoProfile::for_debug(debug))
-    }
-
-    /// Build config for a harness when its profile has already been resolved.
-    /// This keeps the artifact identity typed across callers that know the
-    /// effective profile rather than reconstructing it from a debug flag.
+    /// block (`package` + optional `binary`/`features`), under an
+    /// already-resolved profile. Shared by the ratatoskr and piners harness
+    /// builds and the measured corpus path (which appends the hotpath feature
+    /// to the returned config before building) - they build the same kind of
+    /// engine, so the config mapping lives once here.
     pub fn for_harness_with_profile(
         harness_cfg: &crate::config::HarnessConfig,
         profile: CargoProfile,
@@ -595,36 +587,69 @@ fn find_executable_artifact(
     let mut last_exe: Option<CargoExecutableArtifact> = None;
     let mut matched_exe: Option<CargoExecutableArtifact> = None;
 
-    for line in text.lines() {
-        let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
+    for (line_index, line) in text.lines().enumerate() {
+        let line_number = line_index + 1;
+        let val =
+            crate::cargo_json::parse_cargo_json_line(line, line_number).map_err(DevError::Build)?;
+        let Some(val) = val else {
             continue;
         };
-        if let Some(exe) = val.get("executable").and_then(serde_json::Value::as_str) {
-            let path = PathBuf::from(exe);
-            let target = val
-                .get("target")
-                .and_then(|target| target.get("name"))
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-                .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(str::to_owned))
-                .ok_or_else(|| {
-                    DevError::Build("cargo executable artifact missing target name".into())
-                })?;
-            let artifact = CargoExecutableArtifact { path, target };
-            if expected_name.is_some()
-                && artifact.path.file_stem().and_then(|s| s.to_str()) == expected_name
+        let Some(reason) = val.get("reason").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if reason != "compiler-artifact" {
+            if val
+                .get("executable")
+                .is_some_and(|executable| !executable.is_null())
             {
-                matched_exe = Some(CargoExecutableArtifact {
-                    path: artifact.path.clone(),
-                    target: artifact.target.clone(),
-                });
+                return Err(DevError::Build(format!(
+                    "unexpected cargo JSON record `{reason}` with an executable on stdout line {line_number}"
+                )));
             }
-            all_exes.push(CargoExecutableArtifact {
+            continue;
+        }
+        let Some(executable) = val.get("executable") else {
+            return Err(DevError::Build(format!(
+                "malformed compiler-artifact on cargo stdout line {line_number}: missing `executable`"
+            )));
+        };
+        if executable.is_null() {
+            continue;
+        }
+        let Some(exe) = executable.as_str() else {
+            return Err(DevError::Build(format!(
+                "malformed compiler-artifact on cargo stdout line {line_number}: `executable` is not a string or null"
+            )));
+        };
+        if exe.is_empty() {
+            return Err(DevError::Build(format!(
+                "malformed compiler-artifact on cargo stdout line {line_number}: empty `executable`"
+            )));
+        }
+        let path = PathBuf::from(exe);
+        let target = val
+            .get("target")
+            .and_then(|target| target.get("name"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(str::to_owned))
+            .ok_or_else(|| {
+                DevError::Build("cargo executable artifact missing target name".into())
+            })?;
+        let artifact = CargoExecutableArtifact { path, target };
+        if expected_name.is_some()
+            && artifact.path.file_stem().and_then(|s| s.to_str()) == expected_name
+        {
+            matched_exe = Some(CargoExecutableArtifact {
                 path: artifact.path.clone(),
                 target: artifact.target.clone(),
             });
-            last_exe = Some(artifact);
         }
+        all_exes.push(CargoExecutableArtifact {
+            path: artifact.path.clone(),
+            target: artifact.target.clone(),
+        });
+        last_exe = Some(artifact);
     }
 
     if let Some(exe) = matched_exe {
@@ -675,22 +700,55 @@ pub(crate) fn dump_compiler_errors(stdout: &[u8]) {
 fn rendered_diagnostics(stdout: &[u8]) -> Vec<(bool, String)> {
     let text = String::from_utf8_lossy(stdout);
     let mut out = Vec::new();
-    for line in text.lines() {
-        let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
+    for (line_index, line) in text.lines().enumerate() {
+        let line_number = line_index + 1;
+        let val = match crate::cargo_json::parse_cargo_json_line(line, line_number) {
+            Ok(Some(val)) => val,
+            Ok(None) => continue,
+            Err(error) => {
+                out.push((false, error));
+                continue;
+            }
         };
+        // Not a cargo record, or one of the record kinds that carries no
+        // diagnostic (cargo may add new kinds).
         if val.get("reason").and_then(serde_json::Value::as_str) != Some("compiler-message") {
             continue;
         }
-        let Some(message) = val.get("message") else {
+        let Some(message) = val.get("message").and_then(serde_json::Value::as_object) else {
+            out.push((
+                false,
+                format!(
+                    "malformed compiler-message on cargo stdout line {line_number}: missing object `message`"
+                ),
+            ));
             continue;
         };
-        if let Some(rendered) = message.get("rendered").and_then(serde_json::Value::as_str) {
-            let is_warning =
-                message.get("level").and_then(serde_json::Value::as_str) == Some("warning");
-            // rendered already ends with newline; trim to avoid double-spacing
-            out.push((is_warning, rendered.trim_end().to_owned()));
-        }
+        let Some(level) = message.get("level").and_then(serde_json::Value::as_str) else {
+            out.push((
+                false,
+                format!(
+                    "malformed compiler-message on cargo stdout line {line_number}: missing string `message.level`"
+                ),
+            ));
+            continue;
+        };
+        let Some(message_text) = message.get("message").and_then(serde_json::Value::as_str) else {
+            out.push((
+                false,
+                format!(
+                    "malformed compiler-message on cargo stdout line {line_number}: missing string `message.message`"
+                ),
+            ));
+            continue;
+        };
+        let rendered = message
+            .get("rendered")
+            .and_then(serde_json::Value::as_str)
+            .filter(|rendered| !rendered.trim().is_empty())
+            .map(|rendered| rendered.trim_end().to_owned())
+            .unwrap_or_else(|| format!("{level}: {message_text}"));
+        out.push((level == "warning", rendered));
     }
     out
 }
@@ -743,8 +801,8 @@ mod failure_report_tests {
     #[test]
     fn diagnostics_are_split_by_level() {
         let stdout = concat!(
-            "{\"reason\":\"compiler-message\",\"message\":{\"level\":\"warning\",\"rendered\":\"warning: w\\n\"}}\n",
-            "{\"reason\":\"compiler-message\",\"message\":{\"level\":\"error\",\"rendered\":\"error: e\\n\"}}\n",
+            "{\"reason\":\"compiler-message\",\"message\":{\"level\":\"warning\",\"message\":\"w\",\"rendered\":\"warning: w\\n\"}}\n",
+            "{\"reason\":\"compiler-message\",\"message\":{\"level\":\"error\",\"message\":\"e\",\"rendered\":\"error: e\\n\"}}\n",
             "{\"reason\":\"compiler-artifact\"}\n",
             "not json\n",
         );

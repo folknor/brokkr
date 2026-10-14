@@ -5,8 +5,8 @@
 
 use std::process::Stdio;
 
+use crate::datasets::Bbox;
 use crate::error::DevError;
-use crate::resolve::Bbox;
 
 const HIGHWAY_QUERY: &str =
     r#"{"highway":["motorway","trunk","primary","secondary","tertiary","residential"]}"#;

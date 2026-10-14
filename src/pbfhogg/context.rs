@@ -3,9 +3,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::OscRange;
+use crate::datasets::Bbox;
 use crate::error::DevError;
 use crate::pbfhogg::Compression;
-use crate::resolve::Bbox;
 
 /// Pbfhogg I/O switches and their cargo/argv representation.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -52,9 +52,9 @@ pub struct CommandParams {
     /// Forward pbfhogg's `--force` option for add-locations-to-ways.
     pub force_altw: bool,
     pub locations_on_ways: bool,
-    pub snapshot: Option<String>,
-    pub from_snapshot: Option<String>,
-    pub to_snapshot: Option<String>,
+    pub snapshot: Option<crate::datasets::resolve::SnapshotRef>,
+    pub from_snapshot: Option<crate::datasets::resolve::SnapshotRef>,
+    pub to_snapshot: Option<crate::datasets::resolve::SnapshotRef>,
     pub osc_range: Option<OscRange>,
     pub keep_cache: bool,
     /// `0` asks pbfhogg to resolve the worker count from available CPUs.

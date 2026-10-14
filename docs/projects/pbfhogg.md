@@ -221,7 +221,7 @@ primary, `--as-snapshot` and `--refresh` flows).
 
 Every `brokkr.toml` change a download flow (or `--as-snapshot` promotion)
 makes goes through one `toml_edit` transaction (`DatasetToml` in
-`src/pbfhogg_mod/download_toml.rs`): keys and values are escaped by the
+`src/pbfhogg/download/registry.rs`): keys and values are escaped by the
 writer, comments and unrelated tables survive untouched, and the batch is
 committed once with an atomic replace, only after every file it names exists
 and is hashed. A failure before the commit leaves `brokkr.toml` unchanged -

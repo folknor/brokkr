@@ -1104,15 +1104,17 @@ probe's compile siblings.
 ### Reserved environment variables
 
 `BROKKR_HOLD_NONCE`, `BROKKR_COMPILE_LEASE` and `CARGO_CACHE_RUSTC_INFO` are
-brokkr's transport, not knobs: never set, unset or override them - not in a
-shell, not in a `[[check]] env` block, and not from a build script. The one
-hole `force` cannot close is a *workspace* crate's own `build.rs` emitting
-`cargo::rustc-env=` for a reserved name - the nextest engine applies the test
-package's build-script env after cargo's `[env]` table, so it would displace
-the forced value for that crate's tests (dependencies can't: the engine applies
-only the test binary's own package's entries). `BROKKR_CARGO=1` is different in
-kind: the deliberate human escape hatch, set per invocation by a person and
-never by tooling.
+brokkr's transport. Project configs, `[[check]] env` blocks, and user-authored
+build scripts or shell commands must not set, unset or override them. The
+internal guard decision probe sets `CARGO_CACHE_RUSTC_INFO=0` for its isolated
+Cargo build because that direct invocation bypasses brokkr's Cargo spawn
+policy. The one hole `force` cannot close is a *workspace* crate's own
+`build.rs` emitting `cargo::rustc-env=` for a reserved name - the nextest engine
+applies the test package's build-script env after cargo's `[env]` table, so it
+would displace the forced value for that crate's tests. The engine applies
+build-script env only for the test binary's own package, so dependencies
+cannot cause it. `BROKKR_CARGO=1` is different in kind: the deliberate human
+escape hatch, set per invocation by a person and never by tooling.
 
 ### The version handshake
 
@@ -1218,7 +1220,10 @@ one whose install is gone, but still refuses an unrelated wrapper. Works with
 no `brokkr.toml`.
 
 `scripts/guard-decision-probe.py` builds this checkout's
-`brokkr-rustc-guard` and covers the capability paths against a scratch `$HOME`.
+`brokkr-rustc-guard` in a persistent `brokkr-guard-decision-probe`
+subdirectory of Cargo's resolved target directory, keyed by checkout path and
+separate from check and test artifacts. It covers the capability paths against
+a scratch `$HOME`.
 It includes an idle machine, a stale record left by a crash, a draining hold,
 a mismatched capability, no capability, the `BROKKR_CARGO` hatch, and query
 admission against a refusing hold (with its compile-continuing-print
@@ -1388,17 +1393,22 @@ formatter conventions - that were previously hand-run before every commit.
 ### Reading a failure
 
 The captured stream *is* the diagnostic - brokkr never saw the command's
-internals, only what it printed - so the question is which part of it to show.
+internals, only what it printed. The view controls which diagnostics are
+shown; recognized credential values and the current `HOME` path are redacted
+from the rendered text.
 
 | View | Prints |
 | --- | --- |
-| `diagnostics = "opaque"` | Both retained streams, verbatim |
+| `diagnostics = "opaque"` | Both retained streams, with recognized credentials and the current home path redacted for display |
 | `diagnostics = "rustc"` | Every `error`-level block, then a line counting the warnings not shown |
 
-`opaque` prints the retained stream prefix. Capture is bounded to 1 MiB per
-stream; a selected stream that exceeds the bound, or a pipe that remains open
-past the drain grace, fails closed since capture cannot establish that the
-complete output matched.
+Both views redact recognized credential fields, credential flags, URL user
+information and credential query parameters, bearer/basic values, and the
+current `HOME` path. Redaction affects display only; the check matches the
+original captured streams. Capture is bounded to 1 MiB per stream; a selected
+stream that exceeds the bound, or a pipe that remains open past the drain
+grace, fails closed since capture cannot establish that the complete output
+matched.
 
 `rustc` exists because a `cargo doc --workspace` gate is not an opaque analyser -
 it emits standard rustc diagnostics, and treating them as a blob throws away

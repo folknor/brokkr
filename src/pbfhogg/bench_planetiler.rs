@@ -145,7 +145,7 @@ pub fn run(
 
     let variant_names: Vec<&str> = results.iter().map(|r| r.mode.as_str()).collect();
 
-    crate::harness::run_variants("mode", &variant_names, |mode| {
+    crate::bench_variants::run_variants("mode", &variant_names, |mode| {
         let result = results
             .iter()
             .find(|r| r.mode == mode)

@@ -3,10 +3,10 @@
 
 use std::path::Path;
 
+use crate::db::paths::{results_db_path, sidecar_db_path};
 use crate::db::{self, RunId, RunSelector, RunStore};
 use crate::error::DevError;
 use crate::output;
-use crate::resolve::{results_db_path, sidecar_db_path};
 
 pub(crate) fn cmd_invalidate(
     project_root: &Path,

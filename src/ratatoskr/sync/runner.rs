@@ -137,6 +137,9 @@ pub(super) fn resolve_path(
 /// validated config, resolved sæhrimnir binary, and the built harness.
 pub(super) struct SyncRunner<'a> {
     pub(super) project_root: &'a Path,
+    /// The composed config's `include` files, exempt from the clean-tree
+    /// flag `run.toml` records.
+    pub(super) included_config_files: &'a [PathBuf],
     pub(super) cfg: &'a RatatoskrConfig,
     pub(super) built: &'a HarnessBuild,
     pub(super) mock_binary: &'a Path,
@@ -322,6 +325,7 @@ impl SyncRunner<'_> {
             &dc,
             &mock_outcome,
             self.project_root,
+            self.included_config_files,
         )?;
 
         if dc.killed_on_deadline() {
@@ -417,8 +421,9 @@ fn write_run_toml(
     dc: &output::DeadlineCapture,
     mock: &MockOutcome,
     project_root: &Path,
+    included_config_files: &[PathBuf],
 ) -> Result<(), DevError> {
-    let git_info = git::collect(project_root).ok();
+    let git_info = git::collect_with_config_paths(project_root, included_config_files).ok();
     let body = render_run_toml(script_abs, built, dc, mock, git_info.as_ref())?;
     fs::write(
         harness_dir.parent().unwrap_or(harness_dir).join("run.toml"),

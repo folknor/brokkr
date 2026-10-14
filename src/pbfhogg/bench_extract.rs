@@ -2,11 +2,11 @@
 
 use std::path::Path;
 
+use crate::datasets::Bbox;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
 use crate::pbfhogg::commands::{ArgMode, ExtractStrategy, PbfhoggCommand, scratch_output_path};
 use crate::pbfhogg::context::{CommandContext, CommandObservations, CommandParams, ResolvedInputs};
-use crate::resolve::Bbox;
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -44,7 +44,7 @@ pub fn run(
         .map(|strategy| strategy.name())
         .collect();
 
-    let result = crate::harness::run_variants("strategy", &strategy_names, |name| {
+    let result = crate::bench_variants::run_variants("strategy", &strategy_names, |name| {
         let strategy = ExtractStrategy::parse(name)?;
         let command = PbfhoggCommand::Extract { strategy };
         let args = command.build_args(&command_ctx, ArgMode::Bench)?;

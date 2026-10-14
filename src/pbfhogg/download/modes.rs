@@ -1,3 +1,18 @@
+//! Download, refresh and snapshot download execution.
+
+use super::date::{
+    file_mtime_unix, iso_date_parse_unix, iso_date_to_yyyymmdd, iso_date_today,
+    snapshot_key_to_iso_date, today, unix_to_yyyymmdd,
+};
+use super::layout::{
+    has_existing_osc, has_existing_pbf, indexed_pbf_filename, indexed_pbf_path, is_nonempty,
+    max_osc_seq, osc_filename, raw_pbf_filename, raw_pbf_path,
+};
+use super::registry::{DatasetToml, generate_indexed_pbf};
+use super::source::{ResolvedDownload, resolve};
+use crate::{config::Dataset, error::DevError, output, preflight, tools};
+use std::path::{Path, PathBuf};
+
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub fn run(
     region: &str,
@@ -57,7 +72,10 @@ pub fn run(
 
     // The one line naming the dataset and its upstream; the steps below indent
     // under it.
-    output::download_msg(&format!("=== {dataset_key} ({}) ===", source.display_name()));
+    output::download_msg(&format!(
+        "=== {dataset_key} ({}) ===",
+        source.display_name()
+    ));
 
     let is_new_dataset = dataset.is_none();
 
@@ -129,8 +147,7 @@ pub fn run(
     if indexed_dest.exists() && is_nonempty(&indexed_dest) {
         output::download_msg(&format!("  SKIP (exists): {}", indexed_dest.display()));
     } else {
-        let cat_input = has_existing_pbf(dataset, data_dir)
-            .unwrap_or_else(|| pbf_dest.clone());
+        let cat_input = has_existing_pbf(dataset, data_dir).unwrap_or_else(|| pbf_dest.clone());
         generate_indexed_pbf(&cat_input, &indexed_dest, project_root, build_root)?;
         generated_indexed = true;
     }
@@ -147,10 +164,7 @@ pub fn run(
     let has_indexed = dataset.is_some_and(|ds| ds.pbf.contains_key("indexed"));
 
     if downloaded_pbf && !has_raw {
-        let filename = pbf_dest
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy();
+        let filename = pbf_dest.file_name().unwrap_or_default().to_string_lossy();
         output::download_msg(&format!("  hashing {filename}..."));
         let hash = preflight::cached_path_digest(&pbf_dest, project_root)?.to_string();
         toml.set_pbf("raw", &filename, &hash)?;
@@ -167,10 +181,7 @@ pub fn run(
     }
 
     for (seq, osc_path) in &osc_downloaded {
-        let filename = osc_path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy();
+        let filename = osc_path.file_name().unwrap_or_default().to_string_lossy();
         output::download_msg(&format!("  hashing {filename}..."));
         let hash = preflight::cached_path_digest(osc_path, project_root)?.to_string();
         toml.set_osc(*seq, &filename, &hash)?;
@@ -180,7 +191,7 @@ pub fn run(
     if downloaded_pbf {
         output::download_msg(
             "  NOTE: run 'pbfhogg inspect <file>' to find the PBF sequence number, \
-             then add seq = <N> to the brokkr.toml entry"
+             then add seq = <N> to the brokkr.toml entry",
         );
     }
 
@@ -294,8 +305,8 @@ fn run_as_snapshot(
     // when keys are dates like `20260411`), use that. Otherwise fall back to
     // today's date. Either way, format as YYYY-MM-DD to match the documented
     // schema.
-    let snapshot_download_date = snapshot_key_to_iso_date(snap_key)
-        .unwrap_or_else(|| iso_date_today(&date));
+    let snapshot_download_date =
+        snapshot_key_to_iso_date(snap_key).unwrap_or_else(|| iso_date_today(&date));
     // Hash everything first, then commit the header and every entry in one
     // atomic write - a failed hash must not leave a header with no pbf.
     let mut toml = DatasetToml::open(project_root, hostname, dataset_key)?;
@@ -319,10 +330,7 @@ fn run_as_snapshot(
     }
 
     for (seq, osc_path) in &osc_downloaded {
-        let filename = osc_path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy();
+        let filename = osc_path.file_name().unwrap_or_default().to_string_lossy();
         output::download_msg(&format!("  hashing {filename}..."));
         let hash = preflight::cached_path_digest(osc_path, project_root)?.to_string();
         toml.set_snapshot_osc(snap_key, *seq, &filename, &hash)?;
@@ -332,7 +340,7 @@ fn run_as_snapshot(
     if downloaded_pbf {
         output::download_msg(
             "  NOTE: run 'pbfhogg inspect <file>' to find the PBF sequence number, \
-             then add seq = <N> to the snapshot's pbf.raw entry"
+             then add seq = <N> to the snapshot's pbf.raw entry",
         );
     }
 
@@ -352,42 +360,6 @@ fn run_as_snapshot(
     ));
 
     Ok(())
-}
-
-/// Convert a unix epoch second timestamp into a `YYYYMMDD` date string (UTC).
-/// Used to derive snapshot keys from file mtimes.
-fn unix_to_yyyymmdd(unix_secs: i64) -> String {
-    let days = unix_secs.div_euclid(86_400);
-    let (y, m, d) = days_to_civil(days);
-    format!("{y:04}{m:02}{d:02}")
-}
-
-/// If the snapshot key parses as a `YYYYMMDD` date string, convert it to
-/// `YYYY-MM-DD` for writing as the snapshot's `download_date`. Returns `None`
-/// if the key isn't an 8-digit date (e.g. `pre-refactor` or `staging-1`).
-///
-/// Used by `run_as_snapshot` to derive the snapshot's identity date from
-/// its key when the key follows the common dated convention. Snapshots with
-/// non-date keys fall back to today's date.
-fn snapshot_key_to_iso_date(key: &str) -> Option<String> {
-    CivilDate::parse_yyyymmdd(key).map(CivilDate::iso)
-}
-
-/// Convert a `YYYY-MM-DD` `download_date` string into `YYYYMMDD`. Returns
-/// `None` if the input doesn't match the expected format.
-fn iso_date_to_yyyymmdd(s: &str) -> Option<String> {
-    CivilDate::parse_iso(s).map(CivilDate::yyyymmdd)
-}
-
-/// Get the unix mtime of a file in seconds since epoch, or 0 on any error.
-#[allow(clippy::cast_possible_wrap)]
-fn file_mtime_unix(path: &Path) -> i64 {
-    std::fs::metadata(path)
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 /// Refresh-mode download. Rotates the dataset's primary pbf/osc data into a
@@ -573,7 +545,7 @@ fn run_refresh(
     toml.commit()?;
     output::download_msg(
         "  NOTE: run 'pbfhogg inspect <new pbf>' to find the new sequence number, \
-         then add seq = <N> to the brokkr.toml entry"
+         then add seq = <N> to the brokkr.toml entry",
     );
 
     // -- Summary --
@@ -595,17 +567,6 @@ fn run_refresh(
 }
 
 /// Format `YYYYMMDD` as `YYYY-MM-DD` for writing to brokkr.toml.
-fn iso_date_today(yyyymmdd: &str) -> String {
-    CivilDate::parse_yyyymmdd(yyyymmdd)
-        .map_or_else(|| yyyymmdd.to_owned(), CivilDate::iso)
-}
-
-/// Parse a `YYYY-MM-DD` string as a unix epoch second (UTC midnight).
-/// Returns `None` if the format doesn't match.
-fn iso_date_parse_unix(s: &str) -> Option<i64> {
-    CivilDate::parse_iso(s).map(CivilDate::unix_seconds)
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -660,7 +621,10 @@ mod tests {
 
     #[test]
     fn iso_date_to_yyyymmdd_basic() {
-        assert_eq!(iso_date_to_yyyymmdd("2026-04-11").as_deref(), Some("20260411"));
+        assert_eq!(
+            iso_date_to_yyyymmdd("2026-04-11").as_deref(),
+            Some("20260411")
+        );
         assert_eq!(iso_date_to_yyyymmdd("2026-2-3"), None);
         assert_eq!(iso_date_to_yyyymmdd("not a date"), None);
         assert_eq!(iso_date_to_yyyymmdd("2026-04-1a"), None);
@@ -906,7 +870,10 @@ file = \"planet-20260223.osm.pbf\"
         let parsed: toml::Value = toml::from_str(&after).unwrap();
         let ds = dataset_of(&parsed, "host.local", "denmark");
         assert_eq!(ds["origin"].as_str(), Some("Geofabrik"));
-        assert_eq!(ds["pbf"]["raw"]["file"].as_str(), Some("odd \"name\\.osm.pbf"));
+        assert_eq!(
+            ds["pbf"]["raw"]["file"].as_str(),
+            Some("odd \"name\\.osm.pbf")
+        );
         assert_eq!(ds["osc"]["4705"]["xxhash"].as_str(), Some("def"));
     }
 
@@ -925,7 +892,10 @@ origin = \"Geofabrik\" # trailing
             t.set_osc(1, "d-seq1.osc.gz", "abc").unwrap();
         });
         assert!(after.starts_with(before), "{after}");
-        assert!(after.contains("[plantasjen.datasets.denmark.osc.1]"), "{after}");
+        assert!(
+            after.contains("[plantasjen.datasets.denmark.osc.1]"),
+            "{after}"
+        );
     }
 
     #[test]
@@ -960,7 +930,10 @@ download_date = \"2026-01-02\"
         let mut toml = DatasetToml::open(&dir, "h", "d").unwrap();
         toml.set_pbf("raw", "r.osm.pbf", "abc").unwrap();
         drop(toml);
-        assert_eq!(std::fs::read_to_string(dir.join("brokkr.toml")).unwrap(), before);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("brokkr.toml")).unwrap(),
+            before
+        );
     }
 
     // A dataset registered in an included file is edited there, and the
@@ -977,7 +950,10 @@ download_date = \"2026-01-02\"
         toml.set_pbf("raw", "r.osm.pbf", "abc").unwrap();
         toml.commit().unwrap();
 
-        assert_eq!(std::fs::read_to_string(dir.join("brokkr.toml")).unwrap(), root);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("brokkr.toml")).unwrap(),
+            root
+        );
         let after = std::fs::read_to_string(dir.join("shared/hosts.toml")).unwrap();
         let parsed: toml::Value = toml::from_str(&after).unwrap();
         assert_eq!(

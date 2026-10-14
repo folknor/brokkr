@@ -1,4 +1,6 @@
-include!("harness_mod/types_run.rs");
-include!("harness_mod/format_sidecar.rs");
-include!("harness_mod/measurement_loop.rs");
-include!("harness_mod/tests.rs");
+//! Public measurement session facade.
+
+pub use crate::measure::format_cli_args;
+pub(crate) use crate::measure::kv::parse_kv_lines;
+pub use crate::measure::wall::{WallSource, elapsed_to_ms};
+pub use crate::measure::{BenchConfig, BenchHarness, BenchResult, BuildIdentity};

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::config::{self, ConfigSources, DevConfig, project_config::ProjectConfig};
 use crate::error::DevError;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Project {
     Pbfhogg,
     Elivagar,
@@ -21,10 +21,7 @@ pub enum Project {
     Mogwai,
     /// Any project not in the hardcoded set. Gets generic command support
     /// (check, run, hotpath, results, env, clean, history).
-    /// The parser leaks the TOML value once so `Project` can remain `Copy`.
-    /// Removing that allocation requires an owned representation and a
-    /// coordinated update to the parser and its project consumers.
-    Other(&'static str),
+    Other(String),
 }
 
 impl Project {
@@ -48,15 +45,15 @@ impl Project {
     pub fn from_builtin_name(name: &str) -> Option<Self> {
         Self::ALL
             .iter()
-            .find_map(|(known, project)| (*known == name).then_some(*project))
+            .find_map(|(known, project)| (*known == name).then(|| project.clone()))
     }
 
-    pub fn name(self) -> &'static str {
+    pub fn name(&self) -> &str {
         match self {
             Self::Other(name) => name,
             _ => Self::ALL
                 .iter()
-                .find_map(|(name, project)| (*project == self).then_some(*name))
+                .find_map(|(name, project)| (project == self).then_some(*name))
                 .unwrap_or("unknown"),
         }
     }
@@ -66,7 +63,7 @@ impl Project {
     /// Ratatoskr is a multi-crate workspace; it returns `None` and relies
     /// on `[test] default_package` in `brokkr.toml` to point `brokkr test`
     /// at the right cargo package.
-    pub fn cli_package(self) -> Option<&'static str> {
+    pub fn cli_package(&self) -> Option<&'static str> {
         match self {
             Self::Pbfhogg => Some("pbfhogg-cli"),
             Self::Nidhogg => Some("nidhogg"),
@@ -215,37 +212,12 @@ pub(crate) fn find_config_dir(cwd: &Path) -> Option<PathBuf> {
 }
 
 /// Detect the project from the `brokkr.toml` governing the working directory
-/// (in cwd, or one level up).
+/// (in cwd, or one level up), returning `Ok(None)` when none is found.
 ///
 /// This is the single entry point - `brokkr.toml` is read and parsed exactly
-/// once via [`config::load_with_sources`]. Errors when no `brokkr.toml` is found at either
-/// location.
-pub fn detect() -> Result<Detection, DevError> {
-    let cwd = std::env::current_dir()
-        .map_err(|e| DevError::Config(format!("cannot determine current directory: {e}")))?;
-    let config_dir = find_config_dir(&cwd).ok_or_else(|| {
-        DevError::Config(format!(
-            "no brokkr.toml found in {} or its parent directory",
-            cwd.display()
-        ))
-    })?;
-    let (project, config, project_config, config_sources) = config::load_with_sources(&config_dir)?;
-    crate::cargo_env::install(&config.cargo_env);
-    Ok(Detection {
-        project,
-        config,
-        project_config,
-        project_root: ProjectRoot(config_dir),
-        build_root: BuildRoot::live(cwd),
-        config_sources,
-    })
-}
-
-/// Like [`detect`] but returns `Ok(None)` when no `brokkr.toml` is found in
-/// cwd or its parent.
-///
-/// Used by commands that work fine without brokkr-specific config (`check`).
-/// A malformed `brokkr.toml` still errors - we only swallow the file-not-found
+/// once via [`config::load_with_sources`]. Commands that need a config refuse
+/// the `None` themselves; others work fine without brokkr-specific config
+/// (`check`). A malformed `brokkr.toml` still errors - we only swallow the file-not-found
 /// case.
 pub fn detect_optional() -> Result<Option<Detection>, DevError> {
     let cwd = std::env::current_dir()
@@ -273,7 +245,7 @@ pub fn detect_optional() -> Result<Option<Detection>, DevError> {
 /// catalogue knows, `cli::CommandId::from_name`), optionally followed by a sub-subcommand (`"verify batch"`).
 /// A literal label that names no command is caught by
 /// `tests::require_labels_are_real_commands`.
-pub fn require(current: Project, expected: Project, command: &str) -> Result<(), DevError> {
+pub fn require(current: &Project, expected: &Project, command: &str) -> Result<(), DevError> {
     if let Some(id) =
         crate::cli::CommandId::from_name(command.split_whitespace().next().unwrap_or(""))
     {

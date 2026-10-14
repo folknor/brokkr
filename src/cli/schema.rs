@@ -1,3 +1,9 @@
+//! Clap command and argument definitions.
+
+use super::validation::{
+    validate_env_kv, validate_meta_filter, validate_since, validate_snapshot_key_arg,
+    validate_test_name,
+};
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
 pub(crate) const DEFAULT_DATASET: &str = "denmark";
@@ -39,8 +45,17 @@ pub(crate) struct Cli {
 // What `check --textlint` / `--script` refuse: everything that shapes the build,
 // certifies a run, or runs a phase the selection skips.
 const SELECTION_CONFLICTS: [&str; 11] = [
-    "features", "no_default_features", "package", "profile", "gate", "force_rust",
-    "json", "fix_gremlins", "timings", "commands", "args",
+    "features",
+    "no_default_features",
+    "package",
+    "profile",
+    "gate",
+    "force_rust",
+    "json",
+    "fix_gremlins",
+    "timings",
+    "commands",
+    "args",
 ];
 
 #[derive(Subcommand)]
@@ -267,7 +282,6 @@ In depth: `brokkr man clippy`."
         /// merged `[[check]]` env (ad-hoc) or the entry env (`--sweep`).
         #[arg(long, value_parser = validate_env_kv)]
         env: Vec<String>,
-
     },
     /// Run `cargo fmt`. All arguments are forwarded raw.
     #[command(display_order = 0)]
@@ -492,7 +506,7 @@ In depth: `brokkr man clippy`."
         /// dataset's primary data; pass a key registered under
         /// `[dataset.snapshot.<key>]` for a historical snapshot.
         #[arg(long)]
-        snapshot: Option<String>,
+        snapshot: Option<crate::datasets::resolve::SnapshotRef>,
     },
     /// Check referential integrity
     #[command(name = "check-refs", display_order = 2)]
@@ -505,7 +519,7 @@ In depth: `brokkr man clippy`."
         /// dataset's primary data; pass a key registered under
         /// `[dataset.snapshot.<key>]` for a historical snapshot.
         #[arg(long)]
-        snapshot: Option<String>,
+        snapshot: Option<crate::datasets::resolve::SnapshotRef>,
     },
     /// Check ID ordering
     #[command(name = "check-ids", display_order = 2)]
@@ -523,7 +537,7 @@ In depth: `brokkr man clippy`."
         /// dataset's primary data; pass a key registered under
         /// `[dataset.snapshot.<key>]` for a historical snapshot.
         #[arg(long)]
-        snapshot: Option<String>,
+        snapshot: Option<crate::datasets::resolve::SnapshotRef>,
     },
     /// Sort PBF
     #[command(name = "sort", display_order = 2)]
@@ -537,7 +551,7 @@ In depth: `brokkr man clippy`."
         /// `[dataset.snapshot.<key>]` for a historical snapshot (e.g. one
         /// produced by `brokkr degrade --unsort --as-snapshot ...`).
         #[arg(long)]
-        snapshot: Option<String>,
+        snapshot: Option<crate::datasets::resolve::SnapshotRef>,
     },
     /// Cat passthrough. Flags are orthogonal:
     ///   `--type way|relation` restricts output to one object kind;
@@ -568,7 +582,7 @@ In depth: `brokkr man clippy`."
         /// dataset's primary data; pass a key registered under
         /// `[dataset.snapshot.<key>]` for a historical snapshot.
         #[arg(long)]
-        snapshot: Option<String>,
+        snapshot: Option<crate::datasets::resolve::SnapshotRef>,
     },
     /// Tags filter. Orthogonal flags:
     ///   `--filter EXPR` - pbfhogg filter expression (default
@@ -615,7 +629,7 @@ In depth: `brokkr man clippy`."
         /// primary data; pass a key registered under
         /// `[dataset.snapshot.<key>]` for a historical snapshot.
         #[arg(long)]
-        snapshot: Option<String>,
+        snapshot: Option<crate::datasets::resolve::SnapshotRef>,
         /// Parallel worker threads for pbfhogg tags-filter. `0` = auto
         /// (`available_parallelism()`); omit to use pbfhogg's default.
         /// Requires a pbfhogg build that exposes `-j` on tags-filter;
@@ -643,7 +657,7 @@ In depth: `brokkr man clippy`."
         /// dataset's primary data; pass a key registered under
         /// `[dataset.snapshot.<key>]` for a historical snapshot.
         #[arg(long)]
-        snapshot: Option<String>,
+        snapshot: Option<crate::datasets::resolve::SnapshotRef>,
     },
     /// Get parent elements
     #[command(name = "getparents", display_order = 2)]
@@ -656,7 +670,7 @@ In depth: `brokkr man clippy`."
         /// dataset's primary data; pass a key registered under
         /// `[dataset.snapshot.<key>]` for a historical snapshot.
         #[arg(long)]
-        snapshot: Option<String>,
+        snapshot: Option<crate::datasets::resolve::SnapshotRef>,
     },
     /// Renumber element IDs
     #[command(name = "renumber", display_order = 2)]
@@ -669,7 +683,7 @@ In depth: `brokkr man clippy`."
         /// dataset's primary data; pass a key registered under
         /// `[dataset.snapshot.<key>]` for a historical snapshot.
         #[arg(long)]
-        snapshot: Option<String>,
+        snapshot: Option<crate::datasets::resolve::SnapshotRef>,
     },
     /// Merge OSC changes. `--simplify` picks the BTreeMap dedupe
     /// path (keep only the last change per object) instead of the default
@@ -690,7 +704,7 @@ In depth: `brokkr man clippy`."
         /// dataset's primary/legacy OSC chain; pass a snapshot key to read
         /// from a historical snapshot's OSC table.
         #[arg(long)]
-        snapshot: Option<String>,
+        snapshot: Option<crate::datasets::resolve::SnapshotRef>,
         /// Keep only the last change per (type, id) - BTreeMap dedupe path.
         #[arg(long)]
         simplify: bool,
@@ -709,7 +723,7 @@ In depth: `brokkr man clippy`."
         /// the dataset's primary/legacy data; pass a snapshot key registered
         /// under `[dataset.snapshot.<key>]` to read from a historical snapshot.
         #[arg(long)]
-        snapshot: Option<String>,
+        snapshot: Option<crate::datasets::resolve::SnapshotRef>,
         /// Pass `--locations-on-ways` through to pbfhogg apply-changes.
         #[arg(long)]
         locations_on_ways: bool,
@@ -750,7 +764,7 @@ In depth: `brokkr man clippy`."
         /// `[dataset.snapshot.<key>]` for a historical snapshot (e.g. one
         /// produced by `brokkr degrade --strip-locations --as-snapshot ...`).
         #[arg(long)]
-        snapshot: Option<String>,
+        snapshot: Option<crate::datasets::resolve::SnapshotRef>,
     },
     /// Re-encode a PBF with a configurable elements-per-blob cap.
     ///
@@ -769,7 +783,7 @@ In depth: `brokkr man clippy`."
         /// dataset's primary data; pass a key registered under
         /// `[dataset.snapshot.<key>]` for a historical snapshot.
         #[arg(long)]
-        snapshot: Option<String>,
+        snapshot: Option<crate::datasets::resolve::SnapshotRef>,
         /// Cap on elements per output blob (passes through to pbfhogg).
         /// Omit to use pbfhogg's default (8000).
         #[arg(long, value_name = "N")]
@@ -806,7 +820,7 @@ In depth: `brokkr man clippy`."
         /// dataset's primary data; pass a key registered under
         /// `[dataset.snapshot.<key>]` for a historical snapshot.
         #[arg(long)]
-        snapshot: Option<String>,
+        snapshot: Option<crate::datasets::resolve::SnapshotRef>,
         /// Clear `Sort.Type_then_ID` and produce one adjacent same-kind blob
         /// pair per kind with overlapping ID ranges.
         #[arg(long)]
@@ -843,7 +857,7 @@ In depth: `brokkr man clippy`."
         /// Source bounding box to carve regions from (lon_min,lat_min,lon_max,lat_max).
         /// Falls back to the dataset's configured bbox if omitted.
         #[arg(long)]
-        bbox: Option<crate::resolve::Bbox>,
+        bbox: Option<crate::datasets::Bbox>,
         /// Extract strategy: simple, complete, smart, or all (runs all
         /// three back-to-back, like `brokkr extract --strategy all`).
         #[arg(long, default_value = "simple")]
@@ -852,7 +866,7 @@ In depth: `brokkr man clippy`."
         /// dataset's primary data; pass a key registered under
         /// `[dataset.snapshot.<key>]` for a historical snapshot.
         #[arg(long)]
-        snapshot: Option<String>,
+        snapshot: Option<crate::datasets::resolve::SnapshotRef>,
     },
     /// Filter by timestamp
     #[command(name = "time-filter", display_order = 2)]
@@ -865,7 +879,7 @@ In depth: `brokkr man clippy`."
         /// dataset's primary data; pass a key registered under
         /// `[dataset.snapshot.<key>]` for a historical snapshot.
         #[arg(long)]
-        snapshot: Option<String>,
+        snapshot: Option<crate::datasets::resolve::SnapshotRef>,
     },
     /// Diff base PBF against the applied-changes merged PBF.
     /// `--format osc` switches output from summary (stdout) to an OSC
@@ -893,7 +907,7 @@ In depth: `brokkr man clippy`."
         /// the dataset's primary/legacy data; pass a snapshot key to read
         /// from a historical snapshot.
         #[arg(long)]
-        snapshot: Option<String>,
+        snapshot: Option<crate::datasets::resolve::SnapshotRef>,
         /// Parallel worker threads for pbfhogg diff. `0` = auto
         /// (`available_parallelism()`); omit to use pbfhogg's default (1).
         #[arg(short = 'j', long)]
@@ -928,10 +942,10 @@ Examples:
         /// legacy/primary PBF, or a snapshot key registered under
         /// `[dataset.snapshot.<key>]`.
         #[arg(long)]
-        from: String,
+        from: crate::datasets::resolve::SnapshotRef,
         /// "To" snapshot reference (same naming as `--from`).
         #[arg(long)]
-        to: String,
+        to: crate::datasets::resolve::SnapshotRef,
         /// PBF variant to use on both sides (raw, indexed, locations).
         /// Errors if the requested variant doesn't exist on either snapshot.
         #[arg(long, default_value = DEFAULT_INDEXED_VARIANT)]
@@ -957,7 +971,7 @@ Examples:
         /// dataset's primary data; pass a key registered under
         /// `[dataset.snapshot.<key>]` for a historical snapshot.
         #[arg(long)]
-        snapshot: Option<String>,
+        snapshot: Option<crate::datasets::resolve::SnapshotRef>,
     },
     /// Extract by bounding box (configurable strategy)
     #[command(name = "extract", display_order = 2)]
@@ -971,12 +985,12 @@ Examples:
         strategy: String,
         /// Bounding box (lon_min,lat_min,lon_max,lat_max)
         #[arg(long)]
-        bbox: Option<crate::resolve::Bbox>,
+        bbox: Option<crate::datasets::Bbox>,
         /// Snapshot key to read input from. Use `base` (or omit) for the
         /// dataset's primary data; pass a key registered under
         /// `[dataset.snapshot.<key>]` for a historical snapshot.
         #[arg(long)]
-        snapshot: Option<String>,
+        snapshot: Option<crate::datasets::resolve::SnapshotRef>,
     },
     /// Read benchmark
     #[command(name = "read", display_order = 2)]
@@ -994,7 +1008,7 @@ Examples:
         /// (e.g. `repack --as-snapshot`). Lets pure decode throughput be
         /// measured against blob count independent of any command layer.
         #[arg(long)]
-        snapshot: Option<String>,
+        snapshot: Option<crate::datasets::resolve::SnapshotRef>,
     },
     /// Write benchmark
     #[command(name = "write", display_order = 2)]
@@ -1388,7 +1402,12 @@ In depth: `brokkr man measure`.",
         r#where: Option<String>,
 
         /// Output only these fields (comma-separated, e.g. "t,rss,anon,majflt"). Only with --samples.
-        #[arg(long, value_delimiter = ',', requires = "samples", conflicts_with = "stat")]
+        #[arg(
+            long,
+            value_delimiter = ',',
+            requires = "samples",
+            conflicts_with = "stat"
+        )]
         fields: Vec<String>,
 
         /// Output every Nth sample (downsample). Requires --samples or --stat.
@@ -1603,7 +1622,11 @@ Examples:
     )]
     Invalidate {
         /// UUID prefix to invalidate (mutually exclusive with --commit)
-        #[arg(value_name = "UUID", conflicts_with = "commit", required_unless_present = "commit")]
+        #[arg(
+            value_name = "UUID",
+            conflicts_with = "commit",
+            required_unless_present = "commit"
+        )]
         uuid: Option<String>,
 
         /// Commit hash prefix - invalidate every result rooted at matching commits
@@ -2944,7 +2967,7 @@ pub(crate) struct VerifyPbfArgs {
     /// from the dataset's primary chain when it has none (encoding-only
     /// snapshots). Mutually exclusive with `--input`.
     #[arg(long, conflicts_with = "input")]
-    pub(crate) snapshot: Option<String>,
+    pub(crate) snapshot: Option<crate::datasets::resolve::SnapshotRef>,
     /// Use O_DIRECT for file I/O (requires linux-direct-io feature in pbfhogg)
     #[arg(long)]
     pub(crate) direct_io: bool,
@@ -2970,7 +2993,7 @@ pub(crate) enum VerifyCommand {
         #[command(flatten)]
         pbf: VerifyPbfArgs,
         #[arg(long)]
-        bbox: Option<crate::resolve::Bbox>,
+        bbox: Option<crate::datasets::Bbox>,
     },
     /// Cross-validate multi-extract (single-pass vs sequential)
     #[command(name = "multi-extract", display_order = 2)]
@@ -2978,7 +3001,7 @@ pub(crate) enum VerifyCommand {
         #[command(flatten)]
         pbf: VerifyPbfArgs,
         #[arg(long)]
-        bbox: Option<crate::resolve::Bbox>,
+        bbox: Option<crate::datasets::Bbox>,
         /// Number of non-overlapping bbox regions
         #[arg(long, default_value_t = crate::pbfhogg::commands::DEFAULT_MULTI_EXTRACT_REGIONS)]
         regions: usize,
@@ -3049,7 +3072,7 @@ pub(crate) enum VerifyCommand {
         /// subcommands). Overrides only the PBF input. Mutually exclusive
         /// with `--input`.
         #[arg(long, conflicts_with = "input")]
-        snapshot: Option<String>,
+        snapshot: Option<crate::datasets::resolve::SnapshotRef>,
         /// Comma-separated starting IDs (forwarded to both pbfhogg and osmium)
         #[arg(long = "start-id", value_name = "IDS")]
         start_id: Option<String>,
@@ -3072,7 +3095,7 @@ pub(crate) enum VerifyCommand {
         /// it has one, and from the dataset's primary chain otherwise.
         /// Mutually exclusive with `--input`.
         #[arg(long, conflicts_with = "input")]
-        snapshot: Option<String>,
+        snapshot: Option<crate::datasets::resolve::SnapshotRef>,
         #[arg(long)]
         osc_seq: Option<String>,
     },
@@ -3084,7 +3107,7 @@ pub(crate) enum VerifyCommand {
         #[arg(long)]
         osc_seq: Option<String>,
         #[arg(long)]
-        bbox: Option<crate::resolve::Bbox>,
+        bbox: Option<crate::datasets::Bbox>,
     },
 
     /// Verify PMTiles output integrity
@@ -3277,5 +3300,3 @@ pub(crate) enum PmtilesCorpusCommand {
         tile: Option<String>,
     },
 }
-
-

@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::civil_date::CivilDate;
 use crate::error::DevError;
 use crate::output;
 use crate::preflight::Sha256;
@@ -622,11 +623,17 @@ fn parse_http_date(s: &str) -> Result<i64, String> {
     // Format: "Day, DD Mon YYYY HH:MM:SS GMT"
     // Example: "Tue, 11 Apr 2026 12:34:56 GMT"
     let parts: Vec<&str> = s.split_whitespace().collect();
-    if parts.len() < 6 {
-        return Err(format!("not enough parts: '{s}'"));
+    if parts.len() != 6 {
+        return Err(format!("expected six parts: '{s}'"));
     }
-    let day: i64 = parts[1].parse().map_err(|e| format!("day: {e}"))?;
-    let month: i32 = match parts[2] {
+    if parts[5] != "GMT" {
+        return Err(format!(
+            "expected GMT timezone in '{s}', found '{}'",
+            parts[5]
+        ));
+    }
+    let day: u32 = parts[1].parse().map_err(|e| format!("day: {e}"))?;
+    let month: u32 = match parts[2] {
         "Jan" => 1,
         "Feb" => 2,
         "Mar" => 3,
@@ -641,31 +648,18 @@ fn parse_http_date(s: &str) -> Result<i64, String> {
         "Dec" => 12,
         other => return Err(format!("unknown month: {other}")),
     };
-    let year: i64 = parts[3].parse().map_err(|e| format!("year: {e}"))?;
+    let year: i32 = parts[3].parse().map_err(|e| format!("year: {e}"))?;
     let time_parts: Vec<&str> = parts[4].split(':').collect();
     if time_parts.len() != 3 {
         return Err(format!("bad time: '{}'", parts[4]));
     }
-    let hour: i64 = time_parts[0].parse().map_err(|e| format!("hour: {e}"))?;
-    let minute: i64 = time_parts[1].parse().map_err(|e| format!("minute: {e}"))?;
-    let second: i64 = time_parts[2].parse().map_err(|e| format!("second: {e}"))?;
+    let hour: u32 = time_parts[0].parse().map_err(|e| format!("hour: {e}"))?;
+    let minute: u32 = time_parts[1].parse().map_err(|e| format!("minute: {e}"))?;
+    let second: u32 = time_parts[2].parse().map_err(|e| format!("second: {e}"))?;
 
-    // Convert (Y, M, D) to days since 1970-01-01 using Howard Hinnant's
-    // algorithm - same one used by `pbfhogg::download::days_to_civil` in
-    // reverse.
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    #[allow(clippy::cast_sign_loss)] // yoe, month, day are all non-negative here
-    let yoe = (y - era * 400) as u64;
-    #[allow(clippy::cast_sign_loss)]
-    let m = month as u64;
-    #[allow(clippy::cast_sign_loss)]
-    let d = day as u64;
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    #[allow(clippy::cast_possible_wrap)]
-    let days = era * 146097 + doe as i64 - 719468;
-    Ok(days * 86400 + hour * 3600 + minute * 60 + second)
+    let date = CivilDate::new(year, month, day).ok_or_else(|| format!("invalid date: '{s}'"))?;
+    date.to_unix_seconds(hour, minute, second)
+        .ok_or_else(|| format!("invalid time: '{}'", parts[4]))
 }
 
 // ---------------------------------------------------------------------------

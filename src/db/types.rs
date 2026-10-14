@@ -7,6 +7,12 @@ use crate::build::CargoProfile;
 use crate::error::DevError;
 use crate::git::ShortCommit;
 
+/// The `runs.project` column default: rows written before the column existed
+/// were all pbfhogg's. Must match the `DEFAULT` spelled in the schema DDL and
+/// in the migration that added the column; displays hide it as the implied
+/// project.
+pub(crate) const DEFAULT_PROJECT: &str = "pbfhogg";
+
 // ---------------------------------------------------------------------------
 // Key-value pairs
 // ---------------------------------------------------------------------------

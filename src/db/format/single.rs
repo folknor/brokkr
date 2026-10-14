@@ -215,7 +215,7 @@ fn host_fields(row: &StoredRow) -> Vec<(String, String)> {
             format!("killed at \"{}\"", row.stop_marker),
         ));
     }
-    if !row.project.is_empty() && row.project != crate::db::schema::DEFAULT_PROJECT {
+    if !row.project.is_empty() && row.project != crate::db::types::DEFAULT_PROJECT {
         fields.push(("project".into(), row.project.clone()));
     }
     fields

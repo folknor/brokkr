@@ -9,9 +9,9 @@ use super::{
     verify_extract, verify_getid_removeid, verify_merge, verify_multi_extract, verify_renumber,
     verify_sort, verify_tags_filter,
 };
+use crate::datasets::Bbox;
 use crate::error::DevError;
 use crate::output::verify_summary;
-use crate::resolve::Bbox;
 
 /// Tally a check's outcome into `(passed, failed)`. Kept a free function (not
 /// a closure) so it doesn't hold a mutable borrow of the counters across the

@@ -12,7 +12,7 @@ use super::workload;
 
 /// Run one registered workload under the requested measurement mode.
 pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
-    project::require(req.project, Project::Dellingr, "dellingr")?;
+    project::require(&req.project, &Project::Dellingr, "dellingr")?;
 
     // Resolve before building: a typo'd `--lua` or a drifted workload should
     // cost nothing. The path deliberately comes from the current tree even

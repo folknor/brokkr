@@ -4,7 +4,9 @@
 //! every brokkr invocation with timing, exit status, and sanitized system context.
 
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
+use regex::Regex;
 use rusqlite::Connection;
 
 use crate::db::like;
@@ -440,91 +442,34 @@ fn format_history_command(command: &str) -> String {
     )
 }
 
-/// Return argv safe for durable storage. Values following `--env` and
-/// `--project-dir` are always redacted because they can contain private
-/// environment settings or local filesystem paths.
+/// Return argv safe for history storage. Credentials use the shared argv
+/// policy; the history-only project directory option is also hidden because
+/// it contains a local filesystem path.
 pub(crate) fn redact_argv(argv: &[String]) -> Vec<String> {
-    #[derive(Clone, Copy)]
-    enum NextValue {
-        Secret,
-        Environment,
-        Header,
-    }
-
-    let mut redacted = Vec::with_capacity(argv.len());
-    let mut next = None;
-    for arg in argv {
-        if let Some(kind) = next.take() {
-            redacted.push(match kind {
-                NextValue::Secret => "<redacted>".to_owned(),
-                NextValue::Environment => redact_assignment(arg, true),
-                NextValue::Header => redact_header(arg),
-            });
-            continue;
+    let mut redacted = redact_secret_argv(argv);
+    let mut index = 0;
+    while index < redacted.len() {
+        if redacted[index] == "--project-dir" {
+            if let Some(value) = redacted.get_mut(index + 1) {
+                *value = "<redacted>".to_owned();
+            }
+            index += 2;
+        } else {
+            if redacted[index].starts_with("--project-dir=") {
+                redacted[index] = "--project-dir=<redacted>".to_owned();
+            }
+            index += 1;
         }
-
-        if arg == "--project-dir" {
-            redacted.push(arg.clone());
-            next = Some(NextValue::Secret);
-            continue;
-        }
-        if arg.starts_with("--project-dir=") {
-            redacted.push("--project-dir=<redacted>".to_owned());
-            continue;
-        }
-        if arg == "--env" {
-            redacted.push(arg.clone());
-            next = Some(NextValue::Environment);
-            continue;
-        }
-        if let Some(value) = arg.strip_prefix("--env=") {
-            redacted.push(format!("--env={}", redact_assignment(value, true)));
-            continue;
-        }
-        if matches!(arg.as_str(), "-H" | "--header") {
-            redacted.push(arg.clone());
-            next = Some(NextValue::Header);
-            continue;
-        }
-        if let Some(value) = arg.strip_prefix("--header=") {
-            redacted.push(format!("--header={}", redact_header(value)));
-            continue;
-        }
-        if let Some(value) = arg.strip_prefix("-H=") {
-            redacted.push(format!("-H={}", redact_header(value)));
-            continue;
-        }
-        if let Some((name, _)) = arg.strip_prefix("-H").and_then(|h| h.split_once(':'))
-            && sensitive_name(name)
-        {
-            redacted.push(format!("-H{name}: <redacted>"));
-            continue;
-        }
-
-        if let Some((name, _)) = arg.split_once('=')
-            && sensitive_name(name)
-        {
-            redacted.push(format!("{name}=<redacted>"));
-            continue;
-        }
-        if sensitive_name(arg) {
-            redacted.push(arg.clone());
-            next = Some(NextValue::Secret);
-            continue;
-        }
-
-        redacted.push(redact_url_credentials(arg));
     }
     redacted
 }
 
-/// Return argv with credentials removed and nothing else: the rule for
+/// Return argv with credentials removed and nothing else: the shared rule for
 /// results rows, whose argv is the identity `results --compare` pairs by and
-/// `--grep` selects on. Unlike `redact_argv` (history's rule), `--env` values
-/// and `--project-dir` survive unless the name is a credential name, and a
-/// bare token only hides the next argument when it is itself a flag
-/// (`--token VALUE`), so a positional such as a workload named
-/// `session_bench` cannot swallow the flag after it.
+/// `--grep` selects on, and history rows. Environment values are redacted
+/// only when their variable name is credential-like; project-directory values
+/// survive. A positional such as a workload named `session_bench` cannot
+/// swallow the flag after it.
 pub(crate) fn redact_secret_argv(argv: &[String]) -> Vec<String> {
     let mut redacted = Vec::with_capacity(argv.len());
     let mut next_secret = false;
@@ -536,7 +481,7 @@ pub(crate) fn redact_secret_argv(argv: &[String]) -> Vec<String> {
             continue;
         }
         if std::mem::take(&mut next_env) {
-            redacted.push(redact_assignment(arg, false));
+            redacted.push(redact_assignment(arg));
             continue;
         }
         if std::mem::take(&mut next_header) {
@@ -549,7 +494,7 @@ pub(crate) fn redact_secret_argv(argv: &[String]) -> Vec<String> {
             continue;
         }
         if let Some(value) = arg.strip_prefix("--env=") {
-            redacted.push(format!("--env={}", redact_assignment(value, false)));
+            redacted.push(format!("--env={}", redact_assignment(value)));
             continue;
         }
         if matches!(arg.as_str(), "-H" | "--header") {
@@ -559,6 +504,14 @@ pub(crate) fn redact_secret_argv(argv: &[String]) -> Vec<String> {
         }
         if let Some(value) = arg.strip_prefix("--header=") {
             redacted.push(format!("--header={}", redact_header(value)));
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("-H=") {
+            redacted.push(format!("-H={}", redact_header(value)));
+            continue;
+        }
+        if let Some(header) = arg.strip_prefix("-H").filter(|value| value.contains(':')) {
+            redacted.push(format!("-H{}", redact_header(header)));
             continue;
         }
         if let Some((name, _)) = arg.split_once('=')
@@ -577,13 +530,10 @@ pub(crate) fn redact_secret_argv(argv: &[String]) -> Vec<String> {
     redacted
 }
 
-fn redact_assignment(value: &str, redact_all: bool) -> String {
+fn redact_assignment(value: &str) -> String {
     match value.split_once('=') {
-        Some((name, _)) if redact_all || sensitive_name(name) => {
-            format!("{name}=<redacted>")
-        }
+        Some((name, _)) if sensitive_name(name) => format!("{name}=<redacted>"),
         Some((name, value)) => format!("{name}={}", redact_env_value(name, value)),
-        None if redact_all => "<redacted>".to_owned(),
         None => redact_url_credentials(value),
     }
 }
@@ -595,29 +545,267 @@ fn redact_header(value: &str) -> String {
     }
 }
 
+/// Match credential name components, not arbitrary substrings such as `auth`
+/// inside `author`, `oauth`, or `authority`.
 fn sensitive_name(name: &str) -> bool {
-    let normalized = name
-        .trim_start_matches('-')
-        .to_ascii_lowercase()
-        .replace('-', "_");
+    let mut normalized = String::with_capacity(name.len());
+    let chars: Vec<char> = name.trim().trim_start_matches('-').chars().collect();
+    for (index, ch) in chars.iter().copied().enumerate() {
+        if !ch.is_ascii_alphanumeric() {
+            if !normalized.is_empty() && !normalized.ends_with('_') {
+                normalized.push('_');
+            }
+            continue;
+        }
+        if ch.is_ascii_uppercase() && !normalized.is_empty() {
+            let previous = chars[index - 1];
+            let next_is_lower = chars
+                .get(index + 1)
+                .is_some_and(char::is_ascii_lowercase);
+            let uppercase_run = chars[..index]
+                .iter()
+                .rev()
+                .take_while(|previous| previous.is_ascii_uppercase())
+                .count();
+            if previous.is_ascii_lowercase()
+                || previous.is_ascii_digit()
+                || (previous.is_ascii_uppercase() && next_is_lower && uppercase_run > 1)
+            {
+                normalized.push('_');
+            }
+        }
+        normalized.push(ch.to_ascii_lowercase());
+    }
+    let words: Vec<&str> = normalized
+        .split('_')
+        .filter(|word| !word.is_empty())
+        .collect();
     [
         "password",
+        "passwords",
         "passwd",
+        "passphrase",
         "secret",
         "token",
         "credential",
+        "credentials",
         "authorization",
         "cookie",
+        "cookies",
         "session",
-        "private_key",
-        "api_key",
-        "access_key",
-        "database_url",
         "dsn",
         "auth",
     ]
     .iter()
-    .any(|part| normalized.contains(part))
+    .any(|part| words.contains(part))
+        || words.windows(2).any(|pair| {
+            matches!(pair, ["private", "key"])
+                || matches!(pair, ["api", "key"])
+                || matches!(pair, ["access", "key"])
+                || matches!(pair, ["database", "url"])
+        })
+}
+
+/// Redact likely credentials and the current user's home path from captured
+/// text before it is printed or copied into the run log. This is a rendering
+/// policy only: callers match against the original captured bytes.
+///
+/// The patterns are deliberately narrow, because this text is usually a
+/// diagnostic the reader has to act on: compiler output is full of
+/// `name: Type`, `crate::auth::login` and `src/session.rs:12:5`, none of which
+/// may be touched. Only a value is ever replaced, never the rest of a line:
+/// URL userinfo and credential query parameters, a long token after
+/// `Bearer`/`Basic`, an `Authorization`/`Cookie` header line, the value of a
+/// credential-named flag, and a credential-named field's value when assigned
+/// with `=` or given as a quoted string after `:`.
+pub(crate) fn redact_secret_text(text: &str) -> String {
+    static URL_RE: LazyLock<Option<Regex>> =
+        LazyLock::new(|| Regex::new(r#"(?i)[a-z][a-z0-9+.-]*://[^\s"'<>]+"#).ok());
+    static BEARER_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+        Regex::new(r"(?i)\b(?P<kind>bearer|basic)(?P<space>\s+)[A-Za-z0-9._~+/=-]{16,}").ok()
+    });
+    static FIELD_VALUE_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+        Regex::new(
+            r#"(?i)(?P<key>[a-z0-9][a-z0-9_.-]*)["']?(?:\s*=\s*(?P<value>"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)|\s*:\s*(?P<qvalue>"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'))"#,
+        )
+        .ok()
+    });
+    static HEADER_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+        Regex::new(
+            r"(?i)^(?P<prefix>\s*)(?P<key>proxy-authorization|authorization|set-cookie|cookie)(?P<sep>\s*:\s*)\S[^\r\n]*",
+        )
+        .ok()
+    });
+
+    let Some(url_re) = URL_RE.as_ref() else {
+        return "[captured output withheld: output redaction unavailable]".to_owned();
+    };
+    let Some(bearer_re) = BEARER_RE.as_ref() else {
+        return "[captured output withheld: output redaction unavailable]".to_owned();
+    };
+    let Some(field_value_re) = FIELD_VALUE_RE.as_ref() else {
+        return "[captured output withheld: output redaction unavailable]".to_owned();
+    };
+    let Some(header_re) = HEADER_RE.as_ref() else {
+        return "[captured output withheld: output redaction unavailable]".to_owned();
+    };
+
+    let mut rendered = text.to_owned();
+    if let Some(home) = std::env::var_os("HOME")
+        .and_then(|home| home.into_string().ok())
+        .filter(|home| !home.is_empty() && std::path::Path::new(home).is_absolute())
+    {
+        rendered = rendered.replace(&home, "~");
+    }
+
+    rendered
+        .split_inclusive('\n')
+        .map(|line| {
+            let urls_redacted = url_re
+                .replace_all(line, |captures: &regex::Captures<'_>| {
+                    redact_url_credentials(&captures[0])
+                })
+                .into_owned();
+            let bearer_redacted = bearer_re
+                .replace_all(&urls_redacted, |captures: &regex::Captures<'_>| {
+                    format!("{}{}<redacted>", &captures["kind"], &captures["space"])
+                })
+                .into_owned();
+            let headers_redacted = header_re
+                .replace_all(&bearer_redacted, |captures: &regex::Captures<'_>| {
+                    format!(
+                        "{}{}{}<redacted>",
+                        &captures["prefix"], &captures["key"], &captures["sep"]
+                    )
+                })
+                .into_owned();
+            let flags_redacted = redact_secret_flags(&headers_redacted);
+            redact_secret_fields(&flags_redacted, field_value_re)
+        })
+        .collect()
+}
+
+fn redact_secret_flags(line: &str) -> String {
+    let spans = shell_token_spans(line);
+    let mut rendered = String::with_capacity(line.len());
+    let mut copied_until = 0;
+    let mut index = 0;
+    while index + 1 < spans.len() {
+        let (flag_start, flag_end) = spans[index];
+        let flag = &line[flag_start..flag_end];
+        let flag_name = flag
+            .trim_matches(|ch: char| matches!(ch, '[' | ']' | '(' | ')' | '\'' | '"' | ',' | ':'));
+        if flag_name.starts_with('-') && !flag_name.contains('=') && sensitive_name(flag_name) {
+            let (value_start, value_end) = spans[index + 1];
+            rendered.push_str(&line[copied_until..value_start]);
+            let value = &line[value_start..value_end];
+            if let Some(quote) = value.chars().next().filter(|ch| *ch == '"' || *ch == '\'') {
+                rendered.push(quote);
+                rendered.push_str("<redacted>");
+                rendered.push(quote);
+            } else {
+                rendered.push_str("<redacted>");
+            }
+            copied_until = value_end;
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+
+    if copied_until == 0 {
+        line.to_owned()
+    } else {
+        rendered.push_str(&line[copied_until..]);
+        rendered
+    }
+}
+
+fn shell_token_spans(line: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut token_start = None;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, ch) in line.char_indices() {
+        if token_start.is_none() {
+            if ch.is_whitespace() {
+                continue;
+            }
+            token_start = Some(index);
+        }
+
+        if let Some(active_quote) = quote {
+            if active_quote == '\'' {
+                if ch == active_quote {
+                    quote = None;
+                }
+                continue;
+            }
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' || ch == '\'' {
+            quote = Some(ch);
+        } else if ch.is_whitespace()
+            && let Some(start) = token_start.take()
+        {
+            spans.push((start, index));
+        }
+    }
+    if let Some(start) = token_start {
+        spans.push((start, line.len()));
+    }
+    spans
+}
+
+fn redact_secret_fields(line: &str, field_re: &Regex) -> String {
+    let mut rendered = String::with_capacity(line.len());
+    let mut copied_until = 0;
+    for captures in field_re.captures_iter(line) {
+        let Some(key) = captures.name("key") else {
+            continue;
+        };
+        if !sensitive_name(key.as_str()) {
+            continue;
+        }
+        let Some(value) = captures.name("value").or_else(|| captures.name("qvalue")) else {
+            continue;
+        };
+        rendered.push_str(&line[copied_until..value.start()]);
+        let value_text = value.as_str();
+        if let Some(quote) = value_text.chars().next().filter(|ch| {
+            (*ch == '"' || *ch == '\'') && value_text.len() > 1 && value_text.ends_with(*ch)
+        }) {
+            rendered.push(quote);
+            rendered.push_str("<redacted>");
+            rendered.push(quote);
+        } else {
+            rendered.push_str("<redacted>");
+        }
+        copied_until = value.end();
+    }
+
+    if copied_until == 0 {
+        line.to_owned()
+    } else {
+        rendered.push_str(&line[copied_until..]);
+        rendered
+    }
 }
 
 /// Scrub one captured environment value before it reaches a durable run row.
@@ -774,6 +962,15 @@ mod tests {
         clippy::useless_vec
     )]
     use super::*;
+
+    #[test]
+    fn captured_text_redaction_hides_values_and_spares_locations() {
+        let out = redact_secret_text("api_token=hunter2hunter2 failed at src/session.rs:12:5\n");
+        assert!(!out.contains("hunter2hunter2"), "{out}");
+        assert!(out.contains("api_token=<redacted>"), "{out}");
+        assert!(out.contains("src/session.rs:12:5"), "{out}");
+        assert!(!out.contains("output redaction unavailable"), "{out}");
+    }
 
     #[test]
     fn an_unwritable_store_is_environmental_and_a_fault_is_not() {

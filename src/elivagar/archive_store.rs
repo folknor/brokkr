@@ -127,6 +127,7 @@ impl ArchiveStore {
         revision: Option<&str>,
         file: Option<&str>,
         build_root: &Path,
+        included_config_files: &[PathBuf],
     ) -> Result<ArchiveResolution, DevError> {
         if let Some(file) = file {
             let path = PathBuf::from(file);
@@ -145,7 +146,9 @@ impl ArchiveStore {
         let key = match revision {
             Some(revision) => self.resolve_revision(dataset, variant, revision, build_root)?,
             None => {
-                let commit = crate::git::collect(build_root)?.commit;
+                let commit =
+                    crate::git::collect_with_config_paths(build_root, included_config_files)?
+                        .commit;
                 ArchiveKey::new(dataset, variant, commit.as_str())?
             }
         };

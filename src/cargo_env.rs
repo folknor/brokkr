@@ -78,6 +78,13 @@ pub enum SpawnProfile {
 /// order is only what makes evaluation deterministic).
 static REGISTRY: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
+/// The active check phase and its start time. Process launch code also needs
+/// this context to tag Cargo environment failures, so the shared clock lives
+/// with the lower-level Cargo launch policy rather than in the check command.
+static PHASE_CLOCK: Mutex<Option<(Phase, Instant)>> = Mutex::new(None);
+static PHASE_CLOCK_POISON_REPORTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// The first evaluation failure of this process, with the `check` phase it
 /// happened in (when there was one).
 static FAILED: Mutex<Option<FailureRecord>> = Mutex::new(None);
@@ -105,6 +112,46 @@ fn snapshot() -> Vec<(String, String)> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone()
+}
+
+/// Recover a poisoned phase clock instead of treating poison as no active
+/// phase, which would silently lose Cargo failure attribution and disable the
+/// check watchdog's phase deadline.
+fn phase_clock_lock() -> std::sync::MutexGuard<'static, Option<(Phase, Instant)>> {
+    match PHASE_CLOCK.lock() {
+        Ok(clock) => clock,
+        Err(poisoned) => {
+            let clock = poisoned.into_inner();
+            PHASE_CLOCK.clear_poison();
+            if !PHASE_CLOCK_POISON_REPORTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                crate::output::warn_stderr(
+                    "phase clock mutex was poisoned; recovered its recorded state and will continue enforcing phase deadlines",
+                );
+            }
+            clock
+        }
+    }
+}
+
+/// Start `phase` and its wall clock. Called by the check watchdog at each
+/// phase boundary.
+pub(crate) fn enter_phase(phase: Phase) {
+    *phase_clock_lock() = Some((phase, Instant::now()));
+}
+
+/// Clear phase context when the command watchdog is disarmed.
+pub(crate) fn clear_phase() {
+    *phase_clock_lock() = None;
+}
+
+/// Snapshot the current phase and start time for the watchdog.
+pub(crate) fn phase_clock() -> Option<(Phase, Instant)> {
+    *phase_clock_lock()
+}
+
+/// The phase in flight, if any, for lower-level Cargo launch callers.
+pub(crate) fn current_phase() -> Option<Phase> {
+    phase_clock().map(|(phase, _)| phase)
 }
 
 /// The phase a recorded failure happened in, if one is recorded.

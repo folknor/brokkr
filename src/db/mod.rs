@@ -28,3 +28,5 @@ pub(crate) use types::{KvClass, generate_uuid, short_uuid};
 pub struct ResultsDb {
     conn: rusqlite::Connection,
 }
+
+pub(crate) mod paths;

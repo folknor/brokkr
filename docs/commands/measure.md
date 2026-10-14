@@ -37,7 +37,7 @@ parity run (gate + `runs.db`), while `corpus --hotpath`/`--alloc` builds the
 via the same `MeasurementSession` path as everyone else. `corpus --bench` is refused
 - the parity harness emits NDJSON dispositions, not the `key=value` stderr
 timing contract `--bench` needs. The build-config seam both paths share is
-`MeasurementSession::with_build_config` + `BuildConfig::for_harness`.
+`MeasurementSession::with_build_config` + `BuildConfig::for_harness_with_profile`.
 
 ## Command plans
 
@@ -67,7 +67,7 @@ from sample scratch. Tilegen's checkpoint directory remains available for
 
 ## Benchmark harness
 
-`BenchHarness` (in `src/harness.rs`) provides:
+`BenchHarness` (in `src/measure.rs`) provides:
 - Exclusive lockfile (prevents parallel bench/verify/hotpath runs). The
   lock is re-entrant *within* one brokkr process: a command that
   internally invokes another locked command shares the same hold, and
@@ -243,8 +243,10 @@ attach a sidecar.
 Results DB (`.brokkr/results.db`) stays small and gitignored.
 
 Key files: `src/sidecar.rs` (sampler and FIFO),
-`src/harness_mod/measurement_loop.rs` (iteration collection, capture and recording),
-`src/harness_mod/types_run.rs` (session provenance and row construction), and
+`src/measure/execution.rs` (iteration collection),
+`src/measure/capture.rs` (child capture),
+`src/measure/record.rs` (row and sidecar persistence),
+`src/sidecar_backup.rs` (backup rotation), and
 `src/db/sidecar.rs` (`SidecarDb`).
 
 The child process receives `BROKKR_MARKER_FIFO` env var pointing to a named
@@ -321,7 +323,7 @@ Compose these with `--samples` (and, where noted, `--stat`):
 - `--range 10.0..82.0` - seconds window; `--phase FOO` - restrict to a marker
   phase (name-resolution rules above).
 - `--stat <field>` prints min/max/avg + p50/p95 (linear-interpolation
-  percentiles, matching `harness::percentile`).
+  percentiles, matching `sidecar::linear_percentile`).
 
 A `--where` that does not parse, or a field name outside the table above in
 `--where`/`--fields`/`--stat`, is an error before anything prints - never a

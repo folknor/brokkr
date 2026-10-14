@@ -76,13 +76,16 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
         let mut input_file = None;
         let mut input_mb = None;
         let args = if self.0.needs_pbf() {
-            let pbf = crate::resolve::resolve_pbf_entry(
+            let pbf = crate::datasets::resolve::resolve_pbf_entry(
                 req.dataset,
                 req.variant,
                 paths,
                 req.project_root.as_path(),
             )?;
-            state = (pbf.path.clone(), crate::resolve::file_size_mb(&pbf.path)?);
+            state = (
+                pbf.path.clone(),
+                crate::datasets::resolve::file_size_mb(&pbf.path)?,
+            );
             input_file = pbf
                 .path
                 .file_name()

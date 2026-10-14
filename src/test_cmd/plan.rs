@@ -134,7 +134,7 @@ pub(super) fn prepare_sweep<'s>(
 
     let (env_owned, allow_args) = sweep_env(
         sweep,
-        cx.project,
+        &cx.project,
         project_root,
         cx.target_dir,
         profile_dir,
@@ -890,7 +890,7 @@ pub(super) type SweepEnv = (Vec<(String, String)>, Vec<String>);
 /// (`brokkr test` once dropped this, so a `default_profile` env didn't apply).
 pub(super) fn sweep_env(
     sweep: &PlannedSweep,
-    project: Project,
+    project: &Project,
     project_root: &Path,
     target_dir: &Path,
     profile_dir: &str,
@@ -899,7 +899,7 @@ pub(super) fn sweep_env(
     let (env_allows, allow_args) =
         rustflags::plumbing(project_root, !sweep.rustflags.is_empty(), allow_flags);
     let project_env =
-        check_cmd::sweep_runtime_env(sweep, Some(project), target_dir, profile_dir, env_allows)?;
+        check_cmd::sweep_runtime_env(sweep, Some(project),target_dir, profile_dir, env_allows)?;
     Ok((
         check_cmd::merged_env(&sweep.env, project_env.as_slice()),
         allow_args,
@@ -980,7 +980,7 @@ pub(super) fn resolve_debug(
 pub(super) fn resolve_package(
     cli_package: Option<&str>,
     dev_config: &DevConfig,
-    project: Project,
+    project: &Project,
 ) -> Result<(String, check_cmd::PackageSource), DevError> {
     let (spec, source) = resolve_package_spec(cli_package, dev_config, project)?;
     Ok((single_package(spec)?, source))
@@ -1000,7 +1000,7 @@ pub(super) fn single_package(pkg: String) -> Result<String, DevError> {
 pub(super) fn resolve_package_spec(
     cli_package: Option<&str>,
     dev_config: &DevConfig,
-    project: Project,
+    project: &Project,
 ) -> Result<(String, check_cmd::PackageSource), DevError> {
     use check_cmd::PackageSource;
     if let Some(p) = cli_package {

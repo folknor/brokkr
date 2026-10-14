@@ -15,7 +15,7 @@ pub(crate) fn run(
     target: Option<&str>,
     args: &[String],
 ) -> Result<(), DevError> {
-    project::require(req.project, Project::Mogwai, "mogwai")?;
+    project::require(&req.project, &Project::Mogwai, "mogwai")?;
 
     let cfg = targets::config(req.project_config)?;
 

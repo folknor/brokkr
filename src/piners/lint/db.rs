@@ -2,7 +2,7 @@
 //!
 //! Persists every `brokkr lint-corpus` run's per-probe agreement disposition
 //! into the per-project SQLite database returned by
-//! `resolve::lint_runs_db_path`. The
+//! `piners::db_paths::lint_runs_db_path`. The
 //! lint analogue of the trade-parity corpus store (`src/piners/corpus_db`):
 //! once a run is in the DB its scratch state can be discarded and its data
 //! stays queryable across runs.

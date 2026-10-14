@@ -1,6 +1,6 @@
-pub(crate) fn sidecar_db_path(project_root: &Path) -> PathBuf {
-    crate::clean::layout::ProjectState::new(project_root).sidecar_db()
-}
+//! Locations of piners corpus run databases.
+
+use std::path::{Path, PathBuf};
 
 /// Path to the piners corpus runs database (gitignored, local run history).
 /// Lives under the corpus artefact tree so `brokkr corpus` and `brokkr
@@ -19,4 +19,3 @@ pub(crate) fn lint_runs_db_path(project_root: &Path) -> PathBuf {
         .piners()
         .lint_runs_db()
 }
-

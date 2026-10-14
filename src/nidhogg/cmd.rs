@@ -1,12 +1,13 @@
 use std::path::Path;
 
+use super::data_dir::resolve_nidhogg_data_dir;
 use crate::build;
 use crate::config;
 use crate::context::{bootstrap, bootstrap_config};
+use crate::datasets::resolve::{self, resolve_bbox, resolve_pbf_path};
 use crate::error::DevError;
 use crate::output;
 use crate::project::Project;
-use crate::resolve::{self, resolve_bbox, resolve_nidhogg_data_dir, resolve_pbf_path};
 
 /// The nidhogg server port: `[<host>] port` in brokkr.toml, else
 /// `DEFAULT_PORT`.
@@ -159,7 +160,7 @@ pub(crate) fn ingest(
 
     // Not `resolve_nidhogg_data_dir`: that requires the directory to exist,
     // and ingest is what creates it (`ingest::run` does `create_dir_all`).
-    let data_dir = resolve::nidhogg_data_dir_path(dataset, &paths)?;
+    let data_dir = super::data_dir::nidhogg_data_dir_path(dataset, &paths)?;
 
     let build_config = build_config_with_features(Project::Nidhogg.cli_package(), features);
     let binary = build::cargo_build(&build_config, build_root)?.path;

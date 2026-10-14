@@ -499,7 +499,8 @@ exempt = ["**/examples/**", "**/core/rust/**"]
 Path selection and unmatched-glob warnings follow the shared convention rules
 above. The byte search also works on files that are not valid UTF-8, so they
 are judged on their content rather than skipped. The current year comes from
-libc `gmtime` (no date-crate dependency). Ported from
+Unix time through the shared `CivilDate` conversion (no date-crate dependency).
+Ported from
 nautilus_trader's `check_copyright_year` hook; see `src/header.rs`.
 
 ## `[[textlint]]` array
@@ -695,10 +696,14 @@ passes - that is always the `expect` match.
 
 | `diagnostics` | Failure shows |
 | --- | --- |
-| `opaque` (default) | Both captured streams, verbatim |
+| `opaque` (default) | Both captured streams, with recognized credentials and the current home path redacted for display |
 | `rustc` | Every `error:` / `error[CODE]:` block, then a line counting the warnings not shown |
 
-Neither value caps by line or block count. The only narrowing `rustc` performs
+Both views redact recognized credential fields, credential flags, URL user
+information and credential query parameters, bearer/basic values, and the
+current `HOME` path. Redaction affects display only; the check still matches
+the original captured streams. Neither value caps by line or block count. The
+only narrowing `rustc` performs
 is by diagnostic level, which is a claim about what the reader needs; the
 warning count says out loud that the omission was brokkr's choice, so a
 `warning:`-shaped cause reads as withheld rather than absent.

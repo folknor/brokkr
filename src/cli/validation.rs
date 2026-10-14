@@ -1,7 +1,9 @@
+//! Parse-time validation of command-line values.
+
 /// Validate `--as-snapshot` key: matches `[a-zA-Z0-9_-]+` and is not the
 /// reserved sentinel `base`. Delegates to `config::validate_snapshot_key`
 /// so the parse-time and CLI-time rules stay in sync.
-fn validate_snapshot_key_arg(s: &str) -> Result<String, String> {
+pub(super) fn validate_snapshot_key_arg(s: &str) -> Result<String, String> {
     crate::config::validate_snapshot_key(s)?;
     Ok(s.to_owned())
 }
@@ -9,7 +11,7 @@ fn validate_snapshot_key_arg(s: &str) -> Result<String, String> {
 /// Validate `--meta key=value`: must contain exactly one `=`. Both sides may
 /// be empty (the empty-value case is legitimate for filtering rows where the
 /// stored value is the empty string).
-fn validate_meta_filter(s: &str) -> Result<String, String> {
+pub(super) fn validate_meta_filter(s: &str) -> Result<String, String> {
     if s.matches('=').count() != 1 {
         return Err(format!(
             "expected exactly one '=' in key=value, got '{s}' (use --meta KEY=VALUE)"
@@ -22,7 +24,7 @@ fn validate_meta_filter(s: &str) -> Result<String, String> {
 /// **non-empty** KEY (an env var must be named - unlike `results --meta`, whose
 /// validator deliberately allows an empty key for row filtering), and any VALUE
 /// including empty (`KEY=` legitimately sets an empty variable).
-fn validate_env_kv(s: &str) -> Result<String, String> {
+pub(super) fn validate_env_kv(s: &str) -> Result<String, String> {
     if s.matches('=').count() != 1 {
         return Err(format!(
             "expected exactly one '=' in KEY=VALUE, got '{s}' (use --env KEY=VALUE)"
@@ -31,14 +33,16 @@ fn validate_env_kv(s: &str) -> Result<String, String> {
     match s.split_once('=') {
         Some((k, _)) if !k.is_empty() => Ok(s.to_owned()),
         Some(_) => Err(format!("--env KEY must be non-empty, got '{s}'")),
-        None => Err(format!("expected KEY=VALUE, got '{s}' (use --env KEY=VALUE)")),
+        None => Err(format!(
+            "expected KEY=VALUE, got '{s}' (use --env KEY=VALUE)"
+        )),
     }
 }
 
 /// Validate `brokkr test <NAME>`: a blank name is refused. libtest treats the
 /// name as a substring filter, so `""` matches every test in the package -
 /// a whole-suite run under `--nocapture`, which is `brokkr check`'s job.
-fn validate_test_name(s: &str) -> Result<String, String> {
+pub(super) fn validate_test_name(s: &str) -> Result<String, String> {
     if s.trim().is_empty() {
         return Err(
             "test name must not be blank: an empty filter matches every test \
@@ -54,11 +58,9 @@ fn validate_test_name(s: &str) -> Result<String, String> {
 /// 0-23, minute and second 0-59). The value is compared as a string against
 /// the stored UTC timestamps, so an out-of-range field would not error there -
 /// it would silently select the wrong rows.
-fn validate_since(s: &str) -> Result<String, String> {
+pub(super) fn validate_since(s: &str) -> Result<String, String> {
     let shape = validate_since_shape(s)?;
-    let num = |range: std::ops::Range<usize>| -> u32 {
-        s[range].parse().unwrap_or(u32::MAX)
-    };
+    let num = |range: std::ops::Range<usize>| -> u32 { s[range].parse().unwrap_or(u32::MAX) };
     let (year, month, day) = (num(0..4), num(5..7), num(8..10));
     let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
     let days_in_month = match month {
@@ -69,16 +71,20 @@ fn validate_since(s: &str) -> Result<String, String> {
         _ => return Err(format!("invalid month in '{s}', expected 01-12")),
     };
     if day == 0 || day > days_in_month {
-        return Err(format!("invalid day in '{s}', month {month:02} has {days_in_month} days"));
+        return Err(format!(
+            "invalid day in '{s}', month {month:02} has {days_in_month} days"
+        ));
     }
     if s.len() == 19 && (num(11..13) > 23 || num(14..16) > 59 || num(17..19) > 59) {
-        return Err(format!("invalid time in '{s}', expected HH 00-23, MM and SS 00-59"));
+        return Err(format!(
+            "invalid time in '{s}', expected HH 00-23, MM and SS 00-59"
+        ));
     }
     Ok(shape)
 }
 
 /// The shape half of [`validate_since`]: digits and separators in place.
-fn validate_since_shape(s: &str) -> Result<String, String> {
+pub(super) fn validate_since_shape(s: &str) -> Result<String, String> {
     let b = s.as_bytes();
     let date_ok = b.len() >= 10
         && b[4] == b'-'
@@ -138,6 +144,8 @@ mod tests {
         clippy::useless_vec
     )]
     use super::*;
+    use crate::cli::{Cli, Command, VerifyCommand};
+    use clap::Parser;
 
     /// `Cli::try_parse_from` on a thread with the main thread's stack. An
     /// unoptimized parse of the whole `Command` tree needs more than the 2 MiB
@@ -164,15 +172,16 @@ mod tests {
     fn test_requires_a_name() {
         assert!(parse(["brokkr", "test"]).is_err());
         let plain = parse(["brokkr", "test", "some_test", "-p", "pkg", "-N", "3"]).expect("parse");
-        let Command::Test { name, repeat, .. } = plain.command else { panic!("expected Test") };
+        let Command::Test { name, repeat, .. } = plain.command else {
+            panic!("expected Test")
+        };
         assert_eq!(name, "some_test");
         assert_eq!(repeat.get(), 3);
     }
 
     #[test]
     fn check_accepts_profile_flag() {
-        let parsed = parse(["brokkr", "check", "--profile", "tier1"])
-            .expect("parse");
+        let parsed = parse(["brokkr", "check", "--profile", "tier1"]).expect("parse");
         let Command::Check { profile, .. } = parsed.command else {
             panic!("expected Check");
         };
@@ -224,7 +233,10 @@ mod tests {
             panic!("expected Verify::Sort");
         };
         assert_eq!(
-            pbf.input.as_deref().map(std::path::Path::display).map(|d| d.to_string()),
+            pbf.input
+                .as_deref()
+                .map(std::path::Path::display)
+                .map(|d| d.to_string()),
             Some("fixtures/overlapping.osm.pbf".to_owned())
         );
     }
@@ -259,14 +271,8 @@ mod tests {
 
     #[test]
     fn verify_renumber_accepts_input_path() {
-        let parsed = parse([
-            "brokkr",
-            "verify",
-            "renumber",
-            "--input",
-            "fixtures/x.pbf",
-        ])
-        .expect("parse");
+        let parsed =
+            parse(["brokkr", "verify", "renumber", "--input", "fixtures/x.pbf"]).expect("parse");
         let Command::Verify { verify, .. } = parsed.command else {
             panic!("expected Verify");
         };
@@ -312,8 +318,16 @@ mod tests {
 
     #[test]
     fn validate_since_checks_field_ranges() {
-        for good in ["2026-03-01", "2024-02-29", "2026-12-31 23:59:59", "2026-01-01 00:00:00"] {
-            assert!(validate_since(good).is_ok(), "expected {good:?} to be accepted");
+        for good in [
+            "2026-03-01",
+            "2024-02-29",
+            "2026-12-31 23:59:59",
+            "2026-01-01 00:00:00",
+        ] {
+            assert!(
+                validate_since(good).is_ok(),
+                "expected {good:?} to be accepted"
+            );
         }
         for bad in [
             "2026-13-01",
@@ -326,7 +340,10 @@ mod tests {
             "2026-03-01 12:00:60",
             "2026/03/01",
         ] {
-            assert!(validate_since(bad).is_err(), "expected {bad:?} to be rejected");
+            assert!(
+                validate_since(bad).is_err(),
+                "expected {bad:?} to be rejected"
+            );
         }
     }
 
@@ -362,12 +379,15 @@ mod tests {
 
     #[test]
     fn clippy_all_features_conflicts_with_feature_flags() {
+        assert!(parse(["brokkr", "clippy", "--all-features", "--features", "z"]).is_err());
         assert!(
-            parse(["brokkr", "clippy", "--all-features", "--features", "z"]).is_err()
-        );
-        assert!(
-            parse(["brokkr", "clippy", "--all-features", "--no-default-features"])
-                .is_err()
+            parse([
+                "brokkr",
+                "clippy",
+                "--all-features",
+                "--no-default-features"
+            ])
+            .is_err()
         );
     }
 
@@ -390,7 +410,15 @@ mod tests {
     #[test]
     fn clippy_accepts_repeatable_package_and_env() {
         let parsed = parse([
-            "brokkr", "clippy", "-p", "a", "-p", "b", "--env", "K=V", "--all-features",
+            "brokkr",
+            "clippy",
+            "-p",
+            "a",
+            "-p",
+            "b",
+            "--env",
+            "K=V",
+            "--all-features",
         ])
         .expect("parse");
         let Command::Clippy {

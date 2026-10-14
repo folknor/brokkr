@@ -13,3 +13,5 @@ pub mod update;
 pub mod verify_batch;
 pub mod verify_geocode;
 pub mod verify_readonly;
+
+pub(crate) mod data_dir;

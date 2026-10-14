@@ -230,7 +230,7 @@ const TOPICS: &[Topic] = &[
 ];
 
 /// The topics available in `project`, in table order.
-fn visible(project: Option<Project>) -> Vec<&'static Topic> {
+fn visible(project: Option<&Project>) -> Vec<&'static Topic> {
     TOPICS
         .iter()
         .filter(|t| {
@@ -241,7 +241,7 @@ fn visible(project: Option<Project>) -> Vec<&'static Topic> {
         .collect()
 }
 
-fn visible_to_project(visibility: &crate::cli::Visibility, project: Option<Project>) -> bool {
+fn visible_to_project(visibility: &crate::cli::Visibility, project: Option<&Project>) -> bool {
     match project {
         Some(project) => crate::cli::visible_to(visibility, project),
         None => match visibility {
@@ -288,7 +288,7 @@ pub fn run(
     if !found
         .commands
         .iter()
-        .any(|id| visible_to_project(&id.spec().applies, project))
+        .any(|id| visible_to_project(&id.spec().applies, project.as_ref()))
     {
         let current = project.map_or_else(|| "no detected project".to_owned(), |p| p.to_string());
         return Err(crate::error::DevError::Config(format!(
@@ -360,7 +360,7 @@ fn write_stdout(text: &str) {
 /// The bare-`brokkr man` listing: each topic name padded to a common width
 /// followed by its one-line summary.
 fn list_topics(project: Option<Project>) -> String {
-    let topics = visible(project);
+    let topics = visible(project.as_ref());
     let width = topics.iter().map(|t| t.name.len()).max().unwrap_or(0);
     let mut out = if let Some(project) = project {
         format!("Bundled docs for {project}. Run `brokkr man <topic>` to read one.\n\n")
@@ -401,10 +401,13 @@ mod tests {
     fn generic_topics_survive_every_project() {
         for project in Project::ALL
             .iter()
-            .map(|(_, project)| *project)
-            .chain([Project::Other("some-foreign-repo")])
+            .map(|(_, project)| project.clone())
+            .chain([Project::Other("some-foreign-repo".into())])
         {
-            let names: Vec<&str> = visible(Some(project)).iter().map(|t| t.name).collect();
+            let names: Vec<&str> = visible(Some(&project))
+                .iter()
+                .map(|t| t.name)
+                .collect();
             for expected in ["check", "clippy", "deps", "config", "measure", "run"] {
                 assert!(
                     names.contains(&expected),
@@ -417,14 +420,14 @@ mod tests {
     /// And the project-scoped ones must not leak across.
     #[test]
     fn scoped_topics_stay_in_their_project() {
-        let piners: Vec<&str> = visible(Some(Project::Piners))
+        let piners: Vec<&str> = visible(Some(&Project::Piners))
             .iter()
             .map(|t| t.name)
             .collect();
         assert!(piners.contains(&"corpus"));
         assert!(!piners.contains(&"pbfhogg"));
 
-        let pbfhogg: Vec<&str> = visible(Some(Project::Pbfhogg))
+        let pbfhogg: Vec<&str> = visible(Some(&Project::Pbfhogg))
             .iter()
             .map(|t| t.name)
             .collect();
@@ -436,7 +439,7 @@ mod tests {
     /// one - the generic topics are the whole point of the `Any` arm.
     #[test]
     fn other_project_listing_is_not_empty() {
-        let out = list_topics(Some(Project::Other("some-foreign-repo")));
+        let out = list_topics(Some(Project::Other("some-foreign-repo".into())));
         assert!(out.contains("check"), "{out}");
         assert!(!out.contains("corpus"), "{out}");
     }

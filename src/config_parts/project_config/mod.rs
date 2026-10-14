@@ -23,7 +23,7 @@ pub enum ProjectConfig {
 impl ProjectConfig {
     /// Parse only the section owned by this project and reject any known
     /// project section attached to a different project identity.
-    pub(crate) fn parse(project: Project, table: &toml::Table) -> Result<Self, DevError> {
+    pub(crate) fn parse(project: &Project, table: &toml::Table) -> Result<Self, DevError> {
         reject_foreign_sections(project, table)?;
         match project {
             Project::Litehtml => Ok(Self::Litehtml(litehtml::parse(table)?)),
@@ -60,7 +60,7 @@ impl ProjectConfig {
     }
 }
 
-fn reject_foreign_sections(project: Project, table: &toml::Table) -> Result<(), DevError> {
+fn reject_foreign_sections(project: &Project, table: &toml::Table) -> Result<(), DevError> {
     for (section, owner) in [
         ("litehtml", Project::Litehtml),
         ("sluggrs", Project::Sluggrs),
@@ -69,7 +69,7 @@ fn reject_foreign_sections(project: Project, table: &toml::Table) -> Result<(), 
         ("dellingr", Project::Dellingr),
         ("mogwai", Project::Mogwai),
     ] {
-        if table.contains_key(section) && project != owner {
+        if table.contains_key(section) && project != &owner {
             return Err(DevError::Config(format!(
                 "[{section}] belongs to project \"{}\" (current project: \"{}\")",
                 owner.name(),

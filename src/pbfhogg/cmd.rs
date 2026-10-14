@@ -3,12 +3,12 @@ use std::path::{Path, PathBuf};
 use crate::cli::VerifyCommand;
 use crate::config;
 use crate::context::{MeasurementSession, bootstrap, bootstrap_config};
+use crate::datasets::resolve::{self, resolve_bbox, resolve_pbf_with_size};
 use crate::error::DevError;
 use crate::measure::MeasureRequest;
 use crate::output;
 use crate::preflight;
 use crate::project::Project;
-use crate::resolve::{self, resolve_bbox, resolve_pbf_with_size};
 use crate::tools;
 
 /// Resolve a verify subcommand's input PBF: prefer `--input <PATH>`
@@ -22,7 +22,7 @@ fn resolve_verify_input(
     input: Option<&Path>,
     dataset: &str,
     variant: &str,
-    snapshot: Option<&str>,
+    snapshot: Option<&resolve::SnapshotRef>,
     paths: &config::ResolvedPaths,
     project_root: &Path,
 ) -> Result<PathBuf, DevError> {
@@ -43,8 +43,9 @@ fn resolve_verify_input(
     }
     // `--snapshot base` / omitted → primary data (identical to the legacy
     // `resolve_pbf_path`); a named key reads the snapshot's pbf table.
-    let snapshot_ref = resolve::SnapshotRef::from_opt(snapshot)?;
+    let snapshot_ref = resolve::SnapshotRef::from_opt(snapshot);
     resolve::resolve_snapshot_pbf_path(dataset, &snapshot_ref, variant, paths, project_root)
+        .map_err(Into::into)
 }
 
 /// Resolve the `read` benchmark's input PBF and its size, honouring an
@@ -54,10 +55,10 @@ fn resolve_verify_input(
 /// re-encoded corpus (e.g. a `repack --as-snapshot` at a different blob cap).
 fn resolve_read_pbf_with_size(
     req: &MeasureRequest,
-    snapshot: Option<&str>,
+    snapshot: Option<&resolve::SnapshotRef>,
     paths: &config::ResolvedPaths,
 ) -> Result<(PathBuf, f64), DevError> {
-    let snapshot_ref = resolve::SnapshotRef::from_opt(snapshot)?;
+    let snapshot_ref = resolve::SnapshotRef::from_opt(snapshot);
     let pbf_path = resolve::resolve_snapshot_pbf_path(
         req.dataset,
         &snapshot_ref,
@@ -90,12 +91,12 @@ enum OscScope {
 /// and which chain it came from (for log narration).
 fn resolve_verify_osc(
     dataset: &str,
-    snapshot: Option<&str>,
+    snapshot: Option<&resolve::SnapshotRef>,
     osc_seq: Option<&str>,
     paths: &config::ResolvedPaths,
     project_root: &Path,
 ) -> Result<(PathBuf, OscScope), DevError> {
-    let snapshot_ref = resolve::SnapshotRef::from_opt(snapshot)?;
+    let snapshot_ref = resolve::SnapshotRef::from_opt(snapshot);
     let use_snapshot = match &snapshot_ref {
         resolve::SnapshotRef::Base => false,
         resolve::SnapshotRef::Named(key) => paths
@@ -121,7 +122,7 @@ fn resolve_verify_osc(
 /// counts as configured so resolution reports it rather than a skip hiding it.
 fn osc_configured(
     dataset: &str,
-    snapshot: Option<&str>,
+    snapshot: Option<&resolve::SnapshotRef>,
     osc_seq: Option<&str>,
     paths: &config::ResolvedPaths,
 ) -> bool {
@@ -133,14 +134,14 @@ fn osc_configured(
     };
     !ds.osc.is_empty()
         || snapshot
-            .and_then(|key| ds.snapshot.get(key))
+            .and_then(|key| ds.snapshot.get(key.as_str()))
             .is_some_and(|snap| !snap.osc.is_empty())
 }
 
 /// Whether `verify all` has a bbox to resolve: `--bbox`, or the dataset's
 /// configured `bbox`. Same skip-versus-error split as [`osc_configured`].
 fn bbox_configured(
-    bbox: Option<&crate::resolve::Bbox>,
+    bbox: Option<&crate::datasets::Bbox>,
     dataset: &str,
     paths: &config::ResolvedPaths,
 ) -> bool {
@@ -153,7 +154,7 @@ fn bbox_configured(
 
 /// Narrate which OSC chain a verify subcommand resolved, but only when the
 /// user actually passed `--snapshot` (the plain base case is unremarkable).
-fn narrate_osc_scope(snapshot: Option<&str>, scope: OscScope) {
+fn narrate_osc_scope(snapshot: Option<&resolve::SnapshotRef>, scope: OscScope) {
     let Some(key) = snapshot else {
         return;
     };
@@ -168,7 +169,7 @@ fn narrate_osc_scope(snapshot: Option<&str>, scope: OscScope) {
 pub(crate) fn bench_read(
     req: &MeasureRequest,
     modes_str: &str,
-    snapshot: Option<&str>,
+    snapshot: Option<&resolve::SnapshotRef>,
 ) -> Result<(), DevError> {
     if req.dry_run {
         let paths = dry_run_paths(req)?;
@@ -374,7 +375,7 @@ pub(crate) fn verify(
             pbf.input.as_deref(),
             &pbf.dataset,
             &pbf.variant,
-            pbf.snapshot.as_deref(),
+            pbf.snapshot.as_ref(),
             &paths,
             project_root,
         )?;
@@ -385,18 +386,18 @@ pub(crate) fn verify(
         // corrupted OSC turned five checks into skips and the suite exited 0.
         let osc_path = if osc_configured(
             &pbf.dataset,
-            pbf.snapshot.as_deref(),
+            pbf.snapshot.as_ref(),
             osc_seq.as_deref(),
             &paths,
         ) {
             let (path, scope) = resolve_verify_osc(
                 &pbf.dataset,
-                pbf.snapshot.as_deref(),
+                pbf.snapshot.as_ref(),
                 osc_seq.as_deref(),
                 &paths,
                 project_root,
             )?;
-            narrate_osc_scope(pbf.snapshot.as_deref(), scope);
+            narrate_osc_scope(pbf.snapshot.as_ref(), scope);
             Some(path)
         } else {
             None
@@ -454,7 +455,7 @@ pub(crate) fn verify(
                 pbf.input.as_deref(),
                 &pbf.dataset,
                 &pbf.variant,
-                pbf.snapshot.as_deref(),
+                pbf.snapshot.as_ref(),
                 &paths,
                 project_root,
             )?;
@@ -465,7 +466,7 @@ pub(crate) fn verify(
                 pbf.input.as_deref(),
                 &pbf.dataset,
                 &pbf.variant,
-                pbf.snapshot.as_deref(),
+                pbf.snapshot.as_ref(),
                 &paths,
                 project_root,
             )?;
@@ -476,7 +477,7 @@ pub(crate) fn verify(
                 pbf.input.as_deref(),
                 &pbf.dataset,
                 &pbf.variant,
-                pbf.snapshot.as_deref(),
+                pbf.snapshot.as_ref(),
                 &paths,
                 project_root,
             )?;
@@ -488,7 +489,7 @@ pub(crate) fn verify(
                 pbf.input.as_deref(),
                 &pbf.dataset,
                 &pbf.variant,
-                pbf.snapshot.as_deref(),
+                pbf.snapshot.as_ref(),
                 &paths,
                 project_root,
             )?;
@@ -500,7 +501,7 @@ pub(crate) fn verify(
                 pbf.input.as_deref(),
                 &pbf.dataset,
                 &pbf.variant,
-                pbf.snapshot.as_deref(),
+                pbf.snapshot.as_ref(),
                 &paths,
                 project_root,
             )?;
@@ -511,7 +512,7 @@ pub(crate) fn verify(
                 pbf.input.as_deref(),
                 &pbf.dataset,
                 &pbf.variant,
-                pbf.snapshot.as_deref(),
+                pbf.snapshot.as_ref(),
                 &paths,
                 project_root,
             )?;
@@ -526,7 +527,7 @@ pub(crate) fn verify(
                 pbf.input.as_deref(),
                 &pbf.dataset,
                 &pbf.variant,
-                pbf.snapshot.as_deref(),
+                pbf.snapshot.as_ref(),
                 &paths,
                 project_root,
             )?;
@@ -537,7 +538,7 @@ pub(crate) fn verify(
                 pbf.input.as_deref(),
                 &pbf.dataset,
                 &pbf.variant,
-                pbf.snapshot.as_deref(),
+                pbf.snapshot.as_ref(),
                 &paths,
                 project_root,
             )?;
@@ -548,18 +549,18 @@ pub(crate) fn verify(
                 pbf.input.as_deref(),
                 &pbf.dataset,
                 &pbf.variant,
-                pbf.snapshot.as_deref(),
+                pbf.snapshot.as_ref(),
                 &paths,
                 project_root,
             )?;
             let (osc_path, scope) = resolve_verify_osc(
                 &pbf.dataset,
-                pbf.snapshot.as_deref(),
+                pbf.snapshot.as_ref(),
                 osc_seq.as_deref(),
                 &paths,
                 project_root,
             )?;
-            narrate_osc_scope(pbf.snapshot.as_deref(), scope);
+            narrate_osc_scope(pbf.snapshot.as_ref(), scope);
             let osmosis = match tools::ensure_osmosis(&paths.data_dir) {
                 Ok(tools) => Some(tools),
                 Err(e) => {
@@ -580,18 +581,18 @@ pub(crate) fn verify(
                 pbf.input.as_deref(),
                 &pbf.dataset,
                 &pbf.variant,
-                pbf.snapshot.as_deref(),
+                pbf.snapshot.as_ref(),
                 &paths,
                 project_root,
             )?;
             let (osc_path, scope) = resolve_verify_osc(
                 &pbf.dataset,
-                pbf.snapshot.as_deref(),
+                pbf.snapshot.as_ref(),
                 osc_seq.as_deref(),
                 &paths,
                 project_root,
             )?;
-            narrate_osc_scope(pbf.snapshot.as_deref(), scope);
+            narrate_osc_scope(pbf.snapshot.as_ref(), scope);
             super::verify_derive_changes::run(&harness, &pbf_path, &osc_path, pbf.direct_io)
         }
         VerifyCommand::Renumber {
@@ -606,7 +607,7 @@ pub(crate) fn verify(
                 input.as_deref(),
                 &dataset,
                 &variant,
-                snapshot.as_deref(),
+                snapshot.as_ref(),
                 &paths,
                 project_root,
             )?;
@@ -623,18 +624,18 @@ pub(crate) fn verify(
                 input.as_deref(),
                 &dataset,
                 &variant,
-                snapshot.as_deref(),
+                snapshot.as_ref(),
                 &paths,
                 project_root,
             )?;
             let (osc_path, scope) = resolve_verify_osc(
                 &dataset,
-                snapshot.as_deref(),
+                snapshot.as_ref(),
                 osc_seq.as_deref(),
                 &paths,
                 project_root,
             )?;
-            narrate_osc_scope(snapshot.as_deref(), scope);
+            narrate_osc_scope(snapshot.as_ref(), scope);
             super::verify_diff::run(&harness, &pbf_path, &osc_path)
         }
         // Both returned before this match: `all` (it manages its own output)

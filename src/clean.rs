@@ -130,7 +130,7 @@ fn clean_io_error(action: &str, path: &Path, source: &std::io::Error) -> DevErro
 
 pub(crate) fn cmd_clean(
     dev_config: &config::DevConfig,
-    project: Project,
+    project: &Project,
     project_root: &crate::project::ProjectRoot,
     build_root: &crate::project::BuildRoot,
     opts: CleanOpts,
@@ -164,7 +164,7 @@ pub(crate) fn cmd_clean(
     let state = layout::ProjectState::new(project_root);
 
     // The verify harness writes only under target/verify.
-    if project == Project::Pbfhogg {
+    if *project == Project::Pbfhogg {
         let verify_dir = layout::PbfhoggLayout::new(&paths).verify_output();
         if c.dir(&verify_dir)? {
             output::run_msg(&format!("{} verify output", c.verb()));
@@ -183,7 +183,7 @@ pub(crate) fn cmd_clean(
     // Elivagar's default `-o` target for `pmtiles-corpus mutate` is a
     // brokkr-designated scratch location. `ocean-build_tmp` is not passed by
     // brokkr and belongs to the external tool, so clean leaves it alone.
-    if project == Project::Elivagar {
+    if *project == Project::Elivagar {
         let elivagar = layout::ElivagarLayout::new(&paths);
         if c.dir(&elivagar.corpus_calibrands())? {
             output::run_msg(&format!("{} corpus-calibrands", c.past()));
@@ -209,7 +209,7 @@ pub(crate) fn cmd_clean(
     // script version, including the hashed capture script, each with its own
     // node_modules. There is no project-local `.brokkr/capture.js`; every stale
     // version goes and the current one stays so the next run does not reinstall.
-    if project == Project::Litehtml {
+    if *project == Project::Litehtml {
         if c.dir(state.litehtml().prepare_cache())? {
             output::run_msg(&format!("{} litehtml prepare cache", c.verb()));
         }
@@ -238,7 +238,7 @@ pub(crate) fn cmd_clean(
         // `runs.db` (the archives `regress` diffs), so a routine `brokkr clean`
         // spares it - retention already bounds its growth. Only the explicit
         // deep clean wipes it wholesale, alongside the worktrees.
-        if project == Project::Elivagar {
+        if *project == Project::Elivagar {
             clean_elivagar_outputs(&paths, &c)?;
         }
         // Legacy sibling worktrees (from before the `~/.brokkr/worktrees`
@@ -303,11 +303,11 @@ pub(crate) fn cargo_clean_package(build_root: &Path, pkg: &str) -> Result<(), De
 
 /// Clean the exact scratch paths named by each project's typed layout.
 fn clean_scratch(
-    project: Project,
+    project: &Project,
     paths: &config::ResolvedPaths,
     c: &Cleaner,
 ) -> Result<(), DevError> {
-    if project == Project::Elivagar {
+    if *project == Project::Elivagar {
         let elivagar = layout::ElivagarLayout::new(paths);
         if c.dir(elivagar.scratch())? {
             if !c.dry_run {
@@ -322,7 +322,7 @@ fn clean_scratch(
         return Ok(());
     }
 
-    if project == Project::Nidhogg {
+    if *project == Project::Nidhogg {
         // This is the ingest output path declared by NidhoggLayout. The
         // similarly named project-root tmp directories are not created by brokkr.
         let ingest_output = layout::NidhoggLayout::new(paths).bench_ingest_output();
@@ -331,7 +331,7 @@ fn clean_scratch(
         }
     }
 
-    if project == Project::Pbfhogg {
+    if *project == Project::Pbfhogg {
         let pbfhogg = layout::PbfhoggLayout::new(paths);
         let mut removed = 0usize;
         for file in pbfhogg.scratch_files() {
@@ -424,11 +424,11 @@ fn clean_artifact_root(
 /// Clean each project's artifact roots from its typed layout. Durable stores
 /// are named separately and never inferred from the contents of a directory.
 fn clean_artefact_trees(
-    project: Project,
+    project: &Project,
     state: &layout::ProjectState,
     c: &Cleaner,
 ) -> Result<(), DevError> {
-    if project == Project::Ratatoskr {
+    if *project == Project::Ratatoskr {
         let ratatoskr = state.ratatoskr();
         let permanent = [ratatoskr.gate_db()];
         let mut removed = 0usize;
@@ -444,15 +444,15 @@ fn clean_artefact_trees(
         }
     }
 
-    if project == Project::Dellingr && c.dir(state.dellingr().scratch())? {
+    if *project == Project::Dellingr && c.dir(state.dellingr().scratch())? {
         output::run_msg(&format!("{} dellingr scratch dir", c.verb()));
     }
 
-    if project == Project::Mogwai && c.dir(state.mogwai().scratch())? {
+    if *project == Project::Mogwai && c.dir(state.mogwai().scratch())? {
         output::run_msg(&format!("{} mogwai scratch dir", c.verb()));
     }
 
-    if project == Project::Piners {
+    if *project == Project::Piners {
         let piners = state.piners();
         let corpus = piners.corpus_root();
         let removed = clean_artifact_children(&corpus, &[piners.corpus_runs_db()], c)?;

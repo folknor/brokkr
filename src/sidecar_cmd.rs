@@ -7,10 +7,10 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use crate::db;
+use crate::db::paths::{results_db_path, sidecar_db_path};
 use crate::error::DevError;
 use crate::output;
 use crate::request::{SidecarQuery, SidecarView};
-use crate::resolve::{results_db_path, sidecar_db_path};
 use crate::sidecar_fmt::{
     apply_timeline_filter, parse_time_range, print_compare_timeline, print_counters,
     print_field_stat, print_marker_durations, print_phase_summary, print_run_info,

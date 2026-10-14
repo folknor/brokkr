@@ -18,7 +18,7 @@ pub fn run(
 ) -> Result<(), DevError> {
     let (basename, pbf_str) = crate::utf8_path::path_strings(pbf_path)?;
 
-    crate::harness::run_variants("allocator", ALL_ALLOCATORS, |name| {
+    crate::bench_variants::run_variants("allocator", ALL_ALLOCATORS, |name| {
         let build_config = match name {
             "jemalloc" => {
                 BuildConfig::release_with_features(Project::Pbfhogg.cli_package(), &["jemalloc"])

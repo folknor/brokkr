@@ -493,9 +493,10 @@ pub(super) fn report_script_stage(
 
 /// Render one failing script-check's captured output.
 ///
-/// The captured stream IS the diagnostic here - brokkr never saw the command's
-/// internals, only what it printed - so the rendering question is which part of
-/// it to show, not how much. Two paths:
+/// The captured stream is the diagnostic here. Brokkr never saw the command's
+/// internals, only what it printed. The rendering selects a useful view and
+/// redacts recognized credentials and the current home path; matching still
+/// uses the original bytes. Two paths:
 ///
 /// - `diagnostics = "rustc"` with at least one error finding: the error
 ///   findings alone, with a trailer counting the warning findings withheld.
@@ -504,11 +505,12 @@ pub(super) fn report_script_stage(
 ///   `private-intra-doc-links` warnings from every other crate - a 1:20
 ///   signal-to-noise ratio, with the signal uniformly at `error`. Printing the
 ///   failing level alone fit it in a third of a screen.
-/// - Everything else: both streams verbatim.
+/// - Everything else: both streams with recognized credentials and the
+///   current home path redacted for display.
 ///
-/// A `rustc` entry with no error block falls through to the verbatim view
-/// rather than printing an empty section: a gate can fail because its sentinel
-/// never appeared at all (the command died, or was stubbed), and that failure's
+/// A `rustc` entry with no error block falls through to the opaque view rather
+/// than printing an empty section: a gate can fail because its sentinel never
+/// appeared at all (the command died, or was stubbed), and that failure's
 /// evidence is the output, not a diagnostic level that isn't there.
 ///
 /// Nothing here is capped by line count. The only narrowing is by diagnostic
@@ -584,7 +586,8 @@ fn append_rustc_errors(msg: &mut String, streams: &[(&str, Vec<Block>)]) {
         }
         msg.push_str(&format!("    --- {label} (errors) ---\n"));
         for block in errors {
-            for line in block.text.lines() {
+            let text = crate::history::redact_secret_text(&block.text);
+            for line in text.lines() {
                 msg.push_str("    ");
                 msg.push_str(line);
                 msg.push('\n');
@@ -612,14 +615,17 @@ fn stream_label(stream: crate::config::Stream) -> &'static str {
 /// Append a labelled, indented block of a script-check's captured stream to the
 /// failure message. A no-op for an empty stream.
 ///
-/// Verbatim: an opaque check's verdict is typically its LAST line (that is what
+/// An opaque check's verdict is typically its LAST line (that is what
 /// `last-line` matches), while a command's fatal error is typically near its
-/// first, so any cap hides whichever of those the reader came for.
+/// first. Keep every captured line and redact likely credentials and the
+/// current home path only while rendering; matching already used the original
+/// output.
 fn append_captured_stream(msg: &mut String, label: &str, bytes: &[u8]) {
     if bytes.is_empty() {
         return;
     }
     let text = String::from_utf8_lossy(bytes);
+    let text = crate::history::redact_secret_text(&text);
     msg.push_str(&format!("    --- {label} ---\n"));
     for line in text.lines() {
         msg.push_str("    ");
@@ -816,7 +822,7 @@ mod script_failure_render_tests {
     }
 
     #[test]
-    fn rustc_without_an_error_block_falls_back_to_the_verbatim_view() {
+    fn rustc_without_an_error_block_falls_back_to_the_opaque_view() {
         // A sentinel that never appeared because the command died early: the
         // evidence is the output, not a level that isn't there.
         let mut msg = String::new();

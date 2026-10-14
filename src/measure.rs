@@ -3,10 +3,23 @@
 //! Replaces the separate `BenchRequest` / `HotpathRequest` / `ProfileRequest`
 //! structs with a single `MeasureRequest` carrying a `MeasureMode`.
 
-use std::num::NonZeroUsize;
+use crate::build::CargoProfile;
+use std::path::Path;
+use std::time::Duration;
 
+use self::execution::{Iteration, Measurement};
+use self::record::format_storage_notes;
+use self::wall::{
+    WallSource, bench_ordering_key, elapsed_to_ms, elapsed_to_us, summarize_distribution,
+};
 use crate::config;
+use crate::db::{Distribution, HotpathData, KvPair, ResultsDb};
+use crate::error::DevError;
+use crate::git::GitInfo;
+use crate::lockfile::LockGuard;
+use crate::output::console;
 use crate::project::{BuildRoot, Project, ProjectRoot};
+use std::num::NonZeroUsize;
 
 // ---------------------------------------------------------------------------
 // MeasureMode
@@ -188,3 +201,445 @@ impl MeasureRequest<'_> {
 
 /// Shared execution of standalone command plans.
 pub(crate) mod runner;
+
+// ---------------------------------------------------------------------------
+// Configuration and result types
+// ---------------------------------------------------------------------------
+
+/// Configuration for a benchmark run.
+pub struct BenchConfig {
+    pub command: String,
+    pub input_file: Option<String>,
+    pub input_mb: Option<f64>,
+    /// Optional per-row feature label. When present, it takes precedence over
+    /// the harness-wide build feature label; the DB writer stores a sorted,
+    /// duplicate-free spelling so equivalent feature sets compare alike.
+    pub cargo_features: Option<String>,
+    /// The build identity of a row whose binary brokkr did not build with
+    /// cargo (planetiler's Java, tilemaker's CMake). `None` for every cargo
+    /// build: those rows take the profile the session's build actually used
+    /// ([`BenchHarness::with_build_identity`]).
+    pub external_build: Option<CargoProfile>,
+    pub runs: usize,
+    /// Literal subprocess invocation (pbfhogg/elivagar/...). Populated by
+    /// dispatch from the argv it hands to the tool binary.
+    pub cli_args: Option<String>,
+    pub metadata: Vec<KvPair>,
+}
+
+/// Result of a single benchmark measurement.
+pub struct BenchResult {
+    pub elapsed_ms: i64,
+    /// Exact wall in microseconds, when the harness path knows it.
+    ///
+    /// `elapsed_ms` is an integer and always will be - every query, format
+    /// and historical row depends on it. But sluggrs' measured regions are
+    /// single-digit milliseconds and the deltas worth seeing there are
+    /// 100-200us, which integer milliseconds flatten to nothing. Filled by
+    /// the stderr-kv path (from a fractional `elapsed_ms=6.847` line) and by
+    /// the paths brokkr times itself from an exact `Duration`
+    /// (`run_external`/`run_external_ok`, `BenchHarness::capture_hotpath`, and
+    /// `run_distribution`, whose closures hand back a `Duration` and which
+    /// records the fastest sample here). `run_internal` carries whatever its
+    /// closure returned; a closure that only had milliseconds leaves it
+    /// `None`, and `elapsed_ms` remains the only timing available.
+    ///
+    /// Where both exist, `elapsed_ms` is this value rounded - never treat
+    /// them as independent measurements.
+    pub elapsed_us: Option<i64>,
+    pub kv: Vec<KvPair>,
+    /// Per-iteration wall times in execution order, attached by `record`
+    /// to the aggregate best-of-N result.
+    ///
+    /// Always empty on the `BenchResult` a per-iteration closure hands back -
+    /// one iteration doesn't have a list of iterations. Recording collects each
+    /// iteration's `elapsed_ms` and attaches the vector to the winner, so
+    /// `elapsed_ms` is the best of `iterations`.
+    ///
+    /// Ordering is the payload: `--bench N` reports the minimum, which hides
+    /// whether the run drifted (iteration 3 slowest) or started cold
+    /// (iteration 1 slowest). Never sort this.
+    pub iterations: Vec<i64>,
+    pub distribution: Option<Distribution>,
+    pub hotpath: Option<HotpathData>,
+}
+
+// ---------------------------------------------------------------------------
+// Harness
+// ---------------------------------------------------------------------------
+
+/// The benchmark harness. Holds lockfile guard, database, env snapshot, git info.
+pub struct BenchHarness {
+    lock: LockGuard,
+    db: ResultsDb,
+    /// The `.brokkr` stores the rows land in: the main tree's, also under
+    /// `--commit` (`db_root`).
+    state: crate::clean::layout::ProjectState,
+    /// The host facts a row records, read once from the typed host probes
+    /// (`crate::host`) - not the whole `brokkr env` report, whose tool and
+    /// dataset probes a measurement never reads.
+    host: HostFacts,
+    git: GitInfo,
+    storage_notes: Option<String>,
+    cargo_features: Option<String>,
+    project: crate::project::Project,
+    stop_marker: Option<String>,
+    /// The brokkr invocation (exact argv and arm key, `crate::run_invocation`).
+    /// Set once per harness via `with_invocation`; every row built by this
+    /// harness inherits it via `build_row`. Lets individual bench writers stay
+    /// agnostic of the brokkr-level invocation.
+    invocation: crate::db::RunInvocation,
+    /// The recorded measurement mode. Set once per harness via
+    /// `with_measure_mode`. The single source of a run's mode; read only
+    /// through [`Self::effective_mode`].
+    measure_mode: crate::measure::RecordedMode,
+    /// Whether measurements from this harness are persisted - a switch apart
+    /// from the mode. A request in run mode calls `with_measure_mode(None)`:
+    /// it still reports the timing, but writes neither results nor sidecar
+    /// rows.
+    store_results: bool,
+    /// What the session built, when it built the measured binary: the row's
+    /// `cargo_profile` and canonical `cargo_features` come from it.
+    build_identity: Option<BuildIdentity>,
+    /// Env var snapshot captured from the measurement request. Merged into
+    /// every row's kv via `build_row` as `env.<NAME>` entries - lets
+    /// env-gated code paths (A/B feature flags set from the shell) be
+    /// distinguished across result rows.
+    env_kv: Vec<crate::db::KvPair>,
+    /// Unix epoch at which the current measurement loop began its first
+    /// iteration; 0 until `MeasurementLoop` sets it.
+    ///
+    /// `prev.gap_seconds` has to be measured to the moment this run *started*,
+    /// but it is written by `build_row` during `record` - which happens
+    /// after every iteration has finished. Reading the clock there would fold
+    /// this run's own duration into the gap, so a 10-minute cell launched
+    /// immediately after its predecessor would report a ~10-minute gap and
+    /// wrongly look cache-cold. A `Cell` because the `run_*` methods take
+    /// `&self`.
+    measure_start_epoch: std::cell::Cell<i64>,
+}
+
+/// The machine facts every results row carries.
+struct HostFacts {
+    hostname: String,
+    kernel: Option<String>,
+    governor: Option<String>,
+    memory_available_mb: u64,
+}
+
+impl HostFacts {
+    fn collect(hostname: &str) -> Self {
+        Self {
+            hostname: hostname.to_owned(),
+            kernel: crate::host::kernel::collect().version,
+            governor: crate::host::cpu::collect().governor,
+            memory_available_mb: crate::host::memory::collect().available_mb,
+        }
+    }
+}
+
+/// How the measured binary was built, as a results row records it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildIdentity {
+    pub profile: CargoProfile,
+    /// The canonical feature spelling (sorted, duplicate-free), `None` for a
+    /// default-features build.
+    pub features: Option<String>,
+}
+
+impl BuildIdentity {
+    /// The identity of a cargo build brokkr ran.
+    pub fn of(artifact: &crate::build::BuiltArtifact) -> Self {
+        let mut features: Vec<&str> = artifact.features.iter().map(String::as_str).collect();
+        features.sort_unstable();
+        features.dedup();
+        Self {
+            profile: artifact.profile,
+            features: (!features.is_empty()).then(|| features.join(",")),
+        }
+    }
+}
+
+impl BenchHarness {
+    /// Create a new harness with a pre-acquired lock.
+    ///
+    /// Use this when the lock must be held before other work (e.g. cargo build)
+    /// to prevent concurrent builds from contaminating timing. Git provenance
+    /// comes from the build root (the code that was measured, a `--commit`
+    /// worktree included); the results store lives under the project root.
+    /// `included_config_files` are the composed config's `include` files,
+    /// exempt from the dirty-tree refusal as `brokkr.toml` itself is.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_lock(
+        lock: LockGuard,
+        paths: &crate::config::ResolvedPaths,
+        included_config_files: &[std::path::PathBuf],
+        build_root: &crate::project::BuildRoot,
+        project_root: &crate::project::ProjectRoot,
+        project: crate::project::Project,
+        force: bool,
+        stop_marker: Option<String>,
+    ) -> Result<Self, DevError> {
+        std::fs::create_dir_all(&paths.scratch_dir)?;
+        let host = HostFacts::collect(&paths.hostname);
+        let git =
+            crate::git::collect_with_config_paths(build_root.as_path(), included_config_files)?;
+        let state = crate::clean::layout::ProjectState::new(project_root.as_path());
+        std::fs::create_dir_all(state.root())?;
+        let db = ResultsDb::open(&state.results_db())?;
+        let storage_notes = format_storage_notes(&paths.drives);
+
+        if !git.is_clean {
+            if force {
+                // Name the database. This governs results.db only - a gated
+                // ratatoskr run still records into gate.db, and unqualified
+                // the two lines read as a contradiction.
+                console::warn("dirty tree - results will NOT be stored in results.db");
+            } else {
+                return Err(DevError::Preflight(vec![
+                    "dirty tree - commit or stash changes before benchmarking".into(),
+                    "run with --force to bench anyway (results will not be stored in results.db)"
+                        .into(),
+                ]));
+            }
+        }
+
+        Ok(Self {
+            lock,
+            db,
+            state,
+            host,
+            git,
+            storage_notes,
+            cargo_features: None,
+            project,
+            stop_marker,
+            invocation: crate::db::RunInvocation {
+                argv: Vec::new(),
+                arm_key: String::new(),
+            },
+            measure_mode: crate::measure::RecordedMode::Bench,
+            store_results: true,
+            build_identity: None,
+            env_kv: Vec::new(),
+            measure_start_epoch: std::cell::Cell::new(0),
+        })
+    }
+
+    /// Set the cargo features that were used to build the binary.
+    ///
+    /// When set, this value is used as the default `cargo_features` for all
+    /// results recorded by this harness. Individual `BenchConfig.cargo_features`
+    /// values override the harness default when set. The DB writer canonicalizes
+    /// whichever label wins before persisting it.
+    pub fn with_cargo_features(mut self, features: Option<String>) -> Self {
+        self.cargo_features = features;
+        self
+    }
+
+    /// Set the brokkr invocation for this harness. Every row takes its
+    /// invocation from this session value.
+    pub fn with_invocation(mut self, invocation: crate::db::RunInvocation) -> Self {
+        self.invocation = invocation;
+        self
+    }
+
+    /// Set the recorded measurement mode. Individual writers do not supply
+    /// the measurement mode. `None` denotes run mode: report measurements
+    /// without persisting result or sidecar records.
+    pub fn with_measure_mode(mut self, mode: Option<crate::measure::RecordedMode>) -> Self {
+        self.store_results = mode.is_some();
+        if let Some(mode) = mode {
+            self.measure_mode = mode;
+        }
+        self
+    }
+
+    /// Record what the session built. Rows built by this harness take their
+    /// `cargo_profile` and `cargo_features` from it, unless a row names an
+    /// external tool's identity itself ([`BenchConfig::external_build`]).
+    pub fn with_build_identity(mut self, identity: BuildIdentity) -> Self {
+        self.cargo_features.clone_from(&identity.features);
+        self.build_identity = Some(identity);
+        self
+    }
+
+    /// Attach captured env-var snapshot (see [`crate::config::captured_env_pairs`]).
+    /// Merged into every row's kv via `build_row`.
+    pub fn with_env_kv(mut self, env_kv: Vec<crate::db::KvPair>) -> Self {
+        self.env_kv = env_kv;
+        self
+    }
+
+    /// Expose the held lock so callers that spawn children outside of
+    /// `run_external` (notably `BenchHarness::capture_hotpath`) can still report
+    /// `child_pid` into the lockfile for `brokkr lock`.
+    pub fn lock(&self) -> &LockGuard {
+        &self.lock
+    }
+
+    /// Collect closure-provided timing using the shared measurement loop.
+    pub fn run_internal<F>(&self, config: &BenchConfig, f: F) -> Result<BenchResult, DevError>
+    where
+        F: Fn(usize) -> Result<BenchResult, DevError>,
+    {
+        let mut measurement = self.measure(config, None, WallSource::Closure, false, |i, _| {
+            f(i).map(Iteration::from_result)
+        })?;
+        self.record(config, &mut measurement, |_, _| Ok(()))
+    }
+
+    /// Collect captured profiling iterations, including their failure evidence.
+    pub fn run_hotpath<F>(
+        &self,
+        config: &BenchConfig,
+        program: &Path,
+        f: F,
+    ) -> Result<BenchResult, DevError>
+    where
+        F: Fn(usize, &mut crate::sidecar::SidecarFifo) -> Result<Iteration, DevError>,
+    {
+        let mut measurement = self.measure(
+            config,
+            Some(program),
+            WallSource::External,
+            true,
+            |i, fifo| f(i, fifo.expect("profiled loop owns a FIFO")),
+        )?;
+        self.record(config, &mut measurement, |_, _| Ok(()))
+    }
+
+    pub fn run_external(
+        &self,
+        config: &BenchConfig,
+        program: &Path,
+        args: &[&str],
+        cwd: &Path,
+    ) -> Result<BenchResult, DevError> {
+        self.run_external_ok(config, program, args, cwd, &[])
+    }
+
+    pub fn run_external_ok(
+        &self,
+        config: &BenchConfig,
+        program: &Path,
+        args: &[&str],
+        cwd: &Path,
+        ok_codes: &[i32],
+    ) -> Result<BenchResult, DevError> {
+        self.run_external_prepared(config, program, args, cwd, ok_codes, || Ok(()))
+    }
+
+    pub(crate) fn run_external_prepared<F>(
+        &self,
+        config: &BenchConfig,
+        program: &Path,
+        args: &[&str],
+        cwd: &Path,
+        ok_codes: &[i32],
+        prepare: F,
+    ) -> Result<BenchResult, DevError>
+    where
+        F: Fn() -> Result<(), DevError>,
+    {
+        let mut measurement = self.measure_external(
+            config,
+            program,
+            args,
+            cwd,
+            ok_codes,
+            WallSource::External,
+            prepare,
+        )?;
+        self.record(config, &mut measurement, |_, _| Ok(()))
+    }
+
+    /// Collect all closure durations and summarize the same ordered iterations.
+    pub fn run_distribution<F>(&self, config: &BenchConfig, f: F) -> Result<BenchResult, DevError>
+    where
+        F: Fn(usize) -> Result<Duration, DevError>,
+    {
+        let mut measurement = self.measure(config, None, WallSource::Closure, false, |i, _| {
+            let wall = f(i)?;
+            Ok(Iteration::from_result(BenchResult {
+                elapsed_ms: elapsed_to_ms(&wall),
+                elapsed_us: Some(elapsed_to_us(&wall)),
+                kv: Vec::new(),
+                iterations: Vec::new(),
+                distribution: None,
+                hotpath: None,
+            }))
+        })?;
+        self.record(config, &mut measurement, |result, iterations| {
+            let mut samples: Vec<i64> = iterations
+                .iter()
+                .filter_map(|i| i.result.as_ref())
+                .map(bench_ordering_key)
+                .collect();
+            samples.push(bench_ordering_key(result));
+            result.distribution =
+                summarize_distribution(&samples).map(|(distribution, _)| distribution);
+            Ok(())
+        })
+    }
+
+    pub fn run_external_with_kv(
+        &self,
+        config: &BenchConfig,
+        program: &Path,
+        args: &[&str],
+        cwd: &Path,
+    ) -> Result<BenchResult, DevError> {
+        let mut measurement = self.measure_external(
+            config,
+            program,
+            args,
+            cwd,
+            &[],
+            WallSource::SelfReported,
+            || Ok(()),
+        )?;
+        self.record(config, &mut measurement, |_, _| Ok(()))
+    }
+
+    /// Collect subprocess iterations without recording; postprocessing belongs in `record`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn measure_external<F>(
+        &self,
+        config: &BenchConfig,
+        program: &Path,
+        args: &[&str],
+        cwd: &Path,
+        ok_codes: &[i32],
+        source: WallSource,
+        prepare: F,
+    ) -> Result<Measurement, DevError>
+    where
+        F: Fn() -> Result<(), DevError>,
+    {
+        self.measure(config, Some(program), source, true, |i, fifo| {
+            prepare()?;
+            self.capture(
+                program,
+                args,
+                cwd,
+                &[],
+                ok_codes,
+                fifo.expect("external loop owns a FIFO"),
+                i,
+                None,
+            )
+        })
+    }
+}
+
+mod argv;
+pub use argv::format_cli_args;
+pub(crate) mod capture;
+pub(crate) mod execution;
+pub(crate) mod kv;
+mod record;
+pub(crate) mod wall;
+
+#[cfg(test)]
+mod tests;

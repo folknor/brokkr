@@ -84,7 +84,7 @@ fn feature_summary(req: &MeasureRequest) -> String {
 /// `--commit` worktree when there is one), and runs it through the bench
 /// harness.
 pub(crate) fn cmd(req: &MeasureRequest, target: &str) -> Result<(), DevError> {
-    project::require(req.project, Project::Sluggrs, "hotpath")?;
+    project::require(&req.project, &Project::Sluggrs, "hotpath")?;
 
     let example = example_name(target);
     let command_label = command_label(target);

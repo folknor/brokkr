@@ -1,5 +1,6 @@
 use crate::error::DevError;
 use serde::Deserialize;
+use std::collections::HashSet;
 
 /// Sluggrs visual snapshot testing configuration from `[sluggrs]` in brokkr.toml.
 #[derive(Debug, Clone, Deserialize)]
@@ -24,6 +25,22 @@ pub struct SluggrsSnapshot {
 }
 
 impl SluggrsConfig {
+    /// Validate snapshot identities at config load, including snapshots that
+    /// are not selected by the current command.
+    fn validate(&self) -> Result<(), DevError> {
+        let mut ids = HashSet::new();
+        for snapshot in &self.snapshots {
+            crate::visual::compare::validate_artifact_id(&snapshot.id, "snapshot")?;
+            if !ids.insert(snapshot.id.as_str()) {
+                return Err(DevError::Config(format!(
+                    "duplicate sluggrs snapshot ID {:?}",
+                    snapshot.id
+                )));
+            }
+        }
+        Ok(())
+    }
+
     pub fn snapshot_by_id(&self, id: &str) -> Option<&SluggrsSnapshot> {
         self.snapshots.iter().find(|s| s.id == id)
     }
@@ -38,5 +55,6 @@ pub(crate) fn parse(table: &toml::Table) -> Result<SluggrsConfig, DevError> {
         .clone()
         .try_into()
         .map_err(|e: toml::de::Error| DevError::Config(format!("sluggrs: {e}")))?;
+    config.validate()?;
     Ok(config)
 }

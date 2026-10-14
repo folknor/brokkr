@@ -416,81 +416,8 @@ impl Command {
                 }
             }
 
-            // Every other command is named explicitly so adding a CLI
-            // variant requires classifying its execution input here.
-            command @ (Self::Lock
-            | Self::Kill { .. }
-            | Self::Strays { .. }
-            | Self::Guard { .. }
-            | Self::History { .. }
-            | Self::Check { .. }
-            | Self::Clippy { .. }
-            | Self::Fmt { .. }
-            | Self::Bench { .. }
-            | Self::Run { .. }
-            | Self::Install { .. }
-            | Self::Wc { .. }
-            | Self::Man { .. }
-            | Self::Deps { .. }
-            | Self::Env
-            | Self::DiffSnapshots { .. }
-            | Self::Extract { .. }
-            | Self::Read { .. }
-            | Self::Write { .. }
-            | Self::MergeBench { .. }
-            | Self::Tilegen { .. }
-            | Self::PmtilesWriter { .. }
-            | Self::NodeStore { .. }
-            | Self::ElivPlanetiler { .. }
-            | Self::ElivTilemaker { .. }
-            | Self::RunApi { .. }
-            | Self::RunNidIngest { .. }
-            | Self::RunTiles { .. }
-            | Self::Dellingr { .. }
-            | Self::Mogwai { .. }
-            | Self::GenericHotpath { .. }
-            | Self::Suite { .. }
-            | Self::Passthrough { .. }
-            | Self::Results { .. }
-            | Self::CorpusResults { .. }
-            | Self::Sidecar { .. }
-            | Self::Invalidate { .. }
-            | Self::Clean { .. }
-            | Self::Verify { .. }
-            | Self::Download { .. }
-            | Self::CompareTiles { .. }
-            | Self::PmtilesInspect { .. }
-            | Self::Diag { .. }
-            | Self::Svg { .. }
-            | Self::Regress { .. }
-            | Self::PmtilesCorpus { .. }
-            | Self::DownloadOcean
-            | Self::OceanBuild { .. }
-            | Self::DownloadNaturalEarth
-            | Self::PmtilesStats { .. }
-            | Self::Serve { .. }
-            | Self::Stop
-            | Self::Status
-            | Self::Ingest { .. }
-            | Self::Update { .. }
-            | Self::Query { .. }
-            | Self::Geocode { .. }
-            | Self::Visual { .. }
-            | Self::Test { .. }
-            | Self::List
-            | Self::Approve { .. }
-            | Self::Report { .. }
-            | Self::VisualStatus
-            | Self::Prepare { .. }
-            | Self::HtmlExtract { .. }
-            | Self::Outline { .. }
-            | Self::Hotpath { .. }
-            | Self::Service { .. }
-            | Self::Sync { .. }
-            | Self::MockServe { .. }
-            | Self::Corpus { .. }
-            | Self::LintCorpus { .. }
-            | Self::LintResults { .. }) => RoutedCommand::Other(Box::new(command)),
+            // Commands outside the pbfhogg adapter keep their parsed CLI value.
+            command => RoutedCommand::Other(Box::new(command)),
         }
     }
 }

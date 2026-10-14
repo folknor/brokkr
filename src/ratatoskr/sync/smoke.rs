@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use crate::artefacts;
+use crate::build::CargoProfile;
 use crate::config::project_config::ratatoskr::RatatoskrConfig;
 use crate::error::DevError;
 use crate::output;
@@ -21,6 +22,8 @@ pub struct SyncSmokeRequest<'a> {
     /// The code tree the harness is built from (cwd); differs from
     /// `project_root` only when `brokkr.toml` lives one level up.
     pub build_root: &'a crate::project::BuildRoot,
+    /// The composed config's `include` files (clean-tree exemption).
+    pub included_config_files: &'a [std::path::PathBuf],
     pub ratatoskr: &'a RatatoskrConfig,
     pub script: &'a str,
     pub keep_artefacts: bool,
@@ -58,13 +61,15 @@ pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
     // end, before `_lock`.
     let sigterm = crate::shutdown::SigtermGuard::install();
 
-    let debug = req
+    let profile = req
         .profile_override
-        .unwrap_or_else(|| harness_cfg.debug.unwrap_or(false));
+        .map(CargoProfile::for_debug)
+        .or_else(|| harness_cfg.debug.map(CargoProfile::for_debug))
+        .unwrap_or_default();
     let built = build::build_for_harness(
         req.build_root.as_path(),
         harness_cfg,
-        debug,
+        profile,
         Some(&|pid| _lock.set_child_pid(pid)),
         Some(&|| _lock.clear_child_pid()),
         crate::shutdown::ChildIsolation::ProcessGroup(&sigterm),
@@ -72,6 +77,7 @@ pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
 
     let runner = SyncRunner {
         project_root: req.project_root,
+        included_config_files: req.included_config_files,
         cfg,
         built: &built,
         mock_binary: &mock_binary,

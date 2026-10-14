@@ -12,7 +12,7 @@ pub(crate) enum NidhoggState {
     Ingest,
     Api {
         port: u16,
-        bbox: crate::resolve::Bbox,
+        bbox: crate::datasets::Bbox,
         input_file: Option<String>,
         input_mb: Option<f64>,
     },
@@ -131,7 +131,7 @@ impl PlannedCommand for NidhoggPlan<'_> {
         if !matches!(self.0, NidhoggCommand::Ingest) {
             return server_plan(self.0, req, paths);
         }
-        let (pbf, file_mb) = crate::resolve::resolve_pbf_with_size(
+        let (pbf, file_mb) = crate::datasets::resolve::resolve_pbf_with_size(
             req.dataset,
             req.variant,
             paths,
@@ -171,7 +171,7 @@ fn api_plan(
     paths: &crate::config::ResolvedPaths,
     port: u16,
 ) -> Result<(Vec<String>, NidhoggState), DevError> {
-    let bbox = crate::resolve::resolve_bbox(None, req.dataset, paths)?;
+    let bbox = crate::datasets::resolve::resolve_bbox(None, req.dataset, paths)?;
     let queries = super::client::build_api_queries(&bbox)?;
     let names: Vec<String> = queries
         .into_iter()
@@ -184,7 +184,7 @@ fn api_plan(
         .is_some_and(|dataset| !dataset.pbf.is_empty());
     let pbf = has_configured_pbf
         .then(|| {
-            crate::resolve::resolve_pbf_path(
+            crate::datasets::resolve::resolve_pbf_path(
                 req.dataset,
                 req.variant,
                 paths,
@@ -198,7 +198,7 @@ fn api_plan(
         .map(str::to_owned);
     let input_mb = pbf
         .as_ref()
-        .map(|p| crate::resolve::file_size_mb(p))
+        .map(|p| crate::datasets::resolve::file_size_mb(p))
         .transpose()?;
     Ok((
         vec![super::client::query_url(port), names.join(",")],
@@ -221,16 +221,16 @@ fn tiles_plan(
     if uring {
         crate::preflight::run_preflight(&crate::preflight::uring_checks())?;
     }
-    let data_path = crate::resolve::resolve_nidhogg_data_dir(req.dataset, paths)?;
+    let data_path = crate::nidhogg::data_dir::resolve_nidhogg_data_dir(req.dataset, paths)?;
     let data = crate::utf8_path::path_str(&data_path)?.to_owned();
     let (tiles, mb) = match tiles_variant {
-        Some(v) => crate::resolve::resolve_pmtiles_with_size(
+        Some(v) => crate::datasets::resolve::resolve_pmtiles_with_size(
             req.dataset,
             v,
             paths,
             req.project_root.as_path(),
         )?,
-        None => crate::resolve::resolve_default_pmtiles_with_size(
+        None => crate::datasets::resolve::resolve_default_pmtiles_with_size(
             req.dataset,
             paths,
             req.project_root.as_path(),

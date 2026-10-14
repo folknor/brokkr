@@ -99,6 +99,9 @@ pub(crate) struct ServiceSuiteRequest<'a> {
     /// The code tree the harness is built from (cwd); differs from
     /// `project_root` only when `brokkr.toml` lives one level up.
     pub(crate) build_root: &'a crate::project::BuildRoot,
+    /// The composed config's `include` files, exempt from the clean-tree
+    /// flag each run's `run.toml` records.
+    pub(crate) included_config_files: &'a [std::path::PathBuf],
     pub(crate) ratatoskr: &'a RatatoskrConfig,
     pub(crate) filter: Option<&'a str>,
     pub(crate) keep_artefacts: bool,
@@ -112,6 +115,8 @@ pub(crate) struct ServiceTestRequest<'a> {
     pub(crate) project_root: &'a Path,
     /// The code tree the harness is built from; see [`ServiceSuiteRequest`].
     pub(crate) build_root: &'a crate::project::BuildRoot,
+    /// See [`ServiceSuiteRequest`].
+    pub(crate) included_config_files: &'a [std::path::PathBuf],
     pub(crate) ratatoskr: &'a RatatoskrConfig,
     pub(crate) script: &'a str,
     pub(crate) keep_artefacts: bool,

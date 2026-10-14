@@ -90,7 +90,7 @@ pub fn run(
             (Some(d), _) => {
                 let keep = d.config.worktree_keep(&crate::config::hostname()?);
                 (
-                    Some(d.project),
+                    Some(d.project.clone()),
                     &d.project_root,
                     &d.build_root,
                     d.config.disable_toolchain,
@@ -159,7 +159,7 @@ pub fn run(
     let _log =
         crate::run_log::RunLog::begin(project_root.as_path(), crate::run_log::run_log_kind::BENCH);
     with_worktree(
-        project,
+        project.as_ref(),
         project_root,
         build_root,
         args.commit.as_deref(),
@@ -170,7 +170,7 @@ pub fn run(
             // The lock context's state root is the *project* root, what
             // `brokkr lock` displays; its build root is the tree this closure
             // builds in, whose `target` the disk gate probes.
-            let _lock = acquire_cmd_lock_opt(project, project_root, wt)?;
+            let _lock = acquire_cmd_lock_opt(project.as_ref(),project_root, wt)?;
             let build_root = wt.as_path();
 
             let targets = discover::discover(build_root)?;

@@ -2,11 +2,11 @@ use std::path::{Path, PathBuf};
 
 use crate::config::ResolvedPaths;
 use crate::context::{acquire_cmd_lock, bootstrap, bootstrap_config};
+use crate::datasets::status::DatasetStatus;
 use crate::error::DevError;
 use crate::host::storage::StorageInfo;
 use crate::output;
 use crate::project::Project;
-use crate::resolve::DatasetStatus;
 
 /// Environment information for `brokkr env`.
 pub struct EnvInfo {
@@ -36,7 +36,7 @@ pub struct UserConfigStatus {
 /// Collect all environment information.
 pub fn collect(
     paths: &ResolvedPaths,
-    project: Project,
+    project: &Project,
     project_root: &Path,
     sources: &crate::config::ConfigSources,
 ) -> EnvInfo {
@@ -62,7 +62,7 @@ pub fn collect(
 /// Collect and print the environment report for `brokkr env`.
 pub(crate) fn cmd_env(
     dev_config: &crate::config::DevConfig,
-    project: Project,
+    project: &Project,
     project_root: &crate::project::ProjectRoot,
     build_root: &crate::project::BuildRoot,
     sources: &crate::config::ConfigSources,
@@ -264,11 +264,11 @@ fn free_share(free: u64, total: u64) -> String {
     if total == 0 {
         return String::new();
     }
-    let pct = crate::disk_gate::percent(free, total);
-    if crate::disk_gate::is_low(free, total) {
+    let pct = crate::host::storage::percent(free, total);
+    if crate::host::storage::is_low(free, total) {
         format!(
             " ({pct:.1}%, under the {}% floor - locked commands refuse)",
-            crate::disk_gate::MIN_FREE_PERCENT
+            crate::host::storage::MIN_FREE_PERCENT
         )
     } else {
         format!(" ({pct:.0}%)")
@@ -336,7 +336,7 @@ fn push_drive(out: &mut Vec<(String, String)>, label: &str, value: Option<&str>)
 /// One version row per tool the project's applicable commands use (their
 /// command specs name them, `crate::cli::tools_in`), then the project's own
 /// git revision.
-fn collect_tools(project: Project, project_root: &Path) -> Vec<(String, String)> {
+fn collect_tools(project: &Project, project_root: &Path) -> Vec<(String, String)> {
     let mut tools: Vec<(String, String)> = crate::cli::tools_in(project)
         .into_iter()
         .map(|name| (name.to_owned(), read_tool_version(name, &["--version"])))

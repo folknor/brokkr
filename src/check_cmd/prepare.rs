@@ -88,7 +88,13 @@ pub(crate) fn lane_env(inputs: &LaneInputs<'_>, sweep: &PlannedSweep) -> Result<
     let profile_dir = sweep
         .profile
         .map_or("debug", crate::config::SweepProfile::target_subdir);
-    let project_env = sweep_runtime_env(sweep, inputs.project, inputs.target_dir, profile_dir, env_allows)?;
+    let project_env = sweep_runtime_env(
+        sweep,
+        inputs.project.as_ref(),
+        inputs.target_dir,
+        profile_dir,
+        env_allows,
+    )?;
     let env = merged_env(&sweep.env, &project_env);
     // Cargo sees the merged environment; a sweep CARGO_HOME changes the chain.
     let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();

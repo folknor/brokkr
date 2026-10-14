@@ -2,6 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
+/// Refuse a filesystem when less than this share of its size is available.
+pub(crate) const MIN_FREE_PERCENT: u64 = 5;
+
 /// Probed details for the filesystem holding a configured path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StorageInfo {
@@ -39,6 +42,18 @@ pub(crate) fn probe_paths(paths: &[(&str, &Path)]) -> Vec<StorageInfo> {
 /// zero `total_bytes` means `statvfs` failed.
 pub(crate) fn probe_path(label: &str, path: &Path) -> Option<StorageInfo> {
     probe_storage(label, path, &read_mounts())
+}
+
+/// True when `free` is below [`MIN_FREE_PERCENT`] of `total`. A zero total
+/// means the size could not be read, which fails open.
+pub(crate) fn is_low(free: u64, total: u64) -> bool {
+    total > 0 && u128::from(free) * 100 < u128::from(total) * u128::from(MIN_FREE_PERCENT)
+}
+
+/// `free` as a percentage of a nonzero `total`, for display.
+#[allow(clippy::cast_precision_loss)] // a display percentage
+pub(crate) fn percent(free: u64, total: u64) -> f64 {
+    free as f64 * 100.0 / total as f64
 }
 
 fn probe_storage(label: &str, path: &Path, mounts: &[MountEntry]) -> Option<StorageInfo> {

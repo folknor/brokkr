@@ -48,7 +48,7 @@ fn run_test_phase(
     stop: &mut Option<TerminationSummary>,
 ) -> Result<(), TestPhaseFailure> {
     let TestPhaseArgs {
-        project,
+        project: _,
         project_root,
         state_root,
         sweeps,
@@ -59,6 +59,7 @@ fn run_test_phase(
         lints,
         certifying,
     } = *t;
+    let project = t.project.clone();
     let multi = sweeps.len() > 1;
     let allow_flags = crate::config::check::test_phase_allow_flags(lints);
     announce_test_allows(project_root, sweeps, &allow_flags, &lints.allow_exact);
@@ -108,7 +109,7 @@ fn run_test_phase(
         tap.record(JournalRecord::LaneStarted { lane: i });
         let lane = run_test_lane(
             &LaneArgs {
-                project,
+                project: project.clone(),
                 project_root,
                 state_root,
                 target_dir: &target_dir,
@@ -280,7 +281,7 @@ fn run_test_lane(
         other => other,
     };
     let inputs = LaneInputs {
-        project: a.project,
+        project: a.project.clone(),
         project_root: a.project_root,
         state_root: a.state_root,
         target_dir: a.target_dir,

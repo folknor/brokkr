@@ -52,7 +52,7 @@ pub fn load(
 ) -> Result<(Project, DevConfig, project_config::ProjectConfig), DevError> {
     let (root, _sources) = compose(&project_root.join("brokkr.toml"))?;
     let project = parse_project(&root)?;
-    let project_config = project_config::ProjectConfig::parse(project, &root)?;
+    let project_config = project_config::ProjectConfig::parse(&project, &root)?;
     let config = parse_dev_config(&root)?;
     Ok((project, config, project_config))
 }
@@ -88,10 +88,8 @@ fn parse_project(table: &toml::Table) -> Result<Project, DevError> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| DevError::Config("brokkr.toml missing required 'project' field".into()))?;
 
-    // `Project::Other` is static so `Project` can stay `Copy`. Removing this
-    // leak requires changing that representation and coordinating its consumers.
     let project = Project::from_builtin_name(project_str)
-        .unwrap_or_else(|| Project::Other(Box::leak(project_str.to_owned().into_boxed_str())));
+        .unwrap_or_else(|| Project::Other(project_str.to_owned()));
     Ok(project)
 }
 
@@ -136,6 +134,7 @@ fn parse_dev_config(table: &toml::Table) -> Result<DevConfig, DevError> {
         bin,
         disable_toolchain,
         cargo_env,
+        included_config_files: Vec::new(),
     })
 }
 

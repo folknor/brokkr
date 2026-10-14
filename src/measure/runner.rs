@@ -2,8 +2,6 @@
 //! or run artifacts (input verification may refresh its digest cache);
 //! run never records, and failed samples retain their artifacts.
 
-use std::path::{Path, PathBuf};
-
 use crate::context::MeasurementSession;
 use crate::db::KvPair;
 use crate::error::DevError;
@@ -11,6 +9,7 @@ use crate::harness::{self, BenchConfig};
 use crate::measure::{MeasureMode, MeasureRequest};
 use crate::output;
 use crate::project::{self, Project};
+use std::path::{Path, PathBuf};
 
 pub(crate) struct RowSubject {
     pub command: String,
@@ -140,7 +139,7 @@ fn profiling(req: &MeasureRequest<'_>) -> bool {
 }
 
 pub(crate) fn run(req: &MeasureRequest<'_>, command: &impl PlannedCommand) -> Result<(), DevError> {
-    project::require(req.project, command.project(), command.id())?;
+    project::require(&req.project, &command.project(),command.id())?;
     if profiling(req) && !command.supports_profiling() {
         return Err(DevError::Config(format!(
             "command '{}' does not support hotpath/alloc profiling",
@@ -193,7 +192,10 @@ pub(crate) fn run(req: &MeasureRequest<'_>, command: &impl PlannedCommand) -> Re
                 if let Some(code) = out.failed_code(command.ok_codes()) {
                     return Err(DevError::ExitCode(code));
                 }
-                output::run_msg(&format!("elapsed={}ms", crate::duration_ms(out.elapsed)));
+                output::run_msg(&format!(
+                    "elapsed={}ms",
+                    crate::passthrough_cmd::duration_ms(out.elapsed)
+                ));
             }
             MeasureMode::Bench { .. } => {
                 command.announce(req, &plan)?;
@@ -294,7 +296,10 @@ pub(crate) fn execute_external(
             if let Some(code) = out.failed_code(&[]) {
                 return Err(DevError::ExitCode(code));
             }
-            output::run_msg(&format!("elapsed={}ms", crate::duration_ms(out.elapsed)));
+            output::run_msg(&format!(
+                "elapsed={}ms",
+                crate::passthrough_cmd::duration_ms(out.elapsed)
+            ));
         }
         MeasureMode::Bench { .. } => {
             ctx.harness.run_external_prepared(
@@ -334,7 +339,10 @@ pub(crate) fn execute_example(
             if let Some(code) = out.failed_code(&[]) {
                 return Err(DevError::ExitCode(code));
             }
-            output::run_msg(&format!("elapsed={}ms", crate::duration_ms(out.elapsed)));
+            output::run_msg(&format!(
+                "elapsed={}ms",
+                crate::passthrough_cmd::duration_ms(out.elapsed)
+            ));
         }
         MeasureMode::Bench { .. } => {
             ctx.harness.run_internal(config, |_| {

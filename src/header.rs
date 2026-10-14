@@ -38,35 +38,31 @@ pub fn format_one(v: &HeaderViolation, expected: &str) -> String {
     )
 }
 
-/// The current year in UTC, via libc `gmtime` (no date-crate dependency).
+/// The current year in UTC, using the shared civil-date conversion.
 ///
-/// Returns an error rather than a bogus year if `gmtime_r` fails: on failure it
-/// leaves `tm` zeroed, which would yield 1900 and mark every file's header
-/// stale. `gmtime_r` reports failure by returning a null pointer.
+/// Returns an error if the timestamp cannot be represented as a civil year.
 pub fn current_utc_year() -> Result<i32, DevError> {
-    // SAFETY: `time` accepts a null pointer and returns the epoch seconds;
-    // `gmtime_r` fills a caller-owned `tm`. Neither reads uninitialised memory.
-    unsafe {
-        let t = libc::time(std::ptr::null_mut());
-        utc_year_at(t)
-    }
+    // SAFETY: `time` accepts a null pointer to skip writing the result and
+    // returns the current epoch seconds.
+    let seconds = unsafe { libc::time(std::ptr::null_mut()) };
+    utc_year_at(seconds)
 }
 
 /// Convert injected epoch seconds to a UTC year. Kept separate from the clock
 /// read so the calendar boundary can be tested without depending on today's
 /// date.
+// `time_t` is `i64` on 64-bit Linux but narrower on other targets, so the
+// checked conversion is a no-op only on some of them.
+#[allow(clippy::useless_conversion)]
 fn utc_year_at(seconds: libc::time_t) -> Result<i32, DevError> {
-    // SAFETY: `gmtime_r` reads the initialized scalar and fills this caller-
-    // owned `tm`; a null return is handled instead of reading a failed result.
-    unsafe {
-        let mut tm: libc::tm = std::mem::zeroed();
-        if libc::gmtime_r(&seconds, &mut tm).is_null() {
-            return Err(DevError::Config(
-                "gmtime_r failed to convert epoch seconds to UTC".into(),
-            ));
-        }
-        Ok(tm.tm_year + 1900)
-    }
+    let seconds = i64::try_from(seconds).map_err(|_| {
+        DevError::Config("current timestamp is outside the supported date range".into())
+    })?;
+    crate::civil_date::CivilDate::from_unix_timestamp(seconds)
+        .map(crate::civil_date::CivilDate::year)
+        .ok_or_else(|| {
+            DevError::Config("current timestamp is outside the supported date range".into())
+        })
 }
 
 /// The header text with `{year}` expanded to `year`.

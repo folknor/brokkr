@@ -2,9 +2,9 @@
 
 use std::path::Path;
 
+use crate::db::paths;
 use crate::error::DevError;
 use crate::git::{self, GitInfo};
-use crate::resolve;
 
 use super::status::{Status, StatusTally};
 
@@ -110,8 +110,9 @@ pub(crate) fn format_status_row(
 pub(crate) fn collect_clean_approval(
     subject: &str,
     build_root: &Path,
+    included_config_files: &[std::path::PathBuf],
 ) -> Result<GitInfo, DevError> {
-    let git_info = git::collect(build_root)?;
+    let git_info = git::collect_with_config_paths(build_root, included_config_files)?;
     if !git_info.is_clean {
         return Err(DevError::Verify(format!(
             "{subject} approve requires a clean git tree"
@@ -163,7 +164,7 @@ pub(crate) fn open_results_db<T>(
     project_root: &Path,
     open: impl FnOnce(&Path) -> Result<T, DevError>,
 ) -> Result<T, DevError> {
-    open(&resolve::results_db_path(project_root))
+    open(&paths::results_db_path(project_root))
 }
 
 pub(crate) struct SummaryOptions<'a> {

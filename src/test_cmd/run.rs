@@ -108,7 +108,7 @@ pub(super) fn run_sweeps(
     let ceiling = test_ceiling(timeout)?;
     let sweeps = resolve_sweeps(dev_config.test.as_ref(), &dev_config.check, sweep_filter)?;
 
-    let (pkg, source) = resolve_package(package, dev_config, project)?;
+    let (pkg, source) = resolve_package(package, dev_config, &project)?;
     // Which sweeps the run is eligible to attempt: the resolved package always
     // overrides each sweep's own selection, sweeps whose rules leave it out
     // are excluded, and sweeps that would execute exactly what an earlier one

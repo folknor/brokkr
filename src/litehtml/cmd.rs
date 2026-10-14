@@ -1,6 +1,5 @@
 //! Command dispatch for litehtml visual reference testing.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::build;
@@ -11,52 +10,11 @@ use crate::config::project_config::litehtml::{
 use crate::error::DevError;
 use crate::git;
 use crate::output;
-use crate::project::{self, Project};
 use crate::user_dirs;
 use crate::visual::engine::{self, Subject, SubjectItem, SummaryOptions};
 
 use super::compare;
 use super::db::MechanicalDb;
-
-const DEFAULT_FALLBACK_ASPECT_RATIO: f64 = 2.0;
-
-fn effective_fallback_aspect_ratio(config: &LitehtmlConfig) -> Result<f64, DevError> {
-    let ratio = config
-        .fallback_aspect_ratio
-        .unwrap_or(DEFAULT_FALLBACK_ASPECT_RATIO);
-    if !ratio.is_finite() || ratio <= 0.0 {
-        return Err(DevError::Config(
-            "[litehtml].fallback_aspect_ratio must be a finite number greater than zero".into(),
-        ));
-    }
-    Ok(ratio)
-}
-
-fn validate_config(config: &LitehtmlConfig) -> Result<(), DevError> {
-    if config.viewport_width == 0 {
-        return Err(DevError::Config(
-            "[litehtml].viewport_width must be greater than zero".into(),
-        ));
-    }
-    effective_fallback_aspect_ratio(config)?;
-    let mut ids = HashSet::new();
-    for fixture in &config.fixtures {
-        compare::validate_artifact_id(&fixture.id, "fixture")?;
-        if !ids.insert(fixture.id.as_str()) {
-            return Err(DevError::Config(format!(
-                "duplicate litehtml fixture ID {:?}",
-                fixture.id
-            )));
-        }
-        if fixture.viewport_width == Some(0) {
-            return Err(DevError::Config(format!(
-                "fixture {:?} viewport_width must be greater than zero",
-                fixture.id
-            )));
-        }
-    }
-    Ok(())
-}
 
 fn open_db(project_root: &Path) -> Result<MechanicalDb, DevError> {
     engine::open_results_db(project_root, MechanicalDb::open)
@@ -533,18 +491,15 @@ fn build_pipeline(build_root: &Path) -> Result<PathBuf, DevError> {
 /// the one-level-up layout, where using `project_root` for the build and the
 /// commit stamp built and described the wrong tree.
 pub(crate) fn test(
-    project: Project,
     project_root: &Path,
     build_root: &Path,
+    included_config_files: &[PathBuf],
     litehtml_config: &LitehtmlConfig,
     args: &VisualArgs,
     litehtml: &LitehtmlVisualArgs,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Litehtml, "visual")?;
-    validate_config(litehtml_config)?;
-
     let db = open_db(project_root)?;
-    let git_info = git::collect(build_root)?;
+    let git_info = git::collect_with_config_paths(build_root, included_config_files)?;
     let fixtures = resolve_fixtures(
         litehtml_config,
         args.fixture.as_deref(),
@@ -609,14 +564,7 @@ fn print_run_summary(counts: &compare::StatusTally) -> Result<(), DevError> {
 // List command
 // ---------------------------------------------------------------------------
 
-pub(crate) fn list(
-    project: Project,
-    project_root: &Path,
-    litehtml_config: &LitehtmlConfig,
-) -> Result<(), DevError> {
-    project::require(project, Project::Litehtml, "list")?;
-    validate_config(litehtml_config)?;
-
+pub(crate) fn list(project_root: &Path, litehtml_config: &LitehtmlConfig) -> Result<(), DevError> {
     let db = open_db_read_only(project_root)?;
 
     output::litehtml_msg(&format!(
@@ -731,16 +679,13 @@ fn capture_fixture(
 /// `build_root` is the code tree whose cleanliness and commit the approval
 /// is pinned to; `project_root` holds the visual store. See [`test()`].
 pub(crate) fn approve(
-    project: Project,
     project_root: &Path,
     build_root: &Path,
+    included_config_files: &[PathBuf],
     litehtml_config: &LitehtmlConfig,
     fixture_id: &str,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Litehtml, "approve")?;
-    validate_config(litehtml_config)?;
-
-    let git_info = engine::collect_clean_approval("litehtml", build_root)?;
+    let git_info = engine::collect_clean_approval("litehtml", build_root, included_config_files)?;
 
     let db = open_db(project_root)?;
 
@@ -783,9 +728,7 @@ pub(crate) fn approve(
 // Report command
 // ---------------------------------------------------------------------------
 
-pub(crate) fn report(project: Project, project_root: &Path, run_id: &str) -> Result<(), DevError> {
-    project::require(project, Project::Litehtml, "report")?;
-
+pub(crate) fn report(project_root: &Path, run_id: &str) -> Result<(), DevError> {
     let db = open_db_read_only(project_root)?;
     let results = db.run_results(run_id)?;
 
@@ -814,13 +757,9 @@ pub(crate) fn report(project: Project, project_root: &Path, run_id: &str) -> Res
 // ---------------------------------------------------------------------------
 
 pub(crate) fn status(
-    project: Project,
     project_root: &Path,
     litehtml_config: &LitehtmlConfig,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Litehtml, "visual-status")?;
-    validate_config(litehtml_config)?;
-
     let db = open_db_read_only(project_root)?;
     let approvals = db.all_approvals()?;
 
@@ -1063,14 +1002,12 @@ fn ensure_pinned_chrome(project_root: &Path) -> Result<(), DevError> {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn prepare(
-    project: Project,
     project_root: &Path,
     litehtml_config: &LitehtmlConfig,
     input: &str,
     output_path: &str,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Litehtml, "prepare")?;
-    let ratio = effective_fallback_aspect_ratio(litehtml_config)?;
+    let ratio = litehtml_config.effective_fallback_aspect_ratio();
 
     let script = ensure_litehtml_scripts(project_root)?;
     let script_str = script.display().to_string();
@@ -1142,7 +1079,6 @@ pub(crate) fn prepare(
 // ---------------------------------------------------------------------------
 
 pub(crate) fn extract(
-    project: Project,
     project_root: &Path,
     input: &str,
     selector: Option<&str>,
@@ -1150,8 +1086,6 @@ pub(crate) fn extract(
     to: Option<&str>,
     output_path: &str,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Litehtml, "html-extract")?;
-
     let script = ensure_litehtml_scripts(project_root)?;
     let script_str = script.display().to_string();
 
@@ -1208,15 +1142,12 @@ pub(crate) fn extract(
 // ---------------------------------------------------------------------------
 
 pub(crate) fn outline(
-    project: Project,
     project_root: &Path,
     input: &str,
     depth: usize,
     full: bool,
     selectors: bool,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Litehtml, "outline")?;
-
     let script = ensure_litehtml_scripts(project_root)?;
     let script_str = script.display().to_string();
 
@@ -1359,30 +1290,5 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("html>body[0]>a[0]"));
         assert!(lines[1].contains("... and 1 more (fixtures/sample/offenders.txt)"));
-    }
-
-    #[test]
-    fn aspect_ratio_uses_one_positive_finite_default() {
-        assert_eq!(
-            effective_fallback_aspect_ratio(&config(Vec::new())).unwrap(),
-            DEFAULT_FALLBACK_ASPECT_RATIO
-        );
-
-        for invalid in [0.0, f64::NAN, f64::INFINITY, -1.0] {
-            let mut cfg = config(Vec::new());
-            cfg.fallback_aspect_ratio = Some(invalid);
-            assert!(effective_fallback_aspect_ratio(&cfg).is_err());
-        }
-    }
-
-    #[test]
-    fn capture_dimensions_must_be_positive() {
-        let mut cfg = config(Vec::new());
-        cfg.viewport_width = 0;
-        assert!(validate_config(&cfg).is_err());
-
-        let mut cfg = config(vec![fixture("small")]);
-        cfg.fixtures[0].viewport_width = Some(0);
-        assert!(validate_config(&cfg).is_err());
     }
 }

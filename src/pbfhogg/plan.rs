@@ -3,6 +3,7 @@ use std::path::Path;
 
 use crate::config;
 use crate::context::MeasurementSession;
+use crate::datasets::resolve::{self, resolve_bbox};
 use crate::error::DevError;
 use crate::harness::{self, BenchConfig};
 use crate::measure::runner::{CommandPlan, PlannedCommand, RowSubject};
@@ -14,7 +15,6 @@ use crate::pbfhogg::context::{
     SnapshotSide, TwoPbfOrigin,
 };
 use crate::project::Project;
-use crate::resolve::{self, resolve_bbox};
 
 /// Resolve cargo features for the selected I/O mode and run its preflight
 /// checks. The command arg builder reads the same parameters to construct argv.
@@ -337,10 +337,10 @@ fn build_pbfhogg_context(
         return build_diff_snapshots_context(req, paths, extra_params);
     }
 
-    // Parse the optional `--snapshot` flag from extra_params into a SnapshotRef.
+    // Carry the CLI snapshot selection into dataset resolution.
     // None or "base" → SnapshotRef::Base (legacy top-level data, current
     // behavior preserved). Anything else → Named, validated.
-    let snapshot_ref = resolve::SnapshotRef::from_opt(extra_params.snapshot.as_deref())?;
+    let snapshot_ref = resolve::SnapshotRef::from_opt(extra_params.snapshot.as_ref());
 
     let pbf_path = if command.needs_pbf() {
         Some(resolve::resolve_snapshot_pbf_path(
@@ -511,27 +511,25 @@ fn build_diff_snapshots_context(
     paths: &config::ResolvedPaths,
     extra_params: &CommandParams,
 ) -> Result<CommandContext, DevError> {
-    let from_str = extra_params
+    let from_ref = extra_params
         .from_snapshot
-        .as_deref()
+        .as_ref()
         .ok_or_else(|| DevError::Config("diff-snapshots requires --from".into()))?;
-    let to_str = extra_params
+    let to_ref = extra_params
         .to_snapshot
-        .as_deref()
+        .as_ref()
         .ok_or_else(|| DevError::Config("diff-snapshots requires --to".into()))?;
 
-    let from_ref = resolve::SnapshotRef::parse(from_str)?;
-    let to_ref = resolve::SnapshotRef::parse(to_str)?;
     let from_path = resolve::resolve_snapshot_pbf_path(
         req.dataset,
-        &from_ref,
+        from_ref,
         req.variant,
         paths,
         req.project_root.as_path(),
     )?;
     let to_path = resolve::resolve_snapshot_pbf_path(
         req.dataset,
-        &to_ref,
+        to_ref,
         req.variant,
         paths,
         req.project_root.as_path(),

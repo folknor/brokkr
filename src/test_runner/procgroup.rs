@@ -42,7 +42,7 @@ pub(super) fn spawn_cargo_process_group(
     // The cargo spawn profile, naming the check phase in flight (if any) so a
     // `[cargo_env]` failure is attributed to it.
     let profile = crate::cargo_env::SpawnProfile::Cargo {
-        phase: crate::check_cmd::current_phase(),
+        phase: crate::cargo_env::current_phase(),
     };
     spawn_process_group("cargo", args, cwd, env, context, profile)
 }

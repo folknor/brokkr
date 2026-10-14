@@ -17,30 +17,6 @@ Reported by: pbfhogg-nidhogg.
 
 Residue: Danish geocode fixtures and default term and the fixed `TimeFilter` date remain, and GETID hit counts are still not recorded.
 
-## PRJ-009 - Dataset registry writers and naming conventions
-
-Reported by: pbfhogg-nidhogg.
-
-Residue: no shared `CivilDate` for `tools::parse_http_date` and `header`.
-
-## PRJ-011 - pbfhogg/nidhogg configuration used before it is validated
-
-Reported by: pbfhogg-nidhogg.
-
-Residue: CLI enum integration and typed resolver errors remain undone.
-
-## PRJ-012 - pbfhogg/nidhogg policy invented per call site
-
-Reported by: pbfhogg-nidhogg.
-
-Residue: no `ResolveError` or generic `select_one` in `src/resolve_parts/**`.
-
-## PRJ-013 - pbfhogg/nidhogg errors and silent fallbacks
-
-Reported by: pbfhogg-nidhogg.
-
-Residue: resolver errors are still `DevError`.
-
 ## PRJ-015 - Cross-repo output contracts are unenforced
 
 Reported by: pbfhogg-nidhogg.

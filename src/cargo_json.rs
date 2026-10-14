@@ -11,32 +11,71 @@ use crate::rustc_text::Level;
 
 /// Parse cargo `--message-format=json` stdout into diagnostics.
 ///
-/// Each line is a JSON object from cargo. Only lines with
-/// `"reason": "compiler-message"` are extracted; everything else is skipped.
+/// Cargo may interleave plain-text output, which is ignored. A JSON-shaped
+/// line must be a valid cargo record: malformed records and malformed
+/// `compiler-message` entries become visible error diagnostics rather than
+/// disappearing from the check result. Other known cargo record kinds are
+/// skipped.
 ///
 #[allow(clippy::too_many_lines)] // JSON walk - splitting just shuffles match arms
 pub fn parse_cargo_diagnostics(stdout: &str) -> Vec<Diagnostic> {
     let mut events = Vec::new();
 
-    for line in stdout.lines() {
-        let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
+    for (line_index, line) in stdout.lines().enumerate() {
+        let line_number = line_index + 1;
+        let val = match parse_cargo_json_line(line, line_number) {
+            Ok(Some(val)) => val,
+            Ok(None) => continue,
+            Err(error) => {
+                events.push(cargo_json_error(error));
+                continue;
+            }
+        };
+        // An object without a string `reason` is not a cargo record: a
+        // `cargo test` stdout also carries libtest's JSON events and whatever
+        // the tests print. Cargo documents that new record kinds may appear,
+        // so any reason other than `compiler-message` is skipped.
+        let Some(reason) = val.get("reason").and_then(serde_json::Value::as_str) else {
             continue;
         };
-        if val.get("reason").and_then(|v| v.as_str()) != Some("compiler-message") {
+        if reason != "compiler-message" {
             continue;
         }
-        let Some(msg) = val.get("message") else {
+        let Some(msg) = val.get("message").and_then(serde_json::Value::as_object) else {
+            events.push(cargo_json_error(format!(
+                "malformed compiler-message on cargo stdout line {line_number}: missing object `message`"
+            )));
             continue;
         };
 
-        let level_name = msg
-            .get("level")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
+        let Some(level_name) = msg.get("level").and_then(serde_json::Value::as_str) else {
+            events.push(cargo_json_error(format!(
+                "malformed compiler-message on cargo stdout line {line_number}: missing string `message.level`"
+            )));
+            continue;
+        };
+        let Some(message) = msg.get("message").and_then(serde_json::Value::as_str) else {
+            events.push(cargo_json_error(format!(
+                "malformed compiler-message on cargo stdout line {line_number}: missing string `message.message`"
+            )));
+            continue;
+        };
+        if message.is_empty() {
+            events.push(cargo_json_error(format!(
+                "malformed compiler-message on cargo stdout line {line_number}: empty `message.message`"
+            )));
+            continue;
+        }
         let level = match level_name {
             "warning" => Level::Warning,
             "error" | "error: internal compiler error" => Level::Error,
-            _ => continue,
+            "note" | "help" | "failure-note" => continue,
+            other => {
+                events.push(cargo_json_error(format!(
+                    "unrecognized compiler-message level `{other}` on cargo stdout line {line_number}"
+                )));
+                continue;
+            }
         };
 
         // Only the levels a finding is reported at. rustc also emits top-level
@@ -50,11 +89,7 @@ pub fn parse_cargo_diagnostics(stdout: &str) -> Vec<Diagnostic> {
             .and_then(|v| v.as_str())
             .map(std::string::ToString::to_string);
 
-        let message = msg
-            .get("message")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let message = message.to_owned();
 
         // Whether this compiler-message carries any spans. rustc's summary
         // and meta-noise messages ("N warnings emitted", "generated N
@@ -137,6 +172,34 @@ pub fn parse_cargo_diagnostics(stdout: &str) -> Vec<Diagnostic> {
     }
 
     events
+}
+
+/// Parse cargo's line-delimited record shape. The same stdout can carry text
+/// and JSON that are not cargo's (libtest events, a test's own prints), so a
+/// line that does not parse as an object is ignored - unless it opens the way
+/// cargo serializes every record (`{"reason":`), in which case it is a cargo
+/// record that was damaged (a truncated capture, say) and its loss is
+/// reported to the caller.
+pub(crate) fn parse_cargo_json_line(
+    line: &str,
+    line_number: usize,
+) -> Result<Option<serde_json::Value>, String> {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with('{') {
+        return Ok(None);
+    }
+    match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(value) if value.is_object() => Ok(Some(value)),
+        Ok(_) => Ok(None),
+        Err(error) if trimmed.starts_with("{\"reason\":") => Err(format!(
+            "malformed cargo JSON on stdout line {line_number}: {error}"
+        )),
+        Err(_) => Ok(None),
+    }
+}
+
+fn cargo_json_error(message: String) -> Diagnostic {
+    Diagnostic::new(Level::Error, None, message)
 }
 
 /// Cargo's own manifest lints (`[lints.cargo]`: `unused_dependencies`,

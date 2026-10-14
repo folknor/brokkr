@@ -2,8 +2,6 @@
 //! osmosis and osmconvert outputs shown for additional context.
 
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::time::Instant;
 
 use super::verify::{self, Findings, VerifyHarness};
 use crate::error::DevError;
@@ -418,32 +416,16 @@ fn classify_osmium_only(
     }
 }
 
-/// Run osmosis with `JAVA_HOME` set, returning a `CapturedOutput`.
+/// Run osmosis with `JAVA_HOME` set through the shared child supervisor.
 fn run_osmosis(
     osmosis: &Path,
     java_home: &Path,
     args: &[&str],
     cwd: &Path,
 ) -> Result<output::CapturedOutput, DevError> {
-    let start = Instant::now();
-    let result = Command::new(osmosis.display().to_string())
-        .args(args)
-        .env("JAVA_HOME", java_home.display().to_string())
-        .current_dir(cwd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|error| DevError::Spawn {
-            program: "osmosis".into(),
-            error,
-        })?;
-
-    Ok(output::CapturedOutput {
-        ending: output::Ending::from_exit_status(&result.status),
-        stdout: result.stdout,
-        stderr: result.stderr,
-        elapsed: start.elapsed(),
-    })
+    let program = osmosis.display().to_string();
+    let java_home = java_home.display().to_string();
+    output::run_captured_with_env(&program, args, cwd, &[("JAVA_HOME", java_home.as_str())])
 }
 
 #[cfg(test)]

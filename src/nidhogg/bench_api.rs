@@ -4,11 +4,11 @@
 //! distributions via curl. Queries are derived from the dataset bbox configured
 //! in brokkr.toml.
 
+use crate::datasets::Bbox;
 use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
 use crate::output;
-use crate::resolve::Bbox;
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -39,7 +39,7 @@ pub fn run(
         .collect();
     let variant_names: Vec<&str> = filtered.iter().map(|(name, _)| name.as_str()).collect();
 
-    crate::harness::run_variants("query", &variant_names, |name| {
+    crate::bench_variants::run_variants("query", &variant_names, |name| {
         let (_, body) = filtered
             .iter()
             .find(|(n, _)| n == name)

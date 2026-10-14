@@ -18,11 +18,13 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::build::CargoProfile;
 use crate::config::HarnessConfig;
 use crate::config::project_config::piners::PinersConfig;
 use crate::error::DevError;
 use crate::output::{self, CapturedOutput};
 use crate::piners::build;
+use crate::piners::db_paths::lint_runs_db_path;
 use crate::piners::lint::db::{LintDb, RunMeta};
 use crate::piners::lint::diff::classify;
 use crate::piners::lint::registry::{self, LintPin, LintRegistry, TvDiag};
@@ -31,7 +33,6 @@ use crate::piners::lint::{self, DiagSet, ProbeResult, validators};
 use crate::piners::registry_io;
 use crate::piners::run_model::{Mode, ModeFlags, RunVerdict};
 use crate::piners::time::now_rfc3339;
-use crate::resolve::lint_runs_db_path;
 
 /// A PID-tracked captured-subprocess runner (`program`, `argv`, deadline) ->
 /// output. Factored out so [`reanchor`] can borrow it without a clippy-flagged
@@ -205,13 +206,15 @@ pub fn lint_corpus(
         features: lint_cfg.features.clone(),
         debug: lint_cfg.debug,
     };
-    let debug = args
+    let profile = args
         .profile_override
-        .unwrap_or_else(|| lint_cfg.debug.unwrap_or(true));
+        .map(CargoProfile::for_debug)
+        .or_else(|| lint_cfg.debug.map(CargoProfile::for_debug))
+        .unwrap_or(CargoProfile::Dev);
     let built = build::build_for_harness(
         project_root,
         &harness_cfg,
-        debug,
+        profile,
         Some(&|pid| _lock.set_child_pid(pid)),
         Some(&|| _lock.clear_child_pid()),
         crate::shutdown::ChildIsolation::ProcessGroup(&sigterm),

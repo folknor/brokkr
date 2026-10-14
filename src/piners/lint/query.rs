@@ -8,8 +8,8 @@
 use std::path::Path;
 
 use crate::error::DevError;
+use crate::piners::db_paths::lint_runs_db_path;
 use crate::piners::lint::db::LintDb;
-use crate::resolve::lint_runs_db_path;
 
 /// Flags lifted off the `LintResults` CLI command.
 #[derive(Debug, Default)]

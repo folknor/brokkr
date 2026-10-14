@@ -1,15 +1,18 @@
+//! Resolve registered dataset entries and verify their input files.
+
+use super::Bbox;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use super::error::ResolveError;
 use crate::config;
-use crate::error::DevError;
-use crate::preflight::{self, FileDigest, PathDigest};
+use crate::preflight::{self, FileDigest};
 
 // ---------------------------------------------------------------------------
 // FileEntry trait - unifies PBF, OSC, and PMTiles entry types
 // ---------------------------------------------------------------------------
 
-pub(crate) trait FileEntry {
+pub(super) trait FileEntry {
     fn file(&self) -> &str;
     fn xxhash(&self) -> Option<&FileDigest>;
 }
@@ -41,7 +44,7 @@ impl FileEntry for config::PmtilesEntry {
     }
 }
 
-/// Generic file resolver: lookup entry in map → join path → check exists → verify hash.
+/// Generic file resolver: lookup entry in map -> join path -> check exists -> verify hash.
 fn resolve_entry_path<E: FileEntry>(
     entries: &HashMap<String, E>,
     key: &str,
@@ -50,7 +53,7 @@ fn resolve_entry_path<E: FileEntry>(
     data_dir: &Path,
     origin: Option<&str>,
     project_root: &Path,
-) -> Result<PathBuf, DevError> {
+) -> Result<PathBuf, ResolveError> {
     let entry = get_entry(entries, key, dataset, kind)?;
     finalize_entry_path(entry, data_dir, kind, origin, project_root)
 }
@@ -60,18 +63,16 @@ fn get_entry<'a, E>(
     key: &str,
     dataset: &str,
     kind: &str,
-) -> Result<&'a E, DevError> {
+) -> Result<&'a E, ResolveError> {
     entries.get(key).ok_or_else(|| {
-        let mut available: Vec<&str> = entries.keys().map(String::as_str).collect();
+        let mut available: Vec<String> = entries.keys().cloned().collect();
         available.sort();
-        DevError::Config(format!(
-            "dataset '{dataset}' has no {kind} '{key}' (available: {})",
-            if available.is_empty() {
-                "none".to_string()
-            } else {
-                available.join(", ")
-            }
-        ))
+        ResolveError::UnknownEntry {
+            dataset: dataset.to_owned(),
+            kind: kind.to_owned(),
+            key: key.to_owned(),
+            available,
+        }
     })
 }
 
@@ -84,15 +85,14 @@ fn finalize_entry_path<E: FileEntry>(
     kind: &str,
     origin: Option<&str>,
     project_root: &Path,
-) -> Result<PathBuf, DevError> {
+) -> Result<PathBuf, ResolveError> {
     let path = data_dir.join(entry.file());
 
     if !path.exists() {
-        return Err(DevError::Config(format!(
-            "{} file not found: {}",
-            kind.to_uppercase(),
-            path.display()
-        )));
+        return Err(ResolveError::MissingFile {
+            kind: kind.to_owned(),
+            path,
+        });
     }
 
     if let Some(expected) = entry.xxhash() {
@@ -100,6 +100,32 @@ fn finalize_entry_path<E: FileEntry>(
     }
 
     Ok(path)
+}
+
+/// Select the sole configured entry, with deterministic diagnostics for zero or many.
+fn select_one<'a, E>(
+    entries: &'a HashMap<String, E>,
+    scope: &str,
+    kind: &str,
+    flag: &str,
+) -> Result<(&'a String, &'a E), ResolveError> {
+    if entries.is_empty() {
+        return Err(ResolveError::EmptySelection {
+            scope: scope.to_owned(),
+            kind: kind.to_owned(),
+        });
+    }
+    if entries.len() > 1 {
+        let mut available: Vec<String> = entries.keys().cloned().collect();
+        available.sort();
+        return Err(ResolveError::AmbiguousSelection {
+            scope: scope.to_owned(),
+            kind: kind.to_owned(),
+            flag: flag.to_owned(),
+            available,
+        });
+    }
+    Ok(entries.iter().next().expect("exactly one entry"))
 }
 
 /// Generic default resolver: auto-select if exactly one entry, error if zero or multiple.
@@ -111,27 +137,9 @@ fn resolve_default_entry_path<E: FileEntry>(
     data_dir: &Path,
     origin: Option<&str>,
     project_root: &Path,
-) -> Result<PathBuf, DevError> {
-    if entries.is_empty() {
-        return Err(DevError::Config(format!(
-            "dataset '{dataset}' has no {kind} configured"
-        )));
-    }
-
-    if entries.len() > 1 {
-        let mut keys: Vec<&str> = entries.keys().map(String::as_str).collect();
-        keys.sort();
-        return Err(DevError::Config(format!(
-            "dataset '{dataset}' has multiple {kind} entries - use {flag} to select (available: {})",
-            keys.join(", ")
-        )));
-    }
-
-    if let Some(key) = entries.keys().next() {
-        resolve_entry_path(entries, key, dataset, kind, data_dir, origin, project_root)
-    } else {
-        unreachable!("entries is non-empty (checked above)")
-    }
+) -> Result<PathBuf, ResolveError> {
+    let (key, _) = select_one(entries, &format!("dataset '{dataset}'"), kind, flag)?;
+    resolve_entry_path(entries, key, dataset, kind, data_dir, origin, project_root)
 }
 
 /// Look up a dataset by name, returning it and its origin.
@@ -142,123 +150,11 @@ fn resolve_default_entry_path<E: FileEntry>(
 fn get_dataset<'a>(
     dataset: &str,
     paths: &'a config::ResolvedPaths,
-) -> Result<&'a config::Dataset, DevError> {
+) -> Result<&'a config::Dataset, ResolveError> {
     paths
         .datasets
         .get(dataset)
-        .ok_or_else(|| DevError::Config(format!("unknown dataset: {dataset}")))
-}
-
-/// Whether a configured dataset path exists and passes its content pin.
-/// Computed digests retain file-versus-tree shape, and configured pins are
-/// compared as typed values rather than hexadecimal text.
-pub enum DatasetStatus {
-    /// The configured content pin matches.
-    Verified,
-    /// The input exists but has no configured pin; contains its digest.
-    Present(PathDigest),
-    /// The input exists but differs from its configured pin; contains the
-    /// actual digest.
-    HashMismatch(PathDigest),
-    /// The configured input path is missing.
-    Missing,
-    /// The input exists but could not be hashed; contains a one-line reason.
-    HashError(String),
-    /// The dataset has no file entries or plain input path.
-    NoFiles,
-}
-
-impl config::ResolvedPaths {
-    /// Resolve and check every configured dataset entry for the environment
-    /// report. Keeping this beside normal dataset resolution makes all callers
-    /// share the same path and digest rules; `env` only formats the result.
-    pub fn dataset_status(&self, project_root: &Path) -> Vec<(String, DatasetStatus)> {
-        let mut out = Vec::new();
-
-        for (name, dataset) in &self.datasets {
-            check_file_entries(&mut out, name, &dataset.pbf, "", &self.data_dir, project_root);
-            check_file_entries(
-                &mut out,
-                name,
-                &dataset.osc,
-                "osc.",
-                &self.data_dir,
-                project_root,
-            );
-            check_file_entries(
-                &mut out,
-                name,
-                &dataset.pmtiles,
-                "pmtiles.",
-                &self.data_dir,
-                project_root,
-            );
-
-            // Plain out-of-git inputs have one configured path and digest.
-            // Reporting the computed digest lets the user register the pin.
-            if let Some(path) = dataset.resolve_path(project_root) {
-                let status = if path.exists() {
-                    check_hash_status(&path, dataset.xxh128, project_root)
-                } else {
-                    DatasetStatus::Missing
-                };
-                out.push((name.clone(), status));
-                continue;
-            }
-
-            if dataset.pbf.is_empty() && dataset.osc.is_empty() && dataset.pmtiles.is_empty() {
-                out.push((name.clone(), DatasetStatus::NoFiles));
-            }
-        }
-
-        out.sort_by(|a, b| a.0.cmp(&b.0));
-        out
-    }
-}
-
-fn check_file_entries<E: FileEntry>(
-    out: &mut Vec<(String, DatasetStatus)>,
-    dataset_name: &str,
-    entries: &HashMap<String, E>,
-    prefix: &str,
-    data_dir: &Path,
-    project_root: &Path,
-) {
-    for (key, entry) in entries {
-        let label = format!("{dataset_name}/{prefix}{key}");
-        let path = data_dir.join(entry.file());
-        let status = if !path.exists() {
-            DatasetStatus::Missing
-        } else {
-            check_hash_status(
-                &path,
-                entry.xxhash().map(FileDigest::value),
-                project_root,
-            )
-        };
-        out.push((label, status));
-    }
-}
-
-fn check_hash_status(
-    path: &Path,
-    expected: Option<crate::preflight::Xxh128>,
-    project_root: &Path,
-) -> DatasetStatus {
-    let digest = match preflight::cached_path_digest(path, project_root) {
-        Ok(digest) => digest,
-        Err(error) => return DatasetStatus::HashError(first_line(&error.to_string())),
-    };
-
-    match expected {
-        None => DatasetStatus::Present(digest),
-        Some(pin) if digest.value() == pin => DatasetStatus::Verified,
-        Some(_) => DatasetStatus::HashMismatch(digest),
-    }
-}
-
-fn first_line(message: &str) -> String {
-    message.lines().next().unwrap_or(message).trim().to_owned()
+        .ok_or_else(|| ResolveError::UnknownDataset(dataset.to_owned()))
 }
 
 // ---------------------------------------------------------------------------
@@ -289,23 +185,40 @@ pub(crate) struct ResolvedPbf<'a> {
 
 impl SnapshotRef {
     /// Parse a `--from` / `--to` CLI argument into a `SnapshotRef`.
-    /// `"base"` (case-sensitive) → `Base`. Anything else is validated as a
+    /// `"base"` (case-sensitive) -> `Base`. Anything else is validated as a
     /// snapshot key (`[a-zA-Z0-9_-]+`) and wrapped in `Named`.
-    pub(crate) fn parse(s: &str) -> Result<Self, DevError> {
+    pub(crate) fn parse(s: &str) -> Result<Self, ResolveError> {
         if s == "base" {
             return Ok(Self::Base);
         }
-        crate::config::validate_snapshot_key(s).map_err(DevError::Config)?;
+        crate::config::validate_snapshot_key(s).map_err(ResolveError::InvalidSnapshot)?;
         Ok(Self::Named(s.to_owned()))
     }
 
-    /// Parse an optional `--snapshot` CLI value into a `SnapshotRef`.
-    /// `None` (flag omitted) → `Base` (the dataset's primary data, current
-    /// behavior preserved). `Some(s)` parses `s` (`"base"` → `Base`).
-    pub(crate) fn from_opt(snapshot: Option<&str>) -> Result<Self, DevError> {
-        match snapshot {
-            None => Ok(Self::Base),
-            Some(s) => Self::parse(s),
+    /// Select an already-parsed CLI snapshot, defaulting to the primary data.
+    pub(crate) fn from_opt(snapshot: Option<&Self>) -> Self {
+        snapshot.cloned().unwrap_or(Self::Base)
+    }
+}
+
+impl std::str::FromStr for SnapshotRef {
+    type Err = ResolveError;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
+impl std::fmt::Display for SnapshotRef {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl SnapshotRef {
+    pub(crate) fn as_str(&self) -> &str {
+        match self {
+            Self::Base => "base",
+            Self::Named(key) => key,
         }
     }
 }
@@ -317,7 +230,7 @@ fn snapshot_osc_map<'a>(
     dataset: &str,
     snapshot: &SnapshotRef,
     paths: &'a config::ResolvedPaths,
-) -> Result<&'a HashMap<String, config::OscEntry>, DevError> {
+) -> Result<&'a HashMap<String, config::OscEntry>, ResolveError> {
     let ds = get_dataset(dataset, paths)?;
     match snapshot {
         SnapshotRef::Base => Ok(&ds.osc),
@@ -327,10 +240,11 @@ fn snapshot_osc_map<'a>(
                     .chain(ds.snapshot.keys().map(String::as_str))
                     .collect();
                 available.sort();
-                DevError::Config(format!(
-                    "dataset '{dataset}' has no snapshot '{key}' (available: {})",
-                    available.join(", ")
-                ))
+                ResolveError::UnknownSnapshot {
+                    dataset: dataset.to_owned(),
+                    key: key.clone(),
+                    available: available.into_iter().map(str::to_owned).collect(),
+                }
             })?;
             Ok(&snap.osc)
         }
@@ -353,7 +267,7 @@ pub(crate) fn resolve_snapshot_pbf_path(
     variant: &str,
     paths: &config::ResolvedPaths,
     project_root: &Path,
-) -> Result<PathBuf, DevError> {
+) -> Result<PathBuf, ResolveError> {
     Ok(resolve_snapshot_pbf_entry(dataset, snapshot, variant, paths, project_root)?.path)
 }
 
@@ -364,7 +278,7 @@ pub(crate) fn resolve_snapshot_pbf_entry<'a>(
     variant: &str,
     paths: &'a config::ResolvedPaths,
     project_root: &Path,
-) -> Result<ResolvedPbf<'a>, DevError> {
+) -> Result<ResolvedPbf<'a>, ResolveError> {
     let ds = get_dataset(dataset, paths)?;
     let (entry, kind) = match snapshot {
         SnapshotRef::Base => (
@@ -377,10 +291,11 @@ pub(crate) fn resolve_snapshot_pbf_entry<'a>(
                     .chain(ds.snapshot.keys().map(String::as_str))
                     .collect();
                 available.sort();
-                DevError::Config(format!(
-                    "dataset '{dataset}' has no snapshot '{key}' (available: {})",
-                    available.join(", ")
-                ))
+                ResolveError::UnknownSnapshot {
+                    dataset: dataset.to_owned(),
+                    key: key.clone(),
+                    available: available.into_iter().map(str::to_owned).collect(),
+                }
             })?;
             // Custom missing-variant error: name the available variants and
             // suggest both a one-shot workaround (--variant <X>) and the
@@ -390,19 +305,12 @@ pub(crate) fn resolve_snapshot_pbf_entry<'a>(
             let entry = snap.pbf.get(variant).ok_or_else(|| {
                 let mut available: Vec<&str> = snap.pbf.keys().map(String::as_str).collect();
                 available.sort();
-                let available_str = if available.is_empty() {
-                    "none".to_string()
-                } else {
-                    available.join(", ")
-                };
-                let suggestion_variant = available.first().copied().unwrap_or("raw");
-                DevError::Config(format!(
-                    "dataset '{dataset}' has no snapshot.{key}.pbf variant '{variant}'\n  \
-                     └─ available variants on this snapshot: {available_str}\n  \
-                     └─ pass `--variant {suggestion_variant}` to resolve both sides with the available variant,\n     \
-                     or register the {variant} variant via `brokkr download {dataset} --as-snapshot {key}`\n     \
-                     (which auto-generates pbf.indexed from pbf.raw)."
-                ))
+                ResolveError::SnapshotVariant {
+                    dataset: dataset.to_owned(),
+                    snapshot: key.clone(),
+                    variant: variant.to_owned(),
+                    available: available.into_iter().map(str::to_owned).collect(),
+                }
             })?;
             (entry, format!("snapshot.{key}.pbf variant"))
         }
@@ -414,10 +322,7 @@ pub(crate) fn resolve_snapshot_pbf_entry<'a>(
         ds.origin.as_deref(),
         project_root,
     )?;
-    Ok(ResolvedPbf {
-        path,
-        entry,
-    })
+    Ok(ResolvedPbf { path, entry })
 }
 
 /// Resolve the selected PBF entry from the host's resolved dataset table.
@@ -426,7 +331,7 @@ pub(crate) fn resolve_pbf_entry<'a>(
     variant: &str,
     paths: &'a config::ResolvedPaths,
     project_root: &Path,
-) -> Result<ResolvedPbf<'a>, DevError> {
+) -> Result<ResolvedPbf<'a>, ResolveError> {
     resolve_snapshot_pbf_entry(dataset, &SnapshotRef::Base, variant, paths, project_root)
 }
 
@@ -436,7 +341,7 @@ pub(crate) fn resolve_pbf_path(
     variant: &str,
     paths: &config::ResolvedPaths,
     project_root: &Path,
-) -> Result<PathBuf, DevError> {
+) -> Result<PathBuf, ResolveError> {
     Ok(resolve_pbf_entry(dataset, variant, paths, project_root)?.path)
 }
 
@@ -453,7 +358,7 @@ pub(crate) fn resolve_single_osc(
     osc_seq: Option<&str>,
     paths: &config::ResolvedPaths,
     project_root: &Path,
-) -> Result<(PathBuf, String), DevError> {
+) -> Result<(PathBuf, String), ResolveError> {
     let osc_map = snapshot_osc_map(dataset, snapshot, paths)?;
     let ds = get_dataset(dataset, paths)?;
     let origin = ds.origin.as_deref();
@@ -476,29 +381,12 @@ pub(crate) fn resolve_single_osc(
         return Ok((path, seq.to_string()));
     }
 
-    // Auto-select: requires exactly one configured OSC under the snapshot.
-    if osc_map.is_empty() {
-        let where_clause = match snapshot {
-            SnapshotRef::Base => format!("dataset '{dataset}'"),
-            SnapshotRef::Named(k) => format!("dataset '{dataset}' snapshot '{k}'"),
-        };
-        return Err(DevError::Config(format!(
-            "{where_clause} has no osc configured"
-        )));
-    }
-    if osc_map.len() > 1 {
-        let mut keys: Vec<&str> = osc_map.keys().map(String::as_str).collect();
-        keys.sort();
-        let where_clause = match snapshot {
-            SnapshotRef::Base => format!("dataset '{dataset}'"),
-            SnapshotRef::Named(k) => format!("dataset '{dataset}' snapshot '{k}'"),
-        };
-        return Err(DevError::Config(format!(
-            "{where_clause} has multiple osc entries - use --osc-seq to select (available: {})",
-            keys.join(", ")
-        )));
-    }
-    let key = osc_map.keys().next().expect("len == 1").clone();
+    let where_clause = match snapshot {
+        SnapshotRef::Base => format!("dataset '{dataset}'"),
+        SnapshotRef::Named(key) => format!("dataset '{dataset}' snapshot '{key}'"),
+    };
+    let (key, _) = select_one(osc_map, &where_clause, "osc", "--osc-seq")?;
+    let key = key.clone();
     let path = resolve_entry_path(
         osc_map,
         &key,
@@ -522,7 +410,7 @@ pub(crate) fn resolve_osc_range(
     range: &config::OscRange,
     paths: &config::ResolvedPaths,
     project_root: &Path,
-) -> Result<Vec<PathBuf>, DevError> {
+) -> Result<Vec<PathBuf>, ResolveError> {
     let (lo, hi) = (range.lo(), range.hi());
 
     let osc_map = snapshot_osc_map(dataset, snapshot, paths)?;
@@ -542,9 +430,11 @@ pub(crate) fn resolve_osc_range(
     for seq in lo..=hi {
         let key = seq.to_string();
         if !osc_map.contains_key(&key) {
-            return Err(DevError::Config(format!(
-                "{where_clause} missing osc.{seq} (required by --osc-range {range})"
-            )));
+            return Err(ResolveError::MissingOsc {
+                scope: where_clause.clone(),
+                seq,
+                range: range.clone(),
+            });
         }
         let path = resolve_entry_path(
             osc_map,
@@ -569,7 +459,7 @@ pub(crate) fn resolve_default_osc_path(
     dataset: &str,
     paths: &config::ResolvedPaths,
     project_root: &Path,
-) -> Result<PathBuf, DevError> {
+) -> Result<PathBuf, ResolveError> {
     let ds = get_dataset(dataset, paths)?;
     resolve_default_entry_path(
         &ds.osc,
@@ -587,19 +477,17 @@ pub(crate) fn resolve_bbox(
     bbox: Option<&Bbox>,
     dataset: &str,
     paths: &config::ResolvedPaths,
-) -> Result<Bbox, DevError> {
+) -> Result<Bbox, ResolveError> {
     if let Some(bbox) = bbox {
         return Ok(bbox.clone());
     }
     let ds = paths
         .datasets
         .get(dataset)
-        .ok_or_else(|| DevError::Config(format!("unknown dataset: {dataset}")))?;
-    ds.bbox.clone().ok_or_else(|| {
-        DevError::Config(format!(
-            "dataset '{dataset}' has no bbox configured (use --bbox)"
-        ))
-    })
+        .ok_or_else(|| ResolveError::UnknownDataset(dataset.to_owned()))?;
+    ds.bbox
+        .clone()
+        .ok_or_else(|| ResolveError::MissingBbox(dataset.to_owned()))
 }
 
 /// Resolve the PMTiles path from --dataset + --tiles variant.
@@ -608,7 +496,7 @@ pub(crate) fn resolve_pmtiles_path(
     variant: &str,
     paths: &config::ResolvedPaths,
     project_root: &Path,
-) -> Result<PathBuf, DevError> {
+) -> Result<PathBuf, ResolveError> {
     let ds = get_dataset(dataset, paths)?;
     resolve_entry_path(
         &ds.pmtiles,
@@ -629,7 +517,7 @@ pub(crate) fn resolve_default_pmtiles_path(
     dataset: &str,
     paths: &config::ResolvedPaths,
     project_root: &Path,
-) -> Result<PathBuf, DevError> {
+) -> Result<PathBuf, ResolveError> {
     let ds = get_dataset(dataset, paths)?;
     resolve_default_entry_path(
         &ds.pmtiles,
@@ -648,7 +536,7 @@ pub(crate) fn resolve_pmtiles_with_size(
     variant: &str,
     paths: &config::ResolvedPaths,
     project_root: &Path,
-) -> Result<(PathBuf, f64), DevError> {
+) -> Result<(PathBuf, f64), ResolveError> {
     let path = resolve_pmtiles_path(dataset, variant, paths, project_root)?;
     let mb = file_size_mb(&path)?;
     Ok((path, mb))
@@ -659,14 +547,14 @@ pub(crate) fn resolve_default_pmtiles_with_size(
     dataset: &str,
     paths: &config::ResolvedPaths,
     project_root: &Path,
-) -> Result<(PathBuf, f64), DevError> {
+) -> Result<(PathBuf, f64), ResolveError> {
     let path = resolve_default_pmtiles_path(dataset, paths, project_root)?;
     let mb = file_size_mb(&path)?;
     Ok((path, mb))
 }
 
 /// Get file size in MB (decimal, consistent with bench scripts).
-pub(crate) fn file_size_mb(path: &Path) -> Result<f64, DevError> {
+pub(crate) fn file_size_mb(path: &Path) -> Result<f64, ResolveError> {
     let meta = std::fs::metadata(path)?;
     Ok(meta.len() as f64 / 1_000_000.0)
 }
@@ -677,46 +565,12 @@ pub(crate) fn resolve_pbf_with_size(
     variant: &str,
     paths: &config::ResolvedPaths,
     project_root: &Path,
-) -> Result<(PathBuf, f64), DevError> {
+) -> Result<(PathBuf, f64), ResolveError> {
     let path = resolve_pbf_path(dataset, variant, paths, project_root)?;
     let mb = file_size_mb(&path)?;
     Ok((path, mb))
 }
 
-/// Resolve the nidhogg dataset data directory (required, and must exist).
-pub(crate) fn resolve_nidhogg_data_dir(
-    dataset: &str,
-    paths: &config::ResolvedPaths,
-) -> Result<PathBuf, DevError> {
-    let path = nidhogg_data_dir_path(dataset, paths)?;
-    if !path.exists() {
-        return Err(DevError::Config(format!(
-            "data directory not found: {}",
-            path.display()
-        )));
-    }
-    Ok(path)
-}
-
-/// Where the nidhogg dataset data directory lives, without requiring it to
-/// exist. `ingest` is the one caller that creates the directory, so it must
-/// not be gated on its existence - a first ingest would be impossible.
-pub(crate) fn nidhogg_data_dir_path(
-    dataset: &str,
-    paths: &config::ResolvedPaths,
-) -> Result<PathBuf, DevError> {
-    let ds = paths
-        .datasets
-        .get(dataset)
-        .ok_or_else(|| DevError::Config(format!("unknown dataset: {dataset}")))?;
-    let dir_name = ds.data_dir.as_ref().ok_or_else(|| {
-        DevError::Config(format!("dataset '{dataset}' has no data_dir configured"))
-    })?;
-    Ok(paths.data_dir.join(dir_name))
-}
-
-/// Path to the results database for the current project.
-pub(crate) fn results_db_path(project_root: &Path) -> PathBuf {
-    crate::clean::layout::ProjectState::new(project_root).results_db()
-}
-
+#[cfg(test)]
+#[path = "tests.rs"]
+mod test_cases;

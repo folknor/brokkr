@@ -55,36 +55,11 @@ use crate::test_runner::ceilings::UNWIND_GRACE;
 // every lane's `cargo test --no-run`, cold on a fresh store - plus every
 // listing.
 
-/// The phase in flight and when it started. `None` outside a phase (before
-/// the first, or after the watchdog is disarmed).
-static PHASE_CLOCK: std::sync::Mutex<Option<(Phase, std::time::Instant)>> =
-    std::sync::Mutex::new(None);
-static PHASE_CLOCK_POISON_REPORTED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
 /// Why a ceiling fired, once one has. Read by the command's exit path
 /// ([`watchdog_fired`]) to turn the unwound outcome into [`WATCHDOG_EXIT_CODE`].
 static WATCHDOG_FIRED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 static WATCHDOG_FIRED_POISON_REPORTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
-
-/// Recover a poisoned phase clock instead of treating poison as no active
-/// phase, which would silently disable the phase deadline.
-fn phase_clock_lock() -> std::sync::MutexGuard<'static, Option<(Phase, std::time::Instant)>> {
-    match PHASE_CLOCK.lock() {
-        Ok(clock) => clock,
-        Err(poisoned) => {
-            let clock = poisoned.into_inner();
-            PHASE_CLOCK.clear_poison();
-            if !PHASE_CLOCK_POISON_REPORTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                crate::output::warn_stderr(
-                    "phase clock mutex was poisoned; recovered its recorded state and will continue enforcing phase deadlines",
-                );
-            }
-            clock
-        }
-    }
-}
 
 fn watchdog_fired_lock() -> std::sync::MutexGuard<'static, Option<String>> {
     match WATCHDOG_FIRED.lock() {
@@ -121,19 +96,19 @@ fn begin_phase_with(failing_phase: &mut Option<Phase>, phase: Phase, enter: impl
 /// Restart the phase clock for `phase` alone - for the commands that borrow
 /// check's ceilings without its summary (`brokkr test`, `brokkr clippy`).
 pub(crate) fn enter_phase(phase: Phase) {
-    *phase_clock_lock() = Some((phase, std::time::Instant::now()));
+    crate::cargo_env::enter_phase(phase);
 }
 
 /// The phase in flight, if any: the phase a cargo launch inside it names on
 /// its spawn profile, so a `[cargo_env]` failure is attributed to it.
 pub(crate) fn current_phase() -> Option<Phase> {
-    phase_clock_lock().map(|(phase, _)| phase)
+    crate::cargo_env::current_phase()
 }
 
 /// How long the phase in flight has been running - the wall time its grouped
 /// green line reports. Zero outside a phase.
 pub(crate) fn phase_elapsed() -> std::time::Duration {
-    phase_clock_lock()
+    crate::cargo_env::phase_clock()
         .map(|(_, since)| since.elapsed())
         .unwrap_or_default()
 }
@@ -143,7 +118,7 @@ pub(crate) fn phase_elapsed() -> std::time::Duration {
 /// should stay under, so its overrun fails that child rather than firing the
 /// watchdog on the whole run.
 pub(crate) fn phase_time_left() -> Option<std::time::Duration> {
-    phase_time_left_at(*phase_clock_lock())
+    phase_time_left_at(crate::cargo_env::phase_clock())
 }
 
 /// [`phase_time_left`] over a given clock reading.
@@ -206,7 +181,7 @@ impl CheckWatchdog {
                         );
                         return;
                     }
-                    let overrun = phase_clock_lock().and_then(|(phase, since)| {
+                    let overrun = crate::cargo_env::phase_clock().and_then(|(phase, since)| {
                         let ceiling = crate::test_runner::ceilings::phase_ceiling(phase);
                         (since.elapsed() >= ceiling).then_some((phase, ceiling))
                     });
@@ -238,7 +213,7 @@ impl CheckWatchdog {
 impl Drop for CheckWatchdog {
     fn drop(&mut self) {
         self.disarm.store(true, std::sync::atomic::Ordering::SeqCst);
-        *phase_clock_lock() = None;
+        crate::cargo_env::clear_phase();
         // Wait the thread out, so a fired watchdog's kill loop has stopped
         // before anything after the command (history's `git`, say) spawns a
         // process it would otherwise SIGKILL.
@@ -333,7 +308,7 @@ fn backstop_exit() -> ! {
     // The lock's drop is what normally puts a moved-aside pin back.
     crate::toolchain::restore_active_hold();
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
-    crate::history_cmd::record_history(&raw_args, process_age_ms(), WATCHDOG_EXIT_CODE);
+    crate::history_cmd::record_history(&raw_args, process_age_ms(), WATCHDOG_EXIT_CODE, None);
     std::process::exit(WATCHDOG_EXIT_CODE)
 }
 

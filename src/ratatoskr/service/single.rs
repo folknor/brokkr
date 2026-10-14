@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::artefacts::{self, ArtefactDir};
+use crate::build::CargoProfile;
 use crate::clean::layout::ProjectState;
 use crate::error::DevError;
 use crate::lockfile;
@@ -43,6 +44,7 @@ pub(crate) fn service_test(req: &crate::request::ServiceTestRequest<'_>) -> Resu
     let crate::request::ServiceTestRequest {
         project_root,
         build_root,
+        included_config_files,
         ratatoskr,
         script,
         keep_artefacts,
@@ -68,6 +70,7 @@ pub(crate) fn service_test(req: &crate::request::ServiceTestRequest<'_>) -> Resu
         return service_suite(&crate::request::ServiceSuiteRequest {
             project_root,
             build_root,
+            included_config_files,
             ratatoskr,
             filter: Some(&filter),
             keep_artefacts,
@@ -126,11 +129,14 @@ pub(crate) fn service_test(req: &crate::request::ServiceTestRequest<'_>) -> Resu
     // Cooperative SIGTERM for `brokkr kill`. See run_sync_smoke for rationale.
     let sigterm = crate::shutdown::SigtermGuard::install();
 
-    let debug = profile_override.unwrap_or_else(|| harness_cfg.debug.unwrap_or(false));
+    let profile = profile_override
+        .map(CargoProfile::for_debug)
+        .or_else(|| harness_cfg.debug.map(CargoProfile::for_debug))
+        .unwrap_or_default();
     let built = build::build_for_harness(
         build_root.as_path(),
         harness_cfg,
-        debug,
+        profile,
         Some(&|pid| _lock.set_child_pid(pid)),
         Some(&|| _lock.clear_child_pid()),
         crate::shutdown::ChildIsolation::ProcessGroup(&sigterm),
@@ -169,6 +175,7 @@ pub(crate) fn service_test(req: &crate::request::ServiceTestRequest<'_>) -> Resu
         built: &built,
         script_abs: &script_abs,
         project_root,
+        included_config_files,
         keep_on_success,
         ceiling,
         extra_env: &env_pairs,
@@ -215,6 +222,7 @@ struct ServiceRun<'a> {
     built: &'a HarnessBuild,
     script_abs: &'a Path,
     project_root: &'a Path,
+    included_config_files: &'a [PathBuf],
     keep_on_success: bool,
     ceiling: Duration,
     extra_env: &'a [(&'a str, &'a str)],
@@ -233,6 +241,7 @@ fn run_single(run: &ServiceRun<'_>) -> Result<(), DevError> {
         run.built,
         run.script_abs,
         run.project_root,
+        run.included_config_files,
         run.ceiling,
         run.extra_env,
         run.lock,
@@ -277,6 +286,7 @@ fn run_soak(run: &ServiceRun<'_>, repeat: u32, keep_going: bool) -> Result<(), D
             run.built,
             run.script_abs,
             run.project_root,
+            run.included_config_files,
             run.ceiling,
             run.extra_env,
             run.lock,
@@ -308,11 +318,13 @@ fn run_soak(run: &ServiceRun<'_>, repeat: u32, keep_going: bool) -> Result<(), D
 /// `ceiling` bounds the wall-clock the harness binary may run for - if
 /// it exceeds the budget brokkr SIGKILLs the child and reports the run
 /// as `ceiling=<ceiling>` so the failure surface is unambiguous.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_and_capture(
     artefacts: ArtefactDir,
     built: &HarnessBuild,
     script_abs: &Path,
     project_root: &Path,
+    included_config_files: &[PathBuf],
     ceiling: Duration,
     extra_env: &[(&str, &str)],
     lock: &lockfile::LockGuard,
@@ -371,7 +383,14 @@ pub(super) fn spawn_and_capture(
     let killed_on_deadline = deadline_capture.killed_on_deadline();
     let captured = deadline_capture.captured;
 
-    write_artefacts(artefacts.path(), script_abs, built, &captured, project_root)?;
+    write_artefacts(
+        artefacts.path(),
+        script_abs,
+        built,
+        &captured,
+        project_root,
+        included_config_files,
+    )?;
 
     let elapsed_ms = captured.elapsed.as_millis();
     let (succeeded, exit_label) = classify_capture(&captured, killed_on_deadline, ceiling);

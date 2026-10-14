@@ -4,9 +4,9 @@ use std::path::Path;
 
 use super::commands::{ExtractStrategy, PbfhoggCommand};
 use super::verify::{Findings, VerifyHarness};
+use crate::datasets::Bbox;
 use crate::error::DevError;
 use crate::output::{verify_msg, verify_summary};
-use crate::resolve::Bbox;
 
 /// Cross-validate `pbfhogg extract` against `osmium extract` for
 /// simple, complete-ways, and smart strategies.

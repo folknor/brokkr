@@ -224,7 +224,7 @@ pub fn run(
     std::fs::create_dir_all(scratch_dir)
         .map_err(|e| DevError::Config(format!("failed to create scratch dir: {e}")))?;
 
-    crate::harness::run_variants("command", commands, |name| {
+    crate::bench_variants::run_variants("command", commands, |name| {
         let cmd = preset_to_command(name)?;
 
         let params = CommandParams::default();

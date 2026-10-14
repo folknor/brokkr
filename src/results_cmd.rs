@@ -7,11 +7,11 @@ use std::path::Path;
 use crate::config::{self, DevConfig};
 use crate::db;
 use crate::db::DatasetMatcher;
+use crate::db::paths::{results_db_path, sidecar_db_path};
 use crate::error::DevError;
 use crate::hotpath_fmt;
 use crate::output;
 use crate::request::{ResultsQuery, ResultsView};
-use crate::resolve::{results_db_path, sidecar_db_path};
 
 /// Render a detail-style result view. When the result set is exactly
 /// one row, use the new labelled-block layout via

@@ -11,9 +11,9 @@ use std::path::Path;
 use super::commands::{ExtractStrategy, PbfhoggCommand};
 use super::inspect_report::InspectReport;
 use super::verify::{Findings, VerifyHarness};
+use crate::datasets::Bbox;
 use crate::error::DevError;
 use crate::output::verify_msg;
-use crate::resolve::Bbox;
 
 pub(super) use super::inspect_report::InspectCounts as Counts;
 

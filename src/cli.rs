@@ -1,10 +1,12 @@
+//! Command-line schema, value validation and project visibility.
 // The doc comments here are clap's `--help` text, rendered verbatim, not rustdoc
 // prose: `<dataset>` is a placeholder, not HTML. Project prefixes are supplied
 // by the command specification when the clap command tree is constructed.
 #![allow(rustdoc::broken_intra_doc_links, rustdoc::invalid_html_tags)]
 
-include!("cli/schema.rs");
-include!("cli/validation.rs");
+mod schema;
+mod validation;
+pub(crate) use schema::*;
 mod visibility;
 pub(crate) use visibility::*;
 
@@ -15,7 +17,7 @@ mod visibility_tests {
     use crate::project::Project;
     use clap::CommandFactory;
 
-    fn visible_in(name: &str, project: Project) -> bool {
+    fn visible_in(name: &str, project: &Project) -> bool {
         CommandId::from_name(name).is_some_and(|id| visible_to(&id.spec().applies, project))
     }
 
@@ -75,11 +77,14 @@ mod visibility_tests {
     fn shared_commands_visible_everywhere() {
         for project in Project::ALL
             .iter()
-            .map(|(_, project)| *project)
-            .chain([Project::Other("some-foreign-repo")])
+            .map(|(_, project)| project.clone())
+            .chain([Project::Other("some-foreign-repo".into())])
         {
             for name in ["check", "env", "history", "clean"] {
-                assert!(visible_in(name, project), "`{name}` hidden in {project}");
+                assert!(
+                    visible_in(name, &project),
+                    "`{name}` hidden in {project}"
+                );
             }
         }
     }
@@ -92,14 +97,17 @@ mod visibility_tests {
     #[test]
     fn measured_queries_follow_the_rows() {
         for name in ["results", "sidecar", "invalidate"] {
-            assert!(!visible_in(name, Project::Litehtml), "`{name}` in litehtml");
+            assert!(!visible_in(name, &Project::Litehtml), "`{name}` in litehtml");
             for project in Project::ALL
                 .iter()
-                .map(|(_, project)| *project)
+                .map(|(_, project)| project.clone())
                 .filter(|project| *project != Project::Litehtml)
-                .chain([Project::Other("some-foreign-repo")])
+                .chain([Project::Other("some-foreign-repo".into())])
             {
-                assert!(visible_in(name, project), "`{name}` hidden in {project}");
+                assert!(
+                    visible_in(name, &project),
+                    "`{name}` hidden in {project}"
+                );
             }
         }
     }
@@ -109,10 +117,13 @@ mod visibility_tests {
     /// built-ins would have dropped.
     #[test]
     fn except_subtracts_without_dropping_other() {
-        assert!(!visible_in("results", Project::Litehtml));
-        assert!(visible_in("results", Project::Sluggrs));
-        assert!(visible_in("results", Project::Piners));
-        assert!(visible_in("results", Project::Other("some-foreign-repo")));
+        assert!(!visible_in("results", &Project::Litehtml));
+        assert!(visible_in("results", &Project::Sluggrs));
+        assert!(visible_in("results", &Project::Piners));
+        assert!(visible_in(
+            "results",
+            &Project::Other("some-foreign-repo".into())
+        ));
     }
 
     /// `Other("piners")` is a foreign repo that happens to call itself piners
@@ -120,7 +131,7 @@ mod visibility_tests {
     /// handed piners' project-specific commands.
     #[test]
     fn other_does_not_impersonate_a_builtin() {
-        assert!(visible_in("corpus", Project::Piners));
-        assert!(!visible_in("corpus", Project::Other("piners")));
+        assert!(visible_in("corpus", &Project::Piners));
+        assert!(!visible_in("corpus", &Project::Other("piners".into())));
     }
 }

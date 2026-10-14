@@ -1,3 +1,5 @@
+//! Parsed bounding boxes and geometry conversions.
+
 use std::fmt;
 
 /// Four finite bbox coordinates in `lon_min,lat_min,lon_max,lat_max` order.
@@ -130,7 +132,3 @@ impl fmt::Display for Bbox {
         f.write_str(&self.source)
     }
 }
-
-include!("resolve_parts/schema.rs");
-include!("resolve_parts/runtime.rs");
-include!("resolve_parts/tests.rs");

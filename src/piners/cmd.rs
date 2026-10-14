@@ -47,6 +47,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::artefacts::ArtefactDir;
+use crate::build::CargoProfile;
 use crate::config::project_config::piners::PinersConfig;
 use crate::error::DevError;
 use crate::lockfile::LockGuard;
@@ -54,6 +55,7 @@ use crate::output;
 use crate::piners::build;
 use crate::piners::contract::RunErrorRecord;
 use crate::piners::corpus_db::{CorpusDb, RunContext, RunRecord};
+use crate::piners::db_paths::corpus_runs_db_path;
 use crate::piners::integrity::{self, HarnessEnd, Reconciliation, Trigger};
 use crate::piners::isolate::{self, AttemptOutcome, StopReason};
 use crate::piners::manifest::Manifest;
@@ -61,7 +63,6 @@ use crate::piners::registry::{self, Registry, VerifiedProbe};
 use crate::piners::report;
 use crate::piners::run_model::{Mode, ModeFlags, RunVerdict};
 use crate::piners::select::SelectArgs;
-use crate::resolve::corpus_runs_db_path;
 
 const ARTEFACT_TEST_ID: &str = "corpus";
 
@@ -193,11 +194,13 @@ pub fn corpus(
 
     // Default profile is debug: parity is opt-level-independent, and the
     // debug build keeps the edit/run loop inside the cache-warm window.
-    let debug = args
+    let profile = args
         .profile_override
-        .unwrap_or_else(|| cfg.harness.as_ref().and_then(|h| h.debug).unwrap_or(true));
+        .map(CargoProfile::for_debug)
+        .or_else(|| harness_cfg.debug.map(CargoProfile::for_debug))
+        .unwrap_or(CargoProfile::Dev);
     let context = RunContext {
-        debug,
+        debug: profile == CargoProfile::Dev,
         harness_args: args.harness_args.clone(),
     };
     // Bring the run store to this binary's schema before anything is built or
@@ -215,7 +218,7 @@ pub fn corpus(
     let built = build::build_for_harness(
         project_root,
         harness_cfg,
-        context.debug,
+        profile,
         Some(&|pid| lock.set_child_pid(pid)),
         Some(&|| lock.clear_child_pid()),
         crate::shutdown::ChildIsolation::ProcessGroup(&sigterm),

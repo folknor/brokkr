@@ -18,7 +18,7 @@
 //! until it does, that mode is refused with a clear error rather than recording
 //! a meaningless number.
 
-use crate::build::BuildConfig;
+use crate::build::{BuildConfig, CargoProfile};
 use crate::context::MeasurementSession;
 use crate::db::KvPair;
 use crate::error::DevError;
@@ -94,9 +94,12 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
     // measured run into a dev-build timing. `docs/commands/corpus.md` states
     // the release default. (Reported once as "ignores the config"; it is the
     // documented contract, not an oversight.)
-    let debug = args.profile_override.unwrap_or(false);
+    let profile = args
+        .profile_override
+        .map(CargoProfile::for_debug)
+        .unwrap_or(CargoProfile::Release);
 
-    let mut build_cfg = BuildConfig::for_harness(harness_cfg, debug);
+    let mut build_cfg = BuildConfig::for_harness_with_profile(harness_cfg, profile);
     build_cfg.features.push(profiling.feature().to_owned());
 
     let ctx = MeasurementSession::with_build_config_for_request(req, &build_cfg)?;

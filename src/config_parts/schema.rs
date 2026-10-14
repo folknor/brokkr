@@ -9,7 +9,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::error::DevError;
 use crate::project::Project;
-use crate::resolve::Bbox;
+use crate::datasets::Bbox;
 
 // ---------------------------------------------------------------------------
 // Data structures
@@ -74,7 +74,7 @@ impl<'de> Deserialize<'de> for OscRange {
 }
 
 /// The one bbox text parser used by clap and host dataset deserialization.
-/// `resolve::Bbox::parse` owns the token and finite-number parsing; this
+/// `datasets::Bbox::parse` owns the token and finite-number parsing; this
 /// adapter adds the geographic bounds and min/max ordering required by every
 /// configured or CLI bbox.
 impl FromStr for Bbox {
@@ -189,6 +189,12 @@ pub struct DevConfig {
     /// `[cargo_env]`: variable name -> shell command whose output brokkr sets
     /// on every cargo it launches. See [`crate::cargo_env`].
     pub cargo_env: std::collections::BTreeMap<String, String>,
+    /// Absolute paths of the files this config's `include` graph pulled in
+    /// (composition provenance, not a TOML key). Measurement provenance
+    /// exempts them from the dirty-tree policy exactly as `brokkr.toml`
+    /// itself is, since brokkr writes dataset registrations into them. Set by
+    /// [`load_with_sources`]; empty for a config parsed without composition.
+    pub included_config_files: Vec<std::path::PathBuf>,
 }
 
 /// `[bin]` section: shared defaults for `brokkr run` and `brokkr install`.

@@ -180,11 +180,11 @@ pub(crate) fn invocation() -> CommandId {
         .expect("command policy is installed before dispatch")
 }
 
-pub(crate) fn visible_to(vis: &Visibility, project: Project) -> bool {
+pub(crate) fn visible_to(vis: &Visibility, project: &Project) -> bool {
     let member = |projects: &[Project]| {
         projects
             .iter()
-            .any(|p| std::mem::discriminant(p) == std::mem::discriminant(&project))
+            .any(|p| std::mem::discriminant(p) == std::mem::discriminant(project))
     };
     match vis {
         Visibility::Any => true,
@@ -258,14 +258,14 @@ impl CommandSpec {
         }
     }
 
-    pub(crate) fn require(&self, project: Project) -> Result<(), crate::error::DevError> {
+    pub(crate) fn require(&self, project: &Project) -> Result<(), crate::error::DevError> {
         if visible_to(&self.applies, project) {
             return Ok(());
         }
         let expected = match self.applies {
             Visibility::Only(projects) => projects
                 .iter()
-                .map(|p| p.name())
+                .map(Project::name)
                 .collect::<Vec<_>>()
                 .join(" and "),
             // Rendered as "only available in <expected> projects".
@@ -273,7 +273,7 @@ impl CommandSpec {
                 "non-{}",
                 projects
                     .iter()
-                    .map(|p| p.name())
+                    .map(Project::name)
                     .collect::<Vec<_>>()
                     .join("/non-")
             ),
@@ -291,7 +291,7 @@ impl CommandSpec {
                 "[{}] ",
                 projects
                     .iter()
-                    .map(|p| p.name())
+                    .map(Project::name)
                     .collect::<Vec<_>>()
                     .join("/")
             ),
@@ -301,7 +301,7 @@ impl CommandSpec {
 }
 
 /// Tool probes for an environment report follow the applicable commands.
-pub(crate) fn tools_in(project: Project) -> Vec<&'static str> {
+pub(crate) fn tools_in(project: &Project) -> Vec<&'static str> {
     let mut tools: Vec<_> = COMMANDS
         .iter()
         .filter(|id| visible_to(&id.spec().applies, project))

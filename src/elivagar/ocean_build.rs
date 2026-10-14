@@ -26,13 +26,13 @@ use super::{DEFAULT_TILEGEN, resolve_tilegen};
 
 pub fn run(
     dev_config: &config::DevConfig,
-    project: Project,
+    project: &Project,
     project_root: &crate::project::ProjectRoot,
     build_root: &crate::project::BuildRoot,
     dry_run: bool,
     lock: Option<&LockGuard>,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Elivagar, "ocean-build")?;
+    project::require(project, &Project::Elivagar, "ocean-build")?;
     let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
     let build_root = build_root.as_path();

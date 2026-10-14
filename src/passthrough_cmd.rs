@@ -121,7 +121,7 @@ pub(crate) fn print_run_timing(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_run(
     dev_config: &config::DevConfig,
-    project: Project,
+    project: &Project,
     project_root: &project::ProjectRoot,
     build_root: &project::BuildRoot,
     features: &[String],

@@ -1322,7 +1322,7 @@ warning: `b` (manifest) generated 1 warning
         // emits an absolute path joined onto the cargo-resolved
         // target_dir.
         let target = Path::new("/home/u/proj/target");
-        let env = build_test_env(Some(Project::Nidhogg), target, "debug");
+        let env = build_test_env(Some(&Project::Nidhogg),target, "debug");
         let tmp = env
             .iter()
             .find(|(k, _)| k == "CARGO_TARGET_TMPDIR")
@@ -1339,7 +1339,7 @@ warning: `b` (manifest) generated 1 warning
 
     #[test]
     fn build_test_env_no_tmpdir_for_non_nidhogg() {
-        let env = build_test_env(Some(Project::Pbfhogg), Path::new("/x/target"), "release");
+        let env = build_test_env(Some(&Project::Pbfhogg),Path::new("/x/target"), "release");
         assert!(env.iter().all(|(k, _)| k != "CARGO_TARGET_TMPDIR"));
         assert_eq!(
             env.iter()
@@ -1370,7 +1370,7 @@ warning: `b` (manifest) generated 1 warning
         let key = crate::config::check::rustflags_target_key(&sweep.rustflags).unwrap();
         let env = sweep_runtime_env(
             &sweep,
-            Some(Project::Pbfhogg),
+            Some(&Project::Pbfhogg),
             Path::new("/meta/target"),
             "debug",
             &[],
@@ -1396,7 +1396,7 @@ warning: `b` (manifest) generated 1 warning
         let key = crate::config::check::rustflags_target_key(&sweep.rustflags).unwrap();
         let env = sweep_runtime_env(
             &sweep,
-            Some(Project::Pbfhogg),
+            Some(&Project::Pbfhogg),
             Path::new("/media/folk/Banan/cargo"),
             "debug",
             &[],
@@ -1412,7 +1412,7 @@ warning: `b` (manifest) generated 1 warning
     fn sweep_runtime_env_plain_sweep_uses_metadata_target() {
         let env = sweep_runtime_env(
             &crate::profile::PlannedSweep::from(crate::profile::SweepDecl::default()),
-            Some(Project::Pbfhogg),
+            Some(&Project::Pbfhogg),
             Path::new("/meta/target"),
             "debug",
             &[],

@@ -44,7 +44,7 @@ pub(crate) fn reenter_command_lock() -> Result<lockfile::LockGuard, DevError> {
 /// exits with a confusing `lock: already locked` error that an agent might
 /// "handle" by bypassing the tool or inventing a polling loop.
 pub(crate) fn acquire_cmd_lock(
-    project: Project,
+    project: &Project,
     project_root: &ProjectRoot,
     build_root: &BuildRoot,
 ) -> Result<lockfile::LockGuard, DevError> {
@@ -55,7 +55,7 @@ pub(crate) fn acquire_cmd_lock(
 /// brokkr project (`check` / `test` / `run` in a bare Rust repo). Falls
 /// back to the project label `"brokkr"` when no project is detected.
 pub(crate) fn acquire_cmd_lock_opt(
-    project: Option<Project>,
+    project: Option<&Project>,
     project_root: &ProjectRoot,
     build_root: &BuildRoot,
 ) -> Result<lockfile::LockGuard, DevError> {
@@ -149,7 +149,7 @@ impl MeasurementSession {
     ) -> Result<Self, DevError> {
         Self::new(
             req.dev_config,
-            req.project,
+            req.project.clone(),
             req.project_root,
             req.build_root,
             DirtyPolicy::for_request(req).allowed(),
@@ -183,6 +183,7 @@ impl MeasurementSession {
         let harness = harness::BenchHarness::new_with_lock(
             lock,
             &paths,
+            &dev_config.included_config_files,
             build_root,
             project_root,
             project,
@@ -218,7 +219,7 @@ impl MeasurementSession {
     ) -> Result<Self, DevError> {
         Self::build(
             req.dev_config,
-            req.project,
+            req.project.clone(),
             req.project_root,
             req.build_root,
             package,
@@ -301,7 +302,7 @@ impl MeasurementSession {
             package: build_config.package.clone(),
             bin: build_config.bin.clone(),
             example: build_config.example.clone(),
-            features: crate::resolve_features(dev_config, &build_config.features),
+            features: crate::command_args::resolve_features(dev_config, &build_config.features),
             default_features: build_config.default_features,
             all_features: build_config.all_features,
             profile: build_config.profile,
@@ -324,7 +325,7 @@ impl MeasurementSession {
     ) -> Result<Self, DevError> {
         Self::with_build_config(
             req.dev_config,
-            req.project,
+            req.project.clone(),
             req.project_root,
             req.build_root,
             build_config,
@@ -362,7 +363,7 @@ impl MeasurementSession {
 /// `brokkr clean --worktrees` to garbage collect.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn with_worktree<F, T>(
-    project: Option<Project>,
+    project: Option<&Project>,
     project_root: &ProjectRoot,
     build_root: &BuildRoot,
     commit: Option<&str>,

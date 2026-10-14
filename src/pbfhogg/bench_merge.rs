@@ -39,7 +39,7 @@ pub fn run(
         .collect();
     let variant_refs: Vec<&str> = variant_names.iter().map(String::as_str).collect();
 
-    let result = crate::harness::run_variants("variant", &variant_refs, |variant| {
+    let result = crate::bench_variants::run_variants("variant", &variant_refs, |variant| {
         let (io_mode, compression) = variant.split_once('+').unwrap_or(("buffered", variant));
 
         let bench_args: Vec<&str> = vec![

@@ -213,7 +213,7 @@ pub(super) struct GateHookCtx<'a> {
     pub(super) project_root: &'a Path,
     pub(super) script_abs: &'a Path,
     pub(super) fixture_name: &'a str,
-    pub(super) debug: bool,
+    pub(super) profile: CargoProfile,
     /// The harness build's features, in `canonical_features` form.
     pub(super) features: &'a str,
     pub(super) elapsed_ms: i64,
@@ -259,8 +259,11 @@ pub(super) fn run_gate_hook(ctx: &GateHookCtx<'_>) -> Result<(), DevError> {
     // records the commit it measured rather than whatever HEAD happens to
     // be. `gate.db` itself stays under the main `project_root` below - a
     // worktree is disposable, and the baselines are not.
-    let git_info = git::collect(ctx.req.build_root.as_path())?;
-    let profile_name = CargoProfile::for_debug(ctx.debug).as_label();
+    let git_info = git::collect_with_config_paths(
+        ctx.req.build_root.as_path(),
+        &ctx.req.dev_config.included_config_files,
+    )?;
+    let profile_name = ctx.profile.as_label();
 
     let sidecar_blob = sidecar_to_json(ctx.sidecar_data);
     let meta_blob = meta_to_json(ctx.summary);
@@ -891,7 +894,7 @@ mod tests {
             marker("SYNC_END", 12_500_000),
         ];
         assert_eq!(
-            crate::harness::marker_span_us(&markers, "SYNC_START", "SYNC_END").map(|us| us / 1000),
+            crate::measure::wall::marker_span_us(&markers, "SYNC_START", "SYNC_END").map(|us| us / 1000),
             Some(7500)
         );
     }
@@ -900,7 +903,7 @@ mod tests {
     fn sync_span_returns_none_without_markers() {
         let markers: Vec<sidecar::Marker> = Vec::new();
         assert_eq!(
-            crate::harness::marker_span_us(&markers, "SYNC_START", "SYNC_END").map(|us| us / 1000),
+            crate::measure::wall::marker_span_us(&markers, "SYNC_START", "SYNC_END").map(|us| us / 1000),
             None
         );
     }
@@ -909,7 +912,7 @@ mod tests {
     fn sync_span_returns_none_with_only_start() {
         let markers = vec![marker("SYNC_START", 1_000_000)];
         assert_eq!(
-            crate::harness::marker_span_us(&markers, "SYNC_START", "SYNC_END").map(|us| us / 1000),
+            crate::measure::wall::marker_span_us(&markers, "SYNC_START", "SYNC_END").map(|us| us / 1000),
             None
         );
     }
@@ -920,7 +923,7 @@ mod tests {
         // missing rather than negative.
         let markers = vec![marker("SYNC_END", 500_000), marker("SYNC_START", 1_000_000)];
         assert_eq!(
-            crate::harness::marker_span_us(&markers, "SYNC_START", "SYNC_END").map(|us| us / 1000),
+            crate::measure::wall::marker_span_us(&markers, "SYNC_START", "SYNC_END").map(|us| us / 1000),
             None
         );
     }

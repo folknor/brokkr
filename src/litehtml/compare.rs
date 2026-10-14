@@ -6,7 +6,7 @@ use std::path::Path;
 use crate::error::DevError;
 // Both visual subjects use the shared status thresholds and column formatter;
 // keep project tests on this surface rather than growing adapter-local copies.
-pub(crate) use crate::visual::compare::{compare_pixels, validate_artifact_id};
+pub(crate) use crate::visual::compare::compare_pixels;
 pub(crate) use crate::visual::status::{
     ApprovedScores, ComparisonThresholds, Status, StatusInput, StatusTally, determine_status,
     status_columns,

@@ -169,28 +169,16 @@ pub struct GitInfo {
     pub is_clean: bool,
 }
 
-/// Collect git information from the working directory. The files the
-/// governing `brokkr.toml` `include`s are exempt from the measurement policy
-/// exactly as `brokkr.toml` itself is: brokkr writes dataset registrations
-/// into whichever file holds the dataset.
+/// Collect git information from the working directory without loading brokkr
+/// configuration. The root `brokkr.toml` remains exempt from the measurement
+/// policy; included files count as ordinary changes because their paths are
+/// unavailable without config provenance, so `is_clean` here is only fit for
+/// a caller that does not read it (one that wants the commit alone). Anything
+/// that gates on or records cleanliness must use
+/// [`collect_with_config_paths`] with the composed config's included files
+/// (`DevConfig::included_config_files`, or `Detection::config_sources`).
 pub fn collect(workspace_root: &Path) -> Result<GitInfo, DevError> {
-    // This convenience path remains for callers that only have a repository
-    // path. Callers with startup `ConfigSources` must pass `sources.included()`
-    // to `collect_with_config_paths` so provenance is not recomposed here.
-    collect_with_config_paths(workspace_root, &included_config_files(workspace_root))
-}
-
-/// The composed config's included files. A config that does not compose adds
-/// nothing: the command that loaded it has already failed, or this is not a
-/// brokkr project at all.
-pub(crate) fn included_config_files(workspace_root: &Path) -> Vec<std::path::PathBuf> {
-    let Some(dir) = crate::project::find_config_dir(workspace_root) else {
-        return Vec::new();
-    };
-    match crate::config::compose(&dir.join("brokkr.toml")) {
-        Ok((_, sources)) => sources.included().to_vec(),
-        Err(_) => Vec::new(),
-    }
+    collect_with_config_paths(workspace_root, &[])
 }
 
 /// Collect git information using the already-resolved paths of included

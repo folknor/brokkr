@@ -1,3 +1,8 @@
+//! Atomic dataset registry transactions and generated input installation.
+
+use crate::{build, error::DevError, output};
+use std::path::{Path, PathBuf};
+
 // `brokkr.toml` edits for dataset management: `download`, `download
 // --refresh`, `download --as-snapshot`, and `--as-snapshot` promotion of a
 // repack/degrade artefact.
@@ -24,7 +29,7 @@
 /// One read-modify-write transaction on the config file that holds the
 /// dataset: `<project_root>/brokkr.toml`, or the file it `include`s the
 /// dataset from ([`crate::config::ConfigSources::owner_of_table`]).
-struct DatasetToml {
+pub(super) struct DatasetToml {
     path: PathBuf,
     /// `path` as narration shows it: `brokkr.toml` for the project's own
     /// file, the full path for an included one.
@@ -44,7 +49,11 @@ impl DatasetToml {
     /// host table. The composition is resolved afresh rather than taken from
     /// the loaded config, so the choice of file reflects the files as they are
     /// about to be edited.
-    fn open(project_root: &Path, hostname: &str, dataset_key: &str) -> Result<Self, DevError> {
+    pub(super) fn open(
+        project_root: &Path,
+        hostname: &str,
+        dataset_key: &str,
+    ) -> Result<Self, DevError> {
         let root = project_root.join("brokkr.toml");
         let (_, sources) = crate::config::compose(&root)?;
         let host_namespace = !sources.table_files(&["host", hostname]).is_empty();
@@ -108,7 +117,7 @@ impl DatasetToml {
             if !table.contains_key(key.as_str()) {
                 let mut fresh = toml_edit::Table::new();
                 fresh.set_implicit(true);
-                table.insert(key.as_str(),toml_edit::Item::Table(fresh));
+                table.insert(key.as_str(), toml_edit::Item::Table(fresh));
             }
             table = table
                 .get_mut(key.as_str())
@@ -144,7 +153,7 @@ impl DatasetToml {
     }
 
     /// Make the dataset table explicit and set its `origin`.
-    fn set_dataset_origin(&mut self, origin: &str) -> Result<(), DevError> {
+    pub(super) fn set_dataset_origin(&mut self, origin: &str) -> Result<(), DevError> {
         let label = self.label(&[]);
         let ds = self.table_mut(&[])?;
         ds.set_implicit(false);
@@ -176,17 +185,31 @@ impl DatasetToml {
     }
 
     /// `[..pbf.<variant>]` on the primary snapshot.
-    fn set_pbf(&mut self, variant: &str, filename: &str, xxhash: &str) -> Result<(), DevError> {
+    pub(super) fn set_pbf(
+        &mut self,
+        variant: &str,
+        filename: &str,
+        xxhash: &str,
+    ) -> Result<(), DevError> {
         self.set_file_entry(&["pbf"], variant, filename, xxhash)
     }
 
     /// `[..osc.<seq>]` on the primary snapshot.
-    fn set_osc(&mut self, seq: u64, filename: &str, xxhash: &str) -> Result<(), DevError> {
+    pub(super) fn set_osc(
+        &mut self,
+        seq: u64,
+        filename: &str,
+        xxhash: &str,
+    ) -> Result<(), DevError> {
         self.set_file_entry(&["osc"], &seq.to_string(), filename, xxhash)
     }
 
     /// `[..snapshot.<key>]` with its `download_date`.
-    fn set_snapshot_header(&mut self, snap_key: &str, date: &str) -> Result<(), DevError> {
+    pub(super) fn set_snapshot_header(
+        &mut self,
+        snap_key: &str,
+        date: &str,
+    ) -> Result<(), DevError> {
         let label = self.label(&["snapshot", snap_key]);
         let snap = self.table_mut(&["snapshot", snap_key])?;
         snap.set_implicit(false);
@@ -199,7 +222,7 @@ impl DatasetToml {
     }
 
     /// `[..snapshot.<key>.pbf.<variant>]`.
-    fn set_snapshot_pbf(
+    pub(super) fn set_snapshot_pbf(
         &mut self,
         snap_key: &str,
         variant: &str,
@@ -210,25 +233,31 @@ impl DatasetToml {
     }
 
     /// `[..snapshot.<key>.osc.<seq>]`.
-    fn set_snapshot_osc(
+    pub(super) fn set_snapshot_osc(
         &mut self,
         snap_key: &str,
         seq: u64,
         filename: &str,
         xxhash: &str,
     ) -> Result<(), DevError> {
-        self.set_file_entry(&["snapshot", snap_key, "osc"], &seq.to_string(), filename, xxhash)
+        self.set_file_entry(
+            &["snapshot", snap_key, "osc"],
+            &seq.to_string(),
+            filename,
+            xxhash,
+        )
     }
 
     /// Drop `[..snapshot.<key>]` and every sub-table under it.
-    fn remove_snapshot(&mut self, snap_key: &str) -> Result<(), DevError> {
+    pub(super) fn remove_snapshot(&mut self, snap_key: &str) -> Result<(), DevError> {
         let label = self.label(&["snapshot", snap_key]);
         if !self.has(&["snapshot", snap_key]) {
             return Ok(());
         }
         let snapshots = self.table_mut(&["snapshot"])?;
         snapshots.remove(snap_key);
-        self.changes.push(format!("removed previous {label} and its sub-tables"));
+        self.changes
+            .push(format!("removed previous {label} and its sub-tables"));
         Ok(())
     }
 
@@ -240,7 +269,7 @@ impl DatasetToml {
     /// and their place in the file; only their header changes. The snapshot
     /// header is pinned just ahead of the first moved table so it renders
     /// above its sub-tables rather than wherever a fresh table would land.
-    fn rotate_primary_to_snapshot(
+    pub(super) fn rotate_primary_to_snapshot(
         &mut self,
         snap_key: &str,
         old_download_date: &str,
@@ -270,14 +299,15 @@ impl DatasetToml {
         if let Some(item) = osc {
             snap.insert("osc", item);
         }
-        self.changes
-            .push(format!("rotated {label} pbf/osc tables -> snapshot.{snap_key}"));
+        self.changes.push(format!(
+            "rotated {label} pbf/osc tables -> snapshot.{snap_key}"
+        ));
         Ok(())
     }
 
     /// Atomically replace the file with the edited document, then narrate
     /// what changed.
-    fn commit(self) -> Result<(), DevError> {
+    pub(super) fn commit(self) -> Result<(), DevError> {
         if self.changes.is_empty() {
             return Ok(());
         }
@@ -293,7 +323,10 @@ impl DatasetToml {
 fn min_table_position(item: &toml_edit::Item) -> Option<isize> {
     let table = item.as_table()?;
     let own = table.position();
-    let children = table.iter().filter_map(|(_, child)| min_table_position(child)).min();
+    let children = table
+        .iter()
+        .filter_map(|(_, child)| min_table_position(child))
+        .min();
     match (own, children) {
         (Some(a), Some(b)) => Some(a.min(b)),
         (a, b) => a.or(b),
@@ -307,7 +340,7 @@ fn min_table_position(item: &toml_edit::Item) -> Option<isize> {
 /// interrupted copy leaves a stray temp file rather than a truncated `dest`
 /// that a later run would hash and register. The raw OS code is matched so
 /// this does not depend on `ErrorKind::CrossesDevices`.
-fn move_file_into_place(src: &Path, dest: &Path) -> Result<(), DevError> {
+pub(super) fn move_file_into_place(src: &Path, dest: &Path) -> Result<(), DevError> {
     // A plain rename *moves* a finished file; it is not a temp-and-replace, so
     // it stays raw. Only the cross-filesystem copy needs staging.
     match std::fs::rename(src, dest) {
@@ -331,13 +364,16 @@ fn move_file_into_place(src: &Path, dest: &Path) -> Result<(), DevError> {
 /// `--type node,way,relation`. Plain `cat` is the form pbfhogg documents for
 /// indexdata generation. Writes to a temp name and renames on success, so a
 /// failed or killed `cat` never leaves a truncated `dest` behind.
-fn generate_indexed_pbf(
+pub(super) fn generate_indexed_pbf(
     input: &Path,
     dest: &Path,
     project_root: &Path,
     build_root: &Path,
 ) -> Result<(), DevError> {
-    output::download_msg(&format!("  generating indexed PBF via cat -> {}", dest.display()));
+    output::download_msg(&format!(
+        "  generating indexed PBF via cat -> {}",
+        dest.display()
+    ));
     let binary = build::cargo_build(
         &build::BuildConfig::release(crate::project::Project::Pbfhogg.cli_package()),
         build_root,
@@ -386,11 +422,13 @@ mod toml_tests {
         let text = std::fs::read_to_string(root.join("brokkr.toml")).unwrap();
         let parsed: toml::Value = toml::from_str(&text).unwrap();
         assert_eq!(
-            parsed["host"]["local"]["datasets"]["denmark"]["pbf"]["raw"]["file"]
-                .as_str(),
+            parsed["host"]["local"]["datasets"]["denmark"]["pbf"]["raw"]["file"].as_str(),
             Some("denmark.osm.pbf")
         );
-        assert!(parsed.get("local").is_none(), "unexpected legacy host table:\n{text}");
+        assert!(
+            parsed.get("local").is_none(),
+            "unexpected legacy host table:\n{text}"
+        );
     }
 
     #[test]
@@ -409,6 +447,9 @@ mod toml_tests {
             parsed["local"]["datasets"]["denmark"]["pbf"]["raw"]["file"].as_str(),
             Some("denmark.osm.pbf")
         );
-        assert!(parsed.get("host").is_none(), "unexpected explicit host table:\n{text}");
+        assert!(
+            parsed.get("host").is_none(),
+            "unexpected explicit host table:\n{text}"
+        );
     }
 }

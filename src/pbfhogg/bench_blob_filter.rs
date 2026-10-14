@@ -91,7 +91,7 @@ pub fn run(
         .collect();
     let variant_refs: Vec<&str> = variant_names.iter().map(String::as_str).collect();
 
-    let result = crate::harness::run_variants("variant", &variant_refs, |variant| {
+    let result = crate::bench_variants::run_variants("variant", &variant_refs, |variant| {
         let (cmd, label_suffix) = variant
             .split_once('+')
             .ok_or_else(|| DevError::Config(format!("invalid variant '{variant}'")))?;

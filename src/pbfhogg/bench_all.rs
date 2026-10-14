@@ -49,9 +49,9 @@ pub fn run(
     // entries and stale hashes fail the suite instead of looking like an
     // optional dataset field that was never configured.
     let default_osc = match paths.datasets.get(dataset) {
-        Some(ds) if !ds.osc.is_empty() => Some(crate::resolve::resolve_single_osc(
+        Some(ds) if !ds.osc.is_empty() => Some(crate::datasets::resolve::resolve_single_osc(
             dataset,
-            &crate::resolve::SnapshotRef::Base,
+            &crate::datasets::resolve::SnapshotRef::Base,
             None,
             paths,
             project_root,
@@ -176,7 +176,7 @@ fn run_dataset_dependent(
 
     // bench blob-filter -- if raw PBF is available
     let raw_pbf_path = if ds.is_some_and(|dataset| dataset.pbf.contains_key("raw")) {
-        Some(crate::resolve::resolve_pbf_path(
+        Some(crate::datasets::resolve::resolve_pbf_path(
             dataset,
             "raw",
             paths,
@@ -354,7 +354,7 @@ fn run_osmpbf_baseline(
         .collect();
     let variant_names: Vec<&str> = variant_data.iter().map(|(v, ..)| v.as_str()).collect();
 
-    crate::harness::run_variants("baseline", &variant_names, |variant| {
+    crate::bench_variants::run_variants("baseline", &variant_names, |variant| {
         let (_, elapsed_ms, kv) = variant_data
             .iter()
             .find(|(v, ..)| v == variant)

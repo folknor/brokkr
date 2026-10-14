@@ -1,5 +1,7 @@
+//! Measurement and persistence regression tests.
+
 #[cfg(test)]
-mod tests {
+mod persistence {
     #![allow(
         clippy::unwrap_used,
         clippy::unwrap_in_result,
@@ -17,7 +19,14 @@ mod tests {
         clippy::let_underscore_must_use,
         clippy::useless_vec
     )]
-    use super::*;
+    use crate::bench_variants::*;
+    use crate::db::{KvPair, KvValue, Wall};
+    use crate::git::GitInfo;
+    use crate::measure::*;
+    use crate::measure::{argv::*, execution::*, kv::*, record::*, wall::*};
+    use crate::sidecar::linear_percentile as percentile;
+    use crate::sidecar_backup::*;
+    use std::path::{Path, PathBuf};
 
     // -----------------------------------------------------------------------
     // run progress and sidecar summary lines
@@ -58,7 +67,11 @@ mod tests {
     #[test]
     fn run_variants_summary_names_the_variants_and_renders_bare() {
         let result = run_variants("query", &["a", "b", "c"], |v| {
-            if v == "c" { Ok(()) } else { Err(DevError::Refused(format!("{v} broke"))) }
+            if v == "c" {
+                Ok(())
+            } else {
+                Err(DevError::Refused(format!("{v} broke")))
+            }
         });
         let e = result.unwrap_err();
         assert!(matches!(e, DevError::Reported(_)), "{e:?}");
@@ -532,10 +545,7 @@ mod tests {
             hotpath: None,
         };
         let winner = winning_index(None, 0, &candidate);
-        assert_eq!(
-            winner, 0,
-            "None current should always take candidate"
-        );
+        assert_eq!(winner, 0, "None current should always take candidate");
     }
 
     #[test]
@@ -556,7 +566,11 @@ mod tests {
             distribution: None,
             hotpath: None,
         };
-        assert_eq!(winning_index(Some((0, &current)), 1, &candidate), 0, "should keep the lower value");
+        assert_eq!(
+            winning_index(Some((0, &current)), 1, &candidate),
+            0,
+            "should keep the lower value"
+        );
     }
 
     #[test]
@@ -577,7 +591,11 @@ mod tests {
             distribution: None,
             hotpath: None,
         };
-        assert_eq!(winning_index(Some((0, &current)), 1, &candidate), 1, "should replace with lower value");
+        assert_eq!(
+            winning_index(Some((0, &current)), 1, &candidate),
+            1,
+            "should replace with lower value"
+        );
     }
 
     #[test]
@@ -599,8 +617,11 @@ mod tests {
             distribution: None,
             hotpath: None,
         };
-        assert_eq!(winning_index(Some((0, &current)), 1, &candidate), 0,
-            "on tie, current (first seen) should be kept");
+        assert_eq!(
+            winning_index(Some((0, &current)), 1, &candidate),
+            0,
+            "on tie, current (first seen) should be kept"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -673,11 +694,13 @@ mod tests {
     /// Create a minimal sidecar DB at the given path.
     fn create_sidecar(path: &Path) {
         let db = crate::db::sidecar::SidecarDb::open(path).unwrap();
-        db.conn().execute(
-            "INSERT INTO sidecar_markers (result_uuid, run_idx, marker_idx, \
+        db.conn()
+            .execute(
+                "INSERT INTO sidecar_markers (result_uuid, run_idx, marker_idx, \
              timestamp_us, name) VALUES ('test', 0, 0, 1000, 'marker')",
-            [],
-        ).unwrap();
+                [],
+            )
+            .unwrap();
     }
 
     #[test]
@@ -692,7 +715,7 @@ mod tests {
         for _ in 0..4 {
             backup_sidecar_to(
                 &sidecar_path,
-                crate::project::Project::Pbfhogg,
+                &crate::project::Project::Pbfhogg,
                 Some(&backup_dir),
             )
             .unwrap();
@@ -739,7 +762,7 @@ mod tests {
         // Create a good initial backup.
         backup_sidecar_to(
             &sidecar_path,
-            crate::project::Project::Pbfhogg,
+            &crate::project::Project::Pbfhogg,
             Some(&backup_dir),
         )
         .unwrap();
@@ -754,7 +777,7 @@ mod tests {
 
         let result = backup_sidecar_to(
             &bad_source,
-            crate::project::Project::Pbfhogg,
+            &crate::project::Project::Pbfhogg,
             Some(&backup_dir),
         );
         assert!(result.is_err());
@@ -774,7 +797,7 @@ mod tests {
 
         let result = backup_sidecar_to(
             &sidecar_path,
-            crate::project::Project::Pbfhogg,
+            &crate::project::Project::Pbfhogg,
             Some(&dir),
         );
         assert!(result.is_ok());

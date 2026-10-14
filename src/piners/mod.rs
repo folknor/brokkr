@@ -28,3 +28,5 @@ pub(crate) mod selector;
 pub(crate) mod table;
 pub mod time;
 pub(crate) mod toml_writer;
+
+pub(crate) mod db_paths;

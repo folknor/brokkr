@@ -57,6 +57,7 @@ mod tests {
             bin: None,
             disable_toolchain: false,
             cargo_env: std::collections::BTreeMap::new(),
+            included_config_files: Vec::new(),
         }
     }
 
@@ -988,7 +989,7 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
         let dk = resolved.datasets.get("dk").unwrap();
         assert_eq!(dk.pbf.get("indexed").unwrap().file, "dk-indexed.osm.pbf");
         assert_eq!(
-            dk.bbox.as_ref().map(crate::resolve::Bbox::as_str),
+            dk.bbox.as_ref().map(crate::datasets::Bbox::as_str),
             Some("1,2,3,4")
         );
     }
@@ -1142,7 +1143,7 @@ xxhash = "cccccccccccccccccccccccccccccccc"
         assert_eq!(dk.origin.as_deref(), Some("Geofabrik"));
         assert_eq!(dk.download_date.as_deref(), Some("2026-02-20"));
         assert_eq!(
-            dk.bbox.as_ref().map(crate::resolve::Bbox::as_str),
+            dk.bbox.as_ref().map(crate::datasets::Bbox::as_str),
             Some("8.0,54.5,13.0,58.0")
         );
         assert_eq!(dk.pbf.get("raw").unwrap().file, "dk-raw.osm.pbf");

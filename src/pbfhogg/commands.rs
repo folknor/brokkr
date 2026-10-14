@@ -6,9 +6,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::clean::layout::{PbfhoggFileKind, PbfhoggLayout};
+use crate::datasets::Bbox;
 use crate::error::DevError;
 use crate::pbfhogg::context::{CommandContext, CommandObservations, CommandParams};
-use crate::resolve::Bbox;
 
 // ---------------------------------------------------------------------------
 // Input / output descriptors

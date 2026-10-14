@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::artefacts::{self, ArtefactDir};
+use crate::build::CargoProfile;
 use crate::clean::layout::ProjectState;
 use crate::config::project_config::ratatoskr::RatatoskrConfig;
 use crate::error::DevError;
@@ -36,6 +37,7 @@ pub(crate) fn service_suite(req: &crate::request::ServiceSuiteRequest<'_>) -> Re
     let crate::request::ServiceSuiteRequest {
         project_root,
         build_root,
+        included_config_files,
         ratatoskr,
         filter,
         keep_artefacts,
@@ -97,11 +99,14 @@ pub(crate) fn service_suite(req: &crate::request::ServiceSuiteRequest<'_>) -> Re
     // Cooperative SIGTERM for `brokkr kill`. See run_sync_smoke for rationale.
     let sigterm = crate::shutdown::SigtermGuard::install();
 
-    let debug = profile_override.unwrap_or_else(|| harness_cfg.debug.unwrap_or(false));
+    let profile = profile_override
+        .map(CargoProfile::for_debug)
+        .or_else(|| harness_cfg.debug.map(CargoProfile::for_debug))
+        .unwrap_or_default();
     let built = build::build_for_harness(
         build_root.as_path(),
         harness_cfg,
-        debug,
+        profile,
         Some(&|pid| _lock.set_child_pid(pid)),
         Some(&|| _lock.clear_child_pid()),
         crate::shutdown::ChildIsolation::ProcessGroup(&sigterm),
@@ -208,6 +213,7 @@ pub(crate) fn service_suite(req: &crate::request::ServiceSuiteRequest<'_>) -> Re
                     &built,
                     &script.path,
                     project_root,
+                    included_config_files,
                     script.ceiling,
                     &env_pairs,
                     &_lock,
@@ -592,8 +598,9 @@ pub(super) fn write_artefacts(
     built: &HarnessBuild,
     captured: &CapturedOutput,
     project_root: &Path,
+    included_config_files: &[std::path::PathBuf],
 ) -> Result<(), DevError> {
-    let git = crate::git::collect(project_root).ok();
+    let git = crate::git::collect_with_config_paths(project_root, included_config_files).ok();
     write_artefacts_with_git(artefact_dir, script_abs, built, captured, git.as_ref())
 }
 
@@ -758,7 +765,7 @@ mod tests {
         let built = fake_built(&bin_dir);
         let cap = captured(b"hello\n", b"warn\n", Some(0), None);
 
-        write_artefacts(&artefact_dir, &script, &built, &cap, &parent).unwrap();
+        write_artefacts(&artefact_dir, &script, &built, &cap, &parent, &[]).unwrap();
 
         assert_eq!(
             fs::read(artefact_dir.join("binary-stdout.log")).unwrap(),
@@ -791,7 +798,7 @@ mod tests {
         let built = fake_built(&bin_dir);
         let cap = captured(b"", b"", None, Some(9));
 
-        write_artefacts(&artefact_dir, &script, &built, &cap, &parent).unwrap();
+        write_artefacts(&artefact_dir, &script, &built, &cap, &parent, &[]).unwrap();
         let toml_body = fs::read_to_string(artefact_dir.join("run.toml")).unwrap();
         assert!(toml_body.contains("signal = 9"), "got: {toml_body}");
         assert!(!toml_body.contains("exit_code ="));

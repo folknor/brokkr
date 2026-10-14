@@ -4,7 +4,7 @@
 //! disposition lines, each stored whole as the authoritative record with its
 //! fields projected as generated columns, and the per-trade `trade_diff`
 //! drill-down lines - into the per-project SQLite database returned by
-//! `resolve::corpus_runs_db_path`. Once a run
+//! `piners::db_paths::corpus_runs_db_path`. Once a run
 //! is in the DB its artefact dir can be discarded (pass or fail) and its data
 //! stays queryable across runs via `brokkr corpus-results` (piners only).
 //!

@@ -44,74 +44,31 @@ Reported by: config-cli-bootstrap, ratatoskr, piners, check-core, process-contro
 
 Enforcement proposed: a prefix table with a width test; textlint bans on `\[warn\]` literals outside `output.rs` and `\(s\)` in string regions; one banner constant.
 
-## PLT-006 - Subprocess spawning bypasses the choke points
-
-Reported by: process-control, config-cli-bootstrap, ratatoskr, pbfhogg-nidhogg, convention-engines, elivagar.
-
-Residue: a raw osmosis capture remains in `src/pbfhogg/verify_merge.rs`.
-
 ## PLT-019 - Build profile is a bare string or bool
 
 Reported by: process-control, ratatoskr, test-execution, piners.
 
-Residue: harness profile resolution is still bool-based at the ratatoskr/piners callers, and the DB writers that record `Release` regardless are unchanged.
+Residue: the DB writers that record `Release` regardless of the actual profile are unchanged.
 
 ## PLT-021 - `brokkr.toml` is parsed more than once per invocation
 
 Reported by: config-cli-bootstrap, process-control.
 
-Residue: `git::collect` still recomposes config for callers that only pass a repository path (`collect_with_config_paths` is the provenance-carrying form); `history_cmd.rs` re-runs `project::detect()` after startup and then calls `git::collect`, and other modules call `git::collect` too.
+Residue: five path-only `git::collect` callers remain (the measured commands via `measure.rs`, and ratatoskr service and sync among them). The path-only fallback no longer parses config, so for those callers in-tree `include` files count as uncommitted changes; their request types need to carry the included paths.
 
-## PLT-023 - "Which command runs in which project" has two owners
+## PLT-056 - Wave-3 review leftovers
 
-Reported by: config-cli-bootstrap, small-benches, elivagar.
+Reported by: the wave-3 reviewer, laterally.
 
-Residue: handler-side `project::require` checks remain in `elivagar/cmd.rs`, `litehtml/cmd.rs` and `sluggrs/cmd.rs` (the `verify` nested-variant checks are deliberate and commented).
-
-## PLT-024 - Project name ↔ variant mapping is duplicated
-
-Reported by: config-cli-bootstrap, ratatoskr, pbfhogg-nidhogg.
-
-Residue: `Project::Other` still uses `Box::leak` in `config_parts/parser.rs`. Removing it means changing `Project::Other`'s `&'static str` (which keeps `Project` `Copy`) in `project.rs` together with the parser.
-
-## PLT-025 - Configuration is validated at use instead of at load
-
-Reported by: config-cli-bootstrap, process-control.
-
-Residue: project-specific string validation is still at use time.
+- `history::redact_secret_text` decides what a failing script check shows and has no unit test; an invalid `FIELD_VALUE_RE` would withhold all script-check output.
+- `piners/time.rs` keeps its own `civil_from_days`, the same algorithm as `civil_date::from_unix_timestamp`.
+- `command_input.rs` now routes the remaining `Command` variants through a `command =>` catch-all, so a future variant that needs routing falls through silently where the old exhaustive list forced a decision.
+- `cargo_json::parse_cargo_diagnostics` errors on an unknown `message.level`, so a new rustc level would fail `check`.
+- `ratatoskr service` records `git_clean` from `project_root`; sync gate and bench use `build_root`.
+- history.db redaction narrowed to credential-named `--env` values; existing rows were written under the stricter rule and nothing documents the change.
 
 ## PLT-030 - External tools: unpinned, unverified, re-discovered per site
 
 Reported by: config-cli-bootstrap, elivagar.
 
-Residue: nidhogg's separate curl timeout contract and mutable map-data URLs remain.
-
-## PLT-037 - Secrets and personal data can reach durable logs
-
-Reported by: config-cli-bootstrap, check-core.
-
-Residue: raw script-check output is rendered unsanitized in `check_cmd/conventions.rs`.
-
-## PLT-053 - Malformed external JSON is skipped or misclassified
-
-Reported by: the wave-1 reviewer and a wave-2 fixer, laterally.
-
-`ContractViolation` now covers cargo metadata. Residue: `cargo_json.rs` and two parsers in `build.rs` silently skip malformed JSON lines, so cargo output can be dropped unnoticed.
-
-## PLT-054 - history.db argv redaction over-redacts
-
-Reported by: the wave-2 reviewer, laterally.
-
-`history::redact_argv` lets a bare positional whose text contains `session`/`token`/`auth` swallow the next argument, and `sensitive_name`'s substring match also hits `author`, `oauth` and `authority`. `history::redact_secret_argv` (used for results.db) is the narrower credential-names-only rule; history should adopt it or share its predicate.
-
-## PLT-055 - The guard-decision probe builds into the shared target dir
-
-Reported by: the wave-2 reviewer, laterally.
-
-`scripts/guard-decision-probe.py` runs a plain `cargo build --bin brokkr-rustc-guard` into `target/` inside check's script_check stage, without check's cargo env (`CARGO_CACHE_RUSTC_INFO=0`, `[lints] allow` rustflags). A cold `target/debug` compiles the full dependency set under the phase ceiling. A dedicated target dir, or reusing the artifact check already builds, would bound it.
-
-## PLT-051 - Decisions and leftovers from the command-spec wave
-
-Reported by: the wave-9 reviewer.
-
-Residue: the exhaustive dispatch tables in `command_input.rs` (the bootstrap ones are commented as deliberate one-arm-per-command routing).
+Residue: nidhogg's separate curl timeout contract, and the Natural Earth download in `src/elivagar/download_natural_earth.rs` has no version or digest check (the daily-regenerated ocean polygons in `download_ocean.rs` cannot be pinned, and say so).

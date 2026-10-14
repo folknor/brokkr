@@ -117,13 +117,15 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     // `harness` so it drops first, before the lock is released.
     let mut phase_guard = PhaseGuard::install();
 
-    let debug = req
+    let profile = req
         .profile_override
-        .unwrap_or_else(|| harness_cfg.debug.unwrap_or(false));
+        .map(CargoProfile::for_debug)
+        .or_else(|| harness_cfg.debug.map(CargoProfile::for_debug))
+        .unwrap_or_default();
     let built = build::build_for_harness(
         code_root,
         harness_cfg,
-        debug,
+        profile,
         Some(&|pid| harness.lock().set_child_pid(pid)),
         Some(&|| harness.lock().clear_child_pid()),
         crate::shutdown::ChildIsolation::ProcessGroup(phase_guard.signal_guard()),
@@ -131,7 +133,7 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     // What was actually built: ratatoskr's config sets `debug = true`, so the
     // row's profile follows the build, not a release default.
     let harness = harness.with_build_identity(crate::harness::BuildIdentity {
-        profile: CargoProfile::for_debug(debug),
+        profile,
         features: (!harness_cfg.features.is_empty())
             .then(|| canonical_features(&harness_cfg.features)),
     });
@@ -160,7 +162,7 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         run_root: artefacts.path(),
         harness: &harness,
         fixture_name: &fixture_name,
-        debug,
+        profile,
         gate_rules: gate_rules.as_ref(),
         // The frontmatter `ceiling:` (or discover's default) bounds each
         // measured iteration exactly as it bounds the unmeasured run: a
@@ -253,7 +255,7 @@ struct BenchLoopCtx<'a> {
     run_root: &'a Path,
     harness: &'a BenchHarness,
     fixture_name: &'a str,
-    debug: bool,
+    profile: CargoProfile,
     gate_rules: Option<&'a gate_eval::GateRules>,
     ceiling: Duration,
     phase_guard: &'a mut PhaseGuard,
@@ -271,7 +273,7 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
         run_root,
         harness,
         fixture_name,
-        debug,
+        profile,
         gate_rules,
         ceiling,
         phase_guard,
@@ -457,7 +459,7 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
             project_root: req.project_root.as_path(),
             script_abs,
             fixture_name,
-            debug,
+            profile,
             // The same `[ratatoskr.harness] features` list the build above
             // used; `run_sync_bench` refused a config without the section.
             features: &cfg

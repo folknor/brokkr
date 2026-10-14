@@ -47,7 +47,12 @@ pub(crate) fn cmd_history(q: HistoryQuery) -> Result<(), DevError> {
 
 /// Best-effort recording of command history. Arguments are redacted before
 /// durable storage and kept as a JSON argv so boundaries survive spaces.
-pub(crate) fn record_history(argv: &[String], elapsed_ms: u64, exit_code: i32) {
+pub(crate) fn record_history(
+    argv: &[String],
+    elapsed_ms: u64,
+    exit_code: i32,
+    detection: Option<&project::Detection>,
+) {
     // Sandboxes (and other minimal envs) may have neither XDG_DATA_HOME nor
     // HOME set - there's nowhere to put history.db, and emitting a warning
     // on every invocation is just noise.
@@ -63,19 +68,19 @@ pub(crate) fn record_history(argv: &[String], elapsed_ms: u64, exit_code: i32) {
             )))
         })?;
 
-        // Try to detect project and git info - these are optional.
-        let (project_name, commit_hash, dirty) = match project::detect() {
-            // Git info describes the code under test, so collect it from the
-            // build root (cwd), not the config dir.
-            Ok(d) => match git::collect(d.build_root.as_path()) {
-                Ok(gi) => (
-                    Some(d.project.name().to_owned()),
-                    Some(gi.commit),
-                    Some(!gi.is_clean),
-                ),
-                Err(_) => (Some(d.project.name().to_owned()), None, None),
+        // Detection already parsed the governing config at startup. Reuse its
+        // roots and include provenance for this best-effort metadata; the
+        // watchdog backstop has no Detection and leaves these fields absent.
+        let project_name = detection.map(|d| d.project.name().to_owned());
+        let (commit_hash, dirty) = match detection {
+            Some(d) => match git::collect_with_config_paths(
+                d.build_root.as_path(),
+                d.config_sources.included(),
+            ) {
+                Ok(gi) => (Some(gi.commit), Some(!gi.is_clean)),
+                Err(_) => (None, None),
             },
-            Err(_) => (None, None, None),
+            None => (None, None),
         };
 
         let kernel = host::kernel::kernel_version();

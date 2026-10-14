@@ -6,9 +6,9 @@
 
 use std::time::Instant;
 
+use crate::datasets::Bbox;
 use crate::error::DevError;
 use crate::output;
-use crate::resolve::Bbox;
 
 // ---------------------------------------------------------------------------
 // Public entry point

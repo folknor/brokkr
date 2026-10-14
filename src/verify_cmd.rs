@@ -7,11 +7,14 @@ use crate::{
     project::{self, Project},
 };
 
+// The args are the resolved command context, one per fact the verifiers need.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_verify(
     dev_config: &config::DevConfig,
-    project: Project,
+    project: &Project,
     project_root: &project::ProjectRoot,
     build_root: &project::BuildRoot,
+    included_config_files: &[std::path::PathBuf],
     verify: VerifyCommand,
     features: &[String],
     verbose: bool,
@@ -29,15 +32,15 @@ pub(crate) fn cmd_verify(
             geometry_stats,
             unique_payloads,
         } => {
-            project::require(project, Project::Elivagar, "verify")?;
+            project::require(project, &Project::Elivagar, "verify")?;
             // Never reached under a historical worktree: `run()` dispatches
             // this variant before `with_worktree`, so `build_root` is the
             // main tree and the archive resolver reads its HEAD.
             elivagar::cmd::verify(
                 dev_config,
-                project,
                 project_root,
                 build_root,
+                included_config_files,
                 &dataset,
                 &variant,
                 commit.as_deref(),
@@ -55,22 +58,22 @@ pub(crate) fn cmd_verify(
         // the index, so it re-enters that hold explicitly (and `cargo_build`
         // refuses to run without one).
         VerifyCommand::Batch { dataset } => {
-            project::require(project, Project::Nidhogg, "verify batch")?;
+            project::require(project, &Project::Nidhogg, "verify batch")?;
             nidhogg::cmd::verify_batch(dev_config, project_root, build_root, &dataset)
         }
         VerifyCommand::NidGeocode { queries } => {
-            project::require(project, Project::Nidhogg, "verify geocode")?;
+            project::require(project, &Project::Nidhogg, "verify geocode")?;
             nidhogg::cmd::verify_geocode(dev_config, &queries)
         }
         VerifyCommand::Readonly { dataset } => {
-            project::require(project, Project::Nidhogg, "verify readonly")?;
+            project::require(project, &Project::Nidhogg, "verify readonly")?;
             // Re-enters the hold when a `--commit` worktree already took it.
             let _lock = context::reenter_command_lock()?;
             nidhogg::cmd::verify_readonly(dev_config, project_root, build_root, &dataset, features)
         }
         // ----- pbfhogg verify variants -----
         _ => {
-            project::require(project, Project::Pbfhogg, "verify")?;
+            project::require(project, &Project::Pbfhogg, "verify")?;
             pbfhogg::cmd::verify(
                 dev_config,
                 project_root,

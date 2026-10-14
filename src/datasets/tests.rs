@@ -1,3 +1,5 @@
+//! Dataset resolution regression tests.
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -23,7 +25,8 @@ mod tests {
     use crate::config::{Dataset, OscEntry, PbfEntry, PmtilesEntry, ResolvedPaths};
     use crate::elivagar::archive_store::{ArchiveKey, ArchiveStore};
 
-    use super::*;
+    use crate::datasets::resolve::*;
+    use crate::nidhogg::data_dir::resolve_nidhogg_data_dir;
 
     fn unique_test_dir(name: &str) -> PathBuf {
         crate::test_scratch::scratch("resolve-parts", name)
@@ -156,7 +159,10 @@ mod tests {
 
     #[test]
     fn snapshot_ref_parses_base_sentinel() {
-        assert!(matches!(SnapshotRef::parse("base").unwrap(), SnapshotRef::Base));
+        assert!(matches!(
+            SnapshotRef::parse("base").unwrap(),
+            SnapshotRef::Base
+        ));
     }
 
     #[test]
@@ -179,26 +185,26 @@ mod tests {
 
     #[test]
     fn snapshot_ref_from_opt_none_is_base() {
-        assert!(matches!(SnapshotRef::from_opt(None).unwrap(), SnapshotRef::Base));
+        assert!(matches!(SnapshotRef::from_opt(None), SnapshotRef::Base));
     }
 
     #[test]
     fn snapshot_ref_from_opt_some_base_is_base() {
         assert!(matches!(
-            SnapshotRef::from_opt(Some("base")).unwrap(),
+            SnapshotRef::from_opt(Some(&SnapshotRef::Base)),
             SnapshotRef::Base
         ));
     }
 
     #[test]
     fn snapshot_ref_from_opt_some_named() {
-        let parsed = SnapshotRef::from_opt(Some("unsorted")).unwrap();
+        let parsed = SnapshotRef::from_opt(Some(&SnapshotRef::Named("unsorted".into())));
         assert!(matches!(parsed, SnapshotRef::Named(ref s) if s == "unsorted"));
     }
 
     #[test]
-    fn snapshot_ref_from_opt_propagates_validation() {
-        assert!(SnapshotRef::from_opt(Some("bad key")).is_err());
+    fn snapshot_ref_cli_parser_rejects_invalid_key() {
+        assert!("bad key".parse::<SnapshotRef>().is_err());
     }
 
     #[test]
@@ -353,7 +359,10 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("no snapshot 'missing-snap'"), "got: {err}");
-        assert!(err.contains("base"), "available list should mention base: {err}");
+        assert!(
+            err.contains("base"),
+            "available list should mention base: {err}"
+        );
     }
 
     #[test]
@@ -404,14 +413,9 @@ mod tests {
         datasets.insert(String::from("denmark"), ds);
         let paths = mk_paths(&dir, datasets);
 
-        let (path, seq) = resolve_single_osc(
-            "denmark",
-            &SnapshotRef::Base,
-            None,
-            &paths,
-            Path::new("."),
-        )
-        .expect("resolve");
+        let (path, seq) =
+            resolve_single_osc("denmark", &SnapshotRef::Base, None, &paths, Path::new("."))
+                .expect("resolve");
         assert!(path.ends_with("denmark-4705.osc.gz"));
         assert_eq!(seq, "4705");
 
@@ -434,15 +438,9 @@ mod tests {
         datasets.insert(String::from("planet"), ds);
         let paths = mk_paths(Path::new("/irrelevant"), datasets);
 
-        let err = resolve_single_osc(
-            "planet",
-            &SnapshotRef::Base,
-            None,
-            &paths,
-            Path::new("."),
-        )
-        .unwrap_err()
-        .to_string();
+        let err = resolve_single_osc("planet", &SnapshotRef::Base, None, &paths, Path::new("."))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("multiple osc entries"), "got: {err}");
         assert!(err.contains("4913, 4914, 4915"), "got: {err}");
     }
@@ -493,8 +491,7 @@ mod tests {
 
         let dir = unique_test_dir("snap-osc-range");
         for n in 4969..=4971 {
-            std::fs::write(dir.join(format!("planet-20260411-seq{n}.osc.gz")), "x")
-                .expect("write");
+            std::fs::write(dir.join(format!("planet-20260411-seq{n}.osc.gz")), "x").expect("write");
         }
 
         let mut snap = Snapshot {
@@ -662,7 +659,11 @@ mod tests {
         // definition - and prunes it identically. Not a bleed.
         assert!(ArchiveStore::matches_name(file, "north", "america-raw"));
         // Not an archive at all, and the pre-rename `<dataset>-<commit>` form.
-        assert!(!ArchiveStore::matches_name("ocean-tiles.pmtiles", "ocean", "raw"));
+        assert!(!ArchiveStore::matches_name(
+            "ocean-tiles.pmtiles",
+            "ocean",
+            "raw"
+        ));
         assert!(!ArchiveStore::matches_name(
             "denmark-abc1234.pmtiles",
             "denmark",
