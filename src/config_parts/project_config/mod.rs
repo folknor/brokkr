@@ -13,7 +13,8 @@ use crate::project::Project;
 pub enum ProjectConfig {
     Litehtml(litehtml::LitehtmlConfig),
     Sluggrs(sluggrs::SluggrsConfig),
-    Ratatoskr(ratatoskr::RatatoskrConfig),
+    /// Boxed: the largest section, reached only through [`Self::ratatoskr`].
+    Ratatoskr(Box<ratatoskr::RatatoskrConfig>),
     Piners(piners::PinersConfig),
     Dellingr(dellingr::DellingrConfig),
     Mogwai(mogwai::MogwaiConfig),
@@ -28,7 +29,7 @@ impl ProjectConfig {
         match project {
             Project::Litehtml => Ok(Self::Litehtml(litehtml::parse(table)?)),
             Project::Sluggrs => Ok(Self::Sluggrs(sluggrs::parse(table)?)),
-            Project::Ratatoskr => Ok(Self::Ratatoskr(ratatoskr::parse(table)?)),
+            Project::Ratatoskr => Ok(Self::Ratatoskr(Box::new(ratatoskr::parse(table)?))),
             // Piners keeps its documented path defaults when the table is
             // absent; the other project handlers require their section.
             Project::Piners => Ok(Self::Piners(piners::parse(table)?.unwrap_or_default())),
@@ -42,7 +43,7 @@ impl ProjectConfig {
     /// so the refusal here only fires for a command run from another project.
     pub(crate) fn ratatoskr(&self) -> Result<&ratatoskr::RatatoskrConfig, DevError> {
         match self {
-            Self::Ratatoskr(cfg) => Ok(cfg),
+            Self::Ratatoskr(cfg) => Ok(&**cfg),
             _ => Err(DevError::Config(
                 "this command needs a ratatoskr project (`project = \"ratatoskr\"`)".into(),
             )),

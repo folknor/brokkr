@@ -240,12 +240,6 @@ const TOPICS: &[Topic] = &[
         commands: &[CommandId::Corpus],
     },
     Topic {
-        name: "lint-corpus",
-        summary: "the differential-lint corpus: lints.toml, diffs, --reanchor",
-        content: include_str!("../docs/commands/lint-corpus.md"),
-        commands: &[CommandId::Corpus],
-    },
-    Topic {
         name: "dellingr",
         summary: "the lua-workload bench: [dellingr] config, hash pins, --commit",
         content: include_str!("../docs/projects/dellingr.md"),

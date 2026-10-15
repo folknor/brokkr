@@ -1,8 +1,8 @@
 //! Cargo builds for command-owned harness binaries.
 //!
 //! Shared by every orchestration command that builds a harness from a
-//! `[*.harness]`-shaped block: ratatoskr's `sync` and `service`, and piners'
-//! `corpus` and `lint-corpus`. Decoupled from `[[check]]`: an orchestration
+//! `[*.harness]` block: ratatoskr's `sync` and `service`, and piners'
+//! `corpus`. Decoupled from `[[check]]`: an orchestration
 //! build does not participate in `brokkr check`'s sweep matrix, so everyday
 //! checks don't compile orchestration-only feature graphs.
 //!

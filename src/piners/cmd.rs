@@ -128,11 +128,9 @@ pub fn corpus(
     args: &CorpusArgs,
 ) -> Result<(), DevError> {
     let cfg = piners.clone();
-    crate::piners::layout::ensure_distinct_registry_dirs(project_root, &cfg)?;
     let mode = Mode::resolve(ModeFlags {
         verify_only: args.verify_only,
         reseed: args.reseed,
-        reanchor: false,
         bless: args.bless,
         no_gate: args.no_gate,
     })?;

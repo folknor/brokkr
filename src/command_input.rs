@@ -490,9 +490,7 @@ impl Command {
             | Self::Sync { .. }
             | Self::MockServe { .. }
             | Self::Corpus { .. }
-            | Self::CorpusResults { .. }
-            | Self::LintCorpus { .. }
-            | Self::LintResults { .. }) => RoutedCommand::Other(Box::new(other)),
+            | Self::CorpusResults { .. }) => RoutedCommand::Other(Box::new(other)),
         }
     }
 }

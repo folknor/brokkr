@@ -1,16 +1,10 @@
-//! UTC timestamps for the piners run stores, using brokkr's shared civil-date
-//! conversion so brokkr needs no date crate.
+//! UTC timestamps for the piners corpus run store, using brokkr's shared
+//! civil-date conversion so brokkr needs no date crate.
 //!
-//! Two formats, one per store, and each store keeps its own:
-//!
-//! - [`now_rfc3339`]: `YYYY-MM-DDThh:mm:ssZ`, the lint store's format
-//!   (`tv_anchored_at` and the lint run store's `started_at`).
-//! - [`now_sqlite_utc`]: `YYYY-MM-DD hh:mm:ss`, what SQLite's `datetime('now')`
-//!   writes - the corpus run store's `started_at`, kept so rows recorded before
-//!   brokkr stamped the start itself sort and compare with newer ones.
-//!
-//! Unifying them would break string ordering against rows already stored (`T`
-//! sorts after the space, and the trailing `Z` differs), so neither changes.
+//! [`now_sqlite_utc`] writes `YYYY-MM-DD hh:mm:ss`, what SQLite's
+//! `datetime('now')` writes - the run store's `started_at`, kept so rows
+//! recorded before brokkr stamped the start itself sort and compare with
+//! newer ones.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -34,20 +28,9 @@ fn broken_down(secs: u64) -> (i64, u32, u32, u64, u64, u64) {
     (i64::from(year), month, day, hh, mm, ss)
 }
 
-fn format_rfc3339(secs: u64) -> String {
-    let (year, month, day, hh, mm, ss) = broken_down(secs);
-    format!("{year:04}-{month:02}-{day:02}T{hh:02}:{mm:02}:{ss:02}Z")
-}
-
 fn format_sqlite_utc(secs: u64) -> String {
     let (year, month, day, hh, mm, ss) = broken_down(secs);
     format!("{year:04}-{month:02}-{day:02} {hh:02}:{mm:02}:{ss:02}")
-}
-
-/// Current UTC time as an RFC3339 string (`YYYY-MM-DDThh:mm:ssZ`), the lint
-/// store's format.
-pub fn now_rfc3339() -> String {
-    format_rfc3339(now_secs())
 }
 
 /// Current UTC time as `YYYY-MM-DD hh:mm:ss`, the corpus run store's
@@ -95,19 +78,7 @@ mod tests {
     fn fixed_instant_formats() {
         // 2024-02-29 13:45:09 UTC.
         let secs = 19_782 * 86_400 + 13 * 3600 + 45 * 60 + 9;
-        assert_eq!(format_rfc3339(secs), "2024-02-29T13:45:09Z");
         assert_eq!(format_sqlite_utc(secs), "2024-02-29 13:45:09");
-    }
-
-    #[test]
-    fn rfc3339_shape() {
-        let s = now_rfc3339();
-        let b = s.as_bytes();
-        assert_eq!(s.len(), 20, "{s}");
-        assert_eq!(
-            (b[4], b[7], b[10], b[13], b[16], b[19]),
-            (b'-', b'-', b'T', b':', b':', b'Z')
-        );
     }
 
     #[test]

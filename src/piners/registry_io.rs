@@ -1,7 +1,6 @@
-//! Crash-safe writes for the piners registries (`pins.toml`, `lints.toml`).
+//! Crash-safe writes for the piners registry (`pins.toml`).
 //!
-//! Every registry writer (`corpus --reseed`/`--bless`, `lint-corpus
-//! --reseed`/`--bless`/`--reanchor`) rewrites a hand-curated, git-tracked file
+//! Every registry writer (`corpus --reseed`/`--bless`) rewrites a hand-curated, git-tracked file
 //! whose comments are part of the review surface, so every write goes through
 //! [`write_atomic`] (see `crate::atomic_write`): a reader sees either the old
 //! bytes or the new ones, never a truncated prefix.
@@ -19,9 +18,8 @@ use serde::Deserialize;
 use crate::error::DevError;
 use crate::lockfile::LockGuard;
 
-/// The shared part of a registry snapshot: its canonical file and keyword
-/// grouping files. The two registries parse the canonical text into different
-/// schemas after this filesystem work is complete.
+/// The filesystem part of a registry snapshot: its canonical file and keyword
+/// grouping files, before the canonical text is parsed into its schema.
 pub(crate) struct RegistryFiles {
     pub canonical_text: String,
     pub keywords: BTreeMap<String, Vec<String>>,
@@ -148,10 +146,9 @@ pub fn write_atomic(path: &Path, contents: &str) -> Result<(), DevError> {
 }
 
 /// Take the global brokkr lock for a registry writer that does not otherwise
-/// hold it (the two `--reseed` paths; the run-then-write paths already hold it
-/// for the run).
+/// hold it (`--reseed`; the run-then-write paths already hold it for the run).
 ///
-/// The lock records the parsed invocation (`corpus` / `lint-corpus`); the
+/// The lock records the parsed invocation (`corpus`); the
 /// dispatcher normally holds it already, and this re-enters that hold.
 pub fn lock() -> Result<LockGuard, DevError> {
     crate::context::reenter_command_lock()

@@ -485,10 +485,6 @@ pub fn corpus_msg(msg: &str) {
     emit_tag("[corpus]", msg);
 }
 
-pub fn lint_msg(msg: &str) {
-    emit_tag("[lint]", msg);
-}
-
 pub fn deps_msg(msg: &str) {
     emit_tag("[deps]", msg);
 }
@@ -713,7 +709,6 @@ mod channel_tests {
                 sluggrs_msg,
                 ratatoskr_msg,
                 corpus_msg,
-                lint_msg,
                 deps_msg,
                 wc_msg,
                 run_msg,
@@ -761,7 +756,7 @@ mod channel_tests {
         assert!(stdout.contains("[warn]    visible warning\n"));
         assert!(stdout.contains("\r\x1b[2K[test]    clears status\n"));
         assert!(stdout.contains("[verify]  buffered detail\n"));
-        assert_eq!(log.matches("logged action").count(), 15);
+        assert_eq!(log.matches("logged action").count(), 14);
         assert!(!log.contains('\x1b'));
         assert!(stderr.contains("[sidecar] query provenance\n"));
         assert!(stderr.contains("[warn]    late bookkeeping\n"));

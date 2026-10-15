@@ -1,10 +1,10 @@
 //! Shared registry selection, persisted-selection shape and run-table rendering.
 //!
-//! Corpus and lint runs keep the selection flags plus resolved ids in JSON.
-//! All run tables use the intent label from this module so they do not expose
-//! the full id list or disagree when users combine selectors. The ordered,
-//! deduplicating selection algorithm is shared here too; command wrappers pass
-//! the policy differences for pending pins and verify-only errors.
+//! Corpus runs keep the selection flags plus resolved ids in JSON. The run
+//! tables use the intent label from this module so they do not expose the
+//! full id list or disagree when users combine selectors. The ordered,
+//! deduplicating selection algorithm lives here too; the caller passes the
+//! policy for pending pins and verify-only errors.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
@@ -22,8 +22,7 @@ pub(crate) struct SelectionArgs<'a> {
 pub(crate) struct SelectionPolicy<'a> {
     pub label: &'a str,
     pub registry_file: &'a str,
-    /// Corpus verification rejects named selectors alongside `--verify-only`;
-    /// lint verification deliberately ignores them.
+    /// Corpus verification rejects named selectors alongside `--verify-only`.
     pub whole_universe_named_error: Option<&'a str>,
     /// Set for the registry that supports registered-but-unpinned probes.
     pub pending_hint: Option<&'a str>,

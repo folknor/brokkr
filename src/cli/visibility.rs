@@ -164,10 +164,7 @@ commands! {
     Sync => ("sync", Visibility::Only(&[Project::Ratatoskr]), Required, None, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Direct),
     MockServe => ("mock-serve", Visibility::Only(&[Project::Ratatoskr]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
     Corpus => ("corpus", Visibility::Only(&[Project::Piners]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Mode),
-    CorpusResults => ("corpus-results", Visibility::Only(&[Project::Piners]), Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
-    LintCorpus => ("lint-corpus", Visibility::Only(&[Project::Piners]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
-    LintResults => ("lint-results", Visibility::Only(&[Project::Piners]), Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
-}
+    CorpusResults => ("corpus-results", Visibility::Only(&[Project::Piners]), Required, None, true, crate::measure::MeasureMode::Run, None, &[]),}
 
 static INVOCATION: std::sync::OnceLock<CommandId> = std::sync::OnceLock::new();
 pub(crate) fn set_invocation(command: CommandId) {

@@ -1,4 +1,4 @@
-//! Shared command mode and run verdict model for the piners registries.
+//! Command mode and run verdict model for the piners corpus registry.
 
 use crate::error::DevError;
 
@@ -13,8 +13,7 @@ pub(crate) enum GateMode {
 pub(crate) enum Mode {
     VerifyOnly,
     Reseed,
-    Reanchor,
-    Bless { report_only: bool },
+    Bless,
     Run { gate: GateMode },
 }
 
@@ -22,7 +21,6 @@ pub(crate) enum Mode {
 pub(crate) struct ModeFlags {
     pub verify_only: bool,
     pub reseed: bool,
-    pub reanchor: bool,
     pub bless: bool,
     pub no_gate: bool,
 }
@@ -30,12 +28,10 @@ pub(crate) struct ModeFlags {
 impl Mode {
     /// Resolve the mutually exclusive command modes once, before dispatch.
     pub(crate) fn resolve(flags: ModeFlags) -> Result<Self, DevError> {
-        let mode_count =
-            flags.verify_only as u8 + flags.reseed as u8 + flags.reanchor as u8 + flags.bless as u8;
+        let mode_count = flags.verify_only as u8 + flags.reseed as u8 + flags.bless as u8;
         if mode_count > 1 {
             return Err(DevError::Config(
-                "piners: --verify-only, --reseed, --reanchor, and --bless are mutually exclusive"
-                    .into(),
+                "piners: --verify-only, --reseed, and --bless are mutually exclusive".into(),
             ));
         }
         if flags.verify_only {
@@ -44,13 +40,8 @@ impl Mode {
         if flags.reseed {
             return Ok(Self::Reseed);
         }
-        if flags.reanchor {
-            return Ok(Self::Reanchor);
-        }
         if flags.bless {
-            return Ok(Self::Bless {
-                report_only: flags.no_gate,
-            });
+            return Ok(Self::Bless);
         }
         Ok(Self::Run {
             gate: if flags.no_gate {
@@ -69,12 +60,8 @@ impl Mode {
         self == Self::Reseed
     }
 
-    pub(crate) fn is_reanchor(self) -> bool {
-        self == Self::Reanchor
-    }
-
     pub(crate) fn is_bless(self) -> bool {
-        matches!(self, Self::Bless { .. })
+        self == Self::Bless
     }
 
     pub(crate) fn gated(self) -> bool {
@@ -86,21 +73,12 @@ impl Mode {
         )
     }
 
-    pub(crate) fn report_only(self) -> bool {
-        matches!(
-            self,
-            Self::Run {
-                gate: GateMode::ReportOnly
-            } | Self::Bless { report_only: true }
-        )
-    }
-
     pub(crate) fn blocks_on(self, deviations: bool) -> bool {
         self.gated() && deviations
     }
 }
 
-/// A run's single result and reason, shared by both run-store APIs.
+/// A run's single result and reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunVerdict {
     Pass,

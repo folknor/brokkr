@@ -1,9 +1,8 @@
 # piners project notes
 
-`project = "piners"` in `brokkr.toml`. The project commands include
+`project = "piners"` in `brokkr.toml`. The project commands are
 `brokkr corpus` (the parity-corpus runner) and `brokkr corpus-results` (its
-query sibling), plus `brokkr lint-corpus` and `brokkr lint-results` for the
-differential-lint corpus. Driving the parity runner - config, selection, verification, the
+query sibling). Driving the parity runner - config, selection, verification, the
 expected-disposition gate, reseed/bless - is documented in
 `docs/commands/corpus.md`. This doc covers the **data contracts** the harness
 emits and the **run store** brokkr persists them to. Helpers: `src/piners/`.
@@ -398,7 +397,7 @@ struct, no benchmark filters to reject. The corpus views:
 Each query view takes only its own view flags: `--over` requires
 `--runtimes`, and `--sql`/`--trend` cannot be combined with another view.
 `--run` takes precedence over a positional run id when both are present.
-`corpus-results` and `lint-results` both default `-n` to 20 rows; `-n 0`
+`corpus-results` defaults `-n` to 20 rows; `-n 0`
 returns no rows.
 
 Canned views are `?N`-parameterized; `--columns` interpolates only allow-listed

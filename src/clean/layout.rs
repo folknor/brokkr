@@ -176,14 +176,6 @@ impl PinersLayout {
     pub(crate) fn corpus_runs_db(&self) -> PathBuf {
         self.corpus_root().join("runs.db")
     }
-
-    pub(crate) fn lint_root(&self) -> PathBuf {
-        self.root.join("lint")
-    }
-
-    pub(crate) fn lint_runs_db(&self) -> PathBuf {
-        self.lint_root().join("runs.db")
-    }
 }
 
 /// Dellingr harness output, separate from configurable data scratch so a

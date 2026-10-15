@@ -1468,49 +1468,5 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                 piners::cmd::corpus(project_root, project_config.piners()?, &args)
             }
         }
-        Command::LintCorpus {
-            keyword,
-            probe,
-            all,
-            verify_only,
-            reseed,
-            reanchor,
-            bless,
-            no_gate,
-            all_stages,
-            warnings,
-            debug,
-            release,
-            profile,
-        } => {
-            let args = piners::lint::cmd::LintArgs {
-                keywords: keyword,
-                probe,
-                all,
-                verify_only,
-                reseed,
-                reanchor,
-                bless,
-                no_gate,
-                all_stages,
-                warnings,
-                profile_override: profile_choice(debug, release, profile.as_ref()),
-            };
-            piners::lint::cmd::lint_corpus(project_root, project_config.piners()?, &args)
-        }
-        Command::LintResults {
-            run_id,
-            run,
-            limit,
-            full,
-        } => {
-            let lq = piners::lint::query::LintQuery {
-                run_id,
-                run,
-                limit,
-                full,
-            };
-            piners::lint::query::cmd(project_root, &lq)
-        }
     }
 }

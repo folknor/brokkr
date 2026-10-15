@@ -1,5 +1,5 @@
 //! Crash-safe replacement of a file: small hand-curated ones (`brokkr.toml`,
-//! piners' `pins.toml`/`lints.toml`, the corpus digest, the hash cache and the
+//! piners' `pins.toml`, the corpus digest, the hash cache and the
 //! cargo config edited by `brokkr guard`) through [`replace`], and streamed
 //! ones too large to hold in memory (tool and dataset downloads) through
 //! [`Staged`].

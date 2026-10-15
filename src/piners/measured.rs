@@ -57,7 +57,6 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
     };
 
     let cfg = req.project_config.piners()?.clone();
-    crate::piners::layout::ensure_distinct_registry_dirs(req.project_root.as_path(), &cfg)?;
     let harness_cfg = cfg
         .harness
         .as_ref()
