@@ -30,6 +30,26 @@ point for work on the check pipeline. 820-line `brokkr.toml`, 36
 [result]  check passed in 8m11s
 ```
 
+## Expand `brokkr check --audit` (2026-10-15)
+
+`--audit` today reports selector hygiene only: globs that select nothing and
+exclusions that excuse everything, across gremlins/header/textlint/manifest.
+Those were warnings on every check run, moved behind the flag so ordinary
+runs stay quiet. Grow it into the place that explains a check without running
+one:
+
+- what a `brokkr check` here would do: the resolved profile, its sweeps and
+  their package/feature shapes, which phases are active or skipped and why
+  (markdown-only shortcut, `skip_phases`), the textlint rule set with each
+  rule's file count;
+- problems from other features, where they can be found without a build:
+  `[[check]]` entries no profile reaches, dead `[[quarantine]]` entries,
+  `[[dependency_rule]]` selectors matching no package, `skip_test`
+  classification notes (tripwire hand-backs, bare-`#[test]` shadowing sites)
+  and the classifier's refusals, stale `[lints]` allow entries.
+
+Keep its contract: never runs a phase, never builds, exits 0 on findings.
+
 ## Open: should `brokkr run` release the lock while its program runs? (2026-10-08)
 
 Today `run` holds the global lock through the program's whole run, so a locked

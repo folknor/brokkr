@@ -104,6 +104,10 @@ impl TreeSnapshot {
         })
     }
 
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
     pub(crate) fn files(&self) -> &[PathBuf] {
         &self.files
     }
@@ -112,21 +116,33 @@ impl TreeSnapshot {
         self.unstaged.as_ref()
     }
 
-    /// Read one path from this snapshot. `None` means git listed a file that
-    /// has since been deleted; every other read failure is returned. Both the
-    /// bytes and a missing-file result are cached so scanners share one read.
+    /// The cache key for `rel` (relative to the root, or absolute): the
+    /// file's canonical identity, so `a/../b.rs`, a symlinked spelling and the
+    /// git spelling of one file share one entry - every reader of this
+    /// snapshot sees the same bytes. A path that cannot be canonicalized
+    /// (deleted, say) keys by its joined spelling.
+    fn key(&self, rel: &Path) -> PathBuf {
+        let joined = self.root.join(rel);
+        std::fs::canonicalize(&joined).unwrap_or(joined)
+    }
+
+    /// Read one path from this snapshot, relative to its root or absolute.
+    /// `None` means git listed a file that has since been deleted; every other
+    /// read failure is returned. Both the bytes and a missing-file result are
+    /// cached, by file identity, so scanners share one read.
     pub(crate) fn read_file(
         &self,
         rel: &Path,
     ) -> Result<Option<Arc<[u8]>>, crate::error::DevError> {
+        let key = self.key(rel);
         let mut contents = self
             .contents
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(cached) = contents.get(rel) {
+        if let Some(cached) = contents.get(&key) {
             return Ok(cached.clone());
         }
-        let bytes = match std::fs::read(self.root.join(rel)) {
+        let bytes = match std::fs::read(&key) {
             Ok(bytes) => Some(Arc::from(bytes)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => {
@@ -136,7 +152,7 @@ impl TreeSnapshot {
                 )));
             }
         };
-        contents.insert(rel.to_path_buf(), bytes.clone());
+        contents.insert(key, bytes.clone());
         Ok(bytes)
     }
 
@@ -145,12 +161,13 @@ impl TreeSnapshot {
         rel: &Path,
         bytes: Vec<u8>,
     ) -> Result<(), crate::error::DevError> {
+        let key = self.key(rel);
         let mut contents = self
             .contents
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::fs::write(self.root.join(rel), &bytes).map_err(crate::error::DevError::Io)?;
-        contents.insert(rel.to_path_buf(), Some(Arc::from(bytes)));
+        std::fs::write(&key, &bytes).map_err(crate::error::DevError::Io)?;
+        contents.insert(key, Some(Arc::from(bytes)));
         Ok(())
     }
 }

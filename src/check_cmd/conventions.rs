@@ -216,38 +216,33 @@ pub(super) fn run_manifest(
     )
 }
 
-/// Keep selector-scope warnings visible when a file-scanning phase is skipped.
-/// These warnings do not run the omitted content checks; they only report
-/// configured paths that currently select nothing (or exclusions that leave
-/// nothing selected).
-pub(super) fn warn_skipped_scopes(
-    phase: Phase,
+/// The selector-hygiene findings `brokkr check --audit` reports: configured
+/// paths that select nothing, and exclusions that excuse everything their
+/// selector picked. Resolved against the tracked file list alone; no content
+/// is scanned and no phase runs. An ordinary check reports none of this.
+pub(super) fn selector_findings(
     tree: &LazyTree<'_>,
     gremlins_cfg: Option<&GremlinsConfig>,
     header_cfg: Option<&HeaderConfig>,
     textlint_rules: &[TextlintRule],
     manifest_cfg: Option<&ManifestConfig>,
-) -> Result<(), DevError> {
-    match phase {
-        Phase::Gremlins => warn_gremlins_scope(tree, gremlins_cfg),
-        Phase::Header => warn_header_scope(tree, header_cfg),
-        Phase::Textlint => warn_textlint_scopes(tree, textlint_rules),
-        Phase::Manifest => warn_manifest_scope(tree, manifest_cfg),
-        _ => Ok(()),
-    }
+) -> Result<Vec<String>, DevError> {
+    let files = tree.get()?.files();
+    let mut out = Vec::new();
+    gremlins_scope(files, gremlins_cfg, &mut out);
+    header_scope(files, header_cfg, &mut out)?;
+    textlint_scopes(files, textlint_rules, &mut out)?;
+    manifest_scope(files, manifest_cfg, &mut out)?;
+    Ok(out)
 }
 
-fn warn_gremlins_scope(
-    tree: &LazyTree<'_>,
-    config: Option<&GremlinsConfig>,
-) -> Result<(), DevError> {
+fn gremlins_scope(files: &[PathBuf], config: Option<&GremlinsConfig>, out: &mut Vec<String>) {
     let Some(config) = config.filter(|config| !config.disable) else {
-        return Ok(());
+        return;
     };
     if config.exclude.is_empty() {
-        return Ok(());
+        return;
     }
-    let files = tree.get()?.files();
     let scannable: Vec<&Path> = files
         .iter()
         .filter(|path| {
@@ -263,60 +258,45 @@ fn warn_gremlins_scope(
             .iter()
             .any(|path| *path == dir || path.starts_with(dir))
         {
-            output::warn(&format!(
-                "[gremlins].exclude entry {entry:?} matches no scannable tracked path"
-            ));
+            out.push(format!("[gremlins].exclude entry {entry:?} matches no scannable tracked path"));
         }
     }
-    if !config.exclude.is_empty()
-        && !scannable.iter().any(|path| {
-            !config
-                .exclude
-                .iter()
-                .any(|entry| path.starts_with(Path::new(entry.trim_end_matches('/'))))
-        })
-    {
-        output::warn("[gremlins].exclude removes every scannable tracked path");
+    if !scannable.iter().any(|path| {
+        !config
+            .exclude
+            .iter()
+            .any(|entry| path.starts_with(Path::new(entry.trim_end_matches('/'))))
+    }) {
+        out.push("[gremlins].exclude removes every scannable tracked path".to_owned());
     }
-    Ok(())
 }
 
-fn warn_header_scope(tree: &LazyTree<'_>, config: Option<&HeaderConfig>) -> Result<(), DevError> {
+fn header_scope(files: &[PathBuf], config: Option<&HeaderConfig>, out: &mut Vec<String>) -> Result<(), DevError> {
     let Some(config) = config else {
         return Ok(());
     };
-    let files = tree.get()?.files();
-    let selected = select_glob_paths(files, &config.paths, "[header].paths")?;
-    warn_excluded_paths(
+    let selected = select_glob_paths(files, &config.paths, "[header].paths", out)?;
+    excluded_paths(
         &config.exempt,
         &selected,
         "[header].exempt",
         "[header].exempt excuses every file [header].paths selects",
+        out,
     )
 }
 
-fn warn_textlint_scopes(tree: &LazyTree<'_>, rules: &[TextlintRule]) -> Result<(), DevError> {
-    if rules.is_empty() {
-        return Ok(());
-    }
-    let files = tree.get()?.files();
+fn textlint_scopes(files: &[PathBuf], rules: &[TextlintRule], out: &mut Vec<String>) -> Result<(), DevError> {
     for rule in rules {
         let paths_field = format!("[[textlint]] {:?} paths", rule.name);
-        let selected = select_glob_paths(files, &rule.paths, &paths_field)?;
+        let selected = select_glob_paths(files, &rule.paths, &paths_field, out)?;
         let exclude_field = format!("[[textlint]] {:?} exclude", rule.name);
-        let all_excluded = format!(
-            "[[textlint]] {:?}: exclude excuses every file paths selects",
-            rule.name
-        );
-        warn_excluded_paths(&rule.exclude, &selected, &exclude_field, &all_excluded)?;
+        let all_excluded = format!("[[textlint]] {:?}: exclude excuses every file paths selects", rule.name);
+        excluded_paths(&rule.exclude, &selected, &exclude_field, &all_excluded, out)?;
     }
     Ok(())
 }
 
-fn warn_manifest_scope(
-    tree: &LazyTree<'_>,
-    config: Option<&ManifestConfig>,
-) -> Result<(), DevError> {
+fn manifest_scope(files: &[PathBuf], config: Option<&ManifestConfig>, out: &mut Vec<String>) -> Result<(), DevError> {
     let Some(config) = config else {
         return Ok(());
     };
@@ -326,13 +306,12 @@ fn warn_manifest_scope(
     } else {
         &config.paths[..]
     };
-    let files = tree.get()?.files();
-    let candidates = select_glob_paths(files, paths, "[manifest] paths")?;
-    let included = exclude_glob_paths(&config.exclude, &candidates, "[manifest] exclude")?;
+    let candidates = select_glob_paths(files, paths, "[manifest] paths", out)?;
+    let included = exclude_glob_paths(&config.exclude, &candidates, "[manifest] exclude", out)?;
     if included.is_empty() {
-        output::warn("[manifest] paths and exclude leave no manifest to scan");
+        out.push("[manifest] paths and exclude leave no manifest to scan".to_owned());
     }
-    let _ = exclude_glob_paths(&config.shape_exclude, &included, "[manifest] shape_exclude")?;
+    exclude_glob_paths(&config.shape_exclude, &included, "[manifest] shape_exclude", out)?;
     Ok(())
 }
 
@@ -340,9 +319,10 @@ fn select_glob_paths(
     paths: &[PathBuf],
     patterns: &[String],
     field: &str,
+    out: &mut Vec<String>,
 ) -> Result<Vec<PathBuf>, DevError> {
     let matcher = globs::build_set(patterns, field)?;
-    globs::warn_unmatched(patterns, paths, field)?;
+    out.extend(globs::unmatched(patterns, paths, field)?);
     Ok(paths
         .iter()
         .filter(|path| globs::matches(&matcher, path))
@@ -354,9 +334,10 @@ fn exclude_glob_paths(
     patterns: &[String],
     candidates: &[PathBuf],
     field: &str,
+    out: &mut Vec<String>,
 ) -> Result<Vec<PathBuf>, DevError> {
     let matcher = globs::build_set(patterns, field)?;
-    globs::warn_unmatched(patterns, candidates, field)?;
+    out.extend(globs::unmatched(patterns, candidates, field)?);
     Ok(candidates
         .iter()
         .filter(|path| !globs::matches(&matcher, path))
@@ -364,15 +345,16 @@ fn exclude_glob_paths(
         .collect())
 }
 
-fn warn_excluded_paths(
+fn excluded_paths(
     patterns: &[String],
     candidates: &[PathBuf],
     field: &str,
-    all_excluded_warning: &str,
+    all_excluded: &str,
+    out: &mut Vec<String>,
 ) -> Result<(), DevError> {
-    let remaining = exclude_glob_paths(patterns, candidates, field)?;
+    let remaining = exclude_glob_paths(patterns, candidates, field, out)?;
     if !candidates.is_empty() && remaining.is_empty() {
-        output::warn(all_excluded_warning);
+        out.push(all_excluded.to_owned());
     }
     Ok(())
 }

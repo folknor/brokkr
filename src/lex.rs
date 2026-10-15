@@ -1,16 +1,20 @@
 //! Rust source tokenization for `[[textlint]]` region scoping and reconstructed
-//! `use` statements. Backed by `rustc_lexer` - the rust-lang tokenizer -
-//! so the string/char/comment boundaries are the *real* ones: raw strings
-//! (`r#"..."#`), byte strings, the lifetime-vs-char trap (`'a` vs `'x'`), and
-//! nested block comments are all classified correctly, which a hand-rolled
-//! scanner reliably gets wrong.
+//! `use` statements. Backed by the rust-lang tokenizer as rust-analyzer
+//! republishes it (`ra-ap-rustc_lexer`), so the string/char/comment
+//! boundaries are the *real* ones and keep up with the language: raw strings
+//! (`r#"..."#`), byte and C strings (`cr#"..."#` included), the
+//! lifetime-vs-char trap (`'a` vs `'x'`), and nested block comments are all
+//! classified correctly, which a hand-rolled scanner reliably gets wrong.
 //!
 //! The engine consumes this as a masking layer: [`classify`] labels every byte
-//! of a file, and [`mask_line`] blanks out the bytes of a line that fall
-//! outside a target region, so a textlint `pattern` can be scoped to match only
-//! in code, only in string literals, or only in comments.
+//! of a file, and [`mask_line_by`] blanks out the bytes of a line that fall
+//! outside what a rule keeps - a target region, and under `skip_test` the
+//! production bytes - so a textlint `pattern` can be scoped to match only in
+//! code, only in string literals, or only in comments.
 
-use rustc_lexer::{LiteralKind, TokenKind, tokenize};
+use ra_ap_rustc_lexer::{LiteralKind, TokenKind, tokenize};
+// Declared only to cap its version for the lexer (see Cargo.toml).
+use unicode_ident as _;
 
 /// Which lexical region a byte belongs to. Numeric literals, identifiers,
 /// punctuation and whitespace are all [`Region::Code`]; only *textual* literals
@@ -35,39 +39,56 @@ impl Region {
 }
 
 /// Label every byte of `src` with its lexical region. The returned vector has
-/// exactly `src.len()` entries (rustc_lexer's token lengths tile the input).
+/// exactly `src.len()` entries (the tokenizer's token lengths tile the input).
 pub fn classify(src: &str) -> Vec<Region> {
     let mut regions = Vec::with_capacity(src.len());
-    for token in tokenize(src) {
+    for token in tokens(src) {
         let region = match token.kind {
-            TokenKind::LineComment | TokenKind::BlockComment { .. } => Region::Comment,
+            TokenKind::LineComment { .. } | TokenKind::BlockComment { .. } => Region::Comment,
             TokenKind::Literal { kind, .. } => match kind {
                 LiteralKind::Str { .. }
                 | LiteralKind::ByteStr { .. }
+                | LiteralKind::CStr { .. }
                 | LiteralKind::RawStr { .. }
                 | LiteralKind::RawByteStr { .. }
+                | LiteralKind::RawCStr { .. }
                 | LiteralKind::Char { .. }
                 | LiteralKind::Byte { .. } => Region::Str,
                 LiteralKind::Int { .. } | LiteralKind::Float { .. } => Region::Code,
             },
             _ => Region::Code,
         };
-        for _ in 0..token.len {
-            regions.push(region);
-        }
+        regions.resize(regions.len() + token.len, region);
     }
     regions
 }
 
-/// A copy of `line` with every char outside `target` replaced by a single
-/// space (kept chars are verbatim, so a pattern still matches real text).
-/// `offset` is the byte position of `line` within the file `regions` came from.
-/// Masked-out multi-byte chars collapse to one space - columns drift only
-/// inside the ignored region, which never carries a reported match.
-pub fn mask_line(line: &str, offset: usize, regions: &[Region], target: Region) -> String {
+/// One token as `(kind, byte length)`.
+struct Tok {
+    kind: TokenKind,
+    len: usize,
+}
+
+/// The rustc tokenizer over a whole file. A leading shebang is ordinary
+/// tokens here and frontmatter is not recognised: textlint scans arbitrary
+/// `.rs` files, and every byte still lands in exactly one token.
+fn tokens(src: &str) -> impl Iterator<Item = Tok> + '_ {
+    tokenize(src, ra_ap_rustc_lexer::FrontmatterAllowed::No).map(|t| Tok {
+        kind: t.kind,
+        len: t.len as usize,
+    })
+}
+
+/// A copy of `line` with every char whose file byte offset fails `keep`
+/// replaced by a single space (kept chars are verbatim, so a pattern still
+/// matches real text). `offset` is the byte position of `line` within its
+/// file. Masked-out multi-byte chars collapse to one space - columns drift
+/// only inside the ignored text, which never carries a reported match. Region
+/// scoping and test-code masking compose through `keep`.
+pub fn mask_line_by(line: &str, offset: usize, keep: impl Fn(usize) -> bool) -> String {
     let mut out = String::with_capacity(line.len());
     for (j, ch) in line.char_indices() {
-        if regions.get(offset + j).copied() == Some(target) {
+        if keep(offset + j) {
             out.push(ch);
         } else {
             out.push(' ');
@@ -109,7 +130,7 @@ pub fn use_statements(src: &str) -> Vec<UseStmt> {
     // (start, len, kind) for every token, in order.
     let mut toks: Vec<(usize, usize, TokenKind)> = Vec::new();
     let mut off = 0usize;
-    for t in tokenize(src) {
+    for t in tokens(src) {
         toks.push((off, t.len, t.kind));
         off += t.len;
     }
@@ -170,7 +191,7 @@ fn opens_generic_args(toks: &[(usize, usize, TokenKind)], from: usize) -> bool {
         .find(|(_, _, k)| {
             !matches!(
                 k,
-                TokenKind::Whitespace | TokenKind::LineComment | TokenKind::BlockComment { .. }
+                TokenKind::Whitespace | TokenKind::LineComment { .. } | TokenKind::BlockComment { .. }
             )
         })
         .is_some_and(|(_, _, k)| *k == TokenKind::Lt)
@@ -200,6 +221,22 @@ fn join_range(src: &str, regions: &[Region], start: usize, end: usize) -> String
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+
+    fn mask_line(line: &str, offset: usize, regions: &[Region], target: Region) -> String {
+        mask_line_by(line, offset, |b| regions.get(b).copied() == Some(target))
+    }
+
+    #[test]
+    fn raw_c_string_does_not_swallow_the_code_after_it() {
+        // An older tokenizer read `cr#"a"b"#` as a string ending at the first
+        // quote, then opened another string at the closing one and swallowed
+        // the following function as string content.
+        let src = "const S: &CStr = cr#\"a\"b\"#;\nfn production() { let _ = 1e-9; }\n";
+        let regs = classify(src);
+        let line = src.lines().nth(1).unwrap();
+        let offset = src.find("fn production").unwrap();
+        assert_eq!(mask_line(line, offset, &regs, Region::Code), line);
+    }
 
     fn regions_of(src: &str) -> Vec<Region> {
         classify(src)

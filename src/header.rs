@@ -109,17 +109,12 @@ pub(crate) fn scan_report(
     let expected = expand(&cfg.pattern, year);
 
     let files = tree.files();
-    // Dead scope is warned about, not refused - see `globs::warn_unmatched`.
-    globs::warn_unmatched(&cfg.paths, files, "[header].paths")?;
+    // Dead scope is an audit finding, not a refusal - see `globs::unmatched`.
     let selected: Vec<PathBuf> = files
         .iter()
         .filter(|rel| globs::matches(&paths, rel))
         .cloned()
         .collect();
-    globs::warn_unmatched(&cfg.exempt, &selected, "[header].exempt")?;
-    if !selected.is_empty() && !selected.iter().any(|rel| !globs::matches(&exempt, rel)) {
-        crate::output::warn("[header].exempt excuses every file [header].paths selects");
-    }
 
     let mut out = Vec::new();
     let mut scanned = 0usize;

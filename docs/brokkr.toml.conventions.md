@@ -55,12 +55,14 @@ tree (still listed by `git ls-files`) is passed over.
 
 `[header]`, `[[textlint]]`, and `[manifest]` use the same project-root-relative
 glob syntax over the check's tracked and untracked-not-ignored file snapshot.
-`**` crosses directory separators; `*` stays within one path component. Each
-phase checks every configured glob against the candidate paths in its scope
-when that phase runs, and also when the scan is skipped by a profile or the
-markdown-only shortcut. An unmatched glob is a warning, not a failure: an
+`**` crosses directory separators; `*` stays within one path component.
+
+A glob that selects nothing, or an exclusion that excuses everything its
+selector picked, is neither a failure nor a warning in an ordinary check: an
 exclusion may reserve a path that is absent today, and user-wide rules often
-name paths most projects do not contain.
+name paths most projects do not contain. `brokkr check --audit` reports them,
+for every selector below and `[gremlins].exclude`, without running anything
+else (see `brokkr man check audit`).
 
 | Selector | Effect |
 | --- | --- |
@@ -86,8 +88,8 @@ pattern = "Copyright (C) 2015-{year}"
 exempt = ["**/examples/**", "**/core/rust/**"]
 ```
 
-Path selection and unmatched-glob warnings follow the shared convention rules
-above. The byte search also works on files that are not valid UTF-8, so they
+Path selection and the `--audit` report of unmatched globs follow the shared
+convention rules above. The byte search also works on files that are not valid UTF-8, so they
 are judged on their content rather than skipped. The current year comes from
 Unix time through the shared `CivilDate` conversion (no date-crate dependency).
 Ported from
@@ -139,8 +141,9 @@ predicates are rule-local:
   `Instant::now()` only where the file imports `Instant`. Set
   `only_if_file_matches_above = true` to require that precondition at or above
   each match, so a later line cannot arm an earlier match.
-- `region` (`code` / `string` / `comment`; Rust files, tokenized with
-  `rustc_lexer`) scopes where `pattern` may match: `code` never flags a pattern
+- `region` (`code` / `string` / `comment`; Rust files, tokenized with the
+  rustc tokenizer as `ra-ap-rustc_lexer` publishes it, so current literal forms
+  such as raw C strings split correctly) scopes where `pattern` may match: `code` never flags a pattern
   quoted in a comment or string, `string` targets message text (a `", got"`
   phrasing rule). Only `pattern` is scoped; markers/`except`/reporting stay on
   the physical line.
@@ -161,15 +164,112 @@ predicates are rule-local:
 - `skip_after` (regex; once a line in a file matches it, every *following* line
   in that file is exempt - the matching line itself is still checked). For
   "don't fire inside the test module": `skip_after = '^#\[cfg\(test\)\]'`.
+  A textual cut; `skip_test` below is the structural answer.
+- `skip_test = true` scopes `pattern` to production code (see
+  [Test code](#test-code-skip_test)). Composes with `region`; cannot combine
+  with `join_wrapped_use`.
+- `must_scan` (exact project-relative paths) - files this rule must actually
+  scan. Each must be a present, readable text file selected by `paths` and not
+  `exclude`, with at least one eligible line: not cut off by `skip_after`, satisfying
+  `only_if_file_matches` (at or above the line, when positional), and - under
+  `skip_test` in a `.rs` file - holding unmasked code, not just a comment
+  beside a masked item (any other file admits on non-blank content).
+  A listed path the rule did not scan is a violation at `path:0`. It is the
+  guard against a rule whose scope has silently stopped covering the files it
+  was written for: a sentinel, not proof that every byte of the file was
+  covered.
 
 No arbitrary multiline matching, except `join_wrapped_use` (bounded to `use`
 statements). See `src/textlint.rs` and `src/lex.rs`.
 
 A matched file that is not valid UTF-8 is decoded lossily and scanned (ASCII,
 which patterns are written against, survives verbatim; an invalid byte becomes
-U+FFFD). A *binary* file - a NUL in its first 8000 bytes, git's heuristic - is
-skipped, because a broad `paths` glob legitimately sweeps in images and
-archives where a line pattern means nothing.
+U+FFFD). The exception is `skip_test`: a Rust file the classifier reaches in
+production context must be valid UTF-8 to parse, so an invalid one refuses
+the classification instead. A *binary* file - a NUL in its first 8000 bytes,
+git's heuristic - is skipped, because a broad `paths` glob legitimately sweeps
+in images and archives where a line pattern means nothing.
+
+### Test code (`skip_test`)
+
+```toml
+[[textlint]]
+name = "no-private-epsilon"
+pattern = '[0-9.][eE]-[0-9]'
+paths = ["crates/strategy/src/**/*.rs"]
+exclude = ["crates/strategy/src/tolerance.rs"]
+region = "code"
+skip_test = true
+allow_marker = "// epsilon-ok:"
+must_scan = ["crates/strategy/src/fill/sorting.rs"]
+message = "name a tolerance-module constant instead of a private epsilon"
+```
+
+In `.rs` files, `skip_test` blanks every byte the test-code classifier
+(`src/test_code.rs`) proves absent from every non-test build before
+`pattern` is matched. `allow_marker`, `except` and the context windows still
+read the raw physical line. It needs a Cargo workspace: the roots are every
+workspace target from `cargo metadata --no-deps`, with integration-test
+targets as test roots and every other kind as production roots. The
+classifier runs only when some `skip_test` rule selects at least one tracked
+`.rs` file, so a user-wide `skip_test` rule costs nothing in a tree it has no
+Rust to scan in.
+
+What it skips:
+
+- files reached only through test contexts: `#[cfg(test)] mod x;` and
+  everything below it, `#[path]` targets of such declarations, and
+  integration-test targets. Modules resolve with rustc's directory rules, and
+  `#[path]` is followed plainly or under `cfg_attr`. A file is not named by
+  convention: a production file called `tests.rs` stays covered.
+- items, statements, fields, arms, generic parameters and arguments whose
+  `cfg` is false whenever `test` is false. The proof uses three-valued logic
+  with every other cfg atom unknown, so `cfg(all(test, feature = "x"))` is
+  skipped and `cfg(any(test, feature = "x"))` is not.
+- free functions carrying a bare `#[test]` (single segment, no arguments),
+  with everything they declare or include. This applies only when no
+  reachable source has a `use` binding `test` or a `#[macro_use] extern
+  crate` that does not exclude it, directly or under any `cfg_attr`. Macro
+  input counts here (a `use ... test` or `as test` inside a `cfg_if!`, say),
+  read conservatively. Any of these makes the builtin attribute shadowable,
+  so every bare `#[test]` is then scanned as production, and a warning names
+  the shadowing sites. (A glob import is not a site: a glob-imported `test`
+  colliding with the builtin is an ambiguity error.)
+
+A file reached in several contexts keeps a byte skipped only when every
+production occurrence skips it. A file nothing reaches (or one the tripwire
+below hands back) is scanned as production with only its own `cfg` masks
+applied. Its bare `#[test]` functions stay scanned, since its crate root, where
+a shadowing `#[macro_use]` could sit, is out of sight.
+
+The claim is scoped to the **unexpanded source model**. Macro expansion and
+generated source are outside it, for module edges and for skipped spans alike:
+
+- Macro input is opaque. A `#[cfg(test)]` inside a `macro_rules!` body or a
+  macro call proves nothing, and that code is scanned. Macro input is only
+  read in the loud direction: for literal `include!`s, shadowing imports and
+  the tripwire.
+- Attribute macros may rewrite the cfg attributes inside their input, and
+  derives may emit code no source scan sees.
+- `include!(concat!(env!("OUT_DIR"), ...))` is accepted as generated source
+  without being followed.
+
+Literal `include!`s are followed, including ones inside macro input.
+
+The classifier refuses the whole rule set, naming each site, rather than
+guess. It refuses when a production context holds:
+
+- any other computed `include!`;
+- a node `syn` keeps verbatim;
+- an inline module with a `cfg_attr` path;
+- a module with both `x.rs` and `x/mod.rs`;
+- a reachable file that does not parse.
+
+As detection, not proof, it also runs a tripwire. A file the walk calls
+test-only is handed back to production, with a warning, when production macro
+input names it: `mod <name>` inside macro tokens, or a path-shaped string
+literal (one containing `/` or ending in `.rs`) whose components are a suffix
+of the file's path.
 
 ## `[textlint_preset]` blocks
 

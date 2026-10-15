@@ -85,6 +85,7 @@ mod sidecar_fmt;
 mod sluggrs;
 mod stray;
 mod test_cmd;
+mod test_code;
 mod test_orphans;
 mod test_runner;
 #[cfg(test)]

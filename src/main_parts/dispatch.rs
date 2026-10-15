@@ -203,6 +203,7 @@ pub(super) fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<()
             commands,
             textlint_names,
             script_names,
+            audit,
             args,
         } => run_check(
             features,
@@ -217,6 +218,7 @@ pub(super) fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<()
             commands,
             textlint_names,
             script_names,
+            *audit,
             args,
             detection,
         ),

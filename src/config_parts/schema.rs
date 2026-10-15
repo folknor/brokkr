@@ -642,7 +642,7 @@ pub struct TextlintRule {
     #[serde(default)]
     pub only_if_file_matches_above: bool,
     /// Lexical region the `pattern` is scoped to: `code`, `string`, or
-    /// `comment`. Rust files only (tokenized with `rustc_lexer`). Off = match
+    /// `comment`. Rust files only (tokenized by `crate::lex`). Off = match
     /// the whole line. `code` never flags a pattern quoted in a comment/string;
     /// `string` targets message text (e.g. a `", got"` phrasing rule). Only
     /// `pattern` is scoped - `allow_marker`, `except`, and the reported line
@@ -689,6 +689,25 @@ pub struct TextlintRule {
     /// `tokio::select!` block), a violation unless it appears in the window.
     #[serde(default)]
     pub require_below: Option<ContextWindow>,
+    /// Scope `pattern` to production code: in `.rs` files, bytes the
+    /// test-code classifier (`crate::test_code`) proves absent from every
+    /// non-test build are blanked before matching - out-of-line `#[cfg(test)]`
+    /// modules and everything below them, inline `#[cfg(test)]` items,
+    /// integration-test targets. Composes with `region`. `allow_marker`,
+    /// `except` and the context windows still read the raw physical line. Needs
+    /// a Cargo workspace; refuses when the workspace holds a construct outside
+    /// the classifier's source model. Off by default.
+    #[serde(default)]
+    pub skip_test: bool,
+    /// Exact paths (relative to the project root) this rule must actually
+    /// scan: each must be a present, readable text file selected by `paths`
+    /// and not `exclude`, admitted by `only_if_file_matches`, and - with
+    /// `skip_test` - left with some production code. A listed path that is
+    /// not scanned is a violation. The guard against a rule whose scope has
+    /// silently stopped covering the files it was written for. Empty by
+    /// default.
+    #[serde(default)]
+    pub must_scan: Vec<String>,
     /// Regexes and globs compiled by config parsing. This execution state is
     /// skipped by Serde and is not part of the user-facing rule schema.
     #[serde(skip)]

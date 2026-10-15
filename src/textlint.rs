@@ -20,6 +20,7 @@
 //! Patterns are compiled with the linear-time `regex` crate (no backtracking),
 //! so an author-supplied pattern cannot hang the phase.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use regex::Regex;
@@ -69,9 +70,7 @@ pub(crate) struct Compiled {
     name: String,
     pattern: Regex,
     paths: globset::GlobSet,
-    path_patterns: Vec<globset::GlobSet>,
     exclude: globset::GlobSet,
-    exclude_patterns: Vec<globset::GlobSet>,
     message: String,
     allow_marker: Option<String>,
     allow_marker_above: usize,
@@ -87,6 +86,8 @@ pub(crate) struct Compiled {
     except_below: Option<Window>,
     require_above: Option<Window>,
     require_below: Option<Window>,
+    skip_test: bool,
+    must_scan: Vec<PathBuf>,
 }
 
 /// Maximum character count in one rendered source line. This is a presentation
@@ -161,19 +162,8 @@ fn compile(rules: &[TextlintRule]) -> Result<Vec<Compiled>, DevError> {
         }
         let paths_field = format!("[[textlint]] {:?} paths", rule.name);
         let paths = globs::build_set(&rule.paths, &paths_field)?;
-        let mut path_patterns = Vec::with_capacity(rule.paths.len());
-        for path in &rule.paths {
-            path_patterns.push(globs::build_set(std::slice::from_ref(path), &paths_field)?);
-        }
         let exclude_field = format!("[[textlint]] {:?} exclude", rule.name);
         let exclude = globs::build_set(&rule.exclude, &exclude_field)?;
-        let mut exclude_patterns = Vec::with_capacity(rule.exclude.len());
-        for pattern in &rule.exclude {
-            exclude_patterns.push(globs::build_set(
-                std::slice::from_ref(pattern),
-                &exclude_field,
-            )?);
-        }
         let skip_after = match &rule.skip_after {
             Some(p) => Some(Regex::new(p).map_err(|e| {
                 DevError::Config(format!(
@@ -222,9 +212,7 @@ fn compile(rules: &[TextlintRule]) -> Result<Vec<Compiled>, DevError> {
             name: rule.name.clone(),
             pattern,
             paths,
-            path_patterns,
             exclude,
-            exclude_patterns,
             message: rule.message.clone(),
             allow_marker: rule.allow_marker.clone(),
             allow_marker_above: rule.allow_marker_above,
@@ -240,6 +228,8 @@ fn compile(rules: &[TextlintRule]) -> Result<Vec<Compiled>, DevError> {
             except_below,
             require_above,
             require_below,
+            skip_test: rule.skip_test,
+            must_scan: rule.must_scan.iter().map(PathBuf::from).collect(),
         });
     }
     Ok(out)
@@ -289,6 +279,10 @@ fn compile_window(
 fn join_incompatible_predicate(rule: &TextlintRule) -> Option<&'static str> {
     if rule.region.is_some() {
         Some("region")
+    } else if rule.skip_test {
+        // The join pass reconstructs imports lexically, so `use` text inside
+        // macro input would be read as an import; no rule needs both.
+        Some("skip_test")
     } else if rule.table_row_only {
         Some("table_row_only")
     } else if rule.in_toml_section.is_some() {
@@ -309,21 +303,6 @@ pub struct TextlintScan {
     /// Files at least one rule applied to - not the tracked-file total, which
     /// would credit the phase with files no rule looks at.
     pub files: usize,
-}
-
-fn warn_unmatched_compiled(
-    patterns: &[String],
-    sets: &[globset::GlobSet],
-    paths: &[PathBuf],
-    field: &str,
-) {
-    for (pattern, set) in patterns.iter().zip(sets) {
-        if !paths.iter().any(|path| globs::matches(set, path)) {
-            crate::output::warn(&format!(
-                "{field}: glob {pattern:?} matches no in-scope tracked path"
-            ));
-        }
-    }
 }
 
 /// Scan one tree snapshot against every rule, one pass per file.
@@ -348,50 +327,31 @@ pub fn scan(
         // and tests; parsed config uses the cache compiled by compile_rules.
         compile(rules)?
     };
-    for (rule, compiled_rule) in rules.iter().zip(&compiled) {
-        let paths_field = format!("[[textlint]] {:?} paths", rule.name);
-        if rule.paths.is_empty() {
-            return Err(DevError::Config(format!(
-                "[[textlint]] {:?} has no `paths` - list the files this rule scans",
-                rule.name
-            )));
-        }
-        // Dead scope is warned about, not refused (`globs::warn_unmatched`):
-        // user-wide rules reach every tree brokkr checks, and most trees lack
-        // most of the paths a personal rule names.
-        warn_unmatched_compiled(
-            &rule.paths,
-            &compiled_rule.path_patterns,
-            files,
-            &paths_field,
-        );
-        let in_scope: Vec<PathBuf> = files
-            .iter()
-            .filter(|rel| globs::matches(&compiled_rule.paths, rel))
-            .cloned()
-            .collect();
-        let exclude_field = format!("[[textlint]] {:?} exclude", rule.name);
-        warn_unmatched_compiled(
-            &rule.exclude,
-            &compiled_rule.exclude_patterns,
-            &in_scope,
-            &exclude_field,
-        );
-        if !in_scope.is_empty()
-            && !in_scope
-                .iter()
-                .any(|rel| !globs::matches(&compiled_rule.exclude, rel))
-        {
-            crate::output::warn(&format!(
-                "[[textlint]] {:?}: exclude excuses every file paths selects",
-                rule.name
-            ));
+    // Dead scope (a glob matching nothing, an exclude excusing everything) is
+    // a `brokkr check --audit` finding, never a refusal nor a warning here:
+    // user-wide rules reach every tree brokkr checks, and most trees lack most
+    // of the paths a personal rule names.
+    if let Some(rule) = rules.iter().find(|rule| rule.paths.is_empty()) {
+        return Err(DevError::Config(format!(
+            "[[textlint]] {:?} has no `paths` - list the files this rule scans",
+            rule.name
+        )));
+    }
+    let classification = classify_tests(tree, &compiled, files)?;
+    if let Some(c) = &classification {
+        for note in &c.notes {
+            crate::output::warn(&format!("[[textlint]] skip_test: {note}"));
         }
     }
     let mut out = Vec::new();
     let mut scanned = 0usize;
+    let mut admitted: Vec<HashSet<PathBuf>> = vec![HashSet::new(); compiled.len()];
     for rel in files {
-        let applicable: Vec<&Compiled> = compiled.iter().filter(|c| applies(c, rel)).collect();
+        let (indices, applicable): (Vec<usize>, Vec<&Compiled>) = compiled
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| applies(c, rel))
+            .unzip();
         if applicable.is_empty() {
             continue;
         }
@@ -405,12 +365,88 @@ pub fn scan(
             continue;
         };
         scanned += 1;
-        scan_file(rel, &content, &applicable, &mut out);
+        let mask = classification
+            .as_ref()
+            .filter(|_| is_rust(rel))
+            .and_then(|c| c.mask(rel));
+        for k in scan_file(rel, &content, &applicable, mask, &mut out) {
+            admitted[indices[k]].insert(rel.clone());
+        }
     }
+    out.extend(must_scan_violations(&compiled, &admitted, files));
     Ok(TextlintScan {
         violations: out,
         files: scanned,
     })
+}
+
+fn is_rust(rel: &Path) -> bool {
+    rel.extension().is_some_and(|e| e == "rs")
+}
+
+/// The test-code classification, computed once when some `skip_test` rule
+/// applies to at least one tracked `.rs` file. Otherwise no `cargo metadata`
+/// runs and nothing is parsed: a user-wide `skip_test` rule must not make a
+/// tree it has nothing to scan in fail for lacking a Cargo workspace.
+fn classify_tests(
+    tree: &crate::scope::TreeSnapshot,
+    compiled: &[Compiled],
+    files: &[PathBuf],
+) -> Result<Option<crate::test_code::Classification>, DevError> {
+    let rust: Vec<PathBuf> = files.iter().filter(|f| is_rust(f)).cloned().collect();
+    if !compiled
+        .iter()
+        .any(|c| c.skip_test && rust.iter().any(|f| applies(c, f)))
+    {
+        return Ok(None);
+    }
+    let roots = crate::test_code::workspace_roots(tree.root())?;
+    // Masks must describe the bytes the scan matches against, so the
+    // classifier reads through the same snapshot. The snapshot caches by
+    // file identity, so `src/a/../b.rs`, a symlinked spelling and a file
+    // outside the root all land on the one entry the scan also reads.
+    let read = |abs: &Path| -> Result<String, String> {
+        let bytes = match tree.read_file(abs) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return Err("does not exist".to_owned()),
+            Err(error) => return Err(format!("cannot be read: {error}")),
+        };
+        String::from_utf8(bytes.to_vec()).map_err(|_| "is not valid UTF-8 source".to_owned())
+    };
+    crate::test_code::classify(tree.root(), &roots, &rust, &read).map(Some)
+}
+
+/// One violation per `must_scan` path its rule did not actually scan.
+fn must_scan_violations(
+    compiled: &[Compiled],
+    admitted: &[HashSet<PathBuf>],
+    files: &[PathBuf],
+) -> Vec<TextlintViolation> {
+    let mut out = Vec::new();
+    for (rule, seen) in compiled.iter().zip(admitted) {
+        for path in &rule.must_scan {
+            if seen.contains(path) {
+                continue;
+            }
+            let why = if !files.contains(path) {
+                "is not a tracked file of this tree"
+            } else if !applies(rule, path) {
+                "is not selected by this rule's paths/exclude"
+            } else if rule.skip_test {
+                "was not scanned: deleted, binary, refused by only_if_file_matches, or no production code left under skip_test"
+            } else {
+                "was not scanned: deleted, binary, or refused by only_if_file_matches"
+            };
+            out.push(TextlintViolation {
+                file: path.clone(),
+                line: 0,
+                rule: rule.name.clone(),
+                message: format!("must_scan: {} {why}", path.display()),
+                content: String::new(),
+            });
+        }
+    }
+    out
 }
 
 /// The text a rule is matched against, or `None` for a binary file.
@@ -438,13 +474,63 @@ fn applies(c: &Compiled, rel: &Path) -> bool {
     globs::matches(&c.paths, rel) && !globs::matches(&c.exclude, rel)
 }
 
-fn scan_file(rel: &Path, content: &str, rules: &[&Compiled], out: &mut Vec<TextlintViolation>) {
+/// Per-byte test mask of `content` (already BOM-stripped; `shift` is the
+/// stripped length, since the classifier counts file bytes).
+fn test_bytes(mask: &crate::test_code::FileMask, content: &str, shift: usize) -> Vec<bool> {
+    match mask {
+        crate::test_code::FileMask::Test => vec![true; content.len()],
+        crate::test_code::FileMask::Production(spans) => {
+            let mut bytes = vec![false; content.len()];
+            for span in spans {
+                let start = span.start.saturating_sub(shift).min(bytes.len());
+                let end = span.end.saturating_sub(shift).min(bytes.len());
+                bytes[start..end].fill(true);
+            }
+            bytes
+        }
+    }
+}
+
+/// The text `rule.pattern` is matched against for one physical line: the
+/// line itself, or a copy with bytes outside the rule's lexical region and
+/// (under `skip_test`) test-only bytes blanked.
+fn haystack<'a>(
+    rule: &Compiled,
+    raw: &'a str,
+    offset: usize,
+    regions: Option<&[lex::Region]>,
+    tested: Option<&[bool]>,
+) -> Cow<'a, str> {
+    let tested = tested.filter(|_| rule.skip_test);
+    if rule.region.is_none() && tested.is_none() {
+        return Cow::Borrowed(raw);
+    }
+    Cow::Owned(lex::mask_line_by(raw, offset, |b| {
+        rule.region
+            .is_none_or(|target| regions.and_then(|r| r.get(b)).copied() == Some(target))
+            && !tested.is_some_and(|t| t.get(b).copied().unwrap_or(false))
+    }))
+}
+
+/// Scan one file against its applicable rules; returns the indices (into
+/// `rules`) of the rules that admitted the file to matching, for `must_scan`.
+fn scan_file(
+    rel: &Path,
+    content: &str,
+    rules: &[&Compiled],
+    mask: Option<&crate::test_code::FileMask>,
+    out: &mut Vec<TextlintViolation>,
+) -> Vec<usize> {
     // Strip a single leading UTF-8 BOM so a rule anchored to the start of line 1
     // (e.g. `^use `) matches its first physical line. `strip_prefix` returns a
     // subslice of the same allocation, so classify/line-iteration/offset all stay
     // internally consistent as long as they read this one slice. Line numbers are
     // unaffected: the BOM precedes line 1's text.
+    let original_len = content.len();
     let content = content.strip_prefix('\u{FEFF}').unwrap_or(content);
+    let tested: Option<Vec<bool>> = mask
+        .filter(|_| rules.iter().any(|r| r.skip_test))
+        .map(|m| test_bytes(m, content, original_len - content.len()));
     let lines: Vec<&str> = content.lines().collect();
     // File-scope precondition: a rule with `only_if_file_matches` fires only in
     // files where some line matches it. Computed once per file per rule. When
@@ -462,12 +548,18 @@ fn scan_file(rel: &Path, content: &str, rules: &[&Compiled], out: &mut Vec<Textl
         .iter()
         .map(|rule| skip_after_mask(rule, &lines))
         .collect();
-    // Lexical regions, tokenized once per file, only when a rule needs scoping.
+    // Lexical regions, tokenized once per file, only when a rule needs
+    // scoping or `must_scan` admission needs to tell code from comments.
     let base = content.as_ptr() as usize;
     let regions: Option<Vec<lex::Region>> = rules
         .iter()
-        .any(|r| r.region.is_some())
+        .any(|r| r.region.is_some() || (r.skip_test && is_rust(rel)))
         .then(|| lex::classify(content));
+    let first_precondition: Vec<Option<usize>> = rules
+        .iter()
+        .map(|r| first_precondition_line(r, &lines))
+        .collect();
+    let mut eligible = vec![false; rules.len()];
     let mut section: Option<String> = None;
     for (i, raw) in lines.iter().copied().enumerate() {
         let trimmed = raw.trim();
@@ -491,15 +583,23 @@ fn scan_file(rel: &Path, content: &str, rules: &[&Compiled], out: &mut Vec<Textl
             {
                 continue;
             }
-            // Scope the pattern to a lexical region when asked; markers,
-            // `except`, and the reported line all stay the physical line.
-            let hay: Cow<'_, str> = match (rule.region, &regions) {
-                (Some(target), Some(regs)) => {
-                    let offset = raw.as_ptr() as usize - base;
-                    Cow::Owned(lex::mask_line(raw, offset, regs, target))
-                }
-                _ => Cow::Borrowed(raw),
-            };
+            let offset = raw.as_ptr() as usize - base;
+            if wholly_test(rule, tested.as_deref(), raw, offset) {
+                continue;
+            }
+            // `must_scan` admission: an eligible position that holds real
+            // content (under `skip_test`, unmasked code), whether or not the
+            // pattern then matches.
+            if !eligible[ri]
+                && first_precondition[ri].is_none_or(|first| i >= first)
+                && holds_content(rule, is_rust(rel), raw, offset, regions.as_deref(), tested.as_deref())
+            {
+                eligible[ri] = true;
+            }
+            // Scope the pattern to a lexical region and to production code
+            // when asked; markers, `except`, and the reported line all stay
+            // the physical line.
+            let hay = haystack(rule, raw, offset, regions.as_deref(), tested.as_deref());
             if !rule.pattern.is_match(&hay) {
                 continue;
             }
@@ -532,8 +632,79 @@ fn scan_file(rel: &Path, content: &str, rules: &[&Compiled], out: &mut Vec<Textl
     // Whole-`use`-statement pass: reconstruct wrapped imports once, then match
     // each join rule against the joined text.
     if rules.iter().any(|r| r.join_wrapped_use) {
-        scan_use_statements(rel, content, &lines, rules, &file_ok, &skip_after, out);
+        let stmts = lex::use_statements(content);
+        for (ri, rule) in rules.iter().enumerate() {
+            if rule.join_wrapped_use && file_ok[ri] {
+                eligible[ri] = stmts.iter().any(|st| {
+                    !skip_after[ri].get(st.start_line).copied().unwrap_or(false)
+                        && first_precondition[ri].is_none_or(|first| st.start_line >= first)
+                });
+            }
+        }
+        scan_use_statements(rel, &stmts, &lines, rules, &file_ok, &skip_after, out);
     }
+    (0..rules.len())
+        .filter(|ri| file_ok[*ri] && eligible[*ri])
+        .collect()
+}
+
+/// Whether a `skip_test` rule must pass over this line entirely, because it
+/// is test code. Matching its blanked copy could still fire a
+/// whitespace-shaped pattern, so such a line is not a position at all.
+/// - A line with content is test code when every non-whitespace byte is
+///   masked (syn spans leave indentation outside a masked statement).
+/// - A blank line is test code when it lies inside a masked span: all of its
+///   bytes and its line terminator are masked. A blank line between
+///   production items stays a production position.
+fn wholly_test(rule: &Compiled, tested: Option<&[bool]>, raw: &str, offset: usize) -> bool {
+    let Some(t) = tested.filter(|_| rule.skip_test) else {
+        return false;
+    };
+    let Some(span) = t.get(offset..offset + raw.len()) else {
+        return false;
+    };
+    let mut content = raw.bytes().zip(span).filter(|(b, _)| !b.is_ascii_whitespace()).peekable();
+    if content.peek().is_some() {
+        return content.all(|(_, masked)| *masked);
+    }
+    // Blank: the terminator is the byte after the line (absent at the end of
+    // a file without a trailing newline, which then judges by the line alone).
+    let end = (offset + raw.len() + 1).min(t.len());
+    t.get(offset..end).is_some_and(|s| !s.is_empty() && s.iter().all(|m| *m))
+}
+
+/// The first line satisfying a position-sensitive `only_if_file_matches`
+/// (`Some(usize::MAX)` when none does), or `None` when the rule has no such
+/// precondition. A line at or below it passes `precondition_above_ok`.
+fn first_precondition_line(rule: &Compiled, lines: &[&str]) -> Option<usize> {
+    if !rule.only_if_file_matches_above {
+        return None;
+    }
+    let re = rule.only_if_file_matches.as_ref()?;
+    Some(lines.iter().position(|l| re.is_match(l)).unwrap_or(usize::MAX))
+}
+
+/// Whether a physical line holds something a rule really scans: any
+/// non-blank text, or under `skip_test` in a `.rs` file a non-whitespace code
+/// byte the classifier left unmasked. A comment beside a masked item is not
+/// code. Other files are not Rust, so their lexical regions mean nothing.
+fn holds_content(
+    rule: &Compiled,
+    rust: bool,
+    raw: &str,
+    offset: usize,
+    regions: Option<&[lex::Region]>,
+    tested: Option<&[bool]>,
+) -> bool {
+    if !rule.skip_test || !rust {
+        return !raw.trim().is_empty();
+    }
+    raw.bytes().enumerate().any(|(j, b)| {
+        let at = offset + j;
+        !b.is_ascii_whitespace()
+            && regions.and_then(|r| r.get(at)).copied() == Some(lex::Region::Code)
+            && !tested.is_some_and(|t| t.get(at).copied().unwrap_or(false))
+    })
 }
 
 /// The whole-`use`-statement pass of `scan_file`: reconstruct each wrapped
@@ -542,19 +713,18 @@ fn scan_file(rel: &Path, content: &str, rules: &[&Compiled], out: &mut Vec<Textl
 /// per-line pass but anchored at the statement's physical span.
 fn scan_use_statements(
     rel: &Path,
-    content: &str,
+    stmts: &[lex::UseStmt],
     lines: &[&str],
     rules: &[&Compiled],
     file_ok: &[bool],
     skip_after: &[Vec<bool>],
     out: &mut Vec<TextlintViolation>,
 ) {
-    let stmts = lex::use_statements(content);
     for (ri, rule) in rules.iter().enumerate() {
         if !rule.join_wrapped_use || !file_ok[ri] {
             continue;
         }
-        for st in &stmts {
+        for st in stmts {
             // The same precomputed boundary mask drives physical lines and
             // joined statements: the boundary itself is checked and everything
             // after it is skipped.
@@ -747,12 +917,115 @@ mod tests {
         assert_eq!(result.violations[0].file, PathBuf::from("src/lib.rs"));
     }
 
+    /// Scan `src` with one rule under a test-code mask; return the hit lines
+    /// and whether the rule admitted the file (`must_scan`'s notion).
+    fn run_masked(rule: TextlintRule, src: &str, mask: &crate::test_code::FileMask) -> (Vec<usize>, bool) {
+        let compiled = compile(&[rule]).unwrap();
+        let refs: Vec<&Compiled> = compiled.iter().collect();
+        let mut out = Vec::new();
+        let admitted = scan_file(Path::new("t.rs"), src, &refs, Some(mask), &mut out);
+        (out.iter().map(|v| v.line).collect(), admitted == vec![0])
+    }
+
+    fn masked_span(src: &str, needle: &str) -> crate::test_code::FileMask {
+        let start = src.find(needle).unwrap();
+        let span = start..start + needle.len();
+        crate::test_code::FileMask::Production(std::iter::once(span).collect())
+    }
+
+    #[test]
+    fn skip_test_blanks_test_bytes_and_composes_with_region() {
+        let src = "fn p() { forbidden(); } fn q() { \"forbidden\"; }\n#[cfg(test)]\nfn t() { forbidden(); }\n";
+        let mask = masked_span(src, "#[cfg(test)]\nfn t() { forbidden(); }");
+        let mut r = rule("forbidden");
+        r.skip_test = true;
+        r.region = Some("code".into());
+        assert_eq!(run_masked(r.clone(), src, &mask), (vec![1], true));
+        // Without skip_test the mask is ignored.
+        r.skip_test = false;
+        assert_eq!(run_masked(r, src, &mask).0, vec![1, 3]);
+    }
+
+    #[test]
+    fn a_wholly_test_file_is_not_admitted() {
+        let mut r = rule("forbidden");
+        r.skip_test = true;
+        let src = "fn t() { forbidden(); }\n";
+        assert_eq!(run_masked(r, src, &crate::test_code::FileMask::Test), (vec![], false));
+    }
+
+    #[test]
+    fn blanked_test_lines_never_reach_the_pattern() {
+        let mut r = rule(r"^\s+$");
+        r.skip_test = true;
+        let src = "fn t() { forbidden(); }\n";
+        assert_eq!(run_masked(r.clone(), src, &crate::test_code::FileMask::Test).0, Vec::<usize>::new());
+        let mixed = "fn p() {}\n#[cfg(test)]\nfn t() {}\n";
+        let mask = masked_span(mixed, "#[cfg(test)]\nfn t() {}");
+        assert_eq!(run_masked(r.clone(), mixed, &mask).0, Vec::<usize>::new());
+        // An indented masked statement leaves its indentation unmasked.
+        let indented = "fn p() {\n    #[cfg(test)] let fixture = 1;\n}\n";
+        let mask = masked_span(indented, "#[cfg(test)] let fixture = 1;");
+        assert_eq!(run_masked(r.clone(), indented, &mask).0, Vec::<usize>::new());
+        // Blank lines inside a masked module are test code; blank lines
+        // between production items are not.
+        let blanks = "fn p() {}\n    \n#[cfg(test)]\nmod tests {\n    \n\n}\n";
+        let mask = masked_span(blanks, "#[cfg(test)]\nmod tests {\n    \n\n}");
+        assert_eq!(run_masked(r.clone(), blanks, &mask).0, vec![2]);
+        let mut empty = rule("^$");
+        empty.skip_test = true;
+        assert_eq!(run_masked(empty.clone(), blanks, &mask).0, Vec::<usize>::new());
+        assert_eq!(run_masked(empty, "a\n\nb\n", &crate::test_code::FileMask::Test).0, Vec::<usize>::new());
+    }
+
+    #[test]
+    fn a_comment_beside_masked_code_does_not_admit_the_file() {
+        let src = "// explanation\n#[cfg(test)]\nmod fixtures {}\n";
+        let mask = masked_span(src, "#[cfg(test)]\nmod fixtures {}");
+        let mut r = rule("never");
+        r.skip_test = true;
+        assert!(!run_masked(r, src, &mask).1);
+    }
+
+    #[test]
+    fn an_unsatisfied_positional_precondition_does_not_admit_the_file() {
+        let mut r = rule("never");
+        r.only_if_file_matches = Some("^use x".into());
+        r.only_if_file_matches_above = true;
+        let none = crate::test_code::FileMask::Production(Vec::new());
+        assert!(!run_masked(r.clone(), "fn p() {}\n", &none).1);
+        assert!(run_masked(r, "use x;\nfn p() {}\n", &none).1);
+    }
+
+    #[test]
+    fn skip_test_with_join_wrapped_use_is_a_config_error() {
+        let mut r = rule("use a");
+        r.skip_test = true;
+        r.join_wrapped_use = true;
+        assert!(compile(&[r]).is_err());
+    }
+
+    #[test]
+    fn must_scan_reports_each_path_the_rule_did_not_scan() {
+        let mut r = rule("never");
+        r.paths = vec!["src/**".into()];
+        r.must_scan = vec!["src/a.rs".into(), "src/b.rs".into(), "docs/c.md".into()];
+        let compiled = compile(&[r]).unwrap();
+        let files = vec![PathBuf::from("src/a.rs"), PathBuf::from("src/b.rs"), PathBuf::from("docs/c.md")];
+        let admitted = vec![HashSet::from([PathBuf::from("src/a.rs")])];
+        let missing: Vec<PathBuf> = must_scan_violations(&compiled, &admitted, &files)
+            .into_iter()
+            .map(|v| v.file)
+            .collect();
+        assert_eq!(missing, vec![PathBuf::from("src/b.rs"), PathBuf::from("docs/c.md")]);
+    }
+
     /// Compile one rule and scan a source string; return (line, rule) hits.
     fn run(rule: TextlintRule, src: &str) -> Vec<(usize, String)> {
         let compiled = compile(&[rule]).unwrap();
         let refs: Vec<&Compiled> = compiled.iter().collect();
         let mut out = Vec::new();
-        scan_file(Path::new("t.rs"), src, &refs, &mut out);
+        scan_file(Path::new("t.rs"), src, &refs, None, &mut out);
         out.iter().map(|v| (v.line, v.rule.clone())).collect()
     }
 
@@ -777,6 +1050,8 @@ mod tests {
             except_below: None,
             require_above: None,
             require_below: None,
+            skip_test: false,
+            must_scan: Vec::new(),
             compiled: None,
         }
     }

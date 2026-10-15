@@ -384,6 +384,27 @@ It selects what runs for a human, never what runs for a gate. That is also why
 there is no per-entry "`-p` applies to me" key: that would let a narrowed run
 skip a workspace-wide gate.
 
+## Audit
+
+`brokkr check --audit` reports configuration hygiene and runs nothing else.
+No phase runs, nothing is built, and no file content is scanned. The
+configured selectors are resolved against the tracked file list, and each
+finding is printed as a warning:
+
+- a `paths`, `exclude` or `exempt` glob in `[header]`, `[[textlint]]` or
+  `[manifest]` (including `shape_exclude`) that selects no tracked file;
+- an exclusion that excuses every file its selector picked, and a
+  `[manifest]` scope that leaves no manifest;
+- a `[gremlins].exclude` entry that matches no scannable file, or that
+  removes every one (skipped under `[gremlins].disable = true`).
+
+An ordinary check prints none of this. A user-wide rule legitimately names
+paths most trees lack, and an exclusion may reserve a path that is absent
+today, so a warning on every run would be noise. The audit is where a real
+typo gets found. It ends with `audit: N findings` and exits 0 whatever it
+finds. Clap refuses it beside every flag that selects, shapes or certifies
+a run (`--textlint`/`--script` included).
+
 ## The markdown-only shortcut
 
 In a git repo where **everything uncommitted is markdown**, `check` runs the
@@ -399,10 +420,6 @@ doctest or rustdoc break from a docs edit surfaces on the next full run, and
 script checks are the exception inside `script_check`: they judge a test phase,
 and with none having run they are skipped and counted on a `script-check: N
 post-test checks skipped` line, as under a profile that skips `test`.
-Selector-scope warnings for skipped gremlins, header, textlint, and
-manifest scans still run against the shared tree snapshot; skipping a scan does
-not hide a configured path or exclusion that currently selects nothing.
-`[gremlins].disable = true` disables that phase and its exclusion warnings too.
 
 The classifier is `scope::dirt`, backed by `git::TreeState`
 (`git status --porcelain=v1 -z --no-renames --untracked-files=all`). The same
@@ -461,7 +478,10 @@ fails. Ported from `check_copyright_year`; see `src/header.rs`.
 
 Runs next, only when `[[textlint]]` rules exist. Each rule forbids a regex on
 lines of the files it selects; the keys (`allow_marker`, `except`, `region`,
-`skip_after`, `join_wrapped_use`, ...) are in `brokkr man conventions textlint`.
+`skip_after`, `skip_test`, `must_scan`, `join_wrapped_use`, ...) are in
+`brokkr man conventions textlint`. When a `skip_test` rule selects any tracked
+`.rs` file, the phase runs `cargo metadata --no-deps` once to classify the workspace's test code
+before scanning.
 Beyond those, a rule may carry the
 **context-window gates** `except_above` / `except_below` /
 `require_above` / `require_below` (each `{ lines = N, pattern = "..." }`).
@@ -482,9 +502,9 @@ A clean run reports what it covered - `textlint (21 rules, 812 files)` on the
 conventions line - rather than a bare `ok`, matching the `dependency rules`
 fragment. The file count
 is files at least one rule applied to, not the tracked-file total, so it is a
-statement about the corpus that was actually scanned: a rule whose `paths` glob
-has stopped matching anything still passes, and a shrinking count is the only
-thing that gives it away.
+statement about the corpus that was actually scanned. A rule whose `paths` glob
+has stopped matching anything still passes; a shrinking count gives it away,
+and a rule that names its sentinel files in `must_scan` fails outright.
 
 ## `manifest` phase
 

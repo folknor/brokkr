@@ -325,6 +325,30 @@ pub(crate) fn cmd_check_selected(
     selection_failure(&failed)
 }
 
+/// `check --audit`: report configuration hygiene and nothing else. No phase
+/// runs, nothing is built or scanned for content; the configured selectors
+/// are resolved against the tracked file list and every one that selects
+/// nothing, or excludes everything its selector picked, is printed. An
+/// ordinary check stays silent about these: a user-wide rule legitimately
+/// names paths most trees lack, so saying so on every run is noise.
+///
+/// Findings are reported, not judged: the exit status is 0 either way.
+pub(crate) fn cmd_check_audit(
+    project_root: &Path,
+    gremlins_cfg: Option<&GremlinsConfig>,
+    header_cfg: Option<&HeaderConfig>,
+    textlint_rules: &[TextlintRule],
+    manifest_cfg: Option<&ManifestConfig>,
+) -> Result<(), DevError> {
+    let tree = LazyTree::new(project_root);
+    let findings = conventions::selector_findings(&tree, gremlins_cfg, header_cfg, textlint_rules, manifest_cfg)?;
+    for finding in &findings {
+        output::warn(finding);
+    }
+    output::run_msg(&format!("audit: {}", output::count(findings.len(), "finding")));
+    Ok(())
+}
+
 /// How a failed `--textlint`/`--script` selection ends. A `Reported` failure
 /// printed its full report above, so its label is not echoed (`finish_check`
 /// does the same); any other error carries its only diagnostic in its message,
@@ -654,30 +678,22 @@ fn run_convention_phases_inner(
     // One working-tree snapshot for every file scanner below.
     let tree = LazyTree::new(a.project_root);
 
-    if skip(Phase::Gremlins) {
-        audit_skipped_scopes(Phase::Gremlins, &tree, a, failing_phase)?;
-    } else {
+    if !skip(Phase::Gremlins) {
         start_phase(failing_phase, Phase::Gremlins);
         run_gremlins(&tree, a.gremlins_cfg, a.fix_gremlins)?;
     }
 
-    if skip(Phase::Header) {
-        audit_skipped_scopes(Phase::Header, &tree, a, failing_phase)?;
-    } else {
+    if !skip(Phase::Header) {
         start_phase(failing_phase, Phase::Header);
         run_header(&tree, a.header_cfg)?;
     }
 
-    if skip(Phase::Textlint) {
-        audit_skipped_scopes(Phase::Textlint, &tree, a, failing_phase)?;
-    } else {
+    if !skip(Phase::Textlint) {
         start_phase(failing_phase, Phase::Textlint);
         run_textlint(&tree, a.textlint_rules)?;
     }
 
-    if skip(Phase::Manifest) {
-        audit_skipped_scopes(Phase::Manifest, &tree, a, failing_phase)?;
-    } else {
+    if !skip(Phase::Manifest) {
         start_phase(failing_phase, Phase::Manifest);
         run_manifest(&tree, a.manifest_cfg)?;
     }
@@ -697,41 +713,6 @@ fn run_convention_phases_inner(
         run_publish_cycle(a.project_root, a.commands)?;
     }
     Ok(())
-}
-
-fn audit_skipped_scopes(
-    phase: Phase,
-    tree: &LazyTree<'_>,
-    args: &ConventionPhaseArgs<'_>,
-    failing_phase: &mut Option<Phase>,
-) -> Result<(), DevError> {
-    let configured = match phase {
-        Phase::Gremlins => args
-            .gremlins_cfg
-            .is_some_and(|config| !config.disable && !config.exclude.is_empty()),
-        Phase::Header => args.header_cfg.is_some(),
-        Phase::Textlint => !args.textlint_rules.is_empty(),
-        Phase::Manifest => args.manifest_cfg.is_some(),
-        _ => false,
-    };
-    if !configured {
-        return Ok(());
-    }
-    // Bound the scope lookup as this phase without announcing the skipped scan as a run.
-    *failing_phase = Some(phase);
-    enter_phase(phase);
-    let result = conventions::warn_skipped_scopes(
-        phase,
-        tree,
-        args.gremlins_cfg,
-        args.header_cfg,
-        args.textlint_rules,
-        args.manifest_cfg,
-    );
-    if result.is_ok() {
-        *failing_phase = None;
-    }
-    result
 }
 
 struct BuildPhaseArgs<'a> {

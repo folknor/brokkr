@@ -385,7 +385,7 @@ const TEXTLINT_LIST_FIELDS: [&str; 3] = ["paths", "exclude", "except"];
 /// Fields a `[textlint_preset.<name>]` block may carry: everything a
 /// `[[textlint]]` rule accepts except the three that identify one rule
 /// (`name`, `pattern`, `message`), which are never shareable.
-const TEXTLINT_PRESET_FIELDS: [&str; 16] = [
+const TEXTLINT_PRESET_FIELDS: [&str; 18] = [
     "paths",
     "exclude",
     "except",
@@ -402,6 +402,8 @@ const TEXTLINT_PRESET_FIELDS: [&str; 16] = [
     "except_below",
     "require_above",
     "require_below",
+    "skip_test",
+    "must_scan",
 ];
 
 /// Parse the optional `[textlint_preset.<name>]` blocks into raw TOML tables,

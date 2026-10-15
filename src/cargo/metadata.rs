@@ -800,6 +800,9 @@ pub(crate) struct CargoTarget {
     pub(crate) name: String,
     #[serde(default)]
     pub(crate) kind: Vec<String>,
+    /// The target's root source file (absolute).
+    #[serde(default)]
+    pub(crate) src_path: String,
     #[serde(default)]
     #[allow(dead_code)]
     pub(crate) crate_types: Vec<String>,

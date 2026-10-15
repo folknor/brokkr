@@ -251,25 +251,15 @@ pub(crate) fn scan_report(
     validate_granularity(cfg)?;
 
     let files = tree.files();
-    // Dead globs are warned about, not refused - see `globs::warn_unmatched`.
+    // Dead globs are audit findings, not refusals - see `globs::unmatched`.
     // The adapter group's own references below stay hard errors: they name
     // packages and a marker, not paths, and a dead one silently disables the
     // rule rather than guarding against a file that may come back.
-    globs::warn_unmatched(path_globs, files, "[manifest] paths")?;
-    let path_candidates: Vec<PathBuf> = files
+    let included: Vec<PathBuf> = files
         .iter()
-        .filter(|rel| globs::matches(&paths, rel))
+        .filter(|rel| globs::matches(&paths, rel) && !globs::matches(&exclude, rel))
         .cloned()
         .collect();
-    globs::warn_unmatched(&cfg.exclude, &path_candidates, "[manifest] exclude")?;
-    let included: Vec<PathBuf> = path_candidates
-        .into_iter()
-        .filter(|rel| !globs::matches(&exclude, rel))
-        .collect();
-    if included.is_empty() {
-        crate::output::warn("[manifest] paths and exclude leave no manifest to scan");
-    }
-    globs::warn_unmatched(&cfg.shape_exclude, &included, "[manifest] shape_exclude")?;
 
     let mut manifests: Vec<(PathBuf, DocumentMut)> = Vec::new();
     let mut out = Vec::new();

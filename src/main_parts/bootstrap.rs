@@ -554,6 +554,7 @@ pub(super) fn run_check(
     commands: &bool,
     textlint_names: &[String],
     script_names: &[String],
+    audit: bool,
     args: &[String],
     detection: Option<&project::Detection>,
 ) -> Result<(), DevError> {
@@ -634,6 +635,15 @@ pub(super) fn run_check(
     // The `[lints]` config, loaded once; a tree without one allows nothing.
     let no_lints = config::LintsConfig::default();
     let lints = clippy_cfg.unwrap_or(&no_lints);
+    if audit {
+        return check_cmd::cmd_check_audit(
+            project_root,
+            gremlins_cfg,
+            header_cfg,
+            textlint_rules,
+            manifest_cfg,
+        );
+    }
     if !textlint_names.is_empty() || !script_names.is_empty() {
         return check_cmd::cmd_check_selected(
             project_root,

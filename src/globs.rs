@@ -91,26 +91,26 @@ pub fn build_set(patterns: &[String], field: &str) -> Result<GlobSet, DevError> 
         .map_err(|e| DevError::Config(format!("{field}: {e}")))
 }
 
-/// Warn about each configured glob that matches no path in the scan's scope.
+/// One finding per configured glob that matches no path in the scan's scope.
 /// Checking patterns individually prevents a live pattern from hiding a dead
 /// sibling in the same list.
 ///
-/// A warning, not a refusal. A dead glob is usually a typo or a stale entry,
-/// but not always: an exclusion can deliberately guard a generated or vendored
-/// file that is absent today and may come back, and a user-wide rule (which
-/// applies to every tree brokkr checks) legitimately names paths most trees do
-/// not have. Failing the whole check for either would make a correct config
-/// unusable; saying so on every run is enough to get a real typo fixed.
-pub fn warn_unmatched(patterns: &[String], paths: &[PathBuf], field: &str) -> Result<(), DevError> {
+/// A finding for `brokkr check --audit`, never a refusal and never printed by
+/// an ordinary check. A dead glob is usually a typo or a stale entry, but not
+/// always: an exclusion can deliberately guard a generated or vendored file
+/// that is absent today and may come back, and a user-wide rule (which applies
+/// to every tree brokkr checks) legitimately names paths most trees do not
+/// have. Failing the check, or warning on every run, would punish a correct
+/// config; the audit is where a real typo gets found.
+pub fn unmatched(patterns: &[String], paths: &[PathBuf], field: &str) -> Result<Vec<String>, DevError> {
+    let mut out = Vec::new();
     for pattern in patterns {
         let one = build_set(std::slice::from_ref(pattern), field)?;
         if !paths.iter().any(|path| matches(&one, path)) {
-            crate::output::warn(&format!(
-                "{field}: glob {pattern:?} matches no in-scope tracked path"
-            ));
+            out.push(format!("{field}: glob {pattern:?} matches no in-scope tracked path"));
         }
     }
-    Ok(())
+    Ok(out)
 }
 
 /// Whether `rel` (a project-root-relative path) matches any glob in the set.

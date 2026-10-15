@@ -58,6 +58,24 @@ const SELECTION_CONFLICTS: [&str; 11] = [
     "args",
 ];
 
+// What `check --audit` refuses: it runs no phase, so everything that selects,
+// shapes or certifies one.
+const AUDIT_CONFLICTS: [&str; 13] = [
+    "features",
+    "no_default_features",
+    "package",
+    "profile",
+    "gate",
+    "force_rust",
+    "json",
+    "fix_gremlins",
+    "timings",
+    "commands",
+    "args",
+    "textlint_names",
+    "script_names",
+];
+
 #[derive(Subcommand)]
 pub(crate) enum Command {
     /// Run the convention checks, clippy, rustdoc and tests
@@ -192,6 +210,14 @@ In depth: `brokkr man check` (one section at a time, e.g. `man check clippy`)."
         #[arg(long = "script", value_name = "NAME", value_delimiter = ',',
             conflicts_with_all = SELECTION_CONFLICTS)]
         script_names: Vec<String>,
+
+        /// Report configuration hygiene and run nothing else: `paths`,
+        /// `exclude` and `exempt` globs that select no tracked file, and
+        /// exclusions that excuse everything their selector picked, across
+        /// `[gremlins]`, `[header]`, `[[textlint]]` and `[manifest]`. An
+        /// ordinary check never prints these. Exits 0 whatever it finds.
+        #[arg(long, conflicts_with_all = AUDIT_CONFLICTS)]
+        audit: bool,
 
         /// Raw arguments forwarded to the test phase. Tokens before a
         /// literal `--` are passed to `cargo test` (before cargo's own
