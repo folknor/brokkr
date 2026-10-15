@@ -476,7 +476,7 @@ impl SerialObserve<'_> {
                     None => StreamOrigin::Unattributed { detail: format!("harness {executable}") },
                 },
                 crate::test_runner::StreamSource::Rustdoc => StreamOrigin::Doctest,
-                crate::test_runner::StreamSource::Process => {
+                crate::test_runner::StreamSource::Cargo | crate::test_runner::StreamSource::Process => {
                     StreamOrigin::Unattributed { detail: "cargo's shared stream".into() }
                 }
                 // A serial lane runs no nextest engine; were one to report
@@ -738,6 +738,7 @@ fn run_one_test_sweep(
     if verdict == test_runner::LaneVerdict::Stopped {
         return Err(DevError::Interrupted);
     }
+    let structural = libtest_run.outcome.structural_reasons();
     let test_runner::LibtestRun { captured, hung, completed, .. } = libtest_run;
 
     if let Some(out) = timings {
@@ -795,6 +796,11 @@ fn run_one_test_sweep(
             }
         } else {
             output::error(&crate::test_runner::filter_test(&stdout, &stderr));
+        }
+        // A red test speaks for itself; a broken record does not, and cargo's
+        // summary above can read all green while it fails the sweep.
+        for reason in &structural {
+            output::error(&format!("test record: {reason}"));
         }
         return Ok(false);
     }

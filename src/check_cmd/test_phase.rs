@@ -145,7 +145,9 @@ fn run_test_phase(
                 sweep.label,
                 describe_sweep(sweep, true, attempt.selection(), attempt.described_features())
             ));
-            let decisive = record_phase_stop(i, sweeps.len(), &e, &tap);
+            let attempted =
+                |l: usize| selection.entry(LaneIdx::new(l)).is_some_and(|entry| entry.attempt().is_some());
+            let decisive = record_phase_stop(i, sweeps.len(), &e, &tap, attempted);
             let label = |l: usize| sweeps.get(l).map(|s| s.label.clone());
             *stop = decisive.as_ref().map(|d| TerminationSummary::of(d, label));
             outcome = Err(e);
@@ -166,8 +168,11 @@ fn run_test_phase(
 /// termination that decided it.
 ///
 /// - A lane whose tests failed stops the phase by fail-fast: every later lane
-///   is recorded as stopped by it, so its planned executions are unobserved
-///   for that stated reason, not for none.
+///   the phase would have attempted is recorded as stopped by it, so its
+///   planned executions are unobserved for that stated reason, not for none.
+///   A lane the selection excluded expects nothing and was stopped by
+///   nothing; recording it would name it as the stop's scope. With no later
+///   attempted lane, nothing was cut short and there is no termination.
 /// - A stop (interrupt, phase watchdog) is the run's.
 /// - Anything else that ends the phase - a blown budget, a refusal - is the
 ///   run's too, carrying the lane's own decisive termination when it recorded
@@ -178,12 +183,13 @@ fn record_phase_stop(
     lanes: usize,
     e: &TestPhaseFailure,
     tap: &LaneTap,
+    attempted: impl Fn(usize) -> bool,
 ) -> Option<Termination> {
     let own = tap.decisive_termination();
     match e {
         TestPhaseFailure::TestsFailed => {
             let mut first = None;
-            for lane in failed + 1..lanes {
+            for lane in fail_fast_casualties(failed, lanes, attempted) {
                 let t = Termination {
                     scope: TerminationScope::Lane,
                     lane: Some(lane),
@@ -198,6 +204,26 @@ fn record_phase_stop(
             own.or(first)
         }
         TestPhaseFailure::Error(other) => record_run_stop(other, own),
+    }
+}
+
+/// The lanes a fail-fast at `failed` stops: every later one the phase would
+/// have attempted.
+fn fail_fast_casualties(failed: usize, lanes: usize, attempted: impl Fn(usize) -> bool) -> Vec<usize> {
+    (failed + 1..lanes).filter(|&l| attempted(l)).collect()
+}
+
+#[cfg(test)]
+mod fail_fast_tests {
+    use super::fail_fast_casualties;
+
+    /// An excluded lane between the failure and a later attempted one is
+    /// stopped by nothing; the attempted one is the stop's first casualty.
+    #[test]
+    fn fail_fast_spares_lanes_the_selection_excluded() {
+        assert_eq!(fail_fast_casualties(0, 4, |l| l != 1), vec![2, 3]);
+        assert!(fail_fast_casualties(0, 2, |l| l != 1).is_empty());
+        assert!(fail_fast_casualties(1, 2, |_| true).is_empty());
     }
 }
 

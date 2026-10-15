@@ -16,9 +16,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum StreamSource {
-    /// The launched process's own stdout: a directly executed test binary's,
-    /// or cargo's when no harness is isolated.
+    /// The launched process's own stdout when that process is a directly
+    /// executed test binary: one harness.
     Process,
+    /// Cargo's own stdout. With no harness isolated it carries every binary's
+    /// suites, one after another, so a test name may recur in a later suite.
+    Cargo,
     /// A harness the shim accepted, named by the executable cargo asked the
     /// runner to run - the shim's handshake carries it before the exec.
     Harness { executable: String },
@@ -26,6 +29,18 @@ pub(crate) enum StreamSource {
     Rustdoc,
     /// The bundled nextest engine's event stream.
     Engine,
+}
+
+impl StreamSource {
+    pub(crate) fn describe(&self) -> String {
+        match self {
+            Self::Process => "the test binary".into(),
+            Self::Cargo => "cargo's shared stream".into(),
+            Self::Harness { executable } => format!("harness {executable}"),
+            Self::Rustdoc => "rustdoc".into(),
+            Self::Engine => "the nextest engine".into(),
+        }
+    }
 }
 
 /// How a stream stopped. Three different facts: the writer closed it, a read

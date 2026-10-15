@@ -589,7 +589,7 @@ impl LaneTap {
                         (KillCause::Cancelled, _) => (TerminationCause::SiblingTimeout, None),
                         (KillCause::Stopped, _) => (stop_cause(), None),
                     };
-                    let lane_wide = shared && o.source == StreamSource::Process;
+                    let lane_wide = shared && matches!(o.source, StreamSource::Process | StreamSource::Cargo);
                     // A kill on one binary's stream is that binary's: the
                     // test it names is charged there and nowhere else.
                     let charged = match (&origin, &test, lane_wide) {

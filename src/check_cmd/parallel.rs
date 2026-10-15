@@ -681,6 +681,9 @@ fn report_runs(
                 ));
                 output::error(&run.command);
                 output::error(&test_runner::filter_test(&stdout, &stderr));
+                for reason in run.outcome.structural_reasons() {
+                    output::error(&format!("test record: {reason}"));
+                }
                 ok = false;
                 continue;
             }

@@ -505,8 +505,14 @@ every field, and `diagnostic_continuation.inventory` states it once.
 **Termination** - `{kind, scope}`, `null` when nothing stopped the run - is
 how the run stopped: `phase_deadline` (scope: the phase), `interrupt`,
 `per_test_timeout`, `run_deadline`, `sibling_timeout`, `fail_fast` or
-`engine_error`, with the lane it happened in as the scope where it was a
-lane's. Present outside complete profiles too.
+`engine_error`, with the lane it covered as the scope where it was a lane's.
+When a lane's tests or record fail, the fail-fast it causes is scoped to the
+first later lane it stopped, never one the selection excluded. Failing that
+way in the last attempted lane stops nothing, so `termination` is `null`
+unless the lane recorded its own (a timeout, say), and the error output names
+the failed sweep. An operational error that ends the phase (a refusal, a
+failed pre-build) is the run's, with scope `run`.
+Present outside complete profiles too.
 
 ## Diagnostic continuation
 

@@ -1319,8 +1319,10 @@ The termination rules:
 - **Idle, no-completion or wall** with no defensible identity: a run-level
   timeout (`run_deadline`); the affected executions stay unresolved. No
   timed-out test is ever invented from a suspect.
-- **Fail-fast**: every lane the test phase never reached is recorded as
-  stopped by it, so its executions are `unobserved` for a stated reason. The
+- **Fail-fast**: every later lane the test phase would have attempted is
+  recorded as stopped by it, so its executions are `unobserved` for a stated
+  reason. A lane the selection excluded (`-p`, dedup, not applicable) expects
+  nothing and gets no record, so it is never named as the stop's scope. The
   parallel lane's sibling cancellation, and the engine lane's, are recorded
   as what they are - never inferred from a signal status.
 - **A stream brokkr stopped reading** (the drain grace ran out with something
@@ -1342,6 +1344,30 @@ records on a stream the plan cannot attribute; an attribution error from the
 shim. Across streams, one more: an execution reported by a second stream
 (`duplicate_execution`, see Identities). A terminal record without a start
 still records its outcome.
+
+A test's identity on a stream is its **slot and name**: the suite it was
+reported in (opened only by a valid suite start, so an overlapping start keeps
+the open suite's slot), or outside any suite. The transitions above are judged
+within one slot. Cargo's own stdout (`StreamSource::Cargo`) carries one
+binary's suite after another's, and two binaries may each hold a test of the
+same name, so there a name may recur in a later slot. On a stream that carries
+one binary - a directly executed harness, an isolated one, an engine binary -
+the same recurrence is that harness running the test twice
+(`name_across_slots`), live and on replay. A lookup by name answers only when
+exactly one slot holds it, finished or not. Replay treats an unattributed
+stream as cargo's; any test record on one is already an anomaly.
+
+When a verdict fails on its record rather than a red test (a protocol issue,
+an attribution refusal, an engine failure), or on an unsuccessful exit no kill
+and no red test explains (a harness's own red test explains its exit; any red
+test explains cargo's), the failure output names each one as a
+`test record:` line, beside any red test - on the cargo, parallel and isolated
+lanes. Cargo's own summary can read all green while the record fails the
+sweep. An exit line names the tests a death left unfinished, its suspects;
+cargo's own exit is named only when no harness stream explains it, and a run
+that saw no test at all (a failed build) has its own report. `brokkr test`
+prints the record lines the same way, and tells an unsuccessful process with
+no red test as a harness failure in cargo's words, with its suspect.
 
 **The green invariant**: the plan is complete, every expected execution
 `passed`, nothing anomalous was seen, no termination is on the record, and

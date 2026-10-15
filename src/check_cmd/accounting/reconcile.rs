@@ -102,6 +102,9 @@ pub(crate) enum AnomalyKind {
     StartAfterTerminal,
     RepeatedTerminal,
     TerminalWithoutStart,
+    /// A binary's stream reported a name again in a later suite: its harness
+    /// ran the test twice.
+    NameAcrossSlots,
     /// One expected execution reported on a second stream: two harness
     /// invocations ran what the plan expects run once.
     DuplicateExecution,
@@ -144,6 +147,7 @@ pub(crate) enum AnomalyDetail {
     UnplannedStart { unit: BinaryUnit, test: String },
     RepeatedTerminal { unit: BinaryUnit, test: String },
     TerminalWithoutStart { unit: BinaryUnit, test: String },
+    NameAcrossSlots { unit: BinaryUnit, test: String },
     UnplannedTerminal { unit: BinaryUnit, test: String },
     SlowWarning { unit: BinaryUnit, test: String },
     SuiteSummaryWithoutOpen { unit: BinaryUnit },
@@ -181,6 +185,9 @@ impl Display for AnomalyDetail {
             }
             Self::TerminalWithoutStart { unit, test } => {
                 write!(f, "{}/{test} reported a result it was never seen starting", unit.id())
+            }
+            Self::NameAcrossSlots { unit, test } => {
+                write!(f, "{}/{test} was reported again in a later suite", unit.id())
             }
             Self::UnplannedTerminal { unit, test } => {
                 write!(f, "{}/{test} reported a result the plan does not expect", unit.id())
@@ -384,7 +391,10 @@ fn source_for(origin: &StreamOrigin) -> StreamSource {
         },
         StreamOrigin::Engine { .. } => StreamSource::Engine,
         StreamOrigin::Doctest => StreamSource::Rustdoc,
-        StreamOrigin::Unattributed { .. } => StreamSource::Process,
+        // Mostly cargo's shared stream, and permissive like it; an unknown
+        // harness or engine binary replayed so loses no verdict, since any test
+        // record on an unattributed stream is already an anomaly.
+        StreamOrigin::Unattributed { .. } => StreamSource::Cargo,
     }
 }
 
@@ -783,6 +793,10 @@ pub(crate) fn reconcile(
                     AnomalyKind::TerminalWithoutStart,
                     AnomalyDetail::TerminalWithoutStart { unit: (*unit).clone(), test: name.clone() },
                 ),
+                ProtocolIssue::NameAcrossSlots { name } => (
+                    AnomalyKind::NameAcrossSlots,
+                    AnomalyDetail::NameAcrossSlots { unit: (*unit).clone(), test: name.clone() },
+                ),
             };
             anomaly(kind, Some(st.lane), detail);
         }
@@ -826,15 +840,14 @@ pub(crate) fn reconcile(
         };
         let explained = !st.kills.is_empty() || lane_terms.contains_key(&st.lane) || !run_terms.is_empty();
         let unclean = signal.is_some() || code.is_some_and(|c| c != 0);
-        let tests = observed.tests();
-        let has_bad_terminal = tests.values().any(|test| {
+        let has_bad_terminal = observed.tests().any(|test| {
             test.terminal.is_some_and(|result| !matches!(result, TestResult::Ok | TestResult::Ignored))
         });
         if unclean
             && !explained
             && !has_bad_terminal
-            && !tests.is_empty()
-            && tests.values().all(|test| test.terminal.is_some())
+            && observed.tests().next().is_some()
+            && observed.tests().all(|test| test.terminal.is_some())
         {
             let disposition = match (code, signal) {
                 (_, Some(signal)) => ExitDisposition::Signal(signal),
@@ -908,7 +921,7 @@ pub(crate) fn reconcile(
             .and_then(|state| state.owner)
             .and_then(|stream_id| streams.get(&stream_id))
             .and_then(|stream| reduced(stream, &lane_outcomes))
-            .and_then(|stream| stream.tests().get(test))
+            .and_then(|stream| stream.test(test))
             .and_then(|test| test.terminal);
         let mine = |s: &StreamState| match &s.origin {
             Some(StreamOrigin::Binary { resolution: r, unit: u, one_test }) => {

@@ -391,7 +391,24 @@ pub(super) fn run_one(
             }
         })
         .collect();
-    if verdict == LaneVerdict::Fail && failures.is_empty() {
+    // A broken record fails the run beside any red test, and names itself:
+    // without it a clean exit and a green summary read as "harness failed".
+    // An unsuccessful exit with no red test is the harness's own failure, told
+    // in cargo's words with its suspect; an exit the observations alone
+    // explain (the process itself reported success) is named as a record line.
+    let red = !failures.is_empty();
+    let harness_died = !red && !run.captured.ending.success();
+    let record_reasons = run.outcome.record_reasons();
+    let exit_reasons = if harness_died { Vec::new() } else { run.outcome.exit_reasons() };
+    let silent = record_reasons.is_empty() && exit_reasons.is_empty();
+    failures.extend(record_reasons.into_iter().chain(exit_reasons).map(|reason| Failure {
+        kind: FailureKind::Harness,
+        target: target.to_owned(),
+        what: format!("test record: {reason}"),
+        loc: None,
+        msg: None,
+    }));
+    if verdict == LaneVerdict::Fail && !red && (harness_died || silent) {
         failures.push(harness_failure(
             target,
             &run.captured.ending,

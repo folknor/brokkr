@@ -365,6 +365,7 @@ fn run_one_isolated_test(
             output::error(&format!("failing command: {command}"));
             let stderr = String::from_utf8_lossy(&run.captured.stderr);
             output::error(&test_runner::filter_test(&stdout, &stderr));
+            run.outcome.structural_reasons().iter().for_each(|r| output::error(&format!("test record: {r}")));
             return Ok(IsolatedOutcome::Failed);
         }
         test_runner::LaneVerdict::Incomplete => {

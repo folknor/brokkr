@@ -37,6 +37,48 @@ pub(crate) enum ProtocolIssue {
     TerminalWithoutStart {
         name: String,
     },
+    /// A name already reported in an earlier slot reported again in another,
+    /// on a stream that carries one binary. Its harness ran a test twice; only
+    /// cargo's own stream may legitimately reuse a name, one binary's suite
+    /// after another's.
+    NameAcrossSlots {
+        name: String,
+    },
+}
+
+impl std::fmt::Display for ProtocolIssue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OverlappingSuite => f.write_str("a suite started inside an open suite"),
+            Self::SuiteSummaryWithoutOpen => f.write_str("a suite summary arrived with no open suite"),
+            Self::SuiteTotalsMismatch {
+                reported: (passed, failed, ignored),
+                observed: (observed_passed, observed_failed, observed_ignored),
+            } => write!(
+                f,
+                "a suite claimed {passed} passed, {failed} failed, {ignored} ignored; its records show {observed_passed}, {observed_failed}, {observed_ignored}"
+            ),
+            Self::DuplicateStart { name } => write!(f, "{name} started twice"),
+            Self::StartAfterTerminal { name } => write!(f, "{name} started again after its result"),
+            Self::RepeatedTerminal { name } => write!(f, "{name} reported a second result"),
+            Self::TerminalWithoutStart { name } => {
+                write!(f, "{name} reported a result it was never seen starting")
+            }
+            Self::NameAcrossSlots { name } => {
+                write!(f, "{name} was reported again in a later suite of the same binary")
+            }
+        }
+    }
+}
+
+/// Where on a stream a record sits: inside the suite libtest opened (by
+/// ordinal), or outside any suite. A test's identity on a stream is its slot
+/// and its name, so cargo's stream - one binary's suite after another's - can
+/// carry two binaries' tests of the same name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Slot {
+    Outside,
+    Suite(u64),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -50,8 +92,14 @@ pub(crate) struct StreamOutcome {
     suites_started: u64,
     suites_finished: u64,
     suite_open: bool,
+    /// The slot records land in now. Opened only by a valid suite start, so an
+    /// overlapping start keeps the open suite's namespace.
+    slot: Slot,
     suite_counts: (u64, u64, u64),
-    tests: BTreeMap<String, TestObservation>,
+    tests: BTreeMap<(Slot, String), TestObservation>,
+    /// The slots each name appeared in, so recurrence and lookup by name do
+    /// not scan the stream.
+    slots_by_name: BTreeMap<String, Vec<Slot>>,
     end: Option<StreamEnd>,
     exit: Option<(Option<i32>, Option<i32>)>,
     kills: Vec<KillCause>,
@@ -73,8 +121,10 @@ impl Default for StreamOutcome {
             suites_started: 0,
             suites_finished: 0,
             suite_open: false,
+            slot: Slot::Outside,
             suite_counts: (0, 0, 0),
             tests: BTreeMap::new(),
+            slots_by_name: BTreeMap::new(),
             end: None,
             exit: None,
             kills: Vec::new(),
@@ -95,10 +145,23 @@ impl ExecutionOutcome {
     }
 
     pub(crate) fn observe_event(&mut self, stream: u64, source: StreamSource, event: &ObsEvent) {
+        let test_event = matches!(
+            event,
+            ObsEvent::SuiteStarted { .. }
+                | ObsEvent::SuiteFinished { .. }
+                | ObsEvent::Started { .. }
+                | ObsEvent::Finished { .. }
+        );
         let outcome = self.streams.entry(stream).or_insert_with(|| StreamOutcome {
-            source,
+            source: source.clone(),
             ..StreamOutcome::default()
         });
+        // A kill or an exit can reach a stream first, under a placeholder
+        // source; the stream's own records name what it really is, and that
+        // decides whether a name may recur across its suites.
+        if test_event && !outcome.has_test_activity() {
+            outcome.source = source;
+        }
         outcome.observe(event);
     }
 
@@ -130,10 +193,105 @@ impl ExecutionOutcome {
             .count()
     }
 
+    /// The result of the one test by this name. `None` when no stream or
+    /// several report it - a second occurrence, finished or not, makes the
+    /// name ambiguous, and an ambiguous name proves nothing passed.
     pub(crate) fn test_result(&self, name: &str) -> Option<TestResult> {
-        self.streams
+        let mut holders = self
+            .streams
             .values()
-            .find_map(|stream| stream.tests.get(name).and_then(|test| test.terminal))
+            .filter(|stream| stream.slots_by_name.contains_key(name));
+        let only = holders.next()?;
+        if holders.next().is_some() {
+            return None;
+        }
+        only.test(name)?.terminal
+    }
+
+    /// Every reason the run failed that no red test states:
+    /// [`Self::record_reasons`] and then [`Self::exit_reasons`].
+    pub(crate) fn structural_reasons(&self) -> Vec<String> {
+        let mut reasons = self.record_reasons();
+        reasons.extend(self.exit_reasons());
+        reasons
+    }
+
+    /// What is wrong with the record itself: protocol issues, attribution
+    /// refusals, engine failures.
+    pub(crate) fn record_reasons(&self) -> Vec<String> {
+        let mut reasons = Vec::new();
+        for (id, stream) in &self.streams {
+            let label = stream.label(*id);
+            for issue in &stream.issues {
+                reasons.push(format!("{label}: {issue}"));
+            }
+            for refusal in &stream.refusals {
+                reasons.push(format!("{label}: {}", refusal.detail()));
+            }
+            for failure in &stream.run_failures {
+                match failure {
+                    ExecutionFailure::EngineError => {
+                        reasons.push(format!("{label}: the test engine failed"));
+                    }
+                }
+            }
+        }
+        reasons
+    }
+
+    /// Each unsuccessful exit or signal no red test of its own (or, for
+    /// cargo's, anywhere) and no kill explains, in a
+    /// run that saw tests: cargo killed after green suites (its own stream
+    /// carries none when harnesses are isolated), an `exit(1)` after the last
+    /// test, a death mid-test - naming the tests it left unfinished.
+    pub(crate) fn exit_reasons(&self) -> Vec<String> {
+        // A run with no test activity anywhere (a build that failed) has its
+        // own report. A red test explains its own harness's exit, and cargo's
+        // - cargo exits nonzero for a harness that failed one - but never
+        // another harness's.
+        if !self.has_test_activity() {
+            return Vec::new();
+        }
+        let red = |stream: &StreamOutcome| {
+            stream
+                .tests
+                .values()
+                .any(|test| matches!(test.terminal, Some(TestResult::Failed | TestResult::TimedOut)))
+        };
+        let red_anywhere = self.streams.values().any(red);
+        let mut reasons = Vec::new();
+        let mut cargo = Vec::new();
+        for (id, stream) in &self.streams {
+            let is_cargo = matches!(stream.source, StreamSource::Cargo);
+            if !stream.kills.is_empty() || red(stream) || (is_cargo && red_anywhere) {
+                continue;
+            }
+            let into = if is_cargo { &mut cargo } else { &mut reasons };
+            let how = match stream.exit {
+                Some((_, Some(signal))) => format!("was killed by signal {signal}"),
+                Some((Some(code), None)) if code != 0 => format!("exited with code {code}"),
+                _ => continue,
+            };
+            // A death mid-test names what was running: the suspect.
+            let unfinished: Vec<&str> = stream
+                .tests
+                .iter()
+                .filter(|(_, test)| test.started && test.terminal.is_none())
+                .map(|((_, name), _)| name.as_str())
+                .collect();
+            let label = stream.label(*id);
+            into.push(if unfinished.is_empty() {
+                format!("{label}: the process {how} though no test failed")
+            } else {
+                format!("{label}: the process {how} while running {}", unfinished.join(", "))
+            });
+        }
+        // A harness that died is why cargo exited unsuccessfully; cargo's own
+        // exit is a reason only when no harness gives one.
+        if reasons.is_empty() {
+            reasons = cargo;
+        }
+        reasons
     }
 
     pub(crate) fn has_test_activity(&self) -> bool {
@@ -146,7 +304,7 @@ impl ExecutionOutcome {
             .values()
             .flat_map(|stream| stream.tests.iter())
             .filter(|(_, test)| test.terminal == Some(TestResult::Failed))
-            .map(|(name, _)| name.clone())
+            .map(|((_, name), _)| name.clone())
             .collect();
         names.sort();
         names.dedup();
@@ -198,13 +356,16 @@ impl StreamOutcome {
             ObsEvent::SuiteStarted { .. } => {
                 if self.suite_open {
                     self.issues.push(ProtocolIssue::OverlappingSuite);
+                } else {
+                    self.slot = Slot::Suite(self.suites_started);
                 }
                 self.suite_open = true;
                 self.suites_started += 1;
                 self.suite_counts = (0, 0, 0);
             }
             ObsEvent::Started { name } => {
-                let state = self.tests.entry(name.clone()).or_default();
+                self.note_slot(name);
+                let state = self.tests.entry((self.slot, name.clone())).or_default();
                 if state.terminal.is_some() {
                     self.issues
                         .push(ProtocolIssue::StartAfterTerminal { name: name.clone() });
@@ -215,7 +376,8 @@ impl StreamOutcome {
                 state.started = true;
             }
             ObsEvent::Finished { name, result } => {
-                let state = self.tests.entry(name.clone()).or_default();
+                self.note_slot(name);
+                let state = self.tests.entry((self.slot, name.clone())).or_default();
                 if state.terminal.is_some() {
                     self.issues
                         .push(ProtocolIssue::RepeatedTerminal { name: name.clone() });
@@ -253,18 +415,47 @@ impl StreamOutcome {
                     });
                 }
                 self.suite_open = false;
+                self.slot = Slot::Outside;
                 self.suites_finished += 1;
             }
             ObsEvent::SlowWarning { .. } => {}
         }
     }
 
+    /// Before `name`'s first record in the current slot: on a stream that
+    /// carries one binary, the name already reported in another slot is that
+    /// binary's harness running it again. Raised once per slot it recurs in.
+    fn note_slot(&mut self, name: &str) {
+        let slots = self.slots_by_name.entry(name.to_owned()).or_default();
+        if slots.contains(&self.slot) {
+            return;
+        }
+        if !slots.is_empty() && !matches!(self.source, StreamSource::Cargo) {
+            self.issues.push(ProtocolIssue::NameAcrossSlots { name: name.to_owned() });
+        }
+        slots.push(self.slot);
+    }
+
+    fn label(&self, id: u64) -> String {
+        format!("stream {id} ({})", self.source.describe())
+    }
+
     pub(crate) fn suite_open(&self) -> bool {
         self.suite_open
     }
 
-    pub(crate) fn tests(&self) -> &BTreeMap<String, TestObservation> {
-        &self.tests
+    /// Every test observation on this stream, one per slot a name appeared in.
+    pub(crate) fn tests(&self) -> impl Iterator<Item = &TestObservation> {
+        self.tests.values()
+    }
+
+    /// The one observation of `name` on this stream; `None` when it never
+    /// appeared or appeared in more than one slot.
+    pub(crate) fn test(&self, name: &str) -> Option<&TestObservation> {
+        match self.slots_by_name.get(name)?.as_slice() {
+            [slot] => self.tests.get(&(*slot, name.to_owned())),
+            _ => None,
+        }
     }
 
     pub(crate) fn end(&self) -> Option<StreamEnd> {
