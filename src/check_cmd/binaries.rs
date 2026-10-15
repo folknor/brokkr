@@ -431,7 +431,7 @@ fn toolchain_libdir(
 }
 
 /// Did cargo reject the unification flags themselves, rather than fail to
-/// compile something? Shared by binary enumeration and the install-feature
+/// compile something? Shared by binary enumeration and the member-check
 /// phase, where it aborts the whole phase.
 ///
 /// It has to be a POSITIVE identification of cargo's own option rejection.

@@ -55,6 +55,8 @@ mod tests {
             deps: None,
             lints: None,
             bin: None,
+            member_check: None,
+            fixture_lints: Vec::new(),
             disable_toolchain: false,
             cargo_env: std::collections::BTreeMap::new(),
             included_config_files: Vec::new(),
@@ -1824,6 +1826,101 @@ sweeps = ["all"]
             .to_string();
         assert!(err.contains("'clipy'"), "got: {err}");
         assert!(err.contains("not a skippable check phase"), "got: {err}");
+    }
+
+    // The retired install-feature gate ran by default over `[bin] install`;
+    // dropping it silently would let a green gate mean less than it did.
+    #[test]
+    fn bin_install_without_member_check_is_refused_with_the_old_scope() {
+        let err = parse_dev_config(&root_table("[bin]\ninstall = [\"cli\"]\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("[member_check]") && err.contains("cli"), "got: {err}");
+        assert!(err.contains("release"), "the old profile is named: {err}");
+
+        let cfg = parse_dev_config(&root_table(
+            "[bin]\ninstall = [\"cli\"]\n[member_check]\nwhen = \"off\"\n",
+        ))
+        .unwrap();
+        assert_eq!(cfg.member_check.unwrap().when, Cadence::Off);
+    }
+
+    #[test]
+    fn retired_install_feature_spellings_name_the_rename() {
+        let err = parse_dev_config(&root_table("[bin]\ninstall_feature_check = \"gate\"\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("member_check"), "got: {err}");
+
+        let table = root_table(
+            r#"
+[[check]]
+name = "all"
+[test.profiles.edit]
+certifies = "partial"
+skip_phases = ["install_feature"]
+sweeps = ["all"]
+"#,
+        );
+        let check = parse_check(&table).unwrap();
+        let test = parse_test(&table).unwrap();
+        let err = validate_check_against_test(&check, test.as_ref(), &[])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("renamed `member_check`"), "got: {err}");
+    }
+
+    #[test]
+    fn member_check_defaults_to_production_targets_at_the_gate() {
+        let cfg = parse_dev_config(&root_table("[member_check]\n")).unwrap().member_check.unwrap();
+        assert_eq!(cfg.when, Cadence::Gate);
+        assert_eq!(cfg.targets, vec![MemberTarget::Lib, MemberTarget::Bins]);
+        assert_eq!(cfg.profile, MemberProfile::Dev);
+        // Dev targets are unspellable, and a reasonless skip is refused.
+        assert!(parse_dev_config(&root_table("[member_check]\ntargets = [\"tests\"]\n")).is_err());
+        assert!(parse_dev_config(&root_table("[member_check]\ntargets = []\n")).is_err());
+        assert!(
+            parse_dev_config(&root_table(
+                "[member_check]\nskip = [{ package = \"x\", reason = \" \" }]\n"
+            ))
+            .is_err()
+        );
+    }
+
+    const FIXTURE: &str = r#"
+[[fixture_lint]]
+name = "seal"
+path = "seal"
+manifest = "seal/expect.toml"
+lint_args = ["-W", "clippy::disallowed_methods"]
+[[fixture_lint.variant]]
+name = "walk-up"
+unset = ["CLIPPY_CONF_DIR"]
+"#;
+
+    #[test]
+    fn fixture_lint_parses_and_refuses_deny_levels_and_bad_variants() {
+        let cfg = parse_dev_config(&root_table(FIXTURE)).unwrap();
+        assert_eq!(cfg.fixture_lints.len(), 1);
+        assert_eq!(cfg.fixture_lints[0].variants[0].unset, vec!["CLIPPY_CONF_DIR".to_owned()]);
+
+        // A deny level stops the compile that proves analysis completed.
+        let deny = FIXTURE.replace("\"-W\"", "\"-D\"");
+        let err = parse_dev_config(&root_table(&deny)).unwrap_err().to_string();
+        assert!(err.contains("-W"), "got: {err}");
+
+        // The name is a target-dir component; it may not walk out of it.
+        let escaping = FIXTURE.replace("name = \"seal\"", "name = \"x/../../shared\"");
+        assert!(parse_dev_config(&root_table(&escaping)).is_err());
+
+        let no_variant = FIXTURE.split("[[fixture_lint.variant]]").next().unwrap();
+        assert!(parse_dev_config(&root_table(no_variant)).is_err());
+
+        let both = FIXTURE.replace(
+            "unset = [\"CLIPPY_CONF_DIR\"]",
+            "unset = [\"CLIPPY_CONF_DIR\"]\nenv = { CLIPPY_CONF_DIR = \"{root}\" }",
+        );
+        assert!(parse_dev_config(&root_table(&both)).is_err());
     }
 
     #[test]

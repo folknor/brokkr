@@ -360,31 +360,14 @@ pub fn cmd_run_commit(
     }
 }
 
-/// The `[bin] install` packages with their bin target names, through the
-/// same discovery `cmd_install` resolves against - package names, never bin
-/// names or directory basenames, and an unknown package refused in the same
-/// words. `check`'s install-feature phase reads this so the checked set and
-/// the installed set cannot drift.
-pub fn install_bin_targets(
-    project_root: &Path,
-    install: &[String],
-) -> Result<Vec<(String, Vec<String>)>, DevError> {
-    let runnables = discover(project_root)?;
-    Ok(resolve_install_packages(&runnables, install)?
-        .into_iter()
-        .map(|package| (package.name, package.bin_names))
-        .collect())
-}
-
 struct InstallPackage {
     name: String,
     package_dir: PathBuf,
-    bin_names: Vec<String>,
 }
 
-/// Resolve configured install package names against one metadata snapshot.
-/// Shared by `cmd_install` and the install-feature check so both refuse
-/// unknown packages with the same rule and wording.
+/// Resolve configured install package names against one metadata snapshot:
+/// package names, never bin names or directory basenames, and an unknown
+/// package refused.
 fn resolve_install_packages(
     runnables: &[Runnable],
     install: &[String],
@@ -404,7 +387,6 @@ fn resolve_install_packages(
         out.push(InstallPackage {
             name: pkg.clone(),
             package_dir: first.package_dir.clone(),
-            bin_names: selected.iter().map(|r| r.name.clone()).collect(),
         });
     }
     Ok(out)
@@ -417,7 +399,7 @@ fn resolve_install_packages(
 /// `--locked` is the default because `cargo install --path` otherwise
 /// ignores the workspace `Cargo.lock` entirely and re-resolves every
 /// dependency to the newest semver-compatible version. Every other brokkr
-/// path - `check`, `test`, `run`, the install-feature phase - reads the
+/// path - `check`, `test`, `run`, the member-check phase - reads the
 /// lockfile, so without it `install` is the one command that ships a
 /// dependency set no gate ever validated, and an upstream crate publishing
 /// a breaking minor breaks the deploy of a tree nobody touched. Whatever

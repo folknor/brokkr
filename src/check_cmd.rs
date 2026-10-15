@@ -38,7 +38,7 @@ pub(crate) use crate::build_purpose::features::feature_fixture;
 pub(crate) use crate::build_purpose::requests::SupportRequest;
 pub(crate) use selection::{
     AdmissionNote, AdmissionRule, Attempt, CheckSelections, DeclaredShape, ForwardedArgs,
-    InstallSelection, LaneEntry, PackageSource, PhaseSelection, ReachLedger, ReproLine, Resolution,
+    GatedPhases, MemberSelection, LaneEntry, PackageSource, PhaseSelection, ReachLedger, ReproLine, Resolution,
     ResolutionRun, Selection, SelectionPhase, ShapeId, feature_drop_lines, join_notes,
     reject_direct_execution_args, reject_forwarded_package_selectors, resolve_invocation_sweeps,
     resolve_planned_sweep,
@@ -54,7 +54,9 @@ include!("check_cmd/prepare.rs");
 include!("check_cmd/accounting.rs");
 include!("check_cmd/continuation.rs");
 include!("check_cmd/coverage.rs");
-include!("check_cmd/install_shape.rs");
+include!("check_cmd/member_check.rs");
+mod fixture_lint;
+use fixture_lint::run_fixture_lint_phase;
 include!("check_cmd/binaries.rs");
 include!("check_cmd/direct_runtime.rs");
 include!("check_cmd/nextest.rs");

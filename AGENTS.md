@@ -18,14 +18,14 @@ A doc with 8+ `##` sections is **section-addressed**: `brokkr man conventions sc
 
 - `reference/architecture.md` - the full module map: what each source file owns and why. Read before changing a module you have not touched this session.
 - `reference/output.md` - operator output channel conventions.
-- `docs/brokkr.toml.md` - config core: where it lives, the user-wide layer, `include` composition, top-level shape and host sections, `worktree_keep`, `disable_toolchain`, `[cargo_env]`, `[deps]`, `[bin]`, `[lints]`.
-- `docs/brokkr.toml.conventions.md` - convention gates: `[gremlins]`, shared path selectors, `[header]`, `[[textlint]]`, `[textlint_preset]`, `[[script_check]]`, `[manifest]`, `[rustdoc]`, `[[dependency_rule]]`.
+- `docs/brokkr.toml.md` - config core: where it lives, the user-wide layer, `include` composition, top-level shape and host sections, `worktree_keep`, `disable_toolchain`, `[cargo_env]`, `[deps]`, `[bin]`, `[member_check]`, `[lints]`.
+- `docs/brokkr.toml.conventions.md` - convention gates: `[gremlins]`, shared path selectors, `[header]`, `[[textlint]]`, `[textlint_preset]`, `[[script_check]]`, `[manifest]`, `[rustdoc]`, `[[fixture_lint]]`, `[[dependency_rule]]`.
 - `docs/brokkr.toml.sweeps.md` - `[[check]]` sweeps, the `parallel` lane, `[test]` and its profiles, `[[quarantine]]`.
 - `docs/brokkr.toml.elivagar.md` - `[<host>.tilegen.*]` blocks (elivagar).
 - `docs/brokkr.toml.datasets.md` - `[<host>.datasets.*]` and the variant-selection CLI flags (pbfhogg/elivagar/nidhogg).
 - `docs/brokkr.toml.piners.md` - the `[piners]` config block.
 - `docs/commands/check.md` - using `brokkr check`: flags, output, invocation selection, feature projection, the markdown-only shortcut, the convention/clippy/rustdoc phases, `certifies` and exit codes, log lines, sweep selection.
-- `docs/commands/check.test-lanes.md` - check's test phase: serial/parallel/process-isolated/nextest/doctest lanes, the coverage audit, diagnostic continuation, feature unification, install-feature, dead filters, `BROKKR_TEST_BIN_DIR`.
+- `docs/commands/check.test-lanes.md` - check's test phase: serial/parallel/process-isolated/nextest/doctest lanes, the coverage audit, diagnostic continuation, feature unification, member-check, dead filters, `BROKKR_TEST_BIN_DIR`.
 - `docs/commands/test.md` - `brokkr test`: discovery, matching, `-N`, `--timeout`.
 - `docs/commands/check.hygiene.md` - time ceilings and the per-test cap, strays and orphan reaping, the rustc guard.
 - `reference/check-internals.md` - how the check/test pipeline is built: invocation selection, harness isolation and the failure roster, direct execution, the prepare plan, journal and execution accounting, diagnostic inventory, watchdog attribution, the stray/orphan reapers, the guard's lease protocol, rustflags sink selection. Read before changing any of them.

@@ -84,8 +84,8 @@ pub(crate) enum Command {
         long_about = "\
 Phases in order: the convention checks (gremlins, header, textlint,
 manifest, script checks, dependency rules, publish cycle), then clippy,
-rustdoc and tests - plus coverage and the install-feature phase where the
-profile asks for them. A failing phase stops the run before the next one
+rustdoc and tests - plus coverage, member-check and fixture-lint where the
+profile and config ask for them. A failing phase stops the run before the next one
 starts. Extra args after `--` go to the test phase: tokens before a second
 `--` to `cargo test`, tokens after it to libtest. To run one test without
 the other phases, use `brokkr test NAME`.

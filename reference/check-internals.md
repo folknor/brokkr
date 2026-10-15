@@ -16,7 +16,7 @@ Which lanes each phase of `check` (and `brokkr test`) is eligible to attempt,
 and with which packages, is decided once, before any phase runs
 (`src/check_cmd/selection.rs`), and every consumer reads that answer: clippy
 and rustdoc, the test phase, `prepare`, the lane runners (serial, parallel,
-isolated, nextest), install-feature, `brokkr clippy`, `brokkr test`, and the
+isolated, nextest), member-check, `brokkr clippy`, `brokkr test`, and the
 `package rules` and `brokkr test` plan announcements. Nothing re-derives it.
 It is invocation selection only: it never predicts binaries, tests, inventory
 or outcomes. The prepared inventory and the runtime record (journal,
@@ -101,11 +101,13 @@ test phase, each set when the phase starts work on that sweep - before cargo
 returns, so a sweep whose run failed still counts, and a lane an earlier
 fail-fast never reached does not.
 
-Install-feature has its own selection: not applicable (no `[bin]`, an empty
-install set, `install_feature_check` ruling the claim out, the phase
-skipped), skipped visibly when the `-p` set rules every install package out
-(never a refusal), else the install packages to check. Which of their bins are
-eligible stays cargo's runtime answer.
+Member-check has its own selection: not applicable (no `[member_check]`, its
+`when` ruling the claim out, the phase skipped), else eligible with the `-p`
+set. Which members exist is a cargo metadata fact, so the member set itself -
+workspace members less `skip`, intersected with `-p`, skipped visibly when
+that empties it - is resolved when the phase runs; which bins are eligible
+stays cargo's runtime answer. Fixture-lint's selection is the entries whose
+`when` admits the claim, independent of `-p`.
 
 ### How terminal the cap is
 

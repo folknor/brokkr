@@ -638,7 +638,7 @@ thing, so materializing the default cannot change behaviour.
 
 ### What `package` catches
 
-The `install_feature` phase below compiles the install shape but runs no tests,
+The `member_check` phase below compiles the install shape but runs no tests,
 and the defect class it cannot see is a **runtime** one: a crate whose behaviour
 depends on a feature a sibling workspace member enables. A daemon taking a
 dependency with `default-features = false` and calling a `#[cfg(feature)]`-gated
@@ -667,7 +667,7 @@ different questions, and only the first could be derived.
 ### Consequences of package mode
 
 - **One cargo invocation per package**, never a batched multi-`-p` - the same
-  rule, and the same measured reason, as the `install_feature` phase below.
+  rule, and the same measured reason, as the `member_check` phase below.
   This applies to clippy, the prebuild, the test run, the parallel fan-out and
   the `prepare` phase's enumeration alike.
 - **Its own target dir** (`<target>/unify-package[-<rustflags hash>]`), because
@@ -694,30 +694,53 @@ different questions, and only the first could be derived.
   on), so a package-mode and a workspace-mode lane never dedupe into each
   other in clippy, in `brokkr test`, or in the coverage audit.
 
-## `install_feature` phase (install-shaped resolve)
+## `member_check` phase (each member resolved alone)
 
 Every other compiling phase resolves features over a selection that includes
 sibling workspace members, so a shared dependency's features are the union of
-what all members ask for. `cargo install --path <pkg>` - which is what
-`brokkr install` runs per `[bin] install` package - resolves each package
-**alone**. A call site that only compiles because a sibling enables a
-third-party feature (a tokio, hyper, or upstream-crate feature, not just the
-workspace's own) is green under every workspace-selected sweep and fails at
-install time, on the deploy path.
+what all members ask for. `cargo install -p <member>` - and `brokkr install`
+per `[bin] install` package - resolves each package **alone**. A call site
+that only compiles because a sibling enables a third-party feature (a tokio,
+hyper, or upstream-crate feature, not just the workspace's own) is green under
+every workspace-selected sweep and fails at install time, on the deploy path.
 
-The phase closes that gap: **one `cargo check` per `[bin] install` package**
-under `-Zfeature-unification` with `resolver.feature-unification="package"` -
+The phase closes that gap: **one `cargo check` per workspace member** under
+`-Zfeature-unification` with `resolver.feature-unification="package"` -
 cargo's mode that resolves a selected package as though it were selected
-alone, which is exactly `cargo install`'s boundary. `--bins` (install builds
-only bins, no dev-units), `--release` unless `[bin] debug = true` (the
-profile install uses), and the `[lints]` allows through the same rustflags
-plumbing as the test phase. The CLI `--config` outranks a repo's committed
-`.cargo/config.toml`, so a workspace-mode unification pin (adopted for the
-parallel lane) and this phase coexist. Every package is checked even after
-an earlier one fails, so one run reports the whole install set.
-The package builds and their `--bin NAME` eligibility probes all use the
-`unify-package` target directory beside Cargo's metadata-resolved target dir,
-keeping this package graph out of the workspace-shared cache.
+alone, which is exactly `cargo install`'s boundary - with `--locked`,
+`--keep-going`, the configured profile, and the `[lints]` allows through the
+same rustflags plumbing as the test phase. The CLI `--config` outranks a
+repo's committed `.cargo/config.toml`, so a workspace-mode unification pin
+(adopted for the parallel lane) and this phase coexist. Every member is
+checked even after an earlier one fails, so one run reports the whole
+workspace. The member builds and their `--bin NAME` eligibility probes all
+use the `unify-package` target directory beside Cargo's metadata-resolved
+target dir, keeping this package graph out of the workspace-shared cache
+while every member and every run reuse it incrementally.
+
+```toml
+[member_check]
+when = "gate"               # "off" | "gate" (default) | "always"
+targets = ["lib", "bins"]   # default; any non-empty subset
+profile = "dev"             # "dev" (default) | "release"
+skip = [{ package = "xtask", reason = "tooling, never installed" }]
+```
+
+- **Members** are cargo metadata's `workspace_members` (so `exclude` is
+  respected) less `skip`. Every `skip` entry carries a reason, and one naming
+  no member fails the phase - validated against the whole member set before
+  any `-p` narrowing, so a narrowed run cannot hide a stale entry. There is
+  deliberately no allowlist: a member added later is checked, not silently
+  left out.
+- **Production targets only.** `targets` spells `lib` and `bins`, nothing
+  else. Tests, benches and examples pull the member's dev-dependencies into
+  the same resolve, and a dev-dependency can donate a feature to a dependency
+  the production targets also use - package unification isolates members from
+  each other, not a member's targets from each other. A member with no target
+  of a selected class is fine as long as it has one of the other; a member
+  with none at all fails (skip it with a reason).
+- **Profile** is part of the claim and named on the ok line: code can differ
+  under `debug_assertions`, so a dev check says nothing about release.
 
 Per package rather than one batched multi-`-p` invocation, from a measured
 false positive: cargo dedupes units across a batched graph, so with two
@@ -726,34 +749,39 @@ whose own features do not vary dedupes onto one variant while a crate
 between them compiles against both - producing "expected `AccountId`, found
 `AccountId`" errors in an innocent intermediate crate, a shape no actual
 `cargo install` can resolve its way into. Per-package invocations are the
-advertised boundary, and they attribute every error to the package whose
-resolve produced it. When a single package's resolve still builds two
-feature variants of one crate version, the failure output names the crate -
+advertised boundary, and they attribute every error to the member whose
+resolve produced it. When one resolve builds more than one feature set of a
+crate version, the failure output names the crate as a candidate cause -
 rustc's "mismatched types" between identical type names otherwise reads as
-version skew that is not there.
+version skew that is not there. It is only a candidate: host and target
+dependency domains may legitimately differ.
 
-CLI `-p` intersects with the install list like every other phase: named
-install packages are checked, the rest dropped with a note, and an emptied
+CLI `-p` intersects with the member set: named members are checked, a
+skipped or non-member name is dropped with a note, and an emptied
 intersection skips the phase visibly. (Moot under `--gate`, which refuses
 `-p` outright.)
 
-What a green run claims, precisely: **each install package's binary source
-compiles without features contributed solely by sibling workspace roots.**
-It does not claim the package will `cargo install` - the check performs no
-codegen or linking, and the ok line says so. It does share a dependency
-graph with the install: both resolve against the workspace lockfile, since
-`brokkr install` passes `--locked` (`brokkr man run`). Raw `cargo install
---path`, and `brokkr install --unlocked`, re-resolve instead - and then this
-phase's green says nothing about the versions they pick.
+What a green run claims, precisely: **each checked member's selected
+production targets compile under that member's own resolve, at the named
+profile, against the workspace lockfile.** It does not claim the member will
+`cargo install` - the check performs no codegen or linking. It shares a
+dependency graph with `brokkr install`, which passes `--locked` (`brokkr man
+run`). Raw `cargo install --path`, and `brokkr install --unlocked`,
+re-resolve instead - and then this phase's green says nothing about the
+versions they pick.
 
 Two refusals keep it honest:
 
 - **Zero-target refusal.** `--bins` silently skips a bin whose
   `required-features` are unsatisfied, so the artifact stream is compared
-  against each package's declared bin targets - a gate that checked nothing
-  must not read as green. A bin missing from the stream is then put to cargo
-  by name (`--bin NAME`, every other resolution argument identical): building
-  credits it, a compile error fails the package, and cargo's own
+  against each member's declared production targets, keyed by the member's
+  exact package id, target class and name, and crediting only non-test
+  compiles - a gate that checked nothing must not read as green. A lib
+  missing from a successful stream fails (a lib has no `required-features` to
+  excuse it). A bin missing from the stream is put to cargo by name (`--bin
+  NAME`, every other resolution argument identical): a build whose stream
+  carries the bin's artifact credits it, a compile error fails the member,
+  and cargo's own
   `requires the features` refusal *naming that target* waives it, since
   `cargo install` would skip it too. Anything else fails closed. Brokkr
   deliberately does not decide eligibility from `required-features` itself -
@@ -762,38 +790,41 @@ Two refusals keep it honest:
   and a model wrong in the permissive direction drops a bin from the
   expectations, never compiles it, and reports green: cargo's silent skip
   moved inside brokkr, where nothing is left to catch it. Waived bins are
-  reported by name, and a package whose bins are *all* waived still fails.
+  reported by name, and a member whose targets are *all* waived still fails.
 - **No toolchain fallback.** A cargo without package-mode support fails with
-  a named remedy (update nightly, or `install_feature_check = "off"`);
+  a named remedy (update nightly, or `[member_check] when = "off"`);
   falling back to selected-mode would silently recreate the workspace-unified
   graph the phase exists to leave. That classification aborts the phase, so it
   requires a positive match on cargo's own option rejection *and* the absence
   of rustc diagnostics - a substring test for "nightly" matches ordinary
   compile output and a dependency named `nightly-helper` alike, and would
-  abort the remaining install set with a false remedy.
+  abort the remaining members with a false remedy.
 
 On failure, the errors are ordinary rustc errors against code that compiles
 fine in the rest of the run - genuinely confusing without context - so the
-phase names the mechanism: it diffs the workspace resolve against the
-failing package's install-shaped resolve and prints which features each
-dependency loses ("hyper v1.11.0: server"), with the usual fix being to
-declare the feature in the install package's own manifest. The errors print
-in the one-line form like every other phase; the low-noise debug loop is
-`-p <install pkg>`, which narrows the test phases and the install set
-together.
+phase offers a candidate explanation: it diffs the workspace resolve against
+the failing member's solo resolve (`cargo tree`'s normal+build graph with
+default features - an approximation of the failing build, labelled as one)
+and prints which features each dependency loses ("hyper v1.11.0: server").
+When one of those is what the code needs, the fix is declaring it in the
+member's own manifest. The errors print in the one-line form like every other
+phase; the low-noise debug loop is `-p <member>`, which narrows the test
+phases and the member set together.
 
-When it runs: `[bin] install_feature_check = "off" | "gate" | "always"`,
-default `gate` - only under a `certifies = "complete"` profile, because
-package mode deliberately compiles duplicate variants of shared dependencies
-and is priced for the pre-landing run, not the edit loop. The phase is inert
-without an explicit `[bin] install` list, and the key without the list is a
-load error (a knob that looks armed but can never fire). A partial profile
-may name `install_feature` in `skip_phases`.
-
-The cost is not only the phase's own runtime: its units land in the shared
-target dir, and a first gate run on a workspace-unification-pinned tree has
-been measured to invalidate warm test artifacts, taxing the *next* fast-loop
-run too. That asymmetry is part of why `gate` is the default.
+When it runs: `when = "off" | "gate" | "always"`, default `gate` - only under
+a `certifies = "complete"` profile, because per-member resolution
+deliberately compiles duplicate variants of shared dependencies and is priced
+for the pre-landing run, not the edit loop. Without a `[member_check]` table
+the phase is inert - except that a non-empty `[bin] install` with no table is
+a load error: the retired `install_feature` phase checked those packages by
+default, and silently dropping that obligation would let a green gate mean
+less than it did. The error names the old scope (the install packages, their
+bins, the `[bin] debug` profile) and the new one (every member), which are
+deliberately not equivalent. `[bin] install_feature_check` is a load error
+pointing at `when`, and `install_feature` in `skip_phases` names the rename.
+A partial profile may name `member_check` in `skip_phases`. The phase budget
+is the test phase's (it covers a whole workspace of cold resolves); the
+whole-check ceiling still bounds the run.
 
 ## Dead `skip` / `only` filters
 

@@ -19,8 +19,8 @@ each phase has its own ceiling on top of that:
 | Phase | Ceiling |
 |---|---|
 | `clippy`, `rustdoc` | 5 min |
-| `prepare`, `test` | 15 min |
-| `coverage`, `install_feature`, `script_check` | 5 min |
+| `prepare`, `test`, `member_check`, `fixture_lint` | 15 min |
+| `coverage`, `script_check` | 5 min |
 | every other phase (`gremlins`, `header`, `textlint`, `manifest`, `dependency_rules`, `publish_cycle`) | 2 min |
 
 `prepare` (every run that runs tests; see the `coverage` phase and

@@ -3,7 +3,8 @@
 Both commands share one sweep and profile machinery. `check` is the full
 validation pass (gremlins + header + textlint + manifest + script checks +
 dependency rules + publish cycle + clippy + optional rustdoc + prepare + tests,
-with coverage under a complete claim and install-feature when configured);
+with coverage under a complete claim, and member-check and fixture-lint when
+configured);
 `test` runs the cargo tests matching one name against the same sweep set.
 
 For the underlying config (`[[check]]`, `[[dependency_rule]]`, `[test]`
@@ -17,7 +18,8 @@ This doc covers the command, its output, and the phases up to the tests, then
 
 - `brokkr man test-lanes` - the test phase and its lanes (serial, parallel,
   process-isolated, nextest, doctests), coverage, diagnostic continuation,
-  feature unification, install-feature, dead filters.
+  feature unification, member-check, dead filters.
+- `brokkr man conventions fixture_lint` - the fixture-lint phase.
 - `brokkr man test` - `brokkr test`.
 - `brokkr man hygiene` - time ceilings and the per-test cap, strays, the rustc
   guard.
@@ -26,7 +28,7 @@ This doc covers the command, its output, and the phases up to the tests, then
 
 Gremlins + header + textlint + manifest + script checks + dependency rules +
 publish cycle + clippy + optional rustdoc + prepare + tests + coverage under a
-complete claim + install-feature when configured. Trailing args after
+complete claim + member-check and fixture-lint when configured. Trailing args after
 `brokkr check --` are split on a literal `--`: tokens before it go to
 `cargo test` (e.g.
 `brokkr check -- --test cli_sort` scopes to one test crate), tokens after go
@@ -68,7 +70,7 @@ once instead (see `brokkr man hygiene descendant`).
 
 Flags:
 - `-p/--package <PKG>` (repeatable) - scope every sweep's cargo invocation
-  (clippy, rustdoc, test, install-feature) to the named packages. The set
+  (clippy, rustdoc, test, member-check) to the named packages. The set
   **replaces** each sweep's own package selection - cargo unions selection
   flags, so composing `--workspace --exclude ...` with `--package` would
   silently un-scope the run. Per sweep the set is *intersected* with the
@@ -128,7 +130,7 @@ Output:
   The convention phases (gremlins through publish cycle) share one line with
   their counts; each build phase (clippy, rustdoc, prepare - a complete
   profile's line; any other run's goes to the log - test, coverage - which adds
-  the accounting line - and install-feature) prints one line with
+  the accounting line - member-check and fixture-lint) prints one line with
   its wall time as it completes -
   streamed per phase, not rendered at the end, so a run the watchdog kills
   still shows which phases finished. A pre-test or post-test script-check
@@ -150,8 +152,8 @@ Output:
   summary of `[lints]` suppressions (six names per group, with an omitted
   count for longer lists). The suppressions sit on the verdict rather than on a
   phase line because they narrow clippy (`-A`), rustdoc (dropped at
-  ingestion) and every compiling phase (test, coverage, install-feature,
-  through rustflags) alike; `allow_exact` lists its lint names only, its
+  ingestion) and every compiling phase (test, coverage, member-check,
+  through rustflags) alike - except fixture-lint, which takes no allows; `allow_exact` lists its lint names only, its
   scope being a fixed fact documented under `[lints] allow_exact` below.
   `cargo::` lints are listed in a separate `(sited)` group, because brokkr
   never passes them to a build. A script that builds its own `-A` list
@@ -252,7 +254,7 @@ Output:
   scoped; multiple `-p` packages comma-joined), `failed_phase` (`null` on
   success, else one of `gremlins`/`header`/`textlint`/`manifest`/
   `script_check`/`dependency_rules`/`publish_cycle`/`clippy`/`rustdoc`/
-  `prepare`/`test`/`coverage`/`install_feature`), `scope` (`"prose_only"`
+  `prepare`/`test`/`coverage`/`member_check`/`fixture_lint`), `scope` (`"prose_only"`
   when the markdown-only shortcut skipped the build phases, `null` on a full
   run - without it a shortened `passed` reads as a full one), `termination`
   (how the run stopped, when something stopped it - `{kind, scope}`, see
@@ -284,7 +286,7 @@ refuses as a failed run instead of reading green. The test phase's refusal
 comes before `prepare`, so a run that will test nothing compiles nothing for it.
 The `--json` trailer's `sweeps` lists the sweeps some phase started work on.
 
-The selection model, dedupe keys and install-feature selection are in
+The selection model, dedupe keys and the gated phases' selection are in
 `reference/check-internals.md`.
 
 ## Feature projection
@@ -780,7 +782,7 @@ so other sites of the same lint keep failing the check. The entries' distinct
 lints are named on the verdict line (`allow_exact: clippy::assert_is_empty,
 deprecated`), and the scope is this paragraph's, not the line's: an entry is
 sited per file in the diagnostic phases (clippy and rustdoc), but the
-compiling phases (test, coverage enumeration, install-feature) have no
+compiling phases (test, coverage enumeration, member-check) have no
 per-file mechanism, so there it applies build-wide through rustflags. `cargo::`
 entries never reach a build and are marked `(sited)` on the verdict. The
 per-lint file-count summary (`clippy: allowing
@@ -942,7 +944,8 @@ streamed earlier is neither beside the failure nor attributable among several
 runs.
 
 `--commands` prints each cargo command on stdout before it runs - every
-sweep's, the pre-builds', the enumeration and install-feature probes', and the
+sweep's, the pre-builds', the enumeration's, member-check's and its probes',
+fixture-lint's, and the
 `cargo metadata` invocations of the dependency-rule and publish-cycle phases.
 Streamed, not collected, so a run the watchdog kills still shows what it was
 running. The grouped green lines are unchanged by it. `brokkr clippy` is
@@ -954,11 +957,12 @@ and deadlines), and does not stream the line first as
 well. Its ad-hoc sweep is labelled `clippy`, and the pair reads `[error]
 clippy: <shape>` rather than `clippy clippy:`.
 
-Install-feature's green line carries only the run's counts (`install-feature:
-ok (1 package, 2 bins) in 8.1s`, or `1 of 3 install packages, 2 bins` under a
-`-p` that narrowed the set); the constant explanation of the phase (each
-package resolved on its own like `cargo install`, shared lockfile, no codegen)
-is log-only. The shim-fallback warning (`harness isolation unavailable (...)`)
+Member-check's green line carries only the run's counts and profile
+(`member-check: ok (3 members, 3 libs, 2 bins, dev) in 8.1s`, or `1 of 3
+members, ...` under a `-p` that narrowed the set); the constant explanation of
+the phase (each member resolved on its own like `cargo install`, shared
+lockfile, no codegen) is log-only. Fixture-lint's names each fixture's
+variants, files, expectations and target-dir size. The shim-fallback warning (`harness isolation unavailable (...)`)
 prints once per sweep per run, not once per cargo resolution of a package-mode
 sweep.
 

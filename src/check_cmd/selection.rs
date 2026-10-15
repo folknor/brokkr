@@ -8,7 +8,7 @@ use crate::build_purpose::features::{DroppedToken, FeatureOracle};
 use crate::build_purpose::requests::SupportRequest;
 use crate::check_cmd::{LaneIdx, Lanes};
 use crate::config::check::{CargoUnification, EffectiveUnification};
-use crate::config::{BinConfig, Certifies, FeatureUnification, SweepProfile};
+use crate::config::{Certifies, FeatureUnification, SweepProfile};
 use crate::error::DevError;
 use crate::profile::{LaneExec, PlannedSweep, SweepDecl};
 
@@ -888,8 +888,6 @@ pub(crate) enum AdmissionRule {
     TestExcluded,
     /// The sweep has a `packages` list and it is not on it.
     NotListed,
-    /// The install-feature phase: the package is not in `[bin] install`.
-    NotInstalled,
 }
 
 /// A package the invocation named and a sweep's rules did not admit.
@@ -915,9 +913,6 @@ impl std::fmt::Display for AdmissionNote {
                     "-p {} is not in this sweep's packages list",
                     self.package
                 )
-            }
-            AdmissionRule::NotInstalled => {
-                write!(f, "-p {} is not in [bin] install", self.package)
             }
         }
     }
@@ -1624,31 +1619,25 @@ fn drop_line(label: &str, scope: &str, d: &DroppedToken) -> String {
     )
 }
 
-/// The install-feature phase's selection.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum InstallSelection {
-    /// The phase does not apply to this run, silently: no `[bin]`, an
-    /// empty install set, the mode rules the claim out, or the phase is
-    /// skipped.
+/// The member-check phase's selection. Which members exist is a cargo
+/// metadata fact, so the member set itself is resolved when the phase runs;
+/// this decides only whether it runs.
+#[derive(Debug, Clone)]
+pub(crate) enum MemberSelection {
+    /// The phase does not apply to this run: no `[member_check]`, its
+    /// cadence rules the claim out, or the phase is skipped.
     NotApplicable(&'static str),
-    /// The CLI `-p` set rules every install package out. A visible skip,
-    /// never a refusal.
-    Skipped(&'static str),
-    /// The install packages to check: config order with no `-p`, the
-    /// invocation's order under one. Which of their bins are eligible
-    /// stays a runtime fact (cargo's own answer). `notes` name every `-p`
-    /// package the install set did not admit.
+    /// Run it, over the workspace members (less `skip`), intersected with
+    /// the invocation's `-p` set when there is one.
     Eligible {
-        packages: Vec<String>,
-        configured: usize,
-        debug: bool,
-        notes: Vec<AdmissionNote>,
+        cfg: crate::config::MemberCheckConfig,
+        cli: Vec<String>,
     },
 }
 
-impl InstallSelection {
+impl MemberSelection {
     pub(crate) fn build(
-        bin_cfg: Option<&BinConfig>,
+        cfg: Option<&crate::config::MemberCheckConfig>,
         cli: &[String],
         certifies: Option<Certifies>,
         enabled: bool,
@@ -1656,34 +1645,29 @@ impl InstallSelection {
         if !enabled {
             return Self::NotApplicable(PHASE_SKIPPED);
         }
-        let Some(cfg) = bin_cfg else {
-            return Self::NotApplicable("no [bin] table");
+        let Some(cfg) = cfg else {
+            return Self::NotApplicable("no [member_check] table");
         };
-        if cfg.install.is_empty() {
-            return Self::NotApplicable("no [bin] install packages");
+        if !crate::config::Claim::new(certifies).runs(cfg.when) {
+            return Self::NotApplicable("[member_check] when rules this run out");
         }
-        if !crate::check_cmd::install_feature_applies(cfg.install_feature_check, certifies) {
-            return Self::NotApplicable("install_feature_check rules this run out");
-        }
-        // CLI `-p` is admitted through the same rule every other phase
-        // uses, with `[bin] install` as the allowlist. (Under the gate this
-        // is unreachable - a complete profile refuses `-p` outright.)
-        let requested = if cli.is_empty() { &cfg.install } else { cli };
-        let Admission { kept, notes } = admit_against(
-            requested,
-            &[],
-            Some((cfg.install.as_slice(), AdmissionRule::NotInstalled)),
-        );
-        if kept.is_empty() {
-            return Self::Skipped("-p rules the install set out");
-        }
-        Self::Eligible {
-            packages: kept,
-            configured: cfg.install.len(),
-            debug: cfg.debug,
-            notes,
-        }
+        Self::Eligible { cfg: cfg.clone(), cli: cli.to_vec() }
     }
+}
+
+/// The `[[fixture_lint]]` entries this run lints: each entry's own cadence
+/// against the claim. Independent of `-p` - a fixture is not a workspace
+/// package.
+pub(crate) fn fixture_lint_selection(
+    entries: &[crate::config::FixtureLint],
+    certifies: Option<Certifies>,
+    enabled: bool,
+) -> Vec<crate::config::FixtureLint> {
+    if !enabled {
+        return Vec::new();
+    }
+    let claim = crate::config::Claim::new(certifies);
+    entries.iter().filter(|e| claim.runs(e.when)).cloned().collect()
 }
 
 /// Every selection one `brokkr check` run makes.
@@ -1692,7 +1676,8 @@ pub(crate) struct CheckSelections {
     pub(crate) clippy: PhaseSelection,
     pub(crate) rustdoc: PhaseSelection,
     pub(crate) test: PhaseSelection,
-    pub(crate) install: InstallSelection,
+    pub(crate) members: MemberSelection,
+    pub(crate) fixtures: Vec<crate::config::FixtureLint>,
 }
 
 impl CheckSelections {
@@ -1703,7 +1688,7 @@ impl CheckSelections {
         cli: &[String],
         skip: &dyn Fn(crate::check_cmd::Phase) -> bool,
         rustdoc_configured: bool,
-        bin_cfg: Option<&BinConfig>,
+        gated: GatedPhases<'_>,
         certifies: Option<Certifies>,
         oracle: &FeatureOracle<'_>,
     ) -> Result<Self, DevError> {
@@ -1728,14 +1713,26 @@ impl CheckSelections {
                 SelectionPhase::Test,
                 skip(crate::check_cmd::Phase::Test).then_some(PHASE_SKIPPED),
             )?,
-            install: InstallSelection::build(
-                bin_cfg,
+            members: MemberSelection::build(
+                gated.member_check,
                 cli,
                 certifies,
-                !skip(crate::check_cmd::Phase::InstallFeature),
+                !skip(crate::check_cmd::Phase::MemberCheck),
+            ),
+            fixtures: fixture_lint_selection(
+                gated.fixture_lints,
+                certifies,
+                !skip(crate::check_cmd::Phase::FixtureLint),
             ),
         })
     }
+}
+
+/// The config of the gate-priced compiling phases a check run may select.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct GatedPhases<'a> {
+    pub(crate) member_check: Option<&'a crate::config::MemberCheckConfig>,
+    pub(crate) fixture_lints: &'a [crate::config::FixtureLint],
 }
 
 /// Which sweeps a run actually worked on, for the `--json` trailer's
@@ -2109,7 +2106,7 @@ mod tests {
             &[],
             &skip,
             false,
-            None,
+            GatedPhases::default(),
             None,
             &oracle,
         )
@@ -2117,7 +2114,7 @@ mod tests {
         assert!(!all.clippy.is_enabled() && !all.test.is_enabled() && !all.rustdoc.is_enabled());
         // The same sweep in an enabled phase is the construction error.
         assert!(
-            CheckSelections::build(&[invalid], &[], &|_| false, false, None, None, &oracle)
+            CheckSelections::build(&[invalid], &[], &|_| false, false, GatedPhases::default(), None, &oracle)
                 .is_err()
         );
     }
@@ -2560,63 +2557,32 @@ mod tests {
         assert!(sel.attempt(LaneIdx::new(1)).is_some());
     }
 
+    // Gate-only by default: per-member package-mode resolves are priced for
+    // the pre-landing run, not the edit loop.
     #[test]
-    fn the_install_selection_intersects_and_skips_rather_than_refusing() {
-        let cfg = BinConfig {
-            install: s(&["daemon", "cli"]),
-            install_feature_check: Some(crate::config::InstallFeatureCheck::Always),
-            ..BinConfig::default()
+    fn the_member_selection_follows_its_cadence() {
+        use crate::config::{Cadence, MemberCheckConfig, MemberProfile, MemberTarget};
+        let cfg = |when| MemberCheckConfig {
+            when,
+            targets: vec![MemberTarget::Lib, MemberTarget::Bins],
+            profile: MemberProfile::Dev,
+            skip: Vec::new(),
         };
-        assert_eq!(
-            InstallSelection::build(Some(&cfg), &[], None, true),
-            InstallSelection::Eligible {
-                packages: s(&["daemon", "cli"]),
-                configured: 2,
-                debug: false,
-                notes: Vec::new(),
-            }
-        );
-        assert_eq!(
-            InstallSelection::build(Some(&cfg), &s(&["cli"]), None, true),
-            InstallSelection::Eligible {
-                packages: s(&["cli"]),
-                configured: 2,
-                debug: false,
-                notes: Vec::new()
-            }
-        );
-        // A `-p` package outside the install set is named, not dropped silently.
-        assert_eq!(
-            InstallSelection::build(Some(&cfg), &s(&["cli", "x"]), None, true),
-            InstallSelection::Eligible {
-                packages: s(&["cli"]),
-                configured: 2,
-                debug: false,
-                notes: vec![AdmissionNote {
-                    package: "x".into(),
-                    rule: AdmissionRule::NotInstalled
-                }],
-            }
-        );
-        assert!(matches!(
-            InstallSelection::build(Some(&cfg), &s(&["x"]), None, true),
-            InstallSelection::Skipped(_)
-        ));
-        assert!(matches!(
-            InstallSelection::build(Some(&cfg), &[], None, false),
-            InstallSelection::NotApplicable(_)
-        ));
-        assert!(matches!(
-            InstallSelection::build(None, &[], None, true),
-            InstallSelection::NotApplicable(_)
-        ));
-        let gate = BinConfig {
-            install_feature_check: None,
-            ..cfg
+        let runs = |c: &MemberCheckConfig, certifies, enabled| {
+            matches!(
+                MemberSelection::build(Some(c), &[], certifies, enabled),
+                MemberSelection::Eligible { .. }
+            )
         };
+        assert!(runs(&cfg(Cadence::Gate), Some(Certifies::Complete), true));
+        assert!(!runs(&cfg(Cadence::Gate), Some(Certifies::Partial), true));
+        assert!(!runs(&cfg(Cadence::Gate), None, true));
+        assert!(runs(&cfg(Cadence::Always), None, true));
+        assert!(!runs(&cfg(Cadence::Off), Some(Certifies::Complete), true));
+        assert!(!runs(&cfg(Cadence::Always), None, false));
         assert!(matches!(
-            InstallSelection::build(Some(&gate), &[], None, true),
-            InstallSelection::NotApplicable(_)
+            MemberSelection::build(None, &[], Some(Certifies::Complete), true),
+            MemberSelection::NotApplicable(_)
         ));
     }
 

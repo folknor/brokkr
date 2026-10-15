@@ -241,7 +241,8 @@ Reserved top-level keys parsed as config sections, or consumed by composition:
 `litehtml`, `sluggrs`, `ratatoskr`, `piners`, `dellingr`, `mogwai`, `check`,
 `dependency_rule`, `test`, `quarantine`, `capture_env`, `gremlins`, `header`,
 `textlint`, `textlint_preset`, `script_check`, `manifest`, `rustdoc`, `deps`,
-`lints` (and its `clippy` alias), `bin`, `disable_toolchain`, `cargo_env`.
+`lints` (and its `clippy` alias), `bin`, `member_check`, `fixture_lint`,
+`disable_toolchain`, `cargo_env`.
 
 ## `worktree_keep`
 
@@ -464,13 +465,27 @@ debug = true                 # dev profile for run + `--debug` for install
   `--release`, `cargo install --debug`). Unset means release for both,
   matching `brokkr test`. CLI `--debug` / `--release` (mutually exclusive)
   override in either direction.
-- `install_feature_check` - `"off"` / `"gate"` (the default) / `"always"`:
-  when `brokkr check` runs the install-feature phase, which compiles the
-  `install` packages under package-mode feature unification - the way
-  `cargo install` resolves them, without features sibling workspace members
-  contribute. `"gate"` means only under a `certifies = "complete"` profile.
-  Requires an explicit `install` list; the key without one is a load error.
-  See `brokkr man test-lanes install_feature`.
+
+A non-empty `install` requires a `[member_check]` table (below), and the
+retired `install_feature_check` key is a load error.
+
+## `[member_check]` section
+
+Compile every workspace member's production targets under that member's own
+package-mode resolve - the `cargo install` boundary - one cargo invocation per
+member (optional):
+
+```toml
+[member_check]
+when = "gate"               # "off" | "gate" (default) | "always"
+targets = ["lib", "bins"]   # default; any non-empty subset of lib, bins
+profile = "dev"             # "dev" (default) | "release"
+skip = [{ package = "xtask", reason = "tooling, never installed" }]
+```
+
+Required when `[bin] install` is non-empty (use `when = "off"` to opt out
+explicitly). The semantics, refusals and what a green run claims are in
+`brokkr man test-lanes member_check`.
 
 ## `[lints]` section
 

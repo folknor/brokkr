@@ -179,6 +179,11 @@ pub struct DevConfig {
     /// `None` when the project has no `[bin]` section (discovery still
     /// works; the section only curates ambiguity). See [`BinConfig`].
     pub bin: Option<BinConfig>,
+    /// `[member_check]`: per-member isolated production compile. `None`
+    /// when the table is absent (the phase is then inert).
+    pub member_check: Option<MemberCheckConfig>,
+    /// `[[fixture_lint]]` entries. Empty when none are declared.
+    pub fixture_lints: Vec<FixtureLint>,
     /// Top-level `disable_toolchain = true`: move the project's
     /// `rust-toolchain.toml` (or legacy `rust-toolchain`) aside for the
     /// duration of every brokkr command, so rustup ignores the pin and falls
@@ -220,23 +225,112 @@ pub struct BinConfig {
     pub install: Vec<String>,
     /// Default both commands to the dev profile.
     pub debug: bool,
-    /// When `brokkr check` runs the install-feature phase (compile the
-    /// `install` packages under package-mode feature unification, the way
-    /// `cargo install` resolves them). Unset means `gate`. Only meaningful
-    /// alongside `install` - the parser refuses the key without it.
-    pub install_feature_check: Option<InstallFeatureCheck>,
 }
 
-/// When the install-feature phase runs. `gate` (the default) means only
-/// under a `certifies = "complete"` profile - the pre-landing run - because
-/// package-mode resolution deliberately compiles duplicate variants of
-/// shared dependencies, which is not edit-loop priced.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+/// When a gate-priced compiling phase (`member_check`, `fixture_lint`)
+/// runs. `gate` (the default) means only under a `certifies = "complete"`
+/// profile - the pre-landing run - because both phases compile graphs the
+/// edit loop does not: per-member package-mode resolves, and a fixture
+/// workspace's own dependency build.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum InstallFeatureCheck {
+pub enum Cadence {
     Off,
+    #[default]
     Gate,
     Always,
+}
+
+/// `[member_check]`: compile every workspace member's production targets
+/// under that member's own package-mode resolve - the `cargo install`
+/// boundary - one cargo invocation per member. See
+/// `docs/commands/check.test-lanes.md`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemberCheckConfig {
+    #[serde(default)]
+    pub when: Cadence,
+    /// Which production targets each member compiles. Non-empty; dev
+    /// targets are deliberately unspellable (their dev-dependencies donate
+    /// features to the production graph, which is the masking this phase
+    /// exists to remove).
+    #[serde(default = "MemberTarget::production")]
+    pub targets: Vec<MemberTarget>,
+    #[serde(default)]
+    pub profile: MemberProfile,
+    /// Members left out, each with the reason. A name that is not a
+    /// workspace member fails the phase.
+    #[serde(default)]
+    pub skip: Vec<MemberSkip>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemberTarget {
+    Lib,
+    Bins,
+}
+
+impl MemberTarget {
+    fn production() -> Vec<Self> {
+        vec![Self::Lib, Self::Bins]
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemberProfile {
+    #[default]
+    Dev,
+    Release,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemberSkip {
+    pub package: String,
+    pub reason: String,
+}
+
+/// One `[[fixture_lint]]` entry: lint an in-tree fixture crate with clippy
+/// and compare its diagnostics against a manifest, once per variant. See
+/// `docs/brokkr.toml.conventions.md`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FixtureLint {
+    pub name: String,
+    /// The fixture crate's directory, relative to the project root. Its
+    /// `Cargo.toml` must be its own single-package workspace.
+    pub path: std::path::PathBuf,
+    /// The expectation manifest, relative to the project root.
+    pub manifest: std::path::PathBuf,
+    /// Copy the main workspace's `Cargo.lock` into the fixture before the
+    /// run, so the fixture resolves the product's dependency versions.
+    #[serde(default)]
+    pub seed_lock: bool,
+    /// Lint-level flags passed to clippy after `--`, e.g. `-W
+    /// clippy::disallowed_methods`. The run must compile, so expected
+    /// diagnostics are warnings.
+    #[serde(default)]
+    pub lint_args: Vec<String>,
+    #[serde(default)]
+    pub when: Cadence,
+    /// Environment variants; the lint runs once per variant.
+    #[serde(rename = "variant")]
+    pub variants: Vec<FixtureVariant>,
+}
+
+/// One environment the fixture is linted under. `{root}` in an `env` value
+/// is the project root.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FixtureVariant {
+    pub name: String,
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// Variables removed from the inherited environment.
+    #[serde(default)]
+    pub unset: Vec<String>,
 }
 
 /// `[lints]` section: lint suppressions, applied to every phase that compiles.

@@ -24,7 +24,7 @@ pub(crate) enum Purpose {
     Run,
     Build,
     Install,
-    InstallCheck,
+    MemberCheck,
     Check,
     Test,
     Bench,
@@ -78,8 +78,8 @@ impl Purpose {
                 dev_flag: Some("--debug"),
                 release_flag: None,
             },
-            Self::InstallCheck => Policy {
-                default_profile: Profile::Release,
+            Self::MemberCheck => Policy {
+                default_profile: Profile::Dev,
                 configurable_profile: true,
                 features: false,
                 worktree_target: false,

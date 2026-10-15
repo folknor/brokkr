@@ -47,7 +47,7 @@ pub(crate) fn cmd_check(
     dependency_rules: &[DependencyRule],
     quarantine: &[QuarantineEntry],
     test_cfg: Option<&TestConfig>,
-    bin_cfg: Option<&crate::config::BinConfig>,
+    gated: GatedPhases<'_>,
     gremlins_cfg: Option<&GremlinsConfig>,
     header_cfg: Option<&HeaderConfig>,
     textlint_rules: &[TextlintRule],
@@ -149,7 +149,7 @@ pub(crate) fn cmd_check(
         packages,
         &skip,
         rustdoc_cfg.is_some(),
-        bin_cfg,
+        gated,
         certifies,
         &oracle,
     )?;
@@ -728,7 +728,8 @@ struct BuildPhaseArgs<'a> {
     state_root: &'a Path,
     active_sweeps: &'a [PlannedSweep],
     /// Which lanes each phase may attempt, with which packages - aligned with
-    /// `active_sweeps` - and the install-feature phase's package set.
+    /// `active_sweeps` - and whether the member-check and fixture-lint
+    /// phases run.
     selections: &'a CheckSelections,
     /// `[lints]`: `allow`, suppressed via `-A` on every sweep, and the sited
     /// `allow_exact` list, filtered at JSON ingestion.
@@ -987,7 +988,8 @@ fn run_diagnostic_phases(
 }
 
 /// Everything after the test phase: the coverage audit under a complete
-/// claim, the test verdict, the post-test script checks and install-feature.
+/// claim, the test verdict, the post-test script checks, member-check and
+/// fixture-lint.
 fn finish_build_phases(
     a: &BuildPhaseArgs<'_>,
     skip: &dyn Fn(Phase) -> bool,
@@ -1053,17 +1055,21 @@ fn finish_build_phases(
         }
     }
 
-    // Last on purpose: package-mode resolution can compile duplicate variants
-    // of shared dependencies, making this the most expensive phase on a cold
-    // store, and the repo's ordering rule is cheap-fails-first.
-    if !skip(Phase::InstallFeature) {
-        start_phase(failing_phase, Phase::InstallFeature);
-        run_install_feature_phase(
+    // Last on purpose: per-member package-mode resolves and a fixture's own
+    // dependency build are the most expensive compiles on a cold store, and
+    // the repo's ordering rule is cheap-fails-first.
+    if !skip(Phase::MemberCheck) {
+        start_phase(failing_phase, Phase::MemberCheck);
+        run_member_check_phase(
             a.project_root,
-            &a.selections.install,
+            &a.selections.members,
             &crate::config::check::test_phase_allow_flags(a.lints),
             a.commands,
         )?;
+    }
+    if !skip(Phase::FixtureLint) {
+        start_phase(failing_phase, Phase::FixtureLint);
+        run_fixture_lint_phase(a.project_root, &a.selections.fixtures, a.commands)?;
     }
 
     *failing_phase = None;
@@ -1647,7 +1653,9 @@ mod package_rules_tests {
     fn lines(sweeps: &[PlannedSweep], cli: &[&str]) -> Vec<String> {
         let cli: Vec<String> = cli.iter().map(|p| (*p).to_owned()).collect();
         let oracle = FeatureOracle::unavailable();
-        let selections = CheckSelections::build(sweeps, &cli, &|_| false, false, None, None, &oracle).unwrap();
+        let selections =
+            CheckSelections::build(sweeps, &cli, &|_| false, false, crate::check_cmd::GatedPhases::default(), None, &oracle)
+                .unwrap();
         package_rules_lines(sweeps, &selections)
     }
 

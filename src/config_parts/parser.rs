@@ -34,11 +34,12 @@ impl Claim {
         self.is_complete()
     }
 
-    pub(crate) fn runs_install_feature(self, mode: Option<InstallFeatureCheck>) -> bool {
-        match mode.unwrap_or(InstallFeatureCheck::Gate) {
-            InstallFeatureCheck::Off => false,
-            InstallFeatureCheck::Gate => self.enumerates_universe(),
-            InstallFeatureCheck::Always => true,
+    /// Whether a gate-priced phase with this cadence runs under this claim.
+    pub(crate) fn runs(self, cadence: Cadence) -> bool {
+        match cadence {
+            Cadence::Off => false,
+            Cadence::Gate => self.enumerates_universe(),
+            Cadence::Always => true,
         }
     }
 }
@@ -109,6 +110,8 @@ fn parse_dev_config(table: &toml::Table) -> Result<DevConfig, DevError> {
     let deps = parse_deps(table)?;
     let lints = parse_lints(table)?;
     let bin = parse_bin(table)?;
+    let member_check = parse_member_check(table, bin.as_ref())?;
+    let fixture_lints = parse_fixture_lints(table)?;
     let disable_toolchain = parse_disable_toolchain(table)?;
     let cargo_env = parse_cargo_env(table, &capture_env)?;
     refuse_retired_sha256(table)?;
@@ -132,6 +135,8 @@ fn parse_dev_config(table: &toml::Table) -> Result<DevConfig, DevError> {
         deps,
         lints,
         bin,
+        member_check,
+        fixture_lints,
         disable_toolchain,
         cargo_env,
         included_config_files: Vec::new(),
@@ -190,6 +195,16 @@ fn parse_bin(
     let Some(value) = table.get("bin") else {
         return Ok(None);
     };
+    if value.get("install_feature_check").is_some() {
+        return Err(DevError::Config(
+            "[bin] install_feature_check is retired: the install-feature phase \
+             became `[member_check]`, which compiles every workspace member's \
+             production targets under its own resolve. Remove the key and \
+             declare [member_check] (its `when` key takes the same \
+             off/gate/always values)."
+                .into(),
+        ));
+    }
     let cfg: BinConfig = value
         .clone()
         .try_into()
@@ -206,16 +221,146 @@ fn parse_bin(
             ));
         }
     }
-    // The phase checks the install set, so a knob with no set is a config
-    // that looks armed and can never fire - refused rather than ignored.
-    if cfg.install_feature_check.is_some() && cfg.install.is_empty() {
+    Ok(Some(cfg))
+}
+
+/// Parse the optional `[member_check]` table.
+///
+/// A `[bin] install` list without the table is refused: the retired
+/// install-feature phase compiled those packages by default, so silently
+/// dropping that obligation would let a previously green gate mean less.
+/// The message names what the old gate covered and what the new one does -
+/// they are deliberately not equivalent (every member, not the install set).
+fn parse_member_check(
+    table: &toml::map::Map<String, toml::Value>,
+    bin: Option<&BinConfig>,
+) -> Result<Option<MemberCheckConfig>, DevError> {
+    let Some(value) = table.get("member_check") else {
+        if let Some(bin) = bin.filter(|b| !b.install.is_empty()) {
+            let profile = if bin.debug { "dev" } else { "release" };
+            return Err(DevError::Config(format!(
+                "[bin] install is set but [member_check] is not. The retired \
+                 install-feature gate compiled the install packages ({}) - their \
+                 bins, {profile} profile - under package-mode resolution. \
+                 [member_check] covers every workspace member unless skipped. \
+                 Declare it, for example:\n\n[member_check]\ntargets = [\"lib\", \
+                 \"bins\"]\nprofile = \"{profile}\"\n\nor opt out explicitly with \
+                 `when = \"off\"`.",
+                bin.install.join(", ")
+            )));
+        }
+        return Ok(None);
+    };
+    let cfg: MemberCheckConfig = value
+        .clone()
+        .try_into()
+        .map_err(|e: toml::de::Error| DevError::Config(format!("[member_check]: {e}")))?;
+    if cfg.targets.is_empty() {
         return Err(DevError::Config(
-            "[bin] install_feature_check without [bin] install - the phase \
-             compiles the install packages, so list them."
-                .into(),
+            "[member_check] targets is empty - name \"lib\", \"bins\" or both.".into(),
         ));
     }
+    let mut seen = std::collections::BTreeSet::new();
+    for t in &cfg.targets {
+        if !seen.insert(*t) {
+            return Err(DevError::Config(format!("[member_check] targets lists {t:?} twice.")));
+        }
+    }
+    let mut skipped = std::collections::BTreeSet::new();
+    for s in &cfg.skip {
+        if s.package.trim().is_empty() {
+            return Err(DevError::Config("[member_check] skip has a blank package.".into()));
+        }
+        if s.reason.trim().is_empty() {
+            return Err(DevError::Config(format!(
+                "[member_check] skip {}: the reason is blank - say why the member is left out.",
+                s.package
+            )));
+        }
+        if !skipped.insert(s.package.as_str()) {
+            return Err(DevError::Config(format!("[member_check] skip names {} twice.", s.package)));
+        }
+    }
     Ok(Some(cfg))
+}
+
+/// Parse the `[[fixture_lint]]` array. Shape rules only; everything that
+/// needs the filesystem or cargo (the fixture's workspace, the gitignored
+/// lock, the manifest) is checked when the phase runs.
+fn parse_fixture_lints(
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<Vec<FixtureLint>, DevError> {
+    let Some(value) = table.get("fixture_lint") else {
+        return Ok(Vec::new());
+    };
+    let entries: Vec<FixtureLint> = value
+        .clone()
+        .try_into()
+        .map_err(|e: toml::de::Error| DevError::Config(format!("[[fixture_lint]]: {e}")))?;
+    let mut names = std::collections::BTreeSet::new();
+    for e in &entries {
+        let at = format!("[[fixture_lint]] {:?}", e.name);
+        // The name becomes a target-dir component (`fixture-<name>`), so it
+        // must be one plain component that cannot alias another entry's.
+        if e.name.is_empty()
+            || !e.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(DevError::Config(format!(
+                "[[fixture_lint]] name {:?}: use letters, digits, `-` and `_` only.",
+                e.name
+            )));
+        }
+        if !names.insert(e.name.as_str()) {
+            return Err(DevError::Config(format!("{at}: the name is used twice.")));
+        }
+        for (key, p) in [("path", &e.path), ("manifest", &e.manifest)] {
+            if p.as_os_str().is_empty() || p.is_absolute() {
+                return Err(DevError::Config(format!(
+                    "{at}: `{key}` must be a non-empty path relative to the project root."
+                )));
+            }
+        }
+        if e.variants.is_empty() {
+            return Err(DevError::Config(format!(
+                "{at}: declare at least one [[fixture_lint.variant]] - the lint runs once per variant."
+            )));
+        }
+        let mut variant_names = std::collections::BTreeSet::new();
+        for v in &e.variants {
+            if v.name.trim().is_empty() || !variant_names.insert(v.name.as_str()) {
+                return Err(DevError::Config(format!(
+                    "{at}: variant names must be non-blank and unique."
+                )));
+            }
+            if let Some(both) = v.unset.iter().find(|n| v.env.contains_key(*n)) {
+                return Err(DevError::Config(format!(
+                    "{at} variant {:?}: {both} is both set and unset.",
+                    v.name
+                )));
+            }
+            if let Some(bad) = v
+                .env
+                .keys()
+                .chain(&v.unset)
+                .find(|n| n.starts_with("BROKKR_") || n.as_str() == "CARGO_TARGET_DIR")
+            {
+                return Err(DevError::Config(format!(
+                    "{at} variant {:?}: {bad} is brokkr's own plumbing and cannot be varied.",
+                    v.name
+                )));
+            }
+        }
+        for arg in &e.lint_args {
+            if arg.starts_with("-D") || arg.starts_with("--deny") || arg.starts_with("-F") || arg.starts_with("--forbid") {
+                return Err(DevError::Config(format!(
+                    "{at}: lint_args {arg:?} turns a lint into an error, but the phase requires the \
+                     fixture to compile (a completed compile is its proof the whole crate was \
+                     analysed) - use -W, so expected diagnostics arrive as warnings."
+                )));
+            }
+        }
+    }
+    Ok(entries)
 }
 
 /// Parse the optional `[lints]` section and its `[clippy]` alias, unioned.
@@ -769,6 +914,8 @@ pub(crate) const SECTIONS: &[&str] = &[
     "clippy",
     "lints",
     "bin",
+    "member_check",
+    "fixture_lint",
     "disable_toolchain",
     "cargo_env",
 ];
@@ -1496,6 +1643,13 @@ fn validate_skip_phases(profile_name: &str, def: &ProfileDef) -> Result<(), DevE
     // cannot drift a second hard-coded list out of sync.
     let skippable = skippable_phase_names;
     for p in phases {
+        if p == "install_feature" {
+            return Err(DevError::Config(format!(
+                "[test.profiles.{profile_name}] skip_phases entry 'install_feature': \
+                 the phase was renamed `member_check` when it widened to every \
+                 workspace member."
+            )));
+        }
         if phase_names().any(|n| n == p.as_str()) && !skippable().any(|n| n == p.as_str()) {
             return Err(DevError::Config(format!(
                 "[test.profiles.{profile_name}] skip_phases entry '{p}' \

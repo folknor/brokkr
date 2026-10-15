@@ -32,12 +32,15 @@ const _: () = {
 pub(crate) const fn phase_ceiling(phase: crate::cargo_env::Phase) -> Duration {
     use crate::cargo_env::Phase;
     match phase {
-        Phase::Prepare | Phase::Test => TEST_PHASE_TIMEOUT,
-        Phase::Clippy
-        | Phase::Rustdoc
-        | Phase::Coverage
-        | Phase::InstallFeature
-        | Phase::ScriptCheck => BUILD_PHASE_TIMEOUT,
+        // The gate-priced compiles cover a whole workspace of per-member
+        // resolves, or a fixture's cold dependency build: test-phase sized.
+        // CHECK_CEILING still bounds the whole run.
+        Phase::Prepare | Phase::Test | Phase::MemberCheck | Phase::FixtureLint => {
+            TEST_PHASE_TIMEOUT
+        }
+        Phase::Clippy | Phase::Rustdoc | Phase::Coverage | Phase::ScriptCheck => {
+            BUILD_PHASE_TIMEOUT
+        }
         _ => SOURCE_PHASE_TIMEOUT,
     }
 }

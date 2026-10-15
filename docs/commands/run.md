@@ -188,7 +188,7 @@ version available at install time, which you can see in its output as
 
 That makes `install` the one command in the workflow that does not agree with
 the others about what the dependency graph is. `check`, `test`, `run` and
-`check`'s own install-feature phase all resolve against the committed
+`check`'s own member-check phase all resolve against the committed
 lockfile, so a green gate says nothing about a re-resolving install: an
 upstream crate publishing a breaking minor can break the deploy of a tree
 whose last commit was days ago, and the failure lands in a dependency, on a

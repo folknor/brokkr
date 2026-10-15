@@ -14,7 +14,8 @@ pub enum Phase {
     Prepare,
     Test,
     Coverage,
-    InstallFeature,
+    MemberCheck,
+    FixtureLint,
 }
 
 impl Phase {
@@ -32,7 +33,8 @@ impl Phase {
             Self::Prepare => "prepare",
             Self::Test => "test",
             Self::Coverage => "coverage",
-            Self::InstallFeature => "install_feature",
+            Self::MemberCheck => "member_check",
+            Self::FixtureLint => "fixture_lint",
         }
     }
 }
@@ -80,7 +82,7 @@ impl From<crate::error::DevError> for PhaseFailure {
 }
 
 impl Phase {
-    pub(super) const ALL: [Self; 13] = [
+    pub(super) const ALL: [Self; 14] = [
         Self::Gremlins,
         Self::Header,
         Self::Textlint,
@@ -93,7 +95,8 @@ impl Phase {
         Self::Prepare,
         Self::Test,
         Self::Coverage,
-        Self::InstallFeature,
+        Self::MemberCheck,
+        Self::FixtureLint,
     ];
 
     pub(super) const fn label(self) -> &'static str {
@@ -101,6 +104,8 @@ impl Phase {
             Self::ScriptCheck => "script-check",
             Self::DependencyRules => "dependency rules",
             Self::PublishCycle => "publish cycle",
+            Self::MemberCheck => "member-check",
+            Self::FixtureLint => "fixture-lint",
             _ => self.as_str(),
         }
     }

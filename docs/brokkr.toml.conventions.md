@@ -1,8 +1,8 @@
 # brokkr.toml: convention gates
 
 The brokkr.toml sections that configure `brokkr check`'s source-convention
-phases (gremlins, header, textlint, script checks, manifest, dependency rules)
-and its rustdoc phase. The rest of the schema is in `docs/brokkr.toml.md`
+phases (gremlins, header, textlint, script checks, manifest, dependency rules),
+its rustdoc phase, and its fixture-lint phase. The rest of the schema is in `docs/brokkr.toml.md`
 (`brokkr man config`); how each phase runs is in `brokkr man check`. Each `##`
 heading is addressable: `brokkr man conventions script_check`.
 
@@ -569,6 +569,116 @@ phase drops the lint by exact code - but the same list reaches the test phase's
 rustflags, so adding a rustdoc lint there forces a full test rebuild.
 `allow_exact` suppresses single sites. See the phase in
 `brokkr man check rustdoc`.
+
+## `[[fixture_lint]]` array
+
+Proves clippy's `disallowed_methods`, `disallowed_macros` and
+`disallowed_types` actually fire. Those lints fail open: a configured path
+that no longer resolves (an item moved, a typo) seals nothing, and a nested
+`clippy.toml` silently shadows the root one. The phase lints an in-tree
+fixture crate that calls the sealed items, once per environment variant, and
+holds the diagnostics to a manifest.
+
+```toml
+[[fixture_lint]]
+name = "origin-seal"
+path = "origin-seal"                  # the fixture crate, relative to the root
+manifest = "origin-seal/expect.toml"
+seed_lock = true
+lint_args = ["-W", "clippy::disallowed_methods", "-W", "unfulfilled-lint-expectations"]
+when = "gate"                         # "off" | "gate" (default) | "always"
+
+[[fixture_lint.variant]]
+name = "walk-up"                      # clippy must find the root clippy.toml itself
+unset = ["CLIPPY_CONF_DIR"]
+
+[[fixture_lint.variant]]
+name = "explicit"
+env = { CLIPPY_CONF_DIR = "{root}" }  # {root} is the project root
+```
+
+The manifest maps every fixture source file to what it must produce:
+
+```toml
+[files."src/submit_order_method.rs"]
+expect = [{ lint = "clippy::disallowed_methods", path = "nautilus_trading::Strategy::submit_order" }]
+
+[files."src/lib.rs"]
+clean = true
+```
+
+**The fixture.** `path` and `manifest` must resolve inside the project tree
+(after `..` and symlinks), and `name` is letters, digits, `-` and `_` (it
+names the target dir). Its `Cargo.toml` is its own single-package workspace
+(a `[package]` plus an empty `[workspace]` table). The lint selects its lib
+target, or its only bin when it has no lib; any other shape is refused.
+
+**The run, per variant.** `cargo clean -p <fixture>` first, then `cargo clippy
+--no-deps --locked <target> --message-format=json -- <lint_args>`, both under
+the variant's environment (`unset` removes a variable outright; an empty value
+would not test absence) and the persistent target dir
+`<target>/fixture-<name>`, whose size the ok line reports. The clean is
+because cargo replays a fresh unit's cached diagnostics, so a variant whose
+difference clippy did not fingerprint would silently report the previous
+variant's output; the run must also produce the fixture target's artifact
+with `fresh: false`. `--no-deps` limits clippy to the fixture: the product
+crates it depends on are path dependencies and would otherwise be linted
+under the variant's config too. No `[lints]` allows are injected - one could
+suppress the very lint being proven.
+
+**Warnings, not errors.** The run must compile: rustc emits no artifact after
+an error, and the artifact is the proof the whole crate was analysed. So
+expected diagnostics are warnings, `lint_args` passes `-W`, and `-D` / `-F`
+there is a load error. Any error diagnostic fails the variant - including one
+from an ambient `-D warnings` in a cargo config the fixture inherits.
+Whether the lints are denied in the product is the product clippy phase's
+question.
+
+**The verdict, per file and variant.** Every expectation must appear in its
+file: the diagnostic's lint code equal to `lint` (`-` and `_` unified) and
+one backticked token of its message exactly equal to `path` - never a
+substring, since `submit_order` is a prefix of `submit_order_list`. Every
+fixture warning must match an expectation of the file its primary span is in;
+a `clean` file must produce nothing, and a warning whose span is in no listed
+file fails as unattributed. A manifest where every file is clean is refused.
+Reading the path out of the message is a toolchain-dependent adapter: a
+rewording surfaces as a visible failure, never a loose match.
+
+**The inventory.** The `.rs` files under the fixture dir (except its own
+`target/`) must equal the manifest's files, and every listed file must be
+reached from the target root through unconditional `mod` declarations: a
+`cfg` or `cfg_attr` on any route (a `mod` item, an inline module, a file's
+inner attributes) is refused, a `mod` inside a function or macro is not
+followed, `include!` is never followed, and `#[path]` is followed only at file
+scope. So a `clean` file means "compiled, and produced nothing" - except for
+item-level `cfg` inside a reached file, which the walk does not judge: keep
+sealed calls and `#[expect]` attributes out of conditional items.
+
+**`seed_lock`.** Copies the main workspace's `Cargo.lock` into the fixture,
+lets cargo add the fixture's own entries once (an unlocked `cargo metadata`),
+then checks **external identity containment**: every registry or git package
+in the fixture's lock must be in the main lock with the same name, version and
+source (git rev included) - a package the fixture alone pulls in fails rather
+than resolving freely. It is containment, not graph equivalence: where the
+main lock holds two versions of a crate, a fixture edge may land on either.
+Every lint run is then `--locked`, and the fixture lock must not change. The
+fixture's `Cargo.lock` must be gitignored, or the phase refuses (it is
+rewritten every run).
+
+**Path identity**, always: every path package in the fixture's resolve other
+than its root must be a path package of the main resolve (same name, version,
+canonical manifest), and every direct dependency of the fixture root whose
+resolved package name is a main workspace member must resolve to that member -
+a registry or git twin, renamed or not, fails. `[patch]` and `[replace]` are
+not read: cargo applies only the root's overrides, and their effect is in the
+resolved packages that are compared.
+
+When it runs: per entry, `when` against the claim like `[member_check]`;
+independent of `-p` (a fixture is not a workspace package). A partial profile
+may name `fixture_lint` in `skip_phases`. What stays in the project: checking
+that the manifest's paths equal the paths configured in `clippy.toml`, and
+scanning for nested `clippy.toml` files - both only read files, so they are
+script checks.
 
 ## `[[dependency_rule]]` array
 

@@ -839,6 +839,32 @@ fn supervise_child_capped(
     }
 }
 
+/// [`run_cargo`], with `unset` removed from the inherited environment - for a
+/// caller whose question is what cargo does when a variable is ABSENT, which
+/// an empty value does not answer. `[cargo_env]` still applies.
+pub(crate) fn run_cargo_unsetting(
+    args: &[&str],
+    cwd: &Path,
+    env: &[(&str, &str)],
+    unset: &[&str],
+    phase: Option<crate::cargo_env::Phase>,
+) -> Result<CapturedOutput, DevError> {
+    let dc = run_captured_limited_unsetting(
+        "cargo",
+        args,
+        cwd,
+        env,
+        unset,
+        ChildLimit::Wall(Duration::MAX),
+        None,
+        ChildIsolation::Inherit,
+        SpawnProfile::Cargo { phase },
+        ChildOptions::CARGO,
+        false,
+    )?;
+    captured_without_incomplete_output("cargo", dc, ChildOptions::CARGO)
+}
+
 /// Shared body of the captured runners.
 #[allow(clippy::too_many_arguments)]
 fn run_captured_limited(
@@ -853,9 +879,32 @@ fn run_captured_limited(
     options: ChildOptions,
     allow_capture_truncation: bool,
 ) -> Result<DeadlineCapture, DevError> {
+    run_captured_limited_unsetting(
+        program, args, cwd, env, &[], limit, on_spawn, isolation, profile, options,
+        allow_capture_truncation,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_captured_limited_unsetting(
+    program: &str,
+    args: &[&str],
+    cwd: &Path,
+    env: &[(&str, &str)],
+    unset: &[&str],
+    limit: ChildLimit,
+    on_spawn: Option<&dyn Fn(u32)>,
+    isolation: ChildIsolation<'_>,
+    profile: SpawnProfile,
+    options: ChildOptions,
+    allow_capture_truncation: bool,
+) -> Result<DeadlineCapture, DevError> {
     let start = Instant::now();
     let policy = crate::process::spawn::ChildPolicy::from_cargo_profile(profile);
     let mut cmd = policy.command(program, args, Some(cwd), env, isolation)?;
+    for name in unset {
+        cmd.env_remove(name);
+    }
     crate::process::spawn::capture_stdio(&mut cmd);
     let child = crate::process::spawn::spawn(cmd, on_spawn)?;
     let run = supervise_child_capped(child, program, start, limit, isolation, options, || None);

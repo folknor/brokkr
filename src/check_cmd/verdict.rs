@@ -317,7 +317,7 @@ pub(super) fn finish_check(input: FinishInput<'_>) -> Result<(), DevError> {
 ///
 /// The suppressions are summarized here, once, rather than on each phase's line:
 /// they narrow clippy (`-A`), rustdoc (dropped at ingestion) and every
-/// compiling phase (test, coverage enumeration, install-feature, through
+/// compiling phase (test, coverage enumeration, member-check, through
 /// rustflags) alike, so a clause on any one phase's line would let the others
 /// read as unsuppressed - and this is the one line every run prints, green or
 /// red. `allow_exact` lists only the lint names: file-scoped in the diagnostic
