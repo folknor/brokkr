@@ -527,7 +527,7 @@ pub fn cmd_strays(kill_them: bool) -> Result<(), DevError> {
         output::strays_msg(&killed_line(counts));
     } else {
         output::strays_msg(
-            "`brokkr strays --kill` sends SIGKILL; every locked brokkr command does so on its own once it holds the lock (`brokkr man check strays`)",
+            "`brokkr strays --kill` sends SIGKILL; every locked brokkr command does so on its own once it holds the lock (`brokkr man hygiene strays`)",
         );
     }
     Ok(())

@@ -158,7 +158,7 @@ summary, which is reserved for a lint run whose diagnostics were printed.
   command - a concurrent bench just makes it wait, never error.
 - Runs under `check`'s five-minute `clippy` phase ceiling, measured from lock
   acquisition: an overrun kills the run's processes and exits 124, as in
-  `check` (see `docs/commands/check.md`, Time ceilings). A graceful
+  `check` (see `docs/commands/check.hygiene.md`, Time ceilings). A graceful
   `brokkr kill` or Ctrl-C ends it as an interruption (exit 130).
 - **Inherited limitations** (shared with `brokkr check`'s clippy phase, not
   introduced here): the toolchain file is moved aside *before* the lock is

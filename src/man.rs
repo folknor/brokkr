@@ -58,6 +58,24 @@ const TOPICS: &[Topic] = &[
         commands: &[CommandId::Env],
     },
     Topic {
+        name: "test-lanes",
+        summary: "check's test phase: lanes, nextest, coverage, continuation",
+        content: include_str!("../docs/commands/check.test-lanes.md"),
+        commands: &[CommandId::Env],
+    },
+    Topic {
+        name: "test",
+        summary: "brokkr test: run the tests matching one name",
+        content: include_str!("../docs/commands/test.md"),
+        commands: &[CommandId::Env],
+    },
+    Topic {
+        name: "hygiene",
+        summary: "time ceilings, the per-test cap, strays, the rustc guard",
+        content: include_str!("../docs/commands/check.hygiene.md"),
+        commands: &[CommandId::Env],
+    },
+    Topic {
         name: "clippy",
         summary: "the investigative single-phase clippy runner",
         content: include_str!("../docs/commands/clippy.md"),

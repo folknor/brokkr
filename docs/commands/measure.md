@@ -459,7 +459,7 @@ switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`.
   starttime is a clock-tick token, not a unique generation number. A brokkr SIGKILLed by
   anything else (the OOM killer) gets no walk at all; only the test runners'
   processes have a backstop for that case (a parent-death signal, and the
-  orphan reap at the next locked command - see `brokkr man check strays`).
+  orphan reap at the next locked command - see `brokkr man hygiene strays`).
 - **OOM / crash preservation**: sidecar data is stored even when the child is
   OOM-killed, segfaults, or exits non-zero - the `/proc` trajectory up to the
   kill is the whole point. This holds on every sidecar-enabled harness loop, `--hotpath`/

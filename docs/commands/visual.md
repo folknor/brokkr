@@ -14,7 +14,7 @@ They wait for the lock while building or changing visual baselines. `list`,
 `report`, and `visual-status` do not acquire the command lock.
 
 > Historical note: `visual` was formerly named `test`; that name is now owned
-> by the generic cargo single-test runner - see `docs/commands/check.md`.
+> by the generic cargo single-test runner - see `docs/commands/test.md`.
 
 For project-specific fixture conventions and the prepare pipeline see
 `docs/projects/litehtml.md` and `docs/projects/sluggrs.md`; each also documents

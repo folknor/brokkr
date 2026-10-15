@@ -2038,7 +2038,7 @@ In depth: `brokkr man nidhogg`."
     ///   brokkr test roundtrip_uring_tiny_output -N 5
     ///   brokkr test some_unit_test --debug
     ///
-    /// In depth: `brokkr man check brokkr-test`.
+    /// In depth: `brokkr man test`.
     #[command(display_order = 10)]
     Test {
         /// Exact test name to run (substring filter, case-sensitive).

@@ -127,8 +127,8 @@ This is the fix for stale-incremental build state - phantom undefined
 `anon.*.llvm.*` symbols at link time, or a confident false `E0599` from a
 `-p`-scoped build that another shape compiles fine. In both cases the package
 to name is the *failing* one, which is usually a workspace member rather than
-the project-name default. See `docs/commands/check.md` (`brokkr man check
-test-build-errors`).
+the project-name default. See `docs/commands/check.test-lanes.md` (`brokkr man
+test-lanes build-errors`).
 
 ## `--archives [--keep N]`
 

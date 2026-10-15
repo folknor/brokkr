@@ -927,7 +927,7 @@ debug = true                 # dev profile for run + `--debug` for install
   `cargo install` resolves them, without features sibling workspace members
   contribute. `"gate"` means only under a `certifies = "complete"` profile.
   Requires an explicit `install` list; the key without one is a load error.
-  See `brokkr man check install_feature`.
+  See `brokkr man test-lanes install_feature`.
 
 ## `[lints]` section
 
@@ -955,7 +955,7 @@ allow_exact = ["clippy::unused_async_trait_impl@crates/system/src/kernel.rs"]
 - `allow` - lint names suppressed on every sweep. The clippy phase appends
   `-A <lint>` after `--cap-lints=warn`; the test phase has no rustc
   passthrough of its own and routes them through cargo's rustflags (see
-  *How the test phase injects them* below). The escape hatch for driving a
+  the note below the list). The escape hatch for driving a
   foreign checkout under `disable_toolchain`, where the host's newer compiler
   surfaces lints the project's pinned-toolchain CI cannot see - and where a
   `-Dwarnings` in the project's `.cargo/config.toml` turns each of them into a
@@ -989,58 +989,20 @@ allow_exact = ["clippy::unused_async_trait_impl@crates/system/src/kernel.rs"]
   alternative was an `allow_exact` that silently does nothing about the build
   failure it was written for.
 
-### How the test phase injects them
-
-Only lints rustc itself raises reach the test phase. A `clippy::` or
-`rustdoc::` name is never raised by a rustc build, and a `cargo::` name is not
-a rustc lint at all, so their allows stay out of the build. That is deliberate,
-not tidiness: rustflags are part of every unit's fingerprint, so any flag here
-makes the test phase's artifacts differ from what a plain `cargo build` or
-rust-analyzer builds in the same target dir, and each then rebuilds the whole
-graph over the other's. An allow for a rustc lint (`deprecated`, `dead_code`)
-still pays that cost; where the project can say it in the manifest's `[lints]`
-instead, every build shares one fingerprint.
-
-`cargo test` has no `-- <rustc flags>` passthrough, so the test phase puts the
-`-A` flags into cargo's rustflags. Which layer it uses is decided per sweep,
-because cargo does **not** merge rustflags across kinds of source - it picks
-exactly one, first match wins:
-
-1. `CARGO_ENCODED_RUSTFLAGS`
-2. `RUSTFLAGS`
-3. every *matching* `target.<triple>.rustflags` / `target.<cfg>.rustflags`,
-   joined together
-4. `build.rustflags`
-
-This is why brokkr does not simply export `RUSTFLAGS`: that promotes its own
-flags to source 2 and discards the project's `-Dwarnings`, its
-`-fuse-ld=lld`, its `relocation-model=pic`, all at once. (It is also why
-`[[check]] rustflags` isolates a sweep into `target/rustflags-<hash>` and
-should not be used to carry a lint allow.)
-
-Instead brokkr finds the layer already live and adds to *that* one, where
-cargo's own array merging applies and its entry lands last - which is what a
-lint allow needs, since rustc resolves conflicting lint levels last-wins. A
-config layer is reached with `--config`, the highest-precedence config source,
-so the project's `.cargo/config.toml` is left untouched.
-
-The chain inspected is the whole chain cargo reads: every `.cargo/config.toml`
-from the build root upwards, plus `$CARGO_HOME/config.toml`. A user-level
-`[target.<host-triple>] rustflags` is common - a linker choice, a
-`-Ctarget-cpu` - and it silently decides the winning layer for **every**
-project on that machine, including ones whose own flags live in
-`build.rustflags` and are therefore already being ignored.
-
-An unrecognised `cfg(...)` selector resolves to the inert direction, never the
-destructive one: injecting at `build.rustflags` when a target table actually
-wins merely does nothing, while injecting at `target."cfg(all())"` when
-`build.rustflags` was the live layer would demote it and drop the project's
-flags. The run always prints which layer it used, so an inert injection is
-diagnosable rather than mysterious:
+In the test phase only rustc's own lints are injected (`clippy::`, `rustdoc::`
+and `cargo::` names never reach a build). Each injected allow changes every
+unit's fingerprint, so a lint the project can allow in its manifest's `[lints]`
+is better allowed there. brokkr adds the `-A` flags to whichever rustflags
+source cargo is already using - never by exporting `RUSTFLAGS`, which would
+discard the project's own flags - and prints the layer it chose:
 
 ```
 test: allowing deprecated via --config target."cfg(all())".rustflags ([lints] allow)
 ```
+
+Do not use `[[check]] rustflags` to carry a lint allow; it isolates the sweep
+into its own target dir. How the layer is chosen is in
+`reference/check-internals.md`.
 
 ## `[[check]]` array
 
@@ -1141,7 +1103,7 @@ env = { HIGH_PRECISION = "1" }
   fingerprint-thrash reason `rustflags` does. An explicit `"selected"` is
   honoured everywhere, parallel whole-workspace sweeps included - the fan-out
   executes the prebuilt binaries directly, so the prebuild's resolution is the
-  run's resolution. See `brokkr man check feature-unification`.
+  run's resolution. See `brokkr man test-lanes feature-unification`.
 - `harness` (optional, default `"libtest"`) - which engine executes the
   sweep's test phase. `"libtest"` is brokkr's own lanes (serial,
   `test_threads`, `parallel`, `isolation = "process"`). `"nextest"` runs the
@@ -1165,7 +1127,7 @@ env = { HIGH_PRECISION = "1" }
   of its package. Load errors: combined with `parallel`,
   with `feature_unification = "package"`, or on a profile setting
   `isolation = "process"` (redundant - the engine already isolates). See
-  `brokkr man check nextest`.
+  `brokkr man test-lanes nextest`.
 - `doc_only` (optional, default `false`) - the entry runs `cargo test --doc`
   (doctests, nothing else) with its selection, features, unification pin and
   cargo profile, serially. The doctest twin for a `parallel` workspace
@@ -1342,20 +1304,9 @@ tree this was built for: a binary of ten integration tests out of 2224 computed
 to one slot, and its tests then ran end to end for 22.3s of a 24.5s sweep where
 overlapping them would have cost 10.1s.
 
-**Serial cost, and specifically not wall time.** An earlier version stored each
-binary's measured wall time, which oscillated: wall time is a function of the
-slots the allocator granted, so a binary given a generous share finishes fast,
-is weighted cheap, is starved next run, and becomes the pole again. It showed
-as a clean two-cycle at a fixed budget on a warm machine - the pole alternating
-between the same two binaries, the sweep swinging between 13.8s and 19.5s, and
-the claim spread collapsing run over run (1-7, 1-6, 1-4, 1-3) rather than
-converging. Left running it reached `1-1` - every binary at the floor - and
-took 55.8s against a ~50s baseline for not fanning out at all, so the loop's
-terminal state lost to the thing the lane exists to beat while still reporting
-success. Serial cost does not move when the allocation moves. Roughly
-`wall = max(serial / k, slowest_test)`, so wall conflates what is being
-measured with what was chosen: wall time is what you want to know, and
-precisely therefore not what you may feed back.
+**Serial cost, and specifically not wall time:** wall time depends on the slots
+the allocator granted, so feeding it back oscillates. Serial cost does not move
+when the allocation moves.
 
 **Claims are capped where extra threads stop helping.** That same identity
 says no binary finishes before its longest single test, so slots past
@@ -1377,18 +1328,10 @@ direction - missing, unreadable or stale (including one written by an older
 brokkr, which no longer parses) costs one warm-up run and never a wrong
 result.
 
-The rule this replaced - take as many slots as you have tests, capped at the
-budget - silently defeated the lane on the workspaces that needed it most. Any
-binary holding at least `budget` tests claimed the whole pool and ran alone, so
-a workspace whose binaries each hold more tests than the budget could never fan
-out at any sane setting: overlapping two of them would have needed a budget
-above their test counts, which is hundreds in flight - the mistake the budget
-exists to make unspellable. It failed green, too: measured on a 35-binary tree,
-eight fat binaries serialized at the full budget each and the sweep reported
-success. The claims are what make that visible - several binaries claiming the
-whole budget means they cannot have overlapped - and that case prints as a
-warning on an otherwise green run; the full `claims N-M` plan line is in the
-run log (`.brokkr/check-logs/`, see `docs/commands/check.md`).
+Several binaries each claiming the whole budget cannot have overlapped; that
+case prints as a warning on an otherwise green run, and the full `claims N-M`
+plan line is in the run log (`.brokkr/check-logs/`, see
+`docs/commands/check.md`).
 
 `budget = 0` is a load error. There is no spelling for "unlimited": an
 unbounded lane is precisely the mistake the key exists to make unspellable.
@@ -1430,16 +1373,8 @@ in the run log for the first warm runs and raise the budget past
 `total_serial / pole_serial` (both figures are in `--timings`) before judging
 the lane.
 
-The metric is well defined on every vendor; what it *names* differs. On AMD
-Zen, an L3 domain is a CCX, commonly a whole CCD - 6 or 8 cores - and a real
-boundary, since cross-CCD traffic leaves the die. On Intel there is no CCD:
-L3 is shared across the ring or mesh, often across the socket. The count uses
-the CPUs in the selected L3 domain that the calling thread may run on, so
-affinity can make it a subset on either vendor. On Intel hybrid parts (Alder
-Lake and later) P-cores and E-cores share the L3 and both are counted, which is
-honest for a cache-sharing question and slightly optimistic for a throughput
-one; sysfs exposes no portable core-class field, so the alternative would be
-guessing.
+On AMD the domain is a CCX/CCD; on Intel it is usually the whole die, and
+hybrid parts count P-cores and E-cores alike.
 
 ### Doctests
 
@@ -1648,7 +1583,7 @@ include_ignored = true
   doctests) unless it already names a target (`--test <name>`). Set `true` to
   restore the full `cargo test` default. Project-wide only (no per-`[[check]]`
   or CLI override); `brokkr test <name>` is unaffected. See
-  `docs/commands/check.md`.
+  `docs/commands/check.test-lanes.md`.
 - `serial_builds` (default `false`) runs every cargo invocation of `brokkr
   check`'s clippy, rustdoc and prepare-build steps one after another. By
   default they run as one chain per target directory (the shared one, each
@@ -1703,7 +1638,7 @@ include_ignored = true
   and a dead `only` leaves its lane evaluating nothing while still reading
   as a gate. Complementary to the test phase's `zero tests ran` refusal,
   which catches the same defect at run time in any sweep that runs. See
-  `docs/commands/check.md`.
+  `docs/commands/check.test-lanes.md`.
 - `isolation = "process"` runs each of the profile's tests in its own
   `cargo test ... -- --exact <name>` process.
   `--test-threads=1` serializes tests inside one process per test binary; it

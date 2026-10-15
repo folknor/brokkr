@@ -46,7 +46,7 @@ pub(crate) const fn phase_ceiling(phase: crate::cargo_env::Phase) -> Duration {
 mod tests {
     #[test]
     fn documented_per_test_bound_matches_the_runner() {
-        let manual = include_str!("../../docs/commands/check.md");
+        let manual = include_str!("../../reference/check-internals.md");
         assert!(manual.contains(&format!(
             "| `check` parallel sweep | {}s |",
             super::TEST_TIMEOUT.as_secs()
