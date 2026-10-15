@@ -24,7 +24,7 @@ pub(crate) fn build_test_env(
 ) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     if matches!(project, Some(Project::Nidhogg)) {
-        let tmp = target_dir.join("tmp");
+        let tmp = target_dir.join(crate::target_namespace::TMP);
         out.push((
             "CARGO_TARGET_TMPDIR".into(),
             tmp.to_string_lossy().into_owned(),

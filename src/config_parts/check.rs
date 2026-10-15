@@ -202,10 +202,7 @@ impl SweepProfile {
     pub fn cargo_args(self) -> Vec<String> {
         crate::build_purpose::profile_args(
             crate::build_purpose::Purpose::Check,
-            match self {
-                Self::Dev => crate::build_purpose::Profile::Dev,
-                Self::Release => crate::build_purpose::Profile::Release,
-            },
+            &crate::build_purpose::Profile::from(self),
         )
     }
 }

@@ -234,7 +234,9 @@ pub fn direction(a: &Side, b: &Side) -> Option<&'static str> {
 }
 
 /// The execution context a run row can establish. Legacy or malformed rows
-/// remain unknown rather than receiving the parity command's debug default.
+/// remain unknown rather than receiving the parity command's dev default.
+/// Equal contexts are necessary for comparable counts, not sufficient: two
+/// commits can define the same custom profile differently.
 pub fn context_of(run: &RunRow) -> Option<&RunContext> {
     run.context.as_ref()
 }
@@ -318,21 +320,25 @@ mod tests {
     #[test]
     fn compare_reads_the_typed_context_and_marks_legacy_context_unknown() {
         let db = CorpusDb::open_in_memory().unwrap();
-        let debug = RunContext {
-            debug: true,
+        let corpus = RunContext {
+            profile: crate::build::RustProfile::parse("corpus").unwrap(),
             harness_args: Vec::new(),
         };
         let release = RunContext {
-            debug: false,
+            profile: crate::build::RustProfile::Release,
             harness_args: vec!["--scan".to_owned()],
         };
-        let a = contextual_record(&db, &debug);
+        let a = contextual_record(&db, &corpus);
         let b = contextual_record(&db, &release);
         let rendered = compare_report(&db.compare_runs(a, b).unwrap(), false);
         assert!(
-            rendered.contains("A: debug, B: release -- --scan"),
+            rendered.contains("A: corpus, B: release -- --scan"),
             "{rendered}"
         );
+        // The same named profile on both sides is the same context.
+        let c = contextual_record(&db, &corpus);
+        let rendered = compare_report(&db.compare_runs(a, c).unwrap(), false);
+        assert!(!rendered.contains("differ in execution context"), "{rendered}");
 
         let legacy = record(&db, &["p"], &line("p", "exact", 1, 0, 0), &[]);
         let rendered = compare_report(&db.compare_runs(a, legacy).unwrap(), false);

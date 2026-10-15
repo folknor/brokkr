@@ -136,17 +136,23 @@ fn clamp(limit: usize) -> i64 {
 }
 
 fn run_row(row: &Row<'_>) -> rusqlite::Result<RunRow> {
-    let debug = row.get::<_, Option<i64>>("debug")?;
+    let profile = row.get::<_, Option<String>>("cargo_profile")?;
     let args = row.get::<_, Option<String>>("harness_args")?;
-    let context = match (debug, args) {
-        (Some(debug), Some(args)) if matches!(debug, 0 | 1) => {
-            serde_json::from_str::<Vec<String>>(&args)
-                .ok()
-                .map(|harness_args| RunContext {
-                    debug: debug != 0,
-                    harness_args,
-                })
-        }
+    // Context is known only when both halves parse: a profile no decoder
+    // recognises (or an external build kind, which a corpus harness never
+    // is) leaves the run's context unknown, never guessed.
+    let context = match (profile, args) {
+        (Some(profile), Some(args)) => match crate::build::BuildKind::from_db(&profile) {
+            Ok(crate::build::BuildKind::Cargo(profile)) => {
+                serde_json::from_str::<Vec<String>>(&args)
+                    .ok()
+                    .map(|harness_args| RunContext {
+                        profile,
+                        harness_args,
+                    })
+            }
+            _ => None,
+        },
         _ => None,
     };
     Ok(RunRow {
@@ -168,7 +174,7 @@ fn run_row(row: &Row<'_>) -> rusqlite::Result<RunRow> {
 
 const RUN_COLS: &str = "\
 run_id, started_at, selector, gated, result, fail_reason, harness_exit_code, probe_count, \
-commit_sha, dirty, diagnosis, run_error, debug, harness_args";
+commit_sha, dirty, diagnosis, run_error, cargo_profile, harness_args";
 
 fn disposition_row(row: &Row<'_>) -> rusqlite::Result<DispositionRow> {
     Ok(DispositionRow {

@@ -81,9 +81,14 @@ pub struct LintConfig {
     pub features: Vec<String>,
 
     /// Build the validator with the dev profile by default. CLI
-    /// `--debug`/`--release` still override per-invocation.
+    /// `--debug`/`--release`/`--profile` still override per-invocation.
     #[serde(default)]
     pub debug: Option<bool>,
+
+    /// Build the validator under this cargo profile by default: `dev`,
+    /// `release` or a custom `[profile.<name>]`. Wins over `debug`.
+    #[serde(default)]
+    pub profile: Option<crate::build::RustProfile>,
 
     /// Registry directory holding `lints.toml` + `<keyword>.toml`, resolved
     /// relative to `brokkr.toml`. Defaults to `corpus-lint-registry`.
@@ -99,6 +104,11 @@ pub struct LintConfig {
 }
 
 impl LintConfig {
+    /// The configured default profile: `profile`, else `debug`.
+    pub fn configured_profile(&self) -> Option<crate::build::RustProfile> {
+        crate::build::configured_profile("[piners.lint]", self.profile.as_ref(), self.debug)
+    }
+
     /// The validate subcommand, defaulting to `validate`.
     pub fn subcommand(&self) -> &str {
         self.subcommand.as_deref().unwrap_or("validate")

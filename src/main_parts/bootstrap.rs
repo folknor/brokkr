@@ -4,7 +4,7 @@ use super::dispatch::run;
 use crate::clean::CleanOpts;
 use crate::clean::cmd_clean;
 use crate::cli::{Cli, Command};
-use crate::command_args::{parse_env_overrides, profile_override, resolve_features, resolve_mode};
+use crate::command_args::{parse_env_overrides, resolve_features, resolve_mode};
 use crate::context::with_worktree;
 use crate::error::DevError;
 use crate::fmt_cmd::cmd_fmt;
@@ -291,8 +291,7 @@ pub(super) fn run_man(
 /// toolchain-disable window. The session-workflow closer: install the
 /// workspace's bins without reaching for raw cargo.
 pub(super) fn run_install(
-    debug: bool,
-    release: bool,
+    choice: Option<crate::build::RustProfile>,
     unlocked: bool,
     detection: Option<&project::Detection>,
 ) -> Result<(), DevError> {
@@ -304,8 +303,7 @@ pub(super) fn run_install(
     runnables::cmd_install(
         &project_root,
         bin_cfg,
-        debug,
-        release,
+        choice,
         unlocked,
         Some(&lock),
     )
@@ -330,8 +328,7 @@ pub(super) fn run_wc(
 /// comes from cargo metadata, so `run` still works with no brokkr.toml at all.
 pub(super) fn run_program(
     name: Option<&str>,
-    debug: bool,
-    release: bool,
+    choice: Option<crate::build::RustProfile>,
     feat: &runnables::FeatureArgs<'_>,
     commit: Option<&str>,
     args: &[String],
@@ -347,8 +344,7 @@ pub(super) fn run_program(
             &project_root,
             bin_cfg,
             name,
-            debug,
-            release,
+            choice,
             feat,
             args,
             Some(&lock),
@@ -396,8 +392,7 @@ pub(super) fn run_program(
                 build_root.as_path(),
                 bin_cfg,
                 name,
-                debug,
-                release,
+                choice,
                 feat,
                 args,
                 &lock,
@@ -417,8 +412,7 @@ pub(super) fn run_sync(
     bench: &Option<std::num::NonZeroUsize>,
     force: &bool,
     keep_artefacts: &bool,
-    debug: &bool,
-    release: &bool,
+    choice: Option<&crate::build::RustProfile>,
     gate: &Option<String>,
     as_baseline: &bool,
     commit: &Option<String>,
@@ -457,7 +451,7 @@ pub(super) fn run_sync(
             filter: filter.as_deref(),
             include_ignored: *include_ignored,
             keep_artefacts: *keep_artefacts,
-            profile_override: profile_override(*debug, *release),
+            profile_override: choice.cloned(),
         });
     }
     if script.is_none() && !cohort_gate {
@@ -481,7 +475,7 @@ pub(super) fn run_sync(
             ratatoskr: ratatoskr_config,
             script,
             keep_artefacts: *keep_artefacts,
-            profile_override: profile_override(*debug, *release),
+            profile_override: choice.cloned(),
         });
     };
     // A sync bench runs the sidecar, whose per-run narration is
@@ -507,7 +501,7 @@ pub(super) fn run_sync(
                 bench,
                 force: *force,
                 keep_artefacts: *keep_artefacts,
-                profile_override: profile_override(*debug, *release),
+                profile_override: choice.cloned(),
                 invocation: invocation.clone(),
                 gate: gate.as_deref(),
                 as_baseline: *as_baseline,

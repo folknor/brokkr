@@ -18,12 +18,12 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
-use crate::build::CargoProfile;
+use crate::build::RustProfile;
 use crate::config::HarnessConfig;
 use crate::config::project_config::piners::PinersConfig;
 use crate::error::DevError;
+use crate::harness_build;
 use crate::output::{self, CapturedOutput};
-use crate::piners::build;
 use crate::piners::db_paths::lint_runs_db_path;
 use crate::piners::lint::db::{LintDb, RunMeta};
 use crate::piners::lint::diff::classify;
@@ -74,9 +74,9 @@ pub struct LintArgs {
     pub all_stages: bool,
     /// Include warning diagnostics in the gated diff (default: errors only).
     pub warnings: bool,
-    /// `Some(true)` = debug, `Some(false)` = release, `None` = default
-    /// (debug for this command).
-    pub profile_override: Option<bool>,
+    /// The CLI profile choice (`--debug`/`--release`/`--profile`); `None`
+    /// takes `[piners.lint]`'s default, else dev.
+    pub profile_override: Option<crate::build::RustProfile>,
 }
 
 /// Entry point for `brokkr lint-corpus`.
@@ -205,13 +205,15 @@ pub fn lint_corpus(
         binary: lint_cfg.binary.clone(),
         features: lint_cfg.features.clone(),
         debug: lint_cfg.debug,
+        profile: lint_cfg.profile.clone(),
     };
+    let configured = lint_cfg.configured_profile();
     let profile = args
         .profile_override
-        .map(CargoProfile::for_debug)
-        .or_else(|| lint_cfg.debug.map(CargoProfile::for_debug))
-        .unwrap_or(CargoProfile::Dev);
-    let built = build::build_for_harness(
+        .clone()
+        .or(configured)
+        .unwrap_or(RustProfile::Dev);
+    let built = harness_build::build_for_harness(
         project_root,
         &harness_cfg,
         profile,

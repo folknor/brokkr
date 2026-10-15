@@ -22,9 +22,11 @@ and the `runs.db` ingest are parity-only and skipped.
 - The parity-only flags (`--verify-only`/`--reseed`/`--bless`/`--no-gate`/
   `--keep-artefacts`) conflict with the measurement flags.
 - Profile defaults to **release** for measured runs (meaningful timing);
-  `--debug` profiles the dev build. `[piners.harness] debug` is the parity
-  default and is not consulted here. The row's `cargo_profile` records what
-  was built (`dev` or `release`).
+  `--debug` profiles the dev build and `--profile <name>` any other.
+  `[piners.harness] debug` and `profile` are the parity default and are not
+  consulted here. The row's `cargo_profile` records what was built (`dev`,
+  `release`, or `cargo:<name>` for a custom profile, shown as the bare
+  name), and `brokkr results --compare` pairs rows only on equal profiles.
 - Each iteration is bounded by the parity path's one-hour hang backstop
   (below); a harness still running then is killed and the run fails.
 - Each iteration's output is read first, on every process status, and judged
@@ -53,6 +55,32 @@ and the `runs.db` ingest are parity-only and skipped.
 The `[piners]` block (`corpus_root`, `registry_dir`, `harness`) is documented
 in `docs/brokkr.toml.piners.md`. Kept out of the `[[check]]` sweep, like
 `[ratatoskr]`; paths resolve relative to `brokkr.toml`.
+
+## Build profile
+
+A parity run builds the harness under `--debug`/`--release`/`--profile
+<name>` (mutually exclusive) if given, else `[piners.harness] profile`, else
+`[piners.harness] debug`, else **dev**. Parity is opt-level-independent, so
+the choice is a trade between build time and run time. A dev build keeps
+the edit loop's rebuilds short but runs slowly, and a release build runs fast
+but takes much longer to build. A custom cargo profile sits between them, for
+example:
+
+```toml
+# Cargo.toml
+[profile.corpus]
+inherits = "dev"
+opt-level = 2
+```
+
+with `profile = "corpus"` under `[piners.harness]`. It builds into
+`<target>/corpus/`, so it and `brokkr check`'s dev builds never invalidate
+each other's artifacts, and `BROKKR_TEST_BIN_DIR` points there. The run row
+records the profile the build used in `cargo_profile`. A run's wall is
+comparable only against runs built the same way, and
+`corpus-results --compare` notes a profile difference as a context mismatch.
+Equal names are necessary but not sufficient, since two commits can define
+the same profile differently.
 
 ## The corpus and the registry
 
@@ -284,7 +312,7 @@ The allowlist-friendly replacement for env-var-prefixed invocations
 (`PINERS_CORPUS_*=1 brokkr corpus ...`), whose shifting prefixes defeat
 command approval. Works for parity and measured runs. Forwarded flags
 are part of the run's identity: recorded in the run row's selector and its
-typed `debug`/`harness_args` context columns (runs.db;
+typed `cargo_profile`/`harness_args` context columns (runs.db;
 `corpus-results` renders them as `probe=x -- --flag`) and in
 `cli_args` (results.db). Conflicts with `--verify-only`/`--reseed` (no
 harness runs) and `--bless` (pins must record default-behavior
@@ -630,7 +658,7 @@ produce a file the next load refuses.
 
 `--reseed` stamps hashes from the corpus **filesystem** (not `pins.toml`) -
 the only way the file is created or its hashes refreshed. No build/harness;
-`--no-gate`, `--debug` and `--release` are therefore refused with reseed.
+`--no-gate`, `--debug`, `--release` and `--profile` are therefore refused with reseed.
 Probe dirs are discovered anywhere under `corpus_root` by the marker (a dir
 containing `strategy.pine` plus `tv_trades.csv` or `tv_record.json`, all
 regular files), independent of depth and root layout; the registry dir is

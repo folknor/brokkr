@@ -25,8 +25,8 @@ pub fn format_details(row: &StoredRow) -> String {
     if !row.cargo_features.is_empty() {
         fields.push(("cargo features".into(), row.cargo_features.clone()));
     }
-    if let Some(prof) = row.cargo_profile {
-        fields.push(("cargo profile".into(), prof.as_label().to_owned()));
+    if let Some(prof) = &row.cargo_profile {
+        fields.push(("cargo profile".into(), prof.label()));
     }
     if !row.kernel.is_empty() {
         fields.push(("kernel".into(), row.kernel.clone()));

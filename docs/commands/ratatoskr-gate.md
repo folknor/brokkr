@@ -28,7 +28,7 @@ CREATE TABLE gate_runs (
   gate_name     TEXT NOT NULL,      -- e.g. "jmap_small"
   script        TEXT NOT NULL,      -- project-relative path; legacy rows may be absolute
   fixture       TEXT NOT NULL,
-  profile       TEXT NOT NULL,      -- dev/release
+  profile       TEXT NOT NULL,      -- dev/release/cargo:<name>
   elapsed_ms    INTEGER NOT NULL,
   exit_code     INTEGER NOT NULL,
   success       INTEGER NOT NULL,   -- 0/1
@@ -51,8 +51,11 @@ Current rows store an in-project script path relative to the project root;
 scripts outside the project remain absolute. Older rows contain canonical
 absolute paths. When a checkout has moved, the gate accepts an older absolute
 baseline path whose components end in the current project-relative path. New
-rows store Cargo's profile name (`dev` or `release`); the legacy spelling
-`debug` is read as `dev`.
+rows store Cargo's profile name (`dev` or `release`), or `cargo:<name>` for a
+custom profile, so a profile that happens to be named like another stored
+value cannot be read back as it; the legacy spelling `debug` is read as
+`dev`. Any other value is an unknown profile, and a baseline carrying one
+is refused.
 
 Index on `(gate_name, hostname, created_at)` for the lookup paths below.
 Normalized metric tables can wait until there is a real query need.
@@ -135,7 +138,8 @@ scope for v1.
 4. Validate the looked-up row's `gate_name`, `script`, `fixture`,
    `profile` and `features` match the current invocation. Mismatch is a
    hard error - a `--debug` run against a release baseline (or the
-   reverse) would make every timing rule meaningless, and a baseline built
+   reverse, or any two different profiles) would make every timing rule
+   meaningless, and a baseline built
    with a different feature set measured a different binary. A baseline
    whose `features` is NULL (recorded before the column existed) is
    compared anyway, with a warning that the features identity went
@@ -248,7 +252,7 @@ missing selectors are not filled with a default.
 
 ## CLI
 
-`brokkr sync <SCRIPT> --bench [N] --gate <name> [--force] [--keep-artefacts] [--debug | --release]`
+`brokkr sync <SCRIPT> --bench [N] --gate <name> [--force] [--keep-artefacts] [--debug | --release | --profile NAME]`
 
 `--gate` requires `--bench` - every rule compares measured numbers, so
 there is nothing to evaluate on an unmeasured run.

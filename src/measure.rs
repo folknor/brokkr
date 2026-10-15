@@ -3,7 +3,7 @@
 //! Replaces the separate `BenchRequest` / `HotpathRequest` / `ProfileRequest`
 //! structs with a single `MeasureRequest` carrying a `MeasureMode`.
 
-use crate::build::CargoProfile;
+use crate::build::BuildKind;
 use std::path::Path;
 use std::time::Duration;
 
@@ -219,7 +219,7 @@ pub struct BenchConfig {
     /// cargo (planetiler's Java, tilemaker's CMake). `None` for every cargo
     /// build: those rows take the profile the session's build actually used
     /// ([`BenchHarness::with_build_identity`]).
-    pub external_build: Option<CargoProfile>,
+    pub external_build: Option<BuildKind>,
     pub runs: usize,
     /// Literal subprocess invocation (pbfhogg/elivagar/...). Populated by
     /// dispatch from the argv it hands to the tool binary.
@@ -341,7 +341,7 @@ impl HostFacts {
 /// How the measured binary was built, as a results row records it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildIdentity {
-    pub profile: CargoProfile,
+    pub profile: BuildKind,
     /// The canonical feature spelling (sorted, duplicate-free), `None` for a
     /// default-features build.
     pub features: Option<String>,
@@ -354,7 +354,7 @@ impl BuildIdentity {
         features.sort_unstable();
         features.dedup();
         Self {
-            profile: artifact.profile,
+            profile: BuildKind::Cargo(artifact.profile.clone()),
             features: (!features.is_empty()).then(|| features.join(",")),
         }
     }

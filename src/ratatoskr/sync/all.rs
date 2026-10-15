@@ -3,11 +3,10 @@
 use std::path::Path;
 
 use crate::artefacts;
-use crate::build::CargoProfile;
 use crate::config::project_config::ratatoskr::RatatoskrConfig;
 use crate::error::DevError;
+use crate::harness_build;
 use crate::output;
-use crate::ratatoskr::build;
 use crate::ratatoskr::discover::{self, ScriptInfo, Selection};
 
 use super::list::sync_script_dir;
@@ -96,12 +95,8 @@ pub fn run_sync_all(req: &SyncAllRequest<'_>) -> Result<(), DevError> {
     // for the mechanism.
     let sigterm = crate::shutdown::SigtermGuard::install();
 
-    let profile = req
-        .profile_override
-        .map(CargoProfile::for_debug)
-        .or_else(|| harness_cfg.debug.map(CargoProfile::for_debug))
-        .unwrap_or_default();
-    let built = build::build_for_harness(
+    let profile = crate::ratatoskr::harness_profile(req.profile_override.as_ref(), harness_cfg);
+    let built = harness_build::build_for_harness(
         req.build_root.as_path(),
         harness_cfg,
         profile,
@@ -200,5 +195,6 @@ pub struct SyncAllRequest<'a> {
     /// Include scripts whose frontmatter says `expected: ignored`.
     pub include_ignored: bool,
     pub keep_artefacts: bool,
-    pub profile_override: Option<bool>,
+    /// The CLI profile choice (`--debug`/`--release`/`--profile`).
+    pub profile_override: Option<crate::build::RustProfile>,
 }

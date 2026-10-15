@@ -30,7 +30,9 @@ pub(crate) const RUN_RETENTION_LIMIT: i64 = 1_000;
 /// infer them from selector presentation JSON.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunContext {
-    pub debug: bool,
+    /// The profile the harness was built under - the build's own answer, not
+    /// the request's.
+    pub profile: crate::build::RustProfile,
     pub harness_args: Vec<String>,
 }
 
@@ -156,7 +158,8 @@ fn record_inner(
     gate_diffs: &[GateDiff],
 ) -> Result<i64, DevError> {
     let context = run.context;
-    let debug = context.map(|context| i64::from(context.debug));
+    let cargo_profile = context
+        .map(|context| crate::build::BuildKind::Cargo(context.profile.clone()).to_stored());
     let harness_args = context
         .map(|context| serde_json::to_string(&context.harness_args))
         .transpose()
@@ -167,7 +170,7 @@ fn record_inner(
         "INSERT INTO run \
          (run_id, started_at, selector, gated, result, fail_reason, harness_exit_code, \
           probe_count, harness_stderr, wall_ms, commit_sha, dirty, protocol_violations, run_error, \
-          debug, harness_args, report_warnings) \
+          cargo_profile, harness_args, report_warnings) \
          VALUES (?9, COALESCE(?10, datetime('now')), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             run.selector,
@@ -184,7 +187,7 @@ fn record_inner(
             run.dirty.map(i64::from),
             run.protocol_violations,
             run.run_error,
-            debug,
+            cargo_profile,
             harness_args,
             report_warnings,
         ],
@@ -421,7 +424,7 @@ mod tests {
     fn typed_execution_context_roundtrips_independently_of_selector_json() {
         let db = CorpusDb::open_in_memory().unwrap();
         let context = RunContext {
-            debug: false,
+            profile: crate::build::RustProfile::parse("corpus").unwrap(),
             harness_args: vec!["--scan-signal-extra".to_owned()],
         };
         let run = RunRecord {

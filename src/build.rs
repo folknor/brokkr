@@ -6,69 +6,207 @@ use crate::error::DevError;
 use crate::output;
 
 // ---------------------------------------------------------------------------
-// CargoProfile
+// Profiles and build kinds
 // ---------------------------------------------------------------------------
 
-/// Identifies how a benchmarked binary was built. Stored on every result row
-/// (column `cargo_profile`) so Rust-built runs stay distinguishable from
-/// external baselines that go through entirely different build systems.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum CargoProfile {
-    /// Rust `cargo build --release` - the standard brokkr-built binary.
+/// The prefix that marks a custom profile in a stored build-kind column.
+/// Unprefixed values are the legacy closed set, so a custom profile named
+/// `java` can never be read back as the Java baseline.
+const STORED_NAMED_PREFIX: &str = "cargo:";
+
+/// A custom Cargo profile name (`[profile.<name>]`), syntax-checked.
+///
+/// Two constructors, because selecting and decoding are different questions:
+/// [`Self::select`] also refuses the names brokkr or Cargo own at the target
+/// root ([`crate::target_namespace`]), while [`Self::historical`] only checks
+/// syntax, so a reservation added later never makes a stored row unreadable.
+/// Whether the profile exists is Cargo's to answer, at build time.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProfileName(String);
+
+impl ProfileName {
+    /// A name a build may select.
+    pub fn select(name: &str) -> Result<Self, String> {
+        let name = Self::historical(name)?;
+        match crate::target_namespace::reserved_reason(&name.0) {
+            Some(why) => Err(format!("cargo profile `{}` cannot be used: {why}", name.0)),
+            None => Ok(name),
+        }
+    }
+
+    /// A name read back from a store: syntax only.
+    fn historical(name: &str) -> Result<Self, String> {
+        let valid = !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        if valid {
+            Ok(Self(name.to_owned()))
+        } else {
+            Err(format!(
+                "`{name}` is not a cargo profile name (ASCII letters, digits, `-` and `_` only)"
+            ))
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The Cargo profile a Rust build runs under.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub enum RustProfile {
+    /// `cargo build --release` - the standard brokkr-built binary.
     #[default]
     Release,
-    /// Rust `cargo build` under the dev profile - a harness whose config or
-    /// `--debug` selects a debug build (ratatoskr's sync bench, piners'
-    /// measured corpus). Labelled `release` before this variant existed, so
-    /// older dev rows in those series carry the wrong profile.
+    /// Cargo's dev profile, which builds into `<target>/debug/`.
     Dev,
+    /// A custom `[profile.<name>]` - `cargo build --profile <name>`, built
+    /// into `<target>/<name>/`.
+    Named(ProfileName),
+}
+
+impl RustProfile {
+    /// The profile a `debug` flag selects.
+    pub fn for_debug(debug: bool) -> Self {
+        if debug { Self::Dev } else { Self::Release }
+    }
+
+    /// Parse a selection from config or the CLI: `dev` and `release` are the
+    /// built-ins, any other name a custom profile. `debug` is refused rather
+    /// than aliased - it is a directory, not a profile.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "dev" => Ok(Self::Dev),
+            "release" => Ok(Self::Release),
+            other => ProfileName::select(other).map(Self::Named),
+        }
+    }
+
+    /// The profile's name as Cargo spells it.
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Release => "release",
+            Self::Dev => "dev",
+            Self::Named(name) => name.as_str(),
+        }
+    }
+
+    /// Cargo's directory for this profile's artifacts under the target root.
+    pub fn target_dir(&self) -> &str {
+        match self {
+            Self::Release => "release",
+            Self::Dev => "debug",
+            Self::Named(name) => name.as_str(),
+        }
+    }
+
+    pub fn is_dev(&self) -> bool {
+        matches!(self, Self::Dev)
+    }
+}
+
+impl std::fmt::Display for RustProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for RustProfile {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Self::parse(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+/// A config table's profile default from its `profile` and legacy `debug`
+/// keys. `profile` wins when both are present - composition can leave both
+/// set from different layers, and `profile` is the only key that can name
+/// every profile, so it is the one a higher layer can always override with.
+/// The warning describes the config's resolution, not the build: a CLI flag
+/// may still override the result.
+pub fn configured_profile(
+    table: &str,
+    profile: Option<&RustProfile>,
+    debug: Option<bool>,
+) -> Option<RustProfile> {
+    match (profile, debug) {
+        (Some(profile), Some(debug)) => {
+            output::warn(&format!(
+                "{table}: config profile = \"{profile}\" overrides config debug = {debug}; \
+                 debug is ignored"
+            ));
+            Some(profile.clone())
+        }
+        (Some(profile), None) => Some(profile.clone()),
+        (None, debug) => debug.map(RustProfile::for_debug),
+    }
+}
+
+/// Identifies how a measured binary was built. Stored on every result row
+/// (column `cargo_profile`) so Rust-built runs stay distinguishable from
+/// each other and from external baselines that go through entirely
+/// different build systems.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum BuildKind {
+    /// A Cargo build under the given profile.
+    Cargo(RustProfile),
     /// External Java/Maven build (Planetiler baseline).
     Java,
     /// External CMake/C++ build (Tilemaker baseline).
     CMake,
 }
 
-impl CargoProfile {
-    /// The Rust profile a `debug` flag selects - the one mapping every
-    /// harness-built writer should use rather than spelling `Release`.
-    pub fn for_debug(debug: bool) -> Self {
-        if debug { Self::Dev } else { Self::Release }
+impl Default for BuildKind {
+    fn default() -> Self {
+        Self::Cargo(RustProfile::Release)
     }
+}
 
-    pub fn as_label(self) -> &'static str {
+impl BuildKind {
+    /// The human-facing label: a custom profile renders as its bare name.
+    /// Never written to a store - see [`Self::to_stored`].
+    pub fn as_label(&self) -> &str {
         match self {
-            Self::Release => "release",
-            Self::Dev => "dev",
+            Self::Cargo(profile) => profile.label(),
             Self::Java => "java",
             Self::CMake => "cmake",
         }
     }
 
-    /// Cargo's profile directory for Rust-built artifacts. External build
-    /// kinds have no Cargo target directory.
-    pub fn target_dir(self) -> Option<&'static str> {
+    /// The value written to a store's profile column. Built-ins keep their
+    /// legacy spelling; a custom profile is `cargo:<name>`.
+    pub fn to_stored(&self) -> String {
         match self {
-            Self::Release => Some("release"),
-            Self::Dev => Some("debug"),
-            Self::Java | Self::CMake => None,
+            Self::Cargo(RustProfile::Named(name)) => {
+                format!("{STORED_NAMED_PREFIX}{}", name.as_str())
+            }
+            other => other.as_label().to_owned(),
         }
     }
 
-    /// Parse a DB-stored value. Returns `Err` on unknown strings so the
-    /// caller can surface a migration typo instead of silently coercing
-    /// to `Release`.
+    /// Parse a stored value. Unprefixed values are the closed legacy set, so
+    /// a typo still surfaces as `Err`; `cargo:<name>` is syntax-checked only
+    /// (today's reservations do not reach back into history), and the
+    /// non-canonical `cargo:dev`/`cargo:release` are refused.
     pub fn from_db(s: &str) -> Result<Self, UnknownCargoProfile> {
+        let unknown = || UnknownCargoProfile(s.to_owned());
         match s {
-            "release" => Ok(Self::Release),
-            "dev" => Ok(Self::Dev),
+            "release" => Ok(Self::Cargo(RustProfile::Release)),
+            "dev" => Ok(Self::Cargo(RustProfile::Dev)),
             "java" => Ok(Self::Java),
             "cmake" => Ok(Self::CMake),
-            other => Err(UnknownCargoProfile(other.to_owned())),
+            other => {
+                let name = other.strip_prefix(STORED_NAMED_PREFIX).ok_or_else(unknown)?;
+                if matches!(name, "dev" | "release") {
+                    return Err(unknown());
+                }
+                ProfileName::historical(name)
+                    .map(|n| Self::Cargo(RustProfile::Named(n)))
+                    .map_err(|_| unknown())
+            }
         }
-    }
-
-    fn is_rust_build(self) -> bool {
-        matches!(self, Self::Dev | Self::Release)
     }
 }
 
@@ -80,7 +218,7 @@ pub struct UnknownCargoProfile(pub String);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuiltArtifact {
     pub path: PathBuf,
-    pub profile: CargoProfile,
+    pub profile: RustProfile,
     /// Explicit feature requests passed to this Cargo invocation.
     pub features: Vec<String>,
     /// Cargo target name reported with the executable artifact.
@@ -101,7 +239,7 @@ pub struct BuildConfig {
     /// `--all-features`. Only `brokkr run --commit` sets it, forwarding the
     /// flag a plain `run` hands to `cargo run`.
     pub all_features: bool,
-    pub profile: CargoProfile,
+    pub profile: RustProfile,
 }
 
 impl BuildConfig {
@@ -113,7 +251,7 @@ impl BuildConfig {
             features: Vec::new(),
             default_features: true,
             all_features: false,
-            profile: CargoProfile::Release,
+            profile: RustProfile::Release,
         }
     }
 
@@ -125,7 +263,7 @@ impl BuildConfig {
             features: features.iter().map(|s| (*s).to_owned()).collect(),
             default_features: true,
             all_features: false,
-            profile: CargoProfile::Release,
+            profile: RustProfile::Release,
         }
     }
 
@@ -138,7 +276,7 @@ impl BuildConfig {
             features: features.to_vec(),
             default_features: true,
             all_features: false,
-            profile: CargoProfile::Release,
+            profile: RustProfile::Release,
         }
     }
 
@@ -150,7 +288,7 @@ impl BuildConfig {
             features: features.iter().map(|s| (*s).to_owned()).collect(),
             default_features: false,
             all_features: false,
-            profile: CargoProfile::Release,
+            profile: RustProfile::Release,
         }
     }
 
@@ -162,7 +300,7 @@ impl BuildConfig {
     /// engine, so the config mapping lives once here.
     pub fn for_harness_with_profile(
         harness_cfg: &crate::config::HarnessConfig,
-        profile: CargoProfile,
+        profile: RustProfile,
     ) -> Self {
         Self {
             package: Some(harness_cfg.package.clone()),
@@ -346,13 +484,7 @@ fn cargo_build_locked(
     on_spawn: &dyn Fn(u32),
     isolation: crate::shutdown::ChildIsolation<'_>,
 ) -> Result<BuiltArtifact, DevError> {
-    if !config.profile.is_rust_build() {
-        return Err(DevError::Build(format!(
-            "{} is not a Cargo build profile",
-            config.profile.as_label()
-        )));
-    }
-    let profile = config.profile;
+    let profile = config.profile.clone();
     let on_spawn = Some(on_spawn);
     let args = build_args(config)?;
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -425,29 +557,21 @@ fn cargo_build_locked(
 }
 
 /// Resolve the selected profile's binary path from cargo metadata without
-/// building.
+/// building. A lookup only: nothing here checks that the binary found was
+/// built with the requested features, or under the profile's current
+/// definition, and a custom profile's existence goes unchecked because
+/// Cargo, which validates it, never runs.
 pub fn resolve_existing_binary(
     config: &BuildConfig,
     project_root: &Path,
 ) -> Result<PathBuf, DevError> {
-    if !config.profile.is_rust_build() {
-        return Err(DevError::Build(format!(
-            "{} is not a Cargo build profile",
-            config.profile.as_label()
-        )));
-    }
     let target_override = cargo_target_dir_override(project_root);
     let env = target_dir_env(target_override.as_deref());
     let metadata = metadata::load(project_root, Query::workspace(), &env, None)?;
     let bin_name = resolve_bin_name(&metadata, config)?;
 
     let mut path = PathBuf::from(&metadata.target_directory);
-    path.push(config.profile.target_dir().ok_or_else(|| {
-        DevError::Build(format!(
-            "{} has no Cargo target directory",
-            config.profile.as_label()
-        ))
-    })?);
+    path.push(config.profile.target_dir());
     path.push(bin_name);
 
     if !path.exists() {
@@ -462,18 +586,17 @@ pub fn resolve_existing_binary(
 
 /// Assemble the argument list for `cargo build`.
 fn build_args(config: &BuildConfig) -> Result<Vec<String>, DevError> {
-    if !config.profile.is_rust_build() {
-        return Err(DevError::Build(format!(
-            "{} is not a Cargo build profile",
-            config.profile.as_label()
-        )));
-    }
-    let shape = crate::build_purpose::resolve(crate::build_purpose::Request {
-        purpose: crate::build_purpose::Purpose::Build,
-        profiles: crate::build_purpose::Profiles {
-            invocation: Some(config.profile == CargoProfile::Dev),
+    let purpose = crate::build_purpose::Purpose::Build;
+    let profile = crate::build_purpose::profile(
+        purpose,
+        crate::build_purpose::Profiles {
+            invocation: Some(config.profile.clone()),
             ..Default::default()
         },
+    )?;
+    let shape = crate::build_purpose::resolve(crate::build_purpose::Request {
+        purpose,
+        profile,
         packages: config
             .package
             .as_ref()
@@ -767,6 +890,52 @@ fn filtered_build_stderr(stderr: &[u8]) -> String {
         .join("\n")
         .trim_end()
         .to_owned()
+}
+
+#[cfg(test)]
+mod profile_tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::{BuildKind, RustProfile};
+
+    #[test]
+    fn selection_parses_builtins_first_and_refuses_reserved_names() {
+        assert_eq!(RustProfile::parse("dev").unwrap(), RustProfile::Dev);
+        assert_eq!(RustProfile::parse("release").unwrap(), RustProfile::Release);
+        let corpus = RustProfile::parse("corpus").unwrap();
+        assert_eq!((corpus.label(), corpus.target_dir()), ("corpus", "corpus"));
+        assert_eq!(RustProfile::Dev.target_dir(), "debug");
+        for bad in ["debug", "test", "tmp", "unify-package", "fixture-x", "", "a b", "cargo:x"] {
+            assert!(RustProfile::parse(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn stored_kinds_round_trip_without_colliding() {
+        let java_named = BuildKind::Cargo(RustProfile::parse("java").unwrap());
+        for kind in [
+            BuildKind::default(),
+            BuildKind::Cargo(RustProfile::Dev),
+            BuildKind::Cargo(RustProfile::parse("corpus").unwrap()),
+            java_named.clone(),
+            BuildKind::Java,
+            BuildKind::CMake,
+        ] {
+            assert_eq!(BuildKind::from_db(&kind.to_stored()).unwrap(), kind);
+        }
+        // A custom profile named `java` is never read back as the baseline.
+        assert_eq!(java_named.to_stored(), "cargo:java");
+        assert_ne!(BuildKind::from_db("java").unwrap(), java_named);
+    }
+
+    #[test]
+    fn decoding_stays_strict_for_legacy_values_and_lenient_for_history() {
+        for bad in ["relesae", "debug", "cargo:dev", "cargo:release", "cargo:", "cargo:a b"] {
+            assert!(BuildKind::from_db(bad).is_err(), "{bad:?}");
+        }
+        // A name reserved today still decodes from a row written before.
+        assert!(BuildKind::from_db("cargo:tmp").is_ok());
+    }
 }
 
 #[cfg(test)]

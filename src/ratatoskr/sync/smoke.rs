@@ -3,11 +3,10 @@
 use std::path::Path;
 
 use crate::artefacts;
-use crate::build::CargoProfile;
 use crate::config::project_config::ratatoskr::RatatoskrConfig;
 use crate::error::DevError;
+use crate::harness_build;
 use crate::output;
-use crate::ratatoskr::build;
 
 use super::runner::{SyncRunner, resolve_single, validate_sync_config};
 
@@ -27,7 +26,8 @@ pub struct SyncSmokeRequest<'a> {
     pub ratatoskr: &'a RatatoskrConfig,
     pub script: &'a str,
     pub keep_artefacts: bool,
-    pub profile_override: Option<bool>,
+    /// The CLI profile choice (`--debug`/`--release`/`--profile`).
+    pub profile_override: Option<crate::build::RustProfile>,
 }
 
 /// Drive the unmeasured `brokkr sync <SCRIPT>` end-to-end:
@@ -61,12 +61,8 @@ pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
     // end, before `_lock`.
     let sigterm = crate::shutdown::SigtermGuard::install();
 
-    let profile = req
-        .profile_override
-        .map(CargoProfile::for_debug)
-        .or_else(|| harness_cfg.debug.map(CargoProfile::for_debug))
-        .unwrap_or_default();
-    let built = build::build_for_harness(
+    let profile = crate::ratatoskr::harness_profile(req.profile_override.as_ref(), harness_cfg);
+    let built = harness_build::build_for_harness(
         req.build_root.as_path(),
         harness_cfg,
         profile,

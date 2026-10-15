@@ -2275,6 +2275,7 @@ sweeps = ["all"]
             binary: None,
             features: Vec::new(),
             debug: None,
+            profile: None,
         };
         assert_eq!(h.binary_name(), "app");
     }
@@ -2286,6 +2287,7 @@ sweeps = ["all"]
             binary: Some("parent_death_helper".into()),
             features: Vec::new(),
             debug: None,
+            profile: None,
         };
         assert_eq!(h.binary_name(), "parent_death_helper");
     }
@@ -2321,6 +2323,58 @@ debug = true
         assert_eq!(h.binary_name(), "app");
         assert!(h.features.is_empty());
         assert_eq!(h.debug, Some(true));
+    }
+
+    #[test]
+    fn harness_profile_names_a_custom_profile_and_beats_debug() {
+        let raw = r#"
+project = "ratatoskr"
+[ratatoskr.harness]
+package = "app"
+debug = true
+profile = "corpus"
+"#;
+        let root: toml::Value = toml::from_str(raw).unwrap();
+        let cfg = project_config::ratatoskr::parse(root.as_table().unwrap()).unwrap();
+        let h = cfg.harness.unwrap();
+        assert_eq!(
+            h.configured_profile("[ratatoskr.harness]"),
+            Some(crate::build::RustProfile::parse("corpus").unwrap())
+        );
+        // `release` is the built-in, so a higher layer can always override.
+        let h = HarnessConfig {
+            profile: Some(crate::build::RustProfile::parse("release").unwrap()),
+            ..h
+        };
+        assert_eq!(
+            h.configured_profile("[ratatoskr.harness]"),
+            Some(crate::build::RustProfile::Release)
+        );
+    }
+
+    #[test]
+    fn harness_profile_refuses_a_brokkr_owned_name() {
+        for name in ["debug", "tmp", "rustflags-x", "brokkr-worktrees"] {
+            let raw = format!(
+                "project = \"ratatoskr\"\n[ratatoskr.harness]\npackage = \"app\"\nprofile = \"{name}\"\n"
+            );
+            let root: toml::Value = toml::from_str(&raw).unwrap();
+            let err = project_config::ratatoskr::parse(root.as_table().unwrap()).unwrap_err();
+            assert!(err.to_string().contains(name), "{name}: {err}");
+        }
+    }
+
+    #[test]
+    fn bin_profile_and_absent_debug_are_distinguishable() {
+        let bin = |raw: &str| -> crate::config::BinConfig { toml::from_str(raw).unwrap() };
+        assert_eq!(bin("").debug, None);
+        assert_eq!(bin("debug = false").debug, Some(false));
+        assert_eq!(
+            bin("profile = \"corpus\"\ndebug = true").configured_profile(),
+            Some(crate::build::RustProfile::parse("corpus").unwrap())
+        );
+        assert_eq!(bin("debug = true").configured_profile(), Some(crate::build::RustProfile::Dev));
+        assert_eq!(bin("").configured_profile(), None);
     }
 
     #[test]

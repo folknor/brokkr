@@ -213,7 +213,7 @@ pub(crate) fn prepare(
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,
-        external_build: Some(crate::build::CargoProfile::Java),
+        external_build: Some(crate::build::BuildKind::Java),
         runs,
         cli_args: Some(crate::harness::format_cli_args(
             &pt.java.display().to_string(),

@@ -17,7 +17,10 @@
 //! from selector fields only when each has the expected JSON type; incomplete
 //! context stays unknown; version 10 adds `run.report_warnings`, structured
 //! parse diagnostics for malformed records and dropped diagnostic subrecords
-//! (protocol violations remain counted separately). On a fresh database,
+//! (protocol violations remain counted separately); version 11 adds
+//! `run.cargo_profile`, the build profile in the results store's encoding
+//! (`dev`, `release`, `cargo:<name>`), backfilled from `debug` - which a v11
+//! writer leaves NULL, the profile column superseding it. On a fresh database,
 //! the schema DDL in `schema.rs` creates the current tables (columns included)
 //! inside the shared migration transaction. Schema inspection uses the shared
 //! `db::store` helpers, which preserve errors and recognize generated columns.
@@ -30,7 +33,7 @@ use crate::db::store::{column_exists as has_column, table_exists as has_table};
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding a migration below.
-pub(super) const SCHEMA_VERSION: i64 = 10;
+pub(super) const SCHEMA_VERSION: i64 = 11;
 
 /// Run pending migrations through the shared store policy. The v5 rebuild
 /// preserves historical orphan dispositions, so foreign-key enforcement is
@@ -169,6 +172,20 @@ fn migrate_from(conn: &rusqlite::Connection, current: i64) -> Result<(), DevErro
     if current < 10 && !has_column(conn, "run", "report_warnings")? {
         conn.execute(
             "ALTER TABLE run ADD COLUMN report_warnings TEXT NOT NULL DEFAULT '[]'",
+            [],
+        )?;
+    }
+
+    // v10 -> v11: the build profile by name, since a custom cargo profile
+    // has no `debug` spelling. A known `debug` maps to its built-in; an
+    // unknown one stays NULL, as unknown as it was.
+    if current < 11 {
+        if !has_column(conn, "run", "cargo_profile")? {
+            conn.execute("ALTER TABLE run ADD COLUMN cargo_profile TEXT", [])?;
+        }
+        conn.execute(
+            "UPDATE run SET cargo_profile = CASE debug WHEN 1 THEN 'dev' WHEN 0 THEN 'release' END \
+             WHERE cargo_profile IS NULL",
             [],
         )?;
     }
@@ -434,6 +451,7 @@ mod tests {
         assert!(has_column(&conn, "run", "protocol_violations").unwrap());
         assert!(has_column(&conn, "run", "diagnosis").unwrap());
         assert!(has_column(&conn, "run", "run_error").unwrap());
+        assert!(has_column(&conn, "run", "cargo_profile").unwrap());
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
@@ -477,6 +495,31 @@ mod tests {
                 (4, None, None),
             ]
         );
+    }
+
+    #[test]
+    fn v11_names_the_profile_a_known_debug_flag_implied() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(V1_SCHEMA).unwrap();
+        conn.execute_batch(
+            "INSERT INTO run (run_id, started_at, selector, gated, result, probe_count) VALUES
+                 (1, 'x', '{\"debug\":true,\"harness_args\":[]}', 1, 'pass', 0),
+                 (2, 'x', '{\"debug\":false,\"harness_args\":[]}', 1, 'pass', 0),
+                 (3, 'x', '{}', 1, 'pass', 0);",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+
+        run_migrations(&conn).unwrap();
+
+        let rows: Vec<Option<String>> = conn
+            .prepare("SELECT cargo_profile FROM run ORDER BY run_id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(rows, vec![Some("dev".to_owned()), Some("release".to_owned()), None]);
     }
 
     #[test]

@@ -136,7 +136,7 @@ the next, and best-of-N across different scripts means nothing. For
 measurement across the cohort, use `--gate all`, which is scoped to the
 gates that have pinned baselines to compare against.
 
-## `sync <SCRIPT> [--keep-artefacts] [--debug | --release]` - run one
+## `sync <SCRIPT> [--keep-artefacts] [--debug | --release | --profile NAME]` - run one
 
 Two-child orchestration. Validates `[ratatoskr.harness]`, `[ratatoskr]
 mock_server_binary`, and `[ratatoskr] fixtures_dir`, parses the script's
@@ -168,7 +168,7 @@ before propagating the original failure.
 After the harness exits, brokkr SIGTERMs sæhrimnir with the standard 1.5s
 budget then escalates to SIGKILL. PASS/FAIL on the harness exit code; FAIL
 preserves the artefact dir with `run.toml` (top-level metadata: brokkr
-version, script, binary, features, harness exit code/signal/elapsed, git
+version, script, binary, features, profile, harness exit code/signal/elapsed, git
 state, and a `[mock]` table with the mock outcome) plus the harness's own
 artefacts and the captured mock stderr. `run.toml` is serialized, not
 string-formatted, so a quote or backslash in a path cannot corrupt it, and
@@ -180,7 +180,7 @@ that didn't run (e.g. a spawn-side failure before the harness started) are
 omitted, and the leading `in <total>` is dropped entirely if no phase
 recorded.
 
-## `sync <SCRIPT> --bench [N] [--force] [--keep-artefacts] [--debug | --release] [--gate NAME] [--commit REF]` - measure one
+## `sync <SCRIPT> --bench [N] [--force] [--keep-artefacts] [--debug | --release | --profile NAME] [--gate NAME] [--commit REF]` - measure one
 
 The measured shape. Same two-child spawn, but sæhrimnir is spawned
 once and reused across `--bench` iterations (default 3), and the harness
@@ -201,7 +201,9 @@ booleans so gate selectors can treat them as `1`/`0`. The run uses the shared
 measurement loop, so a completed clean-tree measurement is
 recorded in `results.db` with the usual provenance: every iteration's ranking
 value in execution order, `cargo_profile` from the profile actually built
-(`dev` under `[ratatoskr.harness] debug = true` or `--debug`), configured
+(`dev` under `[ratatoskr.harness] debug = true` or `--debug`, `cargo:<name>`
+under a custom `profile`/`--profile`; `brokkr results --compare` pairs rows
+only on equal profiles), configured
 features, the `capture_env` snapshot, sidecar RunInfo for the winning
 iteration's process, and a measurement-start stamp so `prev.gap_seconds`
 excludes the run's own duration. A failed, hung, or interrupted run has no

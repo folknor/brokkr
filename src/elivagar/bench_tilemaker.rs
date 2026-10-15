@@ -119,7 +119,7 @@ pub(crate) fn prepare(
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,
-        external_build: Some(crate::build::CargoProfile::CMake),
+        external_build: Some(crate::build::BuildKind::CMake),
         runs,
         cli_args: Some(harness::format_cli_args(
             &tm.tilemaker.display().to_string(),

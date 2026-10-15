@@ -50,6 +50,19 @@ pub(crate) fn harness_env(artefact_dir: &Path, bin_dir: &Path) -> HarnessEnv {
     }
 }
 
+/// The profile every ratatoskr orchestration command builds its harness
+/// under: the CLI choice > `[ratatoskr.harness] profile` > `debug` >
+/// release.
+pub(crate) fn harness_profile(
+    choice: Option<&crate::build::RustProfile>,
+    harness_cfg: &HarnessConfig,
+) -> crate::build::RustProfile {
+    // Resolved before the CLI choice applies, so a config setting both keys
+    // warns whatever the invocation chose.
+    let configured = harness_cfg.configured_profile("[ratatoskr.harness]");
+    choice.cloned().or(configured).unwrap_or_default()
+}
+
 pub(crate) fn require_harness_config<'a>(
     cfg: &'a RatatoskrConfig,
     command: &str,
@@ -58,12 +71,11 @@ pub(crate) fn require_harness_config<'a>(
         DevError::Config(format!(
             "{command}: no [ratatoskr.harness] section in brokkr.toml. \
              Declare it with `package = \"<crate>\"` (and optional \
-             `binary`, `features`, `debug`)."
+             `binary`, `features`, `debug`, `profile`)."
         ))
     })
 }
 
-pub mod build;
 pub mod cmd;
 pub mod discover;
 pub mod gate;

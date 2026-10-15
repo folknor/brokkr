@@ -60,7 +60,7 @@ const TARGET_LINK: &str = ".brokkr-target";
 
 /// The directory under the project's effective target dir that holds the
 /// worktrees' isolated target dirs.
-const TARGET_SUBDIR: &str = "brokkr-worktrees";
+const TARGET_SUBDIR: &str = crate::target_namespace::WORKTREES;
 
 /// Name prefix of the legacy sibling layout
 /// (`<parent>/.brokkr-worktree-<project>-<short>`). Only `clean --worktrees`

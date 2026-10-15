@@ -367,7 +367,7 @@ pub struct GateIdentity {
     /// pre-existing rows may still contain a canonical absolute path.
     script: String,
     fixture: String,
-    profile: crate::build::CargoProfile,
+    profile: crate::build::RustProfile,
     features: Option<CanonicalFeatures>,
 }
 
@@ -376,7 +376,7 @@ impl GateIdentity {
         gate: impl Into<String>,
         script: impl Into<String>,
         fixture: impl Into<String>,
-        profile: crate::build::CargoProfile,
+        profile: crate::build::RustProfile,
         features: Option<CanonicalFeatures>,
     ) -> Self {
         Self {
@@ -412,8 +412,8 @@ impl GateIdentity {
         }
         if self.profile != other.profile {
             return Some(GateIdentityMismatch::Profile {
-                baseline: self.profile,
-                current: other.profile,
+                baseline: self.profile.clone(),
+                current: other.profile.clone(),
             });
         }
         if let Some(baseline) = &self.features {
@@ -464,8 +464,8 @@ pub enum GateIdentityMismatch {
         current: String,
     },
     Profile {
-        baseline: crate::build::CargoProfile,
-        current: crate::build::CargoProfile,
+        baseline: crate::build::RustProfile,
+        current: crate::build::RustProfile,
     },
     Features {
         baseline: CanonicalFeatures,
@@ -492,10 +492,10 @@ impl fmt::Display for GateIdentityMismatch {
             Self::Profile { baseline, current } => write!(
                 f,
                 "baseline was built `{}` but this run is `{}`. Re-run with the \
-                 baseline's profile (--debug / --release), or pin a baseline \
-                 recorded under this one.",
-                baseline.as_label(),
-                current.as_label()
+                 baseline's profile (--debug / --release / --profile), or pin a \
+                 baseline recorded under this one.",
+                baseline.label(),
+                current.label()
             ),
             Self::Features { baseline, current } => write!(
                 f,
@@ -751,14 +751,14 @@ mod tests {
             "gate",
             "/old/checkout/crates/app/tests/sync/run.lua",
             "fixture",
-            crate::build::CargoProfile::Release,
+            crate::build::RustProfile::Release,
             Some(CanonicalFeatures::new("")),
         );
         let current = GateIdentity::new(
             "gate",
             "crates/app/tests/sync/run.lua",
             "fixture",
-            crate::build::CargoProfile::Release,
+            crate::build::RustProfile::Release,
             Some(CanonicalFeatures::new("")),
         );
 

@@ -215,7 +215,10 @@ pub struct DevConfig {
 ///   package installs; several is an error naming this key.
 /// - `debug` - default to the dev profile for `run` and `--debug` for
 ///   `install`. Unset means release for both (matching `brokkr test`);
-///   `--debug`/`--release` on the CLI override either way.
+///   `--debug`/`--release`/`--profile` on the CLI override either way.
+/// - `profile` - the cargo profile both commands default to, by name:
+///   `dev`, `release` or a custom `[profile.<name>]`. Wins over `debug`
+///   when both are set.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct BinConfig {
@@ -223,13 +226,23 @@ pub struct BinConfig {
     pub default: Option<String>,
     /// Package names `brokkr install` installs.
     pub install: Vec<String>,
-    /// Default both commands to the dev profile.
-    pub debug: bool,
+    /// Default both commands to the dev profile. An `Option` so a `profile`
+    /// beside it can tell a set `debug` from an absent one.
+    pub debug: Option<bool>,
+    /// Default both commands to this cargo profile.
+    pub profile: Option<crate::build::RustProfile>,
     /// When `brokkr check` compiles the `install` packages' bins under
     /// package-mode feature unification, the way `cargo install` resolves
     /// them. Unset means `gate`. Only meaningful alongside `install`, and
     /// only without a `[member_check]` table, which supersedes it.
     pub install_feature_check: Option<Cadence>,
+}
+
+impl BinConfig {
+    /// The profile `run` and `install` default to: `profile`, else `debug`.
+    pub fn configured_profile(&self) -> Option<crate::build::RustProfile> {
+        crate::build::configured_profile("[bin]", self.profile.as_ref(), self.debug)
+    }
 }
 
 /// When a gate-priced compiling phase (`member_check`, `fixture_lint`)
@@ -278,11 +291,21 @@ impl MemberCheckConfig {
     /// What `[bin] install` has always meant to `brokkr check` without a
     /// `[member_check]` table: its packages' bins, at the profile `brokkr
     /// install` builds, at `install_feature_check`'s cadence.
+    ///
+    /// The member check runs under dev or release only. An install under a
+    /// custom profile checks under release: the phase verifies each member's
+    /// feature resolve, which no profile setting changes, though code gated
+    /// on `debug_assertions` is then checked as release compiles it. Read
+    /// without the profile-over-debug warning, which `install` itself prints.
     pub fn implied_by_install(bin: &BinConfig) -> Self {
+        let dev = match &bin.profile {
+            Some(profile) => profile.is_dev(),
+            None => bin.debug.unwrap_or(false),
+        };
         Self {
             when: bin.install_feature_check.unwrap_or_default(),
             targets: vec![MemberTarget::Bins],
-            profile: if bin.debug { MemberProfile::Dev } else { MemberProfile::Release },
+            profile: if dev { MemberProfile::Dev } else { MemberProfile::Release },
             skip: Vec::new(),
             only: Some(bin.install.clone()),
         }
@@ -1301,14 +1324,13 @@ pub enum FeatureUnification {
 /// directory under `target/` is called and what brokkr's `--debug` flag
 /// says.
 ///
-/// Deliberately not open to custom `[profile.*]` names: brokkr derives
-/// `BROKKR_TEST_BIN_DIR` from the profile's target subdirectory, and
-/// cargo's mapping from a custom profile to its directory is not
-/// something brokkr can read back reliably.
+/// Deliberately not open to custom `[profile.*]` names: sweeps build under
+/// dev or release only (the `build_purpose` policy). Custom profiles are a
+/// harness, run and install feature - [`crate::build::RustProfile`].
 ///
-/// Not to be confused with [`crate::build::CargoProfile`], which is the
-/// provenance tag stored on a result row (release / java / cmake) and
-/// says which *build system* produced a benchmarked binary.
+/// Not to be confused with [`crate::build::BuildKind`], which is the
+/// provenance tag stored on a result row and says which build system and
+/// profile produced a measured binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SweepProfile {
@@ -1848,13 +1870,25 @@ pub struct HarnessConfig {
     pub features: Vec<String>,
 
     /// When true, orchestration commands build the harness with the dev
-    /// profile by default. The CLI `--debug` / `--release` flags still
-    /// override per-invocation.
+    /// profile by default. The CLI `--debug` / `--release` / `--profile`
+    /// flags still override per-invocation.
     #[serde(default)]
     pub debug: Option<bool>,
+
+    /// The cargo profile orchestration commands build the harness with by
+    /// default: `dev`, `release` or a custom `[profile.<name>]`. Wins over
+    /// `debug` when both are set; the CLI flags still override it.
+    #[serde(default)]
+    pub profile: Option<crate::build::RustProfile>,
 }
 
 impl HarnessConfig {
+    /// The configured default profile: `profile`, else `debug`. `table` names
+    /// the section in the override warning.
+    pub fn configured_profile(&self, table: &str) -> Option<crate::build::RustProfile> {
+        crate::build::configured_profile(table, self.profile.as_ref(), self.debug)
+    }
+
     /// Resolved binary name (defaults to `package` when unset). Not
     /// consumed by production code today - `cargo build` already takes
     /// `--package` and `--bin` separately - but exercised by parse tests

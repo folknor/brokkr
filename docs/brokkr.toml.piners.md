@@ -17,9 +17,13 @@ registry_dir = "corpus/registry" # pins.toml + <keyword>.toml files (default: co
 package = "piners-runner"  # cargo package
 binary  = "corpus"         # bin (built as `cargo build -p piners-runner --bin corpus`)
 # features = ["..."]       # optional
-# debug = true             # parity-run default (debug if unset); --debug/--release
+# debug = true             # parity-run default (dev if unset); --debug/--release
                            # override. Measured runs (--hotpath/--alloc) ignore it
                            # and default to release.
+# profile = "corpus"       # parity-run default by cargo profile name, e.g. a
+                           # [profile.corpus] with inherits = "dev", opt-level = 2.
+                           # Wins over debug; --debug/--release/--profile override;
+                           # measured runs ignore it too.
 
 # Optional differential-lint corpus. Snippets live under corpus_root.
 [piners.lint]
@@ -28,6 +32,7 @@ package = "piners-runner"             # validator package built from this tree
 # subcommand = "validate"             # defaults to validate
 # features = ["..."]                  # optional cargo features
 # debug = true                         # defaults to the dev profile
+# profile = "fast"                     # or a cargo profile by name; wins over debug
 registry_dir = "corpus/lint-registry" # lints.toml + <keyword>.toml
 # snippets_dir = "corpus/lint-snippets" # defaults to registry_dir
 # pine_lint_bin = "pine-lint"          # defaults to pine-lint on PATH
@@ -47,9 +52,13 @@ registry_dir = "corpus/lint-registry" # lints.toml + <keyword>.toml
   piners-owned metadata describing it, still holds).
 - `harness` - the corpus harness build spec (shared `[*.harness]` shape).
   Required to run probes; `--verify-only` and `--reseed` work without it.
+  Its `profile` follows the same rules as `[bin] profile` (`docs/brokkr.toml.md`):
+  `dev`, `release` or a custom cargo profile, which builds into
+  `<target>/<name>/` - so a corpus profile and `brokkr check`'s dev builds
+  never invalidate each other's artifacts.
 - `lint` - optional differential-lint corpus settings for `brokkr lint-corpus`
   and `brokkr lint-results`. `package`, optional `binary`/`subcommand`,
-  `features`, and `debug` configure the validator built from this tree;
+  `features`, and `debug`/`profile` configure the validator built from this tree;
   `registry_dir` defaults to `corpus-lint-registry`, `snippets_dir` defaults
   to that registry and must be under `corpus_root`, and `pine_lint_bin`
   defaults to `pine-lint` on `PATH`. Paths resolve relative to `brokkr.toml`.

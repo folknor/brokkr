@@ -339,6 +339,12 @@ In depth: `brokkr man clippy`."
         #[arg(long)]
         release: bool,
 
+        /// Cargo profile by name: `dev`, `release` or a custom
+        /// `[profile.<name>]` (overrides `[bin] profile`/`debug`)
+        #[arg(long, value_name = "NAME", value_parser = crate::build::RustProfile::parse,
+              conflicts_with_all = ["debug", "release"])]
+        profile: Option<crate::build::RustProfile>,
+
         /// Cargo features to enable. Forwarded verbatim to `cargo run`,
         /// which validates them - comma- or space-separated, repeatable.
         #[arg(long, short = 'F', value_name = "LIST")]
@@ -366,7 +372,8 @@ In depth: `brokkr man clippy`."
     ///
     /// Installs the packages named by `[bin] install`, or the workspace's
     /// sole bin-carrying package when the list is absent. `[bin] debug =
-    /// true` installs with `--debug`; `--debug`/`--release` override it.
+    /// true` installs with `--debug` and `[bin] profile` with `--profile`;
+    /// `--debug`/`--release`/`--profile` override them.
     ///
     /// Installs with `--locked`, so what ships is what `check` validated.
     /// `--unlocked` restores cargo's default re-resolution.
@@ -381,6 +388,12 @@ In depth: `brokkr man clippy`."
         /// Install release (overrides `[bin] debug = true`)
         #[arg(long)]
         release: bool,
+
+        /// Cargo profile by name: `dev`, `release` or a custom
+        /// `[profile.<name>]` (overrides `[bin] profile`/`debug`)
+        #[arg(long, value_name = "NAME", value_parser = crate::build::RustProfile::parse,
+              conflicts_with_all = ["debug", "release"])]
+        profile: Option<crate::build::RustProfile>,
 
         /// Re-resolve dependencies instead of honouring Cargo.lock
         #[arg(long)]
@@ -2341,6 +2354,13 @@ In depth: `brokkr man nidhogg`."
         #[arg(long, requires = "service_target")]
         release: bool,
 
+        /// Build the harness under this cargo profile: `dev`, `release` or
+        /// a custom `[profile.<name>]` (`<target>/<name>/`). Overrides
+        /// `[ratatoskr.harness] profile`/`debug`.
+        #[arg(long, value_name = "NAME", value_parser = crate::build::RustProfile::parse,
+              conflicts_with_all = ["debug", "release"], requires = "service_target")]
+        profile: Option<crate::build::RustProfile>,
+
         /// Repeat count. For a single script: number of iterations
         /// (each gets its own `run-N/`). For a directory or `--all`:
         /// cohort cycles, where each cycle invokes every selected
@@ -2453,6 +2473,13 @@ In depth: `brokkr man nidhogg`."
         /// from `brokkr.toml`. Mutually exclusive with `--debug`.
         #[arg(long)]
         release: bool,
+
+        /// Build the harness under this cargo profile: `dev`, `release` or
+        /// a custom `[profile.<name>]` (`<target>/<name>/`). Overrides
+        /// `[ratatoskr.harness] profile`/`debug`.
+        #[arg(long, value_name = "NAME", value_parser = crate::build::RustProfile::parse,
+              conflicts_with_all = ["debug", "release"])]
+        profile: Option<crate::build::RustProfile>,
 
         /// Run the named `[ratatoskr.gate.<name>]` gate after the bench
         /// completes. Records a row in `.brokkr/ratatoskr/gate.db`, looks
@@ -2621,6 +2648,14 @@ In depth: `brokkr man nidhogg`."
         /// characterization build). Overrides the debug default.
         #[arg(long)]
         release: bool,
+
+        /// Build the harness under this cargo profile: `dev`, `release` or
+        /// a custom `[profile.<name>]` (`<target>/<name>/`). Overrides
+        /// `[piners.harness] profile`/`debug` for parity runs; measured
+        /// runs honour only this flag, never the config keys.
+        #[arg(long, value_name = "NAME", value_parser = crate::build::RustProfile::parse,
+              conflicts_with_all = ["debug", "release"])]
+        profile: Option<crate::build::RustProfile>,
 
         /// Preserve the run dir (manifest + harness output) even on
         /// success. Failures are always preserved. (Parity runs only;
@@ -2840,6 +2875,13 @@ In depth: `brokkr man lint-corpus`."
         /// Build the piners validator with the release profile.
         #[arg(long)]
         release: bool,
+
+        /// Build the piners validator under this cargo profile: `dev`,
+        /// `release` or a custom `[profile.<name>]`. Overrides
+        /// `[piners.lint] profile`/`debug`.
+        #[arg(long, value_name = "NAME", value_parser = crate::build::RustProfile::parse,
+              conflicts_with_all = ["debug", "release"])]
+        profile: Option<crate::build::RustProfile>,
     },
 
     /// Query the lint corpus run store (.brokkr/piners/lint/runs.db)

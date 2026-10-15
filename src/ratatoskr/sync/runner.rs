@@ -14,7 +14,7 @@ use crate::git;
 use crate::lockfile;
 use crate::output;
 use crate::output::format_duration;
-use crate::ratatoskr::build::HarnessBuild;
+use crate::harness_build::HarnessBuild;
 use crate::ratatoskr::discover::{self, ScriptInfo, ScriptKind};
 use crate::ratatoskr::saehrimnir::{
     ManagedMock, MockArtifactScope, MockOutcome, MockPaths, resolve_fixture,
@@ -350,6 +350,8 @@ struct SyncRunMetadata {
     script: String,
     binary: String,
     features: String,
+    /// The cargo profile the harness was built under.
+    profile: String,
     /// The harness binary's wall time.
     elapsed_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -394,6 +396,7 @@ pub(super) fn render_run_toml(
         script: script_abs.display().to_string(),
         binary: built.binary.display().to_string(),
         features: built.features_label.clone(),
+        profile: built.profile.label().to_owned(),
         elapsed_ms: u64::try_from(dc.captured.elapsed.as_millis()).unwrap_or(u64::MAX),
         exit_code: dc.captured.code(),
         signal: dc.captured.signal(),

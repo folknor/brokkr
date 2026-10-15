@@ -161,12 +161,19 @@ Prints the two commits side by side, one delta row per matched pair. Two rows
 pair when
 
 ```
-(command, mode, input_file, arm_key, env_fingerprint)
+(command, mode, input_file, arm_key, env_fingerprint, cargo_profile)
 ```
 
 agree. `arm_key` represents measurement-affecting options, so arm-defining
 flags like `--direct-io` keep different measurements separate without
-reparsing argv in the comparison code.
+reparsing argv in the comparison code. `cargo_profile` is there because a
+config-selected profile (`[ratatoskr.harness] profile`, say) changes the
+binary without changing the argv. A row built under anything but release
+gets a `build:` line naming its profile, so rows a profile split apart say
+why. A row whose profile is missing or unreadable pairs with nothing, not
+even with another row carrying the same text: nothing is known about how
+either binary was built. Equal profiles are necessary, not
+sufficient: two commits can define the same custom profile differently.
 
 The command, mode, dataset, metadata, env, and invocation filters above apply
 to both commit result sets before pairing.

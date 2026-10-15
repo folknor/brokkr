@@ -143,7 +143,7 @@ impl PlannedSweep {
     pub(crate) fn cargo_profile(&self) -> SweepProfile {
         crate::build_purpose::profile_for_sweep(
             crate::build_purpose::SweepPurpose::Check,
-            crate::build_purpose::Profiles {
+            crate::build_purpose::SweepProfiles {
                 sweep: self.profile,
                 ..Default::default()
             },
@@ -367,8 +367,12 @@ impl IsolatedTargetKey {
                 mode,
                 rustflags_hash,
             } => match rustflags_hash {
-                Some(hash) => format!("unify-{}-{hash}", mode.as_str()),
-                None => format!("unify-{}", mode.as_str()),
+                Some(hash) => format!(
+                    "{}{}-{hash}",
+                    crate::target_namespace::UNIFY_PREFIX,
+                    mode.as_str()
+                ),
+                None => format!("{}{}", crate::target_namespace::UNIFY_PREFIX, mode.as_str()),
             },
         }
     }

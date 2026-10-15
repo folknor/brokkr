@@ -173,14 +173,14 @@ fn host_fields(row: &StoredRow) -> Vec<(String, String)> {
     if !row.hostname.is_empty() {
         fields.push(("hostname".into(), row.hostname.clone()));
     }
-    match (row.cargo_profile, row.cargo_features.as_str()) {
+    match (&row.cargo_profile, row.cargo_features.as_str()) {
         (Some(prof), "") => {
-            fields.push(("cargo".into(), prof.as_label().to_owned()));
+            fields.push(("cargo".into(), prof.label()));
         }
         (Some(prof), feats) => {
             fields.push((
                 "cargo".into(),
-                format!("{}, features: {feats}", prof.as_label()),
+                format!("{}, features: {feats}", prof.label()),
             ));
         }
         (None, "") => {}

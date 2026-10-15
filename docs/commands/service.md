@@ -19,7 +19,7 @@ Unlike the `sync` collapse there was no results.db migration to do -
 service runs are unmeasured and never recorded there.
 
 Flags that only make sense when running (`-N`, `--keep-going`,
-`--keep-artefacts`, `--debug`/`--release`) are enforced by clap's
+`--keep-artefacts`, `--debug`/`--release`/`--profile`) are enforced by clap's
 `requires` against the SCRIPT-or-`--all` group, so `brokkr service -N 5`
 fails at parse time rather than silently listing; `--filter` and
 `--include-ignored` additionally require `--all`.
@@ -61,7 +61,7 @@ Empty-state output names the expected directory. Nested cohort dirs (`t1/`,
 `extract/`, etc.) are picked up automatically; the displayed name is the path
 relative to the script root, minus `.lua`.
 
-## `service <SCRIPT_OR_DIR> [-N COUNT] [--keep-going] [--keep-artefacts] [--debug | --release]` - run one
+## `service <SCRIPT_OR_DIR> [-N COUNT] [--keep-going] [--keep-artefacts] [--debug | --release | --profile NAME]` - run one
 
 Run a Service-subprocess test script. When the path is a directory under
 `crates/app/tests/service-harness/`, this is sugar for `service --all
@@ -101,14 +101,16 @@ Flags:
 - `-N <COUNT>` - on a single script, repeats with per-iter status, per-iter
   artefact dir, `--keep-going`, exit-code aggregation; on a directory, runs
   the cohort `<COUNT>` times in order via the `--all` code path.
-- `--debug` / `--release` - force the harness build profile. Default is
-  release unless `[ratatoskr.harness] debug = true` flips it; the flags
-  override the toml. Mutually exclusive.
+- `--debug` / `--release` / `--profile <name>` - force the harness build
+  profile (`--profile` takes `dev`, `release` or a custom cargo profile).
+  Default is release unless `[ratatoskr.harness] profile` or `debug = true`
+  sets another; the flags override the toml. Mutually exclusive. `run.toml`
+  records the profile built.
 
 Cross-cutting design lives at
 `<ratatoskr>/docs/harness/{problem-statement,architecture,roadmap}.md`.
 
-## `service --all [--filter SUBSTR] [-N COUNT] [--keep-going] [--include-ignored] [--keep-artefacts] [--debug | --release]` - run the cohort
+## `service --all [--filter SUBSTR] [-N COUNT] [--keep-going] [--include-ignored] [--keep-artefacts] [--debug | --release | --profile NAME]` - run the cohort
 
 Run every discovered script in sequence against a single shared harness
 build. `-N` runs the whole cohort `<count>` times in order (e.g. 50 cycles

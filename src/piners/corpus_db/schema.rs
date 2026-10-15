@@ -252,7 +252,8 @@ CREATE TABLE IF NOT EXISTS run (
     run_error         TEXT,
     debug             INTEGER,
     harness_args      TEXT,
-    report_warnings   TEXT NOT NULL DEFAULT '[]'
+    report_warnings   TEXT NOT NULL DEFAULT '[]',
+    cargo_profile     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_run_started ON run(started_at);
 

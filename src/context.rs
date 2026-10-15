@@ -305,7 +305,7 @@ impl MeasurementSession {
             features: crate::command_args::resolve_features(dev_config, &build_config.features),
             default_features: build_config.default_features,
             all_features: build_config.all_features,
-            profile: build_config.profile,
+            profile: build_config.profile.clone(),
         };
         let artifact = build::cargo_build(&effective_config, effective_build_root)?;
         // The row's `cargo_profile` and canonical `cargo_features` describe

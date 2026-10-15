@@ -75,7 +75,8 @@ pub fn run(project_root: &Path, cfg: &PinersConfig, args: &CorpusArgs) -> Result
     }
     if args.profile_override.is_some() {
         return Err(DevError::Config(
-            "corpus --reseed: --debug/--release only apply when building the harness.".into(),
+            "corpus --reseed: --debug/--release/--profile only apply when building the harness."
+                .into(),
         ));
     }
 

@@ -3,7 +3,6 @@
 use super::execution::{Iteration, Measurement, wall_clock_epoch};
 use super::wall::{all_or_none, bench_ordering_key, result_wall};
 use super::{BenchConfig, BenchHarness, BenchResult};
-use crate::build::CargoProfile;
 use crate::config::DriveConfig;
 use crate::db::{KvKey, KvPair, KvValue, ResultsDb, RunRow, Wall};
 use crate::error::DevError;
@@ -493,8 +492,9 @@ impl BenchHarness {
             // the profile every such build path uses.
             cargo_profile: config
                 .external_build
-                .or_else(|| self.build_identity.as_ref().map(|b| b.profile))
-                .unwrap_or(CargoProfile::Release),
+                .clone()
+                .or_else(|| self.build_identity.as_ref().map(|b| b.profile.clone()))
+                .unwrap_or_default(),
             // Carried through, not recomputed: only the harness path that
             // produced the result knows whether sub-millisecond timing was
             // ever measured. No microseconds means "never measured", which

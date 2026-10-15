@@ -14,14 +14,14 @@ leaves ambiguous - see `docs/brokkr.toml.md` (`brokkr man config bin`).
 ## `brokkr run`
 
 ```
-brokkr run [NAME] [--debug|--release] [--features LIST] [--all-features]
-           [--no-default-features] [--commit REF] [-- ARGS...]
+brokkr run [NAME] [--debug|--release|--profile NAME] [--features LIST]
+           [--all-features] [--no-default-features] [--commit REF] [-- ARGS...]
 ```
 
 Resolves `NAME` to a discovered target and runs
 
 ```
-cargo run [--release] -p <pkg> --bin|--example <NAME> [feature flags] [-- ARGS...]
+cargo run [--release|--profile NAME] -p <pkg> --bin|--example <NAME> [feature flags] [-- ARGS...]
 ```
 
 from the build root (the working directory). The target is **always named
@@ -162,19 +162,19 @@ target name can collide with it. `brokkr run NAME -- ARGS` is left untouched,
 as is every other command's argv.
 
 Walking past the leading flags means the pre-pass has to know which of them
-take a **separate value**: `RUN_VALUE_FLAGS` lists `--features` / `-F` and
-`--commit`, so `brokkr run --features a,b -- --help` skips the `a,b` and still
-finds the `--`.
-A value-taking flag added to `run` and not to that list would silently
-reintroduce the swallowed-first-argument bug.
+take a **separate value** (`--features` / `-F`, `--profile`, `--commit`), so
+`brokkr run --features a,b -- --help` skips the `a,b` and still finds the
+`--`. The set is read from `run`'s clap definition rather than kept by hand,
+so a value-taking flag added to `run` is covered without anyone remembering
+to list it.
 
 ## `brokkr install`
 
 ```
-brokkr install [--debug|--release] [--unlocked]
+brokkr install [--debug|--release|--profile NAME] [--unlocked]
 ```
 
-Runs `cargo install [--debug] --locked --path <pkg dir>` once per selected
+Runs `cargo install [--debug|--profile NAME] --locked --path <pkg dir>` once per selected
 package, in the order `[bin] install` lists them, announcing each invocation.
 `cargo install --path` installs every bin the package carries, so the
 selection is by *package*, not by target.
@@ -240,13 +240,17 @@ package with no bin target is likewise an error rather than a silent skip.
 ## Profile
 
 Both commands ask `src/build_purpose.rs` for their Cargo shape. Profiles
-resolve the same way: `--debug` / `--release` (mutually
-exclusive, rejected by clap together) > `[bin] debug` > **release**.
+resolve the same way: `--debug` / `--release` / `--profile <name>` (mutually
+exclusive, rejected by clap together) > `[bin] profile` > `[bin] debug` >
+**release**.
 
 Release-by-default matches `brokkr test`. `run` expresses the choice as
 `cargo run --release`, `install` as `cargo install --debug` - cargo's two
 commands disagree about which profile needs naming, and `[bin] debug = true`
-means the same thing to both regardless.
+means the same thing to both regardless. A custom profile is `--profile
+<name>` to both, building into `<target>/<name>/`; `--profile dev` and
+`--profile release` are the built-ins under their own names. Cargo, not
+brokkr, checks that a custom profile exists.
 
 ## Lock, toolchain, and unconfigured trees
 

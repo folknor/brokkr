@@ -47,12 +47,12 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::artefacts::ArtefactDir;
-use crate::build::CargoProfile;
+use crate::build::RustProfile;
 use crate::config::project_config::piners::PinersConfig;
 use crate::error::DevError;
+use crate::harness_build;
 use crate::lockfile::LockGuard;
 use crate::output;
-use crate::piners::build;
 use crate::piners::contract::RunErrorRecord;
 use crate::piners::corpus_db::{CorpusDb, RunContext, RunRecord};
 use crate::piners::db_paths::corpus_runs_db_path;
@@ -98,9 +98,10 @@ pub struct CorpusArgs {
     /// Skip the diagnostic isolation pass after an abnormal harness end.
     /// Integrity reporting and the stderr print still apply.
     pub no_isolate: bool,
-    /// `Some(true)` = debug, `Some(false)` = release, `None` = default
-    /// (debug for this command).
-    pub profile_override: Option<bool>,
+    /// The CLI profile choice (`--debug`/`--release`/`--profile`); `None`
+    /// takes the config default, else dev for a parity run and release for
+    /// a measured one.
+    pub profile_override: Option<crate::build::RustProfile>,
     pub keep_artefacts: bool,
     /// Extra flags forwarded verbatim to the harness binary after
     /// `--manifest <path>` (everything after a literal `--` on the CLI).
@@ -114,7 +115,7 @@ pub(crate) fn missing_harness_config_error() -> DevError {
     DevError::Config(
         "corpus: no [piners.harness] section in brokkr.toml. \
          Declare `[piners.harness]` with `package = \"<crate>\"` \
-         (and optional `binary`, `features`, `debug`)."
+         (and optional `binary`, `features`, `debug`, `profile`)."
             .into(),
     )
 }
@@ -192,17 +193,17 @@ pub fn corpus(
 
     let harness_cfg = harness_cfg.ok_or_else(missing_harness_config_error)?;
 
-    // Default profile is debug: parity is opt-level-independent, and the
-    // debug build keeps the edit/run loop inside the cache-warm window.
+    // Default profile is dev: parity is opt-level-independent, and the dev
+    // build keeps the edit/run loop inside the cache-warm window. A custom
+    // `[piners.harness] profile` trades a little of that for a faster run.
+    // The config default resolves first so its override warning prints
+    // whatever the CLI chose.
+    let configured = harness_cfg.configured_profile("[piners.harness]");
     let profile = args
         .profile_override
-        .map(CargoProfile::for_debug)
-        .or_else(|| harness_cfg.debug.map(CargoProfile::for_debug))
-        .unwrap_or(CargoProfile::Dev);
-    let context = RunContext {
-        debug: profile == CargoProfile::Dev,
-        harness_args: args.harness_args.clone(),
-    };
+        .clone()
+        .or(configured)
+        .unwrap_or(RustProfile::Dev);
     // Bring the run store to this binary's schema before anything is built or
     // run: a store that refuses to migrate would otherwise be found only at
     // ingest - after the whole harness run it was meant to keep.
@@ -215,7 +216,7 @@ pub fn corpus(
     // the tree carried uncommitted work, and when the run began.
     let start = RunStart::capture(project_root);
 
-    let built = build::build_for_harness(
+    let built = harness_build::build_for_harness(
         project_root,
         harness_cfg,
         profile,
@@ -224,10 +225,17 @@ pub fn corpus(
         crate::shutdown::ChildIsolation::ProcessGroup(&sigterm),
     )?;
     output::corpus_msg(&format!(
-        "harness build ok (features={}, binary={})",
+        "harness build ok (profile={}, features={}, binary={})",
+        built.profile,
         built.features_label,
         built.binary.display()
     ));
+    // The row records the profile the build returned: a run's wall is
+    // comparable only against runs built the same way.
+    let context = RunContext {
+        profile: built.profile.clone(),
+        harness_args: args.harness_args.clone(),
+    };
 
     // One number per run: the dir is `run-<id>` and the row is stored under
     // the same id. Reserved under the lock, past both every stored run and
@@ -835,7 +843,7 @@ fn selector_json(args: &CorpusArgs, ids: &[String], context: &RunContext, bless:
         &args.probe,
         bless,
         ids,
-        Some((context.debug, &context.harness_args)),
+        Some((&context.profile, &context.harness_args)),
     )
 }
 
@@ -1139,7 +1147,7 @@ mod tests {
     fn envelope_record_carries_the_run_identity() {
         let start = start();
         let context = RunContext {
-            debug: true,
+            profile: RustProfile::Dev,
             harness_args: vec!["--flag".to_owned()],
         };
         let envelope = Envelope {
@@ -1379,7 +1387,7 @@ mod tests {
 
         let start = start();
         let context = RunContext {
-            debug: true,
+            profile: RustProfile::Dev,
             harness_args: Vec::new(),
         };
         let envelope = Envelope {
@@ -1415,7 +1423,7 @@ mod tests {
 
         let start = start();
         let context = RunContext {
-            debug: true,
+            profile: RustProfile::Dev,
             harness_args: Vec::new(),
         };
         let envelope = Envelope {

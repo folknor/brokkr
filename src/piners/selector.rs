@@ -147,7 +147,7 @@ pub(crate) fn json(
     probes: &[String],
     bless: bool,
     ids: &[String],
-    context: Option<(bool, &[String])>,
+    context: Option<(&crate::build::RustProfile, &[String])>,
 ) -> String {
     let mut fields = Map::new();
     fields.insert("all".to_owned(), json!(all));
@@ -155,8 +155,10 @@ pub(crate) fn json(
     fields.insert("probe".to_owned(), json!(probes));
     fields.insert("bless".to_owned(), json!(bless));
     fields.insert("ids".to_owned(), json!(ids));
-    if let Some((debug, harness_args)) = context {
-        fields.insert("debug".to_owned(), json!(debug));
+    if let Some((profile, harness_args)) = context {
+        // The profile by name; rows written before custom profiles carry a
+        // `debug` bool instead, which `compact` still reads.
+        fields.insert("profile".to_owned(), json!(profile.label()));
         fields.insert("harness_args".to_owned(), json!(harness_args));
     }
     Value::Object(fields).to_string()
@@ -198,9 +200,15 @@ pub(crate) fn compact(raw: &str) -> String {
     if value.get("bless").and_then(Value::as_bool) == Some(true) {
         parts.push("bless".to_owned());
     }
-    // Debug is the parity default; only the exception is worth a column.
-    if value.get("debug").and_then(Value::as_bool) == Some(false) {
-        parts.push("release".to_owned());
+    // Dev is the parity default; only the exception is worth a column.
+    match value.get("profile").and_then(Value::as_str) {
+        Some("dev") => {}
+        Some(profile) => parts.push(profile.to_owned()),
+        None => {
+            if value.get("debug").and_then(Value::as_bool) == Some(false) {
+                parts.push("release".to_owned());
+            }
+        }
     }
     if let Some(args) = value.get("harness_args").and_then(Value::as_array) {
         let flags: Vec<&str> = args.iter().filter_map(Value::as_str).collect();

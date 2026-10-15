@@ -453,6 +453,7 @@ all. The section curates what discovery leaves ambiguous:
 default = "app"              # bare `brokkr run` target (bin or example name)
 install = ["app", "runner"]  # packages `brokkr install` installs
 debug = true                 # dev profile for run + `--debug` for install
+# profile = "fast"           # or a cargo profile by name; wins over `debug`
 ```
 
 - `default` - the target name bare `brokkr run` launches. Without it, a sole
@@ -463,13 +464,25 @@ debug = true                 # dev profile for run + `--debug` for install
   config error.
 - `debug` - default both commands to the dev profile (`cargo run` without
   `--release`, `cargo install --debug`). Unset means release for both,
-  matching `brokkr test`. CLI `--debug` / `--release` (mutually exclusive)
-  override in either direction.
+  matching `brokkr test`. CLI `--debug` / `--release` / `--profile`
+  (mutually exclusive) override in either direction.
+- `profile` - the cargo profile both commands default to, by name: `"dev"`,
+  `"release"`, or a custom `[profile.<name>]` from the workspace's
+  `Cargo.toml` (`cargo run --profile <name>`, `cargo install --profile
+  <name>`). Wins over `debug` when both are set - with a warning, since
+  `include` composition can leave both set from different layers - and
+  `"release"` or `"dev"` here overrides an inherited custom one. Names Cargo
+  or brokkr owns under the target directory (`debug`, `test`, `bench`,
+  `doc`, `tmp`, `verify`, `brokkr-worktrees`, and anything starting
+  `rustflags-`, `unify-` or `fixture-`) are refused at load. Cargo checks
+  that the profile exists when it builds.
 - `install_feature_check` - `"off"` / `"gate"` (the default) / `"always"`:
   when `brokkr check` compiles the `install` packages' bins under
   package-mode feature unification - the way `cargo install` resolves them,
   without features sibling workspace members contribute - at the install
-  profile. `"gate"` means only under a `certifies = "complete"` profile.
+  profile (release for a custom one: the check runs under dev or release
+  only, and the feature resolve it verifies does not depend on the
+  profile). `"gate"` means only under a `certifies = "complete"` profile.
   Requires an explicit `install` list; the key without one is a load error.
   This is the member-check phase run over the install set: a `[member_check]`
   table (below) supersedes it, and setting both is a load error. See

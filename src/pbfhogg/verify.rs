@@ -73,7 +73,7 @@ impl VerifyHarness {
             )
         };
         let binary = build::cargo_build(&build_config, effective)?.path;
-        let output_dir = target_dir.join("verify");
+        let output_dir = target_dir.join(crate::target_namespace::VERIFY);
 
         Ok(Self {
             _lock: lock,

@@ -7,13 +7,12 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::artefacts::{self, ArtefactDir};
-use crate::build::CargoProfile;
 use crate::clean::layout::ProjectState;
 use crate::config::project_config::ratatoskr::RatatoskrConfig;
 use crate::error::DevError;
+use crate::harness_build::{self, HarnessBuild};
 use crate::lockfile;
 use crate::output::{self, CapturedOutput};
-use crate::ratatoskr::build::{self, HarnessBuild};
 use crate::ratatoskr::discover::{self, PreserveDataDir, SCRIPT_DIR, ScriptInfo, Selection};
 use crate::ratatoskr::saehrimnir::{ManagedMock, MockArtifactScope, MockPaths, Protocol};
 
@@ -98,14 +97,10 @@ pub(crate) fn service_suite(req: &crate::request::ServiceSuiteRequest<'_>) -> Re
     // Cooperative SIGTERM for `brokkr kill`. See run_sync_smoke for rationale.
     let sigterm = crate::shutdown::SigtermGuard::install();
 
-    let profile = profile_override
-        .map(CargoProfile::for_debug)
-        .or_else(|| harness_cfg.debug.map(CargoProfile::for_debug))
-        .unwrap_or_default();
-    let built = build::build_for_harness(
+    let built = harness_build::build_for_harness(
         build_root.as_path(),
         harness_cfg,
-        profile,
+        crate::ratatoskr::harness_profile(profile_override, harness_cfg),
         Some(&|pid| _lock.set_child_pid(pid)),
         Some(&|| _lock.clear_child_pid()),
         crate::shutdown::ChildIsolation::ProcessGroup(&sigterm),
@@ -576,6 +571,8 @@ struct RunMetadata {
     script: String,
     binary: String,
     features: String,
+    /// The cargo profile the harness was built under.
+    profile: String,
     elapsed_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     exit_code: Option<i32>,
@@ -625,6 +622,7 @@ fn write_artefacts_with_git(
         script: script_abs.display().to_string(),
         binary: built.binary.display().to_string(),
         features: built.features_label.clone(),
+        profile: built.profile.label().to_owned(),
         elapsed_ms: u64::try_from(captured.elapsed.as_millis()).unwrap_or(u64::MAX),
         exit_code: captured.code(),
         signal: captured.signal(),
@@ -719,6 +717,7 @@ mod tests {
             binary: bin_dir.join("app"),
             bin_dir: bin_dir.to_path_buf(),
             features_label: "default".to_owned(),
+            profile: crate::build::RustProfile::Release,
         }
     }
 

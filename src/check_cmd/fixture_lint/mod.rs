@@ -99,7 +99,7 @@ fn lint_fixture(
 ) -> Result<Option<String>, DevError> {
     output::status(&format!("fixture-lint {}", f.name));
     let dir = project_root.join(&f.path);
-    let target_dir = main_target.join(format!("fixture-{}", f.name));
+    let target_dir = main_target.join(format!("{}{}", crate::target_namespace::FIXTURE_PREFIX, f.name));
     let target_env = target_dir.to_string_lossy().into_owned();
     let env: Vec<(&str, &str)> = vec![("CARGO_TARGET_DIR", target_env.as_str())];
 

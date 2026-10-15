@@ -3,9 +3,28 @@
 use std::collections::BTreeMap;
 use std::io::Read;
 
-use crate::build::CargoProfile;
+use crate::build::BuildKind;
 use crate::error::DevError;
 use crate::git::ShortCommit;
+
+/// A row's `cargo_profile` column as read back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoredProfile {
+    Known(BuildKind),
+    /// A value no parser recognises (a migration typo, a newer writer). Kept
+    /// verbatim for display and never comparable, even with an identical
+    /// unknown value: nothing is known about how either binary was built.
+    Unknown(String),
+}
+
+impl StoredProfile {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Known(kind) => kind.as_label().to_owned(),
+            Self::Unknown(raw) => format!("unknown ({raw})"),
+        }
+    }
+}
 
 /// The `runs.project` column default: rows written before the column existed
 /// were all pbfhogg's. Must match the `DEFAULT` spelled in the schema DDL and
@@ -650,7 +669,7 @@ pub struct RunRow {
     pub elapsed: Wall,
     pub peak_rss_mb: Option<f64>,
     pub cargo_features: Option<String>,
-    pub cargo_profile: CargoProfile,
+    pub cargo_profile: BuildKind,
     pub kernel: Option<String>,
     pub cpu_governor: Option<String>,
     pub avail_memory_mb: Option<i64>,
@@ -710,7 +729,7 @@ pub struct StoredRow {
     /// `None` for legacy rows whose `cargo_profile` column is `NULL` or
     /// empty - formatters skip the cargo field entirely rather than
     /// inventing a `release` value.
-    pub cargo_profile: Option<CargoProfile>,
+    pub cargo_profile: Option<StoredProfile>,
     pub kernel: String,
     pub cpu_governor: String,
     pub avail_memory_mb: Option<i64>,
@@ -851,7 +870,7 @@ impl RunRowBuilder {
                 elapsed: Wall::LegacyMillis(100),
                 peak_rss_mb: None,
                 cargo_features: None,
-                cargo_profile: CargoProfile::Release,
+                cargo_profile: BuildKind::default(),
                 kernel: None,
                 cpu_governor: None,
                 avail_memory_mb: None,

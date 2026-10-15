@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config;
 
-pub(crate) const RUSTFLAGS_TARGET_PREFIX: &str = "rustflags-";
+pub(crate) const RUSTFLAGS_TARGET_PREFIX: &str = crate::target_namespace::RUSTFLAGS_PREFIX;
 
 /// The project-local state directory's name, relative to the project root.
 pub(crate) const PROJECT_STATE_DIR: &str = ".brokkr";
@@ -350,7 +350,7 @@ impl<'a> PbfhoggLayout<'a> {
     }
 
     pub(crate) fn verify_output(&self) -> PathBuf {
-        self.paths.target_dir.join("verify")
+        self.paths.target_dir.join(crate::target_namespace::VERIFY)
     }
 
     pub(crate) fn scratch(&self) -> &Path {

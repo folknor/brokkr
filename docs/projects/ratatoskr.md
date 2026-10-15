@@ -9,7 +9,7 @@ Project-specific settings live under `[ratatoskr]` in the project
 
 - `[ratatoskr.harness]` names the cargo package (`package`), optional binary
   target (`binary`, defaulting to the package name), optional cargo
-  `features`, and optional `debug` profile default. Orchestration builds use
+  `features`, and an optional `debug` or `profile` default. Orchestration builds use
   this spec directly; they do not select a `[[check]]` sweep.
 - `mock_server_binary` points to the sæhrimnir executable and `fixtures_dir`
   to its fixture files. Absolute paths stay absolute; relative paths resolve
@@ -48,7 +48,11 @@ Both share the harness build pipeline through `[ratatoskr.harness]`. The
 block is a **self-contained build spec** - it names the cargo package to
 build (`package`), optionally an override `[[bin]]` to spawn (`binary`,
 defaults to `package`), optional cargo `features`, and an optional
-`debug = true` to default the orchestration commands to the dev profile.
+`debug = true` to default the orchestration commands to the dev profile -
+or `profile = "<name>"` to default them to any cargo profile (`dev`,
+`release`, or a custom `[profile.<name>]`, built into `<target>/<name>/`;
+it wins over `debug`, with the rules of `[bin] profile` in
+`docs/brokkr.toml.md`). Unset, the orchestration commands build release.
 It does **not** reference `[[check]]`: orchestration builds are
 intentionally outside the everyday `brokkr check` sweep matrix, so adding
 an orchestration command never widens the per-crate feature graph that
@@ -56,9 +60,10 @@ an orchestration command never widens the per-crate feature graph that
 
 See `RatatoskrConfig` rustdoc in
 `src/config_parts/project_config/ratatoskr.rs` and `HarnessConfig` in
-`src/config.rs` for the fields. The orchestration commands accept `--debug` /
-`--release` (mutually exclusive) to override the toml on a per-invocation
-basis.
+`src/config_parts/schema.rs` for the fields. The orchestration commands
+accept `--debug` / `--release` / `--profile <name>` (mutually exclusive) to
+override the toml on a per-invocation basis. Every run's `run.toml` records
+the `profile` the harness was built under.
 
 A stale `[ratatoskr.harness].sweep` field from the pre-decoupling shape
 is rejected at parse time with a migration message: drop the matching

@@ -30,16 +30,42 @@ pub(crate) enum Purpose {
     Bench,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Profile {
     Dev,
     Release,
     Bench,
+    /// A custom `[profile.<name>]`. Constructible only by [`profile`], which
+    /// refuses it for a purpose whose policy lacks `named_profile` - so no
+    /// sweep, member-check or bench request can carry one.
+    Named(NamedProfile),
+}
+
+/// A custom profile [`profile`] admitted for a named-profile purpose. The
+/// private field keeps every other module from minting one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NamedProfile(crate::build::ProfileName);
+
+impl NamedProfile {
+    pub(crate) fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+fn admitted(p: crate::build::RustProfile) -> Profile {
+    match p {
+        crate::build::RustProfile::Dev => Profile::Dev,
+        crate::build::RustProfile::Release => Profile::Release,
+        crate::build::RustProfile::Named(name) => Profile::Named(NamedProfile(name)),
+    }
 }
 
 struct Policy {
     default_profile: Profile,
     configurable_profile: bool,
+    /// Whether a custom profile is selectable: cargo build, run and install
+    /// take `--profile <name>`; the sweep purposes stay dev/release.
+    named_profile: bool,
     features: bool,
     worktree_target: bool,
     dev_flag: Option<&'static str>,
@@ -54,6 +80,7 @@ impl Purpose {
             Self::Run | Self::Build => Policy {
                 default_profile: Profile::Release,
                 configurable_profile: true,
+                named_profile: true,
                 features: true,
                 // `build::cargo_build` isolates a worktree's target dir itself,
                 // because the same override must reach its metadata query and
@@ -65,6 +92,7 @@ impl Purpose {
             Self::Test => Policy {
                 default_profile: Profile::Release,
                 configurable_profile: true,
+                named_profile: false,
                 features: true,
                 worktree_target: false,
                 dev_flag: None,
@@ -73,6 +101,7 @@ impl Purpose {
             Self::Install => Policy {
                 default_profile: Profile::Release,
                 configurable_profile: true,
+                named_profile: true,
                 features: false,
                 worktree_target: false,
                 dev_flag: Some("--debug"),
@@ -81,6 +110,7 @@ impl Purpose {
             Self::MemberCheck => Policy {
                 default_profile: Profile::Dev,
                 configurable_profile: true,
+                named_profile: false,
                 features: false,
                 worktree_target: false,
                 dev_flag: None,
@@ -89,6 +119,7 @@ impl Purpose {
             Self::Check => Policy {
                 default_profile: Profile::Dev,
                 configurable_profile: true,
+                named_profile: false,
                 features: true,
                 worktree_target: false,
                 dev_flag: None,
@@ -97,6 +128,7 @@ impl Purpose {
             Self::Bench => Policy {
                 default_profile: Profile::Bench,
                 configurable_profile: false,
+                named_profile: false,
                 features: false,
                 worktree_target: true,
                 dev_flag: None,
@@ -106,46 +138,54 @@ impl Purpose {
     }
 }
 
-/// Precedence is invocation > sweep pin > command config > purpose default.
-/// Config defaults are optional: check/clippy have none; run/install use
-/// `[bin] debug`; test uses [test] debug. No launcher implements precedence.
-#[derive(Default, Clone, Copy)]
+/// The profile inputs of a build, run or install: the CLI choice and the
+/// command's config default. Precedence is invocation > config > purpose
+/// default; no launcher implements precedence.
+#[derive(Default, Clone)]
 pub(crate) struct Profiles {
+    pub(crate) invocation: Option<crate::build::RustProfile>,
+    pub(crate) configured: Option<crate::build::RustProfile>,
+}
+
+/// Resolve a build/run/install profile. A custom profile reaching a purpose
+/// that cannot take one is refused, never mapped to another profile.
+pub(crate) fn profile(purpose: Purpose, inputs: Profiles) -> Result<Profile, crate::error::DevError> {
+    let policy = purpose.policy();
+    let requested = inputs.invocation.or(inputs.configured);
+    // Checked before the fixed-profile return, so a purpose that ignores
+    // profile inputs (bench) still refuses a custom one rather than
+    // dropping it.
+    if let Some(crate::build::RustProfile::Named(name)) = &requested
+        && !policy.named_profile
+    {
+        return Err(crate::error::DevError::Config(format!(
+            "cargo profile `{}` cannot be used here: this command builds under dev or release only",
+            name.as_str()
+        )));
+    }
+    if !policy.configurable_profile {
+        return Ok(policy.default_profile);
+    }
+    Ok(requested.map_or(policy.default_profile, admitted))
+}
+
+/// Sweep profile inputs: the CLI `--debug`/`--release`, the `[[check]]`
+/// entry's pin, and `[test] debug`. Precedence invocation > sweep pin >
+/// config > purpose default. Sweeps build under dev or release only.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct SweepProfiles {
     pub(crate) invocation: Option<bool>,
     pub(crate) sweep: Option<SweepProfile>,
     pub(crate) configured: Option<bool>,
 }
 
-pub(crate) fn profile(purpose: Purpose, inputs: Profiles) -> Profile {
-    let policy = purpose.policy();
-    if !policy.configurable_profile {
-        return policy.default_profile;
+impl From<SweepProfile> for Profile {
+    fn from(p: SweepProfile) -> Self {
+        match p {
+            SweepProfile::Dev => Self::Dev,
+            SweepProfile::Release => Self::Release,
+        }
     }
-    inputs
-        .invocation
-        .map(|debug| {
-            if debug {
-                Profile::Dev
-            } else {
-                Profile::Release
-            }
-        })
-        .or_else(|| {
-            inputs.sweep.map(|p| match p {
-                SweepProfile::Dev => Profile::Dev,
-                SweepProfile::Release => Profile::Release,
-            })
-        })
-        .or_else(|| {
-            inputs.configured.map(|debug| {
-                if debug {
-                    Profile::Dev
-                } else {
-                    Profile::Release
-                }
-            })
-        })
-        .unwrap_or(policy.default_profile)
 }
 
 /// Sweep callers can only select profiles valid for cargo check/test/clippy.
@@ -155,7 +195,7 @@ pub(crate) enum SweepPurpose {
     Test,
 }
 
-pub(crate) fn profile_for_sweep(purpose: SweepPurpose, inputs: Profiles) -> SweepProfile {
+pub(crate) fn profile_for_sweep(purpose: SweepPurpose, inputs: SweepProfiles) -> SweepProfile {
     let default = match purpose {
         SweepPurpose::Check => Purpose::Check,
         SweepPurpose::Test => Purpose::Test,
@@ -227,7 +267,9 @@ impl Features {
 
 pub(crate) struct Request<'a> {
     pub(crate) purpose: Purpose,
-    pub(crate) profiles: Profiles,
+    /// Already resolved: [`profile`] for build/run/install, the sweep's own
+    /// profile for check and test, the purpose's fixed profile for bench.
+    pub(crate) profile: Profile,
     /// Canonical package selection argv, produced by metadata discovery or
     /// the selection planner. The resolver never guesses workspace members.
     pub(crate) packages: Vec<String>,
@@ -247,21 +289,21 @@ pub(crate) fn target_dir_override(build_root: &Path) -> Option<String> {
     crate::worktree::isolated_target_dir(build_root).map(|path| path.display().to_string())
 }
 
-pub(crate) fn profile_args(purpose: Purpose, profile: Profile) -> Vec<String> {
+pub(crate) fn profile_args(purpose: Purpose, profile: &Profile) -> Vec<String> {
     let policy = purpose.policy();
     let flag = match profile {
         Profile::Dev => policy.dev_flag,
         Profile::Release => policy.release_flag,
         Profile::Bench => None,
+        Profile::Named(name) => return vec!["--profile".into(), name.as_str().to_owned()],
     };
     flag.into_iter().map(str::to_owned).collect()
 }
 
 pub(crate) fn resolve(request: Request<'_>) -> Shape {
     let policy = request.purpose.policy();
-    let profile = profile(request.purpose, request.profiles);
     let mut args = Vec::new();
-    args.extend(profile_args(request.purpose, profile));
+    args.extend(profile_args(request.purpose, &request.profile));
     args.extend(request.unification);
     args.extend(request.packages);
     if policy.features {
@@ -293,10 +335,7 @@ pub(crate) fn sweep_args(
     // through as argv, so the resolver does not re-render them.
     resolve(Request {
         purpose: Purpose::Check,
-        profiles: Profiles {
-            sweep: Some(profile),
-            ..Default::default()
-        },
+        profile: profile.into(),
         packages,
         features: Features(features.to_vec()),
         unification: sweep.unification_args(),
@@ -309,10 +348,13 @@ pub(crate) fn sweep_args(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
 
     #[test]
     fn profile_defaults_and_override_precedence_follow_each_contract() {
+        use crate::build::RustProfile;
         for (purpose, expected) in [
             (Purpose::Run, Profile::Release),
             (Purpose::Install, Profile::Release),
@@ -320,40 +362,93 @@ mod tests {
             (Purpose::Check, Profile::Dev),
             (Purpose::Bench, Profile::Bench),
         ] {
-            assert_eq!(profile(purpose, Profiles::default()), expected);
+            assert_eq!(profile(purpose, Profiles::default()).unwrap(), expected);
         }
+        let corpus = RustProfile::parse("corpus").unwrap();
         assert_eq!(
             profile(
-                Purpose::Test,
+                Purpose::Run,
                 Profiles {
+                    invocation: Some(RustProfile::Release),
+                    configured: Some(corpus.clone()),
+                }
+            )
+            .unwrap(),
+            Profile::Release
+        );
+        assert_eq!(
+            profile(
+                Purpose::Build,
+                Profiles {
+                    configured: Some(corpus.clone()),
+                    ..Default::default()
+                }
+            )
+            .unwrap(),
+            admitted(corpus.clone())
+        );
+        assert!(
+            profile(
+                Purpose::Bench,
+                Profiles {
+                    configured: Some(corpus.clone()),
+                    ..Default::default()
+                }
+            )
+            .is_err(),
+            "a fixed-profile purpose refuses a custom profile rather than dropping it"
+        );
+        assert!(
+            profile(
+                Purpose::Check,
+                Profiles {
+                    invocation: Some(corpus),
+                    ..Default::default()
+                }
+            )
+            .is_err(),
+            "a custom profile must never reach a sweep purpose"
+        );
+        assert_eq!(
+            profile_for_sweep(
+                SweepPurpose::Test,
+                SweepProfiles {
                     invocation: Some(false),
                     sweep: Some(SweepProfile::Dev),
                     configured: Some(true),
                 }
             ),
-            Profile::Release
+            SweepProfile::Release
         );
         assert_eq!(
-            profile(
-                Purpose::Test,
-                Profiles {
+            profile_for_sweep(
+                SweepPurpose::Test,
+                SweepProfiles {
                     sweep: Some(SweepProfile::Release),
                     configured: Some(true),
                     ..Default::default()
                 }
             ),
-            Profile::Release
+            SweepProfile::Release
         );
         assert_eq!(
-            profile(
-                Purpose::Check,
-                Profiles {
+            profile_for_sweep(
+                SweepPurpose::Check,
+                SweepProfiles {
                     sweep: Some(SweepProfile::Release),
                     ..Default::default()
                 }
             ),
-            Profile::Release
+            SweepProfile::Release
         );
+    }
+
+    #[test]
+    fn a_named_profile_renders_as_cargo_profile_flag() {
+        let named = admitted(crate::build::RustProfile::parse("corpus").unwrap());
+        for purpose in [Purpose::Build, Purpose::Run, Purpose::Install] {
+            assert_eq!(profile_args(purpose, &named), ["--profile", "corpus"]);
+        }
     }
 
     #[test]
@@ -368,7 +463,7 @@ mod tests {
         ] {
             let shape = resolve(Request {
                 purpose,
-                profiles: Profiles::default(),
+                profile: profile(purpose, Profiles::default()).unwrap(),
                 packages: vec!["-p".into(), "pkg".into()],
                 features: Features::values(&values, false, true, FeatureRendering::Occurrences),
                 unification: Vec::new(),
@@ -408,10 +503,14 @@ mod tests {
         ] {
             let shape = resolve(Request {
                 purpose,
-                profiles: Profiles {
-                    invocation: Some(debug),
-                    ..Default::default()
-                },
+                profile: profile(
+                    purpose,
+                    Profiles {
+                        invocation: Some(crate::build::RustProfile::for_debug(debug)),
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
                 packages: Vec::new(),
                 features: Features::default(),
                 unification: Vec::new(),

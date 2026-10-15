@@ -142,7 +142,7 @@ pub fn compare_report(c: &Comparison, full: bool) -> String {
     let ctx_a = compare::context_of(&c.run_a);
     let ctx_b = compare::context_of(&c.run_b);
     let show = |context: &super::ingest::RunContext| {
-        let profile = if context.debug { "debug" } else { "release" };
+        let profile = context.profile.label();
         if context.harness_args.is_empty() {
             profile.to_owned()
         } else {
@@ -555,5 +555,13 @@ mod tests {
         assert_eq!(fmt_selector(release), "all release");
         let debug = r#"{"all":true,"bless":false,"debug":true,"harness_args":[],"ids":[],"keywords":[],"probe":[]}"#;
         assert_eq!(fmt_selector(debug), "all");
+    }
+
+    #[test]
+    fn renders_a_named_profile_but_not_the_dev_default() {
+        let corpus = r#"{"all":true,"bless":false,"profile":"corpus","harness_args":[],"ids":[],"keywords":[],"probe":[]}"#;
+        assert_eq!(fmt_selector(corpus), "all corpus");
+        let dev = r#"{"all":true,"bless":false,"profile":"dev","harness_args":[],"ids":[],"keywords":[],"probe":[]}"#;
+        assert_eq!(fmt_selector(dev), "all");
     }
 }

@@ -5,12 +5,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::artefacts::{self, ArtefactDir};
-use crate::build::CargoProfile;
 use crate::clean::layout::ProjectState;
 use crate::error::DevError;
+use crate::harness_build::{self, HarnessBuild};
 use crate::lockfile;
 use crate::output;
-use crate::ratatoskr::build::{self, HarnessBuild};
 use crate::ratatoskr::discover::{self, PreserveDataDir};
 use crate::ratatoskr::saehrimnir::MockPaths;
 use crate::ratatoskr::timing::format_frontmatter_duration;
@@ -129,14 +128,10 @@ pub(crate) fn service_test(req: &crate::request::ServiceTestRequest<'_>) -> Resu
     // Cooperative SIGTERM for `brokkr kill`. See run_sync_smoke for rationale.
     let sigterm = crate::shutdown::SigtermGuard::install();
 
-    let profile = profile_override
-        .map(CargoProfile::for_debug)
-        .or_else(|| harness_cfg.debug.map(CargoProfile::for_debug))
-        .unwrap_or_default();
-    let built = build::build_for_harness(
+    let built = harness_build::build_for_harness(
         build_root.as_path(),
         harness_cfg,
-        profile,
+        crate::ratatoskr::harness_profile(profile_override, harness_cfg),
         Some(&|pid| _lock.set_child_pid(pid)),
         Some(&|| _lock.clear_child_pid()),
         crate::shutdown::ChildIsolation::ProcessGroup(&sigterm),

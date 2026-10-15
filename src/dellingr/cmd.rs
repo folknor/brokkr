@@ -59,7 +59,7 @@ pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
         features,
         default_features: true,
         all_features: false,
-        profile: crate::build::CargoProfile::Release,
+        profile: crate::build::RustProfile::Release,
     };
 
     let ctx = MeasurementSession::with_build_config_for_request(req, &build_config)?;

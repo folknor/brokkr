@@ -124,7 +124,7 @@ fn build_snapshot_binary(build_root: &Path) -> Result<PathBuf, DevError> {
         features: Vec::new(),
         default_features: true,
         all_features: false,
-        profile: crate::build::CargoProfile::Release,
+        profile: crate::build::RustProfile::Release,
     };
     build::cargo_build(&config, build_root).map(|artifact| artifact.path)
 }

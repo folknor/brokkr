@@ -5,8 +5,8 @@
 //! for `run`, example targets) are runnable by target name. The `[bin]`
 //! section curates what discovery leaves ambiguous - a `default` for bare
 //! `brokkr run`, an `install` package list for multi-bin workspaces, and a
-//! `debug` profile default shared by both commands (release when unset,
-//! matching `brokkr test`; `--debug`/`--release` override).
+//! `profile`/`debug` default shared by both commands (release when unset,
+//! matching `brokkr test`; `--debug`/`--release`/`--profile` override).
 
 use std::path::{Path, PathBuf};
 
@@ -115,28 +115,30 @@ struct Runnable {
     example: bool,
 }
 
-/// Whether the CLI flags / `[bin] debug` resolve to the dev profile.
-/// Precedence: `--debug` / `--release` (mutually exclusive, clap-enforced)
-/// > `[bin] debug` > release.
-fn resolve_debug(cfg: Option<&BinConfig>, debug: bool, release: bool) -> bool {
-    crate::build_purpose::profile(
-        crate::build_purpose::Purpose::Run,
-        bin_profiles(cfg, debug, release),
-    ) == crate::build_purpose::Profile::Dev
+/// The profile `run --commit` builds: the CLI choice > `[bin] profile` >
+/// `[bin] debug` > release.
+fn resolve_profile(
+    cfg: Option<&BinConfig>,
+    choice: Option<crate::build::RustProfile>,
+) -> crate::build::RustProfile {
+    let configured = cfg.and_then(BinConfig::configured_profile);
+    choice.or(configured).unwrap_or_default()
 }
 
-/// The profile inputs `run` and `install` both hand the build-purpose
-/// resolver: the CLI flags and `[bin] debug`.
-fn bin_profiles(
+/// The profile `run` and `install` resolve through the build-purpose
+/// policy: the CLI choice and the `[bin]` default.
+fn bin_profile(
+    purpose: crate::build_purpose::Purpose,
     cfg: Option<&BinConfig>,
-    debug: bool,
-    release: bool,
-) -> crate::build_purpose::Profiles {
-    crate::build_purpose::Profiles {
-        invocation: debug.then_some(true).or_else(|| release.then_some(false)),
-        configured: cfg.map(|c| c.debug),
-        ..Default::default()
-    }
+    choice: Option<crate::build::RustProfile>,
+) -> Result<crate::build_purpose::Profile, DevError> {
+    crate::build_purpose::profile(
+        purpose,
+        crate::build_purpose::Profiles {
+            invocation: choice,
+            configured: cfg.and_then(BinConfig::configured_profile),
+        },
+    )
 }
 
 /// Discover every bin and example target in the workspace via
@@ -255,8 +257,7 @@ pub fn cmd_run(
     project_root: &Path,
     cfg: Option<&BinConfig>,
     name: Option<&str>,
-    debug: bool,
-    release: bool,
+    choice: Option<crate::build::RustProfile>,
     feat: &FeatureArgs<'_>,
     args: &[String],
     lock: Option<&crate::lockfile::LockGuard>,
@@ -266,9 +267,10 @@ pub fn cmd_run(
         return Ok(());
     };
 
+    let purpose = crate::build_purpose::Purpose::Run;
     let shape = crate::build_purpose::resolve(crate::build_purpose::Request {
-        purpose: crate::build_purpose::Purpose::Run,
-        profiles: bin_profiles(cfg, debug, release),
+        purpose,
+        profile: bin_profile(purpose, cfg, choice)?,
         packages: vec!["-p".into(), target.package.clone()],
         features: crate::build_purpose::Features::values(
             feat.features,
@@ -323,8 +325,7 @@ pub fn cmd_run_commit(
     run_dir: &Path,
     cfg: Option<&BinConfig>,
     name: Option<&str>,
-    debug: bool,
-    release: bool,
+    choice: Option<crate::build::RustProfile>,
     feat: &FeatureArgs<'_>,
     args: &[String],
     lock: &crate::lockfile::LockGuard,
@@ -340,7 +341,7 @@ pub fn cmd_run_commit(
         features: feat.features.to_vec(),
         default_features: !feat.no_default,
         all_features: feat.all,
-        profile: crate::build::CargoProfile::for_debug(resolve_debug(cfg, debug, release)),
+        profile: resolve_profile(cfg, choice),
     };
     let exe = crate::build::cargo_build(&build, worktree)?;
     let exe_str = exe.path.display().to_string();
@@ -411,11 +412,14 @@ fn resolve_install_packages(
 pub fn cmd_install(
     project_root: &Path,
     cfg: Option<&BinConfig>,
-    debug: bool,
-    release: bool,
+    choice: Option<crate::build::RustProfile>,
     unlocked: bool,
     lock: Option<&crate::lockfile::LockGuard>,
 ) -> Result<(), DevError> {
+    let purpose = crate::build_purpose::Purpose::Install;
+    // Resolved once, before the first package: a refused profile refuses
+    // the whole install, and the override warning prints once.
+    let profile = bin_profile(purpose, cfg, choice)?;
     let (runnables, workspace_root) = discover_workspace(project_root)?;
     let bins: Vec<&Runnable> = runnables.iter().filter(|r| !r.example).collect();
 
@@ -466,8 +470,8 @@ pub fn cmd_install(
         }
         let mut cargo_args: Vec<String> = vec!["install".into()];
         let shape = crate::build_purpose::resolve(crate::build_purpose::Request {
-            purpose: crate::build_purpose::Purpose::Install,
-            profiles: bin_profiles(cfg, debug, release),
+            purpose,
+            profile: profile.clone(),
             packages: vec!["--path".into(), package.package_dir.display().to_string()],
             features: crate::build_purpose::Features::default(),
             unification: Vec::new(),

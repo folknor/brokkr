@@ -18,7 +18,7 @@
 //! until it does, that mode is refused with a clear error rather than recording
 //! a meaningless number.
 
-use crate::build::{BuildConfig, CargoProfile};
+use crate::build::{BuildConfig, RustProfile};
 use crate::context::MeasurementSession;
 use crate::db::KvPair;
 use crate::error::DevError;
@@ -85,19 +85,20 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
         ..
     } = prepare::prepare(req.project_root.as_path(), &cfg, &lock, &sel)?;
 
-    // Measured runs default to release (meaningful timing); `--debug` profiles
-    // the dev build instead. Parity runs default debug - see `cmd.rs`.
+    // Measured runs default to release (meaningful timing); `--debug` or
+    // `--profile` profiles another build instead. Parity runs default dev -
+    // see `cmd.rs`.
     //
-    // `[piners.harness] debug` is deliberately NOT consulted here. That key
-    // sets the *parity* default (`cmd.rs` reads it); piners' config sets it
-    // for the edit/run loop, and inheriting it would silently turn every
-    // measured run into a dev-build timing. `docs/commands/corpus.md` states
-    // the release default. (Reported once as "ignores the config"; it is the
-    // documented contract, not an oversight.)
+    // `[piners.harness] debug` and `profile` are deliberately NOT consulted
+    // here. Those keys set the *parity* default (`cmd.rs` reads them);
+    // piners' config sets them for the edit/run loop, and inheriting them
+    // would silently turn every measured run into a timing of that build.
+    // `docs/commands/corpus.md` states the release default. (Reported once as
+    // "ignores the config"; it is the documented contract, not an oversight.)
     let profile = args
         .profile_override
-        .map(CargoProfile::for_debug)
-        .unwrap_or(CargoProfile::Release);
+        .clone()
+        .unwrap_or(RustProfile::Release);
 
     let mut build_cfg = BuildConfig::for_harness_with_profile(harness_cfg, profile);
     build_cfg.features.push(profiling.feature().to_owned());
@@ -131,8 +132,8 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
 
     let selector = selector_label(args);
     // The profile lives in the row's `cargo_profile` column, stamped from the
-    // session's build. Rows recorded before `CargoProfile::Dev` existed carry
-    // `release` there and a `meta.profile = dev` patch instead.
+    // session's build. Rows recorded before the dev profile had its own
+    // value carry `release` there and a `meta.profile = dev` patch instead.
     let metadata = vec![
         KvPair::int(
             "probe_count",

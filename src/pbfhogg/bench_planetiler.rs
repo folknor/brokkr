@@ -161,7 +161,7 @@ pub fn run(
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),
             cargo_features: None,
-            external_build: Some(crate::build::CargoProfile::Java),
+            external_build: Some(crate::build::BuildKind::Java),
             runs: 1,
             cli_args: None,
             metadata: vec![KvPair::int("meta.heap_mb", heap_mb)],

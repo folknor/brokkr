@@ -114,7 +114,7 @@ pub(crate) fn cmd(req: &MeasureRequest, target: &str) -> Result<(), DevError> {
         features,
         default_features: true,
         all_features: false,
-        profile: crate::build::CargoProfile::Release,
+        profile: crate::build::RustProfile::Release,
     };
 
     // `MeasurementSession` builds against `build_root` (the worktree under

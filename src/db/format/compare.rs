@@ -156,6 +156,63 @@ struct PairKey {
     input_file: String,
     arm_key: String,
     env_fingerprint: String,
+    build: PairBuild,
+}
+
+/// How a row's binary was built, as a pairing eligibility key. Two rows pair
+/// only on equal known builds: a config-selected profile changes the timing
+/// without changing the argv, so the arm key cannot carry it. Label equality
+/// is necessary, not sufficient - two commits can define the same custom
+/// profile differently.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum PairBuild {
+    Known(crate::build::BuildKind),
+    /// No stored profile, or one brokkr cannot read: nothing is known about
+    /// how the binary was built. Unique per row, so it pairs with nothing -
+    /// not even another row carrying the same unknown text. `raw` is `None`
+    /// for a row with no profile at all.
+    Unknown {
+        side: Side,
+        row_id: i64,
+        raw: Option<String>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum Side {
+    A,
+    B,
+}
+
+impl PairBuild {
+    fn of(row: &StoredRow, side: Side) -> Self {
+        match &row.cargo_profile {
+            Some(crate::db::types::StoredProfile::Known(kind)) => Self::Known(kind.clone()),
+            other => Self::Unknown {
+                side,
+                row_id: row.id,
+                raw: match other {
+                    Some(crate::db::types::StoredProfile::Unknown(raw)) => Some(raw.clone()),
+                    _ => None,
+                },
+            },
+        }
+    }
+
+    /// The line a pair gets when its build is not the default release, so
+    /// rows a profile split apart say why they did not pair.
+    fn annotation(&self) -> Option<String> {
+        match self {
+            Self::Known(kind) if *kind == crate::build::BuildKind::default() => None,
+            Self::Known(kind) => Some(format!("  build: {}", kind.as_label())),
+            Self::Unknown { raw: Some(raw), .. } => {
+                Some(format!("  build: unknown ({raw}), pairs with nothing"))
+            }
+            Self::Unknown { raw: None, .. } => {
+                Some("  build: not recorded, pairs with nothing".to_owned())
+            }
+        }
+    }
 }
 
 /// The host-condition fields of a row, pulled out for pairwise diffing.
@@ -226,8 +283,9 @@ fn build_comparison_pairs(
 ) -> Vec<ComparisonPair> {
     use std::collections::HashMap;
 
-    let row_key = |row: &StoredRow| {
-        pair_key(
+    let row_key = |row: &StoredRow, side: Side| PairKey {
+        build: PairBuild::of(row, side),
+        ..pair_key(
             &row.command,
             &row.mode,
             &row.input_file,
@@ -241,14 +299,14 @@ fn build_comparison_pairs(
     let mut b_map: HashMap<PairKey, RowData> = HashMap::new();
 
     for row in rows_a {
-        let key = row_key(row);
+        let key = row_key(row, Side::A);
         if let std::collections::hash_map::Entry::Vacant(e) = a_map.entry(key.clone()) {
             keys.push(key);
             e.insert(make_row_data(row, matcher));
         }
     }
     for row in rows_b {
-        let key = row_key(row);
+        let key = row_key(row, Side::B);
         if let std::collections::hash_map::Entry::Vacant(e) = b_map.entry(key.clone()) {
             if !a_map.contains_key(&key) {
                 keys.push(key.clone());
@@ -319,6 +377,10 @@ fn build_comparison_pairs(
 /// that signal, and with no B elapsed there is nothing for the host conditions
 /// to explain.
 fn append_pair_annotations(out: &mut String, pair: &ComparisonPair) {
+    if let Some(annotation) = pair.key.build.annotation() {
+        out.push_str(&annotation);
+        out.push('\n');
+    }
     if pair.a_wall.is_none() || pair.b_wall.is_none() {
         return;
     }
@@ -482,6 +544,7 @@ fn pair_key(command: &str, mode: &str, input_file: &str, arm_key: &str, env_fp: 
         input_file: input_file.to_owned(),
         arm_key: arm_key.to_owned(),
         env_fingerprint: env_fp.to_owned(),
+        build: PairBuild::Known(crate::build::BuildKind::default()),
     }
 }
 
@@ -849,7 +912,9 @@ mod tests {
             input_mb: None,
             elapsed: Wall::LegacyMillis(elapsed_ms),
             cargo_features: String::new(),
-            cargo_profile: Some(crate::build::CargoProfile::Release),
+            cargo_profile: Some(crate::db::types::StoredProfile::Known(
+                crate::build::BuildKind::default(),
+            )),
             kernel: String::new(),
             cpu_governor: String::new(),
             avail_memory_mb: None,
@@ -978,6 +1043,32 @@ mod tests {
     // -----------------------------------------------------------------------
     // build_comparison_pairs
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn rows_pair_only_on_equal_known_builds() {
+        use crate::build::{BuildKind, RustProfile};
+        use crate::db::types::StoredProfile;
+        let built = |profile: Option<StoredProfile>, id| {
+            let mut r = row("corpus", "hotpath", "", 100);
+            r.cargo_profile = profile;
+            r.id = id;
+            r
+        };
+        let corpus = || {
+            Some(StoredProfile::Known(BuildKind::Cargo(
+                RustProfile::parse("corpus").unwrap(),
+            )))
+        };
+        let release = || Some(StoredProfile::Known(BuildKind::default()));
+        let unknown = || Some(StoredProfile::Unknown("relesae".to_owned()));
+        let m = DatasetMatcher::empty();
+
+        assert_eq!(build_comparison_pairs(&[built(corpus(), 1)], &[built(corpus(), 2)], &m).len(), 1);
+        assert_eq!(build_comparison_pairs(&[built(release(), 1)], &[built(corpus(), 2)], &m).len(), 2);
+        assert_eq!(build_comparison_pairs(&[built(None, 1)], &[built(None, 2)], &m).len(), 2);
+        // The same unknown text on both sides still pairs with nothing.
+        assert_eq!(build_comparison_pairs(&[built(unknown(), 1)], &[built(unknown(), 1)], &m).len(), 2);
+    }
 
     #[test]
     fn comparison_pairs_both_have_same_benchmark() {

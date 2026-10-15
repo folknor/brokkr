@@ -105,7 +105,8 @@ pub(crate) struct ServiceSuiteRequest<'a> {
     pub(crate) ratatoskr: &'a RatatoskrConfig,
     pub(crate) filter: Option<&'a str>,
     pub(crate) keep_artefacts: bool,
-    pub(crate) profile_override: Option<bool>,
+    /// The CLI profile choice (`--debug`/`--release`/`--profile`).
+    pub(crate) profile_override: Option<&'a crate::build::RustProfile>,
     pub(crate) keep_going: bool,
     pub(crate) include_ignored: bool,
     pub(crate) repeat: std::num::NonZeroU32,
@@ -120,7 +121,8 @@ pub(crate) struct ServiceTestRequest<'a> {
     pub(crate) ratatoskr: &'a RatatoskrConfig,
     pub(crate) script: &'a str,
     pub(crate) keep_artefacts: bool,
-    pub(crate) profile_override: Option<bool>,
+    /// The CLI profile choice (`--debug`/`--release`/`--profile`).
+    pub(crate) profile_override: Option<&'a crate::build::RustProfile>,
     pub(crate) repeat: std::num::NonZeroU32,
     pub(crate) keep_going: bool,
 }

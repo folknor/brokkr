@@ -378,9 +378,10 @@ fn member_check_args(
     args.push("--locked".into());
     let shape = crate::build_purpose::resolve(crate::build_purpose::Request {
         purpose: crate::build_purpose::Purpose::MemberCheck,
-        profiles: crate::build_purpose::Profiles {
-            invocation: Some(profile == MemberProfile::Dev),
-            ..Default::default()
+        profile: if profile == MemberProfile::Dev {
+            crate::build_purpose::Profile::Dev
+        } else {
+            crate::build_purpose::Profile::Release
         },
         packages: vec!["-p".into(), package.to_owned()],
         features: crate::build_purpose::Features::default(),

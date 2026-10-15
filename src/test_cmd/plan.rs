@@ -938,7 +938,7 @@ pub(super) fn resolve_profile(
 ) -> SweepProfile {
     crate::build_purpose::profile_for_sweep(
         crate::build_purpose::SweepPurpose::Test,
-        crate::build_purpose::Profiles {
+        crate::build_purpose::SweepProfiles {
             invocation: profile_override,
             sweep: sweep_profile,
             configured: test_cfg.map(|t| t.debug),

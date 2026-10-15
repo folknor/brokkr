@@ -6,7 +6,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::artefacts::{self, ArtefactDir};
-use crate::build::CargoProfile;
+use crate::build::{BuildKind, RustProfile};
 use crate::clean::layout::ProjectState;
 use crate::config::DevConfig;
 use crate::config::project_config::ratatoskr::RatatoskrConfig;
@@ -17,7 +17,7 @@ use crate::harness::{BenchConfig, BenchHarness, WallSource};
 use crate::output;
 use crate::output::format_duration;
 use crate::project::{BuildRoot, Project, ProjectRoot};
-use crate::ratatoskr::build::{self, HarnessBuild};
+use crate::harness_build::{self, HarnessBuild};
 use crate::ratatoskr::gate as gate_eval;
 use crate::ratatoskr::gate_store::canonical_features;
 use crate::ratatoskr::saehrimnir::{ManagedMock, MockArtifactScope};
@@ -117,23 +117,20 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     // `harness` so it drops first, before the lock is released.
     let mut phase_guard = PhaseGuard::install();
 
-    let profile = req
-        .profile_override
-        .map(CargoProfile::for_debug)
-        .or_else(|| harness_cfg.debug.map(CargoProfile::for_debug))
-        .unwrap_or_default();
-    let built = build::build_for_harness(
+    let built = harness_build::build_for_harness(
         code_root,
         harness_cfg,
-        profile,
+        crate::ratatoskr::harness_profile(req.profile_override.as_ref(), harness_cfg),
         Some(&|pid| harness.lock().set_child_pid(pid)),
         Some(&|| harness.lock().clear_child_pid()),
         crate::shutdown::ChildIsolation::ProcessGroup(phase_guard.signal_guard()),
     )?;
     // What was actually built: ratatoskr's config sets `debug = true`, so the
-    // row's profile follows the build, not a release default.
+    // row's profile follows the build, not a release default. The row, the
+    // gate identity and `run.toml` all take the profile the build returned.
+    let profile = built.profile.clone();
     let harness = harness.with_build_identity(crate::harness::BuildIdentity {
-        profile,
+        profile: BuildKind::Cargo(profile.clone()),
         features: (!harness_cfg.features.is_empty())
             .then(|| canonical_features(&harness_cfg.features)),
     });
@@ -255,7 +252,7 @@ struct BenchLoopCtx<'a> {
     run_root: &'a Path,
     harness: &'a BenchHarness,
     fixture_name: &'a str,
-    profile: CargoProfile,
+    profile: RustProfile,
     gate_rules: Option<&'a gate_eval::GateRules>,
     ceiling: Duration,
     phase_guard: &'a mut PhaseGuard,
@@ -555,7 +552,8 @@ pub struct SyncBenchRequest<'a> {
     /// a completed gated run is recorded in gate.db with `dirty = true`.
     pub force: bool,
     pub keep_artefacts: bool,
-    pub profile_override: Option<bool>,
+    /// The CLI profile choice (`--debug`/`--release`/`--profile`).
+    pub profile_override: Option<crate::build::RustProfile>,
     /// The brokkr invocation (exact argv and arm key) the results row
     /// records.
     pub invocation: crate::db::RunInvocation,

@@ -7,7 +7,7 @@ use super::bootstrap::{
 use crate::clean::CleanOpts;
 use crate::clean::{cargo_clean_package, cmd_clean};
 use crate::cli::{Cli, Command, VerifyCommand};
-use crate::command_args::{profile_override, resolve_features, resolve_mode};
+use crate::command_args::{profile_choice, resolve_features, resolve_mode};
 use crate::config::project_config::ProjectConfig;
 use crate::context::with_worktree;
 use crate::env::cmd_env;
@@ -135,6 +135,7 @@ pub(super) fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<()
             name,
             debug,
             release,
+            profile,
             features,
             all_features,
             no_default_features,
@@ -148,8 +149,7 @@ pub(super) fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<()
             };
             run_program(
                 name.as_deref(),
-                *debug,
-                *release,
+                profile_choice(*debug, *release, profile.as_ref()),
                 &feat,
                 commit.as_deref(),
                 args,
@@ -159,8 +159,13 @@ pub(super) fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<()
         Command::Install {
             debug,
             release,
+            profile,
             unlocked,
-        } => run_install(*debug, *release, *unlocked, detection),
+        } => run_install(
+            profile_choice(*debug, *release, profile.as_ref()),
+            *unlocked,
+            detection,
+        ),
         Command::Wc { threshold } => run_wc(*threshold, detection),
         Command::Bench {
             target,
@@ -1275,7 +1280,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                 package.as_deref(),
                 repeat,
                 jobs,
-                profile_override(debug, release),
+                crate::command_args::profile_override(debug, release),
                 timeout,
                 sweep.as_deref(),
             )
@@ -1347,9 +1352,11 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             keep_artefacts,
             debug,
             release,
+            profile,
             repeat,
             keep_going,
         } => {
+            let choice = profile_choice(debug, release, profile.as_ref());
             // Same bare-is-an-index shape as `sync`: bare lists, SCRIPT
             // runs one (a directory runs that cohort), --all runs the
             // discovered cohort.
@@ -1361,7 +1368,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                     ratatoskr: project_config.ratatoskr()?,
                     filter: filter.as_deref(),
                     keep_artefacts,
-                    profile_override: profile_override(debug, release),
+                    profile_override: choice.as_ref(),
                     keep_going,
                     include_ignored,
                     repeat,
@@ -1374,7 +1381,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                     ratatoskr: project_config.ratatoskr()?,
                     script: &script,
                     keep_artefacts,
-                    profile_override: profile_override(debug, release),
+                    profile_override: choice.as_ref(),
                     repeat,
                     keep_going,
                 })
@@ -1392,6 +1399,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             keep_artefacts,
             debug,
             release,
+            profile,
             gate,
             as_baseline,
             commit,
@@ -1403,8 +1411,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             &bench,
             &force,
             &keep_artefacts,
-            &debug,
-            &release,
+            profile_choice(debug, release, profile.as_ref()).as_ref(),
             &gate,
             &as_baseline,
             &commit,
@@ -1431,6 +1438,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             no_isolate,
             debug,
             release,
+            profile,
             keep_artefacts,
             harness_args,
             mode,
@@ -1445,7 +1453,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                 bless,
                 no_gate,
                 no_isolate,
-                profile_override: profile_override(debug, release),
+                profile_override: profile_choice(debug, release, profile.as_ref()),
                 keep_artefacts,
                 harness_args,
             };
@@ -1473,6 +1481,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             warnings,
             debug,
             release,
+            profile,
         } => {
             let args = piners::lint::cmd::LintArgs {
                 keywords: keyword,
@@ -1485,7 +1494,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                 no_gate,
                 all_stages,
                 warnings,
-                profile_override: profile_override(debug, release),
+                profile_override: profile_choice(debug, release, profile.as_ref()),
             };
             piners::lint::cmd::lint_corpus(project_root, project_config.piners()?, &args)
         }

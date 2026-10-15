@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use crate::build::CargoProfile;
+use crate::build::{BuildKind, RustProfile};
 use crate::config::project_config::ratatoskr::{GateConfig, RatatoskrConfig};
 use crate::error::DevError;
 use crate::git;
@@ -159,7 +159,7 @@ pub fn run_gate_cohort(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
             bench: req.bench,
             force: req.force,
             keep_artefacts: req.keep_artefacts,
-            profile_override: req.profile_override,
+            profile_override: req.profile_override.clone(),
             invocation: req.invocation.clone(),
             gate: Some(name),
             as_baseline: false,
@@ -213,7 +213,7 @@ pub(super) struct GateHookCtx<'a> {
     pub(super) project_root: &'a Path,
     pub(super) script_abs: &'a Path,
     pub(super) fixture_name: &'a str,
-    pub(super) profile: CargoProfile,
+    pub(super) profile: RustProfile,
     /// The harness build's features, in `canonical_features` form.
     pub(super) features: &'a str,
     pub(super) elapsed_ms: i64,
@@ -263,7 +263,7 @@ pub(super) fn run_gate_hook(ctx: &GateHookCtx<'_>) -> Result<(), DevError> {
         ctx.req.build_root.as_path(),
         &ctx.req.dev_config.included_config_files,
     )?;
-    let profile_name = ctx.profile.as_label();
+    let profile_name = BuildKind::Cargo(ctx.profile.clone()).to_stored();
 
     let sidecar_blob = sidecar_to_json(ctx.sidecar_data);
     let meta_blob = meta_to_json(ctx.summary);
@@ -275,7 +275,7 @@ pub(super) fn run_gate_hook(ctx: &GateHookCtx<'_>) -> Result<(), DevError> {
         gate_name: ctx.gate_name.to_owned(),
         script: stored_script_path(ctx.project_root, ctx.script_abs),
         fixture: ctx.fixture_name.to_owned(),
-        profile: profile_name.into(),
+        profile: profile_name,
         elapsed_ms: ctx.elapsed_ms,
         // This hook runs only after every iteration exited successfully;
         // failures return before gate recording. These two stored metrics
@@ -576,20 +576,23 @@ fn identity_profile(
     gate_name: &str,
     row_label: &str,
     profile: &str,
-) -> Result<CargoProfile, DevError> {
+) -> Result<RustProfile, DevError> {
     // Earlier gate rows and the previous writer spelled Cargo's `dev`
     // profile `debug`.
-    let parsed = if profile == "debug" {
-        Ok(CargoProfile::Dev)
-    } else {
-        CargoProfile::from_db(profile)
-    };
-    parsed.map_err(|unknown| {
+    if profile == "debug" {
+        return Ok(RustProfile::Dev);
+    }
+    let unknown = || {
         DevError::Verify(format!(
-            "gate `{gate_name}`: {row_label} row has unknown cargo profile `{}`",
-            unknown.0
+            "gate `{gate_name}`: {row_label} row has unknown cargo profile `{profile}`"
         ))
-    })
+    };
+    // A gate row is always a cargo build; an external kind is as unknown
+    // here as a typo.
+    match BuildKind::from_db(profile) {
+        Ok(BuildKind::Cargo(rust)) => Ok(rust),
+        Ok(BuildKind::Java | BuildKind::CMake) | Err(_) => Err(unknown()),
+    }
 }
 
 /// Project a `SidecarData` into a flat JSON object usable by gate
@@ -659,7 +662,7 @@ mod tests {
     use super::*;
     use crate::config::HarnessConfig;
     use crate::db::KvValue;
-    use crate::ratatoskr::build::HarnessBuild;
+    use crate::harness_build::HarnessBuild;
     use crate::ratatoskr::saehrimnir::{Endpoints, MockOutcome, endpoint_env_pairs};
     use std::fs;
     use std::path::PathBuf;
@@ -728,12 +731,23 @@ mod tests {
     fn legacy_debug_profile_maps_to_dev() {
         assert_eq!(
             identity_profile("g", "baseline", "debug").unwrap(),
-            CargoProfile::Dev
+            RustProfile::Dev
         );
         assert_eq!(
             identity_profile("g", "baseline", "dev").unwrap(),
-            CargoProfile::Dev
+            RustProfile::Dev
         );
+    }
+
+    #[test]
+    fn named_profiles_round_trip_and_unknowns_fail() {
+        let corpus = RustProfile::parse("corpus").unwrap();
+        let stored = BuildKind::Cargo(corpus.clone()).to_stored();
+        assert_eq!(stored, "cargo:corpus");
+        assert_eq!(identity_profile("g", "baseline", &stored).unwrap(), corpus);
+        for bad in ["corpus", "java", "relesae", "cargo:dev"] {
+            assert!(identity_profile("g", "baseline", bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
@@ -753,7 +767,7 @@ mod tests {
             "g",
             "script.lua",
             "fixture.toml",
-            CargoProfile::Release,
+            RustProfile::Release,
             features.map(gate_eval::CanonicalFeatures::new),
         )
     }
@@ -765,6 +779,7 @@ mod tests {
                 binary: None,
                 features: Vec::new(),
                 debug: None,
+                profile: None,
             }),
             mock_server_binary: None,
             fixtures_dir: None,
@@ -1014,6 +1029,7 @@ mod tests {
             binary: PathBuf::from("/odd \"dir\"/back\\slash/app"),
             bin_dir: PathBuf::from("/odd \"dir\"/back\\slash"),
             features_label: "a\"b\\c".to_owned(),
+            profile: RustProfile::parse("corpus").unwrap(),
         };
         let dc = output::DeadlineCapture {
             captured: output::CapturedOutput {
@@ -1049,6 +1065,7 @@ mod tests {
             Some("/odd \"dir\"/back\\slash/app")
         );
         assert_eq!(parsed["features"].as_str(), Some("a\"b\\c"));
+        assert_eq!(parsed["profile"].as_str(), Some("corpus"));
         assert_eq!(parsed["script"].as_str(), Some("/scripts/we\"ird.lua"));
         assert_eq!(
             parsed["git_subject"].as_str(),

@@ -273,7 +273,8 @@ fn collect_rows(
 /// Warn about an unrecognised `cargo_profile` value, once per distinct value
 /// per process. The row mapper runs per row, so a DB with many rows carrying
 /// the same typo would otherwise repeat the line for each. A warning, not an
-/// error: the row is still read, as `release`.
+/// error: the row is still read, its profile marked unknown - never guessed,
+/// since a guessed profile would let it pair with rows it cannot be compared to.
 fn warn_unknown_profile_once(raw: &str) {
     use std::collections::HashSet;
     use std::sync::{Mutex, OnceLock, PoisonError};
@@ -286,7 +287,7 @@ fn warn_unknown_profile_once(raw: &str) {
     if first {
         crate::output::warn(&format!(
             "unknown cargo_profile {raw:?} in results DB - \
-             treating as 'release' (likely a migration typo)"
+             its rows pair with nothing (likely a migration typo)"
         ));
     }
 }
@@ -314,11 +315,11 @@ fn map_stored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
             .get::<_, Option<String>>("cargo_profile")?
             .as_deref()
             .filter(|s| !s.is_empty())
-            .map(|s| match crate::build::CargoProfile::from_db(s) {
-                Ok(p) => p,
+            .map(|s| match crate::build::BuildKind::from_db(s) {
+                Ok(kind) => crate::db::types::StoredProfile::Known(kind),
                 Err(crate::build::UnknownCargoProfile(raw)) => {
                     warn_unknown_profile_once(&raw);
-                    crate::build::CargoProfile::Release
+                    crate::db::types::StoredProfile::Unknown(raw)
                 }
             }),
         kernel: row.get::<_, Option<String>>("kernel")?.unwrap_or_default(),

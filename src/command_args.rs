@@ -11,6 +11,19 @@ pub(crate) fn profile_override(debug: bool, release: bool) -> Option<bool> {
     }
 }
 
+/// The CLI profile choice of a command that takes `--profile` beside
+/// `--debug`/`--release` (all three clap-exclusive): the two flags are
+/// spellings of `--profile dev` and `--profile release`.
+pub(crate) fn profile_choice(
+    debug: bool,
+    release: bool,
+    profile: Option<&crate::build::RustProfile>,
+) -> Option<crate::build::RustProfile> {
+    profile
+        .cloned()
+        .or_else(|| profile_override(debug, release).map(crate::build::RustProfile::for_debug))
+}
+
 pub(crate) fn parse_env_overrides(pairs: &[String]) -> Result<Vec<(String, String)>, DevError> {
     pairs
         .iter()

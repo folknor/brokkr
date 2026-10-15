@@ -477,7 +477,7 @@ fn cargo_bench(
 
     let shape = crate::build_purpose::resolve(crate::build_purpose::Request {
         purpose: crate::build_purpose::Purpose::Bench,
-        profiles: Default::default(),
+        profile: crate::build_purpose::Profile::Bench,
         packages: vec!["-p".into(), target.package.clone()],
         features: crate::build_purpose::Features::default(),
         unification: Vec::new(),
