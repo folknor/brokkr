@@ -2,9 +2,11 @@
 
 How `brokkr check` and `brokkr test` are built, and why: the parts you need in
 order to change the pipeline safely. How the commands are used is in
-`docs/commands/check.md` (`brokkr man check`), and the config schema in
-`docs/brokkr.toml.md`. Sections follow the order of the usage doc; a `###`
-section belongs to the usage doc's `##` section of the same subject (the time
+`docs/commands/check.md` and its siblings `check.test-lanes.md`,
+`check.hygiene.md` and `test.md`; the config schema is in `docs/brokkr.toml.md`,
+`docs/brokkr.toml.conventions.md` and `docs/brokkr.toml.sweeps.md`. Sections
+follow the order of the usage docs; a `###` section belongs to the usage `##`
+section of the same subject (the time
 ceilings, the clippy, rustdoc and test phases, coverage, diagnostic
 continuation).
 
@@ -806,7 +808,7 @@ phase compiles rather than reads diagnostics:
   composes directly into the encoded or plain rustflags environment source,
   or uses `--config` at the active target/build layer. The notice line names
   inherited rustflags environment sources. See
-  [`[lints]`](../brokkr.toml.md#lints-section) for the full rule, including why
+  [`[lints]`](../docs/brokkr.toml.md#lints-section) for the full rule, including why
   an injection can be deliberately inert. If a live environment value is not
   UTF-8, brokkr refuses to compose it because the launch API cannot preserve
   it. If Cargo config cannot be fully read, the sink stays at the potentially
@@ -981,7 +983,7 @@ never replace). This expresses a curated per-package subset as several sibling
 `[[check]]` entries under one profile - the shape a madsim gate needs, where
 one crate runs a single named test and another runs a `virtual_time`-filtered
 set, all under the same shared isolated target dir. See the `sim` worked
-example in `docs/brokkr.toml.md`.
+example in `docs/brokkr.toml.sweeps.md`.
 
 #### Direct execution
 
@@ -1115,7 +1117,7 @@ selector kind is honoured with cargo's meaning - `--test NAME`/`--test=NAME`,
 the sweep's own `tests` filters (`-- --lib` on a sweep with `tests = ["cli"]`
 plans the lib harness and `cli`).
 Full semantics, and the rule for partitioning a suite across a parallel and a
-serial entry, are in `docs/brokkr.toml.md`.
+serial entry, are in `docs/brokkr.toml.sweeps.md`.
 
 ### Identities
 
@@ -1268,7 +1270,7 @@ installed (a configured runner, a cross target, a configured rustdoc - see
 above 1), which shares one stream across tests and harnesses - use
 `parallel = { budget = N }`, which runs the binaries concurrently and
 attributably. The second is config-determined, so config load refuses it
-first, naming the profile and entries (`docs/brokkr.toml.md`); the `prepare`
+first, naming the profile and entries (`docs/brokkr.toml.sweeps.md`); the `prepare`
 refusal stays as the backstop. (A profile that certifies nothing keeps both
 lane shapes; their inventory is unavailable.)
 

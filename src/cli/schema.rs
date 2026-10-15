@@ -376,7 +376,7 @@ In depth: `brokkr man clippy`."
     /// terminal. Topics are filtered by the detected project, except the
     /// project-agnostic topics (such as check, clean, bench, config and
     /// measure), which are listed everywhere. A long topic lists its
-    /// sections instead of dumping the file: `brokkr man config script_check`
+    /// sections instead of dumping the file: `brokkr man conventions script_check`
     /// reads one, `--full` reads the lot.
     #[command(display_order = 0)]
     Man {

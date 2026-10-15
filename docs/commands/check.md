@@ -447,7 +447,7 @@ for zero-width/bidi/emoji noise, which have none) before the scan runs, so the
 subsequent check finds zero and passes.
 
 `[gremlins]` can exclude directories (vendored material) and adjust the banned
-set; see `brokkr man config gremlins`.
+set; see `brokkr man conventions gremlins`.
 
 ## `header` phase
 
@@ -461,7 +461,7 @@ fails. Ported from `check_copyright_year`; see `src/header.rs`.
 
 Runs next, only when `[[textlint]]` rules exist. Each rule forbids a regex on
 lines of the files it selects; the keys (`allow_marker`, `except`, `region`,
-`skip_after`, `join_wrapped_use`, ...) are in `brokkr man config textlint`.
+`skip_after`, `join_wrapped_use`, ...) are in `brokkr man conventions textlint`.
 Beyond those, a rule may carry the
 **context-window gates** `except_above` / `except_below` /
 `require_above` / `require_below` (each `{ lines = N, pattern = "..." }`).
@@ -531,7 +531,7 @@ shrinking number) while a passing gate's name carries nothing to act on. A
 partly-failing stage prints `script-check: M of N ok` above the failure block.
 
 The keys (`match`, `stream`, `stage`, `diagnostics`) and what each failure view
-prints are in `brokkr man config script_check`. For `cargo doc` specifically,
+prints are in `brokkr man conventions script_check`. For `cargo doc` specifically,
 prefer the native [`rustdoc` phase](#rustdoc-phase) over a script check: it
 reads cargo's JSON, so each diagnostic is one line with its lint code.
 
@@ -654,7 +654,7 @@ found early in one group never cuts another group's runs short. The rustdoc
 phase is grouped the same way. `[test] serial_builds`, or a configured cargo
 build dir, makes it one group. If Cargo config cannot be fully inspected, the
 probe also chooses one group; the Cargo invocation reports unreadable or
-invalid config files (`docs/brokkr.toml.md`;
+invalid config files (`docs/brokkr.toml.sweeps.md`;
 `src/check_cmd/concurrency.rs`).
 
 ### Cargo's manifest lints
@@ -836,7 +836,7 @@ markdown-only tree, with a 5-minute ceiling like clippy.
 ## `certifies` and exit codes
 
 A profile may declare `certifies = "complete"` or `"partial"` (see
-`docs/brokkr.toml.md`); the claim decides the success word, the exit code,
+`docs/brokkr.toml.sweeps.md`); the claim decides the success word, the exit code,
 and which narrowing is permitted:
 
 | profile | success line | exit on success | exit on failure |

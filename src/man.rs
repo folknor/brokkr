@@ -47,8 +47,20 @@ struct Topic {
 const TOPICS: &[Topic] = &[
     Topic {
         name: "config",
-        summary: "brokkr.toml: host sections, [[check]] sweeps, [test] profiles",
+        summary: "brokkr.toml: location, include, host sections, [lints], [bin]",
         content: include_str!("../docs/brokkr.toml.md"),
+        commands: &[CommandId::Env],
+    },
+    Topic {
+        name: "conventions",
+        summary: "brokkr.toml convention gates: gremlins, textlint, script_check, manifest",
+        content: include_str!("../docs/brokkr.toml.conventions.md"),
+        commands: &[CommandId::Env],
+    },
+    Topic {
+        name: "sweeps",
+        summary: "brokkr.toml [[check]] sweeps, parallel, [test] profiles, quarantine",
+        content: include_str!("../docs/brokkr.toml.sweeps.md"),
         commands: &[CommandId::Env],
     },
     Topic {

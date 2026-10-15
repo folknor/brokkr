@@ -3,7 +3,7 @@
 //! A bundled doc is one file, but it is read one subject at a time: the
 //! question is nearly always "what does `script_check` do", not "show me all
 //! 890 lines of the config reference". This module gives every `##`/`###`
-//! heading a slug and a byte range, so `brokkr man config script_check` can
+//! heading a slug and a byte range, so `brokkr man conventions script_check` can
 //! print that section alone and bare `brokkr man config` can list what is
 //! addressable.
 //!

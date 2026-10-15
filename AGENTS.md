@@ -14,11 +14,13 @@ These files are not auto-loaded - read them on demand based on what the user ask
 
 They are also compiled into the binary and readable as `brokkr man <topic>` (bare `brokkr man` lists the topics available in the current project). Topics are project-filtered by the same `Visibility` the CLI uses. When editing this list, update `TOPICS` to match.
 
-A doc with 8+ `##` sections is **section-addressed**: `brokkr man config script_check` prints that section alone and bare `brokkr man config` lists the sections. Slugs derive from the headings (`src/man/sections.rs`), so a doc's `##` structure is its lookup surface - keep one subject per `##`, or it can't be reached.
+A doc with 8+ `##` sections is **section-addressed**: `brokkr man conventions script_check` prints that section alone and bare `brokkr man conventions` lists the sections. Slugs derive from the headings (`src/man/sections.rs`), so a doc's `##` structure is its lookup surface - keep one subject per `##`, or it can't be reached.
 
 - `reference/architecture.md` - the full module map: what each source file owns and why. Read before changing a module you have not touched this session.
 - `reference/output.md` - operator output channel conventions.
-- `docs/brokkr.toml.md` - config schema: fields, host sections, `include` composition, `[gremlins]`, `[[check]]`, `[test]` profiles, `[header]`, `[rustdoc]`, `[[textlint]]`, `[[script_check]]`, `[manifest]`, `[bin]`, `[lints]`, `[cargo_env]`, `worktree_keep`, `[[quarantine]]`, the user-wide config layer.
+- `docs/brokkr.toml.md` - config core: where it lives, the user-wide layer, `include` composition, top-level shape and host sections, `worktree_keep`, `disable_toolchain`, `[cargo_env]`, `[deps]`, `[bin]`, `[lints]`.
+- `docs/brokkr.toml.conventions.md` - convention gates: `[gremlins]`, shared path selectors, `[header]`, `[[textlint]]`, `[textlint_preset]`, `[[script_check]]`, `[manifest]`, `[rustdoc]`, `[[dependency_rule]]`.
+- `docs/brokkr.toml.sweeps.md` - `[[check]]` sweeps, the `parallel` lane, `[test]` and its profiles, `[[quarantine]]`.
 - `docs/brokkr.toml.elivagar.md` - `[<host>.tilegen.*]` blocks (elivagar).
 - `docs/brokkr.toml.datasets.md` - `[<host>.datasets.*]` and the variant-selection CLI flags (pbfhogg/elivagar/nidhogg).
 - `docs/brokkr.toml.piners.md` - the `[piners]` config block.

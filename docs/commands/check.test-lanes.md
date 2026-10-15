@@ -103,7 +103,7 @@ queued binaries do not each reserve an OS thread.
 
 ### Process isolation (`isolation = "process"`)
 
-A profile may set `isolation = "process"` (see `docs/brokkr.toml.md`): the
+A profile may set `isolation = "process"` (see `docs/brokkr.toml.sweeps.md`): the
 lane prebuilds the sweep, lists each binary's filtered tests, and then
 **executes each prebuilt binary once per selected test** with
 `--exact <name> --test-threads=1`, under the same reconstructed cargo launch
@@ -151,7 +151,7 @@ Opt a project back in with `[test] doctests = true`, which restores the full
 `cargo test` default (doctests included), or per entry with
 `doc_only = true` - a sweep that runs `cargo test --doc` and nothing else,
 regardless of the `[test]` flag (the doctest twin a `parallel` workspace
-sweep needs; see `[[check]] doc_only` in `docs/brokkr.toml.md`, including
+sweep needs; see `[[check]] doc_only` in `docs/brokkr.toml.sweeps.md`, including
 its refusals and the workspace-shaped-carrier rule complete profiles
 enforce). There is no CLI override - doctest inclusion is a declared,
 CI-parity property of the config. `--skip` is not a workaround: doctests
@@ -198,7 +198,7 @@ the last run (`.brokkr/parallel-timings.toml`), so the first run of a tree
 weights by test count and budget changes need two runs to measure. An unset
 budget (`parallel = {}`) is the physical cores in one last-level cache domain
 (`brokkr env`'s `l3 domain:` line). Allocation rules and their rationale are in
-`docs/brokkr.toml.md` (`parallel`).
+`docs/brokkr.toml.sweeps.md` (`parallel`).
 
 The lane writes its plan and result to the run log:
 
@@ -429,7 +429,7 @@ shrink the certified set. A `complete` profile that leaves a `[[check]]`
 entry referenced by no sweep or lane is therefore a **load-time error**
 (the entry would be enumerated nowhere, so the audit would print `0
 orphaned` over tests that never ran) - **unless the entry declares
-`curated = true`** (see `docs/brokkr.toml.md`): a curated entry's
+`curated = true`** (see `docs/brokkr.toml.sweeps.md`): a curated entry's
 non-selected pairs are outside the universe by declaration, so leaving it
 unreferenced certifies nothing without running, and the entry may live in
 its own deliberately-run profile instead. When a gate lane does run a curated
