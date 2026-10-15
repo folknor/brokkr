@@ -101,9 +101,9 @@ test phase, each set when the phase starts work on that sweep - before cargo
 returns, so a sweep whose run failed still counts, and a lane an earlier
 fail-fast never reached does not.
 
-Member-check has its own selection: not applicable (no `[member_check]`, its
-`when` ruling the claim out, the phase skipped), else eligible with the `-p`
-set. Which members exist is a cargo metadata fact, so the member set itself -
+Member-check has its own selection: not applicable (no `[member_check]` and
+no `[bin] install` implying one, the cadence ruling the claim out, the phase
+skipped), else eligible with the `-p` set. Which members exist is a cargo metadata fact, so the member set itself -
 workspace members less `skip`, intersected with `-p`, skipped visibly when
 that empties it - is resolved when the phase runs; which bins are eligible
 stays cargo's runtime answer. Fixture-lint's selection is the entries whose

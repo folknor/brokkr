@@ -465,9 +465,15 @@ debug = true                 # dev profile for run + `--debug` for install
   `--release`, `cargo install --debug`). Unset means release for both,
   matching `brokkr test`. CLI `--debug` / `--release` (mutually exclusive)
   override in either direction.
-
-A non-empty `install` requires a `[member_check]` table (below), and the
-retired `install_feature_check` key is a load error.
+- `install_feature_check` - `"off"` / `"gate"` (the default) / `"always"`:
+  when `brokkr check` compiles the `install` packages' bins under
+  package-mode feature unification - the way `cargo install` resolves them,
+  without features sibling workspace members contribute - at the install
+  profile. `"gate"` means only under a `certifies = "complete"` profile.
+  Requires an explicit `install` list; the key without one is a load error.
+  This is the member-check phase run over the install set: a `[member_check]`
+  table (below) supersedes it, and setting both is a load error. See
+  `brokkr man test-lanes member_check`.
 
 ## `[member_check]` section
 
@@ -483,8 +489,9 @@ profile = "dev"             # "dev" (default) | "release"
 skip = [{ package = "xtask", reason = "tooling, never installed" }]
 ```
 
-Required when `[bin] install` is non-empty (use `when = "off"` to opt out
-explicitly). The semantics, refusals and what a green run claims are in
+Without the table, a non-empty `[bin] install` implies the narrower install
+gate described under `[bin]`; with it, every member is checked and
+`[bin] install_feature_check` is a conflict. The semantics, refusals and what a green run claims are in
 `brokkr man test-lanes member_check`.
 
 ## `[lints]` section

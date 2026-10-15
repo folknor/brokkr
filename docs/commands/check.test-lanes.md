@@ -792,7 +792,8 @@ Two refusals keep it honest:
   moved inside brokkr, where nothing is left to catch it. Waived bins are
   reported by name, and a member whose targets are *all* waived still fails.
 - **No toolchain fallback.** A cargo without package-mode support fails with
-  a named remedy (update nightly, or `[member_check] when = "off"`);
+  a named remedy (update nightly, or turn the phase off - `[member_check]
+  when = "off"`, or `[bin] install_feature_check = "off"` for the install gate);
   falling back to selected-mode would silently recreate the workspace-unified
   graph the phase exists to leave. That classification aborts the phase, so it
   requires a positive match on cargo's own option rejection *and* the absence
@@ -814,15 +815,18 @@ phases and the member set together.
 When it runs: `when = "off" | "gate" | "always"`, default `gate` - only under
 a `certifies = "complete"` profile, because per-member resolution
 deliberately compiles duplicate variants of shared dependencies and is priced
-for the pre-landing run, not the edit loop. Without a `[member_check]` table
-the phase is inert - except that a non-empty `[bin] install` with no table is
-a load error: the retired `install_feature` phase checked those packages by
-default, and silently dropping that obligation would let a green gate mean
-less than it did. The error names the old scope (the install packages, their
-bins, the `[bin] debug` profile) and the new one (every member), which are
-deliberately not equivalent. `[bin] install_feature_check` is a load error
-pointing at `when`, and `install_feature` in `skip_phases` names the rename.
-A partial profile may name `member_check` in `skip_phases`. The phase budget
+for the pre-landing run, not the edit loop.
+
+Without a `[member_check]` table, a non-empty `[bin] install` implies the
+install gate it has always implied: the phase runs over the install packages
+only, their bins only, at the profile `brokkr install` builds (`[bin] debug`),
+at `[bin] install_feature_check`'s cadence (default `gate`). A package there
+that is not a workspace member fails the phase. A `[member_check]` table
+supersedes the implied gate - every member, its own targets, profile and
+`when` - so `install_feature_check` beside one is a load error. With neither,
+the phase is inert. A partial profile may name `member_check` in
+`skip_phases`; the phase's former name, `install_feature`, is accepted there
+as the same phase. The phase budget
 is the test phase's (it covers a whole workspace of cold resolves); the
 whole-check ceiling still bounds the run.
 

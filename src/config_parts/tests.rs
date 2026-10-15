@@ -1828,30 +1828,50 @@ sweeps = ["all"]
         assert!(err.contains("not a skippable check phase"), "got: {err}");
     }
 
-    // The retired install-feature gate ran by default over `[bin] install`;
-    // dropping it silently would let a green gate mean less than it did.
+    // `[bin] install` keeps its contract: without a `[member_check]` table it
+    // implies the install gate it always did - its packages' bins, at the
+    // install profile, at `install_feature_check`'s cadence.
     #[test]
-    fn bin_install_without_member_check_is_refused_with_the_old_scope() {
-        let err = parse_dev_config(&root_table("[bin]\ninstall = [\"cli\"]\n"))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("[member_check]") && err.contains("cli"), "got: {err}");
-        assert!(err.contains("release"), "the old profile is named: {err}");
+    fn bin_install_without_member_check_implies_the_install_gate() {
+        let cfg = parse_dev_config(&root_table("[bin]\ninstall = [\"cli\"]\n"))
+            .unwrap()
+            .member_check
+            .unwrap();
+        assert_eq!(cfg.only, Some(vec!["cli".to_owned()]));
+        assert_eq!(cfg.targets, vec![MemberTarget::Bins]);
+        assert_eq!(cfg.profile, MemberProfile::Release);
+        assert_eq!(cfg.when, Cadence::Gate);
 
+        let cfg = parse_dev_config(&root_table(
+            "[bin]\ninstall = [\"cli\"]\ndebug = true\ninstall_feature_check = \"always\"\n",
+        ))
+        .unwrap()
+        .member_check
+        .unwrap();
+        assert_eq!((cfg.profile, cfg.when), (MemberProfile::Dev, Cadence::Always));
+
+        // An explicit table supersedes the install gate, all members.
         let cfg = parse_dev_config(&root_table(
             "[bin]\ninstall = [\"cli\"]\n[member_check]\nwhen = \"off\"\n",
         ))
+        .unwrap()
+        .member_check
         .unwrap();
-        assert_eq!(cfg.member_check.unwrap().when, Cadence::Off);
+        assert_eq!((cfg.when, cfg.only), (Cadence::Off, None));
+
+        // Two cadences for one phase is a conflict; a knob without its list
+        // can never fire.
+        assert!(
+            parse_dev_config(&root_table(
+                "[bin]\ninstall = [\"cli\"]\ninstall_feature_check = \"off\"\n[member_check]\n",
+            ))
+            .is_err()
+        );
+        assert!(parse_dev_config(&root_table("[bin]\ninstall_feature_check = \"gate\"\n")).is_err());
     }
 
     #[test]
-    fn retired_install_feature_spellings_name_the_rename() {
-        let err = parse_dev_config(&root_table("[bin]\ninstall_feature_check = \"gate\"\n"))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("member_check"), "got: {err}");
-
+    fn the_old_install_feature_phase_name_still_skips_the_phase() {
         let table = root_table(
             r#"
 [[check]]
@@ -1864,10 +1884,9 @@ sweeps = ["all"]
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref(), &[])
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("renamed `member_check`"), "got: {err}");
+        validate_check_against_test(&check, test.as_ref(), &[]).unwrap();
+        let skips = test.unwrap().profiles["edit"].skip_phases.clone().unwrap();
+        assert_eq!(skips, vec!["member_check".to_owned()]);
     }
 
     #[test]

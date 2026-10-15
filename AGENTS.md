@@ -91,6 +91,16 @@ Single crate, single binary (plus the `brokkr-rustc-guard` bin). No workspace. T
 - Don't remind the user of the rules. They wrote them, so they know them.
 - The user can exempt you from any rule at any time.
 
+### Config contract
+
+**Never break an existing brokkr.toml without asking.** Without explicit user approval, never:
+
+- turn a config that loads today into a load error (retiring a key, a new required table, stricter validation);
+- change what an existing key, default, or absent key implies;
+- rename or remove a name the config refers to (such as phase names in `skip_phases`).
+
+New keys and tables are fine as long as every existing config behaves identically. When a feature seems to need a break, stop and ask, naming the configs it would affect.
+
 ### Bash rules
 
 - Never read or write from `/tmp`. All data lives in the project.

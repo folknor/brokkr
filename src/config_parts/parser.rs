@@ -195,16 +195,6 @@ fn parse_bin(
     let Some(value) = table.get("bin") else {
         return Ok(None);
     };
-    if value.get("install_feature_check").is_some() {
-        return Err(DevError::Config(
-            "[bin] install_feature_check is retired: the install-feature phase \
-             became `[member_check]`, which compiles every workspace member's \
-             production targets under its own resolve. Remove the key and \
-             declare [member_check] (its `when` key takes the same \
-             off/gate/always values)."
-                .into(),
-        ));
-    }
     let cfg: BinConfig = value
         .clone()
         .try_into()
@@ -221,36 +211,42 @@ fn parse_bin(
             ));
         }
     }
+    // The gate checks the install set, so a knob with no set is a config
+    // that looks armed and can never fire - refused rather than ignored.
+    if cfg.install_feature_check.is_some() && cfg.install.is_empty() {
+        return Err(DevError::Config(
+            "[bin] install_feature_check without [bin] install - the gate \
+             compiles the install packages, so list them."
+                .into(),
+        ));
+    }
     Ok(Some(cfg))
 }
 
 /// Parse the optional `[member_check]` table.
 ///
-/// A `[bin] install` list without the table is refused: the retired
-/// install-feature phase compiled those packages by default, so silently
-/// dropping that obligation would let a previously green gate mean less.
-/// The message names what the old gate covered and what the new one does -
-/// they are deliberately not equivalent (every member, not the install set).
+/// Without one, `[bin] install` keeps the meaning it has always had for
+/// `brokkr check`: its packages' bins compiled under their own resolve, at
+/// `install_feature_check`'s cadence ([`MemberCheckConfig::implied_by_install`]).
+/// A table supersedes that, so `install_feature_check` beside one is a
+/// conflict - two cadences for one phase.
 fn parse_member_check(
     table: &toml::map::Map<String, toml::Value>,
     bin: Option<&BinConfig>,
 ) -> Result<Option<MemberCheckConfig>, DevError> {
     let Some(value) = table.get("member_check") else {
-        if let Some(bin) = bin.filter(|b| !b.install.is_empty()) {
-            let profile = if bin.debug { "dev" } else { "release" };
-            return Err(DevError::Config(format!(
-                "[bin] install is set but [member_check] is not. The retired \
-                 install-feature gate compiled the install packages ({}) - their \
-                 bins, {profile} profile - under package-mode resolution. \
-                 [member_check] covers every workspace member unless skipped. \
-                 Declare it, for example:\n\n[member_check]\ntargets = [\"lib\", \
-                 \"bins\"]\nprofile = \"{profile}\"\n\nor opt out explicitly with \
-                 `when = \"off\"`.",
-                bin.install.join(", ")
-            )));
-        }
-        return Ok(None);
+        return Ok(bin
+            .filter(|b| !b.install.is_empty())
+            .map(MemberCheckConfig::implied_by_install));
     };
+    if bin.is_some_and(|b| b.install_feature_check.is_some()) {
+        return Err(DevError::Config(
+            "[bin] install_feature_check and [member_check] both set when the \
+             member check runs - [member_check] supersedes the install gate, so \
+             use its `when` and drop install_feature_check."
+                .into(),
+        ));
+    }
     let cfg: MemberCheckConfig = value
         .clone()
         .try_into()
@@ -1552,10 +1548,19 @@ fn parse_test(
                 .into(),
         ));
     }
-    let config: TestConfig = value
+    let mut config: TestConfig = value
         .clone()
         .try_into()
         .map_err(|e: toml::de::Error| DevError::Config(format!("test: {e}")))?;
+    // The member-check phase was once `install_feature`; a profile written
+    // against that name keeps skipping the same phase.
+    for def in config.profiles.values_mut() {
+        for phase in def.skip_phases.iter_mut().flatten() {
+            if phase == "install_feature" {
+                "member_check".clone_into(phase);
+            }
+        }
+    }
     Ok(Some(config))
 }
 
@@ -1643,13 +1648,6 @@ fn validate_skip_phases(profile_name: &str, def: &ProfileDef) -> Result<(), DevE
     // cannot drift a second hard-coded list out of sync.
     let skippable = skippable_phase_names;
     for p in phases {
-        if p == "install_feature" {
-            return Err(DevError::Config(format!(
-                "[test.profiles.{profile_name}] skip_phases entry 'install_feature': \
-                 the phase was renamed `member_check` when it widened to every \
-                 workspace member."
-            )));
-        }
         if phase_names().any(|n| n == p.as_str()) && !skippable().any(|n| n == p.as_str()) {
             return Err(DevError::Config(format!(
                 "[test.profiles.{profile_name}] skip_phases entry '{p}' \

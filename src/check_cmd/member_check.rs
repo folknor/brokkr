@@ -539,7 +539,8 @@ fn check_one_member(
                  \"package\" mode, which the member-check phase needs to \
                  resolve each member the way `cargo install` will. \
                  Update the nightly toolchain, or set \
-                 `[member_check] when = \"off\"`."
+                 `[member_check] when = \"off\"` (`[bin] install_feature_check \
+                 = \"off\"` for the install gate)."
                     .into(),
             ));
         }
@@ -645,12 +646,24 @@ fn run_member_check_phase(
         &[],
         Some(Phase::MemberCheck),
     )?;
-    let members: Vec<String> = metadata
+    let workspace: Vec<String> = metadata
         .packages
         .iter()
         .filter(|p| metadata.is_member(&p.id))
         .map(|p| p.name.clone())
         .collect();
+    // Implied by `[bin] install`: the install packages are the member set.
+    let members = match &cfg.only {
+        Some(only) => {
+            if let Some(unknown) = only.iter().find(|p| !workspace.contains(p)) {
+                return Err(DevError::Config(format!(
+                    "[bin] install names '{unknown}', which is not a workspace member"
+                )));
+            }
+            only.clone()
+        }
+        None => workspace,
+    };
     let configured = members.len() - cfg.skip.len().min(members.len());
     let (admitted, notes) = admit_members(&members, &cfg.skip, cli)?;
     for note in &notes {

@@ -225,6 +225,11 @@ pub struct BinConfig {
     pub install: Vec<String>,
     /// Default both commands to the dev profile.
     pub debug: bool,
+    /// When `brokkr check` compiles the `install` packages' bins under
+    /// package-mode feature unification, the way `cargo install` resolves
+    /// them. Unset means `gate`. Only meaningful alongside `install`, and
+    /// only without a `[member_check]` table, which supersedes it.
+    pub install_feature_check: Option<Cadence>,
 }
 
 /// When a gate-priced compiling phase (`member_check`, `fixture_lint`)
@@ -262,6 +267,26 @@ pub struct MemberCheckConfig {
     /// workspace member fails the phase.
     #[serde(default)]
     pub skip: Vec<MemberSkip>,
+    /// Not a key: set when the config is implied by `[bin] install` (no
+    /// `[member_check]` table), restricting the members to the install
+    /// packages - the `[bin]` contract the phase inherited.
+    #[serde(skip)]
+    pub only: Option<Vec<String>>,
+}
+
+impl MemberCheckConfig {
+    /// What `[bin] install` has always meant to `brokkr check` without a
+    /// `[member_check]` table: its packages' bins, at the profile `brokkr
+    /// install` builds, at `install_feature_check`'s cadence.
+    pub fn implied_by_install(bin: &BinConfig) -> Self {
+        Self {
+            when: bin.install_feature_check.unwrap_or_default(),
+            targets: vec![MemberTarget::Bins],
+            profile: if bin.debug { MemberProfile::Dev } else { MemberProfile::Release },
+            skip: Vec::new(),
+            only: Some(bin.install.clone()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]

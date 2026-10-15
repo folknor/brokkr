@@ -1646,10 +1646,10 @@ impl MemberSelection {
             return Self::NotApplicable(PHASE_SKIPPED);
         }
         let Some(cfg) = cfg else {
-            return Self::NotApplicable("no [member_check] table");
+            return Self::NotApplicable("no [member_check] table or [bin] install list");
         };
         if !crate::config::Claim::new(certifies).runs(cfg.when) {
-            return Self::NotApplicable("[member_check] when rules this run out");
+            return Self::NotApplicable("the member check's cadence rules this run out");
         }
         Self::Eligible { cfg: cfg.clone(), cli: cli.to_vec() }
     }
@@ -2567,6 +2567,7 @@ mod tests {
             targets: vec![MemberTarget::Lib, MemberTarget::Bins],
             profile: MemberProfile::Dev,
             skip: Vec::new(),
+            only: None,
         };
         let runs = |c: &MemberCheckConfig, certifies, enabled| {
             matches!(
