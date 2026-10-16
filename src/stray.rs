@@ -209,6 +209,25 @@ struct ProcEntry {
     ppid: u32,
     comm: String,
     identity: crate::process::ProcIdentity,
+    /// A formatter: `cargo-fmt`, or a `cargo` whose subcommand is `fmt`.
+    fmt: bool,
+}
+
+/// Whether a `cargo` argv runs the `fmt` subcommand: the first argument after
+/// the binary that is neither a flag nor a `+toolchain` override. A flag that
+/// takes a separate value can hide the subcommand, which errs towards reaping.
+fn argv_is_cargo_fmt(argv: &[u8]) -> bool {
+    argv.split(|&b| b == 0)
+        .skip(1)
+        .find(|arg| !arg.is_empty() && !arg.starts_with(b"-") && !arg.starts_with(b"+"))
+        == Some(b"fmt".as_slice())
+}
+
+fn is_fmt(pid: u32, comm: &str) -> bool {
+    comm == "cargo-fmt"
+        || (comm == "cargo"
+            && std::fs::read(format!("/proc/{pid}/cmdline"))
+                .is_ok_and(|argv| argv_is_cargo_fmt(&argv)))
 }
 
 fn read_proc() -> HashMap<u32, ProcEntry> {
@@ -223,6 +242,7 @@ fn read_proc() -> HashMap<u32, ProcEntry> {
                 ppid: stat.parent().map_or(0, crate::process::Pid::get),
                 comm: stat.comm().to_owned(),
                 identity: stat.identity(),
+                fmt: is_fmt(pid.get(), stat.comm()),
             },
         );
     }
@@ -231,6 +251,10 @@ fn read_proc() -> HashMap<u32, ProcEntry> {
 
 /// Every unprotected cargo-family process, leaves first. Pure over the given
 /// table and ownership rule so the classification is unit-testable.
+///
+/// Formatters are never strays. `cargo fmt` takes no build-directory lock and
+/// compiles nothing, and `brokkr fmt` runs it lock-free, so without this every
+/// locked command elsewhere on the host SIGKILLed a concurrent `brokkr fmt`.
 fn classify(table: &HashMap<u32, ProcEntry>, ownership: Ownership) -> Vec<Stray> {
     let exemptions = ReaperExemptions::from_parent_pairs(
         ownership.me,
@@ -238,7 +262,7 @@ fn classify(table: &HashMap<u32, ProcEntry>, ownership: Ownership) -> Vec<Stray>
     );
     let mut strays = Vec::new();
     for (&pid, entry) in table {
-        if !is_cargo_family(&entry.comm) || ownership.owns(pid, &exemptions) {
+        if !is_cargo_family(&entry.comm) || entry.fmt || ownership.owns(pid, &exemptions) {
             continue;
         }
         let mut under_brokkr = false;
@@ -551,6 +575,7 @@ mod tests {
                             crate::process::Pid::new(pid).unwrap(),
                             crate::process::StartTicks::new(u64::from(pid) * 100),
                         ),
+                        fmt: comm == "cargo-fmt",
                     },
                 )
             })
@@ -584,6 +609,23 @@ mod tests {
             holder: None,
             foreign_ns: None,
         }
+    }
+
+    #[test]
+    fn cargo_fmt_is_never_a_stray() {
+        assert!(argv_is_cargo_fmt(b"cargo\0fmt\0--check\0"));
+        assert!(argv_is_cargo_fmt(b"/usr/bin/cargo\0+nightly\0--quiet\0fmt\0"));
+        assert!(!argv_is_cargo_fmt(b"cargo\0build\0-p\0fmt\0"));
+        assert!(!argv_is_cargo_fmt(b"cargo\0"));
+        let mut t = table(&[
+            (1, 0, "systemd"),
+            (10, 1, "brokkr"),
+            (20, 10, "cargo"),
+            (30, 20, "cargo-fmt"),
+            (40, 30, "rustfmt"),
+        ]);
+        t.get_mut(&20).unwrap().fmt = true;
+        assert!(classify(&t, foreign()).is_empty());
     }
 
     #[test]

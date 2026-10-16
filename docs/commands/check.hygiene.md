@@ -205,6 +205,8 @@ killed and who started it. A rust-analyzer starter is killed too, since it
 would only restart the cargo; a shell or editor starter never is. This brokkr,
 its ancestors and its descendants are always spared, and every signal is
 checked against the process's starttime so a reused pid is never hit.
+Formatters (`cargo fmt`, `cargo-fmt`) are never strays: they take no build lock
+and compile nothing, and `brokkr fmt` usually runs without the lock.
 
 A second reap at the same point kills **orphaned test processes**: tests left
 running by a brokkr that died without a handler (the OOM killer), found by the

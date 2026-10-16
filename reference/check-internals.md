@@ -253,6 +253,12 @@ it would only restart the cargo; a shell or editor starter (a hand-typed
 `cargo`) is never signalled. Failure to read `/proc` reads as nothing found:
 the reap is on the way to the real work, never a gate on it.
 
+Formatters are exempt: `cargo-fmt`, and a `cargo` whose first positional
+argument is `fmt`. `brokkr fmt` holds no lock unless `disable_toolchain` is
+set, so its cargo has no verified owner, and every locked command elsewhere on
+the host used to SIGKILL it. `cargo fmt` takes no build-directory lock and
+compiles nothing, so it is outside what the reap exists to stop.
+
 **Both reapers spare the same process-tree boundary: this brokkr, its visible
 ancestors, and its visible descendants.** `ReaperExemptions` in `src/stray.rs`
 is also used by the orphan selector. A token-bearing ancestor of a live brokkr
