@@ -665,7 +665,7 @@ pub(super) fn run_iteration(
     tap: Option<&check_cmd::LaneTap>,
 ) -> Result<RunReport, DevError> {
     let (pkg, name, repeat) = (plan.shape.pkg(), plan.name, plan.repeat);
-    let tag = |target: Option<&str>| {
+    let tag = |target: Option<&str>, name: &str| {
         let quals: Vec<&str> = plan.sweep_label.into_iter().chain(target).collect();
         let quals = if quals.is_empty() {
             String::new()
@@ -713,7 +713,7 @@ pub(super) fn run_iteration(
             plan.state_root,
             plan.env,
             &OneRun {
-                tag: &tag(None),
+                tag: &tag(None, name),
                 test_tag: None,
                 target: "",
                 ceilings: ceilings_for(&None, plan.ceiling),
@@ -791,7 +791,8 @@ pub(super) fn run_iteration(
             plan.state_root,
             &env,
             &OneRun {
-                tag: &tag(Some(&run.label)),
+                // Under `--timeout` each process is one test: it names it.
+                tag: &tag(Some(&run.label), filter),
                 test_tag: Some(&test_tag),
                 target: &run.label,
                 ceilings: ceilings_for(&run.exact, plan.ceiling),
