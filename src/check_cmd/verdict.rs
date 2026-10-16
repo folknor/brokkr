@@ -557,7 +557,7 @@ pub(crate) struct TestTiming {
     pub(crate) elapsed: std::time::Duration,
 }
 
-pub(super) fn emit_timings(timings: &[TestTiming], multi_sweep: bool) {
+pub(crate) fn emit_timings(timings: &[TestTiming], multi_sweep: bool) {
     if timings.is_empty() {
         output::run_msg("timings: no tests ran");
         return;

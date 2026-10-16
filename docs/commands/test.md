@@ -231,6 +231,14 @@ Flags:
 - `--release` - force release, overriding `[test] debug = true` and a sweep's
   `profile = "dev"` (mutually exclusive with `--debug`)
 - `--timeout <SECS>` - raise the per-test watchdog ceiling (1-280s)
+- `--timings` - after the run, print every test that ran, slowest first, with
+  its wall time (the per-test tracker's clock, from libtest's start event to
+  its result; the build is excluded), as `brokkr check --timings` does. It
+  prints however the run ended, failed or stopped included, and a test killed
+  at its cap is listed with the time it had run, marked `killed at the ... cap,
+  did not finish`. Under several sweeps, or `-N`, each line names its sweep
+  (and run). With `--timeout`, this is how to find every test over the
+  standard cap: `brokkr test -p foo --timeout 280 --timings some_module::`
 
 Because `cargo test <name>` is a substring filter, identically-named tests in
 different modules of the same package all run; use a more qualified name
@@ -238,22 +246,22 @@ different modules of the same package all run; use a more qualified name
 
 A per-test watchdog (shared with `brokkr check`'s test phase) names any test that
 runs longer than 20s and reports it as a hung test. `--timeout <SECS>` raises
-that ceiling for `brokkr test` only, and only for a genuinely single test: if
-`<NAME>` matches more than one (harness, test) in any sweep's discovery - the
-same name in two harnesses counts twice - the command errors before running
-anything, listing them. Sweeps where the name matches zero tests (feature-gated
-out) are fine and are noted by a `SKIP` line when another sweep ran the name. There is no way to disable the ceiling entirely
-- 280s is the cap.
+that ceiling for `brokkr test` only, and always for one isolated test: every
+(harness, test) `<NAME>` matches in a sweep's discovery - the same name in two
+harnesses counts twice - runs as its own process, one after another. Sweeps
+where the name matches zero tests (feature-gated out) are fine and are noted
+by a `SKIP` line when another sweep ran the name. There is no way to disable
+the ceiling entirely - 280s is the cap.
 
 `--timeout` is the **only** exception to the 20s cap anywhere in brokkr, and
 280s is its hard limit. Exceeding the cap - raised or not - fails the run and
 stops it, including between `-N` iterations.
 
-Because it promises a per-test ceiling and already refuses more than one match,
-`--timeout` also makes the *attribution* exact: discovery resolves `<NAME>` to
-the one **full test name** in its one harness, and that binary is invoked with
-libtest `--exact`, so the process is the unit of one test and the kill is named
-by the caller's selection rather than by anything parsed. Resolving the full
+Because it promises a per-test ceiling, `--timeout` also makes the
+*attribution* exact: discovery resolves `<NAME>` to each matching **full test
+name** in its harness, and the binary is invoked once per name with libtest
+`--exact`, so each process is the unit of one test and a kill is named by the
+caller's selection rather than by anything parsed. Resolving the full
 name is load-bearing - `--exact` applied to the substring you typed would match
 nothing, so the run would silently execute zero tests.
 

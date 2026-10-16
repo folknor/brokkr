@@ -35,15 +35,18 @@
 //! Every test gets the shared hard cap; exceeding it fails the run and stops it,
 //! between `-N` iterations included. `--timeout <SECS>` is the only
 //! exception anywhere in brokkr, and it also makes the *attribution* exact:
-//! discovery resolves `<NAME>` to one (harness, full test name), and that one
-//! binary is run with libtest `--exact`, making the process the unit of one
-//! test. Resolving the full name matters - `--exact` on the user's substring
-//! would match nothing and silently run zero tests. What it bounds is that
-//! process from spawn to exit: its static constructors, the test, teardown.
-//! The build and every other harness's listing fall outside it. Because a
-//! higher ceiling only makes sense for one isolated test, it is gated: a
-//! `<NAME>` matching more than one test in a sweep - two harnesses holding the
-//! same name count twice - is a hard error before anything runs.
+//! discovery resolves `<NAME>` to every matching (harness, full test name), and
+//! each is run as its own process with libtest `--exact`, making the process
+//! the unit of one test. Resolving the full name matters - `--exact` on the
+//! user's substring would match nothing and silently run zero tests. What it
+//! bounds is each process from spawn to exit: its static constructors, the
+//! test, teardown. The build and every harness's listing fall outside it. A
+//! raised ceiling is therefore always one isolated test's, however many the
+//! name matches.
+//!
+//! `--timings` collects every test's wall (the tracker's start-to-result
+//! clock) and prints them slowest first after the run, however it ended; a
+//! test killed at its cap is listed with its elapsed time and marked.
 //!
 //! A `<NAME>` matching every discovered test of the package is refused (see
 //! `matches_whole_suite`) - a whole-suite run is `brokkr check`'s job.
@@ -1097,7 +1100,6 @@ include_ignored = false
             focused: Some(FocusedPlan {
                 runs: Vec::new(),
                 searched: 1,
-                exact: None,
                 artifacts: vec![check_cmd::PlannedArtifact::new(
                     None,
                     check_cmd::BinaryUnit::of(harness),
@@ -1105,7 +1107,6 @@ include_ignored = false
                     hash,
                 )],
             }),
-            exact: None,
             support_fingerprint: check_cmd::support_fingerprint(support).unwrap(),
             runtime_fingerprint: check_cmd::BuildRuntimeIndex::default()
                 .fingerprint()
@@ -1246,6 +1247,7 @@ include_ignored = false
             multi: false,
             profile_override: None,
             timeout: Some(30),
+            timings: None,
         };
         let mut reports = Vec::new();
         let mut notes = Vec::new();
@@ -1433,6 +1435,7 @@ include_ignored = false
             expected: Some(1),
             listed: None,
             observe: test_runner::Observe::default(),
+            timings: None,
         };
         let exact = || Attribution::Exact {
             name: "tests::hang".into(),

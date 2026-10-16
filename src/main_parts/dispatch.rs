@@ -1258,6 +1258,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             release,
             timeout,
             sweep,
+            timings,
         } => {
             // The lock lives in the config dir (.brokkr); cargo runs
             // against the code tree (build_root), which differs under
@@ -1283,6 +1284,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                 crate::command_args::profile_override(debug, release),
                 timeout,
                 sweep.as_deref(),
+                timings,
             )
         }
         Command::List => match project_config {

@@ -14,10 +14,10 @@ use conventions::{
 use reporter::Reporter;
 
 use crate::test_runner::hash_file;
-pub(crate) use verdict::TestTiming;
+pub(crate) use verdict::{TestTiming, emit_timings};
 #[cfg(test)]
 use verdict::verdict_context;
-use verdict::{FinishInput, emit_timings, finish_check, run_stop};
+use verdict::{FinishInput, finish_check, run_stop};
 
 include!("check_cmd/phase_type.rs");
 include!("check_cmd/phase.rs");

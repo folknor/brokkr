@@ -1,10 +1,12 @@
 //! Test outcome classification and user-facing verdicts.
 
+use std::cell::RefCell;
 use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
 use crate::cargo_filter;
+use crate::check_cmd;
 use crate::error::DevError;
 use crate::output;
 use crate::test_runner::{self, LaneVerdict};
@@ -236,6 +238,10 @@ pub(super) struct OneRun<'a> {
     /// Where the run's typed observations go (the run's journal), and no
     /// harness isolation: a directly executed harness is already one stream.
     pub(super) observe: test_runner::Observe,
+    /// `--timings`: where every test this invocation ran lands, with its
+    /// wall time, under this sweep label. A test killed at its cap lands too,
+    /// marked, so a hunt for slow tests under `--timeout` still sees it.
+    pub(super) timings: Option<(&'a str, &'a RefCell<Vec<check_cmd::TestTiming>>)>,
 }
 
 pub(super) fn aggregate_exit(
@@ -322,6 +328,9 @@ pub(super) fn run_one(
             }
         },
     )?;
+    if let Some((sweep, out)) = shape.timings {
+        record_timings(sweep, &run, &mut out.borrow_mut());
+    }
 
     let stdout_text = String::from_utf8_lossy(&run.captured.stdout);
     let stderr_text = String::from_utf8_lossy(&run.captured.stderr);
@@ -496,6 +505,33 @@ pub(super) fn run_one(
     output::test_msg(&format!("PASS {tag} ({wall})"));
     std::io::stdout().flush().ok();
     Ok(RunReport::bare(Outcome::Pass))
+}
+
+/// Every completed test's wall, then the test a blown budget killed: its
+/// elapsed is a floor (it never finished), so the name says so.
+pub(super) fn record_timings(
+    sweep: &str,
+    run: &test_runner::LibtestRun,
+    out: &mut Vec<check_cmd::TestTiming>,
+) {
+    for (name, elapsed) in &run.completed {
+        out.push(check_cmd::TestTiming {
+            sweep: sweep.to_owned(),
+            name: name.clone(),
+            elapsed: *elapsed,
+        });
+    }
+    if let Some(hung) = &run.hung {
+        let name = hung.attribution.test_name().unwrap_or("<unattributed>");
+        out.push(check_cmd::TestTiming {
+            sweep: sweep.to_owned(),
+            name: format!(
+                "{name} (killed at the {} cap, did not finish)",
+                output::format_duration(hung.ceiling)
+            ),
+            elapsed: hung.elapsed,
+        });
+    }
 }
 
 /// Classify an observation-backed failed test for reporting. A listed harness

@@ -109,8 +109,6 @@ pub(super) struct ReadySweep<'s> {
     /// The harnesses holding a match, run directly; `None` for a doc-only
     /// sweep's single `cargo test --doc`.
     pub(super) focused: Option<FocusedPlan>,
-    /// The resolved full name `--timeout` runs with `--exact`.
-    pub(super) exact: Option<String>,
     pub(super) support_fingerprint: Vec<String>,
     pub(super) runtime_fingerprint: Vec<String>,
 }
@@ -197,7 +195,6 @@ pub(super) fn prepare_sweep<'s>(
     // Hashed after every build the sweep did: the pre-builds can be re-uplifted
     // by the test build, and the file the tests read is whichever landed last.
     let support_fingerprint = check_cmd::support_fingerprint(&support)?;
-    let exact = focused.as_ref().and_then(|f| f.exact.clone());
     Ok(SweepOutcome::Ready(Box::new(ReadySweep {
         sweep,
         attempt: attempt.clone(),
@@ -205,7 +202,6 @@ pub(super) fn prepare_sweep<'s>(
         env: env_owned,
         allow_args,
         focused,
-        exact,
         support_fingerprint,
         runtime_fingerprint,
     })))
@@ -224,8 +220,10 @@ pub(super) struct SweepContext<'a> {
     pub(super) multi: bool,
     /// `--debug`/`--release`, which outranks a sweep's own profile pin.
     pub(super) profile_override: Option<bool>,
-    /// `--timeout`, the one test's raised cap.
+    /// `--timeout`, each matched test's raised cap.
     pub(super) timeout: Option<u64>,
+    /// `--timings`: every test that ran, collected for the closing list.
+    pub(super) timings: Option<&'a std::cell::RefCell<Vec<check_cmd::TestTiming>>>,
 }
 
 #[allow(
@@ -322,8 +320,6 @@ pub(super) struct FocusedPlan {
     /// How many harnesses were listed, for the no-match note and the closing
     /// error when none matched.
     pub(super) searched: usize,
-    /// Under `--timeout`, the one full test name the run is invoked with.
-    pub(super) exact: Option<String>,
     /// Every harness the prebuild produced - searched, matched or not, and
     /// the `harness = false` ones excluded from the search - by path and
     /// content: the artifact set a rebuild before the run is held to.
@@ -343,6 +339,9 @@ pub(super) struct HarnessRun {
     /// report, which the run's inventory records.
     pub(super) names: Vec<String>,
     pub(super) unit: check_cmd::BinaryUnit,
+    /// Under `--timeout`, the one full test name this process runs with
+    /// `--exact`.
+    pub(super) exact: Option<String>,
 }
 
 /// Discover every eligible harness of the sweep and keep the ones holding a
@@ -354,10 +353,10 @@ pub(super) struct HarnessRun {
 /// prove itself complete (see `focused::discover`) - a failed one stops the
 /// run rather than reading as a harness with no match.
 ///
-/// Also where the two breadth rules are judged, both over what discovery
-/// listed (benchmarks included, since `cargo test` runs them): a `<NAME>`
-/// matching every test of the package is refused, and under `--timeout` a
-/// `<NAME>` matching more than one (harness, test) is.
+/// Also where the breadth rule is judged, over what discovery listed
+/// (benchmarks included, since `cargo test` runs them): a `<NAME>` matching
+/// every test of the package is refused. Under `--timeout` each matched
+/// (harness, test) becomes its own `--exact` run.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) fn plan_focused(
     shape: &BuildShape<'_>,
@@ -430,48 +429,41 @@ pub(super) fn plan_focused(
         })
         .collect();
 
-    let exact = if timeout {
-        let occurrences: Vec<String> = hits
-            .iter()
-            .flat_map(|(b, m)| m.iter().map(move |t| format!("{} {t}", b.label())))
-            .collect();
-        if occurrences.len() > 1 {
-            return Err(DevError::Config(format!(
-                "--timeout only applies to a single test, but `{name}` matches {} in sweep `{}`: \
-                 {}. Narrow it to one fully-qualified test name, or drop --timeout to run them \
-                 all at the {}s ceiling.",
-                output::count(occurrences.len(), "test"),
-                shape.sweep.label,
-                occurrences.join(", "),
-                test_runner::TEST_TIMEOUT.as_secs()
-            )));
-        }
-        hits.first().and_then(|(_, m)| m.first().cloned())
-    } else {
-        None
-    };
-
-    let mut runs = Vec::with_capacity(hits.len());
+    // Under `--timeout`, every matched (harness, test) is its own process,
+    // run `--exact` on its full name: the raised cap is then always one
+    // test's, and a blown one is charged to exactly that test.
+    let mut runs = Vec::new();
     for (b, m) in &hits {
         let (cwd, envelope) = runtime.envelope(b, env)?;
-        runs.push(HarnessRun {
+        let run = |names: Vec<String>, exact: Option<String>| HarnessRun {
             label: b.label(),
             program: b.executable.clone(),
-            cwd,
-            env: envelope,
-            matched: m.len(),
-            names: m.clone(),
+            cwd: cwd.clone(),
+            env: envelope.clone(),
+            matched: names.len(),
+            names,
             unit: check_cmd::BinaryUnit::of(b),
-        });
+            exact,
+        };
+        if timeout {
+            runs.extend(m.iter().map(|t| run(vec![t.clone()], Some(t.clone()))));
+        } else {
+            runs.push(run(m.clone(), None));
+        }
     }
-    if !runs.is_empty() {
-        let labels: Vec<&str> = runs.iter().map(|r| r.label.as_str()).collect();
+    if !hits.is_empty() {
+        let labels: Vec<String> = hits.iter().map(|(b, _)| b.label()).collect();
+        let one_each = if timeout && runs.len() > 1 {
+            format!("; {} under --timeout, one process each", output::count(runs.len(), "test"))
+        } else {
+            String::new()
+        };
         output::test_msg(&format!(
-            "{}{} of {} {} a match: {}",
+            "{}{} of {} {} a match: {}{one_each}",
             sweep_prefix(label),
-            runs.len(),
+            hits.len(),
             output::count(searched, "harness"),
-            if runs.len() == 1 { "holds" } else { "hold" },
+            if hits.len() == 1 { "holds" } else { "hold" },
             labels.join(", ")
         ));
     }
@@ -489,7 +481,6 @@ pub(super) fn plan_focused(
     Ok(FocusedPlan {
         runs,
         searched,
-        exact,
         artifacts,
     })
 }

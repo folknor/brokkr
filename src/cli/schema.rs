@@ -2104,20 +2104,17 @@ In depth: `brokkr man nidhogg`."
         /// from brokkr.toml. Mutually exclusive with --debug.
         #[arg(long)]
         release: bool,
-        /// Override the per-test watchdog ceiling, in seconds.
-        /// Only honored when `<name>` matches exactly one test per sweep;
-        /// if it matches more than one, `brokkr test` errors before
-        /// running. Without this flag the ceiling is the standard per-test
-        /// cap.
+        /// Override the per-test watchdog ceiling, in seconds. Without this
+        /// flag the ceiling is the standard per-test cap.
         ///
         /// This is the ONLY exception to brokkr's per-test cap, and the
         /// parser enforces the runner's supported maximum. Exceeding the cap - raised
         /// or not - fails the run and stops it. The flag also makes
-        /// attribution exact: `<name>` is resolved to its one full test name
-        /// and run with libtest
+        /// attribution exact: `<name>` is resolved to every full test name
+        /// it matches, and each runs as its own process with libtest
         /// `--exact`, so the process is the unit of one test. Note it bounds
-        /// the whole cargo invocation - lock wait, residual compilation,
-        /// startup, the test, teardown - not the test body alone.
+        /// that whole process - startup, the test, teardown - not the test
+        /// body alone.
         #[arg(long, value_name = "SECS", value_parser = clap::value_parser!(u64).range(1..=crate::test_runner::ceilings::MAX_TEST_TIMEOUT.as_secs()))]
         timeout: Option<u64>,
         /// Run only the named sweep from the resolved `default_profile`
@@ -2125,6 +2122,12 @@ In depth: `brokkr man nidhogg`."
         /// sweep the profile lists. Errors if no sweep carries that label.
         #[arg(long, value_name = "LABEL")]
         sweep: Option<String>,
+        /// After the run, print every test that ran in descending order by
+        /// wall-clock time, as `brokkr check --timings` does. Build time is
+        /// excluded - timing starts when libtest emits the per-test start
+        /// marker. Doctests are not timed.
+        #[arg(long)]
+        timings: bool,
     },
     /// List fixtures/snapshots and approval state
     #[command(display_order = 50)]

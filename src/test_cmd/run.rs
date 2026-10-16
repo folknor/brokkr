@@ -46,12 +46,14 @@ pub(crate) fn run(
     profile_override: Option<bool>,
     timeout: Option<u64>,
     sweep_filter: Option<&str>,
+    timings: bool,
 ) -> Result<(), DevError> {
     // Declared before the guard, so the guard drops first and the watchdog's
     // join is the last thing the command does. The run log is the caller's
     // (`main`, opened before the lock), so it outlives the join.
     let _ceiling = check_cmd::CheckWatchdog::arm_for("brokkr test", None)?;
     let _interrupts = crate::shutdown::SigtermGuard::install();
+    let collected = std::cell::RefCell::new(Vec::new());
     let result = run_sweeps(
         dev_config,
         project,
@@ -64,7 +66,15 @@ pub(crate) fn run(
         profile_override,
         timeout,
         sweep_filter,
+        timings.then_some(&collected),
     );
+    // Printed however the run ended: a failing, stopped or capped run's
+    // timings are exactly the ones a slow-test hunt is after.
+    if timings {
+        let collected = collected.into_inner();
+        let multi = collected.iter().any(|t| t.sweep != collected[0].sweep);
+        check_cmd::emit_timings(&collected, multi);
+    }
     // Whatever `result` is: a ceiling that fired as the last child exited can
     // leave an `Ok` behind it, and a killed run is not a pass.
     if check_cmd::watchdog_fired().is_some() {
@@ -103,6 +113,7 @@ pub(super) fn run_sweeps(
     profile_override: Option<bool>,
     timeout: Option<u64>,
     sweep_filter: Option<&str>,
+    timings: Option<&std::cell::RefCell<Vec<check_cmd::TestTiming>>>,
 ) -> Result<(), DevError> {
     let repeat = repeat.get();
     let ceiling = test_ceiling(timeout)?;
@@ -153,6 +164,7 @@ pub(super) fn run_sweeps(
         multi,
         profile_override,
         timeout,
+        timings,
     };
 
     let mut reports: Vec<RunReport> = Vec::new();
@@ -303,8 +315,8 @@ pub(super) fn run_ready(
             },
             name: cx.name,
             focused: r.focused.as_ref(),
-            exact: r.exact.clone(),
             env: &env_refs,
+            timings: cx.timings,
             project_root: cx.project_root,
             state_root: cx.state_root,
             ceiling,
@@ -632,9 +644,9 @@ pub(super) struct SweepPlan<'a> {
     /// The harnesses holding a match, run directly; `None` for a doc-only
     /// sweep's single `cargo test --doc`.
     pub(super) focused: Option<&'a FocusedPlan>,
-    /// The resolved full name `--timeout` runs with `--exact`.
-    pub(super) exact: Option<String>,
     pub(super) env: &'a [(&'a str, &'a str)],
+    /// `--timings`' collection, when asked for.
+    pub(super) timings: Option<&'a std::cell::RefCell<Vec<check_cmd::TestTiming>>>,
     pub(super) project_root: &'a Path,
     pub(super) state_root: &'a Path,
     pub(super) ceiling: Duration,
@@ -671,6 +683,13 @@ pub(super) fn run_iteration(
     // iteration - print it for run 1 only and let repeats collapse to their
     // PASS/FAIL footer line.
     let announce = n == 1;
+    // The sweep a timing is listed under, with the iteration under `-N`.
+    let timing_label = if repeat > 1 {
+        format!("{} run {n}/{repeat}", plan.shape.sweep.label)
+    } else {
+        plan.shape.sweep.label.clone()
+    };
+    let timings = plan.timings.map(|t| (timing_label.as_str(), t));
 
     let Some(focused) = plan.focused else {
         // A doc-only sweep: one rustdoc run over the package, the user's
@@ -703,6 +722,7 @@ pub(super) fn run_iteration(
                 listed: None,
                 // Doctests have no inventory: nothing to attribute them to.
                 observe: test_runner::Observe::default(),
+                timings,
             },
             plan.repeat_state,
             n > 1,
@@ -723,13 +743,13 @@ pub(super) fn run_iteration(
         return Ok(RunReport::bare(Outcome::NoMatch));
     }
 
-    // Under `--timeout`, the resolved name exactly; otherwise the user's
-    // substring, unchanged.
-    let filter = plan.exact.as_deref().unwrap_or(name);
-    let args = direct_libtest_args(filter, plan.exact.is_some());
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let mut parts = Vec::new();
     for run in &focused.runs {
+        // Under `--timeout`, this run's resolved name exactly; otherwise the
+        // user's substring, unchanged.
+        let filter = run.exact.as_deref().unwrap_or(name);
+        let args = direct_libtest_args(filter, run.exact.is_some());
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         // The cwd rides the invocation line: the harness runs outside cargo,
         // under the envelope's cwd, and this is the one place it is named.
         // It goes to the run log; the console shows it only for a harness
@@ -755,7 +775,7 @@ pub(super) fn run_iteration(
             let origin = check_cmd::StreamOrigin::Binary {
                 resolution: None,
                 unit: run.unit.clone(),
-                one_test: plan.exact.clone(),
+                one_test: run.exact.clone(),
             };
             test_runner::Observe {
                 sink: Some(tap.sink(move |_| origin.clone(), false)),
@@ -774,11 +794,12 @@ pub(super) fn run_iteration(
                 tag: &tag(Some(&run.label)),
                 test_tag: Some(&test_tag),
                 target: &run.label,
-                ceilings: ceilings_for(&plan.exact, plan.ceiling),
+                ceilings: ceilings_for(&run.exact, plan.ceiling),
                 announce: false,
                 expected: Some(run.matched),
                 listed: Some(&run.names),
                 observe,
+                timings,
             },
             plan.repeat_state,
             n > 1,
