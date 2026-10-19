@@ -42,7 +42,7 @@
 //! two deliberate writers of `pins.toml`; see [`crate::piners::reseed`] and
 //! [`crate::piners::bless`].
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -174,7 +174,7 @@ pub fn corpus(
         registry_dir,
         corpus_root,
         ids,
-        verified,
+        mut verified,
         feed_count,
         file_count,
     } = prepared;
@@ -258,7 +258,23 @@ pub fn corpus(
         args.keep_artefacts,
     )?;
     output::corpus_msg(&format!("run {run_id} -> {}", artefacts.path().display()));
-    let selector = selector_json(args, &ids, &context, mode.is_bless());
+    // Slowest first, frozen here: isolation attempts filter this same vector,
+    // and the selector records the order the harness was actually handed.
+    let schedule = crate::piners::schedule::slowest_first(
+        &mut verified,
+        &scheduling_estimates(&corpus_db_path, &context),
+    );
+    output::corpus_msg(&if schedule.observed == 0 {
+        "schedule: no qualifying estimates, selection order".to_owned()
+    } else {
+        format!(
+            "schedule: slowest first, {} recorded, {} at the median estimate",
+            output::count(schedule.observed, "estimate"),
+            schedule.imputed
+        )
+    });
+    let execution_order: Vec<String> = verified.iter().map(|v| v.id.clone()).collect();
+    let selector = selector_json(args, &ids, &execution_order, &context, mode.is_bless());
     let envelope = Envelope {
         run_id,
         start: &start,
@@ -834,14 +850,24 @@ fn stored_violations(a: &integrity::RunAssessment, evidence_failed: bool) -> i64
 /// identity (both change what the harness does and how long it takes), so
 /// they remain in this selection record too; `RunContext` also stores them in
 /// dedicated columns for strict comparison.
-fn selector_json(args: &CorpusArgs, ids: &[String], context: &RunContext, bless: bool) -> String {
+fn selector_json(
+    args: &CorpusArgs,
+    ids: &[String],
+    execution_order: &[String],
+    context: &RunContext,
+    bless: bool,
+) -> String {
     crate::piners::selector::json(
         args.all,
         &args.keywords,
         &args.probe,
         bless,
         ids,
-        Some((&context.profile, &context.harness_args)),
+        Some(crate::piners::selector::RunFields {
+            profile: &context.profile,
+            harness_args: &context.harness_args,
+            execution_order,
+        }),
     )
 }
 
@@ -940,6 +966,24 @@ fn capture_harness(
         isolation,
         output::child::ChildOptions::LARGE,
     )
+}
+
+/// Each probe's scheduling estimate (ms) under `context`. Scheduling is
+/// advisory, so a store that cannot be read warns and yields nothing - the
+/// run keeps its selection order.
+fn scheduling_estimates(db_path: &Path, context: &RunContext) -> HashMap<String, f64> {
+    if !db_path.exists() {
+        return HashMap::new();
+    }
+    match CorpusDb::open_readonly(db_path).and_then(|db| db.scheduling_runtimes(context)) {
+        Ok(estimates) => estimates,
+        Err(e) => {
+            output::warn(&format!(
+                "corpus: recorded runtimes unreadable, probes run in selection order: {e}"
+            ));
+            HashMap::new()
+        }
+    }
 }
 
 /// The next run id: one past the highest of every stored run and every

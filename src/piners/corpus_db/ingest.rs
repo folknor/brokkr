@@ -150,6 +150,15 @@ fn prune_run_history(conn: &rusqlite::Connection, keep: i64) -> Result<(), DevEr
     Ok(())
 }
 
+/// A run context in its stored column form: `(cargo_profile, harness_args)`.
+/// The one encoding both ingest and the context-matching reads use.
+pub(super) fn stored_context(context: &RunContext) -> Result<(String, String), DevError> {
+    let profile = crate::build::BuildKind::Cargo(context.profile.clone()).to_stored();
+    let args = serde_json::to_string(&context.harness_args)
+        .map_err(|e| DevError::Database(format!("serializing run harness args: {e}")))?;
+    Ok((profile, args))
+}
+
 fn record_inner(
     conn: &rusqlite::Connection,
     run: &RunRecord<'_>,
@@ -157,13 +166,13 @@ fn record_inner(
     expected: &BTreeMap<String, Option<String>>,
     gate_diffs: &[GateDiff],
 ) -> Result<i64, DevError> {
-    let context = run.context;
-    let cargo_profile = context
-        .map(|context| crate::build::BuildKind::Cargo(context.profile.clone()).to_stored());
-    let harness_args = context
-        .map(|context| serde_json::to_string(&context.harness_args))
-        .transpose()
-        .map_err(|e| DevError::Database(format!("serializing run harness args: {e}")))?;
+    let (cargo_profile, harness_args) = match run.context {
+        Some(context) => {
+            let (profile, args) = stored_context(context)?;
+            (Some(profile), Some(args))
+        }
+        None => (None, None),
+    };
     let report_warnings = serde_json::to_string(&report.warnings)
         .map_err(|e| DevError::Database(format!("serializing harness parse warnings: {e}")))?;
     conn.execute(

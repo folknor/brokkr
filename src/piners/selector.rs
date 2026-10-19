@@ -139,6 +139,16 @@ pub(crate) fn resolve_selection<P>(
     Ok(selected)
 }
 
+/// The corpus run's own fields beside its selection.
+pub(crate) struct RunFields<'a> {
+    pub profile: &'a crate::build::RustProfile,
+    pub harness_args: &'a [String],
+    /// The order the probes were handed to the harness (`ids` stays the
+    /// selection order). Kept because order can shape a run - co-scheduled
+    /// heavy probes contend - and the manifest is gone after ingest.
+    pub execution_order: &'a [String],
+}
+
 /// Serialize the shared selection fields and optional corpus run context.
 pub(crate) fn json(
     all: bool,
@@ -146,7 +156,7 @@ pub(crate) fn json(
     probes: &[String],
     bless: bool,
     ids: &[String],
-    context: Option<(&crate::build::RustProfile, &[String])>,
+    context: Option<RunFields<'_>>,
 ) -> String {
     let mut fields = Map::new();
     fields.insert("all".to_owned(), json!(all));
@@ -154,11 +164,12 @@ pub(crate) fn json(
     fields.insert("probe".to_owned(), json!(probes));
     fields.insert("bless".to_owned(), json!(bless));
     fields.insert("ids".to_owned(), json!(ids));
-    if let Some((profile, harness_args)) = context {
+    if let Some(run) = context {
         // The profile by name; rows written before custom profiles carry a
         // `debug` bool instead, which `compact` still reads.
-        fields.insert("profile".to_owned(), json!(profile.label()));
-        fields.insert("harness_args".to_owned(), json!(harness_args));
+        fields.insert("profile".to_owned(), json!(run.profile.label()));
+        fields.insert("harness_args".to_owned(), json!(run.harness_args));
+        fields.insert("execution_order".to_owned(), json!(run.execution_order));
     }
     Value::Object(fields).to_string()
 }

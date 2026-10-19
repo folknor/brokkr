@@ -338,6 +338,28 @@ slow-probe "trim `bar_budget`/disable" workflow reads off it). Its
 probes, so the sum runs several times the real wall (`run.wall_ms`, brokkr's
 own timing of the harness subprocess).
 
+## Probe scheduling
+
+The harness fills its job slots from the front of the manifest, so brokkr
+orders the manifest slowest first by estimated scan duration. A probe's
+estimate is its `runtime_ms` from the latest run that qualifies: same build
+profile and forwarded harness flags as this run, the probe in that run's
+selection (not a report-only extra), not a `harness_abort` (which times the
+failure, not the workload), and no dropped disposition line naming it in
+that run's `report_warnings`. A historical run whose selector has no `ids`
+array, or whose `report_warnings` is not a JSON array, contributes no
+estimates. A probe with no estimate is placed at the upper
+median of the selection's estimates; on equal estimates a recorded one goes
+first, otherwise ties keep selection order. With no estimates at all, or a
+store that cannot be read (a warning), the run keeps selection order.
+
+The estimate is advisory: `runtime_ms` is the harness's scan time, not how
+long the probe holds its slot, and a changed workload is corrected only by
+its next qualifying run. A wrong estimate costs wall time, never a verdict.
+The order is chosen once, before the manifest is written; diagnostic
+isolation attempts keep it within each subset, and the run's `selector`
+records it as `execution_order`.
+
 ## Verification (the content gate)
 
 Each selected probe's pinned files (`pine`, its `csv` and/or `record`, and
@@ -743,7 +765,9 @@ its row in the corpus run store (`runs.db`) has the same `run_id`, so the
 number a run prints (`run <id> -> <dir>`) is the one `corpus-results`
 takes. The id is reserved under the lock, one past both the highest stored
 run and the highest `run-<id>/` dir on disk. The dir holds `manifest.json`
-plus captured `harness.stdout` / `harness.stderr`; every run's NDJSON is
+(probes scheduled slowest first by estimated scan duration, so the harness -
+which fills its slots from the front of the manifest - is less likely to
+start a slow one last; see "Probe scheduling") plus captured `harness.stdout` / `harness.stderr`; every run's NDJSON is
 ingested into `runs.db`, so the dir is dropped once ingest commits - unless
 `--keep-artefacts`, or diagnostic isolation ran (its `attempt-<n>/` dirs are
 not in `runs.db`, so the dir is preserved and its location printed). A run

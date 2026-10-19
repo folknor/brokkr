@@ -20,6 +20,7 @@ pub mod registry_io;
 pub mod report;
 pub mod reseed;
 pub mod run_model;
+pub mod schedule;
 pub mod select;
 pub(crate) mod selector;
 pub(crate) mod table;

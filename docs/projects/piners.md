@@ -211,9 +211,10 @@ The store has per-db `PRAGMA user_version` migrations and WAL, mirroring
   `.brokkr/` - markdown and `brokkr.toml` included, so clean means `HEAD`
   describes the whole invocation; a toolchain file the lock moved aside is
   judged by its moved bytes against `HEAD`'s; each `NULL` when unknown,
-  never a guessed clean), `selector` (JSON: resolved ids + raw flags, forwarded
-  harness flags, and the build profile as `debug`), dedicated `debug` and
-  `harness_args` columns (typed execution context for `--compare`; older
+  never a guessed clean), `selector` (JSON: resolved ids in selection order + raw
+  flags, forwarded harness flags, the build profile by name - older rows carry
+  a `debug` bool - and `execution_order`, the order the probes were handed to
+  the harness), dedicated `cargo_profile` and `harness_args` columns (typed execution context for `--compare`; older
   selectors backfill them only when their JSON types are valid, otherwise
   context remains unknown), `gated` (neither
   `--no-gate` nor `--bless`), `result` (`pass`/`fail`, or `interrupted`/
