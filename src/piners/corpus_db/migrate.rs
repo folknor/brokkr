@@ -20,7 +20,8 @@
 //! (protocol violations remain counted separately); version 11 adds
 //! `run.cargo_profile`, the build profile in the results store's encoding
 //! (`dev`, `release`, `cargo:<name>`), backfilled from `debug` - which a v11
-//! writer leaves NULL, the profile column superseding it. On a fresh database,
+//! writer leaves NULL, the profile column superseding it; version 12 adds the
+//! `schedule_estimate` table, backfilled from history. On a fresh database,
 //! the schema DDL in `schema.rs` creates the current tables (columns included)
 //! inside the shared migration transaction. Schema inspection uses the shared
 //! `db::store` helpers, which preserve errors and recognize generated columns.
@@ -33,7 +34,7 @@ use crate::db::store::{column_exists as has_column, table_exists as has_table};
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding a migration below.
-pub(super) const SCHEMA_VERSION: i64 = 11;
+pub(super) const SCHEMA_VERSION: i64 = 12;
 
 /// Run pending migrations through the shared store policy. The v5 rebuild
 /// preserves historical orphan dispositions, so foreign-key enforcement is
@@ -54,6 +55,7 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError
                 migrate_from(conn, current)?;
             }
             conn.execute_batch(super::schema::SCHEMA)?;
+            conn.execute_batch(super::schema::SCHEDULE_ESTIMATE_DDL)?;
             conn.execute_batch(&disposition_ddl("disposition"))?;
             Ok(())
         },
@@ -188,6 +190,14 @@ fn migrate_from(conn: &rusqlite::Connection, current: i64) -> Result<(), DevErro
              WHERE cargo_profile IS NULL",
             [],
         )?;
+    }
+
+    // v11 -> v12: the materialized scheduling estimates, backfilled once from
+    // the history every context has, so the first run after the upgrade
+    // schedules as well as the old pass over history did.
+    if current < 12 {
+        conn.execute_batch(super::schema::SCHEDULE_ESTIMATE_DDL)?;
+        super::ingest::update_schedule_estimates(conn, None)?;
     }
 
     Ok(())
@@ -519,7 +529,10 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(rows, vec![Some("dev".to_owned()), Some("release".to_owned()), None]);
+        assert_eq!(
+            rows,
+            vec![Some("dev".to_owned()), Some("release".to_owned()), None]
+        );
     }
 
     #[test]

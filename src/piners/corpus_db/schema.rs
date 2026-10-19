@@ -307,6 +307,22 @@ CREATE TABLE IF NOT EXISTS dense_na_site (
 CREATE INDEX IF NOT EXISTS idx_dense_na_run ON dense_na_site(run_id);
 ";
 
+/// Each probe's scheduling estimate per execution context, kept up to date
+/// by ingest so scheduling is a keyed read instead of a pass over history.
+/// Deliberately outlives run retention: an estimate is advisory and an old
+/// one beats none, so `run_id` is provenance only - not a foreign key, and
+/// its run may have been pruned.
+pub(super) const SCHEDULE_ESTIMATE_DDL: &str = "\
+CREATE TABLE IF NOT EXISTS schedule_estimate (
+    cargo_profile TEXT NOT NULL,
+    harness_args  TEXT NOT NULL,
+    probe         TEXT NOT NULL,
+    runtime_ms    REAL NOT NULL,
+    run_id        INTEGER NOT NULL,
+    PRIMARY KEY (cargo_profile, harness_args, probe)
+);
+";
+
 impl CorpusDb {
     /// Open (or create) the database read-write at `path`, creating the parent
     /// directory, enabling WAL, running migrations, and applying the schema.
@@ -318,6 +334,7 @@ impl CorpusDb {
             crate::db::store::open_read_write(path, "piners corpus runs", migrate::SCHEMA_VERSION)?;
         migrate::run_migrations(&conn)?;
         conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(SCHEDULE_ESTIMATE_DDL)?;
         conn.execute_batch(&disposition_ddl("disposition"))?;
         Ok(Self { conn })
     }
@@ -357,6 +374,7 @@ impl CorpusDb {
     pub(super) fn open_in_memory() -> Result<Self, DevError> {
         let conn = rusqlite::Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(SCHEDULE_ESTIMATE_DDL)?;
         conn.execute_batch(&disposition_ddl("disposition"))?;
         Ok(Self { conn })
     }

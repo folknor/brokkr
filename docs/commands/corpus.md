@@ -348,7 +348,9 @@ selection (not a report-only extra), not a `harness_abort` (which times the
 failure, not the workload), and no dropped disposition line naming it in
 that run's `report_warnings`. A historical run whose selector has no `ids`
 array, or whose `report_warnings` is not a JSON array, contributes no
-estimates. A probe with no estimate is placed at the upper
+estimates. Each ingest folds its run into the `schedule_estimate` table, so
+reading the estimates is a keyed lookup rather than a pass over history, and
+an estimate outlives the retention that prunes its run. A probe with no estimate is placed at the upper
 median of the selection's estimates; on equal estimates a recorded one goes
 first, otherwise ties keep selection order. With no estimates at all, or a
 store that cannot be read (a warning), the run keeps selection order.
@@ -366,7 +368,9 @@ Each selected probe's pinned files (`pine`, its `csv` and/or `record`, and
 `inputs` when pinned) - plus every role (`primary`/`warmup`/`lower`, or the
 single `base`) of every feed group the selection references, and every
 `[harness_files]` entry - are resolved under `corpus_root` and hashed before
-any build. A missing path or hash
+any build. Hashing goes through brokkr's stamp-keyed hash cache, loaded once
+and saved once for the whole selection, so an unchanged file costs a stat.
+A missing path or hash
 mismatch is a hard error (registry lying or the corpus drifted) - no
 `--allow-drift`; re-stamp with `--reseed` or fix the tree. Every error on this
 path names what it concerns - the probe, feed group (with its role) or

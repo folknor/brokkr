@@ -150,6 +150,66 @@ fn prune_run_history(conn: &rusqlite::Connection, keep: i64) -> Result<(), DevEr
     Ok(())
 }
 
+/// Fold qualifying observations into `schedule_estimate`: from run `run_id`
+/// at ingest, or from every stored run (`None`, the v12 backfill). One SQL
+/// for both, reading the stored columns, so ingest and backfill cannot
+/// qualify an observation differently. An observation qualifies from a run
+/// with a known context, for a probe the run selected (a report-only extra
+/// is not one), whose stored disposition is not `harness_abort` (that times
+/// the failure, not the workload), whose run dropped no disposition line
+/// naming it, and whose `runtime_ms` is a finite nonnegative number. A run
+/// whose selector has no `ids` array, or whose `report_warnings` is not a
+/// JSON array, contributes nothing - unreadable evidence is not clean
+/// evidence. All of that filters before the newest per key is chosen, and
+/// an estimate is replaced only by a newer run's, so a disqualified newer
+/// observation leaves the older estimate in place.
+pub(super) fn update_schedule_estimates(
+    conn: &rusqlite::Connection,
+    run_id: Option<i64>,
+) -> Result<(), DevError> {
+    // Two literal filters rather than `(?1 IS NULL OR d.run_id = ?1)`: that
+    // form defeats the disposition key, so every ingest would scan history.
+    let (filter, bound) = match run_id {
+        Some(id) => ("d.run_id = ?1", id),
+        None => ("?1 = ?1", 0),
+    };
+    conn.execute(
+        &format!(
+        "INSERT INTO schedule_estimate (cargo_profile, harness_args, probe, runtime_ms, run_id) \
+         SELECT cargo_profile, harness_args, probe, runtime_ms, run_id FROM ( \
+             SELECT r.cargo_profile, r.harness_args, d.probe, d.runtime_ms, d.run_id, \
+                 ROW_NUMBER() OVER (PARTITION BY r.cargo_profile, r.harness_args, d.probe \
+                                    ORDER BY d.run_id DESC) AS newest \
+             FROM disposition d JOIN run r ON r.run_id = d.run_id \
+             WHERE {filter} \
+               AND r.cargo_profile IS NOT NULL AND r.harness_args IS NOT NULL \
+               AND d.disposition <> 'harness_abort' \
+               AND d.runtime_ms >= 0 AND d.runtime_ms < 9e999 \
+               AND EXISTS (SELECT 1 FROM json_each( \
+                     CASE WHEN json_valid(r.selector) THEN \
+                         CASE WHEN json_type(r.selector, '$.ids') = 'array' \
+                         THEN json_extract(r.selector, '$.ids') ELSE '[]' END \
+                     ELSE '[]' END) AS s \
+                   WHERE s.type = 'text' AND s.value = d.probe) \
+               AND CASE WHEN json_valid(r.report_warnings) \
+                   THEN json_type(r.report_warnings) = 'array' ELSE 0 END \
+               AND NOT EXISTS (SELECT 1 FROM json_each( \
+                     CASE WHEN json_valid(r.report_warnings) \
+                          THEN r.report_warnings ELSE '[]' END) AS w \
+                   WHERE CASE WHEN w.type = 'object' \
+                         THEN json_extract(w.value, '$.kind') = 'disposition_parse' \
+                          AND json_extract(w.value, '$.probe') = d.probe \
+                         ELSE 0 END)) \
+         WHERE newest = 1 \
+         ON CONFLICT (cargo_profile, harness_args, probe) DO UPDATE SET \
+             runtime_ms = excluded.runtime_ms, run_id = excluded.run_id \
+         WHERE excluded.run_id > schedule_estimate.run_id"
+        ),
+        params![bound],
+    )?;
+    Ok(())
+}
+
 /// A run context in its stored column form: `(cargo_profile, harness_args)`.
 /// The one encoding both ingest and the context-matching reads use.
 pub(super) fn stored_context(context: &RunContext) -> Result<(String, String), DevError> {
@@ -242,6 +302,8 @@ fn record_inner(
             ))
         })?;
     }
+
+    update_schedule_estimates(conn, Some(run_id))?;
 
     // Gate violations the harness emitted NO disposition line for (a selected
     // probe that produced nothing, or a never-blessed + never-emitted probe).

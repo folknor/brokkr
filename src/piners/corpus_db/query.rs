@@ -673,47 +673,19 @@ impl CorpusDb {
         Ok(rows)
     }
 
-    /// Each probe's latest runtime that can stand as a scheduling estimate
-    /// for a run under `context` (its build profile and forwarded harness
-    /// arguments). Unlike [`Self::runtimes`]
-    /// an observation qualifies only from a run of that same context, for a
-    /// probe the run selected (a report-only extra is not one), that did not
-    /// end in `harness_abort` (which times the failure, not the workload),
-    /// whose run did not drop a disposition line naming it, and whose value
-    /// is a finite nonnegative number. Every filter applies before the newest
-    /// is chosen, so a disqualified newer row never hides an older estimate.
-    /// A run whose selector has no `ids` array, or whose `report_warnings` is
-    /// not a JSON array, contributes nothing - unreadable evidence is not
-    /// clean evidence - without failing the query for any other run.
+    /// Each probe's scheduling estimate for a run under `context` (its build
+    /// profile and forwarded harness arguments): the latest qualifying
+    /// `runtime_ms` of that context, as ingest keeps it in
+    /// `schedule_estimate` (see `ingest::update_schedule_estimates` for what
+    /// qualifies). Unlike [`Self::runtimes`] it survives run retention.
     pub fn scheduling_runtimes(
         &self,
         context: &RunContext,
     ) -> Result<HashMap<String, f64>, DevError> {
         let (cargo_profile, harness_args) = super::ingest::stored_context(context)?;
         let mut stmt = self.conn().prepare(
-            "SELECT probe, runtime_ms FROM ( \
-                 SELECT d.probe, d.runtime_ms, ROW_NUMBER() OVER \
-                     (PARTITION BY d.probe ORDER BY d.run_id DESC) AS newest \
-                 FROM disposition d JOIN run r ON r.run_id = d.run_id \
-                 WHERE r.cargo_profile = ?1 AND r.harness_args = ?2 \
-                   AND d.disposition <> 'harness_abort' \
-                   AND d.runtime_ms >= 0 AND d.runtime_ms < 9e999 \
-                   AND EXISTS (SELECT 1 FROM json_each( \
-                         CASE WHEN json_valid(r.selector) THEN \
-                             CASE WHEN json_type(r.selector, '$.ids') = 'array' \
-                             THEN json_extract(r.selector, '$.ids') ELSE '[]' END \
-                         ELSE '[]' END) AS s \
-                       WHERE s.type = 'text' AND s.value = d.probe) \
-                   AND CASE WHEN json_valid(r.report_warnings) \
-                       THEN json_type(r.report_warnings) = 'array' ELSE 0 END \
-                   AND NOT EXISTS (SELECT 1 FROM json_each( \
-                         CASE WHEN json_valid(r.report_warnings) \
-                              THEN r.report_warnings ELSE '[]' END) AS w \
-                       WHERE CASE WHEN w.type = 'object' \
-                             THEN json_extract(w.value, '$.kind') = 'disposition_parse' \
-                              AND json_extract(w.value, '$.probe') = d.probe \
-                             ELSE 0 END)) \
-             WHERE newest = 1",
+            "SELECT probe, runtime_ms FROM schedule_estimate \
+             WHERE cargo_profile = ?1 AND harness_args = ?2",
         )?;
         let rows = stmt
             .query_map(params![cargo_profile, harness_args], |row| {
@@ -1037,18 +1009,11 @@ mod tests {
             &dev,
             ids,
             br#"{"probe":"aborts","outcome":"harness_abort","runtime_ms":5}
+{"probe":"warned","outcome":7}
 {"probe":"warned","outcome":"parity","runtime_ms":1}
 {"probe":"extra","outcome":"parity","runtime_ms":50}
 "#,
         );
-        db.conn()
-            .execute(
-                "UPDATE run SET report_warnings = \
-                 '[{\"line\":2,\"kind\":\"disposition_parse\",\"probe\":\"warned\",\"reason\":\"r\",\"raw\":\"x\"}]' \
-                 WHERE run_id = 2",
-                [],
-            )
-            .unwrap();
         // Another context, and a run whose selector is not JSON at all.
         record_in(
             &db,
@@ -1066,7 +1031,11 @@ mod tests {
         );
 
         // `ids` present but not an array of text: no membership.
-        for selector in [r#"{"ids":"other"}"#, r#"{"ids":{"k":"other"}}"#, r#"{"ids":[1]}"#] {
+        for selector in [
+            r#"{"ids":"other"}"#,
+            r#"{"ids":{"k":"other"}}"#,
+            r#"{"ids":[1]}"#,
+        ] {
             record_in(
                 &db,
                 &dev,
@@ -1075,7 +1044,21 @@ mod tests {
 "#,
             );
         }
-        // A newer run for `kept` whose warnings column is unreadable.
+        let check = |kept: f64| {
+            let est = db.scheduling_runtimes(&dev).unwrap();
+            assert_eq!(est.get("kept"), Some(&kept));
+            assert_eq!(est.get("aborts"), Some(&700.0));
+            assert_eq!(est.get("warned"), Some(&600.0));
+            assert_eq!(est.get("extra"), None);
+            assert_eq!(est.get("other"), None);
+            assert_eq!(
+                db.scheduling_runtimes(&traced).unwrap().get("kept"),
+                Some(&3.0)
+            );
+        };
+        check(900.0);
+
+        // A newer qualifying run replaces the estimate.
         record_in(
             &db,
             &dev,
@@ -1083,6 +1066,18 @@ mod tests {
             br#"{"probe":"kept","outcome":"parity","runtime_ms":2}
 "#,
         );
+        check(2.0);
+
+        // The v12 backfill over the same history agrees with ingest, and a
+        // run whose warnings column is unreadable contributes nothing to it.
+        let rebuild = || {
+            db.conn()
+                .execute("DELETE FROM schedule_estimate", [])
+                .unwrap();
+            crate::piners::corpus_db::ingest::update_schedule_estimates(db.conn(), None).unwrap();
+        };
+        rebuild();
+        check(2.0);
         db.conn()
             .execute(
                 "UPDATE run SET report_warnings = 'not json' \
@@ -1090,13 +1085,82 @@ mod tests {
                 [],
             )
             .unwrap();
+        rebuild();
+        check(900.0);
+    }
 
-        let est = db.scheduling_runtimes(&dev).unwrap();
-        assert_eq!(est.get("kept"), Some(&900.0));
-        assert_eq!(est.get("aborts"), Some(&700.0));
-        assert_eq!(est.get("warned"), Some(&600.0));
-        assert_eq!(est.get("extra"), None);
-        assert_eq!(est.get("other"), None);
-        assert_eq!(db.scheduling_runtimes(&traced).unwrap().get("kept"), Some(&3.0));
+    #[test]
+    fn the_v12_migration_backfills_estimates_for_every_context() {
+        let db = CorpusDb::open_in_memory().unwrap();
+        let ids = r#"{"ids":["p","q"]}"#;
+        let dev = RunContext {
+            profile: crate::build::RustProfile::Dev,
+            harness_args: Vec::new(),
+        };
+        let release = RunContext {
+            profile: crate::build::RustProfile::Release,
+            harness_args: vec!["--logs".to_owned()],
+        };
+        record_in(
+            &db,
+            &dev,
+            ids,
+            br#"{"probe":"p","outcome":"parity","runtime_ms":11}
+{"probe":"q","outcome":"parity","runtime_ms":12}
+"#,
+        );
+        record_in(
+            &db,
+            &release,
+            ids,
+            br#"{"probe":"p","outcome":"parity","runtime_ms":21}
+"#,
+        );
+        // Back to a populated v11 store: no estimates table.
+        db.conn()
+            .execute_batch("DROP TABLE schedule_estimate; PRAGMA user_version = 11;")
+            .unwrap();
+        super::super::migrate::run_migrations(db.conn()).unwrap();
+
+        let version: i64 = db
+            .conn()
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, super::super::migrate::SCHEMA_VERSION);
+        let d = db.scheduling_runtimes(&dev).unwrap();
+        assert_eq!((d.get("p"), d.get("q")), (Some(&11.0), Some(&12.0)));
+        let r = db.scheduling_runtimes(&release).unwrap();
+        assert_eq!((r.get("p"), r.get("q")), (Some(&21.0), None));
+    }
+
+    #[test]
+    fn scheduling_estimates_outlive_run_retention_and_never_move_backwards() {
+        let db = CorpusDb::open_in_memory().unwrap();
+        let dev = RunContext {
+            profile: crate::build::RustProfile::Dev,
+            harness_args: Vec::new(),
+        };
+        record_in(
+            &db,
+            &dev,
+            r#"{"ids":["p"]}"#,
+            br#"{"probe":"p","outcome":"parity","runtime_ms":40}
+"#,
+        );
+        db.conn().execute("DELETE FROM disposition", []).unwrap();
+        db.conn().execute("DELETE FROM run", []).unwrap();
+        assert_eq!(db.scheduling_runtimes(&dev).unwrap().get("p"), Some(&40.0));
+        // An older run folded in later (a backfill) cannot overwrite it.
+        db.conn()
+            .execute("UPDATE schedule_estimate SET run_id = 99", [])
+            .unwrap();
+        record_in(
+            &db,
+            &dev,
+            r#"{"ids":["p"]}"#,
+            br#"{"probe":"p","outcome":"parity","runtime_ms":7}
+"#,
+        );
+        assert_eq!(db.scheduling_runtimes(&dev).unwrap().get("p"), Some(&40.0));
     }
 }

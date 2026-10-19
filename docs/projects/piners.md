@@ -197,9 +197,10 @@ dispositions arrive in completion order.
 Every run's harness NDJSON is ingested into a per-project SQLite store at
 `.brokkr/piners/corpus/runs.db` (gitignore it). One transaction after the
 harness exits writes a `run` row plus child `disposition` / `trade_diff` /
-`gate_miss` / `dense_na_site` rows. Each ingest retains a fixed number of the
-newest run IDs (`RUN_RETENTION_LIMIT`) and removes older run rows with their
-children, bounding retained history.
+`gate_miss` / `dense_na_site` rows, and folds the run into
+`schedule_estimate`. Each ingest retains a fixed number of the newest run IDs
+(`RUN_RETENTION_LIMIT`) and removes older run rows with their children,
+bounding retained history; `schedule_estimate` is not pruned with them.
 The store has per-db `PRAGMA user_version` migrations and WAL, mirroring
 `src/db` (`ResultsDb`). Code: `src/piners/corpus_db/`.
 
@@ -293,6 +294,11 @@ The store has per-db `PRAGMA user_version` migrations and WAL, mirroring
   disposition line for (the gate violations with no disposition row).
 - `dense_na_site` - one row per dense-`na` call site (`name`, `call_site`,
   `na_count`).
+- `schedule_estimate` (PK `cargo_profile,harness_args,probe`) - each probe's
+  latest qualifying `runtime_ms` per execution context, folded in by every
+  ingest and read by probe scheduling (see `docs/commands/corpus.md`, "Probe
+  scheduling"). Not a child of `run`: it outlives retention, and its `run_id`
+  is provenance whose run may be gone.
 
 Because the DB is the source of truth, the run dir is dropped (pass or fail)
 once ingest commits, unless `--keep-artefacts` or diagnostic isolation ran
