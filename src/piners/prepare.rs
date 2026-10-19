@@ -38,6 +38,9 @@ pub(crate) fn prepare(
         output::count(ids.len(), "probe"),
         corpus_root.display()
     ));
+    // One hash-cache load and one save for the whole selection, scoped to
+    // verification: dropped (and saved) before anything is handed on.
+    let mut digests = crate::preflight::DigestSession::new(project_root);
     let mut verified = Vec::with_capacity(ids.len());
     for id in &ids {
         let (pin, probe_config) =
@@ -53,11 +56,12 @@ pub(crate) fn prepare(
             pin,
             probe_config,
             &corpus_root,
-            project_root,
+            &mut digests,
         )?);
     }
-    let feed_count = verify_selected_feeds(&ids, &registry, &corpus_root, project_root)?;
-    let file_count = registry::verify_harness_files(&registry, &corpus_root, project_root)?;
+    let feed_count = verify_selected_feeds(&ids, &registry, &corpus_root, &mut digests)?;
+    let file_count = registry::verify_harness_files(&registry, &corpus_root, &mut digests)?;
+    drop(digests);
 
     Ok(PreparedSelection {
         registry,
@@ -76,7 +80,7 @@ fn verify_selected_feeds(
     ids: &[String],
     registry: &Registry,
     corpus_root: &Path,
-    project_root: &Path,
+    digests: &mut crate::preflight::DigestSession,
 ) -> Result<usize, DevError> {
     let referenced: std::collections::BTreeSet<String> = ids
         .iter()
@@ -88,7 +92,7 @@ fn verify_selected_feeds(
                 "piners: referenced feed group '{name}' absent from [feeds]"
             ))
         })?;
-        registry::verify_feed_group(name, group, corpus_root, project_root)?;
+        registry::verify_feed_group(name, group, corpus_root, digests)?;
     }
     Ok(referenced.len())
 }

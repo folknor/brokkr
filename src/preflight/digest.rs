@@ -487,6 +487,64 @@ pub fn cached_path_digest(path: &Path, project_root: &Path) -> Result<PathDigest
     Ok(PathDigest::File(FileDigest::new(digest)))
 }
 
+/// One hash cache shared across many file verifications: loaded once, saved
+/// once when dropped. [`verify_file_digest`] loads and saves the cache per
+/// call, which across a few thousand pins means re-parsing the whole cache a
+/// few thousand times; a session pays that once. Same stamp, settle and key
+/// rules - only the load/save scope differs. Dropped on an error return too,
+/// so the digests computed before a failure are still kept.
+pub struct DigestSession {
+    cache: Option<HashCache>,
+}
+
+impl DigestSession {
+    pub fn new(project_root: &Path) -> Self {
+        Self {
+            cache: Some(HashCache::load(project_root)),
+        }
+    }
+
+    /// Verify a regular file against `expected`. A directory is refused: a
+    /// pin verified here names a file, never a tree fold.
+    pub fn verify_file(
+        &mut self,
+        path: &Path,
+        expected: &FileDigest,
+        origin: Option<&str>,
+    ) -> Result<(), DevError> {
+        let meta = std::fs::metadata(path)?;
+        if !meta.is_file() {
+            return Err(DevError::Preflight(vec![format!(
+                "{} is not a regular file - a file pin cannot verify it",
+                path.display()
+            )]));
+        }
+        let cache = self
+            .cache
+            .as_mut()
+            .ok_or_else(|| DevError::Internal("digest session used after save".to_owned()))?;
+        let actual = hash_file_cached(path, &meta, cache)?;
+        if actual == expected.value() {
+            Ok(())
+        } else {
+            Err(hash_mismatch(
+                path,
+                &expected.to_string(),
+                &actual.to_string(),
+                origin,
+            ))
+        }
+    }
+}
+
+impl Drop for DigestSession {
+    fn drop(&mut self) {
+        if let Some(cache) = self.cache.take() {
+            cache.save();
+        }
+    }
+}
+
 /// One file's digest through `cache`: a hit when the file's stamp matches the
 /// recorded one, otherwise a full read, recorded for the next caller.
 fn hash_file_cached(
@@ -647,6 +705,7 @@ fn collect_tree_entries(
 //   does not grow without bound.
 // - A save happens once per top-level call, not once per miss, so digesting a
 //   tree of N new files is one write rather than N rewrites of a growing file.
+//   A `DigestSession` widens that scope to a whole batch of verifications.
 //
 // Lines in any other shape (including the old four-field format) are dropped
 // on read, which costs one re-hash per file after an upgrade.
@@ -894,6 +953,31 @@ mod hash_cache_tests {
             "{}",
             cache_text(&root)
         );
+    }
+
+    #[test]
+    fn a_digest_session_serves_the_cache_and_refuses_mismatches_and_directories() {
+        let root = crate::test_scratch::scratch("preflight", "digest_session");
+        let file = root.join("s.bin");
+        std::fs::write(&file, b"session").unwrap();
+        let real = compute_file_digest(&file).unwrap();
+        // A cache entry for the file's exact stamp with a made-up digest: the
+        // session must answer from it, never re-read the bytes.
+        let planted: Xxh128 = "000000000000000000000000feedface".parse().unwrap();
+        let key = cache_key(&file).unwrap();
+        let stamp = FileStamp::of(&std::fs::metadata(&file).unwrap());
+        let mut seed = HashCache::load(&root);
+        seed.updates.push((key, stamp, planted));
+        seed.save();
+
+        let mut session = DigestSession::new(&root);
+        session
+            .verify_file(&file, &FileDigest::new(planted), None)
+            .unwrap();
+        let err = session.verify_file(&file, &real, Some("o")).unwrap_err();
+        assert!(format!("{err:?}").contains("hash mismatch"), "{err:?}");
+        let err = session.verify_file(&root, &real, None).unwrap_err();
+        assert!(format!("{err:?}").contains("not a regular file"), "{err:?}");
     }
 
     #[test]

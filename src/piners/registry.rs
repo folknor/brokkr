@@ -1011,9 +1011,9 @@ pub struct VerifiedProbe {
 /// the script and every other file the pin declares.
 ///
 /// A missing file or a hash mismatch is a hard error: either the registry
-/// is lying or the corpus drifted under us. Reuses
-/// [`preflight::verify_file_digest`] (xxh128, mtime-cached) so the digest
-/// matches the rest of brokkr.
+/// is lying or the corpus drifted under us. Hashes through `digests`
+/// ([`preflight::DigestSession`]: xxh128, stamp-cached, one cache load for
+/// the whole selection) so the digest matches the rest of brokkr.
 ///
 /// Two more refusals, both about what the harness will actually do:
 ///
@@ -1032,7 +1032,7 @@ pub fn verify_probe(
     pin: &Pin,
     config: ProbeConfig,
     corpus_root: &Path,
-    project_root: &Path,
+    digests: &mut preflight::DigestSession,
 ) -> Result<VerifiedProbe, DevError> {
     let subject = format!("probe '{id}'");
     if config.feed.is_none() {
@@ -1045,11 +1045,11 @@ pub fn verify_probe(
     }
     // Reseed and verification share the fixed-name constants; a pin cannot
     // make the verifier hash a different file than the harness reads.
-    verify_one(&subject, PINE_FILE, &pin.pine, corpus_root, project_root)?;
+    verify_one(&subject, PINE_FILE, &pin.pine, corpus_root, digests)?;
     let dir = corpus_root.join(pin.probe_dir());
     for (name, file) in pin.optional_files() {
         match file {
-            Some(file) => verify_one(&subject, name, file, corpus_root, project_root)?,
+            Some(file) => verify_one(&subject, name, file, corpus_root, digests)?,
             None if name != CSV_FILE && dir.join(name).exists() => {
                 return Err(DevError::Preflight(vec![format!(
                     "piners: {subject} has a {name} its pin does not declare:\n  {}\n  \
@@ -1078,11 +1078,11 @@ pub fn verify_feed_group(
     name: &str,
     group: &FeedGroup,
     corpus_root: &Path,
-    project_root: &Path,
+    digests: &mut preflight::DigestSession,
 ) -> Result<(), DevError> {
     let subject = format!("feed group '{name}'");
     for (role, pin) in group.roles() {
-        verify_one(&subject, role, pin, corpus_root, project_root)?;
+        verify_one(&subject, role, pin, corpus_root, digests)?;
     }
     Ok(())
 }
@@ -1094,7 +1094,7 @@ pub fn verify_feed_group(
 pub fn verify_harness_files(
     registry: &Registry,
     corpus_root: &Path,
-    project_root: &Path,
+    digests: &mut preflight::DigestSession,
 ) -> Result<usize, DevError> {
     for (name, file) in &registry.harness_files {
         let subject = format!("harness file '{name}'");
@@ -1106,7 +1106,7 @@ pub fn verify_harness_files(
             path: file.path.clone(),
             xxh128,
         };
-        verify_one(&subject, "file", &pin, corpus_root, project_root)?;
+        verify_one(&subject, "file", &pin, corpus_root, digests)?;
     }
     Ok(registry.harness_files.len())
 }
@@ -1116,7 +1116,7 @@ fn verify_one(
     label: &str,
     file: &FilePin,
     corpus_root: &Path,
-    project_root: &Path,
+    digests: &mut preflight::DigestSession,
 ) -> Result<(), DevError> {
     let abs = corpus_root.join(&file.path);
     if !abs.exists() {
@@ -1141,7 +1141,8 @@ fn verify_one(
     let origin = format!("{subject} ({label})");
     crate::piners::lfs::ensure_materialized(&abs).map_err(|e| with_origin(e, &origin, &abs))?;
     let expected = parse_file_digest(&file.xxh128)?;
-    preflight::verify_file_digest(&abs, &expected, project_root, Some(&origin))
+    digests
+        .verify_file(&abs, &expected, Some(&origin))
         .map_err(|e| with_origin(e, &origin, &abs))?;
     Ok(())
 }
@@ -1735,7 +1736,7 @@ pine = { path = "p/bare/strategy.pine", xxh128 = "aa" }
 
     /// `verify_probe` with a resolved feed, the shape every caller hands it.
     fn verify(id: &str, pin: &Pin, root: &Path) -> Result<VerifiedProbe, DevError> {
-        verify_probe(id, pin, feed_decl("f"), root, root)
+        verify_probe(id, pin, feed_decl("f"), root, &mut preflight::DigestSession::new(root))
     }
 
     #[test]
@@ -1787,7 +1788,8 @@ pine = { path = "p/bare/strategy.pine", xxh128 = "aa" }
                 xxh128: Some(facts.xxh128.clone()),
             },
         );
-        assert_eq!(verify_harness_files(&registry, &root, &root).unwrap(), 1);
+        let session = || preflight::DigestSession::new(&root);
+        assert_eq!(verify_harness_files(&registry, &root, &mut session()).unwrap(), 1);
 
         // An edit the pin does not know about is refused before any run.
         std::fs::write(
@@ -1795,7 +1797,7 @@ pine = { path = "p/bare/strategy.pine", xxh128 = "aa" }
             b"[probes.x]\ncapture_origin_ms = 1\n",
         )
         .unwrap();
-        let err = verify_harness_files(&registry, &root, &root).unwrap_err();
+        let err = verify_harness_files(&registry, &root, &mut session()).unwrap_err();
         assert!(format!("{err:?}").contains("harness file 'probe-facts'"));
     }
 
@@ -1859,7 +1861,14 @@ pine = { path = "p/bare/strategy.pine", xxh128 = "aa" }
             csv: Some(write_file(&root, rel, CSV_FILE, b"a,b\n")),
             record: None,
         });
-        let err = verify_probe("nofeed", &pin, ProbeConfig::default(), &root, &root).unwrap_err();
+        let err = verify_probe(
+            "nofeed",
+            &pin,
+            ProbeConfig::default(),
+            &root,
+            &mut preflight::DigestSession::new(&root),
+        )
+        .unwrap_err();
         assert!(format!("{err:?}").contains("resolves no `feed`"));
         // The resolved facts travel with the verified probe.
         let v = verify("nofeed", &pin, &root).unwrap();
