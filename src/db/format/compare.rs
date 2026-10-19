@@ -1063,11 +1063,23 @@ mod tests {
         let unknown = || Some(StoredProfile::Unknown("relesae".to_owned()));
         let m = DatasetMatcher::empty();
 
-        assert_eq!(build_comparison_pairs(&[built(corpus(), 1)], &[built(corpus(), 2)], &m).len(), 1);
-        assert_eq!(build_comparison_pairs(&[built(release(), 1)], &[built(corpus(), 2)], &m).len(), 2);
-        assert_eq!(build_comparison_pairs(&[built(None, 1)], &[built(None, 2)], &m).len(), 2);
+        assert_eq!(
+            build_comparison_pairs(&[built(corpus(), 1)], &[built(corpus(), 2)], &m).len(),
+            1
+        );
+        assert_eq!(
+            build_comparison_pairs(&[built(release(), 1)], &[built(corpus(), 2)], &m).len(),
+            2
+        );
+        assert_eq!(
+            build_comparison_pairs(&[built(None, 1)], &[built(None, 2)], &m).len(),
+            2
+        );
         // The same unknown text on both sides still pairs with nothing.
-        assert_eq!(build_comparison_pairs(&[built(unknown(), 1)], &[built(unknown(), 1)], &m).len(), 2);
+        assert_eq!(
+            build_comparison_pairs(&[built(unknown(), 1)], &[built(unknown(), 1)], &m).len(),
+            2
+        );
     }
 
     #[test]

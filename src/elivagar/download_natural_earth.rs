@@ -212,11 +212,7 @@ pub fn run(data_dir: &Path) -> Result<(), DevError> {
     Ok(())
 }
 
-fn promote_staged(
-    staging: &LayerStaging,
-    ne_dir: &Path,
-    layer_name: &str,
-) -> Result<(), DevError> {
+fn promote_staged(staging: &LayerStaging, ne_dir: &Path, layer_name: &str) -> Result<(), DevError> {
     {
         let required_paths: Vec<_> = REQUIRED_COMPONENTS
             .iter()
@@ -267,7 +263,6 @@ fn promote_staged(
             })?;
             std::fs::rename(extracted, ne_dir.join(file_name))?;
         }
-
     }
     Ok(())
 }

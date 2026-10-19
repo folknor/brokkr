@@ -33,7 +33,9 @@ pub(crate) const VERIFY: &str = "verify";
 
 /// Entries Cargo itself creates at the target root, or profile names Cargo
 /// treats specially. A custom profile cannot take these either.
-const CARGO_OWNED: &[&str] = &["dev", "release", "test", "bench", "debug", "doc", "build", "package"];
+const CARGO_OWNED: &[&str] = &[
+    "dev", "release", "test", "bench", "debug", "doc", "build", "package",
+];
 
 /// Exact brokkr-owned names.
 const EXACT: &[&str] = &[WORKTREES, TMP, VERIFY];
@@ -44,10 +46,14 @@ const PREFIXES: &[&str] = &[RUSTFLAGS_PREFIX, UNIFY_PREFIX, FIXTURE_PREFIX];
 /// Why `name` cannot be a custom profile directory, or `None` when it is free.
 pub(crate) fn reserved_reason(name: &str) -> Option<String> {
     if CARGO_OWNED.contains(&name) {
-        return Some(format!("`{name}` is a Cargo built-in profile or target-dir entry"));
+        return Some(format!(
+            "`{name}` is a Cargo built-in profile or target-dir entry"
+        ));
     }
     if EXACT.contains(&name) {
-        return Some(format!("`{name}` is a directory brokkr owns under the Cargo target root"));
+        return Some(format!(
+            "`{name}` is a directory brokkr owns under the Cargo target root"
+        ));
     }
     PREFIXES.iter().find(|p| name.starts_with(**p)).map(|p| {
         format!("`{name}` starts with `{p}`, a prefix brokkr owns under the Cargo target root")
@@ -60,7 +66,17 @@ mod tests {
 
     #[test]
     fn brokkr_and_cargo_entries_are_reserved_and_others_are_free() {
-        for name in ["dev", "debug", "doc", "tmp", "verify", "brokkr-worktrees", "rustflags-x", "unify-package", "fixture-a"] {
+        for name in [
+            "dev",
+            "debug",
+            "doc",
+            "tmp",
+            "verify",
+            "brokkr-worktrees",
+            "rustflags-x",
+            "unify-package",
+            "fixture-a",
+        ] {
             assert!(reserved_reason(name).is_some(), "{name}");
         }
         for name in ["corpus", "fast-dev", "unify", "fixture", "rustflags"] {

@@ -1651,7 +1651,10 @@ impl MemberSelection {
         if !crate::config::Claim::new(certifies).runs(cfg.when) {
             return Self::NotApplicable("the member check's cadence rules this run out");
         }
-        Self::Eligible { cfg: cfg.clone(), cli: cli.to_vec() }
+        Self::Eligible {
+            cfg: cfg.clone(),
+            cli: cli.to_vec(),
+        }
     }
 }
 
@@ -1667,7 +1670,11 @@ pub(crate) fn fixture_lint_selection(
         return Vec::new();
     }
     let claim = crate::config::Claim::new(certifies);
-    entries.iter().filter(|e| claim.runs(e.when)).cloned().collect()
+    entries
+        .iter()
+        .filter(|e| claim.runs(e.when))
+        .cloned()
+        .collect()
 }
 
 /// Every selection one `brokkr check` run makes.
@@ -2114,8 +2121,16 @@ mod tests {
         assert!(!all.clippy.is_enabled() && !all.test.is_enabled() && !all.rustdoc.is_enabled());
         // The same sweep in an enabled phase is the construction error.
         assert!(
-            CheckSelections::build(&[invalid], &[], &|_| false, false, GatedPhases::default(), None, &oracle)
-                .is_err()
+            CheckSelections::build(
+                &[invalid],
+                &[],
+                &|_| false,
+                false,
+                GatedPhases::default(),
+                None,
+                &oracle
+            )
+            .is_err()
         );
     }
 

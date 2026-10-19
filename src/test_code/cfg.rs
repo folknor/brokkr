@@ -101,7 +101,9 @@ fn parse_pred(input: ParseStream<'_>) -> syn::Result<Pred> {
         return match ident.unraw().to_string().as_str() {
             "any" => Ok(Pred::Any(args)),
             "all" => Ok(Pred::All(args)),
-            "not" if args.len() == 1 => Ok(Pred::Not(Box::new(args.into_iter().next().unwrap_or(Pred::Other)))),
+            "not" if args.len() == 1 => Ok(Pred::Not(Box::new(
+                args.into_iter().next().unwrap_or(Pred::Other),
+            ))),
             _ => Err(syn::Error::new(ident.span(), "not a cfg predicate")),
         };
     }
@@ -112,7 +114,11 @@ fn parse_pred(input: ParseStream<'_>) -> syn::Result<Pred> {
         let _value: syn::LitStr = input.parse()?;
         return Ok(Pred::Other);
     }
-    Ok(if ident.unraw() == "test" { Pred::Test } else { Pred::Other })
+    Ok(if ident.unraw() == "test" {
+        Pred::Test
+    } else {
+        Pred::Other
+    })
 }
 
 fn parse_whole(input: ParseStream<'_>) -> syn::Result<Pred> {
@@ -136,7 +142,10 @@ fn cfg_truth(attr: &Attribute) -> Option<Truth> {
     let Meta::List(list) = &attr.meta else {
         return None;
     };
-    parse_whole.parse2(list.tokens.clone()).ok().map(|p| p.eval())
+    parse_whole
+        .parse2(list.tokens.clone())
+        .ok()
+        .map(|p| p.eval())
 }
 
 /// Whether the attributes prove the node absent from every non-test build:
@@ -171,7 +180,11 @@ fn conditional_metas(attrs: &[Attribute]) -> Vec<(Meta, bool)> {
     out
 }
 
-fn collect_cfg_attr(tokens: proc_macro2::TokenStream, outer_test_only: bool, out: &mut Vec<(Meta, bool)>) {
+fn collect_cfg_attr(
+    tokens: proc_macro2::TokenStream,
+    outer_test_only: bool,
+    out: &mut Vec<(Meta, bool)>,
+) {
     let parsed = (|input: ParseStream<'_>| {
         let guard = parse_pred(input).ok();
         input.parse::<Token![,]>()?;
@@ -256,7 +269,10 @@ mod tests {
     #[test]
     fn raw_identifiers_name_what_their_plain_spelling_does() {
         assert!(absent_without_test(&attrs("#[r#cfg(r#all(r#test))]")));
-        assert_eq!(path_attr(&attrs("#[r#path = \"shared.rs\"]")), Some("shared.rs".into()));
+        assert_eq!(
+            path_attr(&attrs("#[r#path = \"shared.rs\"]")),
+            Some("shared.rs".into())
+        );
     }
 
     #[test]
@@ -299,7 +315,9 @@ mod tests {
     fn malformed_predicate_proves_nothing() {
         assert!(!absent_without_test(&attrs("#[cfg(not(test, unix))]")));
         assert!(!absent_without_test(&attrs("#[cfg(test unix)]")));
-        assert!(!absent_without_test(&attrs("#[cfg(all(test, feature = 7))]")));
+        assert!(!absent_without_test(&attrs(
+            "#[cfg(all(test, feature = 7))]"
+        )));
     }
 
     #[test]
@@ -318,9 +336,18 @@ mod tests {
         assert_eq!(
             paths,
             vec![
-                ConditionalPath { path: "a.rs".into(), test_only: true },
-                ConditionalPath { path: "b.rs".into(), test_only: true },
-                ConditionalPath { path: "c.rs".into(), test_only: false },
+                ConditionalPath {
+                    path: "a.rs".into(),
+                    test_only: true
+                },
+                ConditionalPath {
+                    path: "b.rs".into(),
+                    test_only: true
+                },
+                ConditionalPath {
+                    path: "c.rs".into(),
+                    test_only: false
+                },
             ]
         );
     }

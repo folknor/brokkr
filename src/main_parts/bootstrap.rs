@@ -300,13 +300,7 @@ pub(super) fn run_install(
         None => (None, std::env::current_dir()?),
     };
     let lock = context::reenter_command_lock()?;
-    runnables::cmd_install(
-        &project_root,
-        bin_cfg,
-        choice,
-        unlocked,
-        Some(&lock),
-    )
+    runnables::cmd_install(&project_root, bin_cfg, choice, unlocked, Some(&lock))
 }
 
 /// `wc` lists source files in the code tree (cwd).

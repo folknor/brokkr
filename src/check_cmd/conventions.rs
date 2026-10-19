@@ -258,7 +258,9 @@ fn gremlins_scope(files: &[PathBuf], config: Option<&GremlinsConfig>, out: &mut 
             .iter()
             .any(|path| *path == dir || path.starts_with(dir))
         {
-            out.push(format!("[gremlins].exclude entry {entry:?} matches no scannable tracked path"));
+            out.push(format!(
+                "[gremlins].exclude entry {entry:?} matches no scannable tracked path"
+            ));
         }
     }
     if !scannable.iter().any(|path| {
@@ -271,7 +273,11 @@ fn gremlins_scope(files: &[PathBuf], config: Option<&GremlinsConfig>, out: &mut 
     }
 }
 
-fn header_scope(files: &[PathBuf], config: Option<&HeaderConfig>, out: &mut Vec<String>) -> Result<(), DevError> {
+fn header_scope(
+    files: &[PathBuf],
+    config: Option<&HeaderConfig>,
+    out: &mut Vec<String>,
+) -> Result<(), DevError> {
     let Some(config) = config else {
         return Ok(());
     };
@@ -285,18 +291,29 @@ fn header_scope(files: &[PathBuf], config: Option<&HeaderConfig>, out: &mut Vec<
     )
 }
 
-fn textlint_scopes(files: &[PathBuf], rules: &[TextlintRule], out: &mut Vec<String>) -> Result<(), DevError> {
+fn textlint_scopes(
+    files: &[PathBuf],
+    rules: &[TextlintRule],
+    out: &mut Vec<String>,
+) -> Result<(), DevError> {
     for rule in rules {
         let paths_field = format!("[[textlint]] {:?} paths", rule.name);
         let selected = select_glob_paths(files, &rule.paths, &paths_field, out)?;
         let exclude_field = format!("[[textlint]] {:?} exclude", rule.name);
-        let all_excluded = format!("[[textlint]] {:?}: exclude excuses every file paths selects", rule.name);
+        let all_excluded = format!(
+            "[[textlint]] {:?}: exclude excuses every file paths selects",
+            rule.name
+        );
         excluded_paths(&rule.exclude, &selected, &exclude_field, &all_excluded, out)?;
     }
     Ok(())
 }
 
-fn manifest_scope(files: &[PathBuf], config: Option<&ManifestConfig>, out: &mut Vec<String>) -> Result<(), DevError> {
+fn manifest_scope(
+    files: &[PathBuf],
+    config: Option<&ManifestConfig>,
+    out: &mut Vec<String>,
+) -> Result<(), DevError> {
     let Some(config) = config else {
         return Ok(());
     };
@@ -311,7 +328,12 @@ fn manifest_scope(files: &[PathBuf], config: Option<&ManifestConfig>, out: &mut 
     if included.is_empty() {
         out.push("[manifest] paths and exclude leave no manifest to scan".to_owned());
     }
-    exclude_glob_paths(&config.shape_exclude, &included, "[manifest] shape_exclude", out)?;
+    exclude_glob_paths(
+        &config.shape_exclude,
+        &included,
+        "[manifest] shape_exclude",
+        out,
+    )?;
     Ok(())
 }
 

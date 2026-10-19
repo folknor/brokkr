@@ -880,7 +880,16 @@ fn run_captured_limited(
     allow_capture_truncation: bool,
 ) -> Result<DeadlineCapture, DevError> {
     run_captured_limited_unsetting(
-        program, args, cwd, env, &[], limit, on_spawn, isolation, profile, options,
+        program,
+        args,
+        cwd,
+        env,
+        &[],
+        limit,
+        on_spawn,
+        isolation,
+        profile,
+        options,
         allow_capture_truncation,
     )
 }

@@ -338,7 +338,10 @@ mod tests {
         // The same named profile on both sides is the same context.
         let c = contextual_record(&db, &corpus);
         let rendered = compare_report(&db.compare_runs(a, c).unwrap(), false);
-        assert!(!rendered.contains("differ in execution context"), "{rendered}");
+        assert!(
+            !rendered.contains("differ in execution context"),
+            "{rendered}"
+        );
 
         let legacy = record(&db, &["p"], &line("p", "exact", 1, 0, 0), &[]);
         let rendered = compare_report(&db.compare_runs(a, legacy).unwrap(), false);

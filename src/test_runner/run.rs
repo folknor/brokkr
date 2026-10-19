@@ -132,7 +132,11 @@ where
             downstream(observation);
         }
     });
-    let primary_source = if launch == Launch::Cargo { StreamSource::Cargo } else { StreamSource::Process };
+    let primary_source = if launch == Launch::Cargo {
+        StreamSource::Cargo
+    } else {
+        StreamSource::Process
+    };
     let primary = StreamTap::new(&sink, primary_source);
     let session = shim
         .then(|| {

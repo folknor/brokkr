@@ -57,7 +57,9 @@ impl Manifest {
         for (file, entry) in raw.files {
             match (entry.clean, entry.expect.is_empty()) {
                 (true, false) => {
-                    return Err(format!("{file}: `clean = true` and `expect` together - pick one"));
+                    return Err(format!(
+                        "{file}: `clean = true` and `expect` together - pick one"
+                    ));
                 }
                 (false, true) => {
                     return Err(format!(
@@ -76,9 +78,11 @@ impl Manifest {
         if files.values().all(Vec::is_empty) {
             // Every file clean proves only that nothing fired - including
             // the case where the lint never runs at all.
-            return Err("no file expects a diagnostic - a manifest of clean files proves nothing \
+            return Err(
+                "no file expects a diagnostic - a manifest of clean files proves nothing \
                         fires, not that anything is sealed"
-                .into());
+                    .into(),
+            );
         }
         Ok(Self { files })
     }
@@ -123,10 +127,17 @@ pub(super) fn verdict(manifest: &Manifest, observed: &[Observed]) -> Vec<String>
             ));
             continue;
         };
-        let expected = manifest.files.get(file).map(Vec::as_slice).unwrap_or_default();
+        let expected = manifest
+            .files
+            .get(file)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         if !expected.iter().any(|e| matches(e, o)) {
             let lint = o.lint.as_deref().unwrap_or("uncoded");
-            failures.push(format!("{file}: unexpected {lint}: {} ({})", o.message, o.at));
+            failures.push(format!(
+                "{file}: unexpected {lint}: {} ({})",
+                o.message, o.at
+            ));
         }
     }
     for (file, expected) in &manifest.files {
@@ -171,8 +182,16 @@ clean = true
     fn exact_matches_pass() {
         let m = Manifest::parse(MANIFEST).unwrap();
         let observed = [
-            seen("src/submit_order_method.rs", "clippy::disallowed_methods", "nautilus_trading::Strategy::submit_order"),
-            seen("src/submit_order_list.rs", "clippy::disallowed_methods", "nautilus_trading::Strategy::submit_order_list"),
+            seen(
+                "src/submit_order_method.rs",
+                "clippy::disallowed_methods",
+                "nautilus_trading::Strategy::submit_order",
+            ),
+            seen(
+                "src/submit_order_list.rs",
+                "clippy::disallowed_methods",
+                "nautilus_trading::Strategy::submit_order_list",
+            ),
         ];
         assert!(verdict(&m, &observed).is_empty());
     }
@@ -184,8 +203,16 @@ clean = true
     fn a_prefix_path_does_not_satisfy_an_expectation() {
         let m = Manifest::parse(MANIFEST).unwrap();
         let observed = [
-            seen("src/submit_order_method.rs", "clippy::disallowed_methods", "nautilus_trading::Strategy::submit_order_list"),
-            seen("src/submit_order_list.rs", "clippy::disallowed_methods", "nautilus_trading::Strategy::submit_order_list"),
+            seen(
+                "src/submit_order_method.rs",
+                "clippy::disallowed_methods",
+                "nautilus_trading::Strategy::submit_order_list",
+            ),
+            seen(
+                "src/submit_order_list.rs",
+                "clippy::disallowed_methods",
+                "nautilus_trading::Strategy::submit_order_list",
+            ),
         ];
         let failures = verdict(&m, &observed);
         assert_eq!(failures.len(), 2, "{failures:?}");
@@ -198,10 +225,21 @@ clean = true
         let m = Manifest::parse(MANIFEST).unwrap();
         let mut stray = seen("src/lib.rs", "unfulfilled_lint_expectations", "x");
         stray.message = "this lint expectation is unfulfilled".into();
-        let unattributed = Observed { file: None, ..seen("x", "dead_code", "y") };
+        let unattributed = Observed {
+            file: None,
+            ..seen("x", "dead_code", "y")
+        };
         let observed = [
-            seen("src/submit_order_method.rs", "clippy::disallowed_methods", "nautilus_trading::Strategy::submit_order"),
-            seen("src/submit_order_list.rs", "clippy::disallowed_methods", "nautilus_trading::Strategy::submit_order_list"),
+            seen(
+                "src/submit_order_method.rs",
+                "clippy::disallowed_methods",
+                "nautilus_trading::Strategy::submit_order",
+            ),
+            seen(
+                "src/submit_order_list.rs",
+                "clippy::disallowed_methods",
+                "nautilus_trading::Strategy::submit_order_list",
+            ),
             stray,
             unattributed,
         ];
@@ -213,7 +251,10 @@ clean = true
 
     #[test]
     fn lint_spellings_unify_dashes() {
-        assert!(same_lint("unfulfilled-lint-expectations", "unfulfilled_lint_expectations"));
+        assert!(same_lint(
+            "unfulfilled-lint-expectations",
+            "unfulfilled_lint_expectations"
+        ));
     }
 
     #[test]

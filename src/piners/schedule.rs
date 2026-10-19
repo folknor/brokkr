@@ -48,15 +48,13 @@ pub fn slowest_first(verified: &mut [VerifiedProbe], estimates: &HashMap<String,
     // (estimate, observed): an imputed probe ties at the median by
     // construction, so on a tie the observed probe goes first - otherwise a
     // lone known giant, being the median, would wait behind every unknown.
-    let estimate = |v: &VerifiedProbe| {
-        match estimates
-            .get(&v.id)
-            .copied()
-            .filter(|ms| ms.is_finite() && *ms >= 0.0)
-        {
-            Some(ms) => (ms, true),
-            None => (median, false),
-        }
+    let estimate = |v: &VerifiedProbe| match estimates
+        .get(&v.id)
+        .copied()
+        .filter(|ms| ms.is_finite() && *ms >= 0.0)
+    {
+        Some(ms) => (ms, true),
+        None => (median, false),
     };
     verified.sort_by(|a, b| {
         let ((ma, oa), (mb, ob)) = (estimate(a), estimate(b));
@@ -92,8 +90,10 @@ mod tests {
 
     fn order(ids: &[&str], estimates: &[(&str, f64)]) -> (Vec<String>, Schedule) {
         let mut v: Vec<VerifiedProbe> = ids.iter().map(|id| probe(id)).collect();
-        let est: HashMap<String, f64> =
-            estimates.iter().map(|(k, ms)| ((*k).to_owned(), *ms)).collect();
+        let est: HashMap<String, f64> = estimates
+            .iter()
+            .map(|(k, ms)| ((*k).to_owned(), *ms))
+            .collect();
         let s = slowest_first(&mut v, &est);
         (v.into_iter().map(|p| p.id).collect(), s)
     }
@@ -103,10 +103,21 @@ mod tests {
         // Observed sorted: 10, 500, 500, 9000 -> upper median 500.
         let (ids, s) = order(
             &["fast", "new", "tie-1", "slow", "tie-2"],
-            &[("fast", 10.0), ("slow", 9000.0), ("tie-1", 500.0), ("tie-2", 500.0)],
+            &[
+                ("fast", 10.0),
+                ("slow", 9000.0),
+                ("tie-1", 500.0),
+                ("tie-2", 500.0),
+            ],
         );
         assert_eq!(ids, ["slow", "tie-1", "tie-2", "new", "fast"]);
-        assert_eq!(s, Schedule { observed: 4, imputed: 1 });
+        assert_eq!(
+            s,
+            Schedule {
+                observed: 4,
+                imputed: 1
+            }
+        );
     }
 
     #[test]
@@ -119,6 +130,12 @@ mod tests {
     fn nothing_observed_keeps_selection_order() {
         let (ids, s) = order(&["b", "a", "c"], &[("elsewhere", 5.0), ("a", f64::NAN)]);
         assert_eq!(ids, ["b", "a", "c"]);
-        assert_eq!(s, Schedule { observed: 0, imputed: 0 });
+        assert_eq!(
+            s,
+            Schedule {
+                observed: 0,
+                imputed: 0
+            }
+        );
     }
 }

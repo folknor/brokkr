@@ -454,7 +454,10 @@ pub(super) fn plan_focused(
     if !hits.is_empty() {
         let labels: Vec<String> = hits.iter().map(|(b, _)| b.label()).collect();
         let one_each = if timeout && runs.len() > 1 {
-            format!("; {} under --timeout, one process each", output::count(runs.len(), "test"))
+            format!(
+                "; {} under --timeout, one process each",
+                output::count(runs.len(), "test")
+            )
         } else {
             String::new()
         };

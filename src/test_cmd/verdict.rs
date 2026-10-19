@@ -408,15 +408,24 @@ pub(super) fn run_one(
     let red = !failures.is_empty();
     let harness_died = !red && !run.captured.ending.success();
     let record_reasons = run.outcome.record_reasons();
-    let exit_reasons = if harness_died { Vec::new() } else { run.outcome.exit_reasons() };
+    let exit_reasons = if harness_died {
+        Vec::new()
+    } else {
+        run.outcome.exit_reasons()
+    };
     let silent = record_reasons.is_empty() && exit_reasons.is_empty();
-    failures.extend(record_reasons.into_iter().chain(exit_reasons).map(|reason| Failure {
-        kind: FailureKind::Harness,
-        target: target.to_owned(),
-        what: format!("test record: {reason}"),
-        loc: None,
-        msg: None,
-    }));
+    failures.extend(
+        record_reasons
+            .into_iter()
+            .chain(exit_reasons)
+            .map(|reason| Failure {
+                kind: FailureKind::Harness,
+                target: target.to_owned(),
+                what: format!("test record: {reason}"),
+                loc: None,
+                msg: None,
+            }),
+    );
     if verdict == LaneVerdict::Fail && !red && (harness_died || silent) {
         failures.push(harness_failure(
             target,

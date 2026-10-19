@@ -61,7 +61,10 @@ fn path_attr(attrs: &[syn::Attribute]) -> Option<Result<String, ()>> {
         return Some(Err(()));
     };
     match &nv.value {
-        syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) => Some(Ok(s.value())),
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(s),
+            ..
+        }) => Some(Ok(s.value())),
         _ => Some(Err(())),
     }
 }
@@ -69,20 +72,25 @@ fn path_attr(attrs: &[syn::Attribute]) -> Option<Result<String, ()>> {
 /// Visit one file. `module_dir` is where its child modules resolve.
 fn visit_file(file: &Path, module_dir: &Path, out: &mut Walk) {
     let canonical = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
-    if !out.visited.insert((canonical.clone(), module_dir.to_path_buf())) {
+    if !out
+        .visited
+        .insert((canonical.clone(), module_dir.to_path_buf()))
+    {
         return;
     }
     let source = match std::fs::read_to_string(file) {
         Ok(s) => s,
         Err(e) => {
-            out.refusals.push(format!("{}: unreadable: {e}", file.display()));
+            out.refusals
+                .push(format!("{}: unreadable: {e}", file.display()));
             return;
         }
     };
     let parsed = match syn::parse_file(&source) {
         Ok(f) => f,
         Err(e) => {
-            out.refusals.push(format!("{}: does not parse: {e}", file.display()));
+            out.refusals
+                .push(format!("{}: does not parse: {e}", file.display()));
             return;
         }
     };
@@ -245,7 +253,13 @@ mod tests {
         assert_eq!(
             rel(&dir, &w),
             // Path order is per component: `src/a/...` sorts before `src/a.rs`.
-            ["src/a/child.rs", "src/a.rs", "src/b/mod.rs", "src/inline/deep.rs", "src/lib.rs"]
+            [
+                "src/a/child.rs",
+                "src/a.rs",
+                "src/b/mod.rs",
+                "src/inline/deep.rs",
+                "src/lib.rs"
+            ]
         );
     }
 
@@ -306,14 +320,20 @@ mod tests {
         );
         let w = walk(&dir.join("src/lib.rs"));
         assert!(w.refusals.is_empty(), "{:?}", w.refusals);
-        assert_eq!(rel(&dir, &w), ["src/a/child.rs", "src/a.rs", "src/child.rs", "src/lib.rs"]);
+        assert_eq!(
+            rel(&dir, &w),
+            ["src/a/child.rs", "src/a.rs", "src/child.rs", "src/lib.rs"]
+        );
     }
 
     #[test]
     fn a_file_scope_path_attribute_is_followed() {
         let dir = tree(
             "path_attr",
-            &[("src/lib.rs", "#[path = \"elsewhere/x.rs\"]\nmod x;\n"), ("src/elsewhere/x.rs", "")],
+            &[
+                ("src/lib.rs", "#[path = \"elsewhere/x.rs\"]\nmod x;\n"),
+                ("src/elsewhere/x.rs", ""),
+            ],
         );
         let w = walk(&dir.join("src/lib.rs"));
         assert!(w.refusals.is_empty(), "{:?}", w.refusals);

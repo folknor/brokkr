@@ -225,7 +225,10 @@ impl Collector {
             let conditional = cfg::conditional_paths(&m.attrs);
             if let Some((_, items)) = &m.content {
                 if !conditional.is_empty() {
-                    s.refuse(span, "an inline module with a cfg_attr path is outside the source model");
+                    s.refuse(
+                        span,
+                        "an inline module with a cfg_attr path is outside the source model",
+                    );
                 }
                 // An explicit path replaces the pending stem; an ordinary
                 // inline module consumes it and nests its own name.
@@ -248,7 +251,11 @@ impl Collector {
             };
             s.edge(target, s.test, false);
             for alt in conditional {
-                s.edge(Target::Explicit(s.dir.join(alt.path)), s.test || alt.test_only, false);
+                s.edge(
+                    Target::Explicit(s.dir.join(alt.path)),
+                    s.test || alt.test_only,
+                    false,
+                );
             }
         });
     }
@@ -266,9 +273,16 @@ impl Collector {
             tokens.clone(),
         );
         match literal {
-            Ok(lit) => self.edge(Target::Explicit(self.file_dir.join(lit.value())), self.test, true),
+            Ok(lit) => self.edge(
+                Target::Explicit(self.file_dir.join(lit.value())),
+                self.test,
+                true,
+            ),
             Err(_) if is_out_dir_concat(tokens) => {}
-            Err(_) => self.refuse(span, "include! with a non-literal path is outside the source model"),
+            Err(_) => self.refuse(
+                span,
+                "include! with a non-literal path is outside the source model",
+            ),
         }
     }
 
@@ -332,7 +346,9 @@ impl Collector {
                     _ => {}
                 },
                 TokenTree::Literal(lit) => {
-                    if let Ok(s) = syn::parse2::<syn::LitStr>(TokenTree::Literal(lit.clone()).into()) {
+                    if let Ok(s) =
+                        syn::parse2::<syn::LitStr>(TokenTree::Literal(lit.clone()).into())
+                    {
                         let value = s.value();
                         if value.contains('/') || value.ends_with(".rs") {
                             self.evidence(Evidence::PathLiteral {
@@ -342,7 +358,9 @@ impl Collector {
                         }
                     }
                 }
-                TokenTree::Group(group) if consumed != Some(i) => self.macro_tokens_in(group.stream(), in_use),
+                TokenTree::Group(group) if consumed != Some(i) => {
+                    self.macro_tokens_in(group.stream(), in_use);
+                }
                 TokenTree::Group(_) | TokenTree::Punct(_) => {}
             }
         }
@@ -368,7 +386,9 @@ impl Collector {
         if self.test {
             return;
         }
-        self.facts.test_shadows.push(format!("{}: {what}", position(span)));
+        self.facts
+            .test_shadows
+            .push(format!("{}: {what}", position(span)));
     }
 
     fn function(&mut self, item: &Item, f: &syn::ItemFn) {
@@ -392,9 +412,10 @@ impl Collector {
                     .push(format!("{}: use binds test", position(n.ident.span())));
             }
             syn::UseTree::Rename(r) if r.rename.unraw() == "test" => {
-                self.facts
-                    .test_shadows
-                    .push(format!("{}: use renames to test", position(r.rename.span())));
+                self.facts.test_shadows.push(format!(
+                    "{}: use renames to test",
+                    position(r.rename.span())
+                ));
             }
             syn::UseTree::Group(g) => g.items.iter().for_each(|t| self.use_tree(t)),
             // A glob is not recorded: a glob-imported attribute named `test`
@@ -565,7 +586,10 @@ impl<'ast> Visit<'ast> for Collector {
             Item::Mod(m) => self.module(m),
             Item::Fn(f) => self.function(item, f),
             Item::Verbatim(tokens) => {
-                self.refuse(tokens.span(), "syntax syn cannot model (a verbatim item) is outside the source model");
+                self.refuse(
+                    tokens.span(),
+                    "syntax syn cannot model (a verbatim item) is outside the source model",
+                );
             }
             _ => {
                 if let Item::Use(u) = item {
@@ -574,49 +598,77 @@ impl<'ast> Visit<'ast> for Collector {
                 if let Item::ExternCrate(e) = item {
                     self.extern_crate(e);
                 }
-                self.attributed(item_attrs(item), item.span(), |s| visit::visit_item(s, item));
+                self.attributed(item_attrs(item), item.span(), |s| {
+                    visit::visit_item(s, item);
+                });
             }
         }
     }
 
     fn visit_impl_item(&mut self, item: &'ast ImplItem) {
         if let ImplItem::Verbatim(tokens) = item {
-            self.refuse(tokens.span(), "syntax syn cannot model (a verbatim impl item) is outside the source model");
+            self.refuse(
+                tokens.span(),
+                "syntax syn cannot model (a verbatim impl item) is outside the source model",
+            );
             return;
         }
-        self.attributed(impl_item_attrs(item), item.span(), |s| visit::visit_impl_item(s, item));
+        self.attributed(impl_item_attrs(item), item.span(), |s| {
+            visit::visit_impl_item(s, item);
+        });
     }
 
     fn visit_trait_item(&mut self, item: &'ast TraitItem) {
         if let TraitItem::Verbatim(tokens) = item {
-            self.refuse(tokens.span(), "syntax syn cannot model (a verbatim trait item) is outside the source model");
+            self.refuse(
+                tokens.span(),
+                "syntax syn cannot model (a verbatim trait item) is outside the source model",
+            );
             return;
         }
-        self.attributed(trait_item_attrs(item), item.span(), |s| visit::visit_trait_item(s, item));
+        self.attributed(trait_item_attrs(item), item.span(), |s| {
+            visit::visit_trait_item(s, item);
+        });
     }
 
     fn visit_foreign_item(&mut self, item: &'ast syn::ForeignItem) {
         if let syn::ForeignItem::Verbatim(tokens) = item {
-            self.refuse(tokens.span(), "syntax syn cannot model (a verbatim foreign item) is outside the source model");
+            self.refuse(
+                tokens.span(),
+                "syntax syn cannot model (a verbatim foreign item) is outside the source model",
+            );
             return;
         }
-        self.attributed(foreign_item_attrs(item), item.span(), |s| visit::visit_foreign_item(s, item));
+        self.attributed(foreign_item_attrs(item), item.span(), |s| {
+            visit::visit_foreign_item(s, item);
+        });
     }
 
     fn visit_expr(&mut self, expr: &'ast Expr) {
         if let Expr::Verbatim(tokens) = expr {
-            self.refuse(tokens.span(), "syntax syn cannot model (a verbatim expression) is outside the source model");
+            self.refuse(
+                tokens.span(),
+                "syntax syn cannot model (a verbatim expression) is outside the source model",
+            );
             return;
         }
-        self.attributed(expr_attrs(expr), expr.span(), |s| visit::visit_expr(s, expr));
+        self.attributed(expr_attrs(expr), expr.span(), |s| {
+            visit::visit_expr(s, expr);
+        });
     }
 
     fn visit_stmt(&mut self, stmt: &'ast Stmt) {
         match stmt {
-            Stmt::Local(local) => self.attributed(&local.attrs, stmt.span(), |s| visit::visit_stmt(s, stmt)),
-            Stmt::Macro(mac) => self.attributed(&mac.attrs, stmt.span(), |s| visit::visit_stmt(s, stmt)),
+            Stmt::Local(local) => {
+                self.attributed(&local.attrs, stmt.span(), |s| visit::visit_stmt(s, stmt));
+            }
+            Stmt::Macro(mac) => {
+                self.attributed(&mac.attrs, stmt.span(), |s| visit::visit_stmt(s, stmt));
+            }
             // Masked with its trailing `;`, like `Local` and `Macro`.
-            Stmt::Expr(expr, _) => self.attributed(expr_attrs(expr), stmt.span(), |s| visit::visit_stmt(s, stmt)),
+            Stmt::Expr(expr, _) => self.attributed(expr_attrs(expr), stmt.span(), |s| {
+                visit::visit_stmt(s, stmt);
+            }),
             Stmt::Item(_) => visit::visit_stmt(self, stmt),
         }
     }
@@ -626,7 +678,9 @@ impl<'ast> Visit<'ast> for Collector {
     }
 
     fn visit_variant(&mut self, variant: &'ast syn::Variant) {
-        self.attributed(&variant.attrs, variant.span(), |s| visit::visit_variant(s, variant));
+        self.attributed(&variant.attrs, variant.span(), |s| {
+            visit::visit_variant(s, variant);
+        });
     }
 
     fn visit_arm(&mut self, arm: &'ast syn::Arm) {
@@ -634,11 +688,15 @@ impl<'ast> Visit<'ast> for Collector {
     }
 
     fn visit_field_value(&mut self, field: &'ast syn::FieldValue) {
-        self.attributed(&field.attrs, field.span(), |s| visit::visit_field_value(s, field));
+        self.attributed(&field.attrs, field.span(), |s| {
+            visit::visit_field_value(s, field);
+        });
     }
 
     fn visit_field_pat(&mut self, field: &'ast syn::FieldPat) {
-        self.attributed(&field.attrs, field.span(), |s| visit::visit_field_pat(s, field));
+        self.attributed(&field.attrs, field.span(), |s| {
+            visit::visit_field_pat(s, field);
+        });
     }
 
     fn visit_generic_param(&mut self, param: &'ast syn::GenericParam) {
@@ -647,7 +705,9 @@ impl<'ast> Visit<'ast> for Collector {
             syn::GenericParam::Type(p) => &p.attrs,
             syn::GenericParam::Const(p) => &p.attrs,
         };
-        self.attributed(attrs, param.span(), |s| visit::visit_generic_param(s, param));
+        self.attributed(attrs, param.span(), |s| {
+            visit::visit_generic_param(s, param);
+        });
     }
 
     fn visit_fn_arg(&mut self, arg: &'ast syn::FnArg) {
@@ -660,7 +720,10 @@ impl<'ast> Visit<'ast> for Collector {
 
     fn visit_type(&mut self, ty: &'ast syn::Type) {
         if let syn::Type::Verbatim(tokens) = ty {
-            self.refuse(tokens.span(), "syntax syn cannot model (a verbatim type) is outside the source model");
+            self.refuse(
+                tokens.span(),
+                "syntax syn cannot model (a verbatim type) is outside the source model",
+            );
             return;
         }
         visit::visit_type(self, ty);
@@ -668,7 +731,10 @@ impl<'ast> Visit<'ast> for Collector {
 
     fn visit_pat(&mut self, pat: &'ast syn::Pat) {
         if let syn::Pat::Verbatim(tokens) = pat {
-            self.refuse(tokens.span(), "syntax syn cannot model (a verbatim pattern) is outside the source model");
+            self.refuse(
+                tokens.span(),
+                "syntax syn cannot model (a verbatim pattern) is outside the source model",
+            );
             return;
         }
         visit::visit_pat(self, pat);
@@ -676,7 +742,10 @@ impl<'ast> Visit<'ast> for Collector {
 
     fn visit_type_param_bound(&mut self, bound: &'ast syn::TypeParamBound) {
         if let syn::TypeParamBound::Verbatim(tokens) = bound {
-            self.refuse(tokens.span(), "syntax syn cannot model (a verbatim bound) is outside the source model");
+            self.refuse(
+                tokens.span(),
+                "syntax syn cannot model (a verbatim bound) is outside the source model",
+            );
             return;
         }
         visit::visit_type_param_bound(self, bound);
@@ -684,7 +753,12 @@ impl<'ast> Visit<'ast> for Collector {
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         // An `include!`'s own argument is the edge, not evidence.
-        if mac.path.segments.last().is_some_and(|seg| seg.ident.unraw() == "include") {
+        if mac
+            .path
+            .segments
+            .last()
+            .is_some_and(|seg| seg.ident.unraw() == "include")
+        {
             self.include(&mac.tokens, mac.span());
             return;
         }
@@ -741,7 +815,11 @@ mod tests {
         let facts = analyze(src, &entry(), false, false).unwrap();
         assert_eq!(
             masked(src, &facts.masks),
-            vec!["#[cfg(test)] b: u8", "#[cfg(test)] let y = 1;", "#[cfg(test)] 0 => {}"]
+            vec![
+                "#[cfg(test)] b: u8",
+                "#[cfg(test)] let y = 1;",
+                "#[cfg(test)] 0 => {}"
+            ]
         );
     }
 
@@ -749,7 +827,10 @@ mod tests {
     fn inner_cfg_test_masks_only_its_module() {
         let src = "mod fixtures {\n    #![cfg(test)]\n    fn f() {}\n}\nfn production() {}\n";
         let facts = analyze(src, &entry(), false, false).unwrap();
-        assert_eq!(masked(src, &facts.masks), vec!["mod fixtures {\n    #![cfg(test)]\n    fn f() {}\n}"]);
+        assert_eq!(
+            masked(src, &facts.masks),
+            vec!["mod fixtures {\n    #![cfg(test)]\n    fn f() {}\n}"]
+        );
     }
 
     #[test]
@@ -775,7 +856,11 @@ mod tests {
             dir: PathBuf::from(dir),
             name: name.into(),
         };
-        let targets: Vec<(Target, bool)> = facts.edges.into_iter().map(|e| (e.target, e.test)).collect();
+        let targets: Vec<(Target, bool)> = facts
+            .edges
+            .into_iter()
+            .map(|e| (e.target, e.test))
+            .collect();
         assert_eq!(
             targets,
             vec![
@@ -800,7 +885,8 @@ mod tests {
 
     #[test]
     fn include_literals_resolve_from_the_file_even_inside_inline_modules() {
-        let src = "emit! { include!(\"shared.rs\"); }\nmod inner { const X: u8 = include!(\"v.rs\"); }\n";
+        let src =
+            "emit! { include!(\"shared.rs\"); }\nmod inner { const X: u8 = include!(\"v.rs\"); }\n";
         let facts = analyze(src, &entry(), false, false).unwrap();
         let targets: Vec<Target> = facts.edges.into_iter().map(|e| e.target).collect();
         assert_eq!(
@@ -815,14 +901,29 @@ mod tests {
     #[test]
     fn only_the_exact_out_dir_form_escapes_refusal() {
         let ok = "include!(concat!(env!(\"OUT_DIR\"), \"/gen.rs\"));\n";
-        assert!(analyze(ok, &entry(), false, false).unwrap().refusals.is_empty());
+        assert!(
+            analyze(ok, &entry(), false, false)
+                .unwrap()
+                .refusals
+                .is_empty()
+        );
         for bad in [
             "include!(concat!(\"a\", \"/gen.rs\"));\n",
             "include!(env!(\"MY_OUT_DIR_SOURCE\"));\n",
             "include!(choose!(\"OUT_DIR\", \"production.rs\"));\n",
         ] {
-            assert_eq!(analyze(bad, &entry(), false, false).unwrap().refusals.len(), 1, "{bad}");
-            assert!(analyze(bad, &entry(), true, false).unwrap().refusals.is_empty(), "{bad}");
+            assert_eq!(
+                analyze(bad, &entry(), false, false).unwrap().refusals.len(),
+                1,
+                "{bad}"
+            );
+            assert!(
+                analyze(bad, &entry(), true, false)
+                    .unwrap()
+                    .refusals
+                    .is_empty(),
+                "{bad}"
+            );
         }
     }
 
@@ -854,7 +955,8 @@ mod tests {
 
     #[test]
     fn bare_test_on_a_free_fn_is_recorded_separately() {
-        let src = "#[test]\nfn t() {}\n#[tokio::test]\nfn u() {}\n#[test(x)]\nfn v() {}\nfn p() {}\n";
+        let src =
+            "#[test]\nfn t() {}\n#[tokio::test]\nfn u() {}\n#[test(x)]\nfn v() {}\nfn p() {}\n";
         let facts = analyze(src, &entry(), false, false).unwrap();
         assert!(facts.masks.is_empty());
         assert_eq!(masked(src, &facts.bare_tests), vec!["#[test]\nfn t() {}"]);
@@ -874,10 +976,20 @@ mod tests {
         assert_eq!(facts.test_shadows.len(), 3, "{:?}", facts.test_shadows);
         // Not imports: a `test` path segment mid-path, a call argument.
         let quiet = "m! { use a::test::b; }\nn!(test);\n";
-        assert!(analyze(quiet, &entry(), false, false).unwrap().test_shadows.is_empty());
+        assert!(
+            analyze(quiet, &entry(), false, false)
+                .unwrap()
+                .test_shadows
+                .is_empty()
+        );
         // Test context does not count.
         let gated = "#[cfg(test)]\nm! { use a::test; }\n";
-        assert!(analyze(gated, &entry(), false, false).unwrap().test_shadows.is_empty());
+        assert!(
+            analyze(gated, &entry(), false, false)
+                .unwrap()
+                .test_shadows
+                .is_empty()
+        );
     }
 
     #[test]

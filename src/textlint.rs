@@ -512,6 +512,22 @@ fn haystack<'a>(
     }))
 }
 
+/// Whether `rule` matches per physical line at all, and this line's shape
+/// and TOML section are ones it scans.
+fn line_in_scope(rule: &Compiled, trimmed: &str, section: Option<&str>) -> bool {
+    // Whole-`use`-statement rules are handled in the join pass, not per
+    // physical line (a single-line `use` is one 1-line join).
+    if rule.join_wrapped_use {
+        return false;
+    }
+    if rule.table_row_only && !trimmed.starts_with('|') {
+        return false;
+    }
+    rule.in_toml_section
+        .as_deref()
+        .is_none_or(|want| section == Some(want))
+}
+
 /// Scan one file against its applicable rules; returns the indices (into
 /// `rules`) of the rules that admitted the file to matching, for `must_scan`.
 fn scan_file(
@@ -567,19 +583,9 @@ fn scan_file(
             section = Some(s);
         }
         for (ri, rule) in rules.iter().enumerate() {
-            if !file_ok[ri] || skip_after[ri][i] {
-                continue;
-            }
-            // Whole-`use`-statement rules are handled in the join pass below,
-            // not per physical line (a single-line `use` is one 1-line join).
-            if rule.join_wrapped_use {
-                continue;
-            }
-            if rule.table_row_only && !trimmed.starts_with('|') {
-                continue;
-            }
-            if let Some(want) = &rule.in_toml_section
-                && section.as_deref() != Some(want.as_str())
+            if !file_ok[ri]
+                || skip_after[ri][i]
+                || !line_in_scope(rule, trimmed, section.as_deref())
             {
                 continue;
             }
@@ -592,7 +598,14 @@ fn scan_file(
             // pattern then matches.
             if !eligible[ri]
                 && first_precondition[ri].is_none_or(|first| i >= first)
-                && holds_content(rule, is_rust(rel), raw, offset, regions.as_deref(), tested.as_deref())
+                && holds_content(
+                    rule,
+                    is_rust(rel),
+                    raw,
+                    offset,
+                    regions.as_deref(),
+                    tested.as_deref(),
+                )
             {
                 eligible[ri] = true;
             }
@@ -663,14 +676,19 @@ fn wholly_test(rule: &Compiled, tested: Option<&[bool]>, raw: &str, offset: usiz
     let Some(span) = t.get(offset..offset + raw.len()) else {
         return false;
     };
-    let mut content = raw.bytes().zip(span).filter(|(b, _)| !b.is_ascii_whitespace()).peekable();
+    let mut content = raw
+        .bytes()
+        .zip(span)
+        .filter(|(b, _)| !b.is_ascii_whitespace())
+        .peekable();
     if content.peek().is_some() {
         return content.all(|(_, masked)| *masked);
     }
     // Blank: the terminator is the byte after the line (absent at the end of
     // a file without a trailing newline, which then judges by the line alone).
     let end = (offset + raw.len() + 1).min(t.len());
-    t.get(offset..end).is_some_and(|s| !s.is_empty() && s.iter().all(|m| *m))
+    t.get(offset..end)
+        .is_some_and(|s| !s.is_empty() && s.iter().all(|m| *m))
 }
 
 /// The first line satisfying a position-sensitive `only_if_file_matches`
@@ -681,7 +699,12 @@ fn first_precondition_line(rule: &Compiled, lines: &[&str]) -> Option<usize> {
         return None;
     }
     let re = rule.only_if_file_matches.as_ref()?;
-    Some(lines.iter().position(|l| re.is_match(l)).unwrap_or(usize::MAX))
+    Some(
+        lines
+            .iter()
+            .position(|l| re.is_match(l))
+            .unwrap_or(usize::MAX),
+    )
 }
 
 /// Whether a physical line holds something a rule really scans: any
@@ -919,7 +942,11 @@ mod tests {
 
     /// Scan `src` with one rule under a test-code mask; return the hit lines
     /// and whether the rule admitted the file (`must_scan`'s notion).
-    fn run_masked(rule: TextlintRule, src: &str, mask: &crate::test_code::FileMask) -> (Vec<usize>, bool) {
+    fn run_masked(
+        rule: TextlintRule,
+        src: &str,
+        mask: &crate::test_code::FileMask,
+    ) -> (Vec<usize>, bool) {
         let compiled = compile(&[rule]).unwrap();
         let refs: Vec<&Compiled> = compiled.iter().collect();
         let mut out = Vec::new();
@@ -951,7 +978,10 @@ mod tests {
         let mut r = rule("forbidden");
         r.skip_test = true;
         let src = "fn t() { forbidden(); }\n";
-        assert_eq!(run_masked(r, src, &crate::test_code::FileMask::Test), (vec![], false));
+        assert_eq!(
+            run_masked(r, src, &crate::test_code::FileMask::Test),
+            (vec![], false)
+        );
     }
 
     #[test]
@@ -959,14 +989,20 @@ mod tests {
         let mut r = rule(r"^\s+$");
         r.skip_test = true;
         let src = "fn t() { forbidden(); }\n";
-        assert_eq!(run_masked(r.clone(), src, &crate::test_code::FileMask::Test).0, Vec::<usize>::new());
+        assert_eq!(
+            run_masked(r.clone(), src, &crate::test_code::FileMask::Test).0,
+            Vec::<usize>::new()
+        );
         let mixed = "fn p() {}\n#[cfg(test)]\nfn t() {}\n";
         let mask = masked_span(mixed, "#[cfg(test)]\nfn t() {}");
         assert_eq!(run_masked(r.clone(), mixed, &mask).0, Vec::<usize>::new());
         // An indented masked statement leaves its indentation unmasked.
         let indented = "fn p() {\n    #[cfg(test)] let fixture = 1;\n}\n";
         let mask = masked_span(indented, "#[cfg(test)] let fixture = 1;");
-        assert_eq!(run_masked(r.clone(), indented, &mask).0, Vec::<usize>::new());
+        assert_eq!(
+            run_masked(r.clone(), indented, &mask).0,
+            Vec::<usize>::new()
+        );
         // Blank lines inside a masked module are test code; blank lines
         // between production items are not.
         let blanks = "fn p() {}\n    \n#[cfg(test)]\nmod tests {\n    \n\n}\n";
@@ -974,8 +1010,14 @@ mod tests {
         assert_eq!(run_masked(r.clone(), blanks, &mask).0, vec![2]);
         let mut empty = rule("^$");
         empty.skip_test = true;
-        assert_eq!(run_masked(empty.clone(), blanks, &mask).0, Vec::<usize>::new());
-        assert_eq!(run_masked(empty, "a\n\nb\n", &crate::test_code::FileMask::Test).0, Vec::<usize>::new());
+        assert_eq!(
+            run_masked(empty.clone(), blanks, &mask).0,
+            Vec::<usize>::new()
+        );
+        assert_eq!(
+            run_masked(empty, "a\n\nb\n", &crate::test_code::FileMask::Test).0,
+            Vec::<usize>::new()
+        );
     }
 
     #[test]
@@ -1011,13 +1053,20 @@ mod tests {
         r.paths = vec!["src/**".into()];
         r.must_scan = vec!["src/a.rs".into(), "src/b.rs".into(), "docs/c.md".into()];
         let compiled = compile(&[r]).unwrap();
-        let files = vec![PathBuf::from("src/a.rs"), PathBuf::from("src/b.rs"), PathBuf::from("docs/c.md")];
+        let files = vec![
+            PathBuf::from("src/a.rs"),
+            PathBuf::from("src/b.rs"),
+            PathBuf::from("docs/c.md"),
+        ];
         let admitted = vec![HashSet::from([PathBuf::from("src/a.rs")])];
         let missing: Vec<PathBuf> = must_scan_violations(&compiled, &admitted, &files)
             .into_iter()
             .map(|v| v.file)
             .collect();
-        assert_eq!(missing, vec![PathBuf::from("src/b.rs"), PathBuf::from("docs/c.md")]);
+        assert_eq!(
+            missing,
+            vec![PathBuf::from("src/b.rs"), PathBuf::from("docs/c.md")]
+        );
     }
 
     /// Compile one rule and scan a source string; return (line, rule) hits.

@@ -49,7 +49,9 @@ pub(super) fn run_fixture_lint_phase(
     commands: bool,
 ) -> Result<(), DevError> {
     if fixtures.is_empty() {
-        output::detail("fixture-lint: not applicable (no [[fixture_lint]] entry runs under this claim)");
+        output::detail(
+            "fixture-lint: not applicable (no [[fixture_lint]] entry runs under this claim)",
+        );
         return Ok(());
     }
     let main_target = crate::build::project_info(Some(project_root))?.target_dir;
@@ -89,6 +91,42 @@ fn fail(name: &str, msg: &str) {
     output::error(&format!("fixture-lint {name}: {msg}"));
 }
 
+/// Seed the fixture's lock from the main one, then let cargo resolve it once,
+/// unlocked: it adds the fixture root and its path entries and prunes what
+/// the fixture does not use. `Ok(false)` when a failure was reported.
+fn seed_lock(
+    f: &FixtureLint,
+    dir: &Path,
+    main_lock_path: &Path,
+    fixture_lock_path: &Path,
+    env: &[(&str, &str)],
+    commands: bool,
+) -> Result<bool, DevError> {
+    let Ok(main_lock) = std::fs::read(main_lock_path) else {
+        fail(
+            &f.name,
+            &format!("seed_lock: no main lock at {}", main_lock_path.display()),
+        );
+        return Ok(false);
+    };
+    crate::atomic_write::replace(fixture_lock_path, &main_lock)?;
+    let args = crate::cargo::metadata::Query::resolving().cargo_args();
+    cargo_line(commands, &format!("cargo {}", args.join(" ")));
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let prep = output::run_cargo(&arg_refs, dir, env, Some(Phase::FixtureLint))?;
+    if !prep.success() {
+        fail(
+            &f.name,
+            &format!(
+                "resolving the seeded lock failed:\n{}",
+                String::from_utf8_lossy(&prep.stderr).trim_end()
+            ),
+        );
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 /// Lint one fixture under every variant. `Ok(Some(summary))` on a pass,
 /// `Ok(None)` on reported findings, `Err` on an operational failure.
 fn lint_fixture(
@@ -99,7 +137,11 @@ fn lint_fixture(
 ) -> Result<Option<String>, DevError> {
     output::status(&format!("fixture-lint {}", f.name));
     let dir = project_root.join(&f.path);
-    let target_dir = main_target.join(format!("{}{}", crate::target_namespace::FIXTURE_PREFIX, f.name));
+    let target_dir = main_target.join(format!(
+        "{}{}",
+        crate::target_namespace::FIXTURE_PREFIX,
+        f.name
+    ));
     let target_env = target_dir.to_string_lossy().into_owned();
     let env: Vec<(&str, &str)> = vec![("CARGO_TARGET_DIR", target_env.as_str())];
 
@@ -112,35 +154,24 @@ fn lint_fixture(
     // validate, then every lint runs `--locked` and the lock must not move.
     let main_meta = crate::cargo::metadata::load(
         project_root,
-        crate::cargo::metadata::Query { locked: true, ..Default::default() },
+        crate::cargo::metadata::Query {
+            locked: true,
+            ..Default::default()
+        },
         &[],
         Some(Phase::FixtureLint),
     )?;
     let main_lock_path = Path::new(&main_meta.workspace_root).join("Cargo.lock");
     let fixture_lock_path = dir.join("Cargo.lock");
-    if f.seed_lock {
-        let Ok(main_lock) = std::fs::read(&main_lock_path) else {
-            fail(&f.name, &format!("seed_lock: no main lock at {}", main_lock_path.display()));
-            return Ok(None);
-        };
-        crate::atomic_write::replace(&fixture_lock_path, &main_lock)?;
-        // Unlocked, once: cargo adds the fixture root and its path entries
-        // and prunes what the fixture does not use.
-        let args = crate::cargo::metadata::Query::resolving().cargo_args();
-        cargo_line(commands, &format!("cargo {}", args.join(" ")));
-        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let prep = output::run_cargo(&arg_refs, &dir, &env, Some(Phase::FixtureLint))?;
-        if !prep.success() {
-            fail(&f.name, &format!(
-                "resolving the seeded lock failed:\n{}",
-                String::from_utf8_lossy(&prep.stderr).trim_end()
-            ));
-            return Ok(None);
-        }
+    if f.seed_lock && !seed_lock(f, &dir, &main_lock_path, &fixture_lock_path, &env, commands)? {
+        return Ok(None);
     }
     let fixture_meta = crate::cargo::metadata::load(
         &dir,
-        crate::cargo::metadata::Query { locked: true, ..Default::default() },
+        crate::cargo::metadata::Query {
+            locked: true,
+            ..Default::default()
+        },
         &env,
         Some(Phase::FixtureLint),
     )?;
@@ -161,7 +192,11 @@ fn lint_fixture(
             Err(e) => findings.push(e),
         }
     }
-    findings.extend(lock::path_failures(&main_meta, &fixture_meta, &fixture.root_id));
+    findings.extend(lock::path_failures(
+        &main_meta,
+        &fixture_meta,
+        &fixture.root_id,
+    ));
 
     let manifest = match std::fs::read_to_string(project_root.join(&f.manifest))
         .map_err(|e| e.to_string())
@@ -187,7 +222,10 @@ fn lint_fixture(
         ok &= lint_variant(project_root, f, v, &fixture, &manifest, &env, commands)?;
     }
     if std::fs::read(&fixture_lock_path).ok() != lock_before {
-        fail(&f.name, "the fixture's Cargo.lock changed during the locked lint runs");
+        fail(
+            &f.name,
+            "the fixture's Cargo.lock changed during the locked lint runs",
+        );
         ok = false;
     }
     if !ok {
@@ -211,8 +249,13 @@ fn preflight(project_root: &Path, dir: &Path, f: &FixtureLint) -> Result<(), Str
     let root = project_root
         .canonicalize()
         .map_err(|e| format!("{}: {e}", project_root.display()))?;
-    for (key, p) in [("path", dir.to_path_buf()), ("manifest", project_root.join(&f.manifest))] {
-        let canonical = p.canonicalize().map_err(|e| format!("`{key}` {}: {e}", p.display()))?;
+    for (key, p) in [
+        ("path", dir.to_path_buf()),
+        ("manifest", project_root.join(&f.manifest)),
+    ] {
+        let canonical = p
+            .canonicalize()
+            .map_err(|e| format!("`{key}` {}: {e}", p.display()))?;
         if !canonical.starts_with(&root) || (key == "path" && canonical == root) {
             return Err(format!(
                 "`{key}` {} resolves to {}, outside the project tree (or the root itself)",
@@ -224,7 +267,8 @@ fn preflight(project_root: &Path, dir: &Path, f: &FixtureLint) -> Result<(), Str
     let manifest_path = dir.join("Cargo.toml");
     let text = std::fs::read_to_string(&manifest_path)
         .map_err(|e| format!("{}: {e}", manifest_path.display()))?;
-    let toml: toml::Table = toml::from_str(&text).map_err(|e| format!("{}: {e}", manifest_path.display()))?;
+    let toml: toml::Table =
+        toml::from_str(&text).map_err(|e| format!("{}: {e}", manifest_path.display()))?;
     if !toml.contains_key("workspace") || !toml.contains_key("package") {
         return Err(format!(
             "{} must be its own single-package workspace: a [package] with an empty [workspace] table",
@@ -236,8 +280,12 @@ fn preflight(project_root: &Path, dir: &Path, f: &FixtureLint) -> Result<(), Str
         // tree on every run.
         let lock = f.path.join("Cargo.lock");
         let lock_str = lock.to_string_lossy();
-        let ignored = output::run_captured("git", &["check-ignore", "-q", lock_str.as_ref()], project_root)
-            .map_err(|e| format!("git check-ignore: {e}"))?;
+        let ignored = output::run_captured(
+            "git",
+            &["check-ignore", "-q", lock_str.as_ref()],
+            project_root,
+        )
+        .map_err(|e| format!("git check-ignore: {e}"))?;
         if !ignored.success() {
             return Err(format!(
                 "seed_lock rewrites {} on every run, so it must be gitignored - add it to .gitignore",
@@ -266,7 +314,11 @@ fn shape(dir: &Path, meta: &crate::cargo::metadata::CargoMetadata) -> Result<Fix
         .targets
         .iter()
         .find(|t| t.kind.iter().any(|k| lib_kinds.contains(&k.as_str())));
-    let bins: Vec<_> = pkg.targets.iter().filter(|t| t.kind.iter().any(|k| k == "bin")).collect();
+    let bins: Vec<_> = pkg
+        .targets
+        .iter()
+        .filter(|t| t.kind.iter().any(|k| k == "bin"))
+        .collect();
     let (selector, target, is_lib) = match (lib, bins.as_slice()) {
         (Some(t), _) => (vec!["--lib".to_owned()], t, true),
         (None, [t]) => (vec!["--bin".to_owned(), t.name.clone()], *t, false),
@@ -292,7 +344,12 @@ fn relative(dir: &Path, path: &Path) -> Option<String> {
     let dir = dir.canonicalize().ok()?;
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let rel = path.strip_prefix(&dir).ok()?;
-    Some(rel.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/"))
+    Some(
+        rel.components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/"),
+    )
 }
 
 /// Every `.rs` file under the fixture dir, except its own `target/`.
@@ -321,8 +378,10 @@ fn on_disk(dir: &Path) -> Vec<PathBuf> {
 /// listed file is reached unconditionally from the target root.
 fn inventory(fixture: &Fixture, manifest: &manifest::Manifest) -> Vec<String> {
     let mut findings = Vec::new();
-    let disk: std::collections::BTreeSet<String> =
-        on_disk(&fixture.dir).iter().filter_map(|p| relative(&fixture.dir, p)).collect();
+    let disk: std::collections::BTreeSet<String> = on_disk(&fixture.dir)
+        .iter()
+        .filter_map(|p| relative(&fixture.dir, p))
+        .collect();
     for f in disk.iter().filter(|f| !manifest.files.contains_key(*f)) {
         findings.push(format!("{f} is on disk but not in the manifest"));
     }
@@ -331,9 +390,16 @@ fn inventory(fixture: &Fixture, manifest: &manifest::Manifest) -> Vec<String> {
     }
     let w = walk::walk(&fixture.target.1);
     findings.extend(w.refusals.iter().map(|r| format!("module walk: {r}")));
-    let reached: std::collections::BTreeSet<String> =
-        w.reached.iter().filter_map(|p| relative(&fixture.dir, p)).collect();
-    for f in manifest.files.keys().filter(|f| disk.contains(*f) && !reached.contains(*f)) {
+    let reached: std::collections::BTreeSet<String> = w
+        .reached
+        .iter()
+        .filter_map(|p| relative(&fixture.dir, p))
+        .collect();
+    for f in manifest
+        .files
+        .keys()
+        .filter(|f| disk.contains(*f) && !reached.contains(*f))
+    {
         findings.push(format!(
             "{f} is not reached from {} through unconditional `mod` declarations - it may never compile",
             fixture.target.0
@@ -355,8 +421,11 @@ fn lint_variant(
     let label = format!("{}/{}", f.name, v.name);
     output::status(&format!("fixture-lint {label}"));
     let root = project_root.to_string_lossy();
-    let values: Vec<(String, String)> =
-        v.env.iter().map(|(k, val)| (k.clone(), val.replace("{root}", &root))).collect();
+    let values: Vec<(String, String)> = v
+        .env
+        .iter()
+        .map(|(k, val)| (k.clone(), val.replace("{root}", &root)))
+        .collect();
     let mut env: Vec<(&str, &str)> = base_env.to_vec();
     env.extend(values.iter().map(|(k, val)| (k.as_str(), val.as_str())));
     let unset: Vec<&str> = v.unset.iter().map(String::as_str).collect();
@@ -368,11 +437,14 @@ fn lint_variant(
 
     let clean = run(&["clean".into(), "-p".into(), fixture.root_name.clone()])?;
     if !clean.success() {
-        fail(&label, &format!(
-            "cargo clean -p {} failed, so freshness cannot be guaranteed:\n{}",
-            fixture.root_name,
-            String::from_utf8_lossy(&clean.stderr).trim_end()
-        ));
+        fail(
+            &label,
+            &format!(
+                "cargo clean -p {} failed, so freshness cannot be guaranteed:\n{}",
+                fixture.root_name,
+                String::from_utf8_lossy(&clean.stderr).trim_end()
+            ),
+        );
         return Ok(false);
     }
 
@@ -409,7 +481,11 @@ fn lint_variant(
         .filter(|d| !d.is_error() && d.package_id.as_deref() == Some(root_id.as_str()))
         .map(|d| {
             let file = d.site.as_ref().and_then(|s| {
-                let p = if s.file.is_relative() { fixture.dir.join(&s.file) } else { s.file.clone() };
+                let p = if s.file.is_relative() {
+                    fixture.dir.join(&s.file)
+                } else {
+                    s.file.clone()
+                };
                 relative(&fixture.dir, &p).filter(|r| manifest.files.contains_key(r))
             });
             let at = d.site.as_ref().map_or_else(
@@ -454,14 +530,17 @@ fn fresh_artifact(stdout: &str, fixture: &Fixture) -> bool {
         test: bool,
     }
     let root = fixture.root_id.to_string();
-    stdout.lines().filter_map(|l| serde_json::from_str::<Artifact>(l).ok()).any(|a| {
-        a.reason == "compiler-artifact"
-            && a.package_id == root
-            && a.target.name == fixture.target.0
-            && a.target.kind.iter().any(|k| (k == "bin") != fixture.is_lib)
-            && !a.fresh
-            && !a.profile.is_some_and(|p| p.test)
-    })
+    stdout
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Artifact>(l).ok())
+        .any(|a| {
+            a.reason == "compiler-artifact"
+                && a.package_id == root
+                && a.target.name == fixture.target.0
+                && a.target.kind.iter().any(|k| (k == "bin") != fixture.is_lib)
+                && !a.fresh
+                && !a.profile.is_some_and(|p| p.test)
+        })
 }
 
 /// Bytes under a directory, best-effort (a report figure).

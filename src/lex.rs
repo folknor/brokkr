@@ -191,7 +191,9 @@ fn opens_generic_args(toks: &[(usize, usize, TokenKind)], from: usize) -> bool {
         .find(|(_, _, k)| {
             !matches!(
                 k,
-                TokenKind::Whitespace | TokenKind::LineComment { .. } | TokenKind::BlockComment { .. }
+                TokenKind::Whitespace
+                    | TokenKind::LineComment { .. }
+                    | TokenKind::BlockComment { .. }
             )
         })
         .is_some_and(|(_, _, k)| *k == TokenKind::Lt)

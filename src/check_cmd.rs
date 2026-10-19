@@ -14,10 +14,10 @@ use conventions::{
 use reporter::Reporter;
 
 use crate::test_runner::hash_file;
-pub(crate) use verdict::{TestTiming, emit_timings};
 #[cfg(test)]
 use verdict::verdict_context;
 use verdict::{FinishInput, finish_check, run_stop};
+pub(crate) use verdict::{TestTiming, emit_timings};
 
 include!("check_cmd/phase_type.rs");
 include!("check_cmd/phase.rs");
@@ -25,11 +25,11 @@ include!("check_cmd/diagnostics.rs");
 include!("check_cmd/clippy_cmd.rs");
 include!("check_cmd/test_phase.rs");
 include!("check_cmd/concurrency.rs");
+#[cfg(test)]
+pub(crate) use crate::build_purpose::environment::build_test_env;
 pub(crate) use crate::build_purpose::environment::{
     isolated_target_dir, merged_env, sweep_cargo_env, sweep_runtime_env,
 };
-#[cfg(test)]
-pub(crate) use crate::build_purpose::environment::build_test_env;
 #[cfg(test)]
 use crate::build_purpose::features;
 pub(crate) use crate::build_purpose::features::FeatureOracle;
@@ -38,8 +38,8 @@ pub(crate) use crate::build_purpose::features::feature_fixture;
 pub(crate) use crate::build_purpose::requests::SupportRequest;
 pub(crate) use selection::{
     AdmissionNote, AdmissionRule, Attempt, CheckSelections, DeclaredShape, ForwardedArgs,
-    GatedPhases, MemberSelection, LaneEntry, PackageSource, PhaseSelection, ReachLedger, ReproLine, Resolution,
-    ResolutionRun, Selection, SelectionPhase, ShapeId, feature_drop_lines, join_notes,
+    GatedPhases, LaneEntry, MemberSelection, PackageSource, PhaseSelection, ReachLedger, ReproLine,
+    Resolution, ResolutionRun, Selection, SelectionPhase, ShapeId, feature_drop_lines, join_notes,
     reject_direct_execution_args, reject_forwarded_package_selectors, resolve_invocation_sweeps,
     resolve_planned_sweep,
 };

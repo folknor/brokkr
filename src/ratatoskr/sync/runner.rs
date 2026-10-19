@@ -11,10 +11,10 @@ use crate::clean::layout::ProjectState;
 use crate::config::project_config::ratatoskr::RatatoskrConfig;
 use crate::error::DevError;
 use crate::git;
+use crate::harness_build::HarnessBuild;
 use crate::lockfile;
 use crate::output;
 use crate::output::format_duration;
-use crate::harness_build::HarnessBuild;
 use crate::ratatoskr::discover::{self, ScriptInfo, ScriptKind};
 use crate::ratatoskr::saehrimnir::{
     ManagedMock, MockArtifactScope, MockOutcome, MockPaths, resolve_fixture,

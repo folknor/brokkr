@@ -1736,7 +1736,13 @@ pine = { path = "p/bare/strategy.pine", xxh128 = "aa" }
 
     /// `verify_probe` with a resolved feed, the shape every caller hands it.
     fn verify(id: &str, pin: &Pin, root: &Path) -> Result<VerifiedProbe, DevError> {
-        verify_probe(id, pin, feed_decl("f"), root, &mut preflight::DigestSession::new(root))
+        verify_probe(
+            id,
+            pin,
+            feed_decl("f"),
+            root,
+            &mut preflight::DigestSession::new(root),
+        )
     }
 
     #[test]
@@ -1789,7 +1795,10 @@ pine = { path = "p/bare/strategy.pine", xxh128 = "aa" }
             },
         );
         let session = || preflight::DigestSession::new(&root);
-        assert_eq!(verify_harness_files(&registry, &root, &mut session()).unwrap(), 1);
+        assert_eq!(
+            verify_harness_files(&registry, &root, &mut session()).unwrap(),
+            1
+        );
 
         // An edit the pin does not know about is refused before any run.
         std::fs::write(

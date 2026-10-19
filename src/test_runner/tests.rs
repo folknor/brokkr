@@ -937,21 +937,37 @@ fn suites_on(source: &StreamSource, suites: &[&[(&str, TestResult)]]) -> Executi
     let mut outcome = ExecutionOutcome::default();
     let mut emit = |event: ObsEvent| outcome.observe_event(1, source.clone(), &event);
     for suite in suites {
-        emit(ObsEvent::SuiteStarted { test_count: suite.len() as u64 });
+        emit(ObsEvent::SuiteStarted {
+            test_count: suite.len() as u64,
+        });
         let mut counts = (0, 0, 0);
         for (name, result) in *suite {
-            emit(ObsEvent::Started { name: (*name).into() });
-            emit(ObsEvent::Finished { name: (*name).into(), result: *result });
+            emit(ObsEvent::Started {
+                name: (*name).into(),
+            });
+            emit(ObsEvent::Finished {
+                name: (*name).into(),
+                result: *result,
+            });
             match result {
                 TestResult::Ok => counts.0 += 1,
                 TestResult::Ignored => counts.2 += 1,
                 _ => counts.1 += 1,
             }
         }
-        emit(ObsEvent::SuiteFinished { passed: counts.0, failed: counts.1, ignored: counts.2 });
+        emit(ObsEvent::SuiteFinished {
+            passed: counts.0,
+            failed: counts.1,
+            ignored: counts.2,
+        });
     }
-    emit(ObsEvent::StreamEnded { end: StreamEnd::Eof });
-    emit(ObsEvent::Exited { code: Some(0), signal: None });
+    emit(ObsEvent::StreamEnded {
+        end: StreamEnd::Eof,
+    });
+    emit(ObsEvent::Exited {
+        code: Some(0),
+        signal: None,
+    });
     outcome
 }
 
@@ -961,7 +977,10 @@ fn suites_on(source: &StreamSource, suites: &[&[(&str, TestResult)]]) -> Executi
 #[test]
 fn cargo_stream_allows_one_name_in_two_binaries() {
     let ok = TestResult::Ok;
-    let outcome = suites_on(&StreamSource::Cargo,&[&[("same", ok), ("a", ok)], &[("same", ok)]]);
+    let outcome = suites_on(
+        &StreamSource::Cargo,
+        &[&[("same", ok), ("a", ok)], &[("same", ok)]],
+    );
     assert_eq!(lane_verdict(&outcome), LaneVerdict::Pass);
     assert!(outcome.structural_reasons().is_empty());
     assert_eq!(outcome.counts(), (3, 0, 0));
@@ -977,12 +996,15 @@ fn cargo_stream_allows_one_name_in_two_binaries() {
 #[test]
 fn one_binary_reporting_a_name_in_two_suites_fails_and_says_why() {
     let ok = TestResult::Ok;
-    let outcome = suites_on(&StreamSource::Process,&[&[("a", ok)], &[("a", ok)]]);
+    let outcome = suites_on(&StreamSource::Process, &[&[("a", ok)], &[("a", ok)]]);
     assert_eq!(lane_verdict(&outcome), LaneVerdict::Fail);
     assert_eq!(outcome.terminal_count(), 2);
     let reasons = outcome.structural_reasons();
     assert_eq!(reasons.len(), 1, "{reasons:?}");
-    assert!(reasons[0].contains("a was reported again in a later suite"), "{reasons:?}");
+    assert!(
+        reasons[0].contains("a was reported again in a later suite"),
+        "{reasons:?}"
+    );
 }
 
 /// Cargo killed after every suite reported green fails the lane, and the
@@ -990,12 +1012,22 @@ fn one_binary_reporting_a_name_in_two_suites_fails_and_says_why() {
 #[test]
 fn an_unexplained_exit_after_green_suites_names_itself() {
     let mut outcome = suites_on(&StreamSource::Cargo, &[&[("a", TestResult::Ok)]]);
-    outcome.observe_event(1, StreamSource::Cargo, &ObsEvent::Exited { code: None, signal: Some(9) });
+    outcome.observe_event(
+        1,
+        StreamSource::Cargo,
+        &ObsEvent::Exited {
+            code: None,
+            signal: Some(9),
+        },
+    );
     assert_eq!(lane_verdict(&outcome), LaneVerdict::Fail);
     assert!(outcome.record_reasons().is_empty());
     let exits = outcome.exit_reasons();
     assert_eq!(exits.len(), 1, "{exits:?}");
-    assert!(exits[0].contains("killed by signal 9 though no test failed"), "{exits:?}");
+    assert!(
+        exits[0].contains("killed by signal 9 though no test failed"),
+        "{exits:?}"
+    );
 }
 
 /// Cargo's stream carries no test when harnesses are isolated, and its own
@@ -1004,35 +1036,81 @@ fn an_unexplained_exit_after_green_suites_names_itself() {
 #[test]
 fn exit_reasons_cover_cargo_and_name_a_mid_test_suspect() {
     let mut outcome = ExecutionOutcome::default();
-    let harness = StreamSource::Harness { executable: "it".into() };
+    let harness = StreamSource::Harness {
+        executable: "it".into(),
+    };
     for event in [
         ObsEvent::SuiteStarted { test_count: 1 },
         ObsEvent::Started { name: "a".into() },
-        ObsEvent::Finished { name: "a".into(), result: TestResult::Ok },
-        ObsEvent::SuiteFinished { passed: 1, failed: 0, ignored: 0 },
+        ObsEvent::Finished {
+            name: "a".into(),
+            result: TestResult::Ok,
+        },
+        ObsEvent::SuiteFinished {
+            passed: 1,
+            failed: 0,
+            ignored: 0,
+        },
     ] {
         outcome.observe_event(2, harness.clone(), &event);
     }
-    outcome.observe_event(1, StreamSource::Cargo, &ObsEvent::Exited { code: Some(101), signal: None });
+    outcome.observe_event(
+        1,
+        StreamSource::Cargo,
+        &ObsEvent::Exited {
+            code: Some(101),
+            signal: None,
+        },
+    );
     let exits = outcome.exit_reasons();
     assert_eq!(exits.len(), 1, "{exits:?}");
-    assert!(exits[0].contains("cargo's shared stream): the process exited with code 101"), "{exits:?}");
+    assert!(
+        exits[0].contains("cargo's shared stream): the process exited with code 101"),
+        "{exits:?}"
+    );
 
-    outcome.observe_event(3, harness.clone(), &ObsEvent::SuiteStarted { test_count: 1 });
+    outcome.observe_event(
+        3,
+        harness.clone(),
+        &ObsEvent::SuiteStarted { test_count: 1 },
+    );
     outcome.observe_event(3, harness.clone(), &ObsEvent::Started { name: "b".into() });
-    outcome.observe_event(3, harness, &ObsEvent::Exited { code: None, signal: Some(6) });
+    outcome.observe_event(
+        3,
+        harness,
+        &ObsEvent::Exited {
+            code: None,
+            signal: Some(6),
+        },
+    );
     let exits = outcome.exit_reasons();
     assert_eq!(exits.len(), 1, "{exits:?}");
-    assert!(exits[0].contains("killed by signal 6 while running b"), "{exits:?}");
+    assert!(
+        exits[0].contains("killed by signal 6 while running b"),
+        "{exits:?}"
+    );
 
     // A red test in another harness explains cargo's exit, not this one's.
     for event in [
         ObsEvent::SuiteStarted { test_count: 1 },
         ObsEvent::Started { name: "c".into() },
-        ObsEvent::Finished { name: "c".into(), result: TestResult::Failed },
-        ObsEvent::SuiteFinished { passed: 0, failed: 1, ignored: 0 },
+        ObsEvent::Finished {
+            name: "c".into(),
+            result: TestResult::Failed,
+        },
+        ObsEvent::SuiteFinished {
+            passed: 0,
+            failed: 1,
+            ignored: 0,
+        },
     ] {
-        outcome.observe_event(4, StreamSource::Harness { executable: "other".into() }, &event);
+        outcome.observe_event(
+            4,
+            StreamSource::Harness {
+                executable: "other".into(),
+            },
+            &event,
+        );
     }
     let exits = outcome.exit_reasons();
     assert_eq!(exits.len(), 1, "{exits:?}");
@@ -1046,15 +1124,30 @@ fn a_repeated_result_in_one_suite_fails_cargo_stream_too() {
     for event in [
         ObsEvent::SuiteStarted { test_count: 1 },
         ObsEvent::Started { name: "a".into() },
-        ObsEvent::Finished { name: "a".into(), result: TestResult::Ok },
-        ObsEvent::Finished { name: "a".into(), result: TestResult::Ok },
-        ObsEvent::SuiteFinished { passed: 2, failed: 0, ignored: 0 },
+        ObsEvent::Finished {
+            name: "a".into(),
+            result: TestResult::Ok,
+        },
+        ObsEvent::Finished {
+            name: "a".into(),
+            result: TestResult::Ok,
+        },
+        ObsEvent::SuiteFinished {
+            passed: 2,
+            failed: 0,
+            ignored: 0,
+        },
     ] {
         outcome.observe_event(1, StreamSource::Cargo, &event);
     }
     assert_eq!(lane_verdict(&outcome), LaneVerdict::Fail);
     let reasons = outcome.structural_reasons();
-    assert!(reasons.iter().any(|r| r.contains("a reported a second result")), "{reasons:?}");
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r.contains("a reported a second result")),
+        "{reasons:?}"
+    );
 }
 
 /// A start inside an open suite is malformed, and must not open a fresh
@@ -1065,15 +1158,28 @@ fn an_overlapping_suite_start_keeps_the_open_namespace() {
     for event in [
         ObsEvent::SuiteStarted { test_count: 1 },
         ObsEvent::Started { name: "a".into() },
-        ObsEvent::Finished { name: "a".into(), result: TestResult::Ok },
+        ObsEvent::Finished {
+            name: "a".into(),
+            result: TestResult::Ok,
+        },
         ObsEvent::SuiteStarted { test_count: 1 },
         ObsEvent::Started { name: "a".into() },
     ] {
         outcome.observe_event(1, StreamSource::Cargo, &event);
     }
     let reasons = outcome.structural_reasons();
-    assert!(reasons.iter().any(|r| r.contains("a suite started inside an open suite")), "{reasons:?}");
-    assert!(reasons.iter().any(|r| r.contains("a started again after its result")), "{reasons:?}");
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r.contains("a suite started inside an open suite")),
+        "{reasons:?}"
+    );
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r.contains("a started again after its result")),
+        "{reasons:?}"
+    );
 }
 
 /// A kill can reach a stream before its first record, under a placeholder
@@ -1081,13 +1187,45 @@ fn an_overlapping_suite_start_keeps_the_open_namespace() {
 #[test]
 fn a_streams_records_name_its_source_over_an_earlier_placeholder() {
     let mut outcome = ExecutionOutcome::default();
-    outcome.observe_event(1, StreamSource::Process, &ObsEvent::Exited { code: Some(0), signal: None });
+    outcome.observe_event(
+        1,
+        StreamSource::Process,
+        &ObsEvent::Exited {
+            code: Some(0),
+            signal: None,
+        },
+    );
     let ok = TestResult::Ok;
     for suite in [["same"], ["same"]] {
-        outcome.observe_event(1, StreamSource::Cargo, &ObsEvent::SuiteStarted { test_count: 1 });
-        outcome.observe_event(1, StreamSource::Cargo, &ObsEvent::Started { name: suite[0].into() });
-        outcome.observe_event(1, StreamSource::Cargo, &ObsEvent::Finished { name: suite[0].into(), result: ok });
-        outcome.observe_event(1, StreamSource::Cargo, &ObsEvent::SuiteFinished { passed: 1, failed: 0, ignored: 0 });
+        outcome.observe_event(
+            1,
+            StreamSource::Cargo,
+            &ObsEvent::SuiteStarted { test_count: 1 },
+        );
+        outcome.observe_event(
+            1,
+            StreamSource::Cargo,
+            &ObsEvent::Started {
+                name: suite[0].into(),
+            },
+        );
+        outcome.observe_event(
+            1,
+            StreamSource::Cargo,
+            &ObsEvent::Finished {
+                name: suite[0].into(),
+                result: ok,
+            },
+        );
+        outcome.observe_event(
+            1,
+            StreamSource::Cargo,
+            &ObsEvent::SuiteFinished {
+                passed: 1,
+                failed: 0,
+                ignored: 0,
+            },
+        );
     }
     assert!(outcome.structural_reasons().is_empty());
 }

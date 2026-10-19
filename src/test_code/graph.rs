@@ -150,7 +150,9 @@ impl Walk {
             };
             match facts::analyze(&src, &p.entry, p.test, p.splice) {
                 Err(_) if p.test => self.occurrence(canon, &shown).test = true,
-                Err(error) => self.refusals.push(format!("{shown}: does not parse: {error}")),
+                Err(error) => self
+                    .refusals
+                    .push(format!("{shown}: does not parse: {error}")),
                 Ok(found) => self.record(root, canon, &shown, p.test, found),
             }
         }
@@ -177,14 +179,26 @@ impl Walk {
         self.refusals
             .extend(found.refusals.into_iter().map(|r| format!("{shown}:{r}")));
         self.saw_bare |= !found.bare_refusals.is_empty() || found.edges.iter().any(|e| e.bare);
-        self.bare_refusals
-            .extend(found.bare_refusals.into_iter().map(|r| format!("{shown}:{r}")));
-        self.test_shadows
-            .extend(found.test_shadows.into_iter().map(|s| format!("{shown}:{s}")));
+        self.bare_refusals.extend(
+            found
+                .bare_refusals
+                .into_iter()
+                .map(|r| format!("{shown}:{r}")),
+        );
+        self.test_shadows.extend(
+            found
+                .test_shadows
+                .into_iter()
+                .map(|s| format!("{shown}:{s}")),
+        );
         self.evidence
             .extend(found.evidence.into_iter().map(|e| (shown.to_owned(), e)));
-        self.bare_evidence
-            .extend(found.bare_evidence.into_iter().map(|e| (shown.to_owned(), e)));
+        self.bare_evidence.extend(
+            found
+                .bare_evidence
+                .into_iter()
+                .map(|e| (shown.to_owned(), e)),
+        );
         for edge in found.edges {
             self.follow(root, shown, edge);
         }
@@ -239,7 +253,10 @@ impl Walk {
 }
 
 fn display(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root).unwrap_or(path).display().to_string()
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
 }
 
 /// Sort and merge into disjoint ascending spans.
@@ -315,7 +332,9 @@ fn names_file(evidence: &Evidence, file: &Path) -> bool {
 fn evidence_site(from: &str, evidence: &Evidence) -> String {
     match evidence {
         Evidence::ModName { name, at } => format!("{from}:{at} declares mod {name} in macro input"),
-        Evidence::PathLiteral { value, at } => format!("{from}:{at} spells {value:?} in macro input"),
+        Evidence::PathLiteral { value, at } => {
+            format!("{from}:{at} spells {value:?} in macro input")
+        }
     }
 }
 
@@ -451,11 +470,15 @@ mod tests {
             })
             .collect();
         let files: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
-        classify(dir, &roots, &files, &|p: &Path| std::fs::read_to_string(p).map_err(|e| e.to_string()))
+        classify(dir, &roots, &files, &|p: &Path| {
+            std::fs::read_to_string(p).map_err(|e| e.to_string())
+        })
     }
 
     fn production(spans: &[(usize, usize)]) -> Option<FileMask> {
-        Some(FileMask::Production(spans.iter().map(|&(a, b)| a..b).collect()))
+        Some(FileMask::Production(
+            spans.iter().map(|&(a, b)| a..b).collect(),
+        ))
     }
 
     #[test]
@@ -469,10 +492,18 @@ mod tests {
                 ("src/tests/helper.rs", "fn h() {}\n"),
             ],
         );
-        let c = run(&dir, &[("src/lib.rs", false)], &["src/a.rs", "src/tests.rs", "src/tests/helper.rs"]).unwrap();
+        let c = run(
+            &dir,
+            &[("src/lib.rs", false)],
+            &["src/a.rs", "src/tests.rs", "src/tests/helper.rs"],
+        )
+        .unwrap();
         assert_eq!(c.mask(Path::new("src/a.rs")).cloned(), production(&[]));
         assert_eq!(c.mask(Path::new("src/tests.rs")), Some(&FileMask::Test));
-        assert_eq!(c.mask(Path::new("src/tests/helper.rs")), Some(&FileMask::Test));
+        assert_eq!(
+            c.mask(Path::new("src/tests/helper.rs")),
+            Some(&FileMask::Test)
+        );
     }
 
     #[test]
@@ -480,7 +511,10 @@ mod tests {
         let dir = tree(
             "shared",
             &[
-                ("src/lib.rs", "#[cfg(test)]\n#[path = \"shared.rs\"]\nmod fixtures;\ninclude!(\"shared.rs\");\n"),
+                (
+                    "src/lib.rs",
+                    "#[cfg(test)]\n#[path = \"shared.rs\"]\nmod fixtures;\ninclude!(\"shared.rs\");\n",
+                ),
                 ("src/shared.rs", "fn s() {}\n"),
             ],
         );
@@ -497,7 +531,12 @@ mod tests {
                 ("tests/it.rs", "#[path = \"../src/lib.rs\"]\nmod subject;\n"),
             ],
         );
-        let c = run(&dir, &[("src/lib.rs", false), ("tests/it.rs", true)], &["src/lib.rs", "tests/it.rs"]).unwrap();
+        let c = run(
+            &dir,
+            &[("src/lib.rs", false), ("tests/it.rs", true)],
+            &["src/lib.rs", "tests/it.rs"],
+        )
+        .unwrap();
         assert_eq!(c.mask(Path::new("src/lib.rs")).cloned(), production(&[]));
         assert_eq!(c.mask(Path::new("tests/it.rs")), Some(&FileMask::Test));
     }
@@ -513,8 +552,16 @@ mod tests {
                 ("src/body.rs", body),
             ],
         );
-        let c = run(&dir, &[("src/lib.rs", false), ("src/main.rs", false)], &["src/body.rs"]).unwrap();
-        assert_eq!(c.mask(Path::new("src/body.rs")).cloned(), production(&[(0, 22)]));
+        let c = run(
+            &dir,
+            &[("src/lib.rs", false), ("src/main.rs", false)],
+            &["src/body.rs"],
+        )
+        .unwrap();
+        assert_eq!(
+            c.mask(Path::new("src/body.rs")).cloned(),
+            production(&[(0, 22)])
+        );
     }
 
     #[test]
@@ -522,13 +569,27 @@ mod tests {
         let dir = tree(
             "non_mod_rs",
             &[
-                ("src/lib.rs", "mod outer;\n#[cfg(test)]\n#[path = \"thread_files/child.rs\"]\nmod fixture;\n"),
-                ("src/outer.rs", "#[path = \"thread_files\"]\nmod thread {\n    mod child;\n}\n"),
+                (
+                    "src/lib.rs",
+                    "mod outer;\n#[cfg(test)]\n#[path = \"thread_files/child.rs\"]\nmod fixture;\n",
+                ),
+                (
+                    "src/outer.rs",
+                    "#[path = \"thread_files\"]\nmod thread {\n    mod child;\n}\n",
+                ),
                 ("src/thread_files/child.rs", "fn c() {}\n"),
             ],
         );
-        let c = run(&dir, &[("src/lib.rs", false)], &["src/thread_files/child.rs"]).unwrap();
-        assert_eq!(c.mask(Path::new("src/thread_files/child.rs")).cloned(), production(&[]));
+        let c = run(
+            &dir,
+            &[("src/lib.rs", false)],
+            &["src/thread_files/child.rs"],
+        )
+        .unwrap();
+        assert_eq!(
+            c.mask(Path::new("src/thread_files/child.rs")).cloned(),
+            production(&[])
+        );
     }
 
     #[test]
@@ -536,31 +597,54 @@ mod tests {
         let dir = tree(
             "include_entry",
             &[
-                ("src/lib.rs", "include!(\"fragments/body.rs\");\n#[cfg(test)]\n#[path = \"fragments/child.rs\"]\nmod fixtures;\n"),
+                (
+                    "src/lib.rs",
+                    "include!(\"fragments/body.rs\");\n#[cfg(test)]\n#[path = \"fragments/child.rs\"]\nmod fixtures;\n",
+                ),
                 ("src/fragments/body.rs", "mod child;\n"),
                 ("src/fragments/child.rs", "fn c() {}\n"),
             ],
         );
         let c = run(&dir, &[("src/lib.rs", false)], &["src/fragments/child.rs"]).unwrap();
-        assert_eq!(c.mask(Path::new("src/fragments/child.rs")).cloned(), production(&[]));
+        assert_eq!(
+            c.mask(Path::new("src/fragments/child.rs")).cloned(),
+            production(&[])
+        );
     }
 
     #[test]
     fn unreachable_file_is_production_with_its_own_masks() {
-        let dir = tree("unreachable", &[("src/lib.rs", ""), ("src/dead.rs", "#[cfg(test)]\nfn t() {}\n")]);
+        let dir = tree(
+            "unreachable",
+            &[
+                ("src/lib.rs", ""),
+                ("src/dead.rs", "#[cfg(test)]\nfn t() {}\n"),
+            ],
+        );
         let c = run(&dir, &[("src/lib.rs", false)], &["src/dead.rs"]).unwrap();
-        assert_eq!(c.mask(Path::new("src/dead.rs")).cloned(), production(&[(0, 22)]));
+        assert_eq!(
+            c.mask(Path::new("src/dead.rs")).cloned(),
+            production(&[(0, 22)])
+        );
     }
 
     #[test]
     fn macro_input_naming_the_file_vetoes_a_test_classification() {
         let files = [
-            ("src/lib.rs", "declare!(mod shared);\n#[cfg(test)]\n#[path = \"shared.rs\"]\nmod fixtures;\n#[cfg(test)]\nmod state;\nfn f() { log!(\"state\"); }\n"),
+            (
+                "src/lib.rs",
+                "declare!(mod shared);\n#[cfg(test)]\n#[path = \"shared.rs\"]\nmod fixtures;\n#[cfg(test)]\nmod state;\nfn f() { log!(\"state\"); }\n",
+            ),
             ("src/shared.rs", "fn s() {}\n"),
             ("src/state.rs", "fn t() {}\n"),
         ];
         let dir = tree("veto", &files);
-        let c = run(&dir, &[("src/lib.rs", false)], &["src/shared.rs", "src/state.rs"]).unwrap();
+        let c = run(
+            &dir,
+            &[("src/lib.rs", false)],
+            &["src/shared.rs", "src/state.rs"],
+        )
+        .unwrap();
         assert_eq!(c.mask(Path::new("src/shared.rs")).cloned(), production(&[]));
         // A bare identifier or word in a string is not evidence.
         assert_eq!(c.mask(Path::new("src/state.rs")), Some(&FileMask::Test));
@@ -587,7 +671,10 @@ mod tests {
         let dir = tree(
             "bare_edges",
             &[
-                ("src/main.rs", "#[test]\nfn t() {\n    include!(\"fixture.rs\");\n    include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/x.rs\"));\n}\n"),
+                (
+                    "src/main.rs",
+                    "#[test]\nfn t() {\n    include!(\"fixture.rs\");\n    include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/x.rs\"));\n}\n",
+                ),
                 ("src/fixture.rs", "fn f() {}\n"),
             ],
         );
@@ -596,9 +683,10 @@ mod tests {
 
         let dir = tree(
             "bare_edges_shadowed",
-            &[
-                ("src/main.rs", "use x::test;\n#[test]\nfn t() {\n    include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/x.rs\"));\n}\n"),
-            ],
+            &[(
+                "src/main.rs",
+                "use x::test;\n#[test]\nfn t() {\n    include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/x.rs\"));\n}\n",
+            )],
         );
         assert!(run(&dir, &[("src/main.rs", false)], &[]).is_err());
     }
@@ -608,9 +696,15 @@ mod tests {
         // Nothing shadows `test` anywhere the walk can see, but the file's
         // own crate root is invisible, so its bare `#[test]` stays scanned.
         let body = "#[test]\nfn p() {}\n#[cfg(test)]\nfn t() {}\n";
-        let dir = tree("standalone_bare", &[("src/lib.rs", ""), ("src/dead.rs", body)]);
+        let dir = tree(
+            "standalone_bare",
+            &[("src/lib.rs", ""), ("src/dead.rs", body)],
+        );
         let c = run(&dir, &[("src/lib.rs", false)], &["src/dead.rs"]).unwrap();
-        assert_eq!(c.mask(Path::new("src/dead.rs")).cloned(), production(&[(18, 40)]));
+        assert_eq!(
+            c.mask(Path::new("src/dead.rs")).cloned(),
+            production(&[(18, 40)])
+        );
     }
 
     #[test]
@@ -618,12 +712,18 @@ mod tests {
         let body = "#[test]\nfn t() {}\nfn p() {}\n";
         let dir = tree("bare", &[("src/main.rs", body)]);
         let c = run(&dir, &[("src/main.rs", false)], &["src/main.rs"]).unwrap();
-        assert_eq!(c.mask(Path::new("src/main.rs")).cloned(), production(&[(0, 17)]));
+        assert_eq!(
+            c.mask(Path::new("src/main.rs")).cloned(),
+            production(&[(0, 17)])
+        );
 
         let dir = tree(
             "bare_shadowed",
             &[
-                ("src/main.rs", "include!(\"imports.rs\");\n#[test]\nfn t() {}\n"),
+                (
+                    "src/main.rs",
+                    "include!(\"imports.rs\");\n#[test]\nfn t() {}\n",
+                ),
                 ("src/imports.rs", "use attributes::identity as test;\n"),
             ],
         );
@@ -636,7 +736,11 @@ mod tests {
     fn ambiguous_module_file_is_refused_in_production() {
         let dir = tree(
             "ambiguous",
-            &[("src/lib.rs", "mod x;\n"), ("src/x.rs", ""), ("src/x/mod.rs", "")],
+            &[
+                ("src/lib.rs", "mod x;\n"),
+                ("src/x.rs", ""),
+                ("src/x/mod.rs", ""),
+            ],
         );
         assert!(run(&dir, &[("src/lib.rs", false)], &[]).is_err());
     }
@@ -652,7 +756,10 @@ mod tests {
         );
         let c = run(&dir, &[("src/lib.rs", false)], &["src/t.rs"]).unwrap();
         assert_eq!(c.mask(Path::new("src/t.rs")), Some(&FileMask::Test));
-        let bad = tree("parse_prod", &[("src/lib.rs", "mod t;\n"), ("src/t.rs", "fn (\n")]);
+        let bad = tree(
+            "parse_prod",
+            &[("src/lib.rs", "mod t;\n"), ("src/t.rs", "fn (\n")],
+        );
         assert!(run(&bad, &[("src/lib.rs", false)], &[]).is_err());
     }
 }

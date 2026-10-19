@@ -198,7 +198,9 @@ impl BuildKind {
             "java" => Ok(Self::Java),
             "cmake" => Ok(Self::CMake),
             other => {
-                let name = other.strip_prefix(STORED_NAMED_PREFIX).ok_or_else(unknown)?;
+                let name = other
+                    .strip_prefix(STORED_NAMED_PREFIX)
+                    .ok_or_else(unknown)?;
                 if matches!(name, "dev" | "release") {
                     return Err(unknown());
                 }
@@ -905,7 +907,16 @@ mod profile_tests {
         let corpus = RustProfile::parse("corpus").unwrap();
         assert_eq!((corpus.label(), corpus.target_dir()), ("corpus", "corpus"));
         assert_eq!(RustProfile::Dev.target_dir(), "debug");
-        for bad in ["debug", "test", "tmp", "unify-package", "fixture-x", "", "a b", "cargo:x"] {
+        for bad in [
+            "debug",
+            "test",
+            "tmp",
+            "unify-package",
+            "fixture-x",
+            "",
+            "a b",
+            "cargo:x",
+        ] {
             assert!(RustProfile::parse(bad).is_err(), "{bad:?}");
         }
     }
@@ -930,7 +941,14 @@ mod profile_tests {
 
     #[test]
     fn decoding_stays_strict_for_legacy_values_and_lenient_for_history() {
-        for bad in ["relesae", "debug", "cargo:dev", "cargo:release", "cargo:", "cargo:a b"] {
+        for bad in [
+            "relesae",
+            "debug",
+            "cargo:dev",
+            "cargo:release",
+            "cargo:",
+            "cargo:a b",
+        ] {
             assert!(BuildKind::from_db(bad).is_err(), "{bad:?}");
         }
         // A name reserved today still decodes from a row written before.

@@ -102,12 +102,18 @@ pub fn build_set(patterns: &[String], field: &str) -> Result<GlobSet, DevError> 
 /// to every tree brokkr checks) legitimately names paths most trees do not
 /// have. Failing the check, or warning on every run, would punish a correct
 /// config; the audit is where a real typo gets found.
-pub fn unmatched(patterns: &[String], paths: &[PathBuf], field: &str) -> Result<Vec<String>, DevError> {
+pub fn unmatched(
+    patterns: &[String],
+    paths: &[PathBuf],
+    field: &str,
+) -> Result<Vec<String>, DevError> {
     let mut out = Vec::new();
     for pattern in patterns {
         let one = build_set(std::slice::from_ref(pattern), field)?;
         if !paths.iter().any(|path| matches(&one, path)) {
-            out.push(format!("{field}: glob {pattern:?} matches no in-scope tracked path"));
+            out.push(format!(
+                "{field}: glob {pattern:?} matches no in-scope tracked path"
+            ));
         }
     }
     Ok(out)

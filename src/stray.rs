@@ -614,7 +614,9 @@ mod tests {
     #[test]
     fn cargo_fmt_is_never_a_stray() {
         assert!(argv_is_cargo_fmt(b"cargo\0fmt\0--check\0"));
-        assert!(argv_is_cargo_fmt(b"/usr/bin/cargo\0+nightly\0--quiet\0fmt\0"));
+        assert!(argv_is_cargo_fmt(
+            b"/usr/bin/cargo\0+nightly\0--quiet\0fmt\0"
+        ));
         assert!(!argv_is_cargo_fmt(b"cargo\0build\0-p\0fmt\0"));
         assert!(!argv_is_cargo_fmt(b"cargo\0"));
         let mut t = table(&[

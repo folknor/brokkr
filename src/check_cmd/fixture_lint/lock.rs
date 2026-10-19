@@ -68,16 +68,34 @@ fn package<'a>(meta: &'a CargoMetadata, id: &PackageId) -> Option<&'a CargoPacka
 }
 
 /// The path-identity failures of a fixture resolve against the main one.
-pub(super) fn path_failures(main: &CargoMetadata, fixture: &CargoMetadata, root: &PackageId) -> Vec<String> {
+pub(super) fn path_failures(
+    main: &CargoMetadata,
+    fixture: &CargoMetadata,
+    root: &PackageId,
+) -> Vec<String> {
     let mut failures = Vec::new();
     let main_paths: BTreeSet<(&str, &str, PathBuf)> = main
         .packages
         .iter()
         .filter(|p| p.source.is_none())
-        .map(|p| (p.name.as_str(), p.version.as_str(), canonical(&p.manifest_path)))
+        .map(|p| {
+            (
+                p.name.as_str(),
+                p.version.as_str(),
+                canonical(&p.manifest_path),
+            )
+        })
         .collect();
-    for p in fixture.packages.iter().filter(|p| p.source.is_none() && &p.id != root) {
-        let key = (p.name.as_str(), p.version.as_str(), canonical(&p.manifest_path));
+    for p in fixture
+        .packages
+        .iter()
+        .filter(|p| p.source.is_none() && &p.id != root)
+    {
+        let key = (
+            p.name.as_str(),
+            p.version.as_str(),
+            canonical(&p.manifest_path),
+        );
         if !main_paths.contains(&key) {
             failures.push(format!(
                 "path package {} {} ({}) is not a path package of the main resolve",
@@ -105,7 +123,9 @@ pub(super) fn path_failures(main: &CargoMetadata, fixture: &CargoMetadata, root:
             failures.push(format!(
                 "the fixture depends on {} from {} - not the workspace member at {}",
                 p.name,
-                p.source.as_deref().unwrap_or_else(|| got.to_str().unwrap_or("?")),
+                p.source
+                    .as_deref()
+                    .unwrap_or_else(|| got.to_str().unwrap_or("?")),
                 member.display()
             ));
         }

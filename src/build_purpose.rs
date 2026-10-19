@@ -149,7 +149,10 @@ pub(crate) struct Profiles {
 
 /// Resolve a build/run/install profile. A custom profile reaching a purpose
 /// that cannot take one is refused, never mapped to another profile.
-pub(crate) fn profile(purpose: Purpose, inputs: Profiles) -> Result<Profile, crate::error::DevError> {
+pub(crate) fn profile(
+    purpose: Purpose,
+    inputs: Profiles,
+) -> Result<Profile, crate::error::DevError> {
     let policy = purpose.policy();
     let requested = inputs.invocation.or(inputs.configured);
     // Checked before the fixed-profile return, so a purpose that ignores

@@ -50,7 +50,9 @@ impl std::fmt::Display for ProtocolIssue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::OverlappingSuite => f.write_str("a suite started inside an open suite"),
-            Self::SuiteSummaryWithoutOpen => f.write_str("a suite summary arrived with no open suite"),
+            Self::SuiteSummaryWithoutOpen => {
+                f.write_str("a suite summary arrived with no open suite")
+            }
             Self::SuiteTotalsMismatch {
                 reported: (passed, failed, ignored),
                 observed: (observed_passed, observed_failed, observed_ignored),
@@ -65,7 +67,10 @@ impl std::fmt::Display for ProtocolIssue {
                 write!(f, "{name} reported a result it was never seen starting")
             }
             Self::NameAcrossSlots { name } => {
-                write!(f, "{name} was reported again in a later suite of the same binary")
+                write!(
+                    f,
+                    "{name} was reported again in a later suite of the same binary"
+                )
             }
         }
     }
@@ -253,10 +258,12 @@ impl ExecutionOutcome {
             return Vec::new();
         }
         let red = |stream: &StreamOutcome| {
-            stream
-                .tests
-                .values()
-                .any(|test| matches!(test.terminal, Some(TestResult::Failed | TestResult::TimedOut)))
+            stream.tests.values().any(|test| {
+                matches!(
+                    test.terminal,
+                    Some(TestResult::Failed | TestResult::TimedOut)
+                )
+            })
         };
         let red_anywhere = self.streams.values().any(red);
         let mut reasons = Vec::new();
@@ -283,7 +290,10 @@ impl ExecutionOutcome {
             into.push(if unfinished.is_empty() {
                 format!("{label}: the process {how} though no test failed")
             } else {
-                format!("{label}: the process {how} while running {}", unfinished.join(", "))
+                format!(
+                    "{label}: the process {how} while running {}",
+                    unfinished.join(", ")
+                )
             });
         }
         // A harness that died is why cargo exited unsuccessfully; cargo's own
@@ -431,7 +441,9 @@ impl StreamOutcome {
             return;
         }
         if !slots.is_empty() && !matches!(self.source, StreamSource::Cargo) {
-            self.issues.push(ProtocolIssue::NameAcrossSlots { name: name.to_owned() });
+            self.issues.push(ProtocolIssue::NameAcrossSlots {
+                name: name.to_owned(),
+            });
         }
         slots.push(self.slot);
     }
