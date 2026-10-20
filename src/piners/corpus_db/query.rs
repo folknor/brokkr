@@ -64,18 +64,21 @@ pub struct DispositionRow {
 
 /// One per-trade drill-down row (the rendered subset). `our_qty`/`tv_entry_qty`
 /// carry the size axis the curated view historically dropped - the field the
-/// pyramiding investigations turned on.
+/// pyramiding investigations turned on. Every field but the key is a
+/// projection of the stored record, so any can be NULL: a reconstructed row
+/// predating `breaches`, or a line that omitted or mistyped a field.
 pub struct TradeDiffRow {
     pub our_index: i64,
     pub tv_index: i64,
+    pub breaches: Option<String>,
     pub our_side: Option<String>,
     pub entry_ts_delta: Option<i64>,
     pub exit_ts_delta: Option<i64>,
     pub entry_price_delta: Option<f64>,
     pub exit_price_delta: Option<f64>,
-    pub our_qty: f64,
+    pub our_qty: Option<f64>,
     pub tv_entry_qty: Option<f64>,
-    pub our_pnl: f64,
+    pub our_pnl: Option<f64>,
     pub tv_pnl: Option<f64>,
 }
 
@@ -213,11 +216,12 @@ probe, outcome, disposition, expected, gate_ok, matched, ours_only, tv_only, \
 boundary_ours, boundary_tv, count_tier, p90_entry, p90_exit, p90_pnl, \
 sig_domain, sig_dimension, error";
 
-/// Every queryable `trade_diff` column - the 26 harness fields (`run_id` is
-/// excluded; the run is already fixed by the query). This is the allow-list
-/// behind `--columns`: only an identifier appearing here is ever interpolated
-/// into the projection's SELECT, so a typo can't become SQL injection. Listed
-/// in the schema's column order so `--columns all` reads naturally.
+/// Every queryable `trade_diff` column - the row key, the harness projections
+/// `schema.rs` generates from the stored record, `raw_source`, and the record
+/// itself (`run_id` is excluded; the run is already fixed by the query). This
+/// is the allow-list behind `--columns`: only an identifier appearing here is
+/// ever interpolated into the projection's SELECT, so a typo can't become SQL
+/// injection. A test holds it to the table's real columns.
 pub const TRADE_DIFF_COLUMNS: &[&str] = &[
     "probe",
     "our_index",
@@ -245,16 +249,24 @@ pub const TRADE_DIFF_COLUMNS: &[&str] = &[
     "tv_pnl",
     "tv_entry_signal",
     "tv_exit_signal",
+    "tv_side",
+    "our_entry_label",
+    "our_exit_label",
+    "breaches",
+    "raw_source",
+    "raw_json",
 ];
 
-/// The curated default projection for `--diffs`: the four axes a trade pair can
-/// diverge on - time, price, size, pnl - at a glance. `our_qty`/`tv_entry_qty`
-/// are the size axis the old hard-coded view dropped. `--columns all` widens to
-/// every column (rendered vertically); `--columns a,b,c` picks a subset.
+/// The curated default projection for `--diffs`: why the pair was selected
+/// (`breaches`), then the axes a trade pair can diverge on - time, price,
+/// size, pnl - at a glance. `our_qty`/`tv_entry_qty` are the size axis the
+/// old hard-coded view dropped. `--columns all` widens to every column
+/// (rendered vertically); `--columns a,b,c` picks a subset.
 pub const DEFAULT_DIFF_COLUMNS: &[&str] = &[
     "probe",
     "our_index",
     "tv_index",
+    "breaches",
     "our_side",
     "entry_ts_delta",
     "exit_ts_delta",
@@ -458,6 +470,19 @@ impl CorpusDb {
         Ok(id)
     }
 
+    /// The newest retained run holding a disposition row for `probe`. Joined
+    /// to `run`: migrations keep historical orphan dispositions, and a hint
+    /// naming a run that no longer exists would send `--run` to an error.
+    pub fn latest_run_with_disposition(&self, probe: &str) -> Result<Option<i64>, DevError> {
+        let id = self.conn().query_row(
+            "SELECT MAX(d.run_id) FROM disposition d JOIN run r ON r.run_id = d.run_id \
+             WHERE d.probe = ?1",
+            [probe],
+            |r| r.get::<_, Option<i64>>(0),
+        )?;
+        Ok(id)
+    }
+
     /// The most recent `limit` runs, newest first.
     pub fn recent_runs(&self, limit: usize) -> Result<Vec<RunRow>, DevError> {
         let sql = format!("SELECT {RUN_COLS} FROM run ORDER BY run_id DESC LIMIT ?1");
@@ -538,7 +563,7 @@ impl CorpusDb {
         probe: &str,
     ) -> Result<Vec<TradeDiffRow>, DevError> {
         let mut stmt = self.conn().prepare(
-            "SELECT our_index, tv_index, our_side, entry_ts_delta, exit_ts_delta, \
+            "SELECT our_index, tv_index, breaches, our_side, entry_ts_delta, exit_ts_delta, \
                     entry_price_delta, exit_price_delta, our_qty, tv_entry_qty, our_pnl, tv_pnl \
              FROM trade_diff WHERE run_id = ?1 AND probe = ?2 ORDER BY our_index",
         )?;
@@ -546,6 +571,7 @@ impl CorpusDb {
             Ok(TradeDiffRow {
                 our_index: r.get("our_index")?,
                 tv_index: r.get("tv_index")?,
+                breaches: r.get("breaches")?,
                 our_side: r.get("our_side")?,
                 entry_ts_delta: r.get("entry_ts_delta")?,
                 exit_ts_delta: r.get("exit_ts_delta")?,
@@ -843,21 +869,26 @@ mod tests {
     }
 
     #[test]
-    fn the_disposition_allow_list_is_exactly_the_tables_columns() {
+    fn each_allow_list_is_exactly_its_tables_columns() {
         // Generated columns are hidden from table_info; table_xinfo lists
         // them. A projection added to the schema without an allow-list entry
         // (or the reverse) fails here, not at a user's --columns.
         let db = CorpusDb::open_in_memory().unwrap();
-        let t = db
-            .raw_sql("SELECT name FROM pragma_table_xinfo('disposition') WHERE name <> 'run_id'")
-            .unwrap();
-        let mut table: Vec<String> = t.rows.into_iter().map(|r| r[0].clone()).collect();
-        let mut listed = owned(DISPOSITION_COLUMNS);
-        table.sort();
-        listed.sort();
-        assert_eq!(table, listed);
-        for c in DEFAULT_DISPOSITION_COLUMNS {
-            assert!(DISPOSITION_COLUMNS.contains(c), "{c}");
+        for shape in [Shaped::Dispositions, Shaped::Diffs] {
+            let t = db
+                .raw_sql(&format!(
+                    "SELECT name FROM pragma_table_xinfo('{}') WHERE name <> 'run_id'",
+                    shape.table()
+                ))
+                .unwrap();
+            let mut table: Vec<String> = t.rows.into_iter().map(|r| r[0].clone()).collect();
+            let mut listed = owned(shape.columns());
+            table.sort();
+            listed.sort();
+            assert_eq!(table, listed, "{}", shape.table());
+            for c in shape.defaults() {
+                assert!(shape.columns().contains(c), "{c}");
+            }
         }
     }
 

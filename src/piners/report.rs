@@ -1,7 +1,7 @@
 //! Parse the harness's NDJSON output and aggregate it brokkr-side.
 //!
 //! The harness emits one JSON object per probe and **no trailing summary
-//! line** - brokkr tallies the summary, the root-cause breakdown, and the
+//! line** - brokkr tallies the summary, the divergence breakdown, and the
 //! dense-na breakdown from the per-probe stream itself. brokkr is
 //! deliberately tolerant of unknown fields: the harness owns the schema and
 //! grows it (extra tiers, deltas, provenance) ahead of brokkr learning to
@@ -40,7 +40,9 @@ pub struct Acceptance {
     pub failing: Vec<String>,
 }
 
-/// Root-cause signature, present on non-exact parity probes. brokkr groups the
+/// Divergence signature: a symptom classification, never a cause. Present
+/// whenever a dimension breached - which includes a `byte_exact` probe whose
+/// only disagreement is a displayed label. brokkr groups the
 /// console breakdown by `domain`/`dimension`; `leg`, `detail` and
 /// `dimension_breaches` reach the run store through [`ProbeLine::raw`].
 /// Forward-compat: serde drops any field not modelled here.
@@ -315,56 +317,19 @@ impl ProbeLine {
 }
 
 /// A per-trade `trade_diff` drill-down line (`kind == "trade_diff"`), one per
-/// matched-but-divergent trade pair. The nine index/`our_*` fields are always
-/// present; every other field is omitted by the harness when its leg or
-/// metadata is absent (open round trips, a ts not found in the bar series, a
-/// missing entry/exit leg), hence `Option`. brokkr persists these verbatim to
-/// the corpus DB - they never enter aggregation or the gate.
+/// matched pair the harness counts a breach on. brokkr reads only the row key,
+/// which it validates; the line itself is kept whole as `raw` and stored as
+/// the authoritative record, every field a projection over it (see
+/// `corpus_db/schema.rs`), so a field the harness adds is stored the day it
+/// ships. Never enters aggregation or the gate.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TradeDiffLine {
     pub probe: String,
     pub our_index: i64,
     pub tv_index: i64,
-    pub our_entry_ts: i64,
-    pub our_exit_ts: i64,
-    pub our_entry_price: f64,
-    pub our_exit_price: f64,
-    pub our_qty: f64,
-    pub our_pnl: f64,
-    #[serde(default)]
-    pub entry_ts_delta: Option<i64>,
-    #[serde(default)]
-    pub exit_ts_delta: Option<i64>,
-    #[serde(default)]
-    pub entry_price_delta: Option<f64>,
-    #[serde(default)]
-    pub exit_price_delta: Option<f64>,
-    #[serde(default)]
-    pub our_entry_bar: Option<i64>,
-    #[serde(default)]
-    pub our_exit_bar: Option<i64>,
-    #[serde(default)]
-    pub our_side: Option<String>,
-    #[serde(default)]
-    pub our_entry_id: Option<String>,
-    #[serde(default)]
-    pub our_exit_id: Option<String>,
-    #[serde(default)]
-    pub tv_entry_ts: Option<i64>,
-    #[serde(default)]
-    pub tv_exit_ts: Option<i64>,
-    #[serde(default)]
-    pub tv_entry_price: Option<f64>,
-    #[serde(default)]
-    pub tv_exit_price: Option<f64>,
-    #[serde(default)]
-    pub tv_entry_qty: Option<f64>,
-    #[serde(default)]
-    pub tv_pnl: Option<f64>,
-    #[serde(default)]
-    pub tv_entry_signal: Option<String>,
-    #[serde(default)]
-    pub tv_exit_signal: Option<String>,
+    /// The line, re-serialized compactly.
+    #[serde(skip)]
+    pub raw: String,
 }
 
 /// A stdout line that should have been a disposition record and is not one
@@ -531,10 +496,9 @@ pub struct Summary {
     pub boundary_trades: u64,
 }
 
-/// One root-cause group: non-exact parity probes sharing a
-/// `domain/dimension` signature.
+/// One divergence group: probes whose signature shares a `domain/dimension`.
 #[derive(Debug)]
-pub struct RootCauseGroup {
+pub struct DivergenceGroup {
     pub key: String,
     pub count: usize,
     pub examples: Vec<String>,
@@ -717,8 +681,11 @@ pub fn parse(stdout: &[u8]) -> HarnessReport {
                 }
                 report.warnings.extend(dense_na_warnings);
             }
-            Some("trade_diff") => match serde_json::from_value::<TradeDiffLine>(value) {
-                Ok(t) => report.trade_diffs.push(t),
+            Some("trade_diff") => match TradeDiffLine::deserialize(&value) {
+                Ok(t) => report.trade_diffs.push(TradeDiffLine {
+                    raw: value.to_string(),
+                    ..t
+                }),
                 Err(e) => {
                     output::warn(&format!("corpus: unparsable trade_diff line{at}: {e}"));
                     report.warnings.push(ParseWarning {
@@ -840,7 +807,8 @@ pub fn summarize(probes: &[ProbeLine]) -> Summary {
 }
 
 /// Group probes carrying a signature by `domain/dimension`, with counts and
-/// a few example ids. Probes without a signature (the exact ones) drop out.
+/// a few example ids. Probes without a signature drop out; a `byte_exact`
+/// probe with a label signature stays in, as the label disagreement it is.
 ///
 /// This is the divergence breakdown, and it is keyed on the `signature` -
 /// which piners computes off the *effective* (boundary-discounted) divergence.
@@ -849,7 +817,7 @@ pub fn summarize(probes: &[ProbeLine]) -> Summary {
 /// breakdown reports the effective divergent population without brokkr having
 /// to re-net the raw `ours_only`/`tv_only` itself. (The discount is still made
 /// visible via the summary line and the disposition's `boundary_*` columns.)
-pub fn root_cause_breakdown(probes: &[ProbeLine]) -> Vec<RootCauseGroup> {
+pub fn divergence_breakdown(probes: &[ProbeLine]) -> Vec<DivergenceGroup> {
     let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for p in probes {
         if let Some(sig) = &p.signature {
@@ -875,7 +843,7 @@ pub fn root_cause_breakdown(probes: &[ProbeLine]) -> Vec<RootCauseGroup> {
         .into_iter()
         .map(|(key, mut ids)| {
             ids.sort();
-            RootCauseGroup {
+            DivergenceGroup {
                 count: ids.len(),
                 examples: ids.into_iter().take(MAX_EXAMPLES).collect(),
                 key,
@@ -1015,10 +983,10 @@ pub fn render(
         ));
     }
 
-    let root = root_cause_breakdown(&scored_lines);
-    if !root.is_empty() {
-        output::corpus_msg("root-cause breakdown (non-exact probes by domain/dimension):");
-        for g in &root {
+    let divergence = divergence_breakdown(&scored_lines);
+    if !divergence.is_empty() {
+        output::corpus_msg("divergence breakdown (probes with a signature, by domain/dimension):");
+        for g in &divergence {
             output::corpus_msg(&format!(
                 "  {}: {} (e.g. {})",
                 g.key,
@@ -1167,14 +1135,14 @@ mod tests {
     }
 
     #[test]
-    fn root_cause_groups_by_domain_dimension() {
+    fn divergence_groups_by_domain_dimension() {
         let r = parse(
             br#"{"probe":"a","outcome":"parity","signature":{"domain":"broker-fidelity","dimension":"exit_price"}}
 {"probe":"b","outcome":"parity","signature":{"domain":"broker-fidelity","dimension":"exit_price"}}
 {"probe":"c","outcome":"parity","count_tier":"exact"}
 "#,
         );
-        let groups = root_cause_breakdown(&r.probes);
+        let groups = divergence_breakdown(&r.probes);
         assert_eq!(groups.len(), 1); // exact probe c has no signature
         assert_eq!(groups[0].key, "broker-fidelity/exit_price");
         assert_eq!(groups[0].count, 2);
@@ -1223,13 +1191,13 @@ mod tests {
         assert_eq!(r.probes.len(), 1); // only the disposition line
         assert_eq!(r.probes[0].probe, "p1");
         assert_eq!(r.trade_diffs.len(), 2); // both drill-down records collected
-        assert_eq!(
-            r.trade_diffs[0].tv_exit_signal.as_deref(),
-            Some("mid-bar stop")
-        );
+        // The whole line is kept for the store, fields brokkr never names
+        // included.
+        let first: serde_json::Value = serde_json::from_str(&r.trade_diffs[0].raw).unwrap();
+        assert_eq!(first["tv_exit_signal"], "mid-bar stop");
         assert_eq!(r.trade_diffs[1].our_index, 2);
-        assert!(r.trade_diffs[1].tv_pnl.is_none()); // omitted leg -> None
-        assert!(r.trade_diffs[1].entry_price_delta.is_none());
+        let second: serde_json::Value = serde_json::from_str(&r.trade_diffs[1].raw).unwrap();
+        assert!(second.get("tv_pnl").is_none()); // an omitted leg stays omitted
         let s = summarize(&r.probes);
         assert_eq!(s.actionable_drift, 1); // drill-down lines excluded
     }
@@ -1290,7 +1258,7 @@ mod tests {
 {"probe":"side-flip","outcome":"parity","matched":40,"ours_only":0,"tv_only":0,"acceptance":{"tier":"count_divergent"},"signature":{"domain":"broker-fidelity","dimension":"side"}}
 "#,
         );
-        let groups = root_cause_breakdown(&r.probes);
+        let groups = divergence_breakdown(&r.probes);
         // Only the side-flip's signature survives; the boundary-only probe (no
         // signature) is absent.
         assert_eq!(groups.len(), 1);
@@ -1356,7 +1324,7 @@ mod tests {
         assert_eq!(r.probes[0].probe, "b");
         assert_eq!(r.probes[1].disposition(), "compile_fail");
         assert_eq!(r.trade_diffs.len(), 1);
-        assert!((r.trade_diffs[0].our_pnl - 9.0).abs() < f64::EPSILON);
+        assert!(r.trade_diffs[0].raw.contains("\"our_pnl\":9.0"));
         // A clean report has nothing to report.
         assert!(r.take_duplicates().is_empty());
     }
@@ -1544,7 +1512,7 @@ mod tests {
         assert!(format_summary(&s, "x").contains("harness_abort=1"));
         // Breakdown examples sort by id whatever the arrival order.
         assert_eq!(
-            root_cause_breakdown(&r.probes)[0].examples,
+            divergence_breakdown(&r.probes)[0].examples,
             vec!["b".to_owned(), "m".to_owned()]
         );
     }
@@ -1585,7 +1553,7 @@ mod tests {
         // `extra` and `bad` are neither hidden matches nor tallied.
         assert_eq!(plan.hidden, 1);
         assert_eq!(plan.scored.len(), 2);
-        let root = root_cause_breakdown(&plan.scored);
+        let root = divergence_breakdown(&plan.scored);
         assert_eq!(root.len(), 1);
         assert_eq!(root[0].key, "d/x");
     }

@@ -26,6 +26,10 @@
 //! whose record was rebuilt from exactly the columns it kept - so on such a
 //! row every diagnostic the old schema never had reads NULL, meaning "not
 //! retained", not zero.
+//!
+//! `trade_diff` is built the same way, its physical columns only the row key
+//! plus `raw_source`/`raw_json` (v13 rebuilt the typed table, which had been
+//! dropping every field the harness added after it).
 
 use std::path::Path;
 
@@ -42,7 +46,7 @@ use crate::error::DevError;
 /// clamp's `MIN` would turn a string into `i64::MAX`, and a text
 /// `runtime_ms` would fail every typed read of the column.
 #[derive(Clone, Copy)]
-enum Projection {
+pub(super) enum Projection {
     /// A JSON string.
     Text(&'static str),
     /// A JSON string, with `""` read as NULL - the old ingest's `ne()`.
@@ -51,6 +55,11 @@ enum Projection {
     Array(&'static str),
     /// A JSON number, as a real.
     Real(&'static str),
+    /// A JSON integer, exact and signed - a timestamp, a delta, a bar index.
+    /// A real (`1.5`) or an integer past `i64` reads NULL rather than
+    /// truncated, and nothing is clamped: unlike a count, a negative value is
+    /// meaningful.
+    Int(&'static str),
     /// A non-negative JSON integer, clamped to `i64::MAX` as the old
     /// ingest's `as_i64` did: the harness sends `u64`, and one past
     /// `i64::MAX` comes back from `json_extract` as a REAL no typed read
@@ -85,6 +94,14 @@ impl Projection {
             Projection::NonEmpty(p) => when(p, "'text'", format!("NULLIF({}, '')", at(p))),
             Projection::Array(p) => when(p, "'array'", at(p)),
             Projection::Real(p) => when(p, "'integer', 'real'", at(p)),
+            // JSON calls one past i64::MAX an integer, but `json_extract`
+            // returns it as a REAL no typed read accepts: NULL, not cast.
+            Projection::Int(p) => format!(
+                "CASE WHEN json_type(raw_json, '{p}') = 'integer' \
+                 AND typeof({}) = 'integer' THEN {} END",
+                at(p),
+                at(p)
+            ),
             Projection::Flag(p) => when(p, "'true', 'false'", at(p)),
             Projection::Count(p) => count(p),
             Projection::CountOr0(p) => format!("COALESCE({}, 0)", count(p)),
@@ -206,16 +223,6 @@ const PROJECTIONS: [(&str, Projection); 39] = [
 /// The `disposition` DDL under `name` - `disposition` itself, or the v5
 /// migration's staging table, which must be the same definition.
 pub(super) fn disposition_ddl(name: &str) -> String {
-    let projections: Vec<String> = PROJECTIONS
-        .iter()
-        .map(|(col, p)| {
-            format!(
-                "    {col} {} GENERATED ALWAYS AS ({}) VIRTUAL",
-                p.sql_type(),
-                p.sql()
-            )
-        })
-        .collect();
     format!(
         "CREATE TABLE IF NOT EXISTS {name} (
     run_id        INTEGER NOT NULL REFERENCES run(run_id),
@@ -229,7 +236,80 @@ pub(super) fn disposition_ddl(name: &str) -> String {
     PRIMARY KEY (run_id, probe)
 );
 CREATE INDEX IF NOT EXISTS idx_{name}_probe ON {name}(probe, run_id);",
-        projections.join(",\n")
+        generated(&PROJECTIONS)
+    )
+}
+
+/// The `trade_diff` table's harness fields, projected from `raw_json` as the
+/// `disposition` ones are. Timestamps, deltas and bar indices are exact
+/// signed integers; ids, signals, labels, sides and `breaches` keep an empty
+/// string as stored. The v13 migration verifies the first 23 against the
+/// typed columns they replace; the last four arrived after the typed table
+/// dropped them, so a reconstructed row reads NULL there - not retained.
+pub(super) const TRADE_DIFF_PROJECTIONS: [(&str, Projection); 27] = [
+    ("our_entry_ts", Projection::Int("$.our_entry_ts")),
+    ("our_exit_ts", Projection::Int("$.our_exit_ts")),
+    ("our_entry_price", Projection::Real("$.our_entry_price")),
+    ("our_exit_price", Projection::Real("$.our_exit_price")),
+    ("our_qty", Projection::Real("$.our_qty")),
+    ("our_pnl", Projection::Real("$.our_pnl")),
+    ("entry_ts_delta", Projection::Int("$.entry_ts_delta")),
+    ("exit_ts_delta", Projection::Int("$.exit_ts_delta")),
+    ("entry_price_delta", Projection::Real("$.entry_price_delta")),
+    ("exit_price_delta", Projection::Real("$.exit_price_delta")),
+    ("our_entry_bar", Projection::Int("$.our_entry_bar")),
+    ("our_exit_bar", Projection::Int("$.our_exit_bar")),
+    ("our_side", Projection::Text("$.our_side")),
+    ("our_entry_id", Projection::Text("$.our_entry_id")),
+    ("our_exit_id", Projection::Text("$.our_exit_id")),
+    ("tv_entry_ts", Projection::Int("$.tv_entry_ts")),
+    ("tv_exit_ts", Projection::Int("$.tv_exit_ts")),
+    ("tv_entry_price", Projection::Real("$.tv_entry_price")),
+    ("tv_exit_price", Projection::Real("$.tv_exit_price")),
+    ("tv_entry_qty", Projection::Real("$.tv_entry_qty")),
+    ("tv_pnl", Projection::Real("$.tv_pnl")),
+    ("tv_entry_signal", Projection::Text("$.tv_entry_signal")),
+    ("tv_exit_signal", Projection::Text("$.tv_exit_signal")),
+    ("tv_side", Projection::Text("$.tv_side")),
+    ("our_entry_label", Projection::Text("$.our_entry_label")),
+    ("our_exit_label", Projection::Text("$.our_exit_label")),
+    ("breaches", Projection::Text("$.breaches")),
+];
+
+/// How many leading [`TRADE_DIFF_PROJECTIONS`] the typed (v12 and older)
+/// table kept, which the v13 rebuild reconstructs and verifies.
+pub(super) const TRADE_DIFF_TYPED_FIELDS: usize = 23;
+
+fn generated(projections: &[(&str, Projection)]) -> String {
+    projections
+        .iter()
+        .map(|(col, p)| {
+            format!(
+                "    {col} {} GENERATED ALWAYS AS ({}) VIRTUAL",
+                p.sql_type(),
+                p.sql()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",\n")
+}
+
+/// The `trade_diff` DDL under `name` - `trade_diff` itself, or the v13
+/// migration's staging table. The key stays physical: SQLite refuses a
+/// generated column in a primary key, and brokkr validates the key at parse.
+pub(super) fn trade_diff_ddl(name: &str) -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {name} (
+    run_id        INTEGER NOT NULL REFERENCES run(run_id),
+    probe         TEXT NOT NULL,
+    our_index     INTEGER NOT NULL,
+    tv_index      INTEGER NOT NULL,
+    raw_source    TEXT NOT NULL,
+    raw_json      TEXT NOT NULL,
+{},
+    PRIMARY KEY (run_id, probe, our_index, tv_index)
+);",
+        generated(&TRADE_DIFF_PROJECTIONS)
     )
 }
 
@@ -256,37 +336,6 @@ CREATE TABLE IF NOT EXISTS run (
     cargo_profile     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_run_started ON run(started_at);
-
-CREATE TABLE IF NOT EXISTS trade_diff (
-    run_id            INTEGER NOT NULL REFERENCES run(run_id),
-    probe             TEXT NOT NULL,
-    our_index         INTEGER NOT NULL,
-    tv_index          INTEGER NOT NULL,
-    our_entry_ts      INTEGER NOT NULL,
-    our_exit_ts       INTEGER NOT NULL,
-    our_entry_price   REAL NOT NULL,
-    our_exit_price    REAL NOT NULL,
-    our_qty           REAL NOT NULL,
-    our_pnl           REAL NOT NULL,
-    entry_ts_delta    INTEGER,
-    exit_ts_delta     INTEGER,
-    entry_price_delta REAL,
-    exit_price_delta  REAL,
-    our_entry_bar     INTEGER,
-    our_exit_bar      INTEGER,
-    our_side          TEXT,
-    our_entry_id      TEXT,
-    our_exit_id       TEXT,
-    tv_entry_ts       INTEGER,
-    tv_exit_ts        INTEGER,
-    tv_entry_price    REAL,
-    tv_exit_price     REAL,
-    tv_entry_qty      REAL,
-    tv_pnl            REAL,
-    tv_entry_signal   TEXT,
-    tv_exit_signal    TEXT,
-    PRIMARY KEY (run_id, probe, our_index, tv_index)
-);
 
 CREATE TABLE IF NOT EXISTS gate_miss (
     run_id   INTEGER NOT NULL REFERENCES run(run_id),
@@ -336,6 +385,7 @@ impl CorpusDb {
         conn.execute_batch(SCHEMA)?;
         conn.execute_batch(SCHEDULE_ESTIMATE_DDL)?;
         conn.execute_batch(&disposition_ddl("disposition"))?;
+        conn.execute_batch(&trade_diff_ddl("trade_diff"))?;
         Ok(Self { conn })
     }
 
@@ -376,6 +426,7 @@ impl CorpusDb {
         conn.execute_batch(SCHEMA)?;
         conn.execute_batch(SCHEDULE_ESTIMATE_DDL)?;
         conn.execute_batch(&disposition_ddl("disposition"))?;
+        conn.execute_batch(&trade_diff_ddl("trade_diff"))?;
         Ok(Self { conn })
     }
 }

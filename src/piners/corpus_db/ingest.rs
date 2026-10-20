@@ -362,43 +362,9 @@ fn insert_trade_diff(
     t: &TradeDiffLine,
 ) -> Result<(), DevError> {
     conn.execute(
-        "INSERT INTO trade_diff \
-         (run_id, probe, our_index, tv_index, our_entry_ts, our_exit_ts, our_entry_price, \
-          our_exit_price, our_qty, our_pnl, entry_ts_delta, exit_ts_delta, entry_price_delta, \
-          exit_price_delta, our_entry_bar, our_exit_bar, our_side, our_entry_id, our_exit_id, \
-          tv_entry_ts, tv_exit_ts, tv_entry_price, tv_exit_price, tv_entry_qty, tv_pnl, \
-          tv_entry_signal, tv_exit_signal) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-                 ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
-        params![
-            run_id,
-            t.probe,
-            t.our_index,
-            t.tv_index,
-            t.our_entry_ts,
-            t.our_exit_ts,
-            t.our_entry_price,
-            t.our_exit_price,
-            t.our_qty,
-            t.our_pnl,
-            t.entry_ts_delta,
-            t.exit_ts_delta,
-            t.entry_price_delta,
-            t.exit_price_delta,
-            t.our_entry_bar,
-            t.our_exit_bar,
-            t.our_side,
-            t.our_entry_id,
-            t.our_exit_id,
-            t.tv_entry_ts,
-            t.tv_exit_ts,
-            t.tv_entry_price,
-            t.tv_exit_price,
-            t.tv_entry_qty,
-            t.tv_pnl,
-            t.tv_entry_signal,
-            t.tv_exit_signal,
-        ],
+        "INSERT INTO trade_diff (run_id, probe, our_index, tv_index, raw_source, raw_json) \
+         VALUES (?1, ?2, ?3, ?4, 'harness', ?5)",
+        params![run_id, t.probe, t.our_index, t.tv_index, t.raw],
     )?;
     Ok(())
 }
@@ -714,9 +680,8 @@ mod tests {
         db.conn()
             .execute(
                 "INSERT INTO trade_diff \
-                 (run_id, probe, our_index, tv_index, our_entry_ts, our_exit_ts, \
-                  our_entry_price, our_exit_price, our_qty, our_pnl) \
-                 VALUES (1, 'p', 0, 0, 0, 0, 0, 0, 0, 0)",
+                 (run_id, probe, our_index, tv_index, raw_source, raw_json) \
+                 VALUES (1, 'p', 0, 0, 'harness', '{}')",
                 [],
             )
             .unwrap();

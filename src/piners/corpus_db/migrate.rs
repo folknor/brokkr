@@ -21,7 +21,10 @@
 //! `run.cargo_profile`, the build profile in the results store's encoding
 //! (`dev`, `release`, `cargo:<name>`), backfilled from `debug` - which a v11
 //! writer leaves NULL, the profile column superseding it; version 12 adds the
-//! `schedule_estimate` table, backfilled from history. On a fresh database,
+//! `schedule_estimate` table, backfilled from history; version 13 rebuilds
+//! `trade_diff` around the stored harness record, as v5 did `disposition`,
+//! so the fields the typed table dropped (`breaches`, `tv_side`, the labels)
+//! and every later one are kept. On a fresh database,
 //! the schema DDL in `schema.rs` creates the current tables (columns included)
 //! inside the shared migration transaction. Schema inspection uses the shared
 //! `db::store` helpers, which preserve errors and recognize generated columns.
@@ -29,12 +32,14 @@
 use rusqlite::params;
 use serde_json::{Map, Value};
 
-use super::schema::disposition_ddl;
+use super::schema::{
+    Projection, TRADE_DIFF_PROJECTIONS, TRADE_DIFF_TYPED_FIELDS, disposition_ddl, trade_diff_ddl,
+};
 use crate::db::store::{column_exists as has_column, table_exists as has_table};
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding a migration below.
-pub(super) const SCHEMA_VERSION: i64 = 12;
+pub(super) const SCHEMA_VERSION: i64 = 13;
 
 /// Run pending migrations through the shared store policy. The v5 rebuild
 /// preserves historical orphan dispositions, so foreign-key enforcement is
@@ -57,6 +62,7 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError
             conn.execute_batch(super::schema::SCHEMA)?;
             conn.execute_batch(super::schema::SCHEDULE_ESTIMATE_DDL)?;
             conn.execute_batch(&disposition_ddl("disposition"))?;
+            conn.execute_batch(&trade_diff_ddl("trade_diff"))?;
             Ok(())
         },
     );
@@ -200,6 +206,97 @@ fn migrate_from(conn: &rusqlite::Connection, current: i64) -> Result<(), DevErro
         super::ingest::update_schedule_estimates(conn, None)?;
     }
 
+    // v12 -> v13: rebuild `trade_diff` around the stored record, as v5 did
+    // `disposition`.
+    if current < 13
+        && has_table(conn, "trade_diff")?
+        && !has_column(conn, "trade_diff", "raw_json")?
+    {
+        rebuild_trade_diff(conn)?;
+    }
+
+    Ok(())
+}
+
+/// The typed `trade_diff` columns the v13 projections must reproduce.
+fn typed_trade_diff_fields() -> &'static [(&'static str, Projection)] {
+    &TRADE_DIFF_PROJECTIONS[..TRADE_DIFF_TYPED_FIELDS]
+}
+
+/// Move every typed `trade_diff` row into the v13 shape, refusing the swap
+/// unless every row arrives under its own key and every projection
+/// reproduces the column it replaces (compared null-safely).
+fn rebuild_trade_diff(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    let fields = typed_trade_diff_fields();
+    let names: Vec<&str> = fields.iter().map(|(c, _)| *c).collect();
+    conn.execute_batch(&trade_diff_ddl("trade_diff_v13"))?;
+    {
+        let mut read = conn.prepare(&format!(
+            "SELECT run_id, probe, our_index, tv_index, {} FROM trade_diff",
+            names.join(", ")
+        ))?;
+        let mut write = conn.prepare(
+            "INSERT INTO trade_diff_v13 \
+             (run_id, probe, our_index, tv_index, raw_source, raw_json) \
+             VALUES (?1, ?2, ?3, ?4, 'reconstructed', ?5)",
+        )?;
+        let mut rows = read.query([])?;
+        while let Some(row) = rows.next()? {
+            let probe: String = row.get("probe")?;
+            let our_index: i64 = row.get("our_index")?;
+            let tv_index: i64 = row.get("tv_index")?;
+            let mut rec = Map::new();
+            rec.insert("kind".into(), Value::from("trade_diff"));
+            rec.insert("probe".into(), Value::from(probe.clone()));
+            rec.insert("our_index".into(), Value::from(our_index));
+            rec.insert("tv_index".into(), Value::from(tv_index));
+            for (col, projection) in fields {
+                let value = match projection {
+                    Projection::Int(_) => row.get::<_, Option<i64>>(*col)?.map(Value::from),
+                    Projection::Real(_) => row.get::<_, Option<f64>>(*col)?.map(Value::from),
+                    _ => row.get::<_, Option<String>>(*col)?.map(Value::from),
+                };
+                if let Some(v) = value {
+                    rec.insert((*col).into(), v);
+                }
+            }
+            write.execute(params![
+                row.get::<_, i64>("run_id")?,
+                probe,
+                our_index,
+                tv_index,
+                Value::Object(rec).to_string(),
+            ])?;
+        }
+    }
+    let mismatch = names
+        .iter()
+        .map(|c| format!("o.{c} IS NOT n.{c}"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let (old, new, joined, bad): (i64, i64, i64, i64) = conn.query_row(
+        &format!(
+            "SELECT (SELECT COUNT(*) FROM trade_diff), (SELECT COUNT(*) FROM trade_diff_v13), \
+                    (SELECT COUNT(*) FROM trade_diff o JOIN trade_diff_v13 n \
+                     USING (run_id, probe, our_index, tv_index)), \
+                    (SELECT COUNT(*) FROM trade_diff o JOIN trade_diff_v13 n \
+                     USING (run_id, probe, our_index, tv_index) WHERE {mismatch})"
+        ),
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?;
+    if old != new || joined != old || bad != 0 {
+        return Err(DevError::Database(format!(
+            "corpus runs.db v13 migration: the rebuilt trade_diff table does not reproduce \
+             the old one ({old} rows before, {new} after, {joined} under their own key, {bad} \
+             differing); nothing was changed. The store is run history, not a source of \
+             truth: move runs.db aside to start a fresh one"
+        )));
+    }
+    conn.execute_batch(
+        "DROP TABLE trade_diff;
+         ALTER TABLE trade_diff_v13 RENAME TO trade_diff;",
+    )?;
     Ok(())
 }
 
@@ -705,6 +802,90 @@ mod tests {
             .pragma_query_value(None, "foreign_keys", |r| r.get(0))
             .unwrap();
         assert_eq!(fk, 1);
+    }
+
+    /// The typed `trade_diff` table every store before v13 had.
+    const TYPED_TRADE_DIFF: &str = "\
+        CREATE TABLE trade_diff (run_id INTEGER NOT NULL, probe TEXT NOT NULL, \
+            our_index INTEGER NOT NULL, tv_index INTEGER NOT NULL, \
+            our_entry_ts INTEGER NOT NULL, our_exit_ts INTEGER NOT NULL, \
+            our_entry_price REAL NOT NULL, our_exit_price REAL NOT NULL, \
+            our_qty REAL NOT NULL, our_pnl REAL NOT NULL, entry_ts_delta INTEGER, \
+            exit_ts_delta INTEGER, entry_price_delta REAL, exit_price_delta REAL, \
+            our_entry_bar INTEGER, our_exit_bar INTEGER, our_side TEXT, our_entry_id TEXT, \
+            our_exit_id TEXT, tv_entry_ts INTEGER, tv_exit_ts INTEGER, tv_entry_price REAL, \
+            tv_exit_price REAL, tv_entry_qty REAL, tv_pnl REAL, tv_entry_signal TEXT, \
+            tv_exit_signal TEXT, PRIMARY KEY (run_id, probe, our_index, tv_index));";
+
+    #[test]
+    fn v13_rebuild_reproduces_every_typed_trade_diff_row() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(V1_SCHEMA).unwrap();
+        conn.execute_batch(TYPED_TRADE_DIFF).unwrap();
+        // A full row (a negative delta, an integral price, an empty id) and
+        // the partial open-leg shape, under a run row that no longer exists.
+        conn.execute_batch(
+            "INSERT INTO trade_diff VALUES (1, 'p', 1, 1, 1745295300, 1745295900, 1582.6, \
+                 1582.0, 1.0, -0.46, -900, 0, 0.0, 0.08, 125, 126, 'Long', '', 'X', \
+                 1745296200, 1745295900, 1582.6, 1581.92, 1.0, -0.54, 'entry long', 'stop');
+             INSERT INTO trade_diff (run_id, probe, our_index, tv_index, our_entry_ts, \
+                 our_exit_ts, our_entry_price, our_exit_price, our_qty, our_pnl) \
+                 VALUES (1, 'p', 2, 2, 1, 2, 9.0, 10.0, 2.0, 2.0);",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+
+        run_migrations(&conn).unwrap();
+
+        assert!(!has_table(&conn, "trade_diff_v13").unwrap());
+        type Row = (i64, Option<i64>, Option<f64>, Option<String>, Option<String>, String);
+        let rows: Vec<Row> = conn
+            .prepare(
+                "SELECT our_index, entry_ts_delta, our_exit_price, our_entry_id, breaches, \
+                 raw_source FROM trade_diff ORDER BY our_index",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (1, Some(-900), Some(1582.0), Some(String::new()), None, "reconstructed".to_owned()),
+                (2, None, Some(10.0), None, None, "reconstructed".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_trade_diff_projection_reads_null_for_a_mistyped_integer() {
+        // An exact signed integer: a real delta is not truncated, and a
+        // negative one is not clamped.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(&super::super::schema::trade_diff_ddl("trade_diff"))
+            .unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys = OFF; \
+             INSERT INTO trade_diff (run_id, probe, our_index, tv_index, raw_source, raw_json) \
+             VALUES (1, 'p', 1, 1, 'harness', \
+             '{\"entry_ts_delta\":1.5,\"exit_ts_delta\":-60,\"our_entry_ts\":9223372036854775808,\
+             \"breaches\":\"side+entry_label\"}')",
+        )
+        .unwrap();
+        let row: (Option<i64>, Option<i64>, Option<i64>, Option<String>) = conn
+            .query_row(
+                "SELECT entry_ts_delta, exit_ts_delta, our_entry_ts, breaches FROM trade_diff",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (None, Some(-60), None, Some("side+entry_label".to_owned()))
+        );
     }
 
     #[test]

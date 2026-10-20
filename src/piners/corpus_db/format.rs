@@ -333,14 +333,15 @@ pub fn trade_diffs_table(rows: &[TradeDiffRow]) -> String {
             vec![
                 t.our_index.to_string(),
                 t.tv_index.to_string(),
+                fs(&t.breaches),
                 fs(&t.our_side),
                 fi(t.entry_ts_delta),
                 fi(t.exit_ts_delta),
                 ff(t.entry_price_delta),
                 ff(t.exit_price_delta),
-                ff(Some(t.our_qty)),
+                ff(t.our_qty),
                 ff(t.tv_entry_qty),
-                ff(Some(t.our_pnl)),
+                ff(t.our_pnl),
                 ff(t.tv_pnl),
             ]
         })
@@ -349,6 +350,7 @@ pub fn trade_diffs_table(rows: &[TradeDiffRow]) -> String {
         &[
             "our#",
             "tv#",
+            "breaches",
             "side",
             "Δentry_ts",
             "Δexit_ts",

@@ -102,6 +102,10 @@ pub fn cmd(project_root: &Path, q: &CorpusQuery) -> Result<(), DevError> {
             output::result_msg("no corpus runs to filter");
             return Ok(());
         };
+        let defaulted = explicit_run_id(q).is_none();
+        if defaulted {
+            note_absent_probes(&db, run_id, &q.probe)?;
+        }
         let columns = corpus_db::resolve_columns(shape, &q.columns)?;
         let vertical = q.columns.len() == 1 && q.columns[0] == "all";
         let where_expr = match &q.where_expr {
@@ -112,7 +116,11 @@ pub fn cmd(project_root: &Path, q: &CorpusQuery) -> Result<(), DevError> {
             None => None,
         };
         let table = db.shaped(shape, run_id, &q.probe, &columns, where_expr)?;
-        println!("run {run_id}");
+        if defaulted {
+            println!("run {run_id} (latest; --run N for another)");
+        } else {
+            println!("run {run_id}");
+        }
         if vertical {
             println!("{}", corpus_db::raw_records(&table));
         } else {
@@ -259,6 +267,29 @@ fn resolve_run(db: &CorpusDb, q: &CorpusQuery) -> Result<Option<i64>, DevError> 
     db.latest_run_id()
 }
 
+/// With the run defaulted to the latest, say why a `--probe` that run holds
+/// no disposition for will read empty, and where its newest disposition is -
+/// otherwise a newer run that did not select it (a single-probe `--no-gate`
+/// run by someone else) hides its rows behind an empty table. Presence is
+/// judged on the run's unfiltered dispositions, never on `--where`.
+fn note_absent_probes(db: &CorpusDb, run_id: i64, probes: &[String]) -> Result<(), DevError> {
+    use crate::piners::corpus_db::compare::Presence;
+    for (probe, presence) in db.presence_of(run_id, probes)? {
+        let why = match presence {
+            Presence::Ran(_) => continue,
+            Presence::NotSelected => "was not selected in",
+            Presence::NoLine => "was selected, but no disposition was stored, in",
+            Presence::SelectionUnknown => "has no disposition (selection unknown) in",
+        };
+        let elsewhere = match db.latest_run_with_disposition(&probe)? {
+            Some(other) => format!("its newest stored disposition is in run {other} (--run {other})"),
+            None => "no retained run holds a disposition for it".to_owned(),
+        };
+        output::result_msg(&format!("probe '{probe}' {why} run {run_id}; {elsewhere}"));
+    }
+    Ok(())
+}
+
 fn no_run(run_id: i64) -> DevError {
     DevError::Config(format!(
         "corpus-results: no run {run_id} in runs.db (bare `brokkr corpus-results` lists the runs)"
@@ -278,7 +309,8 @@ fn render_probe(db: &CorpusDb, run_id: i64, probe: &str) -> Result<(), DevError>
             let diffs = db.trade_diffs_for_probe(run_id, probe)?;
             if diffs.is_empty() {
                 output::result_msg(
-                    "(no trade_diff rows - probe was byte-exact or divergence-free)",
+                    "(no stored trade_diff rows; unmatched-count divergence alone produces \
+                     no trade_diff rows)",
                 );
             } else {
                 println!("\ntrade_diff:");

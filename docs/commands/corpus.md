@@ -482,15 +482,16 @@ scored, K missing` plus the invalid/duplicate/extra counts when nonzero - and
 the members of each nonempty category are named on the lines after it (the
 missing list capped, with a count). An empty report therefore reads as
 `850 selected, 0 scored, 850 missing`, never as a bare `0 total`. The tallies
-after it, the root-cause and dense-na breakdowns, and the `N probes matching
+after it, the divergence and dense-na breakdowns, and the `N probes matching
 their pin (hidden)` count all cover the **scored** set only: an extra or an
 invalid line is stored, but never counted as a match or aggregated.
 
 Invalid records, duplicates and extras are **protocol violations** and fail
 the run. **Any selected probe without a valid disposition fails the run**,
 even on exit 0 and even under `--no-gate`: a probe that vanished is not a
-probe that passed. (A `trade_diff` line that fails to parse is still only
-warned about and dropped: it is a diagnostic, never scored.)
+probe that passed. (A `trade_diff` line whose key - `probe`, `our_index`,
+`tv_index` - fails to parse is still only warned about and dropped: it is a
+diagnostic, never scored.)
 
 When the harness ends abnormally, or leaves selected probes without a valid
 disposition, brokkr prints how it ended against how much it reported -

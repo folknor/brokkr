@@ -108,7 +108,9 @@ Emits **one NDJSON object per probe, no summary line** (brokkr aggregates):
   counts (the effective-derived signature already drops boundary-only probes
   from the breakdown). The `boundary_*` <= raw invariant is a contract, not
   enforced; a malformed line saturates `effective` at 0.
-- `signature`: non-exact parity probes. `dense_na_sites`: when non-empty.
+- `signature`: parity probes with a breached dimension - including a
+  `byte_exact` probe whose only disagreement is a displayed label.
+  `dense_na_sites`: when non-empty.
 - `*_fail`: carries `error` instead of the parity fields.
 - `runtime_ms` (optional, any outcome): per-probe wall-clock milliseconds.
   brokkr can't time probes itself (the whole selection is one harness
@@ -122,15 +124,15 @@ kinds without a brokkr change:
 
 - no `kind`, or `kind == "disposition"` - the per-probe line above. The only
   kind that feeds the summary, breakdowns, and the gate. (Both forms accepted.)
-- `kind == "trade_diff"` - a per-trade drill-down record, one per
-  matched-but-divergent trade pair, emitted inline in probe order
-  (self-limiting: an exact probe emits none). 26 fields: 9 always present
-  (`probe`, `our_index`, `tv_index`, `our_entry_ts`/`our_exit_ts`,
-  `our_entry_price`/`our_exit_price`, `our_qty`, `our_pnl`) + 17 nullable (the
-  four `entry`/`exit` ts/price deltas, `our_entry_bar`/`our_exit_bar`,
-  `our_side`/`our_entry_id`/`our_exit_id`, the `tv_*` legs incl.
-  `tv_entry_qty`/`tv_pnl`/`tv_entry_signal`/`tv_exit_signal`). brokkr does not
-  aggregate these but **persists** them (below).
+- `kind == "trade_diff"` - a per-trade drill-down record, one per matched
+  pair the signature counts a breach on, emitted inline in probe order. An
+  unmatched-count divergence produces none, so a probe with no rows is not
+  thereby exact. brokkr validates only the key (`probe`, `our_index`,
+  `tv_index`); a line whose key does not parse is warned about and dropped.
+  The rest - the `our_*`/`tv_*` legs, the deltas, bars, ids, signals, our
+  displayed labels `our_entry_label`/`our_exit_label`, `tv_side`, and
+  `breaches` (the `+`-joined breach names) - rides in the stored record.
+  brokkr does not aggregate these but **persists** them (below).
 - the contract kinds, each carrying `"version": 1` (below).
 - any other `kind` - skipped (forward-compat).
 
@@ -175,7 +177,10 @@ and a stdout line that is not JSON or a disposition line that does not
 deserialize is an invalid record. Any shortfall or violation fails the run
 (report integrity, `docs/commands/corpus.md`), whatever the exit code. brokkr
 renders per-probe lines + a computed summary (led by the reconciliation, `N
-selected, M scored, K missing`) + root-cause breakdown (by `signature` domain/dimension) +
+selected, M scored, K missing`) + divergence breakdown (probes carrying a
+`signature`, by its domain/dimension; the signature is piners' symptom
+classification, never a cause, and a `byte_exact` probe whose only
+disagreement is a displayed label carries one) +
 dense-na breakdown (by builtin: site/na/probe counts). When any probe carried a
 window-boundary discount, a `boundary artifacts: N probes, M trades
 discounted` line follows the summary (the "log what was dropped" rule - a probe
@@ -285,8 +290,14 @@ The store has per-db `PRAGMA user_version` migrations and WAL, mirroring
   `docs/commands/corpus.md`). Its bytes survive in the stored
   `harness_stderr` only if the harness also wrote them there; the stdout
   copy goes with the run dir unless the dir is kept.
-- `trade_diff` (PK `run_id,probe,our_index,tv_index`) - all 26 NDJSON fields.
-  The volume driver; the PK covers probe-within-run lookups. A harness that
+- `trade_diff` (PK `run_id,probe,our_index,tv_index`) - built like
+  `disposition`: the line stored whole as `raw_json`, the key and
+  `raw_source` physical, every harness field a type-gated generated column
+  (timestamps, deltas and bars exact signed integers; prices, quantities and
+  PnL reals; ids, signals, labels, `tv_side` and `breaches` text). v13
+  rebuilt the typed table it replaced, verifying every row; a rebuilt row is
+  `reconstructed`, and its `breaches`, `tv_side` and labels read `NULL` - the
+  typed table had dropped them, so *not retained*. The volume driver; the PK covers probe-within-run lookups. A harness that
   repeats a disposition or `trade_diff` key has the repeats collapsed to the
   last occurrence before ingest (and the run fails - see
   `docs/commands/corpus.md`), so the PKs hold.
@@ -345,15 +356,23 @@ struct, no benchmark filters to reject. The corpus views:
   them too.
 - `brokkr corpus-results --probe <id>` - one probe's **combo** view: its disposition +
   its `trade_diff` rows (the drill-down a blessed `actionable_drift` probe still
-  carries). The curated diff columns cover all four divergence axes -
-  time/price/**qty**/pnl; `our_qty`/`tv_qty` were the field the pyramiding
-  investigations turned on and used to be missing. A single `--probe` only.
+  carries). The curated diff columns lead with `breaches` (why the pair was
+  selected), then cover all four divergence axes - time/price/**qty**/pnl;
+  `our_qty`/`tv_qty` were the field the pyramiding investigations turned on
+  and used to be missing. No rows says only that none are stored: an
+  unmatched-count divergence produces none. A single `--probe` only.
 - `brokkr corpus-results --diffs [--probe <id>...] [--columns ...] [--where "<expr>"]` -
-  the shapeable `trade_diff` table across the latest run (or `--run N`). `--probe`
+  the shapeable `trade_diff` table across the latest run (or `--run N`, or the
+  bare positional id). The header says when the run was defaulted, and then
+  each `--probe` that run holds no disposition for gets a note: not selected,
+  selected with no disposition stored, or selection unknown, plus the newest
+  retained run that does hold one - so a later run by someone else cannot
+  pass for an empty result. Presence is judged on the run's dispositions,
+  never on `--where`. `--probe`
   is repeatable here, an `IN`-list filter (not the combo view). `--columns
   a,b,c` projects onto a subset; `--columns all` selects every `trade_diff`
-  column and renders **vertically** (psql `\x` style, since 26 columns won't fit
-  a row); an unknown column name errors with the valid set - that error is the
+  column, `raw_json` included, and renders **vertically** (psql `\x` style,
+  since the columns won't fit a row); an unknown column name errors with the valid set - that error is the
   column-discovery path (there is no `--list-columns`). `--where` still takes a
   raw boolean expression. Default order is `(probe, our_index)`.
 - `brokkr corpus-results --dispositions [--probe <id>...] [--columns ...] [--where "<expr>"]` -

@@ -1,9 +1,9 @@
 //! `runs.db` - the piners corpus run store.
 //!
 //! Persists every `brokkr corpus` run's harness NDJSON - the per-probe
-//! disposition lines, each stored whole as the authoritative record with its
-//! fields projected as generated columns, and the per-trade `trade_diff`
-//! drill-down lines - into the per-project SQLite database returned by
+//! disposition lines and the per-trade `trade_diff` drill-down lines, each
+//! stored whole as the authoritative record with its fields projected as
+//! generated columns - into the per-project SQLite database returned by
 //! `piners::db_paths::corpus_runs_db_path`. Once a run
 //! is in the DB its artefact dir can be discarded (pass or fail) and its data
 //! stays queryable across runs via `brokkr corpus-results` (piners only).

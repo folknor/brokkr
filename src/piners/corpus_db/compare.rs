@@ -126,6 +126,29 @@ impl CorpusDb {
         })
     }
 
+    /// Where each of `probes` stands in run `run_id`, by the same evidence
+    /// the comparison reads: a stored disposition, then `gate_miss`, then
+    /// the stored selector. An id with no run row is an error.
+    pub fn presence_of(
+        &self,
+        run_id: i64,
+        probes: &[String],
+    ) -> Result<Vec<(String, Presence)>, DevError> {
+        let run = self.run(run_id)?.ok_or_else(|| no_run(run_id))?;
+        let selected = selected_ids(&run.selector);
+        let map = self.presence_map(&run, selected.as_deref())?;
+        Ok(probes
+            .iter()
+            .map(|p| {
+                let presence = map
+                    .get(p)
+                    .cloned()
+                    .unwrap_or_else(|| missing_presence(selected.as_deref(), p));
+                (p.clone(), presence)
+            })
+            .collect())
+    }
+
     /// Every probe the run selected or emitted, with what it emitted.
     fn presence_map(
         &self,
@@ -195,8 +218,7 @@ fn missing_presence(selector_ids: Option<&[String]>, probe: &str) -> Presence {
 
 fn no_run(id: i64) -> DevError {
     DevError::Config(format!(
-        "corpus-results --compare: no run {id} in runs.db (bare `brokkr corpus-results` lists \
-         the runs)"
+        "corpus-results: no run {id} in runs.db (bare `brokkr corpus-results` lists the runs)"
     ))
 }
 
