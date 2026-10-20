@@ -199,6 +199,63 @@ pub fn record_label(
     }
 }
 
+/// One leg of the displayed-label census a parity line carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LegCensus {
+    pub compared: u64,
+    pub mismatched: u64,
+    pub ambiguous: u64,
+    pub unavailable: u64,
+}
+
+/// The displayed-label census over a probe's matched pairs, per leg. The
+/// gate ratchets `mismatched` against the pin (`gate.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LabelCensus {
+    pub entry: LegCensus,
+    pub exit: LegCensus,
+}
+
+/// Read a `labels` value strictly. The census is gate evidence, so nothing
+/// in it defaults: both legs, each with all four counts as non-negative
+/// integers, and counts that can describe one population - `mismatched` and
+/// `ambiguous` are disjoint subsets of `compared`. Unknown keys are
+/// tolerated. (`compared + unavailable` is not held to `matched`: the
+/// harness leaves discounted start-transient pairs out of the census.)
+pub fn parse_label_census(value: &serde_json::Value) -> Result<LabelCensus, String> {
+    let leg = |name: &str| -> Result<LegCensus, String> {
+        let obj = value
+            .get(name)
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| format!("labels.{name} is not an object"))?;
+        let count = |key: &str| {
+            obj.get(key)
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| format!("labels.{name}.{key} is not a non-negative integer"))
+        };
+        let c = LegCensus {
+            compared: count("compared")?,
+            mismatched: count("mismatched")?,
+            ambiguous: count("ambiguous")?,
+            unavailable: count("unavailable")?,
+        };
+        if c.mismatched > c.compared || c.ambiguous > c.compared - c.mismatched {
+            return Err(format!(
+                "labels.{name} counts {} mismatched and {} ambiguous of {} compared",
+                c.mismatched, c.ambiguous, c.compared
+            ));
+        }
+        Ok(c)
+    };
+    if !value.is_object() {
+        return Err("labels is not an object".to_owned());
+    }
+    Ok(LabelCensus {
+        entry: leg("entry")?,
+        exit: leg("exit")?,
+    })
+}
+
 /// A per-probe disposition line.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProbeLine {
@@ -253,6 +310,12 @@ pub struct ProbeLine {
     /// for a present null. Set by [`parse`]; checked by [`record_label`].
     #[serde(skip)]
     pub declared: Option<serde_json::Value>,
+    /// The `labels` census exactly as sent: `None` when the key is missing (a
+    /// harness predating it, or a non-parity line), `Some` - null included -
+    /// when present, which [`Self::labels`] then holds to a valid census. Set
+    /// by [`parse`].
+    #[serde(skip)]
+    pub labels_field: Option<serde_json::Value>,
 }
 
 impl ProbeLine {
@@ -288,11 +351,25 @@ impl ProbeLine {
     }
 
     fn record_check(&self) -> Result<CorpusDisposition, String> {
-        record_label(
+        let label = record_label(
             &self.outcome,
             self.acceptance.as_ref().map(|a| a.tier.as_str()),
             self.declared.as_ref(),
-        )
+        )?;
+        // A present census is gate evidence: a malformed one makes the whole
+        // record invalid, so it taints the probe like any other defect and a
+        // clean repeat cannot launder it.
+        self.labels()?;
+        Ok(label)
+    }
+
+    /// The label census, `None` when the line carries none; `Err` when the
+    /// key is present but not a valid census (an explicit null included).
+    pub fn labels(&self) -> Result<Option<LabelCensus>, String> {
+        self.labels_field
+            .as_ref()
+            .map(parse_label_census)
+            .transpose()
     }
 
     /// The effective `ours_only` count after discounting window-boundary
@@ -656,11 +733,13 @@ pub fn parse(stdout: &[u8]) -> HarnessReport {
                 let raw = value.to_string();
                 // Missing key and present null are different facts.
                 let declared = value.get("disposition").cloned();
+                let labels_field = value.get("labels").cloned();
                 match serde_json::from_value::<ProbeLine>(value) {
                     Ok(mut p) => {
                         p.raw = raw;
                         p.line = position;
                         p.declared = declared;
+                        p.labels_field = labels_field;
                         // Every occurrence is validated here, before repeats
                         // collapse, so a later consistent duplicate cannot
                         // hide an earlier defective record. The record stays
@@ -1303,6 +1382,45 @@ mod tests {
         assert_eq!(r.probes[0].dense_na_sites.len(), 1); // bad site dropped
         assert_eq!(r.probes[0].dense_na_sites[0].name, "a");
         assert_eq!(r.probes[0].dense_na_sites[0].call_site, "8");
+    }
+
+    #[test]
+    fn a_present_label_census_must_be_whole_and_consistent() {
+        let leg = r#"{"compared":3,"mismatched":1,"ambiguous":2,"unavailable":0}"#;
+        let line = |labels: &str| {
+            format!(
+                "{{\"probe\":\"p\",\"outcome\":\"parity\",\"acceptance\":{{\"tier\":\"accepted\"}}{labels}}}"
+            )
+        };
+        // Absent: valid, no census.
+        let r = parse(line("").as_bytes());
+        assert!(r.invalid.is_empty());
+        assert_eq!(r.probes[0].labels(), Ok(None));
+        // Whole and consistent: valid.
+        let r = parse(line(&format!(",\"labels\":{{\"entry\":{leg},\"exit\":{leg}}}")).as_bytes());
+        assert!(r.invalid.is_empty());
+        assert_eq!(r.probes[0].labels().unwrap().unwrap().exit.ambiguous, 2);
+        // Each defect makes the whole record invalid.
+        for bad in [
+            ",\"labels\":null".to_owned(),
+            format!(",\"labels\":{{\"entry\":{leg}}}"),
+            format!(
+                ",\"labels\":{{\"entry\":{leg},\"exit\":{{\"compared\":3,\"mismatched\":-1,\
+                 \"ambiguous\":0,\"unavailable\":0}}}}"
+            ),
+            format!(
+                ",\"labels\":{{\"entry\":{leg},\"exit\":{{\"compared\":3,\"mismatched\":2,\
+                 \"ambiguous\":2,\"unavailable\":0}}}}"
+            ),
+            format!(
+                ",\"labels\":{{\"entry\":{leg},\"exit\":{{\"compared\":3,\"mismatched\":1.5,\
+                 \"ambiguous\":0,\"unavailable\":0}}}}"
+            ),
+        ] {
+            let r = parse(line(&bad).as_bytes());
+            assert_eq!(r.invalid.len(), 1, "{bad}");
+            assert!(r.probes[0].valid_disposition().is_none(), "{bad}");
+        }
     }
 
     #[test]

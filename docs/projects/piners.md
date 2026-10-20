@@ -265,7 +265,14 @@ The store has per-db `PRAGMA user_version` migrations and WAL, mirroring
   trusted from the line), `expected` (from the pins at run time; `NULL` for a
   probe outside the selection), `gate_ok` (the gate's own verdict - a probe is
   ok unless the gate flagged it, so a never-blessed selected probe is not ok
-  and a stray line for an unselected probe is), and `raw_source` - `harness`,
+  and a stray line for an unselected probe is; since v14 the conjunction of
+  the disposition check and the label ratchet), `expected_labels` (v14: the
+  pin's label counts at run time as JSON, `NULL` when unpinned), `label_gate`
+  (v14: the label deviations as a JSON list, `[]` when checked and clean;
+  `NULL` when the probe was not label-checked - unselected or an invalid
+  line - and on every older row, whose label verdict was never recorded,
+  so there `expected_labels` `NULL` means *not recorded*; run detail renders
+  it as the `labels` column), and `raw_source` - `harness`,
   or `reconstructed` for a row migrated from the v4 typed table, whose record
   was rebuilt from exactly the columns it kept (so its newer diagnostics read
   `NULL`, meaning *not retained*, not zero). The projections: `outcome`,

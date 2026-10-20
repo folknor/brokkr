@@ -18,7 +18,7 @@ use rusqlite::params;
 use super::CorpusDb;
 use crate::db::store::as_i64;
 use crate::error::DevError;
-use crate::piners::gate::GateDiff;
+use crate::piners::gate::{GateVerdict, LabelAssessment};
 use crate::piners::report::{HarnessReport, ProbeLine, TradeDiffLine};
 use crate::piners::run_model::RunVerdict;
 
@@ -90,11 +90,11 @@ impl CorpusDb {
         run: &RunRecord<'_>,
         report: &HarnessReport,
         expected: &BTreeMap<String, Option<String>>,
-        gate_diffs: &[GateDiff],
+        gate: &GateVerdict,
     ) -> Result<i64, DevError> {
         self.conn().execute("BEGIN", [])?;
         let result =
-            record_inner(self.conn(), run, report, expected, gate_diffs).and_then(|run_id| {
+            record_inner(self.conn(), run, report, expected, gate).and_then(|run_id| {
                 prune_run_history(self.conn(), RUN_RETENTION_LIMIT)?;
                 Ok(run_id)
             });
@@ -224,7 +224,7 @@ fn record_inner(
     run: &RunRecord<'_>,
     report: &HarnessReport,
     expected: &BTreeMap<String, Option<String>>,
-    gate_diffs: &[GateDiff],
+    gate: &GateVerdict,
 ) -> Result<i64, DevError> {
     let (cargo_profile, harness_args) = match run.context {
         Some(context) => {
@@ -267,13 +267,14 @@ fn record_inner(
     // `gate_ok` unless `gate::evaluate` flagged it. The two used to diverge on
     // a line for a probe outside the selection, which the gate ignores but a
     // recomputation against the (selection-only) expected map stored as
-    // DEVIATES - so a passing run read as failing in `corpus-results`.
-    let deviating: std::collections::HashSet<&str> =
-        gate_diffs.iter().map(|d| d.probe.as_str()).collect();
+    // DEVIATES - so a passing run read as failing in `corpus-results`. It is
+    // the conjunction of both checks, the disposition and the label ratchet.
+    let deviating = gate.deviating();
 
     for p in &report.probes {
         let gate_ok = !deviating.contains(p.probe.as_str());
-        insert_disposition(conn, run_id, p, expected, gate_ok).map_err(|e| {
+        let assessment = gate.assessments.get(&p.probe);
+        insert_disposition(conn, run_id, p, expected, gate_ok, assessment).map_err(|e| {
             DevError::Database(format!(
                 "storing the disposition of probe '{}': {e}",
                 p.probe
@@ -308,8 +309,10 @@ fn record_inner(
     // Gate violations the harness emitted NO disposition line for (a selected
     // probe that produced nothing, or a never-blessed + never-emitted probe).
     // The deviation cases that DO have a disposition row are already captured
-    // there via gate_ok=0; this table preserves only the no-row case.
-    for d in gate_diffs {
+    // there via gate_ok=0; this table preserves only the no-row case. Only a
+    // disposition deviation can mean "no row": a label deviation always has
+    // its disposition row.
+    for d in &gate.dispositions {
         if d.actual.is_none() {
             conn.execute(
                 "INSERT OR IGNORE INTO gate_miss (run_id, probe, expected, actual) \
@@ -331,6 +334,7 @@ fn insert_disposition(
     p: &ProbeLine,
     expected: &BTreeMap<String, Option<String>>,
     gate_ok: bool,
+    labels: Option<&LabelAssessment>,
 ) -> Result<(), DevError> {
     if p.raw.is_empty() {
         // Only `report::parse` builds lines for ingest, and it always sets the
@@ -342,8 +346,9 @@ fn insert_disposition(
     }
     conn.execute(
         "INSERT INTO disposition \
-         (run_id, probe, disposition, expected, gate_ok, raw_source, raw_json) \
-         VALUES (?1, ?2, ?3, ?4, ?5, 'harness', ?6)",
+         (run_id, probe, disposition, expected, gate_ok, raw_source, raw_json, \
+          expected_labels, label_gate) \
+         VALUES (?1, ?2, ?3, ?4, ?5, 'harness', ?6, ?7, ?8)",
         params![
             run_id,
             p.probe,
@@ -351,6 +356,8 @@ fn insert_disposition(
             expected.get(&p.probe).cloned().flatten(),
             i64::from(gate_ok),
             p.raw,
+            labels.and_then(LabelAssessment::pinned_json),
+            labels.and_then(LabelAssessment::deviations_json),
         ],
     )?;
     Ok(())
@@ -373,7 +380,7 @@ fn insert_trade_diff(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
     use super::*;
-    use crate::piners::gate::GateDiff;
+    use crate::piners::gate::{GateDiff, GateVerdict};
     use crate::piners::report::parse;
 
     fn expected_map(pairs: &[(&str, Option<&str>)]) -> BTreeMap<String, Option<String>> {
@@ -415,7 +422,7 @@ mod tests {
             run_error: None,
         };
         let run_id = db
-            .record_run(&run, &report, &expected, &gate_diffs)
+            .record_run(&run, &report, &expected, &GateVerdict::from(gate_diffs))
             .unwrap();
         assert_eq!(run_id, 1);
 
@@ -479,7 +486,7 @@ mod tests {
             protocol_violations: Some(0),
             run_error: None,
         };
-        db.record_run(&run, &parse(b""), &BTreeMap::new(), &[])
+        db.record_run(&run, &parse(b""), &BTreeMap::new(), &GateVerdict::default())
             .unwrap();
 
         assert_eq!(db.run(1).unwrap().unwrap().context, Some(context));
@@ -513,7 +520,7 @@ mod tests {
             &run,
             &report,
             &expected_map(&[("p1", Some("accepted"))]),
-            &[],
+            &GateVerdict::default(),
         )
         .unwrap();
         let t = db
@@ -559,7 +566,7 @@ mod tests {
             run_error: None,
         };
         let run_id = db
-            .record_run(&run, &report, &expected, &gate_diffs)
+            .record_run(&run, &report, &expected, &GateVerdict::from(gate_diffs))
             .unwrap();
         assert!(
             !db.disposition_for_probe(run_id, "p1")
@@ -593,7 +600,7 @@ mod tests {
             protocol_violations: Some(0),
             run_error: Some(json),
         };
-        db.record_run(&run, &parse(b""), &BTreeMap::new(), &[])
+        db.record_run(&run, &parse(b""), &BTreeMap::new(), &GateVerdict::default())
             .unwrap();
         let row = db.run(3).unwrap().unwrap();
         let rec =
@@ -624,7 +631,7 @@ mod tests {
             protocol_violations: Some(0),
             run_error: None,
         };
-        db.record_run(&run, &parse(b""), &BTreeMap::new(), &[])
+        db.record_run(&run, &parse(b""), &BTreeMap::new(), &GateVerdict::default())
             .unwrap();
         db.append_diagnosis(7, "first").unwrap();
         db.append_diagnosis(7, "second").unwrap();
@@ -658,7 +665,7 @@ mod tests {
                 protocol_violations: Some(0),
                 run_error: None,
             };
-            db.record_run(&run, &parse(b""), &BTreeMap::new(), &[])
+            db.record_run(&run, &parse(b""), &BTreeMap::new(), &GateVerdict::default())
                 .unwrap();
         }
 

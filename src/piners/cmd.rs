@@ -404,7 +404,7 @@ pub fn corpus(
     // deviations. Bless never gates - it ignores the verdict - but the diffs
     // still record and still drive the render filter (what differs from the
     // pins about to be re-stamped).
-    let gate_diffs = crate::piners::gate::evaluate(&ids, &registry, report);
+    let gate = crate::piners::gate::GateVerdict::evaluate(&ids, &registry, report);
     // Is exit 1 ("break(s)") explained? For a gated run, when every break is
     // one the pins expect; for bless, when the report actually carries the
     // breaks, since recording them is bless's job.
@@ -424,7 +424,7 @@ pub fn corpus(
     let verdict = RunVerdict::decide(
         (!harness_ok).then(|| harness_reasons.join("; ")),
         mode,
-        (!gate_diffs.is_empty()).then(|| output::count(gate_diffs.len(), "gate deviation")),
+        (!gate.is_empty()).then(|| output::count(gate.deviating_count(), "gate deviation")),
     );
     let run_pass = verdict.is_pass();
 
@@ -432,10 +432,13 @@ pub fn corpus(
     // their pin collapse to a single count; the survivors are worth reading.
     // The summary leads with the reconciliation, so an empty report reads as
     // "N selected, 0 scored, N missing", never as "0 total".
-    let deviating: HashSet<&str> = gate_diffs.iter().map(|d| d.probe.as_str()).collect();
+    let deviating: HashSet<&str> = gate.deviating();
     // Aggregates and the hidden-match count cover the scored set only.
     let scored: HashSet<&str> = rec.valid.iter().map(String::as_str).collect();
     report::render(report, &scored, &deviating, &rec.summary());
+    if let Some(line) = gate.coverage_line() {
+        output::corpus_msg(&line);
+    }
     for line in assessment.detail_lines() {
         output::corpus_msg(&line);
     }
@@ -492,7 +495,7 @@ pub fn corpus(
     // refusing a changed pins.toml, a finalize error) is the command's error,
     // not a second row under this id. Recorded BEFORE any diagnosis, so an
     // interrupted diagnosis cannot lose the original record.
-    if let Err(e) = ingest_run(&corpus_db_path, &record, report, &expected, &gate_diffs) {
+    if let Err(e) = ingest_run(&corpus_db_path, &record, report, &expected, &gate) {
         output::warn(&format!(
             "failed to persist run to {}: {e}",
             corpus_db_path.display()
@@ -608,8 +611,8 @@ pub fn corpus(
         return Ok(());
     }
 
-    if !gate_diffs.is_empty() {
-        crate::piners::gate::render_diffs(&gate_diffs);
+    if !gate.is_empty() {
+        gate.render();
     }
 
     // Data is durable in the DB; the dir is dropped (unless --keep-artefacts)
@@ -1027,7 +1030,7 @@ fn record_unfinished(
         &record,
         &report::HarnessReport::default(),
         &BTreeMap::new(),
-        &[],
+        &crate::piners::gate::GateVerdict::default(),
     ) {
         output::warn(&format!(
             "run {} could not be recorded in {}: {e}",
@@ -1051,10 +1054,10 @@ fn ingest_run(
     record: &RunRecord<'_>,
     report: &report::HarnessReport,
     expected: &BTreeMap<String, Option<String>>,
-    gate_diffs: &[crate::piners::gate::GateDiff],
+    gate: &crate::piners::gate::GateVerdict,
 ) -> Result<(), DevError> {
     let db = CorpusDb::open(db_path)?;
-    db.record_run(record, report, expected, gate_diffs)?;
+    db.record_run(record, report, expected, gate)?;
     Ok(())
 }
 
@@ -1097,7 +1100,7 @@ mod tests {
             &rec,
             &report::HarnessReport::default(),
             &BTreeMap::new(),
-            &[],
+            &crate::piners::gate::GateVerdict::default(),
         )
         .unwrap();
     }

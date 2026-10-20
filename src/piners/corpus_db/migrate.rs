@@ -24,7 +24,9 @@
 //! `schedule_estimate` table, backfilled from history; version 13 rebuilds
 //! `trade_diff` around the stored harness record, as v5 did `disposition`,
 //! so the fields the typed table dropped (`breaches`, `tv_side`, the labels)
-//! and every later one are kept. On a fresh database,
+//! and every later one are kept; version 14 adds `disposition.expected_labels`
+//! and `disposition.label_gate`, the label ratchet's pin and verdict. On a
+//! fresh database,
 //! the schema DDL in `schema.rs` creates the current tables (columns included)
 //! inside the shared migration transaction. Schema inspection uses the shared
 //! `db::store` helpers, which preserve errors and recognize generated columns.
@@ -39,7 +41,7 @@ use crate::db::store::{column_exists as has_column, table_exists as has_table};
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding a migration below.
-pub(super) const SCHEMA_VERSION: i64 = 13;
+pub(super) const SCHEMA_VERSION: i64 = 14;
 
 /// Run pending migrations through the shared store policy. The v5 rebuild
 /// preserves historical orphan dispositions, so foreign-key enforcement is
@@ -213,6 +215,17 @@ fn migrate_from(conn: &rusqlite::Connection, current: i64) -> Result<(), DevErro
         && !has_column(conn, "trade_diff", "raw_json")?
     {
         rebuild_trade_diff(conn)?;
+    }
+
+    // v13 -> v14: the label ratchet's pinned counts and verdict. Nullable,
+    // no default: an older row's label verdict was never recorded, and its
+    // stored `gate_ok` stays the verdict of the gate that ran then.
+    if current < 14 && has_table(conn, "disposition")? {
+        for col in ["expected_labels", "label_gate"] {
+            if !has_column(conn, "disposition", col)? {
+                conn.execute(&format!("ALTER TABLE disposition ADD COLUMN {col} TEXT"), [])?;
+            }
+        }
     }
 
     Ok(())
@@ -559,6 +572,8 @@ mod tests {
         assert!(has_column(&conn, "run", "diagnosis").unwrap());
         assert!(has_column(&conn, "run", "run_error").unwrap());
         assert!(has_column(&conn, "run", "cargo_profile").unwrap());
+        assert!(has_column(&conn, "disposition", "expected_labels").unwrap());
+        assert!(has_column(&conn, "disposition", "label_gate").unwrap());
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();

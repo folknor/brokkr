@@ -60,6 +60,9 @@ pub struct DispositionRow {
     pub sig_domain: Option<String>,
     pub sig_dimension: Option<String>,
     pub error: Option<String>,
+    /// The label ratchet's deviations as stored JSON: `[]` when checked and
+    /// clean, `None` when not label-checked (or a pre-v14 row).
+    pub label_gate: Option<String>,
 }
 
 /// One per-trade drill-down row (the rendered subset). `our_qty`/`tv_entry_qty`
@@ -200,6 +203,7 @@ fn disposition_row(row: &Row<'_>) -> rusqlite::Result<DispositionRow> {
         sig_domain: row.get("sig_domain")?,
         sig_dimension: row.get("sig_dimension")?,
         error: row.get("error")?,
+        label_gate: row.get("label_gate")?,
     })
 }
 
@@ -214,7 +218,7 @@ fn runtime_row(row: &Row<'_>) -> rusqlite::Result<RuntimeRow> {
 const DISPOSITION_COLS: &str = "\
 probe, outcome, disposition, expected, gate_ok, matched, ours_only, tv_only, \
 boundary_ours, boundary_tv, count_tier, p90_entry, p90_exit, p90_pnl, \
-sig_domain, sig_dimension, error";
+sig_domain, sig_dimension, error, label_gate";
 
 /// Every queryable `trade_diff` column - the row key, the harness projections
 /// `schema.rs` generates from the stored record, `raw_source`, and the record
@@ -287,6 +291,8 @@ pub const DISPOSITION_COLUMNS: &[&str] = &[
     "disposition",
     "expected",
     "gate_ok",
+    "expected_labels",
+    "label_gate",
     "raw_source",
     "outcome",
     "matched",
@@ -770,6 +776,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+    use crate::piners::gate::GateVerdict;
     use crate::piners::report::parse;
     use crate::piners::run_model::RunVerdict;
 
@@ -829,7 +836,8 @@ mod tests {
             protocol_violations,
             run_error: None,
         };
-        db.record_run(&run, &report, &BTreeMap::new(), &[]).unwrap();
+        db.record_run(&run, &report, &BTreeMap::new(), &GateVerdict::default())
+            .unwrap();
     }
 
     fn owned(cols: &[&str]) -> Vec<String> {
@@ -1008,7 +1016,8 @@ mod tests {
             protocol_violations: Some(0),
             run_error: None,
         };
-        db.record_run(&run, &report, &BTreeMap::new(), &[]).unwrap();
+        db.record_run(&run, &report, &BTreeMap::new(), &GateVerdict::default())
+            .unwrap();
     }
 
     #[test]

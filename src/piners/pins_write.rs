@@ -33,7 +33,7 @@ use crate::piners::toml_writer::{self, set_block_prefix, set_value, sort_fields,
 
 /// Field order inside a `[probes.<id>]` entry: the blessed contract first,
 /// then the volatile hashes.
-const PROBE_FIELDS: [&str; 5] = ["expected", "pine", "inputs", "csv", "record"];
+const PROBE_FIELDS: [&str; 6] = ["expected", "labels", "pine", "inputs", "csv", "record"];
 
 /// Field order inside a `[feeds.<name>]` group. `base` is the single-base
 /// form; `primary`/`warmup`/`lower` the role form. The two forms never
@@ -207,6 +207,18 @@ fn fill_probe(table: &mut Table, pin: &Pin) -> Result<(), DevError> {
         "expected",
         pin.expected
             .map(|disposition| Value::from(disposition.as_str())),
+    );
+    sync_opt(
+        table,
+        "labels",
+        pin.labels
+            .map(|l| {
+                toml_writer::parse_value(
+                    &format!("{{ entry = {}, exit = {} }}", l.entry, l.exit),
+                    "piners: pins.toml",
+                )
+            })
+            .transpose()?,
     );
     set_value(table, "pine", pin_value(&pin.pine)?);
     sync_opt(
@@ -544,6 +556,32 @@ csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
         // Untouched neighbours keep their bytes.
         assert!(text.contains("expected = \"accepted\" # blessed 2026-05"));
         assert!(text.contains("# zulu is on its way out"));
+    }
+
+    #[test]
+    fn labels_render_after_expected_and_clear_when_dropped() {
+        let feeds = commented_feeds();
+        let mut probes = BTreeMap::new();
+        let mut alpha = pin("alpha-01", "a-old");
+        alpha.expected = Some(registry::CorpusDisposition::Accepted);
+        alpha.labels = Some(registry::LabelPin { entry: 0, exit: 4 });
+        probes.insert("alpha-01".to_owned(), alpha);
+        probes.insert("zulu-09".to_owned(), pin("zulu-09", "zz"));
+
+        let text = render(Some(COMMENTED), &feeds, &BTreeMap::new(), &probes).unwrap();
+        let block = &text[text.find("[probes.alpha-01]").unwrap()..];
+        let labels_at = block.find("labels = { entry = 0, exit = 4 }").unwrap();
+        assert!(block.find("expected").unwrap() < labels_at);
+        assert!(labels_at < block.find("pine").unwrap());
+        assert_eq!(
+            reparse(&text).probes["alpha-01"].labels,
+            Some(registry::LabelPin { entry: 0, exit: 4 })
+        );
+
+        // A later write without labels removes the key.
+        probes.get_mut("alpha-01").unwrap().labels = None;
+        let text = render(Some(&text), &feeds, &BTreeMap::new(), &probes).unwrap();
+        assert!(!text.contains("labels ="));
     }
 
     #[test]

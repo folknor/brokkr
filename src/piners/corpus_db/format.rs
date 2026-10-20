@@ -259,6 +259,38 @@ fn compare_cells(d: &ProbeDelta) -> Vec<String> {
     }
 }
 
+/// The stored label verdict, compactly: `-` when the probe was not
+/// label-checked (or the row predates the ratchet), `ok` when clean, else
+/// each deviation as `entry 0->3` or `missing census`.
+fn label_gate(stored: Option<&str>) -> String {
+    let Some(text) = stored else {
+        return "-".to_owned();
+    };
+    let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(text)
+    else {
+        return text.to_owned();
+    };
+    if items.is_empty() {
+        return "ok".to_owned();
+    }
+    items
+        .iter()
+        .map(|d| {
+            if d.get("missing").is_some() {
+                "missing census".to_owned()
+            } else {
+                format!(
+                    "{} {}->{}",
+                    d["leg"].as_str().unwrap_or("?"),
+                    d["pinned"],
+                    d["actual"]
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// The per-probe disposition table (run detail / `--probe`).
 pub fn dispositions_table(rows: &[DispositionRow]) -> String {
     let cells: Vec<Vec<String>> = rows
@@ -279,6 +311,7 @@ pub fn dispositions_table(rows: &[DispositionRow]) -> String {
                 } else {
                     "DEVIATES".to_owned()
                 },
+                label_gate(d.label_gate.as_deref()),
                 d.matched.to_string(),
                 d.ours_only.to_string(),
                 d.tv_only.to_string(),
@@ -300,6 +333,7 @@ pub fn dispositions_table(rows: &[DispositionRow]) -> String {
             "disposition",
             "expected",
             "gate",
+            "labels",
             "matched",
             "ours",
             "tv",

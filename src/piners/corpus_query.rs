@@ -445,6 +445,7 @@ mod tests {
             sig_domain: None,
             sig_dimension: None,
             error: None,
+            label_gate: None,
         }
     }
 

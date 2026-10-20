@@ -270,7 +270,7 @@ mod tests {
 
     use super::*;
     use crate::piners::corpus_db::{RunContext, RunRecord, compare_report};
-    use crate::piners::gate::GateDiff;
+    use crate::piners::gate::{GateDiff, GateVerdict};
     use crate::piners::report::parse;
 
     fn record(db: &CorpusDb, ids: &[&str], nd: &str, misses: &[&str]) -> i64 {
@@ -302,7 +302,12 @@ mod tests {
                 actual: None,
             })
             .collect();
-        db.record_run(&run, &parse(nd.as_bytes()), &BTreeMap::new(), &diffs)
+        db.record_run(
+            &run,
+            &parse(nd.as_bytes()),
+            &BTreeMap::new(),
+            &GateVerdict::from(diffs),
+        )
             .unwrap()
     }
 
@@ -334,7 +339,7 @@ mod tests {
             &run,
             &parse(line("p", "exact", 1, 0, 0).as_bytes()),
             &BTreeMap::new(),
-            &[],
+            &GateVerdict::default(),
         )
         .unwrap()
     }

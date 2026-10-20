@@ -145,7 +145,8 @@ pub fn run(project_root: &Path, cfg: &PinersConfig, args: &CorpusArgs) -> Result
     if !plan.diff.oracle_switched.is_empty() {
         output::warn(&format!(
             "{} now judged against a different oracle ({CSV_FILE} <-> \
-             {RECORD_FILE}); their `expected` was carried forward from the old one - \
+             {RECORD_FILE}); their `expected` and `labels` were carried forward from the old \
+             one - \
              re-bless: brokkr corpus --bless --probe {}",
             output::count(plan.diff.oracle_switched.len(), "probe"),
             plan.diff.oracle_switched.join(",")
@@ -510,11 +511,15 @@ fn stamp_file(
     }))
 }
 
-/// Copy each surviving probe's blessed `expected` from the old pin set into
-/// the freshly stamped one. A probe new to the corpus stays `expected: None`
-/// (unblessed), which the gate treats as a hard "must bless".
+/// Copy each surviving probe's blessed contract - `expected` and its label
+/// counts - from the old pin set into the freshly stamped one. A probe new to
+/// the corpus stays `expected: None` (unblessed), which the gate treats as a
+/// hard "must bless".
 fn carry_expected(new: &mut BTreeMap<String, Pin>, old: &BTreeMap<String, Pin>) {
-    registry_io::carry_by_id(new, old, |pin, previous| pin.expected = previous.expected);
+    registry_io::carry_by_id(new, old, |pin, previous| {
+        pin.expected = previous.expected;
+        pin.labels = previous.labels;
+    });
 }
 
 /// Re-stamp the selected `[feeds]` groups' file hashes from the corpus
@@ -617,7 +622,7 @@ impl Diff {
         for (id, pin) in new {
             if let Some(prev) = old.get(id)
                 && prev != pin
-                && pin.expected.is_some()
+                && (pin.expected.is_some() || pin.labels.is_some())
                 && prev.record.is_some() != pin.record.is_some()
             {
                 oracle_switched.push(id.clone());

@@ -20,8 +20,12 @@
 //!
 //! What stays physical is what is not the harness's: the row key, brokkr's
 //! own gate label `disposition` (derived by `ProbeLine::disposition`, never
-//! trusted from the line), the pin's `expected`, the gate's `gate_ok`, and
-//! `raw_source`. `raw_source` is `harness` for a parsed harness line and
+//! trusted from the line), the pin's `expected`, the gate's `gate_ok`, the
+//! label ratchet's `expected_labels` (the pin's counts as JSON) and
+//! `label_gate` (the label deviations as a JSON list, `[]` when checked and
+//! clean; NULL when the probe was not label-checked - unselected, an invalid
+//! line, or a row from before v14, whose label verdict was never recorded),
+//! and `raw_source`. `raw_source` is `harness` for a parsed harness line and
 //! `reconstructed` for a row migrated from the typed schema (v4 and older),
 //! whose record was rebuilt from exactly the columns it kept - so on such a
 //! row every diagnostic the old schema never had reads NULL, meaning "not
@@ -232,6 +236,8 @@ pub(super) fn disposition_ddl(name: &str) -> String {
     gate_ok       INTEGER NOT NULL,
     raw_source    TEXT NOT NULL,
     raw_json      TEXT NOT NULL,
+    expected_labels TEXT,
+    label_gate    TEXT,
 {},
     PRIMARY KEY (run_id, probe)
 );

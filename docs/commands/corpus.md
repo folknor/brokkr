@@ -139,6 +139,7 @@ Probes are pinned in the registry (`registry_dir`), two file kinds:
 
   [probes.some-tvr-capture]
   expected = "byte_exact"
+  labels = { entry = 0, exit = 2 }  # blessed label mismatch counts (the label ratchet)
   pine   = { path = "piners/some-tvr-capture/strategy.pine", xxh128 = "<hex>" }
   record = { path = "piners/some-tvr-capture/tv_record.json", xxh128 = "<hex>" }
   ```
@@ -178,9 +179,13 @@ Probes are pinned in the registry (`registry_dir`), two file kinds:
   All `path`s (probe, feed and harness file) are relative to `corpus_root`. `xxh128` is
   brokkr's standard file hash (`preflight::compute_file_digest`, 32 lowercase hex,
   case-insensitive). `expected` is one disposition label (see the gate,
-  below); absent until the probe is blessed. A probe entry holds nothing
-  else: it is machine-stamped (reseed writes its hashes, bless its
-  `expected`), and reseed drops it when the probe's directory vanishes.
+  below); absent until the probe is blessed. `labels` is the per-leg
+  displayed-label mismatch count pair, both legs required (the label
+  ratchet, below); absent until a bless of a parity line carrying the
+  census. A probe entry holds nothing else: it is machine-stamped (reseed
+  writes its hashes, bless its `expected` and `labels`), and reseed drops it
+  when the probe's directory vanishes. A brokkr older than the ratchet
+  refuses a `pins.toml` holding `labels`.
 
   **`[probe_config."<prefix>"]` - how each probe runs.** Four optional
   fields, each flowing into the probe's manifest entry: `feed` (the `[feeds]`
@@ -427,6 +432,31 @@ else the outcome. brokkr compares actual vs `expected` per selected probe;
 gate to informational (still runs/aggregates/prints) - for rollout or ad-hoc
 breakdown runs. It downgrades the gate only: the harness exit and report
 integrity (below) still fail the run.
+
+**The label ratchet.** Every parity line carries `labels`, piners' census of
+displayed-label agreement over the matched pairs, per leg (`entry`,
+`exit`): `compared`, `mismatched`, `ambiguous`, `unavailable`. Labels stay
+out of the tiers (piners `reference/corpus.md`, Label comparison), so a
+label regression on a `byte_exact` probe would pass the disposition check.
+Bless therefore pins each leg's `mismatched` count beside `expected`, and the
+gate fails a selected probe whose count **moved** either way, as `id: entry
+label mismatches rose 0 -> 3` or `... fell 5 -> 2 (improvement - re-bless to
+adopt)`: a fall fails like a tier improvement, so the pin tightens rather
+than leaving the old allowance for a later regression. The ratchet needs no
+judgement of which probes' labels should agree - a probe whose labels
+legitimately differ (counter-built ids, value-bearing comments) pins its
+count. `ambiguous` moves with the pairing and is shown, never gated.
+
+- A pin without `labels` is ungated for labels until a bless stamps it, so
+  adopting the ratchet changes no verdict; such probes are counted in the
+  `labels: N ratcheted, M unpinned, K ambiguous legs` line.
+- A pin with `labels` whose line carries no census fails as missing
+  evidence - a parity line that lost its census, or a non-parity line - unless
+  its disposition already deviates.
+- A present census must be whole and consistent (both legs, four
+  non-negative integer counts, `mismatched + ambiguous <= compared`); anything
+  else, `"labels": null` included, makes the line an invalid record.
+- Only a valid, untainted line is label-checked.
 
 **Pinned breaks.** The harness exits 1 whenever any probe breaks
 (`compile_fail`, `runtime_fail` or `harness_abort`), including a probe pinned
@@ -712,11 +742,11 @@ probes' `[feeds]` groups (`--all` refreshes every group), and every
 `[harness_files]` entry (`--probe` included - an edited facts file is
 re-stamped by any reseed), preserves
 `[probe_config]` verbatim, and carries each surviving probe's `expected`
-forward. It decides nothing about how a probe runs, so a newly discovered or
+and `labels` forward. It decides nothing about how a probe runs, so a newly discovered or
 re-added probe runs under whatever `[probe_config]` declares for its
 directory and stays unblessed. A blessed probe that gained or lost a
 `record` - so is now judged against a different oracle - keeps its
-`expected` but is named in a re-bless warning, since a disposition that
+`expected` and `labels` but is named in a re-bless warning, since a disposition that
 happens to match across the switch would otherwise pass the gate unnoticed.
 A content change that breaks a `[probe_config]` rule - the probe gained a
 `record` under a declared CSV timezone, or the last probe under an exact-dir
@@ -724,7 +754,12 @@ declaration vanished - refuses the reseed, naming the declaration to edit.
 
 `--bless [--all|--keyword <k>|--probe <id>]` runs the selection (verify +
 build + harness), then stamps each probe's current disposition into
-`expected`. Records reality including fails (a probe exercising an
+`expected`, and its label census's per-leg `mismatched` counts into
+`labels`: a non-parity line clears `labels`, and a parity line without a
+census leaves an unpinned probe unpinned (a harness predating the census
+still blesses) but refuses the bless where the pin already holds counts it
+would drop. `changed` counts a probe whose `expected` or `labels` moved.
+Records reality including fails (a probe exercising an
 unimplemented feature legitimately pins `expected = "compile_fail"`; the
 gate then catches it starting to compile). Never gates. Prints `blessed N
 (changed M)`. Excludes `--verify-only`/`--reseed`. Bless is all or nothing:

@@ -1,5 +1,9 @@
 //! `brokkr corpus --bless`: stamp each selected probe's *current*
-//! disposition into its `expected` field in `pins.toml`.
+//! disposition into its `expected` field in `pins.toml`, and its per-leg
+//! displayed-label mismatch counts into `labels` (the label ratchet,
+//! `gate.rs`): a parity line's census is stamped, a non-parity line clears
+//! the counts, and a parity line without a census leaves an unpinned probe
+//! unpinned but refuses the bless where it would drop counts already pinned.
 //!
 //! Bless is the sibling of `--reseed`: reseed adopts new corpus *content*
 //! (re-hashing the pinned probe files), bless adopts new *dispositions*. Both are
@@ -21,9 +25,61 @@ use std::path::Path;
 use crate::error::DevError;
 use crate::output;
 use crate::piners::pins_write;
-use crate::piners::registry::Registry;
+use crate::piners::registry::{LabelPin, Registry};
 use crate::piners::registry_io;
-use crate::piners::report::HarnessReport;
+use crate::piners::report::{HarnessReport, LabelCensus};
+
+/// The label counts a bless stamps for one probe with a valid line, or
+/// `None` when it must refuse. A non-parity line has no labels to pin; a
+/// parity line pins its census. A parity line without one keeps an unpinned
+/// probe unpinned (a harness predating the census still blesses), but cannot
+/// replace counts the pin already holds: that would turn a harness that lost
+/// the census into an authorized-looking removal of the ratchet.
+fn label_stamp(
+    parity: bool,
+    census: Option<LabelCensus>,
+    pinned: Option<LabelPin>,
+) -> Option<Option<LabelPin>> {
+    match (parity, census, pinned) {
+        (false, _, _) => Some(None),
+        (true, Some(c), _) => Some(Some(LabelPin {
+            entry: c.entry.mismatched,
+            exit: c.exit.mismatched,
+        })),
+        (true, None, None) => Some(None),
+        (true, None, Some(_)) => None,
+    }
+}
+
+/// Why a bless is refused, naming every probe per reason; `None` when it
+/// may proceed.
+fn refusal(
+    missing: &[&str],
+    rejected: &[String],
+    unpinned: &[&str],
+    lost_labels: &[&str],
+) -> Option<String> {
+    let mut why = Vec::new();
+    if !missing.is_empty() {
+        why.push(format!("no disposition for {}", missing.join(", ")));
+    }
+    if !rejected.is_empty() {
+        why.push(format!(
+            "unstampable disposition for {}",
+            rejected.join(", ")
+        ));
+    }
+    if !unpinned.is_empty() {
+        why.push(format!("internal: not pinned: {}", unpinned.join(", ")));
+    }
+    if !lost_labels.is_empty() {
+        why.push(format!(
+            "pinned label counts but no label census on the parity line for {}",
+            lost_labels.join(", ")
+        ));
+    }
+    (!why.is_empty()).then(|| why.join("; "))
+}
 
 /// Stamp dispositions for `scope_ids` into the registry's pins, then
 /// rewrite `pins_path` (the whole file - `[feeds]`/`[harness_files]`/
@@ -74,51 +130,58 @@ pub fn apply(
             .map(|p| (p.probe.as_str(), (p.disposition(), p.valid_disposition())))
             .collect();
 
+    // Each line's label census, already held valid by the record check.
+    let census: BTreeMap<&str, Option<LabelCensus>> = report
+        .probes
+        .iter()
+        .map(|p| (p.probe.as_str(), p.labels().ok().flatten()))
+        .collect();
+
     // Validate every stamp before mutating anything.
     let mut missing: Vec<&str> = Vec::new();
     let mut rejected: Vec<String> = Vec::new();
     let mut unpinned: Vec<&str> = Vec::new();
+    let mut lost_labels: Vec<&str> = Vec::new();
+    let mut label_stamps: BTreeMap<&str, Option<LabelPin>> = BTreeMap::new();
     for id in scope_ids {
         match actual.get(id.as_str()) {
             None => missing.push(id),
             Some((derived, None)) => rejected.push(format!("{id} ({derived})")),
             Some(_) if !registry.pins.contains_key(id) => unpinned.push(id),
-            Some(_) => {}
+            Some((_, Some(disp))) => {
+                let pinned = registry.pins.get(id).and_then(|p| p.labels);
+                let line = census.get(id.as_str()).copied().flatten();
+                match label_stamp(disp.is_parity(), line, pinned) {
+                    Some(stamp) => {
+                        label_stamps.insert(id, stamp);
+                    }
+                    None => lost_labels.push(id),
+                }
+            }
         }
     }
-    if !missing.is_empty() || !rejected.is_empty() || !unpinned.is_empty() {
-        let mut why = Vec::new();
-        if !missing.is_empty() {
-            why.push(format!("no disposition for {}", missing.join(", ")));
-        }
-        if !rejected.is_empty() {
-            why.push(format!(
-                "unstampable disposition for {}",
-                rejected.join(", ")
-            ));
-        }
-        if !unpinned.is_empty() {
-            why.push(format!("internal: not pinned: {}", unpinned.join(", ")));
-        }
+    if let Some(why) = refusal(&missing, &rejected, &unpinned, &lost_labels) {
         return Err(DevError::Config(format!(
             "corpus --bless: nothing blessed, pins.toml untouched - every selected probe needs \
-             a stampable disposition ({})",
-            why.join("; ")
+             a stampable disposition ({why})"
         )));
     }
 
     let mut blessed = 0usize;
     let mut changed = 0usize;
     for id in scope_ids {
-        let (Some((_, Some(disp))), Some(pin)) =
-            (actual.get(id.as_str()), registry.pins.get_mut(id))
-        else {
+        let (Some((_, Some(disp))), Some(pin), Some(&labels)) = (
+            actual.get(id.as_str()),
+            registry.pins.get_mut(id),
+            label_stamps.get(id.as_str()),
+        ) else {
             continue; // unreachable: validated above
         };
         blessed += 1;
-        if pin.expected != Some(*disp) {
+        if pin.expected != Some(*disp) || pin.labels != labels {
             changed += 1;
             pin.expected = Some(*disp);
+            pin.labels = labels;
         }
     }
 
@@ -221,6 +284,58 @@ mod tests {
         assert_eq!(
             on_disk.probes["untouched"].expected,
             Some(registry::CorpusDisposition::ByteExact)
+        );
+    }
+
+    const CENSUS: &str = r#""labels":{"entry":{"compared":4,"mismatched":1,"ambiguous":0,"unavailable":0},"exit":{"compared":4,"mismatched":3,"ambiguous":1,"unavailable":0}}"#;
+
+    #[test]
+    fn stamps_the_census_clears_on_a_break_and_keeps_an_unpinned_probe_unpinned() {
+        let dir = crate::test_scratch::scratch("piners_bless", "stamps_labels");
+        let pins_path = dir.join("pins.toml");
+        let mut pins = BTreeMap::new();
+        pins.insert("a".to_owned(), pin(Some("accepted"))); // gains labels
+        let mut broke = pin(Some("accepted"));
+        broke.labels = Some(LabelPin { entry: 0, exit: 0 });
+        pins.insert("b".to_owned(), broke); // now compile_fail: labels clear
+        pins.insert("c".to_owned(), pin(None)); // old harness: stays unpinned
+        let rep = report(&format!(
+            "{{\"probe\":\"a\",\"outcome\":\"parity\",\"acceptance\":{{\"tier\":\"accepted\"}},{CENSUS}}}\n\
+             {{\"probe\":\"b\",\"outcome\":\"compile_fail\",\"error\":\"x\"}}\n\
+             {{\"probe\":\"c\",\"outcome\":\"parity\",\"acceptance\":{{\"tier\":\"accepted\"}}}}"
+        ));
+        let mut reg = registry_of(pins);
+        let ids = ["a".to_owned(), "b".to_owned(), "c".to_owned()];
+        apply(&pins_path, &mut reg, &rep, &ids).unwrap();
+        let on_disk =
+            registry::parse_pins(&std::fs::read_to_string(&pins_path).unwrap(), &pins_path)
+                .unwrap();
+        assert_eq!(
+            on_disk.probes["a"].labels,
+            Some(LabelPin { entry: 1, exit: 3 })
+        );
+        assert_eq!(on_disk.probes["b"].labels, None);
+        assert_eq!(on_disk.probes["c"].labels, None);
+    }
+
+    #[test]
+    fn refuses_to_drop_pinned_labels_for_a_parity_line_without_a_census() {
+        let dir = crate::test_scratch::scratch("piners_bless", "refuses_lost_labels");
+        let pins_path = dir.join("pins.toml");
+        std::fs::write(&pins_path, LOADED).unwrap();
+        let mut pinned = pin(Some("accepted"));
+        pinned.labels = Some(LabelPin { entry: 0, exit: 2 });
+        let mut pins = BTreeMap::new();
+        pins.insert("a".to_owned(), pinned);
+        let mut reg = registry_of(pins);
+        reg.pins_text = LOADED.to_owned();
+        let rep = report(r#"{"probe":"a","outcome":"parity","acceptance":{"tier":"byte_exact"}}"#);
+        let err = apply(&pins_path, &mut reg, &rep, &["a".to_owned()]).unwrap_err();
+        assert!(err.to_string().contains("no label census"));
+        assert_eq!(std::fs::read_to_string(&pins_path).unwrap(), LOADED);
+        assert_eq!(
+            reg.pins["a"].labels,
+            Some(LabelPin { entry: 0, exit: 2 })
         );
     }
 

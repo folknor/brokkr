@@ -424,6 +424,12 @@ pub struct Pin {
     /// across `--reseed` (which touches the pinned files only).
     #[serde(default)]
     pub expected: Option<CorpusDisposition>,
+    /// The blessed per-leg displayed-label mismatch counts, the label
+    /// ratchet (`gate.rs`). `None` means never stamped: labels are ungated
+    /// for the probe until a bless of a parity line carrying the census.
+    /// Stamped and carried exactly like `expected`.
+    #[serde(default)]
+    pub labels: Option<LabelPin>,
     pub pine: FilePin,
     /// The probe's `inputs.json`, when the probe dir carries one.
     #[serde(default)]
@@ -435,6 +441,16 @@ pub struct Pin {
     /// one. Outranks `csv` harness-side.
     #[serde(default)]
     pub record: Option<FilePin>,
+}
+
+/// A probe's blessed label mismatch counts, one per leg. Only `mismatched`
+/// is pinned: `ambiguous` moves with the pairing, so it is reported, never
+/// gated. Both legs are required; only the table as a whole is optional.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LabelPin {
+    pub entry: u64,
+    pub exit: u64,
 }
 
 /// A probe's pinned files, as reseed stamps them.
@@ -453,6 +469,7 @@ impl Pin {
     pub fn content(files: ProbeFiles) -> Self {
         Self {
             expected: None,
+            labels: None,
             pine: files.pine,
             inputs: files.inputs,
             csv: files.csv,
