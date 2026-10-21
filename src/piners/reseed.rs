@@ -33,7 +33,8 @@
 //! probes be declared together and pinned one at a time.
 //!
 //! Reseed touches the pinned *content* only: it re-hashes the probe files,
-//! the selected probes' `[feeds]` groups (all groups for `--all`), and the
+//! the selected probes' `[feeds]` groups plus every group sharing a file
+//! with them (all groups for `--all`), and the
 //! `[harness_files]` (on every reseed), preserves `[probe_config]` verbatim, and
 //! carries each surviving probe's blessed `expected` forward. It decides
 //! nothing about how a probe runs - feed, budget, start and CSV timezone are
@@ -524,13 +525,18 @@ fn carry_expected(new: &mut BTreeMap<String, Pin>, old: &BTreeMap<String, Pin>) 
 
 /// Re-stamp the selected `[feeds]` groups' file hashes from the corpus
 /// filesystem. `None` selects every group; an empty set selects none. Return
-/// the number of file hashes that changed. Paths and unselected groups are
-/// preserved; a missing selected feed file is a hard error.
+/// the number of file hashes that changed. A selection widens to every group
+/// naming a file a selected group names, so a replaced file shared between
+/// groups cannot leave one of them holding the old hash. Paths and the
+/// remaining unselected groups are preserved; a missing selected feed file is
+/// a hard error.
 fn restamp_feeds(
     feeds: &BTreeMap<String, FeedGroup>,
     selected: Option<&BTreeSet<String>>,
     corpus_root: &Path,
 ) -> Result<(BTreeMap<String, FeedGroup>, usize), DevError> {
+    let widened = selected.map(|selected| sharing_groups(feeds, selected));
+    let selected = widened.as_ref();
     let mut out = BTreeMap::new();
     let mut changed = 0;
     for (name, group) in feeds {
@@ -564,6 +570,37 @@ fn restamp_feeds(
         out.insert(name.clone(), stamped);
     }
     Ok((out, changed))
+}
+
+/// `selected` plus every group that names a file some group in the result
+/// names, to a fixed point: re-stamping a group re-hashes all its files, so
+/// a group reached through one shared file can share another onward.
+fn sharing_groups(
+    feeds: &BTreeMap<String, FeedGroup>,
+    selected: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let mut groups = selected.clone();
+    loop {
+        let paths: BTreeSet<&Path> = feeds
+            .iter()
+            .filter(|(name, _)| groups.contains(*name))
+            .flat_map(|(_, group)| group.roles())
+            .map(|(_, pin)| pin.path.as_path())
+            .collect();
+        let before = groups.len();
+        for (name, group) in feeds {
+            if group
+                .roles()
+                .iter()
+                .any(|(_, pin)| paths.contains(pin.path.as_path()))
+            {
+                groups.insert(name.clone());
+            }
+        }
+        if groups.len() == before {
+            return groups;
+        }
+    }
 }
 
 /// Re-stamp every `[harness_files]` hash from the corpus filesystem, the
@@ -1140,6 +1177,41 @@ bar_budget = 20200
         }
         let err = restamp_feeds(&feeds, Some(&selected), &root).unwrap_err();
         assert!(format!("{err:?}").contains("missing.csv"));
+    }
+
+    #[test]
+    fn restamp_feeds_widens_to_groups_sharing_a_file() {
+        // piners' shape: the bench group's lower role is the base group's
+        // file, and its primary is shared onward with a third group.
+        let root = crate::test_scratch::scratch("piners_reseed", "restamp_shared");
+        std::fs::create_dir_all(root.join("data")).unwrap();
+        for f in ["15m", "5m", "lone"] {
+            std::fs::write(root.join(format!("data/{f}.csv")), f.as_bytes()).unwrap();
+        }
+        let file = |p: &str| FilePin {
+            path: format!("data/{p}.csv").into(),
+            xxh128: "stale".into(),
+        };
+        let mut feeds = BTreeMap::new();
+        let group = |primary, lower| FeedGroup::Roles {
+            primary,
+            warmup: None,
+            lower,
+        };
+        feeds.insert("base".to_owned(), group(file("15m"), None));
+        feeds.insert("bench".to_owned(), group(file("5m"), Some(file("15m"))));
+        feeds.insert("fast".to_owned(), group(file("5m"), None));
+        feeds.insert("lone".to_owned(), group(file("lone"), None));
+
+        let selected = BTreeSet::from(["base".to_owned()]);
+        let (stamped, changed) = restamp_feeds(&feeds, Some(&selected), &root).unwrap();
+        assert_eq!(changed, 4);
+        for name in ["base", "bench", "fast"] {
+            for (_, pin) in stamped[name].roles() {
+                assert_ne!(pin.xxh128, "stale", "{name}");
+            }
+        }
+        assert_eq!(stamped["lone"].roles()[0].1.xxh128, "stale");
     }
 
     #[test]

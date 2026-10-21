@@ -738,7 +738,9 @@ named ones), removing them in the same write.
 
 Prints `added/changed/removed` and the number of feed file hashes that changed.
 Touches the pinned *content* only: re-hashes the probe files, the selected
-probes' `[feeds]` groups (`--all` refreshes every group), and every
+probes' `[feeds]` groups and every other group naming one of their files
+(so a replaced file shared between groups cannot leave one stale; `--all`
+refreshes every group), and every
 `[harness_files]` entry (`--probe` included - an edited facts file is
 re-stamped by any reseed), preserves
 `[probe_config]` verbatim, and carries each surviving probe's `expected`
