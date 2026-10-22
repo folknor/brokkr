@@ -14,7 +14,7 @@ use crate::user_dirs;
 use crate::visual::engine::{self, Subject, SubjectItem, SummaryOptions};
 
 use super::compare;
-use super::db::MechanicalDb;
+use super::db::{MechanicalDb, RunCompletion};
 
 fn open_db(project_root: &Path) -> Result<MechanicalDb, DevError> {
     engine::open_results_db(project_root, MechanicalDb::open)
@@ -110,6 +110,9 @@ impl Subject for TestContext<'_> {
     }
 
     fn finish(&mut self, tally: &compare::StatusTally) -> Result<(), DevError> {
+        // Stamp before the summary: the summary errors when fixtures failed,
+        // and a run whose every fixture ran is complete however it scored.
+        self.db.mark_run_complete(self.run_id)?;
         print_run_summary(tally)
     }
 }
@@ -174,9 +177,10 @@ fn run_pipeline(
 /// Record one fixture as `ERROR` and say why, then let the run continue.
 ///
 /// A capture or pipeline failure is this fixture's problem, not the run's:
-/// propagating it aborted the loop and left a `mechanical_runs` row holding
-/// only the fixtures before it, which `report` then showed as a complete run.
-/// Sluggrs has always degraded the same failure to one ERROR row.
+/// propagating it would abort the loop and leave the run holding only the
+/// fixtures before it (now stamped incomplete, so `report` labels it, but
+/// still a run that tested nothing after the failure). Sluggrs has always
+/// degraded the same failure to one ERROR row.
 fn record_error(
     ctx: &TestContext,
     fixture: &LitehtmlFixture,
@@ -752,6 +756,17 @@ pub(crate) fn report(project_root: &Path, run_id: &str) -> Result<(), DevError> 
         )));
     }
 
+    match db.run_completion(run_id)? {
+        RunCompletion::Incomplete => output::litehtml_msg(
+            "  INCOMPLETE RUN: interrupted or aborted before every fixture ran; \
+             the rows below are partial, not a full result",
+        ),
+        RunCompletion::Unknown => output::litehtml_msg(
+            "  note: this run predates completion tracking; whether it ran every \
+             fixture is unknown",
+        ),
+        RunCompletion::Complete => {}
+    }
     print_table_header();
 
     for row in &results {

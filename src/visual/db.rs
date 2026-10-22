@@ -23,6 +23,8 @@ struct Layout {
     id: &'static str,
     element: bool,
     adapter: bool,
+    /// Whether the runs table records completion (`completed` column).
+    completion: bool,
 }
 
 impl Layout {
@@ -37,6 +39,7 @@ impl Layout {
                 id: "fixture_id",
                 element: true,
                 adapter: false,
+                completion: true,
             },
             DbSubject::Sluggrs => Self {
                 store_name: "sluggrs visual store",
@@ -47,6 +50,7 @@ impl Layout {
                 id: "snapshot_id",
                 element: false,
                 adapter: true,
+                completion: false,
             },
         }
     }
@@ -85,6 +89,18 @@ pub(crate) struct RunSummary {
     pub(crate) commit: String,
     pub(crate) dirty: bool,
     pub(crate) adapter_name: Option<String>,
+}
+
+/// Whether a run reached the end of its fixture loop. Only stores that track
+/// it (litehtml) ever answer `Complete` or `Incomplete`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RunCompletion {
+    /// Written before completion was tracked, or by a store that does not
+    /// track it: whether the run finished is not known.
+    Unknown,
+    /// Started and never finished: interrupted, aborted or killed.
+    Incomplete,
+    Complete,
 }
 
 pub(crate) struct ResultRow {
@@ -166,7 +182,16 @@ impl VisualDb {
         dirty: bool,
         adapter_name: Option<&str>,
     ) -> Result<(), DevError> {
-        if self.layout.adapter {
+        if self.layout.completion {
+            self.conn.execute(
+                &format!(
+                    "INSERT INTO {} (run_id, [commit], dirty, completed) \
+                     VALUES (?1, ?2, ?3, 0)",
+                    self.layout.runs,
+                ),
+                rusqlite::params![run_id, commit, dirty as i32],
+            )?;
+        } else if self.layout.adapter {
             self.conn.execute(
                 &format!(
                     "INSERT INTO {} (run_id, [commit], dirty, adapter_name) \
@@ -185,6 +210,39 @@ impl VisualDb {
             )?;
         }
         Ok(())
+    }
+
+    /// Stamp a run as having reached the end of its fixture loop.
+    pub(crate) fn mark_run_complete(&self, run_id: &str) -> Result<(), DevError> {
+        if self.layout.completion {
+            self.conn.execute(
+                &format!(
+                    "UPDATE {} SET completed = 1 WHERE run_id = ?1",
+                    self.layout.runs
+                ),
+                rusqlite::params![run_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn run_completion(&self, run_id: &str) -> Result<RunCompletion, DevError> {
+        if !self.layout.completion {
+            return Ok(RunCompletion::Unknown);
+        }
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT completed FROM {} WHERE run_id = ?1",
+            self.layout.runs
+        ))?;
+        let mut rows = stmt.query_map(rusqlite::params![run_id], |row| {
+            row.get::<_, Option<i64>>(0)
+        })?;
+        Ok(match rows.next() {
+            Some(Ok(Some(0))) => RunCompletion::Incomplete,
+            Some(Ok(Some(_))) => RunCompletion::Complete,
+            Some(Ok(None)) | None => RunCompletion::Unknown,
+            Some(Err(error)) => return Err(error.into()),
+        })
     }
 
     pub(crate) fn insert_result(
@@ -334,13 +392,21 @@ impl VisualDb {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT r.run_id, r.{}, r.pixel_diff_pct, {}, r.status \
              FROM {} r JOIN {} runs ON runs.run_id = r.run_id \
-             WHERE r.{} = ?1 \
+             WHERE r.{} = ?1{} \
              ORDER BY runs.timestamp DESC, runs.rowid DESC LIMIT 1",
             self.layout.id,
             self.layout.qualified_element_column("r"),
             self.layout.results,
             self.layout.runs,
             self.layout.id,
+            // An unfinished run's rows are partial; `status` and `approve`
+            // must not take them for the latest word. Unknown (NULL) runs
+            // predate tracking and keep their old meaning.
+            if self.layout.completion {
+                " AND (runs.completed IS NULL OR runs.completed = 1)"
+            } else {
+                ""
+            },
         ))?;
         let mut rows = stmt.query_map(rusqlite::params![subject_id], map_result_row)?;
         match rows.next() {
@@ -351,7 +417,8 @@ impl VisualDb {
     }
 }
 
-const SCHEMA_VERSION: i64 = 1;
+/// 2 added `completed` to litehtml's runs table; older rows keep NULL.
+const SCHEMA_VERSION: i64 = 2;
 const LEGACY_IMPORT: &str = "results-db-visual-v1";
 
 struct LegacyRun {
@@ -413,6 +480,11 @@ fn initialize(conn: &Connection, layout: &Layout) -> Result<(), DevError> {
     } else {
         ""
     };
+    let completion_column = if layout.completion {
+        ", completed INTEGER"
+    } else {
+        ""
+    };
     let result_element = if layout.element {
         ", element_match_pct REAL"
     } else {
@@ -428,7 +500,7 @@ fn initialize(conn: &Connection, layout: &Layout) -> Result<(), DevError> {
             run_id TEXT PRIMARY KEY, \
             timestamp TEXT NOT NULL DEFAULT (datetime('now')), \
             [commit] TEXT NOT NULL, \
-            dirty INTEGER NOT NULL DEFAULT 0{adapter_column}\
+            dirty INTEGER NOT NULL DEFAULT 0{adapter_column}{completion_column}\
         );\
         CREATE TABLE IF NOT EXISTS {} (\
             run_id TEXT NOT NULL REFERENCES {}(run_id), \
@@ -450,6 +522,12 @@ fn initialize(conn: &Connection, layout: &Layout) -> Result<(), DevError> {
     if layout.adapter && !crate::db::store::column_exists(conn, layout.runs, "adapter_name")? {
         conn.execute_batch(&format!(
             "ALTER TABLE {} ADD COLUMN adapter_name TEXT",
+            layout.runs
+        ))?;
+    }
+    if layout.completion && !crate::db::store::column_exists(conn, layout.runs, "completed")? {
+        conn.execute_batch(&format!(
+            "ALTER TABLE {} ADD COLUMN completed INTEGER",
             layout.runs
         ))?;
     }

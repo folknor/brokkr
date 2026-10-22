@@ -124,6 +124,7 @@ mod tests {
                 Status::Pass,
             )
             .unwrap();
+        mechanical.mark_run_complete("litehtml-run").unwrap();
         mechanical
             .set_approval("fixture", "commit", 2.0, Some(98.0))
             .unwrap();

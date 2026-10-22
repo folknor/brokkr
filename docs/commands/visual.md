@@ -49,6 +49,17 @@ its project-specific config block.
   A capture, pipeline, or comparison failure is one `ERROR` row with the
   reason printed, and the run continues with the next fixture.
 
+  Litehtml records whether a run finished (`completed` on `mechanical_runs`,
+  store schema version 2). A run is stamped complete once its fixture loop has
+  run to the end, however the fixtures scored. A run that was interrupted
+  (`brokkr kill`, Ctrl-C), aborted by an error, or killed outright never gets
+  the stamp. `report` on such a run prints an `INCOMPLETE RUN` line above the
+  partial rows (kept for diagnosis), and `visual-status` and `approve` ignore
+  its rows so partial numbers are never the "last run". Runs written before
+  tracking have unknown completion: `report` notes that, and they still count
+  for `visual-status` and `approve` exactly as before. Sluggrs does not track
+  completion.
+
   Capture (litehtml, bundled Puppeteer script) awaits `document.fonts.ready`
   after load - `networkidle0` does not cover data-URI `@font-face` decoding,
   and measuring before Ahem is active captures fallback-font geometry. Each

@@ -14,7 +14,10 @@ visual-test surface, different pipeline binary).
   file live in `src/visual/db.rs`. Its tables now live in
   `.brokkr/litehtml-visual.db`; existing `mechanical_*` rows are imported from
   `.brokkr/results.db` on first open. `results.db` keeps its independent schema
-  version, owned by `ResultsDb`.
+  version, owned by `ResultsDb`. `mechanical_runs.completed` is NULL for rows
+  from before completion tracking (unknown), 0 from `insert_run` until the
+  fixture loop ends, 1 once `finish` stamps it; readers treat only 0 as
+  unfinished, so a SIGKILL needs no cleanup.
 - `src/litehtml/compare.rs` - element geometry comparison.
 - `src/visual/` - shared pixel comparison, typed visual statuses, run engine,
   database operations, and common command formatting. Run IDs use the shared
