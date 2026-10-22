@@ -448,7 +448,8 @@ switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`.
   prepare steps and every sample), the whole of `check`/`test`/`clippy`/`deps`,
   and the other commands that run captured children with no sidecar: the
   downloads, `ingest`, `update`, the elivagar archive tools, `ocean-build`,
-  `verify`, `visual` and `prepare`. A loop over such children stops at the
+  `verify`, `visual`, `prepare` and nidhogg `serve` from the spawn through
+  the readiness poll (an interrupt there stops the half-started server). A loop over such children stops at the
   first `Interrupted` rather than recording it as that step's failure. Guards
   nest: the outermost installs and
   restores the handlers, so an inner guard (the sidecar's, inside an

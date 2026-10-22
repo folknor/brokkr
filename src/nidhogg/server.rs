@@ -33,7 +33,8 @@ pub const DEFAULT_PORT: u16 = 3033;
 /// still answers on the port, spawns the binary with stdout/stderr
 /// redirected to `logs/serve.log`, records its identity in
 /// `.brokkr/nidhogg.pid`, and polls the HTTP health endpoint until ready
-/// (6s timeout).
+/// (6s timeout). A stop request during that wait takes the half-started
+/// server down and returns `DevError::Interrupted`.
 pub fn serve(
     binary: &Path,
     data_dir: Option<&str>,
@@ -82,6 +83,13 @@ pub fn serve(
 
     let port_str = port.to_string();
 
+    // Covers the spawn and the readiness poll, the only wait in this window,
+    // and it polls the flag. Deliberately after `stop` and the port probe
+    // above: those waits do not poll, so a guard over them would swallow the
+    // first kill. Dropped on return: a server that came up ready stays
+    // detached and outlives this guard exactly as before.
+    let _signals = crate::shutdown::SigtermGuard::install();
+
     // This server intentionally survives the serve command. Plain policy
     // carries OOM/hold protection without parent-death or run-orphan cleanup.
     let mut cmd = crate::process::spawn::ChildPolicy::plain_command(binary);
@@ -121,12 +129,26 @@ pub fn serve(
     }
 
     // Poll HTTP health endpoint until the server is ready.
-    if !poll_for_ready(port, &mut child)? {
-        return Err(DevError::Config(format!(
-            "server did not start within {}s (check {})",
-            super::policy::SERVER_READY_TIMEOUT.as_secs(),
-            log_path.display()
-        )));
+    match poll_for_ready(port, &mut child)? {
+        Readiness::Ready => {}
+        Readiness::TimedOut => {
+            return Err(DevError::Config(format!(
+                "server did not start within {}s (check {})",
+                super::policy::SERVER_READY_TIMEOUT.as_secs(),
+                log_path.display()
+            )));
+        }
+        Readiness::Interrupted => {
+            // The half-started server never became the served instance the
+            // user asked for: take it down through the verified path (which
+            // also drops the pid file), then reap it.
+            if let Err(e) = stop(project_root) {
+                output::warn(&format!("could not stop the half-started server: {e}"));
+                child.kill().ok();
+            }
+            child.wait().ok();
+            return Err(DevError::Interrupted);
+        }
     }
 
     output::run_msg(&format!("nidhogg server started (PID {pid}, port {port})"));
@@ -206,22 +228,57 @@ pub fn check_running(port: u16) -> Result<(), DevError> {
 
 /// Poll the HTTP health endpoint for up to
 /// [`SERVER_READY_TIMEOUT`](super::policy::SERVER_READY_TIMEOUT). Returns
-/// `Ok(false)` on timeout; errors if the server process exits first (its
+/// [`Readiness::TimedOut`] on timeout and [`Readiness::Interrupted`] on a stop
+/// request; errors if the server process exits first (its
 /// log names why) or the health check cannot run at all.
-fn poll_for_ready(port: u16, child: &mut Child) -> Result<bool, DevError> {
-    let deadline = Instant::now() + super::policy::SERVER_READY_TIMEOUT;
+fn poll_for_ready(port: u16, child: &mut Child) -> Result<Readiness, DevError> {
+    poll_until_ready(
+        child,
+        super::policy::SERVER_READY_TIMEOUT,
+        super::policy::SERVER_READY_POLL_INTERVAL,
+        crate::shutdown::is_shutdown_requested,
+        || status(port),
+    )
+}
+
+/// How the readiness wait ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Readiness {
+    Ready,
+    TimedOut,
+    /// A stop (`brokkr kill`, Ctrl-C) arrived during the wait.
+    Interrupted,
+}
+
+/// The readiness loop with its clock inputs, stop flag and health probe
+/// injected so it can be exercised without a real server. The stop flag is
+/// checked before every sleep and again after it.
+fn poll_until_ready(
+    child: &mut Child,
+    timeout: Duration,
+    interval: Duration,
+    interrupted: impl Fn() -> bool,
+    probe: impl Fn() -> Result<bool, DevError>,
+) -> Result<Readiness, DevError> {
+    let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        std::thread::sleep(super::policy::SERVER_READY_POLL_INTERVAL);
+        if interrupted() {
+            return Ok(Readiness::Interrupted);
+        }
+        std::thread::sleep(interval);
+        if interrupted() {
+            return Ok(Readiness::Interrupted);
+        }
         if let Some(exit) = child.try_wait()? {
             return Err(DevError::Config(format!(
                 "server exited during startup ({exit}); see logs/serve.log"
             )));
         }
-        if status(port)? {
-            return Ok(true);
+        if probe()? {
+            return Ok(Readiness::Ready);
         }
     }
-    Ok(false)
+    Ok(Readiness::TimedOut)
 }
 
 /// The identity of the server `serve` spawned, as stored in the pid file.
@@ -414,6 +471,41 @@ mod tests {
             .stderr(Stdio::null());
         crate::process::spawn::ChildPolicy::test_process().apply_runtime_policy(&mut cmd);
         crate::process::spawn::spawn(cmd, None).expect("spawn sleep")
+    }
+
+    #[test]
+    fn readiness_poll_notices_a_stop_request() {
+        let mut child = spawn_sleeper();
+        let out = poll_until_ready(
+            &mut child,
+            Duration::from_secs(5),
+            Duration::from_millis(1),
+            || true,
+            || Ok(false),
+        )
+        .unwrap();
+        assert_eq!(out, Readiness::Interrupted);
+        child.kill().ok();
+        child.wait().ok();
+    }
+
+    #[test]
+    fn readiness_poll_reports_ready_and_timeout() {
+        let mut child = spawn_sleeper();
+        let tick = Duration::from_millis(1);
+        let ready =
+            poll_until_ready(&mut child, Duration::from_secs(5), tick, || false, || Ok(true));
+        assert_eq!(ready.unwrap(), Readiness::Ready);
+        let late = poll_until_ready(
+            &mut child,
+            Duration::from_millis(20),
+            tick,
+            || false,
+            || Ok(false),
+        );
+        assert_eq!(late.unwrap(), Readiness::TimedOut);
+        child.kill().ok();
+        child.wait().ok();
     }
 
     #[test]

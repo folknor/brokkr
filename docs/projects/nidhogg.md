@@ -41,6 +41,13 @@ never signalled, and there is no name-based `pkill` fallback. `ingest`,
 the on-disk data dir directly; `ingest` creates the dataset's `data_dir` if it
 does not exist yet.
 
+`serve` holds a shutdown guard from the spawn through the readiness poll. A
+`brokkr kill` or Ctrl-C in that window stops the half-started server (verified
+SIGTERM, then SIGKILL, pid file removed) and ends the command as interrupted
+(exit 130). The build before the spawn holds its own guard, and the earlier
+stop of the previously recorded server is outside both. Once the server is
+ready the guard is gone and the server stays detached as before.
+
 The persistent server uses the shared plain spawn policy, carrying OOM and
 hold protection while surviving the `serve` command. The server started for
 a tiles measurement uses service policy, including parent-death termination
