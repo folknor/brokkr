@@ -33,6 +33,8 @@ pub(crate) fn cmd_verify(
             unique_payloads,
         } => {
             project::require(project, &Project::Elivagar, "verify")?;
+            // The build and the verifier child both poll the shutdown flag.
+            let _interrupts = crate::shutdown::SigtermGuard::install();
             // Never reached under a historical worktree: `run()` dispatches
             // this variant before `with_worktree`, so `build_root` is the
             // main tree and the archive resolver reads its HEAD.
@@ -59,10 +61,12 @@ pub(crate) fn cmd_verify(
         // refuses to run without one).
         VerifyCommand::Batch { dataset } => {
             project::require(project, &Project::Nidhogg, "verify batch")?;
+            let _interrupts = crate::shutdown::SigtermGuard::install();
             nidhogg::cmd::verify_batch(dev_config, project_root, build_root, &dataset)
         }
         VerifyCommand::NidGeocode { queries } => {
             project::require(project, &Project::Nidhogg, "verify geocode")?;
+            let _interrupts = crate::shutdown::SigtermGuard::install();
             nidhogg::cmd::verify_geocode(dev_config, &queries)
         }
         VerifyCommand::Readonly { dataset } => {

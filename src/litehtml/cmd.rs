@@ -188,6 +188,20 @@ fn record_error(
     Ok(FixtureOutcome::error())
 }
 
+/// [`record_error`] for a failed step's error, except that a stop request is not
+/// this fixture's failure: it propagates, so the run ends instead of recording
+/// an ERROR row per remaining fixture, each interrupted at once.
+fn record_step_error(
+    ctx: &TestContext,
+    fixture: &LitehtmlFixture,
+    error: &DevError,
+) -> Result<FixtureOutcome, DevError> {
+    if matches!(error, DevError::Interrupted) {
+        return Err(DevError::Interrupted);
+    }
+    record_error(ctx, fixture, &error.to_string())
+}
+
 /// Remove a file if present. Used to clear the previous run's pipeline
 /// outputs before rendering, so a pipeline that stops writing one of them
 /// cannot be scored against a stale copy.
@@ -213,7 +227,7 @@ fn run_fixture(ctx: &TestContext, fixture: &LitehtmlFixture) -> Result<FixtureOu
     // baseline's ground truth mid-run; that takes an explicit `--recapture`.
     if let Some(script) = ctx.capture_script {
         if let Err(e) = capture_fixture(fixture, ctx.config, ctx.project_root, script) {
-            return record_error(ctx, fixture, &e.to_string());
+            return record_step_error(ctx, fixture, &e);
         }
     } else if !ref_png.exists() || !ref_json.exists() {
         if ctx.db.get_approval(&fixture.id)?.is_some() {
@@ -226,7 +240,7 @@ fn run_fixture(ctx: &TestContext, fixture: &LitehtmlFixture) -> Result<FixtureOu
         }
         let script = CaptureScript::write(ctx.project_root)?;
         if let Err(e) = capture_fixture(fixture, ctx.config, ctx.project_root, &script.path) {
-            return record_error(ctx, fixture, &e.to_string());
+            return record_step_error(ctx, fixture, &e);
         }
     }
 
@@ -252,7 +266,7 @@ fn run_fixture(ctx: &TestContext, fixture: &LitehtmlFixture) -> Result<FixtureOu
         ctx.project_root,
         &fixture_dir,
     ) {
-        return record_error(ctx, fixture, &e.to_string());
+        return record_step_error(ctx, fixture, &e);
     }
 
     if !fixture_dir.join("pipeline.png").exists() || !fixture_dir.join("pipeline.json").exists() {

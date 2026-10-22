@@ -423,22 +423,34 @@ switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`.
   the id recorded in the lock file. A stop request naming the live
   acquisition is accepted by the holder itself: it sets a sticky stop flag
   that no guard clears and that refuses every further lock acquisition and
-  build admission, then sends itself SIGTERM. "Accepted" means that
-  commitment, not completed termination. Because nothing crosses a PID
-  namespace, this works from the host against a sandboxed holder and between
-  sibling sandboxes (codex runs each command in its own PID namespace). Only
-  when the socket does not answer (an older brokkr, a stopped holder) does
-  `kill` fall back to a numeric SIGTERM, and only when the holder's recorded
-  PID and time namespaces match the caller's and `/proc` numbers processes
-  for the caller's own namespace. `brokkr lock` asks the same socket for the
+  build admission, answers `accepted`, then sends itself SIGTERM. The answer
+  goes first because outside a guard that SIGTERM kills the holder at once.
+  "Accepted" means that commitment, not completed termination. Because
+  nothing crosses a PID namespace, this works from the host against a
+  sandboxed holder and between sibling sandboxes (codex and Claude Code run
+  each command in its own PID namespace). A request that was delivered but
+  got no well-formed answer is reported as unconfirmed: `kill` watches the
+  lock for a few seconds and says whether the holder let go, and never
+  follows up with a signal of its own (a second SIGTERM would escalate a
+  holder already handling the first). Only when the request never reached
+  the socket (an older brokkr, a missing socket) does `kill` fall back to a
+  numeric SIGTERM, and only when the holder's recorded PID and time
+  namespaces match the caller's and `/proc` numbers processes for the
+  caller's own namespace. `brokkr lock` asks the same socket for the
   holder's own account of itself (invocation, how long it has held, CPU, RSS,
   progress), and both it and the lock wait print an advisory line when the
   holder recorded the caller's own `CODEX_THREAD_ID`.
 - **SIGTERM and Ctrl-C (SIGINT)** are caught by a
   `SigtermGuard` (`src/shutdown.rs`), installed for every tracked-child
-  window: each sidecar run, a passthrough child, an orchestrator's whole run
-  (the ratatoskr sync bench holds one across all its iterations), and the
-  whole of `check`/`test`/`clippy`. Guards nest: the outermost installs and
+  window: each sidecar run, a passthrough child, every cargo build, an
+  orchestrator's whole run (the ratatoskr sync bench holds one across all its
+  iterations), a measured command's whole run (build, tool materialization,
+  prepare steps and every sample), the whole of `check`/`test`/`clippy`/`deps`,
+  and the other commands that run captured children with no sidecar: the
+  downloads, `ingest`, `update`, the elivagar archive tools, `ocean-build`,
+  `verify`, `visual` and `prepare`. A loop over such children stops at the
+  first `Interrupted` rather than recording it as that step's failure. Guards
+  nest: the outermost installs and
   restores the handlers, so an inner guard (the sidecar's, inside an
   orchestrator's) can neither clear a request that already landed nor uncover
   the outer window when it drops. A second signal while a request is still

@@ -18,7 +18,10 @@
 ## Verify subcommands
 
 `brokkr verify` holds the brokkr command lock for the whole invocation,
-including `verify all` and its per-check runs.
+including `verify all` and its per-check runs, and a `SigtermGuard` alongside
+it, so `brokkr kill` or Ctrl-C ends the running pbfhogg/osmium child, prints
+`<name>: INTERRUPTED`, stops `verify all` at that check (no further checks, no
+tally banner) and exits 130 through the interrupt cleanup.
 
 **Output model.** Every verify check runs "quiet on pass, loud on fail" via
 `verify::run_check`: by default a check's detail (`verify_msg` output - section

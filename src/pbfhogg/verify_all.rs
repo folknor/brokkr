@@ -16,11 +16,17 @@ use crate::output::verify_summary;
 /// Tally a check's outcome into `(passed, failed)`. Kept a free function (not
 /// a closure) so it doesn't hold a mutable borrow of the counters across the
 /// suite - the final banner reads them directly.
-fn tally(counts: &mut (u32, u32), result: &Result<(), DevError>) {
+///
+/// An interrupted check is not counted: it is returned, so the suite stops
+/// there and `main` runs the interrupt cleanup. Every later check would only
+/// have been interrupted at its first child.
+fn tally(counts: &mut (u32, u32), result: &Result<(), DevError>) -> Result<(), DevError> {
     match result {
         Ok(()) => counts.0 += 1,
+        Err(DevError::Interrupted) => return Err(DevError::Interrupted),
         Err(_) => counts.1 += 1,
     }
+    Ok(())
 }
 
 /// Why the OSC-consuming checks skip. `osc` is `None` only when nothing is
@@ -36,7 +42,9 @@ const NO_BBOX: &str = "SKIPPED (no --bbox and the dataset has no bbox configured
 /// detail replayed unless `verbose`) but does not stop the remaining checks.
 /// Passing checks print a single line; failures replay their captured detail.
 /// Returns `Err(ExitCode(1))` when one or more checks failed - the per-check
-/// lines and the banner have already reported everything.
+/// lines and the banner have already reported everything. A shutdown request
+/// stops the suite at the interrupted check and returns `Err(Interrupted)`,
+/// with no banner.
 ///
 /// `osc`/`bbox` are `None` only when the input is not configured at all; the
 /// checks needing them then print a SKIPPED line and count as skipped.
@@ -61,7 +69,7 @@ pub fn run(
         &run_check(labels::SORT, verbose, || {
             verify_sort::run(harness, pbf, direct_io)
         }),
-    );
+    )?;
 
     // 2. cat
     tally(
@@ -69,7 +77,7 @@ pub fn run(
         &run_check(labels::CAT, verbose, || {
             verify_cat::run(harness, pbf, direct_io)
         }),
-    );
+    )?;
 
     // 3. extract
     if let Some(b) = bbox {
@@ -78,7 +86,7 @@ pub fn run(
             &run_check(labels::EXTRACT, verbose, || {
                 verify_extract::run(harness, pbf, b, direct_io)
             }),
-        );
+        )?;
     } else {
         verify_summary(&format!("extract: {NO_BBOX}"));
         skipped += 1;
@@ -97,7 +105,7 @@ pub fn run(
                     direct_io,
                 )
             }),
-        );
+        )?;
     } else {
         verify_summary(&format!("multi-extract: {NO_BBOX}"));
         skipped += 1;
@@ -109,7 +117,7 @@ pub fn run(
         &run_check(labels::TAGS_FILTER, verbose, || {
             verify_tags_filter::run(harness, pbf, direct_io)
         }),
-    );
+    )?;
 
     // 5. getid-removeid
     tally(
@@ -117,7 +125,7 @@ pub fn run(
         &run_check(labels::GETID_REMOVEID, verbose, || {
             verify_getid_removeid::run(harness, pbf, direct_io)
         }),
-    );
+    )?;
 
     // 6. add-locations-to-ways
     tally(
@@ -125,7 +133,7 @@ pub fn run(
         &run_check(labels::ADD_LOCATIONS_TO_WAYS, verbose, || {
             verify_add_locations::run(harness, pbf, crate::cli::AltwMode::All, direct_io)
         }),
-    );
+    )?;
 
     // 7. check-refs
     tally(
@@ -133,7 +141,7 @@ pub fn run(
         &run_check(labels::CHECK_REFS, verbose, || {
             verify_check_refs::run(harness, pbf, direct_io)
         }),
-    );
+    )?;
 
     // 8. apply-changes
     if let Some(osc_path) = osc {
@@ -143,6 +151,7 @@ pub fn run(
         // dropped: a silently missing reference tool reads as a covered one.
         let osmosis = match crate::tools::ensure_osmosis(data_dir) {
             Ok(tools) => Some(tools),
+            Err(DevError::Interrupted) => return Err(DevError::Interrupted),
             Err(e) => {
                 verify_summary(&format!("osmosis not available (non-fatal): {e}"));
                 None
@@ -153,7 +162,7 @@ pub fn run(
             &run_check(labels::APPLY_CHANGES, verbose, || {
                 verify_merge::run(harness, pbf, osc_path, osmosis.as_ref(), direct_io)
             }),
-        );
+        )?;
     } else {
         verify_summary(&format!("apply-changes: {NO_OSC}"));
         skipped += 1;
@@ -166,7 +175,7 @@ pub fn run(
             &run_check(labels::DIFF_OSC, verbose, || {
                 verify_derive_changes::run(harness, pbf, osc_path, direct_io)
             }),
-        );
+        )?;
     } else {
         verify_summary(&format!("diff --format osc: {NO_OSC}"));
         skipped += 1;
@@ -178,7 +187,7 @@ pub fn run(
         &run_check(labels::RENUMBER, verbose, || {
             verify_renumber::run(harness, pbf, dataset, None, false)
         }),
-    );
+    )?;
 
     // 11. diff
     if let Some(osc_path) = osc {
@@ -187,7 +196,7 @@ pub fn run(
             &run_check(labels::DIFF, verbose, || {
                 verify_diff::run(harness, pbf, osc_path)
             }),
-        );
+        )?;
     } else {
         verify_summary(&format!("diff: {NO_OSC}"));
         skipped += 1;

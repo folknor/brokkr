@@ -182,13 +182,17 @@ struct CcuDependency {
     line_number: u64,
 }
 
-pub(super) fn run(project_root: &Path) -> Vec<PhaseOutcome> {
-    match try_run(project_root) {
+pub(super) fn run(project_root: &Path) -> Result<Vec<PhaseOutcome>, DevError> {
+    Ok(match try_run(project_root) {
         Ok((outdated_events, stale_events)) => PHASES
             .into_iter()
             .zip([outdated_events, stale_events])
             .map(|(phase, events)| PhaseOutcome::ran(phase, events))
             .collect(),
+        // A stop request while ccu ran ended it as `Interrupted`, which the
+        // failure collapse below would otherwise report as a skipped phase and
+        // carry on to a normal verdict.
+        Err(_) if crate::shutdown::is_shutdown_requested() => return Err(DevError::Interrupted),
         Err(reason) => PHASES
             .into_iter()
             .map(|phase| {
@@ -205,7 +209,7 @@ pub(super) fn run(project_root: &Path) -> Vec<PhaseOutcome> {
                 PhaseOutcome::skipped(phase, reason.clone(), events)
             })
             .collect(),
-    }
+    })
 }
 
 fn try_run(project_root: &Path) -> Result<(Vec<DepsEvent>, Vec<DepsEvent>), String> {

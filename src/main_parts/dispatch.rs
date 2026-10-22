@@ -1001,6 +1001,9 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             force,
         } => {
             let _lock = context::reenter_command_lock()?;
+            // The binary build, the downloads and the osmium/pbfhogg steps are
+            // all captured children that poll the shutdown flag.
+            let _interrupts = crate::shutdown::SigtermGuard::install();
             pbfhogg::cmd::download(
                 dev_config,
                 &detection.project_root,
@@ -1033,6 +1036,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             // beside another holder's compile, and the archive read must not
             // race a `tilegen` mid-write.
             let _lock = context::reenter_command_lock()?;
+            let _interrupts = crate::shutdown::SigtermGuard::install();
             elivagar::cmd::inspect(
                 dev_config,
                 &detection.project_root,
@@ -1054,6 +1058,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             y,
         } => {
             let _lock = context::reenter_command_lock()?;
+            let _interrupts = crate::shutdown::SigtermGuard::install();
             elivagar::cmd::diag(
                 dev_config,
                 &detection.project_root,
@@ -1082,6 +1087,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             output,
         } => {
             let _lock = context::reenter_command_lock()?;
+            let _interrupts = crate::shutdown::SigtermGuard::install();
             elivagar::cmd::svg(
                 dev_config,
                 &detection.project_root,
@@ -1156,6 +1162,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
         }
         Command::DownloadOcean => {
             let _lock = context::reenter_command_lock()?;
+            let _interrupts = crate::shutdown::SigtermGuard::install();
             elivagar::cmd::download_ocean(
                 dev_config,
                 &detection.project_root,
@@ -1164,6 +1171,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
         }
         Command::OceanBuild { dry_run } => {
             let _lock = context::reenter_command_lock()?;
+            let _interrupts = crate::shutdown::SigtermGuard::install();
             elivagar::ocean_build::run(
                 dev_config,
                 project,
@@ -1175,6 +1183,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
         }
         Command::DownloadNaturalEarth => {
             let _lock = context::reenter_command_lock()?;
+            let _interrupts = crate::shutdown::SigtermGuard::install();
             elivagar::cmd::download_natural_earth(
                 dev_config,
                 &detection.project_root,
@@ -1203,6 +1212,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
         Command::Status => nidhogg::cmd::status(dev_config),
         Command::Ingest { variant, dataset } => {
             let _lock = context::reenter_command_lock()?;
+            let _interrupts = crate::shutdown::SigtermGuard::install();
             let features = resolve_features(dev_config, &[]);
             nidhogg::cmd::ingest(
                 dev_config,
@@ -1215,6 +1225,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
         }
         Command::Update { args } => {
             let _lock = context::reenter_command_lock()?;
+            let _interrupts = crate::shutdown::SigtermGuard::install();
             let features = resolve_features(dev_config, &[]);
             nidhogg::cmd::update(project_root, build_root, &args, &features)
         }
@@ -1229,6 +1240,9 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             // toolchain-disable. It was the one cargo-driving command reaching
             // its handler unlocked.
             let _lock = context::reenter_command_lock()?;
+            // The whole run: build, Chrome capture, renderer children and the
+            // scoring between them all poll the flag or finish quickly.
+            let _interrupts = crate::shutdown::SigtermGuard::install();
             match project_config {
                 ProjectConfig::Litehtml(litehtml_config) => litehtml::cmd::test(
                     project_root,
@@ -1317,6 +1331,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             let ProjectConfig::Litehtml(cfg) = project_config else {
                 unreachable!("command specification admits prepare only for litehtml")
             };
+            let _interrupts = crate::shutdown::SigtermGuard::install();
             litehtml::cmd::prepare(project_root, cfg, &input, &output)
         }
         Command::HtmlExtract {

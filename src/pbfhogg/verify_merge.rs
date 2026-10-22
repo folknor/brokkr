@@ -90,6 +90,9 @@ pub fn run(
                     drop(std::fs::remove_file(&osmosis_out));
                 }
             }
+            // A stop is not a skipped tool: carry on and the rest of the
+            // check would run against a half-killed comparison.
+            Err(DevError::Interrupted) => return Err(DevError::Interrupted),
             Err(e) => {
                 verify_msg(&format!("  osmosis skipped: {e}"));
             }
@@ -109,6 +112,7 @@ pub fn run(
                     drop(std::fs::remove_file(&osmconvert_out));
                 }
             }
+            Err(DevError::Interrupted) => return Err(DevError::Interrupted),
             Err(e) => {
                 verify_msg(&format!("  osmconvert skipped: {e}"));
             }

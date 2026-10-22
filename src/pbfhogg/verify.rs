@@ -37,10 +37,16 @@ pub(super) mod labels {
 
 /// Shared context for verify subcommands.
 ///
-/// Holds the exclusive lock (preventing concurrent bench/verify runs),
-/// the path to the freshly-built CLI binary, and the output directory
-/// under `target/verify/`.
+/// Holds the exclusive lock (preventing concurrent bench/verify runs), a
+/// shutdown guard, the path to the freshly-built CLI binary, and the output
+/// directory under `target/verify/`.
 pub struct VerifyHarness {
+    /// Makes `brokkr kill` cooperative for the whole verify: without it the
+    /// stop's `SIGTERM` took the default action, killing brokkr mid-check and
+    /// orphaning the pbfhogg/osmium child it was waiting on. With it the
+    /// captured-child supervisor sees the request, ends the child and returns
+    /// `Interrupted`. Declared first, so it is dropped before the lock.
+    _signals: crate::shutdown::SigtermGuard,
     /// RAII lock - released on drop.
     _lock: crate::lockfile::LockGuard,
     /// Path to the built `pbfhogg` release binary.
@@ -63,6 +69,7 @@ impl VerifyHarness {
         features: &[String],
     ) -> Result<Self, DevError> {
         let lock = crate::context::reenter_command_lock()?;
+        let signals = crate::shutdown::SigtermGuard::install();
         let effective = build_root;
         let build_config = if features.is_empty() {
             build::BuildConfig::release(crate::project::Project::Pbfhogg.cli_package())
@@ -76,6 +83,7 @@ impl VerifyHarness {
         let output_dir = target_dir.join(crate::target_namespace::VERIFY);
 
         Ok(Self {
+            _signals: signals,
             _lock: lock,
             binary,
             output_dir,
@@ -387,6 +395,12 @@ impl CheckOutcome for Findings {
 /// line a check printed is never swallowed by a PASS summary. On failure
 /// this returns `DevError::ExitCode(1)` (the failure has already been
 /// reported here, so `main` exits non-zero without re-printing).
+///
+/// A check cut short by a shutdown request (`brokkr kill`, Ctrl-C) is neither
+/// a PASS nor a FAIL: it prints `INTERRUPTED` and returns
+/// `DevError::Interrupted` unchanged, so `main` runs the scratch cleanup and
+/// `verify all` stops instead of starting checks that would be interrupted
+/// at once.
 pub(crate) fn run_check<F, O>(name: &str, verbose: bool, f: F) -> Result<(), DevError>
 where
     F: FnOnce() -> Result<O, DevError>,
@@ -405,6 +419,13 @@ where
             }
             crate::output::verify_summary(&format!("{name}: PASS ({ms}ms)"));
             Ok(())
+        }
+        Err(DevError::Interrupted) => {
+            if !verbose {
+                crate::output::verify_buffer_flush();
+            }
+            crate::output::verify_summary(&format!("{name}: INTERRUPTED ({ms}ms)"));
+            Err(DevError::Interrupted)
         }
         Err(e) => {
             if !verbose {
@@ -561,6 +582,24 @@ mod tests {
     #[test]
     fn unit_outcome_folds_to_ok() {
         assert!(().into_check_result("x").is_ok());
+    }
+
+    #[test]
+    fn run_check_passes_an_interrupt_through_rather_than_failing() {
+        // The bug: an interrupted check folded into a FAIL like any error,
+        // so `main` never ran the interrupt cleanup and `verify all` went on
+        // to start the next check.
+        let interrupted = super::run_check("x", true, || -> Result<(), crate::error::DevError> {
+            Err(crate::error::DevError::Interrupted)
+        });
+        assert!(matches!(
+            interrupted,
+            Err(crate::error::DevError::Interrupted)
+        ));
+        let failed = super::run_check("x", true, || -> Result<(), crate::error::DevError> {
+            Err(crate::error::DevError::Verify("boom".into()))
+        });
+        assert!(matches!(failed, Err(crate::error::DevError::ExitCode(1))));
     }
 
     #[test]

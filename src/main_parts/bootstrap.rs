@@ -56,6 +56,13 @@ where
         dev_config.disable_toolchain,
         context::worktree_keep(dev_config)?,
         |build_root| {
+            // The whole measured command: the build, tool materialization,
+            // prepare steps and every child between measured samples. The
+            // per-sample sidecar and passthrough guards nest inside; without
+            // this one, a stop landing between them (or during the build or a
+            // tool download) took the default action and killed brokkr with
+            // no scratch cleanup.
+            let _interrupts = shutdown::SigtermGuard::install();
             let req = measure::MeasureRequest {
                 dev_config,
                 project_config: &detection.project_config,

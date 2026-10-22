@@ -73,6 +73,10 @@ pub struct DepsArgs {
 }
 
 pub fn run(project_root: &Path, args: &DepsArgs) -> Result<(), DevError> {
+    // One guard for the whole audit: its `cargo metadata` calls and the ccu
+    // network client all poll the flag, so a `brokkr kill` ends the audit as
+    // `Interrupted` instead of killing brokkr mid-child.
+    let _interrupts = crate::shutdown::SigtermGuard::install();
     if let Some(spec) = args.focus.as_deref() {
         return run_focus(project_root, spec, args.json);
     }
@@ -130,7 +134,7 @@ pub fn run(project_root: &Path, args: &DepsArgs) -> Result<(), DevError> {
             .map(DepsEvent::NativeDependency)
             .collect(),
     ));
-    outcomes.extend(ccu::run(project_root));
+    outcomes.extend(ccu::run(project_root)?);
 
     let findings: usize = outcomes.iter().map(PhaseOutcome::findings).sum();
     let phases_run: Vec<Phase> = outcomes

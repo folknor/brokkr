@@ -73,6 +73,9 @@ fn run_single_geocode(port: u16, query: &str) -> Result<GeoResult, DevError> {
 
     let stdout = match super::client::curl_get(&url) {
         Ok(s) => s,
+        // A stop is not a failed query: reported as one, the loop would run
+        // every remaining query only to have curl interrupted each time.
+        Err(DevError::Interrupted) => return Err(DevError::Interrupted),
         Err(e) => return Ok(GeoResult::Error(super::client::describe_curl_error(&e))),
     };
 

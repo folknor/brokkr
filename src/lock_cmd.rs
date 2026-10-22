@@ -40,7 +40,8 @@ pub(crate) fn cmd_lock() -> Result<(), DevError> {
             // metadata: say what the file says, then try the local view.
             crate::lock_service::Reply::Gone
             | crate::lock_service::Reply::Accepted { .. }
-            | crate::lock_service::Reply::NoAnswer(_) => {}
+            | crate::lock_service::Reply::NoAnswer(_)
+            | crate::lock_service::Reply::Unconfirmed(_) => {}
         }
     }
     if let Some(hint) = lockfile::same_agent_hint(&info) {
@@ -257,6 +258,7 @@ fn kill_graceful(info: &lockfile::LockInfo) -> Result<(), DevError> {
                 output::lock_msg("the holder had already released the lock; nothing to kill");
                 return Ok(());
             }
+            Reply::Unconfirmed(why) => return stop_unconfirmed(info, &why),
             Reply::Busy | Reply::Status(_) => "the holder gave an unexpected answer".to_owned(),
             Reply::InvalidStatus(why) => why,
             Reply::NoAnswer(why) => why,
@@ -288,6 +290,39 @@ fn kill_graceful(info: &lockfile::LockInfo) -> Result<(), DevError> {
         }
     }
     Ok(())
+}
+
+/// How long [`stop_unconfirmed`] watches for the holder to let go.
+const RELEASE_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// A `stop` reached the holder but no answer came back, so it may well have
+/// been committed - a holder killed by its own `SIGTERM` before it could
+/// answer looks exactly like this. No numeric `SIGTERM` follows: against a
+/// holder already handling the first one, a second escalates to the default
+/// action. Watch the lock instead and report what it shows.
+fn stop_unconfirmed(info: &lockfile::LockInfo, why: &str) -> Result<(), DevError> {
+    let deadline = std::time::Instant::now() + RELEASE_WAIT;
+    loop {
+        let released = match lockfile::status() {
+            Ok(None) => true,
+            Ok(Some(now)) => now.acq_id != info.acq_id,
+            Err(_) => false,
+        };
+        if released {
+            output::lock_msg(&format!(
+                "stop delivered; the holder released the lock without confirming ({why})"
+            ));
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(DevError::Lock(LockError::from(format!(
+                "stop delivered but not confirmed ({why}), and the holder still holds the lock \
+                 after {} - it may be stopping; check `brokkr lock`. No signal was sent from here",
+                output::format_duration(RELEASE_WAIT)
+            ))));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
 
 /// SIGSTOP the holder, SIGKILL its recorded children, everything beneath it,

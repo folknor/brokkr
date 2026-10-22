@@ -29,16 +29,18 @@
 //!   reply is not proof the hold is still live - the flock probe is.
 //! - **stop** commits the process to stopping: under the service's `live`
 //!   mutex it sets the sticky stop flag (`crate::shutdown::commit_stop`, which
-//!   no guard clears and which every acquisition and admission path checks) and
-//!   then sends this process a `SIGTERM` for the handler's immediate effects.
-//!   `accepted` means that commitment was made while this acquisition was live.
-//!   It is not a promise of termination: a phase that neither polls the flag nor
-//!   has a handler installed takes `SIGTERM`'s default action, exactly as a
-//!   numeric `brokkr kill` always did there.
+//!   no guard clears and which every acquisition and admission path checks),
+//!   writes `accepted`, and then sends this process a `SIGTERM` for the
+//!   handler's immediate effects. `accepted` means that commitment was made
+//!   while this acquisition was live. It is not a promise of termination: a
+//!   phase that neither polls the flag nor has a handler installed takes
+//!   `SIGTERM`'s default action, exactly as a numeric `brokkr kill` always did
+//!   there - which is why the answer is written before the signal.
 //!
-//! Release never waits on the service. The service thread owns the listener and
-//! holds no reference to the lock guard; release flips `live` (a mutex only ever
-//! held for a check, an atomic store and one `kill(2)`), unlinks the path and
+//! Release never waits long on the service. The service thread owns the
+//! listener and holds no reference to the lock guard; release flips `live` (a
+//! mutex only ever held for a check, an atomic store, one short reply write
+//! under the connection's deadline and one `kill(2)`), unlinks the path and
 //! moves on. The thread notices within one poll and exits. Every connection is
 //! served under absolute deadlines for the whole request and the whole reply.
 
@@ -244,43 +246,73 @@ fn handle(stream: &UnixStream, shared: &Shared) {
     let Some(line) = read_line(stream, Instant::now() + IO_DEADLINE) else {
         return;
     };
-    let reply = respond(&line, shared);
-    write_all(stream, reply.as_bytes(), Instant::now() + IO_DEADLINE);
-}
-
-fn respond(line: &str, shared: &Shared) -> String {
-    let (verb, id) = line.split_once(' ').unwrap_or((line, ""));
+    let deadline = Instant::now() + IO_DEADLINE;
+    let (verb, id) = line.split_once(' ').unwrap_or((&line, ""));
     if AcqId::parse(id).as_ref() != Some(&shared.id) || !is_live(shared) {
-        return "gone\n".into();
+        write_all(stream, b"gone\n", deadline);
+        return;
     }
     match verb {
-        "status" => status_reply(shared),
-        "stop" => stop_reply(shared),
-        _ => "error unknown request\n".into(),
+        "status" => {
+            write_all(stream, status_reply(shared).as_bytes(), deadline);
+        }
+        "stop" => stop(stream, shared, deadline),
+        _ => {
+            write_all(stream, b"error unknown request\n", deadline);
+        }
     }
 }
 
-fn stop_reply(shared: &Shared) -> String {
+/// Commit the stop, answer `accepted`, then signal this process.
+///
+/// The answer goes out BEFORE the `SIGTERM`: where no `SigtermGuard` is in
+/// scope the signal takes its default action and the process is gone before
+/// any later write, which left the client reading an empty reply and
+/// reporting that nothing was stopped. Bytes already written stay readable
+/// after the process dies. A failed self-signal is reported on a second
+/// `signal_error=` line.
+fn stop(stream: &UnixStream, shared: &Shared, deadline: Instant) {
+    stop_with(
+        stream,
+        shared,
+        deadline,
+        crate::shutdown::commit_stop,
+        || match crate::process::signal_pid(std::process::id(), libc::SIGTERM) {
+            Ok(true) => None,
+            Ok(false) => Some(io::Error::from_raw_os_error(libc::ESRCH)),
+            Err(error) => Some(error),
+        },
+    );
+}
+
+/// [`stop`] with the commit and the self-signal supplied, so the ordering can
+/// be tested without stopping the test process.
+fn stop_with(
+    stream: &UnixStream,
+    shared: &Shared,
+    deadline: Instant,
+    commit: impl FnOnce(),
+    signal_self: impl FnOnce() -> Option<io::Error>,
+) {
     let live = shared
         .live
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if !*live {
-        return "gone\n".into();
+        drop(live);
+        write_all(stream, b"gone\n", deadline);
+        return;
     }
-    crate::shutdown::commit_stop();
-    let signal_error = match crate::process::signal_pid(std::process::id(), libc::SIGTERM) {
-        Ok(true) => None,
-        Ok(false) => Some(io::Error::from_raw_os_error(libc::ESRCH)),
-        Err(error) => Some(error),
-    };
+    commit();
+    write_all(stream, b"accepted\n", deadline);
+    let signal_error = signal_self();
     drop(live);
-    match signal_error {
-        None => "accepted\n".into(),
-        Some(e) => format!(
-            "accepted signal_error={}\n",
+    if let Some(e) = signal_error {
+        let line = format!(
+            "signal_error={}\n",
             crate::lockfile::escape_value(&e.to_string())
-        ),
+        );
+        write_all(stream, line.as_bytes(), deadline);
     }
 }
 
@@ -538,10 +570,15 @@ pub enum Reply {
     /// The holder answered `status`, but its fields did not match the status
     /// schema this client understands.
     InvalidStatus(String),
-    /// No answer: the socket is missing, refused, or the holder did not reply
-    /// in time (a SIGSTOPped holder, say). Says nothing about liveness - the
-    /// flock does.
+    /// The request never reached the holder: the socket is missing or
+    /// refused, or the holder did not take the request in time. Says nothing
+    /// about liveness - the flock does.
     NoAnswer(String),
+    /// The request was delivered, but no well-formed answer came back: the
+    /// connection closed empty, the reply timed out (a SIGSTOPped holder,
+    /// say) or was not one this client knows. For a `stop` the outcome is
+    /// unknown - the holder may have committed it and died before answering.
+    Unconfirmed(String),
 }
 
 /// Send one request to the holder of acquisition `id`.
@@ -568,7 +605,7 @@ pub fn request(id: &str, verb: &str) -> Reply {
     }
     let Some(text) = read_reply(&stream, deadline) else {
         // For a stop, a lost reply means the outcome is unknown, not refused.
-        return Reply::NoAnswer("no reply from the holder (outcome unknown)".into());
+        return Reply::Unconfirmed("no reply from the holder in time".into());
     };
     parse_reply(&text)
 }
@@ -607,14 +644,18 @@ fn parse_reply(text: &str) -> Reply {
                 Reply::InvalidStatus("the holder returned a missing or invalid status field".into())
             }
         },
+        // A current holder reports a failed self-signal on its own line, after
+        // `accepted`; an older one appended it to the head.
         "accepted" => Reply::Accepted {
-            signal_error: head
-                .split_once("signal_error=")
+            signal_error: std::iter::once(head)
+                .chain(lines)
+                .find_map(|line| line.split_once("signal_error="))
                 .map(|(_, e)| crate::lockfile::unescape_value(e)),
         },
         "gone" => Reply::Gone,
         "busy" => Reply::Busy,
-        other => Reply::NoAnswer(format!("unexpected reply from the holder: {other:?}")),
+        "" => Reply::Unconfirmed("the holder closed the connection without replying".into()),
+        other => Reply::Unconfirmed(format!("unexpected reply from the holder: {other:?}")),
     }
 }
 
@@ -665,7 +706,87 @@ mod tests {
         ));
         assert!(matches!(parse_reply("gone\n"), Reply::Gone));
         assert!(matches!(parse_reply("busy\n"), Reply::Busy));
-        assert!(matches!(parse_reply("nonsense\n"), Reply::NoAnswer(_)));
+    }
+
+    #[test]
+    fn stop_replies_carry_signal_errors_and_unknowns_are_unconfirmed() {
+        assert!(matches!(
+            parse_reply("accepted\nsignal_error=EPERM\n"),
+            Reply::Accepted { signal_error: Some(e) } if e == "EPERM"
+        ));
+        assert!(matches!(parse_reply("nonsense\n"), Reply::Unconfirmed(_)));
+        // The bug: a holder killed by its own SIGTERM before answering left
+        // an empty reply, which read as "no answer" and "nothing was stopped".
+        assert!(matches!(parse_reply(""), Reply::Unconfirmed(_)));
+    }
+
+    fn shared() -> Shared {
+        Shared {
+            id: mint_id().unwrap(),
+            live: Mutex::new(true),
+            identity: Identity::default(),
+            snapshot: Mutex::new(Snapshot::default()),
+            started: Instant::now(),
+        }
+    }
+
+    /// `accepted` is on the wire before the self-signal, so a holder that the
+    /// signal kills outright has still answered: at the moment of the signal
+    /// the client can already read it.
+    #[test]
+    fn stop_answers_before_signalling() {
+        let shared = shared();
+        let (server, client) = UnixStream::pair().unwrap();
+        let mut committed = false;
+        stop_with(
+            &server,
+            &shared,
+            Instant::now() + IO_DEADLINE,
+            || committed = true,
+            || {
+                let mut buf = [0_u8; 16];
+                client.set_nonblocking(true).unwrap();
+                let n = (&client).read(&mut buf).unwrap();
+                assert_eq!(&buf[..n], b"accepted\n", "the answer must precede the signal");
+                client.set_nonblocking(false).unwrap();
+                None
+            },
+        );
+        assert!(committed);
+    }
+
+    /// A failed self-signal still answers `accepted`, with the error on its
+    /// own line; a dead service answers `gone` and commits nothing.
+    #[test]
+    fn stop_reports_signal_error_and_refuses_when_not_live() {
+        let shared = shared();
+        let (server, client) = UnixStream::pair().unwrap();
+        stop_with(
+            &server,
+            &shared,
+            Instant::now() + IO_DEADLINE,
+            || {},
+            || Some(io::Error::from_raw_os_error(libc::EPERM)),
+        );
+        drop(server);
+        let text = read_reply(&client, Instant::now() + IO_DEADLINE).unwrap();
+        assert!(matches!(
+            parse_reply(&text),
+            Reply::Accepted { signal_error: Some(_) }
+        ));
+
+        *shared.live.lock().unwrap() = false;
+        let (server, client) = UnixStream::pair().unwrap();
+        stop_with(
+            &server,
+            &shared,
+            Instant::now() + IO_DEADLINE,
+            || panic!("a dead service must not commit a stop"),
+            || panic!("a dead service must not signal"),
+        );
+        drop(server);
+        let text = read_reply(&client, Instant::now() + IO_DEADLINE).unwrap();
+        assert!(matches!(parse_reply(&text), Reply::Gone));
     }
 
     /// A status request is answered over a real socket, a request naming

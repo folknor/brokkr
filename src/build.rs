@@ -468,6 +468,11 @@ fn with_published_cargo<T>(
                 .into(),
         )
     })?;
+    // A build is minutes of captured cargo whose supervisor polls the shutdown
+    // flag. Without a guard in scope a `brokkr kill` takes the default action,
+    // killing brokkr and orphaning cargo in its process group. Guards nest, so
+    // callers that already hold one are unaffected.
+    let _interrupts = crate::shutdown::SigtermGuard::install();
     let publish = |pid: u32| {
         hold.set_child_pid(pid);
         if let Some(cb) = on_spawn {
