@@ -45,9 +45,15 @@ Pbfhogg, elivagar and nidhogg use `src/measure/runner.rs`. Binary plans run a
 built executable; external plans materialize tools outside the measured samples;
 HTTP/server lifecycle plans provide their own protocol operations. All use one
 `MeasurementSession` for the lock, paths, optional build and request provenance.
+A binary plan's argv is resolved against the built executable before the
+first sample; that resolved invocation is what runs and what `cli_args`
+records. Pbfhogg adds `--overwrite` there when the executable accepts it (see
+`docs/projects/pbfhogg.md`).
 
 Dry-run validates inputs and argv without acquiring a measurement session,
 building, downloading tools, starting servers, or creating run artifacts.
+With nothing built, it prints the argv as planned, before any flag resolved
+against the executable.
 It still follows the command's lock policy, so a measured command can wait for
 the brokkr lock before it reports the plan.
 Input hash verification may refresh `.brokkr/hash_cache`; this validation cache
@@ -57,7 +63,8 @@ directories. API dry-run derives queries without contacting the running server.
 Run executes once without persisting result or sidecar records. Stored modes
 use the request's measurement mode and brokkr invocation; per-row fallback
 fields do not exist. Row command names and subprocess `cli_args` retain their
-previous spelling (examples and HTTP/server lifecycles retain absent `cli_args`).
+previous spelling, except that pbfhogg rows gain `--overwrite` from builds that
+accept it (examples and HTTP/server lifecycles retain absent `cli_args`).
 
 Declared sample scratch is reset before each sample and removed after success.
 A failed process, capture, or artifact promotion retains its current output.

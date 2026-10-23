@@ -634,6 +634,7 @@ impl BenchHarness {
 }
 
 mod argv;
+pub(crate) use argv::Invocation;
 pub use argv::format_cli_args;
 pub(crate) mod capture;
 pub(crate) mod execution;

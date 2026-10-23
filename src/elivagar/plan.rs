@@ -63,7 +63,7 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
         &self,
         req: &MeasureRequest<'_>,
         paths: &crate::config::ResolvedPaths,
-        _binary: &Path,
+        _target: runner::PlanTarget<'_>,
     ) -> Result<CommandPlan<Self::State>, DevError> {
         if matches!(
             self.0,

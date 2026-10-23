@@ -6,10 +6,13 @@ use crate::context::MeasurementSession;
 use crate::datasets::resolve::{self, resolve_bbox};
 use crate::error::DevError;
 use crate::harness::{self, BenchConfig};
-use crate::measure::runner::{CommandPlan, PlannedCommand, RowSubject};
-use crate::measure::{MeasureMode, MeasureRequest};
+use crate::measure::runner::{CommandPlan, PlanTarget, PlannedCommand, RowSubject};
+use crate::measure::{Invocation, MeasureMode, MeasureRequest};
 use crate::output;
-use crate::pbfhogg::commands::{ArgMode, OutputKind, PbfhoggCommand, TagsFilterInput};
+use crate::pbfhogg::binary::{OVERWRITE_FLAG, PbfhoggBinary, Writes};
+use crate::pbfhogg::commands::{
+    ArgMode, CommandArgv, OutputKind, PbfhoggCommand, TagsFilterInput,
+};
 use crate::pbfhogg::context::{
     CommandContext, CommandObservations, CommandParams, MergedCacheState, ResolvedInputs,
     SnapshotSide, TwoPbfOrigin,
@@ -44,8 +47,19 @@ pub(crate) struct PbfhoggPlan<'a> {
     pub params: &'a CommandParams,
 }
 
+/// A planned pbfhogg command: its resolved inputs, its argv with the
+/// overwrite decision the building arm made, and - for a real run - the one
+/// handle on the built executable that both planning-time setup (the merged
+/// diff input) and [`PlannedCommand::materialize`] resolve through. It lives
+/// as long as the plan, so through the last sample.
+pub(crate) struct PbfhoggState {
+    pub ctx: CommandContext,
+    argv: CommandArgv,
+    binary: Option<PbfhoggBinary>,
+}
+
 impl PlannedCommand for PbfhoggPlan<'_> {
-    type State = CommandContext;
+    type State = PbfhoggState;
     fn project(&self) -> Project {
         Project::Pbfhogg
     }
@@ -85,34 +99,62 @@ impl PlannedCommand for PbfhoggPlan<'_> {
         &self,
         req: &MeasureRequest<'_>,
         paths: &config::ResolvedPaths,
-        binary: &Path,
-    ) -> Result<CommandPlan<CommandContext>, DevError> {
-        if req.dry_run {
-            preflight_as_snapshot(self.command, req, self.params)?;
-            resolve_io_features(self.command, self.params)?;
-        }
-        let state =
-            build_pbfhogg_context(req, self.command, self.osc_seq, binary, paths, self.params)?;
+        target: PlanTarget<'_>,
+    ) -> Result<CommandPlan<PbfhoggState>, DevError> {
+        let binary = match target {
+            PlanTarget::DryRun => {
+                preflight_as_snapshot(self.command, req, self.params)?;
+                resolve_io_features(self.command, self.params)?;
+                None
+            }
+            PlanTarget::Built(path) => {
+                Some(PbfhoggBinary::new(path, req.project_root.as_path())?)
+            }
+            PlanTarget::Unbound => {
+                return Err(DevError::Internal(
+                    "a pbfhogg plan needs the built binary".into(),
+                ));
+            }
+        };
+        let ctx = build_pbfhogg_context(
+            req,
+            self.command,
+            self.osc_seq,
+            binary.as_ref(),
+            paths,
+            self.params,
+        )?;
         let mode = arg_mode(req);
-        let args = self.command.build_args(&state, mode)?;
-        let (basename, mb) = result_input_metadata(&state)?;
+        let argv = self.command.build_args(&ctx, mode)?;
+        let (basename, mb) = result_input_metadata(&ctx)?;
         Ok(CommandPlan {
-            args,
+            args: argv.args().to_vec(),
             scratch_dirs: vec![],
             subject: RowSubject {
                 command: self.command.id().into(),
                 input_file: Some(basename),
                 input_mb: Some(mb),
                 cli_args: None,
-                metadata: self.command.metadata(&state.observations),
+                metadata: self.command.metadata(&ctx.observations),
             },
-            state,
+            state: PbfhoggState { ctx, argv, binary },
         })
+    }
+    fn materialize<'p>(
+        &self,
+        plan: &'p CommandPlan<PbfhoggState>,
+        _binary: &'p Path,
+    ) -> Result<Invocation<'p>, DevError> {
+        plan.state
+            .binary
+            .as_ref()
+            .ok_or_else(|| DevError::Internal("pbfhogg plan was resolved without a binary".into()))?
+            .command_invocation(plan.state.argv.clone())
     }
     fn describe(
         &self,
         req: &MeasureRequest<'_>,
-        plan: &CommandPlan<CommandContext>,
+        plan: &CommandPlan<PbfhoggState>,
     ) -> Result<Vec<String>, DevError> {
         // The selected argv was built by `plan`; check the alternate shape as
         // well so a dry run catches missing inputs in either supported mode.
@@ -120,17 +162,23 @@ impl PlannedCommand for PbfhoggPlan<'_> {
             ArgMode::Bench => ArgMode::Hotpath,
             ArgMode::Hotpath => ArgMode::Bench,
         };
-        let _ = self.command.build_args(&plan.state, other_mode)?;
+        let _ = self.command.build_args(&plan.state.ctx, other_mode)?;
 
         let mut lines = vec![format!(
             "{} args: {}",
             self.command.id(),
             plan.args.join(" ")
         )];
-        if let Some(path) = plan.state.inputs.primary_pbf() {
+        if plan.state.argv.negotiates_overwrite() {
+            lines.push(format!(
+                "{OVERWRITE_FLAG}: added at run time if the built binary accepts it"
+            ));
+        }
+        let state = &plan.state.ctx;
+        if let Some(path) = state.inputs.primary_pbf() {
             lines.push(format!("pbf: {}", path.display()));
         }
-        let osc_paths = plan.state.inputs.osc_paths();
+        let osc_paths = state.inputs.osc_paths();
         if let Some(path) = osc_paths.first() {
             lines.push(format!("osc: {}", path.display()));
         }
@@ -146,10 +194,10 @@ impl PlannedCommand for PbfhoggPlan<'_> {
                     .map_or(String::new(), |path| path.display().to_string()),
             ));
         }
-        if let Some(path) = plan.state.inputs.second_pbf() {
+        if let Some(path) = state.inputs.second_pbf() {
             lines.push(format!("pbf_b: {}", path.display()));
         }
-        if let Some(bbox) = plan.state.inputs.bbox() {
+        if let Some(bbox) = state.inputs.bbox() {
             lines.push(format!("bbox: {bbox}"));
         }
         Ok(lines)
@@ -157,9 +205,9 @@ impl PlannedCommand for PbfhoggPlan<'_> {
     fn announce(
         &self,
         req: &MeasureRequest<'_>,
-        plan: &CommandPlan<CommandContext>,
+        plan: &CommandPlan<PbfhoggState>,
     ) -> Result<(), DevError> {
-        let (_, file_mb) = result_input_metadata(&plan.state)?;
+        let (_, file_mb) = result_input_metadata(&plan.state.ctx)?;
         output::bench_msg(&format!(
             "{} ({file_mb:.0} MB), {} run(s)",
             self.command.id(),
@@ -171,25 +219,25 @@ impl PlannedCommand for PbfhoggPlan<'_> {
         &self,
         req: &MeasureRequest<'_>,
         _ctx: &MeasurementSession,
-        plan: &CommandPlan<CommandContext>,
+        plan: &CommandPlan<PbfhoggState>,
     ) -> Result<(), DevError> {
-        cleanup_output(self.command, &plan.state, arg_mode(req))?;
-        self.command.prepare_scratch(&plan.state)
+        cleanup_output(self.command, &plan.state.ctx, arg_mode(req))?;
+        self.command.prepare_scratch(&plan.state.ctx)
     }
     fn finish(
         &self,
         req: &MeasureRequest<'_>,
         ctx: &MeasurementSession,
-        plan: &CommandPlan<CommandContext>,
+        plan: &CommandPlan<PbfhoggState>,
     ) -> Result<(), DevError> {
         promote_artifact(
             self.command,
-            &plan.state,
+            &plan.state.ctx,
             arg_mode(req),
             &ctx.paths,
             req.project_root.as_path(),
         )?;
-        cleanup_output(self.command, &plan.state, arg_mode(req))
+        cleanup_output(self.command, &plan.state.ctx, arg_mode(req))
     }
 }
 
@@ -250,15 +298,15 @@ fn require_snapshot_output(command: &PbfhoggCommand) -> Result<(), DevError> {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_wallclock_core(
     harness: &harness::BenchHarness,
-    binary: &Path,
+    binary: &PbfhoggBinary,
     command: &PbfhoggCommand,
     cmd_ctx: &CommandContext,
     runs: usize,
     project_root: &Path,
     announce: bool,
 ) -> Result<(), DevError> {
-    let args = command.build_args(cmd_ctx, ArgMode::Bench)?;
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let invocation = binary.command_invocation(command.build_args(cmd_ctx, ArgMode::Bench)?)?;
+    let arg_refs = invocation.arg_refs();
 
     let (basename, file_mb) = result_input_metadata(cmd_ctx)?;
 
@@ -269,10 +317,7 @@ pub(crate) fn run_wallclock_core(
         cargo_features: None,
         external_build: None,
         runs,
-        cli_args: Some(harness::format_cli_args(
-            &binary.display().to_string(),
-            &arg_refs,
-        )),
+        cli_args: Some(invocation.cli_args()),
         metadata: command.metadata(&cmd_ctx.observations),
     };
 
@@ -285,7 +330,7 @@ pub(crate) fn run_wallclock_core(
 
     harness.run_external_prepared(
         &config,
-        binary,
+        invocation.program(),
         &arg_refs,
         project_root,
         command.ok_exit_codes(),
@@ -325,11 +370,12 @@ fn result_input_metadata(cmd_ctx: &CommandContext) -> Result<(String, f64), DevE
 }
 
 /// Build the `CommandContext` for a pbfhogg command, resolving all input paths.
+/// `binary` is `None` for a dry run, which builds nothing it could run.
 fn build_pbfhogg_context(
     req: &MeasureRequest,
     command: &PbfhoggCommand,
     osc_seq: Option<&str>,
-    binary: &Path,
+    binary: Option<&PbfhoggBinary>,
     paths: &config::ResolvedPaths,
     extra_params: &CommandParams,
 ) -> Result<CommandContext, DevError> {
@@ -453,12 +499,13 @@ fn build_pbfhogg_context(
 /// Resolve the B-side (merged) PBF path for diff commands.
 ///
 /// In measured modes, cache rebuilding is deterministic unless
-/// `--keep-cache` opts into reuse. Dry-run resolves only the would-be path.
+/// `--keep-cache` opts into reuse. Dry-run (no `binary`) resolves only the
+/// would-be path.
 #[allow(clippy::too_many_arguments)]
 fn resolve_merged_pbf(
     req: &MeasureRequest,
     command: &PbfhoggCommand,
-    binary: &Path,
+    binary: Option<&PbfhoggBinary>,
     pbf_path: Option<&Path>,
     osc_path: Option<&Path>,
     single_osc_seq: Option<&str>,
@@ -479,7 +526,7 @@ fn resolve_merged_pbf(
         resolve::SnapshotRef::Named(k) => k.as_str(),
     };
 
-    if req.dry_run {
+    let Some(binary) = binary else {
         return Ok((
             Some(merged_pbf_path(
                 &paths.scratch_dir,
@@ -489,7 +536,7 @@ fn resolve_merged_pbf(
             )),
             None,
         ));
-    }
+    };
 
     let force_rebuild = !matches!(req.mode, MeasureMode::Run) && !extra_params.keep_cache;
     let (merged, state) = ensure_merged_pbf(
@@ -664,7 +711,7 @@ pub(crate) fn merged_pbf_path(
 /// which the key cannot see.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn ensure_merged_pbf(
-    binary: &Path,
+    binary: &PbfhoggBinary,
     pbf_path: &Path,
     osc_path: &Path,
     snapshot_key: &str,
@@ -713,20 +760,24 @@ pub(crate) fn ensure_merged_pbf(
     // on any error removes the partial file.
     let staged = crate::atomic_write::Staged::stable_keeping(&merged_path, ".osm.pbf")?;
     let partial_str = crate::utf8_path::path_str(staged.tmp_path())?.to_owned();
-    let binary_str = binary.display().to_string();
 
     let start = std::time::Instant::now();
     // The merged cache is the default apply-changes output for this PBF/OSC
     // pair. Its argv shares the command's builder, with no optional transform,
     // job, compression or I/O parameters inherited from the diff invocation.
-    let apply_args = PbfhoggCommand::apply_changes_args(
-        pbf_str,
-        osc_str,
-        &partial_str,
-        &CommandParams::default(),
-    );
-    let apply_arg_refs: Vec<&str> = apply_args.iter().map(String::as_str).collect();
-    let captured = output::run_captured(&binary_str, &apply_arg_refs, project_root)?;
+    // The partial name is owned: a killed run leaves it for the retry to
+    // replace.
+    let invocation = binary.invocation(
+        PbfhoggCommand::apply_changes_args(
+            pbf_str,
+            osc_str,
+            &partial_str,
+            &CommandParams::default(),
+        ),
+        Writes::OwnedOutput,
+    )?;
+    let binary_str = invocation.program_string();
+    let captured = output::run_captured(&binary_str, &invocation.arg_refs(), project_root)?;
 
     captured.check_success(&binary_str)?;
     staged.commit().map_err(|e| {
@@ -740,3 +791,7 @@ pub(crate) fn ensure_merged_pbf(
 
     Ok((merged_path, MergedCacheState::Miss))
 }
+
+#[cfg(test)]
+#[path = "plan_tests.rs"]
+mod tests;

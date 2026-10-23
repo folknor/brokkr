@@ -124,6 +124,48 @@ impl ArgMode {
     }
 }
 
+/// What a command's argv needs for pbfhogg to replace its output. Decided by
+/// the same `build_body` arm that builds the argv, never by a caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Overwrite {
+    /// Reads only.
+    NoOutput,
+    /// Writes a brokkr-owned output: pass `--overwrite` when the executable
+    /// accepts it.
+    Negotiate,
+    /// Writes a brokkr-owned output, and a flag the arm already emitted
+    /// (`build-geocode-index --force`) replaces it in every pbfhogg version.
+    ImpliedByForce,
+}
+
+/// A typed command's argv, still without the executable-dependent
+/// `--overwrite`. Only [`PbfhoggCommand::build_args`] makes one, so its
+/// overwrite decision always comes from the arm that built the arguments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CommandArgv {
+    args: Vec<String>,
+    overwrite: Overwrite,
+}
+
+impl CommandArgv {
+    pub(crate) fn args(&self) -> &[String] {
+        &self.args
+    }
+
+    #[cfg(test)]
+    pub(crate) fn overwrite(&self) -> Overwrite {
+        self.overwrite
+    }
+
+    pub(crate) fn negotiates_overwrite(&self) -> bool {
+        self.overwrite == Overwrite::Negotiate
+    }
+
+    pub(crate) fn into_args(self) -> Vec<String> {
+        self.args
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Sub-enums for multi-variant commands
 // ---------------------------------------------------------------------------
@@ -591,16 +633,19 @@ impl PbfhoggCommand {
     /// filename namespace, so benchmark and profiling runs execute the same
     /// command arguments.
     /// I/O and explicit compression options are appended here so every caller,
-    /// including dry-run, sees the same final command shape.
+    /// including dry-run, sees the same command shape. The one flag not here
+    /// is `--overwrite`: whether it is passed depends on the executable, so
+    /// [`PbfhoggBinary`](crate::pbfhogg::binary::PbfhoggBinary) adds it when
+    /// resolving the returned [`CommandArgv`].
     #[allow(clippy::too_many_lines)]
-    pub fn build_args(&self, ctx: &CommandContext, mode: ArgMode) -> Result<Vec<String>, DevError> {
-        let mut args = self.build_body(ctx, mode)?;
+    pub fn build_args(&self, ctx: &CommandContext, mode: ArgMode) -> Result<CommandArgv, DevError> {
+        let (mut args, overwrite) = self.build_body(ctx, mode)?;
         args.extend(ctx.params.io.args());
         if let Some(compression) = &ctx.params.compression {
             args.push("--compression".into());
             args.push(compression.to_string());
         }
-        Ok(args)
+        Ok(CommandArgv { args, overwrite })
     }
 
     /// Build the core argv for an extract command with an explicit output
@@ -628,9 +673,15 @@ impl PbfhoggCommand {
         Ok(args)
     }
 
-    /// Build the body of the argument vector (no binary prefix).
+    /// Build the body of the argument vector (no binary prefix), together
+    /// with what the same arm decided about replacing its output.
     #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
-    fn build_body(&self, ctx: &CommandContext, mode: ArgMode) -> Result<Vec<String>, DevError> {
+    fn build_body(
+        &self,
+        ctx: &CommandContext,
+        mode: ArgMode,
+    ) -> Result<(Vec<String>, Overwrite), DevError> {
+        use Overwrite::{ImpliedByForce, Negotiate, NoOutput};
         match self {
             // -----------------------------------------------------------------
             // Tool CLI commands (26 from bench_commands.rs)
@@ -667,24 +718,30 @@ impl PbfhoggCommand {
                     args.push("-j".into());
                     args.push(j.to_string());
                 }
-                Ok(args)
+                Ok((args, NoOutput))
             }
-            Self::CheckRefs => Ok(vec!["check".into(), "--refs".into(), ctx.pbf_str()?.into()]),
+            Self::CheckRefs => Ok((
+                vec!["check".into(), "--refs".into(), ctx.pbf_str()?.into()],
+                NoOutput,
+            )),
             Self::CheckIds { full } => {
                 let mut args = vec!["check".into(), "--ids".into(), ctx.pbf_str()?.into()];
                 if *full {
                     args.push("--full".into());
                 }
-                Ok(args)
+                Ok((args, NoOutput))
             }
             Self::Sort => {
                 let output = scratch_output_path(ctx, self, mode)?;
-                Ok(vec![
-                    "sort".into(),
-                    ctx.pbf_str()?.into(),
-                    "-o".into(),
-                    crate::utf8_path::path_string(&output)?,
-                ])
+                Ok((
+                    vec![
+                        "sort".into(),
+                        ctx.pbf_str()?.into(),
+                        "-o".into(),
+                        crate::utf8_path::path_string(&output)?,
+                    ],
+                    Negotiate,
+                ))
             }
             Self::Cat {
                 type_filter,
@@ -717,7 +774,7 @@ impl PbfhoggCommand {
                 }
                 args.push("-o".into());
                 args.push(crate::utf8_path::path_string(&output)?);
-                Ok(args)
+                Ok((args, Negotiate))
             }
             Self::TagsFilter { filter, input } => {
                 let output = scratch_output_path(ctx, self, mode)?;
@@ -756,7 +813,7 @@ impl PbfhoggCommand {
                     args.push("-j".into());
                     args.push(j.to_string());
                 }
-                Ok(args)
+                Ok((args, Negotiate))
             }
             Self::Getid {
                 add_referenced,
@@ -776,7 +833,7 @@ impl PbfhoggCommand {
                 }
                 args.push("-o".into());
                 args.push(crate::utf8_path::path_string(&output)?);
-                Ok(args)
+                Ok((args, Negotiate))
             }
             Self::Getparents => {
                 let output = scratch_output_path(ctx, self, mode)?;
@@ -786,16 +843,19 @@ impl PbfhoggCommand {
                 }
                 args.push("-o".into());
                 args.push(crate::utf8_path::path_string(&output)?);
-                Ok(args)
+                Ok((args, Negotiate))
             }
             Self::Renumber => {
                 let output = scratch_output_path(ctx, self, mode)?;
-                Ok(vec![
-                    "renumber".into(),
-                    ctx.pbf_str()?.into(),
-                    "-o".into(),
-                    crate::utf8_path::path_string(&output)?,
-                ])
+                Ok((
+                    vec![
+                        "renumber".into(),
+                        ctx.pbf_str()?.into(),
+                        "-o".into(),
+                        crate::utf8_path::path_string(&output)?,
+                    ],
+                    Negotiate,
+                ))
             }
             Self::MergeChanges { simplify } => {
                 let output = scratch_output_path(ctx, self, mode)?;
@@ -809,16 +869,19 @@ impl PbfhoggCommand {
                 if *simplify {
                     args.push("--simplify".into());
                 }
-                Ok(args)
+                Ok((args, Negotiate))
             }
             Self::ApplyChanges => {
                 let output = scratch_output_path(ctx, self, mode)?;
                 let osc = ctx.osc_str()?;
-                Ok(Self::apply_changes_args(
-                    ctx.pbf_str()?,
-                    osc,
-                    &crate::utf8_path::path_string(&output)?,
-                    &ctx.params,
+                Ok((
+                    Self::apply_changes_args(
+                        ctx.pbf_str()?,
+                        osc,
+                        &crate::utf8_path::path_string(&output)?,
+                        &ctx.params,
+                    ),
+                    Negotiate,
                 ))
             }
             Self::AddLocationsToWays => {
@@ -839,41 +902,50 @@ impl PbfhoggCommand {
                 if ctx.params.force_altw {
                     args.push("--force".into());
                 }
-                Ok(args)
+                Ok((args, Negotiate))
             }
             Self::TimeFilter => {
                 let output = scratch_output_path(ctx, self, mode)?;
-                Ok(vec![
-                    "time-filter".into(),
-                    ctx.pbf_str()?.into(),
-                    "2024-01-01T00:00:00Z".into(),
-                    "-o".into(),
-                    crate::utf8_path::path_string(&output)?,
-                ])
+                Ok((
+                    vec![
+                        "time-filter".into(),
+                        ctx.pbf_str()?.into(),
+                        "2024-01-01T00:00:00Z".into(),
+                        "-o".into(),
+                        crate::utf8_path::path_string(&output)?,
+                    ],
+                    Negotiate,
+                ))
             }
             Self::Diff { format } | Self::DiffSnapshots { format } => {
                 let from = ctx.pbf_str()?;
                 let to = ctx.pbf_b_str()?;
-                let mut args = match format {
-                    DiffFormat::Default => vec!["diff".into(), from.into(), to.into(), "-c".into()],
+                let (mut args, overwrite) = match format {
+                    DiffFormat::Default => (
+                        vec!["diff".into(), from.into(), to.into(), "-c".into()],
+                        NoOutput,
+                    ),
                     DiffFormat::Osc => {
                         let output = scratch_output_path(ctx, self, mode)?;
-                        vec![
-                            "diff".into(),
-                            "--format".into(),
-                            "osc".into(),
-                            from.into(),
-                            to.into(),
-                            "-o".into(),
-                            crate::utf8_path::path_string(&output)?,
-                        ]
+                        (
+                            vec![
+                                "diff".into(),
+                                "--format".into(),
+                                "osc".into(),
+                                from.into(),
+                                to.into(),
+                                "-o".into(),
+                                crate::utf8_path::path_string(&output)?,
+                            ],
+                            Negotiate,
+                        )
                     }
                 };
                 if let Some(j) = ctx.params.jobs {
                     args.push("-j".into());
                     args.push(j.to_string());
                 }
-                Ok(args)
+                Ok((args, overwrite))
             }
 
             Self::Repack {
@@ -894,7 +966,7 @@ impl PbfhoggCommand {
                 if *force {
                     args.push("--force".into());
                 }
-                Ok(args)
+                Ok((args, Negotiate))
             }
             Self::Degrade {
                 unsort,
@@ -917,7 +989,7 @@ impl PbfhoggCommand {
                 if *strip_indexdata {
                     args.push("--strip-indexdata".into());
                 }
-                Ok(args)
+                Ok((args, Negotiate))
             }
 
             // -----------------------------------------------------------------
@@ -925,13 +997,19 @@ impl PbfhoggCommand {
             // -----------------------------------------------------------------
             Self::BuildGeocodeIndex => {
                 let output_dir = scratch_output_path(ctx, self, mode)?;
-                Ok(vec![
-                    "build-geocode-index".into(),
-                    ctx.pbf_str()?.into(),
-                    "--output-dir".into(),
-                    crate::utf8_path::path_string(&output_dir)?,
-                    "--force".into(),
-                ])
+                // pbfhogg's `--force` here means overwrite plus allow-unindexed,
+                // in every version brokkr builds, so it replaces the output on
+                // its own and the negotiated flag is not needed.
+                Ok((
+                    vec![
+                        "build-geocode-index".into(),
+                        ctx.pbf_str()?.into(),
+                        "--output-dir".into(),
+                        crate::utf8_path::path_string(&output_dir)?,
+                        "--force".into(),
+                    ],
+                    ImpliedByForce,
+                ))
             }
 
             // -----------------------------------------------------------------
@@ -959,7 +1037,9 @@ impl PbfhoggCommand {
                 if let Some(flag) = strategy.flag() {
                     args.push(flag.into());
                 }
-                Ok(args)
+                // The outputs are named in the config file; one argv
+                // `--overwrite` covers every one of them.
+                Ok((args, Negotiate))
             }
 
             // -----------------------------------------------------------------
@@ -972,7 +1052,10 @@ impl PbfhoggCommand {
                     .ok_or_else(|| DevError::Config("extract requires a bbox".into()))?;
                 let output = scratch_output_path(ctx, self, mode)?;
                 let output_str = crate::utf8_path::path_string(&output)?;
-                self.extract_args_for(ctx.pbf_str()?, bbox, &output_str)
+                Ok((
+                    self.extract_args_for(ctx.pbf_str()?, bbox, &output_str)?,
+                    Negotiate,
+                ))
             }
         }
     }
@@ -1182,13 +1265,145 @@ mod tests {
         };
     }
 
+    /// Every command state the CLI and the suite presets can produce.
+    fn every_command_state() -> Vec<PbfhoggCommand> {
+        let mut states = vec![
+            PbfhoggCommand::Inspect {
+                mode: InspectMode::Default { extended: false },
+            },
+            PbfhoggCommand::Inspect {
+                mode: InspectMode::Default { extended: true },
+            },
+            PbfhoggCommand::Inspect {
+                mode: InspectMode::Nodes,
+            },
+            PbfhoggCommand::Inspect {
+                mode: InspectMode::Tags {
+                    type_filter: Some(InspectTypeFilter::Way),
+                },
+            },
+            PbfhoggCommand::CheckRefs,
+            PbfhoggCommand::CheckIds { full: false },
+            PbfhoggCommand::CheckIds { full: true },
+            PbfhoggCommand::Sort,
+            PbfhoggCommand::Cat {
+                type_filter: Some(CatTypeFilter::Way),
+                dedupe: true,
+                clean: true,
+            },
+            PbfhoggCommand::Cat {
+                type_filter: None,
+                dedupe: false,
+                clean: false,
+            },
+            PbfhoggCommand::TagsFilter {
+                filter: "w/highway=primary".into(),
+                input: TagsFilterInput::Pbf {
+                    omit_referenced: true,
+                    invert: true,
+                    remove_tags: true,
+                },
+            },
+            PbfhoggCommand::TagsFilter {
+                filter: "highway=primary".into(),
+                input: TagsFilterInput::Osc,
+            },
+            PbfhoggCommand::Getid {
+                add_referenced: true,
+                invert: true,
+            },
+            PbfhoggCommand::Getparents,
+            PbfhoggCommand::Renumber,
+            PbfhoggCommand::MergeChanges { simplify: true },
+            PbfhoggCommand::MergeChanges { simplify: false },
+            PbfhoggCommand::ApplyChanges,
+            PbfhoggCommand::AddLocationsToWays,
+            PbfhoggCommand::TimeFilter,
+            PbfhoggCommand::Repack {
+                elements_per_blob: Some(100),
+                force: true,
+            },
+            PbfhoggCommand::Degrade {
+                unsort: true,
+                strip_locations: true,
+                strip_indexdata: true,
+            },
+            PbfhoggCommand::Degrade {
+                unsort: true,
+                strip_locations: false,
+                strip_indexdata: false,
+            },
+            PbfhoggCommand::BuildGeocodeIndex,
+        ];
+        for format in [DiffFormat::Default, DiffFormat::Osc] {
+            states.push(PbfhoggCommand::Diff { format });
+            states.push(PbfhoggCommand::DiffSnapshots { format });
+        }
+        for &strategy in ExtractStrategy::all() {
+            states.push(PbfhoggCommand::Extract { strategy });
+            states.push(PbfhoggCommand::MultiExtract {
+                regions: 2,
+                strategy,
+            });
+        }
+        for name in crate::pbfhogg::bench_commands::ALL_COMMANDS {
+            states.push(crate::pbfhogg::bench_commands::preset_to_command(name).unwrap());
+        }
+        states
+    }
+
+    /// A context whose inputs fit `cmd`.
+    fn ctx_for(cmd: &PbfhoggCommand) -> CommandContext {
+        let mut ctx = test_ctx();
+        if matches!(
+            cmd,
+            PbfhoggCommand::Diff { .. } | PbfhoggCommand::DiffSnapshots { .. }
+        ) {
+            use_two_pbfs(&mut ctx);
+        } else if !cmd.needs_pbf() {
+            use_osc_only(&mut ctx);
+        } else if cmd.needs_osc_input() {
+            use_pbf_and_osc(&mut ctx);
+        }
+        ctx
+    }
+
+    #[test]
+    fn the_arm_building_the_argv_decides_overwrite_consistently_with_the_descriptor() {
+        // An output-producing command whose arm forgot to negotiate would
+        // fail on its second iteration once pbfhogg refuses existing outputs.
+        for cmd in every_command_state() {
+            let ctx = ctx_for(&cmd);
+            for mode in [ArgMode::Bench, ArgMode::Hotpath] {
+                let argv = cmd.build_args(&ctx, mode).unwrap();
+                let expected = match cmd.output_kind() {
+                    OutputKind::None => Overwrite::NoOutput,
+                    _ if cmd == PbfhoggCommand::BuildGeocodeIndex => Overwrite::ImpliedByForce,
+                    _ => Overwrite::Negotiate,
+                };
+                assert_eq!(argv.overwrite(), expected, "{cmd:?} in {mode:?}");
+                if expected == Overwrite::ImpliedByForce {
+                    assert!(argv.args().iter().any(|a| a == "--force"), "{cmd:?}");
+                }
+                // The flag is the binary handle's alone to add.
+                assert!(
+                    !argv
+                        .args()
+                        .iter()
+                        .any(|a| a == crate::pbfhogg::binary::OVERWRITE_FLAG || a == "-O"),
+                    "{cmd:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn inspect_builds_correct_args() {
         let ctx = test_ctx();
         let cmd = PbfhoggCommand::Inspect {
             mode: InspectMode::Default { extended: false },
         };
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         assert_eq!(args, vec!["inspect", "/data/denmark.osm.pbf"]);
     }
 
@@ -1198,7 +1413,7 @@ mod tests {
         let cmd = PbfhoggCommand::Inspect {
             mode: InspectMode::Default { extended: true },
         };
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         assert_eq!(args, vec!["inspect", "/data/denmark.osm.pbf", "--extended"]);
     }
 
@@ -1208,7 +1423,7 @@ mod tests {
         let cmd = PbfhoggCommand::Inspect {
             mode: InspectMode::Nodes,
         };
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         assert!(!args.iter().any(|a| a == "--extended"));
     }
 
@@ -1218,7 +1433,7 @@ mod tests {
         let cmd = PbfhoggCommand::Inspect {
             mode: InspectMode::Tags { type_filter: None },
         };
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         assert_eq!(
             args,
             vec![
@@ -1239,8 +1454,8 @@ mod tests {
                 type_filter: Some(InspectTypeFilter::Way),
             },
         };
-        let bench = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
-        let hotpath = cmd.build_args(&ctx, ArgMode::Hotpath).unwrap();
+        let bench = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
+        let hotpath = cmd.build_args(&ctx, ArgMode::Hotpath).unwrap().into_args();
         assert_eq!(bench, hotpath);
         assert!(bench.windows(2).any(|pair| pair == ["--type", "way"]));
         assert!(
@@ -1255,14 +1470,14 @@ mod tests {
         let mut ctx = test_ctx();
         use_pbf_and_osc(&mut ctx);
         let cmd = PbfhoggCommand::ApplyChanges;
-        let bench = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
-        let hotpath = cmd.build_args(&ctx, ArgMode::Hotpath).unwrap();
+        let bench = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
+        let hotpath = cmd.build_args(&ctx, ArgMode::Hotpath).unwrap().into_args();
         assert!(!bench.iter().any(|arg| arg == "--compression"));
         assert!(!hotpath.iter().any(|arg| arg == "--compression"));
 
         ctx.params.compression = Some("zstd:5".parse().unwrap());
         for mode in [ArgMode::Bench, ArgMode::Hotpath] {
-            let args = cmd.build_args(&ctx, mode).unwrap();
+            let args = cmd.build_args(&ctx, mode).unwrap().into_args();
             let option = args.iter().position(|arg| arg == "--compression").unwrap();
             assert_eq!(args[option + 1], "zstd:5");
         }
@@ -1273,7 +1488,7 @@ mod tests {
         let mut ctx = test_ctx();
         use_pbf_and_osc(&mut ctx);
         let cmd = PbfhoggCommand::ApplyChanges;
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         assert_eq!(args[0], "apply-changes");
         assert_eq!(args[1], "/data/denmark.osm.pbf");
         assert_eq!(args[2], "/data/denmark-4705.osc.gz");
@@ -1287,7 +1502,7 @@ mod tests {
         use_pbf_and_osc(&mut ctx);
         ctx.params.locations_on_ways = true;
         let cmd = PbfhoggCommand::ApplyChanges;
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         assert_eq!(args[0], "apply-changes");
         assert!(args.iter().any(|a| a == "--locations-on-ways"));
     }
@@ -1298,7 +1513,7 @@ mod tests {
         use_pbf_and_osc(&mut ctx);
         ctx.params.jobs = Some(8);
         let cmd = PbfhoggCommand::ApplyChanges;
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         let pos = args.iter().position(|a| a == "-j").expect("-j present");
         assert_eq!(args[pos + 1], "8");
     }
@@ -1308,7 +1523,7 @@ mod tests {
         let mut ctx = test_ctx();
         use_pbf_and_osc(&mut ctx);
         let cmd = PbfhoggCommand::ApplyChanges;
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         assert!(!args.iter().any(|a| a == "-j"));
     }
 
@@ -1319,7 +1534,7 @@ mod tests {
         let cmd = PbfhoggCommand::Diff {
             format: DiffFormat::Default,
         };
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         assert_eq!(
             args,
             vec![
@@ -1338,7 +1553,7 @@ mod tests {
         let cmd = PbfhoggCommand::Inspect {
             mode: InspectMode::Nodes,
         };
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         let pos = args.iter().position(|a| a == "-j").expect("-j present");
         assert_eq!(args[pos + 1], "4");
     }
@@ -1350,7 +1565,7 @@ mod tests {
         let cmd = PbfhoggCommand::Inspect {
             mode: InspectMode::Tags { type_filter: None },
         };
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         let pos = args.iter().position(|a| a == "-j").expect("-j present");
         assert_eq!(args[pos + 1], "0");
     }
@@ -1362,7 +1577,7 @@ mod tests {
         let cmd = PbfhoggCommand::Inspect {
             mode: InspectMode::Default { extended: false },
         };
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         assert!(!args.iter().any(|a| a == "-j"));
     }
 
@@ -1374,7 +1589,7 @@ mod tests {
         let cmd = PbfhoggCommand::Diff {
             format: DiffFormat::Default,
         };
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         let pos = args.iter().position(|a| a == "-j").expect("-j present");
         assert_eq!(args[pos + 1], "0");
     }
@@ -1391,7 +1606,7 @@ mod tests {
         let cmd = PbfhoggCommand::DiffSnapshots {
             format: DiffFormat::Osc,
         };
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         let pos = args.iter().position(|a| a == "-j").expect("-j present");
         assert_eq!(args[pos + 1], "8");
     }
@@ -1401,7 +1616,7 @@ mod tests {
         let mut ctx = test_ctx();
         ctx.params.index_type = Some("external".into());
         let cmd = PbfhoggCommand::AddLocationsToWays;
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         assert!(args.contains(&String::from("--index-type")));
         assert!(args.contains(&String::from("external")));
     }
@@ -1411,7 +1626,7 @@ mod tests {
         let mut ctx = test_ctx();
         ctx.params.inject_prepass = true;
         let cmd = PbfhoggCommand::AddLocationsToWays;
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         assert!(args.contains(&String::from("--inject-prepass")));
     }
 
@@ -1419,7 +1634,7 @@ mod tests {
     fn add_locations_to_ways_omits_inject_prepass_by_default() {
         let ctx = test_ctx();
         let cmd = PbfhoggCommand::AddLocationsToWays;
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         assert!(!args.contains(&String::from("--inject-prepass")));
     }
 
@@ -1429,7 +1644,7 @@ mod tests {
         ctx.params.index_type = Some("external".into());
         ctx.params.inject_prepass = true;
         let cmd = PbfhoggCommand::AddLocationsToWays;
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         assert!(args.contains(&String::from("--index-type")));
         assert!(args.contains(&String::from("external")));
         assert!(args.contains(&String::from("--inject-prepass")));
@@ -1440,7 +1655,7 @@ mod tests {
         let mut ctx = test_ctx();
         ctx.params.force_altw = true;
         let cmd = PbfhoggCommand::AddLocationsToWays;
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         assert!(args.contains(&String::from("--force")));
     }
 
@@ -1448,7 +1663,7 @@ mod tests {
     fn add_locations_to_ways_omits_force_altw_by_default() {
         let ctx = test_ctx();
         let cmd = PbfhoggCommand::AddLocationsToWays;
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         assert!(!args.contains(&String::from("--force")));
     }
 
@@ -1460,7 +1675,7 @@ mod tests {
         ctx.params.inject_prepass = true;
         ctx.params.force_altw = true;
         let cmd = PbfhoggCommand::AddLocationsToWays;
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         assert!(args.contains(&String::from("--inject-prepass")));
         assert!(args.contains(&String::from("--force")));
     }
@@ -1470,7 +1685,7 @@ mod tests {
         // Hotpath should NOT default to --index-type external when omitted.
         let ctx = test_ctx();
         let cmd = PbfhoggCommand::AddLocationsToWays;
-        let args = cmd.build_args(&ctx, ArgMode::Hotpath).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Hotpath).unwrap().into_args();
         assert!(!args.contains(&String::from("--index-type")));
     }
 
@@ -1489,7 +1704,7 @@ mod tests {
     fn build_geocode_index_builds_correct_args() {
         let ctx = test_ctx();
         let cmd = PbfhoggCommand::BuildGeocodeIndex;
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         assert_eq!(args[0], "build-geocode-index");
         assert_eq!(args[1], "/data/denmark.osm.pbf");
         assert_eq!(args[2], "--output-dir");
@@ -1534,7 +1749,7 @@ mod tests {
                 remove_tags: true,
             },
         };
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         assert!(args.iter().any(|a| a == "-i"));
         assert!(args.iter().any(|a| a == "-t"));
         assert!(!args.iter().any(|a| a == "-R"));
@@ -1548,7 +1763,7 @@ mod tests {
             filter: "highway=primary".into(),
             input: TagsFilterInput::Osc,
         };
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         assert!(!args.iter().any(|a| a == "-R"));
         assert!(!args.iter().any(|a| a == "-i"));
         assert!(!args.iter().any(|a| a == "-t"));
@@ -1566,7 +1781,7 @@ mod tests {
                 remove_tags: false,
             },
         };
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         let pos = args.iter().position(|a| a == "-j").expect("-j present");
         assert_eq!(args[pos + 1], "4");
     }
@@ -1584,7 +1799,7 @@ mod tests {
         let mut ctx = test_ctx();
         use_osc_only(&mut ctx);
         let cmd = PbfhoggCommand::MergeChanges { simplify: true };
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         assert!(args.iter().any(|a| a == "--simplify"));
     }
 
@@ -1593,7 +1808,7 @@ mod tests {
         let mut ctx = test_ctx();
         use_osc_only(&mut ctx);
         let cmd = PbfhoggCommand::MergeChanges { simplify: false };
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         assert!(!args.iter().any(|a| a == "--simplify"));
     }
 
@@ -1607,7 +1822,7 @@ mod tests {
             regions: 3,
             strategy: ExtractStrategy::Simple,
         };
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         let config_path = multi_extract_config_path(&ctx.scratch_dir);
         assert!(args.iter().any(|a| a == config_path.to_str().unwrap()));
         assert_eq!(std::fs::read_dir(&ctx.scratch_dir).unwrap().count(), 0);

@@ -5,13 +5,14 @@ use std::path::Path;
 use crate::datasets::Bbox;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
+use crate::pbfhogg::binary::PbfhoggBinary;
 use crate::pbfhogg::commands::{ArgMode, ExtractStrategy, PbfhoggCommand, scratch_output_path};
 use crate::pbfhogg::context::{CommandContext, CommandObservations, CommandParams, ResolvedInputs};
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     harness: &BenchHarness,
-    binary: &Path,
+    binary: &PbfhoggBinary,
     pbf_path: &Path,
     file_mb: f64,
     runs: usize,
@@ -47,8 +48,11 @@ pub fn run(
     let result = crate::bench_variants::run_variants("strategy", &strategy_names, |name| {
         let strategy = ExtractStrategy::parse(name)?;
         let command = PbfhoggCommand::Extract { strategy };
-        let args = command.build_args(&command_ctx, ArgMode::Bench)?;
-        let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        // Every strategy and every iteration writes the same output path, so
+        // the argv carries the negotiated overwrite flag.
+        let invocation =
+            binary.command_invocation(command.build_args(&command_ctx, ArgMode::Bench)?)?;
+        let args_refs = invocation.arg_refs();
 
         let config = BenchConfig {
             command: command.id().to_owned(),
@@ -59,15 +63,12 @@ pub fn run(
             cargo_features: None,
             external_build: None,
             runs,
-            cli_args: Some(crate::harness::format_cli_args(
-                &binary.display().to_string(),
-                &args_refs,
-            )),
+            cli_args: Some(invocation.cli_args()),
             metadata: vec![],
         };
 
         harness
-            .run_external(&config, binary, &args_refs, project_root)
+            .run_external(&config, invocation.program(), &args_refs, project_root)
             .map(|_| ())
     });
 

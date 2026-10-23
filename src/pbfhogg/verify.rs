@@ -11,6 +11,8 @@ use crate::build;
 use crate::error::DevError;
 use crate::output;
 use crate::output::CapturedOutput;
+pub(crate) use crate::pbfhogg::binary::Writes;
+use crate::pbfhogg::binary::PbfhoggBinary;
 
 pub(crate) const SORT_TYPE_THEN_ID: &str = "Sort.Type_then_ID";
 
@@ -49,8 +51,9 @@ pub struct VerifyHarness {
     _signals: crate::shutdown::SigtermGuard,
     /// RAII lock - released on drop.
     _lock: crate::lockfile::LockGuard,
-    /// Path to the built `pbfhogg` release binary.
-    pub binary: PathBuf,
+    /// The built `pbfhogg` release binary. Verify builds once, here, so the
+    /// handle stays valid for the harness's whole life.
+    binary: PbfhoggBinary,
     /// Root output directory: `{target_dir}/verify`.
     pub output_dir: PathBuf,
     /// Project root (used as cwd for subprocess invocations).
@@ -79,7 +82,8 @@ impl VerifyHarness {
                 features,
             )
         };
-        let binary = build::cargo_build(&build_config, effective)?.path;
+        let built = build::cargo_build(&build_config, effective)?.path;
+        let binary = PbfhoggBinary::new(&built, project_root)?;
         let output_dir = target_dir.join(crate::target_namespace::VERIFY);
 
         Ok(Self {
@@ -93,12 +97,23 @@ impl VerifyHarness {
 
     // -- Subprocess runners ------------------------------------------------
 
-    /// Run the pbfhogg CLI with the given arguments.
+    /// Run the pbfhogg CLI with the given arguments. `writes` states whether
+    /// the argv writes an output under the verify directory, which pbfhogg
+    /// must then be allowed to replace.
     ///
     /// Does **not** check the exit status - the caller decides whether
     /// non-zero is an error (some commands exit non-zero normally).
-    pub fn run_pbfhogg(&self, args: &[&str]) -> Result<CapturedOutput, DevError> {
-        output::run_captured(&self.binary.display().to_string(), args, &self.project_root)
+    pub(crate) fn run_pbfhogg(
+        &self,
+        args: &[&str],
+        writes: Writes,
+    ) -> Result<CapturedOutput, DevError> {
+        let invocation = self.binary.invocation_strs(args, writes)?;
+        output::run_captured(
+            &invocation.program_string(),
+            &invocation.arg_refs(),
+            &self.project_root,
+        )
     }
 
     /// Run an external tool (e.g. `osmium`, `osmconvert`) with the given arguments.
@@ -116,7 +131,7 @@ impl VerifyHarness {
     /// error but does **not** propagate it (informational only).
     pub fn print_inspect(&self, label: &str, pbf: &Path) -> Result<(), DevError> {
         let pbf_str = pbf.display().to_string();
-        let captured = self.run_pbfhogg(&["inspect", "--extended", &pbf_str])?;
+        let captured = self.run_pbfhogg(&["inspect", "--extended", &pbf_str], Writes::Nothing)?;
 
         if captured.success() {
             let stdout = String::from_utf8_lossy(&captured.stdout);
@@ -142,7 +157,10 @@ impl VerifyHarness {
     pub fn diff_pbfs(&self, a: &Path, b: &Path) -> Result<Verdict, DevError> {
         let a_str = a.display().to_string();
         let b_str = b.display().to_string();
-        let captured = self.run_pbfhogg(&["diff", "--suppress-common", &a_str, &b_str])?;
+        let captured = self.run_pbfhogg(
+            &["diff", "--suppress-common", &a_str, &b_str],
+            Writes::Nothing,
+        )?;
         let stdout = String::from_utf8_lossy(&captured.stdout);
         let verdict =
             diff_verdict(captured.code(), &stdout).map_err(|why| DevError::Subprocess {
@@ -182,7 +200,7 @@ impl VerifyHarness {
     /// empty stdout would otherwise read as "NOT sorted".
     pub fn check_sorted(&self, label: &str, pbf: &Path) -> Result<Verdict, DevError> {
         let pbf_str = pbf.display().to_string();
-        let captured = self.run_pbfhogg(&["inspect", "--extended", &pbf_str])?;
+        let captured = self.run_pbfhogg(&["inspect", "--extended", &pbf_str], Writes::Nothing)?;
         self.check_exit(&captured, "pbfhogg inspect --extended")?;
 
         let stdout = String::from_utf8_lossy(&captured.stdout);
@@ -279,7 +297,7 @@ impl VerifyHarness {
     /// A failed `inspect` is an error - its empty stdout is not "unsorted".
     fn has_sort_flag(&self, pbf: &Path) -> Result<bool, DevError> {
         let pbf_str = pbf.display().to_string();
-        let captured = self.run_pbfhogg(&["inspect", &pbf_str])?;
+        let captured = self.run_pbfhogg(&["inspect", &pbf_str], Writes::Nothing)?;
         self.check_exit(&captured, "pbfhogg inspect")?;
         let stdout = String::from_utf8_lossy(&captured.stdout);
         Ok(stdout.contains(SORT_TYPE_THEN_ID))

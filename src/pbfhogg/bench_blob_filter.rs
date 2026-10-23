@@ -5,6 +5,7 @@ use std::path::Path;
 use crate::clean::layout::PbfhoggLayout;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
+use crate::pbfhogg::binary::{PbfhoggBinary, Writes};
 
 const COMMANDS: &[&str] = &[
     "cat-way",
@@ -13,37 +14,55 @@ const COMMANDS: &[&str] = &[
     "inspect-nodes",
 ];
 
-/// The argv for one of [`COMMANDS`]. An unknown name is an error rather than
-/// `unreachable!()`: the name is parsed back out of a variant string, and
-/// nothing at this signature proves it came from [`COMMANDS`].
-fn command_args(name: &str, pbf: &str, output: &str, force: bool) -> Result<Vec<String>, DevError> {
-    let mut args = match name {
-        "cat-way" => vec![
-            "cat".into(),
-            pbf.into(),
-            "--type".into(),
-            "way".into(),
-            "-o".into(),
-            output.into(),
-        ],
-        "cat-relation" => vec![
-            "cat".into(),
-            pbf.into(),
-            "--type".into(),
-            "relation".into(),
-            "-o".into(),
-            output.into(),
-        ],
-        "inspect-tags-way" => vec![
-            "inspect".into(),
-            "tags".into(),
-            pbf.into(),
-            "--type".into(),
-            "way".into(),
-            "--min-count".into(),
-            super::commands::INSPECT_ALL_TAGS_MIN_COUNT.into(),
-        ],
-        "inspect-nodes" => vec!["inspect".into(), "--nodes".into(), pbf.into()],
+/// The argv for one of [`COMMANDS`], and whether it writes the shared output
+/// file. An unknown name is an error rather than `unreachable!()`: the name
+/// is parsed back out of a variant string, and nothing at this signature
+/// proves it came from [`COMMANDS`].
+fn command_args(
+    name: &str,
+    pbf: &str,
+    output: &str,
+    force: bool,
+) -> Result<(Vec<String>, Writes), DevError> {
+    let (mut args, writes) = match name {
+        "cat-way" => (
+            vec![
+                "cat".into(),
+                pbf.into(),
+                "--type".into(),
+                "way".into(),
+                "-o".into(),
+                output.into(),
+            ],
+            Writes::OwnedOutput,
+        ),
+        "cat-relation" => (
+            vec![
+                "cat".into(),
+                pbf.into(),
+                "--type".into(),
+                "relation".into(),
+                "-o".into(),
+                output.into(),
+            ],
+            Writes::OwnedOutput,
+        ),
+        "inspect-tags-way" => (
+            vec![
+                "inspect".into(),
+                "tags".into(),
+                pbf.into(),
+                "--type".into(),
+                "way".into(),
+                "--min-count".into(),
+                super::commands::INSPECT_ALL_TAGS_MIN_COUNT.into(),
+            ],
+            Writes::Nothing,
+        ),
+        "inspect-nodes" => (
+            vec!["inspect".into(), "--nodes".into(), pbf.into()],
+            Writes::Nothing,
+        ),
         _ => {
             return Err(DevError::Config(format!(
                 "unknown blob-filter command {name:?} (expected one of: {})",
@@ -54,13 +73,13 @@ fn command_args(name: &str, pbf: &str, output: &str, force: bool) -> Result<Vec<
     if force {
         args.push("--force".into());
     }
-    Ok(args)
+    Ok((args, writes))
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     harness: &BenchHarness,
-    binary: &Path,
+    binary: &PbfhoggBinary,
     pbf_indexed: &Path,
     pbf_raw: &Path,
     file_mb: f64,
@@ -100,8 +119,9 @@ pub fn run(
             .find(|&&(l, ..)| l == label_suffix)
             .ok_or_else(|| DevError::Config(format!("unknown variant label '{label_suffix}'")))?;
 
-        let args = command_args(cmd, pbf_str, &output_str, force)?;
-        let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let (args, writes) = command_args(cmd, pbf_str, &output_str, force)?;
+        let invocation = binary.invocation(args, writes)?;
+        let args_refs = invocation.arg_refs();
 
         let config = BenchConfig {
             command: "blob-filter".into(),
@@ -115,15 +135,12 @@ pub fn run(
             cargo_features: None,
             external_build: None,
             runs,
-            cli_args: Some(crate::harness::format_cli_args(
-                &binary.display().to_string(),
-                &args_refs,
-            )),
+            cli_args: Some(invocation.cli_args()),
             metadata: vec![],
         };
 
         harness
-            .run_external(&config, binary, &args_refs, project_root)
+            .run_external(&config, invocation.program(), &args_refs, project_root)
             .map(|_| ())
     });
 
@@ -151,18 +168,29 @@ mod tests {
         clippy::let_underscore_must_use,
         clippy::useless_vec
     )]
-    use super::command_args;
+    use super::{COMMANDS, Writes, command_args};
 
     #[test]
     fn raw_variant_appends_force() {
-        let args = command_args("inspect-nodes", "in.osm.pbf", "out.osm.pbf", true).unwrap();
+        let (args, _) = command_args("inspect-nodes", "in.osm.pbf", "out.osm.pbf", true).unwrap();
         assert_eq!(args, vec!["inspect", "--nodes", "in.osm.pbf", "--force"]);
     }
 
     #[test]
     fn indexed_variant_has_no_force() {
-        let args = command_args("inspect-nodes", "in.osm.pbf", "out.osm.pbf", false).unwrap();
+        let (args, _) = command_args("inspect-nodes", "in.osm.pbf", "out.osm.pbf", false).unwrap();
         assert_eq!(args, vec!["inspect", "--nodes", "in.osm.pbf"]);
+    }
+
+    #[test]
+    fn exactly_the_commands_naming_the_output_declare_it_owned() {
+        // The shared output file is reused by every variant and iteration, so
+        // a command that names it must let pbfhogg replace it.
+        for name in COMMANDS {
+            let (args, writes) = command_args(name, "in.osm.pbf", "out.osm.pbf", false).unwrap();
+            let names_output = args.iter().any(|a| a == "out.osm.pbf");
+            assert_eq!(writes == Writes::OwnedOutput, names_output, "{name}");
+        }
     }
 
     #[test]

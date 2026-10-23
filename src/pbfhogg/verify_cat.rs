@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use super::verify::{Findings, VerifyHarness};
+use super::verify::{Findings, VerifyHarness, Writes};
 use crate::error::DevError;
 use crate::output::verify_msg;
 
@@ -24,7 +24,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
         if direct_io {
             pbfhogg_args.push("--direct-io");
         }
-        let captured = harness.run_pbfhogg(&pbfhogg_args)?;
+        let captured = harness.run_pbfhogg(&pbfhogg_args, Writes::OwnedOutput)?;
         harness.check_exit(&captured, "pbfhogg cat")?;
 
         // --- osmium cat ---

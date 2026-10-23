@@ -174,7 +174,8 @@ fn capture_and_log(
     label: &str,
 ) -> Result<String, DevError> {
     let captured = if tool == "pbfhogg" {
-        harness.run_pbfhogg(args)?
+        // check --refs reports to stdout; the log file is brokkr's own write.
+        harness.run_pbfhogg(args, super::verify::Writes::Nothing)?
     } else {
         harness.run_tool(tool, args)?
     };

@@ -222,7 +222,7 @@ fn run_pbfhogg_mode(
     if direct_io {
         args.push("--direct-io");
     }
-    harness.run_pbfhogg(&args)
+    harness.run_pbfhogg(&args, super::verify::Writes::OwnedOutput)
 }
 
 /// Diff `a` against `b`, narrate the outcome, and hand the verdict back for

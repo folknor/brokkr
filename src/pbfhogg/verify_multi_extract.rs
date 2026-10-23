@@ -10,7 +10,7 @@ use std::path::Path;
 
 use super::commands::{ExtractStrategy, PbfhoggCommand};
 use super::inspect_report::InspectReport;
-use super::verify::{Findings, VerifyHarness};
+use super::verify::{Findings, VerifyHarness, Writes};
 use crate::datasets::Bbox;
 use crate::error::DevError;
 use crate::output::verify_msg;
@@ -25,7 +25,7 @@ fn parse_inspect_counts(stdout: &str) -> Option<Counts> {
 /// Get element counts for a PBF file via `pbfhogg inspect`.
 pub(super) fn inspect_counts(harness: &VerifyHarness, pbf: &Path) -> Result<Counts, DevError> {
     let pbf_str = pbf.display().to_string();
-    let captured = harness.run_pbfhogg(&["inspect", &pbf_str])?;
+    let captured = harness.run_pbfhogg(&["inspect", &pbf_str], Writes::Nothing)?;
     harness.check_exit(&captured, "pbfhogg inspect")?;
 
     let stdout = String::from_utf8_lossy(&captured.stdout);
@@ -74,7 +74,8 @@ pub fn run(
         multi_args.push("--direct-io".into());
     }
     let multi_arg_refs: Vec<&str> = multi_args.iter().map(String::as_str).collect();
-    let captured = harness.run_pbfhogg(&multi_arg_refs)?;
+    // The outputs are named in the config; one --overwrite covers them all.
+    let captured = harness.run_pbfhogg(&multi_arg_refs, Writes::OwnedOutput)?;
     harness.check_exit(&captured, "pbfhogg multi-extract")?;
 
     // --- Sequential single-region extracts ---
@@ -93,7 +94,7 @@ pub fn run(
             seq_args.push("--direct-io".into());
         }
         let seq_arg_refs: Vec<&str> = seq_args.iter().map(String::as_str).collect();
-        let captured = harness.run_pbfhogg(&seq_arg_refs)?;
+        let captured = harness.run_pbfhogg(&seq_arg_refs, Writes::OwnedOutput)?;
         harness.check_exit(&captured, &format!("pbfhogg extract strip-{i}"))?;
     }
 

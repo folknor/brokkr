@@ -126,7 +126,7 @@ impl PlannedCommand for NidhoggPlan<'_> {
         &self,
         req: &MeasureRequest<'_>,
         paths: &crate::config::ResolvedPaths,
-        _binary: &std::path::Path,
+        _target: crate::measure::runner::PlanTarget<'_>,
     ) -> Result<CommandPlan<NidhoggState>, DevError> {
         if !matches!(self.0, NidhoggCommand::Ingest) {
             return server_plan(self.0, req, paths);

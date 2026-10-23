@@ -51,7 +51,7 @@ pub const ALL_COMMANDS: &[&str] = &[
 /// have a `PbfhoggCommand`, argv, metadata, input/output kind, and result
 /// labels all come from the enum itself.
 #[allow(clippy::too_many_lines)]
-fn preset_to_command(name: &str) -> Result<PbfhoggCommand, DevError> {
+pub(crate) fn preset_to_command(name: &str) -> Result<PbfhoggCommand, DevError> {
     Ok(match name {
         "inspect" => PbfhoggCommand::Inspect {
             mode: InspectMode::Default { extended: false },
@@ -169,7 +169,7 @@ fn suite_needs_osc(commands: &[&str]) -> Result<bool, DevError> {
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     harness: &BenchHarness,
-    binary: &Path,
+    binary: &crate::pbfhogg::binary::PbfhoggBinary,
     pbf_path: &Path,
     osc_path: Option<&Path>,
     osc_seq: Option<&str>,

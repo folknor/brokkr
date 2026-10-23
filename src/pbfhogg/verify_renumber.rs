@@ -16,7 +16,7 @@
 use std::fs;
 use std::path::Path;
 
-use super::verify::{Findings, VerifyHarness};
+use super::verify::{Findings, VerifyHarness, Writes};
 use crate::error::DevError;
 use crate::output::verify_msg;
 
@@ -196,7 +196,7 @@ pub fn run(
         pbfhogg_args.push("--start-id");
         pbfhogg_args.push(sid);
     }
-    let captured = harness.run_pbfhogg(&pbfhogg_args)?;
+    let captured = harness.run_pbfhogg(&pbfhogg_args, Writes::OwnedOutput)?;
     harness.check_exit(&captured, "pbfhogg renumber")?;
     let pbfhogg_elapsed = captured.elapsed;
     let pbfhogg_size = fs::metadata(&pbfhogg_out).map(|m| m.len()).unwrap_or(0);
@@ -208,8 +208,10 @@ pub fn run(
 
     // --- pbfhogg diff (summary + context + verbose) ---------------------
     // diff exits non-zero when mismatches exist, so do not check_exit.
-    let captured =
-        harness.run_pbfhogg(&["diff", "-s", "-c", "-v", &osmium_out_str, &pbfhogg_out_str])?;
+    let captured = harness.run_pbfhogg(
+        &["diff", "-s", "-c", "-v", &osmium_out_str, &pbfhogg_out_str],
+        Writes::Nothing,
+    )?;
     let stdout = String::from_utf8_lossy(&captured.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&captured.stderr).into_owned();
     fs::write(&diff_log, format!("{stdout}{stderr}"))?;
@@ -229,7 +231,7 @@ pub fn run(
     // if we can't recover total_relations, the sanity-threshold check is
     // effectively disabled, which would let arbitrarily large relation-only
     // regressions sneak through as PASS.
-    let inspect = harness.run_pbfhogg(&["inspect", &osmium_out_str])?;
+    let inspect = harness.run_pbfhogg(&["inspect", &osmium_out_str], Writes::Nothing)?;
     harness.check_exit(&inspect, "pbfhogg inspect")?;
     let inspect_text = String::from_utf8_lossy(&inspect.stdout);
     let total_relations = parse_total_relations(&inspect_text).ok_or_else(|| {

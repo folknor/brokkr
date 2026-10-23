@@ -7,6 +7,7 @@ use crate::datasets::resolve::{self, resolve_bbox, resolve_pbf_with_size};
 use crate::error::DevError;
 use crate::measure::MeasureRequest;
 use crate::output;
+use crate::pbfhogg::binary::PbfhoggBinary;
 use crate::preflight;
 use crate::project::Project;
 use crate::tools;
@@ -190,7 +191,7 @@ pub(crate) fn bench_read(
     let modes = super::bench_read::parse_modes(modes_str)?;
     super::bench_read::run(
         &ctx.harness,
-        ctx.binary()?,
+        &PbfhoggBinary::new(ctx.binary()?, req.project_root.as_path())?,
         &pbf_path,
         file_mb,
         req.runs(),
@@ -227,7 +228,7 @@ pub(crate) fn bench_write(
     let compressions = super::compression_args(compressions.as_slice(), true);
     super::bench_write::run(
         &ctx.harness,
-        ctx.binary()?,
+        &PbfhoggBinary::new(ctx.binary()?, req.project_root.as_path())?,
         &pbf_path,
         file_mb,
         req.runs(),
@@ -280,7 +281,7 @@ pub(crate) fn bench_merge(
     let compressions = super::compression_args(compressions.as_slice(), false);
     super::bench_merge::run(
         &ctx.harness,
-        ctx.binary()?,
+        &PbfhoggBinary::new(ctx.binary()?, req.project_root.as_path())?,
         &pbf_path,
         &osc_path,
         file_mb,

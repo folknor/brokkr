@@ -94,8 +94,9 @@ not sample scratch. `--skip-to` continues to use elivagar's checkpoint contract.
 
 ## 7. Run-specific metadata
 
-Command names and subprocess `cli_args` retain their previous row identity.
-Pbfhogg carries resolved input and cache observations. Tilegen profiling
+Command names and subprocess `cli_args` retain their previous row identity,
+except that pbfhogg rows gain the negotiated `--overwrite` from builds that
+accept it. Pbfhogg carries resolved input and cache observations. Tilegen profiling
 continues to observe `meta.locations_on_ways_detected` from captured stderr.
 The measurement mode and brokkr invocation come from the session; `BenchConfig`
 has no fallback fields for either.
@@ -107,7 +108,8 @@ reset and the success boundary. Both projects use the same session, results and
 sidecar stores, lock and worktree lifecycle.
 
 Dry-run constructs argv without building, installing tools, starting a child
-or creating run artifacts. Input verification may refresh the digest cache.
+or creating run artifacts, so pbfhogg's executable-dependent `--overwrite` is
+not shown. Input verification may refresh the digest cache.
 Elivagar's argv construction creates no directories.
 
 ## Reconciliation history

@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use super::verify::{self, Findings, VerifyHarness};
+use super::verify::{self, Findings, VerifyHarness, Writes};
 use crate::error::DevError;
 use crate::osc::{self, OscDiff};
 use crate::output;
@@ -42,7 +42,7 @@ pub fn run(
     if direct_io {
         pbfhogg_args.push("--direct-io");
     }
-    let captured = harness.run_pbfhogg(&pbfhogg_args)?;
+    let captured = harness.run_pbfhogg(&pbfhogg_args, Writes::OwnedOutput)?;
     harness.check_exit(&captured, "pbfhogg apply-changes")?;
 
     // --- osmium apply-changes ---
@@ -155,8 +155,8 @@ pub fn run(
     // pbfhogg sort requires by default. With --force it decodes payloads to
     // scan IDs (slower pass 1) but produces content-identical output, so the
     // cross-check's independence is untouched.
-    let captured =
-        harness.run_pbfhogg(&["sort", "--force", &osmium_out_str, "-o", &osmium_sorted_str])?;
+    let sort_args = ["sort", "--force", &osmium_out_str, "-o", &osmium_sorted_str];
+    let captured = harness.run_pbfhogg(&sort_args, Writes::OwnedOutput)?;
     harness.check_exit(&captured, "pbfhogg sort (normalise osmium output)")?;
 
     // --- Strict pbfhogg-vs-osmium element diff (with delete-set tolerance) ---
@@ -209,15 +209,18 @@ fn verify_pbfhogg_vs_osmium(
     // NB: no `--suppress-common` here - pbfhogg rejects it alongside
     // `--format osc` (the OSC diff only emits differing elements anyway, so
     // it would be redundant even if accepted).
-    let captured = harness.run_pbfhogg(&[
-        "diff",
-        "--format",
-        "osc",
-        "-o",
-        &diff_path_str,
-        &pbfhogg_str,
-        &osmium_str,
-    ])?;
+    let captured = harness.run_pbfhogg(
+        &[
+            "diff",
+            "--format",
+            "osc",
+            "-o",
+            &diff_path_str,
+            &pbfhogg_str,
+            &osmium_str,
+        ],
+        Writes::OwnedOutput,
+    )?;
 
     // pbfhogg diff exits 1 when differences are found - that's expected.
     // A signal kill or any other exit code means the diff did not complete,

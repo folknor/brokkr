@@ -374,25 +374,27 @@ pub(super) fn generate_indexed_pbf(
         "  generating indexed PBF via cat -> {}",
         dest.display()
     ));
-    let binary = build::cargo_build(
+    let built = build::cargo_build(
         &build::BuildConfig::release(crate::project::Project::Pbfhogg.cli_package()),
         build_root,
     )?
     .path;
-    let binary_str = binary.display().to_string();
+    let binary = crate::pbfhogg::binary::PbfhoggBinary::new(&built, project_root)?;
     let input_str = input.display().to_string();
     // Stable temp name, as for downloads: runs under the global lock, and a
-    // killed multi-gigabyte `cat` is overwritten by the retry, not leaked.
-    // It keeps the `.osm.pbf` suffix pbfhogg reads the output format from.
-    // Dropping `staged` on any error removes the partial output.
+    // killed multi-gigabyte `cat` is overwritten by the retry, not leaked -
+    // which is why the partial is an owned output pbfhogg must be allowed to
+    // replace. It keeps the `.osm.pbf` suffix pbfhogg reads the output format
+    // from. Dropping `staged` on any error removes the partial output.
     let staged = crate::atomic_write::Staged::stable_keeping(dest, ".osm.pbf")?;
     let tmp_str = staged.tmp_path().display().to_string();
 
-    let captured = output::run_captured(
-        &binary_str,
+    let invocation = binary.invocation_strs(
         &["cat", &input_str, "-o", &tmp_str],
-        project_root,
+        crate::pbfhogg::binary::Writes::OwnedOutput,
     )?;
+    let binary_str = invocation.program_string();
+    let captured = output::run_captured(&binary_str, &invocation.arg_refs(), project_root)?;
     captured.check_success(&binary_str)?;
     staged.commit()?;
     Ok(())

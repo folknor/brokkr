@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use super::commands::GETID_BENCH_IDS;
-use super::verify::{Findings, Verdict, VerifyHarness};
+use super::verify::{Findings, Verdict, VerifyHarness, Writes};
 use super::verify_multi_extract::inspect_counts;
 use crate::error::DevError;
 use crate::output::verify_msg;
@@ -24,7 +24,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
         pbfhogg_args.push("--direct-io");
     }
     pbfhogg_args.extend_from_slice(GETID_BENCH_IDS);
-    let captured = harness.run_pbfhogg(&pbfhogg_args)?;
+    let captured = harness.run_pbfhogg(&pbfhogg_args, Writes::OwnedOutput)?;
     harness.check_exit(&captured, "pbfhogg getid")?;
 
     let selected = inspect_counts(harness, &pbfhogg_getid)?;
@@ -82,7 +82,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
         invert_args.push("--direct-io");
     }
     invert_args.extend_from_slice(GETID_BENCH_IDS);
-    let captured = harness.run_pbfhogg(&invert_args)?;
+    let captured = harness.run_pbfhogg(&invert_args, Writes::OwnedOutput)?;
     harness.check_exit(&captured, "pbfhogg getid --invert")?;
 
     // The complement assertion: getid selects exactly the listed IDs (the

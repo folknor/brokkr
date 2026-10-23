@@ -4,11 +4,12 @@ use std::path::Path;
 
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
+use crate::pbfhogg::binary::{PbfhoggBinary, Writes};
 
 /// Run the write benchmark for each compression mode (sync + pipelined).
 pub fn run(
     harness: &BenchHarness,
-    binary: &Path,
+    binary: &PbfhoggBinary,
     pbf_path: &Path,
     file_mb: f64,
     runs: usize,
@@ -27,14 +28,19 @@ pub fn run(
         // Parse "writer_mode-compression" back out.
         let (writer_mode, compression) = variant.split_once('-').unwrap_or(("sync", variant));
 
-        let bench_args: Vec<&str> = vec![
-            "bench-write",
-            pbf_str,
-            "--compression",
-            compression,
-            "--writer",
-            writer_mode,
-        ];
+        // bench-write encodes in memory and names no output path.
+        let invocation = binary.invocation_strs(
+            &[
+                "bench-write",
+                pbf_str,
+                "--compression",
+                compression,
+                "--writer",
+                writer_mode,
+            ],
+            Writes::Nothing,
+        )?;
+        let bench_args = invocation.arg_refs();
 
         let config = BenchConfig {
             command: "write".into(),
@@ -46,15 +52,12 @@ pub fn run(
             cargo_features: None,
             external_build: None,
             runs,
-            cli_args: Some(crate::harness::format_cli_args(
-                &binary.display().to_string(),
-                &bench_args,
-            )),
+            cli_args: Some(invocation.cli_args()),
             metadata: vec![],
         };
 
         harness
-            .run_external_with_kv(&config, binary, &bench_args, project_root)
+            .run_external_with_kv(&config, invocation.program(), &bench_args, project_root)
             .map(|_| ())
     })
 }

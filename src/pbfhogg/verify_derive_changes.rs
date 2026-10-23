@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use super::verify::{Findings, VerifyHarness};
+use super::verify::{Findings, VerifyHarness, Writes};
 use crate::error::DevError;
 use crate::output::verify_msg;
 
@@ -38,7 +38,7 @@ pub fn run(
     if direct_io {
         ac_args.push("--direct-io");
     }
-    let captured = harness.run_pbfhogg(&ac_args)?;
+    let captured = harness.run_pbfhogg(&ac_args, Writes::OwnedOutput)?;
     harness.check_exit(&captured, "pbfhogg apply-changes")?;
 
     // Step 2: Derive changes with both tools.
@@ -46,15 +46,18 @@ pub fn run(
     let pbfhogg_osc_str = pbfhogg_osc.display().to_string();
 
     verify_msg("--- pbfhogg diff --format osc ---");
-    let captured = harness.run_pbfhogg(&[
-        "diff",
-        "--format",
-        "osc",
-        &pbf_str,
-        &new_pbf_str,
-        "-o",
-        &pbfhogg_osc_str,
-    ])?;
+    let captured = harness.run_pbfhogg(
+        &[
+            "diff",
+            "--format",
+            "osc",
+            &pbf_str,
+            &new_pbf_str,
+            "-o",
+            &pbfhogg_osc_str,
+        ],
+        Writes::OwnedOutput,
+    )?;
     harness.check_exit(&captured, "pbfhogg diff --format osc")?;
 
     let osmium_osc = outdir.join("osmium.osc.gz");
@@ -98,7 +101,7 @@ pub fn run(
     if direct_io {
         rt_args.push("--direct-io");
     }
-    let captured = harness.run_pbfhogg(&rt_args)?;
+    let captured = harness.run_pbfhogg(&rt_args, Writes::OwnedOutput)?;
     harness.check_exit(&captured, "pbfhogg apply-changes (roundtrip)")?;
 
     let rt_osmium = outdir.join("roundtrip-osmium.osm.pbf");
@@ -126,13 +129,16 @@ pub fn run(
     let rt_osmium_sorted = outdir.join("roundtrip-osmium-sorted.osm.pbf");
     let rt_osmium_sorted_str = rt_osmium_sorted.display().to_string();
     verify_msg("--- pbfhogg sort (normalise osmium roundtrip for merge-join diff) ---");
-    let captured = harness.run_pbfhogg(&[
-        "sort",
-        "--force",
-        &rt_osmium_str,
-        "-o",
-        &rt_osmium_sorted_str,
-    ])?;
+    let captured = harness.run_pbfhogg(
+        &[
+            "sort",
+            "--force",
+            &rt_osmium_str,
+            "-o",
+            &rt_osmium_sorted_str,
+        ],
+        Writes::OwnedOutput,
+    )?;
     harness.check_exit(&captured, "pbfhogg sort (normalise osmium roundtrip)")?;
 
     // Element counts.

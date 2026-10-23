@@ -5,12 +5,13 @@ use std::path::Path;
 use crate::clean::layout::PbfhoggLayout;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
+use crate::pbfhogg::binary::{PbfhoggBinary, Writes};
 
 /// Run the merge benchmark for each compression x I/O variant.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     harness: &BenchHarness,
-    binary: &Path,
+    binary: &PbfhoggBinary,
     pbf_path: &Path,
     osc_path: &Path,
     file_mb: f64,
@@ -42,17 +43,22 @@ pub fn run(
     let result = crate::bench_variants::run_variants("variant", &variant_refs, |variant| {
         let (io_mode, compression) = variant.split_once('+').unwrap_or(("buffered", variant));
 
-        let bench_args: Vec<&str> = vec![
-            "bench-merge",
-            pbf_str,
-            osc_str,
-            "-o",
-            output_str,
-            "--compression",
-            compression,
-            "--io-mode",
-            io_mode,
-        ];
+        // Every variant and iteration writes the same output file.
+        let invocation = binary.invocation_strs(
+            &[
+                "bench-merge",
+                pbf_str,
+                osc_str,
+                "-o",
+                output_str,
+                "--compression",
+                compression,
+                "--io-mode",
+                io_mode,
+            ],
+            Writes::OwnedOutput,
+        )?;
+        let bench_args = invocation.arg_refs();
 
         let config = BenchConfig {
             command: "merge".into(),
@@ -63,15 +69,12 @@ pub fn run(
             cargo_features: None,
             external_build: None,
             runs,
-            cli_args: Some(crate::harness::format_cli_args(
-                &binary.display().to_string(),
-                &bench_args,
-            )),
+            cli_args: Some(invocation.cli_args()),
             metadata: vec![],
         };
 
         harness
-            .run_external_with_kv(&config, binary, &bench_args, project_root)
+            .run_external_with_kv(&config, invocation.program(), &bench_args, project_root)
             .map(|_| ())
     });
 

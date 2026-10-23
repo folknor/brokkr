@@ -72,6 +72,11 @@ impl ProjectState {
         self.root.join("hash_cache")
     }
 
+    /// Which pbfhogg builds accept which flags, keyed by executable digest.
+    pub(crate) fn pbfhogg_capabilities_file(&self) -> PathBuf {
+        self.root.join("pbfhogg-capabilities")
+    }
+
     pub(crate) fn worktrees_file(&self) -> PathBuf {
         self.root.join("worktrees.toml")
     }

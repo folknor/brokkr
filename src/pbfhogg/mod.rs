@@ -7,6 +7,7 @@ pub mod bench_merge;
 pub mod bench_planetiler;
 pub mod bench_read;
 pub mod bench_write;
+pub(crate) mod binary;
 pub(crate) mod cmd;
 pub mod commands;
 pub mod context;

@@ -9,11 +9,50 @@
   hotpath runs share the same argv; mode selects a scratch filename namespace.
 - `src/pbfhogg/plan.rs` - resolved command plans for the shared
   `src/measure/runner.rs`; execution uses one `MeasurementSession`.
+- `src/pbfhogg/binary.rs` - `PbfhoggBinary`, through which every pbfhogg
+  spawn is made; see [Output overwrite](#output-overwrite).
 - `src/pbfhogg/...` - benchmarks (read, write, merge, commands, extract,
   allocator, blob-filter, planetiler, all), verify (one check per
   cross-validated command, plus `all`),
   download (Geofabrik or Planet PBF/OSC fetcher with auto-registration in
   `brokkr.toml`).
+
+## Output overwrite
+
+pbfhogg refuses to write an output path that already exists unless it is
+given `--overwrite`, and brokkr reuses its outputs: every `--bench` iteration
+writes the same scratch file, and a killed staged write (the merged diff
+cache, the indexed PBF a download generates) leaves its partial file for the
+retry. So brokkr passes `--overwrite` on every pbfhogg invocation that writes
+an output brokkr owns - measured commands, the suite, the benches and every
+verify check - and on nothing that only reads.
+
+Old pbfhogg commits, which `--commit` baselines build, predate the flag and
+reject it as an unknown argument. The flag is therefore passed only when the
+executable about to run accepts it, asked per subcommand of that executable:
+
+- `SUB --help` must exit 0 (the subcommand exists),
+- `SUB --hel --help` must exit 2 (an unknown flag there is rejected, so long
+  option inference is off and no positional swallows it),
+- then `SUB --overwrite --help` exiting 0 means supported, 2 means not.
+
+Anything else is an error naming the probe, never a silent "unsupported".
+Answers are kept in `.brokkr/pbfhogg-capabilities`, keyed by probe protocol,
+the executable's XXH128 and the subcommand, so a build is probed once and
+different bytes never reuse an answer. `build-geocode-index` keeps its own
+`--force`, which pbfhogg defines as overwrite plus allow-unindexed.
+
+Every pbfhogg spawn is an invocation produced by a `PbfhoggBinary` for one
+build; the typed commands' argv carries its overwrite decision from the arm
+that built it, and hand-built argv declares whether it writes an owned
+output. A handle refuses an executable replaced since it was made, but that
+check runs when an invocation is built, not when it executes: no pbfhogg
+build may run while a handle or its invocations are still to be used (the
+suite closes its handle before `bench allocator` rebuilds pbfhogg).
+
+`--dry-run` builds nothing, so it cannot probe: it prints the argv without the
+flag and a line saying it is added at run time. Recorded `cli_args` include
+`--overwrite` whenever it was passed.
 
 ## Verify subcommands
 

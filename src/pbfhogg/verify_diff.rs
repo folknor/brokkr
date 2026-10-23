@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::Path;
 
-use super::verify::{Findings, VerifyHarness};
+use super::verify::{Findings, VerifyHarness, Writes};
 use crate::error::DevError;
 use crate::output::verify_msg;
 
@@ -29,13 +29,16 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<Findings, 
     let new_pbf_str = new_pbf.display().to_string();
 
     verify_msg("--- creating 'new' PBF via apply-changes ---");
-    let captured =
-        harness.run_pbfhogg(&["apply-changes", &pbf_str, &osc_str, "-o", &new_pbf_str])?;
+    let captured = harness.run_pbfhogg(
+        &["apply-changes", &pbf_str, &osc_str, "-o", &new_pbf_str],
+        Writes::OwnedOutput,
+    )?;
     harness.check_exit(&captured, "pbfhogg apply-changes")?;
 
     // pbfhogg diff - exits non-zero when differences exist, so do NOT check_exit.
     verify_msg("--- pbfhogg diff ---");
-    let captured = harness.run_pbfhogg(&["diff", "-c", &pbf_str, &new_pbf_str])?;
+    let captured =
+        harness.run_pbfhogg(&["diff", "-c", &pbf_str, &new_pbf_str], Writes::Nothing)?;
 
     fs::write(outdir.join("pbfhogg-diff.txt"), &captured.stdout)?;
     fs::write(outdir.join("pbfhogg-summary.txt"), &captured.stderr)?;

@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use super::commands::{ExtractStrategy, PbfhoggCommand};
-use super::verify::{Findings, VerifyHarness};
+use super::verify::{Findings, VerifyHarness, Writes};
 use crate::datasets::Bbox;
 use crate::error::DevError;
 use crate::output::{verify_msg, verify_summary};
@@ -36,7 +36,7 @@ pub fn run(
             pbfhogg_args.push("--direct-io".into());
         }
         let pbfhogg_arg_refs: Vec<&str> = pbfhogg_args.iter().map(String::as_str).collect();
-        let captured = harness.run_pbfhogg(&pbfhogg_arg_refs)?;
+        let captured = harness.run_pbfhogg(&pbfhogg_arg_refs, Writes::OwnedOutput)?;
         harness.check_exit(&captured, "pbfhogg extract")?;
 
         // --- osmium extract ---

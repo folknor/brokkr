@@ -10,6 +10,7 @@ use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness, BenchResult};
 use crate::output;
+use crate::pbfhogg::binary::PbfhoggBinary;
 use crate::pbfhogg::{
     bench_allocator, bench_blob_filter, bench_commands, bench_extract, bench_merge,
     bench_planetiler, bench_read, bench_write,
@@ -35,16 +36,51 @@ pub fn run(
     dataset: &str,
 ) -> Result<(), DevError> {
     let project_root = build_root.as_path();
+    // The suite binary's handle must be gone before bench allocator rebuilds
+    // pbfhogg at the same path: see PbfhoggBinary's lifetime rule.
+    {
+        let built = build::cargo_build(
+            &build::BuildConfig::release_with_owned_features(
+                crate::project::Project::Pbfhogg.cli_package(),
+                &paths.features,
+            ),
+            project_root,
+        )?
+        .path;
+        let binary = PbfhoggBinary::new(&built, project_root)?;
+        run_suite_binary(
+            harness,
+            paths,
+            dataset,
+            &binary,
+            pbf_path,
+            file_mb,
+            runs,
+            project_root,
+        )?;
+    }
+
+    // bench allocator -- default, jemalloc, mimalloc
+    output::bench_msg("=== bench allocator ===");
+    bench_allocator::run(harness, pbf_path, file_mb, runs, project_root)?;
+
+    run_baselines(harness, paths, build_root, pbf_path, file_mb, runs)
+}
+
+/// Every suite benchmark that runs the one suite build.
+#[allow(clippy::too_many_arguments)]
+fn run_suite_binary(
+    harness: &BenchHarness,
+    paths: &ResolvedPaths,
+    dataset: &str,
+    binary: &PbfhoggBinary,
+    pbf_path: &Path,
+    file_mb: f64,
+    runs: usize,
+    project_root: &Path,
+) -> Result<(), DevError> {
     // 1. command presets; extract runs later with the dataset's configured bbox.
     output::bench_msg("=== bench commands ===");
-    let binary = build::cargo_build(
-        &build::BuildConfig::release_with_owned_features(
-            crate::project::Project::Pbfhogg.cli_package(),
-            &paths.features,
-        ),
-        project_root,
-    )?
-    .path;
     // Resolve a configured OSC through the verified resolver. Ambiguous
     // entries and stale hashes fail the suite instead of looking like an
     // optional dataset field that was never configured.
@@ -60,7 +96,7 @@ pub fn run(
     };
     bench_commands::run(
         harness,
-        &binary,
+        binary,
         pbf_path,
         default_osc.as_ref().map(|(path, _)| path.as_path()),
         default_osc.as_ref().map(|(_, seq)| seq.as_str()),
@@ -74,7 +110,7 @@ pub fn run(
     output::bench_msg("=== bench read ===");
     bench_read::run(
         harness,
-        &binary,
+        binary,
         pbf_path,
         file_mb,
         runs,
@@ -88,7 +124,7 @@ pub fn run(
         super::parse_compressions(super::DEFAULT_BENCH_WRITE_COMPRESSIONS, false)?;
     bench_write::run(
         harness,
-        &binary,
+        binary,
         pbf_path,
         file_mb,
         runs,
@@ -100,7 +136,7 @@ pub fn run(
         harness,
         paths,
         dataset,
-        &binary,
+        binary,
         pbf_path,
         file_mb,
         runs,
@@ -108,13 +144,7 @@ pub fn run(
         default_osc
             .as_ref()
             .map(|(path, seq)| (path.as_path(), seq.as_str())),
-    )?;
-
-    // bench allocator -- default, jemalloc, mimalloc
-    output::bench_msg("=== bench allocator ===");
-    bench_allocator::run(harness, pbf_path, file_mb, runs, project_root)?;
-
-    run_baselines(harness, paths, build_root, pbf_path, file_mb, runs)
+    )
 }
 
 /// Run benchmarks that depend on optional dataset config fields (osc, bbox, pbf_raw).
@@ -123,7 +153,7 @@ fn run_dataset_dependent(
     harness: &BenchHarness,
     paths: &ResolvedPaths,
     dataset: &str,
-    binary: &Path,
+    binary: &PbfhoggBinary,
     pbf_path: &Path,
     file_mb: f64,
     runs: usize,
