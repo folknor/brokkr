@@ -1268,6 +1268,45 @@ mod tests {
         assert!(t2 >= t1);
     }
 
+    /// The wire lines are pbfhogg's own goldens (`line_formats_marker_exactly`
+    /// and `line_formats_counter_exactly` in pbfhogg `src/debug.rs`), so a
+    /// format change on either side fails a test here or there.
+    #[test]
+    fn fifo_parses_pbfhogg_golden_lines() {
+        use std::io::Write;
+        let dir = crate::test_scratch::scratch("sidecar", "pbfhogg_goldens");
+        let mut fifo = SidecarFifo::create(&dir, &DEFAULT_MEASUREMENT_TUNABLES).unwrap();
+        let mut writer = fs::OpenOptions::new().write(true).open(&fifo.path).unwrap();
+        writer
+            .write_all(b"42 PASS1_END\n42 @nodes=-7\nPASS1_END\n43 @nodes\n")
+            .unwrap();
+        drop(writer);
+
+        let mut markers = Vec::new();
+        let mut next_marker_idx = 0;
+        let mut counters = Vec::new();
+        let mut truncated = false;
+        fifo.drain(
+            &mut markers,
+            &mut next_marker_idx,
+            &mut counters,
+            None,
+            DEFAULT_MEASUREMENT_TUNABLES.max_fifo_line_bytes,
+            &mut truncated,
+        );
+
+        assert_eq!(markers.len(), 1);
+        assert_eq!(markers[0].marker_idx, 0);
+        assert_eq!(markers[0].timestamp_us, 42);
+        assert_eq!(markers[0].name, "PASS1_END");
+        assert_eq!(counters.len(), 1);
+        assert_eq!(counters[0].timestamp_us, 42);
+        assert_eq!(counters[0].name, "nodes");
+        assert_eq!(counters[0].value, -7);
+        assert_eq!(next_marker_idx, 1);
+        assert!(!truncated);
+    }
+
     #[test]
     fn status_round_trips_for_its_writer() {
         let body = format_status(4242, "STAGE2_START");
