@@ -121,7 +121,6 @@ pub fn run(
 
         let (args, writes) = command_args(cmd, pbf_str, &output_str, force)?;
         let invocation = binary.invocation(args, writes)?;
-        let args_refs = invocation.arg_refs();
 
         let config = BenchConfig {
             command: "blob-filter".into(),
@@ -135,12 +134,12 @@ pub fn run(
             cargo_features: None,
             external_build: None,
             runs,
-            cli_args: Some(invocation.cli_args()),
+            cli_args: None,
             metadata: vec![],
         };
 
         harness
-            .run_external(&config, invocation.program(), &args_refs, project_root)
+            .run_external(&config, &invocation, project_root)
             .map(|_| ())
     });
 

@@ -166,6 +166,14 @@ impl CommandArgv {
     }
 }
 
+/// For observation (dry run prints it); running it goes through
+/// [`PbfhoggBinary::command_invocation`](crate::pbfhogg::binary::PbfhoggBinary::command_invocation).
+impl AsRef<[String]> for CommandArgv {
+    fn as_ref(&self) -> &[String] {
+        &self.args
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Sub-enums for multi-variant commands
 // ---------------------------------------------------------------------------

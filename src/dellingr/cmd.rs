@@ -107,8 +107,12 @@ pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
                 resolved.name,
                 req.runs()
             ));
+            let invocation = crate::measure::Invocation::new(
+                ctx.binary()?,
+                args.iter().map(|&a| a.to_owned()).collect(),
+            );
             ctx.harness
-                .run_external(&config, ctx.binary()?, &args, req.project_root.as_path())
+                .run_external(&config, &invocation, req.project_root.as_path())
         },
     )?;
 

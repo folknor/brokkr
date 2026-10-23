@@ -1,8 +1,8 @@
 //! Nidhogg binary and HTTP/server lifecycle plans.
 use crate::context::MeasurementSession;
 use crate::error::DevError;
-use crate::measure::runner::{CommandPlan, PlanKind, PlannedCommand, RowSubject};
-use crate::measure::{MeasureMode, MeasureRequest};
+use crate::measure::runner::{CommandPlan, PlanKind, PlannedCommand, RowSubject, not_a_binary_plan};
+use crate::measure::{Executable, Invocation, MeasureMode, MeasureRequest};
 use crate::nidhogg::commands::NidhoggCommand;
 use crate::project::Project;
 
@@ -28,6 +28,7 @@ pub(crate) enum NidhoggState {
 
 impl PlannedCommand for NidhoggPlan<'_> {
     type State = NidhoggState;
+    type Argv = Vec<String>;
     fn project(&self) -> Project {
         Project::Nidhogg
     }
@@ -71,6 +72,16 @@ impl PlannedCommand for NidhoggPlan<'_> {
             self.package(),
             &features,
         )))
+    }
+    fn materialize<'p>(
+        &self,
+        plan: &'p CommandPlan<NidhoggState>,
+        executable: Executable<'p>,
+    ) -> Result<Invocation<'p>, DevError> {
+        match self.kind() {
+            PlanKind::Binary => Invocation::built(executable, plan.argv.clone()),
+            PlanKind::External | PlanKind::Lifecycle => Err(not_a_binary_plan(self.id())),
+        }
     }
     fn execute(
         &self,
@@ -152,7 +163,7 @@ impl PlannedCommand for NidhoggPlan<'_> {
         let args = self.0.build_args(pbf_str, output_dir_str)?;
         Ok(CommandPlan {
             state: NidhoggState::Ingest,
-            args,
+            argv: args,
             scratch_dirs: vec![output_dir],
             subject: RowSubject {
                 command: self.0.id().into(),
@@ -291,7 +302,7 @@ fn server_plan(
         _ => unreachable!(),
     };
     Ok(CommandPlan {
-        args,
+        argv: args,
         scratch_dirs: vec![],
         state,
         subject: RowSubject {

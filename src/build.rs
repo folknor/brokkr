@@ -385,6 +385,276 @@ pub fn project_info(cwd: Option<&Path>) -> Result<ProjectInfo, DevError> {
 }
 
 // ---------------------------------------------------------------------------
+// Builds versus live executable handles
+// ---------------------------------------------------------------------------
+
+/// Process-wide exclusion between cargo runs and live
+/// [`PbfhoggBinary`](crate::pbfhogg::binary::PbfhoggBinary) handles.
+///
+/// A handle probed its executable's capabilities and spawns that path; a
+/// rebuild into the same target would replace the bytes under it. So a cargo
+/// spawn through [`with_published_cargo`] is refused before it starts while
+/// any handle is live, and a handle cannot register while a build runs.
+/// Builds are exclusive too, which also keeps the single published cargo PID
+/// truthful. Other processes are excluded by the brokkr lock, which a handle
+/// holds for its whole life. Cargo started any other way (`cargo metadata`
+/// through `output::run_cargo`, read-only and run before handles exist) is
+/// outside this protocol.
+pub(crate) mod executable_guard {
+    use std::sync::{Mutex, PoisonError};
+
+    use crate::error::DevError;
+
+    struct State {
+        live_handles: usize,
+        building: bool,
+    }
+
+    /// The admission state, behind one mutex. Every check-and-change happens
+    /// under it at once; nothing else - no filesystem work, no callback -
+    /// runs while it is held.
+    pub(crate) struct Registry {
+        state: Mutex<State>,
+    }
+
+    impl Registry {
+        pub(crate) const fn new() -> Self {
+            Self {
+                state: Mutex::new(State {
+                    live_handles: 0,
+                    building: false,
+                }),
+            }
+        }
+
+        fn with<R>(&self, f: impl FnOnce(&mut State) -> R) -> R {
+            f(&mut self.state.lock().unwrap_or_else(PoisonError::into_inner))
+        }
+
+        pub(crate) fn begin_build(&'static self) -> Result<BuildToken, DevError> {
+            self.with(|state| {
+                if state.live_handles > 0 {
+                    return Err(DevError::Internal(format!(
+                        "refusing to run cargo while {} pbfhogg handle(s) are live - a \
+                         build would replace an executable a handle is still using",
+                        state.live_handles
+                    )));
+                }
+                if state.building {
+                    return Err(DevError::Internal(
+                        "refusing to start a second concurrent cargo build".into(),
+                    ));
+                }
+                state.building = true;
+                Ok(BuildToken { registry: self })
+            })
+        }
+
+        pub(crate) fn reserve_handle(&'static self) -> Result<HandleToken, DevError> {
+            self.with(|state| {
+                if state.building {
+                    return Err(DevError::Internal(
+                        "refusing to make a pbfhogg handle while a cargo build is running".into(),
+                    ));
+                }
+                state.live_handles += 1;
+                Ok(HandleToken { registry: self })
+            })
+        }
+    }
+
+    /// Held while one cargo process runs; dropping it, on return or unwind,
+    /// ends the build.
+    pub(crate) struct BuildToken {
+        registry: &'static Registry,
+    }
+
+    impl Drop for BuildToken {
+        fn drop(&mut self) {
+            self.registry.with(|state| state.building = false);
+        }
+    }
+
+    /// One live handle's registration; dropping it deregisters. Taken before
+    /// the handle reads its executable, so no build can run between that read
+    /// and the handle's last use.
+    pub(crate) struct HandleToken {
+        registry: &'static Registry,
+    }
+
+    impl Drop for HandleToken {
+        fn drop(&mut self) {
+            self.registry
+                .with(|state| state.live_handles = state.live_handles.saturating_sub(1));
+        }
+    }
+
+    #[cfg(not(test))]
+    static PROCESS: Registry = Registry::new();
+
+    // Unit tests run concurrently in one process, and one test's fixture
+    // handle must not refuse another test's build, so under test each thread
+    // gets its own registry. The registry itself is the production type;
+    // its cross-thread exclusion is tested on a shared instance below.
+    #[cfg(test)]
+    thread_local! {
+        static PROCESS: &'static Registry = Box::leak(Box::new(Registry::new()));
+    }
+
+    fn process() -> &'static Registry {
+        #[cfg(not(test))]
+        {
+            &PROCESS
+        }
+        #[cfg(test)]
+        {
+            PROCESS.with(|registry| *registry)
+        }
+    }
+
+    pub(crate) fn begin_build() -> Result<BuildToken, DevError> {
+        process().begin_build()
+    }
+
+    pub(crate) fn reserve_handle() -> Result<HandleToken, DevError> {
+        process().reserve_handle()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #![allow(clippy::unwrap_used, clippy::expect_used)]
+        use std::sync::{Arc, Barrier};
+
+        use super::{Registry, begin_build, reserve_handle};
+
+        fn shared() -> &'static Registry {
+            Box::leak(Box::new(Registry::new()))
+        }
+
+        #[test]
+        fn a_live_handle_refuses_a_build_until_it_drops() {
+            let handle = reserve_handle().unwrap();
+            assert!(begin_build().is_err());
+            drop(handle);
+            drop(begin_build().unwrap());
+        }
+
+        #[test]
+        fn a_running_build_refuses_a_handle_and_a_second_build() {
+            let build = begin_build().unwrap();
+            assert!(reserve_handle().is_err());
+            assert!(begin_build().is_err());
+            drop(build);
+            drop(reserve_handle().unwrap());
+        }
+
+        #[test]
+        fn every_handle_must_drop_before_a_build() {
+            let a = reserve_handle().unwrap();
+            let b = reserve_handle().unwrap();
+            drop(a);
+            assert!(begin_build().is_err());
+            drop(b);
+            drop(begin_build().unwrap());
+        }
+
+        #[test]
+        fn a_build_that_unwinds_still_releases() {
+            let unwound = std::panic::catch_unwind(|| {
+                let _build = begin_build().unwrap();
+                panic!("cargo observer panicked");
+            });
+            assert!(unwound.is_err());
+            drop(reserve_handle().unwrap());
+        }
+
+        #[test]
+        fn exclusion_holds_across_threads() {
+            // A handle held on one thread refuses a build on another, and a
+            // build running on one thread refuses a handle on another.
+            let registry = shared();
+            let handle = registry.reserve_handle().unwrap();
+            let refused = std::thread::spawn(move || registry.begin_build().is_err());
+            assert!(refused.join().unwrap());
+            drop(handle);
+
+            let build = registry.begin_build().unwrap();
+            let refused = std::thread::spawn(move || registry.reserve_handle().is_err());
+            assert!(refused.join().unwrap());
+            drop(build);
+            drop(registry.reserve_handle().unwrap());
+        }
+
+        #[test]
+        fn racing_threads_never_hold_a_build_beside_a_handle() {
+            // Each round, half the threads race for handles and half for a
+            // build, and every admitted token is held across a rendezvous.
+            // While held, the shared counts must never show a handle and a
+            // build at once, nor two builds.
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            let registry = shared();
+            let handles: &'static AtomicUsize = Box::leak(Box::new(AtomicUsize::new(0)));
+            let builds: &'static AtomicUsize = Box::leak(Box::new(AtomicUsize::new(0)));
+            let threads = 8;
+            let barrier = Arc::new(Barrier::new(threads));
+            let workers: Vec<_> = (0..threads)
+                .map(|i| {
+                    let barrier = Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        for round in 0..100 {
+                            barrier.wait();
+                            let (handle, build) = if (i + round) % 2 == 0 {
+                                (registry.reserve_handle().ok(), None)
+                            } else {
+                                (None, registry.begin_build().ok())
+                            };
+                            if handle.is_some() {
+                                handles.fetch_add(1, Ordering::SeqCst);
+                            }
+                            if build.is_some() {
+                                builds.fetch_add(1, Ordering::SeqCst);
+                            }
+                            barrier.wait();
+                            let (h, b) = (handles.load(Ordering::SeqCst), builds.load(Ordering::SeqCst));
+                            assert!(b <= 1, "two builds admitted at once");
+                            assert!(h == 0 || b == 0, "{h} handle(s) beside a build");
+                            barrier.wait();
+                            if handle.is_some() {
+                                handles.fetch_sub(1, Ordering::SeqCst);
+                            }
+                            if build.is_some() {
+                                builds.fetch_sub(1, Ordering::SeqCst);
+                            }
+                            drop((handle, build));
+                        }
+                    })
+                })
+                .collect();
+            for worker in workers {
+                worker.join().unwrap();
+            }
+            // Quiescent again: both kinds are admitted once everything dropped.
+            drop(registry.reserve_handle().unwrap());
+            drop(registry.begin_build().unwrap());
+        }
+
+        #[test]
+        fn the_cargo_choke_point_refuses_while_a_handle_lives() {
+            // The wiring, not just the registry: the build seam itself is
+            // refused before cargo starts, and before it even asks for the lock.
+            let _handle = reserve_handle().unwrap();
+            let Err(err) = crate::build::cargo_build(
+                &crate::build::BuildConfig::release(None),
+                std::path::Path::new("."),
+            ) else {
+                panic!("a build under a live handle must be refused");
+            };
+            assert!(err.to_string().contains("pbfhogg handle"), "got: {err}");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // cargo build
 // ---------------------------------------------------------------------------
 
@@ -461,6 +731,10 @@ fn with_published_cargo<T>(
     on_spawn: Option<&dyn Fn(u32)>,
     run: impl FnOnce(&dyn Fn(u32)) -> Result<T, DevError>,
 ) -> Result<T, DevError> {
+    // Before cargo starts, and before anything else: a build may not run
+    // while a pbfhogg handle exists, so no handle's executable is replaced
+    // under it, whatever the caller does with the refusal.
+    let _building = executable_guard::begin_build()?;
     let hold = crate::lockfile::current_hold().ok_or_else(|| {
         DevError::Lock(
             "refusing to run cargo outside the brokkr lock - this is a brokkr bug: \

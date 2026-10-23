@@ -99,8 +99,12 @@ pub(crate) fn run(
             // for free. Markers keep the excluded setup visible as its own
             // phase instead of deleting it from the record.
             output::bench_msg(&format!("mogwai {}: {} run(s)", resolved.name, config.runs));
+            let invocation = crate::measure::Invocation::new(
+                ctx.binary()?,
+                argv.iter().map(|&a| a.to_owned()).collect(),
+            );
             ctx.harness
-                .run_external(&config, ctx.binary()?, &argv, req.project_root.as_path())
+                .run_external(&config, &invocation, req.project_root.as_path())
         },
     )?;
 

@@ -95,6 +95,10 @@ pub(crate) struct MeasurementSession {
     /// The artifact a build-shaped session produced; its identity is on the
     /// harness, which stamps every row with it.
     binary: Option<build::BuiltArtifact>,
+    /// The artifact is a pbfhogg build, whose flags are negotiated through
+    /// its handle; the runner's [`Executable`](crate::measure::Executable)
+    /// carries this, so `Invocation::built` can refuse it.
+    negotiated: bool,
 }
 
 /// Whether a measurement request may run against a dirty tree.
@@ -194,6 +198,7 @@ impl MeasurementSession {
             paths,
             harness,
             binary: None,
+            negotiated: false,
         })
     }
 
@@ -283,6 +288,7 @@ impl MeasurementSession {
         force: bool,
         stop_marker: Option<String>,
     ) -> Result<Self, DevError> {
+        let negotiated = project == Project::Pbfhogg;
         let mut session = Self::new(
             dev_config,
             project,
@@ -291,6 +297,7 @@ impl MeasurementSession {
             force,
             stop_marker,
         )?;
+        session.negotiated = negotiated;
         let effective_build_root = build_root.as_path();
         // A session build always carries this host's configured defaults,
         // even when its caller built the BuildConfig through a different path.
@@ -335,11 +342,21 @@ impl MeasurementSession {
         .map(|ctx| ctx.with_request(req))
     }
 
+    /// The built executable's path. Code under `src/pbfhogg` does not call
+    /// this (a one-owner rule in `brokkr.toml`); there the session's
+    /// executable is reached through
+    /// [`PbfhoggBinary::from_session`](crate::pbfhogg::binary::PbfhoggBinary::from_session).
     pub(crate) fn binary(&self) -> Result<&Path, DevError> {
         self.binary
             .as_ref()
             .map(|artifact| artifact.path.as_path())
             .ok_or_else(|| DevError::Internal("session has no built executable".into()))
+    }
+
+    /// The built executable as the measure runner hands it to a plan, tagged
+    /// with whether its flags are negotiated.
+    pub(crate) fn executable(&self) -> Result<crate::measure::Executable<'_>, DevError> {
+        Ok(crate::measure::Executable::new(self.binary()?, self.negotiated))
     }
 }
 

@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use super::verify::{Findings, Verdict, VerifyHarness};
+use super::verify::{ExternalTool, Findings, Verdict, VerifyHarness};
 use crate::cli::AltwMode;
 use crate::error::DevError;
 use crate::output::{CapturedOutput, verify_msg};
@@ -33,7 +33,7 @@ pub fn run(
     let osmium_out = outdir.join("osmium.osm.pbf");
     let osmium_out_str = osmium_out.display().to_string();
     let captured = harness.run_tool(
-        "osmium",
+        ExternalTool::Osmium,
         &[
             "add-locations-to-ways",
             "--keep-member-nodes",

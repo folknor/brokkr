@@ -191,7 +191,7 @@ pub(crate) fn bench_read(
     let modes = super::bench_read::parse_modes(modes_str)?;
     super::bench_read::run(
         &ctx.harness,
-        &PbfhoggBinary::new(ctx.binary()?, req.project_root.as_path())?,
+        &PbfhoggBinary::from_session(&ctx, req.project_root.as_path())?,
         &pbf_path,
         file_mb,
         req.runs(),
@@ -228,7 +228,7 @@ pub(crate) fn bench_write(
     let compressions = super::compression_args(compressions.as_slice(), true);
     super::bench_write::run(
         &ctx.harness,
-        &PbfhoggBinary::new(ctx.binary()?, req.project_root.as_path())?,
+        &PbfhoggBinary::from_session(&ctx, req.project_root.as_path())?,
         &pbf_path,
         file_mb,
         req.runs(),
@@ -281,7 +281,7 @@ pub(crate) fn bench_merge(
     let compressions = super::compression_args(compressions.as_slice(), false);
     super::bench_merge::run(
         &ctx.harness,
-        &PbfhoggBinary::new(ctx.binary()?, req.project_root.as_path())?,
+        &PbfhoggBinary::from_session(&ctx, req.project_root.as_path())?,
         &pbf_path,
         &osc_path,
         file_mb,

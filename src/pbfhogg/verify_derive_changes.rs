@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use super::verify::{Findings, VerifyHarness, Writes};
+use super::verify::{ExternalTool, Findings, VerifyHarness, Writes};
 use crate::error::DevError;
 use crate::output::verify_msg;
 
@@ -65,7 +65,7 @@ pub fn run(
 
     verify_msg("--- osmium derive-changes ---");
     let captured = harness.run_tool(
-        "osmium",
+        ExternalTool::Osmium,
         &[
             "derive-changes",
             &pbf_str,
@@ -109,7 +109,7 @@ pub fn run(
 
     verify_msg("--- roundtrip: apply osmium OSC ---");
     let captured = harness.run_tool(
-        "osmium",
+        ExternalTool::Osmium,
         &[
             "apply-changes",
             &pbf_str,

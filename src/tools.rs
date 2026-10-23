@@ -25,6 +25,60 @@ pub struct OsmosisTools {
     pub java_home: PathBuf,
 }
 
+/// pbfhogg's osmpbf comparison baseline: a standalone crate excluded from
+/// the workspace, at this path under the build root.
+pub(crate) const OSMPBF_BASELINE_MANIFEST: &str = "bench/osmpbf-baseline/Cargo.toml";
+
+/// Build pbfhogg's osmpbf baseline from [`OSMPBF_BASELINE_MANIFEST`] under
+/// the hold, with the worktree's isolated target dir on a `--commit` run, and
+/// hand back its executable. The manifest is fixed rather than a parameter,
+/// so this resolver - the one pbfhogg code may use to build anything - can
+/// never build pbfhogg itself.
+pub(crate) fn osmpbf_baseline(
+    build_root: &crate::project::BuildRoot,
+) -> Result<crate::measure::ResolvedExecutable, DevError> {
+    let manifest = build_root.as_path().join(OSMPBF_BASELINE_MANIFEST);
+    let manifest_str = manifest.display().to_string();
+    let captured = crate::build::run_cargo_for_root(
+        &[
+            "build",
+            "--release",
+            "--manifest-path",
+            &manifest_str,
+            "--message-format=json",
+        ],
+        build_root,
+        &[],
+        None,
+        crate::shutdown::ChildIsolation::Inherit,
+    )?;
+    if !captured.success() {
+        let stderr = String::from_utf8_lossy(&captured.stderr);
+        return Err(DevError::Build(format!(
+            "osmpbf-baseline build failed: {stderr}"
+        )));
+    }
+    Ok(crate::measure::ResolvedExecutable::new(
+        crate::build::find_executable(&captured.stdout, None)?,
+    ))
+}
+
+impl PlanetilerTools {
+    /// The resolved Java runtime, for code that may only spawn resolved
+    /// executables.
+    pub(crate) fn java_executable(&self) -> crate::measure::ResolvedExecutable {
+        crate::measure::ResolvedExecutable::new(self.java.clone())
+    }
+}
+
+impl OsmosisTools {
+    /// The resolved Osmosis launcher, for code that may only spawn resolved
+    /// executables. Run it with `JAVA_HOME` set to [`Self::java_home`].
+    pub(crate) fn osmosis_executable(&self) -> crate::measure::ResolvedExecutable {
+        crate::measure::ResolvedExecutable::new(self.osmosis.clone())
+    }
+}
+
 pub struct TilemakerTools {
     pub tilemaker: PathBuf,
     pub config: PathBuf,

@@ -5,7 +5,7 @@ use crate::clean::layout::ElivagarLayout;
 use crate::context::MeasurementSession;
 use crate::error::DevError;
 use crate::measure::runner::{self, CommandPlan, PlanKind, PlannedCommand, RowSubject};
-use crate::measure::{MeasureMode, MeasureRequest};
+use crate::measure::{Executable, Invocation, MeasureMode, MeasureRequest};
 use crate::project::Project;
 use std::path::Path;
 
@@ -13,6 +13,7 @@ pub(crate) struct ElivagarPlan<'a, 'b>(pub &'a ElivagarCommand<'b>);
 
 impl PlannedCommand for ElivagarPlan<'_, '_> {
     type State = (std::path::PathBuf, f64);
+    type Argv = Vec<String>;
     fn project(&self) -> Project {
         Project::Elivagar
     }
@@ -110,7 +111,7 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
             }
         };
         Ok(CommandPlan {
-            args,
+            argv: args,
             scratch_dirs: vec![],
             state,
             subject: RowSubject {
@@ -121,6 +122,16 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
                 metadata: vec![],
             },
         })
+    }
+    fn materialize<'p>(
+        &self,
+        plan: &'p CommandPlan<Self::State>,
+        executable: Executable<'p>,
+    ) -> Result<Invocation<'p>, DevError> {
+        match self.kind() {
+            PlanKind::Binary => Invocation::built(executable, plan.argv.clone()),
+            PlanKind::External | PlanKind::Lifecycle => Err(runner::not_a_binary_plan(self.id())),
+        }
     }
     fn prepare(
         &self,
@@ -233,7 +244,7 @@ fn run_example(
     plan: &CommandPlan<(std::path::PathBuf, f64)>,
 ) -> Result<(), DevError> {
     let binary = ctx.binary()?;
-    let mut args = plan.args.clone();
+    let mut args = plan.argv.clone();
     let bench = matches!(req.mode, MeasureMode::Bench { .. });
     if bench {
         let runs = args

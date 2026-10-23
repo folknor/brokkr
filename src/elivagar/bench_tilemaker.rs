@@ -27,11 +27,9 @@ pub fn run(
     project_root: &Path,
 ) -> Result<(), DevError> {
     let invocation = prepare(pbf_path, file_mb, runs, layout, false)?;
-    let args: Vec<&str> = invocation.args.iter().map(String::as_str).collect();
     harness.run_external_prepared(
         &invocation.config,
-        &invocation.program,
-        &args,
+        &invocation.invocation(),
         project_root,
         &[],
         || invocation.prepare_sample(),

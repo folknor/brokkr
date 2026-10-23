@@ -40,7 +40,6 @@ pub fn run(
             ],
             Writes::Nothing,
         )?;
-        let bench_args = invocation.arg_refs();
 
         let config = BenchConfig {
             command: "write".into(),
@@ -52,12 +51,12 @@ pub fn run(
             cargo_features: None,
             external_build: None,
             runs,
-            cli_args: Some(invocation.cli_args()),
+            cli_args: None,
             metadata: vec![],
         };
 
         harness
-            .run_external_with_kv(&config, invocation.program(), &bench_args, project_root)
+            .run_external_with_kv(&config, &invocation, project_root)
             .map(|_| ())
     })
 }

@@ -1,5 +1,4 @@
 pub mod bench_all;
-pub mod bench_allocator;
 pub mod bench_blob_filter;
 pub mod bench_commands;
 pub mod bench_extract;

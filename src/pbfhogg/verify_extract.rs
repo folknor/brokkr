@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use super::commands::{ExtractStrategy, PbfhoggCommand};
-use super::verify::{Findings, VerifyHarness, Writes};
+use super::verify::{ExternalTool, Findings, VerifyHarness, Writes};
 use crate::datasets::Bbox;
 use crate::error::DevError;
 use crate::output::{verify_msg, verify_summary};
@@ -43,7 +43,7 @@ pub fn run(
         let osmium_out = outdir.join(format!("osmium-{strategy_name}.osm.pbf"));
         let osmium_out_str = osmium_out.display().to_string();
         let captured = harness.run_tool(
-            "osmium",
+            ExternalTool::Osmium,
             &[
                 "extract",
                 &pbf_str,

@@ -374,12 +374,11 @@ pub(super) fn generate_indexed_pbf(
         "  generating indexed PBF via cat -> {}",
         dest.display()
     ));
-    let built = build::cargo_build(
+    let binary = crate::pbfhogg::binary::PbfhoggBinary::build(
         &build::BuildConfig::release(crate::project::Project::Pbfhogg.cli_package()),
         build_root,
-    )?
-    .path;
-    let binary = crate::pbfhogg::binary::PbfhoggBinary::new(&built, project_root)?;
+        project_root,
+    )?;
     let input_str = input.display().to_string();
     // Stable temp name, as for downloads: runs under the global lock, and a
     // killed multi-gigabyte `cat` is overwritten by the retry, not leaked -
@@ -393,9 +392,8 @@ pub(super) fn generate_indexed_pbf(
         &["cat", &input_str, "-o", &tmp_str],
         crate::pbfhogg::binary::Writes::OwnedOutput,
     )?;
-    let binary_str = invocation.program_string();
-    let captured = output::run_captured(&binary_str, &invocation.arg_refs(), project_root)?;
-    captured.check_success(&binary_str)?;
+    let captured = invocation.capture_in(project_root)?;
+    invocation.check(&captured)?;
     staged.commit()?;
     Ok(())
 }

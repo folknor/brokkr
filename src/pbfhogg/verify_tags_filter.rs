@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use super::verify::{Findings, VerifyHarness, Writes};
+use super::verify::{ExternalTool, Findings, VerifyHarness, Writes};
 use crate::error::DevError;
 use crate::output::verify_msg;
 
@@ -36,7 +36,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
         let osmium_out = outdir.join(format!("osmium-{label}.osm.pbf"));
         let osmium_out_str = osmium_out.display().to_string();
         let captured = harness.run_tool(
-            "osmium",
+            ExternalTool::Osmium,
             &[
                 "tags-filter",
                 &pbf_str,

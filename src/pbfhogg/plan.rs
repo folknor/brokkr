@@ -7,7 +7,7 @@ use crate::datasets::resolve::{self, resolve_bbox};
 use crate::error::DevError;
 use crate::harness::{self, BenchConfig};
 use crate::measure::runner::{CommandPlan, PlanTarget, PlannedCommand, RowSubject};
-use crate::measure::{Invocation, MeasureMode, MeasureRequest};
+use crate::measure::{Executable, Invocation, MeasureMode, MeasureRequest};
 use crate::output;
 use crate::pbfhogg::binary::{OVERWRITE_FLAG, PbfhoggBinary, Writes};
 use crate::pbfhogg::commands::{
@@ -54,12 +54,12 @@ pub(crate) struct PbfhoggPlan<'a> {
 /// as long as the plan, so through the last sample.
 pub(crate) struct PbfhoggState {
     pub ctx: CommandContext,
-    argv: CommandArgv,
-    binary: Option<PbfhoggBinary>,
+    handle: Option<PbfhoggBinary>,
 }
 
 impl PlannedCommand for PbfhoggPlan<'_> {
     type State = PbfhoggState;
+    type Argv = CommandArgv;
     fn project(&self) -> Project {
         Project::Pbfhogg
     }
@@ -100,16 +100,17 @@ impl PlannedCommand for PbfhoggPlan<'_> {
         req: &MeasureRequest<'_>,
         paths: &config::ResolvedPaths,
         target: PlanTarget<'_>,
-    ) -> Result<CommandPlan<PbfhoggState>, DevError> {
+    ) -> Result<CommandPlan<PbfhoggState, CommandArgv>, DevError> {
         let binary = match target {
             PlanTarget::DryRun => {
                 preflight_as_snapshot(self.command, req, self.params)?;
                 resolve_io_features(self.command, self.params)?;
                 None
             }
-            PlanTarget::Built(path) => {
-                Some(PbfhoggBinary::new(path, req.project_root.as_path())?)
-            }
+            PlanTarget::Built(executable) => Some(PbfhoggBinary::from_executable(
+                executable,
+                req.project_root.as_path(),
+            )?),
             PlanTarget::Unbound => {
                 return Err(DevError::Internal(
                     "a pbfhogg plan needs the built binary".into(),
@@ -128,7 +129,7 @@ impl PlannedCommand for PbfhoggPlan<'_> {
         let argv = self.command.build_args(&ctx, mode)?;
         let (basename, mb) = result_input_metadata(&ctx)?;
         Ok(CommandPlan {
-            args: argv.args().to_vec(),
+            argv,
             scratch_dirs: vec![],
             subject: RowSubject {
                 command: self.command.id().into(),
@@ -137,24 +138,29 @@ impl PlannedCommand for PbfhoggPlan<'_> {
                 cli_args: None,
                 metadata: self.command.metadata(&ctx.observations),
             },
-            state: PbfhoggState { ctx, argv, binary },
+            state: PbfhoggState {
+                ctx,
+                handle: binary,
+            },
         })
     }
     fn materialize<'p>(
         &self,
-        plan: &'p CommandPlan<PbfhoggState>,
-        _binary: &'p Path,
+        plan: &'p CommandPlan<PbfhoggState, CommandArgv>,
+        _executable: Executable<'p>,
     ) -> Result<Invocation<'p>, DevError> {
+        // The handle planning built from that same executable resolves the
+        // planned argv; the runner's copy of the path is not used.
         plan.state
-            .binary
+            .handle
             .as_ref()
             .ok_or_else(|| DevError::Internal("pbfhogg plan was resolved without a binary".into()))?
-            .command_invocation(plan.state.argv.clone())
+            .command_invocation(plan.argv.clone())
     }
     fn describe(
         &self,
         req: &MeasureRequest<'_>,
-        plan: &CommandPlan<PbfhoggState>,
+        plan: &CommandPlan<PbfhoggState, CommandArgv>,
     ) -> Result<Vec<String>, DevError> {
         // The selected argv was built by `plan`; check the alternate shape as
         // well so a dry run catches missing inputs in either supported mode.
@@ -167,9 +173,9 @@ impl PlannedCommand for PbfhoggPlan<'_> {
         let mut lines = vec![format!(
             "{} args: {}",
             self.command.id(),
-            plan.args.join(" ")
+            plan.argv.args().join(" ")
         )];
-        if plan.state.argv.negotiates_overwrite() {
+        if plan.argv.negotiates_overwrite() {
             lines.push(format!(
                 "{OVERWRITE_FLAG}: added at run time if the built binary accepts it"
             ));
@@ -205,7 +211,7 @@ impl PlannedCommand for PbfhoggPlan<'_> {
     fn announce(
         &self,
         req: &MeasureRequest<'_>,
-        plan: &CommandPlan<PbfhoggState>,
+        plan: &CommandPlan<PbfhoggState, CommandArgv>,
     ) -> Result<(), DevError> {
         let (_, file_mb) = result_input_metadata(&plan.state.ctx)?;
         output::bench_msg(&format!(
@@ -219,7 +225,7 @@ impl PlannedCommand for PbfhoggPlan<'_> {
         &self,
         req: &MeasureRequest<'_>,
         _ctx: &MeasurementSession,
-        plan: &CommandPlan<PbfhoggState>,
+        plan: &CommandPlan<PbfhoggState, CommandArgv>,
     ) -> Result<(), DevError> {
         cleanup_output(self.command, &plan.state.ctx, arg_mode(req))?;
         self.command.prepare_scratch(&plan.state.ctx)
@@ -228,7 +234,7 @@ impl PlannedCommand for PbfhoggPlan<'_> {
         &self,
         req: &MeasureRequest<'_>,
         ctx: &MeasurementSession,
-        plan: &CommandPlan<PbfhoggState>,
+        plan: &CommandPlan<PbfhoggState, CommandArgv>,
     ) -> Result<(), DevError> {
         promote_artifact(
             self.command,
@@ -306,7 +312,6 @@ pub(crate) fn run_wallclock_core(
     announce: bool,
 ) -> Result<(), DevError> {
     let invocation = binary.command_invocation(command.build_args(cmd_ctx, ArgMode::Bench)?)?;
-    let arg_refs = invocation.arg_refs();
 
     let (basename, file_mb) = result_input_metadata(cmd_ctx)?;
 
@@ -317,7 +322,7 @@ pub(crate) fn run_wallclock_core(
         cargo_features: None,
         external_build: None,
         runs,
-        cli_args: Some(invocation.cli_args()),
+        cli_args: None,
         metadata: command.metadata(&cmd_ctx.observations),
     };
 
@@ -330,8 +335,7 @@ pub(crate) fn run_wallclock_core(
 
     harness.run_external_prepared(
         &config,
-        invocation.program(),
-        &arg_refs,
+        &invocation,
         project_root,
         command.ok_exit_codes(),
         || {
@@ -776,10 +780,8 @@ pub(crate) fn ensure_merged_pbf(
         ),
         Writes::OwnedOutput,
     )?;
-    let binary_str = invocation.program_string();
-    let captured = output::run_captured(&binary_str, &invocation.arg_refs(), project_root)?;
-
-    captured.check_success(&binary_str)?;
+    let captured = invocation.capture_in(project_root)?;
+    invocation.check(&captured)?;
     staged.commit().map_err(|e| {
         DevError::Config(format!(
             "failed to move merged PBF into place ({}): {e}",

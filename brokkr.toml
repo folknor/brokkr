@@ -103,6 +103,45 @@ exclude = ["src/elivagar/eliv.rs", "src/main.rs", "src/main_parts/bootstrap.rs",
 region = "code"
 message = "reach the elivagar and protohoggr crates through src/elivagar/eliv.rs"
 
+# pbfhogg's overwrite boundary (src/pbfhogg/binary.rs): code under src/pbfhogg
+# may hold a pbfhogg executable brokkr built only as a PbfhoggBinary, so it
+# cannot pair one with arguments that skipped --overwrite negotiation. The
+# runner's executable is guarded by types (its path needs a key only the
+# handle can make, and Invocation::built refuses a pbfhogg executable); these
+# two rules guard the remaining seams that hand out a built executable path:
+# free items of crate::build (by call, value or import), harness_build,
+# check_cmd, cargo spawned directly, and the session's binary(): any member
+# named binary, and any path item named binary other than a module segment
+# (`pbfhogg::binary::`), however it is then called, cast or bound.
+# The osmpbf baseline is built through tools::osmpbf_baseline, a resolver
+# whose manifest is fixed, so it cannot build pbfhogg; the rule has no
+# exceptions. Raw identifiers (`r#binary`) are matched. Line patterns are
+# syntax: they assume rustfmt layout, which keeps a path and a method call on
+# one line, and an identifier a macro assembles from separate tokens is
+# outside them. A new module that hands out built executables must be added
+# here. Outside the claim, by design: PATH lookup, a path derived from data,
+# calling another command whole, and macro-assembled references.
+[[textlint]]
+name = "pbfhogg-executables-through-the-handle"
+pattern = '\bbuild::(?:[a-z_]\w*|\{|\*)|\bbuild\s+as\b|\bharness_build\b|\bcheck_cmd\b|\brun_cargo\w*|\.\s*(?:r#)?binary\b|::\s*(?:r#)?binary\b(?:[^:]|$)'
+paths = ["src/pbfhogg/**/*.rs"]
+exclude = ["src/pbfhogg/binary.rs"]
+region = "code"
+test_code = "skip"
+must_scan = ["src/pbfhogg/bench_all.rs", "src/pbfhogg/verify.rs"]
+message = "pbfhogg executables reach src/pbfhogg only as a PbfhoggBinary; build, wrap and spawn through src/pbfhogg/binary.rs"
+
+# The same seams as imports, matched against whole reconstructed `use`
+# statements, so a rustfmt-wrapped or oddly split import (`build` on one line,
+# `as x` on the next) cannot alias them past the line rule above.
+[[textlint]]
+name = "pbfhogg-executable-seams-not-imported"
+pattern = '\bbuild\s*(?:as\b|::\s*(?:[a-z_]|\{|\*))|\bharness_build\b|\bcheck_cmd\b|\brun_cargo\w*'
+paths = ["src/pbfhogg/**/*.rs"]
+exclude = ["src/pbfhogg/binary.rs"]
+join_wrapped_use = true
+message = "import the build seams only in src/pbfhogg/binary.rs; elsewhere in src/pbfhogg a pbfhogg executable is a PbfhoggBinary"
+
 # The probe builds this tree's guard in its own persistent target dir and gives
 # each invocation a private HOME and private lock files. It does not touch the
 # live lock or need `brokkr install`.

@@ -42,20 +42,39 @@
 //!
 //! # Lifetime
 //!
-//! A handle describes the executable as it was when the handle was made.
-//! Invocation construction re-stats the path and refuses one that was
-//! replaced since (device, inode, size, mtime, ctime). That is a replacement
-//! detector at construction, not a guarantee at execution: no pbfhogg build
-//! may run while a handle or an invocation it produced is still going to be
-//! used, and a flow that builds again must end the previous handle's scope
-//! first. The caller owns that ordering.
+//! A handle runs the bytes it probed for as long as it exists. It holds the
+//! brokkr lock (a shared guard on this process's hold), so no other
+//! cooperating brokkr process can build; and it is registered with
+//! [`build::executable_guard`](crate::build::executable_guard), which refuses
+//! any cargo spawn through the build seam while a handle is live and refuses
+//! a handle while a build runs. The registration is taken before the handle
+//! reads its executable, and both are released by RAII. An invocation
+//! borrows its handle, so it cannot outlive that protection. Invocation
+//! construction still re-stats the path as a backstop against a change made
+//! outside cooperating brokkr commands.
+//!
+//! # Boundary
+//!
+//! Code in `src/pbfhogg` never holds the path of a pbfhogg build brokkr made
+//! except through this handle. The runner's [`Executable`] is guarded by
+//! types: its path is readable only with a [`HandleKey`], which only this
+//! module can make, and `Invocation::built` refuses a pbfhogg executable.
+//! The other seams that hand out built paths (the build, harness-build and
+//! check modules, cargo spawned directly, a session's binary) are kept out of
+//! the rest of `src/pbfhogg` by two one-owner rules in `brokkr.toml`, which
+//! assume rustfmt layout and do not see identifiers a macro assembles.
+//! Nothing here exposes the path. Starting pbfhogg by
+//! bare name from `PATH`, deriving a path from data (an artifact stream, a
+//! recorded `binary_path`, `target_dir` joined by hand), or calling another
+//! command whole are outside that claim.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::build::executable_guard::{self, HandleToken};
 use crate::error::DevError;
-use crate::measure::Invocation;
+use crate::measure::{Executable, Invocation};
 use crate::output;
 use crate::pbfhogg::commands::CommandArgv;
 
@@ -79,22 +98,90 @@ pub(crate) enum Writes {
     OwnedOutput,
 }
 
+/// The capability to read an [`Executable`]'s path. Its field is private to
+/// this module, so no other code can make one: the runner's executable
+/// becomes a path only inside a `PbfhoggBinary`.
+pub(crate) struct HandleKey(());
+
 /// A built pbfhogg executable plus the per-subcommand capability answers
-/// negotiated with it. See the module docs for the lifetime obligation.
-#[derive(Debug)]
+/// negotiated with it. See the module docs for the lifetime guarantee.
 pub(crate) struct PbfhoggBinary {
     path: PathBuf,
     identity: FileIdentity,
     digest: String,
     project_root: PathBuf,
     answers: RefCell<BTreeMap<String, bool>>,
+    /// Keeps the brokkr lock held for the handle's life (`None` only for
+    /// test fixtures, which run without the lock).
+    _hold: Option<crate::lockfile::LockGuard>,
+    /// This handle's registration against concurrent builds.
+    _registered: HandleToken,
+}
+
+impl std::fmt::Debug for PbfhoggBinary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PbfhoggBinary")
+            .field("digest", &self.digest)
+            .finish_non_exhaustive()
+    }
 }
 
 impl PbfhoggBinary {
-    /// Wrap a freshly built executable. `project_root` holds the `.brokkr`
-    /// stores (the hash cache and the capability answers) and is the probe's
-    /// working directory.
-    pub(crate) fn new(path: &Path, project_root: &Path) -> Result<Self, DevError> {
+    /// Build pbfhogg with `config` from `build_root` and wrap the result.
+    /// `project_root` holds the `.brokkr` stores (the hash cache and the
+    /// capability answers) and is the probe's working directory.
+    pub(crate) fn build(
+        config: &crate::build::BuildConfig,
+        build_root: &Path,
+        project_root: &Path,
+    ) -> Result<Self, DevError> {
+        let built = crate::build::cargo_build(config, build_root)?;
+        Self::locked(&built.path, project_root)
+    }
+
+    /// Wrap the executable a measurement session built.
+    pub(crate) fn from_session(
+        session: &crate::context::MeasurementSession,
+        project_root: &Path,
+    ) -> Result<Self, DevError> {
+        Self::locked(session.binary()?, project_root)
+    }
+
+    /// Wrap the executable the measure runner built for a plan.
+    pub(crate) fn from_executable(
+        executable: Executable<'_>,
+        project_root: &Path,
+    ) -> Result<Self, DevError> {
+        Self::locked(executable.raw_path(HandleKey(())), project_root)
+    }
+
+    fn locked(path: &Path, project_root: &Path) -> Result<Self, DevError> {
+        let hold = crate::lockfile::current_hold().ok_or_else(|| {
+            DevError::Lock(
+                "a pbfhogg handle needs the brokkr lock held for its whole life - \
+                 this is a brokkr bug: the command must take the lock first"
+                    .into(),
+            )
+        })?;
+        Self::open(path, project_root, Some(hold))
+    }
+
+    /// A handle without the lock, for fixture executables in tests. It is
+    /// still registered, so tests exercise the build exclusion.
+    #[cfg(test)]
+    pub(crate) fn fixture(path: &Path, project_root: &Path) -> Result<Self, DevError> {
+        Self::open(path, project_root, None)
+    }
+
+    fn open(
+        path: &Path,
+        project_root: &Path,
+        hold: Option<crate::lockfile::LockGuard>,
+    ) -> Result<Self, DevError> {
+        // Register before reading the executable, so no build can replace it
+        // between that read and the handle's last use. A failure below drops
+        // the registration with it.
+        let registered = executable_guard::reserve_handle()?;
         let meta = std::fs::metadata(path).map_err(|e| {
             DevError::Build(format!(
                 "pbfhogg executable {} is unreadable: {e}",
@@ -118,12 +205,13 @@ impl PbfhoggBinary {
             digest,
             project_root: project_root.to_path_buf(),
             answers: RefCell::new(answers),
+            _hold: hold,
+            _registered: registered,
         })
     }
 
-    /// The executable path, for messages and row metadata only - spawns go
-    /// through an [`Invocation`].
-    pub(crate) fn display(&self) -> String {
+    /// The executable for this module's own messages; never handed out.
+    fn label(&self) -> String {
         self.path.display().to_string()
     }
 
@@ -167,6 +255,8 @@ impl PbfhoggBinary {
 
     /// Refuse an executable replaced since this handle was made: its cached
     /// answers describe bytes that are no longer the ones that would run.
+    /// Builds cannot do this while the handle lives; this catches a change
+    /// made outside cooperating brokkr commands.
     fn check_identity(&self) -> Result<(), DevError> {
         let now = std::fs::metadata(&self.path)
             .map(|meta| FileIdentity::of(&meta))
@@ -181,7 +271,7 @@ impl PbfhoggBinary {
         } else {
             Err(DevError::Internal(format!(
                 "pbfhogg executable {} was replaced under a live handle - \
-                 a build ran while an older handle was still in use",
+                 something outside brokkr's build seam rewrote it",
                 self.path.display()
             )))
         }
@@ -200,7 +290,7 @@ impl PbfhoggBinary {
     }
 
     fn probe(&self, subcommand: &str) -> Result<bool, DevError> {
-        let program = self.display();
+        let program = self.label();
         let run = |extra: &[&str]| -> Result<Option<i32>, DevError> {
             let mut args = vec![subcommand];
             args.extend_from_slice(extra);

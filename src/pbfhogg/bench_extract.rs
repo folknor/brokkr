@@ -52,7 +52,6 @@ pub fn run(
         // the argv carries the negotiated overwrite flag.
         let invocation =
             binary.command_invocation(command.build_args(&command_ctx, ArgMode::Bench)?)?;
-        let args_refs = invocation.arg_refs();
 
         let config = BenchConfig {
             command: command.id().to_owned(),
@@ -63,12 +62,12 @@ pub fn run(
             cargo_features: None,
             external_build: None,
             runs,
-            cli_args: Some(invocation.cli_args()),
+            cli_args: None,
             metadata: vec![],
         };
 
         harness
-            .run_external(&config, invocation.program(), &args_refs, project_root)
+            .run_external(&config, &invocation, project_root)
             .map(|_| ())
     });
 

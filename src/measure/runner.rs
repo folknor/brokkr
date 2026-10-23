@@ -6,7 +6,7 @@ use crate::context::MeasurementSession;
 use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{self, BenchConfig};
-use crate::measure::{Invocation, MeasureMode, MeasureRequest};
+use crate::measure::{Executable, Invocation, MeasureMode, MeasureRequest};
 use crate::output;
 use crate::project::{self, Project};
 use std::path::{Path, PathBuf};
@@ -48,18 +48,20 @@ pub(crate) enum PlanTarget<'a> {
     /// not spawn, probe or materialise anything against an executable.
     DryRun,
     /// A real run of a [`PlanKind::Binary`] plan, against the executable the
-    /// runner just built. The runner builds nothing else until the plan's
-    /// last sample has run.
-    Built(&'a Path),
+    /// runner just built, handed over opaque. The runner builds nothing else
+    /// until the plan's last sample has run.
+    Built(Executable<'a>),
     /// A real run of an external or lifecycle plan, which spawns its own
     /// programs from [`PlannedCommand::execute`].
     Unbound,
 }
 
-pub(crate) struct CommandPlan<S> {
-    /// The argv as planned. For a binary plan this is what dry run prints;
-    /// what actually runs is [`PlannedCommand::materialize`]'s invocation.
-    pub args: Vec<String>,
+/// A resolved plan. `argv` is the one planned argument value: dry run
+/// prints its strings, and [`PlannedCommand::materialize`] resolves that
+/// same value, so the two cannot drift. A project whose argv carries more
+/// than strings (pbfhogg's overwrite decision) uses its own type.
+pub(crate) struct CommandPlan<S, A = Vec<String>> {
+    pub argv: A,
     pub scratch_dirs: Vec<PathBuf>,
     pub subject: RowSubject,
     pub state: S,
@@ -69,6 +71,10 @@ pub(crate) struct CommandPlan<S> {
 /// mode, recording and the success boundary belong to this runner.
 pub(crate) trait PlannedCommand {
     type State;
+    /// The planned argv. `AsRef` is for observation (dry run) only; turning
+    /// it into something that runs is [`materialize`](Self::materialize)'s
+    /// job, which every plan implements explicitly.
+    type Argv: AsRef<[String]>;
     fn project(&self) -> Project;
     fn id(&self) -> &'static str;
     fn package(&self) -> Option<&'static str>;
@@ -97,34 +103,36 @@ pub(crate) trait PlannedCommand {
         req: &MeasureRequest<'_>,
         paths: &crate::config::ResolvedPaths,
         target: PlanTarget<'_>,
-    ) -> Result<CommandPlan<Self::State>, DevError>;
+    ) -> Result<CommandPlan<Self::State, Self::Argv>, DevError>;
     /// Resolve a binary plan into what the runner executes. Called only for
-    /// a [`PlanTarget::Built`] plan, with that same executable. The default
-    /// runs the plan's argv unchanged; a project that negotiates flags with
-    /// the executable resolves them here, taking the program from its own
-    /// handle rather than from `binary`.
+    /// a [`PlanTarget::Built`] plan, with that same executable. No default:
+    /// a plan pairs its argv with the executable itself
+    /// ([`Invocation::built`]), or resolves flags the executable negotiates
+    /// through its own handle; a non-binary plan refuses.
     fn materialize<'p>(
         &self,
-        plan: &'p CommandPlan<Self::State>,
-        binary: &'p Path,
-    ) -> Result<Invocation<'p>, DevError> {
-        Ok(Invocation::new(binary, plan.args.clone()))
-    }
+        plan: &'p CommandPlan<Self::State, Self::Argv>,
+        executable: Executable<'p>,
+    ) -> Result<Invocation<'p>, DevError>;
     /// Return the resolved command description shown by `--dry-run`.
     /// Projects can add resolved inputs after validating any alternate argv
     /// shapes they support.
     fn describe(
         &self,
         _req: &MeasureRequest<'_>,
-        plan: &CommandPlan<Self::State>,
+        plan: &CommandPlan<Self::State, Self::Argv>,
     ) -> Result<Vec<String>, DevError> {
-        Ok(vec![format!("{} args: {}", self.id(), plan.args.join(" "))])
+        Ok(vec![format!(
+            "{} args: {}",
+            self.id(),
+            plan.argv.as_ref().join(" ")
+        )])
     }
     /// Announce an individual command immediately before its benchmark runs.
     fn announce(
         &self,
         _req: &MeasureRequest<'_>,
-        _plan: &CommandPlan<Self::State>,
+        _plan: &CommandPlan<Self::State, Self::Argv>,
     ) -> Result<(), DevError> {
         Ok(())
     }
@@ -132,7 +140,7 @@ pub(crate) trait PlannedCommand {
         &self,
         _req: &MeasureRequest<'_>,
         _ctx: &MeasurementSession,
-        _plan: &CommandPlan<Self::State>,
+        _plan: &CommandPlan<Self::State, Self::Argv>,
     ) -> Result<(), DevError> {
         Ok(())
     }
@@ -140,7 +148,7 @@ pub(crate) trait PlannedCommand {
         &self,
         _req: &MeasureRequest<'_>,
         _ctx: &MeasurementSession,
-        _plan: &CommandPlan<Self::State>,
+        _plan: &CommandPlan<Self::State, Self::Argv>,
     ) -> Result<(), DevError> {
         Ok(())
     }
@@ -155,10 +163,19 @@ pub(crate) trait PlannedCommand {
         &self,
         _req: &MeasureRequest<'_>,
         _ctx: &MeasurementSession,
-        _plan: &CommandPlan<Self::State>,
+        _plan: &CommandPlan<Self::State, Self::Argv>,
     ) -> Result<(), DevError> {
         Err(DevError::Internal("plan has no lifecycle executor".into()))
     }
+}
+
+/// The `materialize` a non-binary plan kind gives: the runner never calls it
+/// for one, so reaching it is a runner bug, refused rather than answered
+/// with a made-up invocation.
+pub(crate) fn not_a_binary_plan(id: &str) -> DevError {
+    DevError::Internal(format!(
+        "{id} is not a binary plan; the runner executes it, not an invocation"
+    ))
 }
 
 fn profiling(req: &MeasureRequest<'_>) -> bool {
@@ -192,7 +209,7 @@ pub(crate) fn run(req: &MeasureRequest<'_>, command: &impl PlannedCommand) -> Re
         None => MeasurementSession::new_for_request(req)?,
     };
     let binary = if matches!(command.kind(), PlanKind::Binary) {
-        Some(ctx.binary()?)
+        Some(ctx.executable()?)
     } else {
         None
     };
@@ -232,10 +249,11 @@ fn execute_invocation<C: PlannedCommand, P: Fn() -> Result<(), DevError>>(
     req: &MeasureRequest<'_>,
     ctx: &MeasurementSession,
     command: &C,
-    plan: &CommandPlan<C::State>,
+    plan: &CommandPlan<C::State, C::Argv>,
     invocation: &Invocation<'_>,
     prepare: &P,
 ) -> Result<(), DevError> {
+    invocation.require_no_env("the measure runner")?;
     let binary = invocation.program();
     let program = invocation.program_string();
     let args = invocation.arg_refs();
@@ -258,8 +276,7 @@ fn execute_invocation<C: PlannedCommand, P: Fn() -> Result<(), DevError>>(
             command.announce(req, plan)?;
             ctx.harness.run_external_prepared(
                 &config,
-                binary,
-                &args,
+                invocation,
                 req.project_root.as_path(),
                 command.ok_codes(),
                 prepare,
@@ -304,6 +321,11 @@ pub(crate) struct ExternalInvocation {
 }
 
 impl ExternalInvocation {
+    /// The program and argv as one [`Invocation`] for the harness.
+    pub(crate) fn invocation(&self) -> Invocation<'_> {
+        Invocation::new(&self.program, self.args.clone())
+    }
+
     pub(crate) fn prepare_sample(&self) -> Result<(), DevError> {
         for file in &self.output_files {
             match std::fs::remove_file(file) {
@@ -337,6 +359,7 @@ pub(crate) fn execute_external(
     invocation: &ExternalInvocation,
 ) -> Result<(), DevError> {
     let args: Vec<&str> = invocation.args.iter().map(String::as_str).collect();
+    let run = invocation.invocation();
     let prepare = || invocation.prepare_sample();
     match req.mode {
         MeasureMode::Run => {
@@ -355,8 +378,7 @@ pub(crate) fn execute_external(
         MeasureMode::Bench { .. } => {
             ctx.harness.run_external_prepared(
                 &invocation.config,
-                &invocation.program,
-                &args,
+                &run,
                 req.project_root.as_path(),
                 &[],
                 prepare,

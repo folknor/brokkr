@@ -12,7 +12,7 @@
 - `src/pbfhogg/binary.rs` - `PbfhoggBinary`, through which every pbfhogg
   spawn is made; see [Output overwrite](#output-overwrite).
 - `src/pbfhogg/...` - benchmarks (read, write, merge, commands, extract,
-  allocator, blob-filter, planetiler, all), verify (one check per
+  blob-filter, planetiler, all), verify (one check per
   cross-validated command, plus `all`),
   download (Geofabrik or Planet PBF/OSC fetcher with auto-registration in
   `brokkr.toml`).
@@ -45,10 +45,32 @@ different bytes never reuse an answer. `build-geocode-index` keeps its own
 Every pbfhogg spawn is an invocation produced by a `PbfhoggBinary` for one
 build; the typed commands' argv carries its overwrite decision from the arm
 that built it, and hand-built argv declares whether it writes an owned
-output. A handle refuses an executable replaced since it was made, but that
-check runs when an invocation is built, not when it executes: no pbfhogg
-build may run while a handle or its invocations are still to be used (the
-suite closes its handle before `bench allocator` rebuilds pbfhogg).
+output. A measured plan carries that one argv value: dry run prints it, and
+the runner resolves the same value through the handle.
+
+A handle runs the bytes it probed for as long as it exists. It holds the
+brokkr lock, so no other cooperating brokkr command can build, and while any
+handle is live in the process every cargo spawn through the build seam is
+refused before it starts (a handle cannot be made while a build runs, and
+builds are exclusive). A flow that builds again ends its handle first, as the
+suite does before building the osmpbf baseline. Cargo started any other way
+is outside that protocol.
+
+Code under `src/pbfhogg` holds a pbfhogg executable brokkr built only as a
+`PbfhoggBinary`. The executable the runner hands a plan is guarded by types:
+its path needs a key only the handle can make, and pairing it with argv
+directly is refused for a pbfhogg build. The handle and its invocations
+expose no path, and reference tools run by a closed name set or as
+executables a named resolver produced. The remaining seams that hand out a
+built path (the build, harness-build and check modules, cargo spawned
+directly, a session's binary) are kept out by two rules in brokkr's own
+`brokkr.toml`, `pbfhogg-executables-through-the-handle` for code and
+`pbfhogg-executable-seams-not-imported` for imports; being line patterns, they
+assume rustfmt layout, do not see an identifier a macro assembles from
+separate tokens, and allow no exceptions. The osmpbf baseline builds
+through a resolver in `src/tools.rs` whose manifest is fixed. Starting pbfhogg by
+bare name from `PATH`, deriving a path from data, or calling another command
+whole is outside that claim.
 
 `--dry-run` builds nothing, so it cannot probe: it prints the argv without the
 flag and a line saying it is added at run time. Recorded `cli_args` include

@@ -221,8 +221,9 @@ pub struct BenchConfig {
     /// ([`BenchHarness::with_build_identity`]).
     pub external_build: Option<BuildKind>,
     pub runs: usize,
-    /// Literal subprocess invocation (pbfhogg/elivagar/...). Populated by
-    /// dispatch from the argv it hands to the tool binary.
+    /// Literal subprocess invocation (pbfhogg/elivagar/...). The
+    /// invocation-taking external runners overwrite it with the rendering of
+    /// the invocation they execute; other paths take it from dispatch.
     pub cli_args: Option<String>,
     pub metadata: Vec<KvPair>,
 }
@@ -509,32 +510,31 @@ impl BenchHarness {
         self.record(config, &mut measurement, |_, _| Ok(()))
     }
 
-    pub fn run_external(
+    /// External wall-clock over `invocation`. The row's `cli_args` is the
+    /// invocation's own rendering, so the recorded command is the one that ran.
+    pub(crate) fn run_external(
         &self,
         config: &BenchConfig,
-        program: &Path,
-        args: &[&str],
+        invocation: &Invocation<'_>,
         cwd: &Path,
     ) -> Result<BenchResult, DevError> {
-        self.run_external_ok(config, program, args, cwd, &[])
+        self.run_external_ok(config, invocation, cwd, &[])
     }
 
-    pub fn run_external_ok(
+    pub(crate) fn run_external_ok(
         &self,
         config: &BenchConfig,
-        program: &Path,
-        args: &[&str],
+        invocation: &Invocation<'_>,
         cwd: &Path,
         ok_codes: &[i32],
     ) -> Result<BenchResult, DevError> {
-        self.run_external_prepared(config, program, args, cwd, ok_codes, || Ok(()))
+        self.run_external_prepared(config, invocation, cwd, ok_codes, || Ok(()))
     }
 
     pub(crate) fn run_external_prepared<F>(
         &self,
         config: &BenchConfig,
-        program: &Path,
-        args: &[&str],
+        invocation: &Invocation<'_>,
         cwd: &Path,
         ok_codes: &[i32],
         prepare: F,
@@ -542,16 +542,18 @@ impl BenchHarness {
     where
         F: Fn() -> Result<(), DevError>,
     {
+        invocation.require_no_env("the external wall-clock runner")?;
+        let config = config_for(config, invocation);
         let mut measurement = self.measure_external(
-            config,
-            program,
-            args,
+            &config,
+            invocation.program(),
+            &invocation.arg_refs(),
             cwd,
             ok_codes,
             WallSource::External,
             prepare,
         )?;
-        self.record(config, &mut measurement, |_, _| Ok(()))
+        self.record(&config, &mut measurement, |_, _| Ok(()))
     }
 
     /// Collect all closure durations and summarize the same ordered iterations.
@@ -583,23 +585,24 @@ impl BenchHarness {
         })
     }
 
-    pub fn run_external_with_kv(
+    pub(crate) fn run_external_with_kv(
         &self,
         config: &BenchConfig,
-        program: &Path,
-        args: &[&str],
+        invocation: &Invocation<'_>,
         cwd: &Path,
     ) -> Result<BenchResult, DevError> {
+        invocation.require_no_env("the self-reported external runner")?;
+        let config = config_for(config, invocation);
         let mut measurement = self.measure_external(
-            config,
-            program,
-            args,
+            &config,
+            invocation.program(),
+            &invocation.arg_refs(),
             cwd,
             &[],
             WallSource::SelfReported,
             || Ok(()),
         )?;
-        self.record(config, &mut measurement, |_, _| Ok(()))
+        self.record(&config, &mut measurement, |_, _| Ok(()))
     }
 
     /// Collect subprocess iterations without recording; postprocessing belongs in `record`.
@@ -633,8 +636,23 @@ impl BenchHarness {
     }
 }
 
+/// `config` with `cli_args` taken from the invocation that is about to run,
+/// so the row cannot record a different command from the one executed.
+fn config_for(config: &BenchConfig, invocation: &Invocation<'_>) -> BenchConfig {
+    BenchConfig {
+        command: config.command.clone(),
+        input_file: config.input_file.clone(),
+        input_mb: config.input_mb,
+        cargo_features: config.cargo_features.clone(),
+        external_build: config.external_build.clone(),
+        runs: config.runs,
+        cli_args: Some(invocation.cli_args()),
+        metadata: config.metadata.clone(),
+    }
+}
+
 mod argv;
-pub(crate) use argv::Invocation;
+pub(crate) use argv::{Executable, ExternalTool, Invocation, ResolvedExecutable};
 pub use argv::format_cli_args;
 pub(crate) mod capture;
 pub(crate) mod execution;

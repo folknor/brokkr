@@ -16,7 +16,7 @@
 use std::fs;
 use std::path::Path;
 
-use super::verify::{Findings, VerifyHarness, Writes};
+use super::verify::{ExternalTool, Findings, VerifyHarness, Writes};
 use crate::error::DevError;
 use crate::output::verify_msg;
 
@@ -180,7 +180,7 @@ pub fn run(
         osmium_args.push("--start-id");
         osmium_args.push(sid);
     }
-    let captured = harness.run_tool("osmium", &osmium_args)?;
+    let captured = harness.run_tool(ExternalTool::Osmium, &osmium_args)?;
     harness.check_exit(&captured, "osmium renumber")?;
     let osmium_elapsed = captured.elapsed;
     let osmium_size = fs::metadata(&osmium_out).map(|m| m.len()).unwrap_or(0);

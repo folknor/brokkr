@@ -5,7 +5,7 @@ use std::path::Path;
 use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness, BenchResult};
-use crate::output;
+use crate::measure::{Invocation, ResolvedExecutable};
 use crate::tools;
 
 struct ParsedResult {
@@ -85,30 +85,28 @@ fn required_metric(key: &str, value: Option<i64>) -> Result<i64, DevError> {
 }
 
 fn run_planetiler_subprocess(
-    java: &Path,
+    java: &ResolvedExecutable,
     classpath: &str,
     pbf_path: &Path,
     heap_mb: i64,
     runs: usize,
     project_root: &Path,
 ) -> Result<Vec<ParsedResult>, DevError> {
-    let heap_arg = format!("-Xmx{heap_mb}m");
     let pbf_str = crate::utf8_path::path_str(pbf_path)?;
-    let runs_str = runs.to_string();
-    let java_str = crate::utf8_path::path_str(java)?;
+    let invocation = Invocation::resolved(
+        java,
+        vec![
+            format!("-Xmx{heap_mb}m"),
+            "-cp".into(),
+            classpath.to_owned(),
+            "BenchPbfRead".into(),
+            pbf_str.to_owned(),
+            runs.to_string(),
+        ],
+    );
 
-    let args: Vec<&str> = vec![
-        &heap_arg,
-        "-cp",
-        classpath,
-        "BenchPbfRead",
-        pbf_str,
-        &runs_str,
-    ];
-
-    let captured = output::run_captured(java_str, &args, project_root)?;
-
-    captured.check_success(java_str)?;
+    let captured = invocation.capture_in(project_root)?;
+    invocation.check(&captured)?;
 
     let stderr = String::from_utf8_lossy(&captured.stderr);
     parse_planetiler_output(&stderr)
@@ -134,8 +132,14 @@ pub fn run(
 
     let (basename, _) = crate::utf8_path::path_strings(pbf_path)?;
 
-    let results =
-        run_planetiler_subprocess(&pt.java, &classpath, pbf_path, heap_mb, runs, project_root)?;
+    let results = run_planetiler_subprocess(
+        &pt.java_executable(),
+        &classpath,
+        pbf_path,
+        heap_mb,
+        runs,
+        project_root,
+    )?;
 
     if results.is_empty() {
         return Err(DevError::Build(

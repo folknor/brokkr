@@ -3,11 +3,12 @@
 
 use std::path::Path;
 
-use super::verify::{self, Findings, VerifyHarness, Writes};
+use super::verify::{self, ExternalTool, Findings, VerifyHarness, Writes};
 use crate::error::DevError;
 use crate::osc::{self, OscDiff};
 use crate::output;
 use crate::output::verify_msg;
+use crate::measure::Invocation;
 use crate::tools::OsmosisTools;
 
 /// Cap on the number of failing IDs printed per category (nodes /
@@ -51,7 +52,7 @@ pub fn run(
 
     verify_msg("--- osmium apply-changes ---");
     let captured = harness.run_tool(
-        "osmium",
+        ExternalTool::Osmium,
         &[
             "apply-changes",
             &pbf_str,
@@ -69,8 +70,7 @@ pub fn run(
         verify_msg("--- osmosis --apply-change ---");
         let osmosis_out_str = osmosis_out.display().to_string();
         match run_osmosis(
-            &tools.osmosis,
-            &tools.java_home,
+            tools,
             &[
                 "--read-xml-change",
                 &format!("file={osc_str}"),
@@ -105,7 +105,7 @@ pub fn run(
         verify_msg("--- osmconvert ---");
         let osmconvert_out_str = osmconvert_out.display().to_string();
         let out_arg = format!("-o={osmconvert_out_str}");
-        match harness.run_tool("osmconvert", &[&pbf_str, &osc_str, &out_arg]) {
+        match harness.run_tool(ExternalTool::Osmconvert, &[&pbf_str, &osc_str, &out_arg]) {
             Ok(captured) => {
                 if let Err(e) = harness.check_exit(&captured, "osmconvert") {
                     verify_msg(&format!("  osmconvert failed: {e}"));
@@ -425,14 +425,15 @@ fn classify_osmium_only(
 
 /// Run osmosis with `JAVA_HOME` set through the shared child supervisor.
 fn run_osmosis(
-    osmosis: &Path,
-    java_home: &Path,
+    tools: &OsmosisTools,
     args: &[&str],
     cwd: &Path,
 ) -> Result<output::CapturedOutput, DevError> {
-    let program = osmosis.display().to_string();
-    let java_home = java_home.display().to_string();
-    output::run_captured_with_env(&program, args, cwd, &[("JAVA_HOME", java_home.as_str())])
+    let osmosis = tools.osmosis_executable();
+    let java_home = tools.java_home.display().to_string();
+    Invocation::resolved(&osmosis, args.iter().map(|&a| a.to_owned()).collect())
+        .with_env("JAVA_HOME", &java_home)
+        .capture_in(cwd)
 }
 
 #[cfg(test)]

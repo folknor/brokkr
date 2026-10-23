@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 
 use crate::build;
 use crate::error::DevError;
+pub(crate) use crate::measure::ExternalTool;
+use crate::measure::Invocation;
 use crate::output;
 use crate::output::CapturedOutput;
 pub(crate) use crate::pbfhogg::binary::Writes;
@@ -53,7 +55,7 @@ pub struct VerifyHarness {
     _lock: crate::lockfile::LockGuard,
     /// The built `pbfhogg` release binary. Verify builds once, here, so the
     /// handle stays valid for the harness's whole life.
-    binary: PbfhoggBinary,
+    handle: PbfhoggBinary,
     /// Root output directory: `{target_dir}/verify`.
     pub output_dir: PathBuf,
     /// Project root (used as cwd for subprocess invocations).
@@ -82,14 +84,13 @@ impl VerifyHarness {
                 features,
             )
         };
-        let built = build::cargo_build(&build_config, effective)?.path;
-        let binary = PbfhoggBinary::new(&built, project_root)?;
+        let handle = PbfhoggBinary::build(&build_config, effective, project_root)?;
         let output_dir = target_dir.join(crate::target_namespace::VERIFY);
 
         Ok(Self {
             _signals: signals,
             _lock: lock,
-            binary,
+            handle,
             output_dir,
             project_root: project_root.to_path_buf(),
         })
@@ -108,19 +109,21 @@ impl VerifyHarness {
         args: &[&str],
         writes: Writes,
     ) -> Result<CapturedOutput, DevError> {
-        let invocation = self.binary.invocation_strs(args, writes)?;
-        output::run_captured(
-            &invocation.program_string(),
-            &invocation.arg_refs(),
-            &self.project_root,
-        )
+        self.handle
+            .invocation_strs(args, writes)?
+            .capture_in(&self.project_root)
     }
 
-    /// Run an external tool (e.g. `osmium`, `osmconvert`) with the given arguments.
+    /// Run a reference tool with the given arguments.
     ///
     /// Does **not** check the exit status.
-    pub fn run_tool(&self, program: &str, args: &[&str]) -> Result<CapturedOutput, DevError> {
-        output::run_captured(program, args, &self.project_root)
+    pub(crate) fn run_tool(
+        &self,
+        tool: ExternalTool,
+        args: &[&str],
+    ) -> Result<CapturedOutput, DevError> {
+        Invocation::tool(tool, args.iter().map(|&a| a.to_owned()).collect())
+            .capture_in(&self.project_root)
     }
 
     // -- Common verify operations ------------------------------------------

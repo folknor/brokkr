@@ -187,8 +187,9 @@ fn run(
             //
             // The trade is that `elapsed_ms=` becomes mandatory on stderr: a run
             // that omits it fails rather than being silently mistimed.
+            let invocation = crate::measure::Invocation::new(ctx.binary()?, Vec::new());
             ctx.harness
-                .run_external_with_kv(&config, ctx.binary()?, &[], build_root)
+                .run_external_with_kv(&config, &invocation, build_root)
         },
     )?;
 

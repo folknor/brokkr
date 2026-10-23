@@ -212,24 +212,24 @@ fn args(argv: &[&str]) -> Vec<String> {
 #[test]
 fn owned_outputs_get_the_flag_exactly_where_the_subcommand_accepts_it() {
     let (root, path) = install("per-subcommand", FAKE_PBFHOGG);
-    let binary = PbfhoggBinary::new(&path, &root).unwrap();
+    let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
 
     let sort = binary
         .invocation(args(&["sort", "in.pbf", "-o", "out.pbf"]), Writes::OwnedOutput)
         .unwrap();
-    assert_eq!(sort.args().last().map(String::as_str), Some(OVERWRITE_FLAG));
-    assert_eq!(sort.program(), path.as_path());
+    assert_eq!(sort.args_for_test().last().map(String::as_str), Some(OVERWRITE_FLAG));
+    assert_eq!(sort.program_for_test(), path.as_path());
 
     let cat = binary
         .invocation(args(&["cat", "in.pbf", "-o", "out.pbf"]), Writes::OwnedOutput)
         .unwrap();
-    assert!(!cat.args().iter().any(|a| a == OVERWRITE_FLAG));
+    assert!(!cat.args_for_test().iter().any(|a| a == OVERWRITE_FLAG));
 }
 
 #[test]
 fn each_subcommand_is_probed_once_per_handle_and_once_per_build() {
     let (root, path) = install("probe-once", FAKE_PBFHOGG);
-    let binary = PbfhoggBinary::new(&path, &root).unwrap();
+    let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
     for _ in 0..3 {
         binary
             .invocation(args(&["sort", "-o", "x"]), Writes::OwnedOutput)
@@ -242,7 +242,7 @@ fn each_subcommand_is_probed_once_per_handle_and_once_per_build() {
     assert_eq!(spawns(&path), 6);
 
     // A second handle on the same bytes reads the recorded answers.
-    let again = PbfhoggBinary::new(&path, &root).unwrap();
+    let again = PbfhoggBinary::fixture(&path, &root).unwrap();
     let sort = again
         .invocation(args(&["sort", "-o", "x"]), Writes::OwnedOutput)
         .unwrap();
@@ -250,14 +250,14 @@ fn each_subcommand_is_probed_once_per_handle_and_once_per_build() {
         .invocation(args(&["cat", "-o", "x"]), Writes::OwnedOutput)
         .unwrap();
     assert_eq!(spawns(&path), 6);
-    assert!(sort.args().iter().any(|a| a == OVERWRITE_FLAG));
-    assert!(!cat.args().iter().any(|a| a == OVERWRITE_FLAG));
+    assert!(sort.args_for_test().iter().any(|a| a == OVERWRITE_FLAG));
+    assert!(!cat.args_for_test().iter().any(|a| a == OVERWRITE_FLAG));
 }
 
 #[test]
 fn different_bytes_never_reuse_a_recorded_answer() {
     let (root, path) = install("rebuilt", FAKE_PBFHOGG);
-    PbfhoggBinary::new(&path, &root)
+    PbfhoggBinary::fixture(&path, &root)
         .unwrap()
         .invocation(args(&["sort", "-o", "x"]), Writes::OwnedOutput)
         .unwrap();
@@ -265,29 +265,29 @@ fn different_bytes_never_reuse_a_recorded_answer() {
 
     // The rebuild no longer accepts the flag on sort.
     publish(&path, &FAKE_PBFHOGG.replace("sort) ok=0", "sort) ok=2"));
-    let rebuilt = PbfhoggBinary::new(&path, &root).unwrap();
+    let rebuilt = PbfhoggBinary::fixture(&path, &root).unwrap();
     let sort = rebuilt
         .invocation(args(&["sort", "-o", "x"]), Writes::OwnedOutput)
         .unwrap();
     assert_eq!(spawns(&path), 6);
-    assert!(!sort.args().iter().any(|a| a == OVERWRITE_FLAG));
+    assert!(!sort.args_for_test().iter().any(|a| a == OVERWRITE_FLAG));
 }
 
 #[test]
 fn reads_and_forced_commands_never_probe_or_get_the_flag() {
     let (root, path) = install("no-probe", FAKE_PBFHOGG);
-    let binary = PbfhoggBinary::new(&path, &root).unwrap();
+    let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
     let inspect = binary
         .invocation(args(&["sort", "in.pbf"]), Writes::Nothing)
         .unwrap();
-    assert_eq!(inspect.args(), args(&["sort", "in.pbf"]).as_slice());
+    assert_eq!(inspect.args_for_test(), args(&["sort", "in.pbf"]).as_slice());
     assert_eq!(spawns(&path), 0);
 }
 
 #[test]
 fn a_broken_binary_is_an_error_not_a_cached_unsupported() {
     let (root, path) = install("always-2", "#!/bin/sh\necho \"$*\" >> \"$0.log\"\nexit 2\n");
-    let binary = PbfhoggBinary::new(&path, &root).unwrap();
+    let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
     let err = binary
         .invocation(args(&["sort", "-o", "x"]), Writes::OwnedOutput)
         .unwrap_err()
@@ -300,7 +300,7 @@ fn a_broken_binary_is_an_error_not_a_cached_unsupported() {
 #[test]
 fn an_unknown_subcommand_is_an_error() {
     let (root, path) = install("unknown-sub", FAKE_PBFHOGG);
-    let binary = PbfhoggBinary::new(&path, &root).unwrap();
+    let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
     assert!(
         binary
             .invocation(args(&["no-such", "-o", "x"]), Writes::OwnedOutput)
@@ -311,7 +311,7 @@ fn an_unknown_subcommand_is_an_error() {
 #[test]
 fn a_binary_replaced_under_a_live_handle_is_refused() {
     let (root, path) = install("replaced", FAKE_PBFHOGG);
-    let binary = PbfhoggBinary::new(&path, &root).unwrap();
+    let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
     publish(&path, &format!("{FAKE_PBFHOGG}# rebuilt\n"));
     let err = binary
         .invocation(args(&["sort", "in.pbf"]), Writes::Nothing)
@@ -322,16 +322,14 @@ fn a_binary_replaced_under_a_live_handle_is_refused() {
 
 /// Spawn `invocation` the way every pbfhogg call site does.
 pub(crate) fn execute(invocation: &crate::measure::Invocation<'_>, cwd: &Path) -> Option<i32> {
-    crate::output::run_captured(&invocation.program_string(), &invocation.arg_refs(), cwd)
-        .unwrap()
-        .code()
+    invocation.capture_in(cwd).unwrap().code()
 }
 
 #[test]
 fn a_reused_owned_output_runs_twice_against_a_refusing_binary() {
     // The second iteration is the one the refusal breaks.
     let (root, path) = install("reuse", FAKE_PBFHOGG);
-    let binary = PbfhoggBinary::new(&path, &root).unwrap();
+    let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
     let out = root.join("out.pbf");
     let out_str = out.to_str().unwrap();
     for _ in 0..2 {
@@ -367,7 +365,7 @@ pub(crate) fn typed_ctx(root: &Path) -> crate::pbfhogg::context::CommandContext 
 fn typed_commands_resolve_through_the_negotiation_their_arm_chose() {
     use crate::pbfhogg::commands::{ArgMode, PbfhoggCommand};
     let (root, path) = install("typed", FAKE_PBFHOGG);
-    let binary = PbfhoggBinary::new(&path, &root).unwrap();
+    let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
     let ctx = typed_ctx(&root);
 
     // A writing command is negotiated and survives a reused output.
@@ -375,7 +373,7 @@ fn typed_commands_resolve_through_the_negotiation_their_arm_chose() {
         let sort = binary
             .command_invocation(PbfhoggCommand::Sort.build_args(&ctx, ArgMode::Bench).unwrap())
             .unwrap();
-        assert_eq!(sort.args().last().map(String::as_str), Some(OVERWRITE_FLAG));
+        assert_eq!(sort.args_for_test().last().map(String::as_str), Some(OVERWRITE_FLAG));
         assert_eq!(execute(&sort, &root), Some(0));
     }
     let probes = spawns(&path);
@@ -388,12 +386,12 @@ fn typed_commands_resolve_through_the_negotiation_their_arm_chose() {
                 .unwrap(),
         )
         .unwrap();
-    assert!(!geocode.args().iter().any(|a| a == OVERWRITE_FLAG));
+    assert!(!geocode.args_for_test().iter().any(|a| a == OVERWRITE_FLAG));
     // A read-only command: no probe, no flag.
     let check = binary
         .command_invocation(PbfhoggCommand::CheckRefs.build_args(&ctx, ArgMode::Bench).unwrap())
         .unwrap();
-    assert!(!check.args().iter().any(|a| a == OVERWRITE_FLAG));
+    assert!(!check.args_for_test().iter().any(|a| a == OVERWRITE_FLAG));
     assert_eq!(spawns(&path), probes);
 }
 
@@ -403,7 +401,7 @@ fn a_probe_that_cannot_spawn_names_the_subcommand_and_the_probe() {
     // A missing working directory makes the probe's spawn itself fail.
     let binary = PbfhoggBinary {
         project_root: root.join("gone"),
-        ..PbfhoggBinary::new(&path, &root).unwrap()
+        ..PbfhoggBinary::fixture(&path, &root).unwrap()
     };
     let err = binary
         .invocation(args(&["sort", "-o", "x"]), Writes::OwnedOutput)
@@ -414,9 +412,30 @@ fn a_probe_that_cannot_spawn_names_the_subcommand_and_the_probe() {
 }
 
 #[test]
+fn a_live_handle_refuses_a_build_and_releases_on_drop() {
+    // The handle registers before it reads its executable; while it lives,
+    // no cargo may start through the build seam.
+    let (root, path) = install("refuses-build", FAKE_PBFHOGG);
+    let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
+    assert!(crate::build::executable_guard::begin_build().is_err());
+    drop(binary);
+    drop(crate::build::executable_guard::begin_build().unwrap());
+}
+
+#[test]
+fn a_handle_cannot_be_made_while_a_build_runs() {
+    let (root, path) = install("during-build", FAKE_PBFHOGG);
+    let build = crate::build::executable_guard::begin_build().unwrap();
+    assert!(PbfhoggBinary::fixture(&path, &root).is_err());
+    drop(build);
+    // The failed construction left no registration behind.
+    drop(crate::build::executable_guard::begin_build().unwrap());
+}
+
+#[test]
 fn an_empty_argv_is_refused() {
     let (root, path) = install("empty-argv", FAKE_PBFHOGG);
-    let binary = PbfhoggBinary::new(&path, &root).unwrap();
+    let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
     assert!(binary.invocation(Vec::new(), Writes::Nothing).is_err());
 }
 

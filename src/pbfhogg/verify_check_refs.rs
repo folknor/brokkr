@@ -14,7 +14,7 @@
 use std::fs;
 use std::path::Path;
 
-use super::verify::{Findings, Verdict, VerifyHarness};
+use super::verify::{ExternalTool, Findings, Verdict, VerifyHarness, Writes};
 use crate::error::DevError;
 use crate::output::verify_msg;
 
@@ -165,19 +165,25 @@ fn parse_osmium(text: &str) -> CheckRefCounts {
     counts
 }
 
-/// Capture output from a tool, save to file, and print with prefix.
+/// Which side of the comparison a captured run is.
+#[derive(Clone, Copy)]
+enum Side {
+    Pbfhogg,
+    Osmium,
+}
+
+/// Capture output from one side, save to file, and print with prefix.
 fn capture_and_log(
     harness: &VerifyHarness,
-    tool: &str,
+    side: Side,
     args: &[&str],
     out_file: &Path,
     label: &str,
 ) -> Result<String, DevError> {
-    let captured = if tool == "pbfhogg" {
+    let captured = match side {
         // check --refs reports to stdout; the log file is brokkr's own write.
-        harness.run_pbfhogg(args, super::verify::Writes::Nothing)?
-    } else {
-        harness.run_tool(tool, args)?
+        Side::Pbfhogg => harness.run_pbfhogg(args, Writes::Nothing)?,
+        Side::Osmium => harness.run_tool(ExternalTool::Osmium, args)?,
     };
     let text = format!(
         "{}{}",
@@ -209,14 +215,14 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
     }
     let pbfhogg_text = capture_and_log(
         harness,
-        "pbfhogg",
+        Side::Pbfhogg,
         &pbf_ways_args,
         &outdir.join("pbfhogg-ways.txt"),
         "pbfhogg (ways only)",
     )?;
     let osmium_text = capture_and_log(
         harness,
-        "osmium",
+        Side::Osmium,
         &["check-refs", &pbf_str],
         &outdir.join("osmium-ways.txt"),
         "osmium (ways only)",
@@ -242,14 +248,14 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
     }
     let pbfhogg_text = capture_and_log(
         harness,
-        "pbfhogg",
+        Side::Pbfhogg,
         &pbf_all_args,
         &outdir.join("pbfhogg-all.txt"),
         "pbfhogg (with relations)",
     )?;
     let osmium_text = capture_and_log(
         harness,
-        "osmium",
+        Side::Osmium,
         &["check-refs", "-r", &pbf_str],
         &outdir.join("osmium-all.txt"),
         "osmium (with relations)",

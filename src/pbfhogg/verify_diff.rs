@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::Path;
 
-use super::verify::{Findings, VerifyHarness, Writes};
+use super::verify::{ExternalTool, Findings, VerifyHarness, Writes};
 use crate::error::DevError;
 use crate::output::verify_msg;
 
@@ -52,7 +52,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<Findings, 
     // denmark against pbfhogg's changes-only output). `--summary` prints its
     // stats on stderr, which we capture separately below.
     let captured = harness.run_tool(
-        "osmium",
+        ExternalTool::Osmium,
         &[
             "diff",
             "--suppress-common",

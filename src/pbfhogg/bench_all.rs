@@ -9,13 +9,15 @@ use crate::config::ResolvedPaths;
 use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness, BenchResult};
+use crate::measure::{ExternalTool, Invocation};
 use crate::output;
 use crate::pbfhogg::binary::PbfhoggBinary;
 use crate::pbfhogg::{
-    bench_allocator, bench_blob_filter, bench_commands, bench_extract, bench_merge,
-    bench_planetiler, bench_read, bench_write,
+    bench_blob_filter, bench_commands, bench_extract, bench_merge, bench_planetiler, bench_read,
+    bench_write,
 };
 use crate::project::BuildRoot;
+use crate::tools;
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -36,18 +38,17 @@ pub fn run(
     dataset: &str,
 ) -> Result<(), DevError> {
     let project_root = build_root.as_path();
-    // The suite binary's handle must be gone before bench allocator rebuilds
-    // pbfhogg at the same path: see PbfhoggBinary's lifetime rule.
+    // No build may start while a pbfhogg handle is alive, and the osmpbf
+    // baseline builds, so the suite handle's scope closes first.
     {
-        let built = build::cargo_build(
+        let binary = PbfhoggBinary::build(
             &build::BuildConfig::release_with_owned_features(
                 crate::project::Project::Pbfhogg.cli_package(),
                 &paths.features,
             ),
             project_root,
-        )?
-        .path;
-        let binary = PbfhoggBinary::new(&built, project_root)?;
+            project_root,
+        )?;
         run_suite_binary(
             harness,
             paths,
@@ -59,10 +60,6 @@ pub fn run(
             project_root,
         )?;
     }
-
-    // bench allocator -- default, jemalloc, mimalloc
-    output::bench_msg("=== bench allocator ===");
-    bench_allocator::run(harness, pbf_path, file_mb, runs, project_root)?;
 
     run_baselines(harness, paths, build_root, pbf_path, file_mb, runs)
 }
@@ -253,12 +250,11 @@ fn run_baselines(
     // osmpbf baseline -- build and run
     // Same shape as the suite's other optional sections: a header only when
     // the section runs, a one-line reason when it does not.
-    let manifest = project_root.join("bench/osmpbf-baseline/Cargo.toml");
-    if manifest.exists() {
+    if project_root.join(tools::OSMPBF_BASELINE_MANIFEST).exists() {
         output::bench_msg("=== osmpbf baseline ===");
         skip_on_error(
             "osmpbf baseline",
-            run_osmpbf_baseline(harness, &manifest, pbf_path, file_mb, runs, build_root),
+            run_osmpbf_baseline(harness, pbf_path, file_mb, runs, build_root),
         )?;
     } else {
         output::bench_msg("=== osmpbf baseline === (skipped, no bench/osmpbf-baseline project)");
@@ -323,48 +319,19 @@ fn skip_on_error(what: &str, result: Result<(), DevError>) -> Result<(), DevErro
 
 fn run_osmpbf_baseline(
     harness: &BenchHarness,
-    manifest: &Path,
     pbf_path: &Path,
     file_mb: f64,
     runs: usize,
     build_root: &BuildRoot,
 ) -> Result<(), DevError> {
     let project_root = build_root.as_path();
-    let manifest_str = manifest.display().to_string();
-
-    // Build the baseline binary under the hold, with the worktree's isolated
-    // target dir when this is a `--commit` run.
-    let captured = build::run_cargo_for_root(
-        &[
-            "build",
-            "--release",
-            "--manifest-path",
-            &manifest_str,
-            "--message-format=json",
-        ],
-        build_root,
-        &[],
-        None,
-        crate::shutdown::ChildIsolation::Inherit,
-    )?;
-
-    if !captured.success() {
-        let stderr = String::from_utf8_lossy(&captured.stderr);
-        return Err(DevError::Build(format!(
-            "osmpbf-baseline build failed: {stderr}"
-        )));
-    }
-
-    let binary = build::find_executable(&captured.stdout, None)?;
+    let binary = tools::osmpbf_baseline(build_root)?;
 
     // Run the baseline binary: {binary} {pbf} {runs}
     let pbf_str = crate::utf8_path::path_str(pbf_path)?;
-    let runs_str = runs.to_string();
-    let binary_str = binary.display().to_string();
-
-    let captured = output::run_captured(&binary_str, &[pbf_str, &runs_str], project_root)?;
-
-    captured.check_success(&binary_str)?;
+    let invocation = Invocation::resolved(&binary, vec![pbf_str.to_owned(), runs.to_string()]);
+    let captured = invocation.capture_in(project_root)?;
+    invocation.check(&captured)?;
 
     // Parse stderr for --- delimited blocks.
     let stderr = String::from_utf8_lossy(&captured.stderr);
@@ -435,15 +402,10 @@ fn run_osmium_baseline(
 
     let basename = crate::utf8_path::file_name(pbf_path);
 
-    let osmium_args: Vec<&str> = vec![
-        "cat",
-        pbf_str,
-        "-o",
-        "/dev/null",
-        "-f",
-        "opl",
-        "--overwrite",
-    ];
+    let cat = Invocation::tool(
+        ExternalTool::Osmium,
+        strings(&["cat", pbf_str, "-o", "/dev/null", "-f", "opl", "--overwrite"]),
+    );
 
     let config = BenchConfig {
         command: "baseline-osmium-cat-opl".into(),
@@ -452,11 +414,11 @@ fn run_osmium_baseline(
         cargo_features: None,
         external_build: None,
         runs,
-        cli_args: Some(crate::harness::format_cli_args("osmium", &osmium_args)),
+        cli_args: None,
         metadata: vec![],
     };
 
-    harness.run_external(&config, Path::new("osmium"), &osmium_args, project_root)?;
+    harness.run_external(&config, &cat, project_root)?;
 
     // osmium add-locations-to-ways baseline
     std::fs::create_dir_all(scratch_dir)
@@ -466,13 +428,16 @@ fn run_osmium_baseline(
         PbfhoggLayout::fixed_scratch_file(scratch_dir, "bench-osmium-altw-output.osm.pbf");
     let altw_output_str = crate::utf8_path::path_str(&altw_output)?;
 
-    let altw_args: Vec<&str> = vec![
-        "add-locations-to-ways",
-        pbf_str,
-        "-o",
-        altw_output_str,
-        "--overwrite",
-    ];
+    let altw = Invocation::tool(
+        ExternalTool::Osmium,
+        strings(&[
+            "add-locations-to-ways",
+            pbf_str,
+            "-o",
+            altw_output_str,
+            "--overwrite",
+        ]),
+    );
 
     let altw_config = BenchConfig {
         command: "baseline-osmium-add-locations-to-ways".into(),
@@ -481,11 +446,11 @@ fn run_osmium_baseline(
         cargo_features: None,
         external_build: None,
         runs,
-        cli_args: Some(crate::harness::format_cli_args("osmium", &altw_args)),
+        cli_args: None,
         metadata: vec![],
     };
 
-    harness.run_external(&altw_config, Path::new("osmium"), &altw_args, project_root)?;
+    harness.run_external(&altw_config, &altw, project_root)?;
 
     std::fs::remove_file(&altw_output).ok();
 
@@ -495,6 +460,10 @@ fn run_osmium_baseline(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+fn strings(args: &[&str]) -> Vec<String> {
+    args.iter().map(|&a| a.to_owned()).collect()
+}
 
 /// Parse `---` delimited blocks from stderr output.
 ///

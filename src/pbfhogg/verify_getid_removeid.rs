@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use super::commands::GETID_BENCH_IDS;
-use super::verify::{Findings, Verdict, VerifyHarness, Writes};
+use super::verify::{ExternalTool, Findings, Verdict, VerifyHarness, Writes};
 use super::verify_multi_extract::inspect_counts;
 use crate::error::DevError;
 use crate::output::verify_msg;
@@ -48,7 +48,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
     let mut osmium_args: Vec<&str> = vec!["getid", &pbf_str];
     osmium_args.extend_from_slice(GETID_BENCH_IDS);
     osmium_args.extend_from_slice(&["-o", &osmium_getid_str, "--overwrite"]);
-    let captured = harness.run_tool("osmium", &osmium_args)?;
+    let captured = harness.run_tool(ExternalTool::Osmium, &osmium_args)?;
     harness.check_exit(&captured, "osmium getid")?;
 
     // Print inspect output for both getid outputs.
