@@ -49,6 +49,8 @@ pub(super) struct Edge {
     pub(super) target: Target,
     /// Only test builds follow this edge.
     pub(super) test: bool,
+    /// No test build follows this edge.
+    pub(super) dead: bool,
     /// An `include!` splice rather than a module: parsed as items or as one
     /// expression.
     pub(super) splice: bool,
@@ -73,6 +75,10 @@ pub(super) struct Facts {
     /// Byte spans (file coordinates) proven absent without `test`, outside
     /// spans already inherited as test.
     pub(super) masks: Vec<Range<usize>>,
+    /// Byte spans proven absent from every test build, outside spans already
+    /// inherited as dead. Collected in test contexts too: they narrow the
+    /// test-code selection and never touch `masks`.
+    pub(super) dead: Vec<Range<usize>>,
     /// Spans of free functions carrying a bare `#[test]`. Absent without
     /// `test` only if nothing can shadow the builtin attribute, which the
     /// graph decides across every reachable source.
@@ -102,15 +108,30 @@ fn origin(src: &str) -> usize {
     at
 }
 
-/// Analyze `src` under `entry`. `test` is the inherited status: a file only
-/// reached as test contributes test edges and no masks or refusals of its own.
-/// An `Err` is a parse failure, described with its position.
-pub(super) fn analyze(src: &str, entry: &Entry, test: bool, splice: bool) -> Result<Facts, String> {
+/// What an occurrence of a file inherits from the edge that reached it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub(super) struct Context {
+    /// Absent from every non-test build: the file contributes test edges and
+    /// no masks or refusals of its own.
+    pub(super) test: bool,
+    /// Absent from every test build: the whole occurrence is dead there.
+    pub(super) dead: bool,
+}
+
+/// Analyze `src` under `entry` and the inherited `context`. An `Err` is a
+/// parse failure, described with its position.
+pub(super) fn analyze(
+    src: &str,
+    entry: &Entry,
+    context: Context,
+    splice: bool,
+) -> Result<Facts, String> {
     let origin = origin(src);
     let body = &src[origin..];
     let mut collector = Collector {
         origin,
-        test,
+        test: context.test,
+        dead: context.dead,
         file_dir: entry.dir.clone(),
         dir: entry.dir.clone(),
         stem: entry.stem.clone(),
@@ -142,6 +163,8 @@ pub(super) fn analyze(src: &str, entry: &Entry, test: bool, splice: bool) -> Res
 struct Collector {
     origin: usize,
     test: bool,
+    /// Inside a node proven absent from every test build.
+    dead: bool,
     /// The analyzed file's own directory: where `include!` resolves.
     file_dir: PathBuf,
     /// The current module directory (inline modules extend it).
@@ -176,10 +199,11 @@ impl Collector {
         }
     }
 
-    fn edge(&mut self, target: Target, test: bool, splice: bool) {
+    fn edge(&mut self, target: Target, test: bool, dead: bool, splice: bool) {
         self.facts.edges.push(Edge {
             target,
             test,
+            dead,
             splice,
             bare: self.bare,
         });
@@ -190,23 +214,35 @@ impl Collector {
             self.facts.masks.push(self.origin..len);
             self.test = true;
         }
+        if cfg::absent_with_test(&file.attrs) && !self.dead {
+            self.facts.dead.push(self.origin..len);
+            self.dead = true;
+        }
         for item in &file.items {
             self.visit_item(item);
         }
     }
 
-    /// Run `f` over a node whose `attrs` may prove it test-only, masking its
-    /// whole span (attributes included) when they do.
+    /// Run `f` over a node whose `attrs` may prove it test-only or absent
+    /// from test builds, recording its whole span (attributes included) when
+    /// they do.
     fn attributed(&mut self, attrs: &[Attribute], span: Span, f: impl FnOnce(&mut Self)) {
         let absent = cfg::absent_without_test(attrs);
         if absent && !self.test {
             let bytes = self.bytes(span);
             self.facts.masks.push(bytes);
         }
-        let saved = self.test;
+        let dead = cfg::absent_with_test(attrs);
+        if dead && !self.dead {
+            let bytes = self.bytes(span);
+            self.facts.dead.push(bytes);
+        }
+        let (saved_test, saved_dead) = (self.test, self.dead);
         self.test |= absent;
+        self.dead |= dead;
         f(self);
-        self.test = saved;
+        self.test = saved_test;
+        self.dead = saved_dead;
     }
 
     /// `dir`, extended by the pending non-mod-rs stem.
@@ -249,11 +285,15 @@ impl Collector {
                     name,
                 },
             };
-            s.edge(target, s.test, false);
+            // An alternative every test build selects replaces the default
+            // path there, so the default is dead in test builds.
+            let replaced = conditional.iter().any(|alt| alt.always_in_test);
+            s.edge(target, s.test, s.dead || replaced, false);
             for alt in conditional {
                 s.edge(
                     Target::Explicit(s.dir.join(alt.path)),
                     s.test || alt.test_only,
+                    s.dead || alt.never_in_test,
                     false,
                 );
             }
@@ -276,6 +316,7 @@ impl Collector {
             Ok(lit) => self.edge(
                 Target::Explicit(self.file_dir.join(lit.value())),
                 self.test,
+                self.dead,
                 true,
             ),
             Err(_) if is_out_dir_concat(tokens) => {}
@@ -771,11 +812,39 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
 
+    const TEST: Context = Context {
+        test: true,
+        dead: false,
+    };
+
     fn entry() -> Entry {
         Entry {
             dir: PathBuf::from("src"),
             stem: Some("foo".into()),
         }
+    }
+
+    #[test]
+    fn spans_and_edges_dead_in_test_builds_are_recorded_in_every_context() {
+        let src = "#[cfg(test)]\nmod tests {\n    #[cfg(not(test))]\n    fn gone() {}\n    #[cfg(not(test))]\n    #[path = \"helper.rs\"]\n    mod helper;\n    fn live() {}\n}\n#[cfg(any())]\nfn never() {}\n";
+        let facts = analyze(src, &entry(), Context::default(), false).unwrap();
+        assert_eq!(
+            masked(src, &facts.dead),
+            vec![
+                "#[cfg(not(test))]\n    fn gone() {}",
+                "#[cfg(not(test))]\n    #[path = \"helper.rs\"]\n    mod helper;",
+                "#[cfg(any())]\nfn never() {}",
+            ]
+        );
+        assert!(facts.edges.iter().all(|e| e.test && e.dead));
+        // A test-context occurrence still reports its dead spans.
+        let inner = "#[cfg(not(test))]\nfn gone() {}\nfn live() {}\n";
+        let facts = analyze(inner, &entry(), TEST, false).unwrap();
+        assert!(facts.masks.is_empty());
+        assert_eq!(
+            masked(inner, &facts.dead),
+            vec!["#[cfg(not(test))]\nfn gone() {}"]
+        );
     }
 
     fn masked<'a>(src: &'a str, spans: &[Range<usize>]) -> Vec<&'a str> {
@@ -785,21 +854,21 @@ mod tests {
     #[test]
     fn cfg_test_item_is_masked_with_its_attribute() {
         let src = "fn a() {}\n#[cfg(test)]\nfn b() {}\nfn c() {}\n";
-        let facts = analyze(src, &entry(), false, false).unwrap();
+        let facts = analyze(src, &entry(), Context::default(), false).unwrap();
         assert_eq!(masked(src, &facts.masks), vec!["#[cfg(test)]\nfn b() {}"]);
     }
 
     #[test]
     fn attribute_on_a_generic_param_masks_only_the_param() {
         let src = "fn production<#[cfg(test)] T>() { forbidden(); }\n";
-        let facts = analyze(src, &entry(), false, false).unwrap();
+        let facts = analyze(src, &entry(), Context::default(), false).unwrap();
         assert_eq!(masked(src, &facts.masks), vec!["#[cfg(test)] T"]);
     }
 
     #[test]
     fn impl_with_generic_commas_and_use_tree_are_masked_whole() {
         let src = "#[cfg(test)]\nimpl<A, B> T<A, B> for X { fn f() {} }\n#[cfg(test)]\nuse crate::{a, b};\nfn p() {}\n";
-        let facts = analyze(src, &entry(), false, false).unwrap();
+        let facts = analyze(src, &entry(), Context::default(), false).unwrap();
         assert_eq!(
             masked(src, &facts.masks),
             vec![
@@ -812,7 +881,7 @@ mod tests {
     #[test]
     fn statements_fields_and_arms_are_masked() {
         let src = "struct S { a: u8, #[cfg(test)] b: u8 }\nfn f(x: u8) { #[cfg(test)] let y = 1; match x { #[cfg(test)] 0 => {} _ => {} } }\n";
-        let facts = analyze(src, &entry(), false, false).unwrap();
+        let facts = analyze(src, &entry(), Context::default(), false).unwrap();
         assert_eq!(
             masked(src, &facts.masks),
             vec![
@@ -826,7 +895,7 @@ mod tests {
     #[test]
     fn inner_cfg_test_masks_only_its_module() {
         let src = "mod fixtures {\n    #![cfg(test)]\n    fn f() {}\n}\nfn production() {}\n";
-        let facts = analyze(src, &entry(), false, false).unwrap();
+        let facts = analyze(src, &entry(), Context::default(), false).unwrap();
         assert_eq!(
             masked(src, &facts.masks),
             vec!["mod fixtures {\n    #![cfg(test)]\n    fn f() {}\n}"]
@@ -836,14 +905,14 @@ mod tests {
     #[test]
     fn file_level_inner_cfg_masks_the_file_after_the_bom() {
         let src = "\u{feff}#![cfg(test)]\nfn f() {}\n";
-        let facts = analyze(src, &entry(), false, false).unwrap();
+        let facts = analyze(src, &entry(), Context::default(), false).unwrap();
         assert_eq!(facts.masks, vec![3..src.len()]);
     }
 
     #[test]
     fn spans_are_shifted_past_a_bom_and_shebang() {
         let src = "\u{feff}#!/usr/bin/env run\nfn a() {}\n#[cfg(test)]\nfn b() {}\n";
-        let facts = analyze(src, &entry(), false, false).unwrap();
+        let facts = analyze(src, &entry(), Context::default(), false).unwrap();
         assert_eq!(masked(src, &facts.masks), vec!["#[cfg(test)]\nfn b() {}"]);
     }
 
@@ -851,7 +920,7 @@ mod tests {
     fn module_edges_follow_rustc_directory_ownership() {
         // `entry()` is the non-mod-rs file `src/foo.rs`.
         let src = "mod a;\n#[cfg(test)]\nmod t;\n#[path = \"x/y.rs\"]\nmod p;\nmod inl {\n    mod b;\n    #[path = \"q.rs\"]\n    mod q;\n}\n#[path = \"other\"]\nmod moved { mod c; }\n";
-        let facts = analyze(src, &entry(), false, false).unwrap();
+        let facts = analyze(src, &entry(), Context::default(), false).unwrap();
         let ord = |dir: &str, name: &str| Target::Ordinary {
             dir: PathBuf::from(dir),
             name: name.into(),
@@ -879,7 +948,7 @@ mod tests {
     #[test]
     fn ungated_child_of_a_test_module_is_test() {
         let src = "#[cfg(test)]\nmod tests {\n    mod nested;\n}\n";
-        let facts = analyze(src, &entry(), false, false).unwrap();
+        let facts = analyze(src, &entry(), Context::default(), false).unwrap();
         assert!(facts.edges.iter().all(|e| e.test));
     }
 
@@ -887,7 +956,7 @@ mod tests {
     fn include_literals_resolve_from_the_file_even_inside_inline_modules() {
         let src =
             "emit! { include!(\"shared.rs\"); }\nmod inner { const X: u8 = include!(\"v.rs\"); }\n";
-        let facts = analyze(src, &entry(), false, false).unwrap();
+        let facts = analyze(src, &entry(), Context::default(), false).unwrap();
         let targets: Vec<Target> = facts.edges.into_iter().map(|e| e.target).collect();
         assert_eq!(
             targets,
@@ -902,7 +971,7 @@ mod tests {
     fn only_the_exact_out_dir_form_escapes_refusal() {
         let ok = "include!(concat!(env!(\"OUT_DIR\"), \"/gen.rs\"));\n";
         assert!(
-            analyze(ok, &entry(), false, false)
+            analyze(ok, &entry(), Context::default(), false)
                 .unwrap()
                 .refusals
                 .is_empty()
@@ -913,12 +982,12 @@ mod tests {
             "include!(choose!(\"OUT_DIR\", \"production.rs\"));\n",
         ] {
             assert_eq!(
-                analyze(bad, &entry(), false, false).unwrap().refusals.len(),
+                analyze(bad, &entry(), Context::default(), false).unwrap().refusals.len(),
                 1,
                 "{bad}"
             );
             assert!(
-                analyze(bad, &entry(), true, false)
+                analyze(bad, &entry(), TEST, false)
                     .unwrap()
                     .refusals
                     .is_empty(),
@@ -930,14 +999,14 @@ mod tests {
     #[test]
     fn cfg_inside_macro_input_proves_nothing() {
         let src = "rewrite! { #[cfg(test)] fn f() {} }\n";
-        let facts = analyze(src, &entry(), false, false).unwrap();
+        let facts = analyze(src, &entry(), Context::default(), false).unwrap();
         assert!(facts.masks.is_empty());
     }
 
     #[test]
     fn tripwire_evidence_names_files_not_identifiers() {
         let src = "fn p() { println!(\"tests {}\", state); }\nother!(mod fixtures);\nload!(\"data/shared.rs\");\n";
-        let facts = analyze(src, &entry(), false, false).unwrap();
+        let facts = analyze(src, &entry(), Context::default(), false).unwrap();
         assert_eq!(
             facts.evidence,
             vec![
@@ -957,7 +1026,7 @@ mod tests {
     fn bare_test_on_a_free_fn_is_recorded_separately() {
         let src =
             "#[test]\nfn t() {}\n#[tokio::test]\nfn u() {}\n#[test(x)]\nfn v() {}\nfn p() {}\n";
-        let facts = analyze(src, &entry(), false, false).unwrap();
+        let facts = analyze(src, &entry(), Context::default(), false).unwrap();
         assert!(facts.masks.is_empty());
         assert_eq!(masked(src, &facts.bare_tests), vec!["#[test]\nfn t() {}"]);
     }
@@ -965,19 +1034,19 @@ mod tests {
     #[test]
     fn imports_and_macro_use_that_can_shadow_test_are_reported() {
         let src = "use a::test;\nuse b::{c as test};\nuse d::testing;\n#[macro_use]\nextern crate e;\n#[macro_use(f)]\nextern crate g;\n#[macro_use(test)]\nextern crate h;\n#[cfg_attr(feature = \"hooks\", macro_use)]\nextern crate i;\nuse j::k as r#test;\n";
-        let facts = analyze(src, &entry(), false, false).unwrap();
+        let facts = analyze(src, &entry(), Context::default(), false).unwrap();
         assert_eq!(facts.test_shadows.len(), 6, "{:?}", facts.test_shadows);
     }
 
     #[test]
     fn shadowing_imports_inside_macro_input_are_reported() {
         let src = "cfg_if::cfg_if! {\n    if #[cfg(feature = \"x\")] {\n        use attrs::wrap as test;\n    } else {\n        use attrs::{other, test};\n    }\n}\nm! { use a::test; }\n";
-        let facts = analyze(src, &entry(), false, false).unwrap();
+        let facts = analyze(src, &entry(), Context::default(), false).unwrap();
         assert_eq!(facts.test_shadows.len(), 3, "{:?}", facts.test_shadows);
         // Not imports: a `test` path segment mid-path, a call argument.
         let quiet = "m! { use a::test::b; }\nn!(test);\n";
         assert!(
-            analyze(quiet, &entry(), false, false)
+            analyze(quiet, &entry(), Context::default(), false)
                 .unwrap()
                 .test_shadows
                 .is_empty()
@@ -985,7 +1054,7 @@ mod tests {
         // Test context does not count.
         let gated = "#[cfg(test)]\nm! { use a::test; }\n";
         assert!(
-            analyze(gated, &entry(), false, false)
+            analyze(gated, &entry(), Context::default(), false)
                 .unwrap()
                 .test_shadows
                 .is_empty()
@@ -995,14 +1064,14 @@ mod tests {
     #[test]
     fn expression_statement_is_masked_with_its_semicolon() {
         let src = "fn f() { #[cfg(test)] setup(); run(); }\n";
-        let facts = analyze(src, &entry(), false, false).unwrap();
+        let facts = analyze(src, &entry(), Context::default(), false).unwrap();
         assert_eq!(masked(src, &facts.masks), vec!["#[cfg(test)] setup();"]);
     }
 
     #[test]
     fn edges_and_refusals_inside_a_bare_test_are_tagged() {
         let src = "#[test]\nfn fixture() {\n    include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/x.rs\"));\n    include!(\"y.rs\");\n}\n";
-        let facts = analyze(src, &entry(), false, false).unwrap();
+        let facts = analyze(src, &entry(), Context::default(), false).unwrap();
         assert!(facts.refusals.is_empty());
         assert_eq!(facts.bare_refusals.len(), 1);
         assert!(facts.edges.iter().all(|e| e.bare && !e.test));
@@ -1030,6 +1099,7 @@ mod tests {
         Collector {
             origin: 0,
             test: false,
+            dead: false,
             file_dir: PathBuf::from("src"),
             dir: PathBuf::from("src"),
             stem: None,
@@ -1040,8 +1110,8 @@ mod tests {
 
     #[test]
     fn a_splice_may_be_one_expression() {
-        let facts = analyze("[1u8, 2, 3]\n", &entry(), false, true).unwrap();
+        let facts = analyze("[1u8, 2, 3]\n", &entry(), Context::default(), true).unwrap();
         assert!(facts.edges.is_empty());
-        assert!(analyze("[1u8, 2, 3]\n", &entry(), false, false).is_err());
+        assert!(analyze("[1u8, 2, 3]\n", &entry(), Context::default(), false).is_err());
     }
 }

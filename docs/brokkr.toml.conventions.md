@@ -164,16 +164,20 @@ predicates are rule-local:
 - `skip_after` (regex; once a line in a file matches it, every *following* line
   in that file is exempt - the matching line itself is still checked). For
   "don't fire inside the test module": `skip_after = '^#\[cfg\(test\)\]'`.
-  A textual cut; `skip_test` below is the structural answer.
-- `skip_test = true` scopes `pattern` to production code (see
-  [Test code](#test-code-skip_test)). Composes with `region`; cannot combine
-  with `join_wrapped_use`.
+  A textual cut; `test_code` below is the structural answer.
+- `test_code` (`"include"`, the default, `"skip"` or `"only"`) scopes
+  `pattern` to production code or to test code (see
+  [Test code](#test-code-test_code)). Composes with `region`; cannot combine
+  with `join_wrapped_use`. The older `skip_test = true` still reads as
+  `test_code = "skip"` and `skip_test = false` as `"include"`; one table may
+  not set both keys.
 - `must_scan` (exact project-relative paths) - files this rule must actually
   scan. Each must be a present, readable text file selected by `paths` and not
   `exclude`, with at least one eligible line: not cut off by `skip_after`, satisfying
   `only_if_file_matches` (at or above the line, when positional), and - under
-  `skip_test` in a `.rs` file - holding unmasked code, not just a comment
-  beside a masked item (any other file admits on non-blank content).
+  `test_code` in a `.rs` file - holding code in scope, not just a comment
+  beside it (any other file admits on non-blank content under `"skip"`, and
+  never under `"only"`).
   A listed path the rule did not scan is a violation at `path:0`. It is the
   guard against a rule whose scope has silently stopped covering the files it
   was written for: a sentinel, not proof that every byte of the file was
@@ -184,13 +188,13 @@ statements). See `src/textlint.rs` and `src/lex.rs`.
 
 A matched file that is not valid UTF-8 is decoded lossily and scanned (ASCII,
 which patterns are written against, survives verbatim; an invalid byte becomes
-U+FFFD). The exception is `skip_test`: a Rust file the classifier reaches in
+U+FFFD). The exception is `test_code`: a Rust file the classifier reaches in
 production context must be valid UTF-8 to parse, so an invalid one refuses
 the classification instead. A *binary* file - a NUL in its first 8000 bytes,
 git's heuristic - is skipped, because a broad `paths` glob legitimately sweeps
 in images and archives where a line pattern means nothing.
 
-### Test code (`skip_test`)
+### Test code (`test_code`)
 
 ```toml
 [[textlint]]
@@ -199,23 +203,34 @@ pattern = '[0-9.][eE]-[0-9]'
 paths = ["crates/strategy/src/**/*.rs"]
 exclude = ["crates/strategy/src/tolerance.rs"]
 region = "code"
-skip_test = true
+test_code = "skip"
 allow_marker = "// epsilon-ok:"
 must_scan = ["crates/strategy/src/fill/sorting.rs"]
 message = "name a tolerance-module constant instead of a private epsilon"
+
+[[textlint]]
+name = "test-data-paths-via-common"
+pattern = '\bdata/'
+paths = ["src/**/*.rs", "tests/**/*.rs"]
+exclude = ["tests/common/**"]
+region = "string"
+test_code = "only"
+message = "resolve datasets through tests/common, not a data/ literal"
 ```
 
-In `.rs` files, `skip_test` blanks every byte the test-code classifier
-(`src/test_code.rs`) proves absent from every non-test build before
-`pattern` is matched. `allow_marker`, `except` and the context windows still
-read the raw physical line. It needs a Cargo workspace: the roots are every
-workspace target from `cargo metadata --no-deps`, with integration-test
-targets as test roots and every other kind as production roots. The
-classifier runs only when some `skip_test` rule selects at least one tracked
-`.rs` file, so a user-wide `skip_test` rule costs nothing in a tree it has no
-Rust to scan in.
+In `.rs` files, `test_code = "skip"` blanks every byte the test-code
+classifier (`src/test_code.rs`) proves absent from every non-test build
+before `pattern` is matched. `test_code = "only"` is its complement for code
+that exists for tests: it blanks every other byte, and also what is proven
+absent from test builds as well (below). `allow_marker`, `except` and the
+context windows still read the raw physical line. It needs a Cargo workspace:
+the roots are every workspace target from `cargo metadata --no-deps`, with
+integration-test targets as test roots and every other kind as production
+roots. The classifier runs only when some rule with a `test_code` scope
+selects at least one tracked `.rs` file, so a user-wide scoped rule costs
+nothing in a tree it has no Rust to scan in.
 
-What it skips:
+What `"skip"` skips:
 
 - files reached only through test contexts: `#[cfg(test)] mod x;` and
   everything below it, `#[path]` targets of such declarations, and
@@ -270,6 +285,32 @@ test-only is handed back to production, with a warning, when production macro
 input names it: `mod <name>` inside macro tokens, or a path-shaped string
 literal (one containing `/` or ending in `.rs`) whose components are a suffix
 of the file's path.
+
+What `"only"` selects is exactly what `"skip"` skips, less code no test build
+contains: a byte stays selected when some occurrence of its file does not
+prove it absent from test builds. That proof evaluates `cfg` with `test` true
+and every other atom unknown, and also reads the `cfg` a `cfg_attr`
+introduces, so `#[cfg(not(test))]` inside a test module, `#[cfg(any())]`, and
+a module declared at such a position are dropped. Correlations between atoms
+are not tracked: `#[cfg(feature = "x")] #[cfg(not(feature = "x"))]` is
+impossible but stays selected. Consequences of the exclusive definition:
+
+- shipping code is never test code, even when an integration test also
+  includes it by `#[path]`; a rule meant for both uses the default `include`.
+- `#[cfg(any(test, feature = "x"))]` helpers ship under a feature, so they are
+  production and not selected.
+- test code the source model cannot see (inside macro input, generated by a
+  macro) is not selected; nor is any file that is not Rust.
+- a file nothing reaches, or one the tripwire hands back, has only its own
+  `#[cfg(test)]` spans selected.
+
+When something could shadow the builtin `#[test]`, a bare `#[test]` function
+is scanned as production by `"skip"`, which errs toward scanning. For `"only"`
+the same doubt would drop it silently, so the classifier also classifies as if
+every bare `#[test]` were the builtin, and an `"only"` rule that selects a file
+whose selection differs between the two readings refuses, naming the files and
+the shadowing sites. A file an independent proof settles either way, such as
+production code also reached through a bare test function, is not refused.
 
 ## `[textlint_preset]` blocks
 

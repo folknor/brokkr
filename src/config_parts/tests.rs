@@ -82,12 +82,79 @@ mod tests {
             .filter(|key| !matches!(key.as_str(), "name" | "pattern" | "message"))
             .cloned()
             .collect();
+        // `skip_test` is the legacy spelling of `test_code`, rewritten before
+        // the rule deserializes, so the rule itself has no such field.
         let preset_fields: std::collections::BTreeSet<String> = TEXTLINT_PRESET_FIELDS
             .iter()
+            .filter(|field| **field != "skip_test")
             .map(|field| (*field).to_owned())
             .collect();
 
         assert_eq!(preset_fields, rule_fields);
+    }
+
+    #[test]
+    fn textlint_skip_test_reads_as_test_code_per_table_before_presets() {
+        let rules = textlint_of(
+            r#"
+[textlint_preset.legacy]
+paths = ["src/**/*.rs"]
+skip_test = true
+
+[[textlint]]
+name = "inherits"
+pattern = "p"
+message = "m"
+preset = "legacy"
+
+[[textlint]]
+name = "overrides-with-new-key"
+pattern = "p"
+message = "m"
+preset = "legacy"
+test_code = "only"
+
+[[textlint]]
+name = "overrides-with-old-key"
+pattern = "p"
+message = "m"
+preset = "legacy"
+skip_test = false
+"#,
+        )
+        .unwrap();
+        assert_eq!(rules[0].test_code, TestCode::Skip);
+        assert_eq!(rules[1].test_code, TestCode::Only);
+        assert_eq!(rules[2].test_code, TestCode::Include);
+
+        // A malformed preset value a nearer table overrides never loads,
+        // which is how it behaved before `test_code` existed.
+        let overridden = textlint_of(
+            r#"
+[textlint_preset.junk]
+paths = ["src/**/*.rs"]
+skip_test = "unused"
+
+[[textlint]]
+name = "r"
+pattern = "p"
+message = "m"
+preset = "junk"
+skip_test = false
+"#,
+        )
+        .unwrap();
+        assert_eq!(overridden[0].test_code, TestCode::Include);
+
+        let both = textlint_of(
+            "[[textlint]]\nname = \"r\"\npattern = \"p\"\npaths = [\"**\"]\nmessage = \"m\"\nskip_test = true\ntest_code = \"skip\"\n",
+        )
+        .unwrap_err();
+        assert!(both.to_string().contains("both"), "unexpected: {both}");
+        let unknown = textlint_of(
+            "[[textlint]]\nname = \"r\"\npattern = \"p\"\npaths = [\"**\"]\nmessage = \"m\"\ntest_code = \"tests\"\n",
+        );
+        assert!(unknown.is_err());
     }
 
     fn script_checks_of(src: &str) -> Result<Vec<ScriptCheck>, DevError> {

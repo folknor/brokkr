@@ -1,5 +1,10 @@
 //! Which bytes of a workspace's Rust source are test code: the classifier
-//! behind `[[textlint]] skip_test`.
+//! behind `[[textlint]] test_code`.
+//!
+//! Two selections come out of it. The skip mask is the claim below. The test
+//! selection is the skip mask less what every occurrence proves absent from
+//! test builds too (dead code), so `test_code = "only"` sees code that exists
+//! for tests and that some test build may contain.
 //!
 //! The claim is scoped to brokkr's *unexpanded source model*. A byte is
 //! test-only when every occurrence of it the model can see is absent from

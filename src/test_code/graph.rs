@@ -6,9 +6,9 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::error::DevError;
 
-use super::facts::{self, Edge, Entry, Evidence, Facts, Target};
+use super::facts::{self, Context, Edge, Entry, Evidence, Facts, Target};
 
-/// What `skip_test` may skip in one file, in file byte coordinates.
+/// What `test_code = "skip"` may skip in one file, in file byte coordinates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FileMask {
     /// Every occurrence of the file is test-only.
@@ -22,6 +22,15 @@ pub(crate) enum FileMask {
 #[derive(Debug, Default)]
 pub(crate) struct Classification {
     files: HashMap<PathBuf, FileMask>,
+    /// What `test_code = "only"` selects: bytes the skip mask covers that
+    /// some occurrence does not prove absent from test builds. Disjoint
+    /// ascending spans; a span may run past the end of the file.
+    tests: HashMap<PathBuf, Vec<Range<usize>>>,
+    /// Files whose test selection depends on what a bare `#[test]` names,
+    /// which a shadowing site leaves unresolved.
+    unresolved: HashSet<PathBuf>,
+    /// The shadowing sites behind `unresolved`.
+    pub(crate) shadows: Vec<String>,
     /// Operator-facing notes: tripwire vetoes, and why bare `#[test]`
     /// functions are not being skipped when something could shadow it.
     pub(crate) notes: Vec<String>,
@@ -30,6 +39,14 @@ pub(crate) struct Classification {
 impl Classification {
     pub(crate) fn mask(&self, rel: &Path) -> Option<&FileMask> {
         self.files.get(rel)
+    }
+
+    pub(crate) fn test_selection(&self, rel: &Path) -> Option<&[Range<usize>]> {
+        self.tests.get(rel).map(Vec::as_slice)
+    }
+
+    pub(crate) fn is_unresolved(&self, rel: &Path) -> bool {
+        self.unresolved.contains(rel)
     }
 }
 
@@ -72,7 +89,7 @@ pub(crate) type Reader<'a> = dyn Fn(&Path) -> Result<String, String> + 'a;
 struct VisitKey {
     canon: PathBuf,
     entry: Entry,
-    test: bool,
+    context: Context,
     splice: bool,
 }
 
@@ -88,12 +105,15 @@ struct Occurrences {
     shown: String,
     production: Vec<ProductionMasks>,
     test: bool,
+    /// One entry per occurrence not proven absent from test builds (in any
+    /// context): the spans that occurrence proves absent from them.
+    live: Vec<Vec<Range<usize>>>,
 }
 
 struct Pending {
     path: PathBuf,
     entry: Entry,
-    test: bool,
+    context: Context,
     splice: bool,
 }
 
@@ -105,6 +125,8 @@ struct Walk {
     /// Whether any edge or refusal came from inside a bare-`#[test]`
     /// function, so a second walk would differ.
     saw_bare: bool,
+    /// Whether any production occurrence holds a bare-`#[test]` function.
+    bare_candidates: bool,
     seen: HashSet<VisitKey>,
     occurrences: HashMap<PathBuf, Occurrences>,
     refusals: Vec<String>,
@@ -132,7 +154,7 @@ impl Walk {
             let key = VisitKey {
                 canon: canon.clone(),
                 entry: p.entry.clone(),
-                test: p.test,
+                context: p.context,
                 splice: p.splice,
             };
             if !self.seen.insert(key) {
@@ -142,18 +164,26 @@ impl Walk {
             let src = match read(&p.path) {
                 Ok(src) => src,
                 Err(why) => {
-                    if !p.test {
+                    if !p.context.test {
                         self.refusals.push(format!("{shown}: {why}"));
                     }
                     continue;
                 }
             };
-            match facts::analyze(&src, &p.entry, p.test, p.splice) {
-                Err(_) if p.test => self.occurrence(canon, &shown).test = true,
+            match facts::analyze(&src, &p.entry, p.context, p.splice) {
+                Err(_) if p.context.test => {
+                    // Unparsed test code proves nothing dead: all of it is
+                    // live unless the edge itself was dead.
+                    let o = self.occurrence(canon, &shown);
+                    o.test = true;
+                    if !p.context.dead {
+                        o.live.push(Vec::new());
+                    }
+                }
                 Err(error) => self
                     .refusals
                     .push(format!("{shown}: does not parse: {error}")),
-                Ok(found) => self.record(root, canon, &shown, p.test, found),
+                Ok(found) => self.record(root, canon, &shown, p.context, found),
             }
         }
     }
@@ -166,9 +196,15 @@ impl Walk {
         o
     }
 
-    fn record(&mut self, root: &Path, canon: PathBuf, shown: &str, test: bool, found: Facts) {
+    fn record(&mut self, root: &Path, canon: PathBuf, shown: &str, context: Context, found: Facts) {
+        if !context.test {
+            self.bare_candidates |= !found.bare_tests.is_empty();
+        }
         let o = self.occurrence(canon, shown);
-        if test {
+        if !context.dead {
+            o.live.push(normalize(found.dead));
+        }
+        if context.test {
             o.test = true;
         } else {
             o.production.push(ProductionMasks {
@@ -206,13 +242,17 @@ impl Walk {
 
     fn follow(&mut self, root: &Path, from: &str, mut edge: Edge) {
         edge.test |= edge.bare && self.bare_is_test;
+        let context = Context {
+            test: edge.test,
+            dead: edge.dead,
+        };
         match edge.target {
             Target::Explicit(path) => {
                 let entry = Entry::owning(&path);
                 self.queue.push(Pending {
                     path,
                     entry,
-                    test: edge.test,
+                    context,
                     splice: edge.splice,
                 });
             }
@@ -234,7 +274,7 @@ impl Walk {
                             dir: dir.clone(),
                             stem: Some(name.clone()),
                         },
-                        test: edge.test,
+                        context,
                         splice: false,
                     });
                 }
@@ -243,7 +283,7 @@ impl Walk {
                     self.queue.push(Pending {
                         path: nested,
                         entry,
-                        test: edge.test,
+                        context,
                         splice: false,
                     });
                 }
@@ -338,17 +378,53 @@ fn evidence_site(from: &str, evidence: &Evidence) -> String {
     }
 }
 
-/// Masks of a file analyzed on its own, as a production crate root: for a
-/// file nothing reaches, or one the tripwire vetoed. Only its `cfg` masks
-/// apply: bare `#[test]` is never honored here, because the walk cannot see
-/// the file's crate root, where a `#[macro_use] extern crate` could shadow
-/// the builtin. A parse failure masks nothing.
-fn standalone(path: &Path, read: &Reader<'_>) -> Vec<Range<usize>> {
-    read(path)
+/// `a` with every byte of `b` removed; both disjoint and ascending.
+fn subtract(a: &[Range<usize>], b: &[Range<usize>]) -> Vec<Range<usize>> {
+    let mut out = Vec::new();
+    for span in a {
+        let mut start = span.start;
+        for cut in b {
+            if cut.end <= start || cut.start >= span.end {
+                continue;
+            }
+            if cut.start > start {
+                out.push(start..cut.start);
+            }
+            start = start.max(cut.end);
+        }
+        if start < span.end {
+            out.push(start..span.end);
+        }
+    }
+    out
+}
+
+/// What the test selection keeps of `candidates`: bytes some live occurrence
+/// does not prove absent from test builds. With no live occurrence, nothing.
+fn live_part(candidates: &[Range<usize>], live: &[Vec<Range<usize>>]) -> Vec<Range<usize>> {
+    let Some((first, rest)) = live.split_first() else {
+        return Vec::new();
+    };
+    let dead_everywhere = rest.iter().fold(first.clone(), |acc, d| intersect(&acc, d));
+    subtract(candidates, &dead_everywhere)
+}
+
+/// A file analyzed on its own, as a production crate root: for a file
+/// nothing reaches, or one the tripwire vetoed. Returns its `cfg` skip masks
+/// and its test selection (those masks less what its own attributes prove
+/// absent from test builds). Bare `#[test]` is never honored here, because the
+/// walk cannot see the file's crate root, where a `#[macro_use] extern crate`
+/// could shadow the builtin. A parse failure masks and selects nothing.
+fn standalone(path: &Path, read: &Reader<'_>) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
+    let Some(found) = read(path)
         .ok()
-        .and_then(|src| facts::analyze(&src, &Entry::owning(path), false, false).ok())
-        .map(|f| normalize(f.masks))
-        .unwrap_or_default()
+        .and_then(|src| facts::analyze(&src, &Entry::owning(path), Context::default(), false).ok())
+    else {
+        return (Vec::new(), Vec::new());
+    };
+    let masks = normalize(found.masks);
+    let tests = subtract(&masks, &normalize(found.dead));
+    (masks, tests)
 }
 
 fn walk_from(root: &Path, roots: &[Root], read: &Reader<'_>, bare_is_test: bool) -> Walk {
@@ -360,7 +436,10 @@ fn walk_from(root: &Path, roots: &[Root], read: &Reader<'_>, bare_is_test: bool)
         walk.queue.push(Pending {
             path: r.path.clone(),
             entry: Entry::owning(&r.path),
-            test: r.test,
+            context: Context {
+                test: r.test,
+                dead: false,
+            },
             splice: false,
         });
     }
@@ -368,14 +447,81 @@ fn walk_from(root: &Path, roots: &[Root], read: &Reader<'_>, bare_is_test: bool)
     walk
 }
 
+/// Per-file verdicts of one walk.
+#[derive(Default)]
+struct Verdicts {
+    masks: HashMap<PathBuf, FileMask>,
+    tests: HashMap<PathBuf, Vec<Range<usize>>>,
+    notes: Vec<String>,
+}
+
+/// The skip mask and test selection of every file in `rust_files`, with
+/// bare-`#[test]` spans counted as test code when `honor_bare_tests`.
+fn verdicts(
+    root: &Path,
+    walk: &Walk,
+    honor_bare_tests: bool,
+    rust_files: &[PathBuf],
+    read: &Reader<'_>,
+) -> Verdicts {
+    let mut out = Verdicts::default();
+    for rel in rust_files {
+        let abs = root.join(rel);
+        let occurrence = std::fs::canonicalize(&abs)
+            .ok()
+            .and_then(|canon| walk.occurrences.get(&canon));
+        let (mask, tests) = match occurrence {
+            Some(o) if !o.production.is_empty() => {
+                let mut masks = o.production.iter().map(|m| {
+                    let mut spans = m.cfg.clone();
+                    if honor_bare_tests {
+                        spans.extend(m.bare_tests.iter().cloned());
+                    }
+                    normalize(spans)
+                });
+                let first = masks.next().unwrap_or_default();
+                let mask = masks.fold(first, |acc, m| intersect(&acc, &m));
+                let tests = live_part(&mask, &o.live);
+                (FileMask::Production(mask), tests)
+            }
+            Some(o) if o.test => match walk.evidence.iter().find(|(_, e)| names_file(e, &abs)) {
+                Some((from, evidence)) => {
+                    out.notes.push(format!(
+                        "{}: reached only as test code, but {}; scanned as production",
+                        o.shown,
+                        evidence_site(from, evidence)
+                    ));
+                    let (mask, tests) = standalone(&abs, read);
+                    (FileMask::Production(mask), tests)
+                }
+                None => {
+                    let whole = 0..usize::MAX;
+                    let tests = live_part(std::slice::from_ref(&whole), &o.live);
+                    (FileMask::Test, tests)
+                }
+            },
+            _ => {
+                let (mask, tests) = standalone(&abs, read);
+                (FileMask::Production(mask), tests)
+            }
+        };
+        out.masks.insert(rel.clone(), mask);
+        out.tests.insert(rel.clone(), tests);
+    }
+    out
+}
+
 /// Classify `rust_files` (relative to `root`) against `roots`, reading every
 /// source through `read`. Refuses, naming every site, when a production
-/// context holds a construct outside the source model.
+/// context holds a construct outside the source model. `select_tests` asks
+/// for the unresolved-file set a `test_code = "only"` rule needs, which can
+/// cost a further walk.
 pub(crate) fn classify(
     root: &Path,
     roots: &[Root],
     rust_files: &[PathBuf],
     read: &Reader<'_>,
+    select_tests: bool,
 ) -> Result<Classification, DevError> {
     // A bare `#[test]` is the builtin only if nothing in scope can shadow it.
     // Imports are module-scoped and `#[macro_use]` reaches a whole crate, so
@@ -399,49 +545,54 @@ pub(crate) fn classify(
         walk.refusals.sort();
         walk.refusals.dedup();
         return Err(DevError::Refused(format!(
-            "skip_test cannot classify this workspace's test code; each site is outside the source model:\n  {}",
+            "test_code cannot classify this workspace's test code; each site is outside the source model:\n  {}",
             walk.refusals.join("\n  ")
         )));
     }
     let mut out = Classification::default();
     if !honor_bare_tests {
         walk.test_shadows.sort();
+        walk.test_shadows.dedup();
         out.notes.push(format!(
             "bare #[test] functions are scanned as production, because something could shadow the builtin attribute:\n  {}",
             walk.test_shadows.join("\n  ")
         ));
     }
-    for rel in rust_files {
-        let abs = root.join(rel);
-        let occurrence = std::fs::canonicalize(&abs)
-            .ok()
-            .and_then(|canon| walk.occurrences.get(&canon));
-        let mask = match occurrence {
-            Some(o) if !o.production.is_empty() => {
-                let mut masks = o.production.iter().map(|m| {
-                    let mut spans = m.cfg.clone();
-                    if honor_bare_tests {
-                        spans.extend(m.bare_tests.iter().cloned());
-                    }
-                    normalize(spans)
-                });
-                let first = masks.next().unwrap_or_default();
-                FileMask::Production(masks.fold(first, |acc, m| intersect(&acc, &m)))
+    let found = verdicts(root, &walk, honor_bare_tests, rust_files, read);
+    out.files = found.masks;
+    out.tests = found.tests;
+    out.notes.extend(found.notes);
+    // Unresolved bare `#[test]`: the test selection above treats each as
+    // production. Classify again as if each were the builtin; a file whose
+    // selection differs between the two readings cannot be test-scanned
+    // honestly, while one an independent proof settles either way can.
+    if !honor_bare_tests && select_tests && (walk.saw_bare || walk.bare_candidates) {
+        let builtin = walk_from(root, roots, read, true);
+        let alternative = verdicts(root, &builtin, true, rust_files, read);
+        for rel in rust_files {
+            let (now, then) = (out.tests.get(rel), alternative.tests.get(rel));
+            if now == then {
+                continue;
             }
-            Some(o) if o.test => match walk.evidence.iter().find(|(_, e)| names_file(e, &abs)) {
-                Some((from, evidence)) => {
-                    out.notes.push(format!(
-                        "{}: reached only as test code, but {}; scanned as production",
-                        o.shown,
-                        evidence_site(from, evidence)
-                    ));
-                    FileMask::Production(standalone(&abs, read))
-                }
-                None => FileMask::Test,
-            },
-            _ => FileMask::Production(standalone(&abs, read)),
-        };
-        out.files.insert(rel.clone(), mask);
+            // Two spellings of one selection (a whole-file span against a
+            // file-level `#![cfg(test)]` span, say) can differ past the end
+            // of the file or over a BOM, which the scanner strips; compare
+            // only the bytes it matches against. A shebang is matched, so a
+            // selection that differs over one stays different.
+            let body = read(&root.join(rel)).map_or(0..usize::MAX, |src| {
+                let bom = if src.starts_with('\u{feff}') { 3 } else { 0 };
+                bom..src.len()
+            });
+            let clip = |spans: Option<&Vec<Range<usize>>>| {
+                spans.map_or_else(Vec::new, |s| {
+                    normalize(intersect(s, std::slice::from_ref(&body)))
+                })
+            };
+            if clip(now) != clip(then) {
+                out.unresolved.insert(rel.clone());
+            }
+        }
+        out.shadows.clone_from(&walk.test_shadows);
     }
     Ok(out)
 }
@@ -470,9 +621,166 @@ mod tests {
             })
             .collect();
         let files: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
-        classify(dir, &roots, &files, &|p: &Path| {
-            std::fs::read_to_string(p).map_err(|e| e.to_string())
-        })
+        classify(
+            dir,
+            &roots,
+            &files,
+            &|p: &Path| std::fs::read_to_string(p).map_err(|e| e.to_string()),
+            true,
+        )
+    }
+
+    fn selected(c: &Classification, dir: &Path, rel: &str) -> Vec<String> {
+        let src = std::fs::read_to_string(dir.join(rel)).unwrap();
+        c.test_selection(Path::new(rel))
+            .unwrap()
+            .iter()
+            .map(|r| src[r.start..r.end.min(src.len())].to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn test_selection_is_test_only_code_live_in_some_test_build() {
+        let dir = tree(
+            "select",
+            &[
+                (
+                    "src/lib.rs",
+                    "mod shared;\nfn p() {}\n#[cfg(test)]\nmod tests {\n    #[cfg(not(test))]\n    fn gone() {}\n    fn live() {}\n}\n#[cfg(test)]\n#[cfg(not(test))]\nmod dead;\n#[cfg(any())]\nfn never() {}\n",
+                ),
+                ("src/shared.rs", "fn s() {}\n"),
+                ("src/dead.rs", "fn d() {}\n"),
+                ("tests/it.rs", "#[path = \"../src/shared.rs\"]\nmod shared;\nfn t() {}\n"),
+            ],
+        );
+        let c = run(
+            &dir,
+            &[("src/lib.rs", false), ("tests/it.rs", true)],
+            &["src/lib.rs", "src/shared.rs", "src/dead.rs", "tests/it.rs"],
+        )
+        .unwrap();
+        // The test module less its dead item; the dead declaration and the
+        // dead-everywhere function are not selected.
+        assert_eq!(
+            selected(&c, &dir, "src/lib.rs"),
+            vec!["#[cfg(test)]\nmod tests {\n    ", "\n    fn live() {}\n}"]
+        );
+        // Shipping code an integration test also includes is not test code.
+        assert!(selected(&c, &dir, "src/shared.rs").is_empty());
+        // Reached only through an edge dead in test builds.
+        assert!(selected(&c, &dir, "src/dead.rs").is_empty());
+        assert_eq!(
+            selected(&c, &dir, "tests/it.rs"),
+            vec!["#[path = \"../src/shared.rs\"]\nmod shared;\nfn t() {}\n"]
+        );
+        // The skip mask is untouched by dead-code proofs.
+        assert_eq!(c.mask(Path::new("src/dead.rs")), Some(&FileMask::Test));
+    }
+
+    #[test]
+    fn a_file_dead_in_one_test_context_stays_selected_through_a_live_one() {
+        let dir = tree(
+            "select_two",
+            &[
+                (
+                    "src/lib.rs",
+                    "#[cfg(test)]\n#[cfg_attr(test, cfg(not(test)))]\n#[path = \"fixture.rs\"]\nmod dead_f;\n#[cfg(test)]\n#[path = \"fixture.rs\"]\nmod f;\n",
+                ),
+                ("src/fixture.rs", "fn f() {}\n"),
+            ],
+        );
+        let c = run(&dir, &[("src/lib.rs", false)], &["src/fixture.rs"]).unwrap();
+        assert_eq!(selected(&c, &dir, "src/fixture.rs"), vec!["fn f() {}\n"]);
+        assert!(!c.is_unresolved(Path::new("src/fixture.rs")));
+    }
+
+    #[test]
+    fn shadowed_bare_test_marks_only_files_whose_selection_it_decides() {
+        let dir = tree(
+            "select_shadowed",
+            &[
+                (
+                    "src/lib.rs",
+                    "use attrs::test;\nmod shared;\n#[test]\nfn example() {\n    #[path = \"shared.rs\"]\n    mod subject;\n}\n#[cfg(not(test))]\n#[test]\nfn impossible() {}\n",
+                ),
+                ("src/shared.rs", "fn s() {}\n"),
+                ("src/other.rs", "#[cfg(test)]\nfn t() {}\n"),
+            ],
+        );
+        let c = run(
+            &dir,
+            &[("src/lib.rs", false)],
+            &["src/lib.rs", "src/shared.rs", "src/other.rs"],
+        )
+        .unwrap();
+        // `example` is test code only if the attribute is the builtin.
+        assert!(c.is_unresolved(Path::new("src/lib.rs")));
+        // Reached by an ordinary production edge as well: production either way.
+        assert!(!c.is_unresolved(Path::new("src/shared.rs")));
+        // Unreachable, settled by its own cfg.
+        assert!(!c.is_unresolved(Path::new("src/other.rs")));
+        assert_eq!(c.shadows.len(), 1);
+    }
+
+    #[test]
+    fn a_default_path_every_test_build_replaces_is_not_selected() {
+        let dir = tree(
+            "select_replaced",
+            &[
+                (
+                    "src/lib.rs",
+                    "#[cfg_attr(test, path = \"replacement.rs\")]\nmod helper;\n",
+                ),
+                ("src/helper.rs", "#[cfg(test)]\nfn forbidden() {}\n"),
+                ("src/replacement.rs", "fn r() {}\n"),
+            ],
+        );
+        let c = run(&dir, &[("src/lib.rs", false)], &["src/helper.rs"]).unwrap();
+        assert!(selected(&c, &dir, "src/helper.rs").is_empty());
+        // The skip mask still masks the cfg(test) item.
+        assert_eq!(
+            c.mask(Path::new("src/helper.rs")).cloned(),
+            production(&[(0, 30)])
+        );
+    }
+
+    #[test]
+    fn equal_selections_spelled_differently_are_not_unresolved() {
+        let dir = tree(
+            "select_spelling",
+            &[
+                (
+                    "src/lib.rs",
+                    "use attrs::test;\n#[test]\nfn example() {\n    #[path = \"helper.rs\"]\n    mod helper;\n}\n",
+                ),
+                ("src/helper.rs", "\u{feff}#![cfg(test)]\nfn helper() {}\n"),
+                ("src/script.rs", "#!/usr/bin/env x\n#![cfg(test)]\nfn s() {}\n"),
+            ],
+        );
+        let c = run(&dir, &[("src/lib.rs", false)], &["src/helper.rs"]).unwrap();
+        assert!(!c.is_unresolved(Path::new("src/helper.rs")));
+        // A shebang the scanner matches is a real difference between the
+        // two readings.
+        std::fs::write(
+            dir.join("src/lib.rs"),
+            "use attrs::test;\n#[test]\nfn example() {\n    #[path = \"script.rs\"]\n    mod helper;\n}\n",
+        )
+        .unwrap();
+        let c = run(&dir, &[("src/lib.rs", false)], &["src/script.rs"]).unwrap();
+        assert!(c.is_unresolved(Path::new("src/script.rs")));
+    }
+
+    #[test]
+    fn a_dead_bare_test_is_not_unresolved() {
+        let dir = tree(
+            "select_dead_bare",
+            &[(
+                "src/lib.rs",
+                "use attrs::test;\n#[cfg(not(test))]\n#[test]\nfn impossible() {}\n",
+            )],
+        );
+        let c = run(&dir, &[("src/lib.rs", false)], &["src/lib.rs"]).unwrap();
+        assert!(!c.is_unresolved(Path::new("src/lib.rs")));
     }
 
     fn production(spans: &[(usize, usize)]) -> Option<FileMask> {

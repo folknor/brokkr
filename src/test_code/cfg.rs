@@ -1,12 +1,13 @@
-//! Proof that a `cfg` predicate is false in every non-test build.
+//! Proof that a `cfg` predicate is false in every non-test build, or in
+//! every test build.
 //!
 //! The predicate is evaluated in strong Kleene logic with the bare `test`
-//! atom False and every other atom Unknown. A result of False holds under
-//! every assignment of the unknown atoms, so it is a proof of absence. It is
-//! not a decision procedure: `all(feature = "x", not(feature = "x"))` is
-//! impossible but evaluates Unknown, which keeps the node covered - the loud
-//! direction. Anything that does not parse as a well-formed predicate proves
-//! nothing.
+//! atom fixed (False for non-test builds, True for test builds) and every
+//! other atom Unknown. A result of False holds under every assignment of the
+//! unknown atoms, so it is a proof of absence. It is not a decision
+//! procedure: `all(feature = "x", not(feature = "x"))` is impossible but
+//! evaluates Unknown, which keeps the node in play. Anything that does not
+//! parse as a well-formed predicate proves nothing.
 
 use syn::ext::IdentExt;
 use syn::parse::{ParseStream, Parser};
@@ -56,14 +57,16 @@ enum Pred {
 }
 
 impl Pred {
-    fn eval(&self) -> Truth {
+    /// Truth with the bare `test` atom fixed to `test`.
+    fn eval(&self, test: bool) -> Truth {
         match self {
+            Self::Test if test => Truth::True,
             Self::Test => Truth::False,
             Self::Bool(true) => Truth::True,
             Self::Bool(false) => Truth::False,
             Self::Other => Truth::Unknown,
             Self::Any(preds) => {
-                let values: Vec<Truth> = preds.iter().map(Self::eval).collect();
+                let values: Vec<Truth> = preds.iter().map(|p| p.eval(test)).collect();
                 if values.contains(&Truth::True) {
                     Truth::True
                 } else if values.iter().all(|v| *v == Truth::False) {
@@ -73,7 +76,7 @@ impl Pred {
                 }
             }
             Self::All(preds) => {
-                let values: Vec<Truth> = preds.iter().map(Self::eval).collect();
+                let values: Vec<Truth> = preds.iter().map(|p| p.eval(test)).collect();
                 if values.contains(&Truth::False) {
                     Truth::False
                 } else if values.iter().all(|v| *v == Truth::True) {
@@ -82,7 +85,7 @@ impl Pred {
                     Truth::Unknown
                 }
             }
-            Self::Not(pred) => pred.eval().not(),
+            Self::Not(pred) => pred.eval(test).not(),
         }
     }
 }
@@ -133,25 +136,43 @@ fn parse_whole(input: ParseStream<'_>) -> syn::Result<Pred> {
     Ok(pred)
 }
 
-/// Truth of one `#[cfg(...)]` attribute's predicate, or `None` for an
-/// attribute that is not `cfg` or does not parse as a predicate.
-fn cfg_truth(attr: &Attribute) -> Option<Truth> {
-    if !is_named(attr.path(), "cfg") {
+/// The predicate of a `cfg(...)` meta, or `None` for a meta that is not
+/// `cfg` or does not parse as a predicate.
+fn cfg_pred(meta: &Meta) -> Option<Pred> {
+    if !is_named(meta.path(), "cfg") {
         return None;
     }
-    let Meta::List(list) = &attr.meta else {
+    let Meta::List(list) = meta else {
         return None;
     };
-    parse_whole
-        .parse2(list.tokens.clone())
-        .ok()
-        .map(|p| p.eval())
+    parse_whole.parse2(list.tokens.clone()).ok()
 }
 
 /// Whether the attributes prove the node absent from every non-test build:
 /// several `cfg` attributes conjoin, so one False suffices.
 pub(super) fn absent_without_test(attrs: &[Attribute]) -> bool {
-    attrs.iter().any(|a| cfg_truth(a) == Some(Truth::False))
+    attrs
+        .iter()
+        .any(|a| cfg_pred(&a.meta).is_some_and(|p| p.eval(false) == Truth::False))
+}
+
+/// Whether the attributes prove the node absent from every test build. Unlike
+/// [`absent_without_test`] this also reads the `cfg`s a `cfg_attr` introduces:
+/// `cfg_attr(G, cfg(P))` removes the node whenever `G` holds and `P` does not,
+/// so it is a proof when `all(G, not(P))` is True. Used only to select test
+/// code, never to widen what production scanning skips.
+pub(super) fn absent_with_test(attrs: &[Attribute]) -> bool {
+    let direct = attrs
+        .iter()
+        .any(|a| cfg_pred(&a.meta).is_some_and(|p| p.eval(true) == Truth::False));
+    direct
+        || conditional_metas(attrs).into_iter().any(|(meta, guards)| {
+            cfg_pred(&meta).is_some_and(|p| {
+                let mut all = guards;
+                all.push(Pred::Not(Box::new(p)));
+                Pred::All(all).eval(true) == Truth::True
+            })
+        })
 }
 
 /// One `path = "..."` alternative a `cfg_attr` may select.
@@ -160,21 +181,26 @@ pub(super) struct ConditionalPath {
     pub(super) path: String,
     /// The alternative is only ever selected in test builds.
     pub(super) test_only: bool,
+    /// The alternative is never selected in a test build.
+    pub(super) never_in_test: bool,
+    /// The alternative is selected in every test build, so the declaration's
+    /// default path never is.
+    pub(super) always_in_test: bool,
 }
 
-/// Every attribute a (possibly nested) `cfg_attr` may introduce, with
-/// whether only test builds can introduce it. A guard that fails to parse
+/// Every attribute a (possibly nested) `cfg_attr` may introduce, with the
+/// guards that must all hold for it to apply. A guard that fails to parse
 /// but leaves the input at its separating comma (`sanitize("x")`, say) is
-/// treated as possibly true. One whose failure stops before that comma
+/// kept as an unknown guard. One whose failure stops before that comma
 /// (`a::b`, `feature = 7`) drops the whole `cfg_attr`; rustc rejects every
 /// such guard, so no compiling source loses an attribute that way.
-fn conditional_metas(attrs: &[Attribute]) -> Vec<(Meta, bool)> {
+fn conditional_metas(attrs: &[Attribute]) -> Vec<(Meta, Vec<Pred>)> {
     let mut out = Vec::new();
     for attr in attrs {
         if is_named(attr.path(), "cfg_attr")
             && let Meta::List(list) = &attr.meta
         {
-            collect_cfg_attr(list.tokens.clone(), false, &mut out);
+            collect_cfg_attr(list.tokens.clone(), &[], &mut out);
         }
     }
     out
@@ -182,11 +208,11 @@ fn conditional_metas(attrs: &[Attribute]) -> Vec<(Meta, bool)> {
 
 fn collect_cfg_attr(
     tokens: proc_macro2::TokenStream,
-    outer_test_only: bool,
-    out: &mut Vec<(Meta, bool)>,
+    outer: &[Pred],
+    out: &mut Vec<(Meta, Vec<Pred>)>,
 ) {
     let parsed = (|input: ParseStream<'_>| {
-        let guard = parse_pred(input).ok();
+        let guard = parse_pred(input).unwrap_or(Pred::Other);
         input.parse::<Token![,]>()?;
         let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
         Ok((guard, metas))
@@ -195,30 +221,37 @@ fn collect_cfg_attr(
     let Ok((guard, metas)) = parsed else {
         return;
     };
-    let test_only = outer_test_only || guard.is_some_and(|g| g.eval() == Truth::False);
+    let mut guards = outer.to_vec();
+    guards.push(guard);
     for meta in metas {
         match meta {
             Meta::List(list) if is_named(&list.path, "cfg_attr") => {
-                collect_cfg_attr(list.tokens, test_only, out);
+                collect_cfg_attr(list.tokens, &guards, out);
             }
-            other => out.push((other, test_only)),
+            other => out.push((other, guards.clone())),
         }
     }
 }
 
 /// Every `path = "..."` reachable through (possibly nested) `cfg_attr`s.
-/// An alternative whose guard proves False without `test` is test-only.
+/// An alternative whose guards prove False without `test` is test-only; one
+/// whose guards prove False with `test` is never selected in a test build.
 pub(super) fn conditional_paths(attrs: &[Attribute]) -> Vec<ConditionalPath> {
     conditional_metas(attrs)
         .into_iter()
-        .filter_map(|(meta, test_only)| match meta {
+        .filter_map(|(meta, guards)| match meta {
             Meta::NameValue(nv) if is_named(&nv.path, "path") => match nv.value {
                 syn::Expr::Lit(syn::ExprLit {
                     lit: Lit::Str(s), ..
-                }) => Some(ConditionalPath {
-                    path: s.value(),
-                    test_only,
-                }),
+                }) => {
+                    let all = Pred::All(guards);
+                    Some(ConditionalPath {
+                        path: s.value(),
+                        test_only: all.eval(false) == Truth::False,
+                        never_in_test: all.eval(true) == Truth::False,
+                        always_in_test: all.eval(true) == Truth::True,
+                    })
+                }
                 _ => None,
             },
             _ => None,
@@ -331,24 +364,56 @@ mod tests {
     #[test]
     fn cfg_attr_paths_carry_their_guard() {
         let paths = conditional_paths(&attrs(
-            "#[cfg_attr(test, path = \"a.rs\")] #[cfg_attr(unix, cfg_attr(test, path = \"b.rs\"), path = \"c.rs\")]",
+            "#[cfg_attr(test, path = \"a.rs\")] #[cfg_attr(unix, cfg_attr(test, path = \"b.rs\"), path = \"c.rs\")] #[cfg_attr(not(test), path = \"d.rs\")]",
         ));
         assert_eq!(
             paths,
             vec![
                 ConditionalPath {
                     path: "a.rs".into(),
-                    test_only: true
+                    test_only: true,
+                    never_in_test: false,
+                    always_in_test: true,
                 },
                 ConditionalPath {
                     path: "b.rs".into(),
-                    test_only: true
+                    test_only: true,
+                    never_in_test: false,
+                    always_in_test: false,
                 },
                 ConditionalPath {
                     path: "c.rs".into(),
-                    test_only: false
+                    test_only: false,
+                    never_in_test: false,
+                    always_in_test: false,
+                },
+                ConditionalPath {
+                    path: "d.rs".into(),
+                    test_only: false,
+                    never_in_test: true,
+                    always_in_test: false,
                 },
             ]
         );
+    }
+
+    #[test]
+    fn absence_from_test_builds_reads_cfg_and_cfg_attr() {
+        assert!(absent_with_test(&attrs("#[cfg(not(test))]")));
+        assert!(absent_with_test(&attrs("#[cfg(any())]")));
+        assert!(!absent_with_test(&attrs("#[cfg(test)]")));
+        assert!(!absent_with_test(&attrs("#[cfg(feature = \"x\")]")));
+        // cfg_attr(G, cfg(P)) removes the node when G holds and P does not.
+        assert!(absent_with_test(&attrs("#[cfg_attr(test, cfg(not(test)))]")));
+        assert!(absent_with_test(&attrs(
+            "#[cfg_attr(all(), cfg_attr(test, cfg(any())))]"
+        )));
+        // An unknown guard proves nothing.
+        assert!(!absent_with_test(&attrs("#[cfg_attr(unix, cfg(not(test)))]")));
+        // Correlations between atoms are not tracked: this pair is
+        // impossible, yet neither attribute alone is False.
+        assert!(!absent_with_test(&attrs(
+            "#[cfg(feature = \"x\")] #[cfg(not(feature = \"x\"))]"
+        )));
     }
 }

@@ -526,7 +526,7 @@ const TEXTLINT_LIST_FIELDS: [&str; 3] = ["paths", "exclude", "except"];
 /// Fields a `[textlint_preset.<name>]` block may carry: everything a
 /// `[[textlint]]` rule accepts except the three that identify one rule
 /// (`name`, `pattern`, `message`), which are never shareable.
-const TEXTLINT_PRESET_FIELDS: [&str; 18] = [
+const TEXTLINT_PRESET_FIELDS: [&str; 19] = [
     "paths",
     "exclude",
     "except",
@@ -544,8 +544,50 @@ const TEXTLINT_PRESET_FIELDS: [&str; 18] = [
     "require_above",
     "require_below",
     "skip_test",
+    "test_code",
     "must_scan",
 ];
+
+/// `skip_test` is the legacy spelling of `test_code`: the two keys are one
+/// scalar slot. The other spelling of `key`, if it has one.
+fn textlint_alias(key: &str) -> Option<&'static str> {
+    match key {
+        "skip_test" => Some("test_code"),
+        "test_code" => Some("skip_test"),
+        _ => None,
+    }
+}
+
+/// Whether `table` already fills `key`'s slot, under either spelling.
+fn textlint_slot_taken(table: &toml::value::Table, key: &str) -> bool {
+    table.contains_key(key) || textlint_alias(key).is_some_and(|a| table.contains_key(a))
+}
+
+/// One authored table - a rule or a preset - may spell the `test_code` slot
+/// only one way.
+fn reject_both_spellings(body: &toml::value::Table, label: &str) -> Result<(), DevError> {
+    if body.contains_key("skip_test") && body.contains_key("test_code") {
+        return Err(DevError::Config(format!(
+            "{label} sets both `skip_test` and `test_code`; keep `test_code`"
+        )));
+    }
+    Ok(())
+}
+
+/// Read a legacy `skip_test` left in a fully merged rule as `test_code`:
+/// `true` is `"skip"`, `false` is `"include"`. Runs after presets merge, so a
+/// malformed value a nearer table overrides never reaches it, as before.
+fn normalize_skip_test(body: &mut toml::value::Table, label: &str) -> Result<(), DevError> {
+    let Some(value) = body.remove("skip_test") else {
+        return Ok(());
+    };
+    let skip = value
+        .as_bool()
+        .ok_or_else(|| DevError::Config(format!("{label}: `skip_test` must be a boolean")))?;
+    let scope = if skip { "skip" } else { "include" };
+    body.insert("test_code".to_owned(), toml::Value::String(scope.to_owned()));
+    Ok(())
+}
 
 /// Parse the optional `[textlint_preset.<name>]` blocks into raw TOML tables,
 /// keyed by name. They are merged into rules by [`apply_textlint_preset`]
@@ -583,6 +625,7 @@ fn parse_textlint_presets(
                 )));
             }
         }
+        reject_both_spellings(body, &format!("[textlint_preset.{name}]"))?;
         out.insert(name.clone(), body.clone());
     }
     Ok(out)
@@ -606,7 +649,7 @@ fn merge_preset_into_combined(combined: &mut toml::value::Table, preset: &toml::
             } else {
                 combined.insert(key.clone(), preset_value.clone());
             }
-        } else if !combined.contains_key(key) {
+        } else if !textlint_slot_taken(combined, key) {
             // First-listed preset wins for scalars.
             combined.insert(key.clone(), preset_value.clone());
         }
@@ -620,7 +663,9 @@ fn merge_preset_into_combined(combined: &mut toml::value::Table, preset: &toml::
 fn apply_textlint_preset(rule: &mut toml::value::Table, preset: &toml::value::Table) {
     for (key, preset_value) in preset {
         let Some(rule_value) = rule.get(key) else {
-            rule.insert(key.clone(), preset_value.clone());
+            if !textlint_slot_taken(rule, key) {
+                rule.insert(key.clone(), preset_value.clone());
+            }
             continue;
         };
         if !TEXTLINT_LIST_FIELDS.contains(&key.as_str()) {
@@ -716,6 +761,7 @@ fn parse_textlint(
             .get("name")
             .and_then(|v| v.as_str())
             .map_or_else(|| "<unnamed>".to_owned(), |n| format!("{n:?}"));
+        reject_both_spellings(&body, &format!("[[textlint]] {label}"))?;
         // Combine the named presets in declaration order into one table, then
         // layer that under the rule - so a later preset never reorders an
         // earlier one's list entries ahead of it.
@@ -731,6 +777,7 @@ fn parse_textlint(
             referenced.insert(name);
         }
         apply_textlint_preset(&mut body, &combined);
+        normalize_skip_test(&mut body, &format!("[[textlint]] {label}"))?;
         let rule: TextlintRule = toml::Value::Table(body)
             .try_into()
             .map_err(|e: toml::de::Error| {

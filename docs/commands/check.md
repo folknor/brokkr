@@ -480,10 +480,10 @@ fails. Ported from `check_copyright_year`; see `src/header.rs`.
 
 Runs next, only when `[[textlint]]` rules exist. Each rule forbids a regex on
 lines of the files it selects; the keys (`allow_marker`, `except`, `region`,
-`skip_after`, `skip_test`, `must_scan`, `join_wrapped_use`, ...) are in
-`brokkr man conventions textlint`. When a `skip_test` rule selects any tracked
-`.rs` file, the phase runs `cargo metadata --no-deps` once to classify the workspace's test code
-before scanning.
+`skip_after`, `test_code`, `must_scan`, `join_wrapped_use`, ...) are in
+`brokkr man conventions textlint`. When a rule with a `test_code` scope selects
+any tracked `.rs` file, the phase runs `cargo metadata --no-deps` once to
+classify the workspace's test code before scanning.
 Beyond those, a rule may carry the
 **context-window gates** `except_above` / `except_below` /
 `require_above` / `require_below` (each `{ lines = N, pattern = "..." }`).
