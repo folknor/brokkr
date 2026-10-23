@@ -86,6 +86,7 @@ mod sidecar_fmt;
 mod sluggrs;
 mod stray;
 mod target_namespace;
+mod target_platform;
 mod test_cmd;
 mod test_code;
 mod test_orphans;

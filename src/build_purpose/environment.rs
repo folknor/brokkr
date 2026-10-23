@@ -145,8 +145,16 @@ fn resolve_sweep_env(
 ) -> Result<Vec<(String, String)>, crate::error::DevError> {
     let isolated = isolated_target_dir(sweep, meta_target_dir);
     let effective = isolated.as_deref().unwrap_or(meta_target_dir);
+    // A target sweep's own artifacts land under `<target dir>/<triple>/`;
+    // `BROKKR_TEST_BIN_DIR` names that directory. Host units cargo builds
+    // alongside (build scripts, proc-macro test harnesses) stay outside it,
+    // and a host harness that spawns a binary from it gets the target's.
+    let profile_dir = match &sweep.target {
+        Some(triple) => format!("{triple}/{profile_dir}"),
+        None => profile_dir.to_owned(),
+    };
     let mut out = if runtime_env {
-        build_test_env(project, effective, profile_dir)
+        build_test_env(project, effective, &profile_dir)
     } else {
         Vec::new()
     };

@@ -915,9 +915,10 @@ short list and mis-attributed which test carried a mutation's coverage):
   shared stream with a warning, as it always has.
 
   Where the runner cannot be installed without overriding something - a
-  runner already configured for the host, a configured rustdoc, an effective
-  target other than the host (`CARGO_BUILD_TARGET`, `build.target`), a
-  forwarded `--config` or `--target` - the sweep drops `--no-fail-fast`
+  runner already configured for the host, a configured rustdoc, an ambient
+  target other than the host (`CARGO_BUILD_TARGET`, `build.target`) on a sweep
+  without its own `target`, a forwarded `--config` or `--target` - the sweep
+  drops `--no-fail-fast`
   instead, warns why, and stops at the first failing harness: an honest short
   list rather than a wrong name. A complete profile refuses such a lane during
   `prepare`, with the reason: every harness would share one stream, and an
@@ -927,7 +928,11 @@ short list and mis-attributed which test carried a mutation's coverage):
   reads back as `<path> (deleted)`, which has a space and no longer exists.
   The magic link has no whitespace and still execs the replaced inode, and the
   shim authenticates its peer by inode rather than by link text. The threat model is accidents and misbehaving tests; project code
-  that deliberately attacks this IPC is out of scope.
+  that deliberately attacks this IPC is out of scope. When the cargo argv
+  names a `--target` other than the host (a `[[check]] target` sweep), the
+  shim is installed under that triple's runner variable as well as the
+  host's: cargo runs the target's test binaries through the one and host units
+  (a proc-macro's test harness) through the other.
 - **The `failures:` name list is the authoritative roster.** The captured
   detail blocks are best-effort - an aborted suite can truncate the stream,
   and a detail block can hide inside another test's captured output. Any name
@@ -1020,11 +1025,12 @@ linked against. Cargo-owned values are applied last, so a sweep's `env` cannot
 forge them. Two refusals keep the direct launch honest: a configured target
 runner (`[target.<triple>].runner` or `CARGO_TARGET_<TRIPLE>_RUNNER` - a
 qemu/wine/valgrind wrapper direct execution would silently bypass), or any
-configured build target (`build.target`, `CARGO_BUILD_TARGET` - the host's
+ambient build target (`build.target`, `CARGO_BUILD_TARGET` - the host's
 included, since setting one moves the artifacts), refuses
 every direct-execution path (this lane, the process-isolated one, and `brokkr
 test`) at resolution time - read from the environment cargo builds under, so a
-sweep `env` setting either counts. An unreadable or malformed selected Cargo
+sweep `env` setting either counts. A sweep's own `target` key is not an
+ambient build target: see "Target sweeps" below. An unreadable or malformed selected Cargo
 config, or a missing required include, also refuses launch reconstruction.
 The chain is read once per lane, when its environment is decided, and that one
 snapshot feeds the runner refusal, the serial shim decision and the direct
@@ -1042,6 +1048,38 @@ planning and forwards option args to each one-test child; `--format` and
 `--test-threads` remain runner-owned.
 `CARGO_TARGET_TMPDIR` is deliberately not reproduced at runtime - cargo's
 contract makes it compile-time (`env!`) only.
+
+#### Target sweeps
+
+A `[[check]]` entry's `target` is build shape (`EffectiveBuild` and
+`DeclaredShape` encode it; the shape id encoding appends it only when set, so
+every host shape id is unchanged) and `build_purpose::sweep_args` puts
+`--target <triple>` on every cargo run of the sweep. Each lane resolves it
+once, when its environment is decided (`resolve_sweep_target`,
+`src/target_platform.rs`): the compiler cargo would run is found by cargo's
+precedence (`RUSTC`, `CARGO_BUILD_RUSTC`, `build.rustc`, `rustc`) under the
+sweep's env, and through it the sysroot must hold the triple's standard
+library, `rustc --print cfg --target` gives the triple's cfg facts and
+`--print target-libdir --target` its libdir; `cargo --version` must be 1.89 or
+newer, since an older cargo builds a cross target's doctests and does not run
+them. The cfg facts decide only names the triple alone fixes; every other name
+is undecided, and an undecided atom makes its whole selector undecided.
+
+Those facts feed three consumers. Runner discovery (`CargoLaunchConfig::
+discover_for`) adds the triple's runner - its table, its env spelling, or a
+`cfg(...)` table not proven false for it - and the lane refuses it in every
+lane kind: brokkr executes the sweep's binaries itself (the serial lane lists
+them too), so a runner would be bypassed, and emulated targets are therefore
+unsupported. The same discovery drops an ambient `build.target`, which the
+explicit `--target` overrides. The rustflags sink matches the triple's
+`target.*` tables against those facts. And the direct runtime picks each
+binary's toolchain libdir by its exact output root: `<base>/<triple>/<profile>`
+is the target's, `<base>/<profile>` the host's, for `<base>` each of the
+target dir and build dir cargo metadata reports under the lane's env; a root
+matching neither, or both with different libdirs, refuses the envelope.
+Forwarded `--target`, `--config`, `--manifest-path` and `--target-dir` are
+refused on a target sweep in every lane, since each moves something the
+resolution fixed.
 
 Feature unification is unchanged on the prebuild side: on a sweep whose
 selection is exactly the whole workspace (no `packages`, no

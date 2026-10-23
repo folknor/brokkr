@@ -239,6 +239,19 @@ impl ForwardedArgs {
             .collect()
     }
 
+    /// The forwarded `--target`, `--config`, `--manifest-path` and
+    /// `--target-dir` args: each moves the platform, config chain, project or
+    /// artifact root a target sweep's preflight resolved.
+    pub(crate) fn platform_overrides(&self) -> Vec<String> {
+        self.unsupported_direct_options()
+            .into_iter()
+            .filter(|token| {
+                let head = token.split_once('=').map_or(token.as_str(), |(head, _)| head);
+                head != "--no-run"
+            })
+            .collect()
+    }
+
     /// Whether the forwarded cargo args carry `--config` or `--target`
     /// (either spelling), which change the config chain or the build
     /// platform out from under anything brokkr installs into cargo.
@@ -546,6 +559,16 @@ impl StableEncoder {
         }
     }
 
+    /// A sweep's target triple, appended last and only when set, so every
+    /// host shape keeps the encoding (and so the id) it had before the key
+    /// existed.
+    fn target(&mut self, value: Option<&str>) {
+        if let Some(triple) = value {
+            self.string("target");
+            self.string(triple);
+        }
+    }
+
     fn unification(&mut self, value: EffectiveUnification) {
         match value.describe() {
             None => self.tag(0),
@@ -574,6 +597,7 @@ pub(crate) struct DeclaredShape {
     env: Vec<(String, String)>,
     profile: Option<SweepProfile>,
     unification: EffectiveUnification,
+    target: Option<String>,
 }
 
 impl DeclaredShape {
@@ -590,6 +614,7 @@ impl DeclaredShape {
                 .collect(),
             profile: sweep.profile,
             unification: sweep.effective_unification(),
+            target: sweep.target.clone(),
         }
     }
 
@@ -603,6 +628,7 @@ impl DeclaredShape {
         out.pairs(&self.env);
         out.profile(self.profile);
         out.unification(self.unification);
+        out.target(self.target.as_deref());
         out.finish()
     }
 
@@ -835,6 +861,7 @@ struct SupportBuild {
 #[derive(Debug, Clone)]
 struct EffectiveBuild {
     profile: Option<SweepProfile>,
+    target: Option<String>,
     rustflags: Vec<String>,
     env: Vec<(String, String)>,
     unification: EffectiveUnification,
@@ -861,6 +888,7 @@ impl EffectiveBuild {
             support.package.encode(&mut out);
             out.strings(&support.features);
         }
+        out.target(self.target.as_deref());
         out.finish()
     }
 }
@@ -1081,6 +1109,7 @@ impl Attempt {
     ) -> EffectiveBuild {
         EffectiveBuild {
             profile,
+            target: sweep.target.clone(),
             rustflags: sweep.rustflags.clone(),
             env: sweep
                 .env
@@ -1856,6 +1885,35 @@ mod tests {
             label: label.into(),
             ..Default::default()
         })
+    }
+
+    #[test]
+    fn a_target_is_build_shape_and_leaves_host_shapes_unchanged() {
+        let host = sweep("host");
+        let musl = with_sweep(sweep("musl"), |d| {
+            d.target = Some("x86_64-unknown-linux-musl".into());
+        });
+        let host_shape = DeclaredShape::of(&host);
+        let musl_shape = DeclaredShape::of(&musl);
+        assert_ne!(host_shape.id(), musl_shape.id());
+        // A host shape encodes exactly what it did before the key existed:
+        // nothing is appended for an unset target.
+        let mut expected = StableEncoder::default();
+        expected.string("brokkr.declared-shape.v1");
+        expected.strings(&[]);
+        expected.strings(&[]);
+        expected.strings(&host_shape.features);
+        expected.strings(&[]);
+        expected.pairs(&[]);
+        expected.profile(None);
+        expected.unification(host.effective_unification());
+        assert_eq!(host_shape.stable_encoding(), expected.finish());
+        // Every cargo run of a target sweep names the triple.
+        assert_eq!(
+            crate::build_purpose::triple_args(&musl),
+            s(&["--target", "x86_64-unknown-linux-musl"])
+        );
+        assert!(crate::build_purpose::triple_args(&host).is_empty());
     }
 
     fn listed(label: &str, packages: &[&str]) -> PlannedSweep {

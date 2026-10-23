@@ -1233,6 +1233,21 @@ pub struct CheckEntry {
     /// two different lint surfaces, and neither may dedupe into the other.
     #[serde(default)]
     pub profile: Option<SweepProfile>,
+    /// The target triple this sweep compiles and runs for, passed as
+    /// `--target` to every cargo run of the sweep. Unset builds for the host,
+    /// which is what every sweep did before this key existed. A bare triple
+    /// name (`x86_64-unknown-linux-musl`); custom `.json` target specs are
+    /// not accepted, because brokkr derives the artifact directory from the
+    /// name.
+    ///
+    /// Part of the build shape: `cfg(target_env)` and friends decide which
+    /// code exists, so a host and a musl sweep of the same features are two
+    /// compiles and two lint surfaces. The sweep's binaries are executed
+    /// directly, so the host must be able to run them: a triple with a
+    /// configured runner is refused, and one the host cannot execute fails
+    /// when its binaries are listed.
+    #[serde(default)]
+    pub target: Option<String>,
     /// Run this sweep's test binaries concurrently under a budget of
     /// in-flight tests, instead of letting cargo run them one at a time.
     /// Execution policy only - never part of the build shape, since it

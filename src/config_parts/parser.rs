@@ -1483,6 +1483,7 @@ fn validate_check_entry(entry: &CheckEntry) -> Result<(), DevError> {
         }
     }
     reject_reserved_sweep_env(&entry.env, &format!("[[check]] entry '{}'", entry.name))?;
+    validate_check_entry_target(entry)?;
     if entry.curated
         && entry.tests.is_empty()
         && entry.skip.is_empty()
@@ -1494,6 +1495,34 @@ fn validate_check_entry(entry: &CheckEntry) -> Result<(), DevError> {
              shape exists to run a hand-picked subset\"; an unfiltered entry \
              is a full sweep and must stay in the coverage universe - drop \
              `curated` or add the filters that define the subset.",
+            entry.name
+        )));
+    }
+    Ok(())
+}
+
+/// The `target` key on one `[[check]]` entry: a bare triple name, and the one
+/// source of the sweep's build target.
+fn validate_check_entry_target(entry: &CheckEntry) -> Result<(), DevError> {
+    let Some(target) = &entry.target else {
+        return Ok(());
+    };
+    let bare = !target.is_empty()
+        && !target.ends_with(".json")
+        && target
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if !bare {
+        return Err(DevError::Config(format!(
+            "[[check]] entry '{}' sets `target = {target:?}`; it must be a bare target triple \
+             such as \"x86_64-unknown-linux-musl\" (custom .json target specs are not supported).",
+            entry.name
+        )));
+    }
+    if entry.env.contains_key("CARGO_BUILD_TARGET") {
+        return Err(DevError::Config(format!(
+            "[[check]] entry '{}' sets both `target` and `env.CARGO_BUILD_TARGET`; `target` is \
+             the sweep's build target. Drop the env key.",
             entry.name
         )));
     }

@@ -6,8 +6,9 @@ mod serial_shim_tests {
     fn forwarded_target_and_config_force_first_failure_mode() {
         let root = std::path::Path::new("/nonexistent");
         for arg in ["--target", "--target=other", "--config", "--config=target.x.runner=tool"] {
-            let reason = serial_shim_fallback(root, &ForwardedArgs::parse(&[arg.into()]), &[], &Default::default())
-                .expect("forwarded override must disable shim");
+            let reason =
+                serial_shim_fallback(root, &ForwardedArgs::parse(&[arg.into()]), &[], &Default::default(), false)
+                    .expect("forwarded override must disable shim");
             assert!(reason.contains("forwarded"));
         }
     }
@@ -19,9 +20,24 @@ mod serial_shim_tests {
             &ForwardedArgs::parse(&[]),
             &[("CARGO_BUILD_TARGET".into(), "other".into())],
             &Default::default(),
+            false,
         )
         .expect("target env must disable shim");
         assert!(reason.contains("CARGO_BUILD_TARGET"));
+    }
+
+    #[test]
+    fn a_target_sweeps_own_triple_overrides_an_ambient_build_target() {
+        // The sweep's `--target` wins over CARGO_BUILD_TARGET, so the ambient
+        // value is no reason to give up the shim.
+        let reason = serial_shim_fallback(
+            std::path::Path::new("/nonexistent"),
+            &ForwardedArgs::parse(&[]),
+            &[("CARGO_BUILD_TARGET".into(), "other".into())],
+            &Default::default(),
+            true,
+        );
+        assert!(!reason.is_some_and(|r| r.contains("CARGO_BUILD_TARGET")));
     }
 }
 

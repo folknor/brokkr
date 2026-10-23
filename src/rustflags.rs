@@ -134,7 +134,7 @@ impl RustflagsEnv {
         let mut notes = self.invocation_notes();
         match read_config_files_under(build_root, EffectiveEnv::new(&[])) {
             Ok(files) => {
-                for triple in target_triples_for_sink(build_root, &files) {
+                for triple in target_triples_for_sink(build_root, &files, EffectiveEnv::new(&[])) {
                     let key = target_rustflags_env_var(&triple);
                     if std::env::var_os(&key).is_some() {
                         notes.push(format!("{key} is set for target {triple}"));
@@ -222,7 +222,14 @@ pub(crate) struct ConfigEnvEntry {
 /// precedence, and each file is parsed once for this discovery.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CargoLaunchConfig {
+    /// The host's runner: what cargo runs host binaries (a proc-macro's test
+    /// harness, or every test of a host sweep) through.
     pub(crate) runner: Option<Source>,
+    /// A target sweep's runner, possibly applying: the triple's own table or
+    /// env spelling, or a `cfg(...)` table not proven false for it.
+    pub(crate) target_runner: Option<Source>,
+    /// An ambient build target. Always `None` for a target sweep, whose
+    /// explicit `--target` overrides it.
     pub(crate) build_target: Option<Source>,
     pub(crate) rustdoc: Option<Source>,
     pub(crate) build_dir: bool,
@@ -234,6 +241,15 @@ impl CargoLaunchConfig {
         root: &Path,
         env: EffectiveEnv<'_>,
     ) -> Result<Self, crate::error::DevError> {
+        Self::discover_for(root, env, None)
+    }
+
+    /// The launch facts for a sweep that may carry a `target`.
+    pub(crate) fn discover_for(
+        root: &Path,
+        env: EffectiveEnv<'_>,
+        target: Option<&crate::target_platform::SweepTarget>,
+    ) -> Result<Self, crate::error::DevError> {
         let files = read_config_files_under(root, env)?;
 
         let host = host_triple_for(root);
@@ -241,10 +257,17 @@ impl CargoLaunchConfig {
         let runner = runner_var
             .as_deref()
             .and_then(|key| env.source(key))
-            .or_else(|| config_runner_source(&files, host.as_deref()));
-        let build_target = env
-            .source("CARGO_BUILD_TARGET")
-            .or_else(|| config_source(&files, "build", "target"));
+            .or_else(|| config_runner_source(&files, Platform::Host(host.as_deref())));
+        let target_runner = target.and_then(|t| {
+            env.source(&runner_env_var(&t.triple))
+                .or_else(|| config_runner_source(&files, Platform::Target(t)))
+        });
+        let build_target = if target.is_some() {
+            None
+        } else {
+            env.source("CARGO_BUILD_TARGET")
+                .or_else(|| config_source(&files, "build", "target"))
+        };
         let rustdoc = env
             .source("RUSTDOC")
             .or_else(|| env.source("CARGO_BUILD_RUSTDOC"))
@@ -262,6 +285,7 @@ impl CargoLaunchConfig {
 
         Ok(Self {
             runner,
+            target_runner,
             build_target,
             rustdoc,
             build_dir,
@@ -480,7 +504,7 @@ fn config_source(files: &[(PathBuf, toml::Table)], table: &str, key: &str) -> Op
     })
 }
 
-fn config_runner_source(files: &[(PathBuf, toml::Table)], host: Option<&str>) -> Option<Source> {
+fn config_runner_source(files: &[(PathBuf, toml::Table)], platform: Platform<'_>) -> Option<Source> {
     files.iter().find_map(|(path, doc)| {
         let targets = doc.get("target")?.as_table()?;
         targets.iter().find_map(|(selector, value)| {
@@ -494,9 +518,9 @@ fn config_runner_source(files: &[(PathBuf, toml::Table)], host: Option<&str>) ->
             {
                 // Unknown -> true: replacing a runner that might apply is the
                 // destructive direction.
-                eval_cfg_for_host(expr, host) != Some(false)
+                eval_cfg_on(expr, platform) != Some(false)
             } else {
-                host == Some(selector.as_str())
+                platform.triple() == Some(selector.as_str())
             };
             applies.then(|| Source {
                 origin: SourceOrigin::Config(path.clone()),
@@ -621,13 +645,14 @@ impl Sink {
 /// `rustflags` is exported as an env var by `sweep_runtime_env`, which makes
 /// source 1/2 live for that sweep regardless of what the config chain says.
 ///
-/// Only the process environment is inspected, not a sweep's `env` table, and
-/// that is sufficient rather than an oversight: `RUSTFLAGS` and
-/// `CARGO_ENCODED_RUSTFLAGS` are reserved keys that config loading refuses in
-/// both a `[[check]]` entry's `env` and a profile's `env`, unconditionally
-/// (`reject_reserved_sweep_env`). No sweep can reach a compiling phase carrying
-/// either, so the process env plus `sweep_sets_rustflags` is the whole set of
-/// ways source 1/2 can be live.
+/// For sources 1 and 2 only the process environment is inspected, not a
+/// sweep's `env` table, and that is sufficient rather than an oversight:
+/// `RUSTFLAGS` and `CARGO_ENCODED_RUSTFLAGS` are reserved keys that config
+/// loading refuses in both a `[[check]]` entry's `env` and a profile's `env`,
+/// unconditionally (`reject_reserved_sweep_env`). No sweep can reach a
+/// compiling phase carrying either, so the process env plus
+/// `sweep_sets_rustflags` is the whole set of ways source 1/2 can be live.
+/// Sources 3 and 4 are read under `cargo_env`, which a sweep's `env` can move.
 ///
 /// Presence, not content, decides both env sources, because that is cargo's
 /// rule: it reads `RUSTFLAGS` whenever the variable is set, and a set-but-empty
@@ -635,12 +660,23 @@ impl Sink {
 /// rustflags table. Treating an empty `RUSTFLAGS` as unset would pick a
 /// `--config` sink cargo never reads, and every allow injected there would be
 /// silently inert.
-pub fn sink(build_root: &Path, sweep_sets_rustflags: bool) -> Sink {
+///
+/// `target` is a `[[check]]` sweep's `target`: cargo then builds for that
+/// triple whatever `build.target` says, so its tables are the ones matched.
+/// `cargo_env` is the environment the build runs under (a sweep's `env` over
+/// brokkr's): it selects the config chain (`CARGO_HOME`) and carries the
+/// target-table env spellings.
+pub(crate) fn sink(
+    build_root: &Path,
+    sweep_sets_rustflags: bool,
+    target: Option<&crate::target_platform::SweepTarget>,
+    cargo_env: EffectiveEnv<'_>,
+) -> Sink {
     let env = RustflagsEnv::process();
     if let Some(sink) = env_sink(sweep_sets_rustflags, &env) {
         return sink;
     }
-    let files = match read_config_files_under(build_root, EffectiveEnv::new(&[])) {
+    let files = match read_config_files_under(build_root, cargo_env) {
         Ok(files) => files,
         // BuildConfig is the non-destructive fallback: an unseen target table
         // may leave brokkr's allows inert, while a speculative TargetConfig
@@ -648,20 +684,27 @@ pub fn sink(build_root: &Path, sweep_sets_rustflags: bool) -> Sink {
         // selected unreadable or malformed config before compiling.
         Err(_) => return Sink::BuildConfig,
     };
-    let triples = target_triples_for_sink(build_root, &files);
+    let triples = match target {
+        Some(t) => vec![t.triple.clone()],
+        None => target_triples_for_sink(build_root, &files, cargo_env),
+    };
     // Cargo treats the target-triple environment spelling as a matching
     // `target.<triple>.rustflags` entry. Add brokkr's flags to the target
     // source when it is live, so the higher-priority source-3 rule does not
     // make an injected `build.rustflags` inert.
     if triples
         .iter()
-        .any(|triple| std::env::var_os(target_rustflags_env_var(triple)).is_some())
+        .any(|triple| cargo_env.contains(&target_rustflags_env_var(triple)))
     {
         return Sink::TargetConfig;
     }
     let host = host_triple_for(build_root);
+    let platform = match target {
+        Some(t) => Platform::Target(t),
+        None => Platform::Host(host.as_deref()),
+    };
     for (_, doc) in &files {
-        if has_matching_target_rustflags(doc, host.as_deref()) {
+        if target_rustflags_match(doc, platform) == Some(true) {
             return Sink::TargetConfig;
         }
     }
@@ -686,12 +729,14 @@ fn env_sink(sweep_sets_rustflags: bool, env: &RustflagsEnv) -> Option<Sink> {
 /// The two always travel together (the same sink decision selects both), and
 /// both `check`'s test phase and `brokkr test` need the pair, so the split
 /// lives here rather than being re-derived at each call site.
-pub fn plumbing<'a>(
+pub(crate) fn plumbing<'a>(
     build_root: &Path,
     sweep_sets_rustflags: bool,
+    target: Option<&crate::target_platform::SweepTarget>,
+    cargo_env: EffectiveEnv<'_>,
     allow_flags: &'a [String],
 ) -> (&'a [String], Vec<String>) {
-    let sink = sink(build_root, sweep_sets_rustflags);
+    let sink = sink(build_root, sweep_sets_rustflags, target, cargo_env);
     if sink.is_env() {
         (allow_flags, Vec::new())
     } else {
@@ -727,9 +772,14 @@ fn target_rustflags_env_var(triple: &str) -> String {
 /// Cargo's configured target names drive `CARGO_TARGET_<triple>_RUSTFLAGS`.
 /// Respect `CARGO_BUILD_TARGET` or `build.target`; if neither is present,
 /// Cargo builds for the host.
-fn target_triples_for_sink(build_root: &Path, files: &[(PathBuf, toml::Table)]) -> Vec<String> {
+fn target_triples_for_sink(
+    build_root: &Path,
+    files: &[(PathBuf, toml::Table)],
+    cargo_env: EffectiveEnv<'_>,
+) -> Vec<String> {
     let host = host_triple_for(build_root);
-    let configured = std::env::var_os("CARGO_BUILD_TARGET")
+    let configured = cargo_env
+        .get_os("CARGO_BUILD_TARGET")
         .and_then(|value| value.into_string().ok())
         .and_then(|value| parse_target_values(&value, host.as_deref()))
         .or_else(|| {
@@ -784,16 +834,17 @@ fn target_key_triple(value: &str, host: Option<&str>) -> Option<String> {
 /// `triple` is `None` when the host triple could not be read, in which case a
 /// bare `[target.<triple>]` table cannot be confirmed to match and is treated
 /// as not matching - the inert direction.
+#[cfg(test)]
 fn has_matching_target_rustflags(doc: &toml::Table, triple: Option<&str>) -> bool {
-    target_rustflags_match(doc, triple) == Some(true)
+    target_rustflags_match(doc, Platform::Host(triple)) == Some(true)
 }
 
-/// Three-valued form of [`has_matching_target_rustflags`]: `Some(true)` when
-/// some flagged target table confidently matches the host, `Some(false)` when
-/// none can, and `None` when none matched confidently but at least one could
-/// not be decided (an unmodelled `cfg(...)`, or a bare triple with no host
-/// triple to compare against).
-fn target_rustflags_match(doc: &toml::Table, triple: Option<&str>) -> Option<bool> {
+/// Whether some flagged `target.*` table applies, three-valued: `Some(true)` when
+/// some flagged target table confidently matches the platform, `Some(false)`
+/// when none can, and `None` when none matched confidently but at least one
+/// could not be decided (an unmodelled `cfg(...)`, or a bare triple with no
+/// host triple to compare against).
+fn target_rustflags_match(doc: &toml::Table, platform: Platform<'_>) -> Option<bool> {
     let Some(targets) = doc.get("target").and_then(toml::Value::as_table) else {
         return Some(false);
     };
@@ -810,8 +861,8 @@ fn target_rustflags_match(doc: &toml::Table, triple: Option<&str>) -> Option<boo
             .strip_prefix("cfg(")
             .and_then(|s| s.strip_suffix(')'))
         {
-            Some(expr) => eval_cfg_for_host(expr, triple),
-            None => triple.map(|t| t == selector),
+            Some(expr) => eval_cfg_on(expr, platform),
+            None => platform.triple().map(|t| t == selector),
         };
         match matches {
             Some(true) => return Some(true),
@@ -829,14 +880,14 @@ fn target_rustflags_match(doc: &toml::Table, triple: Option<&str>) -> Option<boo
 /// The fall-through is the deliberate safe direction; this is how the caller
 /// finds out it was taken on a guess.
 pub fn sink_may_be_inert(build_root: &Path) -> bool {
-    if sink(build_root, false) != Sink::BuildConfig {
+    if sink(build_root, false, None, EffectiveEnv::new(&[])) != Sink::BuildConfig {
         return false;
     }
     let triple = host_triple_for(build_root);
     match read_config_files_under(build_root, EffectiveEnv::new(&[])) {
-        Ok(files) => files
-            .iter()
-            .any(|(_, doc)| target_rustflags_match(doc, triple.as_deref()).is_none()),
+        Ok(files) => files.iter().any(|(_, doc)| {
+            target_rustflags_match(doc, Platform::Host(triple.as_deref())).is_none()
+        }),
         // The notice cannot establish that its chosen layer is live when part
         // of the config chain was unreadable, so report the uncertainty.
         Err(_) => true,
@@ -874,12 +925,54 @@ pub(crate) fn eval_cfg(expr: &str) -> Option<bool> {
 
 /// Evaluate a cargo `cfg(...)` selector against a known host triple.
 pub(crate) fn eval_cfg_for_host(expr: &str, host: Option<&str>) -> Option<bool> {
-    let (value, rest) = parse_expr(expr.trim(), host)?;
+    eval_cfg_on(expr, Platform::Host(host))
+}
+
+/// The platform a cargo `[target.*]` selector is matched against.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Platform<'a> {
+    /// The host: brokkr's own `cfg!` values plus the host triple (`None` when
+    /// it could not be read).
+    Host(Option<&'a str>),
+    /// A `[[check]]` sweep's `target`, with rustc's facts for it.
+    Target(&'a crate::target_platform::SweepTarget),
+}
+
+impl<'a> Platform<'a> {
+    /// The triple a bare `[target.<triple>]` selector must equal.
+    fn triple(self) -> Option<&'a str> {
+        match self {
+            Self::Host(host) => host,
+            Self::Target(target) => Some(&target.triple),
+        }
+    }
+
+    /// Whether `key = "value"` holds, or `None` when unmodelled.
+    fn key_matches(self, key: &str, value: &str) -> Option<bool> {
+        match self {
+            Self::Host(host) => Some(cfg_key(key, host)? == value),
+            Self::Target(target) => target.cfg.key_matches(key, value),
+        }
+    }
+
+    /// Whether bare `name` holds, or `None` when unmodelled.
+    fn flag(self, name: &str) -> Option<bool> {
+        match self {
+            Self::Host(_) => cfg_flag(name),
+            Self::Target(target) => target.cfg.flag(name),
+        }
+    }
+}
+
+/// Evaluate a cargo `cfg(...)` selector body against `platform`. Any atom the
+/// platform does not decide makes the whole expression undecided (`None`).
+pub(crate) fn eval_cfg_on(expr: &str, platform: Platform<'_>) -> Option<bool> {
+    let (value, rest) = parse_expr(expr.trim(), platform)?;
     rest.trim().is_empty().then_some(value)
 }
 
 /// Parse one predicate and return it with the unconsumed remainder.
-fn parse_expr<'a>(s: &'a str, host: Option<&str>) -> Option<(bool, &'a str)> {
+fn parse_expr<'a>(s: &'a str, host: Platform<'_>) -> Option<(bool, &'a str)> {
     let s = s.trim_start();
     let end = s
         .find(|c: char| !(c.is_alphanumeric() || c == '_'))
@@ -908,17 +1001,17 @@ fn parse_expr<'a>(s: &'a str, host: Option<&str>) -> Option<(bool, &'a str)> {
         let quoted = after_eq.strip_prefix('"')?;
         let close = quoted.find('"')?;
         let (value, after) = quoted.split_at(close);
-        return Some((cfg_key(ident, host)? == value, &after[1..]));
+        return Some((host.key_matches(ident, value)?, &after[1..]));
     }
 
     // Bare flag: `unix`, `windows`.
-    Some((cfg_flag(ident)?, rest))
+    Some((host.flag(ident)?, rest))
 }
 
 /// Parse a comma-separated argument list up to the closing paren, returning the
 /// evaluated arguments and the remainder after the paren. An argument that
 /// cannot be evaluated poisons the whole expression.
-fn parse_args<'a>(mut s: &'a str, host: Option<&str>) -> Option<(Vec<bool>, &'a str)> {
+fn parse_args<'a>(mut s: &'a str, host: Platform<'_>) -> Option<(Vec<bool>, &'a str)> {
     let mut args = Vec::new();
     loop {
         s = s.trim_start();

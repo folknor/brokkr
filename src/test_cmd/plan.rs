@@ -371,13 +371,21 @@ pub(super) fn plan_focused(
     // Direct execution would bypass a configured runner or misread a cross
     // build; refuse before running anything. Reuse that validated snapshot for
     // the launch envelope instead of reading config again.
-    let launch_config = crate::rustflags::CargoLaunchConfig::discover(
+    let target = check_cmd::resolve_sweep_target(project_root, shape.sweep)?;
+    let launch_config = crate::rustflags::CargoLaunchConfig::discover_for(
         project_root,
         crate::rustflags::EffectiveEnv::new(env),
+        target.as_ref(),
     )?;
     check_cmd::refuse_configured_runner_with_config(&launch_config)?;
-    let runtime =
-        check_cmd::DirectRuntime::load_with_config(project_root, env, index, launch_config)?;
+    check_cmd::refuse_target_runner(shape.sweep, &launch_config)?;
+    let runtime = check_cmd::DirectRuntime::load_with_config(
+        project_root,
+        env,
+        index,
+        launch_config,
+        target,
+    )?;
     let split = focused::eligibility(binaries)?;
     if !split.excluded.is_empty() {
         let labels: Vec<String> = split.excluded.iter().map(|b| b.label()).collect();
@@ -890,8 +898,17 @@ pub(super) fn sweep_env(
     profile_dir: &str,
     allow_flags: &[String],
 ) -> Result<SweepEnv, DevError> {
-    let (env_allows, allow_args) =
-        rustflags::plumbing(project_root, !sweep.rustflags.is_empty(), allow_flags);
+    let target = check_cmd::resolve_sweep_target(project_root, sweep)?;
+    let sweep_only = check_cmd::merged_env(&sweep.env, &[]);
+    let sweep_refs: Vec<(&str, &str)> =
+        sweep_only.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let (env_allows, allow_args) = rustflags::plumbing(
+        project_root,
+        !sweep.rustflags.is_empty(),
+        target.as_ref(),
+        rustflags::EffectiveEnv::new(&sweep_refs),
+        allow_flags,
+    );
     let project_env =
         check_cmd::sweep_runtime_env(sweep, Some(project), target_dir, profile_dir, env_allows)?;
     Ok((

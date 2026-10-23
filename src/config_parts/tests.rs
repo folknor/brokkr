@@ -706,6 +706,30 @@ preset = ["a", "b"]
     }
 
     #[test]
+    fn check_entry_target_is_a_bare_triple_and_the_only_build_target() {
+        let parse = |body: &str| {
+            let src = format!("[[check]]\nname = \"musl\"\n{body}");
+            let table: toml::map::Map<String, toml::Value> = toml::from_str(&src).unwrap();
+            parse_check(&table)
+        };
+        assert_eq!(
+            parse("target = \"x86_64-unknown-linux-musl\"\n").unwrap()[0].target.as_deref(),
+            Some("x86_64-unknown-linux-musl")
+        );
+        assert!(parse("").unwrap()[0].target.is_none());
+        for bad in ["", "custom.json", "../x", "a b"] {
+            let err = parse(&format!("target = \"{bad}\"\n")).unwrap_err().to_string();
+            assert!(err.contains("bare target triple"), "{bad}: {err}");
+        }
+        let err = parse(
+            "target = \"x86_64-unknown-linux-musl\"\nenv = { CARGO_BUILD_TARGET = \"other\" }\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("CARGO_BUILD_TARGET"), "{err}");
+    }
+
+    #[test]
     fn check_entry_defaults_to_auto_unification() {
         // Absence and `auto` mean the same thing, so a config rewrite that
         // materializes the default cannot change behaviour.

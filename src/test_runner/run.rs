@@ -74,6 +74,17 @@ pub(crate) struct LibtestRun {
     pub(crate) in_flight: Vec<String>,
 }
 
+/// The `--target` triple on a cargo argv, before the `--` that hands the rest
+/// to libtest.
+fn cargo_target<'a>(args: &[&'a str]) -> Option<&'a str> {
+    let cargo_side = args.iter().position(|a| *a == "--").map_or(args, |end| &args[..end]);
+    cargo_side.iter().enumerate().find_map(|(i, arg)| match arg.strip_prefix("--target") {
+        Some("") => cargo_side.get(i + 1).copied(),
+        Some(rest) => rest.strip_prefix('='),
+        None => None,
+    })
+}
+
 /// Run one libtest invocation. Cargo and direct launches share process
 /// lifecycle, JSON observation, the watchdog, drains, cancellation and
 /// outcome reduction. Reconstructed human text is captured for display only.
@@ -150,6 +161,7 @@ where
         .transpose()?;
 
     let runner_env;
+    let target_runner_env;
     let socket_env;
     let rustdoc_env;
     let mut cargo_env = env.to_vec();
@@ -160,17 +172,24 @@ where
         let host = crate::rustflags::host_triple().ok_or_else(|| {
             DevError::Config("cannot determine host triple for harness runner".into())
         })?;
-        runner_env = (
-            crate::rustflags::runner_env_var(&host),
-            format!(
-                "{} {}",
-                harness_shim::own_exe().display(),
-                harness_shim::RUNNER_ARG
-            ),
+        let runner = format!(
+            "{} {}",
+            harness_shim::own_exe().display(),
+            harness_shim::RUNNER_ARG
         );
+        // Under `--target` cargo runs the target's test binaries through the
+        // triple's runner and host units (a proc-macro's test harness)
+        // through the host's, so the shim stands in for both.
+        target_runner_env = cargo_target(args)
+            .filter(|triple| *triple != host)
+            .map(|triple| (crate::rustflags::runner_env_var(triple), runner.clone()));
+        runner_env = (crate::rustflags::runner_env_var(&host), runner);
         socket_env = session.socket();
         rustdoc_env = session.rustdoc();
         cargo_env.push((&runner_env.0, &runner_env.1));
+        if let Some((key, value)) = &target_runner_env {
+            cargo_env.push((key, value));
+        }
         cargo_env.push(("BROKKR_HARNESS_SOCKET", &socket_env));
         cargo_env.push(("RUSTDOC", &rustdoc_env));
     }
@@ -491,4 +510,20 @@ pub(crate) fn effective_test_threads(args: &[String]) -> Result<Option<u32>, Dev
         idx += 1;
     }
     Ok(current)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cargo_target;
+
+    #[test]
+    fn cargo_target_reads_the_cargo_side_only() {
+        assert_eq!(
+            cargo_target(&["test", "--target", "x86_64-unknown-linux-musl", "--", "--target", "x"]),
+            Some("x86_64-unknown-linux-musl")
+        );
+        assert_eq!(cargo_target(&["test", "--target=aarch64-apple-darwin"]), Some("aarch64-apple-darwin"));
+        assert_eq!(cargo_target(&["test", "--target-dir", "/t"]), None);
+        assert_eq!(cargo_target(&["test", "--", "--target", "x"]), None);
+    }
 }

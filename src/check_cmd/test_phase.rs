@@ -287,6 +287,7 @@ fn run_test_lane(
     timings: Option<&mut Vec<TestTiming>>,
 ) -> Result<bool, DevError> {
     let sweep = a.sweep;
+    refuse_target_sweep_args(sweep, &ForwardedArgs::parse(a.extra_args))?;
     // A lane whose up-front preparation failed has no inventory and is not
     // prepared a second time: preparing lists (executes) every binary, so a
     // retry would run each listing twice in one invocation. A lane that needs a

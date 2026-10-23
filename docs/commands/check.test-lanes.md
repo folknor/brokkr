@@ -20,9 +20,11 @@ Runs after clippy, one lane per selected sweep.
   harness that crashes cannot hide or misattribute the failures of the
   harnesses after it. A crash shows as `CRASHED <harness> (signal: ...)` with
   the in-flight test as a suspect only. Where the isolation shim cannot be
-  installed (a configured runner or rustdoc, a non-host target, a forwarded
-  `--config`/`--target`), the sweep drops `--no-fail-fast`, warns, and stops at
-  the first failing harness; a complete profile refuses such a lane.
+  installed (a configured runner or rustdoc, an ambient non-host build target,
+  a forwarded `--config`/`--target`), the sweep drops `--no-fail-fast`, warns,
+  and stops at the first failing harness; a complete profile refuses such a
+  lane. A `[[check]] target` sweep keeps the shim: it stands in for both the
+  triple's runner and the host's.
 - A failing sweep ends the run before later sweeps test, so their results are
   absent from a red run.
 - Warnings from a passing sweep and its pre-builds are owner-filtered (a path
@@ -183,8 +185,10 @@ reproduces cargo's launch contract for each binary (cwd, loader path, `[env]`,
 build-script env, `CARGO_PKG_*`, `CARGO_BIN_EXE_*`; not `OUT_DIR`, which cargo
 never gives a test). Consequences:
 
-- A configured target runner or build target refuses the lane (and every other
-  direct-execution path, `brokkr test` included) rather than being bypassed.
+- A configured target runner or ambient build target refuses the lane (and
+  every other direct-execution path, `brokkr test` included) rather than being
+  bypassed. A sweep's own `target` key is the supported way to run for another
+  triple; see `brokkr man sweeps`.
 - Forwarded cargo args only cargo can honour (`--no-run`, `--target`,
   `--config`, `--manifest-path`, `--target-dir`) are rejected.
 - Cargo target selectors after `--` (`--test NAME`, `--lib`, `--bins`, ...)
@@ -971,7 +975,10 @@ Both `brokkr check` (test phase) and `brokkr test` set the following on every
   when `--debug` or `[test] debug` applies, and follows the sweep's own
   `profile` when it declares one. The profile tracks the cargo invocation 1:1 - it does
   *not* track whatever profile cargo happens to compile the test harness with.
-  `<target>` comes from `cargo metadata --no-deps`. Tests that spawn the
+  `<target>` comes from `cargo metadata --no-deps`. A sweep with a `target`
+  triple gets `<target>/<triple>/<profile>`, where its own artifacts land;
+  host units cargo builds alongside (a proc-macro's test harness) receive the
+  same directory. Tests that spawn the
   rebuilt binary should read this var as the primary source of truth and fall
   back to `cfg!(debug_assertions)` only when it's unset (e.g. plain
   `cargo test` outside brokkr). The `cfg!(debug_assertions)` heuristic is

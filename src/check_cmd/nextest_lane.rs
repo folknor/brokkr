@@ -363,13 +363,35 @@ pub(crate) fn build_nextest(
         .inspect_err(|e| report_certifying_failure(inputs, sweep, attempt, e))
 }
 
-/// The host as the engine's build platform (no cross target).
-fn host_build_platforms() -> Result<BuildPlatforms, DevError> {
-    let host = HostPlatform::detect(PlatformLibdir::from_rustc_stdout(
-        nextest_runner::RustcCli::print_host_libdir().read(),
-    ))
-    .map_err(|e| DevError::Build(format!("nextest host platform detection failed: {e}")))?;
-    Ok(BuildPlatforms { host, target: None })
+/// The engine's build platforms: the host, with the libdir of the compiler
+/// cargo runs under the lane's env (unavailable when that probe fails, as
+/// nextest records it), plus a target sweep's own triple with the libdir its
+/// preflight resolved.
+fn build_platforms(
+    project_root: &Path,
+    env_refs: &[(&str, &str)],
+    target: Option<&crate::target_platform::SweepTarget>,
+) -> Result<BuildPlatforms, DevError> {
+    let host_libdir = crate::target_platform::host_libdir(
+        project_root,
+        crate::rustflags::EffectiveEnv::new(env_refs),
+    )
+    .ok()
+    .map(String::into_bytes);
+    let host = HostPlatform::detect(PlatformLibdir::from_rustc_stdout(host_libdir))
+        .map_err(|e| DevError::Build(format!("nextest host platform detection failed: {e}")))?;
+    let target = target
+        .map(|t| {
+            let triple = nextest_runner::cargo_config::TargetTriple::deserialize_str(Some(t.triple.clone()))
+                .map_err(|e| DevError::Build(format!("nextest cannot model target `{}`: {e}", t.triple)))?
+                .ok_or_else(|| DevError::Internal("a present triple deserialized to none".into()))?;
+            Ok::<_, DevError>(nextest_runner::platform::TargetPlatform::new(
+                triple,
+                PlatformLibdir::from_rustc_stdout(Some(t.libdir.clone().into_bytes())),
+            ))
+        })
+        .transpose()?;
+    Ok(BuildPlatforms { host, target })
 }
 
 /// The engine lane's build products, read into the engine by
@@ -408,8 +430,11 @@ fn build_nextest_shape(
     // artifact resolution. `--all-features --filter-platform` mirrors what
     // cargo-nextest itself asks for - the graph is a naming universe, not the
     // build's resolution.
-    let build_platforms = host_build_platforms()?;
-    let triple = build_platforms.host.platform.triple_str().to_owned();
+    let build_platforms = build_platforms(project_root, &env_refs, env.target.as_ref())?;
+    let triple = match &env.target {
+        Some(t) => t.triple.clone(),
+        None => build_platforms.host.platform.triple_str().to_owned(),
+    };
 
     let report_launch = |command: &str, e: DevError| {
         if !matches!(e, DevError::Interrupted) {
@@ -1348,7 +1373,7 @@ mod nextest_lane_tests {
                 &NextestBuild {
                     metadata_json: &metadata,
                     stdout: &stream,
-                    build_platforms: host_build_platforms().unwrap(),
+                    build_platforms: build_platforms(&root, &[], None).unwrap(),
                     // One second: the cap the synthesized config carries.
                     ceiling: std::time::Duration::from_secs(1),
                 },

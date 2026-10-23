@@ -382,6 +382,8 @@ struct RawCargoMetadata {
     workspace_root: String,
     #[serde(default)]
     target_directory: String,
+    #[serde(default)]
+    build_directory: Option<String>,
 }
 
 /// Typed workspace, target, package, and resolve facts with an index built
@@ -391,6 +393,9 @@ pub(crate) struct CargoMetadata {
     pub(crate) packages: Vec<CargoPackage>,
     pub(crate) workspace_root: String,
     pub(crate) target_directory: String,
+    /// Where cargo keeps intermediate artifacts, when it reports one apart
+    /// from `target_directory` (`build.build-dir`).
+    pub(crate) build_directory: Option<String>,
     pub(crate) workspace_members: Vec<PackageId>,
     pub(crate) workspace_default_members: Option<Vec<PackageId>>,
     /// Original JSON for engines such as guppy that consume Cargo's complete
@@ -411,6 +416,7 @@ impl<'de> Deserialize<'de> for CargoMetadata {
             packages: raw.packages,
             workspace_root: raw.workspace_root,
             target_directory: raw.target_directory,
+            build_directory: raw.build_directory,
             workspace_members: raw.workspace_members,
             workspace_default_members: raw.workspace_default_members,
             raw_json: None,
@@ -433,6 +439,7 @@ impl CargoMetadata {
             packages,
             workspace_root,
             target_directory: String::new(),
+            build_directory: None,
             workspace_members: workspace_members.to_vec(),
             workspace_default_members: None,
             raw_json: None,
@@ -465,6 +472,7 @@ impl CargoMetadata {
             packages,
             workspace_root: self.workspace_root.clone(),
             target_directory: self.target_directory.clone(),
+            build_directory: self.build_directory.clone(),
             workspace_members: self.workspace_members.clone(),
             workspace_default_members: self.workspace_default_members.clone(),
             raw_json: None,

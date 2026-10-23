@@ -71,6 +71,10 @@ pub struct SweepDecl {
     /// under `brokkr check`; the CLI/`[test] debug` answer under `brokkr
     /// test`). Part of the build shape.
     pub profile: Option<SweepProfile>,
+    /// The `[[check]]` entry's `target`: the triple every cargo run of the
+    /// sweep passes as `--target`, or `None` for the host. Part of the build
+    /// shape.
+    pub target: Option<String>,
     /// The `[[check]]` entry's `feature_unification`, as configured. Policy,
     /// not yet an answer: `auto` resolves differently depending on CLI scope
     /// and parallel eligibility, which are invocation facts.
@@ -741,6 +745,7 @@ fn sweep_decl_from_entry(
         lane_exec,
         curated: entry.curated,
         profile: entry.profile,
+        target: entry.target.clone(),
         feature_unification: entry.feature_unification,
         entry_name: entry.name.clone(),
         // A gate sweep always lints every target; only the investigative

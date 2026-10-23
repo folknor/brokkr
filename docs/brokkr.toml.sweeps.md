@@ -206,6 +206,56 @@ env = { HIGH_PRECISION = "1" }
   `[test] debug = true` for the fast inner loop without the documented
   `brokkr test tape_lateness_under_acceleration` silently switching to dev and
   failing on the build profile rather than on the code.
+- `target` (optional, unset) - the target triple this sweep compiles and runs
+  for, as a bare name (`"x86_64-unknown-linux-musl"`; custom `.json` specs are
+  refused). Unset builds for the host, as every sweep did before the key
+  existed. For code gated on `cfg(target_env)` and friends, which no host sweep
+  ever compiles:
+
+  ```toml
+  [[check]]
+  name = "musl"
+  target = "x86_64-unknown-linux-musl"
+  build_packages = ["pbfhogg-cli"]
+  parallel = {}
+  ```
+
+  Like `profile`, it reaches every cargo run of the sweep as `--target` -
+  clippy, rustdoc, the pre-builds, the test run, process-isolated runs, nextest
+  and the coverage enumeration - and is **build shape**: a host and a musl
+  sweep of the same features never dedupe in clippy and keep separate coverage
+  universes. `BROKKR_TEST_BIN_DIR` points at `<target>/<triple>/<profile>`.
+
+  brokkr executes the sweep's test binaries itself in every lane, so the host
+  must be able to run them. x86_64 musl runs natively on an x86_64 glibc host,
+  so the whole suite runs, parallel lane included. There is no guess about
+  which triples the host can run: a binary it cannot execute fails when it is
+  listed. A runner that may apply to the triple
+  (`[target.<triple>].runner`, its `CARGO_TARGET_<TRIPLE>_RUNNER` spelling, or
+  a `[target.'cfg(...)']` runner brokkr cannot prove false for the triple) is
+  refused rather than bypassed, so emulated targets (qemu) are not supported.
+  A host runner keeps its usual treatment.
+
+  Before anything builds, each lane resolves the triple against the compiler
+  cargo would use (`RUSTC`, `CARGO_BUILD_RUSTC`, `build.rustc`, then `rustc`,
+  under the sweep's env) and refuses: a triple the toolchain has no standard
+  library for (`rustup target add <triple>`); a cargo older than 1.89, which
+  builds a cross target's doctests without running them; and forwarded
+  `--target`, `--config`, `--manifest-path` or `--target-dir`. The sweep's
+  `env` may not set `CARGO_BUILD_TARGET`; an ambient one is overridden. There
+  is no check for a C compiler: which one a `cc`-based build script picks is
+  its own decision, and its error names it (`musl-gcc` from `musl-tools` on
+  Debian and Ubuntu).
+
+  Cargo semantics worth knowing: under `--target`, `RUSTFLAGS` and the
+  `rustflags` tables reach the target's units only, not build scripts or
+  proc-macros, so a sweep's `rustflags` and the `[lints] allow` flags do too.
+  `[target.'cfg(...)']` tables are matched against the triple's facts from
+  `rustc --print cfg --target`, for the names the triple alone fixes
+  (`target_arch`, `target_os`, `target_family`, `target_env`, `target_vendor`,
+  `target_abi`, `target_pointer_width`, `target_endian`, `unix`, `windows`);
+  any other name leaves the selector undecided, which refuses a runner and
+  falls back to `build.rustflags` for the allows.
 - `curated` (optional, default `false`) - declares the entry a hand-picked
   subset for coverage purposes, and requires the entry to carry its own
   `tests`/`skip`/`only` filters (an unfiltered "curated" entry is just an
@@ -274,8 +324,9 @@ contract (package-root cwd, loader path, `[env]` config, build-script
 cargo gives build scripts and rustdoc, never a test; see `brokkr man check` on direct execution). No
 cargo re-entry means the lane is sound on every selection shape,
 `test_exclude_packages` included, and touches cargo's build lock only once. Two
-consequences: a configured target runner (`[target.<triple>].runner`) or build
-target refuses the lane rather than being silently bypassed, and forwarded cargo args that only cargo-mediated execution can
+consequences: a configured target runner (`[target.<triple>].runner`) or an
+ambient build target refuses the lane rather than being silently bypassed (the
+sweep's own `target` key is honoured), and forwarded cargo args that only cargo-mediated execution can
 honour (`--no-run`, `--target`, `--config`, `--manifest-path`,
 `--target-dir`) are rejected on a parallel sweep.
 

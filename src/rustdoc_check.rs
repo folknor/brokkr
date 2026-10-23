@@ -128,9 +128,10 @@ fn place_with(env: &[(String, String)], process: impl Fn(&str) -> Option<String>
 ///
 /// Cargo's artifact message for a doc unit carries `"filenames": []`, so the
 /// path is rebuilt the way cargo names it: `<doc_dir>/<crate>/index.html`,
-/// the crate being the target name with `-` as `_`. A wrong guess (a
-/// `build.target` triple puts docs under `<target>/<triple>/doc`) leaves the
-/// unit dirty - the slow direction, never the wrong one.
+/// the crate being the target name with `-` as `_`. The caller passes
+/// `<target>/<triple>/doc` for a `[[check]] target` sweep. A wrong guess (an
+/// ambient `build.target` triple also moves docs there) leaves the unit dirty -
+/// the slow direction, never the wrong one.
 pub fn stamp_outputs(stdout: &str, doc_dir: &Path, started: std::time::SystemTime) {
     for name in documented_targets(stdout) {
         let path = doc_dir.join(name.replace('-', "_")).join("index.html");

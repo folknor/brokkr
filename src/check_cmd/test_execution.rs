@@ -102,6 +102,11 @@ pub(crate) fn describe_sweep(
     if let Some(p) = sweep.profile {
         parts.push(format!("profile {}", p.target_subdir()));
     }
+    // Same reason: a target sweep compiles everything again under
+    // `target/<triple>/`.
+    if let Some(triple) = &sweep.target {
+        parts.push(format!("target {triple}"));
+    }
 
     if for_test {
         let filters = sweep.lane_filters();
@@ -309,6 +314,7 @@ fn serial_shim_fallback(
     forwarded: &ForwardedArgs,
     project_env: &[(String, String)],
     sweep_env: &std::collections::BTreeMap<String, String>,
+    has_target: bool,
 ) -> Option<String> {
     // Cargo sees this merged environment. In particular, a sweep CARGO_HOME
     // changes the config chain the shim must inspect before replacing a runner.
@@ -317,7 +323,7 @@ fn serial_shim_fallback(
         .iter()
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect();
-    let launch = match crate::rustflags::CargoLaunchConfig::discover(
+    let mut launch = match crate::rustflags::CargoLaunchConfig::discover(
         root,
         crate::rustflags::EffectiveEnv::new(&cargo_env_refs),
     ) {
@@ -326,6 +332,11 @@ fn serial_shim_fallback(
             return Some(format!("Cargo config could not be validated: {error}"));
         }
     };
+    // A target sweep's explicit `--target` overrides an ambient build target,
+    // and the lane refused a runner for its triple before building.
+    if has_target {
+        launch.build_target = None;
+    }
     serial_shim_fallback_with_config(forwarded, &launch)
 }
 
@@ -567,7 +578,13 @@ fn run_one_test_sweep(
     let shim_reason = if parallel_threads {
         None
     } else {
-        serial_shim_fallback(project_root, &forwarded, project_env, &sweep.env)
+        serial_shim_fallback(
+            project_root,
+            &forwarded,
+            project_env,
+            &sweep.env,
+            sweep.target.is_some(),
+        )
     };
     let use_shim = !parallel_threads && shim_reason.is_none();
     let sink = observe.sink();

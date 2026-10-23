@@ -107,7 +107,10 @@ pub(crate) struct DirectRuntime {
     /// Union of every build script's link-search dirs, sorted. Filtered per
     /// binary against its output dir, the way cargo filters them.
     linked_paths: Vec<String>,
+    /// The host toolchain's libdir.
     libdir: String,
+    /// A target sweep's own platform, for binaries built for it.
+    target: Option<TargetRoots>,
     /// What `CARGO` is set to: the cargo executable this brokkr runs.
     cargo: String,
     /// Validated launch settings from the cargo config chain. Retaining the
@@ -115,25 +118,76 @@ pub(crate) struct DirectRuntime {
     launch_config: rustflags::CargoLaunchConfig,
 }
 
+/// Where a target sweep's units land, to tell them from the host units cargo
+/// builds alongside (build scripts, a proc-macro's test harness).
+#[derive(Debug)]
+struct TargetRoots {
+    triple: String,
+    /// The triple's runtime library dir.
+    libdir: String,
+    /// The artifact bases cargo uses under the lane's env: the target dir,
+    /// and the build dir when it reports a separate one. A host unit's output
+    /// root is `<base>/<profile>`, a target unit's `<base>/<triple>/<profile>`.
+    bases: Vec<PathBuf>,
+}
+
+impl TargetRoots {
+    /// The libdir for an executable whose output root is `root`: the one
+    /// platform whose roots contain it, or a refusal when none does or both
+    /// do with different libdirs. Never a guess.
+    fn libdir_for<'a>(&'a self, root: &Path, host: &'a str) -> Result<&'a str, DevError> {
+        let Some(profile) = root.file_name() else {
+            return Err(self.unknown(root));
+        };
+        let is_target = self
+            .bases
+            .iter()
+            .any(|base| root == base.join(&self.triple).join(profile));
+        let is_host = self.bases.iter().any(|base| root == base.join(profile));
+        match (is_target, is_host) {
+            (true, false) => Ok(&self.libdir),
+            (false, true) => Ok(host),
+            (true, true) if self.libdir == host => Ok(host),
+            _ => Err(self.unknown(root)),
+        }
+    }
+
+    fn unknown(&self, root: &Path) -> DevError {
+        DevError::Config(format!(
+            "cannot tell whether the test binaries under {} were built for `{}` or for the host: \
+             the directory is not exactly one of the artifact roots cargo reports, so brokkr will \
+             not run them with a guessed loader path",
+            root.display(),
+            self.triple
+        ))
+    }
+}
+
 impl DirectRuntime {
     /// Assemble the runtime for one sweep: cargo metadata for the package
     /// facts, the prebuild's artifact index, and the launch config snapshot
     /// already validated during lane setup, so config values are not
-    /// rediscovered before each direct lane action.
+    /// rediscovered before each direct lane action. `target` is the sweep's
+    /// resolved `target`, if it has one.
     pub(crate) fn load_with_config(
         project_root: &Path,
         env_refs: &[(&str, &str)],
         index: BuildRuntimeIndex,
         launch_config: rustflags::CargoLaunchConfig,
+        target: Option<crate::target_platform::SweepTarget>,
     ) -> Result<Self, DevError> {
         let linked_paths = index.all_linked_paths();
         let effective_env = rustflags::EffectiveEnv::new(env_refs);
+        let target = target
+            .map(|t| target_roots(project_root, env_refs, t))
+            .transpose()?;
         Ok(Self {
             project_root: project_root.to_path_buf(),
             packages: workspace_pkg_meta(project_root)?,
             linked_paths,
             index,
             libdir: toolchain_libdir(project_root, env_refs)?,
+            target,
             cargo: cargo_program(project_root, effective_env),
             launch_config,
         })
@@ -220,11 +274,39 @@ impl DirectRuntime {
             .find(|(k, _)| k == "LD_LIBRARY_PATH")
             .map(|(_, v)| v.clone())
             .or_else(|| std::env::var("LD_LIBRARY_PATH").ok());
-        let search = cargo_search_path(binary, &self.linked_paths, &self.libdir);
+        let libdir = match &self.target {
+            Some(roots) => roots.libdir_for(&root_output(Path::new(&binary.executable)), &self.libdir)?,
+            None => &self.libdir,
+        };
+        let search = cargo_search_path(binary, &self.linked_paths, libdir);
         env.push(("LD_LIBRARY_PATH".into(), join_dylib_path(search, existing.as_deref())));
 
         Ok((cwd, env))
     }
+}
+
+/// A target sweep's roots under the lane's env: the target and build dirs
+/// cargo reports when the lane's own `CARGO_TARGET_DIR` and config apply.
+fn target_roots(
+    project_root: &Path,
+    env_refs: &[(&str, &str)],
+    target: crate::target_platform::SweepTarget,
+) -> Result<TargetRoots, DevError> {
+    let metadata = crate::cargo::metadata::load(
+        project_root,
+        crate::cargo::metadata::Query::workspace(),
+        env_refs,
+        current_phase(),
+    )?;
+    let mut bases = vec![PathBuf::from(&metadata.target_directory)];
+    if let Some(build) = metadata.build_directory.as_deref().filter(|b| !b.is_empty()) {
+        bases.push(PathBuf::from(build));
+    }
+    Ok(TargetRoots {
+        triple: target.triple,
+        libdir: target.libdir,
+        bases,
+    })
 }
 
 /// The output dir a test executable was built into (`target/<profile>`):
@@ -407,7 +489,11 @@ fn workspace_pkg_meta(project_root: &Path) -> Result<HashMap<String, PkgRuntimeM
 /// cargo built for another target - a cross build is exactly where a runner
 /// would be configured, under a triple this check would never look at. Any
 /// configured target refuses, the host's included: the setting changes where
-/// cargo puts the artifacts, which the envelope does not model.
+/// cargo puts the artifacts, which the envelope does not model. A
+/// `[[check]] target` sweep is different: its explicit `--target` overrides
+/// the ambient one (discovery leaves `build_target` unset), the envelope
+/// models its artifact roots, and its own runner is refused separately
+/// (`refuse_target_runner`).
 ///
 /// The environment checked is the one cargo builds under: `env` (the sweep's,
 /// which reaches cargo as its process environment) over brokkr's own. A sweep
@@ -513,9 +599,51 @@ mod direct_runtime_tests {
             linked_paths,
             index,
             libdir: "/toolchain/lib".into(),
+            target: None,
             cargo: "/usr/bin/cargo".into(),
             launch_config: rustflags::CargoLaunchConfig::default(),
         }
+    }
+
+    #[test]
+    fn target_roots_pick_one_platform_or_refuse() {
+        let roots = TargetRoots {
+            triple: "x86_64-unknown-linux-musl".into(),
+            libdir: "/sysroot/musl/lib".into(),
+            bases: vec![PathBuf::from("/cache/x86_64-unknown-linux-musl")],
+        };
+        let host = "/sysroot/host/lib";
+        // A target dir named after the triple: its own debug dir is the
+        // host's, the nested one the target's.
+        assert_eq!(
+            roots
+                .libdir_for(Path::new("/cache/x86_64-unknown-linux-musl/debug"), host)
+                .unwrap(),
+            host
+        );
+        assert_eq!(
+            roots
+                .libdir_for(
+                    Path::new("/cache/x86_64-unknown-linux-musl/x86_64-unknown-linux-musl/debug"),
+                    host
+                )
+                .unwrap(),
+            "/sysroot/musl/lib"
+        );
+        assert!(roots.libdir_for(Path::new("/elsewhere/debug"), host).is_err());
+        // A build dir nested so one root is both a host and a target root.
+        let overlapping = TargetRoots {
+            bases: vec![
+                PathBuf::from("/cache"),
+                PathBuf::from("/cache/x86_64-unknown-linux-musl"),
+            ],
+            ..roots
+        };
+        assert!(
+            overlapping
+                .libdir_for(Path::new("/cache/x86_64-unknown-linux-musl/debug"), host)
+                .is_err()
+        );
     }
 
     fn test_binary() -> TestBinary {

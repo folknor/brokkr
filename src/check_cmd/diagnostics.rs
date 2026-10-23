@@ -169,11 +169,19 @@ fn run_one_diagnostic_cargo(
         // cargo there), else the one cargo metadata reports. A lookup failure
         // only costs the stamp: the next run re-documents.
         let target_dir = match meta_target_dir {
-            Some(dir) => Some(dir.to_path_buf()),
+            Some(dir) => Some(
+                crate::build_purpose::environment::isolated_target_dir(sweep, dir)
+                    .unwrap_or_else(|| dir.to_path_buf()),
+            ),
             None => build::project_info(Some(project_root)).ok().map(|i| i.target_dir),
         };
         if let Some(dir) = target_dir {
-            crate::rustdoc_check::stamp_outputs(&stdout, &dir.join("doc"), started);
+            // Under `--target` cargo documents into `<target>/<triple>/doc`.
+            let doc_dir = match &sweep.target {
+                Some(triple) => dir.join(triple).join("doc"),
+                None => dir.join("doc"),
+            };
+            crate::rustdoc_check::stamp_outputs(&stdout, &doc_dir, started);
         }
     }
     let diagnostics = cargo_json::parse_cargo_diagnostics(&stdout);
@@ -647,7 +655,7 @@ fn announce_test_allows(
         .collect();
     // The sink can differ per sweep (a `rustflags` sweep exports an env var and
     // so always lands in the env layer); report the plain-sweep shape explicitly.
-    let sink = rustflags::sink(project_root, false);
+    let sink = rustflags::sink(project_root, false, None, rustflags::EffectiveEnv::new(&[]));
     // One clause, not a second line: that a sited entry widens here is a
     // property of the phase, not news about any particular entry, so it does
     // not earn a line of its own - let alone one per entry.

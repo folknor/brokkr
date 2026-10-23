@@ -408,26 +408,14 @@ fn package_name_from_id(id: &str) -> String {
 /// running test binaries directly: proc-macro test binaries link libstd
 /// dynamically (rustc dlopens proc-macro crates; they have no choice),
 /// and cargo supplies this path itself when it runs test binaries. Found
-/// the hard way on nautilus's only `proc-macro = true` crate. Run in the
-/// project root so rustup resolves the same toolchain cargo uses.
+/// the hard way on nautilus's only `proc-macro = true` crate. Asked of the
+/// compiler cargo itself runs (`RUSTC`, `CARGO_BUILD_RUSTC`, `build.rustc`,
+/// then `rustc` under rustup in the project root), under the lane's env.
 fn toolchain_libdir(
     project_root: &Path,
     env_refs: &[(&str, &str)],
 ) -> Result<String, DevError> {
-    let captured = output::run_captured_with_env(
-        "rustc",
-        &["--print", "target-libdir"],
-        project_root,
-        env_refs,
-    )?;
-
-    if !captured.success() {
-        return Err(DevError::Build(format!(
-            "rustc --print target-libdir failed: {}",
-            String::from_utf8_lossy(&captured.stderr)
-        )));
-    }
-    Ok(String::from_utf8_lossy(&captured.stdout).trim().to_owned())
+    crate::target_platform::host_libdir(project_root, crate::rustflags::EffectiveEnv::new(env_refs))
 }
 
 /// Did cargo reject the unification flags themselves, rather than fail to

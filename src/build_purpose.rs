@@ -336,7 +336,7 @@ pub(crate) fn sweep_args(
 ) -> Vec<String> {
     // Features arrive already projected by check's selection; they pass
     // through as argv, so the resolver does not re-render them.
-    resolve(Request {
+    let mut args = resolve(Request {
         purpose: Purpose::Check,
         profile: profile.into(),
         packages,
@@ -346,7 +346,19 @@ pub(crate) fn sweep_args(
         env: Vec::new(),
         build_root: None,
     })
-    .args
+    .args;
+    args.extend(triple_args(sweep));
+    args
+}
+
+/// The `--target <triple>` a sweep's `target` key puts on every one of its
+/// cargo runs, or nothing for a host sweep.
+pub(crate) fn triple_args(sweep: &PlannedSweep) -> Vec<String> {
+    sweep
+        .target
+        .iter()
+        .flat_map(|t| ["--target".to_owned(), t.clone()])
+        .collect()
 }
 
 #[cfg(test)]
