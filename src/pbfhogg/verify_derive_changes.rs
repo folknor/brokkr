@@ -118,6 +118,23 @@ pub fn run(
     )?;
     harness.check_exit(&captured, "osmium apply-changes (roundtrip)")?;
 
+    // pbfhogg diff is a merge-join and refuses an input that does not declare
+    // Sort.Type_then_ID. osmium's apply-changes output is content-sorted but
+    // does not stamp the feature, so normalise it through `pbfhogg sort` - a
+    // passthrough plus flag stamp, content unchanged - before comparing.
+    // `--force` because osmium writes no blob-level indexdata.
+    let rt_osmium_sorted = outdir.join("roundtrip-osmium-sorted.osm.pbf");
+    let rt_osmium_sorted_str = rt_osmium_sorted.display().to_string();
+    verify_msg("--- pbfhogg sort (normalise osmium roundtrip for merge-join diff) ---");
+    let captured = harness.run_pbfhogg(&[
+        "sort",
+        "--force",
+        &rt_osmium_str,
+        "-o",
+        &rt_osmium_sorted_str,
+    ])?;
+    harness.check_exit(&captured, "pbfhogg sort (normalise osmium roundtrip)")?;
+
     // Element counts.
     verify_msg("=== element counts ===");
     harness.print_inspect("new", &new_pbf)?;
@@ -128,11 +145,11 @@ pub fn run(
 
     for (label, a, b) in [
         ("pbfhogg roundtrip vs new", &rt_pbfhogg, &new_pbf),
-        ("osmium roundtrip vs new", &rt_osmium, &new_pbf),
+        ("osmium roundtrip vs new", &rt_osmium_sorted, &new_pbf),
         (
             "pbfhogg roundtrip vs osmium roundtrip",
             &rt_pbfhogg,
-            &rt_osmium,
+            &rt_osmium_sorted,
         ),
     ] {
         verify_msg(&format!("=== diff: {label} ==="));

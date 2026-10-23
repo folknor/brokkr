@@ -27,13 +27,16 @@ pub fn run(
 
     let pbf_str = pbf.display().to_string();
 
-    // Osmium runs once as the reference for every mode.
+    // Osmium runs once as the reference for every mode. pbfhogg always keeps
+    // untagged relation-member nodes (a documented deviation in pbfhogg's
+    // DEVIATIONS.md); osmium does so only with --keep-member-nodes.
     let osmium_out = outdir.join("osmium.osm.pbf");
     let osmium_out_str = osmium_out.display().to_string();
     let captured = harness.run_tool(
         "osmium",
         &[
             "add-locations-to-ways",
+            "--keep-member-nodes",
             &pbf_str,
             "-o",
             &osmium_out_str,

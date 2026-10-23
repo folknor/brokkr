@@ -90,6 +90,15 @@ outputs - osmium-only IDs that appear in the input OSC's delete set are
 exempt (osmium does version-based deletes; pbfhogg/osmosis/osmconvert delete
 unconditionally), everything else fails.
 
+`pbfhogg diff` is a merge-join and refuses an input that does not declare
+`Sort.Type_then_ID`. osmium's `apply-changes` output is content-sorted but does
+not stamp the feature, so `verify_merge` and `verify_derive_changes` pass it
+through `pbfhogg sort --force` (content unchanged) before diffing.
+
+`verify add-locations-to-ways` runs osmium with `--keep-member-nodes`: pbfhogg
+keeps untagged relation-member nodes unconditionally (a documented pbfhogg
+deviation), osmium only with that flag.
+
 ## OSC parser (`src/osc.rs`)
 
 Minimal `.osc` / `.osc.gz` reader. Returns `OscDiff` with sorted ID sets per
@@ -157,6 +166,9 @@ compare pairs automatically, no suffix required.
   Values: `zlib` or `zlib:N` (1-9), `zstd` or `zstd:N`, `none`. Bare
   `zlib` and `zstd` use the binary's default levels. No cargo features
   required.
+- The synthetic `write` and `merge` benches run their own codec matrix and
+  refuse all three flags rather than ignore them: pick codecs with
+  `--compressions`, and io_uring on `merge` with `--uring`.
 - `--inject-prepass` - (`add-locations-to-ways` only) emit the injected-prepass
   wire extensions (BlobHeader field 5 way-member bitmaps, Way field 20
   shared-node pins; declared via the `pbfhogg.WayMembers-v1` /

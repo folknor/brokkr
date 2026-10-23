@@ -249,6 +249,32 @@ pub(super) fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<()
     }
 }
 
+/// `write` and `merge` share `PbfArgs` with the single-command benches but run
+/// their own variant matrix, so `--compression`, `--direct-io` and
+/// `--io-uring` would be silently ignored. Refuse them instead, naming the
+/// flag the matrix does honour.
+fn reject_unused_pbf_flags(
+    command: &str,
+    pbf: &crate::cli::PbfArgs,
+    uring_flag: Option<&str>,
+) -> Result<(), DevError> {
+    if pbf.compression.is_some() {
+        return Err(DevError::Usage(format!(
+            "{command} ignores --compression; use --compressions to pick the codecs it benchmarks"
+        )));
+    }
+    if pbf.direct_io {
+        return Err(DevError::Usage(format!("{command} does not support --direct-io")));
+    }
+    if pbf.io_uring {
+        return Err(DevError::Usage(match uring_flag {
+            Some(flag) => format!("{command} ignores --io-uring; use {flag}"),
+            None => format!("{command} does not support --io-uring"),
+        }));
+    }
+    Ok(())
+}
+
 // The project command table: one arm per subcommand, so its size tracks the CLI's.
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
 fn run_project(command: Command, detection: &project::Detection) -> Result<(), DevError> {
@@ -487,28 +513,34 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             mode,
             pbf,
             compressions,
-        } => run_measured(
-            &mode,
-            detection,
-            &pbf.dataset,
-            &pbf.variant,
-            &invocation,
-            |req| pbfhogg::cmd::bench_write(req, &compressions),
-        ),
+        } => {
+            reject_unused_pbf_flags("write", &pbf, None)?;
+            run_measured(
+                &mode,
+                detection,
+                &pbf.dataset,
+                &pbf.variant,
+                &invocation,
+                |req| pbfhogg::cmd::bench_write(req, &compressions),
+            )
+        }
         Command::MergeBench {
             mode,
             pbf,
             compressions,
             uring,
             osc_seq,
-        } => run_measured(
-            &mode,
-            detection,
-            &pbf.dataset,
-            &pbf.variant,
-            &invocation,
-            |req| pbfhogg::cmd::bench_merge(req, osc_seq.as_deref(), uring, &compressions),
-        ),
+        } => {
+            reject_unused_pbf_flags("merge", &pbf, Some("--uring"))?;
+            run_measured(
+                &mode,
+                detection,
+                &pbf.dataset,
+                &pbf.variant,
+                &invocation,
+                |req| pbfhogg::cmd::bench_merge(req, osc_seq.as_deref(), uring, &compressions),
+            )
+        }
 
         // ----- elivagar commands -----
         Command::Tilegen {
