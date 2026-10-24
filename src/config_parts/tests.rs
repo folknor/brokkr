@@ -845,8 +845,8 @@ preset = ["a", "b"]
         let table: toml::map::Map<String, toml::Value> = toml::from_str(src).unwrap();
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        let quarantine = parse_quarantine(&table).unwrap();
-        validate_check_against_test(&check, test.as_ref(), &quarantine)
+        parse_quarantine(&table)?;
+        validate_check_against_test(&check, test.as_ref())
     }
 
     #[test]
@@ -1766,7 +1766,7 @@ features = ["a"]
             serial_builds: false,
             profiles,
         };
-        let err = validate_check_against_test(&check, Some(&test), &[])
+        let err = validate_check_against_test(&check, Some(&test))
             .unwrap_err()
             .to_string();
         assert!(err.contains("'consumer'"), "got: {err}");
@@ -1787,7 +1787,7 @@ sweeps = ["all"]
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref(), &[])
+        let err = validate_check_against_test(&check, test.as_ref())
             .unwrap_err()
             .to_string();
         assert!(err.contains("teir1"), "got: {err}");
@@ -1807,7 +1807,7 @@ sweeps = ["all"]
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref(), &[])
+        let err = validate_check_against_test(&check, test.as_ref())
             .unwrap_err()
             .to_string();
         assert!(err.contains("'nope'"), "got: {err}");
@@ -1830,7 +1830,7 @@ skip = [{ package = "core", pattern = "io" }]
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref(), &[])
+        let err = validate_check_against_test(&check, test.as_ref())
             .unwrap_err()
             .to_string();
         assert!(err.contains("shorter than 4"), "got: {err}");
@@ -1852,7 +1852,7 @@ sweeps = ["all"]
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref(), &[])
+        let err = validate_check_against_test(&check, test.as_ref())
             .unwrap_err()
             .to_string();
         assert!(err.contains("gate_profile"), "got: {err}");
@@ -1875,7 +1875,7 @@ sweeps = ["all"]
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref(), &[])
+        let err = validate_check_against_test(&check, test.as_ref())
             .unwrap_err()
             .to_string();
         assert!(err.contains("complete"), "got: {err}");
@@ -1899,7 +1899,7 @@ include_ignored = true
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        validate_check_against_test(&check, test.as_ref(), &[]).unwrap();
+        validate_check_against_test(&check, test.as_ref()).unwrap();
     }
 
     #[test]
@@ -1916,7 +1916,7 @@ sweeps = ["all"]
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref(), &[])
+        let err = validate_check_against_test(&check, test.as_ref())
             .unwrap_err()
             .to_string();
         assert!(err.contains("skip_phases"), "got: {err}");
@@ -1938,7 +1938,7 @@ sweeps = ["all"]
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref(), &[])
+        let err = validate_check_against_test(&check, test.as_ref())
             .unwrap_err()
             .to_string();
         assert!(err.contains("'clipy'"), "got: {err}");
@@ -2001,7 +2001,7 @@ sweeps = ["all"]
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        validate_check_against_test(&check, test.as_ref(), &[]).unwrap();
+        validate_check_against_test(&check, test.as_ref()).unwrap();
         let skips = test.unwrap().profiles["edit"].skip_phases.clone().unwrap();
         assert_eq!(skips, vec!["member_check".to_owned()]);
     }
@@ -2075,7 +2075,7 @@ skip = ["tier2::"]
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        validate_check_against_test(&check, test.as_ref(), &[]).unwrap();
+        validate_check_against_test(&check, test.as_ref()).unwrap();
     }
 
     #[test]
@@ -2100,67 +2100,45 @@ skip = ["tier2::"]
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        validate_check_against_test(&check, test.as_ref(), &[]).unwrap();
+        validate_check_against_test(&check, test.as_ref()).unwrap();
     }
 
+    /// A complete profile owes doctests whatever `[test] doctests` says, and
+    /// the run derives a carrier for every tested build no `doc_only` entry
+    /// carries - so neither a doc entry nor a quarantine is required at load
+    /// any more. Which builds reach a doctested library is a metadata fact the
+    /// run plans with; the load-time ledger that demanded one or the other
+    /// (and called a quarantine beside a doc entry stale) is retired.
     #[test]
-    fn complete_profile_requires_doctests_or_quarantine() {
-        let table = root_table(
-            r#"
-project = "pbfhogg"
-[[check]]
-name = "all"
-[test.profiles.gate]
-certifies = "complete"
-sweeps = ["all"]
-include_ignored = true
-"#,
-        );
-        let check = parse_check(&table).unwrap();
-        let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref(), &[])
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("doctests"), "got: {err}");
-
-        // A doctests quarantine entry with an issue justifies the same
-        // config.
-        let q = vec![QuarantineEntry {
-            pattern: None,
-            package: None,
-            category: Some("doctests".into()),
-            issue: "B42".into(),
-            reason: "42/55 persistence doctests fail to compile".into(),
-        }];
-        validate_check_against_test(&check, test.as_ref(), &q).unwrap();
+    fn complete_profile_needs_no_doctest_declaration_at_load() {
+        const QUARANTINE: &str = "\n[[quarantine]]\ncategory = \"doctests\"\nissue = \"B42\"\n\
+                                  reason = \"42/55 persistence doctests fail to compile\"\n";
+        let with_doc = "[[check]]\nname = \"all\"\n[[check]]\nname = \"doc\"\ndoc_only = true\n\
+                        [test.profiles.gate]\ncertifies = \"complete\"\nsweeps = [\"all\", \"doc\"]\n\
+                        include_ignored = true\n";
+        let without_doc = "[[check]]\nname = \"all\"\n\
+                           [test.profiles.gate]\ncertifies = \"complete\"\nsweeps = [\"all\"]\n";
+        for fragment in [with_doc, without_doc] {
+            validate_fragment(fragment).unwrap();
+            // A doctests quarantine suppresses the derived carriers; beside a
+            // doc entry it is no longer stale at load, since whether it
+            // suppresses anything depends on the builds' metadata.
+            validate_fragment(&format!("{fragment}{QUARANTINE}")).unwrap();
+        }
     }
 
+    /// A doctests quarantine is a complete claim's: it suppresses the
+    /// carriers the claim derives whatever `[test] doctests` says, which now
+    /// governs inline doctests outside a complete claim only - so the pair is
+    /// no longer stale at load.
     #[test]
-    fn doctests_quarantine_goes_stale_when_doctests_run() {
-        let table = root_table(
-            r#"
-project = "pbfhogg"
-[[check]]
-name = "all"
-[test]
-doctests = true
-[test.profiles.tier1]
-sweeps = ["all"]
-"#,
-        );
-        let check = parse_check(&table).unwrap();
-        let test = parse_test(&table).unwrap();
-        let q = vec![QuarantineEntry {
-            pattern: None,
-            package: None,
-            category: Some("doctests".into()),
-            issue: "B42".into(),
-            reason: "no longer true".into(),
-        }];
-        let err = validate_check_against_test(&check, test.as_ref(), &q)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("stale"), "got: {err}");
+    fn a_doctests_quarantine_beside_doctests_true_loads() {
+        validate_fragment(
+            "[[check]]\nname = \"all\"\n[test]\ndoctests = true\n\
+             [test.profiles.gate]\ncertifies = \"complete\"\nsweeps = [\"all\"]\n\
+             [[quarantine]]\ncategory = \"doctests\"\nissue = \"B42\"\nreason = \"fails\"\n",
+        )
+        .unwrap();
     }
 
     #[test]
@@ -2182,7 +2160,7 @@ include_ignored = true
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref(), &[])
+        let err = validate_check_against_test(&check, test.as_ref())
             .unwrap_err()
             .to_string();
         assert!(err.contains("extends"), "got: {err}");
@@ -2204,7 +2182,7 @@ sweeps = ["all"]
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref(), &[])
+        let err = validate_check_against_test(&check, test.as_ref())
             .unwrap_err()
             .to_string();
         assert!(err.contains("combines `lanes`"), "got: {err}");
@@ -2223,7 +2201,7 @@ lanes = ["nope"]
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref(), &[])
+        let err = validate_check_against_test(&check, test.as_ref())
             .unwrap_err()
             .to_string();
         assert!(err.contains("lane 'nope'"), "got: {err}");
@@ -2245,7 +2223,7 @@ lanes = ["tier1"]
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref(), &[])
+        let err = validate_check_against_test(&check, test.as_ref())
             .unwrap_err()
             .to_string();
         assert!(err.contains("declares `certifies`"), "got: {err}");
@@ -2268,7 +2246,7 @@ lanes = ["inner"]
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref(), &[])
+        let err = validate_check_against_test(&check, test.as_ref())
             .unwrap_err()
             .to_string();
         assert!(err.contains("do not nest"), "got: {err}");
@@ -2296,7 +2274,7 @@ lanes = ["tier1"]
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref(), &[])
+        let err = validate_check_against_test(&check, test.as_ref())
             .unwrap_err()
             .to_string();
         assert!(err.contains("via lanes"), "got: {err}");
@@ -2326,7 +2304,7 @@ lanes = ["lane-a", "lane-b"]
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        validate_check_against_test(&check, test.as_ref(), &[]).unwrap();
+        validate_check_against_test(&check, test.as_ref()).unwrap();
     }
 
     #[test]
@@ -2344,7 +2322,7 @@ test_threads = 4
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref(), &[])
+        let err = validate_check_against_test(&check, test.as_ref())
             .unwrap_err()
             .to_string();
         assert!(err.contains("serial by construction"), "got: {err}");
@@ -2366,7 +2344,7 @@ test_threads = 1
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        validate_check_against_test(&check, test.as_ref(), &[]).unwrap();
+        validate_check_against_test(&check, test.as_ref()).unwrap();
     }
 
     #[test]

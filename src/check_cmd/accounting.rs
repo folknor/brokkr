@@ -668,12 +668,12 @@ mod accounting_tests {
         l.kind = LaneKind::DocOnly;
         l.inventory = Inventory::DocTests;
         l.doc_carrier = true;
-        l.doc_streams_required = required;
+        l.doc_required = if required { vec![Resolution::Combined] } else { Vec::new() };
         l
     }
 
     fn rustdoc(lane: usize, stream: u64, event: ObsEvent) -> JournalRecord {
-        JournalRecord::Observed { lane, stream, origin: StreamOrigin::Doctest, event }
+        JournalRecord::Observed { lane, stream, origin: StreamOrigin::Doctest { resolution: None }, event }
     }
 
     /// A planned carrier whose lane passed but never presented a rustdoc
@@ -742,6 +742,77 @@ mod accounting_tests {
         let r = reconcile(&p, &stopped, true, Vec::new());
         assert!(!r.doctests.carriers[0].completed);
         assert!(!r.green());
+    }
+
+    fn doc_stream(lane: usize, stream: u64, resolution: Option<&str>) -> Vec<JournalRecord> {
+        let origin = StreamOrigin::Doctest { resolution: resolution.map(str::to_owned) };
+        let at = |event| JournalRecord::Observed { lane, stream, origin: origin.clone(), event };
+        vec![
+            at(ObsEvent::SuiteStarted { test_count: 1 }),
+            at(started("src/lib.rs - doc (line 1)")),
+            at(finished("src/lib.rs - doc (line 1)", TestResult::Ok)),
+            at(ObsEvent::SuiteFinished { passed: 1, failed: 0, ignored: 0 }),
+            at(ObsEvent::StreamEnded { end: StreamEnd::Eof }),
+        ]
+    }
+
+    /// A carrier owes a stream per obliged resolution: one package's
+    /// doctests cannot stand in for another's that never ran.
+    #[test]
+    fn a_carrier_owes_a_stream_per_obliged_resolution() {
+        let mut lane = carrier_lane(0, false);
+        lane.doc_required = vec![Resolution::from_option(Some("a")), Resolution::from_option(Some("b"))];
+        let p = plan(vec![lane]);
+        let run = |streams: &[Option<&str>]| {
+            let mut records = vec![JournalRecord::LaneStarted { lane: 0 }];
+            for (i, r) in streams.iter().enumerate() {
+                records.extend(doc_stream(0, 10 + i as u64, *r));
+            }
+            records.push(JournalRecord::LaneFinished { lane: 0, passed: true });
+            records.push(JournalRecord::Closed);
+            reconcile(&p, &records, true, Vec::new())
+        };
+        let half = run(&[Some("a")]);
+        assert!(!half.doctests.carriers[0].completed);
+        assert_eq!(half.doctests.carriers[0].missing, vec!["b".to_owned()]);
+        assert!(!half.green());
+        let whole = run(&[Some("a"), Some("b")]);
+        assert!(whole.doctests.carriers[0].completed, "{:?}", whole.doctests.carriers);
+        assert!(whole.green());
+    }
+
+    /// A derived carrier's decline is policy evidence: recorded on the
+    /// carrier, never a stream the carrier must close, and never counted
+    /// toward what it owes.
+    #[test]
+    fn a_declined_library_is_recorded_and_presents_nothing() {
+        let p = plan(vec![carrier_lane(0, true)]);
+        let decline = JournalRecord::Observed {
+            lane: 0,
+            stream: 7,
+            origin: StreamOrigin::Doctest { resolution: None },
+            event: ObsEvent::DoctestDeclined { package: "cli".into() },
+        };
+        let mut records = vec![JournalRecord::LaneStarted { lane: 0 }, decline.clone()];
+        records.extend(doc_stream(0, 8, None));
+        records.push(JournalRecord::LaneFinished { lane: 0, passed: true });
+        records.push(JournalRecord::Closed);
+        let r = reconcile(&p, &records, true, Vec::new());
+        let carrier = &r.doctests.carriers[0];
+        assert!(carrier.completed, "{carrier:?}");
+        assert_eq!(carrier.streams, 1, "the decline is not a stream");
+        assert_eq!(carrier.declined, vec!["cli".to_owned()]);
+        assert!(r.truncated_streams.is_empty(), "{:?}", r.truncated_streams);
+        assert!(r.green());
+
+        // A decline alone does not satisfy an obliged resolution.
+        let only = vec![
+            JournalRecord::LaneStarted { lane: 0 },
+            decline,
+            JournalRecord::LaneFinished { lane: 0, passed: true },
+            JournalRecord::Closed,
+        ];
+        assert!(!reconcile(&p, &only, true, Vec::new()).doctests.carriers[0].completed);
     }
 
     /// The carrier flag says whether the lane will actually run doctests: a

@@ -301,10 +301,15 @@ pub(crate) struct PreparedLane {
     /// see it, and without this a support binary another lane rebuilt since
     /// the plan ran unverified.
     pub(crate) support_fingerprint: Vec<String>,
-    /// A serial lane's `cargo test` selection reaches a member with a
-    /// doctested target ([`DocFacts::obliges`]), so - where the lane carries
-    /// doctests - it must present a rustdoc stream to have completed.
-    pub(crate) doc_obligation: bool,
+    /// The cargo resolutions that must each present a rustdoc stream for this
+    /// lane - where it carries doctests - to have completed: a configured
+    /// `doc_only` lane's every resolution (cargo refuses `--doc` with no
+    /// library), otherwise each resolution whose selection reaches a member
+    /// with a doctested target ([`DocFacts::obliges`]).
+    pub(crate) doc_required: Vec<Resolution>,
+    /// A derived carrier's per-library rustdoc admission, from the same
+    /// metadata as [`Self::doc_required`].
+    pub(crate) rustdoc_admission: Option<BTreeMap<PathBuf, crate::test_runner::LibraryDoctest>>,
     /// Why this lane has no inventory, when it has none: its streams cannot be
     /// attributed to binaries. See [`Inventory::Unavailable`].
     pub(crate) unavailable: Option<UnavailableReason>,
@@ -351,7 +356,8 @@ impl PreparedLane {
             verify: false,
             runtime_fingerprint: None,
             support_fingerprint: Vec::new(),
-            doc_obligation: false,
+            doc_required: Vec::new(),
+            rustdoc_admission: None,
             unavailable: None,
             snapshot: None,
             prepare_failed: None,
@@ -649,7 +655,24 @@ fn prepare_lane_from(
             if inputs.certifying {
                 refuse_unattributable_serial(sweep, &env, extra_args)?;
             }
-            PreparedLane::bare(env)
+            let mut prepared = PreparedLane::bare(env);
+            if sweep.origin.is_derived_carrier() {
+                // Derived only where some resolution owes doctests; it owes
+                // them exactly there, and declines what a manifest opts out.
+                let facts = workspace_doc_facts(inputs.project_root, &prepared.env.refs())?;
+                prepared.doc_required = facts.obliged_resolutions(attempt);
+                prepared.rustdoc_admission = Some(facts.rustdoc_dispositions());
+            } else {
+                // Cargo refuses `--doc` over a selection with no library, so
+                // a configured doc lane that ran presented a stream on every
+                // resolution.
+                prepared.doc_required = attempt
+                    .runs()
+                    .iter()
+                    .map(|run| Resolution::from_option(run.resolution.as_deref()))
+                    .collect();
+            }
+            prepared
         }
         (LaneKind::Parallel | LaneKind::Isolated, prebuilt) => {
             prepare_direct(
@@ -778,7 +801,8 @@ fn serial_unattributable(
                  which shares one output stream across tests and harnesses, so its executions cannot \
                  be attributed under a \"complete\" claim. Use `parallel = {{ budget = N }}` on the \
                  [[check]] entry instead - the parallel-binaries lane runs the binaries concurrently \
-                 with each one on its own stream.",
+                 with each one on its own stream, and the claim still runs the lane's doctests, in \
+                 the doctest carrier it derives for any tested build no `doc_only` entry carries.",
                 sweep.label
             ),
         });
@@ -825,6 +849,19 @@ pub(crate) struct DocFacts {
     /// `Target::doctestable`; a `cdylib`/`staticlib`/`dylib`-only library has
     /// no rustdoc test pass).
     doctestable: BTreeSet<String>,
+    /// Every member whose library rustdoc can test at all, by manifest
+    /// directory, and whether its manifest leaves `doctest` on. Positive in
+    /// both directions: a library absent here is unknown, never opted out.
+    libraries: BTreeMap<PathBuf, crate::test_runner::LibraryDoctest>,
+}
+
+/// A target rustdoc can run doctests for, whatever its `doctest` flag says.
+fn rustdoc_testable(target: &crate::cargo::metadata::CargoTarget) -> bool {
+    target
+        .crate_types
+        .iter()
+        .chain(&target.kind)
+        .any(|kind| matches!(kind.as_str(), "lib" | "rlib" | "proc-macro"))
 }
 
 impl DocFacts {
@@ -848,18 +885,62 @@ impl DocFacts {
             .iter()
             .filter(|pkg| meta.is_member(&pkg.id))
             .filter(|pkg| {
-                pkg.targets.iter().any(|target| {
-                    target.doctest.unwrap_or(false)
-                        && target
-                            .crate_types
-                            .iter()
-                            .chain(&target.kind)
-                            .any(|kind| matches!(kind.as_str(), "lib" | "rlib" | "proc-macro"))
-                })
+                pkg.targets
+                    .iter()
+                    .any(|target| target.doctest.unwrap_or(false) && rustdoc_testable(target))
             })
             .map(|pkg| pkg.name.clone())
             .collect::<BTreeSet<_>>();
-        Self { members, default_members, doctestable }
+        let libraries = meta
+            .packages
+            .iter()
+            .filter(|pkg| meta.is_member(&pkg.id))
+            .filter_map(|pkg| {
+                let lib = pkg.targets.iter().find(|target| rustdoc_testable(target))?;
+                let dir = Path::new(&pkg.manifest_path).parent()?;
+                Some((
+                    crate::test_runner::canonical_package_dir(dir),
+                    crate::test_runner::LibraryDoctest {
+                        package: pkg.name.clone(),
+                        doctested: lib.doctest.unwrap_or(false),
+                    },
+                ))
+            })
+            .collect();
+        Self { members, default_members, doctestable, libraries }
+    }
+
+    /// Facts for a workspace of library members, each `(name, doctested)`,
+    /// all default members, each at `/ws/<name>`.
+    #[cfg(test)]
+    pub(crate) fn for_members(members: &[(&str, bool)]) -> Self {
+        Self {
+            members: members.iter().map(|(n, _)| (*n).to_owned()).collect(),
+            default_members: members.iter().map(|(n, _)| (*n).to_owned()).collect(),
+            doctestable: members.iter().filter(|(_, d)| *d).map(|(n, _)| (*n).to_owned()).collect(),
+            libraries: members
+                .iter()
+                .map(|(n, d)| {
+                    (
+                        PathBuf::from(format!("/ws/{n}")),
+                        crate::test_runner::LibraryDoctest { package: (*n).to_owned(), doctested: *d },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// Whether any member has a doctested target at all: a workspace with
+    /// none owes no doctest carrier.
+    pub(crate) fn any_doctestable(&self) -> bool {
+        !self.doctestable.is_empty()
+    }
+
+    /// The rustdoc admission table a derived carrier's strict session holds:
+    /// a library whose manifest opts out is declined there rather than run,
+    /// since an explicit `cargo test --doc` would test it regardless.
+    pub(crate) fn rustdoc_dispositions(&self) -> BTreeMap<PathBuf, crate::test_runner::LibraryDoctest> {
+        self.libraries.clone()
     }
 
     /// The members one resolution of a serial lane runs `cargo test` over -
@@ -884,9 +965,19 @@ impl DocFacts {
     pub(crate) fn obliges(&self, selection: &Selection) -> bool {
         self.selected(selection).iter().any(|p| self.doctestable.contains(*p))
     }
+
+    /// The resolutions of a lane that are obliged to present a rustdoc stream.
+    pub(crate) fn obliged_resolutions(&self, attempt: &Attempt) -> Vec<Resolution> {
+        attempt
+            .runs()
+            .iter()
+            .filter(|run| self.obliges(&run.selection))
+            .map(|run| Resolution::from_option(run.resolution.as_deref()))
+            .collect()
+    }
 }
 
-fn workspace_doc_facts(project_root: &Path, env_refs: &[(&str, &str)]) -> Result<DocFacts, DevError> {
+pub(crate) fn workspace_doc_facts(project_root: &Path, env_refs: &[(&str, &str)]) -> Result<DocFacts, DevError> {
     // The shared workspace snapshot, keyed on the lane's env, so preparing
     // several serial lanes under one env runs `cargo metadata` once.
     let metadata = crate::cargo::metadata::load(
@@ -919,7 +1010,7 @@ fn prepare_serial(
     let libtest_extra = forwarded.libtest();
     let env_refs = env.refs();
     let doc_facts = workspace_doc_facts(inputs.project_root, &env_refs)?;
-    let doc_obligation = attempt.runs().iter().any(|run| doc_facts.obliges(&run.selection));
+    let doc_required = doc_facts.obliged_resolutions(attempt);
     let built = match prebuilt {
         Some(b) => b,
         None => build_serial(inputs, sweep, attempt, extra_args, env)?.ok_or_else(|| not_prepared(sweep))?,
@@ -937,7 +1028,7 @@ fn prepare_serial(
     let filter_args = lane_filter_args(sweep, libtest_extra);
     let mut prepared = PreparedLane::bare(env.clone());
     prepared.runtime_fingerprint = fingerprint;
-    prepared.doc_obligation = doc_obligation;
+    prepared.doc_required = doc_required;
     prepared.include_ignored = lane_runs_ignored(sweep, libtest_extra);
     prepared.libtest_extra = libtest_extra.to_vec();
     prepared.target_filters = sweep.lane_filters().cargo_args();
@@ -1762,7 +1853,6 @@ pub(crate) fn prepare_profile(
         let mut record = LaneRecord {
             include_ignored: sweep.lane_filters().include_ignored,
             doc_carrier: lane_runs_doctests(sweep, doctests),
-            doc_streams_required: kind == LaneKind::DocOnly,
             ..LaneRecord::empty(lane_idx, sweep.label.clone(), kind, shape.clone())
         };
 
@@ -1896,8 +1986,8 @@ pub(crate) fn prepare_profile(
             );
         }
         record.include_ignored = prepared.include_ignored;
-        if record.doc_carrier && kind == LaneKind::Serial {
-            record.doc_streams_required = prepared.doc_obligation;
+        if record.doc_carrier {
+            record.doc_required.clone_from(&prepared.doc_required);
         }
         record.inventory = if kind == LaneKind::DocOnly {
             Inventory::DocTests

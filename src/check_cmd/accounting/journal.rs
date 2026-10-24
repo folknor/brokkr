@@ -27,8 +27,13 @@ pub(crate) enum StreamOrigin {
     },
     /// The engine lane: every record names its own binary.
     Engine { resolution: Option<String>, unit: BinaryUnit },
-    /// rustdoc's stream: doctests, outside binary accounting.
-    Doctest,
+    /// rustdoc's stream: doctests, outside binary accounting. `resolution` is
+    /// the cargo resolution of the lane that ran it, which is what a carrier's
+    /// per-resolution obligation is held against.
+    Doctest {
+        #[serde(default)]
+        resolution: Option<String>,
+    },
     /// Nothing in the plan accounts for this stream.
     Unattributed { detail: String },
 }

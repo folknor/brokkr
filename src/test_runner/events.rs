@@ -105,6 +105,10 @@ pub(crate) enum AttributionRefusal {
     RebuiltExecutable { executable: String },
     MissingPlannedStream { executable: String, unit: String },
     RustdocWithoutCarrier,
+    /// A derived doctest carrier's rustdoc named a package directory its
+    /// admission table does not hold (or named none): neither run nor
+    /// declined, since only a positively identified library may be either.
+    UnidentifiedRustdoc { package_dir: String },
     UnknownRole { role: u8 },
     ExecutableHashFailed { executable: String, detail: String },
     RunnerMismatch,
@@ -139,6 +143,13 @@ impl AttributionRefusal {
             Self::RustdocWithoutCarrier => {
                 "a rustdoc connected on a run the plan holds no doctest carrier for".into()
             }
+            Self::UnidentifiedRustdoc { package_dir } if package_dir.is_empty() => {
+                "a derived doctest carrier's rustdoc named no package directory".into()
+            }
+            Self::UnidentifiedRustdoc { package_dir } => format!(
+                "a derived doctest carrier's rustdoc ran for {package_dir}, which is no workspace \
+                 member library the plan knows"
+            ),
             Self::UnknownRole { role } => format!("unknown harness handshake role {role}"),
             Self::ExecutableHashFailed { executable, detail } => {
                 format!("{executable} could not be hashed: {detail}")
@@ -196,6 +207,13 @@ pub(crate) enum ObsEvent {
     /// The shim could not authenticate or attribute a harness.
     AttributionRefused {
         refusal: AttributionRefusal,
+    },
+    /// A derived doctest carrier's rustdoc for a library whose manifest sets
+    /// `doctest = false`: authenticated, identified, and not run. Policy
+    /// evidence, not an execution - it counts toward nothing a carrier must
+    /// present.
+    DoctestDeclined {
+        package: String,
     },
 }
 

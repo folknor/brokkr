@@ -132,26 +132,23 @@ env = { HIGH_PRECISION = "1" }
   `brokkr man test-lanes nextest`.
 - `doc_only` (optional, default `false`) - the entry runs `cargo test --doc`
   (doctests, nothing else) with its selection, features, unification pin and
-  cargo profile, serially. The doctest twin for a `parallel` workspace
-  sweep: doctests live in cargo's `--doc` pseudo-target, which no binary
-  fan-out can carry, so a project parallelizing its main sweep pairs it with
-  a doc-only entry of the same selection. Runs doctests regardless of
-  `[test] doctests` (the key is the entry's own opt-in), and a referenced
-  doc-only entry satisfies a complete profile's doctest obligation even
-  under `doctests = false` - a `category = "doctests"` quarantine coexisting
-  with one is then a stale-entry load error. Owns cargo target selection
-  outright (`--doc` is exclusive): entry `tests`, `lib_tests`, `exclude_tests` and forwarded target
-  selectors are refused, as are entry-level `skip`/`only` - doctests cannot
-  be enumerated, so a filter on them could never be audited for liveness,
-  and under a complete claim profile-inherited filters are refused too
-  (compose the doc twin as its own filterless lane). Under a complete claim
-  with a doctest obligation, at least one doctest carrier must be
-  **workspace-shaped**: `packages` empty, with `test_exclude_packages`
-  allowed and reported - a package-scoped twin would prove "some doctests
-  ran" while the rest of the workspace's silently stopped, invisible to an
-  audit that cannot enumerate doctests. Doc-only sweeps sit outside the
-  coverage pair audit (reported on the coverage line) and are execution
-  policy, never build shape.
+  cargo profile, serially. Doctests live in cargo's `--doc` pseudo-target,
+  which no binary fan-out can carry, so this is how a run that is not a
+  complete claim gets the doctests of a `parallel` or nextest build. Runs
+  doctests regardless of `[test] doctests` (the key is the entry's own
+  opt-in), with cargo's meaning of `--doc` - which tests a library whose
+  manifest sets `doctest = false` too. Under a complete claim a doc-only
+  entry discharges the doctest obligation of the tested build it equals
+  (see [Doctests](#doctests) below); the claim derives a carrier for every
+  other tested build, so the entry is never required there. Owns cargo
+  target selection outright (`--doc` is exclusive): entry `tests`,
+  `lib_tests`, `exclude_tests` and forwarded target selectors are refused, as
+  are entry-level `skip`/`only` - doctests cannot be enumerated, so a filter
+  on them could never be audited for liveness, and under a complete claim
+  profile-inherited filters are refused too (compose the doc twin as its own
+  filterless lane). Doc-only sweeps sit outside the coverage pair audit
+  (reported on the coverage line) and are execution policy, never build
+  shape.
 - `tests` / `skip` / `only` (optional, default `[]`) - per-`[[check]]` libtest
   filters, **ANDed** with any referencing profile's filters of the same name
   (they append, never replace): `tests` -> cargo `--test <name>` target
@@ -455,23 +452,43 @@ hybrid parts count P-cores and E-cores alike.
 ### Doctests
 
 Doctests live in cargo's `--doc` pseudo-target, which has no binary for a
-`parallel` sweep to fan out over, and nextest does not execute them. When
-`[test] doctests = true`, load rejects a config whose `[[check]]` entries are
-all parallel or nextest lanes, because none can run doctests. A complete
-profile must also select at least one lane that actually runs them; this is
-checked per profile, since partial profiles do not claim complete coverage.
+`parallel` sweep to fan out over, and nextest does not execute them.
 
-A plain libtest lane can carry doctests when its package and target selection
-includes them. A `doc_only = true` entry is the explicit alternative: it runs
-`cargo test --doc` with its own selection and can provide the workspace-wide
-doctest carrier for a parallel profile. Both obligations are load errors, so
-the configured complete claim cannot pass without its declared doctests.
+**Outside a complete claim**, a plain libtest lane carries doctests inline
+under `[test] doctests = true` when its target selection includes them, and a
+`doc_only = true` entry carries them explicitly. When `[test] doctests =
+true`, load rejects a config whose `[[check]]` entries are all parallel or
+nextest lanes: an ordinary run would have nowhere to run them.
 
-When a parallel sweep is workspace-wide but the serial remainder is
-package-scoped, those serial siblings only run their packages' doctests. Add a
-workspace-shaped `doc_only = true` twin of the parallel entry to carry doctests
-for the rest of the workspace; see the `doc_only` key above for the selection
-rule a complete profile enforces.
+**Under `certifies = "complete"`** the obligation is per tested build, whatever
+`[test] doctests` says: a doctest under `cfg(feature = "ffi")` compiles only in
+a build with that feature, so one workspace doc twin cannot stand in for a
+package-scoped feature lane. For every lane it runs that is not doc-only or
+`curated` and whose selection reaches a member with a doctested library, the
+claim runs `cargo test --doc` of exactly that lane's build - its requests,
+features, unification answer, profile, target, rustflags, env and
+`build_packages` - unfiltered and serial. A configured `doc_only` entry of an
+equal build discharges it; otherwise the run derives the carrier itself, adds
+it as a lane (`<entry> (doctests)`, announced at the top of the run), and
+lints nothing extra for it, since its source lane's own clippy run covers the
+build. Equal builds share one carrier, so a parallel lane and its nextest twin
+owe one pass. A package-mode lane's carrier runs only the packages that reach
+a doctested library. Serial lanes run no doctests inline under a complete
+claim, so every doctest runs once per tested build and never under a lane's
+`skip`/`only`. A derived carrier honours a library manifest's `doctest =
+false`: cargo's `--doc` would test that library anyway, so brokkr declines its
+rustdoc (recorded in the doctest block) instead of running it. Converting a
+lane to `parallel` or `harness = "nextest"` therefore never drops its doctests
+from the gate.
+
+A `[[quarantine]] category = "doctests"` entry suppresses every derived
+carrier (the run names what it suppresses); configured `doc_only` entries
+still run. A complete claim that owes doctests also needs one
+**workspace-shaped** carrier, configured or derived: `packages` empty, with
+`test_exclude_packages` allowed and reported. The derived carriers cover every
+tested build, but a member no lane selects is in none of them, and its
+doctests would stop running unseen - the audit cannot enumerate doctests. A
+workspace whose members have no doctested library owes neither.
 
 ### What it does not do
 
@@ -559,13 +576,16 @@ include_ignored = true
   sweep that must run optimized still does under `brokkr test`. Affects
   `brokkr check` not at all - check's test phase builds dev unless the sweep's
   `profile` says otherwise, and this field is never consulted there.
-- `doctests` (default `false`) decides whether `brokkr check`'s test phase runs
-  doctests. Off by default because CI runs under cargo-nextest, which never
-  executes doctests - running them here would gate on a signal CI can't see. In
-  the default state each sweep's `cargo test` is scoped to `--tests` (no
-  doctests) unless it already names a target (`--test <name>`). Set `true` to
-  restore the full `cargo test` default. Project-wide only (no per-`[[check]]`
-  or CLI override); `brokkr test <name>` is unaffected. See
+- `doctests` (default `false`) decides whether `brokkr check`'s serial lanes
+  run doctests inline, outside a complete claim. Off by default because CI
+  runs under cargo-nextest, which never executes doctests - running them here
+  would gate on a signal CI can't see. In the default state each sweep's
+  `cargo test` is scoped to `--tests` (no doctests) unless it already names a
+  target (`--test <name>`). Set `true` to restore the full `cargo test`
+  default. A `certifies = "complete"` profile ignores it: it runs every tested
+  build's doctests in doctest carriers either way (see
+  [Doctests](#doctests)). Project-wide only (no per-`[[check]]` or CLI
+  override); `brokkr test <name>` is unaffected. See
   `docs/commands/check.test-lanes.md`.
 - `serial_builds` (default `false`) runs every cargo invocation of `brokkr
   check`'s clippy, rustdoc and prepare-build steps one after another. By
@@ -639,6 +659,8 @@ include_ignored = true
   its executions cannot be attributed. The error names the profile and the
   entries; give them `parallel = { budget = N }`, or move them to a profile
   without `test_threads`. Parallel, nextest and doc-only entries are exempt.
+  Either fix keeps the entries' doctests in the claim, which runs them in a
+  doctest carrier of each tested build (see [Doctests](#doctests)).
 - `lanes = ["tier1", "serial"]` composes profiles as a *list of runs*:
   each lane resolves independently and the test
   phase runs every lane's sweeps in order (labels lane-qualified,
@@ -661,8 +683,9 @@ include_ignored = true
   and `extends` (an inherited filter set defeats an explicit claim), and runs
   the **coverage phase**: every (build shape, test) pair that no lane runs
   must be justified by a `[[quarantine]]` entry or be `#[ignore]`d at the
-  source, or the check fails as orphaned. `[test] doctests = false` needs a
-  `[[quarantine]] category = "doctests"` entry. Profiles without `certifies`
+  source, or the check fails as orphaned. It also runs every tested build's
+  doctests, unless a `[[quarantine]] category = "doctests"` entry justifies
+  their absence (see [Doctests](#doctests)). Profiles without `certifies`
   behave exactly as before the key existed (binary exit codes, `check
   passed`). Neither `certifies` nor `skip_phases` is inherited through
   `extends`.
@@ -695,10 +718,12 @@ reason   = "42/55 persistence doctests fail to compile"
   entry to one package's pairs. Without it, a name-only pattern absorbs
   same-named pairs in every package, so a test that later stops running
   for an unrelated reason lands as accounted instead of orphaned.
-- Staleness is mechanical in both directions: a `pattern` entry justifying
-  zero non-run pairs fails the check (delete it when the bug closes), and
-  a `doctests` entry with `[test] doctests = true` is rejected at load
-  time. Per-entry pair counts print on every complete run, so an entry
+- A `pattern` entry justifying zero non-run pairs fails the check (delete it
+  when the bug closes). A `doctests` entry suppresses the doctest carriers a
+  complete run derives, whatever `[test] doctests` says, so no combination
+  with that flag or with `doc_only` entries is a load error; every complete
+  run under one names the carriers it suppressed, or says it suppressed
+  none. Per-entry pair counts print on every complete run, so an entry
   silently growing (a new test riding an old substring) is visible.
 
 For the sweep-selection ladder used by `brokkr check` (and how `brokkr test`

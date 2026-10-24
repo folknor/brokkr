@@ -2068,6 +2068,7 @@ mod serial_observe_tests {
             hashes: HashMap::new(),
             expected: Vec::new(),
             rustdoc: false,
+            rustdoc_admission: None,
             strict,
         };
         (plan, unit)

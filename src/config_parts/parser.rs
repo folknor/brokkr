@@ -99,7 +99,7 @@ fn parse_dev_config(table: &toml::Table) -> Result<DevConfig, DevError> {
     let check = parse_check(table)?;
     let test = parse_test(table)?;
     let quarantine = parse_quarantine(table)?;
-    validate_check_against_test(&check, test.as_ref(), &quarantine)?;
+    validate_check_against_test(&check, test.as_ref())?;
     let capture_env = parse_capture_env(table)?;
     let gremlins = parse_gremlins(table)?;
     let header = parse_header(table)?;
@@ -1772,7 +1772,6 @@ fn validate_skip_phases(profile_name: &str, def: &ProfileDef) -> Result<(), DevE
 fn validate_check_against_test(
     check: &[CheckEntry],
     test: Option<&TestConfig>,
-    quarantine: &[QuarantineEntry],
 ) -> Result<(), DevError> {
     let Some(t) = test else {
         return Ok(());
@@ -1798,8 +1797,10 @@ fn validate_check_against_test(
             "[test] doctests = true, but every [[check]] entry sets \
              `parallel` or `harness = \"nextest\"`. A parallel sweep fans out \
              over test binaries and doctests have none, and nextest never \
-             executes doctests - so there is nowhere for them to run. Add a \
-             plain libtest [[check]] entry, or set doctests = false."
+             executes doctests - so there is nowhere for them to run outside a \
+             complete claim. Add a plain libtest [[check]] entry, or set doctests = \
+             false: a `certifies = \"complete\"` profile runs every tested build's \
+             doctests either way, in the doctest carriers it derives."
                 .into(),
         ));
     }
@@ -1831,20 +1832,10 @@ fn validate_check_against_test(
             )));
         }
     }
-    // Staleness, direction two: a doctests quarantine while doctests
-    // actually run justifies nothing. The ledger must shrink when the
-    // suppression it covers is removed.
-    if t.doctests
-        && quarantine
-            .iter()
-            .any(|q| q.category.as_deref() == Some("doctests"))
-    {
-        return Err(DevError::Config(
-            "[[quarantine]] category = \"doctests\" is stale: `[test] doctests = \
-             true`, so nothing is suppressed. Delete the entry."
-                .into(),
-        ));
-    }
+    // A doctests quarantine is a complete claim's: it suppresses the doctest
+    // carriers the claim derives, whatever `[test] doctests` says (that flag
+    // governs inline doctests outside a complete claim only), so neither
+    // combination of the two is stale at load.
     if t.profiles.is_empty() {
         return Ok(());
     }
@@ -1914,9 +1905,7 @@ fn validate_check_against_test(
             }
         }
     }
-    validate_doctest_ledger(t, check, quarantine)?;
     let resolved_profiles = crate::profile::resolve_profiles_for_validation(t, check)?;
-    validate_complete_doctest_carriers(t, &resolved_profiles)?;
     validate_complete_test_threads(t, &resolved_profiles)?;
     Ok(())
 }
@@ -1956,7 +1945,9 @@ fn validate_complete_test_threads(
                  [[check]] entr{} {}, which [test.profiles.{claim}] certifies \"complete\". \
                  Cargo-mediated parallelism shares one output stream across tests and \
                  harnesses, so those executions cannot be attributed. Set `parallel = {{ \
-                 budget = N }}` on {}, or move {} to a profile without `test_threads`.",
+                 budget = N }}` on {}, or move {} to a profile without `test_threads`. \
+                 Either way the claim still runs the entry's doctests, in the doctest \
+                 carrier it derives for a tested build no `doc_only` entry carries.",
                 configured_threads.unwrap_or_default(),
                 if serial.len() == 1 { "y" } else { "ies" },
                 serial.iter().map(|s| format!("'{s}'")).collect::<Vec<_>>().join(", "),
@@ -2064,77 +2055,17 @@ fn validate_lanes_profile(
 /// at run time by the coverage phase - every non-run (sweep, test) pair
 /// must be quarantined or the check fails as orphaned. What remains
 /// structural: no `extends` (an inherited filter set defeats an explicit
-/// claim). The doctest ledger (doctests off needs justification) is a
-/// certifying-profile property, checked in [`validate_doctest_ledger`]
-/// rather than per lane, because a referenced `doc_only` entry can satisfy
-/// it and lanes only see their own slice.
+/// claim). Doctests need no load-time rule here: a complete run derives a
+/// carrier for every tested build no `doc_only` entry carries (or a
+/// `[[quarantine]] category = "doctests"` entry suppresses them), and which
+/// builds reach a doctested library is a cargo metadata fact, known only
+/// when the run plans.
 fn validate_complete_profile(name: &str, def: &ProfileDef) -> Result<(), DevError> {
     if def.extends.is_some() {
         return Err(DevError::Config(format!(
             "[test.profiles.{name}] cannot back a \"complete\" claim: uses `extends` (an \
              inherited filter set defeats an explicit claim)."
         )));
-    }
-    Ok(())
-}
-
-/// The doctest side of the complete-claim ledger, resolved from EFFECTIVE
-/// referenced lanes rather than `[test] doctests` alone: a complete profile
-/// must run doctests somewhere (ordinary libtest lanes under
-/// `doctests = true`, or a referenced `doc_only` entry) or carry a
-/// `[[quarantine]] category = "doctests"` justification - and must not have
-/// both a doc-only route and the quarantine, because a justification for a
-/// suppression that is not happening is a stale ledger entry.
-fn validate_doctest_ledger(
-    t: &TestConfig,
-    check: &[CheckEntry],
-    quarantine: &[QuarantineEntry],
-) -> Result<(), DevError> {
-    if t.doctests {
-        // Ordinary serial lanes run doctests; the pre-existing global stale
-        // rule already rejects a doctests quarantine here.
-        return Ok(());
-    }
-    let has_quarantine = quarantine
-        .iter()
-        .any(|q| q.category.as_deref() == Some("doctests"));
-    let complete: Vec<&str> = t
-        .profiles
-        .iter()
-        .filter(|(_, d)| Claim::new(d.certifies).enumerates_universe())
-        .map(|(n, _)| n.as_str())
-        .collect();
-    if complete.is_empty() {
-        return Ok(());
-    }
-    let mut all_covered = true;
-    for name in &complete {
-        let mut referenced: BTreeSet<String> = BTreeSet::new();
-        let mut visited: BTreeSet<String> = BTreeSet::new();
-        referenced_check_entries(&t.profiles, name, &mut visited, &mut referenced);
-        let has_doc_lane = check
-            .iter()
-            .any(|e| e.doc_only && referenced.contains(&e.name));
-        if !has_doc_lane {
-            all_covered = false;
-            if !has_quarantine {
-                return Err(DevError::Config(format!(
-                    "[test.profiles.{name}] cannot back a \"complete\" claim: doctests are \
-                     disabled with no justification. Doctests are invisible to the coverage \
-                     enumeration, so `[test] doctests = false` needs a referenced \
-                     `doc_only = true` [[check]] entry, a `[[quarantine]] category = \
-                     \"doctests\"` entry with an issue, or doctests = true."
-                )));
-            }
-        }
-    }
-    if all_covered && has_quarantine {
-        return Err(DevError::Config(
-            "[[quarantine]] category = \"doctests\" is stale: every complete profile runs \
-             doctests through a referenced `doc_only` entry, so nothing is suppressed. Delete \
-             the entry."
-                .into(),
-        ));
     }
     Ok(())
 }
@@ -2225,38 +2156,6 @@ fn validate_complete_universe(
              universe), or delete the entry.",
             unreferenced.join(", "),
         )));
-    }
-    Ok(())
-}
-
-/// A complete profile must carry configured doctests through at least one
-/// selected lane. Use the same lane predicate as preparation and accounting,
-/// so nextest, isolation, parallel execution and target filters cannot drift
-/// into separate interpretations of what runs doctests.
-fn validate_complete_doctest_carriers(
-    config: &TestConfig,
-    profiles: &BTreeMap<String, Vec<crate::profile::SweepDecl>>,
-) -> Result<(), DevError> {
-    if !config.doctests {
-        return Ok(());
-    }
-    for (name, profile) in &config.profiles {
-        if !Claim::new(profile.certifies).requires_attribution() {
-            continue;
-        }
-        let carries_doctests = profiles.get(name).is_some_and(|sweeps| {
-            sweeps.iter().any(|declaration| {
-                let sweep = crate::profile::PlannedSweep::resolve(declaration.clone(), false);
-                crate::check_cmd::lane_runs_doctests(&sweep, config.doctests)
-            })
-        });
-        if !carries_doctests {
-            return Err(DevError::Config(format!(
-                "[test.profiles.{name}] certifies \"complete\" and \
-                 [test] doctests = true, but none of its selected lanes runs doctests. \
-                 Add a serial sweep without target filters or a `doc_only` entry."
-            )));
-        }
     }
     Ok(())
 }
@@ -2652,7 +2551,7 @@ sweeps = ["default", "ffi"]
         )
         .unwrap();
         let check = check_entries(&["default", "ffi", "live", "sim"]);
-        let err = validate_check_against_test(&check, Some(&cfg), &[])
+        let err = validate_check_against_test(&check, Some(&cfg))
             .unwrap_err()
             .to_string();
         assert!(err.contains("live"), "got: {err}");
@@ -2675,7 +2574,7 @@ sweeps = ["default"]
         )
         .unwrap();
         let check = check_entries(&["default", "ffi"]);
-        let err = validate_check_against_test(&check, Some(&cfg), &[])
+        let err = validate_check_against_test(&check, Some(&cfg))
             .unwrap_err()
             .to_string();
         assert!(err.contains("ffi"), "got: {err}");
@@ -2698,7 +2597,7 @@ sweeps = ["live", "sim"]
         )
         .unwrap();
         let check = check_entries(&["default", "ffi", "live", "sim"]);
-        validate_check_against_test(&check, Some(&cfg), &[]).unwrap();
+        validate_check_against_test(&check, Some(&cfg)).unwrap();
     }
 
     #[test]
@@ -2722,10 +2621,10 @@ sweeps = ["sim-live"]
         let mut check = check_entries(&["default", "sim-live"]);
         check[1].curated = true;
         check[1].only = vec!["targeted".into()];
-        validate_check_against_test(&check, Some(&cfg), &[]).unwrap();
+        validate_check_against_test(&check, Some(&cfg)).unwrap();
 
         check[1].curated = false;
-        let err = validate_check_against_test(&check, Some(&cfg), &[])
+        let err = validate_check_against_test(&check, Some(&cfg))
             .unwrap_err()
             .to_string();
         assert!(err.contains("sim-live"), "got: {err}");
@@ -2744,7 +2643,7 @@ sweeps = ["default"]
         )
         .unwrap();
         let check = check_entries(&["default", "ffi", "live"]);
-        validate_check_against_test(&check, Some(&cfg), &[]).unwrap();
+        validate_check_against_test(&check, Some(&cfg)).unwrap();
     }
 
     /// The broadarrow shape: a lane profile with `test_threads = 8` over a
@@ -2769,7 +2668,7 @@ sweeps = ["doc-carrier"]
         .unwrap();
         let mut check = check_entries(&["default", "telemetry", "doc-carrier"]);
         check[0].parallel = Some(ParallelBinaries { budget: Some(8) });
-        let err = validate_check_against_test(&check, Some(&cfg), &[])
+        let err = validate_check_against_test(&check, Some(&cfg))
             .unwrap_err()
             .to_string();
         assert!(err.contains("[test.profiles.threaded]"), "got: {err}");
@@ -2778,7 +2677,7 @@ sweeps = ["doc-carrier"]
 
         // Every entry parallel: nothing to attribute through cargo.
         check[1].parallel = Some(ParallelBinaries { budget: None });
-        validate_check_against_test(&check, Some(&cfg), &[]).unwrap();
+        validate_check_against_test(&check, Some(&cfg)).unwrap();
     }
 
     #[test]
@@ -2791,6 +2690,6 @@ test_threads = 8
 "#,
         )
         .unwrap();
-        validate_check_against_test(&check_entries(&["default"]), Some(&cfg), &[]).unwrap();
+        validate_check_against_test(&check_entries(&["default"]), Some(&cfg)).unwrap();
     }
 }

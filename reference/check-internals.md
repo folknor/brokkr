@@ -75,6 +75,28 @@ sweeps narrowed to the same package with the same build fold into one. The
 coverage audit still groups by the configured shape (`build_shape_key`): it
 identifies the declared sweep, and a complete profile refuses `-p` anyway.
 
+**Derived doctest carriers.** A complete claim without a `doctests` quarantine
+appends lanes before anything is selected (`derive_doctest_carriers` in
+`selection.rs`, called from `cmd_check`), so every phase, the reach ledger,
+the plan and the journal see them as lanes like any other. Each non-doc,
+non-curated lane whose resolutions reach a doctested member (`DocFacts`, from
+`cargo metadata`) is keyed on its test-phase effective build with support
+builds included - the clippy key plus `build_packages`, which a doctest can
+run through `BROKKR_TEST_BIN_DIR` - and gets a carrier unless a configured
+`doc_only` lane or an earlier carrier holds that key. The carrier is a clone
+of the planned sweep (`PlannedSweep::doctest_carrier`): doc-only execution
+under the watchdog, every libtest filter dropped, `curated` off, the
+invocation's unification answer kept rather than re-resolved, typed by
+`SweepOrigin::DoctestCarrier`. Because a complete claim refuses `-p` and
+forwarded args before selection, the clone's attempt builds exactly its
+source's requests. Dedupe is per lane, not per resolution: a configured
+`doc_only` entry equal to only some resolutions of a lane leaves the whole
+lane's carrier in place, a redundant pass rather than a narrowed request built
+outside the selection. Carriers are `NotApplicable` in clippy and rustdoc (the
+source lane lints the build), and a package-mode carrier executes only its
+resolutions that owe doctests, since `cargo test --doc` over a bin-only
+package fails before any rustdoc runs.
+
 A lane that is not eligible builds nothing for that phase. In particular
 `prepare` records an excluded test lane as skipped and builds neither its
 support binaries nor its shape; an eligible lane keeps the order support
@@ -914,6 +936,23 @@ short list and mis-attributed which test carried a mutation's coverage):
   the session stays permissive: a harness that cannot be isolated runs on the
   shared stream with a warning, as it always has.
 
+  A rustdoc handshakes only when it runs doctests: `--test` in its argv, or
+  inside an `@path` argument file (cargo moves a long rustdoc command line into
+  one); an argument file the shim cannot read counts as running them, so it
+  can never slip past a strict session. Its handshake names the package
+  directory cargo runs it for (`CARGO_MANIFEST_DIR` in cargo's environment for
+  the doctest invocation). A **derived doctest carrier**'s strict session
+  holds a table of every member library rustdoc can test, by canonical
+  manifest directory, built from `cargo metadata`, and admits rustdoc per
+  library after the usual authentication: a library whose manifest leaves
+  `doctest` on gets its pipe; one whose manifest sets `doctest = false` is
+  **declined** - the decline is journaled first, then the shim exits 0 without
+  running rustdoc, since an explicit `cargo test --doc` would test it
+  regardless; a directory the table does not hold, or none at all, is refused
+  as an attribution error - only a positively identified library may be either
+  run or declined. A configured `doc_only` lane holds no table: its author
+  asked for `--doc`, and gets cargo's meaning of it.
+
   Where the runner cannot be installed without overriding something - a
   runner already configured for the host, a configured rustdoc, an ambient
   target other than the host (`CARGO_BUILD_TARGET`, `build.target`) on a sweep
@@ -1150,8 +1189,9 @@ their failures together and two identical red runs produce identical output.
 
 Mutually exclusive with `isolation = "process"` (refused before any test runs).
 Doctests cannot run on a parallel sweep, so `[test] doctests = true` requires
-at least one entry without `parallel` - and a `certifies = "complete"` profile
-must include one among its own sweeps. Both are load errors.
+at least one entry without `parallel` (a load error); a `certifies =
+"complete"` profile runs a parallel sweep's doctests in the carrier it derives
+for the sweep's build (see derived doctest carriers above).
 
 Cargo target selectors passed after `--` (`brokkr check -- --test read_paths`)
 shape which binaries the sweep plans, rather than being appended to each
@@ -1456,24 +1496,32 @@ failed, ignored) and, per planned doctest carrier, whether it completed and
 how many rustdoc streams it presented. They cannot be enumerated, so there is
 no inventory (`unavailable`) and no accounting (`unknown`) - never reported
 as zero. A lane is a planned carrier only if it will actually run doctests: a
-`doc_only` lane, or a serial libtest lane under `[test] doctests = true` whose
-selection carries no target selector (one turns cargo's doctest pass off).
-On a strict session a rustdoc may connect only on a carrier's run; anywhere
-else it is refused as an attribution error. A carrier **completed** when its
-lane finished with nothing recorded stopping it, every rustdoc stream it
-presented was closed by its writer with its suite closed, and - for a
-`doc_only` lane always, for a serial carrier whose selection reaches a member
-with a doctested target - at least one rustdoc stream presented at all (the
-one floor that tells "ran" from "never ran"; how many more there should have
-been is not knowable). The serial obligation comes from `cargo metadata` (a
+`doc_only` lane (configured or derived), or - outside a complete claim, which
+runs no doctests inline - a serial libtest lane under `[test] doctests = true`
+whose selection carries no target selector (one turns cargo's doctest pass
+off). On a strict session a rustdoc may connect only on a carrier's run;
+anywhere else it is refused as an attribution error. Every rustdoc stream is
+journaled with the cargo resolution of the run it came from, and the plan
+holds, per carrier, the resolutions that owe one (`doc_required`): a
+configured `doc_only` lane's every resolution (cargo refuses `--doc` with no
+library), otherwise each resolution whose selection reaches a member with a
+doctested target. A carrier **completed** when its lane finished with nothing
+recorded stopping it, every rustdoc stream it presented was closed by its
+writer with its suite closed, and every resolution it owed presented at least
+one stream of its own - one package's stream never stands in for another's
+(the one floor that tells "ran" from "never ran"; how many more there should
+have been is not knowable). The obligation comes from `cargo metadata` (a
 target with `doctest = true` of crate type `lib`, `rlib` or `proc-macro`,
-over the members the lane's `cargo test` selects), never from the harnesses
-the build produced: `[lib] test` and `doctest` are independent, so a library
-harness neither implies doctests nor is implied by them. A
-carrier that did not complete fails certification - the green invariant -
-though it moves no binary accounting count, which is scoped to enumerable
-binary tests; a failing doctest fails the test verdict through its cargo
-status.
+over the members each resolution selects), never from the harnesses the build
+produced: `[lib] test` and `doctest` are independent, so a library harness
+neither implies doctests nor is implied by them. A carrier that did not
+complete fails certification - the green invariant - though it moves no
+binary accounting count, which is scoped to enumerable binary tests; a
+failing doctest fails the test verdict through its cargo status. The block
+names, per carrier, the owed resolutions that presented nothing (`missing`)
+and the libraries a derived carrier declined (`declined`, below): a decline
+is policy evidence, journaled as its own record, never a stream the carrier
+must close and never counted toward what it owes.
 
 ### Inventory and certification are separate
 

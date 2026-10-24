@@ -278,8 +278,14 @@ before any phase runs, and every phase reads that one answer. Per phase a sweep
 is *eligible*, *excluded* (the `-p` set names none of its packages), *deduped*
 onto an earlier sweep that compiles the same thing (clippy and rustdoc only -
 `check`'s test lanes never dedupe), *not applicable* (rustdoc on a `doc_only`
-carrier) or *disabled* (the phase does not run). A sweep that is not eligible
-builds nothing for that phase, its `build_packages` included.
+carrier, and clippy and rustdoc on a doctest carrier a complete claim derived)
+or *disabled* (the phase does not run). A sweep that is not eligible builds
+nothing for that phase, its `build_packages` included.
+
+A `certifies = "complete"` run first adds the doctest carriers its tested
+builds are owed - one `<entry> (doctests)` lane per build no `doc_only` entry
+carries, named at the top of the run (see `brokkr man sweeps` under
+`parallel`, Doctests).
 
 When `-p` excludes every applicable sweep of an enabled phase, that phase
 refuses as a failed run instead of reading green. The test phase's refusal

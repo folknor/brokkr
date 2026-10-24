@@ -128,6 +128,9 @@ const UCRED_SIZE: libc::socklen_t = std::mem::size_of::<libc::ucred>() as libc::
 const ACCEPT: u8 = 1;
 const PASSTHROUGH: u8 = 0;
 const REFUSE: u8 = 2;
+/// A derived doctest carrier's rustdoc for a library whose manifest sets
+/// `doctest = false`: exit successfully without running it.
+const DECLINE: u8 = 3;
 
 /// State shared by the session owner, acceptor, watchdog, and drains.
 struct SessionState {
@@ -388,6 +391,9 @@ enum Refusal {
         executable: String,
     },
     RustdocWithoutCarrier,
+    UnidentifiedRustdoc {
+        package_dir: String,
+    },
     UnknownRole {
         role: u8,
     },
@@ -425,6 +431,9 @@ impl Refusal {
                 executable: executable.clone(),
             }),
             Self::RustdocWithoutCarrier => Some(AttributionRefusal::RustdocWithoutCarrier),
+            Self::UnidentifiedRustdoc { package_dir } => Some(AttributionRefusal::UnidentifiedRustdoc {
+                package_dir: package_dir.clone(),
+            }),
             Self::UnknownRole { role } => Some(AttributionRefusal::UnknownRole { role: *role }),
             Self::ExecutableHashFailed { executable, detail } => {
                 Some(AttributionRefusal::ExecutableHashFailed {
@@ -478,6 +487,26 @@ fn refuse(stream: &UnixStream, refusal: &Refusal, s: &SessionState) {
     }
 }
 
+/// A derived carrier admits rustdoc per library, by the package directory the
+/// handshake names: `Some(package)` when that library's manifest opts out of
+/// doctests and it is to be declined, `None` to run it. A directory the table
+/// does not hold - or none at all - is refused: only a positively identified
+/// library may be either run or declined. Sessions without a table (every
+/// other lane) admit any rustdoc the carrier flag allows.
+fn rustdoc_declined(s: &SessionState, package_dir: String) -> Result<Option<String>, Refusal> {
+    let Some(table) = s.strict.as_ref().and_then(|plan| plan.rustdoc_admission.as_ref()) else {
+        return Ok(None);
+    };
+    let library = (!package_dir.is_empty())
+        .then(|| table.get(&super::canonical_package_dir(Path::new(&package_dir))))
+        .flatten();
+    match library {
+        None => Err(Refusal::UnidentifiedRustdoc { package_dir }),
+        Some(lib) if !lib.doctested => Ok(Some(lib.package.clone())),
+        Some(_) => Ok(None),
+    }
+}
+
 fn accept_one(stream: &UnixStream, s: &Arc<SessionState>) -> Result<(), Refusal> {
     // SO_PEERCRED supplies the kernel's PID at connect time. Check the direct
     // cargo parent and executable before giving this peer a pipe.
@@ -489,6 +518,9 @@ fn accept_one(stream: &UnixStream, s: &Arc<SessionState>) -> Result<(), Refusal>
     if root == 0 || proc_parent(pid).map_err(Refusal::AuthenticationIo)? != root {
         return Err(Refusal::NotCargoChild);
     }
+    // The library a derived carrier's rustdoc is for, when its manifest opts
+    // out of doctests: decided here, acted on once the peer is authenticated.
+    let mut declined: Option<String> = None;
     let source = match role {
         ROLE_HARNESS => {
             if let Some(plan) = &s.strict {
@@ -518,6 +550,7 @@ fn accept_one(stream: &UnixStream, s: &Arc<SessionState>) -> Result<(), Refusal>
             if s.strict.as_ref().is_some_and(|plan| !plan.rustdoc) {
                 return Err(Refusal::RustdocWithoutCarrier);
             }
+            declined = rustdoc_declined(s, executable)?;
             StreamSource::Rustdoc
         }
         role => return Err(Refusal::UnknownRole { role }),
@@ -546,6 +579,18 @@ fn accept_one(stream: &UnixStream, s: &Arc<SessionState>) -> Result<(), Refusal>
         .insert(identity);
     if !fresh {
         return Err(Refusal::DuplicateConnection);
+    }
+    // An authenticated rustdoc for an opted-out library: recorded first, then
+    // told to exit successfully without running. A decline whose record could
+    // not be written is never acknowledged - the shim then fails closed.
+    if let Some(package) = declined {
+        if !s.accepting.load(Ordering::Acquire) {
+            return Err(Refusal::SessionClosing);
+        }
+        if let Some(sink) = s.sink.as_ref() {
+            StreamTap::new(sink, StreamSource::Rustdoc).emit(ObsEvent::DoctestDeclined { package });
+        }
+        return send_verdict(stream, DECLINE, None).map_err(Refusal::SessionIo);
     }
     // The drain list is the admission barrier with `finish`: if this
     // connection began before shutdown, finish will collect its thread; after
@@ -829,6 +874,8 @@ enum Verdict {
     Accept(OwnedFd),
     Passthrough,
     Refuse,
+    /// A derived doctest carrier declined this library: exit 0, run nothing.
+    Decline,
 }
 
 /// Receive the verdict: the pipe to put on fd 1, leave to run unisolated, or a
@@ -851,6 +898,7 @@ fn recv_verdict(stream: &UnixStream) -> io::Result<Verdict> {
     match byte[0] {
         PASSTHROUGH => return Ok(Verdict::Passthrough),
         REFUSE => return Ok(Verdict::Refuse),
+        DECLINE => return Ok(Verdict::Decline),
         _ => {}
     }
     let cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
@@ -890,10 +938,40 @@ pub(crate) fn maybe_run() -> Option<i32> {
     // A rustdoc invocation that runs no doctests (a version probe, say) has
     // no stream to isolate - its stdout is cargo's answer - so it never asks
     // for a pipe, and a strict session never sees it to refuse it.
-    let runs_doctests = role != ROLE_RUSTDOC || command.iter().any(|a| a == "--test");
-    let error = run_shim(role, &command, runs_doctests);
-    eprintln!("brokkr harness shim: {error}");
-    Some(1)
+    let runs_doctests = role != ROLE_RUSTDOC || rustdoc_runs_doctests(&command[1..]);
+    match run_shim(role, &command, runs_doctests) {
+        ShimEnd::Declined => Some(0),
+        ShimEnd::Failed(error) => {
+            eprintln!("brokkr harness shim: {error}");
+            Some(1)
+        }
+    }
+}
+
+/// Whether a rustdoc argv runs doctests: `--test`, given directly or inside an
+/// `@path` argument file (cargo moves a long rustdoc command line into one).
+/// An argument file that cannot be read counts as running them: the
+/// handshake then decides, so an unreadable file can never slip a doctest run
+/// past a strict session.
+fn rustdoc_runs_doctests(args: &[std::ffi::OsString]) -> bool {
+    args.iter().any(|arg| {
+        let bytes = arg.as_bytes();
+        if bytes == b"--test" {
+            return true;
+        }
+        let Some(path) = bytes.strip_prefix(b"@") else {
+            return false;
+        };
+        fs::read(std::ffi::OsStr::from_bytes(path))
+            .map_or(true, |content| content.split(|b| *b == b'\n').any(|line| line == b"--test"))
+    })
+}
+
+/// How a shim that did not exec ends.
+enum ShimEnd {
+    /// The session declined this rustdoc: exit successfully.
+    Declined,
+    Failed(io::Error),
 }
 
 /// Obtain this harness's pipe if the run offers one, then exec the program.
@@ -904,17 +982,25 @@ pub(crate) fn maybe_run() -> Option<i32> {
 /// doctest runtool (rustdoc captures its output) and any nested cargo. On a
 /// strict session only a passthrough verdict may do that; any failure to get a
 /// verdict, and a refusal, end the shim here instead, without the exec.
-fn run_shim(role: u8, args: &[std::ffi::OsString], handshake: bool) -> io::Error {
+fn run_shim(role: u8, args: &[std::ffi::OsString], handshake: bool) -> ShimEnd {
     let Some((program, rest)) = args.split_first() else {
-        return io::Error::other("missing harness program");
+        return ShimEnd::Failed(io::Error::other("missing harness program"));
     };
     let strict = std::env::var_os(STRICT_ENV).is_some();
+    // A harness names the executable cargo asked it to run; a rustdoc names
+    // the package directory cargo runs it for (cargo's own environment for
+    // the doctest invocation), which a derived carrier admits it by.
+    let named = if role == ROLE_RUSTDOC {
+        std::env::var_os("CARGO_MANIFEST_DIR").unwrap_or_default()
+    } else {
+        program.clone()
+    };
     let verdict = if handshake {
         std::env::var_os(SOCKET_ENV)
             .ok_or_else(|| io::Error::other("no harness session in the environment"))
             .and_then(|socket| UnixStream::connect(Path::new(&socket)))
             .and_then(|stream| {
-                send_hello(&stream, role, program.as_bytes())?;
+                send_hello(&stream, role, named.as_bytes())?;
                 recv_verdict(&stream)
             })
     } else {
@@ -924,22 +1010,23 @@ fn run_shim(role: u8, args: &[std::ffi::OsString], handshake: bool) -> io::Error
         Ok(Verdict::Accept(pipe)) => {
             // SAFETY: both fds are valid; dup2 onto fd 1 is the documented use.
             if unsafe { libc::dup2(pipe.as_raw_fd(), libc::STDOUT_FILENO) } < 0 {
-                return io::Error::last_os_error();
+                return ShimEnd::Failed(io::Error::last_os_error());
             }
         }
         Ok(Verdict::Passthrough) => {}
+        Ok(Verdict::Decline) => return ShimEnd::Declined,
         Ok(Verdict::Refuse) => {
-            return io::Error::other(format!(
+            return ShimEnd::Failed(io::Error::other(format!(
                 "refused by the strict harness session: {} cannot be attributed to a planned \
-                 test binary, so it is not run",
+                 test binary or library, so it is not run",
                 program.to_string_lossy()
-            ));
+            )));
         }
         Err(e) if strict => {
-            return io::Error::other(format!(
+            return ShimEnd::Failed(io::Error::other(format!(
                 "no verdict from the strict harness session ({e}); not running {} unisolated",
                 program.to_string_lossy()
-            ));
+            )));
         }
         Err(_) => {}
     }
@@ -959,7 +1046,7 @@ fn run_shim(role: u8, args: &[std::ffi::OsString], handshake: bool) -> io::Error
             cmd.env_remove(key);
         }
     }
-    cmd.exec()
+    ShimEnd::Failed(cmd.exec())
 }
 
 #[cfg(test)]
@@ -1053,6 +1140,7 @@ mod tests {
                     .map(|(p, h)| ((*p).to_owned(), (*h).to_owned()))
                     .collect(),
                 rustdoc,
+                rustdoc_admission: None,
             }),
         })
     }
@@ -1071,6 +1159,84 @@ mod tests {
         fs::write(&path, body).expect("write harness");
         let hash = hash_file(&path).expect("hash");
         (path.to_string_lossy().into_owned(), hash)
+    }
+
+    /// A strict carrier session holding a derived carrier's admission table:
+    /// `lib` doctested, `cli` opted out, both real directories.
+    fn admission_state(name: &str, sink: ObservationSink) -> (Arc<SessionState>, std::path::PathBuf) {
+        let root = crate::test_scratch::scratch("harness_shim", name);
+        for pkg in ["lib", "cli"] {
+            fs::create_dir_all(root.join(pkg)).expect("package dir");
+        }
+        let table = [("lib", true), ("cli", false)]
+            .into_iter()
+            .map(|(pkg, doctested)| {
+                (
+                    super::super::canonical_package_dir(&root.join(pkg)),
+                    super::super::LibraryDoctest { package: pkg.to_owned(), doctested },
+                )
+            })
+            .collect();
+        let mut state = Arc::into_inner(strict_state(&[], true, Some(sink))).expect("sole owner");
+        state.strict.as_mut().expect("strict").rustdoc_admission = Some(table);
+        (Arc::new(state), root)
+    }
+
+    /// A derived carrier admits rustdoc per library, after authentication:
+    /// an opted-out library is declined - recorded, then told to exit 0 - a
+    /// doctested one gets its pipe, and a directory the table does not hold
+    /// (or none) is refused, never run and never declined.
+    #[test]
+    fn a_derived_carrier_admits_rustdoc_per_library() {
+        let (sink, observed) = collecting_sink();
+        let (state, root) = admission_state("admission-decline", sink);
+        let (parent, shim) = UnixStream::pair().expect("socket pair");
+        send_hello(&shim, ROLE_RUSTDOC, root.join("cli").as_os_str().as_bytes()).expect("send");
+        assert!(accept_one(&parent, &state).is_ok());
+        assert!(matches!(recv_verdict(&shim).expect("verdict"), Verdict::Decline));
+        let events: Vec<ObsEvent> = observed.lock().expect("sink").iter().map(|o| o.event.clone()).collect();
+        assert_eq!(events, vec![ObsEvent::DoctestDeclined { package: "cli".into() }]);
+        release(&state);
+
+        let (sink, observed) = collecting_sink();
+        let (state, root) = admission_state("admission-run", sink);
+        let (parent, shim) = UnixStream::pair().expect("socket pair");
+        send_hello(&shim, ROLE_RUSTDOC, root.join("lib").as_os_str().as_bytes()).expect("send");
+        assert!(accept_one(&parent, &state).is_ok());
+        assert!(matches!(recv_verdict(&shim).expect("verdict"), Verdict::Accept(_)));
+        assert!(observed.lock().expect("sink").is_empty());
+        release(&state);
+
+        for (case, named) in [("admission-unknown", "elsewhere"), ("admission-unnamed", "")] {
+            let (sink, _) = collecting_sink();
+            let (state, root) = admission_state(case, sink);
+            let dir = if named.is_empty() { Vec::new() } else { root.join(named).as_os_str().as_bytes().to_vec() };
+            let (parent, shim) = UnixStream::pair().expect("socket pair");
+            send_hello(&shim, ROLE_RUSTDOC, &dir).expect("send");
+            assert!(
+                matches!(accept_one(&parent, &state), Err(Refusal::UnidentifiedRustdoc { .. })),
+                "{case}"
+            );
+            release(&state);
+        }
+    }
+
+    /// Cargo can move a long rustdoc command line into an `@argfile`; the
+    /// doctest flag inside one still makes the invocation hand-shake, and an
+    /// unreadable one is treated as a doctest run rather than waved through.
+    #[test]
+    fn a_rustdoc_argfile_is_read_for_the_doctest_flag() {
+        let dir = crate::test_scratch::scratch("harness_shim", "argfile");
+        let with = dir.join("with");
+        let without = dir.join("without");
+        fs::write(&with, "--crate-name\nlib\n--test\nsrc/lib.rs\n").expect("write");
+        fs::write(&without, "--crate-name\nlib\nsrc/lib.rs\n").expect("write");
+        let arg = |p: &Path| std::ffi::OsString::from(format!("@{}", p.display()));
+        assert!(rustdoc_runs_doctests(&["--test".into()]));
+        assert!(rustdoc_runs_doctests(&[arg(&with)]));
+        assert!(!rustdoc_runs_doctests(&[arg(&without)]));
+        assert!(rustdoc_runs_doctests(&[arg(&dir.join("missing"))]));
+        assert!(!rustdoc_runs_doctests(&["--version".into()]));
     }
 
     fn release(state: &SessionState) {

@@ -102,6 +102,29 @@ pub struct SweepDecl {
     /// ever see gate sweeps, and the one sweep that can carry this
     /// runs alone under `cmd_clippy` with nothing to dedupe against.
     pub lib_only: bool,
+    /// Where the sweep came from: a configured `[[check]]` entry, or the
+    /// doctest carrier a complete claim derived for one. Typed rather than
+    /// read off the label, since any printable label is a legal entry name.
+    pub origin: SweepOrigin,
+}
+
+/// Who declared a sweep.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum SweepOrigin {
+    /// A `[[check]]` entry (or the ad-hoc / legacy default sweep).
+    #[default]
+    Configured,
+    /// The doctest carrier a `certifies = "complete"` run derived for a
+    /// tested build its configured lanes leave without one: `cargo test
+    /// --doc` of exactly that lane's requests. `source` is the label of the
+    /// lane it was derived from.
+    DoctestCarrier { source: String },
+}
+
+impl SweepOrigin {
+    pub fn is_derived_carrier(&self) -> bool {
+        matches!(self, Self::DoctestCarrier { .. })
+    }
 }
 
 /// A sweep ready for execution in one invocation. Construction resolves the
@@ -149,6 +172,26 @@ impl PlannedSweep {
     pub(crate) fn with_targets(&self, targets: Vec<TargetSelector>) -> Self {
         let mut declaration = self.declaration.clone();
         declaration.filters.targets = targets;
+        Self {
+            declaration,
+            effective_unification: self.effective_unification,
+        }
+    }
+
+    /// The doctest carrier of this lane: the same planned compile inputs -
+    /// selection, features, unification answer, profile, target, rustflags,
+    /// env and support builds - executed as `cargo test --doc` under the
+    /// watchdog, with every libtest-level filter dropped (doctests cannot be
+    /// enumerated, so a filter on them could never be audited). Cloned from
+    /// the planned sweep rather than re-resolved, so the unification answer
+    /// the invocation gave this lane is the carrier's too.
+    pub(crate) fn doctest_carrier(&self, label: String) -> Self {
+        let mut declaration = self.declaration.clone();
+        declaration.origin = SweepOrigin::DoctestCarrier { source: self.label.clone() };
+        declaration.label = label;
+        declaration.lane_exec = LaneExec::DocOnly { threads: Threads::Watchdogged };
+        declaration.filters = LaneFilters::default();
+        declaration.curated = false;
         Self {
             declaration,
             effective_unification: self.effective_unification,
@@ -866,6 +909,7 @@ fn sweep_decl_from_entry(
         // A gate sweep always lints every target; only the investigative
         // `brokkr clippy --lib` narrows, and it sets this after construction.
         lib_only: false,
+        origin: SweepOrigin::Configured,
     }
 }
 

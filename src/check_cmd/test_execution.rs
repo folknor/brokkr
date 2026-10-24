@@ -454,6 +454,9 @@ pub(crate) struct SerialPlan {
     /// This lane is a planned doctest carrier ([`lane_runs_doctests`]): only
     /// then may a rustdoc stream connect.
     pub(crate) rustdoc: bool,
+    /// A derived carrier's per-library rustdoc admission
+    /// ([`crate::test_runner::StrictPlan::rustdoc_admission`]).
+    pub(crate) rustdoc_admission: Option<BTreeMap<PathBuf, crate::test_runner::LibraryDoctest>>,
     /// The run is certifying: the harness shim fails closed - a harness it
     /// cannot attribute to a planned binary, or whose content is not the
     /// planned one, is refused rather than run - and a planned harness that
@@ -489,7 +492,9 @@ impl SerialObserve<'_> {
                     },
                     None => StreamOrigin::Unattributed { detail: format!("harness {executable}") },
                 },
-                crate::test_runner::StreamSource::Rustdoc => StreamOrigin::Doctest,
+                crate::test_runner::StreamSource::Rustdoc => {
+                    StreamOrigin::Doctest { resolution: resolution.clone() }
+                }
                 crate::test_runner::StreamSource::Cargo | crate::test_runner::StreamSource::Process => {
                     StreamOrigin::Unattributed { detail: "cargo's shared stream".into() }
                 }
@@ -599,6 +604,7 @@ fn run_one_test_sweep(
                 crate::test_runner::ShimMode::Strict(crate::test_runner::StrictPlan {
                     known: plan.hashes.clone(),
                     rustdoc: plan.rustdoc,
+                    rustdoc_admission: plan.rustdoc_admission.clone(),
                 })
             }
             (_, true) => crate::test_runner::ShimMode::Permissive,

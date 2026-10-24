@@ -262,6 +262,14 @@ pub(crate) struct CarrierState {
     pub(crate) completed: bool,
     /// The rustdoc streams this carrier presented.
     pub(crate) streams: usize,
+    /// The obliged resolutions that presented no stream (`the lane's
+    /// selection` for a combined one).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) missing: Vec<String>,
+    /// The libraries a derived carrier declined for their manifest's
+    /// `doctest = false`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) declined: Vec<String>,
 }
 
 /// What the doctest streams said. Doctests cannot be enumerated, so there is
@@ -375,6 +383,8 @@ struct StreamState {
     origin: Option<StreamOrigin>,
     kills: Vec<Termination>,
     reported_unattributed: bool,
+    /// A decline record rather than a rustdoc stream: nothing ran on it.
+    declined: bool,
 }
 
 fn reduced<'a>(
@@ -390,7 +400,7 @@ fn source_for(origin: &StreamOrigin) -> StreamSource {
             executable: unit.id(),
         },
         StreamOrigin::Engine { .. } => StreamSource::Engine,
-        StreamOrigin::Doctest => StreamSource::Rustdoc,
+        StreamOrigin::Doctest { .. } => StreamSource::Rustdoc,
         // Mostly cargo's shared stream, and permissive like it; an unknown
         // harness or engine binary replayed so loses no verdict, since any test
         // record on an unattributed stream is already an anomaly.
@@ -542,6 +552,9 @@ pub(crate) fn reconcile(
     // lane caused does not reach back and unsettle a carrier that had ended.
     let mut lane_finished_clean: BTreeMap<usize, bool> = BTreeMap::new();
     let mut doctests = DoctestObserved::default();
+    // Per lane, the libraries a derived carrier declined for their manifest's
+    // `doctest = false`.
+    let mut declined: BTreeMap<usize, Vec<String>> = BTreeMap::new();
     let duplicate =
         |execs: &mut BTreeMap<ExecKey, ExecState>, key: &ExecKey, stream: u64| -> Option<AnomalyDetail> {
         let e = execs.entry(key.clone()).or_default();
@@ -573,13 +586,19 @@ pub(crate) fn reconcile(
                 let (resolution, unit) = match origin {
                     StreamOrigin::Binary { resolution, unit, .. } => (resolution.clone(), unit.clone()),
                     StreamOrigin::Engine { resolution, unit } => (resolution.clone(), unit.clone()),
-                    StreamOrigin::Doctest => {
+                    StreamOrigin::Doctest { .. } => {
                         match event {
                             ObsEvent::Finished { result, .. } => match result {
                                 TestResult::Ok => doctests.passed += 1,
                                 TestResult::Ignored => doctests.ignored += 1,
                                 _ => doctests.failed += 1,
                             },
+                            // Policy evidence, not a stream: it presents nothing
+                            // a carrier owes, and is never held to a suite.
+                            ObsEvent::DoctestDeclined { package } => {
+                                st.declined = true;
+                                declined.entry(*lane).or_default().push(package.clone());
+                            }
                             ObsEvent::AttributionRefused { refusal } => {
                                 anomaly(
                                     AnomalyKind::AttributionError,
@@ -663,8 +682,9 @@ pub(crate) fn reconcile(
                     | ObsEvent::SuiteFinished { .. }
                     | ObsEvent::StreamEnded { .. }
                     | ObsEvent::Exited { .. }
-                            | ObsEvent::Killed { .. }
-                    | ObsEvent::RunFailed { .. } => {}
+                    | ObsEvent::Killed { .. }
+                    | ObsEvent::RunFailed { .. }
+                    | ObsEvent::DoctestDeclined { .. } => {}
                     ObsEvent::AttributionRefused { refusal } => {
                         anomaly(
                             AnomalyKind::AttributionError,
@@ -867,10 +887,10 @@ pub(crate) fn reconcile(
     // closing them; any stream that says it was cut short or failed to read
     // is short too, attributed or not.
     let mut truncated_streams: Vec<String> = Vec::new();
-    for (id, st) in &streams {
+    for (id, st) in streams.iter().filter(|(_, st)| !st.declined) {
         let name = match &st.origin {
             Some(StreamOrigin::Binary { unit, .. }) => Some(unit.id()),
-            Some(StreamOrigin::Doctest) => Some("rustdoc".to_owned()),
+            Some(StreamOrigin::Doctest { .. }) => Some("rustdoc".to_owned()),
             Some(StreamOrigin::Engine { .. } | StreamOrigin::Unattributed { .. }) | None => None,
         };
         let label = plan
@@ -894,20 +914,42 @@ pub(crate) fn reconcile(
     }
 
     for lane in plan.lanes.iter().filter(|l| l.doc_carrier) {
-        let doc_streams: Vec<&StreamState> = streams
+        let doc_streams: Vec<(&StreamState, Resolution)> = streams
             .values()
-            .filter(|s| s.lane == lane.lane.get() && matches!(s.origin, Some(StreamOrigin::Doctest)))
+            .filter(|s| s.lane == lane.lane.get() && !s.declined)
+            .filter_map(|s| match &s.origin {
+                Some(StreamOrigin::Doctest { resolution }) => {
+                    Some((s, Resolution::from_option(resolution.as_deref())))
+                }
+                _ => None,
+            })
             .collect();
         // `all` over no streams is vacuously true, which is exactly the
-        // carrier that never ran: where the plan says the lane holds a
-        // library, its doctests must have presented at least one stream.
+        // carrier that never ran: every resolution the plan says holds a
+        // doctested library must have presented a stream of its own - one
+        // package's stream does not stand in for another's.
+        let missing: Vec<String> = lane
+            .doc_required
+            .iter()
+            .filter(|required| !doc_streams.iter().any(|(_, r)| r == *required))
+            .map(|r| r.as_option().unwrap_or("the lane's selection").to_owned())
+            .collect();
+        // Every stream that did present is held to a clean end, required or
+        // not: a `--doc` run over a library the plan did not oblige is still
+        // a run.
         let completed = lane_finished_clean.get(&lane.lane.get()).copied().unwrap_or(false)
-            && (!lane.doc_streams_required || !doc_streams.is_empty())
-            && doc_streams.iter().all(|s| {
+            && missing.is_empty()
+            && doc_streams.iter().all(|(s, _)| {
                 reduced(s, &lane_outcomes)
                     .is_some_and(|o| !o.suite_open() && o.end() == Some(StreamEnd::Eof))
             });
-        doctests.carriers.push(CarrierState { lane: lane.label.clone(), completed, streams: doc_streams.len() });
+        doctests.carriers.push(CarrierState {
+            lane: lane.label.clone(),
+            completed,
+            streams: doc_streams.len(),
+            missing,
+            declined: declined.remove(&lane.lane.get()).unwrap_or_default(),
+        });
     }
 
     let mut accounted = Vec::with_capacity(expected.len());

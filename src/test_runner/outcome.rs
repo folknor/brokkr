@@ -428,7 +428,9 @@ impl StreamOutcome {
                 self.slot = Slot::Outside;
                 self.suites_finished += 1;
             }
-            ObsEvent::SlowWarning { .. } => {}
+            // No test activity: a decline-only stream is outside every
+            // completeness judgement, and the accounting records it apart.
+            ObsEvent::SlowWarning { .. } | ObsEvent::DoctestDeclined { .. } => {}
         }
     }
 

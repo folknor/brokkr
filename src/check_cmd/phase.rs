@@ -77,7 +77,7 @@ pub(crate) fn cmd_check(
     let _interrupts = crate::shutdown::SigtermGuard::install();
     let gate_name = resolve_gate_profile(gate, test_cfg)?;
     let profile_name = gate_name.as_deref().or(profile_name);
-    let active_sweeps = active_sweeps_resolved(check_entries, test_cfg, profile_name,
+    let mut active_sweeps = active_sweeps_resolved(check_entries, test_cfg, profile_name,
         (features, no_default_features), (project_root, packages, extra_args))?;
     // The profile that drove sweep selection, if any. Ad-hoc CLI features
     // bypass profiles entirely (priority 1 in decide_active_sweeps), so an
@@ -91,6 +91,34 @@ pub(crate) fn cmd_check(
     let claim = Claim::new(certifies);
     reject_scoped_complete(claim, packages)?;
     reject_extra_args_complete(claim, extra_args)?;
+
+    // Each planned cargo request carries the sweep's features projected onto
+    // its packages; the metadata snapshot that takes is read at most once,
+    // and only when some projection could drop a token.
+    let oracle = FeatureOracle::at(project_root);
+    // A complete claim owes every tested build's doctests, unless a
+    // `[[quarantine]] category = "doctests"` entry justifies their absence:
+    // the carriers its configured lanes leave missing are derived here,
+    // before anything is selected, so every phase, the plan and the journal
+    // see them as lanes like any other.
+    let doctests_quarantined =
+        quarantine.iter().any(|q| q.category.as_deref() == Some("doctests"));
+    let doc_facts = if claim.enumerates_universe() {
+        Some(workspace_doc_facts(project_root, &[])?)
+    } else {
+        None
+    };
+    if let Some(facts) = &doc_facts {
+        let derived = derive_doctest_carriers(&active_sweeps, facts, &oracle)?;
+        if doctests_quarantined {
+            // Said, not run: the quarantine's reach is part of what the run is.
+            announce_quarantined_carriers(&derived);
+        } else {
+            announce_derived_carriers(&derived);
+            active_sweeps.extend(derived);
+        }
+    }
+    let doc_facts = doc_facts.filter(|_| !doctests_quarantined);
 
     announce_profile_header(&active_sweeps, &profile_label);
     announce_invocation_shaping(project_root, packages, extra_args);
@@ -112,8 +140,12 @@ pub(crate) fn cmd_check(
     // would mark lanes an earlier test-phase fail-fast never reached. Policy coverage never reads this - it reads the
     // plan.
     let mut ledger = ReachLedger::new(&active_sweeps);
-    // Doctests off unless `[test] doctests = true` (nextest/CI never runs them).
-    let doctests = test_cfg.is_some_and(|c| c.doctests);
+    // Whether a serial lane runs doctests inline: off unless `[test] doctests
+    // = true` (nextest/CI never runs them), and off under a complete claim,
+    // whose doctests run once per tested build, unfiltered, in its doc
+    // carriers - an inline pass would run them again under the lane's
+    // `skip`/`only`, which no audit can hold to anything.
+    let doctests = test_cfg.is_some_and(|c| c.doctests) && !claim.enumerates_universe();
     let serial_builds =
         resolve_serial_builds(project_root, test_cfg.is_some_and(|c| c.serial_builds), &active_sweeps);
 
@@ -140,10 +172,6 @@ pub(crate) fn cmd_check(
     // mode over a selection naming no packages) fails before anything runs,
     // with no trailer; a "nothing reached" refusal is stored and reported at
     // its phase's boundary.
-    // Each planned cargo request also carries the sweep's features projected
-    // onto its packages; the metadata snapshot that takes is read at most
-    // once, and only when some projection could drop a token.
-    let oracle = FeatureOracle::at(project_root);
     let selections = CheckSelections::build(
         &active_sweeps,
         packages,
@@ -199,6 +227,7 @@ pub(crate) fn cmd_check(
                 rustdoc_cfg,
                 claim,
                 doctests,
+                workspace_doctests_owed: doc_facts.as_ref().is_some_and(DocFacts::any_doctestable),
                 commands,
                 extra_args,
                 background: &background,
@@ -382,6 +411,48 @@ fn select_named<T: Clone>(
 /// Log the profile and its sweep set. Run log only: the set is a function of
 /// the config, identical run to run, and the verdict line carries the
 /// profile and the count of sweeps that actually ran.
+/// The lanes the derived carriers came from.
+fn carrier_sources(derived: &[PlannedSweep]) -> String {
+    derived
+        .iter()
+        .filter_map(|s| match &s.origin {
+            profile::SweepOrigin::DoctestCarrier { source } => Some(source.as_str()),
+            profile::SweepOrigin::Configured => None,
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Name the doctest carriers a complete claim added, and the lane each came
+/// from: a run that tests more than its config lists must say so.
+fn announce_derived_carriers(derived: &[PlannedSweep]) {
+    if derived.is_empty() {
+        return;
+    }
+    output::run_msg(&format!(
+        "doctests: {} for the complete claim's tested builds no doc_only entry carries ({})",
+        output::count(derived.len(), "derived carrier"),
+        carrier_sources(derived)
+    ));
+}
+
+/// Name the tested builds whose doctests a `doctests` quarantine keeps from
+/// running, or that it suppresses none.
+fn announce_quarantined_carriers(derived: &[PlannedSweep]) {
+    if derived.is_empty() {
+        output::run_msg(
+            "doctests: the `doctests` quarantine suppresses no carrier in this profile - \
+             every tested build with doctests has a doc_only entry",
+        );
+        return;
+    }
+    output::run_msg(&format!(
+        "doctests: quarantined - {} not run ({})",
+        output::count(derived.len(), "derived carrier"),
+        carrier_sources(derived)
+    ));
+}
+
 fn announce_profile_header(active_sweeps: &[PlannedSweep], profile_label: &Option<String>) {
     let labels: Vec<&str> = active_sweeps.iter().map(|s| s.label.as_str()).collect();
     let n = output::count(active_sweeps.len(), "sweep");
@@ -741,7 +812,11 @@ struct BuildPhaseArgs<'a> {
     /// `[rustdoc]`; `None` leaves the rustdoc phase inert.
     rustdoc_cfg: Option<&'a RustdocConfig>,
     claim: Claim,
+    /// Serial lanes run doctests inline (never under a complete claim).
     doctests: bool,
+    /// The complete claim owes doctests (no `doctests` quarantine) and some
+    /// member has a doctested target, so a workspace-shaped carrier must run.
+    workspace_doctests_owed: bool,
     commands: bool,
     extra_args: &'a [String],
     /// Joined before the prepare phase lists anything.
@@ -1093,16 +1168,16 @@ fn finish_build_phases(
 ///   `skip`/`only` could never be audited for liveness and a dead one would
 ///   silently reshape the doctest run under a complete claim. Compose the
 ///   doc twin as its own filterless lane.
-/// - Under `certifies = "complete"` with a doctest obligation (`[test]
-///   doctests = true`, or a doc-only sweep standing in for the doctests
-///   quarantine), some referenced sweep must be a WORKSPACE-SHAPED doctest
-///   carrier: `packages` empty, and either `test_exclude_packages` non-empty
-///   (which forces an explicit `--workspace`, the exclusion reported like
-///   every other declared narrowing) or the bare selection confirmed to be
-///   the whole workspace. A package-scoped doc twin would prove "some
-///   doctests ran" while the rest of the workspace's doctests silently
-///   stopped - the audit cannot see doctests, so this structural rule is the
-///   only guard.
+/// - Under `certifies = "complete"` owing doctests (no `doctests`
+///   quarantine, and some member has a doctested target), some sweep -
+///   configured or derived - must be a WORKSPACE-SHAPED doctest carrier:
+///   `packages` empty, and either `test_exclude_packages` non-empty (which
+///   forces an explicit `--workspace`, the exclusion reported like every
+///   other declared narrowing) or the bare selection confirmed to be the
+///   whole workspace. The derived carriers cover every tested build, but a
+///   member no lane selects is in none of them: without a workspace-shaped
+///   carrier its doctests would stop running unseen - the audit cannot see
+///   doctests, so this structural rule is the only guard.
 fn verify_doc_only_rules(a: &BuildPhaseArgs<'_>) -> Result<(), DevError> {
     // Every configured doc-only sweep, for the structural carrier rule below.
     let is_doc_only = |s: &PlannedSweep| matches!(s.lane_exec(), LaneExec::DocOnly { .. });
@@ -1162,9 +1237,11 @@ fn verify_doc_only_rules(a: &BuildPhaseArgs<'_>) -> Result<(), DevError> {
             )));
         }
     }
-    if a.doctests || !doc_sweeps.is_empty() {
+    if a.workspace_doctests_owed {
         let whole =
             build::project_info(Some(a.project_root))?.bare_selection_is_whole_workspace;
+        // Derived carriers count: one cloned from a workspace-shaped lane is
+        // as workspace-shaped as its source.
         let carrier = a.active_sweeps.iter().any(|s| {
             let carries = lane_runs_doctests(s, a.doctests);
             let workspace_shaped =
@@ -1173,11 +1250,13 @@ fn verify_doc_only_rules(a: &BuildPhaseArgs<'_>) -> Result<(), DevError> {
         });
         if !carrier {
             return Err(DevError::Config(
-                "this \"complete\" profile claims doctest coverage but no referenced sweep \
-                 carries workspace doctests: every doctest-capable lane is package-scoped or \
-                 narrower than the workspace. Add a workspace-shaped `doc_only = true` \
-                 [[check]] entry to the profile (its `packages` empty; `test_exclude_packages` \
-                 is allowed and reported), or a serial libtest sweep of that shape."
+                "this \"complete\" profile owes doctests but no referenced sweep carries \
+                 workspace doctests: every lane is package-scoped or narrower than the \
+                 workspace, so a member no lane selects would have its doctests stop running \
+                 unseen. Add a workspace-shaped `doc_only = true` [[check]] entry to the \
+                 profile (its `packages` empty; `test_exclude_packages` is allowed and \
+                 reported), or justify the absence with a `[[quarantine]] category = \
+                 \"doctests\"` entry."
                     .into(),
             ));
         }
@@ -1417,11 +1496,22 @@ fn run_sequential_resolutions(
     let mut all_passed = true;
     for run in attempt.runs() {
         let resolution = run.resolution.clone();
+        // A derived carrier runs exactly the resolutions that owe doctests: a
+        // package-mode lane's bin-only package has no library for `--doc`,
+        // and cargo refuses one before any rustdoc could be declined.
+        if sweep.origin.is_derived_carrier()
+            && prepared.is_some_and(|p| {
+                !p.doc_required.contains(&Resolution::from_option(resolution.as_deref()))
+            })
+        {
+            continue;
+        }
         let plan = prepared.map(|p| SerialPlan {
             resolution: resolution.clone(),
             units: p.units_by_path(&resolution),
             hashes: p.hashes_by_path(&resolution),
             rustdoc: lane_runs_doctests(sweep, flags.0),
+            rustdoc_admission: p.rustdoc_admission.clone(),
             strict: flags.3,
             expected: p
                 .resolutions

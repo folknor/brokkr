@@ -1286,6 +1286,72 @@ impl LaneEntry {
 
 const PHASE_SKIPPED: &str = "the phase does not run";
 const DOCTEST_CARRIER: &str = "doctest carrier, no build shape of its own";
+const DERIVED_CARRIER: &str = "derived doctest carrier, linted with the lane it was derived from";
+
+/// The doctest carriers a `certifies = "complete"` run adds: one per tested
+/// build its configured lanes leave without one.
+///
+/// The obligation is per tested build, not per profile: a doctest under
+/// `cfg(feature = "ffi")` compiles only in a build with that feature, so one
+/// workspace doc twin cannot stand in for a package-scoped feature lane. A
+/// build is identified by the test phase's [`EffectiveBuild`] with support
+/// builds included - every concrete request (selection, resolution boundary,
+/// projected features), unification, profile, target, rustflags, env and the
+/// `build_packages` a doctest can run - which is exactly what a clone of the
+/// lane with doc-only execution builds, since a complete claim refuses `-p`
+/// and every request comes from the lane's own configuration.
+///
+/// A configured `doc_only` lane discharges the build it equals. Every other
+/// non-curated lane whose resolutions reach a doctested member and whose build
+/// no carrier holds yet gets [`PlannedSweep::doctest_carrier`]; equal builds
+/// collapse onto the first. A curated lane runs a hand-picked subset by
+/// declaration and owes nothing on its own.
+pub(crate) fn derive_doctest_carriers(
+    sweeps: &[PlannedSweep],
+    facts: &crate::check_cmd::DocFacts,
+    oracle: &FeatureOracle<'_>,
+) -> Result<Vec<PlannedSweep>, DevError> {
+    let test = PhaseSelection::for_check(SelectionPhase::Test, sweeps, &[], oracle)?;
+    let key = |i: usize, sweep: &PlannedSweep| {
+        test.attempt(LaneIdx::new(i))
+            .map(|a| a.effective_build(sweep, sweep.profile, SupportIdentity::Include))
+    };
+    let mut carried: Vec<EffectiveBuild> = sweeps
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.lane_exec().is_doc_only())
+        .filter_map(|(i, s)| key(i, s))
+        .collect();
+    let mut labels: Vec<String> = sweeps.iter().map(|s| s.label.clone()).collect();
+    let mut out = Vec::new();
+    for (i, sweep) in sweeps.iter().enumerate() {
+        if sweep.lane_exec().is_doc_only() || sweep.curated {
+            continue;
+        }
+        let Some(attempt) = test.attempt(LaneIdx::new(i)) else {
+            continue;
+        };
+        if !attempt.runs().iter().any(|run| facts.obliges(&run.selection)) {
+            continue;
+        }
+        let build = attempt.effective_build(sweep, sweep.profile, SupportIdentity::Include);
+        if carried.contains(&build) {
+            continue;
+        }
+        carried.push(build);
+        // The display label only: identity is the typed origin. Kept unique
+        // because preparation hands builds over by label.
+        let mut label = format!("{} (doctests)", sweep.label);
+        let mut n = 2;
+        while labels.contains(&label) {
+            label = format!("{} (doctests {n})", sweep.label);
+            n += 1;
+        }
+        labels.push(label.clone());
+        out.push(sweep.doctest_carrier(label));
+    }
+    Ok(out)
+}
 
 /// What a phase dedupes on.
 enum Dedupe<'a> {
@@ -1451,6 +1517,14 @@ impl PhaseSelection {
             {
                 return Ok(LaneEntry::NotApplicable(NotApplicable {
                     reason: DOCTEST_CARRIER,
+                    admission,
+                }));
+            }
+            // A derived carrier compiles exactly what its source lane does,
+            // which that lane's own entry already lints.
+            if phase != SelectionPhase::Test && sweep.origin.is_derived_carrier() {
+                return Ok(LaneEntry::NotApplicable(NotApplicable {
+                    reason: DERIVED_CARRIER,
                     admission,
                 }));
             }
@@ -2186,6 +2260,97 @@ mod tests {
         })];
         let sel = for_check(SelectionPhase::Rustdoc, &only_doc, &s(&["x"])).unwrap();
         assert!(sel.refusal().is_none());
+    }
+
+    fn with_exec(sweep: PlannedSweep, exec: LaneExec) -> PlannedSweep {
+        with_sweep(sweep, |d| d.lane_exec = exec)
+    }
+
+    fn derive(sweeps: &[PlannedSweep], facts: &crate::check_cmd::DocFacts) -> Vec<PlannedSweep> {
+        derive_doctest_carriers(sweeps, facts, &FeatureOracle::unavailable()).unwrap()
+    }
+
+    /// brokkr#22: a complete claim owes every tested build's doctests, not
+    /// one carrier somewhere. A parallel lane gets a carrier of exactly its
+    /// build - filters dropped, run under the watchdog, its unification
+    /// answer kept; its nextest twin (same build) adds none; a `doc_only`
+    /// entry of a lane's build discharges it; a lane reaching no doctested
+    /// member, and a curated one, owe nothing.
+    #[test]
+    fn a_complete_claim_derives_one_carrier_per_tested_build_without_one() {
+        let facts = crate::check_cmd::DocFacts::for_members(&[("a", true), ("b", true), ("bin", false)]);
+        let a = with_sweep(with_exec(listed("a", &["a"]), LaneExec::Parallel { budget: 4 }), |d| {
+            d.filters.include_ignored = true;
+        });
+        let a_twin = with_exec(listed("a-serial", &["a"]), LaneExec::Nextest { threads: None });
+        let b = with_exec(listed("b", &["b"]), LaneExec::Parallel { budget: 4 });
+        let b_doc = with_exec(listed("b-doc", &["b"]), LaneExec::doc_only());
+        let bin = listed("bin", &["bin"]);
+        let curated = with_sweep(listed("cur", &["a"]), |d| {
+            d.curated = true;
+            d.env.insert("SHAPE".into(), "curated".into());
+        });
+        let sweeps = vec![a.clone(), a_twin, b, b_doc, bin, curated];
+        let derived = derive(&sweeps, &facts);
+        assert_eq!(derived.len(), 1, "{:?}", derived.iter().map(|s| &s.label).collect::<Vec<_>>());
+        let carrier = &derived[0];
+        assert_eq!(carrier.label, "a (doctests)");
+        assert_eq!(carrier.origin, crate::profile::SweepOrigin::DoctestCarrier { source: "a".into() });
+        assert!(carrier.lane_exec().is_doc_only());
+        assert!(!carrier.lane_exec().threads().is_some_and(crate::profile::Threads::is_cargo_mediated));
+        assert_eq!(carrier.lane_filters(), &crate::profile::LaneFilters::default());
+        assert_eq!(carrier.packages, a.packages);
+        assert_eq!(carrier.effective_unification(), a.effective_unification());
+
+        // The carrier is a test lane only: clippy and rustdoc lint its source.
+        let mut all = sweeps;
+        all.extend(derived);
+        let last = LaneIdx::new(all.len() - 1);
+        for phase in [SelectionPhase::Clippy, SelectionPhase::Rustdoc] {
+            let sel = for_check(phase, &all, &[]).unwrap();
+            assert!(matches!(sel.entry(last), Some(LaneEntry::NotApplicable(_))), "{phase:?}");
+        }
+        assert!(for_check(SelectionPhase::Test, &all, &[]).unwrap().attempt(last).is_some());
+
+        // Once derived, a build is carried: a second derivation adds nothing.
+        assert!(derive(&all, &facts).is_empty());
+    }
+
+    /// The derived label never collides with a configured one - preparation
+    /// hands builds over by label - and identity is the typed origin either way.
+    #[test]
+    fn a_derived_carrier_label_never_collides() {
+        let facts = crate::check_cmd::DocFacts::for_members(&[("a", true)]);
+        let sweeps = vec![
+            with_exec(listed("a", &["a"]), LaneExec::Parallel { budget: 2 }),
+            with_sweep(listed("a (doctests)", &["a"]), |d| {
+                d.env.insert("X".into(), "1".into());
+            }),
+        ];
+        let labels: Vec<String> = derive(&sweeps, &facts).iter().map(|s| s.label.clone()).collect();
+        assert_eq!(labels, s(&["a (doctests 2)", "a (doctests) (doctests)"]));
+    }
+
+    /// A package-mode lane's carrier keeps its per-package resolutions, and
+    /// owes a stream only on the ones that reach a doctested member: a
+    /// bin-only package beside a library neither blocks the carrier nor is
+    /// required to present doctests.
+    #[test]
+    fn a_package_mode_carrier_owes_doctests_per_resolution() {
+        let facts = crate::check_cmd::DocFacts::for_members(&[("a", true), ("bin", false)]);
+        let lane = package_mode(with_exec(listed("pkg", &["a", "bin"]), LaneExec::Parallel { budget: 2 }));
+        let derived = derive(std::slice::from_ref(&lane), &facts);
+        assert_eq!(derived.len(), 1);
+        let sel = for_check(SelectionPhase::Test, &derived, &[]).unwrap();
+        let attempt = sel.attempt(LaneIdx::new(0)).unwrap();
+        assert_eq!(attempt.runs().len(), 2, "one resolution per package, as the source lane");
+        assert_eq!(
+            facts.obliged_resolutions(attempt),
+            vec![Resolution::Package(PkgName("a".into()))]
+        );
+        // A package-mode lane over bin-only packages owes nothing.
+        let bins = package_mode(listed("bins", &["bin"]));
+        assert!(derive(&[bins], &facts).is_empty());
     }
 
     #[test]

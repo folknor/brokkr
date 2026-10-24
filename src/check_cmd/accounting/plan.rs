@@ -368,14 +368,16 @@ pub(crate) struct LaneRecord {
     /// turns cargo's doctest pass off). See [`lane_runs_doctests`]. Only a
     /// carrier's lane may present a rustdoc stream on a strict session.
     pub(crate) doc_carrier: bool,
-    /// The carrier must present at least one rustdoc stream to have
-    /// completed: a `doc_only` lane always (cargo refuses `--doc` with no
-    /// library), a serial carrier when its selection reaches a member whose
-    /// cargo metadata marks a target doctested (`DocFacts::obliges` - never
-    /// inferred from a library harness, which `test`/`doctest` set
-    /// independently). The count beyond one is not knowable - doctests have no
-    /// inventory - so one is the floor that tells "ran" from "never ran".
-    pub(crate) doc_streams_required: bool,
+    /// The cargo resolutions that must each present at least one rustdoc
+    /// stream for the carrier to have completed: a configured `doc_only`
+    /// lane's every resolution (cargo refuses `--doc` with no library),
+    /// otherwise each resolution whose selection reaches a member whose cargo
+    /// metadata marks a target doctested (`DocFacts::obliges` - never inferred
+    /// from a library harness, which `test`/`doctest` set independently). Per
+    /// resolution, so one package's stream cannot stand in for another's. The
+    /// count beyond one is not knowable - doctests have no inventory - so one
+    /// is the floor that tells "ran" from "never ran".
+    pub(crate) doc_required: Vec<Resolution>,
 }
 
 impl LaneRecord {
@@ -393,7 +395,7 @@ impl LaneRecord {
             },
             include_ignored: false,
             doc_carrier: false,
-            doc_streams_required: false,
+            doc_required: Vec::new(),
         }
     }
 }
@@ -580,7 +582,7 @@ struct LaneRecordWire {
     include_ignored: bool,
     doc_carrier: bool,
     #[serde(default)]
-    doc_streams_required: bool,
+    doc_required: Vec<Resolution>,
 }
 
 impl From<LaneRecord> for LaneRecordWire {
@@ -593,7 +595,7 @@ impl From<LaneRecord> for LaneRecordWire {
             inventory: l.inventory.into(),
             include_ignored: l.include_ignored,
             doc_carrier: l.doc_carrier,
-            doc_streams_required: l.doc_streams_required,
+            doc_required: l.doc_required,
         }
     }
 }
@@ -610,7 +612,7 @@ impl From<LaneRecordWire> for LaneRecord {
             inventory,
             include_ignored: w.include_ignored,
             doc_carrier: w.doc_carrier,
-            doc_streams_required: w.doc_streams_required,
+            doc_required: w.doc_required,
         }
     }
 }

@@ -152,11 +152,24 @@ appended on top of one.
 Opt a project back in with `[test] doctests = true`, which restores the full
 `cargo test` default (doctests included), or per entry with
 `doc_only = true` - a sweep that runs `cargo test --doc` and nothing else,
-regardless of the `[test]` flag (the doctest twin a `parallel` workspace
-sweep needs; see `[[check]] doc_only` in `docs/brokkr.toml.sweeps.md`, including
-its refusals and the workspace-shaped-carrier rule complete profiles
-enforce). There is no CLI override - doctest inclusion is a declared,
-CI-parity property of the config. `--skip` is not a workaround: doctests
+regardless of the `[test]` flag (how a `parallel` or nextest build's doctests
+run outside a complete claim; see `[[check]] doc_only` in
+`docs/brokkr.toml.sweeps.md`, including its refusals).
+
+**A `certifies = "complete"` profile runs doctests whatever the flag says**,
+once per tested build: for each lane whose build no `doc_only` entry of the
+same build carries, it derives a `cargo test --doc` lane of exactly that
+build (`<entry> (doctests)`), announced at the top of the run and accounted
+per cargo resolution in the doctest block. Its serial lanes run no doctests
+inline, so none runs twice or under a lane's `skip`/`only`. A
+`[[quarantine]] category = "doctests"` entry suppresses the derived carriers,
+and the run names what it suppressed. The rules - which lanes owe doctests,
+how a library's `doctest = false` is honoured, the workspace-shaped carrier a
+claim needs - are under `parallel` -> Doctests in
+`docs/brokkr.toml.sweeps.md`.
+
+There is no CLI override - doctest inclusion is a declared, CI-parity
+property of the config. `--skip` is not a workaround: doctests
 share libtest's filter namespace with unit tests, so skipping them by
 pattern would eat legitimate module tests too. `brokkr test <name>` is
 unaffected - it runs the full `cargo test` default so a deliberately named
@@ -226,8 +239,9 @@ failing one prints its label, a copy-pasteable repro command and its output,
 reported after the join in plan order so concurrent failures never interleave.
 
 Mutually exclusive with `isolation = "process"`. Doctests cannot run on a
-parallel sweep: `[test] doctests = true` needs at least one non-parallel entry,
-and a complete profile must include one (both load errors).
+parallel sweep: `[test] doctests = true` needs at least one non-parallel entry
+(a load error), and a complete profile runs the sweep's doctests in a doctest
+carrier of its build (see Doctests above).
 
 ## nextest (bundled; the `harness = "nextest"` lane)
 
@@ -501,6 +515,11 @@ plus the doctest block and the run's termination:
                               "carriers": [ { "lane": "doc", "completed": true, "streams": 1 } ] } }
 }
 ```
+
+A doctest carrier entry also lists, when non-empty, `missing` - the cargo
+resolutions it owed a rustdoc stream that presented none (a package name, or
+`the lane's selection` for a combined one) - and `declined`, the libraries a
+derived carrier declined for their manifest's `doctest = false`.
 
 `policy_coverage.status` is `passed`, `failed` (orphans, stale entries or
 dead filters) or `incomplete`; `dead_filters` counts the dead `skip`/`only`
