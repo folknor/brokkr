@@ -32,7 +32,7 @@ A doc with 8+ `##` sections is **section-addressed**: `brokkr man conventions sc
 - `docs/commands/clippy.md` - `brokkr clippy`.
 - `docs/commands/deps.md` - `brokkr deps`.
 - `docs/commands/bench.md` - `brokkr bench` (criterion).
-- `docs/commands/run.md` - `brokkr run` / `brokkr install`.
+- `docs/commands/run.md` - `brokkr run` / `brokkr build` / `brokkr install`.
 - `docs/commands/clean.md` - `brokkr clean`.
 - `docs/commands/results.md` - `brokkr results`.
 - `docs/commands/measure.md` - `--bench`/`--hotpath`/`--alloc`/`--stop`, the sidecar profiler, markers, `brokkr sidecar`.
@@ -65,7 +65,7 @@ Single crate, single binary (plus the `brokkr-rustc-guard` bin). No workspace. T
 ## Shared commands quick reference
 
 - `check` / `test` - the validation pipeline (see `docs/commands/check.md`). A markdown-only dirty tree runs the prose phases only.
-- `clippy`, `deps`, `bench`, `run` / `install`, `clean`, `results` - see their docs above.
+- `clippy`, `deps`, `bench`, `run` / `build` / `install`, `clean`, `results` - see their docs above.
 - `man [TOPIC] [SECTION...]` - read the bundled docs.
 - `env` - host facts, tool versions, dataset status and digests.
 - `wc [threshold]` - tracked `.rs` files over `threshold` lines (default 800).

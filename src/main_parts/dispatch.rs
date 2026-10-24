@@ -2,7 +2,7 @@
 
 use super::bootstrap::{
     refuse_unmeasured_force, require_detection, run_check, run_clippy, run_deps, run_fmt,
-    run_install, run_man, run_measured, run_program, run_sync, run_wc,
+    run_build, run_install, run_man, run_measured, run_program, run_sync, run_wc,
 };
 use crate::clean::CleanOpts;
 use crate::clean::{cargo_clean_package, cmd_clean};
@@ -153,6 +153,29 @@ pub(super) fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<()
                 &feat,
                 commit.as_deref(),
                 args,
+                detection,
+            )
+        }
+        Command::Build {
+            name,
+            debug,
+            release,
+            profile,
+            features,
+            all_features,
+            no_default_features,
+            commit,
+        } => {
+            let feat = runnables::FeatureArgs {
+                features,
+                all: *all_features,
+                no_default: *no_default_features,
+            };
+            run_build(
+                name.as_deref(),
+                profile_choice(*debug, *release, profile.as_ref()),
+                &feat,
+                commit.as_deref(),
                 detection,
             )
         }
@@ -337,6 +360,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
         | Command::Fmt { .. }
         | Command::Bench { .. }
         | Command::Run { .. }
+        | Command::Build { .. }
         | Command::Install { .. }
         | Command::Wc { .. }
         | Command::Man { .. }

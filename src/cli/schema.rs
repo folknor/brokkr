@@ -368,6 +368,53 @@ In depth: `brokkr man clippy`."
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Build one bin or example target and print a stable path to it.
+    ///
+    /// Resolves NAME exactly as `run` does, builds it under the lock, copies
+    /// the executable to `.brokkr/artifacts/<xxh128>/<name>` and prints that
+    /// path - the only line on stdout; all narration goes to stderr. The copy
+    /// never changes under a later build, so a script can run it as long as
+    /// it likes: `bin=$(brokkr build dellingr --release)`. A name that does
+    /// not pick one target is an error, not an index.
+    ///
+    /// In depth: `brokkr man run`.
+    #[command(display_order = 0)]
+    Build {
+        /// Bin or example target name (bare form: `[bin] default`)
+        name: Option<String>,
+
+        /// Dev profile (overrides `[bin] debug`)
+        #[arg(long, conflicts_with = "release")]
+        debug: bool,
+
+        /// Release profile (overrides `[bin] debug = true`)
+        #[arg(long)]
+        release: bool,
+
+        /// Cargo profile by name: `dev`, `release` or a custom
+        /// `[profile.<name>]` (overrides `[bin] profile`/`debug`)
+        #[arg(long, value_name = "NAME", value_parser = crate::build::RustProfile::parse,
+              conflicts_with_all = ["debug", "release"])]
+        profile: Option<crate::build::RustProfile>,
+
+        /// Cargo features to enable. Forwarded verbatim to `cargo build`,
+        /// which validates them - comma- or space-separated, repeatable.
+        #[arg(long, short = 'F', value_name = "LIST")]
+        features: Vec<String>,
+
+        /// Enable all Cargo features.
+        #[arg(long, conflicts_with = "features")]
+        all_features: bool,
+
+        /// Disable default Cargo features.
+        #[arg(long)]
+        no_default_features: bool,
+
+        /// Build this commit in a persistent worktree instead of the live
+        /// tree. Remove the worktrees with `brokkr clean --worktrees`.
+        #[arg(long, value_name = "REF")]
+        commit: Option<String>,
+    },
     /// Install the project's binaries (`cargo install --path ...`).
     ///
     /// Installs the packages named by `[bin] install`, or the workspace's

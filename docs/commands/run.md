@@ -1,10 +1,11 @@
-# brokkr run + brokkr install
+# brokkr run + brokkr build + brokkr install
 
-Two metadata-driven commands for launching and installing a workspace's own
-binaries, available in any Rust project (not project-gated) and working with no
-`brokkr.toml` at all. `run` builds and runs one target; `install` puts the
-project's binaries on `PATH`. Together they close the session loop that
-otherwise reaches for raw cargo.
+Three metadata-driven commands for launching, building and installing a
+workspace's own binaries, available in any Rust project (not project-gated) and
+working with no `brokkr.toml` at all. `run` builds and runs one target; `build`
+builds one and hands a script a path to it; `install` puts the project's
+binaries on `PATH`. Together they close the session loop that otherwise reaches
+for raw cargo.
 
 Neither command requires configuration: targets come from `cargo metadata
 --no-deps`, so every bin and example in the workspace is reachable by name the
@@ -167,6 +168,54 @@ take a **separate value** (`--features` / `-F`, `--profile`, `--commit`), so
 `--`. The set is read from `run`'s clap definition rather than kept by hand,
 so a value-taking flag added to `run` is covered without anyone remembering
 to list it.
+
+## `brokkr build`
+
+```
+brokkr build [NAME] [--debug|--release|--profile NAME] [--features LIST]
+             [--all-features] [--no-default-features] [--commit REF]
+```
+
+For a script that runs a workspace binary itself - a differential test, a
+comparison against another implementation - and so needs its path rather than
+a `brokkr run`. A script that runs `cargo build` on its own is foreign to the
+host: the stray reaper kills a cargo with no brokkr owner, and the rustc guard
+refuses a compile while a hold exists, so it dies beside any `brokkr check`. A
+script that runs `target/<profile>/<name>` without building gets whatever the
+last build of anything sharing that path left there, possibly another commit's
+or another feature set's.
+
+`build` resolves `NAME` exactly as `run` does (see Target discovery), builds it
+under the lock - from the live tree, or a `--commit` worktree - and copies the
+executable to
+
+```
+.brokkr/artifacts/<xxh128>/<name>
+```
+
+under the project root, then prints that absolute path. **On a build it is the
+only line on stdout**; everything else the run says, from a lock wait to the
+cargo build and any error, goes to stderr, so `bin=$(brokkr build dellingr
+--release)` captures the path and nothing else. (`--help` is not a build: clap
+prints it to stdout before anything else runs.) A `NAME` that does not pick exactly one target fails, after
+the same index `run` prints: a command whose output is a path has nothing to
+print when it chose nothing, and an exit 0 would hand the script an empty value.
+
+The snapshot is keyed by its own content - the copy is hashed, not the source
+a later build could replace - and is never written again once in place;
+building identical bytes again reuses it. A later build therefore never
+changes what a path already handed out runs. The file keeps its name, so it is
+the same executable in another directory, and that is the whole promise: it is
+not a bundle. A program that finds siblings or resources beside its own path
+(`current_exe`), or loads libraries through an `$ORIGIN`-relative path, sees
+the snapshot directory instead of `target/<profile>/`. Like running the
+uplifted file directly, it gets none of cargo's launch environment.
+
+Snapshots accumulate, one per distinct build. A `brokkr clean` run by hand
+removes the store; the cleanup that follows an interrupted command does not,
+since a script may still be running one. `clean` needs a `brokkr.toml`, so in
+a tree with none the store is yours to delete: `.brokkr/artifacts/` holds
+nothing else.
 
 ## `brokkr install`
 

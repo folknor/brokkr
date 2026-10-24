@@ -180,6 +180,11 @@ pub(crate) fn main() {
     };
     let (cli, command_id) = parse_cli(detection.as_ref().map(|d| &d.project));
     cli::set_invocation(command_id);
+    // `build`'s stdout is its value - the snapshot path - so everything else
+    // the run says, from the lock wait on, goes to stderr.
+    if command_id == cli::CommandId::Build {
+        output::reserve_stdout();
+    }
 
     // Lead our own process group before spawning anything or acquiring the
     // lock, so brokkr's internal `kill(-pgid, ...)` sweeps can't escape upward
@@ -400,6 +405,60 @@ pub(super) fn run_program(
             )
         },
     )
+}
+
+/// `build` builds the code tree (cwd), or a `--commit` worktree of it, and
+/// prints the snapshot's path as its one stdout line (startup reserved stdout
+/// for it). The snapshot store is the project's own `.brokkr/artifacts`
+/// whichever tree was built, so `brokkr clean` finds every snapshot.
+pub(super) fn run_build(
+    name: Option<&str>,
+    choice: Option<crate::build::RustProfile>,
+    feat: &runnables::FeatureArgs<'_>,
+    commit: Option<&str>,
+    detection: Option<&project::Detection>,
+) -> Result<(), DevError> {
+    let fallback_roots = project::detect_roots()?;
+    let (project, bin_cfg, project_root, build_root, disable_toolchain, keep) = match detection {
+        Some(d) => (
+            Some(&d.project),
+            d.config.bin.as_ref(),
+            &d.project_root,
+            &d.build_root,
+            d.config.disable_toolchain,
+            context::worktree_keep(&d.config)?,
+        ),
+        None => (
+            None,
+            None,
+            &fallback_roots.0,
+            &fallback_roots.1,
+            false,
+            crate::worktree_record::DEFAULT_KEEP,
+        ),
+    };
+    let store = crate::clean::layout::ProjectState::new(project_root.as_path()).artifacts_dir();
+    let path = match commit {
+        None => {
+            let _lock = context::reenter_command_lock()?;
+            runnables::cmd_build(build_root.as_path(), &store, bin_cfg, name, choice, feat)?
+        }
+        Some(commit) => context::with_worktree(
+            project,
+            project_root,
+            build_root,
+            Some(commit),
+            false,
+            disable_toolchain,
+            keep,
+            |wt| {
+                let _lock = context::reenter_command_lock()?;
+                runnables::cmd_build(wt.as_path(), &store, bin_cfg, name, choice, feat)
+            },
+        )?,
+    };
+    output::data_stdout(&path.display().to_string());
+    Ok(())
 }
 
 /// `sync`: bare lists, a script runs, `--bench` measures, `--all` and

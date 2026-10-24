@@ -361,6 +361,91 @@ pub fn cmd_run_commit(
     }
 }
 
+/// `brokkr build [NAME]`: build the target in `build_root` - the live tree,
+/// or a `--commit` worktree - and copy the executable into `store`, returning
+/// the copy's path.
+///
+/// NAME resolves as for `run`, except that a bare form with several
+/// candidates is a refusal after the index: a command whose output is a path
+/// has nothing to print when it chose nothing, and exiting 0 would hand a
+/// script an empty value.
+pub fn cmd_build(
+    build_root: &Path,
+    store: &Path,
+    cfg: Option<&BinConfig>,
+    name: Option<&str>,
+    choice: Option<crate::build::RustProfile>,
+    feat: &FeatureArgs<'_>,
+) -> Result<PathBuf, DevError> {
+    let runnables = discover(build_root)?;
+    let Some(target) = resolve_target(&runnables, cfg, name)? else {
+        return Err(DevError::Refused(
+            "no target chosen: name one (`brokkr build <name>`) or set [bin] default".into(),
+        ));
+    };
+    let build = crate::build::BuildConfig {
+        package: Some(target.package.clone()),
+        bin: (!target.example).then(|| target.name.clone()),
+        example: target.example.then(|| target.name.clone()),
+        features: feat.features.to_vec(),
+        default_features: !feat.no_default,
+        all_features: feat.all,
+        profile: resolve_profile(cfg, choice),
+    };
+    let exe = crate::build::cargo_build(&build, build_root)?;
+    snapshot_executable(&exe.path, store)
+}
+
+/// Copy `exe` to `store/<xxh128>/<file name>` and return that path.
+///
+/// The cargo-uplifted path is rewritten by the next build of anything sharing
+/// it, so a script holding it runs whatever was built last. The snapshot is
+/// keyed by its own content and never written again once in place: the copy
+/// is hashed (not the source, which a build could replace in between), then
+/// renamed into its digest directory, and an identical earlier snapshot is
+/// reused as it is. The file keeps its name, so it is the same executable
+/// under another directory - which is all it is: a program that looks beside
+/// itself for siblings or resources sees the snapshot directory.
+fn snapshot_executable(exe: &Path, store: &Path) -> Result<PathBuf, DevError> {
+    let file_name = exe.file_name().ok_or_else(|| {
+        DevError::Build(format!("built executable has no file name: {}", exe.display()))
+    })?;
+    std::fs::create_dir_all(store)?;
+    let staging = Staging(store.join(format!(
+        ".staging-{}-{}",
+        std::process::id(),
+        file_name.to_string_lossy()
+    )));
+    std::fs::copy(exe, &staging.0)?;
+    let digest = crate::preflight::compute_file_digest(&staging.0)?;
+    let dir = store.join(digest.to_string());
+    let dest = dir.join(file_name);
+    if !dest.is_file() {
+        std::fs::create_dir_all(&dir)?;
+        std::fs::rename(&staging.0, &dest)?;
+    }
+    Ok(dest)
+}
+
+/// The staging copy, removed however the snapshot ends - published (renamed
+/// away, so nothing is left to remove), reused, or failed partway. A failed
+/// copy is the case that matters: an out-of-space write leaves a partial
+/// executable on the disk that just ran out, under a name no later run reuses.
+struct Staging(PathBuf);
+
+impl Drop for Staging {
+    fn drop(&mut self) {
+        match std::fs::remove_file(&self.0) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => output::warn(&format!(
+                "could not remove snapshot staging copy {}: {e}",
+                self.0.display()
+            )),
+        }
+    }
+}
+
 struct InstallPackage {
     name: String,
     package_dir: PathBuf,
@@ -545,6 +630,47 @@ mod tests {
 
     fn rewrite(args: &[&str]) -> Vec<String> {
         bare_run_sentinel(args.iter().map(|s| (*s).to_owned()).collect())
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_snapshot_is_keyed_by_content_and_survives_a_rebuild() {
+        let root = crate::test_scratch::scratch("runnables", "snapshot");
+        let exe = root.join("target/release/tool");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        let store = crate::clean::layout::ProjectState::new(&root).artifacts_dir();
+
+        std::fs::write(&exe, b"first build").unwrap();
+        let first = snapshot_executable(&exe, &store).unwrap();
+        assert_eq!(first.file_name().unwrap(), "tool", "the name is kept");
+        // The same bytes again reuse the snapshot rather than rewrite it.
+        assert_eq!(snapshot_executable(&exe, &store).unwrap(), first);
+
+        // A rebuild replaces the uplifted file; the snapshot a script holds
+        // keeps the bytes it was handed, and the new build gets its own.
+        std::fs::write(&exe, b"second build").unwrap();
+        let second = snapshot_executable(&exe, &store).unwrap();
+        assert_ne!(second, first);
+        assert_eq!(std::fs::read(&first).unwrap(), b"first build");
+        assert_eq!(std::fs::read(&second).unwrap(), b"second build");
+
+        // No staging copy is left behind.
+        let staged = |store: &Path| -> usize {
+            std::fs::read_dir(store)
+                .unwrap()
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().starts_with(".staging-"))
+                .count()
+        };
+        assert_eq!(staged(&store), 0);
+
+        // Nor by a snapshot that fails after the copy: a file sitting where
+        // its digest directory belongs makes the publish step fail.
+        std::fs::write(&exe, b"third build").unwrap();
+        let digest = crate::preflight::compute_file_digest(&exe).unwrap();
+        std::fs::write(store.join(digest.to_string()), b"in the way").unwrap();
+        assert!(snapshot_executable(&exe, &store).is_err());
+        assert_eq!(staged(&store), 0, "a failed snapshot leaves no staging copy");
     }
 
     #[test]

@@ -96,7 +96,9 @@ Bare `brokkr clean`, in order:
   trees and child directories under `.brokkr/piners/corpus/` (the `gate.db`
   and `runs.db` paths are protected),
   `.brokkr/dellingr/`, `.brokkr/mogwai/`, `.brokkr/test-hung/`, and, for
-  litehtml, `.brokkr/prepare-cache/`. The per-user
+  litehtml, `.brokkr/prepare-cache/`. `.brokkr/artifacts/` (the `brokkr build`
+  snapshots) goes only in a clean run by hand, never in the cleanup after an
+  interrupted command, since a script may still be running one. The per-user
   `~/.brokkr/sidecar-status` file is removed with the project scratch.
   Other directories under `.brokkr/ratatoskr/` are preserved. Hung-test snapshots
   also prune their oldest directories as new diagnostics arrive, keeping a

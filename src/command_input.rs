@@ -424,6 +424,7 @@ impl Command {
             | Self::Clippy { .. }
             | Self::Fmt { .. }
             | Self::Run { .. }
+            | Self::Build { .. }
             | Self::Install { .. }
             | Self::Wc { .. }
             | Self::Man { .. }

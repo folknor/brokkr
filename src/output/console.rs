@@ -97,6 +97,33 @@ static RENDER: Mutex<Renderer> = Mutex::new(Renderer {
 });
 static RUN_LOG: Mutex<Option<std::fs::File>> = Mutex::new(None);
 static STATUS_ENABLED: AtomicBool = AtomicBool::new(false);
+/// Set by [`reserve_stdout`]: every console line goes to stderr, and stdout
+/// carries only [`data_stdout`] lines.
+static STDOUT_RESERVED: AtomicBool = AtomicBool::new(false);
+
+/// Reserve stdout for a command's data. From here on every prefixed line, raw
+/// replay and status line goes to stderr instead, so a caller capturing stdout
+/// (`bin=$(brokkr build NAME)`) gets exactly what [`data_stdout`] wrote and
+/// nothing a lock wait or a build said. Set once at startup, before the lock
+/// is taken, by a command whose stdout is a value.
+pub fn reserve_stdout() {
+    STDOUT_RESERVED.store(true, Ordering::Relaxed);
+    STATUS_ENABLED.store(false, Ordering::Relaxed);
+}
+
+/// One line of a command's data on stdout, teed to the run log. The one
+/// printer [`reserve_stdout`] leaves on stdout.
+pub fn data_stdout(line: &str) {
+    use std::io::Write;
+    let text = format!("{line}\n");
+    log_write(&text, false);
+    let _held = RENDER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut out = std::io::stdout().lock();
+    out.write_all(text.as_bytes()).ok();
+    out.flush().ok();
+}
 
 /// The longest status line drawn, in chars. The line is transient and is
 /// never read back, so a fixed cap is enough to keep it from wrapping on an
@@ -123,6 +150,9 @@ pub fn close_run_log() {
 /// a file (the LLM case) gets persistent lines only.
 pub fn enable_status_line() {
     use std::io::IsTerminal;
+    if STDOUT_RESERVED.load(Ordering::Relaxed) {
+        return;
+    }
     STATUS_ENABLED.store(std::io::stdout().is_terminal(), Ordering::Relaxed);
 }
 
@@ -245,6 +275,11 @@ enum Stream {
 /// closed the pipe must not turn into a panic that stops the run log.
 fn render(r: &mut Renderer, stream: Stream, text: &[u8]) {
     use std::io::Write;
+    let stream = if STDOUT_RESERVED.load(Ordering::Relaxed) {
+        Stream::Err
+    } else {
+        stream
+    };
     let mut out = std::io::stdout().lock();
     if r.drawn {
         out.write_all(b"\r\x1b[2K").ok();

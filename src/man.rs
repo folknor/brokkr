@@ -107,7 +107,7 @@ const TOPICS: &[Topic] = &[
     },
     Topic {
         name: "run",
-        summary: "run + install: target discovery, the bare index, [bin]",
+        summary: "run + build + install: target discovery, the bare index, [bin], snapshots",
         content: include_str!("../docs/commands/run.md"),
         commands: &[CommandId::Env],
     },

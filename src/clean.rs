@@ -199,6 +199,13 @@ pub(crate) fn cmd_clean(
         output::run_msg(&format!("{} test-hung snapshots", c.verb()));
     }
 
+    // Only by hand: a script may still be running a snapshot `brokkr build`
+    // handed it, and the cleanup after an interrupted command must not pull
+    // it out from under that script.
+    if !interrupted && c.dir(&state.artifacts_dir())? {
+        output::run_msg(&format!("{} build artifact snapshots", c.verb()));
+    }
+
     if let Some(status) = crate::user_dirs::sidecar_status()
         && c.file(&status)?
     {

@@ -8,7 +8,11 @@ Quiet progress still reaches an open run log; forced results remain visible
 when the result cannot be retrieved from storage.
 
 Operator messages default to stdout. Sidecar query provenance, including its
-errors and warnings, uses stderr so query data on stdout stays parseable.
+errors and warnings, uses stderr so query data on stdout stays parseable. A
+command whose stdout is a value (`brokkr build`, whose one line is a path)
+calls `console::reserve_stdout` at startup, before the lock is taken: from then
+on every prefixed line, raw replay and status line goes to stderr, and
+`console::data_stdout` is the only writer left on stdout.
 Late bookkeeping warnings use `output::warn_forced` on stderr to leave a final
 JSON trailer intact. Shutdown warnings and errors attempt the log and renderer
 with bounded mutex waits rather than waiting indefinitely. A busy run log is

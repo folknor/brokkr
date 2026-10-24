@@ -80,6 +80,7 @@ Check => ("check", Visibility::Any, Optional, Blocking, true, crate::measure::Me
 Clippy => ("clippy", Visibility::Any, Optional, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
 Fmt => ("fmt", Visibility::Any, Optional, None, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
 Run => ("run", Visibility::Any, Optional, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Direct),
+Build => ("build", Visibility::Any, Optional, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Direct),
 Install => ("install", Visibility::Any, Optional, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
 Wc => ("wc", Visibility::Any, Optional, None, true, crate::measure::MeasureMode::Run, None, &[]),
 Man => ("man", Visibility::Any, None, None, true, crate::measure::MeasureMode::Run, None, &[]),
@@ -245,6 +246,7 @@ impl CommandSpec {
             }
             WorktreePolicy::Direct => match command {
                 super::Command::Run { commit, .. }
+                | super::Command::Build { commit, .. }
                 | super::Command::Bench { commit, .. }
                 | super::Command::Verify { commit, .. }
                 | super::Command::Sync { commit, .. } => Ok(commit.is_some()),

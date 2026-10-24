@@ -81,6 +81,14 @@ impl ProjectState {
         self.root.join("worktrees.toml")
     }
 
+    /// `brokkr build`'s immutable executable snapshots, one directory per
+    /// content digest (`artifacts/<xxh128>/<name>`). Outside cargo's target
+    /// dir on purpose: every name under `<target>/` is a profile name cargo
+    /// may own.
+    pub(crate) fn artifacts_dir(&self) -> PathBuf {
+        self.root.join("artifacts")
+    }
+
     /// Spill directory for the corpus digest's external sort. Each sorter
     /// makes its own subdirectory here and removes it when dropped.
     pub(crate) fn corpus_sort_dir(&self) -> PathBuf {
