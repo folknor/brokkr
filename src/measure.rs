@@ -472,6 +472,12 @@ impl BenchHarness {
         self
     }
 
+    /// Whether the measured tree (the build root, a `--commit` worktree
+    /// included) is clean, so its rows are stored.
+    pub(crate) fn tree_is_clean(&self) -> bool {
+        self.git.is_clean
+    }
+
     /// Expose the held lock so callers that spawn children outside of
     /// `run_external` (notably `BenchHarness::capture_hotpath`) can still report
     /// `child_pid` into the lockfile for `brokkr lock`.

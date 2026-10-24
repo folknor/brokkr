@@ -9,6 +9,10 @@ use std::collections::BTreeSet;
 
 use crate::db::{HotpathData, HotpathFunction, HotpathThread, KvPair, Percentile, Quantity};
 
+/// Functions shown per section when the caller does not choose: `results
+/// --top`'s default, and the report an unstored measured run prints.
+pub const DEFAULT_TOP: usize = 10;
+
 /// Format a hotpath report for display.
 ///
 /// Returns `None` if `data` contains no functions and no threads.

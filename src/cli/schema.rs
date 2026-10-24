@@ -1334,7 +1334,7 @@ In depth: `brokkr man results`."
         limit: usize,
 
         /// Maximum number of functions shown in hotpath reports (0 = all)
-        #[arg(long, default_value = "10")]
+        #[arg(long, default_value_t = crate::hotpath_fmt::DEFAULT_TOP)]
         top: usize,
     },
     /// Query sidecar /proc timelines, markers, and phase summaries
@@ -2842,7 +2842,8 @@ pub(crate) struct ModeArgs {
     #[arg(long, value_delimiter = ',')]
     pub(crate) features: Vec<String>,
 
-    /// Run even if the git tree is dirty (results will not be stored)
+    /// Run even if the measured tree is dirty (a dirty tree's results are not
+    /// stored; a clean tree, such as a --commit worktree, still stores)
     #[arg(long)]
     pub(crate) force: bool,
 

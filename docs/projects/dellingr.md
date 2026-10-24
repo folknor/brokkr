@@ -174,7 +174,11 @@ One row series per workload is what makes the query surface useful:
   pair key is `(command, mode, input_file, arm_key, env_fingerprint)`)
 - `brokkr results --command same_obj_read --mode bench` - keeps instrumented
   runs out of a wall-clock series
-- `brokkr results <uuid>` - per-iteration walls and `prev.*` provenance
+- `brokkr results <uuid>` - per-iteration walls and `prev.*` provenance, and
+  for a `--hotpath`/`--alloc` row the per-function table (calls, percent of
+  total; `--top N` widens it). A stored run does not print that table itself
+  (`-v` does not change this); an unstored one (`--force` on a dirty tree)
+  prints it after its `[result]` line
 - `brokkr sidecar <uuid>` - the phase markers and counters
 
 The `dataset` column is empty by design. It means "which external corpus", and

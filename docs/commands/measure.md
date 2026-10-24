@@ -125,6 +125,13 @@ The `[result]` line prints `elapsed_ms=` and a distribution's `min_ms=`/
 `p50_ms=`/`p95_ms=`/`max_ms=` with three decimals whenever the microsecond
 reading exists (`min_ms=0.298`), and as integers otherwise.
 
+A stored mode refuses a dirty measured tree unless `--force` is given, and
+then warns that results will not be stored. The tree is the build root, so a
+`--commit` worktree is always clean and stores whether or not `--force` was
+passed - `--force` permits a dirty tree, it never decides storage. On a clean
+tree it warns that it has no effect, so an A/B whose baseline is `--commit` and
+whose other arm is a dirty working tree shows which arm filed a row.
+
 If the `results.db` insert fails, the `[result]` line still prints
 (unconditionally, since the row cannot be looked up later) and the sidecar
 trajectory is stored under `dirty` before the error is returned - a DB failure
@@ -141,7 +148,11 @@ One fact, one place. A run with a clean tree prints, in order:
 - `[bench] run i/n` before each iteration, **only when n > 1** (a single run
   has nothing to count). Quiet-gated.
 - the `[result]` line, the one place the wall time appears (quiet-gated, except
-  when the row could not be stored).
+  when the row could not be stored). A `--hotpath`/`--alloc` run whose row
+  could not be stored (a dirty tree, a failed insert) follows it with the
+  per-function report `brokkr results <uuid>` would have shown (default
+  `--top`), since there is no uuid to ask with. A stored run does not print
+  the report.
 - `[run] results.db a1b2c3d4`, the stored row's short id - the one line
   naming it, and not hidden by quiet mode, since it is how the run is found
   again (`brokkr results a1b2c3d4`, `brokkr sidecar a1b2c3d4`).

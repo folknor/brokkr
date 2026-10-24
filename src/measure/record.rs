@@ -95,9 +95,10 @@ pub(super) fn emit_result_lines(
     console::result_msg(&format_result_line(config, mode, result, git));
 }
 
-/// Emit a `[result]` line unconditionally (ignores quiet mode).
-/// Used for results that can't be looked up later: a dirty tree, or a
-/// clean one whose results.db insert failed.
+/// Emit a `[result]` line unconditionally (ignores quiet mode), followed by
+/// the hotpath report when the run captured one. Used for results that can't
+/// be looked up later: a dirty tree, or a clean one whose results.db insert
+/// failed.
 pub(super) fn force_emit_result_lines(
     config: &BenchConfig,
     mode: Option<&str>,
@@ -105,6 +106,16 @@ pub(super) fn force_emit_result_lines(
     git: &GitInfo,
 ) {
     console::result_forced(&format_result_line(config, mode, result, git));
+    // A hotpath/alloc profile is otherwise only readable through `brokkr
+    // results <uuid>`, and an unstored run has no uuid.
+    if let Some(ref hotpath) = result.hotpath
+        && let Some(report) = crate::hotpath_fmt::format_hotpath_report(
+            hotpath,
+            crate::hotpath_fmt::DEFAULT_TOP,
+        )
+    {
+        console::raw_stdout(&format!("\n{report}\n"));
+    }
 }
 
 /// Look up an integer KV pair by key.
