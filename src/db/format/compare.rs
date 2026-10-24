@@ -151,6 +151,14 @@ struct ComparisonPair {
     /// Work-size counters on each side. See [`format_counter_diff`].
     a_counters: std::collections::BTreeMap<String, String>,
     b_counters: std::collections::BTreeMap<String, String>,
+    /// Build provenance on each side (`provenance.*`, bare names); empty
+    /// for a row that recorded none. See [`format_provenance_diff`].
+    a_provenance: std::collections::BTreeMap<String, String>,
+    b_provenance: std::collections::BTreeMap<String, String>,
+    /// When the two compared rows' recorded provenance differs: the most
+    /// recent older pair under the same key whose rows both recorded equal
+    /// provenance, already rendered.
+    like_for_like: Option<String>,
 }
 
 /// The full identity of a comparison row. Keeping the components separate
@@ -249,6 +257,68 @@ struct RowData {
     host: HostEnv,
     /// Every non-provenance counter on this row, stringified for comparison.
     counters: std::collections::BTreeMap<String, String>,
+    provenance: std::collections::BTreeMap<String, String>,
+}
+
+/// A row's build provenance, by bare name. Empty when it recorded none.
+fn collect_provenance(kv: &[KvPair]) -> std::collections::BTreeMap<String, String> {
+    kv.iter()
+        .filter(|p| p.class() == KvClass::Provenance)
+        .map(|p| (KvClass::Provenance.suffix(&p.key).to_owned(), p.value.to_string()))
+        .collect()
+}
+
+/// The older pair a provenance-differing comparison can be read against:
+/// the most recent (A, B) rows under the same key, other than the two
+/// compared, that both recorded provenance and recorded it equal. Absent
+/// provenance is never equal to anything - it is unknown, not a match.
+/// Named by short ids with the pair's host differences, and never
+/// substituted for the comparison shown: the latest rows are what compare.
+/// `None` unless the compared rows (the first of each side) both recorded
+/// provenance and it differs.
+fn like_for_like(rows_a: &[&StoredRow], rows_b: &[&StoredRow]) -> Option<String> {
+    let (latest_a, latest_b) = (
+        collect_provenance(&rows_a.first()?.kv),
+        collect_provenance(&rows_b.first()?.kv),
+    );
+    if latest_a.is_empty() || latest_b.is_empty() || latest_a == latest_b {
+        return None;
+    }
+    // Recency by stored row id, which one results.db hands out in insertion
+    // order across both sides: the pair whose older member is newest wins,
+    // then the one whose newer member is. List positions say nothing across
+    // two independently filled histories.
+    let mut best: Option<((i64, i64), &StoredRow, &StoredRow)> = None;
+    for (i, a) in rows_a.iter().enumerate() {
+        let pa = collect_provenance(&a.kv);
+        if pa.is_empty() {
+            continue;
+        }
+        for (j, b) in rows_b.iter().enumerate() {
+            if (i == 0 && j == 0) || collect_provenance(&b.kv) != pa {
+                continue;
+            }
+            let rank = (a.id.min(b.id), a.id.max(b.id));
+            if best.is_none_or(|(r, _, _)| rank > r) {
+                best = Some((rank, a, b));
+            }
+        }
+    }
+    let (_, a, b) = best?;
+    let host = |row: &StoredRow| HostEnv {
+        memory_mb: row.avail_memory_mb,
+        governor: row.cpu_governor.clone(),
+        kernel: row.kernel.clone(),
+    };
+    let mut line = format!(
+        "  older pair with equal recorded build provenance: {} vs {}",
+        super::super::types::short_uuid(&a.uuid),
+        super::super::types::short_uuid(&b.uuid)
+    );
+    if let Some(diff) = format_host_diff(&host(a), &host(b)) {
+        line.push_str(&format!(" ({})", diff.trim_start()));
+    }
+    Some(line)
 }
 
 /// Collect a row's runtime counters, keyed by name.
@@ -274,6 +344,7 @@ fn make_row_data(row: &StoredRow, matcher: &DatasetMatcher) -> RowData {
         input_display: format_input(&row.input_file, row.input_mb, matcher),
         captured_env: row.captured_env.clone(),
         counters: collect_counters(&row.kv),
+        provenance: collect_provenance(&row.kv),
         host: HostEnv {
             memory_mb: row.avail_memory_mb,
             governor: row.cpu_governor.clone(),
@@ -303,9 +374,14 @@ fn build_comparison_pairs(
     let mut keys: Vec<PairKey> = Vec::new();
     let mut a_map: HashMap<PairKey, RowData> = HashMap::new();
     let mut b_map: HashMap<PairKey, RowData> = HashMap::new();
+    // Every row per key, latest first, for the like-for-like lookup; the
+    // first of each is the one compared.
+    let mut a_rows: HashMap<PairKey, Vec<&StoredRow>> = HashMap::new();
+    let mut b_rows: HashMap<PairKey, Vec<&StoredRow>> = HashMap::new();
 
     for row in rows_a {
         let key = row_key(row, Side::A);
+        a_rows.entry(key.clone()).or_default().push(row);
         if let std::collections::hash_map::Entry::Vacant(e) = a_map.entry(key.clone()) {
             keys.push(key);
             e.insert(make_row_data(row, matcher));
@@ -313,6 +389,7 @@ fn build_comparison_pairs(
     }
     for row in rows_b {
         let key = row_key(row, Side::B);
+        b_rows.entry(key.clone()).or_default().push(row);
         if let std::collections::hash_map::Entry::Vacant(e) = b_map.entry(key.clone()) {
             if !a_map.contains_key(&key) {
                 keys.push(key.clone());
@@ -325,6 +402,12 @@ fn build_comparison_pairs(
         .map(|k| {
             let a = a_map.remove(&k);
             let b = b_map.remove(&k);
+            let a_provenance = a.as_ref().map(|r| r.provenance.clone()).unwrap_or_default();
+            let b_provenance = b.as_ref().map(|r| r.provenance.clone()).unwrap_or_default();
+            let like_for_like = like_for_like(
+                a_rows.get(&k).map_or(&[][..], Vec::as_slice),
+                b_rows.get(&k).map_or(&[][..], Vec::as_slice),
+            );
             let input_display = a
                 .as_ref()
                 .or(b.as_ref())
@@ -371,6 +454,9 @@ fn build_comparison_pairs(
                 b_host,
                 a_counters,
                 b_counters,
+                a_provenance,
+                b_provenance,
+                like_for_like,
             }
         })
         .collect()
@@ -402,6 +488,53 @@ fn append_pair_annotations(out: &mut String, pair: &ComparisonPair) {
         out.push_str(&annotation);
         out.push('\n');
     }
+    if let Some(annotation) = format_provenance_diff(&pair.a_provenance, &pair.b_provenance) {
+        out.push_str(&annotation);
+        out.push('\n');
+    }
+    if let Some(line) = &pair.like_for_like {
+        out.push_str(line);
+        out.push('\n');
+    }
+}
+
+/// Format the build-provenance line: every field that differs between two
+/// rows that both recorded provenance, or which side recorded none.
+///
+/// Reported, never a reason not to pair. The inputs it covers are exactly
+/// what a legitimate A/B can vary - a toolchain-bump commit, a commit adding
+/// `-Ctarget-cpu=native` to the repository's config - so the comparison stays
+/// possible and says what differed. Rows from before provenance was recorded
+/// on both sides print nothing: there is nothing to tell apart.
+fn format_provenance_diff(
+    a: &std::collections::BTreeMap<String, String>,
+    b: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    match (a.is_empty(), b.is_empty()) {
+        (true, true) => return None,
+        (true, false) => return Some("  build provenance: not recorded on A".to_owned()),
+        (false, true) => return Some("  build provenance: not recorded on B".to_owned()),
+        (false, false) => {}
+    }
+    let mut names: std::collections::BTreeSet<&str> = a.keys().map(String::as_str).collect();
+    names.extend(b.keys().map(String::as_str));
+    let differing: Vec<String> = names
+        .into_iter()
+        .filter_map(|name| {
+            let (av, bv) = (a.get(name), b.get(name));
+            (av != bv).then(|| {
+                format!(
+                    "{name} {} -> {}",
+                    av.map_or("(absent)", String::as_str),
+                    bv.map_or("(absent)", String::as_str)
+                )
+            })
+        })
+        .collect();
+    if differing.is_empty() {
+        return None;
+    }
+    Some(format!("  build provenance differs: {}", differing.join(", ")))
 }
 
 /// Format the counter line: every work-size counter that moved between the two
@@ -964,6 +1097,71 @@ mod tests {
             "",
         );
         assert_ne!(k1, k2);
+    }
+
+    fn built(id: &str, wall: i64, provenance: &[(&str, &str)]) -> StoredRow {
+        let mut r = row("render", "bench", "", wall);
+        r.uuid = format!("{id}00000000");
+        // Row ids follow the fixture id's digits, so recency is explicit.
+        r.id = id.chars().filter(char::is_ascii_digit).collect::<String>().parse().unwrap_or(0);
+        r.kv = provenance
+            .iter()
+            .map(|(k, v)| KvPair::text(crate::db::KvKey::provenance(*k), *v))
+            .collect();
+        r
+    }
+
+    /// The latest rows are always the ones compared; differing provenance is
+    /// named, and the most recent older pair with equal recorded provenance
+    /// is offered beside it, never substituted.
+    #[test]
+    fn differing_provenance_is_named_and_an_equal_older_pair_offered() {
+        let native = [("rustflags", "-Ctarget-cpu=native")];
+        let generic = [("rustflags", "")];
+        // One results.db numbers both sides: A rows 11, 10; B rows 21, 20.
+        let a = [built("aaaa0011", 100, &native), built("aaaa0010", 120, &generic)];
+        let b = [built("bbbb0021", 80, &generic), built("bbbb0020", 110, &generic)];
+        let out = format_compare("A", &a, "B", &b, 10, &DatasetMatcher::empty());
+        assert!(out.contains("build provenance differs: rustflags -Ctarget-cpu=native -> "), "{out}");
+        assert!(
+            out.contains("older pair with equal recorded build provenance: aaaa0010 vs bbbb0021"),
+            "{out}"
+        );
+    }
+
+    /// Among several equal-provenance older pairs, the one whose older member
+    /// is newest wins, by row id - not by list position on each side.
+    #[test]
+    fn the_like_for_like_pair_is_the_most_recent_by_row_id() {
+        let latest = [("rustflags", "-Ctarget-cpu=native")];
+        let one = [("rustflags", "-Cone")];
+        let two = [("rustflags", "-Ctwo")];
+        // A rows ids 1000, 999, 998; B rows ids 100, 99. Equal-provenance
+        // candidates: (999, 99) and (998, 100). By position the first wins
+        // (A's second row); by recency the second does - its older member,
+        // B's row 100, is newer than row 99.
+        let a = [built("a1000", 1, &latest), built("a999", 1, &one), built("a998", 1, &two)];
+        let b = [built("b100", 1, &two), built("b99", 1, &one)];
+        let rows_a: Vec<&StoredRow> = a.iter().collect();
+        let rows_b: Vec<&StoredRow> = b.iter().collect();
+        let line = like_for_like(&rows_a, &rows_b).unwrap();
+        assert!(line.contains("a9980000 vs b1000000"), "{line}");
+    }
+
+    /// History without provenance is unknown: never "equal", and on one side
+    /// only it is said, not silently paired as a match.
+    #[test]
+    fn absent_provenance_is_unknown_not_equal() {
+        let native = [("rustflags", "-Ctarget-cpu=native")];
+        let generic = [("rustflags", "")];
+        let a = [built("aaaa0001", 100, &native), built("aaaa0002", 120, &[])];
+        let b = [built("bbbb0001", 80, &generic), built("bbbb0002", 110, &[])];
+        let out = format_compare("A", &a, "B", &b, 10, &DatasetMatcher::empty());
+        assert!(!out.contains("older pair"), "two unrecorded rows are not a match: {out}");
+        let one_sided = format_compare("A", &[built("a", 1, &native)], "B", &[built("b", 1, &[])], 10, &DatasetMatcher::empty());
+        assert!(one_sided.contains("build provenance: not recorded on B"), "{one_sided}");
+        let neither = format_compare("A", &[built("a", 1, &[])], "B", &[built("b", 1, &[])], 10, &DatasetMatcher::empty());
+        assert!(!neither.contains("provenance"), "{neither}");
     }
 
     #[test]

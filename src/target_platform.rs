@@ -154,6 +154,14 @@ pub(crate) fn host_libdir(root: &Path, env: EffectiveEnv<'_>) -> Result<String, 
         .to_owned())
 }
 
+/// The `-V` line of the compiler cargo runs in `root` under `env`
+/// (`rustc 1.x.y (hash date)`), chosen by cargo's own precedence.
+pub(crate) fn compiler_version(root: &Path, env: EffectiveEnv<'_>) -> Result<String, DevError> {
+    let files = crate::rustflags::read_config_files_under(root, env)?;
+    let rustc = compiler(root, env, &files);
+    Ok(probe(root, env, &rustc, &["-V"])?.trim().to_owned())
+}
+
 /// The compiler cargo runs, by cargo's own precedence: `RUSTC`, then
 /// `CARGO_BUILD_RUSTC`, then the highest-precedence `build.rustc` in the
 /// config chain, then `rustc` from `PATH`. A config path holding a `/` is

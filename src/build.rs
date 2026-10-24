@@ -225,6 +225,12 @@ pub struct BuiltArtifact {
     pub features: Vec<String>,
     /// Cargo target name reported with the executable artifact.
     pub target: String,
+    /// The directory cargo ran in: what decides the config chain the build
+    /// read, and so its host-side provenance (`crate::build_provenance`).
+    pub build_root: PathBuf,
+    /// Cargo's resolved profile for this executable, from its
+    /// compiler-artifact record ([`crate::build_provenance::unit_pairs`]).
+    pub unit_profile: Vec<(String, String)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -812,7 +818,7 @@ fn cargo_build_locked(
 
     // An `--example` build names its target as surely as `--bin` does, and
     // cargo emits the example's executable under that name. Without it here
-    // the example path fell through to `find_executable`'s "exactly one
+    // the example path fell through to `find_executable_artifact`'s "exactly one
     // executable" fallback - correct in practice, but by luck rather than by
     // the name we already know.
     let expected = config
@@ -826,6 +832,8 @@ fn cargo_build_locked(
         profile,
         features: config.features.clone(),
         target: executable.target,
+        build_root: project_root.to_path_buf(),
+        unit_profile: executable.unit_profile,
     };
 
     output::build_msg(&format!(
@@ -953,26 +961,21 @@ fn resolve_bin_name(metadata: &CargoMetadata, config: &BuildConfig) -> Result<St
     Ok(bins[0].name.clone())
 }
 
-/// Scan JSON lines from cargo output to find the compiled executable.
+pub(crate) struct CargoExecutableArtifact {
+    pub(crate) path: PathBuf,
+    target: String,
+    /// The record's `profile` object, as [`crate::build_provenance::unit_pairs`].
+    pub(crate) unit_profile: Vec<(String, String)>,
+}
+
+/// Scan cargo's JSON output for the compiled executable, keeping the target
+/// name and resolved profile from the same compiler-artifact message.
 ///
 /// Prefer the executable whose file stem matches `expected_name`. When there
 /// is no exact match, require cargo to have reported exactly one executable;
 /// cargo does not guarantee JSON ordering, so selecting the last is unsafe.
 /// The same single-executable rule applies when no name was supplied.
-pub fn find_executable(stdout: &[u8], expected_name: Option<&str>) -> Result<PathBuf, DevError> {
-    find_executable_artifact(stdout, expected_name).map(|artifact| artifact.path)
-}
-
-struct CargoExecutableArtifact {
-    path: PathBuf,
-    target: String,
-}
-
-/// Find the executable Cargo artifact and retain the target name emitted in
-/// the same compiler-artifact message. Selection and ambiguity rules match
-/// `find_executable` so callers still identify the exact binary they asked
-/// Cargo to build.
-fn find_executable_artifact(
+pub(crate) fn find_executable_artifact(
     stdout: &[u8],
     expected_name: Option<&str>,
 ) -> Result<CargoExecutableArtifact, DevError> {
@@ -1030,18 +1033,28 @@ fn find_executable_artifact(
             .ok_or_else(|| {
                 DevError::Build("cargo executable artifact missing target name".into())
             })?;
-        let artifact = CargoExecutableArtifact { path, target };
+        let unit_profile = val
+            .get("profile")
+            .map(crate::build_provenance::unit_pairs)
+            .unwrap_or_default();
+        let artifact = CargoExecutableArtifact {
+            path,
+            target,
+            unit_profile,
+        };
         if expected_name.is_some()
             && artifact.path.file_stem().and_then(|s| s.to_str()) == expected_name
         {
             matched_exe = Some(CargoExecutableArtifact {
                 path: artifact.path.clone(),
                 target: artifact.target.clone(),
+                unit_profile: artifact.unit_profile.clone(),
             });
         }
         all_exes.push(CargoExecutableArtifact {
             path: artifact.path.clone(),
             target: artifact.target.clone(),
+            unit_profile: artifact.unit_profile.clone(),
         });
         last_exe = Some(artifact);
     }

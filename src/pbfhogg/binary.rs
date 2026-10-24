@@ -134,9 +134,10 @@ impl PbfhoggBinary {
         config: &crate::build::BuildConfig,
         build_root: &Path,
         project_root: &Path,
-    ) -> Result<Self, DevError> {
+    ) -> Result<(Self, crate::measure::BuildIdentity), DevError> {
         let built = crate::build::cargo_build(config, build_root)?;
-        Self::locked(&built.path, project_root)
+        let identity = crate::measure::BuildIdentity::of(&built);
+        Ok((Self::locked(&built.path, project_root)?, identity))
     }
 
     /// Wrap the executable a measurement session built.

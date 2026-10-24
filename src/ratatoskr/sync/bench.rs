@@ -134,6 +134,7 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         profile: BuildKind::Cargo(profile.clone()),
         features: (!harness_cfg.features.is_empty())
             .then(|| canonical_features(&harness_cfg.features)),
+        provenance: built.identity.provenance.clone(),
     });
     output::ratatoskr_msg(&format!(
         "harness build ok (features={}, binary={})",

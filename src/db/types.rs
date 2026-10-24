@@ -46,6 +46,10 @@ pub(crate) enum KvClass {
     Predecessor,
     ThreadSummary,
     Sidecar,
+    /// What the measured binary was built with beyond what its commit
+    /// records (`crate::build_provenance`). Written by the harness alone: a
+    /// runtime pair in this namespace is dropped, never stored.
+    Provenance,
     Counter,
 }
 
@@ -57,6 +61,7 @@ impl KvClass {
             Self::Predecessor => Some("prev."),
             Self::ThreadSummary => Some("threads."),
             Self::Sidecar => Some("sidecar."),
+            Self::Provenance => Some("provenance."),
             Self::Counter => None,
         }
     }
@@ -71,6 +76,7 @@ impl KvClass {
             Self::Predecessor,
             Self::ThreadSummary,
             Self::Sidecar,
+            Self::Provenance,
         ]
         .into_iter()
         .find_map(|class| {
@@ -141,6 +147,11 @@ impl KvKey {
     /// Build a predecessor-provenance key from its bare name.
     pub fn predecessor(name: impl Into<String>) -> Self {
         Self::new(KvClass::Predecessor, name)
+    }
+
+    /// Build a build-provenance key from its bare name.
+    pub fn provenance(name: impl Into<String>) -> Self {
+        Self::new(KvClass::Provenance, name)
     }
 
     /// Build a hotpath thread-summary key from its bare name.

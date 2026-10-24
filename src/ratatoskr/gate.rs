@@ -158,6 +158,7 @@ impl MetricKey {
                 KvClass::Environment
                 | KvClass::Predecessor
                 | KvClass::ThreadSummary
+                | KvClass::Provenance
                 | KvClass::Counter => {}
             }
         }

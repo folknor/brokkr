@@ -374,7 +374,7 @@ pub(super) fn generate_indexed_pbf(
         "  generating indexed PBF via cat -> {}",
         dest.display()
     ));
-    let binary = crate::pbfhogg::binary::PbfhoggBinary::build(
+    let (binary, _) = crate::pbfhogg::binary::PbfhoggBinary::build(
         &build::BuildConfig::release(crate::project::Project::Pbfhogg.cli_package()),
         build_root,
         project_root,

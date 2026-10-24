@@ -32,7 +32,9 @@ pub fn run(
     let layout = ElivagarLayout::new(paths);
     // 1. bench self -- full elivagar pipeline
     output::bench_msg("=== bench self ===");
-    let binary = build::cargo_build(&super::build_config(features), project_root)?.path;
+    let built = build::cargo_build(&super::build_config(features), project_root)?;
+    harness.note_build(crate::harness::BuildIdentity::of(&built));
+    let binary = built.path;
     run_tilegen(
         harness,
         &binary,
@@ -215,7 +217,9 @@ fn run_example(
     let command = BuiltCommand::Example(example);
     let mut build = super::build_config(features);
     build.example = Some(example.cargo_example().into());
-    let binary = build::cargo_build(&build, project_root)?.path;
+    let built = build::cargo_build(&build, project_root)?;
+    harness.note_build(crate::harness::BuildIdentity::of(&built));
+    let binary = built.path;
     let mut args = command.build_args("", layout, None)?;
     let run_arg = args
         .last_mut()

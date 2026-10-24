@@ -32,6 +32,8 @@ pub struct HarnessBuild {
     pub features_label: String,
     /// The profile cargo built under.
     pub profile: RustProfile,
+    /// The build's identity as a results row records it, provenance included.
+    pub identity: crate::measure::BuildIdentity,
 }
 
 /// Build the harness `harness_cfg` describes under `profile`.
@@ -63,11 +65,13 @@ pub fn build_for_harness(
         })?
         .to_path_buf();
 
+    let identity = crate::measure::BuildIdentity::of(&artifact);
     Ok(HarnessBuild {
         binary: artifact.path,
         bin_dir,
         features_label,
         profile: artifact.profile,
+        identity,
     })
 }
 

@@ -36,7 +36,7 @@ pub(crate) const OSMPBF_BASELINE_MANIFEST: &str = "bench/osmpbf-baseline/Cargo.t
 /// never build pbfhogg itself.
 pub(crate) fn osmpbf_baseline(
     build_root: &crate::project::BuildRoot,
-) -> Result<crate::measure::ResolvedExecutable, DevError> {
+) -> Result<(crate::measure::ResolvedExecutable, crate::measure::BuildIdentity), DevError> {
     let manifest = build_root.as_path().join(OSMPBF_BASELINE_MANIFEST);
     let manifest_str = manifest.display().to_string();
     let captured = crate::build::run_cargo_for_root(
@@ -58,9 +58,18 @@ pub(crate) fn osmpbf_baseline(
             "osmpbf-baseline build failed: {stderr}"
         )));
     }
-    Ok(crate::measure::ResolvedExecutable::new(
-        crate::build::find_executable(&captured.stdout, None)?,
-    ))
+    let artifact = crate::build::find_executable_artifact(&captured.stdout, None)?;
+    // Cargo runs in the build root (the manifest is named by path), so that
+    // root's config chain is the one this build read.
+    let identity = crate::measure::BuildIdentity {
+        profile: crate::build::BuildKind::Cargo(crate::build::RustProfile::Release),
+        features: None,
+        provenance: crate::build_provenance::BuildProvenance::of(
+            build_root.as_path(),
+            &artifact.unit_profile,
+        ),
+    };
+    Ok((crate::measure::ResolvedExecutable::new(artifact.path), identity))
 }
 
 impl PlanetilerTools {

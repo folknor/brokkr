@@ -467,6 +467,16 @@ impl BenchHarness {
         kv.extend(previous_run_kv(&self.db, self.measure_start_epoch.get())?);
         let mut peak_rss_mb: Option<f64> = None;
         for pair in &result.kv {
+            // The provenance namespace is the harness's alone: a measured
+            // program printing `provenance.rustflags=...` must not overwrite
+            // or impersonate what brokkr recorded about the build.
+            if is_harness_owned(pair) {
+                console::warn(&format!(
+                    "dropped `{}` from the run's output: the provenance namespace is brokkr's own",
+                    pair.key.as_str()
+                ));
+                continue;
+            }
             if pair.key == "peak_rss_kb" {
                 if let KvValue::Int(kb) = &pair.value {
                     #[allow(clippy::cast_precision_loss)]
@@ -478,6 +488,11 @@ impl BenchHarness {
             }
             kv.push(pair.clone());
         }
+
+        // Appended after every other source: the insert keeps the last pair
+        // per key, so nothing earlier can stand in for it.
+        let identity = self.build_identity.borrow().clone();
+        kv.extend(row_provenance(config.external_build.as_ref(), identity.as_ref()));
 
         // Harness-level values take precedence. The individual writers
         // don't have to know or care about the measurement mode or the
@@ -504,7 +519,7 @@ impl BenchHarness {
             cargo_profile: config
                 .external_build
                 .clone()
-                .or_else(|| self.build_identity.as_ref().map(|b| b.profile.clone()))
+                .or_else(|| identity.as_ref().map(|b| b.profile.clone()))
                 .unwrap_or_default(),
             // Carried through, not recomputed: only the harness path that
             // produced the result knows whether sub-millisecond timing was
@@ -546,6 +561,27 @@ impl BenchHarness {
             distribution: result.distribution.clone(),
             hotpath: result.hotpath.clone(),
         })
+    }
+}
+
+/// Whether a pair the measured program printed falls in a namespace only the
+/// harness writes. The provenance namespace is the one: a program printing
+/// `provenance.rustflags=...` must not overwrite or impersonate what brokkr
+/// recorded about the build.
+fn is_harness_owned(pair: &KvPair) -> bool {
+    pair.class() == crate::db::KvClass::Provenance
+}
+
+/// The provenance a row carries: its session build's, when the session built
+/// the binary and the row is not an external tool's; none otherwise - an
+/// installed tool, or a binary brokkr did not build, is not this build.
+fn row_provenance(
+    external_build: Option<&crate::build::BuildKind>,
+    identity: Option<&super::BuildIdentity>,
+) -> Vec<KvPair> {
+    match (external_build, identity) {
+        (None, Some(identity)) => identity.provenance.kv(),
+        _ => Vec::new(),
     }
 }
 
@@ -595,4 +631,41 @@ fn previous_run_kv(db: &ResultsDb, measure_start_epoch: i64) -> Result<Vec<KvPai
         kv.push(KvPair::text(KvKey::predecessor("input_file"), input));
     }
     Ok(kv)
+}
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+
+    fn identity() -> super::super::BuildIdentity {
+        super::super::BuildIdentity {
+            profile: crate::build::BuildKind::Cargo(crate::build::RustProfile::Release),
+            features: None,
+            provenance: crate::build_provenance::BuildProvenance::from_pairs(&[
+                ("rustc", "rustc 1.99.0"),
+                ("rustflags", "-Ctarget-cpu=native"),
+            ]),
+        }
+    }
+
+    #[test]
+    fn a_built_row_carries_its_builds_provenance_and_no_other_row_does() {
+        let id = identity();
+        let keys: Vec<String> = row_provenance(None, Some(&id))
+            .iter()
+            .map(|p| p.key.as_str().to_owned())
+            .collect();
+        assert_eq!(keys, ["provenance.rustc", "provenance.rustflags"]);
+        // An external tool's row, or a session that built nothing, records
+        // none rather than a build it did not run.
+        assert!(row_provenance(Some(&crate::build::BuildKind::Java), Some(&id)).is_empty());
+        assert!(row_provenance(None, None).is_empty());
+    }
+
+    #[test]
+    fn a_program_cannot_write_into_the_provenance_namespace() {
+        assert!(is_harness_owned(&KvPair::text("provenance.rustflags", "-Cforged")));
+        assert!(!is_harness_owned(&KvPair::text("cells", "4")));
+        assert!(!is_harness_owned(&KvPair::text(KvKey::metadata("build"), "x")));
+    }
 }

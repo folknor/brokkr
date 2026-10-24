@@ -300,8 +300,10 @@ pub struct BenchHarness {
     /// rows.
     store_results: bool,
     /// What the session built, when it built the measured binary: the row's
-    /// `cargo_profile` and canonical `cargo_features` come from it.
-    build_identity: Option<BuildIdentity>,
+    /// `cargo_profile`, canonical `cargo_features` and `provenance.*` pairs
+    /// come from it. A cell, because a suite measuring several binaries
+    /// notes each build before the rows measuring it ([`Self::note_build`]).
+    build_identity: std::cell::RefCell<Option<BuildIdentity>>,
     /// Env var snapshot captured from the measurement request. Merged into
     /// every row's kv via `build_row` as `env.<NAME>` entries - lets
     /// env-gated code paths (A/B feature flags set from the shell) be
@@ -346,10 +348,15 @@ pub struct BuildIdentity {
     /// The canonical feature spelling (sorted, duplicate-free), `None` for a
     /// default-features build.
     pub features: Option<String>,
+    /// What else the build was made with (`crate::build_provenance`), stored
+    /// as the row's `provenance.*` pairs.
+    pub provenance: crate::build_provenance::BuildProvenance,
 }
 
 impl BuildIdentity {
-    /// The identity of a cargo build brokkr ran.
+    /// The identity of a cargo build brokkr ran: its provenance is read for
+    /// the root that build ran in, which a separately built baseline crate
+    /// does not share with the project.
     pub fn of(artifact: &crate::build::BuiltArtifact) -> Self {
         let mut features: Vec<&str> = artifact.features.iter().map(String::as_str).collect();
         features.sort_unstable();
@@ -357,6 +364,10 @@ impl BuildIdentity {
         Self {
             profile: BuildKind::Cargo(artifact.profile.clone()),
             features: (!features.is_empty()).then(|| features.join(",")),
+            provenance: crate::build_provenance::BuildProvenance::of(
+                &artifact.build_root,
+                &artifact.unit_profile,
+            ),
         }
     }
 }
@@ -421,7 +432,7 @@ impl BenchHarness {
             },
             measure_mode: crate::measure::RecordedMode::Bench,
             store_results: true,
-            build_identity: None,
+            build_identity: std::cell::RefCell::new(None),
             env_kv: Vec::new(),
             measure_start_epoch: std::cell::Cell::new(0),
         })
@@ -461,8 +472,22 @@ impl BenchHarness {
     /// external tool's identity itself ([`BenchConfig::external_build`]).
     pub fn with_build_identity(mut self, identity: BuildIdentity) -> Self {
         self.cargo_features.clone_from(&identity.features);
-        self.build_identity = Some(identity);
+        self.build_identity = std::cell::RefCell::new(Some(identity));
         self
+    }
+
+    /// Record the build the rows that follow measure, for a suite that builds
+    /// several binaries in one session (the project's own, a baseline crate).
+    /// Rows recorded after it take its profile and provenance.
+    pub fn note_build(&self, identity: BuildIdentity) {
+        *self.build_identity.borrow_mut() = Some(identity);
+    }
+
+    /// Stop attributing a build: the rows that follow measure an executable
+    /// brokkr did not build (an installed tool), so they record no provenance
+    /// rather than the last build's.
+    pub fn forget_build(&self) {
+        *self.build_identity.borrow_mut() = None;
     }
 
     /// Attach captured env-var snapshot (see [`crate::config::captured_env_pairs`]).

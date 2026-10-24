@@ -84,7 +84,8 @@ impl VerifyHarness {
                 features,
             )
         };
-        let handle = PbfhoggBinary::build(&build_config, effective, project_root)?;
+        // Verify records no results rows, so the build's identity goes unused.
+        let (handle, _) = PbfhoggBinary::build(&build_config, effective, project_root)?;
         let output_dir = target_dir.join(crate::target_namespace::VERIFY);
 
         Ok(Self {

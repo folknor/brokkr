@@ -256,6 +256,12 @@ fn extras_fields(row: &StoredRow) -> Vec<(String, String)> {
         let label = kv.key.replace('_', " ");
         fields.push((label, kv.value.to_string()));
     }
+    // The build the row measured, in the order brokkr recorded it (compiler,
+    // rustflags, inputs, the unit's resolved profile), labelled `build ...`.
+    for kv in row.kv.iter().filter(|kv| kv.class() == KvClass::Provenance) {
+        let label = format!("build {}", kv.class().suffix(&kv.key).replace('_', " "));
+        fields.push((label, kv.value.to_string()));
+    }
     fields
 }
 

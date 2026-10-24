@@ -718,6 +718,11 @@ mod tests {
             bin_dir: bin_dir.to_path_buf(),
             features_label: "default".to_owned(),
             profile: crate::build::RustProfile::Release,
+            identity: crate::measure::BuildIdentity {
+                profile: crate::build::BuildKind::Cargo(crate::build::RustProfile::Release),
+                features: None,
+                provenance: crate::build_provenance::BuildProvenance::default(),
+            },
         }
     }
 

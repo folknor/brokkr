@@ -1030,6 +1030,11 @@ mod tests {
             bin_dir: PathBuf::from("/odd \"dir\"/back\\slash"),
             features_label: "a\"b\\c".to_owned(),
             profile: RustProfile::parse("corpus").unwrap(),
+            identity: crate::measure::BuildIdentity {
+                profile: crate::build::BuildKind::Cargo(RustProfile::parse("corpus").unwrap()),
+                features: None,
+                provenance: crate::build_provenance::BuildProvenance::default(),
+            },
         };
         let dc = output::DeadlineCapture {
             captured: output::CapturedOutput {

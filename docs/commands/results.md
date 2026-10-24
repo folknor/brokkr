@@ -215,6 +215,55 @@ bypass flag and then gets passed out of habit. Where a moved count really does
 invalidate a series, that is the project's rule to enforce unconditionally, not
 a per-comparison verdict.
 
-`meta.`, `env.` and `prev.` pairs are excluded as provenance: they differ
-between two runs without the work differing, and `prev.*` describes the
-preceding run so it differs on nearly every pair.
+`meta.`, `env.`, `prev.` and `provenance.` pairs are excluded as provenance:
+they differ between two runs without the work differing, and `prev.*`
+describes the preceding run so it differs on nearly every pair.
+
+### Build provenance
+
+A row whose binary brokkr built carries `provenance.*` pairs: what the build
+was made with beyond what its commit records. Host side, read for the
+directory cargo ran in - the compiler's `-V` line (`rustc`, chosen by cargo's
+own precedence, `RUSTC` > `CARGO_BUILD_RUSTC` > `build.rustc` > `PATH`), the
+rustflags cargo applies (`rustflags`) and which source supplied them
+(`rustflags_source`: `env:RUSTFLAGS`, `env:CARGO_ENCODED_RUSTFLAGS`,
+`target`, `build`, `none`, or `undecided` when a flagged `cfg(...)` table or
+an unreadable config means no confident answer, and then no `rustflags` pair),
+the codegen keys of every config file in the chain (`config`: `build.rustflags`
+and its compiler, wrapper, target, rustdocflags and incremental keys,
+`target.*.rustflags` and `.linker`, every `[profile.*]` table) and the
+environment variables cargo reads for them (`env`: `RUSTFLAGS`, the compiler
+and wrapper selectors, `CARGO_INCREMENTAL`, `CARGO_BUILD_*` for those keys,
+`CARGO_PROFILE_*`, `CARGO_TARGET_*_RUSTFLAGS` / `_LINKER`). The resolved
+`rustflags` follow cargo's merge: an array value appends to lower-precedence
+files' and a string replaces them, the target source takes its triple table
+before its matching `cfg(...)` tables, and a target source that comes to no
+flags falls through to `build.rustflags`. The environment sources do not: a
+set `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS`, empty or not, wins outright. Unit side, from cargo's own record of
+the measured executable: `opt_level`, `debuginfo`, `debug_assertions`,
+`overflow_checks`. A suite building several binaries attributes each row to
+the build it measured - pbfhogg's osmpbf baseline is its own crate and records
+its own - and a row measuring an installed tool (osmium, planetiler,
+tilemaker) or a binary brokkr did not build records none. The namespace is
+brokkr's alone: a `provenance.*` pair the measured program prints is dropped
+with a warning. `brokkr results <uuid>` lists the pairs as `build ...` fields.
+
+Differing provenance never splits a pair: what it covers is exactly what a
+legitimate A/B varies (a toolchain-bump commit, a commit adding
+`-Ctarget-cpu=native` to the repository's config), and the comparison must
+stay possible. It is named instead:
+
+```
+  build provenance differs: rustflags -Ctarget-cpu=native -> , rustflags_source target -> none
+  older pair with equal recorded build provenance: 1a2b3c4d vs 5e6f7a8b (host: memory 31000 MB vs 28000 MB (-3000 MB, -9.7%))
+```
+
+The compared rows are always the latest of each side. The second line, when
+it appears, names the most recent older pair under the same key whose rows
+both recorded equal provenance - most recent by row id, the pair whose older
+row is newest - by short ids and with that pair's own host
+differences - a pointer to a like-for-like reading, never substituted for the
+one shown. A row without provenance (everything recorded before brokkr kept
+it) is unknown, never equal to anything: one side missing prints `build
+provenance: not recorded on A` (or `B`), and two unrecorded rows are never
+offered as the like-for-like pair.

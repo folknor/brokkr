@@ -41,7 +41,7 @@ pub fn run(
     // No build may start while a pbfhogg handle is alive, and the osmpbf
     // baseline builds, so the suite handle's scope closes first.
     {
-        let binary = PbfhoggBinary::build(
+        let (binary, identity) = PbfhoggBinary::build(
             &build::BuildConfig::release_with_owned_features(
                 crate::project::Project::Pbfhogg.cli_package(),
                 &paths.features,
@@ -49,6 +49,7 @@ pub fn run(
             project_root,
             project_root,
         )?;
+        harness.note_build(identity);
         run_suite_binary(
             harness,
             paths,
@@ -260,6 +261,10 @@ fn run_baselines(
         output::bench_msg("=== osmpbf baseline === (skipped, no bench/osmpbf-baseline project)");
     }
 
+    // An installed osmium is not a build of this session: its rows record no
+    // provenance rather than the osmpbf baseline's.
+    harness.forget_build();
+
     // osmium -- if available
     if super::verify::which_exists("osmium") {
         output::bench_msg("=== osmium baseline ===");
@@ -325,7 +330,10 @@ fn run_osmpbf_baseline(
     build_root: &BuildRoot,
 ) -> Result<(), DevError> {
     let project_root = build_root.as_path();
-    let binary = tools::osmpbf_baseline(build_root)?;
+    let (binary, identity) = tools::osmpbf_baseline(build_root)?;
+    // The baseline is its own crate with its own manifest profile: its rows
+    // carry its build, not the suite's.
+    harness.note_build(identity);
 
     // Run the baseline binary: {binary} {pbf} {runs}
     let pbf_str = crate::utf8_path::path_str(pbf_path)?;

@@ -35,7 +35,7 @@
 //! `[target.<host-triple>] rustflags` is common (linker choice, `target-cpu`),
 //! and it decides the winning layer for every project on that machine.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Cargo's two environment rustflags sources and their precedence. Keep the
@@ -723,6 +723,174 @@ fn env_sink(sweep_sets_rustflags: bool, env: &RustflagsEnv) -> Option<Sink> {
     }
 }
 
+/// The rustflags cargo applies to a host build rooted at `build_root`, and the
+/// source that supplied them - cargo's precedence, first match wins:
+/// `CARGO_ENCODED_RUSTFLAGS`, `RUSTFLAGS`, every matching `target.<triple>` /
+/// `target.<cfg>` table joined (with `CARGO_TARGET_<triple>_RUSTFLAGS`), then
+/// `build.rustflags` (with `CARGO_BUILD_RUSTFLAGS`). A target source that comes
+/// to no flags falls through to `build.rustflags`; a set env source, empty or
+/// not, wins outright. Each key merges across the config chain as
+/// cargo merges config values (an array appends, a string replaces), and the
+/// target source takes the triple key first, then the matching cfg keys.
+///
+/// `None` flags with source `undecided` when the answer cannot be read with
+/// confidence: an unreadable config chain, a flagged `cfg(...)` table this
+/// evaluator does not model, or a non-Unicode env value. A recorded guess
+/// would be worse than the admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EffectiveRustflags {
+    pub(crate) source: &'static str,
+    pub(crate) flags: Option<Vec<String>>,
+}
+
+pub(crate) fn effective_rustflags(build_root: &Path, env: EffectiveEnv<'_>) -> EffectiveRustflags {
+    let undecided = EffectiveRustflags {
+        source: "undecided",
+        flags: None,
+    };
+    let rustflags_env = RustflagsEnv::from(env);
+    if let Some((key, value)) = rustflags_env.active() {
+        let Some(value) = value.to_str() else {
+            return undecided;
+        };
+        let flags = if key == "CARGO_ENCODED_RUSTFLAGS" {
+            value.split('\u{1f}').filter(|f| !f.is_empty()).map(str::to_owned).collect()
+        } else {
+            value.split_whitespace().map(str::to_owned).collect()
+        };
+        let source = if key == "CARGO_ENCODED_RUSTFLAGS" {
+            "env:CARGO_ENCODED_RUSTFLAGS"
+        } else {
+            "env:RUSTFLAGS"
+        };
+        return EffectiveRustflags {
+            source,
+            flags: Some(flags),
+        };
+    }
+    let Ok(files) = read_config_files_under(build_root, env) else {
+        return undecided;
+    };
+    let host = host_triple_for(build_root);
+    let triples = target_triples_for_sink(build_root, &files, env);
+    let [triple] = triples.as_slice() else {
+        // Several configured targets build several ways; no one answer.
+        return undecided;
+    };
+    // The cfg evaluator answers for the host; a configured cross target's
+    // `cfg(...)` tables are not the host's to judge.
+    if host.as_deref() != Some(triple.as_str()) {
+        return undecided;
+    }
+    let platform = Platform::Host(host.as_deref());
+    match target_table_flags(&files, triple, platform, env) {
+        None => return undecided,
+        Some(Some(flags)) => {
+            return EffectiveRustflags {
+                source: "target",
+                flags: Some(flags),
+            };
+        }
+        Some(None) => {}
+    }
+    match build_table_flags(&files, env) {
+        None => undecided,
+        Some(Some(flags)) => EffectiveRustflags {
+            source: "build",
+            flags: Some(flags),
+        },
+        Some(None) => EffectiveRustflags {
+            source: "none",
+            flags: Some(Vec::new()),
+        },
+    }
+}
+
+/// Source 3, as cargo builds it: the `target.<triple>` key (config merged,
+/// then its `CARGO_TARGET_<triple>_RUSTFLAGS` spelling), then every matching
+/// `target.cfg(...)` key in key order, each merged across the chain on its
+/// own. `None` is undecided; `Some(None)` is no flags at all - an empty
+/// result falls through to `build.rustflags`, as cargo's does.
+fn target_table_flags(
+    files: &[(PathBuf, toml::Table)],
+    triple: &str,
+    platform: Platform<'_>,
+    env: EffectiveEnv<'_>,
+) -> Option<Option<Vec<String>>> {
+    let target_key = |selector: &str| {
+        let selector = selector.to_owned();
+        move |doc: &toml::Table| -> Option<toml::Value> {
+            doc.get("target")?.as_table()?.get(&selector)?.as_table()?.get("rustflags").cloned()
+        }
+    };
+    let mut flags: Vec<String> = merged_config_flags(files, target_key(triple))?.unwrap_or_default();
+    if let Some(value) = env.get_os(&target_rustflags_env_var(triple)) {
+        flags.extend(value.to_str()?.split_whitespace().map(str::to_owned));
+    }
+    let cfg_selectors: BTreeSet<&str> = files
+        .iter()
+        .filter_map(|(_, doc)| doc.get("target")?.as_table())
+        .flat_map(|targets| targets.keys().map(String::as_str))
+        .filter(|selector| selector.starts_with("cfg("))
+        .collect();
+    for selector in cfg_selectors {
+        let Some(cfg_flags) = merged_config_flags(files, target_key(selector))? else {
+            continue;
+        };
+        let expr = selector.strip_prefix("cfg(").and_then(|s| s.strip_suffix(')'))?;
+        if eval_cfg_on(expr, platform)? {
+            flags.extend(cfg_flags);
+        }
+    }
+    Some((!flags.is_empty()).then_some(flags))
+}
+
+/// Source 4: `build.rustflags` merged across the chain, then
+/// `CARGO_BUILD_RUSTFLAGS`. `None` is undecided; `Some(None)` is no flags.
+fn build_table_flags(
+    files: &[(PathBuf, toml::Table)],
+    env: EffectiveEnv<'_>,
+) -> Option<Option<Vec<String>>> {
+    let mut flags: Vec<String> = merged_config_flags(files, |doc: &toml::Table| {
+        doc.get("build")?.as_table()?.get("rustflags").cloned()
+    })?
+    .unwrap_or_default();
+    if let Some(value) = env.get_os("CARGO_BUILD_RUSTFLAGS") {
+        flags.extend(value.to_str()?.split_whitespace().map(str::to_owned));
+    }
+    Some((!flags.is_empty()).then_some(flags))
+}
+
+/// One rustflags key merged across the config chain as cargo merges config
+/// values: lowest precedence first, an array appending to what lies below, a
+/// string replacing it. `None` is undecided (a value of another shape);
+/// `Some(None)` is a key no file sets.
+fn merged_config_flags(
+    files: &[(PathBuf, toml::Table)],
+    get: impl Fn(&toml::Table) -> Option<toml::Value>,
+) -> Option<Option<Vec<String>>> {
+    let mut merged: Option<Vec<String>> = None;
+    for (_, doc) in files.iter().rev() {
+        let Some(value) = get(doc) else {
+            continue;
+        };
+        match value {
+            toml::Value::String(s) => {
+                merged = Some(s.split_whitespace().map(str::to_owned).collect());
+            }
+            toml::Value::Array(items) => {
+                let items: Vec<String> = items
+                    .iter()
+                    .map(|v| v.as_str().map(str::to_owned))
+                    .collect::<Option<_>>()?;
+                merged.get_or_insert_with(Vec::new).extend(items);
+            }
+            _ => return None,
+        }
+    }
+    Some(merged)
+}
+
 /// Split `allow_flags` into the share that rides the environment and the share
 /// that rides cargo's command line - exactly one of which is ever non-empty.
 ///
@@ -1144,6 +1312,67 @@ mod tests {
             Err(crate::error::DevError::Config(message))
                 if message.contains("CARGO_ENCODED_RUSTFLAGS")
         ));
+    }
+
+    #[test]
+    fn effective_rustflags_follow_cargos_precedence() {
+        let root = crate::test_scratch::scratch("rustflags", "effective");
+        std::fs::create_dir_all(root.join(".cargo")).unwrap();
+        let home = ("CARGO_HOME", "no-cargo-home");
+        // The environment wins outright, whatever the config says.
+        std::fs::write(root.join(".cargo/config.toml"), "[build]\nrustflags = [\"-Cbuild\"]\n").unwrap();
+        let env = [home, ("RUSTFLAGS", "-Cfrom-env  -Cmore")];
+        let got = effective_rustflags(&root, EffectiveEnv::new(&env));
+        assert_eq!(got.source, "env:RUSTFLAGS");
+        assert_eq!(got.flags.unwrap(), ["-Cfrom-env", "-Cmore"]);
+
+    }
+
+    /// The config sources over an explicit chain (highest precedence first),
+    /// independent of whatever the host's own config files hold.
+    #[test]
+    fn config_rustflags_sources_join_and_demote() {
+        let chain = |docs: &[&str]| -> Vec<(PathBuf, toml::Table)> {
+            docs.iter()
+                .enumerate()
+                .map(|(i, d)| (PathBuf::from(format!("/c{i}")), d.parse().unwrap()))
+                .collect()
+        };
+        let none: [(&str, &str); 0] = [];
+        let env = EffectiveEnv::new(&none);
+        let host = Platform::Host(Some("x86_64-unknown-linux-gnu"));
+        let triple = "x86_64-unknown-linux-gnu";
+        // Arrays from two files join, lowest precedence first...
+        let files = chain(&["[build]\nrustflags = [\"-Chigh\"]\n", "[build]\nrustflags = [\"-Clow\"]\n"]);
+        assert_eq!(build_table_flags(&files, env), Some(Some(vec!["-Clow".into(), "-Chigh".into()])));
+        assert_eq!(target_table_flags(&files, triple, host, env), Some(None));
+        // ...while a string replaces whatever lies below it.
+        let files = chain(&[
+            "[build]\nrustflags = \"-Ctarget-cpu=x86-64\"\n",
+            "[build]\nrustflags = [\"-Ctarget-cpu=native\"]\n",
+        ]);
+        assert_eq!(build_table_flags(&files, env), Some(Some(vec!["-Ctarget-cpu=x86-64".into()])));
+        // The triple key comes first, merged across files, then the matching
+        // cfg keys; a bare triple must equal the platform's.
+        let files = chain(&[
+            "[target.'cfg(all())']\nrustflags = [\"-Ccfg\"]\n\
+             [target.x86_64-unknown-linux-gnu]\nrustflags = [\"-Ctriple-high\"]\n",
+            "[target.x86_64-unknown-linux-gnu]\nrustflags = [\"-Ctriple-low\"]\n\
+             [target.aarch64-unknown-linux-gnu]\nrustflags = [\"-Cother\"]\n",
+        ]);
+        assert_eq!(
+            target_table_flags(&files, triple, host, env),
+            Some(Some(vec!["-Ctriple-low".into(), "-Ctriple-high".into(), "-Ccfg".into()]))
+        );
+        // An empty target result falls through to `build.rustflags`.
+        let files = chain(&[
+            "[target.x86_64-unknown-linux-gnu]\nrustflags = []\n[build]\nrustflags = [\"-Cbuild\"]\n",
+        ]);
+        assert_eq!(target_table_flags(&files, triple, host, env), Some(None));
+        assert_eq!(build_table_flags(&files, env), Some(Some(vec!["-Cbuild".into()])));
+        // A flagged table this evaluator cannot judge is an admission, not a guess.
+        let files = chain(&["[target.'cfg(target_has_atomic = \"128\")']\nrustflags = [\"-Cx\"]\n"]);
+        assert_eq!(target_table_flags(&files, "x86_64-unknown-linux-gnu", host, env), None);
     }
 
     #[test]
