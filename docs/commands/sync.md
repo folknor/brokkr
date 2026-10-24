@@ -239,7 +239,8 @@ here the `.lua` script is the test, not the subject.
 Git state is read from the worktree, so the recorded commit describes what
 was built. That also makes a `--commit` run inherently clean - a detached
 worktree has nothing uncommitted in it - so `--force` is not needed and the
-row is not filed under the `dirty` alias.
+row is not filed under the `dirty` alias. Passing it anyway warns that it has
+no effect and the row will be stored, as on any clean tree.
 
 `--commit` composes with `--gate`. It is the intended way to bisect a
 gate failure: re-run the same gate at successive refs and watch which one

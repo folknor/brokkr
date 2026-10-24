@@ -129,7 +129,8 @@ A stored mode refuses a dirty measured tree unless `--force` is given, and
 then warns that results will not be stored. The tree is the build root, so a
 `--commit` worktree is always clean and stores whether or not `--force` was
 passed - `--force` permits a dirty tree, it never decides storage. On a clean
-tree it warns that it has no effect, so an A/B whose baseline is `--commit` and
+tree it warns that it has no effect (every measured command, ratatoskr's
+`sync --bench` included), so an A/B whose baseline is `--commit` and
 whose other arm is a dirty working tree shows which arm filed a row.
 
 If the `results.db` insert fails, the `[result]` line still prints

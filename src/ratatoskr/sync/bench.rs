@@ -97,6 +97,7 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         req.force,
         None,
     )?;
+    harness.note_unneeded_force(req.force);
     let code_root = req.build_root.as_path();
     let harness = harness
         .with_invocation(req.invocation.clone())

@@ -207,11 +207,8 @@ impl MeasurementSession {
     /// harness will carry them in the `brokkr_args` and `variant`
     /// columns, so individual bench writers don't have to plumb them.
     pub(crate) fn with_request(mut self, req: &crate::measure::MeasureRequest) -> Self {
-        // `--force` permits a dirty tree; it never decides storage. Say so
-        // when it had nothing to permit, or an A/B whose one arm is a clean
-        // `--commit` worktree reads as if both arms went unstored.
-        if req.force && req.mode.recorded().is_some() && self.harness.tree_is_clean() {
-            output::warn("clean tree - --force has no effect, results will be stored in results.db");
+        if req.mode.recorded().is_some() {
+            self.harness.note_unneeded_force(req.force);
         }
         self.harness = self
             .harness

@@ -472,10 +472,14 @@ impl BenchHarness {
         self
     }
 
-    /// Whether the measured tree (the build root, a `--commit` worktree
-    /// included) is clean, so its rows are stored.
-    pub(crate) fn tree_is_clean(&self) -> bool {
-        self.git.is_clean
+    /// Warn when a stored mode's `--force` had no dirty tree to permit.
+    /// `--force` never decides storage; a clean measured tree (a `--commit`
+    /// worktree always is) stores regardless. Saying so keeps an A/B whose
+    /// one arm is a clean worktree from reading as if both went unstored.
+    pub(crate) fn note_unneeded_force(&self, force: bool) {
+        if force && self.git.is_clean {
+            console::warn("clean tree - --force has no effect, results will be stored in results.db");
+        }
     }
 
     /// Expose the held lock so callers that spawn children outside of
