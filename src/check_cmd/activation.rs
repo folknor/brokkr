@@ -166,6 +166,15 @@ fn resolve_sweeps(
     for sweep in &mut sweeps {
         sweep.env.extend(inputs.env_overrides.iter().cloned());
     }
+    // Every path a test run's sweeps take passes here - an entry on its own,
+    // a profile, an ad-hoc sweep carrying a profile's shaping - so an
+    // exclusion no lane can honour is refused once, whichever built it.
+    // Clippy runs no tests: there is nothing for an exclusion to leave out.
+    if matches!(purpose, ActivationPurpose::Check) {
+        for sweep in &sweeps {
+            profile::refuse_unhonoured_exclusions(sweep)?;
+        }
+    }
     Ok(sweeps)
 }
 

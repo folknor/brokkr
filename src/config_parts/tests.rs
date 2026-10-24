@@ -657,6 +657,30 @@ preset = ["a", "b"]
         assert!(err.contains("mutually exclusive"), "got: {err}");
     }
 
+    fn check_table(body: &str) -> toml::map::Map<String, toml::Value> {
+        toml::from_str(&format!("[[check]]\nname = \"x\"\n{body}")).unwrap()
+    }
+
+    #[test]
+    fn target_selection_keys_compose_with_the_entry_rules() {
+        // A lib selection is a filter `curated` accepts...
+        assert!(parse_check(&check_table("lib_tests = true\ncurated = true\n")).is_ok());
+        assert!(parse_check(&check_table("exclude_tests = [\"slow_*\"]\ncurated = true\n")).is_ok());
+        // ...and `--doc` combines with neither selector nor exclusion.
+        for body in ["lib_tests = true\n", "exclude_tests = [\"slow\"]\n"] {
+            let err = parse_check(&check_table(&format!("doc_only = true\n{body}")))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("doc_only"), "got: {err}");
+        }
+        // An exclusion is a target name or a glob over one, nothing a nextest
+        // filterset would have to escape.
+        let err = parse_check(&check_table("exclude_tests = [\"a)|all(\"]\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("exclude_tests"), "got: {err}");
+    }
+
     #[test]
     fn parse_check_rejects_unfiltered_curated_entry() {
         // Curated means "a hand-picked subset"; without its own filters the
@@ -1724,6 +1748,8 @@ features = ["a"]
                 extends: None,
                 sweeps: Some(vec!["all".into(), "consumer".into()]),
                 tests: None,
+                lib_tests: None,
+                exclude_tests: None,
                 only: None,
                 skip: None,
                 include_ignored: None,

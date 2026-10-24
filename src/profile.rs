@@ -143,6 +143,18 @@ impl PlannedSweep {
         self.effective_unification
     }
 
+    /// This sweep with its target selection replaced and everything else as
+    /// planned - a focused run's projection of the selection onto its one
+    /// package.
+    pub(crate) fn with_targets(&self, targets: Vec<TargetSelector>) -> Self {
+        let mut declaration = self.declaration.clone();
+        declaration.filters.targets = targets;
+        Self {
+            declaration,
+            effective_unification: self.effective_unification,
+        }
+    }
+
     /// The profile cargo uses when this sweep leaves the key unset.
     pub(crate) fn cargo_profile(&self) -> SweepProfile {
         crate::build_purpose::profile_for_sweep(
@@ -300,6 +312,13 @@ impl LaneExec {
     /// attributes tests to individual processes and packages.
     pub fn applies_qualified_skips(self) -> bool {
         matches!(self, Self::Isolated | Self::Nextest { .. })
+    }
+
+    /// Whether this execution runs the enumerated test binaries itself,
+    /// rather than handing cargo a selection - the lanes that can drop a
+    /// binary after the build (`exclude_tests`).
+    pub fn runs_enumerated_binaries(self) -> bool {
+        matches!(self, Self::Parallel { .. } | Self::Isolated | Self::Nextest { .. })
     }
 
     /// The doctest-only lane (`[[check]] doc_only`): `cargo test --doc` and
@@ -544,13 +563,101 @@ impl TargetName {
     }
 }
 
+/// One cargo target selector a sweep declares. Selectors union, as cargo's
+/// target flags do: `--lib --test cli` is the library harness plus `cli`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TargetSelector {
+    /// `lib_tests = true`: cargo `--lib`, every selected package's library
+    /// unit-test harness, with cargo's explicit-selection semantics (a
+    /// library whose manifest sets `test = false` is selected too).
+    Lib,
+    /// One `tests` entry: cargo `--test <name>`, a glob as cargo allows.
+    Test(TargetName),
+}
+
+impl TargetSelector {
+    pub(crate) fn cargo_args(&self) -> Vec<String> {
+        match self {
+            Self::Lib => vec!["--lib".to_owned()],
+            Self::Test(name) => vec!["--test".to_owned(), name.0.clone()],
+        }
+    }
+
+    /// Whether `package` has a target this selector names - the condition
+    /// for handing the selector to a cargo run scoped to that one package,
+    /// which refuses a selector naming nothing it has.
+    pub(crate) fn selects_in(&self, package: &crate::cargo::metadata::CargoPackage) -> bool {
+        const LIB_KINDS: [&str; 6] = ["lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"];
+        package.targets.iter().any(|t| match self {
+            Self::Lib => t.kind.iter().any(|k| LIB_KINDS.contains(&k.as_str())),
+            Self::Test(name) => {
+                t.kind.iter().any(|k| k == "test") && target_glob_matches(name.as_str(), &t.name)
+            }
+        })
+    }
+
+    /// How the plan line names it.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Lib => "--lib".to_owned(),
+            Self::Test(name) => format!("--test {}", name.0),
+        }
+    }
+}
+
+/// Whether `target` matches a target-name `pattern`, with cargo's glob
+/// support. A pattern that is not a valid glob is compared literally.
+pub(crate) fn target_glob_matches(pattern: &str, target: &str) -> bool {
+    globset::Glob::new(pattern)
+        .map_or(pattern == target, |g| g.compile_matcher().is_match(target))
+}
+
+/// Refuse an `exclude_tests` the sweep's lane cannot honour. A serial lane
+/// hands cargo its selection and cargo has no complement selector, so the
+/// excluded targets would run - refused, never dropped.
+pub(crate) fn refuse_unhonoured_exclusions(decl: &SweepDecl) -> Result<(), DevError> {
+    if decl.filters.exclude.is_empty() || decl.lane_exec.runs_enumerated_binaries() {
+        return Ok(());
+    }
+    Err(DevError::Config(format!(
+        "sweep '{}' has `exclude_tests`, but its tests run through one `cargo test` \
+         invocation, which cannot leave a target out. Exclusion needs a lane that runs its \
+         test binaries itself: set `parallel = {{}}` or `harness = \"nextest\"` on the \
+         [[check]] entry, or `isolation = \"process\"` on the profile.",
+        decl.label
+    )))
+}
+
+/// The `[[check]]` entry's own target selection: its `tests`, plus the
+/// library harness when it sets `lib_tests`.
+fn entry_selectors(entry: &CheckEntry) -> Vec<TargetSelector> {
+    let mut out: Vec<TargetSelector> = entry
+        .tests
+        .iter()
+        .cloned()
+        .map(|t| TargetSelector::Test(TargetName::new(t)))
+        .collect();
+    if entry.lib_tests {
+        out.push(TargetSelector::Lib);
+    }
+    out
+}
+
 /// Semantic filters and target selection for one resolved sweep.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LaneFilters {
     /// Ordered skips and positional filters, each retaining provenance.
     pub filters: Vec<Filter>,
-    /// Cargo integration-test targets selected by name.
-    pub targets: Vec<TargetName>,
+    /// Cargo target selectors (`tests`, `lib_tests`); empty selects every
+    /// test target.
+    pub targets: Vec<TargetSelector>,
+    /// `exclude_tests`: integration-test targets (globs) removed from what
+    /// the lane executes after the build. Never cargo argv - cargo has no
+    /// complement selector, and spelling the complement out as explicit
+    /// selectors would change what cargo builds and refuses - so only lanes
+    /// that execute their enumerated binaries themselves can honour it
+    /// (`LaneExec::runs_enumerated_binaries`).
+    pub exclude: Vec<TargetName>,
     /// Whether this lane executes ignored tests before forwarded args are
     /// considered.
     pub include_ignored: bool,
@@ -583,12 +690,19 @@ impl LaneFilters {
         false
     }
 
-    /// Render cargo's target selector pairs at the launch boundary.
+    /// Render cargo's target selectors at the launch boundary.
     pub fn cargo_args(&self) -> Vec<String> {
         self.targets
             .iter()
-            .flat_map(|target| ["--test".to_owned(), target.0.clone()])
+            .flat_map(TargetSelector::cargo_args)
             .collect()
+    }
+
+    /// Whether `exclude_tests` removes the integration-test target `name`.
+    /// Only `test`-kind targets can be excluded; `kind` is the target's
+    /// selector kind (`test`, `lib`, `bin`, ...).
+    pub fn excludes(&self, kind: &str, name: &str) -> bool {
+        kind == "test" && self.exclude.iter().any(|e| target_glob_matches(e.as_str(), name))
     }
 
     /// Render libtest's configured `--skip` flags and ignored-test switch.
@@ -709,7 +823,8 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> SweepDecl {
     // No profile in play, so the entry's own filters are all there is.
     let filters = LaneFilters {
         filters: entry_filters(entry),
-        targets: entry.tests.iter().cloned().map(TargetName::new).collect(),
+        targets: entry_selectors(entry),
+        exclude: entry.exclude_tests.iter().cloned().map(TargetName::new).collect(),
         include_ignored: false,
     };
     let lane_exec = LaneExec::resolve(
@@ -779,6 +894,8 @@ fn entry_filters(entry: &CheckEntry) -> Vec<DeclaredFilter> {
 struct ResolvedProfile {
     sweeps: Vec<String>,
     tests: Vec<String>,
+    lib_tests: bool,
+    exclude_tests: Vec<String>,
     only: Vec<String>,
     skip: Vec<SkipSpec>,
     /// Which profile in the `extends` chain actually declared `only` / `skip`.
@@ -921,6 +1038,14 @@ fn resolve_profile_chain(
         }
         if let Some(v) = &def.tests {
             out.tests = v.clone();
+        }
+        // Like every list here, a child's explicit value replaces its
+        // parent's - `lib_tests = false` clears an inherited `true`.
+        if let Some(v) = def.lib_tests {
+            out.lib_tests = v;
+        }
+        if let Some(v) = &def.exclude_tests {
+            out.exclude_tests = v.clone();
         }
         if let Some(v) = &def.only {
             out.only = v.clone();
@@ -1106,9 +1231,19 @@ fn shaping_from(profile: &ResolvedProfile, profile_name: &str) -> RunShaping {
         origin: only_at.clone(),
     }));
 
+    let mut targets: Vec<TargetSelector> = profile
+        .tests
+        .iter()
+        .cloned()
+        .map(|t| TargetSelector::Test(TargetName::new(t)))
+        .collect();
+    if profile.lib_tests {
+        targets.push(TargetSelector::Lib);
+    }
     let filters = LaneFilters {
         filters,
-        targets: profile.tests.iter().cloned().map(TargetName::new).collect(),
+        targets,
+        exclude: profile.exclude_tests.iter().cloned().map(TargetName::new).collect(),
         include_ignored: profile.include_ignored,
     };
     RunShaping {
@@ -1128,9 +1263,14 @@ fn build_sweep_decl(
     let shaping = shaping_from(profile, profile_name);
     let mut filters = shaping.filters;
     filters.filters.extend(entry_filters(entry));
+    for selector in entry_selectors(entry) {
+        if !filters.targets.contains(&selector) {
+            filters.targets.push(selector);
+        }
+    }
     filters
-        .targets
-        .extend(entry.tests.iter().cloned().map(TargetName::new));
+        .exclude
+        .extend(entry.exclude_tests.iter().cloned().map(TargetName::new));
     // Profile env is the base; the entry's own env overlays it so a
     // sweep-specific var wins on a key collision.
     let mut env = shaping.env;
@@ -1232,6 +1372,75 @@ lanes = ["tier1", "serial"]
             plan_decl(sweeps[0].clone()).build_shape_key(),
             plan_decl(sweeps[1].clone()).build_shape_key()
         );
+    }
+
+    #[test]
+    fn lib_selection_inherits_unions_and_clears() {
+        let (checks, cfg) = parse_fragment(
+            r#"
+[[check]]
+name = "default"
+tests = ["error_boundary"]
+exclude_tests = ["slow_*"]
+parallel = {}
+
+[test.profiles.base]
+sweeps = ["default"]
+lib_tests = true
+exclude_tests = ["compiler"]
+
+[test.profiles.child]
+extends = "base"
+
+[test.profiles.cleared]
+extends = "base"
+lib_tests = false
+"#,
+        );
+        let lib = TargetSelector::Lib;
+        let boundary = TargetSelector::Test(TargetName::new("error_boundary"));
+        let child = resolve(&cfg, &checks, "child").unwrap();
+        // The inherited lib selection unions with the entry's `tests`, and the
+        // exclusions of both levels apply.
+        assert_eq!(child[0].filters.targets, [lib, boundary.clone()]);
+        assert_eq!(child[0].filters.cargo_args(), ["--lib", "--test", "error_boundary"]);
+        let excluded: Vec<&str> = child[0].filters.exclude.iter().map(TargetName::as_str).collect();
+        assert_eq!(excluded, ["compiler", "slow_*"]);
+        assert!(child[0].filters.excludes("test", "slow_parse"));
+        assert!(!child[0].filters.excludes("lib", "slow_parse"), "only test targets are excluded");
+        // An explicit `false` clears the inherited selection.
+        let cleared = resolve(&cfg, &checks, "cleared").unwrap();
+        assert_eq!(cleared[0].filters.targets, [boundary]);
+    }
+
+    /// A serial lane hands cargo its selection and cargo cannot leave a
+    /// target out, so an exclusion there is refused, not dropped.
+    #[test]
+    fn an_exclusion_on_a_serial_lane_is_refused() {
+        let (checks, cfg) = parse_fragment(
+            r#"
+[[check]]
+name = "default"
+exclude_tests = ["slow"]
+
+[test.profiles.serial]
+sweeps = ["default"]
+
+[test.profiles.isolated]
+sweeps = ["default"]
+isolation = "process"
+"#,
+        );
+        let err = crate::check_cmd::decide_active_sweeps(&checks, Some(&cfg), Some("serial"), &[], false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("exclude_tests"), "got: {err}");
+        assert!(
+            crate::check_cmd::decide_active_sweeps(&checks, Some(&cfg), Some("isolated"), &[], false)
+                .is_ok()
+        );
+        // No profile at all: the entry alone is a serial lane.
+        assert!(crate::check_cmd::decide_active_sweeps(&checks, None, None, &[], false).is_err());
     }
 
     #[test]

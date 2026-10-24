@@ -572,6 +572,7 @@ pub(crate) fn assemble_nextest_lane(
     // Filters: `only` and unqualified `skip` ride nextest's own libtest
     // pattern emulation (same substring semantics, nothing to escape);
     // package-qualified skips become one filterset each.
+    refuse_stale_exclusions(label, &sweep.filters, lane_binaries.iter())?;
     let test_filter = sweep_engine_filter(sweep, &pcx, &known_groups)?;
 
     // Double-spawn re-invokes the CURRENT executable with a `__double-spawn`
@@ -669,7 +670,12 @@ pub(crate) fn assemble_nextest_lane(
         }
     }
     let mut binaries = Vec::new();
-    for b in &lane_binaries {
+    for b in drop_excluded(lane_binaries.iter().collect(), &sweep.filters) {
+        // An excluded binary never enters the prepared set: the filterset
+        // keeps the engine from running it, and leaving it out here keeps its
+        // tests out of the lane's filter-liveness candidates - an `only`
+        // matching only an excluded target must read as dead. Its pairs stay
+        // in the shape's universe, audited as not run.
         let unit = BinaryUnit::of(b);
         let (names, ignored) = selected.remove(&unit).unwrap_or_default();
         let hash = hash_file(Path::new(&b.executable))
@@ -688,6 +694,9 @@ pub(crate) fn assemble_nextest_lane(
 
     let mut prepared = PreparedLane::bare(env.clone());
     prepared.runtime_fingerprint = artifacts.runtime_fingerprint;
+    // The prepared set left the excluded binaries out; the re-verification
+    // must too, or a rebuild reads them as artifacts the plan never held.
+    prepared.target_exclusions = sweep.filters.exclude.clone();
     prepared.include_ignored = sweep.filters.include_ignored;
     prepared.enumerated = lane_binaries.len();
     prepared.resolutions.push(PreparedResolution { resolution: None, selection, binaries });
@@ -1085,9 +1094,29 @@ fn sweep_engine_filter(
     // admit everything - `not A` admits what `not B` excludes. The skips are
     // subtractions that must all hold, so they are one conjunction.
     let mut filtersets: Vec<Filterset> = Vec::new();
-    if let Some(expr) = qualified_skips_filterset(sweep.filters.skips())? {
+    // `exclude_tests` joins the same conjunction: each excluded target is one
+    // more subtraction every admitted test must clear. Explicit matcher
+    // prefixes (`=` equality, `#` glob), as nextest asks of generated
+    // expressions; the names were held to a filterset-safe charset when the
+    // config loaded, and to a live target before this filter is compiled -
+    // the engine refuses a `binary()` matcher no binary answers to.
+    let exclusions: Vec<String> = sweep
+        .filters
+        .exclude
+        .iter()
+        .map(|t| format!("not (kind(=test) & binary(#{}))", t.as_str()))
+        .collect();
+    let skips = qualified_skips_filterset(sweep.filters.skips())?;
+    let conjunction: Vec<String> = skips
+        .into_iter()
+        .chain(exclusions.into_iter().map(|e| format!("({e})")))
+        .collect();
+    if !conjunction.is_empty() {
+        let expr = conjunction.join(" & ");
         let parsed = Filterset::parse(expr.clone(), pcx, FiltersetKind::Test, known_groups).map_err(|e| {
-            DevError::Config(format!("qualified skips `{expr}` did not compile: {e:?}"))
+            DevError::Config(format!(
+                "qualified skips and test exclusions `{expr}` did not compile: {e:?}"
+            ))
         })?;
         filtersets.push(parsed);
     }
@@ -1363,6 +1392,7 @@ mod nextest_lane_tests {
             owners: &owners,
             commands: false,
             certifying: false,
+            universe_selectors: &NO_UNIVERSE_SELECTORS,
         };
         let assemble = |sweep: &PlannedSweep| {
             assemble_nextest_lane(
@@ -1415,6 +1445,62 @@ mod nextest_lane_tests {
         let quick = assemble(&fast);
         let passed = run_nextest_engine("engine", Some(1), quick.nextest.as_ref().unwrap(), &LaneTap::new(0)).unwrap();
         assert!(passed);
+    }
+
+    /// `exclude_tests` reaches the REAL engine's filterset: excluding the one
+    /// target leaves nothing selected (so the expression compiled and the
+    /// engine applied it), and a name matching no target is refused as stale.
+    #[test]
+    fn an_exclusion_reaches_the_engine_filter() {
+        let root = crate::test_scratch::scratch("nextest_lane", "exclusion");
+        let (metadata, stream) = engine_fixture(&root);
+        let owners = crate::diagnostic::OwnerIndex::from_metadata_at(
+            &root,
+            &root,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        );
+        let inputs = LaneInputs {
+            project: None,
+            project_root: &root,
+            state_root: &root,
+            target_dir: &root,
+            allow_flags: &[],
+            owners: &owners,
+            commands: false,
+            certifying: false,
+            universe_selectors: &NO_UNIVERSE_SELECTORS,
+        };
+        let assemble = |exclude: &str| {
+            let sweep = planned(crate::profile::SweepDecl {
+                label: "engine".into(),
+                lane_exec: crate::profile::LaneExec::Nextest { threads: Some(1) },
+                filters: crate::profile::LaneFilters {
+                    exclude: vec![crate::profile::TargetName::new(exclude)],
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+            assemble_nextest_lane(
+                &inputs,
+                &sweep,
+                vec!["-p".into(), "core".into()],
+                &LaneEnv::default(),
+                &NextestBuild {
+                    metadata_json: &metadata,
+                    stdout: &stream,
+                    build_platforms: build_platforms(&root, &[], None).unwrap(),
+                    ceiling: std::time::Duration::from_secs(1),
+                },
+            )
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default()
+        };
+        let excluded = assemble("sui*");
+        assert!(excluded.contains("selected no tests"), "got: {excluded}");
+        let stale = assemble("nope");
+        assert!(stale.contains("matches no integration-test target"), "got: {stale}");
     }
 
     /// The fail-fast stop signals every test still running. Those deaths are

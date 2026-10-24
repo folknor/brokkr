@@ -571,7 +571,7 @@ fn selector_kind(binary: &TestBinary) -> &str {
 /// Whether `target` matches a selector's `name`, with cargo's glob support.
 /// A name that is not a valid glob is compared literally.
 fn target_name_matches(name: &str, target: &str) -> bool {
-    globset::Glob::new(name).map_or(name == target, |g| g.compile_matcher().is_match(target))
+    crate::profile::target_glob_matches(name, target)
 }
 
 /// Parse a selector list (`["--test", "a", "--lib", "--bin=x"]`). Tokens
@@ -627,10 +627,11 @@ fn parse_target_selectors(args: &[String]) -> Vec<TargetSelector> {
 /// token after a bare `--test` as a target name made each of those match no
 /// binary, and the lane refused as "matched no test binaries".
 ///
-/// Where the enumeration already carried the same selectors (every
-/// non-package-mode resolution), this filter is idempotent. Under package
-/// mode the sweep's `--test` filters cannot ride the per-package enumeration
-/// (cargo refuses a target a package lacks), so this is where they narrow.
+/// Where the enumeration already carried the same selectors, this filter is
+/// idempotent. Under package mode each per-package enumeration carries only
+/// the selectors its package has (cargo refuses a target a package lacks),
+/// and a package with none builds its default set, so this is where they
+/// narrow.
 fn filter_binaries<'a>(binaries: &'a [TestBinary], selectors: &[String]) -> Vec<&'a TestBinary> {
     let parsed = parse_target_selectors(selectors);
     if parsed.is_empty() {
@@ -650,6 +651,53 @@ fn filter_binaries<'a>(binaries: &'a [TestBinary], selectors: &[String]) -> Vec<
             })
         })
         .collect()
+}
+
+/// Drop the binaries a lane's `exclude_tests` removes. Applied after
+/// [`filter_binaries`], by the lanes that execute their binaries themselves.
+pub(crate) fn drop_excluded<'a>(
+    binaries: Vec<&'a TestBinary>,
+    filters: &crate::profile::LaneFilters,
+) -> Vec<&'a TestBinary> {
+    if filters.exclude.is_empty() {
+        return binaries;
+    }
+    binaries
+        .into_iter()
+        .filter(|b| !filters.excludes(selector_kind(b), &b.target))
+        .collect()
+}
+
+/// Refuse an `exclude_tests` entry that matched no integration-test target the
+/// lane built - the stale-name failure cargo gives a `tests` entry. Without it
+/// a renamed target would silently start running again, under the same
+/// config that says it does not.
+pub(crate) fn refuse_stale_exclusions<'a>(
+    label: &str,
+    filters: &crate::profile::LaneFilters,
+    built: impl IntoIterator<Item = &'a TestBinary>,
+) -> Result<(), DevError> {
+    if filters.exclude.is_empty() {
+        return Ok(());
+    }
+    let tests: Vec<&TestBinary> = built
+        .into_iter()
+        .filter(|b| selector_kind(b) == "test")
+        .collect();
+    let stale: Vec<&str> = filters
+        .exclude
+        .iter()
+        .map(crate::profile::TargetName::as_str)
+        .filter(|pattern| !tests.iter().any(|b| target_name_matches(pattern, &b.target)))
+        .collect();
+    if stale.is_empty() {
+        return Ok(());
+    }
+    Err(DevError::Config(format!(
+        "sweep '{label}': `exclude_tests` entry {} matches no integration-test target this \
+         lane built. Fix the name, or drop the entry.",
+        stale.join(", ")
+    )))
 }
 
 #[cfg(test)]
@@ -809,6 +857,103 @@ mod binaries_tests {
         let filtered = filter_binaries(&bins, &["--test".into(), "cli_sort".into()]);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].target, "cli_sort");
+    }
+
+    #[test]
+    fn exclusions_drop_test_targets_and_a_stale_one_is_refused() {
+        let bins = [
+            bin("a", "a", "lib", "/1"),
+            bin("a", "slow_parse", "test", "/2"),
+            bin("a", "fast", "test", "/3"),
+        ];
+        let filters = crate::profile::LaneFilters {
+            exclude: vec![crate::profile::TargetName::new("slow_*")],
+            ..Default::default()
+        };
+        let kept: Vec<&str> = super::drop_excluded(bins.iter().collect(), &filters)
+            .iter()
+            .map(|b| b.target.as_str())
+            .collect();
+        assert_eq!(kept, ["a", "fast"]);
+        assert!(super::refuse_stale_exclusions("s", &filters, bins.iter()).is_ok());
+
+        // A name no test target carries - a lib's name included - is stale.
+        let stale = crate::profile::LaneFilters {
+            exclude: vec![crate::profile::TargetName::new("a")],
+            ..Default::default()
+        };
+        let err = super::refuse_stale_exclusions("s", &stale, bins.iter()).unwrap_err();
+        assert!(err.to_string().contains("matches no integration-test target"), "{err}");
+    }
+
+    /// A package-mode prebuild carries the selectors its package has - a
+    /// `test = false` library is built only when `--lib` names it - and none
+    /// it lacks, which cargo would refuse.
+    #[test]
+    fn a_package_prebuild_carries_the_selectors_its_package_has() {
+        let json = r#"{
+            "packages": [
+                {"name": "a", "id": "path+file:///w/a#0.1.0", "targets": [
+                    {"name": "a", "kind": ["lib"], "src_path": "/w/a/src/lib.rs"},
+                    {"name": "stack", "kind": ["test"], "src_path": "/w/a/tests/stack.rs"}]},
+                {"name": "b", "id": "path+file:///w/b#0.1.0", "targets": [
+                    {"name": "cli", "kind": ["test"], "src_path": "/w/b/tests/cli.rs"}]}
+            ],
+            "workspace_members": ["path+file:///w/a#0.1.0", "path+file:///w/b#0.1.0"],
+            "resolve": null
+        }"#;
+        let meta: crate::cargo::metadata::CargoMetadata = serde_json::from_str(json).unwrap();
+        let test = |n: &str| crate::profile::TargetSelector::Test(crate::profile::TargetName::new(n));
+        let sweep = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
+            filters: crate::profile::LaneFilters {
+                targets: vec![crate::profile::TargetSelector::Lib, test("st*"), test("cli")],
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert_eq!(
+            super::package_selectors(&sweep, &meta.packages[0]),
+            ["--lib", "--test", "st*"]
+        );
+        assert_eq!(super::package_selectors(&sweep, &meta.packages[1]), ["--test", "cli"]);
+    }
+
+    /// The re-verification holds out exactly the binaries the prepared lane
+    /// left out; otherwise a rebuild reads an excluded target as drift.
+    #[test]
+    fn re_verification_holds_out_excluded_binaries() {
+        let root = crate::test_scratch::scratch("binaries", "drift_exclusion");
+        let kept_exe = root.join("kept");
+        let slow_exe = root.join("slow_parse");
+        std::fs::write(&kept_exe, b"kept").unwrap();
+        std::fs::write(&slow_exe, b"slow").unwrap();
+        let kept = bin("a", "kept", "test", &kept_exe.display().to_string());
+        let slow = bin("a", "slow_parse", "test", &slow_exe.display().to_string());
+        let planned = vec![super::PlannedArtifact::new(
+            None,
+            super::BinaryUnit::of(&kept),
+            kept.executable.clone(),
+            super::hash_file(&kept_exe).unwrap(),
+        )];
+        let excluded = [crate::profile::TargetName::new("slow_*")];
+        let check = |exclusions: &[crate::profile::TargetName]| {
+            super::DriftCheck {
+                artifacts: planned.clone(),
+                target_filters: &[],
+                target_exclusions: exclusions,
+                runtime_fingerprint: None,
+                support_fingerprint: &[],
+            }
+            .run(
+                &[None],
+                |_| Ok(Some((vec![kept.clone(), slow.clone()], super::BuildRuntimeIndex::default()))),
+                &[],
+            )
+            .unwrap()
+            .unwrap()
+        };
+        assert!(check(&excluded).is_empty(), "the excluded binary is not drift");
+        assert!(!check(&[]).is_empty(), "without the exclusion it would be");
     }
 
     // Forwarded selectors other than `--test NAME` used to be read as

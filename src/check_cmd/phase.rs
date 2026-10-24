@@ -888,6 +888,7 @@ fn run_prepare_phase(a: &BuildPhaseArgs<'_>, certifying: bool) -> Result<Prepare
     );
     let target_dir = info.target_dir;
     let allow_flags = crate::config::check::test_phase_allow_flags(a.lints);
+    let universe_selectors = universe_selectors(a.active_sweeps);
     let inputs = LaneInputs {
         project: a.project.clone(),
         project_root: a.project_root,
@@ -897,6 +898,7 @@ fn run_prepare_phase(a: &BuildPhaseArgs<'_>, certifying: bool) -> Result<Prepare
         owners: &owners,
         commands: a.commands,
         certifying,
+        universe_selectors: &universe_selectors,
     };
     // Two steps: every lane built (target-dir chains, concurrent), then every
     // lane listed one at a time with nothing compiling. The background
@@ -1146,7 +1148,10 @@ fn verify_doc_only_rules(a: &BuildPhaseArgs<'_>) -> Result<(), DevError> {
     }
     for s in &doc_sweeps {
         let filters = s.lane_filters();
-        if !filters.filters.is_empty() || !filters.targets.is_empty() || filters.include_ignored
+        if !filters.filters.is_empty()
+            || !filters.targets.is_empty()
+            || !filters.exclude.is_empty()
+            || filters.include_ignored
         {
             return Err(DevError::Config(format!(
                 "sweep '{}' is doc-only and inherits `skip`/`only`/`tests` filters from its \

@@ -916,6 +916,10 @@ pub(crate) enum AdmissionRule {
     TestExcluded,
     /// The sweep has a `packages` list and it is not on it.
     NotListed,
+    /// The sweep selects test targets (`tests`, `lib_tests`) and the package
+    /// has none of them. Only a focused `brokkr test` run projects selection
+    /// onto its package; `check -p` hands cargo the selection as configured.
+    NoSelectedTarget,
 }
 
 /// A package the invocation named and a sweep's rules did not admit.
@@ -939,6 +943,13 @@ impl std::fmt::Display for AdmissionNote {
                 write!(
                     f,
                     "-p {} is not in this sweep's packages list",
+                    self.package
+                )
+            }
+            AdmissionRule::NoSelectedTarget => {
+                write!(
+                    f,
+                    "-p {} has none of the test targets this sweep selects",
                     self.package
                 )
             }
@@ -1373,7 +1384,8 @@ impl PhaseSelection {
             SelectionPhase::Clippy | SelectionPhase::Rustdoc => Dedupe::BuildShape,
         };
         let provenance = (!cli.is_empty()).then_some(Provenance::Cli);
-        let mut selection = Self::construct(phase, sweeps, cli, provenance, &dedupe, oracle)?;
+        let mut selection =
+            Self::construct(phase, sweeps, cli, provenance, &[], &dedupe, oracle)?;
         selection.refusal = selection.nothing_reached(sweeps);
         Ok(selection)
     }
@@ -1382,10 +1394,15 @@ impl PhaseSelection {
     /// whatever its source, and lanes that would execute identically
     /// dedupe ([`ExecProjection`]). `debug_of` is each sweep's effective
     /// debug answer (`resolve_debug`). Apply `--sweep` before this.
+    /// `untargeted[i]` marks a sweep whose target selection, projected onto
+    /// `package`, selects nothing: it is excluded, ahead of the dedupe and of
+    /// any support build, rather than run with no selector - which would
+    /// select every test target.
     pub(crate) fn for_brokkr_test(
         sweeps: &[PlannedSweep],
         package: &str,
         source: PackageSource,
+        untargeted: &[bool],
         debug_of: &dyn Fn(&PlannedSweep) -> bool,
         oracle: &FeatureOracle<'_>,
     ) -> Result<Self, DevError> {
@@ -1394,16 +1411,19 @@ impl PhaseSelection {
             sweeps,
             &[package.to_owned()],
             Some(Provenance::ResolvedPackage(source)),
+            untargeted,
             &Dedupe::Execution(debug_of),
             oracle,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn construct(
         phase: SelectionPhase,
         sweeps: &[PlannedSweep],
         overrides: &[String],
         provenance: Option<Provenance>,
+        untargeted: &[bool],
         dedupe: &Dedupe<'_>,
         oracle: &FeatureOracle<'_>,
     ) -> Result<Self, DevError> {
@@ -1414,6 +1434,18 @@ impl PhaseSelection {
                 Some(_) => admit(sweep, overrides, phase),
                 None => Admission::default(),
             };
+            if untargeted.get(i.get()).copied().unwrap_or(false) && !admission.kept.is_empty() {
+                return Ok(LaneEntry::Excluded(Excluded {
+                    notes: admission
+                        .kept
+                        .iter()
+                        .map(|package| AdmissionNote {
+                            package: package.clone(),
+                            rule: AdmissionRule::NoSelectedTarget,
+                        })
+                        .collect(),
+                }));
+            }
             if phase == SelectionPhase::Rustdoc
                 && matches!(sweep.lane_exec(), crate::profile::LaneExec::DocOnly { .. })
             {
@@ -1570,6 +1602,11 @@ pub(crate) struct ExecProjection {
     key: EffectiveBuild,
     debug: bool,
     doc_only: bool,
+    /// The (projected) target selection and exclusions: two sweeps of one
+    /// build that select different harnesses search different tests, and
+    /// folding one onto the other would lose a test only the second holds.
+    targets: Vec<crate::profile::TargetSelector>,
+    exclude: Vec<crate::profile::TargetName>,
 }
 
 impl ExecProjection {
@@ -1578,6 +1615,8 @@ impl ExecProjection {
             key: attempt.effective_build(sweep, None, SupportIdentity::Include),
             debug,
             doc_only: matches!(sweep.lane_exec(), crate::profile::LaneExec::DocOnly { .. }),
+            targets: sweep.lane_filters().targets.clone(),
+            exclude: sweep.lane_filters().exclude.clone(),
         }
     }
 }
@@ -1958,6 +1997,7 @@ mod tests {
             sweeps,
             package,
             source,
+            &[],
             debug_of,
             &FeatureOracle::unavailable(),
         )
@@ -2425,6 +2465,7 @@ mod tests {
             &[piners_sweep()],
             "piners-vm",
             PackageSource::Cli,
+            &[],
             &debug_of(false),
             &oracle,
         )
@@ -2602,6 +2643,7 @@ mod tests {
             &sweeps,
             "piners-vm",
             PackageSource::Cli,
+            &[],
             &debug_of(false),
             &oracle,
         )

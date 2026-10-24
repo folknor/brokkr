@@ -1197,7 +1197,14 @@ and every binary listed under the launch envelope execution will use
 (`DirectRuntime::envelope`: cwd,
 loader path, `[env]`, `CARGO_PKG_*`, build-script env), since a listing is
 the binary's own code and a custom harness may read its environment. Under a
-complete claim, each shape resolution's universe is enumerated. The plan
+complete claim, each shape resolution's universe is enumerated: `cargo test
+--no-run --tests` plus every explicit target selector (`--lib`, `--test
+<name>`) any lane of the shape declares, projected onto a package-mode
+resolution's one package. `--tests` alone leaves out a target whose manifest
+sets `test = false`, which an explicit selector still builds, so without the
+union a lane running such a target would hold a binary its shape's universe
+lacks; a `test = false` target no lane names stays out, as it always was. The
+plan
 records, per shape resolution under that claim, its universe and
 `#[ignore]`d subset; per prepared lane, its selected pairs and the executions
 they imply (ignored names excluded unless the lane lifts `#[ignore]`;

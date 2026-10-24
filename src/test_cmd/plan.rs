@@ -32,12 +32,14 @@ pub(super) fn sweep_plan_line(
     let mut eligible: Vec<&str> = Vec::new();
     let mut not_listed: Vec<&str> = Vec::new();
     let mut excluded: Vec<&str> = Vec::new();
+    let mut untargeted: Vec<&str> = Vec::new();
     let mut deduped: Vec<String> = Vec::new();
     for (s, entry) in sweeps.iter().zip(selection.entries().iter()) {
         match entry {
             LaneEntry::Attempt(_) => eligible.push(&s.label),
             LaneEntry::Excluded(e) => match exclusion_rule(e.notes()) {
                 Some(check_cmd::AdmissionRule::TestExcluded) => excluded.push(&s.label),
+                Some(check_cmd::AdmissionRule::NoSelectedTarget) => untargeted.push(&s.label),
                 _ => not_listed.push(&s.label),
             },
             LaneEntry::Deduped(d) => {
@@ -62,6 +64,12 @@ pub(super) fn sweep_plan_line(
             excluded.join(", ")
         ));
     }
+    if !untargeted.is_empty() {
+        out.push(format!(
+            "none of their test targets here: {}",
+            untargeted.join(", ")
+        ));
+    }
     if !deduped.is_empty() {
         out.push(format!("deduped: {}", deduped.join(", ")));
     }
@@ -84,6 +92,9 @@ pub(super) fn exclusion_describe(notes: &[check_cmd::AdmissionNote]) -> &'static
     match exclusion_rule(notes) {
         Some(check_cmd::AdmissionRule::TestExcluded) => {
             "package excluded from this sweep (test_exclude_packages)"
+        }
+        Some(check_cmd::AdmissionRule::NoSelectedTarget) => {
+            "package has none of the test targets this sweep selects (tests, lib_tests)"
         }
         _ => "package not in this sweep's packages list",
     }
@@ -386,7 +397,14 @@ pub(super) fn plan_focused(
         launch_config,
         target,
     )?;
-    let split = focused::eligibility(binaries)?;
+    // `exclude_tests` leaves its targets out of the search; the prebuild's
+    // artifacts (and so the re-verification) still hold every harness built.
+    let searched_binaries: Vec<check_cmd::TestBinary> =
+        check_cmd::drop_excluded(binaries.iter().collect(), shape.sweep.lane_filters())
+            .into_iter()
+            .cloned()
+            .collect();
+    let split = focused::eligibility(&searched_binaries)?;
     if !split.excluded.is_empty() {
         let labels: Vec<String> = split.excluded.iter().map(|b| b.label()).collect();
         output::test_msg(&format!(
@@ -412,8 +430,11 @@ pub(super) fn plan_focused(
         listed.push((b, names));
     }
 
+    // A sweep that selects its targets was configured to be a subset, so a
+    // name matching all of it is what that configuration permits - the
+    // refusal guards the package-wide search only.
     let every: Vec<String> = listed.iter().flat_map(|(_, n)| n.iter().cloned()).collect();
-    if matches_whole_suite(&every, name) {
+    if shape.sweep.lane_filters().targets.is_empty() && matches_whole_suite(&every, name) {
         return Err(DevError::Config(format!(
             "`{name}` matches all {} tests in package `{}` (sweep '{}'): brokkr test is for one \
              test or a few, and streams every match's output live. Run the whole suite with \
@@ -744,12 +765,16 @@ pub(super) fn cargo_head(shape: &BuildShape<'_>, leading: &[&str]) -> Vec<String
 
 /// The prebuild that compiles a split sweep's test harnesses and lists them.
 ///
-/// `--tests` because that is the selection a named `cargo test -p PKG NAME`
-/// resolves to (a positional test name with no target flag selects all test
-/// targets, not cargo's default set): the default set also builds every
-/// example merely to check it compiles, so an unrelated broken example would
-/// newly fail the build. `json-render-diagnostics` keeps the artifact records
-/// on stdout for the listing while compiler errors stay readable on stderr.
+/// A sweep that selects targets (`tests`, `lib_tests`, projected onto the
+/// run's package) builds exactly those - a sweep that exists to run one
+/// harness under a release profile does not compile every other one to look
+/// for a name. Otherwise `--tests`, because that is the selection a named
+/// `cargo test -p PKG NAME` resolves to (a positional test name with no target
+/// flag selects all test targets, not cargo's default set): the default set
+/// also builds every example merely to check it compiles, so an unrelated
+/// broken example would newly fail the build. `json-render-diagnostics` keeps
+/// the artifact records on stdout for the listing while compiler errors stay
+/// readable on stderr.
 pub(super) fn prebuild_argv(shape: &BuildShape<'_>) -> Vec<String> {
     let mut args = cargo_head(
         shape,
@@ -759,7 +784,12 @@ pub(super) fn prebuild_argv(shape: &BuildShape<'_>) -> Vec<String> {
             "--message-format=json-render-diagnostics",
         ],
     );
-    args.push("--tests".into());
+    let selectors = shape.sweep.lane_filters().cargo_args();
+    if selectors.is_empty() {
+        args.push("--tests".into());
+    } else {
+        args.extend(selectors);
+    }
     args
 }
 
@@ -1044,7 +1074,7 @@ pub(super) fn resolve_sweeps(
 /// Reuses `check_cmd::decide_active_sweeps` (no CLI features, no
 /// `--profile` override - resolution falls through to
 /// `[test] default_profile` -> `[[check]]` entries -> legacy
-/// `--all-features`), then drops the libtest filters that would
+/// `--all-features`), then drops the libtest name filters that would
 /// fight with the user's `<name>` argument. `env` is preserved, so a
 /// profile's env reaches `brokkr test` exactly as it reaches `check`.
 pub(super) fn decide_sweeps(
@@ -1055,12 +1085,20 @@ pub(super) fn decide_sweeps(
     Ok(sweeps
         .into_iter()
         .map(|mut s| {
-            // The user's `<name>` is the libtest filter. Profile-level
-            // `only` / `skip` / `tests` would either narrow it further (rare,
-            // surprising) or cause silent zero-match failures; drop them. With
-            // nothing declared applying, nothing can be audited as dead here
-            // either - and `brokkr test` runs no coverage phase anyway.
-            s.filters = crate::profile::LaneFilters::default();
+            // The user's `<name>` is the libtest filter, so the declared
+            // `only` / `skip` name filters go: they would narrow it further or
+            // cause silent zero-match failures, and with them not applying,
+            // nothing can be audited as dead here either. Target selection
+            // stays: `tests`, `lib_tests` and `exclude_tests` say which
+            // harnesses the sweep is, not which names match, and a sweep that
+            // exists to run one harness (a release-profile stack check) must
+            // not build every harness of the package to look for a name.
+            // `run_sweeps` projects the selection onto the run's package.
+            s.filters = crate::profile::LaneFilters {
+                targets: std::mem::take(&mut s.filters.targets),
+                exclude: std::mem::take(&mut s.filters.exclude),
+                ..Default::default()
+            };
             // `brokkr test` has no parallel fan-out to promote for, so the
             // only question is what the entry pinned. Planning the sweep here
             // is what stops the key being silently ignored by this command
@@ -1070,6 +1108,125 @@ pub(super) fn decide_sweeps(
             PlannedSweep::resolve(s, false)
         })
         .collect())
+}
+
+/// Project each sweep's target selection onto the one package the run tests.
+///
+/// A selector is first held to the sweep's own configured domain - its
+/// `packages`, the workspace less its `test_exclude_packages`, or cargo's
+/// default members - and one that names no target there is a config error,
+/// as cargo makes it under `check`. Only then is the selection narrowed to the
+/// run's package: a selector naming another package's target drops out, since
+/// cargo refuses `-p PKG --test NAME` for a target PKG lacks. The second value
+/// marks the sweeps left with no selector at all: their lane has nothing to
+/// search in this package and is excluded, never widened to every harness.
+pub(super) fn project_targets(
+    sweeps: Vec<PlannedSweep>,
+    pkg: &str,
+    project_root: &Path,
+) -> Result<(Vec<PlannedSweep>, Vec<bool>), DevError> {
+    if sweeps
+        .iter()
+        .all(|s| s.lane_filters().targets.is_empty() && s.lane_filters().exclude.is_empty())
+    {
+        let n = sweeps.len();
+        return Ok((sweeps, vec![false; n]));
+    }
+    let metadata = crate::cargo::metadata::load(
+        project_root,
+        crate::cargo::metadata::Query::workspace(),
+        &[],
+        None,
+    )?;
+    project_targets_with(sweeps, pkg, &metadata)
+}
+
+/// [`project_targets`] against a given metadata snapshot.
+pub(super) fn project_targets_with(
+    sweeps: Vec<PlannedSweep>,
+    pkg: &str,
+    metadata: &crate::cargo::metadata::CargoMetadata,
+) -> Result<(Vec<PlannedSweep>, Vec<bool>), DevError> {
+    let mut out = Vec::with_capacity(sweeps.len());
+    let mut emptied = Vec::with_capacity(sweeps.len());
+    for sweep in sweeps {
+        let filters = sweep.lane_filters();
+        if filters.targets.is_empty() && filters.exclude.is_empty() {
+            out.push(sweep);
+            emptied.push(false);
+            continue;
+        }
+        let domain = configured_domain(&sweep, metadata);
+        // An exclusion is held to the same domain, as `check` holds it to the
+        // lane's built targets: a renamed target must not quietly start
+        // running here while `check` refuses the config. It is not projected
+        // - excluding another package's target is simply nothing to do here.
+        for excluded in &filters.exclude {
+            let selector = crate::profile::TargetSelector::Test(excluded.clone());
+            if !domain.iter().any(|p| selector.selects_in(p)) {
+                return Err(DevError::Config(format!(
+                    "sweep '{}' has `exclude_tests` entry {}, which matches no integration-test \
+                     target in its own selection. Fix the name, or drop the entry.",
+                    sweep.label,
+                    excluded.as_str()
+                )));
+            }
+        }
+        if filters.targets.is_empty() {
+            out.push(sweep);
+            emptied.push(false);
+            continue;
+        }
+        let package = metadata.packages.iter().find(|p| p.name == pkg);
+        let mut kept = Vec::new();
+        for selector in &filters.targets {
+            if !domain.iter().any(|p| selector.selects_in(p)) {
+                return Err(DevError::Config(format!(
+                    "sweep '{}' selects `{}`, which no package in its own selection has a target \
+                     for - a stale or misspelled entry, which cargo would refuse under `check`",
+                    sweep.label,
+                    selector.describe()
+                )));
+            }
+            if package.is_some_and(|p| selector.selects_in(p)) {
+                kept.push(selector.clone());
+            }
+        }
+        emptied.push(kept.is_empty());
+        out.push(sweep.with_targets(kept));
+    }
+    Ok((out, emptied))
+}
+
+/// The packages a sweep's own selection reaches in the test phase.
+fn configured_domain<'m>(
+    sweep: &PlannedSweep,
+    metadata: &'m crate::cargo::metadata::CargoMetadata,
+) -> Vec<&'m crate::cargo::metadata::CargoPackage> {
+    let members: Vec<&crate::cargo::metadata::CargoPackage> = metadata
+        .packages
+        .iter()
+        .filter(|p| metadata.is_member(&p.id))
+        .collect();
+    match check_cmd::Selection::configured(sweep, check_cmd::SelectionPhase::Test) {
+        check_cmd::Selection::Explicit(names) => members
+            .into_iter()
+            .filter(|p| names.contains(&p.name))
+            .collect(),
+        check_cmd::Selection::WorkspaceExcluding(excluded) => members
+            .into_iter()
+            .filter(|p| !excluded.contains(&p.name))
+            .collect(),
+        // Cargo's default selection, as metadata reports it: the default
+        // members, which encode the root-package rule too.
+        _ => {
+            let defaults = metadata.default_member_ids();
+            members
+                .into_iter()
+                .filter(|p| defaults.contains(&p.id.to_string()))
+                .collect()
+        }
+    }
 }
 
 /// Narrow the resolved sweep set to a single `--sweep <label>`. Passing

@@ -192,7 +192,14 @@ never gives a test). Consequences:
 - Forwarded cargo args only cargo can honour (`--no-run`, `--target`,
   `--config`, `--manifest-path`, `--target-dir`) are rejected.
 - Cargo target selectors after `--` (`--test NAME`, `--lib`, `--bins`, ...)
-  narrow which binaries the sweep plans, unioned with the sweep's own `tests`.
+  narrow which binaries the sweep plans, unioned with the sweep's own `tests`
+  and `lib_tests`.
+- The sweep's `exclude_tests` then drops its targets from the plan, after the
+  build: this lane, the process-isolated lane and the nextest lane (as a
+  filterset term) are the ones that can, since a serial lane hands cargo its
+  selection whole. An exclusion matching no integration-test target the lane
+  built fails the lane, as a stale `tests` name fails cargo. The re-verification
+  before the lane runs holds the same binaries out.
 - On a sweep selecting exactly the whole workspace, `feature_unification =
   "auto"` still promotes the prebuild to workspace unification; an explicit
   `selected` is honoured.
@@ -443,7 +450,10 @@ never credited to a `[[quarantine]]` entry. The exemption is keyed on the
 sweeps, not the shape: a non-curated entry sharing a build shape with a
 curated one keeps that shape fully audited. The universe and each lane's
 selection come from the binaries' own libtest listings, under the lane's real
-filters, so libtest itself decides what a filter admits. Every non-selected
+filters, so libtest itself decides what a filter admits. A shape's universe
+is its `--tests` set plus every target a lane of the shape selects
+explicitly (`tests`, `lib_tests`), so a `test = false` target a lane runs is
+audited like any other. Every non-selected
 pair must be quarantined (`[[quarantine]]` pattern match, optionally
 package-scoped - meaning every binary of that package - counted per entry -
 the **most-specific** matching pattern takes the pair, so a narrow entry is
@@ -700,6 +710,12 @@ different questions, and only the first could be derived.
   package-qualified tokens are projected onto each resolution's one package,
   so `strategy/hotpath` does not reach the `vm` resolution - see
   [Feature projection](check.md#feature-projection).
+- **Each resolution carries only its package's target selectors.** A
+  `--lib` / `--test <name>` reaches a resolution's prebuild only when its
+  package has that target (cargo refuses one it lacks), so an explicitly
+  selected `test = false` target is built there as everywhere else. A package
+  with none of the selected targets builds its default set, which the
+  selectors then narrow to nothing.
 - The mode is part of the **build shape** (and of what `brokkr test` dedupes
   on), so a package-mode and a workspace-mode lane never dedupe into each
   other in clippy, in `brokkr test`, or in the coverage audit.
@@ -866,8 +882,9 @@ nothing is orphaned.
 Four rules decide what "matched nothing" means:
 
 - **Judged against the lane's binaries, not the shape's universe.** A lane
-  narrows binaries with `tests = [...]` (`--test <target>`), so a filter is
-  matched against the names *that lane* can see. Against the wider universe
+  narrows binaries with `tests = [...]` (`--test <target>`), `lib_tests` and
+  `exclude_tests`, so a filter is matched against the names *that lane* can
+  see - an `only` that matches nothing outside an excluded target is dead. Against the wider universe
   a skip would read as alive on the strength of a match inside a binary the
   lane narrowed away.
 - **The reference set is the filter's own scope**, which is the union of

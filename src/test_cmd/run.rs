@@ -17,8 +17,8 @@ use super::display::{RepeatState, lone_test_tag, show_failed_invocation, show_re
 use super::plan::{
     BuildShape, FocusedPlan, NoMatchNote, ReadySweep, Searched, SweepContext, SweepOutcome,
     direct_libtest_args, exclusion_describe, lint_allow_flags, prebuild_targets, prepare_sweep,
-    resolve_debug, resolve_package, resolve_sweeps, run_pre_build, single_run, sweep_plan_line,
-    test_argv,
+    project_targets, resolve_debug, resolve_package, resolve_sweeps, run_pre_build, single_run,
+    sweep_plan_line, test_argv,
 };
 use super::verdict::{
     OneRun, Outcome, RunReport, aggregate_exit, ceilings_for, format_repeat_summary, run_one,
@@ -120,18 +120,8 @@ pub(super) fn run_sweeps(
     let sweeps = resolve_sweeps(dev_config.test.as_ref(), &dev_config.check, sweep_filter)?;
 
     let (pkg, source) = resolve_package(package, dev_config, &project)?;
-    // Which sweeps the run is eligible to attempt: the resolved package always
-    // overrides each sweep's own selection, sweeps whose rules leave it out
-    // are excluded, and sweeps that would execute exactly what an earlier one
-    // does are deduped. After `--sweep`, so a lane-qualified label reaches a
-    // sweep the dedupe would otherwise fold away.
-    let test_cfg = dev_config.test.as_ref();
-    let debug_of = |s: &PlannedSweep| resolve_debug(profile_override, test_cfg, s.profile);
-    // Each sweep's features are projected onto the one package: a token only
-    // another of the sweep's packages routes is dropped, and said so.
-    let oracle = check_cmd::FeatureOracle::at(project_root);
-    let selection =
-        check_cmd::PhaseSelection::for_brokkr_test(&sweeps, &pkg, source, &debug_of, &oracle)?;
+    let (sweeps, selection) =
+        select_for_package(sweeps, &pkg, source, dev_config, profile_override, project_root)?;
     check_cmd::announce_feature_drops(&sweeps, &[&selection]);
     // A deduped sweep is not a sweep this run goes through.
     let multi = selection
@@ -258,6 +248,39 @@ pub(super) fn run_sweeps(
     let outcomes: Vec<Outcome> = reports.iter().map(|r| r.outcome).collect();
     let searched = Searched::of(&ready).describe();
     aggregate_exit(&outcomes, &pkg, name, &searched)
+}
+
+/// Which sweeps the run is eligible to attempt for `pkg`, and how.
+///
+/// Each sweep's target selection is first narrowed to the package; a sweep
+/// left selecting nothing there is excluded rather than widened. Then the
+/// resolved package always overrides each sweep's own selection, sweeps whose
+/// rules leave it out are excluded, and sweeps that would execute exactly what
+/// an earlier one does are deduped. After `--sweep`, so a lane-qualified label
+/// reaches a sweep the dedupe would otherwise fold away. Each sweep's features
+/// are projected onto the one package: a token only another of the sweep's
+/// packages routes is dropped, and said so.
+fn select_for_package(
+    sweeps: Vec<PlannedSweep>,
+    pkg: &str,
+    source: check_cmd::PackageSource,
+    dev_config: &DevConfig,
+    profile_override: Option<bool>,
+    project_root: &Path,
+) -> Result<(Vec<PlannedSweep>, check_cmd::PhaseSelection), DevError> {
+    let (sweeps, untargeted) = project_targets(sweeps, pkg, project_root)?;
+    let test_cfg = dev_config.test.as_ref();
+    let debug_of = |s: &PlannedSweep| resolve_debug(profile_override, test_cfg, s.profile);
+    let oracle = check_cmd::FeatureOracle::at(project_root);
+    let selection = check_cmd::PhaseSelection::for_brokkr_test(
+        &sweeps,
+        pkg,
+        source,
+        &untargeted,
+        &debug_of,
+        &oracle,
+    )?;
+    Ok((sweeps, selection))
 }
 
 /// Run every ready sweep's iterations, recording each in its lane's journal.
@@ -495,6 +518,7 @@ pub(super) fn sweep_drift(
     let check = check_cmd::DriftCheck {
         artifacts,
         target_filters: &[],
+        target_exclusions: &[],
         runtime_fingerprint: runtime,
         support_fingerprint: &prepared.support_fingerprint,
     };

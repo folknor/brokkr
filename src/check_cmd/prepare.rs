@@ -77,6 +77,35 @@ pub(crate) struct LaneInputs<'a> {
     /// the policy universe, hold each lane to its plan before it runs. Not
     /// what makes a lane prepared - every run prepares its lanes.
     pub(crate) certifying: bool,
+    /// Every explicit target selector a lane of each build shape declares
+    /// ([`universe_selectors`]): what that shape's universe enumerates beside
+    /// `--tests`.
+    pub(crate) universe_selectors: &'a UniverseSelectors,
+}
+
+/// The explicit target selectors of each build shape's lanes, unioned.
+pub(crate) type UniverseSelectors = BTreeMap<ShapeId, Vec<crate::profile::TargetSelector>>;
+
+/// The union for inputs that enumerate no universe (a lane's run, fixtures).
+pub(crate) static NO_UNIVERSE_SELECTORS: UniverseSelectors = UniverseSelectors::new();
+
+/// Union the target selectors every lane of a shape declares. A shape's
+/// universe is enumerated once, with `--tests`, which leaves out a target
+/// whose manifest sets `test = false` - one an explicit `--lib` / `--test`
+/// still selects. Enumerating the union beside `--tests` puts every target any
+/// of the shape's lanes runs into the universe, and nothing more: a
+/// `test = false` target no lane names stays out, as it always was.
+pub(crate) fn universe_selectors(sweeps: &[PlannedSweep]) -> UniverseSelectors {
+    let mut out = UniverseSelectors::new();
+    for sweep in sweeps.iter().filter(|s| lane_kind(s) != LaneKind::DocOnly) {
+        let union = out.entry(shape_id(sweep)).or_default();
+        for selector in &sweep.lane_filters().targets {
+            if !union.contains(selector) {
+                union.push(selector.clone());
+            }
+        }
+    }
+    out
 }
 
 pub(crate) fn lane_env(inputs: &LaneInputs<'_>, sweep: &PlannedSweep) -> Result<LaneEnv, DevError> {
@@ -243,6 +272,9 @@ pub(crate) struct PreparedLane {
     pub(crate) resolutions: Vec<PreparedResolution>,
     /// Target selectors the binaries were narrowed with after the prebuild.
     pub(crate) target_filters: Vec<String>,
+    /// The sweep's `exclude_tests`, removed after `target_filters` narrowed:
+    /// the re-verification must hold the same binaries out.
+    pub(crate) target_exclusions: Vec<crate::profile::TargetName>,
     /// The direct-execution lanes' launch envelope.
     pub(crate) runtime: Option<DirectRuntime>,
     pub(crate) nextest: Option<NextestPrepared>,
@@ -310,6 +342,7 @@ impl PreparedLane {
             pkg_skipped: 0,
             resolutions: Vec::new(),
             target_filters: Vec::new(),
+            target_exclusions: Vec::new(),
             runtime: None,
             nextest: None,
             cargo_extra: Vec::new(),
@@ -375,16 +408,47 @@ impl PreparedLane {
 /// REPLACING the sweep's own `-p` list (cargo unions selection flags) - with
 /// the profile, the unification pin and the features, which the parallel
 /// lane's per-package prebuild used to drop. The features are the request's
-/// projection onto that one package. The sweep's `--test` filters do not ride
-/// a per-package prebuild (cargo refuses a target a package lacks); they
-/// narrow the listed binaries instead.
-fn resolution_selection(sweep: &PlannedSweep, run: &ResolutionRun) -> Vec<String> {
-    let purpose = if run.resolution.is_some() {
-        CargoSelectionPurpose::Shape
-    } else {
-        CargoSelectionPurpose::TestLane
+/// projection onto that one package. A per-package prebuild carries the
+/// sweep's target selectors projected onto its package: cargo refuses a
+/// selector naming a target the package lacks, and leaving them all off would
+/// build cargo's default set, which omits a target its manifest marks
+/// `test = false` - one an explicit `--lib` / `--test` selects. A package with
+/// none of the selected targets builds its default set, which the selectors
+/// then narrow to nothing. `packages` is the workspace metadata, loaded when
+/// a package-mode lane selects targets.
+fn resolution_selection(
+    sweep: &PlannedSweep,
+    run: &ResolutionRun,
+    packages: Option<&crate::cargo::metadata::CargoMetadata>,
+) -> Vec<String> {
+    let Some(package) = run.resolution.as_deref() else {
+        return cargo_selection_args(
+            sweep,
+            run,
+            sweep.cargo_profile(),
+            CargoSelectionPurpose::TestLane,
+        );
     };
-    cargo_selection_args(sweep, run, sweep.cargo_profile(), purpose)
+    let mut args =
+        cargo_selection_args(sweep, run, sweep.cargo_profile(), CargoSelectionPurpose::Shape);
+    if let Some(pkg) = packages.and_then(|m| m.packages.iter().find(|p| p.name == package)) {
+        args.extend(package_selectors(sweep, pkg));
+    }
+    args
+}
+
+/// The sweep's target selectors one package has, as cargo argv.
+fn package_selectors(
+    sweep: &PlannedSweep,
+    package: &crate::cargo::metadata::CargoPackage,
+) -> Vec<String> {
+    sweep
+        .lane_filters()
+        .targets
+        .iter()
+        .filter(|selector| selector.selects_in(package))
+        .flat_map(crate::profile::TargetSelector::cargo_args)
+        .collect()
 }
 
 /// The libtest argv that selects what a lane runs: its positional filters,
@@ -967,9 +1031,20 @@ fn build_direct(
     env: &LaneEnv,
 ) -> Result<Option<CargoBuilt>, DevError> {
     let forwarded = direct_preflight(sweep, extra_args, env)?;
+    let per_package = attempt.runs().iter().any(|run| run.resolution.is_some());
+    let metadata = if per_package && !sweep.lane_filters().targets.is_empty() {
+        Some(crate::cargo::metadata::load(
+            inputs.project_root,
+            crate::cargo::metadata::Query::workspace(),
+            &[],
+            None,
+        )?)
+    } else {
+        None
+    };
     build_resolutions(inputs, attempt, &env.refs(), &|run| {
         let mut selection = env.allow_args.clone();
-        selection.extend(resolution_selection(sweep, run));
+        selection.extend(resolution_selection(sweep, run, metadata.as_deref()));
         selection.extend(forwarded.selectors.iter().cloned());
         selection.extend(forwarded.cargo.iter().cloned());
         selection
@@ -1007,10 +1082,10 @@ fn prepare_direct(
     let mut prepared = PreparedLane::bare(env.clone());
     prepared.runtime_fingerprint = fingerprint;
     prepared.include_ignored = lane_runs_ignored(sweep, &libtest_extra);
-    // The sweep's own `--test` filters UNION with any the caller supplied,
+    // The sweep's own target selectors UNION with any the caller supplied,
     // matching cargo's semantics for repeated selection flags. Under package
-    // mode the sweep's filters cannot ride the per-package prebuild (cargo
-    // refuses a target a package lacks), so this is where they narrow.
+    // mode each per-package prebuild carried only the selectors its package
+    // has (`resolution_selection`), so this is where the rest narrow.
     prepared.target_filters = sweep.lane_filters().cargo_args();
     prepared.target_filters.extend(extra_selectors.iter().cloned());
     prepared.cargo_extra = cargo_extra;
@@ -1039,10 +1114,17 @@ fn list_direct_binaries(
     runtime: &DirectRuntime,
 ) -> Result<(), DevError> {
     let filter_args = lane_filter_args(sweep, libtest_extra);
+    refuse_stale_exclusions(
+        &sweep.label,
+        sweep.lane_filters(),
+        built.iter().flat_map(|(_, _, binaries)| binaries.iter()),
+    )?;
+    prepared.target_exclusions = sweep.lane_filters().exclude.clone();
     for (resolution, selection, binaries) in built {
         prepared.enumerated += binaries.len();
         let mut out = Vec::new();
-        for b in filter_binaries(&binaries, &prepared.target_filters) {
+        let selected = filter_binaries(&binaries, &prepared.target_filters);
+        for b in drop_excluded(selected, sweep.lane_filters()) {
             let Some(p) = list_binary(sweep, b, &filter_args, env_refs, runtime, &mut prepared.pkg_skipped)?
             else {
                 return Err(not_prepared(sweep));
@@ -1131,6 +1213,7 @@ fn lane_drift_with(
     let check = DriftCheck {
         artifacts: prepared.artifacts(),
         target_filters: &prepared.target_filters,
+        target_exclusions: &prepared.target_exclusions,
         runtime_fingerprint: prepared.runtime_fingerprint.as_ref(),
         support_fingerprint: &prepared.support_fingerprint,
     };
@@ -1145,6 +1228,7 @@ fn lane_drift_with(
 pub(crate) struct DriftCheck<'a> {
     pub(crate) artifacts: Vec<PlannedArtifact>,
     pub(crate) target_filters: &'a [String],
+    pub(crate) target_exclusions: &'a [crate::profile::TargetName],
     pub(crate) runtime_fingerprint: Option<&'a Vec<String>>,
     pub(crate) support_fingerprint: &'a [String],
 }
@@ -1170,8 +1254,12 @@ impl DriftCheck<'_> {
             rebuilt.push((resolution.clone(), binaries));
         }
         let mut current: Vec<ArtifactFingerprint> = Vec::new();
+        let exclusions = crate::profile::LaneFilters {
+            exclude: self.target_exclusions.to_vec(),
+            ..Default::default()
+        };
         for (resolution, binaries) in &rebuilt {
-            for b in filter_binaries(binaries, self.target_filters) {
+            for b in drop_excluded(filter_binaries(binaries, self.target_filters), &exclusions) {
                 let hash = hash_file(Path::new(&b.executable))
                     .map_err(|e| DevError::Build(format!("could not hash {}: {e}", b.executable)))?;
                 current.push(ArtifactFingerprint::new(
@@ -1244,7 +1332,37 @@ fn build_universe(
     run: &ResolutionRun,
     env: &LaneEnv,
 ) -> Result<UniverseBuilt, DevError> {
-    let bare = shape_enumeration_args(sweep, run, env.allow_args.clone());
+    let mut bare = shape_enumeration_args(sweep, run, env.allow_args.clone());
+    let union = inputs
+        .universe_selectors
+        .get(&shape_id(sweep))
+        .filter(|selectors| !selectors.is_empty());
+    if let Some(selectors) = union {
+        // Explicit `--tests` first: with a selector beside it nothing else
+        // adds it, and cargo unions the two.
+        bare.push("--tests".into());
+        match run.resolution.as_deref() {
+            None => bare.extend(selectors.iter().flat_map(crate::profile::TargetSelector::cargo_args)),
+            // A package-mode resolution takes only the selectors its package
+            // has, as its lanes' own prebuilds do.
+            Some(package) => {
+                let metadata = crate::cargo::metadata::load(
+                    inputs.project_root,
+                    crate::cargo::metadata::Query::workspace(),
+                    &[],
+                    None,
+                )?;
+                if let Some(pkg) = metadata.packages.iter().find(|p| p.name == package) {
+                    bare.extend(
+                        selectors
+                            .iter()
+                            .filter(|s| s.selects_in(pkg))
+                            .flat_map(crate::profile::TargetSelector::cargo_args),
+                    );
+                }
+            }
+        }
+    }
     match test_binaries_with_runtime(inputs.project_root, &bare, &env.refs(), inputs.commands)? {
         Some((binaries, index)) => Ok(UniverseBuilt { binaries, index }),
         None => Err(DevError::Reported(format!("the universe of sweep '{}' could not be enumerated", sweep.label))),
@@ -2093,6 +2211,7 @@ mod prepare_tests {
             owners: no_owners(),
             commands: false,
             certifying: false,
+            universe_selectors: &NO_UNIVERSE_SELECTORS,
         };
         let mut skipped = 0;
         let p = list_binary_or_unlisted(&inputs, &planned(crate::profile::SweepDecl::default()), &target, &[], &[], &runtime, &mut skipped)
@@ -2148,6 +2267,32 @@ mod prepare_tests {
         })
     }
 
+    /// Two lanes of one build shape that select different targets: the
+    /// shape's universe enumerates both lanes' selectors, so a `test = false`
+    /// target either one names is in it. A doc-only lane contributes nothing.
+    #[test]
+    fn a_shapes_universe_enumerates_every_lanes_selectors() {
+        let lane = |label: &str, targets: Vec<crate::profile::TargetSelector>| {
+            planned(crate::profile::SweepDecl {
+                label: label.into(),
+                filters: crate::profile::LaneFilters { targets, ..Default::default() },
+                ..Default::default()
+            })
+        };
+        let manual = crate::profile::TargetSelector::Test(crate::profile::TargetName::new("manual"));
+        let sweeps = [
+            lane("libs", vec![crate::profile::TargetSelector::Lib]),
+            lane("manual", vec![manual.clone(), crate::profile::TargetSelector::Lib]),
+            lane("plain", Vec::new()),
+        ];
+        let union = universe_selectors(&sweeps);
+        assert_eq!(union.len(), 1, "one build shape");
+        assert_eq!(
+            union.values().next().unwrap(),
+            &vec![crate::profile::TargetSelector::Lib, manual]
+        );
+    }
+
     fn inputs_in<'a>(dir: &'a Path, certifying: bool) -> LaneInputs<'a> {
         LaneInputs {
             project: None,
@@ -2158,6 +2303,7 @@ mod prepare_tests {
             owners: no_owners(),
             commands: false,
             certifying,
+            universe_selectors: &NO_UNIVERSE_SELECTORS,
         }
     }
 

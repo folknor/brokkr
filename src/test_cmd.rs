@@ -23,9 +23,11 @@
 //!
 //! Feature selection follows the same priority ladder as
 //! `brokkr check`'s test phase, with two intentional differences:
-//! profile libtest filters (`only` / `skip` / `tests`) are dropped
+//! the declared libtest name filters (`only` / `skip`) are dropped
 //! (the user's `<NAME>` is the filter), and CLI `--features` is not
-//! accepted. Profile-declared `env` vars *are* propagated, so a
+//! accepted. Target selection (`tests`, `lib_tests`, `exclude_tests`) is
+//! kept and projected onto the run's package: a sweep selecting no target
+//! there is excluded, and one selecting some builds and searches only those. Profile-declared `env` vars *are* propagated, so a
 //! profile that gates platform tests behind `BROKKR_TEST_PLATFORM=1`
 //! still works under `brokkr test`. A sweep's configured features are
 //! projected onto the one package the run selects (and its support builds
@@ -97,6 +99,7 @@ mod tests {
             sweeps,
             pkg,
             check_cmd::PackageSource::Cli,
+            &[],
             &|_| false,
             // Every package unknown: projection is the identity, so these
             // tests see the configured features. Routing has its own tests
@@ -366,6 +369,148 @@ mod tests {
                 "--tests"
             ]
         );
+    }
+
+    fn test_target(name: &str) -> crate::profile::TargetSelector {
+        crate::profile::TargetSelector::Test(crate::profile::TargetName::new(name))
+    }
+
+    /// A sweep that selects its targets builds exactly those: a release sweep
+    /// that exists to run one harness does not compile every other one.
+    #[test]
+    fn a_selecting_sweep_prebuilds_only_its_targets() {
+        let sweep = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
+            filters: crate::profile::LaneFilters {
+                targets: vec![test_target("native_stack"), crate::profile::TargetSelector::Lib],
+                ..Default::default()
+            },
+            ..crate::profile::SweepDecl::default()
+        });
+        let run = one_package(&sweep, "pkg");
+        let shape = BuildShape {
+            sweep: &sweep,
+            allow_args: &[],
+            run: &run,
+            jobs: None,
+            profile: crate::config::SweepProfile::Dev,
+        };
+        let pre = prebuild_argv(&shape);
+        assert!(pre.ends_with(&["--test".into(), "native_stack".into(), "--lib".into()]), "{pre:?}");
+        assert!(!pre.contains(&"--tests".to_owned()), "{pre:?}");
+    }
+
+    /// Two packages of one workspace: `a` has a lib and the `native_stack`
+    /// harness, `b` has only a `cli` harness; `a` is the sole default member.
+    fn two_package_metadata() -> crate::cargo::metadata::CargoMetadata {
+        let target = |name: &str, kind: &str| {
+            format!(r#"{{"name": "{name}", "kind": ["{kind}"], "src_path": "/x/{name}.rs"}}"#)
+        };
+        let json = format!(
+            r#"{{
+                "packages": [
+                    {{"name": "a", "id": "path+file:///w/a#0.1.0", "targets": [{}, {}]}},
+                    {{"name": "b", "id": "path+file:///w/b#0.1.0", "targets": [{}]}}
+                ],
+                "workspace_members": ["path+file:///w/a#0.1.0", "path+file:///w/b#0.1.0"],
+                "workspace_default_members": ["path+file:///w/a#0.1.0"],
+                "resolve": null
+            }}"#,
+            target("a", "lib"),
+            target("native_stack", "test"),
+            target("cli", "test"),
+        );
+        serde_json::from_str(&json).unwrap()
+    }
+
+    fn selecting(label: &str, packages: &[&str], targets: Vec<crate::profile::TargetSelector>) -> PlannedSweep {
+        crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
+            label: label.into(),
+            packages: packages.iter().map(|p| (*p).to_owned()).collect(),
+            filters: crate::profile::LaneFilters {
+                targets,
+                ..Default::default()
+            },
+            ..crate::profile::SweepDecl::default()
+        })
+    }
+
+    #[test]
+    fn selection_projects_onto_the_runs_package() {
+        let meta = two_package_metadata();
+        let sweeps = vec![
+            selecting("plain", &[], Vec::new()),
+            selecting("stack", &["a", "b"], vec![test_target("native_*"), test_target("cli")]),
+            selecting("cli-only", &["a", "b"], vec![test_target("cli")]),
+        ];
+        let (projected, untargeted) = project_targets_with(sweeps, "a", &meta).unwrap();
+        assert_eq!(untargeted, [false, false, true]);
+        // `cli` is b's: it drops out for a run of `a`, `native_*` stays.
+        assert_eq!(projected[1].lane_filters().targets, [test_target("native_*")]);
+        assert!(projected[0].lane_filters().targets.is_empty());
+    }
+
+    /// A selector live only in a package outside the sweep's own selection is
+    /// a config error, as cargo would make it under `check` - never an
+    /// exclusion that hides the mistake. A bare sweep's domain is cargo's
+    /// default members, not the whole workspace.
+    #[test]
+    fn a_selector_naming_no_target_in_the_sweeps_domain_is_refused() {
+        let meta = two_package_metadata();
+        let only_a = vec![selecting("x", &["a"], vec![test_target("cli")])];
+        assert!(project_targets_with(only_a, "a", &meta).is_err());
+        let bare = vec![selecting("x", &[], vec![test_target("cli")])];
+        assert!(project_targets_with(bare, "a", &meta).is_err());
+        let lib_in_b = vec![selecting("x", &["b"], vec![crate::profile::TargetSelector::Lib])];
+        assert!(project_targets_with(lib_in_b, "b", &meta).is_err());
+    }
+
+    /// An exclusion matching no integration-test target in the sweep's own
+    /// selection is refused, as `check` refuses it - a renamed target must
+    /// not quietly start running under `brokkr test`. One naming another
+    /// package's target is valid and simply does nothing for this package.
+    #[test]
+    fn a_stale_exclusion_is_refused_in_a_focused_run() {
+        let meta = two_package_metadata();
+        let excluding = |name: &str| {
+            crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
+                label: "x".into(),
+                packages: vec!["a".into(), "b".into()],
+                filters: crate::profile::LaneFilters {
+                    exclude: vec![crate::profile::TargetName::new(name)],
+                    ..Default::default()
+                },
+                ..crate::profile::SweepDecl::default()
+            })
+        };
+        assert!(project_targets_with(vec![excluding("nope")], "a", &meta).is_err());
+        let (_, untargeted) = project_targets_with(vec![excluding("cli")], "a", &meta).unwrap();
+        assert_eq!(untargeted, [false]);
+    }
+
+    /// A sweep whose projection selects nothing is excluded before the dedupe,
+    /// so it neither runs with no selector (every harness) nor absorbs a twin.
+    #[test]
+    fn an_untargeted_sweep_is_excluded_and_selections_do_not_dedupe() {
+        let sweeps = vec![
+            selecting("one", &[], vec![test_target("alpha")]),
+            selecting("two", &[], vec![test_target("beta")]),
+            selecting("none", &[], Vec::new()),
+        ];
+        let sel = check_cmd::PhaseSelection::for_brokkr_test(
+            &sweeps,
+            "pkg",
+            check_cmd::PackageSource::Cli,
+            &[false, false, true],
+            &|_| false,
+            &check_cmd::FeatureOracle::empty(),
+        )
+        .unwrap();
+        let entries: Vec<&LaneEntry> = sel.entries().iter().collect();
+        // Same build, different harnesses: both attempted, neither deduped.
+        assert!(entries[0].attempt().is_some());
+        assert!(entries[1].attempt().is_some());
+        assert!(matches!(entries[2], LaneEntry::Excluded(_)));
+        assert!(sweep_plan_line(&sweeps, &sel, "pkg").contains("none of their test targets here: none"));
     }
 
     /// A directly run harness gets the filter first and the focused-run flags
@@ -880,15 +1025,19 @@ env = { BROKKR_TEST_PLATFORM = "1", FOO = "bar" }
     #[test]
     fn decide_sweeps_default_profile_filters_dropped() {
         // `brokkr test <name>` uses the user's name as the filter; any
-        // `only` / `skip` / `tests` / `include_ignored` / `test_threads`
-        // declared by the profile is intentionally dropped (mixing them
-        // with `<name>` caused silent zero-match failures).
+        // `only` / `skip` / `include_ignored` / `test_threads` declared by
+        // the profile is intentionally dropped (mixing them with `<name>`
+        // caused silent zero-match failures). Target selection is not a name
+        // filter, and stays.
         let toml_text = r#"
 default_profile = "tier1"
 
 [profiles.tier1]
 sweeps = ["all"]
 skip = ["tier2::"]
+only = ["tier1::"]
+tests = ["native_stack"]
+lib_tests = true
 include_ignored = false
 "#;
         let test_cfg: TestConfig = toml::from_str(toml_text).unwrap();
@@ -901,9 +1050,14 @@ include_ignored = false
         }];
         let sweeps = decide_sweeps(Some(&test_cfg), &entries).unwrap();
         assert_eq!(sweeps.len(), 1);
-        // Sweep struct only carries label / feature_args / build_packages -
-        // any libtest filter from the profile is intentionally absent.
         assert_eq!(sweeps[0].label, "all");
+        let filters = sweeps[0].lane_filters();
+        assert!(filters.filters.is_empty(), "name filters are dropped");
+        assert!(!filters.include_ignored);
+        assert_eq!(
+            filters.targets,
+            [test_target("native_stack"), crate::profile::TargetSelector::Lib]
+        );
     }
 
     fn names(list: &[&str]) -> Vec<String> {
@@ -1041,6 +1195,7 @@ include_ignored = false
             std::slice::from_ref(&sweep),
             "piners-strategy",
             check_cmd::PackageSource::Cli,
+            &[],
             &|_| false,
             &check_cmd::FeatureOracle::fixed(ws),
         )

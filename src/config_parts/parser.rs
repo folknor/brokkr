@@ -1276,6 +1276,26 @@ fn validate_non_empty_string_list(
 /// surface that would be copied more often than it is earned.
 const MIN_FILTER_LEN: usize = 4;
 
+/// Validate `exclude_tests` entries: target names or globs over the characters
+/// a cargo target name and a glob use. The names are also interpolated into a
+/// nextest filterset for the nextest lane, so anything else is refused rather
+/// than escaped - a wrongly escaped exclusion silently changes what runs.
+fn validate_exclude_tests(names: &[String], at: &str) -> Result<(), DevError> {
+    for name in names {
+        let ok = !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '*' | '?'));
+        if !ok {
+            return Err(DevError::Config(format!(
+                "{at} has `exclude_tests` entry {name:?}; an entry is a test target name, or a \
+                 glob over one using `*` and `?` (letters, digits, `_`, `-`)."
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Reject a degenerate `skip` / `only` substring. `at` names the config block.
 fn validate_filter_floor(kind: &str, pattern: &str, at: &str) -> Result<(), DevError> {
     let trimmed = pattern.trim();
@@ -1402,6 +1422,7 @@ fn validate_check_entry(entry: &CheckEntry) -> Result<(), DevError> {
         ("build_packages", &entry.build_packages),
         ("rustflags", &entry.rustflags),
         ("tests", &entry.tests),
+        ("exclude_tests", &entry.exclude_tests),
         ("skip", &entry.skip),
         ("only", &entry.only),
     ] {
@@ -1415,6 +1436,7 @@ fn validate_check_entry(entry: &CheckEntry) -> Result<(), DevError> {
         }
     }
     let at = format!("[[check]] entry '{}'", entry.name);
+    validate_exclude_tests(&entry.exclude_tests, &at)?;
     for s in &entry.skip {
         validate_filter_floor("skip", s, &at)?;
     }
@@ -1486,12 +1508,14 @@ fn validate_check_entry(entry: &CheckEntry) -> Result<(), DevError> {
     validate_check_entry_target(entry)?;
     if entry.curated
         && entry.tests.is_empty()
+        && !entry.lib_tests
+        && entry.exclude_tests.is_empty()
         && entry.skip.is_empty()
         && entry.only.is_empty()
     {
         return Err(DevError::Config(format!(
             "[[check]] entry '{}' sets `curated = true` but carries no \
-             `tests`/`skip`/`only` filters of its own. Curated means \"this \
+             `tests`/`lib_tests`/`exclude_tests`/`skip`/`only` filters of its own. Curated means \"this \
              shape exists to run a hand-picked subset\"; an unfiltered entry \
              is a full sweep and must stay in the coverage universe - drop \
              `curated` or add the filters that define the subset.",
@@ -1552,10 +1576,11 @@ fn validate_check_entry_doc_only(entry: &CheckEntry) -> Result<(), DevError> {
     }
     // `--doc` is exclusive in cargo: it cannot combine with any other target
     // selector, so a doc-only entry owns target selection outright.
-    if !entry.tests.is_empty() {
+    if !entry.tests.is_empty() || entry.lib_tests || !entry.exclude_tests.is_empty() {
         return Err(DevError::Config(format!(
-            "[[check]] entry '{}' sets both `doc_only` and `tests`; cargo's `--doc` cannot \
-             combine with other target selectors. Scope with `packages` or features instead.",
+            "[[check]] entry '{}' sets `doc_only` with `tests`/`lib_tests`/`exclude_tests`; \
+             cargo's `--doc` cannot combine with other target selectors, and a doc-only run \
+             has no test binaries to exclude. Scope with `packages` or features instead.",
             entry.name
         )));
     }
@@ -1845,6 +1870,7 @@ fn validate_check_against_test(
         }
         validate_skip_phases(profile_name, def)?;
         let at = format!("[test.profiles.{profile_name}]");
+        validate_exclude_tests(def.exclude_tests.as_deref().unwrap_or_default(), &at)?;
         for o in def.only.iter().flatten() {
             validate_filter_floor("only", o, &at)?;
         }
@@ -1984,6 +2010,8 @@ fn validate_lanes_profile(
     }
     if def.sweeps.is_some()
         || def.tests.is_some()
+        || def.lib_tests.is_some()
+        || def.exclude_tests.is_some()
         || def.only.is_some()
         || def.skip.is_some()
         || def.include_ignored.is_some()

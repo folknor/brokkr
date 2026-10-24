@@ -1197,6 +1197,18 @@ pub struct CheckEntry {
     /// named test targets - the curated-subset knob a sim sweep needs.
     #[serde(default)]
     pub tests: Vec<String>,
+    /// Select the library unit-test harness: cargo `--lib`, unioned with the
+    /// `tests` selectors and any profile's (cargo's explicit-selection
+    /// semantics: every selected package's library, `test = false` or not).
+    #[serde(default)]
+    pub lib_tests: bool,
+    /// Integration-test targets (names or globs) this sweep does not run,
+    /// removed from the enumerated binaries after the build. Honoured only
+    /// by lanes that execute their binaries themselves - `parallel`,
+    /// `harness = "nextest"`, or a profile's `isolation = "process"` - and
+    /// refused on any other. Unioned with any profile `exclude_tests`.
+    #[serde(default)]
+    pub exclude_tests: Vec<String>,
     /// Per-check libtest `--skip <substr>` filters, ANDed with any profile
     /// `skip` filters.
     #[serde(default)]
@@ -1589,6 +1601,13 @@ pub struct ProfileDef {
     /// `--test <name>` for each entry. Limits cargo to specific test
     /// binaries (the `tests/<name>.rs` files).
     pub tests: Option<Vec<String>>,
+    /// `--lib`: select the library unit-test harness, unioned with `tests`.
+    /// An explicit value replaces an inherited one (`false` clears it).
+    pub lib_tests: Option<bool>,
+    /// Integration-test targets (names or globs) the profile's lanes do not
+    /// run, removed after the build; see the `[[check]]` field of the same
+    /// name for which lanes honour it.
+    pub exclude_tests: Option<Vec<String>>,
     /// Positional substring filter passed to libtest. Tests whose name
     /// contains any of these strings run; everything else is filtered
     /// out by libtest. Use module path prefixes (e.g. `tier2::`) to

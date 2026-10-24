@@ -140,7 +140,7 @@ env = { HIGH_PRECISION = "1" }
   doc-only entry satisfies a complete profile's doctest obligation even
   under `doctests = false` - a `category = "doctests"` quarantine coexisting
   with one is then a stale-entry load error. Owns cargo target selection
-  outright (`--doc` is exclusive): entry `tests` and forwarded target
+  outright (`--doc` is exclusive): entry `tests`, `lib_tests`, `exclude_tests` and forwarded target
   selectors are refused, as are entry-level `skip`/`only` - doctests cannot
   be enumerated, so a filter on them could never be audited for liveness,
   and under a complete claim profile-inherited filters are refused too
@@ -159,6 +159,29 @@ env = { HIGH_PRECISION = "1" }
   substring filters. This lets a curated subset (e.g. one named test per
   package) be expressed as several sibling `[[check]]` entries under one
   profile, rather than one sweep running a whole package set's tests.
+- `lib_tests` (optional, default `false`) - select the library unit-test
+  harness: cargo `--lib`, unioned with the `tests` selectors as cargo unions
+  target flags (`lib_tests = true` with `tests = ["error_boundary"]` runs the
+  lib's unit tests plus that one integration test). Cargo's explicit-selection
+  semantics: every selected package's library, `test = false` or not. Also a
+  profile key, where an explicit value replaces an inherited one (`false`
+  clears it). Not spelled `tests = ["lib"]`, which names an integration test
+  called `lib`.
+- `exclude_tests` (optional, default `[]`) - integration-test targets (names,
+  or globs using `*` and `?`) this sweep does not run, unioned with any profile
+  `exclude_tests`. Never cargo argv: cargo has no complement selector, and
+  writing the complement out as explicit `--test` flags would change what cargo
+  builds and refuses (a bin whose required features are off, a `--lib` no
+  package can scope). The targets are built with the rest and dropped from what
+  the lane executes, so only a lane that runs its test binaries itself can
+  honour it - `parallel`, `harness = "nextest"` (as a filterset term), or a
+  profile's `isolation = "process"`; a serial lane refuses it when its sweeps
+  resolve. An entry matching no integration-test target the lane built is an
+  error, the stale-name failure cargo gives `tests`. Excluded targets' tests are
+  non-run pairs for the coverage audit (so `curated` accepts the key), and
+  under a complete claim the universe enumeration still lists every built
+  harness, an excluded one included - exclusion stops its tests running, not
+  its listing. `lib_tests` and `exclude_tests` are refused with `doc_only`.
 - `profile` (optional, unset) - the cargo profile this sweep compiles and runs
   under: `"dev"` (alias `"debug"`) or `"release"`. Unset means the command's own
   default, which is what every sweep did before this key existed: dev under
@@ -258,7 +281,7 @@ env = { HIGH_PRECISION = "1" }
   falls back to `build.rustflags` for the allows.
 - `curated` (optional, default `false`) - declares the entry a hand-picked
   subset for coverage purposes, and requires the entry to carry its own
-  `tests`/`skip`/`only` filters (an unfiltered "curated" entry is just an
+  `tests`/`lib_tests`/`exclude_tests`/`skip`/`only` filters (an unfiltered "curated" entry is just an
   uncounted full sweep - parse error). Two effects, both scoped to
   `certifies = "complete"` profiles: the entry is **exempt from the
   complete-universe rule** (a `complete` profile need not reference it, so a
@@ -565,8 +588,9 @@ include_ignored = true
   profile renames.
 - `[test.profiles.<name>]` declares a test selection layered onto one or more
   `[[check]]` entries. Fields: `sweeps` (required, list of `[[check]]` entry
-  names), `tests` (`--test <name>`), `only` (positional substring filter),
-  `skip`, `include_ignored`, `test_threads`, `env`. `extends = "<other>"`
+  names), `tests` (`--test <name>`), `lib_tests` (`--lib`), `exclude_tests`,
+  `only` (positional substring filter), `skip`, `include_ignored`,
+  `test_threads`, `env`. `extends = "<other>"`
   walks the chain with cycle detection; collections are replaced (child
   wins), env merges key-by-key.
 - `skip` entries are either bare substrings (libtest `--skip`) or

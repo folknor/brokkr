@@ -33,14 +33,21 @@ the whole suite is `brokkr check -p <pkg>`'s job. Two layers:
 
 It is a package-wide rule, so a name that leaves even one test out runs:
 `::` passes in a package whose integration tests sit at the top level of
-their files.
+their files. A sweep that selects its targets (`tests`, `lib_tests`) is exempt:
+its configuration made it a subset, so a name matching all of that subset is
+what the configuration permits.
 
 Unit tests and integration tests are both matched by the name substring within
-the selected package, across every test harness of the package (`lib`, bins,
-integration tests, and examples or benches with `test = true`). Each sweep
-builds once - `cargo test --no-run -p <pkg> --tests`, the same selection a
-named `cargo test -p <pkg> <name>` compiles, so examples are not built merely
-to check they compile. Then:
+the selected package, across every test harness the sweep runs. A sweep with no
+target selection searches every harness of the package (`lib`, bins,
+integration tests, and examples or benches with `test = true`) and builds once
+with `cargo test --no-run -p <pkg> --tests` - the same selection a named `cargo
+test -p <pkg> <name>` compiles, so examples are not built merely to check they
+compile. A sweep that selects targets builds and searches exactly those, its
+`--test <name>` / `--lib` selectors in place of `--tests`: a release sweep that
+exists to run one harness does not compile the package's other harnesses to
+look for a name. Its `exclude_tests` targets are built with the rest but left
+out of the search. Then:
 
 1. **Discovery.** Every prebuilt harness lists itself, directly and one at a
    time in cargo's run order, with libtest's JSON discovery (`--list --format
@@ -112,10 +119,22 @@ output is still buffered until the doctest completes. Fixing that means passing
 rustdoc its own flag through `RUSTDOCFLAGS`, which brokkr does not do yet.
 
 Sweep selection: if `[test].default_profile` is set, the test runs against
-every `[[check]]` entry the profile references (profile filters are dropped -
-the user's `<NAME>` is the filter); else if `[[check]]` is non-empty, every
-entry runs in declaration order; else fall back to a single `--all-features`
-sweep. Each sweep's `build_packages` are rebuilt with the matching feature
+every `[[check]]` entry the profile references; else if `[[check]]` is
+non-empty, every entry runs in declaration order; else fall back to a single
+`--all-features` sweep. The declared name filters (`only`, `skip`) and
+`include_ignored` are dropped - the user's `<NAME>` is the filter. Target
+selection is kept, because it says which harnesses a sweep is, not which names
+match: `tests`, `lib_tests` (entry and profile) and `exclude_tests`.
+
+Each sweep's selectors are projected onto the run's one package. A selector is
+first held to the sweep's own selection - its `packages`, the workspace less
+its `test_exclude_packages`, or cargo's default members - and one naming no
+target there is a config error, as cargo would make it under `check`. Then a
+selector naming a target the run's package lacks drops out, since cargo
+refuses `-p <pkg> --test <name>` for it. A sweep left selecting nothing is out
+of scope (`none of their test targets here:` on the plan line), never widened
+to every harness. Sweeps that select different targets never dedupe onto each
+other: they search different tests. Each sweep's `build_packages` are rebuilt with the matching feature
 flags before the test phase, so `tests/cli_*.rs` invocations get a CLI binary
 with the same feature set the test crate sees.
 
@@ -132,7 +151,8 @@ and a single-sweep run drops the prefix. A multi-sweep run opens with one plan
 line rendered from the run's selection (see "Invocation selection" in `brokkr man check`), naming the
 sweeps it is eligible to go through, those out of the package's scope with
 their reason (`not this package:` for a `packages` list the target isn't in,
-`excluded by test_exclude_packages:`), and those deduped onto an earlier sweep
+`excluded by test_exclude_packages:`, `none of their test targets here:`), and
+those deduped onto an earlier sweep
 that would execute the same thing (`deduped: serial/all (as tier1/all)`). That
 line is the only place an out-of-scope or deduped sweep is named: it prints no
 `SKIP` of its own (a run resolving to a single sweep has no plan line, so its

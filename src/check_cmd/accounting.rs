@@ -756,7 +756,9 @@ mod accounting_tests {
         let narrowed = planned(SweepDecl {
             label: "narrowed".into(),
             filters: crate::profile::LaneFilters {
-                targets: vec![crate::profile::TargetName::new("cli")],
+                targets: vec![crate::profile::TargetSelector::Test(
+                    crate::profile::TargetName::new("cli"),
+                )],
                 ..Default::default()
             },
             ..SweepDecl::default()

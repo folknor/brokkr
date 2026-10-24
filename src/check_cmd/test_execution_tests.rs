@@ -1885,6 +1885,7 @@ warning: `b` (manifest) generated 1 warning
             filters: crate::profile::LaneFilters {
                 filters: skips,
                 targets: Vec::new(),
+                exclude: Vec::new(),
                 include_ignored: true,
             },
             lane_exec: crate::profile::LaneExec::Serial {
@@ -1906,7 +1907,10 @@ warning: `b` (manifest) generated 1 warning
         // shape must show each target as one item, not `--test` and the bare
         // name as two comma-separated fragments.
         let targets = |names: &[&str]| crate::profile::LaneFilters {
-            targets: names.iter().map(|n| crate::profile::TargetName::new(*n)).collect(),
+            targets: names
+                .iter()
+                .map(|n| crate::profile::TargetSelector::Test(crate::profile::TargetName::new(*n)))
+                .collect(),
             ..Default::default()
         };
         let one = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {

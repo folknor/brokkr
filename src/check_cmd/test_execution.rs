@@ -119,7 +119,10 @@ pub(crate) fn describe_sweep(
             parts.push("include-ignored".into());
         }
         for target in &filters.targets {
-            parts.push(format!("--test {}", target.as_str()));
+            parts.push(target.describe());
+        }
+        for excluded in &filters.exclude {
+            parts.push(format!("exclude {}", excluded.as_str()));
         }
         for filter in filters.only() {
             parts.push(format!("filter {}", filter.pattern));

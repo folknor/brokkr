@@ -978,8 +978,8 @@ sweep.
 
 **CLI features override sweep *selection*, not run shaping.** The two are
 independent: sweep selection decides what cargo compiles, while a profile's
-`skip` / `only` / `tests` / `include_ignored` / `test_threads` / `isolation` /
-`env` decide which tests run and how. A test that cannot pass in-process
+`skip` / `only` / `tests` / `lib_tests` / `exclude_tests` / `include_ignored` /
+`test_threads` / `isolation` / `env` decide which tests run and how. A test that cannot pass in-process
 cannot pass in-process at any feature shape, so an ad-hoc run inherits the
 shaping of the profile it would otherwise have used (`--profile NAME`, else
 `[test] default_profile`).

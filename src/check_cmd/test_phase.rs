@@ -316,6 +316,8 @@ fn run_test_lane(
         owners,
         commands: a.commands,
         certifying: a.certifying,
+        // Running a lane enumerates no universe; that is the prepare phase's.
+        universe_selectors: &NO_UNIVERSE_SELECTORS,
     };
     // Per-sweep: a sweep carrying `rustflags` runs in its own isolated
     // target dir with a matching BROKKR_TEST_BIN_DIR + RUSTFLAGS, so a
