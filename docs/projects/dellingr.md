@@ -119,7 +119,9 @@ of them, and only the one that drifted needs re-registering.
 
 Retuning a workload is then a deliberate re-registration: edit the file, put
 the new digest in `brokkr.toml`, and know that rows on either side of that
-commit are not comparable.
+commit are not comparable. `brokkr results --compare` enforces it: the digest
+is part of each row's `input_file` (see "Reading the results"), so rows of two
+generations of a workload never pair.
 
 ## `--commit` semantics
 
@@ -136,12 +138,19 @@ worktree) must not be interchanged; see `src/dellingr/workload.rs`.
 
 ## The harness contract
 
-brokkr resolves `--lua <name>` to a path and passes it as the harness's single
-argument:
+brokkr resolves `--lua <name>` and passes the path **as registered** - relative
+to the directory holding `brokkr.toml` - as the harness's single argument, with
+that directory as the working directory (under `--commit` too: only the binary
+comes from the worktree):
 
 ```
-target/release/examples/<example> /abs/path/to/workload.lua
+target/release/examples/<example> bench/same_obj_read.lua
 ```
+
+The harness uses the string it is handed as the script's chunk name and its
+`target=` value, so error locations read `bench/same_obj_read.lua:12:` and the
+stored value is the same in every checkout and on every host. The absolute path
+is brokkr's alone: it is what the existence and digest checks read.
 
 The harness speaks the standard sidecar protocol - nothing dellingr-specific:
 
@@ -162,9 +171,9 @@ which store.
 Rows are filed under the **workload name**, not under `dellingr`:
 
 ```
-uuid      timestamp            commit   command        mode     elapsed  dataset  args
-9f2a1c04  2026-07-25 11:41:02  4c19ab2  same_obj_read  bench    1240 ms           --lua same_obj_read --bench 5
-77b4f2ad  2026-07-25 11:20:44  8e0d113  same_obj_read  bench    1310 ms           --lua same_obj_read --bench 5 --commit 8e0d113
+uuid      timestamp            commit   command        mode     elapsed  dataset                 args
+9f2a1c04  2026-07-25 11:41:02  4c19ab2  same_obj_read  bench    1240 ms  same_obj_read@eaa3cf86  --lua same_obj_read --bench 5
+77b4f2ad  2026-07-25 11:20:44  8e0d113  same_obj_read  bench    1310 ms  same_obj_read@eaa3cf86  --lua same_obj_read --bench 5 --commit 8e0d113
 ```
 
 One row series per workload is what makes the query surface useful:
@@ -181,8 +190,14 @@ One row series per workload is what makes the query surface useful:
   prints it after its `[result]` line
 - `brokkr sidecar <uuid>` - the phase markers and counters
 
-The `dataset` column is empty by design. It means "which external corpus", and
-dellingr has none; the workload is the operation, already in `command`.
+A row's `input_file` is the workload file that ran and its verified digest,
+`bench/same_obj_read.lua@<32-hex xxh128>`. That makes both part of the pair key:
+the bench and hotpath variants are different files, and a re-registered
+workload is a new generation, so neither pairs with rows of the other. The
+`dataset` column shows the file's short name and a digest prefix, lengthened
+past eight characters only when two generations shown together share it. Rows
+recorded before workloads carried an `input_file` have an empty one and pair
+only with each other.
 
 ## Scratch and clean
 

@@ -8,8 +8,19 @@
 //! `north-america`) survive intact. With no configured keys - or a
 //! filename that doesn't match any of them - it falls back to the first
 //! dash-separated component of the basename.
+//!
+//! A content-addressed input (`PATH@<32 hex xxh128>`, what `brokkr dellingr`
+//! records for a workload) is labelled by its path part plus a digest prefix,
+//! so two generations of one file never render alike. The prefix is the
+//! shortest one - at least [`MIN_GENERATION_HEX`] characters - that tells
+//! apart every generation of that path among the rows being rendered, which
+//! is why the renderers hand the matcher their rows ([`DatasetMatcher::for_inputs`]).
 
+use std::collections::BTreeMap;
 use std::path::Path;
+
+/// The shortest digest prefix a generation label shows.
+const MIN_GENERATION_HEX: usize = 8;
 
 /// Short-label resolver for `input_file` values.
 ///
@@ -18,8 +29,27 @@ use std::path::Path;
 /// available (tests, ad-hoc callers). Keys are stored sorted
 /// longest-first so [`short_name`](Self::short_name) does a simple
 /// linear scan and returns on the first prefix match.
+#[derive(Clone)]
 pub struct DatasetMatcher {
     keys: Vec<String>,
+    /// Every content generation among the rows being rendered, by path part.
+    generations: BTreeMap<String, Vec<String>>,
+}
+
+/// Split a content-addressed input into its path and its full digest. Only a
+/// trailing `@` followed by exactly 32 lowercase hex characters counts.
+pub fn split_generation(input_file: &str) -> (&str, Option<&str>) {
+    match input_file.rsplit_once('@') {
+        Some((path, digest))
+            if digest.len() == 32
+                && digest
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) =>
+        {
+            (path, Some(digest))
+        }
+        _ => (input_file, None),
+    }
 }
 
 impl DatasetMatcher {
@@ -34,12 +64,31 @@ impl DatasetMatcher {
         // Longest first so "greater-london" wins over "greater" if both
         // ever appear as configured dataset keys.
         keys.sort_by_key(|k| std::cmp::Reverse(k.len()));
-        Self { keys }
+        Self {
+            keys,
+            generations: BTreeMap::new(),
+        }
     }
 
     #[cfg(test)]
     pub fn empty() -> Self {
-        Self { keys: Vec::new() }
+        Self::new(Vec::<String>::new())
+    }
+
+    /// This matcher, aware of every content generation among `inputs` - the
+    /// rows about to be rendered - so each generation label is unambiguous
+    /// within that set.
+    pub fn for_inputs<'a>(&self, inputs: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut out = self.clone();
+        for input in inputs {
+            if let (path, Some(digest)) = split_generation(input) {
+                let seen = out.generations.entry(path.to_owned()).or_default();
+                if !seen.iter().any(|d| d == digest) {
+                    seen.push(digest.to_owned());
+                }
+            }
+        }
+        out
     }
 
     /// Return a short dataset label for the given `input_file`.
@@ -47,6 +96,28 @@ impl DatasetMatcher {
         if input_file.is_empty() {
             return String::new();
         }
+        let (path, digest) = split_generation(input_file);
+        let label = self.path_label(path);
+        match digest {
+            Some(digest) => format!("{label}@{}", &digest[..self.prefix_len(path, digest)]),
+            None => label,
+        }
+    }
+
+    /// The shortest prefix of `digest`, at least [`MIN_GENERATION_HEX`] long,
+    /// that no other known generation of `path` shares.
+    fn prefix_len(&self, path: &str, digest: &str) -> usize {
+        let others: Vec<&String> = self
+            .generations
+            .get(path)
+            .map(|g| g.iter().filter(|d| d.as_str() != digest).collect())
+            .unwrap_or_default();
+        (MIN_GENERATION_HEX..digest.len())
+            .find(|&n| others.iter().all(|o| !o.starts_with(&digest[..n])))
+            .unwrap_or(digest.len())
+    }
+
+    fn path_label(&self, input_file: &str) -> String {
         let basename = Path::new(input_file)
             .file_name()
             .and_then(|s| s.to_str())
@@ -164,6 +235,30 @@ mod tests {
         // Legacy heuristic splits on '-' only; stems without a dash come
         // through with their sub-extensions intact.
         assert_eq!(m.short_name("denmark.osm.pbf"), "denmark.osm");
+    }
+
+    #[test]
+    fn a_content_generation_keeps_its_digest_in_the_label() {
+        let m = DatasetMatcher::empty();
+        let digest = "51b15378d6e75699f24b1fd2d025b30a";
+        assert_eq!(
+            m.short_name(&format!("bench/method.lua@{digest}")),
+            "method@51b15378"
+        );
+        // Not 32 lowercase hex: an ordinary path that happens to hold an `@`.
+        assert_eq!(m.short_name("data/x@abc.osm.pbf"), "x@abc.osm");
+    }
+
+    #[test]
+    fn generations_sharing_a_prefix_are_told_apart() {
+        let a = "bench/method.lua@12345678aaaaaaaaaaaaaaaaaaaaaaaa";
+        let b = "bench/method.lua@12345678abbbbbbbbbbbbbbbbbbbbbbb";
+        let other = "bench/sort.lua@12345678cccccccccccccccccccccccc";
+        let m = DatasetMatcher::empty().for_inputs([a, b, other, a]);
+        assert_eq!(m.short_name(a), "method@12345678aa");
+        assert_eq!(m.short_name(b), "method@12345678ab");
+        // Another path's generation does not lengthen this one.
+        assert_eq!(m.short_name(other), "sort@12345678");
     }
 
     #[test]

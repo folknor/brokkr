@@ -7,6 +7,7 @@ pub fn format_table(rows: &[StoredRow], matcher: &DatasetMatcher) -> String {
     if rows.is_empty() {
         return String::from("(no results)");
     }
+    let matcher = &matcher.for_inputs(rows.iter().map(|r| r.input_file.as_str()));
 
     let widths = compute_table_widths(rows, matcher);
     let mut out = String::new();
@@ -396,6 +397,29 @@ mod tests {
 
     fn format_input_with_empty(input_file: &str, input_mb: Option<f64>) -> String {
         format_input(input_file, input_mb, &DatasetMatcher::empty())
+    }
+
+    #[test]
+    fn the_table_labels_workload_generations_apart() {
+        // The table hands the matcher its own rows, so two generations
+        // sharing their first eight hex still get distinct labels.
+        let rows = [
+            super::super::fixture_row(
+                "method",
+                "bench",
+                "bench/method.lua@12345678aaaaaaaaaaaaaaaaaaaaaaaa",
+                100,
+            ),
+            super::super::fixture_row(
+                "method",
+                "bench",
+                "bench/method.lua@12345678bbbbbbbbbbbbbbbbbbbbbbbb",
+                90,
+            ),
+        ];
+        let out = format_table(&rows, &DatasetMatcher::empty());
+        assert!(out.contains("method@12345678a"), "{out}");
+        assert!(out.contains("method@12345678b"), "{out}");
     }
 
     // -----------------------------------------------------------------------

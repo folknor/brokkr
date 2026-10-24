@@ -31,6 +31,12 @@ pub fn format_compare_with_limit(
     limit: usize,
     matcher: &DatasetMatcher,
 ) -> String {
+    let matcher = &matcher.for_inputs(
+        rows_a
+            .iter()
+            .chain(rows_b)
+            .map(|r| r.input_file.as_str()),
+    );
     let mut pairs = build_comparison_pairs(rows_a, rows_b, matcher);
     // The cap defaults to 20, so say when it bit: a comparison that silently
     // ends early reads as "these are all the commands that were measured".
@@ -900,39 +906,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn row(command: &str, variant: &str, input_file: &str, elapsed_ms: i64) -> StoredRow {
-        StoredRow {
-            id: 0,
-            timestamp: String::from("2026-03-01 00:00:00"),
-            hostname: String::from("testhost"),
-            commit: "aabbccdd".parse().expect("fixture commit is valid"),
-            subject: String::from("test commit"),
-            command: command.to_owned(),
-            mode: variant.to_owned(),
-            input_file: input_file.to_owned(),
-            input_mb: None,
-            elapsed: Wall::LegacyMillis(elapsed_ms),
-            cargo_features: String::new(),
-            cargo_profile: Some(crate::db::types::StoredProfile::Known(
-                crate::build::BuildKind::default(),
-            )),
-            kernel: String::new(),
-            cpu_governor: String::new(),
-            avail_memory_mb: None,
-            storage_notes: String::new(),
-            peak_rss_mb: None,
-            uuid: String::from("abcdef1234567890"),
-            cli_args: String::new(),
-            brokkr_args: String::new(),
-            arm_key: None,
-            project: String::from("test"),
-            stop_marker_requested: String::new(),
-            stop_marker: String::new(),
-            kv: vec![],
-            captured_env: std::collections::BTreeMap::new(),
-            iterations: Vec::new(),
-            distribution: None,
-            hotpath: None,
-        }
+        super::super::fixture_row(command, variant, input_file, elapsed_ms)
     }
 
     // -----------------------------------------------------------------------
@@ -990,6 +964,33 @@ mod tests {
             "",
         );
         assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn workload_generations_do_not_pair_and_render_apart() {
+        // One generation on each side, sharing their first eight hex: the
+        // full digest splits the pair key, and the labels must still differ.
+        let a = || {
+            row(
+                "method",
+                "bench",
+                "bench/method.lua@12345678aaaaaaaaaaaaaaaaaaaaaaaa",
+                100,
+            )
+        };
+        let b = || {
+            row(
+                "method",
+                "bench",
+                "bench/method.lua@12345678bbbbbbbbbbbbbbbbbbbbbbbb",
+                90,
+            )
+        };
+        let pairs = build_comparison_pairs(&[a()], &[b()], &DatasetMatcher::empty());
+        assert_eq!(pairs.len(), 2, "two generations must not pair");
+        let out = format_compare("aaa", &[a()], "bbb", &[b()], 10, &DatasetMatcher::empty());
+        assert!(out.contains("method@12345678a"), "{out}");
+        assert!(out.contains("method@12345678b"), "{out}");
     }
 
     #[test]

@@ -25,7 +25,11 @@ pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
         req.mode.profiled().is_some(),
     )?;
     let example = workload::config(req.project_config)?.example.clone();
-    let lua_path = resolved.path_str()?.to_owned();
+    // The registered relative path, not the absolute one: the harness runs
+    // from the project root (both paths below pass it as the working
+    // directory, under `--commit` too, where only the binary comes from the
+    // worktree), and uses this string as the chunk name and `target=` value.
+    let lua_path = resolved.arg()?.to_owned();
 
     if req.dry_run {
         let variant = if req.mode.profiled().is_some() {
@@ -66,22 +70,7 @@ pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
 
     let binary_str = ctx.binary()?.display().to_string();
     let args = [lua_path.as_str()];
-
-    // Filed under the workload name, not `dellingr`: one row series per
-    // workload is what makes `--command`, `--compare` and the per-iteration
-    // view answer the question anyone actually asks of this data. `input_file`
-    // stays empty - the workload is the operation here, not a dataset, and
-    // duplicating the name into that column would only widen the table.
-    let config = BenchConfig {
-        command: resolved.name.clone(),
-        input_file: None,
-        input_mb: None,
-        cargo_features: None,
-        external_build: None,
-        runs: req.runs(),
-        cli_args: Some(harness::format_cli_args(&binary_str, &args)),
-        metadata: vec![],
-    };
+    let config = bench_config(&resolved, &binary_str, &args, req.runs())?;
 
     crate::measure_dispatch::dispatch_profiled(
         req,
@@ -119,6 +108,32 @@ pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
     Ok(())
 }
 
+/// The row configuration for one workload run.
+///
+/// Filed under the workload name, not `dellingr`: one row series per workload
+/// is what makes `--command`, `--compare` and the per-iteration view answer the
+/// question anyone actually asks of this data. `input_file` is the file that
+/// ran and its verified digest: the bench and hotpath variants are different
+/// files, and a re-registered workload is a new generation, so neither pairs
+/// with rows of the other in a comparison.
+fn bench_config(
+    resolved: &workload::Resolved,
+    binary: &str,
+    args: &[&str],
+    runs: usize,
+) -> Result<BenchConfig, DevError> {
+    Ok(BenchConfig {
+        command: resolved.name.clone(),
+        input_file: Some(resolved.input_file()?),
+        input_mb: None,
+        cargo_features: None,
+        external_build: None,
+        runs,
+        cli_args: Some(harness::format_cli_args(binary, args)),
+        metadata: vec![],
+    })
+}
+
 /// Human-readable feature summary for `--dry-run` output.
 fn feature_summary(req: &MeasureRequest) -> String {
     let features = req.build_features();
@@ -126,5 +141,44 @@ fn feature_summary(req: &MeasureRequest) -> String {
         "no cargo features".to_owned()
     } else {
         format!("--features {}", features.join(","))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    fn resolved(file: &str, xxh128: &str) -> workload::Resolved {
+        workload::Resolved {
+            name: "method".into(),
+            registered: file.into(),
+            xxh128: xxh128.into(),
+        }
+    }
+
+    #[test]
+    fn the_row_names_the_registered_file_and_its_generation() {
+        let bench = resolved("bench/method.lua", "51b15378d6e75699f24b1fd2d025b30a");
+        let args = [bench.arg().unwrap()];
+        let config = bench_config(&bench, "/t/release/examples/hotpath", &args, 3).unwrap();
+        assert_eq!(config.command, "method");
+        assert_eq!(
+            config.input_file.as_deref(),
+            Some("bench/method.lua@51b15378d6e75699f24b1fd2d025b30a")
+        );
+        // The harness is handed the registered path, never an absolute one.
+        assert!(config.cli_args.unwrap().ends_with(" bench/method.lua"));
+
+        // The hotpath variant and a re-registered generation are each a
+        // different input, so none of the three rows pair with another.
+        let hotpath = resolved("examples/calls/method.lua", "6372dbfbd4aea331f0642f73b0662aa5");
+        let regenerated = resolved("bench/method.lua", "51b15378000000000000000000000000");
+        let inputs: Vec<String> = [&bench, &hotpath, &regenerated]
+            .iter()
+            .map(|r| bench_config(r, "h", &[], 1).unwrap().input_file.unwrap())
+            .collect();
+        assert_ne!(inputs[0], inputs[1]);
+        assert_ne!(inputs[0], inputs[2]);
     }
 }

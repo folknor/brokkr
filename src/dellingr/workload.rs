@@ -1,4 +1,4 @@
-//! Workload registry resolution: `--lua <name>` -> a verified absolute path.
+//! Workload registry resolution: `--lua <name>` -> a verified workload file.
 
 use std::path::{Path, PathBuf};
 
@@ -7,25 +7,40 @@ use crate::config::project_config::dellingr::DellingrConfig;
 use crate::error::DevError;
 use crate::preflight;
 
-/// A workload resolved to an absolute path, with its digest already verified.
+/// A workload resolved against the current tree, with its digest verified.
 #[derive(Debug)]
 pub(crate) struct Resolved {
     /// The name `--lua` took, and the label the run is filed under in
     /// `results.db`.
     pub(crate) name: String,
-    /// Absolute path to the `.lua` file in the *current* tree.
-    pub(crate) path: PathBuf,
+    /// The path exactly as `brokkr.toml` registers it, relative to the
+    /// project root. This is what the harness is handed, run from the project
+    /// root: it becomes the script's chunk name and the `target=` value, so
+    /// error locations and stored rows read the same in every checkout. The
+    /// absolute path the existence and digest checks read stays inside
+    /// [`resolve`].
+    pub(crate) registered: PathBuf,
+    /// The registered xxh128 the file was verified against.
+    pub(crate) xxh128: String,
 }
 
 impl Resolved {
-    /// The workload path as a UTF-8 string for the child's argv.
-    pub(crate) fn path_str(&self) -> Result<&str, DevError> {
-        self.path.to_str().ok_or_else(|| {
+    /// The registered path as a UTF-8 string for the child's argv.
+    pub(crate) fn arg(&self) -> Result<&str, DevError> {
+        self.registered.to_str().ok_or_else(|| {
             DevError::Config(format!(
                 "workload path is not valid UTF-8: {}",
-                self.path.display()
+                self.registered.display()
             ))
         })
+    }
+
+    /// The row's `input_file`: the registered path plus the full verified
+    /// digest. Both are the workload's identity - re-registering changed
+    /// contents at the same path is the deliberate signal that older rows no
+    /// longer compare, so rows of two generations must not pair.
+    pub(crate) fn input_file(&self) -> Result<String, DevError> {
+        Ok(format!("{}@{}", self.arg()?, self.xxh128))
     }
 }
 
@@ -108,7 +123,8 @@ pub(crate) fn resolve(
 
     Ok(Resolved {
         name: name.to_owned(),
-        path,
+        registered: file.clone(),
+        xxh128: xxh128.to_string(),
     })
 }
 
@@ -173,7 +189,13 @@ mod tests {
 
         let resolved = resolve(&cfg, &root, "read", false).unwrap();
         assert_eq!(resolved.name, "read");
-        assert_eq!(resolved.path, root.join("examples/fields/read.lua"));
+        // The harness is handed the path as registered, never the checkout's
+        // absolute path, and the row names the file and its generation.
+        assert_eq!(resolved.arg().unwrap(), "examples/fields/read.lua");
+        assert_eq!(
+            resolved.input_file().unwrap(),
+            format!("examples/fields/read.lua@{digest}")
+        );
     }
 
     #[test]
@@ -194,9 +216,9 @@ mod tests {
         );
 
         let bench = resolve(&cfg, &root, "read", false).unwrap();
-        assert_eq!(bench.path, root.join("bench/read.lua"));
+        assert_eq!(bench.arg().unwrap(), "bench/read.lua");
         let instrumented = resolve(&cfg, &root, "read", true).unwrap();
-        assert_eq!(instrumented.path, root.join("examples/fields/read.lua"));
+        assert_eq!(instrumented.arg().unwrap(), "examples/fields/read.lua");
     }
 
     #[test]
