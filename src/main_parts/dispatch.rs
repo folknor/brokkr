@@ -691,9 +691,14 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
         // Dataset/variant are the `run_measured` scaffolding every measured
         // command shares; dellingr has neither, so both stay empty rather
         // than inventing a dataset name that would land in the DB.
-        Command::Dellingr { mode, lua } => {
+        Command::Dellingr { mode, lua, all } => {
+            let selection = if all {
+                dellingr::cmd::Selection::All
+            } else {
+                dellingr::cmd::Selection::Named(lua)
+            };
             run_measured(&mode, detection, "", "", &invocation, |req| {
-                dellingr::cmd::run(req, &lua)
+                dellingr::cmd::run(req, &selection)
             })
         }
 

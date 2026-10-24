@@ -1,6 +1,8 @@
-//! `brokkr dellingr` - build the Lua bench harness and run one workload.
+//! `brokkr dellingr` - build the Lua bench harness and run the selected
+//! workloads.
 
 use crate::build;
+use crate::config::project_config::dellingr::DellingrConfig;
 use crate::context::MeasurementSession;
 use crate::error::DevError;
 use crate::harness::{self, BenchConfig};
@@ -10,26 +12,50 @@ use crate::project::{self, Project};
 
 use super::workload;
 
-/// Run one registered workload under the requested measurement mode.
-pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
+/// Which workloads a run covers.
+pub(crate) enum Selection {
+    /// `--lua`: the names given, in order.
+    Named(Vec<String>),
+    /// `--all`: every registered workload the mode can run.
+    All,
+}
+
+/// Run the selected registered workloads under the requested measurement
+/// mode, one row each, against a single build of the harness.
+pub(crate) fn run(req: &MeasureRequest, selection: &Selection) -> Result<(), DevError> {
     project::require(&req.project, &Project::Dellingr, "dellingr")?;
 
-    // Resolve before building: a typo'd `--lua` or a drifted workload should
-    // cost nothing. The path deliberately comes from the current tree even
-    // under `--commit` - see `workload::resolve`. Instrumented modes resolve
-    // the workload's `hotpath_file` variant, not `file`.
-    let resolved = workload::resolve(
-        req.project_config,
-        req.project_root.as_path(),
-        lua,
-        req.mode.profiled().is_some(),
+    let instrumented = req.mode.profiled().is_some();
+    let (names, skipped) = selected(
+        workload::config(req.project_config)?,
+        selection,
+        instrumented,
     )?;
+    if !skipped.is_empty() {
+        output::warn(&format!(
+            "--all skips workloads without a hotpath variant: {}",
+            skipped.join(", ")
+        ));
+    }
+
+    // Resolve every workload before building: a typo'd `--lua` or a drifted
+    // workload should cost nothing, and should not surface only after the
+    // workloads ahead of it have run. The path deliberately comes from the
+    // current tree even under `--commit` - see `workload::resolve`.
+    // Instrumented modes resolve the workload's `hotpath_file` variant, not
+    // `file`.
+    let resolved = names
+        .into_iter()
+        .map(|name| {
+            workload::resolve(
+                req.project_config,
+                req.project_root.as_path(),
+                name,
+                instrumented,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let example = workload::config(req.project_config)?.example.clone();
-    // The registered relative path, not the absolute one: the harness runs
-    // from the project root (both paths below pass it as the working
-    // directory, under `--commit` too, where only the binary comes from the
-    // worktree), and uses this string as the chunk name and `target=` value.
-    let lua_path = resolved.arg()?.to_owned();
 
     if req.dry_run {
         let variant = if req.mode.profiled().is_some() {
@@ -39,7 +65,13 @@ pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
         };
         // `dry_run_msg`, not the quiet-gated `bench_msg`: `run_measured` sets
         // quiet unless `--verbose`, and a dry run's output is its whole point.
-        output::dry_run_msg(&format!("workload {lua} -> {lua_path}{variant}"));
+        for workload in &resolved {
+            output::dry_run_msg(&format!(
+                "workload {} -> {}{variant}",
+                workload.name,
+                workload.arg()?
+            ));
+        }
         output::dry_run_msg(&format!(
             "would build --example {example} ({})",
             feature_summary(req)
@@ -68,9 +100,83 @@ pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
 
     let ctx = MeasurementSession::with_build_config_for_request(req, &build_config)?;
 
+    // One workload keeps its own error; several run as variants, so one
+    // failing does not skip the rest and the end names every one that failed.
+    match resolved.as_slice() {
+        [only] => run_one(req, &ctx, only),
+        _ => {
+            let names: Vec<&str> = resolved.iter().map(|w| w.name.as_str()).collect();
+            crate::bench_variants::run_variants("workload", &names, |name| {
+                let workload = resolved
+                    .iter()
+                    .find(|w| w.name == name)
+                    .ok_or_else(|| DevError::Internal(format!("unresolved workload {name}")))?;
+                run_one(req, &ctx, workload)
+            })
+        }
+    }
+}
+
+/// The workload names a selection runs, and the ones `--all` skipped.
+///
+/// `--lua` names run in the order given, a repeated name kept once: running it
+/// twice would only store a second row of the same measurement. A named
+/// workload without a hotpath variant still refuses an instrumented run (in
+/// `workload::resolve`), since naming it asked for it. `--all` asked for
+/// whatever the mode can run, so in an instrumented mode it skips those
+/// workloads instead, and refuses only when that leaves nothing.
+fn selected<'a>(
+    cfg: &'a DellingrConfig,
+    selection: &'a Selection,
+    instrumented: bool,
+) -> Result<(Vec<&'a str>, Vec<&'a str>), DevError> {
+    match selection {
+        Selection::Named(lua) => {
+            let mut names: Vec<&str> = Vec::new();
+            for name in lua {
+                if !names.contains(&name.as_str()) {
+                    names.push(name);
+                }
+            }
+            Ok((names, Vec::new()))
+        }
+        Selection::All => {
+            let mut names: Vec<&str> = Vec::new();
+            let mut skipped: Vec<&str> = Vec::new();
+            for (name, entry) in &cfg.workloads {
+                if instrumented && entry.hotpath_file.is_none() {
+                    skipped.push(name);
+                } else {
+                    names.push(name);
+                }
+            }
+            if names.is_empty() {
+                let why = if cfg.workloads.is_empty() {
+                    "no workloads are registered in [dellingr.workloads.*]"
+                } else {
+                    "no registered workload has a hotpath variant \
+                     (hotpath_file / hotpath_xxh128)"
+                };
+                return Err(DevError::Config(format!("--all has nothing to run: {why}")));
+            }
+            Ok((names, skipped))
+        }
+    }
+}
+
+/// Run one resolved workload against the session's harness build.
+fn run_one(
+    req: &MeasureRequest,
+    ctx: &MeasurementSession,
+    resolved: &workload::Resolved,
+) -> Result<(), DevError> {
+    // The registered relative path, not the absolute one: the harness runs
+    // from the project root (both paths below pass it as the working
+    // directory, under `--commit` too, where only the binary comes from the
+    // worktree), and uses this string as the chunk name and `target=` value.
     let binary_str = ctx.binary()?.display().to_string();
-    let args = [lua_path.as_str()];
-    let config = bench_config(&resolved, &binary_str, &args, req.runs())?;
+    let args = [resolved.arg()?];
+    let config = bench_config(resolved, &binary_str, &args, req.runs())?;
 
     crate::measure_dispatch::dispatch_profiled(
         req,
@@ -155,6 +261,64 @@ mod tests {
             registered: file.into(),
             xxh128: xxh128.into(),
         }
+    }
+
+    /// A registry of `(name, has a hotpath variant)` workloads.
+    fn registry(workloads: &[(&str, bool)]) -> DellingrConfig {
+        let digest: crate::preflight::FileDigest =
+            "51b15378d6e75699f24b1fd2d025b30a".parse().unwrap();
+        DellingrConfig {
+            example: "hotpath".into(),
+            workloads: workloads
+                .iter()
+                .map(|&(name, hotpath)| {
+                    let entry = crate::config::project_config::dellingr::DellingrWorkload {
+                        file: format!("bench/{name}.lua").into(),
+                        xxh128: digest,
+                        hotpath_file: hotpath.then(|| format!("examples/{name}.lua").into()),
+                        hotpath_xxh128: hotpath.then_some(digest),
+                    };
+                    (name.to_owned(), entry)
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_named_selection_keeps_the_given_order_and_each_name_once() {
+        let cfg = registry(&[]);
+        let lua = Selection::Named(
+            ["sort", "method", "sort", "calls", "method"]
+                .iter()
+                .map(|&s| s.to_owned())
+                .collect(),
+        );
+        // Unknown names pass through: `workload::resolve` refuses them with
+        // the registered list.
+        let (names, skipped) = selected(&cfg, &lua, true).unwrap();
+        assert_eq!(names, ["sort", "method", "calls"]);
+        assert!(skipped.is_empty());
+    }
+
+    #[test]
+    fn all_runs_every_workload_and_skips_bench_only_ones_when_instrumented() {
+        let cfg = registry(&[("sort", true), ("calls", false), ("method", true)]);
+        let (names, skipped) = selected(&cfg, &Selection::All, false).unwrap();
+        assert_eq!(names, ["calls", "method", "sort"]);
+        assert!(skipped.is_empty());
+
+        let (names, skipped) = selected(&cfg, &Selection::All, true).unwrap();
+        assert_eq!(names, ["method", "sort"]);
+        assert_eq!(skipped, ["calls"]);
+    }
+
+    #[test]
+    fn all_refuses_when_nothing_is_left_to_run() {
+        assert!(selected(&registry(&[]), &Selection::All, false).is_err());
+        let bench_only = registry(&[("calls", false)]);
+        assert!(selected(&bench_only, &Selection::All, false).is_ok());
+        let err = selected(&bench_only, &Selection::All, true).unwrap_err();
+        assert!(err.to_string().contains("hotpath variant"), "{err}");
     }
 
     #[test]

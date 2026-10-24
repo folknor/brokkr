@@ -2270,8 +2270,13 @@ In depth: `brokkr man nidhogg`."
     /// Benchmark a registered Lua workload
     ///
     /// Builds the `[dellingr] example` harness target and runs it against the
-    /// workload `--lua` names, resolved through the `[dellingr.workloads.*]`
-    /// registry and verified against its pinned `xxh128`.
+    /// workloads `--lua` names, resolved through the `[dellingr.workloads.*]`
+    /// registry and verified against their pinned `xxh128`.
+    ///
+    /// `--lua` takes several workloads, repeated or comma-separated
+    /// (`--lua a,b`), or `--all` selects every registered one. Every one is
+    /// resolved and verified before the single build, then each runs in turn
+    /// as its own row; one failing does not skip the rest.
     ///
     /// The mode selects the build: `--bench` builds the harness bare (the
     /// uninstrumented walls, the ones worth comparing), `--hotpath` adds the
@@ -2290,9 +2295,15 @@ In depth: `brokkr man nidhogg`."
         #[command(flatten)]
         mode: ModeArgs,
 
-        /// Registered workload name from `[dellingr.workloads.*]`
-        #[arg(long)]
-        lua: String,
+        /// Registered workload name from `[dellingr.workloads.*]`; repeat it
+        /// or comma-separate names to run several
+        #[arg(long, required_unless_present = "all", value_delimiter = ',')]
+        lua: Vec<String>,
+
+        /// Run every registered workload; under `--hotpath` / `--alloc`,
+        /// every one with a hotpath variant
+        #[arg(long, conflicts_with = "lua")]
+        all: bool,
     },
 
     // ----- mogwai-only commands (display_order = 58) -----

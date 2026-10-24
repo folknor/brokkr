@@ -11,7 +11,21 @@ brokkr dellingr --lua same_obj_read --bench
 brokkr dellingr --lua same_obj_read --hotpath
 brokkr dellingr --lua same_obj_read --alloc
 brokkr dellingr --lua same_obj_read --bench --commit <ref>
+brokkr dellingr --lua same_obj_read,method --bench
+brokkr dellingr --lua same_obj_read --lua method --hotpath
+brokkr dellingr --all --bench
 ```
+
+`--lua` selects one or more workloads by exact name, repeated or
+comma-separated; `--all` selects every registered workload. Under `--hotpath`
+/ `--alloc`, `--all` skips the workloads without a hotpath variant and warns
+naming them, while a workload named with `--lua` refuses the run (see below).
+Every
+selected workload is resolved and its digest verified before anything builds,
+so one typo'd name or drifted file refuses the whole run up front. The harness
+builds once, then the workloads run in the order given, each filed as its own
+row; a workload that fails does not skip the rest, and the run ends naming
+every one that failed. A name given twice runs once.
 
 ## What makes this project's bench surface different
 
@@ -138,8 +152,9 @@ worktree) must not be interchanged; see `src/dellingr/workload.rs`.
 
 ## The harness contract
 
-brokkr resolves `--lua <name>` and passes the path **as registered** - relative
-to the directory holding `brokkr.toml` - as the harness's single argument, with
+For each workload, brokkr resolves `--lua <name>` and passes the path **as
+registered** - relative to the directory holding `brokkr.toml` - as the
+harness's single argument, with
 that directory as the working directory (under `--commit` too: only the binary
 comes from the worktree):
 
