@@ -1287,7 +1287,7 @@ mod nextest_lane_tests {
         }
     }
 
-    /// The engine ORs the filtersets it is given (nextest-runner 0.126
+    /// The engine ORs the filtersets it is given (nextest-runner's
     /// `BinaryFilter::check_match` folds them with `logic_or`), so disjoint
     /// qualified skips given one filterset each admit everything: a test
     /// excluded by one skip is admitted by the other's negation. They must be
