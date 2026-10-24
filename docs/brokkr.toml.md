@@ -244,6 +244,9 @@ Reserved top-level keys parsed as config sections, or consumed by composition:
 `lints` (and its `clippy` alias), `bin`, `member_check`, `fixture_lint`,
 `disable_toolchain`, `cargo_env`.
 
+`strip_rustflags` is also brokkr's, but only as a non-table value: a
+`[strip_rustflags]` table is still read as a hostname section.
+
 ## `worktree_keep`
 
 ```toml
@@ -367,6 +370,86 @@ every run, so a command that keeps a run log (`check`, `test`, measured runs,
 Worktree builds (`--commit`) run in a separate checkout that may carry its own
 committed pin; brokkr re-points the disable there for the build, so the
 worktree's pin is disabled too rather than honored.
+
+## `strip_rustflags` - removing flags from the tree's cargo config
+
+```toml
+strip_rustflags = ["-Clink-arg=-fuse-ld=lld"]
+```
+
+A top-level array, beside `disable_toolchain`. It is a plain key rather than
+a table so it claims no name a hostname section could already use.
+
+For a foreign checkout whose own `.cargo/config.toml` carries a flag that is
+wrong on this host. The case it was written for: the project's
+`[target.'cfg(target_os = "linux")'] rustflags` names `-fuse-ld=lld`, the
+user-wide `~/.cargo/config.toml` names another linker, cargo joins every
+matching target table, the C driver gets both, lld is not installed, and every
+link fails in code nobody touched. Cargo cannot subtract a flag: `--config`
+merges arrays, and `RUSTFLAGS` replaces every config source at once, dropping
+the project's `-Dwarnings` with the flag you meant. Moving the whole file aside
+would drop those too, so local gates would run laxer than CI.
+
+While brokkr holds the global lock, the one file cargo reads in
+`<tree>/.cargo` (the legacy extensionless `config` when it exists, else
+`config.toml`) is replaced by a copy with the listed flags removed, and the
+original is put back before the lock is released. It follows
+`disable_toolchain`'s lifecycle exactly: the build root on every locked
+command, the checkout itself under `--commit`, restored on exit, error,
+interrupt or watchdog kill.
+
+**What an entry matches.** An entry is a token sequence: a string splits on
+whitespace, and an array of strings gives tokens verbatim, for an operand that
+contains a space. A `-C` or `-Z` token followed by another forms one unit with
+it, so `"-Clink-arg=x"` and `"-C link-arg=x"` are the same entry and match
+either spelling in the file, while a payload alone (`"link-arg=x"`) never
+matches half of a pair. Matching is physical deletion from each `rustflags`
+value of the file - `build.rustflags`, `host.rustflags`,
+`host.<triple>.rustflags` and every `target.<triple-or-cfg>.rustflags` - not an
+interpretation of rustc's command line:
+
+- Every match is found against the original value before anything is removed,
+  so removal never creates a new match. Two entries matching overlapping runs
+  are refused rather than chosen between.
+- A value with no match is left byte-for-byte as it was, and a file with no
+  match anywhere is not replaced at all. A string value stays a string (its
+  surviving tokens rejoined with single spaces), so cargo's string-replaces,
+  array-appends merge is unchanged.
+- brokkr refuses to edit a value where a match follows a response file
+  (`@path`) or `--`, or directly follows an option that may take it as an
+  operand (a bare short option such as `-o`, or a long option without `=`),
+  other than the operand-less `-O -g -v -V -h --test --verbose --version
+  --help`. What another config layer contributes before the value is outside
+  the contract.
+- Includes are not followed; only flags written in the selected file are
+  edited. An entry that matched nothing is warned about on every run, naming
+  any `include` or response file it saw as places the flag might live instead.
+- When a removal empties every matching target table, cargo falls through to
+  `build.rustflags`; brokkr warns when the source a host build uses changed.
+
+A non-array value, empty entries, entries that are not strings or string
+arrays, and two entries naming the same flag are config errors. A symlinked
+config file is refused. The user-wide config layer rejects the key; under
+`include` the including file's list replaces an included one, like any plain
+value.
+
+**What is promised about the file.** The original is moved, never copied, and
+every move is a rename that will not replace an existing file, so an editor
+saving the config during the window is never lost: brokkr finds a file it did
+not install and stops with a refusal naming every file present, changing
+nothing. The installed copy starts with a `# brokkr strip_rustflags v1` line
+naming hashes of the original and of itself, which is how a later run tells
+its own untouched install from an edit. A run that died mid-window is put back
+by the next brokkr run in that tree, whatever `brokkr.toml` says by then, and a
+`--commit` worktree is put back before its cleanliness is checked for reuse.
+Three names next to the file are brokkr's own while it works -
+`<file>.brokkr-original`, `<file>.brokkr-installing` and
+`<file>.brokkr-displaced`; changing those by hand, or writing through a
+descriptor an editor had open on the file before the window, is outside what
+is guarded. The installed copy and its original count as clean for
+measurement and history only when the original still equals `HEAD` and the
+copy is brokkr's untouched install over it. Code:
+`src/cargo_config_strip/`, `src/tree_policy.rs`.
 
 ## `[cargo_env]` - variables computed per cargo invocation
 

@@ -32,9 +32,9 @@ pub(super) struct HoldEffects {
     /// Wait out earlier compilation leases; the returned descriptor is the
     /// exclusive lease held while the capability is published.
     pub(super) drain: fn() -> Result<Option<OwnedFd>, DevError>,
-    /// Activate the context's toolchain-disable path, when configured.
-    pub(super) toolchain:
-        fn(&LockContext<'_>) -> Result<Option<crate::toolchain::DisabledToolchain>, DevError>,
+    /// Activate the context's tree policy, when one is carried.
+    pub(super) tree:
+        fn(&LockContext<'_>) -> Result<Option<crate::tree_policy::HeldTree>, DevError>,
     /// Attach this hold's minted nonce to the live guard for child stamping.
     pub(super) capability: fn(Nonce) -> Option<Nonce>,
     /// Runs once the fresh hold is registered: the stray reap and the stale
@@ -47,28 +47,24 @@ pub(super) const HOST_EFFECTS: HoldEffects = HoldEffects {
     service: host_service,
     disk_gate: crate::disk_gate::check,
     drain: host_drain,
-    toolchain: activate_toolchain,
+    tree: activate_tree,
     capability: Some,
     after_fresh_hold: host_after_fresh_hold,
 };
 
-fn activate_toolchain(
-    ctx: &LockContext<'_>,
-) -> Result<Option<crate::toolchain::DisabledToolchain>, DevError> {
-    crate::toolchain::activate_for_lock(ctx.disable_toolchain_dir)
+fn activate_tree(ctx: &LockContext<'_>) -> Result<Option<crate::tree_policy::HeldTree>, DevError> {
+    crate::tree_policy::activate_for_lock(ctx.tree)
 }
 
-fn no_toolchain(
-    _: &LockContext<'_>,
-) -> Result<Option<crate::toolchain::DisabledToolchain>, DevError> {
+fn no_tree(_: &LockContext<'_>) -> Result<Option<crate::tree_policy::HeldTree>, DevError> {
     Ok(None)
 }
 
-pub(super) const HOST_EFFECTS_WITHOUT_TOOLCHAIN: HoldEffects = HoldEffects {
+pub(super) const HOST_EFFECTS_WITHOUT_TREE: HoldEffects = HoldEffects {
     service: host_service,
     disk_gate: crate::disk_gate::check,
     drain: host_drain,
-    toolchain: no_toolchain,
+    tree: no_tree,
     capability: Some,
     after_fresh_hold: host_after_fresh_hold,
 };
@@ -207,7 +203,7 @@ pub(super) fn acquire_at_with(
     let flocked = flocked.start_service(ctx, effects.service)?;
     let gated = flocked.gate(ctx, effects.disk_gate)?;
     let drained = gated.drain(ctx, effects.drain)?;
-    let authorized = drained.authorize(effects.toolchain, ctx)?;
+    let authorized = drained.authorize(effects.tree, ctx)?;
     Ok(authorized.into_live(effects.capability, effects.after_fresh_hold))
 }
 
@@ -288,19 +284,16 @@ struct Drained {
 }
 
 impl Drained {
-    /// Run fallible toolchain activation before publishing the capability.
+    /// Run fallible tree activation before publishing the capability.
     /// Once this transition succeeds, `Authorized::into_live` performs no
     /// fallible work before the new `LockInner` owns the capability.
     fn authorize(
         mut self,
-        toolchain_effect: fn(
-            &LockContext<'_>,
-        )
-            -> Result<Option<crate::toolchain::DisabledToolchain>, DevError>,
+        tree_effect: fn(&LockContext<'_>) -> Result<Option<crate::tree_policy::HeldTree>, DevError>,
         ctx: &LockContext<'_>,
     ) -> Result<Authorized, DevError> {
         refuse_if_stopping()?;
-        let toolchain = toolchain_effect(ctx)?;
+        let tree = tree_effect(ctx)?;
         refuse_if_stopping()?;
 
         let nonce = Nonce::mint().ok_or_else(|| {
@@ -322,7 +315,7 @@ impl Drained {
             flocked: self.flocked,
             state: self.state,
             nonce,
-            toolchain,
+            tree,
         })
     }
 }
@@ -332,7 +325,7 @@ struct Authorized {
     flocked: Flocked,
     state: LockState,
     nonce: Nonce,
-    toolchain: Option<crate::toolchain::DisabledToolchain>,
+    tree: Option<crate::tree_policy::HeldTree>,
 }
 
 impl Authorized {
@@ -348,17 +341,17 @@ impl Authorized {
         if let Some(service) = &service {
             service.update(snapshot_of(&self.state));
         }
-        let mut active_toolchain_dirs = HashMap::new();
-        if let Some(disabled) = &self.toolchain {
-            active_toolchain_dirs.insert(disabled.directory().to_owned(), 1);
+        let mut active_tree_dirs = HashMap::new();
+        if let Some(held) = &self.tree {
+            active_tree_dirs.insert(held.directory().to_owned(), 1);
         }
         let inner = Arc::new(LockInner {
             fd: self.flocked.fd,
             path: self.flocked.path,
             state: Mutex::new(self.state),
-            toolchain: self.toolchain,
+            tree: self.tree,
             capability: attach_capability(self.nonce),
-            active_toolchain_dirs: Mutex::new(active_toolchain_dirs),
+            active_tree_dirs: Mutex::new(active_tree_dirs),
             service,
         });
         held_registry().push(Arc::downgrade(&inner));

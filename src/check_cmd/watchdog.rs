@@ -305,8 +305,9 @@ fn backstop_exit() -> ! {
         "the run did not unwind within {}s of the kill; exiting {WATCHDOG_EXIT_CODE} directly",
         UNWIND_GRACE.as_secs(),
     ));
-    // The lock's drop is what normally puts a moved-aside pin back.
-    crate::toolchain::restore_active_hold();
+    // The lock's drop is what normally undoes the tree edits (a moved-aside
+    // pin, a filtered cargo config). Bounded: the exit must happen anyway.
+    crate::tree_policy::restore_active_hold();
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
     crate::history_cmd::record_history(&raw_args, process_age_ms(), WATCHDOG_EXIT_CODE, None);
     std::process::exit(WATCHDOG_EXIT_CODE)

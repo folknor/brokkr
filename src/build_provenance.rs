@@ -61,8 +61,18 @@ impl BuildProvenance {
     }
 }
 
-/// Host-side pairs per build root, computed once per brokkr process.
+/// Host-side pairs per build root, computed once per brokkr process and
+/// forgotten whenever a tree policy installs or restores a file they read.
 static HOST_CACHE: Mutex<BTreeMap<PathBuf, Vec<(String, String)>>> = Mutex::new(BTreeMap::new());
+
+/// Drop every cached host pair set: the cargo config or toolchain pin under
+/// some build root has just changed for the rest of the locked window.
+pub(crate) fn forget_host_cache() {
+    HOST_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+}
 
 /// The host-side provenance of builds rooted at `build_root` (see the module
 /// docs), cached per root.

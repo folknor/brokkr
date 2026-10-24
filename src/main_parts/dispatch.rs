@@ -23,7 +23,7 @@ use crate::visual_approve_cmd::cmd_approve;
 use crate::{
     bench_cmd, check_cmd, cli, command_input, context, dellingr, elivagar, history_cmd,
     invalidate_cmd, litehtml, lockfile, measure, mogwai, nidhogg, output, pbfhogg, piners, project,
-    ratatoskr, results_cmd, runnables, sidecar_cmd, sluggrs, test_cmd, toolchain,
+    ratatoskr, results_cmd, runnables, sidecar_cmd, sluggrs, test_cmd,
 };
 
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
@@ -64,38 +64,38 @@ pub(super) fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<()
                     .expect("locking commands resolve a build root"),
                 // Activated explicitly below, so it can be skipped for
                 // worktree commands and tracked on the hold.
-                disable_toolchain_dir: None,
+                tree: None,
             };
             Some(if spec.lock == cli::LockPolicy::NonBlocking {
-                lockfile::try_acquire_without_toolchain(&ctx)?
+                lockfile::try_acquire_without_tree(&ctx)?
             } else {
-                lockfile::acquire_without_toolchain(&ctx)?
+                lockfile::acquire_without_tree(&ctx)?
             })
         }
     };
-    let disable_dir = detection
-        .filter(|d| d.config.disable_toolchain)
-        .map(|d| d.build_root.as_path().to_path_buf());
-    context::set_configured_toolchain_dir(disable_dir);
+    // Every detected tree is carried, active policy or not: activation also
+    // recovers a cargo config a crashed run left filtered, which must happen
+    // even after the policy that filtered it is gone.
+    context::set_configured_tree(detection.map(|d| {
+        (
+            d.build_root.as_path().to_path_buf(),
+            crate::tree_policy::TreePolicy::of(&d.config),
+        )
+    }));
     let historical = spec.uses_worktree(&cli.command)?;
-    let _toolchain = if !historical && spec.lock != cli::LockPolicy::None {
-        detection
-            .filter(|d| d.config.disable_toolchain)
-            .map(|d| toolchain::DisabledToolchain::activate(d.build_root.as_path()))
-            .transpose()?
-    } else {
-        None
+    // Registered before activation, so the watchdog sees every applied edit;
+    // declared first, so it is dropped after the edits are undone.
+    let _tree_registration = match (&_lock, detection) {
+        (Some(lock), Some(d)) if !historical => Some(lock.track_tree_dir(d.build_root.as_path())),
+        _ => None,
     };
-    let _toolchain_registration = _toolchain.as_ref().and_then(|_| {
-        _lock.as_ref().map(|lock| {
-            lock.track_toolchain_dir(
-                detection
-                    .expect("toolchain suppression requires config")
-                    .build_root
-                    .as_path(),
-            )
-        })
-    });
+    let _tree = match (&_lock, detection) {
+        (Some(_), Some(d)) if !historical => Some(crate::tree_policy::HeldTree::activate(
+            d.build_root.as_path(),
+            &crate::tree_policy::TreePolicy::of(&d.config),
+        )?),
+        _ => None,
+    };
     match &cli.command {
         Command::Fmt { args } => run_fmt(args, detection),
         Command::Man {
@@ -1038,7 +1038,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                 &detection.build_root,
                 commit.as_deref(),
                 false,
-                dev_config.disable_toolchain,
+                &crate::tree_policy::TreePolicy::of(dev_config),
                 context::worktree_keep(dev_config)?,
                 |build_root| {
                     cmd_verify(
@@ -1297,8 +1297,8 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             // `visual` builds the renderer with cargo, so it takes the global
             // lock like every other build path: the lock is what serialises it
             // against a concurrent measured run (whose timings it would
-            // otherwise contaminate) and what activates the armed
-            // toolchain-disable. It was the one cargo-driving command reaching
+            // otherwise contaminate) and what activates the armed tree
+            // policy. It was the one cargo-driving command reaching
             // its handler unlocked.
             let _lock = context::reenter_command_lock()?;
             // The whole run: build, Chrome capture, renderer children and the

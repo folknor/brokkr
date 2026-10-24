@@ -58,6 +58,7 @@ mod tests {
             member_check: None,
             fixture_lints: Vec::new(),
             disable_toolchain: false,
+            strip_rustflags: Vec::new(),
             cargo_env: std::collections::BTreeMap::new(),
             included_config_files: Vec::new(),
         }
@@ -2004,6 +2005,29 @@ sweeps = ["all"]
         validate_check_against_test(&check, test.as_ref()).unwrap();
         let skips = test.unwrap().profiles["edit"].skip_phases.clone().unwrap();
         assert_eq!(skips, vec!["member_check".to_owned()]);
+    }
+
+    #[test]
+    fn strip_rustflags_is_a_top_level_array_and_a_table_stays_a_host() {
+        let cfg = parse_dev_config(&root_table(
+            "strip_rustflags = [\"-Clink-arg=-fuse-ld=lld\", [\"-C\", \"link-arg=a b\"]]\n",
+        ))
+        .unwrap();
+        assert_eq!(cfg.strip_rustflags.len(), 2);
+        assert!(cfg.hosts.is_empty());
+
+        // A host that happens to bear the name keeps loading as one.
+        let cfg = parse_dev_config(&root_table("[strip_rustflags]\nport = 3034\n")).unwrap();
+        assert!(cfg.strip_rustflags.is_empty());
+        assert!(cfg.hosts.contains_key("strip_rustflags"));
+
+        for bad in [
+            "strip_rustflags = \"-Cx\"\n",
+            "strip_rustflags = [\"\"]\n",
+            "strip_rustflags = [\"-Cx\", \"-C x\"]\n",
+        ] {
+            assert!(parse_dev_config(&root_table(bad)).is_err(), "{bad}");
+        }
     }
 
     #[test]

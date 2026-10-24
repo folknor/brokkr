@@ -9,7 +9,7 @@ use crate::process::{HostScope, Pid, ProcIdentity, StartTicks};
 mod hold_protocol;
 pub(super) mod presentation;
 mod record;
-use self::hold_protocol::{HOST_EFFECTS, HOST_EFFECTS_WITHOUT_TOOLCHAIN, acquire_at};
+use self::hold_protocol::{HOST_EFFECTS, HOST_EFFECTS_WITHOUT_TREE, acquire_at};
 #[cfg(test)]
 use self::hold_protocol::{HoldEffects, LOCK_POLL, wait_for_flock};
 pub use self::presentation::{same_agent_hint, verified_summary_for, verified_uptime_for};
@@ -127,18 +127,18 @@ struct LockInner {
     /// lock on a scratch path can never alias the real global lock.
     path: PathBuf,
     state: Mutex<LockState>,
-    /// Toolchain-disable guard activated under this lock (when `disable_toolchain`
-    /// is armed). Restored on drop *before* the flock is released, so the pinned
-    /// rust-toolchain is moved aside for exactly the locked window. See
-    /// [`crate::toolchain`].
-    toolchain: Option<crate::toolchain::DisabledToolchain>,
+    /// Tree edits activated under this lock (a disabled toolchain pin, a
+    /// filtered cargo config). Undone on drop *before* the flock is released,
+    /// so they are in force for exactly the locked window. See
+    /// [`crate::tree_policy`].
+    tree: Option<crate::tree_policy::HeldTree>,
     /// The compilation capability belongs to this hold. Nested guards share
     /// the `LockInner`, and dropping the last guard drops this nonce with it.
     capability: Option<Nonce>,
-    /// Directories whose disabled toolchain pins need watchdog restoration.
-    /// The primary lock-scoped guard is inserted at construction; worktree
-    /// guards register their paths for exactly their own lifetime.
-    active_toolchain_dirs: Mutex<HashMap<PathBuf, usize>>,
+    /// Directories whose tree edits need watchdog restoration. The primary
+    /// lock-scoped guard is inserted at construction; worktree guards register
+    /// their paths for exactly their own lifetime.
+    active_tree_dirs: Mutex<HashMap<PathBuf, usize>>,
     /// This acquisition's control socket. Dropped first on release, while the
     /// flock is still held: a stop that has not committed by then is refused.
     service: Option<crate::lock_service::Service>,
@@ -177,10 +177,10 @@ impl Drop for LockInner {
         // but the kernel has released the flock so `status()`'s probe
         // reports no holder and the next acquirer rewrites it.
         invalidate_metadata(self.fd.as_raw_fd());
-        // Restore the disabled toolchain (if any) while we still hold the flock,
-        // then release. Doing it before LOCK_UN keeps the moved-aside window
-        // inside the locked window, so a concurrent brokkr can never observe it.
-        drop(self.toolchain.take());
+        // Undo the tree edits (if any) while we still hold the flock, then
+        // release. Doing it before LOCK_UN keeps the edited window inside the
+        // locked window, so a concurrent brokkr can never observe it.
+        drop(self.tree.take());
         // The flock is released automatically when the fd is closed, but
         // unlock explicitly for clarity. OwnedFd handles close.
         unsafe {
@@ -198,7 +198,7 @@ pub struct LockGuard {
 
 /// The locks this process currently holds, weakly. This registry is
 /// intentionally process-wide: any thread can re-enter a process-owned flock,
-/// and the watchdog thread also reads the active hold's toolchain paths. A
+/// and the watchdog thread also reads the active hold's tree paths. A
 /// thread-local index could miss the existing hold and self-deadlock.
 /// [`acquire`] consults this to re-enter an existing hold instead of opening
 /// a second fd on the same file. `flock(2)` treats each fd as an independent
@@ -220,18 +220,19 @@ fn held_registry() -> std::sync::MutexGuard<'static, Vec<Weak<LockInner>>> {
 }
 
 impl LockGuard {
-    /// Register an additional disabled toolchain directory for the lifetime
-    /// of this worktree guard, so the watchdog can restore it if the main
-    /// thread cannot unwind.
-    pub(crate) fn track_toolchain_dir(&self, dir: &Path) -> ToolchainRegistration {
+    /// Register an additional edited tree directory for the lifetime of this
+    /// worktree guard, so the watchdog can restore it if the main thread
+    /// cannot unwind. Registered before the edits are applied, so no applied
+    /// edit is ever invisible to the watchdog.
+    pub(crate) fn track_tree_dir(&self, dir: &Path) -> TreeRegistration {
         let dir = dir.to_owned();
         let mut active = self
             .inner
-            .active_toolchain_dirs
+            .active_tree_dirs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         *active.entry(dir.clone()).or_default() += 1;
-        ToolchainRegistration {
+        TreeRegistration {
             inner: Arc::downgrade(&self.inner),
             dir,
         }
@@ -321,27 +322,27 @@ pub struct LockContext<'a> {
     pub project_root: &'a crate::project::ProjectRoot,
     /// The code tree whose `target` the disk gate probes.
     pub build_root: &'a crate::project::BuildRoot,
-    /// The build root whose pinned toolchain should be moved aside for this
-    /// hold, when the detected project config enables `disable_toolchain`.
-    /// `None` keeps acquisition independent of any process-global setting.
-    pub disable_toolchain_dir: Option<&'a Path>,
+    /// The build root and policy a fresh hold applies ([`crate::tree_policy`]),
+    /// from the detected project config. `None` keeps acquisition independent
+    /// of any process-global setting.
+    pub tree: Option<crate::tree_policy::TreeTarget<'a>>,
 }
 
-/// Registration of a toolchain directory whose pin is currently held aside.
-/// It is separate from the file-moving guard so a watchdog thread can find the
+/// Registration of a directory whose tree edits are currently in force. It is
+/// separate from the editing guard so a watchdog thread can find the
 /// directory while that guard remains on a blocked main-thread stack.
-pub(crate) struct ToolchainRegistration {
+pub(crate) struct TreeRegistration {
     inner: Weak<LockInner>,
     dir: PathBuf,
 }
 
-impl Drop for ToolchainRegistration {
+impl Drop for TreeRegistration {
     fn drop(&mut self) {
         let Some(inner) = self.inner.upgrade() else {
             return;
         };
         let mut active = inner
-            .active_toolchain_dirs
+            .active_tree_dirs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let remove = match active.get_mut(&self.dir) {
@@ -434,23 +435,23 @@ pub fn acquire(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
     acquire_at(&path, ctx, &HOST_EFFECTS)
 }
 
-/// Acquire the global lock without applying the configured build-root
-/// toolchain setting. Worktree execution uses this because its own pin is
-/// activated explicitly after the checkout exists.
-pub(crate) fn acquire_without_toolchain(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
+/// Acquire the global lock without applying the configured build-root tree
+/// policy. Worktree execution uses this because its own tree is activated
+/// explicitly after the checkout exists.
+pub(crate) fn acquire_without_tree(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
     let path = lock_path()?;
-    acquire_at(&path, ctx, &HOST_EFFECTS_WITHOUT_TOOLCHAIN)
+    acquire_at(&path, ctx, &HOST_EFFECTS_WITHOUT_TREE)
 }
 
-/// As [`acquire_without_toolchain`], but a lock held by another process is
+/// As [`acquire_without_tree`], but a lock held by another process is
 /// refused at once with the typed busy refusal instead of waited for. Re-entry
 /// into this process's own hold still succeeds.
-pub(crate) fn try_acquire_without_toolchain(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
+pub(crate) fn try_acquire_without_tree(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
     let path = lock_path()?;
     hold_protocol::acquire_at_with(
         &path,
         ctx,
-        &HOST_EFFECTS_WITHOUT_TOOLCHAIN,
+        &HOST_EFFECTS_WITHOUT_TREE,
         hold_protocol::FlockWait::NonBlocking,
     )
 }
@@ -489,10 +490,10 @@ pub(crate) fn current_capability() -> Option<Nonce> {
         .find_map(|inner| inner.capability.clone())
 }
 
-/// Toolchain paths attached to the active global hold, or `None` if no such
-/// hold exists. `Some([])` is meaningful: the live hold intentionally has no
-/// disabled pin, so a watchdog must not fall back to the command's armed path.
-pub(crate) fn current_hold_toolchain_dirs() -> Option<Vec<PathBuf>> {
+/// Edited tree paths attached to the active global hold, or `None` if no such
+/// hold exists. `Some([])` is meaningful: the live hold intentionally edits
+/// nothing, so a watchdog must not fall back to the command's armed path.
+pub(crate) fn current_hold_tree_dirs() -> Option<Vec<PathBuf>> {
     let path = lock_path().ok()?;
     let mut held = held_registry();
     held.retain(|w| w.strong_count() > 0);
@@ -501,7 +502,7 @@ pub(crate) fn current_hold_toolchain_dirs() -> Option<Vec<PathBuf>> {
         .filter_map(Weak::upgrade)
         .find(|inner| inner.path == path)?;
     let active = inner
-        .active_toolchain_dirs
+        .active_tree_dirs
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut dirs = active.keys().cloned().collect::<Vec<_>>();
@@ -653,9 +654,7 @@ mod tests {
         Ok(None)
     }
 
-    fn no_toolchain(
-        _: &LockContext<'_>,
-    ) -> Result<Option<crate::toolchain::DisabledToolchain>, DevError> {
+    fn no_tree(_: &LockContext<'_>) -> Result<Option<crate::tree_policy::HeldTree>, DevError> {
         Ok(None)
     }
 
@@ -679,7 +678,7 @@ mod tests {
     }
 
     /// The effects every test hold uses: no drain of the real compile lease
-    /// (and so no stray reap, which SIGKILLs host processes), no toolchain
+    /// (and so no stray reap, which SIGKILLs host processes), no tree
     /// activation, no capability attached to the hold, no
     /// post-hold reap, and no free-space gate (a test must not fail because
     /// the host's disk is full). What remains is exactly what these tests are
@@ -688,7 +687,7 @@ mod tests {
         service: no_service,
         disk_gate: no_disk_gate,
         drain: no_drain,
-        toolchain: no_toolchain,
+        tree: no_tree,
         capability: no_capability,
         after_fresh_hold: nothing_after,
     };
@@ -870,7 +869,7 @@ mod tests {
             command: crate::cli::CommandId::Lock,
             project_root: &roots.0,
             build_root: &roots.1,
-            disable_toolchain_dir: None,
+            tree: None,
         }
     }
 

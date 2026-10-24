@@ -149,23 +149,38 @@ pub fn parse_cargo_diagnostics(stdout: &str) -> Vec<Diagnostic> {
                 .map(std::string::ToString::to_string)
         });
 
-        // Child diagnostics - only the message is consumed (the text renderer
-        // scrapes the "expected/found" detail line from it).
-        let children: Vec<String> = msg
+        // Child diagnostics: their level and message. The "expected/found"
+        // detail is scraped from any child; a link failure's cause is in its
+        // `note` children, where rustc puts the linker's own output.
+        let children: Vec<(String, String)> = msg
             .get("children")
             .and_then(|c| c.as_array())
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|child| child.get("message")?.as_str())
-                    .filter(|child_msg| !child_msg.is_empty())
-                    .map(str::to_owned)
+                    .filter_map(|child| {
+                        let message = child.get("message")?.as_str()?;
+                        let level = child.get("level").and_then(|v| v.as_str()).unwrap_or("");
+                        Some((level.to_owned(), message.to_owned()))
+                    })
+                    .filter(|(_, child_msg)| !child_msg.is_empty())
                     .collect()
             })
             .unwrap_or_default();
 
+        let detail = if is_link_failure(&message) {
+            linker_detail(
+                children
+                    .iter()
+                    .filter(|(level, _)| level == "note")
+                    .map(|(_, message)| message.as_str()),
+            )
+        } else {
+            let messages: Vec<String> = children.into_iter().map(|(_, m)| m).collect();
+            detail_from_json(primary_label.as_deref(), &messages)
+        };
         let mut diagnostic = Diagnostic::new(level, code, message);
         diagnostic.site = site;
-        diagnostic.detail = detail_from_json(primary_label.as_deref(), &children);
+        diagnostic.detail = detail;
         diagnostic.package_id = val
             .get("package_id")
             .and_then(|v| v.as_str())
@@ -317,6 +332,34 @@ fn manifest_lint_header(block: &crate::rustc_text::Block) -> Option<(Level, &str
     Some((level, message))
 }
 
+/// Whether a diagnostic message is rustc's linker failure
+/// (`` linking with `cc` failed: exit status: 1 ``).
+pub(crate) fn is_link_failure(message: &str) -> bool {
+    message.starts_with("linking with ")
+}
+
+/// The cause of a link failure, from that diagnostic's own notes: what the
+/// linker printed, which is where a wrong `-fuse-ld`, a missing library or an
+/// undefined symbol is named. The note quoting the linker command line (huge,
+/// and the cause is never in it) and the "some arguments are omitted" pointer
+/// are left out. Continuation lines are kept, indented under the diagnostic.
+pub(crate) fn linker_detail<'a>(notes: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    let lines: Vec<&str> = notes
+        .into_iter()
+        .filter(|note| {
+            let note = note.trim_start();
+            !(note.starts_with('"')
+                || note.starts_with("LC_ALL=")
+                || note.starts_with("env -u")
+                || note.starts_with("some arguments are omitted"))
+        })
+        .flat_map(str::lines)
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    (!lines.is_empty()).then(|| lines.join("\n    "))
+}
+
 fn detail_from_json(primary_label: Option<&str>, children: &[String]) -> Option<String> {
     if let Some(label) = primary_label
         && label.contains("expected")
@@ -408,6 +451,19 @@ mod tests {
             events[0].detail.as_deref(),
             Some("expected `i32`, found `&str`")
         );
+    }
+
+    /// The ticket's case: the cause sat in a note nobody saw.
+    #[test]
+    fn a_link_failure_carries_the_linker_output() {
+        let input = r#"{"reason":"compiler-message","message":{"level":"error","code":null,"message":"linking with `clang` failed: exit status: 1","spans":[],"children":[{"level":"note","message":"\"clang\" \"-m64\" \"-fuse-ld=wild\" \"-fuse-ld=lld\"","spans":[]},{"level":"note","message":"some arguments are omitted. use `--verbose` to show all linker arguments","spans":[]},{"level":"note","message":"clang: error: invalid linker name in argument '-fuse-ld=lld'\n","spans":[]}],"rendered":"rendered"}}"#;
+        let events = parse_cargo_diagnostics(input);
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].detail.as_deref(),
+            Some("clang: error: invalid linker name in argument '-fuse-ld=lld'")
+        );
+        assert!(events[0].format_one().contains("invalid linker name"));
     }
 
     #[test]

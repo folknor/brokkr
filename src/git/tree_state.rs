@@ -146,13 +146,14 @@ impl TreeState {
 
     /// Whether a source or build-input change would make a commit hash
     /// misdescribe the measurement. Documentation, brokkr-owned state,
-    /// project config outputs, approved visual baselines, and an unchanged
-    /// toolchain pin temporarily moved by brokkr are exempt.
+    /// project config outputs, approved visual baselines, and brokkr's own
+    /// locked-window tree edits over unchanged committed files (a moved
+    /// toolchain pin, a filtered cargo config) are exempt.
     pub(crate) fn for_measurement(&self) -> bool {
-        let unchanged_toolchain_moves = unchanged_toolchain_moves(&self.root, &self.entries);
+        let tree_edits = brokkr_tree_edits(&self.root, &self.entries);
         self.entries.iter().any(|entry| {
             entry.paths.iter().any(|path| {
-                !unchanged_toolchain_moves.contains(&path.path)
+                !tree_edits.contains(&path.path)
                     && !matches!(
                         path.class,
                         PathClass::BrokkrStore
@@ -167,12 +168,12 @@ impl TreeState {
 
     /// Whether an invocation record should say the working tree was dirty.
     /// This is broader than measurement cleanliness: prose and project config
-    /// count, while brokkr's own state and an unchanged moved pin do not.
+    /// count, while brokkr's own state and its own tree edits do not.
     pub(crate) fn for_record(&self) -> bool {
-        let unchanged_toolchain_moves = unchanged_toolchain_moves(&self.root, &self.entries);
+        let tree_edits = brokkr_tree_edits(&self.root, &self.entries);
         self.entries.iter().any(|entry| {
             entry.paths.iter().any(|path| {
-                !unchanged_toolchain_moves.contains(&path.path)
+                !tree_edits.contains(&path.path)
                     && path.class != PathClass::BrokkrStore
             })
         })
@@ -285,6 +286,94 @@ fn is_toolchain_original(path: &Path) -> bool {
 
 fn is_toolchain_sidecar(path: &Path) -> bool {
     crate::toolchain::moved_paths().any(|(_, sidecar)| path == sidecar.as_path())
+}
+
+/// Every path brokkr's locked-window tree edits account for.
+fn brokkr_tree_edits(root: &Path, entries: &[Entry]) -> HashSet<PathBuf> {
+    let mut paths = unchanged_toolchain_moves(root, entries);
+    paths.extend(unchanged_cargo_config_strips(root, entries));
+    paths
+}
+
+/// The committed blob at `path` (relative to `root`) as (mode, bytes), when
+/// HEAD has one.
+fn head_blob(root: &Path, path: &str) -> Option<(String, Vec<u8>)> {
+    let tree = crate::output::child::command_output(
+        crate::process::spawn::ChildPolicy::plain_command("git")
+            .args(["ls-tree", "HEAD", "--", path])
+            .current_dir(root),
+    )
+    .ok()?;
+    if !tree.status.success() {
+        return None;
+    }
+    let mode = String::from_utf8_lossy(&tree.stdout)
+        .split_whitespace()
+        .next()?
+        .to_owned();
+    let head = crate::output::child::command_output(
+        crate::process::spawn::ChildPolicy::plain_command("git")
+            .args(["show", &format!("HEAD:./{path}")])
+            .current_dir(root),
+    )
+    .ok()?;
+    head.status.success().then_some((mode, head.stdout))
+}
+
+/// A filtered cargo config and its moved original are exempt only in the
+/// exact shape brokkr's install leaves: the live file modified in the
+/// worktree and nothing else, the original untracked (or ignored, when it is
+/// absent from status but present on disk), no transaction scratch beside
+/// them, the original's bytes and executable bit equal to HEAD's, and the
+/// live file verifying as brokkr's untouched install over that original (its
+/// bytes and its mode). Any edit to either file stays dirty.
+fn unchanged_cargo_config_strips(root: &Path, entries: &[Entry]) -> HashSet<PathBuf> {
+    use crate::cargo_config_strip::transaction::{BASES, DISPLACED, INSTALLING, ORIGINAL};
+    let status = |path: &Path| {
+        entries
+            .iter()
+            .find(|entry| entry.paths.iter().any(|p| p.path == path))
+            .map(|entry| (entry.index, entry.worktree))
+    };
+    let mut unchanged = HashSet::new();
+    for base in BASES {
+        let live = PathBuf::from(".cargo").join(base);
+        let original = PathBuf::from(".cargo").join(format!("{base}{ORIGINAL}"));
+        let original_untracked = match status(&original) {
+            Some(state) => state == (b'?', b'?'),
+            None => root.join(&original).is_file(),
+        };
+        if status(&live) != Some((b' ', b'M')) || !original_untracked {
+            continue;
+        }
+        if [INSTALLING, DISPLACED]
+            .iter()
+            .any(|suffix| root.join(".cargo").join(format!("{base}{suffix}")).exists())
+        {
+            continue;
+        }
+        let Some(live_str) = live.to_str() else { continue };
+        let Some((mode, head)) = head_blob(root, live_str) else {
+            continue;
+        };
+        let Ok(moved) = std::fs::read(root.join(&original)) else {
+            continue;
+        };
+        let executable = {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(root.join(&original))
+                .ok()
+                .is_some_and(|meta| meta.permissions().mode() & 0o111 != 0)
+        };
+        if moved == head
+            && (mode == "100755") == executable
+            && crate::cargo_config_strip::verifies(&root.join(&live), &root.join(&original))
+        {
+            unchanged.insert(live);
+            unchanged.insert(original);
+        }
+    }
+    unchanged
 }
 
 /// Paths from a toolchain pin and its sidecar are exempt only when the sidecar

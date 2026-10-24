@@ -85,7 +85,7 @@ pub fn run(
         .is_none()
         .then(crate::project::detect_roots)
         .transpose()?;
-    let (project, project_root, build_root, disable_toolchain, keep, included_config_files) =
+    let (project, project_root, build_root, tree, keep, included_config_files) =
         match (detection, fallback_roots.as_ref()) {
             (Some(d), _) => {
                 let keep = d.config.worktree_keep(&crate::config::hostname()?);
@@ -93,7 +93,7 @@ pub fn run(
                     Some(d.project.clone()),
                     &d.project_root,
                     &d.build_root,
-                    d.config.disable_toolchain,
+                    crate::tree_policy::TreePolicy::of(&d.config),
                     keep,
                     d.config_sources.included().to_vec(),
                 )
@@ -102,7 +102,7 @@ pub fn run(
                 None,
                 project_root,
                 build_root,
-                false,
+                crate::tree_policy::TreePolicy::default(),
                 crate::worktree_record::DEFAULT_KEEP,
                 Vec::new(),
             ),
@@ -128,12 +128,12 @@ pub fn run(
     let compare = args.compare.clone();
 
     // Resolve the baseline name HERE, before the lock and therefore before
-    // brokkr has touched the tree. Taking the lock activates the
-    // toolchain-disable, which renames `rust-toolchain.toml` to a
-    // `.brokkr-disabled` sidecar - a deletion plus an untracked file, which is
-    // exactly what `git status --porcelain` reports as a dirty tree. Asking
-    // afterwards means the guard reads brokkr's own side effect as the user's
-    // uncommitted work and refuses every run in a `disable_toolchain` project.
+    // brokkr has touched the tree. Taking the lock activates the tree policy,
+    // which renames `rust-toolchain.toml` to a `.brokkr-disabled` sidecar (a
+    // deletion plus an untracked file) and may put a filtered cargo config in
+    // place - exactly what `git status --porcelain` reports as a dirty tree.
+    // Asking afterwards means the guard reads brokkr's own side effect as the
+    // user's uncommitted work and refuses every run in such a project.
     //
     // The guard exists to catch changes that make a commit hash a lie about
     // what was measured. It therefore has to be asked at a moment when the only
@@ -164,7 +164,7 @@ pub fn run(
         build_root,
         args.commit.as_deref(),
         false,
-        disable_toolchain,
+        &tree,
         keep,
         |wt| {
             // The lock context's state root is the *project* root, what

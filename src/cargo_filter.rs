@@ -140,53 +140,79 @@ fn format_cargo_build_failure(stderr: &str, tool: &str, empty_message: &str) -> 
     filtered
 }
 
-/// Extra detail for a `linking with ...` build failure. The one-line
-/// condensation keeps `` error: linking with `clang` failed `` and drops the
-/// `= note:` block - which is where the linker put the actual cause. Pull
-/// the undefined-symbol lines back out, and when they carry the
-/// stale-incremental signature - a symbol in the failing crate's own
-/// namespace, referenced by an `.rcgu.o` incremental codegen unit - name
-/// the fix: `brokkr clean --cargo <pkg>`. A genuinely missing symbol from
-/// another crate matches neither the namespace nor the rcgu test, so the
-/// hint stays off the ordinary link-error path.
+/// The stale-incremental hint for a `linking with ...` build failure. The
+/// linker's own output already rides each link diagnostic as its detail
+/// ([`linker_notes`]); this adds the one thing the output does not say. When
+/// a link block's undefined symbol is in the failing crate's own namespace and
+/// referenced by an `.rcgu.o` incremental codegen unit, name the fix:
+/// `brokkr clean --cargo <pkg>`. Each link block is paired with the `could
+/// not compile` line that follows it, so one crate's failure never lends its
+/// name to another's. A genuinely missing symbol from another crate matches
+/// neither the namespace nor the rcgu test, so the hint stays off the
+/// ordinary link-error path.
 fn linker_failure_detail(stderr: &str) -> Option<String> {
-    if !stderr.contains("linking with ") {
-        return None;
-    }
-    let undefined: Vec<&str> = stderr
-        .lines()
-        .map(|l| {
-            let t = l.trim_start();
-            t.strip_prefix("= note: ").unwrap_or(t)
-        })
-        .filter(|t| {
-            let lower = t.to_lowercase();
-            lower.contains("undefined symbol") || lower.contains("undefined reference")
-        })
-        .collect();
-    if undefined.is_empty() {
-        return None;
-    }
-
-    let mut out: Vec<String> = undefined.iter().map(|t| format!("  linker: {t}")).collect();
-
-    // `error: could not compile `pkg` (lib test)` names the crate whose
-    // build cache is suspect; its symbols are `pkg`-with-underscores paths.
-    let package = stderr.lines().find_map(|l| {
-        let rest = l.trim_start().strip_prefix("error: could not compile `")?;
-        let (pkg, _) = rest.split_once('`')?;
-        Some(pkg.to_string())
-    });
-    if let Some(pkg) = package {
-        let ident = format!("{}::", pkg.replace('-', "_"));
-        if stderr.contains(".rcgu.o") && undefined.iter().any(|t| t.contains(&ident)) {
-            out.push(format!(
-                "  stale incremental cache suspected (phantom symbol in an \
-                 incremental codegen unit) - run: brokkr clean --cargo {pkg}"
-            ));
+    let blocks = rustc_text::rustc_blocks(stderr);
+    let mut hints = Vec::new();
+    for (index, block) in blocks.iter().enumerate() {
+        let is_link = block
+            .text
+            .lines()
+            .next()
+            .and_then(|header| header.strip_prefix("error: "))
+            .is_some_and(crate::cargo_json::is_link_failure);
+        if !is_link {
+            continue;
+        }
+        let undefined: Vec<&str> = block
+            .text
+            .lines()
+            .filter(|line| {
+                let lower = line.to_lowercase();
+                lower.contains("undefined symbol") || lower.contains("undefined reference")
+            })
+            .collect();
+        if undefined.is_empty() {
+            continue;
+        }
+        // `error: could not compile `pkg` (lib test)` names the crate whose
+        // build cache is suspect; its symbols are `pkg`-with-underscores paths.
+        let package = blocks[index + 1..].iter().find_map(|later| {
+            let rest = later.text.trim_start().strip_prefix("error: could not compile `")?;
+            let (pkg, _) = rest.split_once('`')?;
+            Some(pkg.to_string())
+        });
+        if let Some(pkg) = package {
+            let ident = format!("{}::", pkg.replace('-', "_"));
+            if block.text.contains(".rcgu.o") && undefined.iter().any(|t| t.contains(&ident)) {
+                hints.push(format!(
+                    "  stale incremental cache suspected (phantom symbol in an \
+                     incremental codegen unit) - run: brokkr clean --cargo {pkg}"
+                ));
+            }
         }
     }
-    Some(out.join("\n"))
+    (!hints.is_empty()).then(|| hints.join("\n"))
+}
+
+/// The `= note:` texts of one rendered diagnostic block, each with its
+/// continuation lines (the indented lines under it, up to the next note or
+/// the end of the block).
+fn linker_notes(block: &[String]) -> Vec<String> {
+    let mut notes: Vec<String> = Vec::new();
+    let mut open = false;
+    for line in block.iter().skip(1) {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("= note:") {
+            notes.push(rest.trim().to_owned());
+            open = true;
+        } else if trimmed.is_empty() || trimmed == "|" || trimmed.starts_with("= ") {
+            open = false;
+        } else if open && let Some(last) = notes.last_mut() {
+            last.push('\n');
+            last.push_str(trimmed);
+        }
+    }
+    notes
 }
 
 /// Parse a diagnostic block into structured fields.
@@ -203,9 +229,15 @@ fn parse_block(block: &[String], level: Level) -> Diagnostic {
     {
         header = format!("{header}[{rule}]");
     }
+    let detail = if crate::cargo_json::is_link_failure(&message) {
+        let notes = linker_notes(block);
+        crate::cargo_json::linker_detail(notes.iter().map(String::as_str))
+    } else {
+        extract_detail(block)
+    };
     let mut diagnostic = Diagnostic::new(level, code_from_header(&header), message);
     diagnostic.site = extract_location(block).as_deref().and_then(parse_site);
-    diagnostic.detail = extract_detail(block);
+    diagnostic.detail = detail;
     diagnostic
 }
 
@@ -460,6 +492,43 @@ error: could not compile `mycrate` (bin \"mycrate\") due to 1 previous error
             "got: {result}"
         );
         assert!(!result.contains("brokkr clean"), "got: {result}");
+    }
+
+    #[test]
+    fn linker_failure_names_the_linker_error_and_skips_the_command_line() {
+        let stderr = "\
+error: linking with `clang` failed: exit status: 1
+  |
+  = note: LC_ALL=\"C\" PATH=\"/usr/bin\" \"clang\" \"-fuse-ld=wild\" \"-fuse-ld=lld\"
+  = note: some arguments are omitted. use `--verbose` to show all linker arguments
+  = note: clang: error: invalid linker name in argument '-fuse-ld=lld'
+
+error: could not compile `mycrate` (lib) due to 1 previous error
+";
+        let result = filter_test("", stderr);
+        assert!(result.contains("invalid linker name in argument '-fuse-ld=lld'"), "got: {result}");
+        assert!(!result.contains("PATH="), "got: {result}");
+        assert!(!result.contains("arguments are omitted"), "got: {result}");
+    }
+
+    #[test]
+    fn a_stale_hint_names_the_crate_whose_link_failed() {
+        let stderr = "\
+error: linking with `cc` failed: exit status: 1
+  |
+  = note: /usr/bin/ld: main.o: undefined reference to `sqlite3_open'
+
+error: could not compile `first` (bin \"first\") due to 1 previous error
+error: linking with `clang` failed: exit status: 1
+  |
+  = note: wild: error: Undefined symbol second::tests::x, referenced by
+              /t/debug/deps/second-1.abc.rcgu.o
+
+error: could not compile `second` (lib test) due to 1 previous error
+";
+        let result = filter_test("", stderr);
+        assert!(result.contains("brokkr clean --cargo second"), "got: {result}");
+        assert!(!result.contains("brokkr clean --cargo first"), "got: {result}");
     }
 
     #[test]

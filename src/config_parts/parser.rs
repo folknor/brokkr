@@ -113,6 +113,7 @@ fn parse_dev_config(table: &toml::Table) -> Result<DevConfig, DevError> {
     let member_check = parse_member_check(table, bin.as_ref())?;
     let fixture_lints = parse_fixture_lints(table)?;
     let disable_toolchain = parse_disable_toolchain(table)?;
+    let strip_rustflags = parse_strip_rustflags(table)?;
     let cargo_env = parse_cargo_env(table, &capture_env)?;
     refuse_retired_sha256(table)?;
     let hosts = parse_hosts(table)?;
@@ -138,6 +139,7 @@ fn parse_dev_config(table: &toml::Table) -> Result<DevConfig, DevError> {
         member_check,
         fixture_lints,
         disable_toolchain,
+        strip_rustflags,
         cargo_env,
         included_config_files: Vec::new(),
     })
@@ -867,6 +869,35 @@ fn parse_disable_toolchain(
     }
 }
 
+/// Parse the optional top-level `strip_rustflags = [...]`: flags removed from
+/// the tree's own cargo config for the locked window. Each entry is validated
+/// here, and two entries naming the same units (`-Cx` and `-C x`) are refused
+/// as duplicates. A `[strip_rustflags]` *table* is not this key but a
+/// hostname section, as it always was ([`VALUE_KEYS`]).
+fn parse_strip_rustflags(
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<Vec<crate::cargo_config_strip::StripSpec>, DevError> {
+    let Some(value) = table.get("strip_rustflags").filter(|value| !value.is_table()) else {
+        return Ok(Vec::new());
+    };
+    let entries = value
+        .as_array()
+        .ok_or_else(|| DevError::Config("strip_rustflags must be an array".into()))?;
+    let mut specs: Vec<crate::cargo_config_strip::StripSpec> = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let spec = crate::cargo_config_strip::StripSpec::parse(entry)?;
+        if let Some(earlier) = specs.iter().find(|earlier| earlier.same_as(&spec)) {
+            return Err(DevError::Config(format!(
+                "strip_rustflags lists {:?} and {:?}, which name the same flag",
+                earlier.raw(),
+                spec.raw()
+            )));
+        }
+        specs.push(spec);
+    }
+    Ok(specs)
+}
+
 /// Parse the optional top-level `capture_env = ["PBFHOGG*", "MALLOC_CONF"]`
 /// list. Each entry is either an exact env var name or a `PREFIX*` glob;
 /// `*` is only supported as the final character.
@@ -963,6 +994,12 @@ pub(crate) const SECTIONS: &[&str] = &[
     "cargo_env",
 ];
 
+/// Top-level keys brokkr claims only when their value is not a table. A
+/// non-table top-level value has never loaded, so claiming one breaks no
+/// config, while a table under the same name stays the hostname section it
+/// always was - the kernel accepts any bytes as a hostname.
+pub(crate) const VALUE_KEYS: &[&str] = &["strip_rustflags"];
+
 /// Every other top-level table is a hostname section. The table shape is
 /// ambiguous by design: hostnames are open-ended, so section-name typos are
 /// caught by the host schema (and empty, no-op host sections are refused).
@@ -995,6 +1032,9 @@ fn parse_hosts(
 
     for (key, value) in table {
         if SECTIONS.contains(&key.as_str()) {
+            continue;
+        }
+        if !value.is_table() && VALUE_KEYS.contains(&key.as_str()) {
             continue;
         }
         if !value.is_table() {

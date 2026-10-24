@@ -8,22 +8,28 @@ use crate::lockfile;
 use crate::output;
 use crate::project::{BuildRoot, Project, ProjectRoot};
 
-/// The build root whose pinned toolchain a fresh hold moves aside, recorded
-/// once at startup from the detected config (`disable_toolchain`). A brokkr
-/// process handles one CLI invocation, and every nested lock acquisition in
-/// that invocation inherits this detected policy. This is invocation context,
-/// used to fill [`lockfile::LockContext::disable_toolchain_dir`]. The lock
-/// layer stores active paths on each hold, including worktree paths.
-static CONFIGURED_TOOLCHAIN_DIR: std::sync::OnceLock<Option<std::path::PathBuf>> =
-    std::sync::OnceLock::new();
+/// The build root a fresh hold edits and the policy it applies, recorded once
+/// at startup from the detected config. A brokkr process handles one CLI
+/// invocation, and every nested lock acquisition in that invocation inherits
+/// this detected policy. This is invocation context, used to fill
+/// [`lockfile::LockContext::tree`]. The lock layer stores active paths on
+/// each hold, including worktree paths.
+static CONFIGURED_TREE: std::sync::OnceLock<
+    Option<(std::path::PathBuf, crate::tree_policy::TreePolicy)>,
+> = std::sync::OnceLock::new();
 
-/// Record the invocation's toolchain-disable path. The first call wins.
-pub(crate) fn set_configured_toolchain_dir(dir: Option<std::path::PathBuf>) {
-    CONFIGURED_TOOLCHAIN_DIR.set(dir).ok();
+/// Record the invocation's tree target. The first call wins.
+pub(crate) fn set_configured_tree(
+    tree: Option<(std::path::PathBuf, crate::tree_policy::TreePolicy)>,
+) {
+    CONFIGURED_TREE.set(tree).ok();
 }
 
-fn configured_toolchain_dir() -> Option<&'static Path> {
-    CONFIGURED_TOOLCHAIN_DIR.get().and_then(Option::as_deref)
+fn configured_tree() -> Option<crate::tree_policy::TreeTarget<'static>> {
+    CONFIGURED_TREE
+        .get()
+        .and_then(Option::as_ref)
+        .map(|(dir, policy)| crate::tree_policy::TreeTarget { dir, policy })
 }
 
 /// Re-enter the invocation's hold without inventing a second lock label.
@@ -67,7 +73,7 @@ pub(crate) fn acquire_cmd_lock_opt(
         command: crate::cli::invocation(),
         project_root,
         build_root,
-        disable_toolchain_dir: configured_toolchain_dir(),
+        tree: configured_tree(),
     })
 }
 
@@ -173,7 +179,7 @@ impl MeasurementSession {
     ) -> Result<Self, DevError> {
         // Take the lock before resolving paths, for the same reason as
         // `MeasurementSession::with_build_config`: `resolve_bootstrap_paths` runs
-        // `cargo metadata`, and the lock activates the configured toolchain-disable.
+        // `cargo metadata`, and the lock activates the configured tree policy.
         // Acquiring first keeps a worktree's committed pin from being live
         // during that metadata call. The harness is handed the held lock.
         let lock = lockfile::acquire(&lockfile::LockContext {
@@ -181,7 +187,7 @@ impl MeasurementSession {
             command: crate::cli::invocation(),
             project_root,
             build_root,
-            disable_toolchain_dir: configured_toolchain_dir(),
+            tree: configured_tree(),
         })?;
         let paths = resolve_bootstrap_paths(dev_config, project_root, build_root)?;
         let harness = harness::BenchHarness::new_with_lock(
@@ -388,7 +394,7 @@ pub(crate) fn with_worktree<F, T>(
     build_root: &BuildRoot,
     commit: Option<&str>,
     dry_run: bool,
-    disable_toolchain: bool,
+    tree: &crate::tree_policy::TreePolicy,
     keep: usize,
     f: F,
 ) -> Result<T, DevError>
@@ -418,15 +424,15 @@ where
             // waiter's message show for the whole run (the closure's re-entrant
             // acquires never rewrite it), so it carries the caller's project
             // and the invoked command, not a bookkeeping name.
-            // The live build root's pin is unrelated to this run. Leave it
-            // alone and explicitly activate the worktree's pin below, once its
-            // checkout exists.
-            let lock = lockfile::acquire_without_toolchain(&lockfile::LockContext {
+            // The live build root's tree is unrelated to this run. Leave it
+            // alone and explicitly activate the worktree's tree below, once
+            // its checkout exists.
+            let lock = lockfile::acquire_without_tree(&lockfile::LockContext {
                 project: project.map_or("brokkr", Project::name),
                 command: crate::cli::invocation(),
                 project_root,
                 build_root,
-                disable_toolchain_dir: None,
+                tree: None,
             })?;
 
             // Retention runs from `create`'s cut hook: only when a worktree is
@@ -454,23 +460,19 @@ where
             if !output::is_quiet() {
                 output::run_msg(&format!("commit {} ({})", wt.commit(), wt.subject()));
             }
-            // The worktree is a checkout of `hash`, which may carry its own
-            // committed rust-toolchain pin. Move it aside for the closure. Safe
-            // as a bare guard here (unlike the race `toolchain`'s module doc
-            // describes for `fmt`) because it sits entirely inside the lock
-            // held above; declared after `lock`, it drops - restoring the pin -
-            // before the flock is released.
-            let toolchain_guard = if disable_toolchain {
-                Some(crate::toolchain::DisabledToolchain::activate(wt.as_path())?)
-            } else {
-                None
-            };
-            let _toolchain_registration = toolchain_guard
-                .as_ref()
-                .map(|_| lock.track_toolchain_dir(wt.as_path()));
+            // The worktree is a checkout of `hash`, which carries its own
+            // committed toolchain pin and cargo config. Apply the tree policy
+            // to it for the closure. Safe as a bare guard here (unlike the
+            // race `toolchain`'s module doc describes for `fmt`) because it
+            // sits entirely inside the lock held above; declared after `lock`,
+            // it drops - undoing the edits - before the flock is released. The
+            // directory is registered first, so the watchdog can see every
+            // edit that is ever applied.
+            let registration = lock.track_tree_dir(wt.as_path());
+            let tree_guard = crate::tree_policy::HeldTree::activate(wt.as_path(), tree)?;
             let result = f(&wt);
-            drop(toolchain_guard);
-            drop(_toolchain_registration);
+            drop(tree_guard);
+            drop(registration);
             drop(lock);
             result
         }

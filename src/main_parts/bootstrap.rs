@@ -53,7 +53,7 @@ where
         &detection.build_root,
         mode.commit.as_deref(),
         mode.dry_run,
-        dev_config.disable_toolchain,
+        &crate::tree_policy::TreePolicy::of(dev_config),
         context::worktree_keep(dev_config)?,
         |build_root| {
             // The whole measured command: the build, tool materialization,
@@ -361,7 +361,7 @@ pub(super) fn run_program(
     // taken inside the closure so the toolchain-disable lands on the
     // worktree rather than the live tree.
     let fallback_roots = project::detect_roots()?;
-    let (project, bin_cfg, project_root, build_root, disable_toolchain, keep) = match detection {
+    let (project, bin_cfg, project_root, build_root, tree, keep) = match detection {
         Some(d) => {
             let keep = context::worktree_keep(&d.config)?;
             (
@@ -369,7 +369,7 @@ pub(super) fn run_program(
                 d.config.bin.as_ref(),
                 &d.project_root,
                 &d.build_root,
-                d.config.disable_toolchain,
+                crate::tree_policy::TreePolicy::of(&d.config),
                 keep,
             )
         }
@@ -378,7 +378,7 @@ pub(super) fn run_program(
             None,
             &fallback_roots.0,
             &fallback_roots.1,
-            false,
+            crate::tree_policy::TreePolicy::default(),
             crate::worktree_record::DEFAULT_KEEP,
         ),
     };
@@ -388,7 +388,7 @@ pub(super) fn run_program(
         build_root,
         Some(commit),
         false,
-        disable_toolchain,
+        &tree,
         keep,
         |wt| {
             let worktree = wt.as_path();
@@ -419,13 +419,13 @@ pub(super) fn run_build(
     detection: Option<&project::Detection>,
 ) -> Result<(), DevError> {
     let fallback_roots = project::detect_roots()?;
-    let (project, bin_cfg, project_root, build_root, disable_toolchain, keep) = match detection {
+    let (project, bin_cfg, project_root, build_root, tree, keep) = match detection {
         Some(d) => (
             Some(&d.project),
             d.config.bin.as_ref(),
             &d.project_root,
             &d.build_root,
-            d.config.disable_toolchain,
+            crate::tree_policy::TreePolicy::of(&d.config),
             context::worktree_keep(&d.config)?,
         ),
         None => (
@@ -433,7 +433,7 @@ pub(super) fn run_build(
             None,
             &fallback_roots.0,
             &fallback_roots.1,
-            false,
+            crate::tree_policy::TreePolicy::default(),
             crate::worktree_record::DEFAULT_KEEP,
         ),
     };
@@ -449,7 +449,7 @@ pub(super) fn run_build(
             build_root,
             Some(commit),
             false,
-            disable_toolchain,
+            &tree,
             keep,
             |wt| {
                 let _lock = context::reenter_command_lock()?;
@@ -547,7 +547,7 @@ pub(super) fn run_sync(
         &detection.build_root,
         commit.as_deref(),
         false,
-        dev_config.disable_toolchain,
+        &crate::tree_policy::TreePolicy::of(dev_config),
         context::worktree_keep(dev_config)?,
         |build_root| {
             let req = ratatoskr::sync::SyncBenchRequest {

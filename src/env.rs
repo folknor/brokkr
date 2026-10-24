@@ -71,11 +71,15 @@ pub(crate) fn cmd_env(
     // a tree pinning a toolchain we don't have installed, `env` fails outright
     // unless the pin is moved aside. That window is the *locked* window (see
     // `crate::toolchain`), so reporting the environment has to take the lock
-    // for the same reason `fmt` does, despite touching nothing. Only when
-    // `disable_toolchain` is set: with nothing to move, `env` stays lock-free
-    // (its command spec takes no dispatcher hold) and can still be run
-    // alongside a long build.
-    let _lock = if dev_config.disable_toolchain {
+    // for the same reason `fmt` does, despite touching nothing. The same holds
+    // for a stripped cargo config, which `cargo metadata` reads, and for one a
+    // killed run left filtered, which the lock's activation recovers whatever
+    // the policy says now. Only then: otherwise `env` stays lock-free (its
+    // command spec takes no dispatcher hold) and can still be run alongside a
+    // long build.
+    let _lock = if crate::tree_policy::TreePolicy::of(dev_config).is_active()
+        || crate::cargo_config_strip::has_leftovers(build_root.as_path())
+    {
         Some(acquire_cmd_lock(project, project_root, build_root)?)
     } else {
         None

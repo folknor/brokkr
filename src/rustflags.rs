@@ -337,29 +337,29 @@ pub(crate) fn read_config_file(
     Ok(files)
 }
 
-fn push_existing_config(
-    out: &mut Vec<PathBuf>,
-    dir: &Path,
-    seen: &mut HashSet<PathBuf>,
-) -> Result<(), crate::error::DevError> {
-    let legacy = dir.join("config");
-    let modern = dir.join("config.toml");
-    let mut selected = None;
-    for path in [&legacy, &modern] {
-        match std::fs::metadata(path) {
-            Ok(metadata) if metadata.is_file() => {
-                selected = Some(path.clone());
-                break;
-            }
+/// The config file cargo reads in one `.cargo`-shaped directory: the
+/// extensionless legacy `config` when it exists, else `config.toml`.
+pub(crate) fn selected_config_file(dir: &Path) -> Result<Option<PathBuf>, crate::error::DevError> {
+    for path in [dir.join("config"), dir.join("config.toml")] {
+        match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => return Ok(Some(path)),
             Ok(_) => {}
             // No file at one of Cargo's search locations is ordinary; an
             // inaccessible location could hide the selected legacy file and
             // must not be treated as that ordinary absence.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(config_read_error(path, &error)),
+            Err(error) => return Err(config_read_error(&path, &error)),
         }
     }
-    if let Some(path) = selected {
+    Ok(None)
+}
+
+fn push_existing_config(
+    out: &mut Vec<PathBuf>,
+    dir: &Path,
+    seen: &mut HashSet<PathBuf>,
+) -> Result<(), crate::error::DevError> {
+    if let Some(path) = selected_config_file(dir)? {
         let identity = path.canonicalize().unwrap_or_else(|_| path.clone());
         if seen.insert(identity) {
             out.push(path);
@@ -703,12 +703,46 @@ pub(crate) fn sink(
         Some(t) => Platform::Target(t),
         None => Platform::Host(host.as_deref()),
     };
-    for (_, doc) in &files {
-        if target_rustflags_match(doc, platform) == Some(true) {
-            return Sink::TargetConfig;
-        }
+    if target_source_live(&files, &triples, platform) {
+        Sink::TargetConfig
+    } else {
+        Sink::BuildConfig
     }
-    Sink::BuildConfig
+}
+
+/// Whether source 3 is provably live: some selector known to match - the
+/// triple key, or a `cfg(...)` that evaluates true - has non-empty flags once
+/// merged across the chain as cargo merges them (a string replaces lower
+/// layers, an array appends). A selector whose `cfg` cannot be evaluated
+/// proves nothing either way and is passed over - the inert direction - so
+/// an undecided table cannot cancel a proven one, and a lower layer's flags
+/// a higher layer replaced cannot prove anything.
+fn target_source_live(
+    files: &[(PathBuf, toml::Table)],
+    triples: &[String],
+    platform: Platform<'_>,
+) -> bool {
+    let flags_of = |selector: &str| {
+        let selector = selector.to_owned();
+        merged_config_flags(files, move |doc: &toml::Table| {
+            doc.get("target")?.as_table()?.get(&selector)?.as_table()?.get("rustflags").cloned()
+        })
+    };
+    let non_empty = |merged: Option<Option<Vec<String>>>| matches!(merged, Some(Some(flags)) if !flags.is_empty());
+    let cfg_selectors: BTreeSet<&str> = files
+        .iter()
+        .filter_map(|(_, doc)| doc.get("target")?.as_table())
+        .flat_map(|targets| targets.keys().map(String::as_str))
+        .filter(|selector| selector.starts_with("cfg("))
+        .collect();
+    let cfg_live = cfg_selectors.into_iter().any(|selector| {
+        let matches = selector
+            .strip_prefix("cfg(")
+            .and_then(|s| s.strip_suffix(')'))
+            .and_then(|expr| eval_cfg_on(expr, platform));
+        matches == Some(true) && non_empty(flags_of(selector))
+    });
+    cfg_live || triples.iter().any(|triple| non_empty(flags_of(triple)))
 }
 
 /// Resolve the environment-backed sink independently from process and config
@@ -1021,7 +1055,10 @@ fn target_rustflags_match(doc: &toml::Table, platform: Platform<'_>) -> Option<b
         let has_flags = table
             .as_table()
             .and_then(|t| t.get("rustflags"))
-            .is_some_and(|v| v.as_array().is_some_and(|a| !a.is_empty()));
+            .is_some_and(|v| {
+                v.as_array().is_some_and(|a| !a.is_empty())
+                    || v.as_str().is_some_and(|s| !s.trim().is_empty())
+            });
         if !has_flags {
             continue;
         }
@@ -1275,6 +1312,40 @@ mod tests {
         assert_eq!(env_sink(false, &plain_empty), Some(Sink::Env));
         assert_eq!(env_sink(true, &RustflagsEnv::default()), Some(Sink::Env));
         assert_eq!(env_sink(false, &RustflagsEnv::default()), None);
+    }
+
+    #[test]
+    fn the_target_source_is_decided_on_merged_flags() {
+        let doc = |text: &str| (PathBuf::from("c"), text.parse::<toml::Table>().unwrap());
+        let host = Platform::Host(Some("x86_64-unknown-linux-gnu"));
+        let triples = vec!["x86_64-unknown-linux-gnu".to_owned()];
+        let live = |files: &[(PathBuf, toml::Table)]| target_source_live(files, &triples, host);
+
+        // A string value counts, not only a non-empty array.
+        assert!(live(&[doc("[target.'cfg(all())']\nrustflags = \"-Dwarnings\"\n")]));
+        // A higher layer's empty string replaces the lower array: nothing left.
+        assert!(!live(&[
+            doc("[target.'cfg(all())']\nrustflags = \"\"\n"),
+            doc("[target.'cfg(all())']\nrustflags = [\"-Dwarnings\"]\n"),
+        ]));
+        // A table brokkr cannot evaluate does not cancel one it can prove.
+        assert!(live(&[doc(
+            "[target.'cfg(all())']\nrustflags = [\"-Dwarnings\"]\n\
+             [target.'cfg(target_has_atomic = \"128\")']\nrustflags = [\"-Cx\"]\n"
+        )]));
+        assert!(!live(&[doc("[build]\nrustflags = [\"-Cx\"]\n")]));
+        // Replacement and an undecided table together: the replaced lower
+        // layer's flags prove nothing (the review's counterexample).
+        assert!(!live(&[
+            doc(
+                "[build]\nrustflags = [\"-Ctarget-cpu=native\"]\n\
+                 [target.'cfg(all())']\nrustflags = \"\"\n\
+                 [target.'cfg(all(windows, target_has_atomic = \"128\"))']\nrustflags = [\"-Cx\"]\n"
+            ),
+            doc("[target.'cfg(all())']\nrustflags = [\"-Dwarnings\"]\n"),
+        ]));
+        // The triple key counts like a matching cfg.
+        assert!(live(&[doc("[target.x86_64-unknown-linux-gnu]\nrustflags = [\"-Cx\"]\n")]));
     }
 
     #[test]

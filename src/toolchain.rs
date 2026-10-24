@@ -15,7 +15,7 @@
 //! return, the cooperative-interrupt path (runs unwind through
 //! `DevError::Interrupted`) and a `check`/`test`/`clippy` watchdog kill, which
 //! unwinds the same way - and whose exit backstop calls
-//! [`restore_active_hold`]. It does **not** cover a hard kill
+//! [`crate::tree_policy::restore_active_hold`]. It does **not** cover a hard kill
 //! (`brokkr kill --hard`, SIGKILL) or a signal during an unguarded window (a
 //! bare `cargo build`), which terminates brokkr with no unwinding - that
 //! mirrors how the rest of brokkr
@@ -27,15 +27,17 @@
 //!
 //! A `--commit` run builds in a persistent worktree rather than the live build
 //! root, so [`with_worktree`](crate::context::with_worktree), which holds the
-//! lock across the whole `--commit` run, activates a [`DisabledToolchain`] on
-//! the worktree path itself for the build closure when `disable_toolchain` is
-//! set - otherwise the commit's own committed pin would be honoured there.
-//! (The worktree path is attached to the active hold for its own lifetime.)
+//! lock across the whole `--commit` run, activates the tree policy on the
+//! worktree path itself for the build closure - otherwise the commit's own
+//! committed pin would be honoured there. (The worktree path is attached to
+//! the active hold for its own lifetime.)
 //!
 //! ## Serialisation
 //!
-//! Activation is driven by the global command lock, not the top of `run`. The
-//! lock context carries the configured build-root path into acquisition. After
+//! Activation is driven by the global command lock, through
+//! [`crate::tree_policy`], which also owns the cargo config strip sharing
+//! this lifecycle. The lock context carries the configured build-root path
+//! and policy into acquisition. After
 //! taking the flock, checking the disk gate and draining compiler leases,
 //! acquisition moves the file aside before publishing the hold capability.
 //! The returned `LockGuard` restores it just before releasing the flock, so
@@ -56,29 +58,14 @@ use std::path::{Path, PathBuf};
 use crate::error::DevError;
 use crate::output;
 
-/// Activate the configured toolchain-disable path, if any. Lock acquisition
-/// calls this after the compiler drain and before publishing the capability.
-/// The returned guard is stored in the `LockGuard` and restores the file just
-/// before the flock is released.
-pub fn activate_for_lock(dir: Option<&Path>) -> Result<Option<DisabledToolchain>, DevError> {
-    match dir {
-        Some(dir) => Ok(Some(DisabledToolchain::activate(dir)?)),
-        None => Ok(None),
-    }
-}
-
-/// Put back toolchain pins held aside by the live lock, for a process about to
-/// exit without unwinding - the `check` watchdog's backstop, whose main thread
-/// (and so the `LockGuard` whose drop normally restores) is stuck. The hold
-/// records its primary directory and any active worktree directories. Only a
-/// sidecar whose original is absent is renamed back, as the guard's drop would
-/// do; the path list is scoped to the active hold.
-pub fn restore_active_hold() {
-    let Some(dirs) = crate::lockfile::current_hold_toolchain_dirs() else {
-        return;
-    };
+/// Put back toolchain pins held aside in `dirs`, for a process about to exit
+/// without unwinding - the `check` watchdog's backstop, through
+/// [`crate::tree_policy::restore_active_hold`], whose main thread (and so the
+/// guard whose drop normally restores) is stuck. Only a sidecar whose original
+/// is absent is renamed back, as the guard's drop would do.
+pub fn restore_dirs(dirs: &[PathBuf]) {
     for dir in dirs {
-        restore_dir(&dir);
+        restore_dir(dir);
     }
 }
 
@@ -136,17 +123,11 @@ pub(crate) fn moved_paths() -> impl Iterator<Item = (&'static str, PathBuf)> {
 /// Guard that has moved a project's toolchain file(s) aside and restores them
 /// when dropped. An empty guard (no files found) is a harmless no-op.
 pub struct DisabledToolchain {
-    /// Directory whose toolchain files are held aside.
-    dir: PathBuf,
     /// `(moved-aside path, original path)` pairs to rename back on drop.
     moved: Vec<(PathBuf, PathBuf)>,
 }
 
 impl DisabledToolchain {
-    pub(crate) fn directory(&self) -> &Path {
-        &self.dir
-    }
-
     /// Move any toolchain file in `dir` aside, returning a guard that restores
     /// it on drop. `dir` is the code tree where cargo runs (the build root).
     ///
@@ -154,7 +135,10 @@ impl DisabledToolchain {
     /// adopted (tracked for restore) even when the original is already gone, so
     /// the next clean run heals it.
     pub fn activate(dir: &Path) -> Result<Self, DevError> {
-        let mut moved = Vec::new();
+        // The guard exists before the first move, so an error on a later
+        // file drops it and puts back what was already moved.
+        let mut guard = Self { moved: Vec::new() };
+        let moved = &mut guard.moved;
         for (name, sidecar) in moved_paths() {
             let orig = dir.join(name);
             let aside = dir.join(sidecar);
@@ -209,10 +193,7 @@ impl DisabledToolchain {
                 moved.push((aside, orig));
             }
         }
-        Ok(Self {
-            dir: dir.to_owned(),
-            moved,
-        })
+        Ok(guard)
     }
 }
 
@@ -336,14 +317,35 @@ mod tests {
         let toml = dir.join("rust-toolchain.toml");
         fs::write(&toml, "pinned").unwrap();
 
+        let policy = crate::tree_policy::TreePolicy {
+            disable_toolchain: true,
+            strip_rustflags: Vec::new(),
+        };
         {
-            let guard = super::activate_for_lock(Some(&dir)).unwrap();
+            let target = crate::tree_policy::TreeTarget {
+                dir: &dir,
+                policy: &policy,
+            };
+            let guard = crate::tree_policy::activate_for_lock(Some(target)).unwrap();
             assert!(guard.is_some());
             assert!(!toml.exists());
             assert!(dir.join(format!("rust-toolchain.toml{SUFFIX}")).exists());
         }
         assert!(toml.exists());
 
-        assert!(super::activate_for_lock(None).unwrap().is_none());
+        assert!(crate::tree_policy::activate_for_lock(None).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_failed_later_move_puts_back_the_earlier_one() {
+        let dir = tmpdir("rollback");
+        let toml = dir.join("rust-toolchain.toml");
+        fs::write(&toml, "a").unwrap();
+        // The legacy pin's sidecar name is a directory, so removing the
+        // stale sidecar fails after the first pin has moved.
+        fs::write(dir.join("rust-toolchain"), "b").unwrap();
+        fs::create_dir(dir.join(format!("rust-toolchain{SUFFIX}"))).unwrap();
+        assert!(DisabledToolchain::activate(&dir).is_err());
+        assert_eq!(fs::read_to_string(&toml).unwrap(), "a");
     }
 }

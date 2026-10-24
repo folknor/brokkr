@@ -191,6 +191,10 @@ pub struct DevConfig {
     /// toolchain we don't have or don't want. `false` by default. See
     /// [`crate::toolchain`].
     pub disable_toolchain: bool,
+    /// Top-level `strip_rustflags`: flags removed from the tree's own cargo
+    /// config for the locked window. Empty when the key is absent, and then
+    /// nothing is edited. See [`crate::cargo_config_strip`].
+    pub strip_rustflags: Vec<crate::cargo_config_strip::StripSpec>,
     /// `[cargo_env]`: variable name -> shell command whose output brokkr sets
     /// on every cargo it launches. See [`crate::cargo_env`].
     pub cargo_env: std::collections::BTreeMap<String, String>,

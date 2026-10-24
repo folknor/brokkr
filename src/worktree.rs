@@ -187,6 +187,14 @@ impl Worktree {
         let record_name = record_name(&slot)
             .ok_or_else(|| DevError::Config(format!("bad worktree slot {}", slot.display())))?;
 
+        // A run that died while its cargo config was filtered left the
+        // checkout in a state only recovery can read; put it back before any
+        // cleanliness question is asked of it, or it reads as modified and is
+        // refused forever. Policy-independent, and a no-op without leftovers.
+        if checkout.exists() {
+            crate::cargo_config_strip::recover(&checkout)?;
+        }
+
         // Reuse path: if a worktree already exists here and its HEAD matches
         // the requested commit, skip remove + re-add.
         if checkout.exists()
