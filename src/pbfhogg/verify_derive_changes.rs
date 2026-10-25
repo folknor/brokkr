@@ -58,7 +58,9 @@ pub fn run(
         ],
         Writes::OwnedOutput,
     )?;
-    harness.check_exit(&captured, "pbfhogg diff --format osc")?;
+    // Like a text diff, it exits 1 when the inputs differ - the normal case
+    // here - and still writes its OSC; 2 and above are real failures.
+    captured.check_success_or("pbfhogg diff --format osc", &[1])?;
 
     let osmium_osc = outdir.join("osmium.osc.gz");
     let osmium_osc_str = osmium_osc.display().to_string();

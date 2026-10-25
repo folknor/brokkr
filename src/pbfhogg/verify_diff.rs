@@ -35,10 +35,12 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<Findings, 
     )?;
     harness.check_exit(&captured, "pbfhogg apply-changes")?;
 
-    // pbfhogg diff - exits non-zero when differences exist, so do NOT check_exit.
+    // pbfhogg diff exits 1 when differences exist; 2 and above mean it did
+    // not complete, and its missing summary must not reach the parser.
     verify_msg("--- pbfhogg diff ---");
     let captured =
         harness.run_pbfhogg(&["diff", "-c", &pbf_str, &new_pbf_str], Writes::Nothing)?;
+    captured.check_success_or("pbfhogg diff", &[1])?;
 
     fs::write(outdir.join("pbfhogg-diff.txt"), &captured.stdout)?;
     fs::write(outdir.join("pbfhogg-summary.txt"), &captured.stderr)?;
