@@ -28,7 +28,7 @@ toml_edit = "0.25.13"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.150"
 libc = "0.2.191"
-rusqlite = { version = "0.40.0", features = ["bundled", "backup"] }
+rusqlite = { version = "0.41.0", features = ["bundled", "backup"] }
 xxhash-rust = { version = "0.8.16", features = ["xxh3"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 png = "0.18"
@@ -37,7 +37,7 @@ globset = "0.4"
 # The rust-lang tokenizer, as rust-analyzer republishes it: tracks current
 # token syntax (raw C strings, guarded string prefixes), which textlint's
 # region masking and `skip_test` admission must not misread.
-ra-ap-rustc_lexer = "0.178"
+ra-ap-rustc_lexer = "0.179.0"
 # Not used directly. The lexer asserts at compile time that unicode-ident and
 # unicode-properties carry the same Unicode version, but only requires
 # unicode-ident >= 1.0.22, which admits releases a Unicode version ahead of

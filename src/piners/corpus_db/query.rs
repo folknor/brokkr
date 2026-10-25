@@ -742,8 +742,7 @@ fn read_raw(
 ) -> Result<RawTable, DevError> {
     let columns: Vec<String> = stmt
         .column_names()
-        .iter()
-        .map(|s| (*s).to_owned())
+        .map(str::to_owned)
         .collect();
     let n = columns.len();
     let rows = stmt.query_map(params, |row| {
