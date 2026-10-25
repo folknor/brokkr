@@ -241,6 +241,20 @@ impl VerifyHarness {
         }
     }
 
+    /// Write `input` without its blob-level indexdata to `output`, through
+    /// `pbfhogg degrade --strip-indexdata` (element content and order kept),
+    /// so a check can drive the unindexed code path of a command whose
+    /// indexed run it already verifies.
+    pub fn strip_indexdata(&self, input: &Path, output: &Path) -> Result<(), DevError> {
+        let input_str = input.display().to_string();
+        let output_str = output.display().to_string();
+        let captured = self.run_pbfhogg(
+            &["degrade", "--strip-indexdata", &input_str, "-o", &output_str],
+            Writes::OwnedOutput,
+        )?;
+        self.check_exit(&captured, "pbfhogg degrade --strip-indexdata")
+    }
+
     /// Compare the sort flag between a pbfhogg-produced PBF and a reference PBF.
     ///
     /// Returns [`Verdict::Fail`] only if the reference has Sort.Type_then_ID

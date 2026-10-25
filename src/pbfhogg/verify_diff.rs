@@ -3,14 +3,15 @@
 use std::fs;
 use std::path::Path;
 
-use super::verify::{ExternalTool, Findings, VerifyHarness, Writes};
+use super::verify::{ExternalTool, Findings, Verdict, VerifyHarness, Writes};
 use crate::error::DevError;
 use crate::output::verify_msg;
 
 /// Cross-validate `pbfhogg diff` against `osmium diff --summary`.
 ///
 /// Creates a "new" PBF by merging, then diffs old vs new with both tools
-/// and compares their summary output and line counts.
+/// and compares their summary output and line counts, then reruns pbfhogg's
+/// diff on the pair stripped of indexdata against its indexed answer.
 pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<Findings, DevError> {
     let outdir = harness.subdir("diff")?;
 
@@ -38,14 +39,14 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<Findings, 
     // pbfhogg diff exits 1 when differences exist; 2 and above mean it did
     // not complete, and its missing summary must not reach the parser.
     verify_msg("--- pbfhogg diff ---");
-    let captured =
+    let captured_indexed =
         harness.run_pbfhogg(&["diff", "-c", &pbf_str, &new_pbf_str], Writes::Nothing)?;
-    captured.check_success_or("pbfhogg diff", &[1])?;
+    captured_indexed.check_success_or("pbfhogg diff", &[1])?;
 
-    fs::write(outdir.join("pbfhogg-diff.txt"), &captured.stdout)?;
-    fs::write(outdir.join("pbfhogg-summary.txt"), &captured.stderr)?;
-    let pbfhogg_diff = String::from_utf8_lossy(&captured.stdout);
-    let pbfhogg_summary = String::from_utf8_lossy(&captured.stderr);
+    fs::write(outdir.join("pbfhogg-diff.txt"), &captured_indexed.stdout)?;
+    fs::write(outdir.join("pbfhogg-summary.txt"), &captured_indexed.stderr)?;
+    let pbfhogg_diff = String::from_utf8_lossy(&captured_indexed.stdout);
+    let pbfhogg_summary = String::from_utf8_lossy(&captured_indexed.stderr);
 
     // osmium diff - exits non-zero when differences exist, so do NOT check_exit.
     // `--suppress-common` (osmium's -c) is required to match pbfhogg's `-c`
@@ -93,7 +94,82 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<Findings, 
 
     // compare_diff_classes reports every failure as an `Err`.
     compare_diff_classes(&pbfhogg_summary, &osmium_summary)?;
-    Ok(Findings::new())
+
+    let mut findings = Findings::new();
+    findings.record(
+        "unindexed diff vs indexed diff",
+        unindexed_diff_matches(
+            harness,
+            &outdir,
+            pbf,
+            &new_pbf,
+            &captured_indexed.stdout,
+            &pbfhogg_summary,
+        )?,
+    );
+    Ok(findings)
+}
+
+/// Rerun the diff on the same pair stripped of indexdata and require the
+/// indexed run's listing byte for byte and its summary's class counts.
+///
+/// pbfhogg diff has a separate code path for inputs without indexdata, meant
+/// to answer exactly as the indexed one does. apply-changes refuses an
+/// unindexed base, so a raw variant cannot drive this check; stripping both
+/// sides of the pair verified above can. The indexed classes are reconciled
+/// with osmium above, so matching them holds the unindexed path to osmium
+/// too. The summary is compared by its classes, not its text, which leaves
+/// pbfhogg free to word the two paths' stderr differently.
+fn unindexed_diff_matches(
+    harness: &VerifyHarness,
+    outdir: &Path,
+    old: &Path,
+    new: &Path,
+    indexed_listing: &[u8],
+    indexed_summary: &str,
+) -> Result<Verdict, DevError> {
+    let old_raw = outdir.join("old-unindexed.osm.pbf");
+    let new_raw = outdir.join("new-unindexed.osm.pbf");
+    verify_msg("--- stripping indexdata from old and new ---");
+    harness.strip_indexdata(old, &old_raw)?;
+    harness.strip_indexdata(new, &new_raw)?;
+
+    verify_msg("--- pbfhogg diff (unindexed inputs) ---");
+    let old_raw_str = old_raw.display().to_string();
+    let new_raw_str = new_raw.display().to_string();
+    let captured =
+        harness.run_pbfhogg(&["diff", "-c", &old_raw_str, &new_raw_str], Writes::Nothing)?;
+    captured.check_success_or("pbfhogg diff (unindexed inputs)", &[1])?;
+    fs::write(outdir.join("pbfhogg-unindexed-diff.txt"), &captured.stdout)?;
+    fs::write(
+        outdir.join("pbfhogg-unindexed-summary.txt"),
+        &captured.stderr,
+    )?;
+    let raw_summary = String::from_utf8_lossy(&captured.stderr);
+
+    verify_msg("=== diff: unindexed vs indexed ===");
+    let indexed_classes = parse_pbfhogg_diff_summary(indexed_summary);
+    let raw_classes = parse_pbfhogg_diff_summary(&raw_summary);
+    let listing_matches = captured.stdout == indexed_listing;
+    if listing_matches && raw_classes.is_some() && raw_classes == indexed_classes {
+        verify_msg("  PASS (identical listing and classes)");
+        return Ok(Verdict::Pass);
+    }
+    if !listing_matches {
+        let at = captured
+            .stdout
+            .iter()
+            .zip(indexed_listing)
+            .position(|(a, b)| a != b)
+            .unwrap_or_else(|| captured.stdout.len().min(indexed_listing.len()));
+        verify_msg(&format!("  FAIL (listing first differs at byte {at})"));
+    }
+    if raw_classes != indexed_classes || raw_classes.is_none() {
+        verify_msg(&format!(
+            "  FAIL (classes differ: unindexed {raw_classes:?}, indexed {indexed_classes:?})"
+        ));
+    }
+    Ok(Verdict::Fail)
 }
 
 /// Cross-check pbfhogg's `{c} created, {m} modified, {d} deleted` summary

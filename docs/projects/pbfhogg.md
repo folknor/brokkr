@@ -156,6 +156,18 @@ unconditionally), everything else fails.
 not stamp the feature, so `verify_merge` and `verify_derive_changes` pass it
 through `pbfhogg sort --force` (content unchanged) before diffing.
 
+`pbfhogg diff` has a separate code path for inputs without indexdata, meant
+to answer exactly as the indexed one does. `apply-changes` refuses an
+unindexed base, so `--variant raw` cannot reach it; instead `verify_diff` and
+`verify_derive_changes` strip both sides of their verified pair with `pbfhogg
+degrade --strip-indexdata` and rerun the diff. `verify_derive_changes`
+requires the indexed OSC's decompressed content (gzip framing is not
+compared), and `verify_diff` requires the indexed listing byte for byte and
+the same summary classes. The indexed answer is the one held to osmium, so
+the match holds the unindexed path to osmium too. Both treat exit 1 from
+`pbfhogg diff`, text or OSC, as "the inputs differ", and 2 and above as a
+failed run.
+
 `verify add-locations-to-ways` runs osmium with `--keep-member-nodes`: pbfhogg
 keeps untagged relation-member nodes unconditionally (a documented pbfhogg
 deviation), osmium only with that flag.

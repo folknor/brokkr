@@ -2,14 +2,17 @@
 
 use std::path::Path;
 
-use super::verify::{ExternalTool, Findings, VerifyHarness, Writes};
+use super::verify::{ExternalTool, Findings, Verdict, VerifyHarness, Writes};
 use crate::error::DevError;
+use crate::osc;
 use crate::output::verify_msg;
 
 /// Cross-validate `pbfhogg diff --format osc` against `osmium derive-changes`.
 ///
 /// Creates a "new" PBF by applying changes, derives changes from old->new with
 /// both tools, then roundtrips each derived OSC back through apply-changes and compares.
+/// Finally derives again from the pair stripped of indexdata and requires the
+/// indexed OSC's content.
 #[allow(clippy::too_many_lines)]
 pub fn run(
     harness: &VerifyHarness,
@@ -170,6 +173,11 @@ pub fn run(
         findings.record(&format!("diff {label}"), diff);
     }
 
+    findings.record(
+        "unindexed OSC vs indexed OSC",
+        unindexed_osc_matches(harness, &outdir, pbf, &new_pbf, &pbfhogg_osc)?,
+    );
+
     // Sort checks.
     findings.record("new order", harness.check_sorted("new", &new_pbf)?);
     findings.record(
@@ -178,4 +186,60 @@ pub fn run(
     );
 
     Ok(findings)
+}
+
+/// Rerun the derive on the same pair stripped of indexdata and require the
+/// indexed run's OSC exactly.
+///
+/// pbfhogg diff has a separate code path for inputs without indexdata, meant
+/// to write the same OSC, full metadata included. apply-changes refuses an
+/// unindexed base, so a raw variant cannot drive this check; stripping both
+/// sides of the pair verified above can. The indexed OSC is cross-checked
+/// against osmium by the roundtrips, so matching it holds the unindexed path
+/// to osmium too.
+fn unindexed_osc_matches(
+    harness: &VerifyHarness,
+    outdir: &Path,
+    old: &Path,
+    new: &Path,
+    indexed_osc: &Path,
+) -> Result<Verdict, DevError> {
+    let old_raw = outdir.join("old-unindexed.osm.pbf");
+    let new_raw = outdir.join("new-unindexed.osm.pbf");
+    verify_msg("--- stripping indexdata from old and new ---");
+    harness.strip_indexdata(old, &old_raw)?;
+    harness.strip_indexdata(new, &new_raw)?;
+
+    let raw_osc = outdir.join("pbfhogg-unindexed.osc.gz");
+    let old_raw_str = old_raw.display().to_string();
+    let new_raw_str = new_raw.display().to_string();
+    let raw_osc_str = raw_osc.display().to_string();
+    verify_msg("--- pbfhogg diff --format osc (unindexed inputs) ---");
+    let captured = harness.run_pbfhogg(
+        &[
+            "diff",
+            "--format",
+            "osc",
+            &old_raw_str,
+            &new_raw_str,
+            "-o",
+            &raw_osc_str,
+        ],
+        Writes::OwnedOutput,
+    )?;
+    captured.check_success_or("pbfhogg diff --format osc (unindexed inputs)", &[1])?;
+
+    verify_msg("=== diff: unindexed OSC vs indexed OSC ===");
+    match osc::first_content_difference(&raw_osc, indexed_osc)? {
+        None => {
+            verify_msg("  PASS (identical content)");
+            Ok(Verdict::Pass)
+        }
+        Some(offset) => {
+            verify_msg(&format!(
+                "  FAIL (decompressed content first differs at byte {offset})"
+            ));
+            Ok(Verdict::Fail)
+        }
+    }
 }

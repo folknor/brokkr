@@ -17,7 +17,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::{self, Cursor, Read};
+use std::io::{self, BufRead, Cursor, Read};
 use std::path::Path;
 
 use flate2::read::MultiGzDecoder;
@@ -69,27 +69,8 @@ impl OscDiff {
 /// the create/modify/delete sections). Plain `GzDecoder` stops silently at the
 /// first member boundary and would yield a truncated-but-valid-looking OSC.
 pub fn parse_osc_file(path: &Path) -> Result<OscDiff, DevError> {
-    let mut file = File::open(path)
-        .map_err(|e| DevError::Verify(format!("cannot open OSC {}: {e}", path.display())))?;
-    let mut magic = [0; 2];
-    let mut prefix_len = 0;
-    while prefix_len < magic.len() {
-        let read = file
-            .read(&mut magic[prefix_len..])
-            .map_err(|e| DevError::Verify(format!("cannot read OSC {}: {e}", path.display())))?;
-        if read == 0 {
-            break;
-        }
-        prefix_len += read;
-    }
-    let input = Cursor::new(magic[..prefix_len].to_vec()).chain(file);
-    let compressed = prefix_len == 2 && magic == [0x1f, 0x8b];
-    let result = if compressed {
-        parse_osc_reader(MultiGzDecoder::new(input))
-    } else {
-        parse_osc_reader(input)
-    };
-    result.map_err(|error| match error {
+    let (input, compressed) = open_osc(path)?;
+    parse_osc_reader(input).map_err(|error| match error {
         OscReadError::Read(error) if compressed => {
             DevError::Verify(format!("cannot decompress OSC {}: {error}", path.display()))
         }
@@ -105,6 +86,68 @@ pub fn parse_osc_file(path: &Path) -> Result<OscDiff, DevError> {
             path.display()
         )),
     })
+}
+
+/// Open an OSC file as its decompressed byte stream, gzip detected by magic
+/// as in [`parse_osc_file`]. The flag says whether it was gzip.
+fn open_osc(path: &Path) -> Result<(Box<dyn Read>, bool), DevError> {
+    let mut file = File::open(path)
+        .map_err(|e| DevError::Verify(format!("cannot open OSC {}: {e}", path.display())))?;
+    let mut magic = [0; 2];
+    let mut prefix_len = 0;
+    while prefix_len < magic.len() {
+        let read = file
+            .read(&mut magic[prefix_len..])
+            .map_err(|e| DevError::Verify(format!("cannot read OSC {}: {e}", path.display())))?;
+        if read == 0 {
+            break;
+        }
+        prefix_len += read;
+    }
+    let input = Cursor::new(magic[..prefix_len].to_vec()).chain(file);
+    let compressed = prefix_len == 2 && magic == [0x1f, 0x8b];
+    if compressed {
+        Ok((Box::new(MultiGzDecoder::new(input)), true))
+    } else {
+        Ok((Box::new(input), false))
+    }
+}
+
+/// The offset of the first byte at which two OSC files' decompressed contents
+/// differ (where the shorter one ends, if one is a prefix of the other), or
+/// `None` when they are identical. The gzip framing is not compared: pbfhogg
+/// splices independently-gzipped members, so two runs may frame the same
+/// document differently.
+pub fn first_content_difference(a: &Path, b: &Path) -> Result<Option<u64>, DevError> {
+    let (a_input, _) = open_osc(a)?;
+    let (b_input, _) = open_osc(b)?;
+    first_stream_difference(a_input, b_input).map_err(|e| {
+        DevError::Verify(format!(
+            "cannot read OSC {} or {}: {e}",
+            a.display(),
+            b.display()
+        ))
+    })
+}
+
+fn first_stream_difference(a: impl Read, b: impl Read) -> io::Result<Option<u64>> {
+    let mut a = io::BufReader::new(a);
+    let mut b = io::BufReader::new(b);
+    let mut offset: u64 = 0;
+    loop {
+        let a_buf = a.fill_buf()?;
+        let b_buf = b.fill_buf()?;
+        if a_buf.is_empty() || b_buf.is_empty() {
+            return Ok((a_buf.len() != b_buf.len()).then_some(offset));
+        }
+        let n = a_buf.len().min(b_buf.len());
+        if let Some(i) = a_buf[..n].iter().zip(&b_buf[..n]).position(|(x, y)| x != y) {
+            return Ok(Some(offset + i as u64));
+        }
+        a.consume(n);
+        b.consume(n);
+        offset += n as u64;
+    }
 }
 
 /// Section the parser is currently inside. `None` means "between
@@ -493,6 +536,42 @@ mod tests {
             diff.deleted_ways.iter().copied().collect::<Vec<_>>(),
             vec![2]
         );
+    }
+
+    #[test]
+    fn content_difference_ignores_gzip_framing() {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Write;
+
+        let gz = |s: &str| {
+            let mut e = GzEncoder::new(Vec::new(), Compression::default());
+            e.write_all(s.as_bytes()).unwrap();
+            e.finish().unwrap()
+        };
+        let doc = r#"<osmChange><create><node id="1" version="1"/></create></osmChange>"#;
+        let (head, tail) = doc.split_at(30);
+        let mut two_members = gz(head);
+        two_members.extend(gz(tail));
+
+        let one = crate::test_scratch::scratch_path("osc", "framing-one.osc.gz");
+        let two = crate::test_scratch::scratch_path("osc", "framing-two.osc.gz");
+        let plain = crate::test_scratch::scratch_path("osc", "framing-plain.osc");
+        std::fs::write(&one, gz(doc)).unwrap();
+        std::fs::write(&two, two_members).unwrap();
+        std::fs::write(&plain, doc).unwrap();
+        assert_eq!(first_content_difference(&one, &two).unwrap(), None);
+        assert_eq!(first_content_difference(&one, &plain).unwrap(), None);
+    }
+
+    #[test]
+    fn content_difference_names_the_first_differing_offset() {
+        let at = |a: &str, b: &str| first_stream_difference(a.as_bytes(), b.as_bytes()).unwrap();
+        assert_eq!(at("abc", "abc"), None);
+        assert_eq!(at("abc", "abd"), Some(2));
+        assert_eq!(at("abc", "abcd"), Some(3));
+        assert_eq!(at("abcd", "abc"), Some(3));
+        assert_eq!(at("", ""), None);
     }
 
     #[test]
