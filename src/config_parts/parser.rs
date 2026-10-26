@@ -1091,6 +1091,8 @@ struct GremlinsRaw {
     #[serde(default)]
     exclude: Vec<String>,
     #[serde(default)]
+    include: Vec<String>,
+    #[serde(default)]
     allow: Vec<String>,
     #[serde(default)]
     ban: Vec<String>,
@@ -1100,9 +1102,10 @@ struct GremlinsRaw {
 ///
 /// Validates each `exclude` entry (no empty strings - a blank prefix would
 /// match every path and silently disable the whole scan - and no absolute
-/// paths), and parses `allow`/`ban` `U+XXXX` codepoints into char sets. A
-/// codepoint listed in both is allowed - `allow` wins at scan time, so
-/// allow-listing exceptions to a banned range is the intended usage.
+/// paths), compiles the `include` globs, and parses `allow`/`ban` `U+XXXX`
+/// codepoints into char sets. A codepoint listed in both is allowed - `allow`
+/// wins at scan time, so allow-listing exceptions to a banned range is the
+/// intended usage.
 fn parse_gremlins(
     table: &toml::map::Map<String, toml::Value>,
 ) -> Result<Option<GremlinsConfig>, DevError> {
@@ -1144,6 +1147,9 @@ fn parse_gremlins(
         }
     }
 
+    // Compiled here, after composition, so an invalid glob is a load error
+    // naming the key, as `[header]` paths are.
+    let include_set = crate::globs::build_set(&raw.include, "[gremlins].include")?;
     let allow = parse_codepoint_set("allow", &raw.allow)?;
     let ban = parse_codepoint_set("ban", &raw.ban)?;
     // A codepoint appearing in both `allow` and `ban` is NOT an error: the
@@ -1155,6 +1161,8 @@ fn parse_gremlins(
     Ok(Some(GremlinsConfig {
         disable: raw.disable,
         exclude: raw.exclude,
+        include: raw.include,
+        include_set,
         allow,
         ban,
     }))

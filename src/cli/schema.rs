@@ -212,7 +212,7 @@ In depth: `brokkr man check` (one section at a time, e.g. `man check clippy`)."
         script_names: Vec<String>,
 
         /// Report configuration hygiene and run nothing else: `paths`,
-        /// `exclude` and `exempt` globs that select no tracked file, and
+        /// `include`, `exclude` and `exempt` globs that select no tracked file, and
         /// exclusions that excuse everything their selector picked, across
         /// `[gremlins]`, `[header]`, `[[textlint]]` and `[manifest]`. An
         /// ordinary check never prints these. Exits 0 whatever it finds.

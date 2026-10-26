@@ -408,8 +408,10 @@ finding is printed as a warning:
   `[manifest]` (including `shape_exclude`) that selects no tracked file;
 - an exclusion that excuses every file its selector picked, and a
   `[manifest]` scope that leaves no manifest;
-- a `[gremlins].exclude` entry that matches no scannable file, or that
-  removes every one (skipped under `[gremlins].disable = true`).
+- a `[gremlins].include` glob that matches no tracked file, and a
+  `[gremlins].exclude` entry that matches no scannable file (built-in
+  extension or `include`), or that removes every one (all skipped under
+  `[gremlins].disable = true`).
 
 An ordinary check prints none of this. A user-wide rule legitimately names
 paths most trees lack, and an exclusion may reserve a path that is absent
@@ -465,7 +467,8 @@ trailer carries it as `scope: "prose_only"`.
 Runs first and fails the check if any banned Unicode character
 is found in `.rs`/`.toml`/`.md`/`.markdown`/`.js`/`.sh`/`.py`/`.yml`/`.yaml`
 files (case-insensitive, tracked or untracked-not-gitignored, so new plan docs
-are caught before staging) - see
+are caught before staging), plus any file a `[gremlins].include` glob names -
+see
 `src/gremlins.rs` for the banned set (invisible/zero-width, non-breaking
 spaces, bidi overrides, em/en dashes, typographic quotes, and emoji /
 pictographs: Misc Symbols, Dingbats, the emoji planes, and emoji variation
@@ -476,8 +479,9 @@ rewrites every banned char in place with its ASCII equivalent (or deletes it
 for zero-width/bidi/emoji noise, which have none) before the scan runs, so the
 subsequent check finds zero and passes.
 
-`[gremlins]` can exclude directories (vendored material) and adjust the banned
-set; see `brokkr man conventions gremlins`.
+`[gremlins]` can include further files (an extensionless `LICENSE`), exclude
+directories (vendored material) and adjust the banned set; see
+`brokkr man conventions gremlins`.
 
 ## `header` phase
 

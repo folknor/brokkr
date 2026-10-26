@@ -1,6 +1,7 @@
 //! Gremlin detector for `brokkr check`.
 //!
-//! Scans tracked and untracked-not-ignored source, config, and doc files for invisible or visually
+//! Scans tracked and untracked-not-ignored source, config, and doc files
+//! (the built-in extension list plus any `[gremlins].include` glob) for invisible or visually
 //! deceptive Unicode characters that tend to sneak in via copy-paste from
 //! editors, chat logs, or LLM output and cause subtle bugs. The banned
 //! set covers several families:
@@ -145,7 +146,7 @@ pub fn fix(
     let files = tree.files();
     let mut out = Vec::new();
     for rel in files {
-        if !is_scannable(rel) || is_excluded(rel, config) {
+        if !is_selected(rel, config) {
             continue;
         }
         let Some(bytes) = tree.read_file(rel)? else {
@@ -284,8 +285,9 @@ const GREMLINS: &[(char, &str)] = &[
     ('\u{FFFC}', "OBJECT REPLACEMENT CHARACTER"),
 ];
 
-/// Scan every snapshot file with a scannable extension, skipping any path
-/// under a `[gremlins].exclude` directory.
+/// Scan every snapshot file with a scannable extension or matching a
+/// `[gremlins].include` glob, skipping any path under a `[gremlins].exclude`
+/// directory.
 #[cfg(test)]
 pub fn scan(
     tree: &crate::scope::TreeSnapshot,
@@ -304,7 +306,7 @@ pub(crate) fn scan_report(
     let mut out = Vec::new();
     let mut scanned = 0usize;
     for rel in files {
-        if !is_scannable(rel) || is_excluded(rel, config) {
+        if !is_selected(rel, config) {
             continue;
         }
         let Some(bytes) = tree.read_file(rel)? else {
@@ -473,13 +475,22 @@ fn pictograph_name(cp: u32) -> Option<&'static str> {
     }
 }
 
-/// True when `rel` lives under a `[gremlins].exclude` directory and should
-/// be skipped. `None` config (no `[gremlins]` section) excludes nothing.
-fn is_excluded(rel: &Path, config: Option<&GremlinsConfig>) -> bool {
-    config.is_some_and(|c| c.is_excluded(rel))
+/// Whether the scan and `--fix-gremlins` take `rel`: a [candidate](is_candidate)
+/// not under a `[gremlins].exclude` directory. Exclusion wins over `include`.
+fn is_selected(rel: &Path, config: Option<&GremlinsConfig>) -> bool {
+    is_candidate(rel, config) && !config.is_some_and(|c| c.is_excluded(rel))
 }
 
-fn is_scannable(rel: &Path) -> bool {
+/// Whether `rel` is picked before exclusions apply: a built-in scanned
+/// extension, or a `[gremlins].include` glob match. Shared with the `--audit`,
+/// which judges each exclude entry against this set - judging it against the
+/// selected set would make every effective exclusion look dead.
+pub(crate) fn is_candidate(rel: &Path, config: Option<&GremlinsConfig>) -> bool {
+    has_scanned_extension(rel)
+        || config.is_some_and(|c| crate::globs::matches(&c.include_set, rel))
+}
+
+fn has_scanned_extension(rel: &Path) -> bool {
     let Some(ext) = rel.extension().and_then(|e| e.to_str()) else {
         return false;
     };
@@ -758,20 +769,80 @@ mod tests {
     }
 
     #[test]
-    fn is_scannable_matches_expected_extensions() {
-        assert!(is_scannable(Path::new("src/foo.rs")));
-        assert!(is_scannable(Path::new("Cargo.toml")));
-        assert!(is_scannable(Path::new("README.md")));
-        assert!(is_scannable(Path::new("README.MD")));
-        assert!(is_scannable(Path::new("guide.markdown")));
-        assert!(is_scannable(Path::new("x.js")));
-        assert!(is_scannable(Path::new("y.sh")));
-        assert!(is_scannable(Path::new("scripts/check.py")));
-        assert!(is_scannable(Path::new("config.yml")));
-        assert!(is_scannable(Path::new("config.yaml")));
-        assert!(!is_scannable(Path::new("foo.html")));
-        assert!(!is_scannable(Path::new("Cargo.lock")));
-        assert!(!is_scannable(Path::new("no_ext")));
+    fn builtin_extensions_select_without_config() {
+        let selected = |p: &str| is_selected(Path::new(p), None);
+        assert!(selected("src/foo.rs"));
+        assert!(selected("Cargo.toml"));
+        assert!(selected("README.md"));
+        assert!(selected("README.MD"));
+        assert!(selected("guide.markdown"));
+        assert!(selected("x.js"));
+        assert!(selected("y.sh"));
+        assert!(selected("scripts/check.py"));
+        assert!(selected("config.yml"));
+        assert!(selected("config.yaml"));
+        assert!(!selected("foo.html"));
+        assert!(!selected("Cargo.lock"));
+        assert!(!selected("no_ext"));
+    }
+
+    fn include_config(include: &[&str], exclude: &[&str]) -> GremlinsConfig {
+        let include: Vec<String> = include.iter().map(|s| (*s).to_owned()).collect();
+        GremlinsConfig {
+            include_set: crate::globs::build_set(&include, "[gremlins].include").unwrap(),
+            include,
+            exclude: exclude.iter().map(|s| (*s).to_owned()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn include_adds_files_and_exclude_still_wins() {
+        let cfg = include_config(&["LICENSE", "**/*.txt"], &["vendor"]);
+        let selected = |p: &str| is_selected(Path::new(p), Some(&cfg));
+        assert!(selected("LICENSE"));
+        assert!(selected("notes/a.txt"));
+        assert!(selected("src/lib.rs"));
+        // Shared selector syntax: a bare name is anchored at the root.
+        assert!(!selected("sub/LICENSE"));
+        assert!(!selected("Cargo.lock"));
+        // Exclusion wins over include, and over the built-in list.
+        assert!(!selected("vendor/x.txt"));
+        assert!(!selected("vendor/lib.rs"));
+        // The audit's candidate set is taken before exclusion.
+        assert!(is_candidate(Path::new("vendor/x.txt"), Some(&cfg)));
+    }
+
+    #[test]
+    fn scan_and_fix_follow_include() {
+        let root = crate::scope::test_git_tree("gremlins", "include_tree");
+        std::fs::write(root.join("LICENSE"), "MIT \u{2014} see below\n").unwrap();
+        std::fs::write(root.join("NOTICE"), "untouched \u{2014}\n").unwrap();
+        std::fs::create_dir_all(root.join("vendor")).unwrap();
+        std::fs::write(root.join("vendor/LICENSE"), "vendored \u{2014}\n").unwrap();
+        let cfg = include_config(&["LICENSE", "vendor/LICENSE"], &["vendor"]);
+
+        let tree = crate::scope::TreeSnapshot::load(&root).unwrap();
+        let found = scan(&tree, Some(&cfg)).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].path, PathBuf::from("LICENSE"));
+        // Without the include the extensionless file is not scanned.
+        assert!(scan(&tree, None).unwrap().is_empty());
+
+        let fixed = fix(&tree, Some(&cfg)).unwrap();
+        assert_eq!(fixed.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(root.join("LICENSE")).unwrap(),
+            "MIT - see below\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("NOTICE")).unwrap(),
+            "untouched \u{2014}\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("vendor/LICENSE")).unwrap(),
+            "vendored \u{2014}\n"
+        );
     }
 
     #[test]

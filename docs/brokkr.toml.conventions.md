@@ -12,6 +12,7 @@ heading is addressable: `brokkr man conventions script_check`.
 [gremlins]
 disable = false                                    # skip the phase entirely
 exclude = ["docs/reference-manual", "vendor/upstream-docs"]
+include = ["LICENSE", "**/*.txt"]                  # scan these beyond the built-in list
 allow = ["U+2019"]                                 # un-ban these codepoints
 ban = ["U+2011"]                                   # flag these codepoints
 ```
@@ -25,7 +26,20 @@ ban = ["U+2011"]                                   # flag these codepoints
   are project-root-relative directories matched by path prefix on the
   git-relative path: `docs/manual` covers `docs/manual/` and below, but not a
   sibling `docs/manual-extra`. Empty/absolute entries are rejected at parse
-  time.
+  time. `exclude` wins over `include` and over the built-in extension list.
+- `include` (default empty) - globs, in the shared selector syntax below,
+  naming files to scan in addition to the built-in extension list
+  (`.rs`/`.toml`/`.md`/`.markdown`/`.js`/`.sh`/`.py`/`.yml`/`.yaml`,
+  case-insensitive). Without it an extensionless file such as `LICENSE`, or
+  one with any other extension, is not scanned. `--fix-gremlins` follows the
+  scan, so an included file can be rewritten too: name paths deliberately,
+  never test fixtures that carry typographic Unicode on purpose. An included
+  file gets the same byte scan and fix as any other, with no check that it
+  is text: a binary passes or fails on its bytes (invalid UTF-8 is reported
+  byte by byte), a selected symlink is read and rewritten through to its
+  target, and a selected gitlink of an initialized submodule fails the phase
+  as unreadable. A broad glob such as `**` drags in lockfiles and data, and
+  the scan cost grows with it. An invalid glob is rejected at load time.
 - `allow` - codepoints to remove from the built-in banned set. The scan skips
   them and `--fix-gremlins` leaves them in place, even though they are normally
   gremlins (e.g. permit `U+2019` if a repo deliberately uses curly
@@ -53,7 +67,7 @@ tree (still listed by `git ls-files`) is passed over.
 
 ## Shared convention path selectors
 
-`[header]`, `[[textlint]]`, and `[manifest]` use the same project-root-relative
+`[header]`, `[[textlint]]`, `[manifest]` and `[gremlins].include` use the same project-root-relative
 glob syntax over the check's tracked and untracked-not-ignored file snapshot.
 `**` crosses directory separators; `*` stays within one path component.
 
@@ -70,9 +84,11 @@ else (see `brokkr man check audit`).
 | `[[textlint]].paths`, `[[textlint]].exclude` | Select files for each rule, then excuse matching files from that rule. |
 | `[manifest].paths`, `[manifest].exclude` | Select manifests for all enabled checks (default `**/Cargo.toml`), then excuse matching manifests from all checks. |
 | `[manifest].shape_exclude` | Skip structural and target-shape checks for matching included manifests; dependency-content checks still run. |
+| `[gremlins].include` | Add matching files to the gremlin scan beyond the built-in extension list. A glob counts as matching even when the extension list already covers its files or `[gremlins].exclude` removes them. |
 
 `[gremlins].exclude` is a directory-prefix list rather than a glob selector;
-its path rules are described in the gremlins section above.
+its path rules are described in the gremlins section above. Its entries are
+judged against the built-in extension list plus `include`.
 
 ## `[header]` section
 

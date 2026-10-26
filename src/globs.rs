@@ -1,6 +1,6 @@
 //! Small wrapper over `globset` for the path-glob lists shared by the `[header]`,
-//! `[[textlint]]`, and `[manifest]` checks. These name which files a rule
-//! applies to or is excused from.
+//! `[[textlint]]`, and `[manifest]` checks and `[gremlins].include`. These name
+//! which files a rule applies to or is excused from.
 
 use std::path::{Path, PathBuf};
 

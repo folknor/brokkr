@@ -584,6 +584,30 @@ preset = ["a", "b"]
     }
 
     #[test]
+    fn parse_gremlins_include_compiles_globs() {
+        let table: toml::map::Map<String, toml::Value> =
+            toml::from_str("[gremlins]\ninclude = [\"LICENSE\", \"**/*.txt\"]\n").unwrap();
+        let cfg = parse_gremlins(&table).unwrap().unwrap();
+        assert_eq!(cfg.include, vec!["LICENSE".to_owned(), "**/*.txt".to_owned()]);
+        assert!(cfg.include_set.is_match("LICENSE"));
+        assert!(cfg.include_set.is_match("docs/a.txt"));
+        assert!(!cfg.include_set.is_match("NOTICE"));
+
+        // An invalid glob is a load error naming the key.
+        let table: toml::map::Map<String, toml::Value> =
+            toml::from_str("[gremlins]\ninclude = [\"a[\"]\n").unwrap();
+        let err = parse_gremlins(&table).unwrap_err().to_string();
+        assert!(err.contains("[gremlins].include"), "{err}");
+
+        // Absent include selects nothing extra.
+        let table: toml::map::Map<String, toml::Value> =
+            toml::from_str("[gremlins]\ndisable = false\n").unwrap();
+        let cfg = parse_gremlins(&table).unwrap().unwrap();
+        assert!(cfg.include.is_empty());
+        assert!(!cfg.include_set.is_match("LICENSE"));
+    }
+
+    #[test]
     fn parse_gremlins_disable_allow_ban() {
         let table: toml::map::Map<String, toml::Value> = toml::from_str(
             "[gremlins]\ndisable = true\nallow = [\"U+2019\"]\nban = [\"u+2011\"]\n",

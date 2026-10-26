@@ -142,10 +142,10 @@ pub struct DevConfig {
     /// run (as `env.<NAME>` pairs). Supports exact names (`MALLOC_CONF`)
     /// and `PREFIX_*` globs (`PBFHOGG_*`). Empty by default.
     pub capture_env: Vec<String>,
-    /// `[gremlins]` config: directories the gremlin scanner skips. Used to
-    /// silence vendored / third-party material (reference manuals, imported
-    /// docs) that legitimately carries gremlin characters. `None` when the
-    /// project has no `[gremlins]` section. See [`GremlinsConfig`].
+    /// `[gremlins]` config: the gremlin scanner's file selection (extra
+    /// `include` globs, `exclude` directories) and banned-set adjustments.
+    /// `None` when the project has no `[gremlins]` section. See
+    /// [`GremlinsConfig`].
     pub gremlins: Option<GremlinsConfig>,
     /// `[header]` config: required text anywhere in selected files, with a current-year check.
     /// `None` when the project has no `[header]` section. See [`HeaderConfig`].
@@ -517,6 +517,11 @@ impl<'de> Deserialize<'de> for SitedAllow {
 ///   path prefix on the git-relative path: `docs/manual` excludes
 ///   `docs/manual` and everything under `docs/manual/`, but not a sibling
 ///   `docs/manual-extra`.
+/// - `include` - globs (the shared selector syntax of `[header]` and
+///   `[[textlint]]`) naming files to scan in addition to the built-in
+///   extension list, such as an extensionless `LICENSE`. `exclude` still wins,
+///   and `--fix-gremlins` follows the scan, so an included file can be
+///   rewritten too.
 /// - `allow` - codepoints to un-ban: the scan skips them and `--fix-gremlins`
 ///   leaves them alone, even though they are in the built-in banned set.
 /// - `ban` - codepoints to flag beyond the built-in set. Scan-only: brokkr
@@ -532,6 +537,12 @@ pub struct GremlinsConfig {
     /// Directories (project-root-relative) to skip when scanning for
     /// gremlins. Empty / unset means scan everything.
     pub exclude: Vec<String>,
+    /// Globs naming files scanned beyond the built-in extension list, as
+    /// written (the `--audit` reports each one that matches nothing).
+    pub include: Vec<String>,
+    /// `include` compiled once at config load, so an invalid glob is a load
+    /// error rather than a phase failure.
+    pub include_set: globset::GlobSet,
     /// Codepoints removed from the effective banned set (scan skips, fix
     /// leaves alone). Singletons and ranges.
     pub allow: CodepointSet,

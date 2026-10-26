@@ -232,32 +232,43 @@ pub(super) fn selector_findings(
 ) -> Result<Vec<String>, DevError> {
     let files = tree.get()?.files();
     let mut out = Vec::new();
-    gremlins_scope(files, gremlins_cfg, &mut out);
+    gremlins_scope(files, gremlins_cfg, &mut out)?;
     header_scope(files, header_cfg, &mut out)?;
     textlint_scopes(files, textlint_rules, &mut out)?;
     manifest_scope(files, manifest_cfg, &mut out)?;
     Ok(out)
 }
 
-fn gremlins_scope(files: &[PathBuf], config: Option<&GremlinsConfig>, out: &mut Vec<String>) {
+/// `[gremlins]` selector hygiene. Each `include` glob is judged against the
+/// whole file list, before exclusion and whether or not the built-in extension
+/// list already covers its matches, like the other shared selectors. Each
+/// `exclude` entry is judged against the candidate set (built-in extensions
+/// plus `include`, before exclusion), so an exclusion covering only an included
+/// file is live.
+fn gremlins_scope(
+    files: &[PathBuf],
+    config: Option<&GremlinsConfig>,
+    out: &mut Vec<String>,
+) -> Result<(), DevError> {
     let Some(config) = config.filter(|config| !config.disable) else {
-        return;
+        return Ok(());
     };
+    out.extend(globs::unmatched(
+        &config.include,
+        files,
+        "[gremlins].include",
+    )?);
     if config.exclude.is_empty() {
-        return;
+        return Ok(());
     }
-    let scannable: Vec<&Path> = files
+    let candidates: Vec<&Path> = files
         .iter()
-        .filter(|path| {
-            path.extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(crate::globs::is_scanned_extension)
-        })
         .map(PathBuf::as_path)
+        .filter(|path| gremlins::is_candidate(path, Some(config)))
         .collect();
     for entry in &config.exclude {
         let dir = Path::new(entry.trim_end_matches('/'));
-        if !scannable
+        if !candidates
             .iter()
             .any(|path| *path == dir || path.starts_with(dir))
         {
@@ -266,14 +277,10 @@ fn gremlins_scope(files: &[PathBuf], config: Option<&GremlinsConfig>, out: &mut 
             ));
         }
     }
-    if !scannable.iter().any(|path| {
-        !config
-            .exclude
-            .iter()
-            .any(|entry| path.starts_with(Path::new(entry.trim_end_matches('/'))))
-    }) {
+    if !candidates.is_empty() && candidates.iter().all(|path| config.is_excluded(path)) {
         out.push("[gremlins].exclude removes every scannable tracked path".to_owned());
     }
+    Ok(())
 }
 
 fn header_scope(
@@ -870,6 +877,77 @@ mod script_failure_render_tests {
         for line in ["a", "b", "c"] {
             assert!(msg.contains(line));
         }
+    }
+}
+
+#[cfg(test)]
+mod gremlins_scope_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    fn config(include: &[&str], exclude: &[&str]) -> GremlinsConfig {
+        let include: Vec<String> = include.iter().map(|s| (*s).to_owned()).collect();
+        GremlinsConfig {
+            include_set: globs::build_set(&include, "[gremlins].include").unwrap(),
+            include,
+            exclude: exclude.iter().map(|s| (*s).to_owned()).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn findings(files: &[&str], cfg: &GremlinsConfig) -> Vec<String> {
+        let files: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
+        let mut out = Vec::new();
+        gremlins_scope(&files, Some(cfg), &mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn an_include_glob_matching_nothing_is_reported() {
+        let out = findings(
+            &["src/lib.rs", "LICENSE"],
+            &config(&["LICENSE", "COPYING"], &[]),
+        );
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert!(out[0].contains("[gremlins].include"));
+        assert!(out[0].contains("COPYING"));
+    }
+
+    #[test]
+    fn an_include_match_counts_before_exclusion_and_extensions() {
+        // An excluded match and a match the extension list already scans both
+        // keep the glob live.
+        let out = findings(
+            &["src/lib.rs", "vendor/LICENSE", "README.md"],
+            &config(&["vendor/LICENSE", "*.md"], &["vendor"]),
+        );
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn an_exclude_covering_only_an_included_file_is_live() {
+        let out = findings(
+            &["src/lib.rs", "legal/LICENSE"],
+            &config(&["legal/*"], &["legal"]),
+        );
+        assert!(out.is_empty(), "{out:?}");
+        // Without the include the same exclusion matches nothing scannable.
+        let out = findings(&["src/lib.rs", "legal/LICENSE"], &config(&[], &["legal"]));
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert!(out[0].contains("matches no scannable tracked path"));
+    }
+
+    #[test]
+    fn removes_every_needs_a_candidate_to_remove() {
+        // No candidate at all: only the dead-entry finding, not a claim that
+        // the exclusion removed everything.
+        let out = findings(&["Cargo.lock"], &config(&[], &["vendor"]));
+        assert_eq!(out.len(), 1, "{out:?}");
+        let out = findings(&["vendor/a.rs"], &config(&[], &["vendor"]));
+        assert_eq!(
+            out,
+            vec!["[gremlins].exclude removes every scannable tracked path".to_owned()]
+        );
     }
 }
 
