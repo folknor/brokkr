@@ -131,6 +131,9 @@ pub struct DevConfig {
     /// `--all-features` sweep for backward compatibility with
     /// projects that haven't configured anything.
     pub check: Vec<CheckEntry>,
+    /// Each `[[lint_sweep]]` entry: a build shape clippy and rustdoc check
+    /// and the test phase never sees. Empty when none are declared.
+    pub lint_sweeps: Vec<LintSweep>,
     pub test: Option<TestConfig>,
     /// `[[quarantine]]` entries: the justification ledger for coverage
     /// accounting. Under a `certifies =
@@ -255,7 +258,9 @@ impl BinConfig {
 /// `fixture_lint`) take, because both compile graphs the edit loop does not:
 /// per-member package-mode resolves, and a fixture workspace's own dependency
 /// build. `[[script_check]]` defaults its `when` to `always` instead, since
-/// every script check ran on every check before the key existed.
+/// every script check ran on every check before the key existed, and
+/// `[[lint_sweep]]` follows it: a lint sweep is a clippy and rustdoc pass like
+/// the ones every check already runs.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Cadence {
@@ -1156,6 +1161,60 @@ where
     }
 
     deserializer.deserialize_any(StringOrVec)
+}
+
+/// One `[[lint_sweep]]` entry: a build shape `brokkr check` lints with clippy
+/// and documents with rustdoc, and never tests. For a shape whose test phase
+/// cannot run here - a cross-target triple the host cannot execute, such as
+/// aarch64 to lint a `cfg(not(target_arch = "x86_64"))` fallback.
+///
+/// The keys are exactly the build-shape keys of [`CheckEntry`], with the same
+/// meaning, plus `when`; every test-shaping key is an unknown field. Never
+/// referenced by a profile and never given a profile's `env`: the entry is
+/// the whole shape. See `docs/brokkr.toml.sweeps.md`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LintSweep {
+    pub name: String,
+    #[serde(default)]
+    pub features: Vec<String>,
+    #[serde(default)]
+    pub no_default_features: bool,
+    #[serde(default)]
+    pub packages: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub rustflags: Vec<String>,
+    #[serde(default)]
+    pub profile: Option<SweepProfile>,
+    #[serde(default)]
+    pub target: Option<String>,
+    #[serde(default)]
+    pub feature_unification: FeatureUnification,
+    /// Which runs lint it; `always` when absent, like `[[script_check]]`.
+    #[serde(default = "Cadence::always")]
+    pub when: Cadence,
+}
+
+impl LintSweep {
+    /// The `[[check]]` entry of this build shape with every test key at its
+    /// default: what validation and sweep planning run on, so a lint sweep
+    /// compiles exactly what a `[[check]]` entry of the same keys would.
+    pub fn as_check_entry(&self) -> CheckEntry {
+        CheckEntry {
+            name: self.name.clone(),
+            features: self.features.clone(),
+            no_default_features: self.no_default_features,
+            packages: self.packages.clone(),
+            env: self.env.clone(),
+            rustflags: self.rustflags.clone(),
+            profile: self.profile,
+            target: self.target.clone(),
+            feature_unification: self.feature_unification,
+            ..CheckEntry::default()
+        }
+    }
 }
 
 /// One `[[check]]` entry: a single named cargo invocation shape that

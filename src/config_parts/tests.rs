@@ -43,6 +43,7 @@ mod tests {
             hosts,
             dependency_rules: Vec::new(),
             check: Vec::new(),
+            lint_sweeps: Vec::new(),
             test: None,
             quarantine: Vec::new(),
             capture_env: Vec::new(),
@@ -2184,6 +2185,64 @@ sweeps = ["all"]
         ] {
             assert!(parse_dev_config(&root_table(bad)).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn lint_sweep_is_a_build_shape_defaulting_to_always_and_a_table_stays_a_host() {
+        let cfg = parse_dev_config(&root_table(
+            "[[lint_sweep]]\nname = \"aarch64\"\ntarget = \"aarch64-unknown-linux-gnu\"\n\
+             features = [\"simd\"]\n",
+        ))
+        .unwrap();
+        let [sweep] = cfg.lint_sweeps.as_slice() else { panic!("one lint sweep") };
+        assert_eq!(sweep.when, Cadence::Always);
+        let entry = sweep.as_check_entry();
+        assert_eq!(entry.target.as_deref(), Some("aarch64-unknown-linux-gnu"));
+        assert_eq!(entry.features, vec!["simd".to_owned()]);
+        assert!(entry.tests.is_empty() && entry.parallel.is_none() && !entry.doc_only);
+        assert!(cfg.hosts.is_empty());
+
+        // A host that happens to bear the name keeps loading as one.
+        let cfg = parse_dev_config(&root_table("[lint_sweep]\nport = 3034\n")).unwrap();
+        assert!(cfg.lint_sweeps.is_empty());
+        assert!(cfg.hosts.contains_key("lint_sweep"));
+    }
+
+    #[test]
+    fn lint_sweep_refuses_test_keys_names_it_cannot_own_and_bad_shapes() {
+        let err = |src: &str| parse_dev_config(&root_table(src)).unwrap_err().to_string();
+        // Every test-shaping key is an unknown field, not a refusal list.
+        for key in ["skip = [\"x\"]", "parallel = {}", "doc_only = true", "build_packages = [\"p\"]"] {
+            let msg = err(&format!("[[lint_sweep]]\nname = \"a\"\n{key}\n"));
+            assert!(msg.contains("[[lint_sweep]]"), "{key}: {msg}");
+        }
+        let msg = err("[[check]]\nname = \"a\"\n\n[[lint_sweep]]\nname = \"a\"\n");
+        assert!(msg.contains("name of a [[check]] entry"), "{msg}");
+        let msg = err("[[lint_sweep]]\nname = \"a\"\n\n[[lint_sweep]]\nname = \"a\"\n");
+        assert!(msg.contains("duplicate name 'a'"), "{msg}");
+        let msg = err("[[lint_sweep]]\nname = \"tier1/a\"\n");
+        assert!(msg.contains("`/`"), "{msg}");
+        // The shared [[check]] validator, speaking as the lint table.
+        let msg = err("[[lint_sweep]]\nname = \"a\"\nfeature_unification = \"package\"\n");
+        assert!(msg.contains("[[lint_sweep]] entry 'a'"), "{msg}");
+        let msg = err("[[lint_sweep]]\nname = \"a\"\ntarget = \"spec.json\"\n");
+        assert!(msg.contains("[[lint_sweep]] entry 'a'"), "{msg}");
+        let msg = err("[[lint_sweep]]\nname = \"a\"\nenv = { RUSTFLAGS = \"-Cx\" }\n");
+        assert!(msg.contains("[[lint_sweep]] entry 'a'"), "{msg}");
+    }
+
+    #[test]
+    fn a_gate_lint_sweep_needs_a_complete_profile() {
+        const GATE: &str = "[[lint_sweep]]\nname = \"arm\"\nwhen = \"gate\"\n\n\
+                            [[lint_sweep]]\nname = \"spare\"\nwhen = \"off\"\n";
+        let msg = parse_dev_config(&root_table(GATE)).unwrap_err().to_string();
+        assert!(msg.contains("'arm'") && msg.contains("clippy only"), "{msg}");
+        let partial = format!("{GATE}\n[[check]]\nname = \"d\"\n\n[test.profiles.quick]\nsweeps = [\"d\"]\ncertifies = \"partial\"\n");
+        assert!(parse_dev_config(&root_table(&partial)).is_err());
+        let complete = partial.replace("\"partial\"", "\"complete\"");
+        let cfg = parse_dev_config(&root_table(&complete)).unwrap();
+        let whens: Vec<Cadence> = cfg.lint_sweeps.iter().map(|s| s.when).collect();
+        assert_eq!(whens, vec![Cadence::Gate, Cadence::Off]);
     }
 
     #[test]

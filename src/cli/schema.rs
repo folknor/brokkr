@@ -254,7 +254,8 @@ Two modes:
     `--no-default-features`. Env is the union of every [[check]] entry's env
     (a project invariant a probe must not drop); a key two entries set to
     different values is a config error unless `--env` picks one.
-  - `--sweep NAME`: borrow one [[check]] entry's packages/features/env verbatim.
+  - `--sweep NAME`: borrow one [[check]] or [[lint_sweep]] entry's
+    packages/features/env/target verbatim, whatever its `when`.
 
 `--env KEY=VALUE` (repeatable) overrides either env source and wins last.
 Output matches `brokkr check`'s clippy phase: one uncapped line per
@@ -291,8 +292,8 @@ In depth: `brokkr man clippy`."
         #[arg(long, conflicts_with = "sweep")]
         no_default_features: bool,
 
-        /// Borrow one `[[check]]` entry's packages/features/env and run just
-        /// its clippy invocation. Conflicts with the ad-hoc target flags.
+        /// Borrow one `[[check]]` or `[[lint_sweep]]` entry's shape and run
+        /// just its clippy invocation. Conflicts with the ad-hoc target flags.
         #[arg(long, value_name = "NAME", conflicts_with = "package")]
         sweep: Option<String>,
 

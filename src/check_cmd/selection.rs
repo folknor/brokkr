@@ -1306,8 +1306,13 @@ const DERIVED_CARRIER: &str = "derived doctest carrier, linted with the lane it 
 /// no carrier holds yet gets [`PlannedSweep::doctest_carrier`]; equal builds
 /// collapse onto the first. A curated lane runs a hand-picked subset by
 /// declaration and owes nothing on its own.
+///
+/// `reserved` holds labels a carrier may not take beyond the tested lanes'
+/// own: the run's lint lanes, which are no part of the obligation and so are
+/// kept out of `sweeps`.
 pub(crate) fn derive_doctest_carriers(
     sweeps: &[PlannedSweep],
+    reserved: &[&str],
     facts: &crate::check_cmd::DocFacts,
     oracle: &FeatureOracle<'_>,
 ) -> Result<Vec<PlannedSweep>, DevError> {
@@ -1322,7 +1327,11 @@ pub(crate) fn derive_doctest_carriers(
         .filter(|(_, s)| s.lane_exec().is_doc_only())
         .filter_map(|(i, s)| key(i, s))
         .collect();
-    let mut labels: Vec<String> = sweeps.iter().map(|s| s.label.clone()).collect();
+    let mut labels: Vec<String> = sweeps
+        .iter()
+        .map(|s| s.label.clone())
+        .chain(reserved.iter().map(|r| (*r).to_owned()))
+        .collect();
     let mut out = Vec::new();
     for (i, sweep) in sweeps.iter().enumerate() {
         if sweep.lane_exec().is_doc_only() || sweep.curated {
@@ -1698,18 +1707,16 @@ impl ExecProjection {
 /// One line per dropped token per lane: the run (or support build) that
 /// does not carry it, and the members that route it. Rendered once per
 /// lane however many phases share the request - the same text from two
-/// phases is one line.
-pub(crate) fn feature_drop_lines(
-    sweeps: &[PlannedSweep],
-    phases: &[&PhaseSelection],
-) -> Vec<String> {
+/// phases is one line. Each selection comes with the lanes it was built over:
+/// a `check` run's test selection covers fewer lanes than its clippy one.
+pub(crate) fn feature_drop_lines(phases: &[(&[PlannedSweep], &PhaseSelection)]) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut push = |line: String| {
         if !lines.contains(&line) {
             lines.push(line);
         }
     };
-    for phase in phases.iter().filter(|p| p.is_enabled()) {
+    for (sweeps, phase) in phases.iter().filter(|(_, p)| p.is_enabled()) {
         for (_, sweep, entry) in phase.entries().iter_with(sweeps) {
             // Attempted and deduped lanes alike: a dedupe decides who runs,
             // never whether a lane's narrowing is said.
@@ -1819,6 +1826,63 @@ pub(crate) fn fixture_lint_selection(
         .collect()
 }
 
+/// Every lane one `brokkr check` run plans: the tested sweeps (configured,
+/// then any doctest carriers a complete claim derived), then the
+/// `[[lint_sweep]]` lanes. Clippy and rustdoc see every lane; the test
+/// machinery - preparation, the test phase, the coverage audit, the doc-only
+/// rules - sees only the tested prefix. The lint lanes sit at the end, so a
+/// [`LaneIdx`] means the same sweep in every phase that has it.
+///
+/// A lint lane equal to a tested build folds onto it in clippy and rustdoc
+/// (never the reverse: dedupe folds onto an earlier lane), and label
+/// reservation may rename a derived doctest carrier. The tested lanes'
+/// compile inputs, test obligations and preparation scheduling are untouched.
+#[derive(Debug, Clone)]
+pub(crate) struct RunSweeps {
+    lanes: Vec<PlannedSweep>,
+    tested: usize,
+}
+
+impl RunSweeps {
+    /// Refuses a lint label equal to a tested one: the two would read as one
+    /// sweep in the `--json` trailer. Load validation and carrier label
+    /// reservation leave only the legacy `all-features` sweep to reach this.
+    pub(crate) fn new(tested: Vec<PlannedSweep>, lint: Vec<PlannedSweep>) -> Result<Self, DevError> {
+        if let Some(clash) = lint.iter().find(|l| tested.iter().any(|t| t.label == l.label)) {
+            return Err(DevError::Config(format!(
+                "[[lint_sweep]] '{}' has the label of a sweep this run tests; rename the lint sweep",
+                clash.label
+            )));
+        }
+        let count = tested.len();
+        let mut lanes = tested;
+        lanes.extend(lint);
+        Ok(Self { lanes, tested: count })
+    }
+
+    /// A run with no lint lanes: every lane is tested.
+    #[cfg(test)]
+    pub(crate) fn tested_only(tested: Vec<PlannedSweep>) -> Self {
+        let count = tested.len();
+        Self { lanes: tested, tested: count }
+    }
+
+    /// The sweeps the test machinery runs: the lanes before the lint lanes.
+    pub(crate) fn tested(&self) -> &[PlannedSweep] {
+        &self.lanes[..self.tested]
+    }
+
+    /// The lint lanes alone.
+    pub(crate) fn lint(&self) -> &[PlannedSweep] {
+        &self.lanes[self.tested..]
+    }
+
+    /// Every lane, tested first: what clippy and rustdoc select over.
+    pub(crate) fn linted(&self) -> &[PlannedSweep] {
+        &self.lanes
+    }
+}
+
 /// Every selection one `brokkr check` run makes.
 #[derive(Debug, Clone)]
 pub(crate) struct CheckSelections {
@@ -1831,9 +1895,11 @@ pub(crate) struct CheckSelections {
 
 impl CheckSelections {
     /// `skip` is the run's phase-skip predicate (profile `skip_phases` and
-    /// the prose-only shortcut); a skipped phase constructs nothing.
+    /// the prose-only shortcut); a skipped phase constructs nothing. Clippy
+    /// and rustdoc select over every lane, the test phase over the tested
+    /// ones ([`RunSweeps`]).
     pub(crate) fn build(
-        sweeps: &[PlannedSweep],
+        sweeps: &RunSweeps,
         cli: &[String],
         skip: &dyn Fn(crate::check_cmd::Phase) -> bool,
         rustdoc_configured: bool,
@@ -1841,9 +1907,15 @@ impl CheckSelections {
         certifies: Option<Certifies>,
         oracle: &FeatureOracle<'_>,
     ) -> Result<Self, DevError> {
-        let phase = |p: SelectionPhase, off: Option<&'static str>| match off {
-            Some(reason) => Ok(PhaseSelection::disabled(p, sweeps, reason)),
-            None => PhaseSelection::for_check(p, sweeps, cli, oracle),
+        let phase = |p: SelectionPhase, off: Option<&'static str>| {
+            let lanes = match p {
+                SelectionPhase::Test => sweeps.tested(),
+                SelectionPhase::Clippy | SelectionPhase::Rustdoc => sweeps.linted(),
+            };
+            match off {
+                Some(reason) => Ok(PhaseSelection::disabled(p, lanes, reason)),
+                None => PhaseSelection::for_check(p, lanes, cli, oracle),
+            }
         };
         let rustdoc_off = if skip(crate::check_cmd::Phase::Rustdoc) {
             Some(PHASE_SKIPPED)
@@ -2267,7 +2339,24 @@ mod tests {
     }
 
     fn derive(sweeps: &[PlannedSweep], facts: &crate::check_cmd::DocFacts) -> Vec<PlannedSweep> {
-        derive_doctest_carriers(sweeps, facts, &FeatureOracle::unavailable()).unwrap()
+        derive_doctest_carriers(sweeps, &[], facts, &FeatureOracle::unavailable()).unwrap()
+    }
+
+    /// A lint lane's label is reserved: the carrier takes the next free one
+    /// rather than reading as the lint lane in the run's sweep list.
+    #[test]
+    fn a_carrier_does_not_take_a_lint_lane_label() {
+        let facts = crate::check_cmd::DocFacts::for_members(&[("a", true)]);
+        let a = listed("a", &["a"]);
+        let labels = |reserved: &[&str]| -> Vec<String> {
+            derive_doctest_carriers(std::slice::from_ref(&a), reserved, &facts, &FeatureOracle::unavailable())
+                .unwrap()
+                .into_iter()
+                .map(|c| c.label.clone())
+                .collect()
+        };
+        assert_eq!(labels(&[]), ["a (doctests)"]);
+        assert_eq!(labels(&["a (doctests)"]), ["a (doctests 2)"]);
     }
 
     /// brokkr#22: a complete claim owes every tested build's doctests, not
@@ -2372,7 +2461,7 @@ mod tests {
         let skip = |p: Phase| matches!(p, Phase::Test | Phase::Clippy);
         let oracle = FeatureOracle::unavailable();
         let all = CheckSelections::build(
-            std::slice::from_ref(&invalid),
+            &RunSweeps::tested_only(vec![invalid.clone()]),
             &[],
             &skip,
             false,
@@ -2385,7 +2474,7 @@ mod tests {
         // The same sweep in an enabled phase is the construction error.
         assert!(
             CheckSelections::build(
-                &[invalid],
+                &RunSweeps::tested_only(vec![invalid]),
                 &[],
                 &|_| false,
                 false,
@@ -2395,6 +2484,38 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// Lint lanes reach clippy and rustdoc only, after the tested lanes, and
+    /// one compiling a tested lane's build folds onto it there.
+    #[test]
+    fn lint_lanes_are_selected_by_the_diagnostic_phases_alone() {
+        let lanes = RunSweeps::new(
+            vec![sweep("default")],
+            vec![sweep("same-shape"), listed("arm", &["a"])],
+        )
+        .unwrap();
+        assert_eq!(lanes.tested().len(), 1);
+        assert_eq!(lanes.lint().len(), 2);
+        let oracle = FeatureOracle::unavailable();
+        let all = CheckSelections::build(&lanes, &[], &|_| false, true, GatedPhases::default(), None, &oracle)
+            .unwrap();
+        assert_eq!(all.test.entries().len(), 1);
+        for phase in [&all.clippy, &all.rustdoc] {
+            assert_eq!(phase.entries().len(), 3);
+            assert!(phase.attempt(LaneIdx::new(0)).is_some());
+            assert!(matches!(phase.entry(LaneIdx::new(1)), Some(LaneEntry::Deduped(d)) if d.onto() == LaneIdx::new(0)));
+            assert!(phase.attempt(LaneIdx::new(2)).is_some());
+        }
+        // Each selection is read against the lanes it was built over.
+        assert!(feature_drop_lines(&[
+            (lanes.linted(), &all.clippy),
+            (lanes.tested(), &all.test),
+        ])
+        .is_empty());
+        // A lint label equal to a tested one would be one name for two sweeps.
+        let err = RunSweeps::new(vec![sweep("all-features")], vec![sweep("all-features")]).unwrap_err();
+        assert!(err.to_string().contains("'all-features'"), "{err}");
     }
 
     #[test]
@@ -2600,7 +2721,7 @@ mod tests {
         let dropped: Vec<&str> = run.dropped().iter().map(|d| d.token.as_str()).collect();
         assert_eq!(dropped, ["piners-runner/trace", "piners-harness/bench"]);
         assert_eq!(
-            feature_drop_lines(&sweeps, &[&sel]),
+            feature_drop_lines(&[(&sweeps[..], &sel)]),
             s(&[
                 "sweep piners, -p piners-strategy: dropped piners-runner/trace (applies to piners-runner, piners-harness only)",
                 "sweep piners, -p piners-strategy: dropped piners-harness/bench (applies to piners-harness only)",
@@ -2741,7 +2862,7 @@ mod tests {
             "the test run's selection is the domain"
         );
         assert!(run.feature_args()[1].contains("piners-runner/trace"));
-        let lines = feature_drop_lines(std::slice::from_ref(&sweep), &[&sel]);
+        let lines = feature_drop_lines(&[(std::slice::from_ref(&sweep), &sel)]);
         assert_eq!(
             lines,
             s(&[
@@ -2819,7 +2940,7 @@ mod tests {
         // The deduped lane's own drop is still said: folding it onto `a`
         // decides who runs, not whether its narrowing is announced.
         assert_eq!(
-            feature_drop_lines(&sweeps, &[&sel]),
+            feature_drop_lines(&[(&sweeps[..], &sel)]),
             s(&[
                 "sweep b, -p piners-vm: dropped piners-harness/bench (applies to piners-harness only)"
             ])

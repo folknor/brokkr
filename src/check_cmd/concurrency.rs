@@ -22,9 +22,12 @@
 /// group into one chain: `[test] serial_builds`, or a configured build dir
 /// (`CARGO_BUILD_BUILD_DIR` - inherited or in a sweep's own `env` - or
 /// `build.build-dir` anywhere in the config chain), which holds intermediate
-/// artifacts that target dirs do not separate. Resolved once per run and
-/// passed to every [`run_grouped`] call.
-fn resolve_serial_builds(project_root: &Path, configured: bool, sweeps: &[PlannedSweep]) -> bool {
+/// artifacts that target dirs do not separate. Resolved once per run for the
+/// lanes of the phases it schedules - `check` asks once for clippy and rustdoc
+/// over every lane and once for preparation over the tested lanes, so a lint
+/// lane's env never reschedules a test build - and passed to every
+/// [`run_grouped`] call of those phases. `phases` names them in the log line.
+fn resolve_serial_builds(project_root: &Path, configured: bool, sweeps: &[PlannedSweep], phases: &str) -> bool {
     let sweep_probes: Vec<(bool, bool)> = sweeps.iter().map(|sweep| {
         let env: Vec<(&str, &str)> = sweep
             .env
@@ -51,7 +54,7 @@ fn resolve_serial_builds(project_root: &Path, configured: bool, sweeps: &[Planne
         } else {
             "a cargo build dir is configured"
         };
-        output::detail(&format!("build phases: one cargo chain ({reason})"));
+        output::detail(&format!("{phases}: one cargo chain ({reason})"));
     }
     serial
 }

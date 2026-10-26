@@ -621,6 +621,7 @@ pub(super) fn run_check(
     let project = detection.map(|d| d.project.clone());
     let (
         check_entries,
+        lint_sweeps,
         dependency_rules,
         quarantine,
         test_cfg,
@@ -635,6 +636,7 @@ pub(super) fn run_check(
     ) = if let Some(d) = detection {
         (
             d.config.check.as_slice(),
+            d.config.lint_sweeps.as_slice(),
             d.config.dependency_rules.as_slice(),
             d.config.quarantine.as_slice(),
             d.config.test.as_ref(),
@@ -658,6 +660,7 @@ pub(super) fn run_check(
             .as_ref()
             .expect("the unconfigured branch loaded user config");
         (
+            &[][..],
             &[][..],
             &[][..],
             &[][..],
@@ -715,6 +718,7 @@ pub(super) fn run_check(
         project_root,
         state_root,
         check_entries,
+        lint_sweeps,
         dependency_rules,
         quarantine,
         test_cfg,
@@ -757,13 +761,14 @@ pub(super) fn run_clippy(
     detection: Option<&project::Detection>,
 ) -> Result<(), DevError> {
     let no_config_roots = project::detect_roots()?;
-    let (check_entries, clippy_cfg, project_root) = match detection {
+    let (check_entries, lint_sweeps, clippy_cfg, project_root) = match detection {
         Some(d) => (
             d.config.check.as_slice(),
+            d.config.lint_sweeps.as_slice(),
             d.config.lints.as_ref(),
             d.build_root.as_path(),
         ),
-        None => (&[][..], None, no_config_roots.1.as_path()),
+        None => (&[][..], &[][..], None, no_config_roots.1.as_path()),
     };
     let env_overrides = parse_env_overrides(env)?;
     let _lock = context::reenter_command_lock()?;
@@ -771,6 +776,7 @@ pub(super) fn run_clippy(
     check_cmd::cmd_clippy(
         project_root,
         check_entries,
+        lint_sweeps,
         package,
         *all_features,
         features,

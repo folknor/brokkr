@@ -20,7 +20,7 @@ A doc with 8+ `##` sections is **section-addressed**: `brokkr man conventions sc
 - `reference/output.md` - operator output channel conventions.
 - `docs/brokkr.toml.md` - config core: where it lives, the user-wide layer, `include` composition, top-level shape and host sections, `worktree_keep`, `disable_toolchain`, `strip_rustflags`, `[cargo_env]`, `[deps]`, `[bin]`, `[member_check]`, `[lints]`.
 - `docs/brokkr.toml.conventions.md` - convention gates: `[gremlins]`, shared path selectors, `[header]`, `[[textlint]]`, `[textlint_preset]`, `[[script_check]]`, `[manifest]`, `[rustdoc]`, `[[fixture_lint]]`, `[[dependency_rule]]`.
-- `docs/brokkr.toml.sweeps.md` - `[[check]]` sweeps, the `parallel` lane, `[test]` and its profiles, `[[quarantine]]`.
+- `docs/brokkr.toml.sweeps.md` - `[[check]]` sweeps, `[[lint_sweep]]` (linted, never tested), the `parallel` lane, `[test]` and its profiles, `[[quarantine]]`.
 - `docs/brokkr.toml.elivagar.md` - `[<host>.tilegen.*]` blocks (elivagar).
 - `docs/brokkr.toml.datasets.md` - `[<host>.datasets.*]` and the variant-selection CLI flags (pbfhogg/elivagar/nidhogg).
 - `docs/brokkr.toml.piners.md` - the `[piners]` config block.

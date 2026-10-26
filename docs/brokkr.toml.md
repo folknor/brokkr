@@ -12,8 +12,9 @@ The rest of the universal schema is split by subject:
 - Source-convention gates (`[gremlins]`, `[header]`, `[[textlint]]`,
   `[textlint_preset]`, `[[script_check]]`, `[manifest]`, `[[dependency_rule]]`,
   `[rustdoc]`) -> `docs/brokkr.toml.conventions.md` (`brokkr man conventions`)
-- Sweeps and test policy (`[[check]]`, `parallel`, `[test]` and its profiles,
-  `[[quarantine]]`) -> `docs/brokkr.toml.sweeps.md` (`brokkr man sweeps`)
+- Sweeps and test policy (`[[check]]`, `[[lint_sweep]]`, `parallel`, `[test]`
+  and its profiles, `[[quarantine]]`) -> `docs/brokkr.toml.sweeps.md`
+  (`brokkr man sweeps`)
 
 Project-specific config blocks live in their own docs, so a checkout only ever
 reads the ones that apply to it:
@@ -247,8 +248,10 @@ Reserved top-level keys parsed as config sections, or consumed by composition:
 `lints` (and its `clippy` alias), `bin`, `member_check`, `fixture_lint`,
 `disable_toolchain`, `cargo_env`.
 
-`strip_rustflags` is also brokkr's, but only as a non-table value: a
-`[strip_rustflags]` table is still read as a hostname section.
+`strip_rustflags` and `lint_sweep` are also brokkr's, but only as non-table
+values: a `[strip_rustflags]` or `[lint_sweep]` table is still read as a
+hostname section, while the `strip_rustflags = [...]` array and the
+`[[lint_sweep]]` array of tables are brokkr's.
 
 ## `worktree_keep`
 

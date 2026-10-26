@@ -448,7 +448,8 @@ The same key and vocabulary as `[member_check]` and `[[fixture_lint]]`:
 | `off` | Never in a plain check |
 
 The defaults split on purpose. `[[script_check]]` has always run everywhere,
-so an entry without `when` keeps doing so; `[member_check]` and
+so an entry without `when` keeps doing so, and `[[lint_sweep]]`
+(`brokkr man sweeps`) defaults to `always` with it; `[member_check]` and
 `[[fixture_lint]]` are expensive by nature and start gate-only. `gate` is for
 an expensive check such as Miri that belongs in the pre-landing run and not the
 edit loop, without the `skip_phases` profile that would also drop the cheap

@@ -101,6 +101,7 @@ fn parse_dev_config(table: &toml::Table) -> Result<DevConfig, DevError> {
     let test = parse_test(table)?;
     let quarantine = parse_quarantine(table)?;
     validate_check_against_test(&check, test.as_ref())?;
+    let lint_sweeps = parse_lint_sweeps(table, &check, test.as_ref())?;
     let capture_env = parse_capture_env(table)?;
     let gremlins = parse_gremlins(table)?;
     let header = parse_header(table)?;
@@ -125,6 +126,7 @@ fn parse_dev_config(table: &toml::Table) -> Result<DevConfig, DevError> {
         hosts,
         dependency_rules,
         check,
+        lint_sweeps,
         test,
         quarantine,
         capture_env,
@@ -1042,8 +1044,10 @@ pub(crate) const SECTIONS: &[&str] = &[
 /// Top-level keys brokkr claims only when their value is not a table. A
 /// non-table top-level value has never loaded, so claiming one breaks no
 /// config, while a table under the same name stays the hostname section it
-/// always was - the kernel accepts any bytes as a hostname.
-pub(crate) const VALUE_KEYS: &[&str] = &["strip_rustflags"];
+/// always was - the kernel accepts any bytes as a hostname. An array of tables
+/// is not a table, so `[[lint_sweep]]` is claimed while a `[lint_sweep]`
+/// hostname section keeps loading.
+pub(crate) const VALUE_KEYS: &[&str] = &["strip_rustflags", "lint_sweep"];
 
 /// Every other top-level table is a hostname section. The table shape is
 /// ambiguous by design: hostnames are open-ended, so section-name typos are
@@ -1448,7 +1452,69 @@ fn parse_check(
                 entry.name
             )));
         }
-        validate_check_entry(entry)?;
+        validate_check_entry(entry, "[[check]]")?;
+    }
+    Ok(entries)
+}
+
+/// Parse the optional `[[lint_sweep]]` array. Absent -> empty, and so is a
+/// `[lint_sweep]` table: that key is claimed only when its value is not a
+/// table ([`VALUE_KEYS`]), so a hostname section of that name loads as it
+/// always did. Each entry is validated as the test-free `[[check]]` entry of
+/// its shape ([`LintSweep::as_check_entry`]).
+///
+/// Refused: a name used twice, or also used by a `[[check]]` entry (the two
+/// share the run's sweep labels and `brokkr clippy --sweep`); a name holding
+/// `/`, the separator of a lanes profile's `lane/entry` labels; and a `when =
+/// "gate"` entry where no `[test.profiles.*]` declares `certifies =
+/// "complete"`, since only a complete claim runs it.
+fn parse_lint_sweeps(
+    table: &toml::map::Map<String, toml::Value>,
+    check: &[CheckEntry],
+    test: Option<&TestConfig>,
+) -> Result<Vec<LintSweep>, DevError> {
+    let Some(value) = table.get("lint_sweep").filter(|value| !value.is_table()) else {
+        return Ok(Vec::new());
+    };
+    let entries: Vec<LintSweep> = value
+        .clone()
+        .try_into()
+        .map_err(|e: toml::de::Error| DevError::Config(format!("[[lint_sweep]]: {e}")))?;
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for entry in &entries {
+        validate_check_entry(&entry.as_check_entry(), "[[lint_sweep]]")?;
+        if !seen.insert(entry.name.as_str()) {
+            return Err(DevError::Config(format!(
+                "[[lint_sweep]] has duplicate name '{}' - each entry must have a unique name.",
+                entry.name
+            )));
+        }
+        if check.iter().any(|c| c.name == entry.name) {
+            return Err(DevError::Config(format!(
+                "[[lint_sweep]] '{0}' has the name of a [[check]] entry; the two share the run's \
+                 sweep labels and `brokkr clippy --sweep {0}`, so rename one.",
+                entry.name
+            )));
+        }
+        if entry.name.contains('/') {
+            return Err(DevError::Config(format!(
+                "[[lint_sweep]] '{}' has a `/` in its name, the separator of a lanes profile's \
+                 `lane/entry` sweep labels; pick a name without one.",
+                entry.name
+            )));
+        }
+    }
+    let complete_declared = test.is_some_and(|t| {
+        t.profiles.values().any(|p| p.certifies == Some(Certifies::Complete))
+    });
+    if let Some(stranded) = entries.iter().find(|e| e.when == Cadence::Gate && !complete_declared) {
+        return Err(DevError::Config(format!(
+            "[[lint_sweep]] '{0}' has when = \"gate\", but no [test.profiles.*] declares \
+             certifies = \"complete\", so it would never run. Add a complete profile, or set \
+             when = \"off\" and lint it on demand with `brokkr clippy --sweep {0}` (clippy only - \
+             rustdoc has no on-demand runner for a lint sweep).",
+            stranded.name
+        )));
     }
     Ok(entries)
 }
@@ -1500,15 +1566,16 @@ fn reject_reserved_sweep_env(
 /// Validate one `[[check]]` entry's fields (name, package lists, env, and the
 /// rustflags/filter fields). Split out of `parse_check` to keep that function
 /// under the line ceiling; duplicate-name detection stays in the caller since
-/// it is cross-entry.
-fn validate_check_entry(entry: &CheckEntry) -> Result<(), DevError> {
+/// it is cross-entry. `section` names the table in messages: a `[[lint_sweep]]`
+/// is validated as the test-free `[[check]]` entry of its shape.
+fn validate_check_entry(entry: &CheckEntry, section: &str) -> Result<(), DevError> {
     if entry.name.trim().is_empty() {
-        return Err(DevError::Config(
-            "[[check]] entry has empty `name` - every entry needs a label \
-             used by output and by `[test.profiles].sweeps` references."
-                .into(),
-        ));
+        return Err(DevError::Config(format!(
+            "{section} entry has empty `name` - every entry needs a label \
+             used by output and by name references."
+        )));
     }
+    let at = format!("{section} entry '{}'", entry.name);
     for (field, values) in [
         ("packages", &entry.packages),
         ("test_exclude_packages", &entry.test_exclude_packages),
@@ -1522,13 +1589,11 @@ fn validate_check_entry(entry: &CheckEntry) -> Result<(), DevError> {
         for v in values {
             if v.trim().is_empty() {
                 return Err(DevError::Config(format!(
-                    "[[check]] entry '{}' has a blank string in `{field}`.",
-                    entry.name
+                    "{at} has a blank string in `{field}`."
                 )));
             }
         }
     }
-    let at = format!("[[check]] entry '{}'", entry.name);
     validate_exclude_tests(&entry.exclude_tests, &at)?;
     for s in &entry.skip {
         validate_filter_floor("skip", s, &at)?;
@@ -1566,10 +1631,9 @@ fn validate_check_entry(entry: &CheckEntry) -> Result<(), DevError> {
     // than by a runtime check that could be forgotten.
     if entry.feature_unification == FeatureUnification::Package && entry.packages.is_empty() {
         return Err(DevError::Config(format!(
-            "[[check]] entry '{}' sets `feature_unification = \"package\"` with no `packages`. \
+            "{at} sets `feature_unification = \"package\"` with no `packages`. \
              Package mode resolves each selected package on its own, so it needs an explicit \
-             package list to resolve - name the package(s) whose install-shape you are testing.",
-            entry.name
+             package list to resolve - name the package(s) whose install-shape you are checking."
         )));
     }
     // Contradictory selection models: package mode names packages positively
@@ -1591,14 +1655,11 @@ fn validate_check_entry(entry: &CheckEntry) -> Result<(), DevError> {
     validate_check_entry_doc_only(entry)?;
     for key in entry.env.keys() {
         if key.trim().is_empty() {
-            return Err(DevError::Config(format!(
-                "[[check]] entry '{}' has a blank `env` key.",
-                entry.name
-            )));
+            return Err(DevError::Config(format!("{at} has a blank `env` key.")));
         }
     }
-    reject_reserved_sweep_env(&entry.env, &format!("[[check]] entry '{}'", entry.name))?;
-    validate_check_entry_target(entry)?;
+    reject_reserved_sweep_env(&entry.env, &at)?;
+    validate_check_entry_target(entry, &at)?;
     if entry.curated
         && entry.tests.is_empty()
         && !entry.lib_tests
@@ -1620,7 +1681,7 @@ fn validate_check_entry(entry: &CheckEntry) -> Result<(), DevError> {
 
 /// The `target` key on one `[[check]]` entry: a bare triple name, and the one
 /// source of the sweep's build target.
-fn validate_check_entry_target(entry: &CheckEntry) -> Result<(), DevError> {
+fn validate_check_entry_target(entry: &CheckEntry, at: &str) -> Result<(), DevError> {
     let Some(target) = &entry.target else {
         return Ok(());
     };
@@ -1631,16 +1692,14 @@ fn validate_check_entry_target(entry: &CheckEntry) -> Result<(), DevError> {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
     if !bare {
         return Err(DevError::Config(format!(
-            "[[check]] entry '{}' sets `target = {target:?}`; it must be a bare target triple \
-             such as \"x86_64-unknown-linux-musl\" (custom .json target specs are not supported).",
-            entry.name
+            "{at} sets `target = {target:?}`; it must be a bare target triple \
+             such as \"x86_64-unknown-linux-musl\" (custom .json target specs are not supported)."
         )));
     }
     if entry.env.contains_key("CARGO_BUILD_TARGET") {
         return Err(DevError::Config(format!(
-            "[[check]] entry '{}' sets both `target` and `env.CARGO_BUILD_TARGET`; `target` is \
-             the sweep's build target. Drop the env key.",
-            entry.name
+            "{at} sets both `target` and `env.CARGO_BUILD_TARGET`; `target` is \
+             the sweep's build target. Drop the env key."
         )));
     }
     Ok(())

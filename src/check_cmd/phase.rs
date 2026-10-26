@@ -25,7 +25,7 @@ use crate::cargo_filter;
 use crate::cargo_json;
 use crate::diagnostic::{Diagnostic, Owner, OwnerIndex};
 use crate::config::{
-    Cadence, Certifies, CheckEntry, Claim, DependencyRule, GremlinsConfig, HeaderConfig, LintsConfig,
+    Cadence, Certifies, CheckEntry, Claim, DependencyRule, GremlinsConfig, HeaderConfig, LintSweep, LintsConfig,
     ManifestConfig, RustdocConfig, QuarantineEntry, ScriptCheck, SitedAllow,
     Stage, TestConfig, TextlintRule,
 };
@@ -44,6 +44,7 @@ pub(crate) fn cmd_check(
     project_root: &Path,
     state_root: &Path,
     check_entries: &[CheckEntry],
+    lint_sweeps: &[LintSweep],
     dependency_rules: &[DependencyRule],
     quarantine: &[QuarantineEntry],
     test_cfg: Option<&TestConfig>,
@@ -96,6 +97,15 @@ pub(crate) fn cmd_check(
     // the entries this run owes.
     let owed_scripts = scripts_for_claim(script_checks, claim);
     let script_checks = owed_scripts.as_slice();
+    // The `[[lint_sweep]]` lanes this run owes, planned like the tested ones
+    // but never handed to the test machinery. An ad-hoc features run replaces
+    // sweep selection wholesale, so it takes none.
+    let adhoc = !features.is_empty() || no_default_features;
+    let lint_lanes = if adhoc {
+        Vec::new()
+    } else {
+        lint_lanes_for_claim(lint_sweeps, claim, (project_root, packages, extra_args))?
+    };
 
     // Each planned cargo request carries the sweep's features projected onto
     // its packages; the metadata snapshot that takes is read at most once,
@@ -114,7 +124,8 @@ pub(crate) fn cmd_check(
         None
     };
     if let Some(facts) = &doc_facts {
-        let derived = derive_doctest_carriers(&active_sweeps, facts, &oracle)?;
+        let reserved: Vec<&str> = lint_lanes.iter().map(|l| l.label.as_str()).collect();
+        let derived = derive_doctest_carriers(&active_sweeps, &reserved, facts, &oracle)?;
         if doctests_quarantined {
             // Said, not run: the quarantine's reach is part of what the run is.
             announce_quarantined_carriers(&derived);
@@ -124,8 +135,10 @@ pub(crate) fn cmd_check(
         }
     }
     let doc_facts = doc_facts.filter(|_| !doctests_quarantined);
+    let sweeps = RunSweeps::new(active_sweeps, lint_lanes)?;
 
-    announce_profile_header(&active_sweeps, &profile_label);
+    announce_profile_header(sweeps.tested(), &profile_label);
+    announce_lint_lanes(sweeps.lint());
     announce_invocation_shaping(project_root, packages, extra_args);
     announce_adhoc_shaping(
         features,
@@ -143,8 +156,8 @@ pub(crate) fn cmd_check(
     // test phase, or both, and the trailer lists the union. Two flags rather
     // than one because clippy runs first - folding it into the test flag
     // would mark lanes an earlier test-phase fail-fast never reached. Policy coverage never reads this - it reads the
-    // plan.
-    let mut ledger = ReachLedger::new(&active_sweeps);
+    // plan. Over every lane, so a lint lane clippy reached is listed too.
+    let mut ledger = ReachLedger::new(sweeps.linted());
     // Whether a serial lane runs doctests inline: off unless `[test] doctests
     // = true` (their separate rustdoc pass is kept out of the edit loop for
     // cost), and off under a complete claim, whose doctests run once per
@@ -152,8 +165,12 @@ pub(crate) fn cmd_check(
     // run them again under the lane's `skip`/`only`, which no audit can hold
     // to anything.
     let doctests = test_cfg.is_some_and(|c| c.doctests) && !claim.enumerates_universe();
-    let serial_builds =
-        resolve_serial_builds(project_root, test_cfg.is_some_and(|c| c.serial_builds), &active_sweeps);
+    // Two answers: a lint lane's env can configure a build dir for the
+    // diagnostic phases that run it, and must not reschedule preparation.
+    let serial_configured = test_cfg.is_some_and(|c| c.serial_builds);
+    let diagnostic_serial_builds =
+        resolve_serial_builds(project_root, serial_configured, sweeps.linted(), "clippy and rustdoc");
+    let serial_builds = resolve_serial_builds(project_root, serial_configured, sweeps.tested(), "prepare");
 
     // A partial profile may skip phases (validated against Phase::ALL at
     // load time). Announce the omission up front - a narrowed run must
@@ -179,7 +196,7 @@ pub(crate) fn cmd_check(
     // with no trailer; a "nothing reached" refusal is stored and reported at
     // its phase's boundary.
     let selections = CheckSelections::build(
-        &active_sweeps,
+        &sweeps,
         packages,
         &skip,
         rustdoc_cfg.is_some(),
@@ -187,8 +204,12 @@ pub(crate) fn cmd_check(
         certifies,
         &oracle,
     )?;
-    announce_package_rules(&active_sweeps, &selections);
-    announce_feature_drops(&active_sweeps, &[&selections.clippy, &selections.rustdoc, &selections.test]);
+    announce_package_rules(sweeps.linted(), &selections);
+    announce_feature_drops(&[
+        (sweeps.linted(), &selections.clippy),
+        (sweeps.linted(), &selections.rustdoc),
+        (sweeps.tested(), &selections.test),
+    ]);
 
     // Run every phase behind one closure so a failure from *any* of them
     // (not just the test phase) still funnels through the summary line below,
@@ -225,10 +246,11 @@ pub(crate) fn cmd_check(
                 project_root,
                 script_checks,
                 state_root,
-                active_sweeps: &active_sweeps,
+                sweeps: &sweeps,
                 selections: &selections,
                 lints,
                 serial_builds,
+                diagnostic_serial_builds,
                 quarantine,
                 rustdoc_cfg,
                 claim,
@@ -276,12 +298,12 @@ pub(crate) fn cmd_check(
     }
 
     if timings {
-        emit_timings(&collected_timings, active_sweeps.len() > 1);
+        emit_timings(&collected_timings, sweeps.tested().len() > 1);
     }
 
     let outcome = outcome.map_err(PhaseFailure::into_dev_error);
 
-    let ran_labels = ledger.reached_labels(&active_sweeps);
+    let ran_labels = ledger.reached_labels(sweeps.linted());
 
     // The summary/trailer scope label: the CLI `-p` set, comma-joined so the
     // `--json` `package` field stays a string.
@@ -540,8 +562,8 @@ fn announce_package_rules(sweeps: &[PlannedSweep], selections: &CheckSelections)
 /// carry, and which members route them - a `-p` run, a package-mode
 /// resolution or a support build compiles fewer features than the sweep
 /// declares, and that must not be silent. Silent when nothing was dropped.
-pub(crate) fn announce_feature_drops(sweeps: &[PlannedSweep], phases: &[&PhaseSelection]) {
-    for line in feature_drop_lines(sweeps, phases) {
+pub(crate) fn announce_feature_drops(phases: &[(&[PlannedSweep], &PhaseSelection)]) {
+    for line in feature_drop_lines(phases) {
         output::run_msg(&line);
     }
 }
@@ -678,26 +700,72 @@ fn announce_skipped_phases(skip_phases: &[String]) {
 fn scripts_for_claim(checks: &[ScriptCheck], claim: Claim) -> Vec<ScriptCheck> {
     let (owed, excluded): (Vec<&ScriptCheck>, Vec<&ScriptCheck>) =
         checks.iter().partition(|c| claim.runs(c.when));
+    let excluded: Vec<(&str, Cadence)> = excluded.iter().map(|c| (c.name.as_str(), c.when)).collect();
+    log_ruled_out("script-check", "check", &excluded);
+    owed.into_iter().cloned().collect()
+}
+
+/// The `[[lint_sweep]]` lanes a run under `claim` owes, planned. Cadence is
+/// decided first, so an entry the run does not owe is never planned - and so
+/// can never refuse the invocation (a forwarded package selector against a
+/// package-mode entry, say). The ruled-out ones go to the run log, as script
+/// checks' do. Planned through the resolution point the tested sweeps use,
+/// from the test-free `[[check]]` entry of each shape; no profile reaches them.
+fn lint_lanes_for_claim(
+    entries: &[LintSweep],
+    claim: Claim,
+    // (project root, CLI `-p` scope, forwarded args)
+    invocation: (&Path, &[String], &[String]),
+) -> Result<Vec<PlannedSweep>, DevError> {
+    let (owed, excluded): (Vec<&LintSweep>, Vec<&LintSweep>) =
+        entries.iter().partition(|e| claim.runs(e.when));
+    let excluded: Vec<(&str, Cadence)> = excluded.iter().map(|e| (e.name.as_str(), e.when)).collect();
+    log_ruled_out("lint-sweep", "sweep", &excluded);
+    if owed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let decls = owed
+        .iter()
+        .map(|e| profile::sweep_from_check_entry(&e.as_check_entry()))
+        .collect();
+    resolve_invocation_sweeps(decls, invocation.0, invocation.1, &ForwardedArgs::parse(invocation.2))
+}
+
+/// Name, in the run log only, the entries a run's claim rules out by their
+/// `when`, one line per cadence: on the console they would be noise on every
+/// edit-loop run. This accounts for cadence alone; an owed entry may still
+/// not run (`skip_phases`, an earlier failure, a `-p` that excludes it).
+fn log_ruled_out(phase: &str, noun: &str, excluded: &[(&str, Cadence)]) {
     for cadence in [Cadence::Gate, Cadence::Off] {
-        let names: Vec<&str> = excluded
-            .iter()
-            .filter(|c| c.when == cadence)
-            .map(|c| c.name.as_str())
-            .collect();
+        let names: Vec<&str> =
+            excluded.iter().filter(|(_, when)| *when == cadence).map(|(name, _)| *name).collect();
         if names.is_empty() {
             continue;
         }
         let (noun, why) = match cadence {
-            Cadence::Gate => ("gate-only check", "no complete claim"),
-            _ => ("check", "when = \"off\""),
+            Cadence::Gate => (format!("gate-only {noun}"), "no complete claim"),
+            _ => (noun.to_owned(), "when = \"off\""),
         };
         output::detail(&format!(
-            "script-check: {} not run, {why}: {}",
-            output::count(names.len(), noun),
+            "{phase}: {} not run, {why}: {}",
+            output::count(names.len(), &noun),
             names.join(", ")
         ));
     }
-    owed.into_iter().cloned().collect()
+}
+
+/// Name the run's lint lanes, in the run log: like the profile header, a
+/// function of the config, identical run to run.
+fn announce_lint_lanes(lint: &[PlannedSweep]) {
+    if lint.is_empty() {
+        return;
+    }
+    let labels: Vec<&str> = lint.iter().map(|s| s.label.as_str()).collect();
+    output::detail(&format!(
+        "{} ({}), clippy and rustdoc only",
+        output::count(lint.len(), "lint sweep"),
+        labels.join(", ")
+    ));
 }
 
 /// Decide the phases to skip because the working tree holds documentation
@@ -833,17 +901,21 @@ struct BuildPhaseArgs<'a> {
     /// where cargo runs in `project_root` (the code tree) but hung-test
     /// snapshots must stay out of the foreign repo.
     state_root: &'a Path,
-    active_sweeps: &'a [PlannedSweep],
+    /// Every lane of the run: the tested ones ([`Self::tested`]) for the
+    /// test machinery, all of them for clippy and rustdoc.
+    sweeps: &'a RunSweeps,
     /// Which lanes each phase may attempt, with which packages - aligned with
-    /// `active_sweeps` - and whether the member-check and fixture-lint
-    /// phases run.
+    /// the lanes each phase covers - and whether the member-check and
+    /// fixture-lint phases run.
     selections: &'a CheckSelections,
     /// `[lints]`: `allow`, suppressed via `-A` on every sweep, and the sited
     /// `allow_exact` list, filtered at JSON ingestion.
     lints: &'a LintsConfig,
-    /// One cargo chain for every build phase (`[test] serial_builds`, or a
-    /// configured cargo build dir), resolved once for the run.
+    /// One cargo chain for the prepare builds (`[test] serial_builds`, or a
+    /// cargo build dir a tested lane sees), resolved once for the run.
     serial_builds: bool,
+    /// The same answer for clippy and rustdoc, over every lane they run.
+    diagnostic_serial_builds: bool,
     quarantine: &'a [QuarantineEntry],
     /// `[rustdoc]`; `None` leaves the rustdoc phase inert.
     rustdoc_cfg: Option<&'a RustdocConfig>,
@@ -857,6 +929,13 @@ struct BuildPhaseArgs<'a> {
     extra_args: &'a [String],
     /// Joined before the prepare phase lists anything.
     background: &'a BackgroundScripts,
+}
+
+impl BuildPhaseArgs<'_> {
+    /// The lanes the test machinery sees: never a lint lane.
+    fn tested(&self) -> &[PlannedSweep] {
+        self.sweeps.tested()
+    }
 }
 
 /// What a run reports beyond its verdict, for the `--json` trailer.
@@ -949,7 +1028,7 @@ fn run_build_phases(
                     project: a.project.clone(),
                     project_root: a.project_root,
                     state_root: a.state_root,
-                    sweeps: a.active_sweeps,
+                    sweeps: a.tested(),
                     selection: &a.selections.test,
                     doctests: a.doctests,
                     commands: a.commands,
@@ -999,7 +1078,7 @@ fn run_prepare_phase(a: &BuildPhaseArgs<'_>, certifying: bool) -> Result<Prepare
     );
     let target_dir = info.target_dir;
     let allow_flags = crate::config::check::test_phase_allow_flags(a.lints);
-    let universe_selectors = universe_selectors(a.active_sweeps);
+    let universe_selectors = universe_selectors(a.tested());
     let inputs = LaneInputs {
         project: a.project.clone(),
         project_root: a.project_root,
@@ -1014,10 +1093,10 @@ fn run_prepare_phase(a: &BuildPhaseArgs<'_>, certifying: bool) -> Result<Prepare
     // Two steps: every lane built (target-dir chains, concurrent), then every
     // lane listed one at a time with nothing compiling. The background
     // script checks may compile, so they are joined in between.
-    let builds = build_profile(&inputs, a.active_sweeps, &a.selections.test, a.extra_args, a.serial_builds);
+    let builds = build_profile(&inputs, a.tested(), &a.selections.test, a.extra_args, a.serial_builds);
     a.background.join()?;
     let mut preparer = CargoPreparer::new(inputs, a.extra_args, builds);
-    let prep = prepare_profile(a.active_sweeps, &a.selections.test, a.doctests, certifying, &mut preparer);
+    let prep = prepare_profile(a.tested(), &a.selections.test, a.doctests, certifying, &mut preparer);
     for marker in &prep.plan.incomplete {
         if certifying {
             output::error(&format!("prepare: {marker}"));
@@ -1064,6 +1143,7 @@ fn run_prepare_phase(a: &BuildPhaseArgs<'_>, certifying: bool) -> Result<Prepare
 /// The two per-build-shape diagnostic phases: clippy, then rustdoc. Rustdoc
 /// comes second because it reuses clippy's compiled dependencies, and before
 /// the tests because a doc link is cheaper to fail on than a test suite.
+/// Both run over every lane, the `[[lint_sweep]]` ones included.
 fn run_diagnostic_phases(
     a: &BuildPhaseArgs<'_>,
     skip: &dyn Fn(Phase) -> bool,
@@ -1074,13 +1154,13 @@ fn run_diagnostic_phases(
         start_phase(failing_phase, Phase::Clippy);
         run_clippy_phase(
             a.project_root,
-            a.active_sweeps,
+            a.sweeps.linted(),
             &a.selections.clippy,
             a.lints,
             Reporter::Check { commands: a.commands },
             &mut |i| ledger.reach_diagnostics(LaneIdx::new(i)),
             false,
-            a.serial_builds,
+            a.diagnostic_serial_builds,
         )?;
     }
 
@@ -1089,12 +1169,12 @@ fn run_diagnostic_phases(
         run_rustdoc_phase(
             a.project_root,
             a.rustdoc_cfg,
-            a.active_sweeps,
+            a.sweeps.linted(),
             &a.selections.rustdoc,
             a.lints,
             Reporter::Check { commands: a.commands },
             &mut |i| ledger.reach_diagnostics(LaneIdx::new(i)),
-            a.serial_builds,
+            a.diagnostic_serial_builds,
         )?;
     }
     Ok(())
@@ -1123,7 +1203,7 @@ fn finish_build_phases(
             if test_failure.is_none() {
                 start_phase(failing_phase, Phase::Coverage);
             }
-            let audit = audit_coverage(&prepared, a.active_sweeps, a.quarantine, test_failure.is_none());
+            let audit = audit_coverage(&prepared, a.tested(), a.quarantine, test_failure.is_none());
             // Counts first, verdict second: the summary carries them even when
             // the audit is what failed.
             if run_report.termination.is_none() {
@@ -1218,13 +1298,13 @@ fn verify_doc_only_rules(a: &BuildPhaseArgs<'_>) -> Result<(), DevError> {
     // Every configured doc-only sweep, for the structural carrier rule below.
     let is_doc_only = |s: &PlannedSweep| matches!(s.lane_exec(), LaneExec::DocOnly { .. });
     let doc_sweeps: Vec<&PlannedSweep> =
-        a.active_sweeps.iter().filter(|s| is_doc_only(s)).collect();
+        a.tested().iter().filter(|s| is_doc_only(s)).collect();
     // The execution-compatibility rules judge only the doc-only lanes this
     // invocation will attempt: a lane the Test selection excludes (an
     // out-of-scope `-p`) or a disabled Test phase never runs `--doc`, so it
     // cannot conflict with a forwarded selector or a run shape.
     let attempted: Vec<&PlannedSweep> = a
-        .active_sweeps
+        .tested()
         .iter()
         .enumerate()
         .filter(|(i, s)| is_doc_only(s) && a.selections.test.attempt(LaneIdx::new(*i)).is_some())
@@ -1278,7 +1358,7 @@ fn verify_doc_only_rules(a: &BuildPhaseArgs<'_>) -> Result<(), DevError> {
             build::project_info(Some(a.project_root))?.bare_selection_is_whole_workspace;
         // Derived carriers count: one cloned from a workspace-shaped lane is
         // as workspace-shaped as its source.
-        let carrier = a.active_sweeps.iter().any(|s| {
+        let carrier = a.tested().iter().any(|s| {
             let carries = lane_runs_doctests(s, a.doctests);
             let workspace_shaped =
                 s.packages.is_empty() && (!s.test_exclude_packages.is_empty() || whole);
@@ -1784,8 +1864,9 @@ mod package_rules_tests {
     fn lines(sweeps: &[PlannedSweep], cli: &[&str]) -> Vec<String> {
         let cli: Vec<String> = cli.iter().map(|p| (*p).to_owned()).collect();
         let oracle = FeatureOracle::unavailable();
+        let lanes = crate::check_cmd::RunSweeps::tested_only(sweeps.to_vec());
         let selections =
-            CheckSelections::build(sweeps, &cli, &|_| false, false, crate::check_cmd::GatedPhases::default(), None, &oracle)
+            CheckSelections::build(&lanes, &cli, &|_| false, false, crate::check_cmd::GatedPhases::default(), None, &oracle)
                 .unwrap();
         package_rules_lines(sweeps, &selections)
     }

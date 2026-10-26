@@ -1,15 +1,18 @@
 # brokkr.toml: sweeps, test profiles and quarantine
 
 The brokkr.toml sections that decide what `brokkr check` and `brokkr test`
-build and run: `[[check]]` sweeps, the `parallel` lane, `[test]` and its
-profiles, and the `[[quarantine]]` ledger. The rest of the schema is in
+build and run: `[[check]]` sweeps, `[[lint_sweep]]` shapes that are linted and
+never tested, the `parallel` lane, `[test]` and its profiles, and the
+`[[quarantine]]` ledger. The rest of the schema is in
 `docs/brokkr.toml.md` (`brokkr man config`); how the lanes run is in
 `brokkr man test-lanes`.
 
 ## `[[check]]` array
 
 Optional. Each entry is one (clippy + test) sweep with the entry's feature
-flags. Profiles in `[test.profiles]` reference these by name.
+flags. Profiles in `[test.profiles]` reference these by name. A shape that
+should be linted but cannot or need not be tested is a
+[`[[lint_sweep]]`](#lint_sweep-array) instead.
 
 ```toml
 [[check]]
@@ -324,6 +327,95 @@ lanes reference it.
 The legacy `[check]` table form (with `consumer_features`) is rejected at
 parse time with a migration message - move the flags into a `[[check]]` entry.
 
+## `[[lint_sweep]]` array
+
+Optional. Each entry is a build shape `brokkr check` lints with clippy and, with
+`[rustdoc]`, documents with rustdoc, and never tests. It is for a shape whose
+test phase cannot run on this host or is not wanted: a `[[check]]` entry always
+runs its tests, and a cross-target binary the host cannot execute fails when it
+is listed. The motivating case is linting code behind a
+`cfg(not(target_arch = "x86_64"))` fallback from an x86_64 host:
+
+```toml
+[[lint_sweep]]
+name = "aarch64"
+target = "aarch64-unknown-linux-gnu"
+features = ["simd"]
+```
+
+The keys are the build-shape keys of `[[check]]`, with the same meaning and
+the same load checks: `name` (required), `features`, `no_default_features`,
+`packages`, `env`, `rustflags`, `profile`, `target` and `feature_unification`,
+plus `when` (below). Every test-shaping key - `tests`, `lib_tests`,
+`exclude_tests`, `skip`, `only`, `curated`, `parallel`, `harness`, `doc_only`,
+`build_packages`, `test_exclude_packages` - is an unknown key and a load error.
+The entry is the whole shape: no profile references a lint sweep, and no
+profile's `env` reaches it.
+
+`name` must be unique among the lint sweeps and differ from every `[[check]]`
+name: the two share the run's sweep labels and `brokkr clippy --sweep`. It may
+not contain `/`, the separator of a lanes profile's `lane/entry` labels.
+
+When it runs: per entry, `when` against the run's claim, the vocabulary of
+`[[script_check]]`, `[member_check]` and `[[fixture_lint]]`:
+
+| `when` | Runs |
+| --- | --- |
+| `always` (default) | In every `brokkr check` whose clippy or rustdoc phase runs, under any profile; not in an ad-hoc `--features` run |
+| `gate` | Only under a `certifies = "complete"` profile |
+| `off` | Never in `brokkr check`; `brokkr clippy --sweep NAME` lints it on demand |
+
+`always` is the default for the reason `[[script_check]]` has it: a lint sweep
+is a clippy and rustdoc pass of the kind every check already runs, while
+`[member_check]` and `[[fixture_lint]]` compile graphs the edit loop does not
+and start gate-only. A `gate` entry is a **load error** when no
+`[test.profiles.*]` declares `certifies = "complete"`, since it could never run.
+The run log names the entries a run's claim left out
+(`lint-sweep: 1 gate-only sweep not run, no complete claim: aarch64`); the
+console does not.
+`brokkr clippy --sweep NAME` runs clippy only - nothing runs a lint sweep's
+rustdoc pass on demand.
+
+How a run treats one:
+
+- The lint lanes join clippy and rustdoc after the tested sweeps, selected,
+  `-p`-narrowed, deduped and reported by the same rules
+  (`brokkr man check invocation-selection`). One whose build equals a tested
+  sweep's is deduped onto it (`clippy aarch64: deduped`), so a lint sweep costs nothing where a
+  running `[[check]]` entry already compiles its shape; under a profile that
+  does not select that entry it is real work. A `-p` its `packages` list
+  rules out entirely excludes it, like a `[[check]]` entry.
+- The test machinery never sees them: no preparation, test lane, coverage
+  universe, doctest carrier or doc-only rule. The tested sweeps' compile
+  inputs, test obligations and preparation scheduling are what they would be
+  without the lint sweeps; a derived doctest carrier only skips a label a lint
+  sweep holds (`foo (doctests 2)`).
+- Clippy lints them with `--all-targets` like every gate sweep, so the
+  triple must compile the tests, benches and examples too; rustdoc documents
+  cargo's default doc targets. No binary for the triple is linked or run, so
+  its standard library (`rustup target add <triple>`) is what the triple
+  itself needs. Build scripts and proc-macros are host code and still build
+  and run: one that compiles C for the target needs that target's C compiler
+  or system libraries, which the entry's `env` can point it at. Their `env`
+  may also configure a cargo build dir; that serializes the clippy and
+  rustdoc runs and leaves preparation alone.
+- A missing standard library for the triple fails in clippy with rustc's own
+  error (`can't find crate for core`, naming `rustup target add`); there is no
+  separate preflight.
+- Skipped with the phases that run them: a profile's `skip_phases` naming
+  `clippy` and `rustdoc`, and the markdown-only shortcut. An ad-hoc
+  `--features`/`--no-default-features` run replaces sweep selection wholesale
+  and takes none. The `--json` trailer's `sweeps` lists one clippy or rustdoc
+  reached; one deduped onto a tested sweep is not listed separately.
+
+Composition is the ordinary array rule (`brokkr man config include`): an
+included entry is replaced by repeating it in full under its name, and
+`lint_sweep = []` clears the inherited list. The key is claimed only as an
+array, so a `[lint_sweep]` table is still a hostname section; it and a
+`[[lint_sweep]]` array cannot both stand at that spelling, so a host of that
+name moves to `[host.lint_sweep]`. The user-wide config does not accept the
+key.
+
 ## `parallel` - running a sweep's test binaries at once
 
 `parallel = { budget = N }` on a `[[check]]` entry runs that sweep's test
@@ -604,7 +696,9 @@ include_ignored = true
   outside its `OUT_DIR` - into the source tree or a shared directory - so a
   project whose build scripts do that sets this. A cargo build dir configured
   anywhere (`CARGO_BUILD_BUILD_DIR`, `build.build-dir`) holds intermediate
-  artifacts across target dirs and forces one chain on its own. If Cargo
+  artifacts across target dirs and forces one chain on its own - for clippy
+  and rustdoc when any lane they run sees one, for the prepare builds when a
+  tested lane does, so a `[[lint_sweep]]` `env` reaches only the first. If Cargo
   config cannot be fully inspected, brokkr also uses one chain; Cargo reports
   unreadable or invalid config files when the build runs.
 - `default_profile` is the validation profile `brokkr check` uses when no

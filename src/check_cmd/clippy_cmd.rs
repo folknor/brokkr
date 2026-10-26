@@ -2,6 +2,7 @@
 pub(crate) fn cmd_clippy(
     project_root: &Path,
     check_entries: &[CheckEntry],
+    lint_sweeps: &[LintSweep],
     packages: &[String],
     all_features: bool,
     features: &[String],
@@ -21,6 +22,7 @@ pub(crate) fn cmd_clippy(
     let _interrupts = crate::shutdown::SigtermGuard::install();
     let mut declaration = build_clippy_sweep(
         check_entries,
+        lint_sweeps,
         packages,
         all_features,
         features,
@@ -47,7 +49,7 @@ pub(crate) fn cmd_clippy(
         .expect("one declaration plans one sweep");
     // The same serial-builds rule `check` resolves: a configured cargo build
     // dir makes one chain of the probe's runs too.
-    let serial_builds = resolve_serial_builds(project_root, false, std::slice::from_ref(&sweep));
+    let serial_builds = resolve_serial_builds(project_root, false, std::slice::from_ref(&sweep), "clippy");
 
     // One sweep -> run_clippy_phase runs `multi = false`, so output carries no
     // sweep-label tags. The selection has no CLI override: ad-hoc `-p` is

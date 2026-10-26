@@ -42,6 +42,11 @@ the package pin and a parallel `auto` entry `check` would promote to a workspace
 pin is promoted here too. A profile's `env` is not applied: `--sweep` names a
 `[[check]]` entry, not a profile lane.
 
+`NAME` may also be a `[[lint_sweep]]` entry, replayed the same way - its
+`target` included - whatever its `when`. That is the on-demand spelling for a
+`when = "off"` lint sweep, and it is clippy only: nothing runs a lint sweep's
+rustdoc pass outside `brokkr check`. The two tables' names never collide.
+
 ```
 brokkr clippy --sweep ffi
 ```
@@ -85,13 +90,15 @@ The base env depends on the mode:
   every `build.rs` reads), so it carries all of them and lets the project
   decide what belongs there. If two entries set the same key to *different*
   values, that is a config error - resolve it with `--env KEY=...`, or replay one
-  entry with `--sweep NAME`. Union (rather than intersection) is deliberate: an
+  entry with `--sweep NAME`. `[[lint_sweep]]` env is not in the union: a
+  cross-target or `off` entry's env belongs to its own shape, not to a probe
+  that did not name it. Union (rather than intersection) is deliberate: an
   invariant present in most-but-not-all entries must survive, which intersection
   would drop. `brokkr check`'s ad-hoc `--features` path takes the same union
   from the same function, so the two commands cannot resolve different shapes
   from one config - they used to, and a scoped `check` silently compiled
   without the invariant `clippy` was applying.
-- **`--sweep NAME`:** just that entry's `env`.
+- **`--sweep NAME`:** just that entry's `env` (`[[check]]` or `[[lint_sweep]]`).
 
 `--env` overrides both, and a key set via `--env` is exempt from the cross-sweep
 conflict check (so `--env` can resolve a conflict, not just be masked by it).

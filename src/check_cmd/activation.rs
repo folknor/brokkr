@@ -1,6 +1,6 @@
 // Sweep selection and the shared ad-hoc environment policy.
 
-use crate::config::{CheckEntry, TestConfig};
+use crate::config::{CheckEntry, LintSweep, TestConfig};
 use crate::error::DevError;
 use crate::profile::{self, SweepDecl};
 
@@ -54,6 +54,7 @@ pub(crate) fn decide_active_sweeps(
         ActivationPurpose::Check,
         SweepInputs {
             check_entries,
+            lint_sweeps: &[],
             test_cfg,
             profile_name,
             features,
@@ -69,6 +70,10 @@ pub(crate) fn decide_active_sweeps(
 #[derive(Clone, Copy)]
 struct SweepInputs<'a> {
     check_entries: &'a [CheckEntry],
+    /// Reached only by `brokkr clippy --sweep NAME`; never unioned into an
+    /// ad-hoc env, so a cross-target or `off` lint sweep cannot reach a probe
+    /// that did not name it.
+    lint_sweeps: &'a [LintSweep],
     test_cfg: Option<&'a TestConfig>,
     profile_name: Option<&'a str>,
     features: &'a [String],
@@ -90,16 +95,26 @@ fn resolve_sweeps(
         .map(|(k, _)| k.as_str())
         .collect();
     let mut sweeps = if let Some(name) = inputs.sweep_name {
+        // A `[[lint_sweep]]` replays as the test-free `[[check]]` entry of its
+        // shape. Load validation keeps the two name sets disjoint.
         let entry = inputs
             .check_entries
             .iter()
             .find(|entry| entry.name == name)
+            .cloned()
+            .or_else(|| {
+                inputs
+                    .lint_sweeps
+                    .iter()
+                    .find(|sweep| sweep.name == name)
+                    .map(LintSweep::as_check_entry)
+            })
             .ok_or_else(|| {
                 DevError::Config(format!(
-                    "--sweep '{name}' matches no [[check]] entry in brokkr.toml"
+                    "--sweep '{name}' matches no [[check]] or [[lint_sweep]] entry in brokkr.toml"
                 ))
             })?;
-        vec![profile::sweep_from_check_entry(entry)]
+        vec![profile::sweep_from_check_entry(&entry)]
     } else if policy.always_adhoc || !inputs.features.is_empty() || inputs.no_default_features {
         let mut sweep = SweepDecl {
             label: policy.label.into(),
@@ -199,14 +214,16 @@ pub(crate) fn effective_profile_name(
 /// Construct the single `SweepDecl` a `brokkr clippy` invocation runs; the
 /// caller plans it through the same unification resolution `check` uses.
 ///
-/// `--sweep NAME` borrows the named `[[check]]` entry wholesale (packages,
-/// features, env). Otherwise it is ad-hoc: packages from `-p`, features from the
-/// flags, env unioned from every `[[check]]` entry. `--env` overrides win over
-/// both and are applied last; keys an override sets are exempt from cross-sweep
-/// conflict detection, so `--env` can *resolve* a conflict rather than be masked
-/// by it.
+/// `--sweep NAME` borrows the named `[[check]]` or `[[lint_sweep]]` entry
+/// wholesale (packages, features, env, target). Otherwise it is ad-hoc:
+/// packages from `-p`, features from the flags, env unioned from every
+/// `[[check]]` entry. `--env` overrides win over both and are applied last;
+/// keys an override sets are exempt from cross-sweep conflict detection, so
+/// `--env` can *resolve* a conflict rather than be masked by it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_clippy_sweep(
     check_entries: &[CheckEntry],
+    lint_sweeps: &[LintSweep],
     packages: &[String],
     all_features: bool,
     features: &[String],
@@ -218,6 +235,7 @@ pub(crate) fn build_clippy_sweep(
         ActivationPurpose::Clippy,
         SweepInputs {
             check_entries,
+            lint_sweeps,
             test_cfg: None,
             profile_name: None,
             features,
@@ -367,7 +385,7 @@ mod clippy_sweep_tests {
         let entries = vec![entry("core", &[("CODEGEN", "1")])];
         let features = vec!["ffi".to_owned()];
         let check = decide_active_sweeps(&entries, None, None, &features, true).unwrap();
-        let clippy = build_clippy_sweep(&entries, &[], false, &features, true, None, &[]).unwrap();
+        let clippy = build_clippy_sweep(&entries, &[], &[], false, &features, true, None, &[]).unwrap();
         assert_eq!(
             check[0].features.configured_key(),
             clippy.features.configured_key()
@@ -379,7 +397,7 @@ mod clippy_sweep_tests {
 
     #[test]
     fn adhoc_all_features() {
-        let s = build_clippy_sweep(&[], &[], true, &[], false, None, &[]).unwrap();
+        let s = build_clippy_sweep(&[], &[], &[], true, &[], false, None, &[]).unwrap();
         assert_eq!(s.features.configured_key(), vec!["--all-features"]);
         // Ad-hoc features are the invocation's own: never projected.
         assert!(s.features.invocation_explicit);
@@ -389,7 +407,7 @@ mod clippy_sweep_tests {
     #[test]
     fn adhoc_no_default_plus_features() {
         let feats = vec!["x".to_owned(), "y".to_owned()];
-        let s = build_clippy_sweep(&[], &[], false, &feats, true, None, &[]).unwrap();
+        let s = build_clippy_sweep(&[], &[], &[], false, &feats, true, None, &[]).unwrap();
         assert_eq!(
             s.features.configured_key(),
             vec!["--no-default-features", "--features", "x,y"]
@@ -400,7 +418,7 @@ mod clippy_sweep_tests {
     #[test]
     fn adhoc_packages_copied() {
         let pkgs = vec!["crate_a".to_owned(), "crate_b".to_owned()];
-        let s = build_clippy_sweep(&[], &pkgs, false, &[], false, None, &[]).unwrap();
+        let s = build_clippy_sweep(&[], &[], &pkgs, false, &[], false, None, &[]).unwrap();
         assert_eq!(s.packages, vec!["crate_a", "crate_b"]);
     }
 
@@ -411,7 +429,7 @@ mod clippy_sweep_tests {
         // P1-1 regression: conflict no longer errors before the override applies.
         let entries = [entry("a", &[("HP", "1")]), entry("b", &[("HP", "2")])];
         let ov = overrides(&[("HP", "chosen")]);
-        let s = build_clippy_sweep(&entries, &[], false, &[], false, None, &ov).unwrap();
+        let s = build_clippy_sweep(&entries, &[], &[], false, &[], false, None, &ov).unwrap();
         assert_eq!(s.env.get("HP").map(String::as_str), Some("chosen"));
     }
 
@@ -419,7 +437,7 @@ mod clippy_sweep_tests {
     fn adhoc_env_override_wins_over_agreeing_value() {
         let entries = [entry("a", &[("HP", "1")])];
         let ov = overrides(&[("HP", "9")]);
-        let s = build_clippy_sweep(&entries, &[], false, &[], false, None, &ov).unwrap();
+        let s = build_clippy_sweep(&entries, &[], &[], false, &[], false, None, &ov).unwrap();
         assert_eq!(s.env.get("HP").map(String::as_str), Some("9"));
     }
 
@@ -429,7 +447,7 @@ mod clippy_sweep_tests {
     fn sweep_unknown_name_errors() {
         let entries = [entry("known", &[])];
         let err =
-            build_clippy_sweep(&entries, &[], false, &[], false, Some("missing"), &[]).unwrap_err();
+            build_clippy_sweep(&entries, &[], &[], false, &[], false, Some("missing"), &[]).unwrap_err();
         assert!(err.to_string().contains("missing"), "got: {err}");
     }
 
@@ -439,7 +457,7 @@ mod clippy_sweep_tests {
         e.features = vec!["ffi".into()];
         e.packages = vec!["nautilus-model".into()];
         let entries = [e];
-        let s = build_clippy_sweep(&entries, &[], false, &[], false, Some("ffi"), &[]).unwrap();
+        let s = build_clippy_sweep(&entries, &[], &[], false, &[], false, Some("ffi"), &[]).unwrap();
         assert_eq!(s.features.configured_key(), vec!["--features", "ffi"]);
         // A replayed entry's features are the entry's: projected like any
         // gate sweep's (an identity here, over the entry's own selection).
@@ -449,10 +467,27 @@ mod clippy_sweep_tests {
     }
 
     #[test]
+    fn sweep_replays_a_lint_sweep_and_the_ad_hoc_env_never_takes_its_env() {
+        let lint: crate::config::LintSweep = toml::from_str(
+            "name = \"arm\"\ntarget = \"aarch64-unknown-linux-gnu\"\nenv = { CC = \"arm-cc\" }\n",
+        )
+        .unwrap();
+        let lint = [lint];
+        let s = build_clippy_sweep(&[], &lint, &[], false, &[], false, Some("arm"), &[]).unwrap();
+        assert_eq!(s.target.as_deref(), Some("aarch64-unknown-linux-gnu"));
+        assert_eq!(s.env.get("CC").map(String::as_str), Some("arm-cc"));
+        // A probe that did not name it compiles none of its shape.
+        let adhoc = build_clippy_sweep(&[], &lint, &[], false, &[], false, None, &[]).unwrap();
+        assert!(adhoc.env.is_empty() && adhoc.target.is_none());
+        let err = build_clippy_sweep(&[], &lint, &[], false, &[], false, Some("x"), &[]).unwrap_err();
+        assert!(err.to_string().contains("[[lint_sweep]]"), "{err}");
+    }
+
+    #[test]
     fn sweep_env_override_wins_over_entry() {
         let entries = [entry("ffi", &[("HP", "1")])];
         let ov = overrides(&[("HP", "0")]);
-        let s = build_clippy_sweep(&entries, &[], false, &[], false, Some("ffi"), &ov).unwrap();
+        let s = build_clippy_sweep(&entries, &[], &[], false, &[], false, Some("ffi"), &ov).unwrap();
         assert_eq!(s.env.get("HP").map(String::as_str), Some("0"));
     }
 }

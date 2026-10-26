@@ -292,6 +292,12 @@ builds are owed - one `<entry> (doctests)` lane per build no `doc_only` entry
 carries, named at the top of the run (see `brokkr man sweeps` under
 `parallel`, Doctests).
 
+The `[[lint_sweep]]` entries the run's claim owes are lanes of clippy and
+rustdoc only, after the tested sweeps: those two phases select, narrow and
+dedupe them like any sweep, and the test phase, `prepare` and the coverage
+audit never see them (`[[lint_sweep]]` in `brokkr man sweeps`). An ad-hoc
+`--features` run takes none.
+
 When `-p` excludes every applicable sweep of an enabled phase, that phase
 refuses as a failed run instead of reading green. The test phase's refusal
 comes before `prepare`, so a run that will test nothing compiles nothing for it.
@@ -696,8 +702,9 @@ after another in configured order, since cargo would only queue them on its
 build-dir lock; the groups run concurrently. Every run is made and the verdict
 is decided once all of them are in, exactly as for a serial phase - a lint
 found early in one group never cuts another group's runs short. The rustdoc
-phase is grouped the same way. `[test] serial_builds`, or a configured cargo
-build dir, makes it one group. If Cargo config cannot be fully inspected, the
+phase is grouped the same way. `[test] serial_builds`, or a cargo build dir
+any lane these two phases run is configured with (a `[[lint_sweep]]` `env`
+included), makes it one group. If Cargo config cannot be fully inspected, the
 probe also chooses one group; the Cargo invocation reports unreadable or
 invalid config files (`docs/brokkr.toml.sweeps.md`;
 `src/check_cmd/concurrency.rs`).
@@ -998,6 +1005,10 @@ sweep.
 | `[[check]]` + `default_profile = "tier1"`, no flags | the entries `tier1.sweeps` references | tier1's filters |
 | `--profile tier1` | the entries `tier1.sweeps` references | tier1's filters |
 | `--features X` (or `--no-default-features`) | one ad-hoc sweep, no `build_packages` | the resolved profile's filters (see below) |
+
+Every row but the ad-hoc one also lints and documents the `[[lint_sweep]]`
+entries its claim owes, after the sweeps above; they are not sweeps of the
+test phase.
 
 **CLI features override sweep *selection*, not run shaping.** The two are
 independent: sweep selection decides what cargo compiles, while a profile's

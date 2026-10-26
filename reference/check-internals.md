@@ -22,10 +22,21 @@ It is invocation selection only: it never predicts binaries, tests, inventory
 or outcomes. The prepared inventory and the runtime record (journal,
 accounting) keep their own models.
 
-Per phase, one entry per active sweep, in sweep order. The selection and
-prepared-lane collections are `Lanes<T>` values built from the active sweep
-list and addressed with `LaneIdx`; persisted lane records carry that same typed
-index into the journal and termination labels:
+Per phase, one entry per lane that phase covers, in lane order. A `check` run's
+lanes are a `RunSweeps`: the tested sweeps (configured, then derived doctest
+carriers), then the owed `[[lint_sweep]]` lanes. Clippy and rustdoc select over
+all of them, the test phase over the tested prefix only, so a `LaneIdx` names
+the same sweep in every phase that has it and the test machinery - `prepare`,
+the lanes, the coverage audit, the doc-only rules, carrier derivation - is
+handed the tested slice and cannot see a lint lane. Lint lanes are planned
+from the test-free `[[check]]` entry of their shape after their cadence is
+decided, so an entry the run does not owe is never planned and cannot refuse
+the invocation; the carrier deriver reserves their labels as a separate input.
+The selection and prepared-lane collections are `Lanes<T>` values built from
+the lanes their phase covers and addressed with `LaneIdx`; a consumer pairing
+selections of different phases (`feature_drop_lines`) takes each with its own
+lane slice. Persisted lane records carry that same typed index into the
+journal and termination labels:
 
 - **Selection**, the effective package selection: the sweep's own `packages`
   list; `--workspace --exclude` from `test_exclude_packages` (test phase only -
