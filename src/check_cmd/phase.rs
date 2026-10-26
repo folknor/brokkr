@@ -141,10 +141,11 @@ pub(crate) fn cmd_check(
     // plan.
     let mut ledger = ReachLedger::new(&active_sweeps);
     // Whether a serial lane runs doctests inline: off unless `[test] doctests
-    // = true` (nextest/CI never runs them), and off under a complete claim,
-    // whose doctests run once per tested build, unfiltered, in its doc
-    // carriers - an inline pass would run them again under the lane's
-    // `skip`/`only`, which no audit can hold to anything.
+    // = true` (their separate rustdoc pass is kept out of the edit loop for
+    // cost), and off under a complete claim, whose doctests run once per
+    // tested build, unfiltered, in its doc carriers - an inline pass would
+    // run them again under the lane's `skip`/`only`, which no audit can hold
+    // to anything.
     let doctests = test_cfg.is_some_and(|c| c.doctests) && !claim.enumerates_universe();
     let serial_builds =
         resolve_serial_builds(project_root, test_cfg.is_some_and(|c| c.serial_builds), &active_sweeps);

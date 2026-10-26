@@ -1409,15 +1409,17 @@ pub enum SweepProfile {
 ///   pin the faster-compiling build without typing `--debug` every time.
 ///   The CLI wins: `--debug` forces dev, `--release` forces release, and
 ///   only when neither is passed does this field decide.
-/// - `doctests` decides whether the test phase runs doctests. It defaults
-///   to `false` because every brokkr-managed project runs its CI under
-///   cargo-nextest, which never executes doctests - so a `brokkr check`
-///   that ran them would fail (or pass) on a signal CI cannot see, breaking
-///   CI parity. With the default, brokkr scopes `cargo test` to `--tests`
-///   (lib + bins + integration, no doctests) unless the sweep already
-///   carries an explicit target selector (`--test <name>`), which excludes
-///   doctests on its own. Set `doctests = true` to opt a project back in to
-///   the full `cargo test` default (doctests included).
+/// - `doctests` decides whether the test phase's serial lanes run doctests
+///   inline, outside a complete claim. It defaults to `false` for cost:
+///   rustdoc compiles and runs doctests in a pass of its own (each example
+///   separately before edition 2024; in 2024 every one it cannot merge),
+///   which can be too slow for the edit loop. A `certifies = "complete"`
+///   profile runs them in derived doctest carriers whatever this key says.
+///   With the default, brokkr scopes `cargo test` to `--tests` (lib + bins +
+///   integration, no doctests) unless the sweep already carries an explicit
+///   target selector (`--test <name>`), which then decides the targets. Set
+///   `doctests = true` to opt a project back in to the full `cargo test`
+///   default (doctests included).
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct TestConfig {
@@ -1537,7 +1539,8 @@ pub struct QuarantineEntry {
     /// Only valid alongside `pattern`.
     pub package: Option<String>,
     /// Non-test suppression channels. The only category is `"doctests"`,
-    /// which justifies `[test] doctests = false` under a complete profile.
+    /// which suppresses the doctest carriers a complete run derives, whatever
+    /// `[test] doctests` says.
     /// `parse_quarantine` enforces this at config load; this remains a string
     /// because coverage consumers render the category label.
     pub category: Option<String>,

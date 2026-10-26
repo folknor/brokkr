@@ -647,11 +647,11 @@ fn run_one_test_sweep(
     // exclusive doctest pseudo-target, and forwarded/configured selectors
     // were refused up front, so nothing can widen it here. Otherwise,
     // exclude doctests unless the project opted in (`[test] doctests =
-    // true`): nextest - and therefore every brokkr-managed project's CI -
-    // never runs doctests, so running them here is a signal CI can't see.
+    // true`): rustdoc's separate doctest pass is too costly for the edit
+    // loop, and a complete claim runs them in its derived carriers instead.
     // `--tests` selects lib + bins + integration but not doctests. A sweep
     // that already carries an explicit target selector (e.g. a profile's
-    // `--test <name>`) excludes doctests on its own, and `--tests` would
+    // `--test <name>`) decides its targets itself, and `--tests` would
     // wrongly broaden it, so only inject when no selector is present.
     if matches!(execution, crate::profile::LaneExec::DocOnly { .. }) {
         args.push("--doc".into());

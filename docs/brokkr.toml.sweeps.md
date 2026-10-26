@@ -577,15 +577,24 @@ include_ignored = true
   `brokkr check` not at all - check's test phase builds dev unless the sweep's
   `profile` says otherwise, and this field is never consulted there.
 - `doctests` (default `false`) decides whether `brokkr check`'s serial lanes
-  run doctests inline, outside a complete claim. Off by default because CI
-  runs under cargo-nextest, which never executes doctests - running them here
-  would gate on a signal CI can't see. In the default state each sweep's
-  `cargo test` is scoped to `--tests` (no doctests) unless it already names a
-  target (`--test <name>`). Set `true` to restore the full `cargo test`
-  default. A `certifies = "complete"` profile ignores it: it runs every tested
-  build's doctests in doctest carriers either way (see
-  [Doctests](#doctests)). Project-wide only (no per-`[[check]]` or CLI
-  override); `brokkr test <name>` is unaffected. See
+  run doctests inline, outside a complete claim. Off by default for cost:
+  rustdoc compiles and runs doctests in a pass of its own, apart from the test
+  build. Before edition 2024 it compiles each example separately; edition 2024
+  merges the compatible ones, but `compile_fail`, `standalone_crate` and the
+  like still compile alone - which can make doctests too slow for the edit
+  loop in a project with many examples. The gate checks them instead: a
+  `certifies = "complete"` profile ignores this key and runs every tested
+  build's doctests in doctest carriers, unless a `[[quarantine]] category =
+  "doctests"` entry suppresses them (see [Doctests](#doctests)). In the
+  default state each sweep's `cargo test` is scoped to `--tests` (no
+  doctests) unless it already carries a target selector (`--test <name>`),
+  which then decides the targets. Set `true` to restore the full `cargo test`
+  default. With the key `false`, a run outside a complete profile skips
+  doctests unless a `doc_only` entry or a forwarded `--doc` selects them, and
+  brokkr does not warn about it: a project that never runs a complete profile
+  leaves its doctests unchecked unless it sets this key or selects them
+  explicitly. No per-`[[check]]` or CLI switch overrides the key;
+  `brokkr test <name>` is unaffected. See
   `docs/commands/check.test-lanes.md`.
 - `serial_builds` (default `false`) runs every cargo invocation of `brokkr
   check`'s clippy, rustdoc and prepare-build steps one after another. By

@@ -139,15 +139,16 @@ Works without a `brokkr.toml` - usable in any Rust+git repo. When a
 
 ### Doctests
 
-The test phase does **not** run doctests by default. Every brokkr-managed
-project runs its CI under cargo-nextest, which never executes doctests, so a
-`brokkr check` that ran them would gate on a signal CI cannot see (a rotten
-doctest failing the check, or a passing one masking rot CI ignores). To match
-CI, each sweep's `cargo test` is scoped to `--tests` (lib + bins + integration
-tests, no doctests) - **unless** the sweep already carries an explicit target
-selector (a profile's `--test <name>`, or a `--test`/`--lib`/`--doc`/... token
-after `brokkr check --`), which excludes doctests on its own; `--tests` is not
-appended on top of one.
+The test phase does **not** run doctests by default, for cost: rustdoc
+compiles and runs them in a pass of its own, apart from the test build -
+each example separately before edition 2024, and in 2024 every example it
+cannot merge (`compile_fail`, `standalone_crate` and the like) - which can
+make them too slow for the edit loop in a project with many examples. The gate
+checks them instead (below). Each sweep's `cargo test` is scoped to `--tests`
+(lib + bins + integration tests, no doctests) - **unless** the sweep already
+carries an explicit target selector (a profile's `--test <name>`, or a
+`--test`/`--lib`/`--doc`/... token after `brokkr check --`), which then
+decides the targets itself; `--tests` is not appended on top of one.
 
 Opt a project back in with `[test] doctests = true`, which restores the full
 `cargo test` default (doctests included), or per entry with
@@ -168,10 +169,15 @@ how a library's `doctest = false` is honoured, the workspace-shaped carrier a
 claim needs - are under `parallel` -> Doctests in
 `docs/brokkr.toml.sweeps.md`.
 
-There is no CLI override - doctest inclusion is a declared, CI-parity
-property of the config. `--skip` is not a workaround: doctests
-share libtest's filter namespace with unit tests, so skipping them by
-pattern would eat legitimate module tests too. `brokkr test <name>` is
+With `[test] doctests = false`, then, a run outside a complete profile skips
+doctests unless a `doc_only` entry or a forwarded `--doc` selects them, and
+brokkr does not warn about it: a project that never runs a complete profile
+leaves its doctests unchecked unless it sets the key or selects them
+explicitly.
+
+No CLI switch overrides `[test] doctests`, and `--skip` cannot stand in for
+one: doctests share libtest's filter namespace with unit tests, so skipping
+them by pattern would eat legitimate module tests too. `brokkr test <name>` is
 unaffected - it runs the full `cargo test` default so a deliberately named
 doctest still runs (and within a doc-only sweep it runs `--doc <name>`).
 
