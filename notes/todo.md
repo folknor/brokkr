@@ -258,6 +258,22 @@ would churn every litehtml/sluggrs invocation in CI and docs.
 
 ## Backlog
 
+### Prune inert `[[install]]` registry records (2026-10-26)
+
+`~/.brokkr/install/` gets one record per distinct copy destination ever
+installed, and nothing ever deletes one: not removing the installed folder, not
+dropping the step from the config, not a `to` or parent-symlink change that
+moves the destination. A record with no install in flight whose destination no
+longer exists is already inert: it authorizes nothing, admission treats it as
+stale, and it holds no nesting claim. So growth is bounded only by the number
+of destinations ever used, a few hundred bytes each.
+
+Fix shape: in the registry scan `recover_all` already does on every install,
+delete each record with `pending` empty whose destination is genuinely absent
+(`NotFound` only, not any other lookup error), with a directory fsync
+afterwards. Add a test. The first run would also remove the record left by the
+end-to-end test of the feature.
+
 ### Inter-suite gap on the unisolated serial path
 
 When harness isolation cannot be installed (a configured host runner or
