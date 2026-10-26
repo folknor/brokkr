@@ -44,6 +44,11 @@ pub(crate) fn sidecar_status() -> Option<PathBuf> {
     brokkr_state_dir().map(|dir| dir.join("sidecar-status"))
 }
 
+/// The `[[install]]` ownership registry: one record per copy destination.
+pub(crate) fn install_registry() -> Option<PathBuf> {
+    brokkr_state_dir().map(|dir| dir.join("install"))
+}
+
 /// Persistent cargo worktrees shared by every project for this user.
 pub(crate) fn worktrees() -> Option<PathBuf> {
     brokkr_state_dir().map(|dir| dir.join("worktrees"))

@@ -4,10 +4,10 @@ Three metadata-driven commands for launching, building and installing a
 workspace's own binaries, available in any Rust project (not project-gated) and
 working with no `brokkr.toml` at all. `run` builds and runs one target; `build`
 builds one and hands a script a path to it; `install` puts the project's
-binaries on `PATH`. Together they close the session loop that otherwise reaches
-for raw cargo.
+binaries on `PATH` and runs its post-install steps. Together they close the
+session loop that otherwise reaches for raw cargo.
 
-Neither command requires configuration: targets come from `cargo metadata
+None of them requires configuration: targets come from `cargo metadata
 --no-deps`, so every bin and example in the workspace is reachable by name the
 moment it exists. The optional `[bin]` section only curates what discovery
 leaves ambiguous - see `docs/brokkr.toml.md` (`brokkr man config bin`).
@@ -224,7 +224,8 @@ brokkr install [--debug|--release|--profile NAME] [--unlocked]
 ```
 
 Runs `cargo install [--debug|--profile NAME] --locked --path <pkg dir>` once per selected
-package, in the order `[bin] install` lists them, announcing each invocation.
+package, in the order `[bin] install` lists them, announcing each invocation,
+then the project's `[[install]]` steps (see Post-install steps below).
 `cargo install --path` installs every bin the package carries, so the
 selection is by *package*, not by target.
 
@@ -286,6 +287,93 @@ you could type to resolve the ambiguity in the moment. The answer is a
 `[bin] install` list, and the error says so. A `[bin] install` entry naming a
 package with no bin target is likewise an error rather than a silent skip.
 
+### Post-install steps: `[[install]]`
+
+What a project needs on the machine besides its binaries - a Claude Code
+plugin folder under `~/.claude`, a shell completion, a man page - is declared
+as steps that `install` runs after every package installed:
+
+```toml
+[[install]]
+name = "claude-mod"
+copy = { from = "mod/orchestrate", to = "~/.claude/skills/orchestrate" }
+
+[[install]]
+name = "completions"
+run = { command = "orchestrate completions zsh > ~/.zfunc/_orchestrate" }
+```
+
+A build script cannot do this job: it cannot tell an install from a `check`
+or a release `test`, cargo skips it when its inputs are unchanged (so a
+deleted copy is never restored), and it would write outside `OUT_DIR` under
+every command.
+
+Each entry has a unique `name` and exactly one action key, holding that
+action's own table. Steps run in the composed order of the config, once per
+`install`, including one where cargo found nothing to rebuild; an entry an
+including file redefines by `name` moves to the including file's position, as
+with every other named array. Every step is checked before the first `cargo
+install` runs - except that a copy source an earlier `run` step may generate
+is allowed to be missing then - and each copy step is checked again just
+before it runs. Each step is announced as an `[install]` line when it starts.
+The first step that fails stops the rest and fails the install with exit 1,
+naming the step; the binaries and any earlier steps stay installed. The
+user-wide `brokkr.toml` cannot declare steps.
+
+**`run = { command }`** runs `sh -c command` from the build root, under the
+lock `install` holds and inside the same `disable_toolchain` window as the
+cargo installs, with inherited output. A non-zero exit, a signal death or a
+failure to start fails the step. A command that itself runs a locked brokkr
+command refuses rather than waiting on its own parent.
+
+**`copy = { from, to }`** publishes the file or directory `from` (a plain
+relative path inside the project root, where `brokkr.toml` lives - note that
+`run` starts in the build root instead) at `to`, which is absolute or starts
+with `~/`. The copy carries regular files and directories with their
+permission bits; a symlink or special file anywhere in `from` refuses the
+step. The destination is an artifact brokkr owns **exclusively**: every
+install replaces it wholesale, so a file deleted from the source is gone from
+the install. A change made inside the destination by hand is never
+overwritten - it makes the next install refuse, as below.
+
+That ownership is checked before anything is written. `install` replaces a
+destination only when it is absent or holds exactly what this project's step
+of that name last installed there, judged by a fingerprint of its paths,
+types, permission bits and bytes kept in `~/.brokkr/install/`. Ownership is
+by project and step name, so renaming either makes the old artifact foreign.
+A destination brokkr did not install, or that another step installed, is
+refused on sight, without being read - pick a `to` of the step's own. One
+changed since this step installed it is refused too, naming the remedy
+(remove it, or undo the change). When the source is unchanged the step
+reports the destination up to date and writes nothing. Ownership, timestamps,
+xattrs and hard links are not part of the fingerprint. A destination may not
+contain the home directory, the project or build root, the source, or
+`~/.brokkr`, may not lie inside `~/.brokkr`, and may not nest with another
+step's destination or with a destination any project still holds. A
+symlinked parent (`~/.claude` pointing into a dotfiles repo) is followed; the
+destination itself is never a symlink. Missing parents are created, and only
+once every check has passed.
+
+The new copy is staged in a private `.brokkr-install-<random>` directory
+beside the destination and swapped in with one atomic rename, so the
+destination path always names either the old artifact or the new one. Every
+step of that exchange is journaled, and the next `install` - of any project -
+finishes or undoes one a crash interrupted. What is not promised: a reader
+that walks the artifact while it is swapped can see files of both versions;
+the destination must not be written while it is replaced, since a write
+through a file already open on the old copy can escape the check that
+otherwise preserves an unexpected object rather than deleting it; and nothing
+else may create `.brokkr-install-*` names. An install brokkr cannot resolve
+is left in place, warned about, and blocks its destination until it is
+cleaned up by hand. A record file in `~/.brokkr/install/` that cannot be read
+is warned about on every install and refuses every copy step, since a claim
+it may hold cannot be ruled out; `run` steps and installs without copy steps
+are unaffected.
+
+Removing a step from the config does not uninstall what it installed; the
+artifact stays, and a later step targeting the same path is refused until it
+is removed.
+
 ## Profile
 
 Both commands ask `src/build_purpose.rs` for their Cargo shape. Profiles
@@ -305,7 +393,7 @@ brokkr, checks that a custom profile exists.
 
 Both commands take the global per-user lock **blocking**, like every other
 brokkr command that runs cargo: a concurrent bench run means `[lock] waiting
-for …` rather than an error. Both ride the `disable_toolchain` window, so a
+for the brokkr lock ...` rather than an error. Both ride the `disable_toolchain` window, so a
 foreign checkout's pinned `rust-toolchain.toml` is moved aside for the build
 exactly as it is under `check`.
 
@@ -319,8 +407,9 @@ man check` ("A descendant of the holder refuses rather than waits").
 
 With no `brokkr.toml`, the working directory is the project root and there is
 no `[bin]` section - discovery, the bare index, and the sole-runnable and
-sole-package rules all still work. Configuration buys disambiguation, never
-capability.
+sole-package rules all still work. For running, building and installing
+binaries, configuration buys disambiguation, never capability; the one thing
+only a `brokkr.toml` provides is `install`'s post-install steps.
 
 ## Exit statuses
 

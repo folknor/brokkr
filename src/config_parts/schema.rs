@@ -182,6 +182,10 @@ pub struct DevConfig {
     /// `None` when the project has no `[bin]` section (discovery still
     /// works; the section only curates ambiguity). See [`BinConfig`].
     pub bin: Option<BinConfig>,
+    /// `[[install]]` steps `brokkr install` runs after every package's
+    /// `cargo install` succeeded, in composed order. Empty when none are
+    /// declared. See [`InstallStep`] and [`crate::install_step`].
+    pub install_steps: Vec<InstallStep>,
     /// `[member_check]`: per-member isolated production compile. `None`
     /// when the table is absent (the phase is then inert).
     pub member_check: Option<MemberCheckConfig>,
@@ -250,6 +254,28 @@ impl BinConfig {
     pub fn configured_profile(&self) -> Option<crate::build::RustProfile> {
         crate::build::configured_profile("[bin]", self.profile.as_ref(), self.debug)
     }
+}
+
+/// One `[[install]]` entry: a named post-install step. Exactly one action key
+/// per entry, each holding its own payload table, so a later kind adds a key
+/// without sharing field names with the others.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallStep {
+    /// Unique among the composed entries; names the step in announcements
+    /// and failures, and is the shadowing key across config layers.
+    pub name: String,
+    pub action: InstallAction,
+}
+
+/// What an [`InstallStep`] does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstallAction {
+    /// `copy = { from, to }`: publish the file or directory `from` (relative
+    /// to the project root) at `to` (absolute, or `~/`-relative), as an
+    /// artifact brokkr owns exclusively.
+    Copy { from: String, to: String },
+    /// `run = { command }`: `sh -c command` from the build root.
+    Run { command: String },
 }
 
 /// When a phase or entry runs: `off`, `gate` (only under a `certifies =

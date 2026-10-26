@@ -155,7 +155,7 @@ stage = "pre-test"
 # Even data-printer lint exceptions must not hand-roll operator prefixes.
 [[textlint]]
 name = "operator-prefixes-use-output"
-pattern = '(?:e?print(?:ln)?!|plain(?:_stderr)?)\s*\(\s*(?:&format!\s*\(\s*)?"\[(?:build|run|result|bench|verify|hotpath|download|lock|strays|guard|sidecar|error|warn|test|ratatoskr|corpus|lint|litehtml|sluggrs)\]'
+pattern = '(?:e?print(?:ln)?!|plain(?:_stderr)?)\s*\(\s*(?:&format!\s*\(\s*)?"\[(?:build|run|result|bench|verify|hotpath|download|lock|strays|guard|sidecar|error|warn|test|ratatoskr|corpus|lint|litehtml|sluggrs|install)\]'
 paths = ["src/**/*.rs"]
 exclude = ["src/output/console.rs"]
 message = "send operator messages through the matching output printer"

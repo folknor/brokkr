@@ -44,6 +44,7 @@ mod history_cmd;
 mod hold;
 mod host;
 mod hotpath_fmt;
+mod install_step;
 mod invalidate_cmd;
 mod lex;
 mod litehtml;

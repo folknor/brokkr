@@ -307,12 +307,17 @@ pub(super) fn run_install(
     unlocked: bool,
     detection: Option<&project::Detection>,
 ) -> Result<(), DevError> {
-    let (bin_cfg, project_root) = match detection {
+    let (bin_cfg, build_root) = match detection {
         Some(d) => (d.config.bin.as_ref(), d.build_root.as_path().to_path_buf()),
         None => (None, std::env::current_dir()?),
     };
+    let steps = detection.map(|d| crate::install_step::Steps {
+        steps: &d.config.install_steps,
+        project: d.project.name(),
+        project_root: d.project_root.as_path(),
+    });
     let lock = context::reenter_command_lock()?;
-    runnables::cmd_install(&project_root, bin_cfg, choice, unlocked, Some(&lock))
+    runnables::cmd_install(&build_root, bin_cfg, steps, choice, unlocked, Some(&lock))
 }
 
 /// `wc` lists source files in the code tree (cwd).

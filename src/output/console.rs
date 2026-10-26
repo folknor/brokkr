@@ -520,6 +520,11 @@ pub fn corpus_msg(msg: &str) {
     emit_tag("[corpus]", msg);
 }
 
+/// `brokkr install`'s `[[install]]` steps, announced like its cargo runs.
+pub fn install_msg(msg: &str) {
+    emit_tag("[install]", msg);
+}
+
 pub fn deps_msg(msg: &str) {
     emit_tag("[deps]", msg);
 }
@@ -745,6 +750,7 @@ mod channel_tests {
                 ratatoskr_msg,
                 corpus_msg,
                 deps_msg,
+                install_msg,
                 wc_msg,
                 run_msg,
                 dry_run_msg,
@@ -791,7 +797,7 @@ mod channel_tests {
         assert!(stdout.contains("[warn]    visible warning\n"));
         assert!(stdout.contains("\r\x1b[2K[test]    clears status\n"));
         assert!(stdout.contains("[verify]  buffered detail\n"));
-        assert_eq!(log.matches("logged action").count(), 14);
+        assert_eq!(log.matches("logged action").count(), 15);
         assert!(!log.contains('\x1b'));
         assert!(stderr.contains("[sidecar] query provenance\n"));
         assert!(stderr.contains("[warn]    late bookkeeping\n"));

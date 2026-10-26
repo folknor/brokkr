@@ -119,7 +119,9 @@ impl Sha256 {
     }
 }
 
-struct Sha256State {
+/// Incremental SHA-256, for a caller that hashes a framed encoding rather
+/// than one stream (the install tree fingerprint).
+pub(crate) struct Sha256State {
     words: [u32; 8],
     block: [u8; 64],
     used: usize,
@@ -127,7 +129,7 @@ struct Sha256State {
 }
 
 impl Sha256State {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             words: [
                 0x6a09_e667,
@@ -145,7 +147,7 @@ impl Sha256State {
         }
     }
 
-    fn update(&mut self, mut bytes: &[u8]) {
+    pub(crate) fn update(&mut self, mut bytes: &[u8]) {
         let byte_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         self.total_bytes = self.total_bytes.wrapping_add(byte_len);
 
@@ -174,7 +176,7 @@ impl Sha256State {
         }
     }
 
-    fn finish(mut self) -> Sha256 {
+    pub(crate) fn finish(mut self) -> Sha256 {
         let bit_length = self.total_bytes.wrapping_mul(8);
         self.block[self.used] = 0x80;
         self.used += 1;

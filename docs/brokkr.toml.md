@@ -248,10 +248,10 @@ Reserved top-level keys parsed as config sections, or consumed by composition:
 `lints` (and its `clippy` alias), `bin`, `member_check`, `fixture_lint`,
 `disable_toolchain`, `cargo_env`.
 
-`strip_rustflags` and `lint_sweep` are also brokkr's, but only as non-table
-values: a `[strip_rustflags]` or `[lint_sweep]` table is still read as a
-hostname section, while the `strip_rustflags = [...]` array and the
-`[[lint_sweep]]` array of tables are brokkr's.
+`strip_rustflags`, `lint_sweep` and `install` are also brokkr's, but only as
+non-table values: a `[strip_rustflags]`, `[lint_sweep]` or `[install]` table
+is still read as a hostname section, while the `strip_rustflags = [...]` array
+and the `[[lint_sweep]]` and `[[install]]` arrays of tables are brokkr's.
 
 ## `worktree_keep`
 
@@ -576,6 +576,37 @@ debug = true                 # dev profile for run + `--debug` for install
   This is the member-check phase run over the install set: a `[member_check]`
   table (below) supersedes it, and setting both is a load error. See
   `brokkr man test-lanes member_check`.
+
+## `[[install]]` - post-install steps
+
+Steps `brokkr install` runs, in order, after every package installed
+(optional):
+
+```toml
+[[install]]
+name = "claude-mod"
+copy = { from = "mod/orchestrate", to = "~/.claude/skills/orchestrate" }
+
+[[install]]
+name = "completions"
+run = { command = "orchestrate completions zsh > ~/.zfunc/_orchestrate" }
+```
+
+- `name` - required and unique; it names the step in output and errors, and
+  an including file reusing it replaces the included entry.
+- exactly one action key per entry, each holding its own table:
+  - `copy` - `from` (relative, inside the project root) and `to` (absolute,
+    or starting with `~/`). Neither may hold an empty, `.` or `..`
+    component or a trailing slash. Unknown fields are refused.
+  - `run` - `command`, run as `sh -c` from the build root.
+
+A blank name, a repeated name, an entry with no action or with both, a blank
+`command`, and a `from` or `to` breaking the rules above are load errors.
+Like `lint_sweep`, the key is claimed only as an array: an `[install]` table
+is still a hostname section.
+The user-wide layer cannot declare steps. What the steps do - exclusive
+ownership of a copy destination, the ownership check, atomic replacement and
+crash recovery - is in `brokkr man run install` (its "Post-install steps").
 
 ## `[member_check]` section
 

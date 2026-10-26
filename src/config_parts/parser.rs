@@ -112,6 +112,7 @@ fn parse_dev_config(table: &toml::Table) -> Result<DevConfig, DevError> {
     let deps = parse_deps(table)?;
     let lints = parse_lints(table)?;
     let bin = parse_bin(table)?;
+    let install_steps = parse_install_steps(table)?;
     let member_check = parse_member_check(table, bin.as_ref())?;
     let fixture_lints = parse_fixture_lints(table)?;
     let disable_toolchain = parse_disable_toolchain(table)?;
@@ -139,6 +140,7 @@ fn parse_dev_config(table: &toml::Table) -> Result<DevConfig, DevError> {
         deps,
         lints,
         bin,
+        install_steps,
         member_check,
         fixture_lints,
         disable_toolchain,
@@ -1047,7 +1049,7 @@ pub(crate) const SECTIONS: &[&str] = &[
 /// always was - the kernel accepts any bytes as a hostname. An array of tables
 /// is not a table, so `[[lint_sweep]]` is claimed while a `[lint_sweep]`
 /// hostname section keeps loading.
-pub(crate) const VALUE_KEYS: &[&str] = &["strip_rustflags", "lint_sweep"];
+pub(crate) const VALUE_KEYS: &[&str] = &["strip_rustflags", "lint_sweep", "install"];
 
 /// Every other top-level table is a hostname section. The table shape is
 /// ambiguous by design: hostnames are open-ended, so section-name typos are
@@ -1455,6 +1457,121 @@ fn parse_check(
         validate_check_entry(entry, "[[check]]")?;
     }
     Ok(entries)
+}
+
+/// The raw shape of one `[[install]]` entry, before the one-action rule.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawInstallStep {
+    name: String,
+    copy: Option<RawInstallCopy>,
+    run: Option<RawInstallRun>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawInstallCopy {
+    from: String,
+    to: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawInstallRun {
+    command: String,
+}
+
+/// Parse the optional `[[install]]` array. Absent -> empty, and so is an
+/// `[install]` table: like `lint_sweep`, the key is claimed only when its value
+/// is not a table ([`VALUE_KEYS`]), so a hostname section of that name loads
+/// as it always did.
+///
+/// Refused: a blank or repeated name; an entry with no action key or more
+/// than one; a blank `command`; a `from` that is not a plain relative path
+/// inside the project root; and a `to` that is not absolute or `~/`-relative.
+/// Neither path may hold an empty, `.` or `..` component (a trailing slash
+/// included): the destination is a path brokkr may replace wholesale and
+/// must mean exactly one place, and the source must stay in the project.
+fn parse_install_steps(
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<Vec<InstallStep>, DevError> {
+    let Some(value) = table.get("install").filter(|value| !value.is_table()) else {
+        return Ok(Vec::new());
+    };
+    let raw: Vec<RawInstallStep> = value
+        .clone()
+        .try_into()
+        .map_err(|e: toml::de::Error| DevError::Config(format!("[[install]]: {e}")))?;
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut steps = Vec::with_capacity(raw.len());
+    for entry in raw {
+        let name = entry.name;
+        if name.trim().is_empty() {
+            return Err(DevError::Config("[[install]] has a blank name.".into()));
+        }
+        if !seen.insert(name.clone()) {
+            return Err(DevError::Config(format!(
+                "[[install]] has duplicate name '{name}' - each step must have a unique name."
+            )));
+        }
+        let action = match (entry.copy, entry.run) {
+            (Some(copy), None) => {
+                let plain = |path: &str| path.split('/').all(|c| !c.is_empty() && c != "." && c != "..");
+                if copy.from.trim().is_empty() || !plain(&copy.from) {
+                    return Err(DevError::Config(format!(
+                        "[[install]] '{name}': copy.from {:?} must name a file or directory inside \
+                         the project root, as a relative path with no empty, . or .. component.",
+                        copy.from
+                    )));
+                }
+                validate_install_destination(&name, &copy.to)?;
+                InstallAction::Copy { from: copy.from, to: copy.to }
+            }
+            (None, Some(run)) => {
+                if run.command.trim().is_empty() {
+                    return Err(DevError::Config(format!(
+                        "[[install]] '{name}': run.command is blank."
+                    )));
+                }
+                InstallAction::Run { command: run.command }
+            }
+            (None, None) => {
+                return Err(DevError::Config(format!(
+                    "[[install]] '{name}' has no action - give it copy = {{ from, to }} or \
+                     run = {{ command }}."
+                )));
+            }
+            (Some(_), Some(_)) => {
+                return Err(DevError::Config(format!(
+                    "[[install]] '{name}' has both copy and run - one action per step; \
+                     split it into two steps."
+                )));
+            }
+        };
+        steps.push(InstallStep { name, action });
+    }
+    Ok(steps)
+}
+
+/// The lexical rules for an `[[install]]` `copy.to`. Resolution against the
+/// filesystem happens at install time ([`crate::install_step`]).
+fn validate_install_destination(name: &str, to: &str) -> Result<(), DevError> {
+    let rest = if let Some(rest) = to.strip_prefix("~/") {
+        rest
+    } else if let Some(rest) = to.strip_prefix('/') {
+        rest
+    } else {
+        return Err(DevError::Config(format!(
+            "[[install]] '{name}': copy.to {to:?} must be an absolute path or start with ~/."
+        )));
+    };
+    if rest.split('/').any(|c| c.is_empty() || c == "." || c == "..") {
+        return Err(DevError::Config(format!(
+            "[[install]] '{name}': copy.to {to:?} has an empty, . or .. component - spell \
+             the destination as one plain path, with no trailing slash."
+        )));
+    }
+    Ok(())
 }
 
 /// Parse the optional `[[lint_sweep]]` array. Absent -> empty, and so is a

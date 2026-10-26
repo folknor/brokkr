@@ -494,9 +494,14 @@ fn resolve_install_packages(
 /// `unlocked` restores cargo's default. A tree with no `Cargo.lock` is
 /// re-resolved either way - cargo refuses `--locked` without one - and says
 /// so rather than failing.
+///
+/// `steps` are the project's `[[install]]` steps: checked (and interrupted
+/// copies recovered) before the first package, run in order after the last
+/// one succeeded. See [`crate::install_step`].
 pub fn cmd_install(
-    project_root: &Path,
+    build_root: &Path,
     cfg: Option<&BinConfig>,
+    steps: Option<crate::install_step::Steps<'_>>,
     choice: Option<crate::build::RustProfile>,
     unlocked: bool,
     lock: Option<&crate::lockfile::LockGuard>,
@@ -505,7 +510,7 @@ pub fn cmd_install(
     // Resolved once, before the first package: a refused profile refuses
     // the whole install, and the override warning prints once.
     let profile = bin_profile(purpose, cfg, choice)?;
-    let (runnables, workspace_root) = discover_workspace(project_root)?;
+    let (runnables, workspace_root) = discover_workspace(build_root)?;
     let bins: Vec<&Runnable> = runnables.iter().filter(|r| !r.example).collect();
 
     let install = match cfg.map(|c| c.install.as_slice()) {
@@ -537,6 +542,7 @@ pub fn cmd_install(
         }
     };
     let selected = resolve_install_packages(&runnables, &install)?;
+    let plan = crate::install_step::preflight(steps, build_root)?;
 
     // A lock cargo cannot find is a lock `--locked` would only make it abort
     // over. Look where cargo does: every package discovered here is a member
@@ -562,7 +568,7 @@ pub fn cmd_install(
             unification: Vec::new(),
             targets: Vec::new(),
             env: Vec::new(),
-            build_root: Some(project_root),
+            build_root: Some(build_root),
         });
         cargo_args.extend(shape.args);
         if locked {
@@ -578,7 +584,7 @@ pub fn cmd_install(
             )));
         }
     }
-    Ok(())
+    plan.execute(lock)
 }
 
 /// Spawn cargo with inherited stdio and return its exit code. A signal death

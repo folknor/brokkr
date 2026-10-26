@@ -427,6 +427,9 @@ In depth: `brokkr man clippy`."
     /// Installs with `--locked`, so what ships is what `check` validated.
     /// `--unlocked` restores cargo's default re-resolution.
     ///
+    /// Then runs the project's `[[install]]` steps in order: `copy` publishes
+    /// a file or directory brokkr owns exclusively, `run` a shell command.
+    ///
     /// In depth: `brokkr man run`.
     #[command(display_order = 0)]
     Install {

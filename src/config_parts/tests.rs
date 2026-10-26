@@ -56,6 +56,7 @@ mod tests {
             deps: None,
             lints: None,
             bin: None,
+            install_steps: Vec::new(),
             member_check: None,
             fixture_lints: Vec::new(),
             disable_toolchain: false,
@@ -2206,6 +2207,45 @@ sweeps = ["all"]
         let cfg = parse_dev_config(&root_table("[lint_sweep]\nport = 3034\n")).unwrap();
         assert!(cfg.lint_sweeps.is_empty());
         assert!(cfg.hosts.contains_key("lint_sweep"));
+    }
+
+    #[test]
+    fn install_steps_keep_their_order_and_a_table_stays_a_host() {
+        let cfg = parse_dev_config(&root_table(
+            "[[install]]\nname = \"mod\"\ncopy = { from = \"mod/x\", to = \"~/.claude/skills/x\" }\n\
+             [[install]]\nname = \"done\"\n[install.run]\ncommand = \"echo ok\"\n",
+        ))
+        .unwrap();
+        assert_eq!(cfg.install_steps, vec![
+            InstallStep {
+                name: "mod".into(),
+                action: InstallAction::Copy { from: "mod/x".into(), to: "~/.claude/skills/x".into() },
+            },
+            InstallStep { name: "done".into(), action: InstallAction::Run { command: "echo ok".into() } },
+        ]);
+
+        let cfg = parse_dev_config(&root_table("[install]\nport = 3034\n")).unwrap();
+        assert!(cfg.install_steps.is_empty());
+        assert!(cfg.hosts.contains_key("install"));
+    }
+
+    #[test]
+    fn install_steps_refuse_ambiguous_actions_and_loose_destinations() {
+        let err = |src: &str| parse_dev_config(&root_table(src)).unwrap_err().to_string();
+        let step = |body: &str| format!("[[install]]\nname = \"s\"\n{body}\n");
+        assert!(err(&step("")).contains("no action"));
+        assert!(err(&step("copy = { from = \"a\", to = \"/b\" }\nrun = { command = \"c\" }")).contains("both"));
+        assert!(err(&step("run = { command = \"c\", cwd = \"x\" }")).contains("unknown field"));
+        for from in ["/etc", "../elsewhere", ".", "a/./b", "a/"] {
+            let msg = err(&step(&format!("copy = {{ from = \"{from}\", to = \"/b\" }}")));
+            assert!(msg.contains("inside the project root"), "{from}: {msg}");
+        }
+        for to in ["rel/path", "~", "~user/x", "/a/../b", "/a/./b", "/a//b", "/a/b/", "~/"] {
+            let msg = err(&step(&format!("copy = {{ from = \"a\", to = \"{to}\" }}")));
+            assert!(msg.contains("copy.to"), "{to}: {msg}");
+        }
+        let twice = format!("{}{}", step("run = { command = \"c\" }"), step("run = { command = \"d\" }"));
+        assert!(err(&twice).contains("duplicate"));
     }
 
     #[test]
