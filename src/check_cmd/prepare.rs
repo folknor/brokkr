@@ -77,6 +77,10 @@ pub(crate) struct LaneInputs<'a> {
     /// the policy universe, hold each lane to its plan before it runs. Not
     /// what makes a lane prepared - every run prepares its lanes.
     pub(crate) certifying: bool,
+    /// The run's `doctests` answer: whether a serial lane's `cargo test`
+    /// leaves `--tests` off ([`serial_target_args`]), which its preparation
+    /// must build exactly as.
+    pub(crate) doctests: bool,
     /// Every explicit target selector a lane of each build shape declares
     /// ([`universe_selectors`]): what that shape's universe enumerates beside
     /// `--tests`.
@@ -301,6 +305,14 @@ pub(crate) struct PreparedLane {
     /// see it, and without this a support binary another lane rebuilt since
     /// the plan ran unverified.
     pub(crate) support_fingerprint: Vec<String>,
+    /// The support executables behind [`Self::support_fingerprint`], as
+    /// descriptors: a serial lane hashes them again when its own `cargo test`
+    /// build finishes, rather than reusing the plan's strings as evidence.
+    pub(crate) support: Vec<SupportArtifact>,
+    /// Per cargo resolution, the fingerprint of that resolution's own runtime
+    /// index (a serial lane's): each resolution is its own `cargo test`, whose
+    /// build stream carries only its own facts.
+    pub(crate) resolution_fingerprints: HashMap<Option<String>, Vec<String>>,
     /// The cargo resolutions that must each present a rustdoc stream for this
     /// lane - where it carries doctests - to have completed: a configured
     /// `doc_only` lane's every resolution (cargo refuses `--doc` with no
@@ -356,6 +368,8 @@ impl PreparedLane {
             verify: false,
             runtime_fingerprint: None,
             support_fingerprint: Vec::new(),
+            support: Vec::new(),
+            resolution_fingerprints: HashMap::new(),
             doc_required: Vec::new(),
             rustdoc_admission: None,
             unavailable: None,
@@ -732,6 +746,8 @@ type BuiltResolutions = Vec<(Option<String>, Vec<String>, Vec<TestBinary>)>;
 pub(crate) struct CargoBuilt {
     built: BuiltResolutions,
     index: BuildRuntimeIndex,
+    /// Each resolution's own runtime index, before the merge.
+    by_resolution: Vec<(Option<String>, BuildRuntimeIndex)>,
 }
 
 impl CargoBuilt {
@@ -744,29 +760,34 @@ impl CargoBuilt {
 }
 
 /// Build every resolution of a libtest lane. `selection_of` spells one
-/// resolution's cargo selection. `Ok(None)` is a build failure already
-/// reported.
+/// resolution's cargo selection; `as_selected` builds exactly it (the serial
+/// lane, whose selection already carries its target args) rather than adding
+/// `--tests` to a selection that names no target. `Ok(None)` is a build
+/// failure already reported.
 fn build_resolutions(
     inputs: &LaneInputs<'_>,
     attempt: &Attempt,
     env_refs: &[(&str, &str)],
+    as_selected: bool,
     selection_of: &dyn Fn(&ResolutionRun) -> Vec<String>,
 ) -> Result<Option<CargoBuilt>, DevError> {
     let mut built: BuiltResolutions = Vec::new();
     let mut index = BuildRuntimeIndex::default();
+    let mut by_resolution = Vec::new();
     // Under package mode one prebuild PER PACKAGE, never a batched multi-`-p`:
     // the batched graph is observably not the N independent resolutions the
     // mode exists for, so it would enumerate binaries no run uses.
     for run in attempt.runs() {
         let selection = selection_of(run);
-        let Some((binaries, idx)) = test_binaries_with_runtime(inputs.project_root, &selection, env_refs, inputs.commands)?
-        else {
+        let build = if as_selected { test_binaries_as_selected } else { test_binaries_with_runtime };
+        let Some((binaries, idx)) = build(inputs.project_root, &selection, env_refs, inputs.commands)? else {
             return Ok(None);
         };
+        by_resolution.push((run.resolution.clone(), idx.clone()));
         index.merge(idx);
         built.push((run.resolution.clone(), selection, binaries));
     }
-    Ok(Some(CargoBuilt { built, index }))
+    Ok(Some(CargoBuilt { built, index, by_resolution }))
 }
 
 /// Why a serial lane's harnesses cannot be attributed, as the short reason
@@ -1015,7 +1036,7 @@ fn prepare_serial(
         Some(b) => b,
         None => build_serial(inputs, sweep, attempt, extra_args, env)?.ok_or_else(|| not_prepared(sweep))?,
     };
-    let CargoBuilt { built, index } = built;
+    let CargoBuilt { built, index, by_resolution } = built;
     let fingerprint = Some(index.fingerprint()?);
     let runtime =
         DirectRuntime::load_with_config(
@@ -1028,10 +1049,17 @@ fn prepare_serial(
     let filter_args = lane_filter_args(sweep, libtest_extra);
     let mut prepared = PreparedLane::bare(env.clone());
     prepared.runtime_fingerprint = fingerprint;
+    for (resolution, index) in &by_resolution {
+        prepared.resolution_fingerprints.insert(resolution.clone(), index.fingerprint()?);
+    }
     prepared.doc_required = doc_required;
     prepared.include_ignored = lane_runs_ignored(sweep, libtest_extra);
     prepared.libtest_extra = libtest_extra.to_vec();
+    // The sweep's selectors and the forwarded ones: `cargo test` builds and
+    // runs both, so the plan lists both, and a harness it does not list is
+    // one this build did not produce.
     prepared.target_filters = sweep.lane_filters().cargo_args();
+    prepared.target_filters.extend(forwarded.partition_targets().0);
     for (resolution, selection, binaries) in built {
         prepared.enumerated += binaries.len();
         let mut out = Vec::new();
@@ -1053,8 +1081,10 @@ fn prepare_serial(
 }
 
 /// The serial lane's build: exactly the cargo-level argv `run_one_test_sweep`
-/// hands `cargo test`, so the prebuild names the same units and the run is a
-/// no-op rebuild. `Ok(None)` is a build failure already reported.
+/// hands `cargo test`, target args included ([`serial_target_args`]), so the
+/// prebuild names the same units, its artifact stream is the one the run's
+/// build will carry, and the run is a no-op rebuild. `Ok(None)` is a build
+/// failure already reported.
 fn build_serial(
     inputs: &LaneInputs<'_>,
     sweep: &PlannedSweep,
@@ -1064,7 +1094,8 @@ fn build_serial(
 ) -> Result<Option<CargoBuilt>, DevError> {
     let forwarded = ForwardedArgs::parse(extra_args);
     let cargo_extra = forwarded.cargo();
-    build_resolutions(inputs, attempt, &env.refs(), &|run| {
+    let target_args = serial_target_args(sweep, inputs.doctests, &forwarded);
+    build_resolutions(inputs, attempt, &env.refs(), true, &|run| {
         let mut selection = env.allow_args.clone();
         selection.extend(cargo_selection_args(
             sweep,
@@ -1073,6 +1104,7 @@ fn build_serial(
             CargoSelectionPurpose::TestLane,
         ));
         selection.extend(cargo_extra.iter().cloned());
+        selection.extend(target_args.iter().cloned());
         selection
     })
 }
@@ -1133,7 +1165,7 @@ fn build_direct(
     } else {
         None
     };
-    build_resolutions(inputs, attempt, &env.refs(), &|run| {
+    build_resolutions(inputs, attempt, &env.refs(), false, &|run| {
         let mut selection = env.allow_args.clone();
         selection.extend(resolution_selection(sweep, run, metadata.as_deref()));
         selection.extend(forwarded.selectors.iter().cloned());
@@ -1160,7 +1192,7 @@ fn prepare_direct(
         Some(b) => b,
         None => build_direct(inputs, sweep, attempt, extra_args, env)?.ok_or_else(|| not_prepared(sweep))?,
     };
-    let CargoBuilt { built, index } = built;
+    let CargoBuilt { built, index, .. } = built;
     let fingerprint = Some(index.fingerprint()?);
     let runtime =
         DirectRuntime::load_with_config(
@@ -1242,9 +1274,10 @@ fn list_direct_binaries(
 /// build can rewrite another's artifacts in place, and nothing builds between
 /// this check and the lane's first launch. What is not verified: the contents
 /// of link-search directories (dylibs a build script placed there), which no
-/// artifact stream names. A serial lane's harnesses are checked once more at
-/// their handshake, immediately before each runs (`StrictPlan`), since its
-/// `cargo test` builds again on its own.
+/// artifact stream names. A serial or doc-only lane comes here only when its
+/// harnesses cannot go through the shim; otherwise its own `cargo test` build
+/// is held to the plan when it finishes ([`GateCheck`]), the same comparison
+/// over the build that actually executes, and nothing is rebuilt first.
 ///
 /// `support` is what the lane's `build_packages` pre-builds just produced
 /// ([`run_sweep_pre_build`]); hashed here, after the lane's builds, and held
@@ -1261,10 +1294,12 @@ pub(crate) fn lane_drift_of(
     support: &[SupportArtifact],
 ) -> Result<Vec<String>, DevError> {
     let env_refs = prepared.env.refs();
+    // A serial lane's recorded selection already carries its target args.
+    let build = if lane_kind(sweep) == LaneKind::Serial { test_binaries_as_selected } else { test_binaries_with_runtime };
     lane_drift_with(
         sweep,
         prepared,
-        |r| test_binaries_with_runtime(inputs.project_root, &r.selection, &env_refs, inputs.commands),
+        |r| build(inputs.project_root, &r.selection, &env_refs, inputs.commands),
         support,
     )
 }
@@ -1344,12 +1379,25 @@ impl DriftCheck<'_> {
             index.merge(idx);
             rebuilt.push((resolution.clone(), binaries));
         }
+        self.compare_built(&rebuilt, &index, support).map(Some)
+    }
+
+    /// Hash what a build produced - `rebuilt`, its runtime `index` and the
+    /// `support` executables - and hold it to the plan. The one comparison
+    /// both a rebuild before a lane and a serial lane's own `cargo test`
+    /// build (its gate) go through.
+    pub(crate) fn compare_built(
+        &self,
+        rebuilt: &[(Option<String>, Vec<TestBinary>)],
+        index: &BuildRuntimeIndex,
+        support: &[SupportArtifact],
+    ) -> Result<Vec<String>, DevError> {
         let mut current: Vec<ArtifactFingerprint> = Vec::new();
         let exclusions = crate::profile::LaneFilters {
             exclude: self.target_exclusions.to_vec(),
             ..Default::default()
         };
-        for (resolution, binaries) in &rebuilt {
+        for (resolution, binaries) in rebuilt {
             for b in drop_excluded(filter_binaries(binaries, self.target_filters), &exclusions) {
                 let hash = hash_file(Path::new(&b.executable))
                     .map_err(|e| DevError::Build(format!("could not hash {}: {e}", b.executable)))?;
@@ -1360,7 +1408,7 @@ impl DriftCheck<'_> {
                 ));
             }
         }
-        Ok(Some(self.compare(&current, &index.fingerprint()?, &support_fingerprint(support)?)))
+        Ok(self.compare(&current, &index.fingerprint()?, &support_fingerprint(support)?))
     }
 
     /// Hold what a build produced to what was planned: `current` is every
@@ -1803,6 +1851,38 @@ impl Preparer for CargoPreparer<'_> {
     }
 }
 
+/// Run-log lines naming each harness a lane listed with no tests at all: it
+/// is built and spawned on every run for nothing, and `test = false` on its
+/// target skips both. Judged only on a lane that narrows nothing by name - no
+/// name filter, skip or forwarded libtest arg - where an empty listing means
+/// an empty harness rather than a filter that matched nothing in it, and that
+/// names no target explicitly, since an explicit selector builds a `test =
+/// false` target regardless. Each executable is named once per process,
+/// however many lanes list it.
+fn empty_harness_notes(sweep: &PlannedSweep, prepared: &PreparedLane) -> Vec<String> {
+    static SAID: std::sync::Mutex<BTreeSet<String>> = std::sync::Mutex::new(BTreeSet::new());
+    let narrows = lane_filter_args(sweep, &prepared.libtest_extra).iter().any(|a| a != "--include-ignored");
+    let selects = !prepared.target_filters.is_empty() || !sweep.lane_filters().targets.is_empty();
+    if narrows || selects || prepared.pkg_skipped > 0 {
+        return Vec::new();
+    }
+    let mut said = SAID.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    prepared
+        .resolutions
+        .iter()
+        .flat_map(|r| r.binaries.iter())
+        .filter(|b| b.unlisted.is_none() && b.selected.is_empty() && b.benchmarks.is_empty())
+        .filter(|b| said.insert(b.binary.executable.clone()))
+        .map(|b| {
+            format!(
+                "prepare: {} has no tests, yet every check builds and runs it - `test = false` on that \
+                 target in Cargo.toml skips both",
+                b.unit.id()
+            )
+        })
+        .collect()
+}
+
 /// The prepared profile: the plan, and each lane's executable preparation.
 pub(crate) struct ProfilePrep {
     pub(crate) plan: AccountingPlan,
@@ -1884,6 +1964,7 @@ pub(crate) fn prepare_profile(
             preparer.support(sweep, lane_attempt).and_then(|support| {
                 let mut prepared = preparer.lane(sweep, lane_attempt)?;
                 prepared.support_fingerprint = support_fingerprint(&support)?;
+                prepared.support = support;
                 Ok(prepared)
             })
         };
@@ -1898,6 +1979,9 @@ pub(crate) fn prepare_profile(
             Ok(prepared) => {
                 if !held.is_empty() {
                     output::detail(&format!("prepare: sweep '{}': {}", sweep.label, held.join("\n")));
+                }
+                for line in empty_harness_notes(sweep, &prepared) {
+                    output::detail(&line);
                 }
                 prepared
             }
@@ -2119,6 +2203,41 @@ mod prepare_tests {
         })
     }
 
+    /// A harness listed with no tests is named once, and only by a lane
+    /// whose listing narrows nothing: under a filter an empty listing says
+    /// nothing about the harness.
+    #[test]
+    fn an_empty_harness_is_named_once_and_only_when_nothing_narrows() {
+        let lane = |extra: &[&str]| {
+            let b = binary("empty-harness-probe");
+            let mut p = PreparedLane::bare(LaneEnv::default());
+            p.libtest_extra = extra.iter().map(|s| (*s).to_owned()).collect();
+            p.resolutions.push(PreparedResolution {
+                resolution: None,
+                selection: Vec::new(),
+                binaries: vec![PreparedBinary {
+                    unit: BinaryUnit::of(&b),
+                    binary: b,
+                    hash: "h".into(),
+                    unlisted: None,
+                    selected: Vec::new(),
+                    ignored: BTreeSet::new(),
+                    benchmarks: Vec::new(),
+                }],
+            });
+            p
+        };
+        let s = sweep("one");
+        assert!(empty_harness_notes(&s, &lane(&["--skip", "x"])).is_empty(), "a skip narrows the listing");
+        let mut selected = lane(&[]);
+        selected.target_filters = vec!["--lib".into()];
+        assert!(empty_harness_notes(&s, &selected).is_empty(), "an explicit selector builds it regardless");
+        let notes = empty_harness_notes(&s, &lane(&[]));
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("empty-harness-probe") && notes[0].contains("test = false"), "{notes:?}");
+        assert!(empty_harness_notes(&s, &lane(&[])).is_empty(), "named once per process");
+    }
+
     #[test]
     fn a_prepared_profile_plans_executions_and_its_universe() {
         let mut fake = Fake::new(None);
@@ -2301,6 +2420,7 @@ mod prepare_tests {
             owners: no_owners(),
             commands: false,
             certifying: false,
+            doctests: false,
             universe_selectors: &NO_UNIVERSE_SELECTORS,
         };
         let mut skipped = 0;
@@ -2393,6 +2513,7 @@ mod prepare_tests {
             owners: no_owners(),
             commands: false,
             certifying,
+            doctests: false,
             universe_selectors: &NO_UNIVERSE_SELECTORS,
         }
     }

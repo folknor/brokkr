@@ -1392,6 +1392,7 @@ mod nextest_lane_tests {
             owners: &owners,
             commands: false,
             certifying: false,
+            doctests: false,
             universe_selectors: &NO_UNIVERSE_SELECTORS,
         };
         let assemble = |sweep: &PlannedSweep| {
@@ -1469,6 +1470,7 @@ mod nextest_lane_tests {
             owners: &owners,
             commands: false,
             certifying: false,
+            doctests: false,
             universe_selectors: &NO_UNIVERSE_SELECTORS,
         };
         let assemble = |exclude: &str| {

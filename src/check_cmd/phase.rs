@@ -1088,6 +1088,7 @@ fn run_prepare_phase(a: &BuildPhaseArgs<'_>, certifying: bool) -> Result<Prepare
         owners: &owners,
         commands: a.commands,
         certifying,
+        doctests: a.doctests,
         universe_selectors: &universe_selectors,
     };
     // Two steps: every lane built (target-dir chains, concurrent), then every
@@ -1592,8 +1593,11 @@ fn resolve_gate_profile(
 /// yields a single unscoped resolution, so this is one iteration and the argv
 /// is what it always was.
 ///
-/// Under a complete profile `prepared` is the lane's plan: each resolution's
-/// harnesses are then held to it through the strict shim.
+/// `prepared` is the lane's plan: each resolution's harnesses attribute to it,
+/// and under a complete profile are held to it through the strict shim.
+/// `gated` is set when the lane's builds are verified at their gate rather
+/// than by a rebuild before the lane: the support executables each
+/// resolution's build is held to beside its own artifacts ([`GateCheck`]).
 #[allow(clippy::too_many_arguments)]
 fn run_sequential_resolutions(
     project_root: &Path,
@@ -1607,6 +1611,8 @@ fn run_sequential_resolutions(
     flags: (bool, bool, bool, bool),
     mut timings: Option<&mut Vec<TestTiming>>,
     prepared: Option<&PreparedLane>,
+    gated: Option<&[SupportArtifact]>,
+    shim: &SerialShim,
     tap: &LaneTap,
 ) -> Result<bool, DevError> {
     let mut all_passed = true;
@@ -1637,6 +1643,17 @@ fn run_sequential_resolutions(
                 .filter(|b| b.executed(p.include_ignored).next().is_some())
                 .map(|b| (b.binary.executable.clone(), b.unit.clone()))
                 .collect(),
+            gate: gated.map(|support| GateCheck {
+                artifacts: p
+                    .artifacts()
+                    .into_iter()
+                    .filter(|a| a.resolution == Resolution::from_option(resolution.as_deref()))
+                    .collect(),
+                target_filters: p.target_filters.clone(),
+                runtime_fingerprint: p.resolution_fingerprints.get(&resolution).cloned(),
+                support_fingerprint: p.support_fingerprint.clone(),
+                support: support.to_vec(),
+            }),
         });
         let passed = run_one_test_sweep(
             project_root,
@@ -1652,6 +1669,7 @@ fn run_sequential_resolutions(
             flags.2,
             timings.as_deref_mut(),
             &SerialObserve { tap, plan },
+            shim,
         )?;
         // Keep going rather than returning on the first red package: the phase
         // reports every failure it can reach in one run, and stopping here

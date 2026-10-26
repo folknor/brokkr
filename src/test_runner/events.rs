@@ -103,6 +103,10 @@ pub(crate) enum AttributionRefusal {
     SessionIo { detail: String },
     UnplannedExecutable { executable: String },
     RebuiltExecutable { executable: String },
+    /// The build cargo was about to run did not verify against the plan
+    /// (drifted, failed, or never seen): every connection of the run is
+    /// refused before any test executes.
+    UnverifiedBuild { detail: String },
     MissingPlannedStream { executable: String, unit: String },
     RustdocWithoutCarrier,
     /// A derived doctest carrier's rustdoc named a package directory its
@@ -137,6 +141,7 @@ impl AttributionRefusal {
             Self::RebuiltExecutable { executable } => format!(
                 "{executable} is not the content the plan enumerated - it was rebuilt since the plan"
             ),
+            Self::UnverifiedBuild { detail } => format!("a harness was refused because {detail}"),
             Self::MissingPlannedStream { executable, unit } => format!(
                 "cargo exited successfully but the planned harness {unit} ({executable}) never presented its stream"
             ),

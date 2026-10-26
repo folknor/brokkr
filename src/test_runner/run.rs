@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use super::harness_shim;
 use super::{
-    Ceilings, Doorbell, ExecutionOutcome, HungTest, KillCause, ObsEvent, Observation, ObservationSink,
+    BuildGate, Ceilings, Doorbell, ExecutionOutcome, HungTest, KillCause, ObsEvent, Observation, ObservationSink,
     RunContext, StreamSource, StreamTap, StrictPlan, TestTracker, WATCHDOG_POLL, clone_buffer,
     clone_hung, drain_libtest_json, drain_stderr, drain_to_buffer, join_drains,
     spawn_cargo_process_group, spawn_process_group, watchdog_loop,
@@ -29,11 +29,15 @@ pub(crate) enum ShimMode {
     Strict(StrictPlan),
 }
 
-/// What a caller wants observed: the journal sink, and the isolation policy.
+/// What a caller wants observed: the journal sink, the isolation policy, and
+/// the verification barrier the shim holds every connection on.
 #[derive(Clone, Default)]
 pub(crate) struct Observe {
     pub(crate) sink: Option<ObservationSink>,
     pub(crate) shim: ShimMode,
+    /// Set by a caller that compares the run's own build against a plan
+    /// (`BuildGate`); meaningful only with the shim on.
+    pub(crate) gate: Option<Arc<BuildGate>>,
 }
 
 /// What the process a run launched is, which decides where a hang snapshot is
@@ -155,6 +159,7 @@ where
                 Arc::clone(&stdout_buf),
                 Some(Arc::clone(&sink)),
                 strict.clone(),
+                observe.gate.clone(),
                 context.clone(),
             )
         })

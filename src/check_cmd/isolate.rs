@@ -316,6 +316,7 @@ fn run_one_isolated_test(
     let observe = test_runner::Observe {
         sink: Some(sink),
         shim: test_runner::ShimMode::Off,
+        gate: None,
     };
     let run = test_runner::run_libtest(
         test_runner::Launch::Direct {

@@ -286,6 +286,7 @@ fn run_one_binary(
     let observe = test_runner::Observe {
         sink: Some(sink),
         shim: test_runner::ShimMode::Off,
+        gate: None,
     };
     let run_result = test_runner::run_libtest(
         test_runner::Launch::Direct {

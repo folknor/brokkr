@@ -269,8 +269,8 @@ fn build_lane_support(
 }
 
 /// Run one sweep's test lane: its pre-builds (unless it runs its prepared
-/// snapshot), then whichever harness it names. `Ok(false)` is a failure
-/// already reported.
+/// snapshot, or verifies its own `cargo test` build at the shim), then
+/// whichever harness it names. `Ok(false)` is a failure already reported.
 ///
 /// `prepared` is the lane's plan: its artifacts are verified against it before
 /// anything runs, and the lane executes exactly what it lists. Where the
@@ -316,6 +316,7 @@ fn run_test_lane(
         owners,
         commands: a.commands,
         certifying: a.certifying,
+        doctests: a.doctests,
         // Running a lane enumerates no universe; that is the prepare phase's.
         universe_selectors: &NO_UNIVERSE_SELECTORS,
     };
@@ -331,6 +332,11 @@ fn run_test_lane(
     };
     let kind = lane_kind(sweep);
     let needs_selection = matches!(kind, LaneKind::Parallel | LaneKind::Isolated | LaneKind::Nextest);
+    // Decided once per lane: the route below and every run of the lane read
+    // the same answer, so a lane routed to verify at the shim gets the shim.
+    let shim = matches!(kind, LaneKind::Serial | LaneKind::DocOnly)
+        .then(|| SerialShim::decide(a.project_root, sweep, a.extra_args, &env.project_env));
+    let snapshot_holds = |p: &PreparedLane| p.snapshot.as_ref().is_some_and(|s| snapshot_drift(s).is_empty());
 
     // A lane that executes its binaries directly runs its prepared snapshot:
     // when every executable it runs or hands its tests still has the content
@@ -338,16 +344,26 @@ fn run_test_lane(
     // here would only ask whether building again changes anything - and a
     // project whose build scripts rerun on every build answers yes, which is
     // drift this lane never had. Any mismatch takes the rebuild-and-compare
-    // path below. A serial lane runs `cargo test`, which builds anyway.
-    let unchanged = prepared.is_some_and(|p| {
-        needs_selection
-            && p.verify
-            && p.unavailable.is_none()
-            && p.snapshot.as_ref().is_some_and(|s| snapshot_drift(s).is_empty())
-    });
+    // path below.
+    let unchanged = prepared.is_some_and(|p| needs_selection && p.verify && p.unavailable.is_none() && snapshot_holds(p));
+    // A serial or doc-only lane runs `cargo test`, which builds before it runs
+    // anything, so it is the build that executes that gets verified: its own
+    // artifact stream is held to the plan when it finishes, and the shim holds
+    // every harness until it has been (`GateCheck`). No build of its own
+    // happens here - except its `build_packages` support builds when the
+    // snapshot shows something the plan listed changed, since `cargo test`
+    // never rebuilds a support package outside its selection.
+    let gated = shim == Some(SerialShim::Attach)
+        && prepared.is_some_and(|p| p.verify && p.unavailable.is_none() && p.snapshot.is_some());
+    let mut gated_support: Option<Vec<SupportArtifact>> = None;
     let own;
     let prepared = match prepared {
         Some(p) if unchanged => Some(p),
+        Some(p) if gated => {
+            gated_support =
+                Some(if snapshot_holds(p) { p.support.clone() } else { build_lane_support(a, sweep, &env, owners)? });
+            Some(p)
+        }
         // A serial lane whose harnesses cannot be attributed: it runs through
         // cargo, as it always has, with no plan to hold it to.
         Some(p) if p.unavailable.is_some() => {
@@ -440,6 +456,8 @@ fn run_test_lane(
             (a.doctests, a.multi, a.commands, a.certifying),
             timings,
             prepared,
+            gated_support.as_deref(),
+            &shim.unwrap_or_else(|| SerialShim::decide(a.project_root, sweep, a.extra_args, &env.project_env)),
             tap,
         ),
     }

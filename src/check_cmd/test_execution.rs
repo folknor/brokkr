@@ -305,6 +305,63 @@ fn run_sweep_pre_build(
     Err(DevError::Reported(failed))
 }
 
+/// Whether a serial lane's `cargo test` runs its harnesses through the shim.
+/// Decided once per lane, before it runs: the lane's route (whether its own
+/// build can be verified at the shim, see `run_test_lane`) and every one of
+/// its runs read the same answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SerialShim {
+    Attach,
+    /// Cargo-mediated test threads: the unisolated runner by design.
+    CargoThreaded,
+    /// The shim cannot be installed, for this reason.
+    Unavailable(String),
+}
+
+impl SerialShim {
+    pub(crate) fn decide(
+        root: &Path,
+        sweep: &PlannedSweep,
+        extra_args: &[String],
+        project_env: &[(String, String)],
+    ) -> Self {
+        if sweep.lane_exec().threads().is_some_and(crate::profile::Threads::is_cargo_mediated) {
+            return Self::CargoThreaded;
+        }
+        match serial_shim_fallback(
+            root,
+            &ForwardedArgs::parse(extra_args),
+            project_env,
+            &sweep.env,
+            sweep.target.is_some(),
+        ) {
+            Some(reason) => Self::Unavailable(reason),
+            None => Self::Attach,
+        }
+    }
+}
+
+/// The target-kind args a serial or doc-only lane's `cargo test` carries. A
+/// doc-only sweep runs doctests and nothing else - `--doc` is cargo's
+/// exclusive doctest pseudo-target, and forwarded or configured selectors were
+/// refused up front, so nothing can widen it. Otherwise doctests are excluded
+/// unless the project opted in (`[test] doctests = true`): rustdoc's separate
+/// doctest pass is too costly for the edit loop, and a complete claim runs
+/// them in its derived carriers instead. `--tests` selects lib + bins +
+/// integration but not doctests. A sweep that already carries an explicit
+/// target selector (a profile's `--test <name>`, a forwarded one) decides its
+/// targets itself, and `--tests` would wrongly broaden it. The serial lane's
+/// preparation builds with exactly these ([`build_serial`]).
+pub(crate) fn serial_target_args(sweep: &PlannedSweep, doctests: bool, forwarded: &ForwardedArgs) -> Vec<String> {
+    if matches!(sweep.lane_exec(), crate::profile::LaneExec::DocOnly { .. }) {
+        vec!["--doc".into()]
+    } else if !doctests && sweep.lane_filters().targets.is_empty() && !forwarded.has_target_selector() {
+        vec!["--tests".into()]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Why a serial sweep cannot isolate its harnesses, or `None` when it can.
 ///
 /// The isolation installs brokkr as cargo's host target runner and rustdoc (see
@@ -464,6 +521,152 @@ pub(crate) struct SerialPlan {
     /// attributes: the shim stays permissive, as it was before any lane had a
     /// plan, and an unknown harness is an unattributed stream, not a refusal.
     pub(crate) strict: bool,
+    /// Set when the run's own build is held to the plan at its gate instead
+    /// of by a rebuild before the lane (see `run_test_lane`).
+    pub(crate) gate: Option<GateCheck>,
+}
+
+/// What one resolution's `cargo test` build is held to when it finishes,
+/// before cargo runs anything it built: the same comparison a rebuild before
+/// the lane makes ([`DriftCheck`]), over this resolution's share of the plan.
+#[derive(Clone)]
+pub(crate) struct GateCheck {
+    pub(crate) artifacts: Vec<PlannedArtifact>,
+    pub(crate) target_filters: Vec<String>,
+    /// This resolution's runtime-index fingerprint; `None` where the plan
+    /// holds none (a doc-only lane builds no shape in preparation).
+    pub(crate) runtime_fingerprint: Option<Vec<String>>,
+    pub(crate) support_fingerprint: Vec<String>,
+    /// The support executables, hashed again when the build finishes.
+    pub(crate) support: Vec<SupportArtifact>,
+}
+
+/// The reason a lane's plan stopped describing it, as the journal and the run
+/// log say it.
+fn superseded_reason(drift: &[String]) -> String {
+    format!("artifacts changed since the plan - {}", drift.join("; "))
+}
+
+/// The `success` of cargo's `build-finished` record, when `line` is one.
+fn build_finished(line: &str) -> Option<bool> {
+    #[derive(serde::Deserialize)]
+    struct Finished {
+        reason: String,
+        success: bool,
+    }
+    serde_json::from_str::<Finished>(line).ok().filter(|f| f.reason == "build-finished").map(|f| f.success)
+}
+
+/// Reads a serial run's cargo stdout up to `build-finished`, then holds the
+/// build that stream describes to the plan and settles the gate the shim's
+/// connections wait on. On drift outside a certifying claim the lane is
+/// recorded as superseded at once - whether or not anything ever connects.
+/// Everything after the first `build-finished` is ignored: by then cargo is
+/// running tests, and nothing they print may amend the verdict.
+struct BuildVerifier {
+    check: GateCheck,
+    resolution: Option<String>,
+    gate: std::sync::Arc<crate::test_runner::BuildGate>,
+    tap: LaneTap,
+    strict: bool,
+    stream: String,
+    closed: bool,
+}
+
+impl BuildVerifier {
+    fn line(&mut self, line: &str) {
+        if self.closed {
+            return;
+        }
+        self.stream.push_str(line);
+        self.stream.push('\n');
+        let Some(success) = build_finished(line) else {
+            return;
+        };
+        self.closed = true;
+        self.gate.receive();
+        let verdict = if success { self.compare() } else { crate::test_runner::GateState::BuildFailed };
+        self.stream = String::new();
+        // Recorded before the gate opens, so no harness of a superseded lane
+        // runs ahead of the record that says so.
+        if let crate::test_runner::GateState::Drift(drift) = &verdict
+            && !self.strict
+            && !matches!(self.gate.state(), crate::test_runner::GateState::Expired)
+        {
+            self.tap.record(JournalRecord::LaneSuperseded { lane: self.tap.lane(), reason: superseded_reason(drift) });
+        }
+        self.gate.settle(verdict);
+    }
+
+    fn compare(&self) -> crate::test_runner::GateState {
+        let (binaries, index, _) = parse_test_binaries(&self.stream);
+        let check = DriftCheck {
+            artifacts: self.check.artifacts.clone(),
+            target_filters: &self.check.target_filters,
+            target_exclusions: &[],
+            runtime_fingerprint: self.check.runtime_fingerprint.as_ref(),
+            support_fingerprint: &self.check.support_fingerprint,
+        };
+        match check.compare_built(&[(self.resolution.clone(), binaries)], &index, &self.check.support) {
+            Ok(drift) if drift.is_empty() => crate::test_runner::GateState::Clean,
+            Ok(drift) => crate::test_runner::GateState::Drift(drift),
+            Err(e) => crate::test_runner::GateState::Failed(e.to_string()),
+        }
+    }
+}
+
+/// What a gated serial run's build verdict means once cargo is done.
+///
+/// - The planned build, or a build that failed (the ordinary failure path
+///   reports it): nothing.
+/// - No build stream from a cargo that itself failed: cargo's failure, which
+///   the ordinary path reports.
+/// - A comparison that could not be made: the run's error in every mode, as
+///   a rebuild-and-compare that cannot hash is.
+/// - Under a certifying claim, anything else: the shim refused every
+///   connection of this resolution before any of its tests ran, and the lane
+///   fails.
+/// - Otherwise the lane's inventory no longer describes it: a drift was
+///   recorded when it was found, an expiry when a connection waited it out;
+///   a cargo that succeeded with no build stream at all is recorded here.
+fn gate_outcome(
+    state: &crate::test_runner::GateState,
+    strict: bool,
+    cargo_succeeded: bool,
+    unit: &str,
+    tap: &LaneTap,
+    full_command: &str,
+) -> Result<(), DevError> {
+    use crate::test_runner::GateState as G;
+    match state {
+        G::Clean | G::BuildFailed => Ok(()),
+        G::Pending | G::Received if !cargo_succeeded => Ok(()),
+        G::Failed(detail) => Err(DevError::Build(format!(
+            "test {unit}: the build could not be verified against the plan: {detail}"
+        ))),
+        other if strict => {
+            output::error(full_command);
+            Err(DevError::Build(format!(
+                "sweep '{unit}': {}. Its harnesses were refused before any of its tests ran: the run \
+                 would execute binaries the plan never enumerated.",
+                other.describe()
+            )))
+        }
+        G::Drift(drift) => {
+            output::detail(&format!("test {unit}: {}; its inventory is unavailable", superseded_reason(drift)));
+            Ok(())
+        }
+        G::Expired => {
+            output::detail(&format!("test {unit}: {}; its inventory is unavailable", G::Expired.describe()));
+            Ok(())
+        }
+        other => {
+            let reason = other.describe();
+            tap.record(JournalRecord::LaneSuperseded { lane: tap.lane(), reason: reason.clone() });
+            output::detail(&format!("test {unit}: {reason}; its inventory is unavailable"));
+            Ok(())
+        }
+    }
 }
 
 /// How a serial run reports what it saw.
@@ -572,6 +775,7 @@ fn run_one_test_sweep(
     commands: bool,
     timings: Option<&mut Vec<TestTiming>>,
     observe: &SerialObserve<'_>,
+    shim: &SerialShim,
 ) -> Result<bool, DevError> {
     let forwarded = ForwardedArgs::parse(extra_args);
     let (cargo_extra, libtest_extra) = (forwarded.cargo(), forwarded.libtest());
@@ -579,23 +783,20 @@ fn run_one_test_sweep(
     // serial lane isolates its harnesses unless it cannot.
     // (Under a complete profile neither escape exists: preparation refused
     // both, since neither can be attributed.)
-    let execution = sweep.lane_exec();
-    let parallel_threads = execution
-        .threads()
-        .is_some_and(crate::profile::Threads::is_cargo_mediated);
-    let shim_reason = if parallel_threads {
-        None
-    } else {
-        serial_shim_fallback(
-            project_root,
-            &forwarded,
-            project_env,
-            &sweep.env,
-            sweep.target.is_some(),
-        )
+    let parallel_threads = *shim == SerialShim::CargoThreaded;
+    let shim_reason = match shim {
+        SerialShim::Unavailable(reason) => Some(reason.clone()),
+        SerialShim::Attach | SerialShim::CargoThreaded => None,
     };
-    let use_shim = !parallel_threads && shim_reason.is_none();
+    let use_shim = *shim == SerialShim::Attach;
     let sink = observe.sink();
+    // A run whose own build is held to the plan: the shim holds every
+    // connection until the build stream says what was built and it has been
+    // compared. Without the shim nothing could hold them, so the lane's route
+    // never asks for a gate then.
+    let gate_check = observe.plan.as_ref().and_then(|p| p.gate.clone()).filter(|_| use_shim);
+    let gate = gate_check.as_ref().map(|_| std::sync::Arc::new(crate::test_runner::BuildGate::default()));
+    let strict = observe.plan.as_ref().is_some_and(|p| p.strict);
     let obs = crate::test_runner::Observe {
         sink: Some(std::sync::Arc::clone(&sink)),
         shim: match (&observe.plan, use_shim) {
@@ -609,7 +810,30 @@ fn run_one_test_sweep(
             }
             (_, true) => crate::test_runner::ShimMode::Permissive,
         },
+        gate: gate.clone(),
     };
+    // Outside a certifying claim a connection that waited out the bound runs
+    // anyway: the lane is superseded right then, before it does, so an
+    // interrupt or a timeout ending the run early cannot leave its
+    // observations read against a plan its build was never held to.
+    if let Some(gate) = gate.as_ref().filter(|_| !strict) {
+        let tap = observe.tap.clone();
+        gate.on_expiry(move || {
+            tap.record(JournalRecord::LaneSuperseded {
+                lane: tap.lane(),
+                reason: crate::test_runner::GateState::Expired.describe(),
+            });
+        });
+    }
+    let mut verifier = gate_check.zip(gate.clone()).map(|(check, gate)| BuildVerifier {
+        check,
+        resolution: run.resolution.clone(),
+        gate,
+        tap: observe.tap.clone(),
+        strict,
+        stream: String::new(),
+        closed: false,
+    });
 
     let mut args: Vec<String> = vec!["test".into(), "--message-format=json".into()];
     // Before the selection and the `--` split: `--config` is a cargo option,
@@ -643,27 +867,11 @@ fn run_one_test_sweep(
         }
         args.push(c.clone());
     }
-    // A doc-only sweep runs doctests and nothing else - `--doc` is cargo's
-    // exclusive doctest pseudo-target, and forwarded/configured selectors
-    // were refused up front, so nothing can widen it here. Otherwise,
-    // exclude doctests unless the project opted in (`[test] doctests =
-    // true`): rustdoc's separate doctest pass is too costly for the edit
-    // loop, and a complete claim runs them in its derived carriers instead.
-    // `--tests` selects lib + bins + integration but not doctests. A sweep
-    // that already carries an explicit target selector (e.g. a profile's
-    // `--test <name>`) decides its targets itself, and `--tests` would
-    // wrongly broaden it, so only inject when no selector is present.
-    if matches!(execution, crate::profile::LaneExec::DocOnly { .. }) {
-        args.push("--doc".into());
-    } else if !doctests
-        && sweep.lane_filters().targets.is_empty()
-        && !forwarded.has_target_selector()
-    {
-        args.push("--tests".into());
-    }
+    args.extend(serial_target_args(sweep, doctests, &forwarded));
 
     // Thread policy comes from the resolved lane; every policy uses the
     // same JSON tracker and hard per-test watchdog.
+    let execution = sweep.lane_exec();
     let parallel = parallel_threads;
     let filters = sweep.lane_filters();
     let mut libtest_args = filters.libtest_args();
@@ -750,7 +958,11 @@ fn run_one_test_sweep(
         },
         test_runner::Ceilings::shared_harness(),
         &obs,
-        |_| {},
+        move |line: &str| {
+            if let Some(v) = verifier.as_mut() {
+                v.line(line);
+            }
+        },
         |_| {},
         {
             let unit = unit.clone();
@@ -805,6 +1017,10 @@ fn run_one_test_sweep(
             hung.ceiling.as_secs(),
             sweep.label
         )));
+    }
+
+    if let Some(gate) = &gate {
+        gate_outcome(&gate.state(), strict, captured.success(), &unit, observe.tap, &full_command)?;
     }
 
     let diagnostics = owned_build_diagnostics(&stdout, &stderr, owners);

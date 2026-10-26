@@ -47,9 +47,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::{
-    AttributionRefusal, Ceilings, Doorbell, HungTest, JsonReconstructor, ObsEvent, ObservationSink,
-    RunContext, StreamEnd, StreamSource, StreamTap, StrictPlan, TestTracker, WATCHDOG_POLL,
-    hash_file,
+    AttributionRefusal, BuildGate, Ceilings, Doorbell, GATE_PENDING_BOUND, GateState, HungTest,
+    JsonReconstructor, ObsEvent, ObservationSink, RunContext, StreamEnd, StreamSource, StreamTap,
+    StrictPlan, TestTracker, WATCHDOG_POLL, hash_file,
 };
 use crate::error::DevError;
 use crate::process::{Pid, ProcStat, VerifiedProcess};
@@ -150,6 +150,12 @@ struct SessionState {
     /// run may attribute, and whether a rustdoc may connect. Anything else,
     /// and any cargo child that fails the handshake, is refused.
     strict: Option<StrictPlan>,
+    /// Set when the caller holds the run's own build to a plan: every
+    /// connection waits for that comparison before it is answered. A strict
+    /// session admits only on [`GateState::Clean`]; a permissive one admits
+    /// whatever the verdict, having only waited so no test can touch the
+    /// compared files before they are hashed.
+    gate: Option<Arc<BuildGate>>,
 }
 
 pub(super) struct Session {
@@ -163,6 +169,7 @@ impl Session {
         stdout: Arc<Mutex<Vec<u8>>>,
         sink: Option<ObservationSink>,
         strict: Option<StrictPlan>,
+        gate: Option<Arc<BuildGate>>,
         context: RunContext,
     ) -> Result<Self, DevError> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -199,6 +206,7 @@ impl Session {
                 sink,
                 context,
                 strict,
+                gate,
             }),
         })
     }
@@ -392,6 +400,10 @@ enum Refusal {
     RebuiltExecutable {
         executable: String,
     },
+    /// A strict session's build did not verify against the plan.
+    UnverifiedBuild {
+        detail: String,
+    },
     RustdocWithoutCarrier,
     UnidentifiedRustdoc {
         package_dir: String,
@@ -431,6 +443,9 @@ impl Refusal {
             }
             Self::RebuiltExecutable { executable } => Some(AttributionRefusal::RebuiltExecutable {
                 executable: executable.clone(),
+            }),
+            Self::UnverifiedBuild { detail } => Some(AttributionRefusal::UnverifiedBuild {
+                detail: detail.clone(),
             }),
             Self::RustdocWithoutCarrier => Some(AttributionRefusal::RustdocWithoutCarrier),
             Self::UnidentifiedRustdoc { package_dir } => Some(AttributionRefusal::UnidentifiedRustdoc {
@@ -509,6 +524,24 @@ fn rustdoc_declined(s: &SessionState, package_dir: String) -> Result<Option<Stri
     }
 }
 
+/// Wait for the session's build verdict, when the caller holds the build to a
+/// plan. A strict session admits only a clean build; a permissive one admits
+/// whatever the verdict - the caller records what it means for the lane's
+/// inventory - having waited only so nothing runs before the compared files
+/// were hashed. A closing session or a stop ends the wait as a refusal.
+fn await_verified_build(s: &SessionState) -> Result<(), Refusal> {
+    let Some(gate) = &s.gate else {
+        return Ok(());
+    };
+    let closed = || !s.accepting.load(Ordering::Acquire) || s.context.stop.is_requested();
+    match gate.wait(GATE_PENDING_BOUND, closed) {
+        None => Err(Refusal::SessionClosing),
+        Some(GateState::Clean) => Ok(()),
+        Some(state) if s.strict.is_some() => Err(Refusal::UnverifiedBuild { detail: state.describe() }),
+        Some(_) => Ok(()),
+    }
+}
+
 fn accept_one(stream: &UnixStream, s: &Arc<SessionState>) -> Result<(), Refusal> {
     // SO_PEERCRED supplies the kernel's PID at connect time. Check the direct
     // cargo parent and executable before giving this peer a pipe.
@@ -520,6 +553,10 @@ fn accept_one(stream: &UnixStream, s: &Arc<SessionState>) -> Result<(), Refusal>
     if root == 0 || proc_parent(pid).map_err(Refusal::AuthenticationIo)? != root {
         return Err(Refusal::NotCargoChild);
     }
+    // Nothing cargo runs is answered before its build has been held to the
+    // plan. Every check below - the strict hash, the peer's liveness - runs
+    // after this wait, however long it took.
+    await_verified_build(s)?;
     // The library a derived carrier's rustdoc is for, when its manifest opts
     // out of doctests: decided here, acted on once the peer is authenticated.
     let mut declined: Option<String> = None;
@@ -605,7 +642,9 @@ fn accept_one(stream: &UnixStream, s: &Arc<SessionState>) -> Result<(), Refusal>
         .harnesses
         .lock()
         .map_err(|_| Refusal::StatePoisoned("harness list"))?;
-    if !s.accepting.load(Ordering::Acquire) {
+    // A strict session admits nothing once a stop is requested, even after a
+    // clean verdict: the run is ending and certifies nothing past this point.
+    if !s.accepting.load(Ordering::Acquire) || (s.strict.is_some() && s.context.stop.is_requested()) {
         return Err(Refusal::SessionClosing);
     }
     let (reader, writer) = pipe().map_err(Refusal::SessionIo)?;
@@ -1068,8 +1107,8 @@ mod tests {
         let stdout = Arc::new(Mutex::new(Vec::new()));
         let context = RunContext::new(super::super::StopSignal::new(|| false), |_| {});
         let first =
-            Session::new(Arc::clone(&stdout), None, None, context.clone()).expect("first session");
-        let second = Session::new(stdout, None, None, context).expect("second session");
+            Session::new(Arc::clone(&stdout), None, None, None, context.clone()).expect("first session");
+        let second = Session::new(stdout, None, None, None, context).expect("second session");
         assert_ne!(first.socket(), second.socket());
         assert_eq!(
             fs::read_link(first.rustdoc()).expect("rustdoc symlink"),
@@ -1151,6 +1190,7 @@ mod tests {
                 rustdoc,
                 rustdoc_admission: None,
             }),
+            gate: None,
         })
     }
 
@@ -1368,6 +1408,60 @@ mod tests {
                 refusal: AttributionRefusal::RebuiltExecutable { .. },
             }
         )));
+    }
+
+    /// A session holding the run's build to a plan answers nothing before the
+    /// comparison is settled. A strict one admits only a clean build; a
+    /// permissive one admits whatever the verdict, since the caller records
+    /// what a drift means for the lane's inventory.
+    #[test]
+    fn a_gated_session_answers_only_once_the_build_is_settled() {
+        let (path, hash) = planned_file("gated", b"harness");
+        for (strict, verdict, admitted) in [
+            (true, GateState::Clean, true),
+            (true, GateState::Drift(vec!["x was rebuilt".into()]), false),
+            (true, GateState::BuildFailed, false),
+            (false, GateState::Drift(vec!["x was rebuilt".into()]), true),
+        ] {
+            let (sink, observed) = collecting_sink();
+            let mut state = Arc::into_inner(strict_state(&[(path.as_str(), hash.as_str())], false, Some(sink)))
+                .expect("sole owner");
+            if !strict {
+                state.strict = None;
+            }
+            let gate = Arc::new(BuildGate::default());
+            state.gate = Some(Arc::clone(&gate));
+            let state = Arc::new(state);
+            let settler = {
+                let gate = Arc::clone(&gate);
+                let verdict = verdict.clone();
+                thread::spawn(move || {
+                    thread::sleep(Duration::from_millis(30));
+                    gate.receive();
+                    gate.settle(verdict);
+                })
+            };
+            let (parent, shim) = UnixStream::pair().expect("socket pair");
+            send_hello(&shim, ROLE_HARNESS, path.as_bytes()).expect("send");
+            let answer = accept_one(&parent, &state);
+            settler.join().expect("settler");
+            if admitted {
+                assert!(answer.is_ok(), "strict={strict} {verdict:?}");
+                assert!(matches!(recv_verdict(&shim).expect("verdict"), Verdict::Accept(_)));
+                release(&state);
+            } else {
+                let Err(refusal) = answer else {
+                    panic!("strict={strict} {verdict:?} is refused");
+                };
+                assert!(matches!(&refusal, Refusal::UnverifiedBuild { .. }));
+                refuse(&parent, &refusal, &state);
+                assert!(matches!(recv_verdict(&shim).expect("verdict"), Verdict::Refuse));
+                assert!(observed.lock().expect("observed").iter().any(|o| matches!(
+                    &o.event,
+                    ObsEvent::AttributionRefused { refusal: AttributionRefusal::UnverifiedBuild { .. } }
+                )));
+            }
+        }
     }
 
     /// A rustdoc stream is admitted only on a run the plan holds a doctest

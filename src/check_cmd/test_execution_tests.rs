@@ -2070,6 +2070,7 @@ mod serial_observe_tests {
             rustdoc: false,
             rustdoc_admission: None,
             strict,
+            gate: None,
         };
         (plan, unit)
     }
@@ -2098,6 +2099,139 @@ mod serial_observe_tests {
         let observe = SerialObserve { tap: &other, plan: Some(p) };
         hear(&observe, "/t/debug/deps/unknown-9");
         assert!(other.seen_units().is_empty(), "an unplanned harness is not attributed");
+    }
+}
+
+#[cfg(test)]
+mod build_gate_tests {
+    use super::*;
+    use crate::test_runner::{BuildGate, GateState};
+    use std::sync::Arc;
+
+    /// A planned test executable on disk, the plan's record of it, and the
+    /// cargo artifact line that names it.
+    fn planned(name: &str) -> (String, PlannedArtifact, String) {
+        let dir = crate::test_scratch::scratch("build_gate", name);
+        let path = dir.join("suite-1");
+        std::fs::write(&path, b"the planned build").expect("write");
+        let exe = path.to_string_lossy().into_owned();
+        let b = test_binary_for_tests("core", "test", "suite");
+        let planned = PlannedArtifact::new(
+            None,
+            BinaryUnit::of(&b),
+            exe.clone(),
+            crate::test_runner::hash_file(&path).expect("hash"),
+        );
+        let line = serde_json::json!({
+            "reason": "compiler-artifact",
+            "package_id": "path+file:///x/core#core@0.1.0",
+            "manifest_path": "/x/core/Cargo.toml",
+            "target": { "name": "suite", "kind": ["test"] },
+            "profile": { "test": true },
+            "executable": exe,
+        })
+        .to_string();
+        (exe, planned, line)
+    }
+
+    fn verifier(artifact: PlannedArtifact, strict: bool) -> (BuildVerifier, Arc<BuildGate>) {
+        let gate = Arc::new(BuildGate::default());
+        let v = BuildVerifier {
+            check: GateCheck {
+                artifacts: vec![artifact],
+                target_filters: Vec::new(),
+                runtime_fingerprint: Some(Vec::new()),
+                support_fingerprint: Vec::new(),
+                support: Vec::new(),
+            },
+            resolution: None,
+            gate: Arc::clone(&gate),
+            tap: LaneTap::new(42_001),
+            strict,
+            stream: String::new(),
+            closed: false,
+        };
+        (v, gate)
+    }
+
+    const FINISHED: &str = r#"{"reason":"build-finished","success":true}"#;
+
+    /// The run's own build stream is what the gate judges: the planned file
+    /// is clean, the same path with other content is drift, and nothing is
+    /// decided before `build-finished`.
+    #[test]
+    fn the_gate_judges_the_runs_own_build() {
+        let (_, artifact, line) = planned("clean");
+        let (mut v, gate) = verifier(artifact, true);
+        v.line(&line);
+        assert_eq!(gate.state(), GateState::Pending, "nothing is decided before build-finished");
+        v.line(FINISHED);
+        assert_eq!(gate.state(), GateState::Clean);
+
+        let (exe, artifact, line) = planned("drift");
+        std::fs::write(&exe, b"another shape's build").expect("rebuild");
+        let (mut v, gate) = verifier(artifact, false);
+        v.line(&line);
+        v.line(FINISHED);
+        assert!(matches!(gate.state(), GateState::Drift(d) if d.iter().any(|l| l.contains("different content"))));
+    }
+
+    /// A build the plan does not hold - a new executable, a runtime envelope
+    /// that changed - is drift too: the comparison is the whole rebuild check.
+    #[test]
+    fn an_unplanned_executable_or_envelope_is_drift() {
+        let (_, artifact, line) = planned("envelope");
+        let (mut v, gate) = verifier(artifact, true);
+        v.check.runtime_fingerprint = Some(vec!["build-script core out_dir=None env=[] linked=[]".into()]);
+        v.line(&line);
+        v.line(FINISHED);
+        assert!(matches!(gate.state(), GateState::Drift(d) if d.iter().any(|l| l.contains("launch envelope"))));
+    }
+
+    /// A failed build compares nothing, and what cargo prints once it runs
+    /// tests never amends a verdict.
+    #[test]
+    fn a_failed_build_compares_nothing_and_later_output_is_ignored() {
+        let (_, artifact, line) = planned("failed");
+        let (mut v, gate) = verifier(artifact, true);
+        v.line(&line);
+        v.line(r#"{"reason":"build-finished","success":false}"#);
+        assert_eq!(gate.state(), GateState::BuildFailed);
+        v.line(FINISHED);
+        assert_eq!(gate.state(), GateState::BuildFailed);
+    }
+
+    /// After the run: a certifying lane fails on anything but a clean or a
+    /// failed build; one that is not is never refused - its inventory is
+    /// superseded - except where the comparison itself could not be made.
+    #[test]
+    fn the_gate_outcome_follows_the_claim() {
+        let tap = LaneTap::new(42_002);
+        let drift = GateState::Drift(vec!["x was rebuilt".into()]);
+        assert!(gate_outcome(&GateState::Clean, true, true, "u", &tap, "").is_ok());
+        assert!(gate_outcome(&GateState::BuildFailed, true, false, "u", &tap, "").is_ok());
+        assert!(gate_outcome(&GateState::Pending, true, false, "u", &tap, "").is_ok(), "cargo's own failure");
+        assert!(gate_outcome(&drift, true, true, "u", &tap, "").is_err());
+        assert!(gate_outcome(&GateState::Expired, true, true, "u", &tap, "").is_err());
+        assert!(gate_outcome(&GateState::Pending, true, true, "u", &tap, "").is_err());
+        assert!(gate_outcome(&drift, false, true, "u", &tap, "").is_ok());
+        assert!(gate_outcome(&GateState::Expired, false, true, "u", &tap, "").is_ok());
+        assert!(gate_outcome(&GateState::Failed("gone".into()), false, true, "u", &tap, "").is_err());
+    }
+
+    /// The serial lane's target args are the one spelling its preparation
+    /// and its run share.
+    #[test]
+    fn serial_target_args_follow_doctests_and_selectors() {
+        let plain = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
+            label: "default".into(),
+            ..crate::profile::SweepDecl::default()
+        });
+        let none = ForwardedArgs::parse(&[]);
+        assert_eq!(serial_target_args(&plain, false, &none), vec!["--tests".to_owned()]);
+        assert!(serial_target_args(&plain, true, &none).is_empty());
+        let selected = ForwardedArgs::parse(&["--test".to_owned(), "x".to_owned()]);
+        assert!(serial_target_args(&plain, false, &selected).is_empty());
     }
 }
 

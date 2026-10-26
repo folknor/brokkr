@@ -425,6 +425,21 @@ they changed, the lane is rebuilt and checked against the plan, and under a
 complete claim any difference is a hard error ("artifacts changed since the
 plan"), never a silent re-plan.
 
+A serial or doc-only lane makes no build of its own before it runs: the lane
+enters cargo once, for its `cargo test` (its `build_packages` support builds
+run again first only when a file the plan listed changed), and that run's own
+build is what gets checked. When cargo reports the build finished, before it
+starts any test, brokkr holds what it built to the plan, and the harness
+isolation holds every test binary until that is done. Under a complete claim
+a difference refuses that run's binaries before any test runs; otherwise the
+lane runs, and its inventory is reported unavailable with the reason. A
+serial lane without harness isolation has no inventory to hold it to.
+
+The run log names any test binary a lane listed with no tests at all, when
+the lane neither filters by name nor selects targets explicitly: every check
+builds and spawns it for nothing, and `test = false` on that target in
+`Cargo.toml` skips both.
+
 Under a complete claim, a lane that cannot be prepared leaves the plan
 incomplete and no tests run (`failed_phase: "prepare"`). Two lane shapes cannot
 be attributed and are refused there: a serial lane whose harness isolation

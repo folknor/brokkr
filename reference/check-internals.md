@@ -951,7 +951,9 @@ short list and mis-attributed which test carried a mutation's coverage):
   reports green, a planned harness with expected executions that never
   presented its stream is an attribution error too. Outside a complete profile
   the session stays permissive: a harness that cannot be isolated runs on the
-  shared stream with a warning, as it always has.
+  shared stream with a warning, as it always has. On a lane that verifies its
+  own build (see "The plan (`prepare`)"), every connection, either mode, first
+  waits for that verdict; only a strict session refuses on it.
 
   A rustdoc handshakes only when it runs doctests: `--test` in its argv, or
   inside an `@path` argument file (cargo moves a long rustdoc command line into
@@ -1307,7 +1309,11 @@ must never share the machine with a compile:
    ends this pass with one inventory disposition: `prepared` (including any
    unlistable binaries), `skipped`, `unavailable`, or `doc_tests` for a
    doctest-only lane. A skipped lane has no selected executions, and an
-   unavailable lane has no binary inventory.
+   unavailable lane has no binary inventory. A lane that narrows nothing by
+   name (no filter, skip or forwarded libtest arg) and names no target
+   explicitly also names, in the run log only and once per executable, every
+   harness it listed with no tests at all: one built and spawned on every run
+   for nothing, which `test = false` on its target would spare.
 3. **Policy (complete claims only).** After every lane's inventory disposition
    is fixed, enumerate each shape resolution's universe and `#[ignore]`d
    subset, validate that the prepared binaries belong to that universe, then
@@ -1349,9 +1355,42 @@ immediately before it ran; a test that replaces a support binary while the lane
 runs, a detached process a build script left behind, or a dylib in a
 link-search directory is outside it.
 
-When a file no longer matches - and before every serial lane, and for a lane
-that was prepared without a snapshot - the lane's support builds and its shape
-are built again (re-uplifting the support binaries a later lane's build may
+A serial or doc-only lane runs `cargo test`, which builds before it runs
+anything, so what it verifies is the build that executes: no build of its own
+happens before it, and the lane enters cargo once. Its `cargo test` already
+streams `--message-format=json`, and cargo writes `build-finished` before it
+spawns its first test runner. The lane reads that stream up to
+`build-finished` and, for that resolution, makes the comparison a rebuild
+would - test executables by path and content hash under the lane's target
+selectors, the resolution's own runtime-index fingerprint (each resolution is
+its own `cargo test`, so the plan keeps one per resolution beside the merged
+one), the support executables, hashed again from their recorded descriptors.
+Until that verdict is in, the harness shim answers no connection, harness or
+rustdoc: the comparison reads live files, and a test that ran first could
+change them. A strict session then admits only a clean build; a drifted,
+unverifiable or failed comparison refuses every connection of that resolution
+before any of its tests runs, and the lane fails with the reason. A
+non-certifying session admits whatever the verdict, and a drift supersedes the
+lane, journaled the moment it is found - whether or not anything ever
+connects. A connection that waits 30 s with no `build-finished` read settles
+the gate as unverified, never to be overwritten by a later verdict, and a
+non-certifying lane is superseded right then, before that connection is
+answered; a stop or a closing session ends every wait, a settled gate
+included. A hash that cannot be taken is the lane's error in either mode. The barrier is per
+resolution: a package-mode lane's earlier resolutions have run, each against
+its own verified build, when a later one is refused. The comparison itself
+runs on the stdout drain, so it is bounded by the phase watchdog, not by the
+connection wait. The prepare build of such a lane is the run's cargo-side argv
+exactly, `--tests` or not (`serial_target_args`), so the two streams describe
+the same units. The `build_packages` support builds are run again first only
+when the lane's snapshot shows a planned file changed, since `cargo test` never
+rebuilds a support package outside its selection. A lane whose harnesses cannot
+go through the shim (see "The failure list") has nothing to hold its harnesses
+at, and takes the rebuild path below.
+
+When a file no longer matches - and for a serial lane with no shim, and for a
+lane that was prepared without a snapshot - the lane's support builds and its
+shape are built again (re-uplifting the support binaries a later lane's build may
 have replaced) and, once **every** resolution of the lane is rebuilt - one
 resolution's build can rewrite another's binary in place - its test
 executables are checked against the plan by path **and** content hash, the
@@ -1364,10 +1403,10 @@ hard error for the lane - "artifacts changed since the plan" - never a silent
 re-plan. Nothing builds between that check and a direct lane's launches. (A
 run that certifies nothing is not refused for a plan that went stale: the lane
 runs what it builds now, the journal records the lane as superseded, and its
-inventory reads unavailable with the reason.) The serial lane's `cargo
-test` builds once more on its own, so each of its harnesses is hashed again
-at its shim handshake, immediately before it runs, and refused if it is not
-the planned content. Not verified: the contents of link-search directories
+inventory reads unavailable with the reason.) On a strict session each serial
+harness is also hashed again at its shim handshake, after the gate and
+immediately before it runs, and refused if it is not the planned content.
+Not verified: the contents of link-search directories
 (a dylib a build script dropped there), which no artifact stream names. The
 lanes then **consume** the prepared selection: the parallel lane
 claims slots from the plan's counts, the isolated lane runs the plan's cases,

@@ -174,19 +174,32 @@ pub(crate) fn test_binaries_with_runtime(
     env_refs: &[(&str, &str)],
     commands: bool,
 ) -> Result<Option<(Vec<TestBinary>, BuildRuntimeIndex)>, DevError> {
+    let mut selection = selection.to_vec();
+    // `--tests` builds lib+bins+integration harnesses. A selection that
+    // already names a target (`--test <name>`) must not be broadened -
+    // cargo unions selection flags, so `--test foo --tests` would build
+    // every harness and enumerate tests the lane meant to exclude.
+    if !ForwardedArgs::parse(&selection).has_target_selector() {
+        selection.push("--tests".into());
+    }
+    test_binaries_as_selected(project_root, &selection, env_refs, commands)
+}
+
+/// [`test_binaries_with_runtime`] over exactly `selection`, target args
+/// included: the serial lane's preparation, whose build must be the very
+/// argv its `cargo test` run builds ([`serial_target_args`]).
+pub(crate) fn test_binaries_as_selected(
+    project_root: &Path,
+    selection: &[String],
+    env_refs: &[(&str, &str)],
+    commands: bool,
+) -> Result<Option<(Vec<TestBinary>, BuildRuntimeIndex)>, DevError> {
     let mut args: Vec<String> = vec![
         "test".into(),
         "--no-run".into(),
         "--message-format=json".into(),
     ];
     args.extend(selection.iter().cloned());
-    // `--tests` builds lib+bins+integration harnesses. A selection that
-    // already names a target (`--test <name>`) must not be broadened -
-    // cargo unions selection flags, so `--test foo --tests` would build
-    // every harness and enumerate tests the lane meant to exclude.
-    if !ForwardedArgs::parse(&args).has_target_selector() {
-        args.push("--tests".into());
-    }
 
     cargo_line(commands, &format!("cargo {}", args.join(" ")));
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
