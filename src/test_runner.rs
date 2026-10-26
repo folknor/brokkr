@@ -48,7 +48,9 @@ pub(crate) use run::{
 };
 
 // Internal paths shared only among runner modules and the harness shim.
-use deadline::{DeadlineReading, TestTracker, WATCHDOG_POLL, enforce_deadline, watchdog_loop};
+use deadline::{
+    DeadlineReading, Doorbell, TestTracker, WATCHDOG_POLL, enforce_deadline, watchdog_loop,
+};
 #[cfg(test)]
 use deadline::{Expiry, watchdog_loop_with_timing};
 use hung::capture_hung_test;

@@ -1,6 +1,6 @@
 // Convention scans and their findings; cargo diagnostic execution lives elsewhere.
 
-use super::{Phase, cargo_line, fmt_wall, phase_ok, phase_time_left};
+use super::{Phase, cargo_line, fmt_wall, phase_inert, phase_ok, phase_time_left};
 use crate::config::{
     DependencyRule, Diagnostics, GremlinsConfig, HeaderConfig, ManifestConfig, ScriptCheck, Stage,
     TextlintRule,
@@ -127,6 +127,7 @@ pub(super) fn run_header(
     header_cfg: Option<&HeaderConfig>,
 ) -> Result<(), DevError> {
     let Some(cfg) = header_cfg else {
+        phase_inert(Phase::Header);
         return Ok(());
     };
     let year = crate::header::current_utc_year()?;
@@ -156,6 +157,7 @@ pub(super) fn run_header(
 /// unless the project defines `[[textlint]]` entries.
 pub(super) fn run_textlint(tree: &LazyTree<'_>, rules: &[TextlintRule]) -> Result<(), DevError> {
     if rules.is_empty() {
+        phase_inert(Phase::Textlint);
         return Ok(());
     }
 
@@ -193,6 +195,7 @@ pub(super) fn run_manifest(
     manifest_cfg: Option<&ManifestConfig>,
 ) -> Result<(), DevError> {
     let Some(cfg) = manifest_cfg else {
+        phase_inert(Phase::Manifest);
         return Ok(());
     };
 
@@ -418,6 +421,7 @@ pub(super) fn run_script_checks(
 ) -> Result<(), DevError> {
     let checks: Vec<&ScriptCheck> = checks.iter().filter(|c| c.stage == stage).collect();
     if checks.is_empty() {
+        phase_inert(Phase::ScriptCheck);
         return Ok(());
     }
 
@@ -644,6 +648,7 @@ pub(super) fn run_dependency_rules(
     commands: bool,
 ) -> Result<(), DevError> {
     if rules.is_empty() {
+        phase_inert(Phase::DependencyRules);
         return Ok(());
     }
 

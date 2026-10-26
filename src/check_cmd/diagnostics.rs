@@ -334,6 +334,7 @@ fn run_rustdoc_phase(
     serial_builds: bool,
 ) -> Result<(), PhaseFailure> {
     let Some(cfg) = cfg else {
+        phase_inert(Phase::Rustdoc);
         return Ok(());
     };
     let (allow, allow_exact) = (lints.allow.as_slice(), lints.allow_exact.as_slice());

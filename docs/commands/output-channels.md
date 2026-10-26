@@ -24,6 +24,13 @@ and are resolved identically for every project by `BenchHarness::new_with_lock`
 (`src/measure.rs`), which reads git provenance from the build root.
 See `docs/commands/measure.md` for the sidecar's sampling/marker protocol.
 
+The `.brokkr/` directory ignores itself: every command that reads config
+creates it with a `.gitignore` of `*` (left alone if one is already there), so
+its logs, journals and databases stay out of `git status` and out of a
+`git add -A` even in a repo whose own `.gitignore` never mentions it. A project
+that commits its `results.db` keeps doing so: git keeps tracking a tracked
+file whatever an ignore rule says, and the first add is `git add -f`.
+
 What brokkr itself prints around a measured run (the `run i/n` line, the
 single `[sidecar]` summary, the `[run] results.db <id>` line naming the stored
 row, the `[run] commit` line for `--commit`) is specified in

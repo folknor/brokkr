@@ -203,9 +203,14 @@ Output:
   narration. Waiting commands cannot open or prune logs; an open failure warns
   and preserves history. Names advance past the newest same-kind stamp after a
   clock rollback, so retention still prunes in creation order. If listing the
-  directory fails, brokkr warns and skips retention for that run. The log keeps
+  directory fails, brokkr warns and skips retention for that run; a log it
+  could not remove warns too, since a silent failure would quietly defeat the
+  bound. The log keeps
   every line printed after opening, plus the narration a green run no longer
   prints: shapes, full cargo argv, the
+  `phase <name>: started` line of every phase (followed by `phase <name>: not
+  configured` when the phase had nothing to run, so an inert phase never reads
+  as one that checked something), the
   `[lints]` sink, per-unit counts, build and fan-out times, the parallel plan
   and per-sweep slowest binary, the roll-call. Written and flushed as each
   event happens, so a watchdog-killed or panicked run keeps everything up to

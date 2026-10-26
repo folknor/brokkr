@@ -137,9 +137,15 @@ Two details decide whether "20 seconds" means 20 seconds:
 
 - **The watchdog wakes on the deadline**, not on a fixed interval. It sleeps to
   the soonest thing it bounds - the oldest in-flight test's ceiling, the
-  no-progress clock, the idle window, the caller's wall - capped by its poll so it
-  still notices cancellation promptly. A flat 250ms poll meant every cap was really
-  "the ceiling plus up to 250ms".
+  no-progress clock, the idle window, the caller's wall - capped by its poll so a
+  test that starts mid-sleep has its deadline read promptly. A flat 250ms poll
+  meant every cap was really "the ceiling plus up to 250ms".
+- **The end of a run is not a poll away.** The runner waits on the child's
+  pidfd, so its exit wakes the waiter at once; the poll only bounds how late a
+  stop or a sibling's abort is noticed. The watchdog sleeps on a doorbell (a
+  condvar) that the end of the run rings, so joining it does not wait out its
+  sleep either. With flat sleeps a suite of sub-millisecond tests cost up to
+  two polls per run.
 - **The run is frozen before it is diagnosed.** The offending group is SIGSTOPped
   first, then snapshotted, then SIGKILLed. Snapshotting first let the test keep
   running for as long as `/proc` collection took; killing first would fix the cap

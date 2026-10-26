@@ -338,7 +338,9 @@ pub(crate) fn accounting_open(state_root: &Path, plan: &AccountingPlan) -> Resul
     let base = accounting_base(state_root);
     let dir = base.join(&plan.run_id);
     std::fs::create_dir_all(&dir)?;
-    prune_accounting_runs(&base, &plan.run_id, ACCOUNTING_RUNS_KEPT);
+    for failure in prune_accounting_runs(&base, &plan.run_id, ACCOUNTING_RUNS_KEPT) {
+        crate::output::warn(&format!("accounting retention: {failure}"));
+    }
     let plan_path = dir.join("plan.json");
     // Compact: a workspace's plan names every pair of every lane, and the
     // file is read by tools, not by eye.
@@ -378,10 +380,13 @@ pub(super) fn runs_to_prune(names: &[String], opening: &str, keep: usize) -> Vec
         .collect()
 }
 
-/// Apply the retention rule to the run directories under `base`.
-fn prune_accounting_runs(base: &Path, opening: &str, keep: usize) {
-    let Ok(entries) = std::fs::read_dir(base) else {
-        return;
+/// Apply the retention rule to the run directories under `base`, returning
+/// what could not be removed: a failed prune silently defeats the bound, so
+/// the caller reports each one. A run already gone counts as removed.
+pub(super) fn prune_accounting_runs(base: &Path, opening: &str, keep: usize) -> Vec<String> {
+    let entries = match std::fs::read_dir(base) {
+        Ok(entries) => entries,
+        Err(e) => return vec![format!("could not list {}: {e}", base.display())],
     };
     let names: Vec<String> = entries
         .filter_map(Result::ok)
@@ -389,9 +394,18 @@ fn prune_accounting_runs(base: &Path, opening: &str, keep: usize) {
         .filter_map(|e| e.file_name().to_str().map(str::to_owned))
         .filter(|n| is_run_id(n))
         .collect();
-    for name in runs_to_prune(&names, opening, keep) {
-        std::fs::remove_dir_all(base.join(name)).ok();
-    }
+    runs_to_prune(&names, opening, keep)
+        .into_iter()
+        .filter_map(|name| {
+            let path = base.join(name);
+            match std::fs::remove_dir_all(&path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    Some(format!("could not prune {}: {e}", path.display()))
+                }
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 /// Append one record to the open journal; a no-op when none is open (a run

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use super::harness_shim;
 use super::{
-    Ceilings, ExecutionOutcome, HungTest, KillCause, ObsEvent, Observation, ObservationSink,
+    Ceilings, Doorbell, ExecutionOutcome, HungTest, KillCause, ObsEvent, Observation, ObservationSink,
     RunContext, StreamSource, StreamTap, StrictPlan, TestTracker, WATCHDOG_POLL, clone_buffer,
     clone_hung, drain_libtest_json, drain_stderr, drain_to_buffer, join_drains,
     spawn_cargo_process_group, spawn_process_group, watchdog_loop,
@@ -130,7 +130,7 @@ where
     let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
     let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
     let tracker = Arc::new(Mutex::new(TestTracker::default()));
-    let done = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(Doorbell::default());
     let hung = Arc::new(Mutex::new(None::<HungTest>));
     let outcome = Arc::new(Mutex::new(ExecutionOutcome::default()));
     let downstream = observe.sink.clone();
@@ -296,7 +296,7 @@ where
     if let Some(session) = &session {
         session.settle();
     }
-    done.store(true, Ordering::SeqCst);
+    done.ring();
     if let Some(session) = &session {
         session.finish();
     }
@@ -385,6 +385,10 @@ fn wait_child(
         program: program.into(),
         error,
     };
+    // Exit wakes the wait through the child's pidfd; the poll interval only
+    // bounds how late a stop or a sibling's abort is noticed. Without a pidfd
+    // (an old kernel) the wait falls back to sleeping the interval.
+    let pidfd = harness_shim::open_pidfd(pgid).ok();
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Ok((status, context.stop.is_requested(), false)),
@@ -396,7 +400,12 @@ fn wait_child(
                     let status = child.wait().map_err(spawn_err)?;
                     return Ok((status, stopped, cancelled && !stopped));
                 }
-                thread::sleep(WATCHDOG_POLL);
+                match &pidfd {
+                    Some(fd) => {
+                        harness_shim::pidfd_wait(fd, WATCHDOG_POLL);
+                    }
+                    None => thread::sleep(WATCHDOG_POLL),
+                }
             }
             Err(error) => return Err(spawn_err(error)),
         }

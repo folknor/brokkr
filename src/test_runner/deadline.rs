@@ -2,9 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use super::{KillCause, Leader, ObsEvent, RunContext, StreamTap, capture_hung_test};
@@ -513,6 +511,39 @@ impl TestTracker {
     }
 }
 
+/// The watchdog's stop signal. The watchdog sleeps on it to its next deadline,
+/// and ringing it ends that sleep at once, so a run that finished is not held
+/// up to one poll longer while its watchdog is joined. A poisoned bell reads as
+/// rung: a watchdog that cannot tell should stand down, not keep sleeping.
+#[derive(Default)]
+pub(super) struct Doorbell {
+    rung: Mutex<bool>,
+    bell: Condvar,
+}
+
+impl Doorbell {
+    pub(super) fn ring(&self) {
+        if let Ok(mut rung) = self.rung.lock() {
+            *rung = true;
+        }
+        self.bell.notify_all();
+    }
+
+    pub(super) fn is_rung(&self) -> bool {
+        self.rung.lock().map_or(true, |rung| *rung)
+    }
+
+    /// Sleep up to `wait`, returning early when rung. True when rung.
+    pub(super) fn sleep(&self, wait: Duration) -> bool {
+        let Ok(rung) = self.rung.lock() else {
+            return true;
+        };
+        self.bell
+            .wait_timeout_while(rung, wait, |rung| !*rung)
+            .map_or(true, |(rung, _)| *rung)
+    }
+}
+
 #[allow(clippy::needless_pass_by_value)] // The Arcs are moved into a spawned thread.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn watchdog_loop(
@@ -520,7 +551,7 @@ pub(super) fn watchdog_loop(
     leader_pid: u32,
     leader: Leader,
     tracker: Arc<Mutex<TestTracker>>,
-    done: Arc<AtomicBool>,
+    done: Arc<Doorbell>,
     hung: Arc<Mutex<Option<HungTest>>>,
     ceilings: Ceilings,
     started: Instant,
@@ -549,7 +580,7 @@ pub(super) fn watchdog_loop_with_timing(
     leader_pid: u32,
     leader: Leader,
     tracker: Arc<Mutex<TestTracker>>,
-    done: Arc<AtomicBool>,
+    done: Arc<Doorbell>,
     hung: Arc<Mutex<Option<HungTest>>>,
     ceilings: Ceilings,
     poll: Duration,
@@ -565,14 +596,15 @@ pub(super) fn watchdog_loop_with_timing(
 ) {
     let timeout = ceilings.per_test;
     loop {
-        if done.load(Ordering::SeqCst) {
+        if done.is_rung() {
             return;
         }
         // Sleep to the nearest known deadline rather than a flat interval, so the
         // wake-up lands ON the ceiling instead of up to one poll past it. A flat
         // 250ms poll meant every cap was really "the ceiling plus up to 250ms",
-        // which is not what a hard cap means. Capped by `poll` so the loop still
-        // notices `done` and the abort flag promptly.
+        // which is not what a hard cap means. Capped by `poll` so a test that
+        // starts mid-sleep has its deadline read promptly; the end of the run
+        // rings `done` and wakes the sleep at once.
         let until_deadline = tracker
             .lock()
             .ok()
@@ -580,8 +612,7 @@ pub(super) fn watchdog_loop_with_timing(
             .into_iter()
             .chain(ceilings.wall.map(|w| w.saturating_sub(started.elapsed())))
             .min();
-        thread::sleep(until_deadline.map_or(poll, |d| d.min(poll)));
-        if done.load(Ordering::SeqCst) {
+        if done.sleep(until_deadline.map_or(poll, |d| d.min(poll))) {
             return;
         }
 
@@ -597,7 +628,7 @@ pub(super) fn watchdog_loop_with_timing(
         let Some(verdict) = ceilings.verdict(&readings, idle, started.elapsed()) else {
             continue;
         };
-        if done.load(Ordering::SeqCst) {
+        if done.is_rung() {
             return;
         }
         enforce_deadline(

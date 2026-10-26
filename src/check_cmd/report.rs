@@ -121,6 +121,12 @@ fn phase_ok(name: &'static str, counts: Option<String>) {
     }
 }
 
+/// Log that `phase` had nothing to run, pairing its `started` line: without
+/// it an unconfigured phase reads in the log as one that checked something.
+fn phase_inert(phase: Phase) {
+    output::detail(&format!("phase {}: not configured", phase.as_str()));
+}
+
 fn conventions_open() {
     with_report(|r| r.conventions = Some(Vec::new()));
 }

@@ -47,7 +47,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::{
-    AttributionRefusal, Ceilings, HungTest, JsonReconstructor, ObsEvent, ObservationSink,
+    AttributionRefusal, Ceilings, Doorbell, HungTest, JsonReconstructor, ObsEvent, ObservationSink,
     RunContext, StreamEnd, StreamSource, StreamTap, StrictPlan, TestTracker, WATCHDOG_POLL,
     hash_file,
 };
@@ -142,7 +142,7 @@ struct SessionState {
     drains: Mutex<Vec<thread::JoinHandle<()>>>,
     accepting: AtomicBool,
     drain_cancel: AtomicBool,
-    watchdog_done: AtomicBool,
+    watchdog_done: Doorbell,
     stdout: Arc<Mutex<Vec<u8>>>,
     sink: Option<ObservationSink>,
     context: RunContext,
@@ -194,7 +194,7 @@ impl Session {
                 drains: Mutex::new(Vec::new()),
                 accepting: AtomicBool::new(true),
                 drain_cancel: AtomicBool::new(false),
-                watchdog_done: AtomicBool::new(false),
+                watchdog_done: Doorbell::default(),
                 stdout,
                 sink,
                 context,
@@ -227,7 +227,7 @@ impl Session {
     }
 
     pub(super) fn stop_watchdog(&self) {
-        self.state.watchdog_done.store(true, Ordering::Release);
+        self.state.watchdog_done.ring();
     }
 
     pub(super) fn settle(&self) {
@@ -298,7 +298,7 @@ impl Session {
         thread::spawn(move || {
             let mut idle_since = started;
             loop {
-                if state.watchdog_done.load(Ordering::Acquire) {
+                if state.watchdog_done.is_rung() {
                     return;
                 }
                 let mut wait = WATCHDOG_POLL;
@@ -337,7 +337,7 @@ impl Session {
                 }
                 let idle = (!executing).then(|| idle_since.elapsed());
                 if let Some(verdict) = ceilings.verdict(&readings, idle, started.elapsed()) {
-                    if state.watchdog_done.load(Ordering::Acquire) {
+                    if state.watchdog_done.is_rung() {
                         return;
                     }
                     let charged = verdict
@@ -362,7 +362,9 @@ impl Session {
                 if let Some(idle) = idle {
                     wait = wait.min(super::IDLE_TIMEOUT.saturating_sub(idle));
                 }
-                thread::sleep(wait);
+                if state.watchdog_done.sleep(wait) {
+                    return;
+                }
             }
         })
     }
@@ -771,9 +773,9 @@ fn proc_parent(pid: u32) -> io::Result<u32> {
         .ok_or_else(|| io::Error::other("missing parent pid"))
 }
 
-/// An unverified pidfd for a process the test itself owns.
-#[cfg(test)]
-fn open_pidfd(pid: u32) -> io::Result<OwnedFd> {
+/// An unverified pidfd for a process the caller itself owns: its own child,
+/// not yet reaped, so the pid cannot have been recycled.
+pub(super) fn open_pidfd(pid: u32) -> io::Result<OwnedFd> {
     // SAFETY: a plain syscall with no pointer arguments.
     let ret = unsafe { libc::syscall(libc::SYS_pidfd_open, pid.cast_signed(), 0_u32) };
     if ret < 0 {
@@ -785,12 +787,19 @@ fn open_pidfd(pid: u32) -> io::Result<OwnedFd> {
 }
 
 fn pidfd_exited(fd: &OwnedFd) -> bool {
+    pidfd_wait(fd, Duration::ZERO)
+}
+
+/// Wait up to `wait` for the process behind `fd` to exit; true once it has.
+/// A pidfd turns readable at exit, so the waiter wakes then, not a poll later.
+pub(super) fn pidfd_wait(fd: &OwnedFd, wait: Duration) -> bool {
     let mut pfd = libc::pollfd {
         fd: fd.as_raw_fd(),
         events: libc::POLLIN,
         revents: 0,
     };
-    unsafe { libc::poll(&mut pfd, 1, 0) > 0 }
+    let ms = libc::c_int::try_from(wait.as_millis()).unwrap_or(libc::c_int::MAX);
+    unsafe { libc::poll(&mut pfd, 1, ms) > 0 }
 }
 
 fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
@@ -1130,7 +1139,7 @@ mod tests {
             drains: Mutex::new(Vec::new()),
             accepting: AtomicBool::new(true),
             drain_cancel: AtomicBool::new(false),
-            watchdog_done: AtomicBool::new(false),
+            watchdog_done: Doorbell::default(),
             stdout: Arc::new(Mutex::new(Vec::new())),
             sink,
             context: RunContext::new(super::super::StopSignal::new(|| false), |_| {}),

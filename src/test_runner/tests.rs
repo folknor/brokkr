@@ -342,6 +342,66 @@ fn idle_wedge_fires_only_with_nothing_in_flight() {
     );
 }
 
+/// Ringing the doorbell ends a watchdog's sleep at once. The poll here is an
+/// hour, so a watchdog that only noticed `done` between sleeps would never be
+/// joined; the join returning at all is the proof, the clock is a sanity bound.
+#[test]
+fn ringing_the_doorbell_wakes_a_sleeping_watchdog() {
+    let root = test_root("watchdog_doorbell");
+    let done = Arc::new(Doorbell::default());
+    let hung = Arc::new(Mutex::new(None::<HungTest>));
+    let watchdog = {
+        let done = Arc::clone(&done);
+        let hung = Arc::clone(&hung);
+        thread::spawn(move || {
+            watchdog_loop_with_timing(
+                root,
+                0,
+                Leader::Cargo,
+                Arc::new(Mutex::new(TestTracker::default())),
+                done,
+                hung,
+                Ceilings {
+                    per_test: Duration::from_secs(3600),
+                    wall: None,
+                    shape: WallShape::SharedHarness,
+                },
+                Duration::from_secs(3600),
+                Instant::now(),
+                None,
+                &test_context(),
+            );
+        })
+    };
+    thread::sleep(Duration::from_millis(20));
+    let rung = Instant::now();
+    done.ring();
+    watchdog.join().expect("watchdog thread");
+    assert!(rung.elapsed() < Duration::from_secs(5), "the ring woke the sleep");
+    assert!(hung.lock().unwrap().is_none(), "a rung watchdog enforces nothing");
+}
+
+/// A pidfd wait returns when the child exits, not when the timeout runs out.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_pidfd_wait_wakes_on_child_exit() {
+    let mut child = Command::new("sh")
+        .args(["-c", "sleep 0.05"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn shell");
+    let fd = harness_shim::open_pidfd(child.id()).expect("pidfd");
+    let started = Instant::now();
+    assert!(
+        harness_shim::pidfd_wait(&fd, Duration::from_secs(30)),
+        "the exit makes the pidfd readable"
+    );
+    assert!(started.elapsed() < Duration::from_secs(10), "woken by the exit");
+    child.wait().ok();
+}
+
 /// The wall deadline must fire with an entirely empty tracker: no announced
 /// start, no announced result, nothing for either event-driven ceiling to
 /// age. That is the case the whole struct exists for - a run whose lifecycle
@@ -369,7 +429,7 @@ fn the_wall_deadline_fires_with_no_events_at_all() {
     // after IDLE_TIMEOUT (five minutes), and per-test aging needs a start
     // that never comes. Neither can explain a kill here.
     let tracker = Arc::new(Mutex::new(TestTracker::default()));
-    let done = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(Doorbell::default());
     let hung = Arc::new(Mutex::new(None::<HungTest>));
 
     watchdog_loop_with_timing(
@@ -543,7 +603,7 @@ fn an_expired_per_test_cap_kills_even_with_the_wall_far_away() {
         in_suite: false,
         idle_since: Instant::now(),
     }));
-    let done = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(Doorbell::default());
     let hung = Arc::new(Mutex::new(None::<HungTest>));
 
     // The wall is an hour away and must not be what saves or condemns this
@@ -626,7 +686,7 @@ fn watchdog_kills_process_group_and_writes_snapshot() {
         in_suite: false,
         idle_since: started,
     }));
-    let done = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(Doorbell::default());
     let hung = Arc::new(Mutex::new(None::<HungTest>));
 
     watchdog_loop_with_timing(

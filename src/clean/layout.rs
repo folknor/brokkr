@@ -15,6 +15,9 @@ pub(crate) const RUSTFLAGS_TARGET_PREFIX: &str = crate::target_namespace::RUSTFL
 /// The project-local state directory's name, relative to the project root.
 pub(crate) const PROJECT_STATE_DIR: &str = ".brokkr";
 
+/// The state directory's own `.gitignore`: everything in it, itself included.
+const SELF_IGNORE: &[u8] = b"# Written by brokkr: per-host state.\n*\n";
+
 /// The project-local `.brokkr` root and its named stores.
 #[derive(Debug, Clone)]
 pub(crate) struct ProjectState {
@@ -30,6 +33,25 @@ impl ProjectState {
 
     pub(crate) fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Create the state directory with a `.gitignore` of `*` inside it, as
+    /// pytest, ruff and venv do, so its logs and journals never show up in
+    /// `git status` or ride along on a `git add -A` in a repo that does not
+    /// ignore it, and do not read as code dirt to check's markdown-only
+    /// shortcut. An existing `.gitignore` is left alone. A file git already
+    /// tracks (a committed `results.db`) stays tracked under the rule.
+    pub(crate) fn ensure_self_ignored(&self) -> std::io::Result<()> {
+        std::fs::create_dir_all(&self.root)?;
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(self.root.join(".gitignore"))
+        {
+            Ok(mut file) => std::io::Write::write_all(&mut file, SELF_IGNORE),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
     pub(crate) fn results_db(&self) -> PathBuf {
@@ -591,5 +613,25 @@ impl<'a> RustflagsTargets<'a> {
                 (is_reserved && entry.file_type().ok()?.is_dir()).then(|| entry.path())
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    /// The state directory ignores itself, and a `.gitignore` already there,
+    /// written by brokkr or by hand, is never rewritten.
+    #[test]
+    fn the_state_directory_ignores_itself_once() {
+        let root = crate::test_scratch::scratch("layout", "self_ignore");
+        let state = ProjectState::new(&root);
+        state.ensure_self_ignored().unwrap();
+        let ignore = state.root().join(".gitignore");
+        assert_eq!(std::fs::read(&ignore).unwrap(), SELF_IGNORE);
+        std::fs::write(&ignore, b"custom\n").unwrap();
+        state.ensure_self_ignored().unwrap();
+        assert_eq!(std::fs::read(&ignore).unwrap(), b"custom\n");
     }
 }

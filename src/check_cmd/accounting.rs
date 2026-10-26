@@ -919,6 +919,32 @@ mod accounting_tests {
         }
     }
 
+    /// A run retention cannot remove is reported, not dropped: a silent
+    /// failure would defeat the bound. A locked subdirectory makes the removal
+    /// fail; root ignores the lock, so the case only means something unprivileged.
+    #[test]
+    fn retention_reports_a_run_it_could_not_remove() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = crate::test_scratch::scratch("accounting", "prune_failure");
+        let base = accounting_base(&dir);
+        let stuck = base.join("1000000000000-1");
+        let locked = stuck.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("f"), b"x").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+        std::fs::create_dir_all(base.join("1000000000001-1")).unwrap();
+        let failures = journal::prune_accounting_runs(&base, "1000000000001-1", 1);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(failures[0].contains("1000000000000-1"), "{failures:?}");
+        assert!(journal::prune_accounting_runs(&base, "1000000000001-1", 1).is_empty());
+        assert!(!stuck.exists());
+    }
+
     /// Opening a run writes its plan and journal, prunes the run directories
     /// beyond retention, and leaves the journal readable back.
     #[test]

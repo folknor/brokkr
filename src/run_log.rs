@@ -165,13 +165,17 @@ fn open_run_log_with(
     }
     if let Some((current, file)) = opened {
         // Prune only after creating it: a failed open must not evict history.
-        if retention_ready {
+        let prune_failures = if retention_ready {
             before.push(current.clone());
-            for oldest in logs_to_prune_with(before, kind, &current, tunables.retained) {
-                std::fs::remove_file(oldest).ok();
-            }
-        }
+            remove_logs(logs_to_prune_with(before, kind, &current, tunables.retained))
+        } else {
+            Vec::new()
+        };
         crate::output::open_run_log(file);
+        // Reported once the log is open, so the run's own log records them.
+        for failure in prune_failures {
+            crate::output::warn(&format!("{kind} run log retention: {failure}"));
+        }
         let argv: Vec<String> = std::env::args().collect();
         crate::output::detail(&format!("argv: {}", argv.join(" ")));
         if let Ok(cwd) = std::env::current_dir() {
@@ -187,6 +191,20 @@ fn open_run_log_with(
             dir.display()
         ));
     }
+}
+
+/// Remove pruned logs, returning what could not be removed: a failed prune
+/// silently defeats the retention bound. A log already gone counts as removed.
+fn remove_logs(paths: Vec<PathBuf>) -> Vec<String> {
+    paths
+        .into_iter()
+        .filter_map(|path| match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Some(format!("could not prune {}: {e}", path.display()))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// Choose a millisecond-shaped name that sorts after every existing log of

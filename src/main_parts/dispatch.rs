@@ -43,6 +43,17 @@ pub(super) fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<()
         .map(|d| &d.project_root)
         .or_else(|| fallback_roots.as_ref().map(|roots| &roots.0));
     let project = detection.map(|d| d.project.clone());
+    // Before anything writes there: the first run log or journal must already
+    // land in an ignored directory.
+    if let Some(root) = state_root
+        && spec.config != cli::ConfigNeed::None
+        && let Err(e) = crate::clean::layout::ProjectState::new(root.as_path()).ensure_self_ignored()
+    {
+        crate::output::warn(&format!(
+            "could not write {}/.gitignore: {e}",
+            crate::clean::layout::PROJECT_STATE_DIR
+        ));
+    }
     let _log = spec.run_log.map(|kind| {
         crate::run_log::RunLog::begin(
             state_root

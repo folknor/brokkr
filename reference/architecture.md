@@ -8,7 +8,7 @@ Single crate, single binary. No workspace.
 
 - `src/main.rs` - module declarations and imports; `main_parts/bootstrap.rs` owns startup and command context helpers; the normal `main_parts/dispatch.rs` module owns dispatch. Shared argument resolution lives in `command_args.rs`; passthrough/timing, formatting, PMTiles statistics, verification, generic hotpath and visual approval have normal modules (`passthrough_cmd.rs`, `fmt_cmd.rs`, `pmtiles_stats_cmd.rs`, `verify_cmd.rs`, `generic_hotpath_cmd.rs`, `visual_approve_cmd.rs`). `command_input.rs` consumes the parsed CLI into concrete execution inputs. `project.rs` mints distinct private `ProjectRoot` and `BuildRoot` types; `context.rs` requires those types for measurement, lock and worktree setup.
 - `src/clean.rs` - `brokkr clean` policy and cleanup implementation, including scratch, artefact, archive and worktree pruning through the typed layouts below
-- `src/clean/layout.rs` - the project `.brokkr` state root, named per-project paths, constructed scratch targets and reserved FIFO/target namespaces; clean delegates archive retention to Elivagar's store
+- `src/clean/layout.rs` - the project `.brokkr` state root (and its self-ignoring `.gitignore`), named per-project paths, constructed scratch targets and reserved FIFO/target namespaces; clean delegates archive retention to Elivagar's store
 - `src/env.rs` - `brokkr env` report collection, formatting and command orchestration over typed host facts
 - `src/host/` - typed CPU, kernel/io_uring, memory and storage probes used by environment reporting and history, with reusable storage and io_uring results
 - `src/lock_cmd.rs` - `brokkr lock` and `brokkr kill` presentation and orchestration over `lockfile` and `lock_service`
