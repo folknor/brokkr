@@ -123,9 +123,20 @@ entire purpose is being safe to delete. Keeping them in a brokkr-designated
 directory means `clean` spares them under the existing rule rather than by a
 special case, and a user's own `cargo clean` cannot reach them at all.
 
-`--baselines` lists brokkr's own stamp store, not criterion's directory tree -
-so this command only ever reads files it wrote, and a change to criterion's
-on-disk layout cannot break the listing.
+`--baselines` lists brokkr's own stamp store, not criterion's directory tree,
+so a change to criterion's on-disk layout cannot break the listing.
+
+## A run that measured nothing
+
+Criterion exits 0 when the filter after `--` matches no benchmark, so a
+mistyped filter or a renamed benchmark id would otherwise "save" a baseline
+holding nothing, stamped as if it were real. A measuring run therefore checks
+that criterion actually wrote something: every benchmark measured into baseline
+`NAME` writes `<benchmark id>/NAME/estimates.json` under the criterion home,
+and a run that wrote or rewrote none of them is refused with `cargo bench
+measured nothing into baseline ...` and leaves no new stamp. This is the one place
+brokkr reads criterion's directory tree. If criterion ever moves those files,
+every save will be refused, which is the safe way for it to fail.
 
 ## The invocation brokkr constructs
 

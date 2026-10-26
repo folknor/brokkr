@@ -39,7 +39,9 @@
 mod discover;
 mod stamp;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use crate::context::{acquire_cmd_lock_opt, with_worktree};
 use crate::error::DevError;
@@ -214,16 +216,79 @@ fn measure(
         "measuring {} into baseline '{baseline}'",
         target.name
     ));
+    let criterion_dir = criterion_dir(home);
+    let before = saved_estimates(&criterion_dir, baseline);
     cargo_bench(home, build_root, target, &criterion_args, lock)?;
 
-    // Written only after a successful run: a stamp for a baseline that doesn't
-    // exist would make a later comparison claim comparability it can't have.
+    // Criterion exits 0 when a filter matches no benchmark, so success alone
+    // does not mean anything was measured. Each benchmark it measures rewrites
+    // its `<baseline>/estimates.json`; none written means nothing ran, and a
+    // stamp then would vouch for an empty (or older) baseline.
+    let measured = rewritten(&before, &saved_estimates(&criterion_dir, baseline));
+    if measured == 0 {
+        return Err(DevError::Refused(format!(
+            "cargo bench measured nothing into baseline '{baseline}' - no benchmark in {} \
+             matched the arguments after `--`; nothing saved",
+            target.name
+        )));
+    }
+
+    // Written only after a run that measured something: a stamp for a baseline
+    // that doesn't exist would make a later comparison claim comparability it
+    // can't have.
     stamp::write(home, baseline, &stamp::Stamp::capture(build_root))?;
     output::bench_msg(&format!(
         "saved baseline '{baseline}' - compare with `brokkr bench {} --compare {baseline} <other>`",
         target.name
     ));
     Ok(())
+}
+
+/// Criterion's data directory under the bench home (its `CRITERION_HOME`).
+fn criterion_dir(home: &Path) -> PathBuf {
+    home.join("criterion")
+}
+
+/// Every `<baseline>/estimates.json` under `dir`, with its modification time:
+/// the files a `--save-baseline <baseline>` run writes, one per benchmark.
+/// Symlinks are not followed. An unreadable directory contributes nothing.
+fn saved_estimates(dir: &Path, baseline: &str) -> HashMap<PathBuf, Option<SystemTime>> {
+    let mut found = HashMap::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if !kind.is_dir() {
+                continue;
+            }
+            let path = entry.path();
+            if entry.file_name() == baseline {
+                let estimates = path.join("estimates.json");
+                if let Ok(meta) = std::fs::metadata(&estimates) {
+                    found.insert(estimates, meta.modified().ok());
+                }
+            }
+            pending.push(path);
+        }
+    }
+    found
+}
+
+/// How many estimate files `after` holds that `before` did not, or holds
+/// with a different modification time.
+fn rewritten(
+    before: &HashMap<PathBuf, Option<SystemTime>>,
+    after: &HashMap<PathBuf, Option<SystemTime>>,
+) -> usize {
+    after
+        .iter()
+        .filter(|(path, modified)| before.get(*path) != Some(*modified))
+        .count()
 }
 
 /// Diff two stored baselines without sampling.
@@ -484,7 +549,7 @@ fn cargo_bench(
         targets: vec!["--bench".into(), target.name.clone()],
         env: vec![(
             "CRITERION_HOME".into(),
-            home.join("criterion").display().to_string(),
+            criterion_dir(home).display().to_string(),
         )],
         build_root: Some(build_root),
     });
@@ -524,4 +589,39 @@ fn cargo_bench(
     Err(DevError::Reported(format!(
         "cargo bench failed (exit code {code})"
     )))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn estimate(dir: &Path, bench: &str, baseline: &str) -> PathBuf {
+        let path = dir.join(bench).join(baseline).join("estimates.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"{}").unwrap();
+        path
+    }
+
+    /// A run whose filter matched nothing writes no estimates, so nothing
+    /// counts as measured, while another baseline's files and an older copy of
+    /// this one are not mistaken for this run's work.
+    #[test]
+    fn only_estimates_this_run_wrote_count_as_measured() {
+        let dir = crate::test_scratch::scratch("bench_cmd", "measured");
+        estimate(&dir, "group/old_bench", "abc123");
+        estimate(&dir, "group/other", "def456");
+        let before = saved_estimates(&dir, "abc123");
+        assert_eq!(before.len(), 1);
+
+        // An unmatched filter: nothing written.
+        assert_eq!(rewritten(&before, &saved_estimates(&dir, "abc123")), 0);
+
+        // A matched one: a new benchmark appears and the old one is rewritten.
+        estimate(&dir, "group/new_bench", "abc123");
+        let old = dir.join("group/old_bench/abc123/estimates.json");
+        let later = SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options().write(true).open(&old).unwrap().set_modified(later).unwrap();
+        assert_eq!(rewritten(&before, &saved_estimates(&dir, "abc123")), 2);
+    }
 }
