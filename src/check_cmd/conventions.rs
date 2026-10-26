@@ -766,6 +766,7 @@ mod script_failure_render_tests {
             stream: Stream::Both,
             stage: Stage::PreTest,
             diagnostics,
+            when: crate::config::Cadence::Always,
         }
     }
 

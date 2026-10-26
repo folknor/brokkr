@@ -407,6 +407,7 @@ match   = "last-line"   # exact | last-line | contains   (default: last-line)
 stream  = "stdout"      # stdout | stderr | both          (default: stdout)
 stage   = "pre-clippy"  # pre-clippy | pre-test | post-test | background (default: pre-clippy)
 diagnostics = "opaque"  # opaque | rustc                  (default: opaque)
+when    = "always"      # off | gate | always             (default: always)
 ```
 
 - `name` - label shown when the entry **fails** (`beta: stdout did not match
@@ -431,9 +432,50 @@ diagnostics = "opaque"  # opaque | rustc                  (default: opaque)
   into one stream in the command (for example, `2>&1`) and select that stream.
 - `stage` - where in the check pipeline the entry runs (below).
 - `diagnostics` - the output shape a **failure** is rendered against (below).
+- `when` - which runs the entry is part of (below).
 
 The command's exit code is ignored - only the output match decides. See
 `src/script_check.rs` and `docs/commands/check.md`.
+
+### `when`
+
+The same key and vocabulary as `[member_check]` and `[[fixture_lint]]`:
+
+| `when` | Runs |
+| --- | --- |
+| `always` (default) | In every `brokkr check` that runs the `script_check` phase |
+| `gate` | Only under a `certifies = "complete"` profile (`--gate`, or a complete `--profile` or `default_profile`) |
+| `off` | Never in a plain check |
+
+The defaults split on purpose. `[[script_check]]` has always run everywhere,
+so an entry without `when` keeps doing so; `[member_check]` and
+`[[fixture_lint]]` are expensive by nature and start gate-only. `gate` is for
+an expensive check such as Miri that belongs in the pre-landing run and not the
+edit loop, without the `skip_phases` profile that would also drop the cheap
+phases. It is orthogonal to `stage`, so a gate-only entry may sit at any stage;
+`background` suits a slow one.
+
+`brokkr check --script NAME` runs the named entry whatever its `when` - an
+explicit request, and the way to try a gate-only check without running the
+gate. `off` plus `--script` is the spelling for a check run only on demand.
+A profile's `skip_phases = ["script_check"]` still drops every entry, whatever
+its `when` (a complete profile cannot skip phases).
+
+An entry left out by its `when` is not counted on the stage's
+`script-check (N checks)` line. The run log names the ones left out, for
+example `script-check: 1 gate-only check not run, no complete claim: miri`;
+the console stays quiet, since that would be noise on every edit-loop run.
+
+A `gate` entry the project's own config defines (its `brokkr.toml` or an
+include) is a **load error** when no `[test.profiles.*]` declares `certifies =
+"complete"`: it could never run in any check, and nothing would say so. Add a
+complete profile, or set `when = "off"`. An include's entry is changed by
+repeating the whole entry under the same name, since shadowing replaces the
+entry rather than merging its keys. Entries from the user-wide config are
+exempt: that file reaches every project, gate or not, and trees with no
+`brokkr.toml`, and a project cannot edit it. Such an entry runs under a
+complete claim, like a project's own, and is logged as not run on every other
+run, including every run in a project with no complete profile.
 
 ### `diagnostics`
 

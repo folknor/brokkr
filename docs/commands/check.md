@@ -376,7 +376,8 @@ whose selection includes that package.
 named `[[textlint]]` rules and `[[script_check]]` entries - every other phase
 is skipped. Both are repeatable (or comma-separated) and combine. Script checks
 run whatever their `stage`, since stages only place them around phases this
-run skips.
+run skips, and whatever their `when`: naming an entry is an explicit request,
+so a `gate` or `off` entry runs too.
 
 This is for a person iterating on one failing gate, where a full run would
 re-run clippy before reaching it each time. It is never a gate:
@@ -434,7 +435,10 @@ doctest or rustdoc break from a docs edit surfaces on the next full run, and
 `--force-rust` checks the build on demand when a docs edit warrants it. `post-test`
 script checks are the exception inside `script_check`: they judge a test phase,
 and with none having run they are skipped and counted on a `script-check: N
-post-test checks skipped` line, as under a profile that skips `test`.
+post-test checks skipped` line, as under a profile that skips `test`. A
+`when = "gate"` script check never runs under the shortcut, since every
+profile waives it; on a markdown-only tree it runs when a complete profile
+does, with the rest of the full run.
 
 The classifier is `scope::dirt`, backed by `git::TreeState`
 (`git status --porcelain=v1 -z --no-renames --untracked-files=all`). The same
@@ -541,8 +545,12 @@ the inline table, are their own group and never ordered against it.
 
 Runs next, only when `[[script_check]]` entries exist (inert
 otherwise). This is the phase's default `pre-clippy` stage; an entry can instead
-name `pre-test` or `post-test` and run at that point in the pipeline (see
-`stage` below). Each entry runs `command` via `sh -c` (so pipes/redirects/env
+name `pre-test` or `post-test` and run at that point in the pipeline, or
+`background` and run alongside the phases up to the prepare builds (see
+`stage` in `brokkr man conventions script_check`). An entry's `when` decides which runs it is part of - every
+check by default, or `gate` for complete-claim runs only - before any stage
+runs; entries left out are named in the run log and not counted on the
+stage's line. Each entry runs `command` via `sh -c` (so pipes/redirects/env
 expansion work) with cwd = the code tree, and **passes iff the captured output
 matches `expect`**. Asserting on a success sentinel - not the exit code - is the
 point: it catches a check silently stubbed to `exit 0`, because the script must
@@ -567,7 +575,7 @@ the line falsifiable (a stage that quietly stopped running its checks shows a
 shrinking number) while a passing gate's name carries nothing to act on. A
 partly-failing stage prints `script-check: M of N ok` above the failure block.
 
-The keys (`match`, `stream`, `stage`, `diagnostics`) and what each failure view
+The keys (`match`, `stream`, `stage`, `diagnostics`, `when`) and what each failure view
 prints are in `brokkr man conventions script_check`. For `cargo doc` specifically,
 prefer the native [`rustdoc` phase](#rustdoc-phase) over a script check: it
 reads cargo's JSON, so each diagnostic is one line with its lint code.
@@ -576,7 +584,7 @@ reads cargo's JSON, so each diagnostic is one line with its lint code.
 its later lanes never ran and there is no partial-run reading for a sentinel
 gate (the coverage audit, which deliberately does run there, reconciles the
 plan against the journal, which a failed run has as surely as a green one).
-All three stages share the one
+Every stage shares the one
 `script_check` phase name for `skip_phases` and the JSON `failed_phase`; the
 failing entry is named in the output regardless.
 

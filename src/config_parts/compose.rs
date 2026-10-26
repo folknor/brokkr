@@ -52,6 +52,10 @@ pub struct UserLayerSources {
     pub path: PathBuf,
     pub textlint: usize,
     pub script_checks: usize,
+    /// The names of the `[[script_check]]` entries the user layer
+    /// contributed. Disjoint from every project-layer entry's name, since a
+    /// project entry reusing a name shadows the user one.
+    pub script_check_names: BTreeSet<String>,
 }
 
 impl ConfigSources {
@@ -169,10 +173,14 @@ fn compose_layers(root: Option<&Path>) -> Result<(toml::Table, ConfigSources), D
         Vec::new()
     };
     let has_user_layer = user_layer.is_some();
-    let user_sources = user_layer.as_ref().map(|(path, table)| UserLayerSources {
-        path: path.clone(),
-        textlint: surviving_user_entry_count(table, "textlint", &files),
-        script_checks: surviving_user_entry_count(table, "script_check", &files),
+    let user_sources = user_layer.as_ref().map(|(path, table)| {
+        let scripts = surviving_user_entries(table, "script_check", &files);
+        UserLayerSources {
+            path: path.clone(),
+            textlint: surviving_user_entries(table, "textlint", &files).len(),
+            script_checks: scripts.len(),
+            script_check_names: scripts.into_iter().filter_map(entry_name).map(str::to_owned).collect(),
+        }
     });
     if let Some(user_layer) = user_layer {
         files.insert(0, user_layer);
@@ -208,16 +216,19 @@ fn selected_user_table() -> Result<Option<(PathBuf, toml::Table)>, DevError> {
     Ok(None)
 }
 
-/// Count user entries that remain after the higher-precedence project layers
-/// have replaced same-named entries. Unnamed entries always survive the
-/// array merge, matching `merge_entries`.
-fn surviving_user_entry_count(
-    user: &toml::Table,
+/// The user entries that remain after the higher-precedence project layers
+/// have replaced same-named entries, or replaced the whole array with a value
+/// that is not an array of tables. Unnamed entries always survive the array
+/// merge, matching `merge_entries`. A higher layer reusing a name drops every
+/// user entry of that name, so a surviving entry's name is never also a
+/// project entry's.
+fn surviving_user_entries<'a>(
+    user: &'a toml::Table,
     key: &str,
     higher_layers: &[(PathBuf, toml::Table)],
-) -> usize {
+) -> Vec<&'a toml::Value> {
     let Some(user_entries) = user.get(key).and_then(toml::Value::as_array) else {
-        return 0;
+        return Vec::new();
     };
     let mut shadowed = HashSet::new();
     let mut replaced = false;
@@ -233,12 +244,12 @@ fn surviving_user_entry_count(
         }
     }
     if replaced {
-        return 0;
+        return Vec::new();
     }
     user_entries
         .iter()
         .filter(|entry| entry_name(entry).is_none_or(|name| !shadowed.contains(name)))
-        .count()
+        .collect()
 }
 
 /// Remove `[textlint_preset.*]` blocks that only the user layer (file 0)

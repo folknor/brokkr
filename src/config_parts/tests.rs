@@ -343,6 +343,138 @@ stage = "post-test"
         assert_eq!(stages, vec![Stage::PreClippy, Stage::PreTest, Stage::PostTest]);
     }
 
+    const GATE_AND_OFF_SCRIPTS: &str = r#"
+[[script_check]]
+name = "fmt"
+command = "a"
+expect = "ok"
+
+[[script_check]]
+name = "miri"
+command = "b"
+expect = "ok"
+when = "gate"
+
+[[script_check]]
+name = "slow"
+command = "c"
+expect = "ok"
+when = "off"
+"#;
+
+    #[test]
+    fn script_check_when_defaults_to_always() {
+        // Every entry written before `when` existed ran on every check; the
+        // key's absence must keep it there, unlike member_check's gate default.
+        let checks = script_checks_of(GATE_AND_OFF_SCRIPTS).unwrap();
+        let whens: Vec<Cadence> = checks.iter().map(|c| c.when).collect();
+        assert_eq!(whens, vec![Cadence::Always, Cadence::Gate, Cadence::Off]);
+        let typo = GATE_AND_OFF_SCRIPTS.replace("when = \"off\"", "when = \"never\"");
+        assert!(script_checks_of(&typo).is_err());
+    }
+
+    fn with_scripts(test: Option<&str>) -> DevConfig {
+        let mut config = make_config(HashMap::new());
+        config.script_checks = script_checks_of(GATE_AND_OFF_SCRIPTS).unwrap();
+        config.test = test.map(|t| toml::from_str(t).unwrap());
+        config
+    }
+
+    #[test]
+    fn a_gate_script_without_a_complete_profile_is_refused() {
+        let err = refuse_gate_scripts_without_gate(&with_scripts(None), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("\"miri\""), "got: {err}");
+        assert!(!err.contains("slow"), "an off entry is not stranded: {err}");
+        // A partial profile is not a gate.
+        let partial = with_scripts(Some("[profiles.quick]\ncertifies = \"partial\"\n"));
+        assert!(refuse_gate_scripts_without_gate(&partial, None).is_err());
+        let complete = with_scripts(Some("[profiles.gate]\ncertifies = \"complete\"\n"));
+        refuse_gate_scripts_without_gate(&complete, None).unwrap();
+    }
+
+    #[test]
+    fn a_user_layer_gate_script_is_exempt() {
+        // The user-wide file reaches every project and trees with no
+        // brokkr.toml; the project cannot edit it, so it cannot be refused.
+        let user: BTreeSet<String> = ["miri".to_owned()].into();
+        refuse_gate_scripts_without_gate(&with_scripts(None), Some(&user)).unwrap();
+        let other: BTreeSet<String> = ["fmt".to_owned()].into();
+        assert!(refuse_gate_scripts_without_gate(&with_scripts(None), Some(&other)).is_err());
+    }
+
+    /// The surviving user names are read off the merge rule rather than the
+    /// merge itself, so they are checked against what the merge produced: the
+    /// composed entries are exactly the survivors plus every project entry
+    /// that still stands.
+    #[test]
+    fn surviving_user_entries_match_the_composed_array() {
+        let user: toml::Table = toml::from_str(
+            "[[script_check]]\nname = \"miri\"\nuser = true\n\n\
+             [[script_check]]\nname = \"fmt\"\nuser = true\n",
+        )
+        .unwrap();
+        let layer = |src: &str| (PathBuf::from("brokkr.toml"), toml::from_str::<toml::Table>(src).unwrap());
+        let check = |layers: Vec<(PathBuf, toml::Table)>, expected: &[&str]| {
+            let survivors: Vec<String> = surviving_user_entries(&user, "script_check", &layers)
+                .into_iter()
+                .filter_map(entry_name)
+                .map(str::to_owned)
+                .collect();
+            assert_eq!(survivors, expected);
+            let mut merged = toml::Table::new();
+            let mut sources = ConfigSources::default();
+            merge_into(&mut merged, user.clone(), 0, &mut Vec::new(), &mut sources);
+            for (idx, (_, table)) in layers.into_iter().enumerate() {
+                merge_into(&mut merged, table, idx + 1, &mut Vec::new(), &mut sources);
+            }
+            let composed_user: Vec<&str> = merged
+                .get("script_check")
+                .and_then(toml::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|e| e.get("user").is_some())
+                .filter_map(entry_name)
+                .collect();
+            assert_eq!(composed_user, expected);
+        };
+        check(Vec::new(), &["miri", "fmt"]);
+        check(vec![layer("[[script_check]]\nname = \"miri\"\n")], &["fmt"]);
+        // An empty array replaces the user entries; one reintroduced above it
+        // is the project's, not the user's.
+        check(
+            vec![layer("script_check = []\n"), layer("[[script_check]]\nname = \"fmt\"\n")],
+            &[],
+        );
+    }
+
+    /// The refusal runs on the loaded config, and an include's entry is the
+    /// project's own: refused without a complete profile, loaded with one.
+    #[test]
+    fn loading_refuses_an_included_gate_script_without_a_complete_profile() {
+        let dir = crate::test_scratch::scratch("config", "included_gate_script");
+        std::fs::write(
+            dir.join("shared.toml"),
+            "[[script_check]]\nname = \"miri\"\ncommand = \"m\"\nexpect = \"ok\"\nwhen = \"gate\"\n",
+        )
+        .unwrap();
+        let root = "project = \"gatecheck\"\ninclude = [\"shared.toml\"]\n";
+        std::fs::write(dir.join("brokkr.toml"), root).unwrap();
+        let err = load(&dir).unwrap_err().to_string();
+        assert!(err.contains("\"miri\""), "got: {err}");
+        std::fs::write(
+            dir.join("brokkr.toml"),
+            format!(
+                "{root}\n[[check]]\nname = \"all\"\n\n\
+                 [test.profiles.gate]\ncertifies = \"complete\"\nsweeps = [\"all\"]\n"
+            ),
+        )
+        .unwrap();
+        let (_, config, _) = load(&dir).unwrap();
+        assert_eq!(config.script_checks[0].when, Cadence::Gate);
+    }
+
     #[test]
     fn script_check_rejects_unknown_stage() {
         // deny_unknown_fields covers typo'd keys; this covers a typo'd *value*,

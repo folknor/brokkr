@@ -187,6 +187,7 @@ mod tests {
             stream: Stream::Stdout,
             stage: Stage::PreClippy,
             diagnostics: Diagnostics::Opaque,
+            when: crate::config::Cadence::Always,
         };
         let started = std::time::Instant::now();
         let deadline = std::time::Duration::from_millis(300);

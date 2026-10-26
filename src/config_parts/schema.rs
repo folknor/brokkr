@@ -249,11 +249,13 @@ impl BinConfig {
     }
 }
 
-/// When a gate-priced compiling phase (`member_check`, `fixture_lint`)
-/// runs. `gate` (the default) means only under a `certifies = "complete"`
-/// profile - the pre-landing run - because both phases compile graphs the
-/// edit loop does not: per-member package-mode resolves, and a fixture
-/// workspace's own dependency build.
+/// When a phase or entry runs: `off`, `gate` (only under a `certifies =
+/// "complete"` profile - the pre-landing run), or `always`. The type's
+/// default, `gate`, is what the gate-priced compiling phases (`member_check`,
+/// `fixture_lint`) take, because both compile graphs the edit loop does not:
+/// per-member package-mode resolves, and a fixture workspace's own dependency
+/// build. `[[script_check]]` defaults its `when` to `always` instead, since
+/// every script check ran on every check before the key existed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Cadence {
@@ -261,6 +263,13 @@ pub enum Cadence {
     #[default]
     Gate,
     Always,
+}
+
+impl Cadence {
+    /// The `[[script_check]]` default (a serde `default` path).
+    const fn always() -> Self {
+        Self::Always
+    }
 }
 
 /// `[member_check]`: compile every workspace member's production targets
@@ -730,6 +739,11 @@ pub struct ScriptCheck {
     /// The output shape a failure is rendered against. Defaults to `opaque`.
     #[serde(default)]
     pub diagnostics: Diagnostics,
+    /// Which runs this entry is part of. Defaults to `always`; `gate` runs it
+    /// only under a complete claim, `off` never in a plain check. `check
+    /// --script NAME` runs it whatever this says.
+    #[serde(default = "Cadence::always")]
+    pub when: Cadence,
 }
 
 /// One `[[textlint]]` rule: forbid a regex `pattern` on lines of files matching

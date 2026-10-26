@@ -51,10 +51,11 @@ impl Claim {
 pub fn load(
     project_root: &Path,
 ) -> Result<(Project, DevConfig, project_config::ProjectConfig), DevError> {
-    let (root, _sources) = compose(&project_root.join("brokkr.toml"))?;
+    let (root, sources) = compose(&project_root.join("brokkr.toml"))?;
     let project = parse_project(&root)?;
     let project_config = project_config::ProjectConfig::parse(&project, &root)?;
     let config = parse_dev_config(&root)?;
+    refuse_gate_scripts_without_gate(&config, sources.user_layer().map(|u| &u.script_check_names))?;
     Ok((project, config, project_config))
 }
 
@@ -855,6 +856,50 @@ fn parse_script_checks(
         }
     }
     Ok(checks)
+}
+
+/// Refuse a project-contributed `[[script_check]]` with `when = "gate"` in a
+/// config where no `[test.profiles.*]` declares `certifies = "complete"`.
+/// Only a complete claim runs such an entry, so with no complete profile it
+/// would never run in any `brokkr check` and nothing would say so; `when =
+/// "off"` plus `check --script NAME` is the spelling for an on-demand check.
+///
+/// `user_owned` names the entries the user-wide layer contributed. They are
+/// exempt: that file reaches every project, gate or not, and trees with no
+/// `brokkr.toml`, and a project cannot edit it - such an entry just does not
+/// run where there is no gate. An include is part of the project's own
+/// composition, so its entries are held to the rule like `brokkr.toml`'s.
+fn refuse_gate_scripts_without_gate(
+    config: &DevConfig,
+    user_owned: Option<&BTreeSet<String>>,
+) -> Result<(), DevError> {
+    let complete_declared = config.test.as_ref().is_some_and(|t| {
+        t.profiles.values().any(|p| p.certifies == Some(Certifies::Complete))
+    });
+    if complete_declared {
+        return Ok(());
+    }
+    let stranded: Vec<&str> = config
+        .script_checks
+        .iter()
+        .filter(|c| c.when == Cadence::Gate)
+        .filter(|c| user_owned.is_none_or(|names| !names.contains(&c.name)))
+        .map(|c| c.name.as_str())
+        .collect();
+    let Some(first) = stranded.first() else {
+        return Ok(());
+    };
+    Err(DevError::Config(format!(
+        "[[script_check]] {first:?} has when = \"gate\", but no [test.profiles.*] declares \
+         certifies = \"complete\", so it would never run{}. Add a complete profile, or set \
+         when = \"off\" on the entry and run it on demand with `brokkr check --script \
+         {first}` (an included entry is overridden by repeating it in full under its name).",
+        if stranded.len() > 1 {
+            format!(" (nor would {})", stranded[1..].join(", "))
+        } else {
+            String::new()
+        }
+    )))
 }
 
 /// Parse the optional top-level `disable_toolchain = true`. Absent is `false`.

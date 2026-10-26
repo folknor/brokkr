@@ -204,7 +204,8 @@ In depth: `brokkr man check` (one section at a time, e.g. `man check clippy`)."
         textlint_names: Vec<String>,
 
         /// Run only the named `[[script_check]]` entry (repeatable, or
-        /// comma-separated), whatever its stage, skipping every other phase.
+        /// comma-separated), whatever its stage or `when`, skipping every
+        /// other phase.
         /// For iterating on one failing script - not a gate. Combines with
         /// `--textlint`.
         #[arg(long = "script", value_name = "NAME", value_delimiter = ',',

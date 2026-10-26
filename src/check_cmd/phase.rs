@@ -25,7 +25,7 @@ use crate::cargo_filter;
 use crate::cargo_json;
 use crate::diagnostic::{Diagnostic, Owner, OwnerIndex};
 use crate::config::{
-    Certifies, CheckEntry, Claim, DependencyRule, GremlinsConfig, HeaderConfig, LintsConfig,
+    Cadence, Certifies, CheckEntry, Claim, DependencyRule, GremlinsConfig, HeaderConfig, LintsConfig,
     ManifestConfig, RustdocConfig, QuarantineEntry, ScriptCheck, SitedAllow,
     Stage, TestConfig, TextlintRule,
 };
@@ -91,6 +91,11 @@ pub(crate) fn cmd_check(
     let claim = Claim::new(certifies);
     reject_scoped_complete(claim, packages)?;
     reject_extra_args_complete(claim, extra_args)?;
+    // Each script check's `when` against the claim, decided once: the
+    // background start, every stage and the post-test skipped count see only
+    // the entries this run owes.
+    let owed_scripts = scripts_for_claim(script_checks, claim);
+    let script_checks = owed_scripts.as_slice();
 
     // Each planned cargo request carries the sweep's features projected onto
     // its packages; the metadata snapshot that takes is read at most once,
@@ -663,6 +668,36 @@ fn announce_skipped_phases(skip_phases: &[String]) {
             skip_phases.join(", ")
         ));
     }
+}
+
+/// The `[[script_check]]` entries a run under `claim` owes: those whose
+/// `when` the claim runs. The rest are named in the run log only - on the
+/// console they would be noise on every edit-loop run. This line accounts
+/// for cadence alone; an owed entry may still not run (`skip_phases`, an
+/// earlier failure, a post-test entry with no test phase).
+fn scripts_for_claim(checks: &[ScriptCheck], claim: Claim) -> Vec<ScriptCheck> {
+    let (owed, excluded): (Vec<&ScriptCheck>, Vec<&ScriptCheck>) =
+        checks.iter().partition(|c| claim.runs(c.when));
+    for cadence in [Cadence::Gate, Cadence::Off] {
+        let names: Vec<&str> = excluded
+            .iter()
+            .filter(|c| c.when == cadence)
+            .map(|c| c.name.as_str())
+            .collect();
+        if names.is_empty() {
+            continue;
+        }
+        let (noun, why) = match cadence {
+            Cadence::Gate => ("gate-only check", "no complete claim"),
+            _ => ("check", "when = \"off\""),
+        };
+        output::detail(&format!(
+            "script-check: {} not run, {why}: {}",
+            output::count(names.len(), noun),
+            names.join(", ")
+        ));
+    }
+    owed.into_iter().cloned().collect()
 }
 
 /// Decide the phases to skip because the working tree holds documentation
@@ -1839,6 +1874,28 @@ mod complete_rejection_tests {
         assert!(reject_scoped_complete(Claim::new(Some(Certifies::Complete)), &pkgs).is_err());
         reject_scoped_complete(Claim::new(Some(Certifies::Complete)), &[]).unwrap();
         reject_scoped_complete(Claim::new(Some(Certifies::Partial)), &pkgs).unwrap();
+    }
+
+    #[test]
+    fn script_checks_owed_follow_their_cadence() {
+        use crate::config::{Cadence, Diagnostics, MatchMode, ScriptCheck, Stage, Stream};
+        let entry = |name: &str, when: Cadence| ScriptCheck {
+            name: name.into(),
+            command: "true".into(),
+            expect: "ok".into(),
+            match_mode: MatchMode::LastLine,
+            stream: Stream::Stdout,
+            stage: Stage::PreClippy,
+            diagnostics: Diagnostics::Opaque,
+            when,
+        };
+        let all = [entry("a", Cadence::Always), entry("g", Cadence::Gate), entry("o", Cadence::Off)];
+        let owed = |certifies| -> Vec<String> {
+            super::scripts_for_claim(&all, Claim::new(certifies)).into_iter().map(|c| c.name).collect()
+        };
+        assert_eq!(owed(None), ["a"]);
+        assert_eq!(owed(Some(Certifies::Partial)), ["a"]);
+        assert_eq!(owed(Some(Certifies::Complete)), ["a", "g"]);
     }
 }
 

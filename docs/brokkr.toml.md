@@ -87,7 +87,10 @@ silently ignoring it.
 
 `[[textlint]]` `paths` globs and `[[script_check]]` commands are interpreted
 against each project's own tree, exactly as if the entry had been written in
-that project's config. Presets resolve after all config layers are composed,
+that project's config. One exception: a user `[[script_check]]` with `when =
+"gate"` is not refused in a project that declares no complete profile, as a
+project's own would be; it runs under a complete claim and is logged as not
+run on every other run. Presets resolve after all config layers are composed,
 so a user rule can use a project preset and a project rule can use a user
 preset. A preset not referenced by any composed rule is an error, except a
 user-only preset whose last referencing rule a project shadowed: that one is

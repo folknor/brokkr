@@ -866,7 +866,9 @@ phases and the member set together.
 When it runs: `when = "off" | "gate" | "always"`, default `gate` - only under
 a `certifies = "complete"` profile, because per-member resolution
 deliberately compiles duplicate variants of shared dependencies and is priced
-for the pre-landing run, not the edit loop.
+for the pre-landing run, not the edit loop. (`[[script_check]]` takes the same
+key but defaults to `always`, because script checks ran on every check before
+it existed.)
 
 Without a `[member_check]` table, a non-empty `[bin] install` implies the
 install gate it has always implied: the phase runs over the install packages
