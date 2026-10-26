@@ -97,9 +97,17 @@ Limits worth knowing:
   interface, so the stamp records a **digest of the file** rather than the flags
   themselves. It can say the file changed, not which flag changed. That is
   enough to refuse a comparison, which is the job.
+- "Not there" is a reading, "could not read" is not. An unset `RUSTFLAGS` or
+  `CARGO_ENCODED_RUSTFLAGS`, a missing user cargo config and a build root with
+  no `.cargo` config are recorded as `(unset)` or `(absent)` and compared like
+  any value, so unset against set, or a config added between two commits,
+  refuses. Ancestors above the build root stay one-sided when absent: a
+  `--commit` worktree's parent directories are not the live tree's.
 - Only fields **both** stamps recorded are compared. A field one side never had
   is not a difference, so adding a new field later does not retroactively
-  invalidate every existing baseline.
+  invalidate every existing baseline, and a reading that failed (a digest that
+  could not be computed, a CPU model the host does not report) does not refuse
+  on its own.
 - A stamp that exists but cannot be read (permissions, I/O) is **not** a pass:
   `--compare` refuses, since the environments were never checked. `--lenient`
   downgrades that to a warning like any other mismatch.

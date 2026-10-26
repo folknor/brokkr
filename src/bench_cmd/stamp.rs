@@ -23,9 +23,15 @@
 //! usually lives - are not exposed by any stable cargo interface. Rather than
 //! report a flag set we know to be incomplete, the stamp records a digest of
 //! that file. It cannot say *which* flag changed, only that the file did, which
-//! is enough to refuse the comparison. A digest that can't be computed is
-//! recorded as absent, and absence never triggers a refusal on its own - a
-//! missing reading is not evidence of a difference.
+//! is enough to refuse the comparison.
+//!
+//! "Not there" and "could not read" are kept apart. An unset `RUSTFLAGS`, a
+//! missing user cargo config or a build root with no `.cargo` config is a
+//! reading, recorded as `(unset)` or `(absent)` and compared like any value,
+//! so unset against set refuses. A digest that can't be computed is no
+//! reading: the field is left out, and a field one side lacks never refuses on
+//! its own - a missing reading is not evidence of a difference, and a stamp
+//! written before a field existed must stay comparable.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -61,11 +67,13 @@ impl Stamp {
             fields.insert("cpu".into(), cpu);
         }
         // Both spellings matter: cargo re-exports the encoded form to build
-        // scripts, and a caller may have set either.
+        // scripts, and a caller may have set either. Unset is recorded as
+        // such, so unset against set is a difference rather than a field one
+        // side lacks.
         for var in ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"] {
-            if let Ok(val) = std::env::var(var) {
-                fields.insert(var.to_lowercase(), val);
-            }
+            let val = std::env::var_os(var)
+                .map_or_else(|| UNSET.to_owned(), |v| v.to_string_lossy().into_owned());
+            fields.insert(var.to_lowercase(), val);
         }
         if let Some(digest) = cargo_config_digest() {
             fields.insert("cargo_config".into(), digest);
@@ -79,6 +87,16 @@ impl Stamp {
         // sides being compared.
         for (depth, digest) in repo_config_digests(build_root) {
             fields.insert(format!("repo_cargo_config_d{depth}"), digest);
+        }
+        // The build root's own config is the same directory on both sides of
+        // any comparison, so its absence is a reading like any other: a config
+        // added between two commits is a difference. Deeper ancestors are not
+        // - a `--commit` worktree's parents are not the live tree's - so they
+        // stay one-sided when absent.
+        if !fields.contains_key("repo_cargo_config_d0")
+            && crate::user_dirs::cargo_config_file(&build_root.join(".cargo")).is_none()
+        {
+            fields.insert("repo_cargo_config_d0".into(), ABSENT.into());
         }
 
         Self { fields }
@@ -125,13 +143,23 @@ impl Stamp {
     }
 }
 
+/// The value of an environment variable that was not set.
+const UNSET: &str = "(unset)";
+
+/// The value of a config file that does not exist.
+const ABSENT: &str = "(absent)";
+
 /// Digest of the user's cargo config, the usual home of standing rustflags.
 ///
 /// Digests the file cargo actually reads, which is the extensionless legacy
-/// `config` when both spellings exist (`user_dirs::cargo_config_file`).
+/// `config` when both spellings exist (`user_dirs::cargo_config_file`). No
+/// file is [`ABSENT`], a value like any other; a file that exists but cannot
+/// be digested, or no cargo home at all, is no reading.
 fn cargo_config_digest() -> Option<String> {
     let home = crate::user_dirs::cargo_home()?;
-    let path = crate::user_dirs::cargo_config_file(&home)?;
+    let Some(path) = crate::user_dirs::cargo_config_file(&home) else {
+        return Some(ABSENT.into());
+    };
     preflight::compute_file_digest(&path)
         .map(|d| d.to_string())
         .ok()
@@ -253,6 +281,29 @@ mod tests {
         let new = Stamp::parse("rustc=1.90.0\ncargo_config=abc123\n");
         assert!(old.differences(&new).is_empty());
         assert!(new.differences(&old).is_empty());
+    }
+
+    /// Unset is a value, not a missing field: RUSTFLAGS going from unset to
+    /// set, or a repo config appearing, refuses. The old one-sided rule let
+    /// both through.
+    #[test]
+    fn unset_against_set_is_a_difference() {
+        let unset = Stamp::parse("rustflags=(unset)\nrepo_cargo_config_d0=(absent)\n");
+        let set = Stamp::parse("rustflags=-Ctarget-cpu=native\nrepo_cargo_config_d0=abc\n");
+        let keys: Vec<String> = unset.differences(&set).into_iter().map(|d| d.0).collect();
+        assert_eq!(keys, ["repo_cargo_config_d0", "rustflags"]);
+    }
+
+    /// A capture taken now records every unset flag variable and an absent
+    /// build-root config explicitly, so two new stamps always share them.
+    #[test]
+    fn a_capture_records_absence_explicitly() {
+        let root = crate::test_scratch::scratch("bench_stamp", "absence");
+        let stamp = Stamp::capture(&root);
+        for key in ["rustflags", "cargo_encoded_rustflags", "repo_cargo_config_d0"] {
+            assert!(stamp.fields.contains_key(key), "{key} missing: {}", stamp.render());
+        }
+        assert_eq!(stamp.fields["repo_cargo_config_d0"], super::ABSENT);
     }
 
     #[test]
