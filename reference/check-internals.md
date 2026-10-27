@@ -409,6 +409,22 @@ the dead cargo.
 Unit tests never register a token or run the host reap; the mechanism is
 exercised against a scratch directory and a child the test owns.
 
+### The launch token is for reporting only
+
+A second inherited mark rides beside `BROKKR_TEST_RUN` on every child a hold
+spawns: `BROKKR_EXEC=<acquisition id>.<sequence>`, allocated and stamped in
+`process::spawn::spawn` (and once per lane in the nextest engine's generated
+config), from the same `LockInner` snapshot as the capability, so a child never
+carries one acquisition's authorization and another's cohort. `brokkr lock`
+uses it to find the holder's processes wherever they reparented
+(`src/lock/collector.rs`). It is deliberately inert everywhere else: neither
+reaper reads it, the watchdog and `kill --hard` do not select by it, and the
+guard admits by capability, not by it. A process carrying one mark and not the
+other is reported or reaped by whichever mark it carries, no more. Its
+semantics are those of `environ` - the environment of the last exec - so a
+process that changed its environment in place is attributed by what it was
+exec'd with.
+
 ## The rustc guard
 
 The reap removes strays after the fact; the guard prevents them from

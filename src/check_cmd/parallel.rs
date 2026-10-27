@@ -466,6 +466,14 @@ fn run_parallel_sweep(
     };
 
     let queue = std::sync::Mutex::new(planned.iter());
+    // The lane and each binary in flight as holder activities, so `brokkr
+    // lock` shows which binaries run and how many are done. Workers name the
+    // lane as their parent explicitly: threads do not inherit activities.
+    let lane = crate::lockfile::activity::Activity::begin(format!("parallel lane {}", sweep.label));
+    let lane_handle = lane.handle();
+    let finished = std::sync::atomic::AtomicU64::new(0);
+    let total = planned.len() as u64;
+    lane.progress(0, total);
     std::thread::scope(|scope| {
         let mut handles = Vec::new();
         for _ in 0..planned.len().min(usize::try_from(budget).unwrap_or(usize::MAX)) {
@@ -474,6 +482,9 @@ fn run_parallel_sweep(
             let aborted = &aborted;
             let extras = &extras;
             let queue = &queue;
+            let lane = &lane;
+            let lane_handle = &lane_handle;
+            let finished = &finished;
             handles.push(scope.spawn(move || {
                 let mut completed = Vec::new();
                 loop {
@@ -485,9 +496,15 @@ fn run_parallel_sweep(
                             let out = if aborted.load(std::sync::atomic::Ordering::SeqCst) {
                                 Ok(BinaryRun::skipped_after_abort(&run.planned.binary))
                             } else {
+                                let _binary = crate::lockfile::activity::Activity::begin_under(
+                                    lane_handle,
+                                    format!("{}/{}", run.planned.binary.package, run.planned.binary.target),
+                                );
                                 run_one_binary(state_root, sweep, run, extras, runtime,
                                     env_refs, *slots, tap, aborted)
                             };
+                            let done = finished.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                            lane.progress(done, total);
                             if out.as_ref().is_ok_and(|r| r.hung.is_some()) {
                                 aborted.store(true, std::sync::atomic::Ordering::SeqCst);
                             }

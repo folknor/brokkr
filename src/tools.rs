@@ -574,6 +574,7 @@ fn download_file_inner(
     // global lock, so no second writer shares it.
     let staged = crate::atomic_write::Staged::stable(dest)?;
     let tmp_str = staged.tmp_path().display().to_string();
+    let _activity = crate::lockfile::activity::Activity::begin(format!("download {url}"));
 
     // No `--max-time`: see `CURL_STALL_ARGS` for why a stall detector bounds
     // this rather than a total-duration cap.

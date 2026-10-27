@@ -83,7 +83,7 @@ const TOPICS: &[Topic] = &[
     },
     Topic {
         name: "hygiene",
-        summary: "time ceilings, the per-test cap, strays, the rustc guard",
+        summary: "time ceilings, the per-test cap, lock status, strays, the rustc guard",
         content: include_str!("../docs/commands/check.hygiene.md"),
         commands: &[CommandId::Env],
     },

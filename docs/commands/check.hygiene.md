@@ -1,8 +1,9 @@
-# Time ceilings, strays and the rustc guard
+# Time ceilings, strays, lock status and the rustc guard
 
-What bounds and protects every locked brokkr command: the time ceilings and
-per-test cap on `check`, `test` and `clippy`, the stray and orphan reaps, and
-the rustc guard. Their internals are in `reference/check-internals.md`.
+What bounds, protects and reports every locked brokkr command: the time
+ceilings and per-test cap on `check`, `test` and `clippy`, the stray and orphan
+reaps, what `brokkr lock` shows about a holder, and the rustc guard. Their
+internals are in `reference/check-internals.md`.
 
 ## Time ceilings
 
@@ -56,7 +57,7 @@ thread (`src/check_cmd/watchdog.rs`) SIGKILLs every descendant of the brokkr
 process found in `/proc`, each checked against its starttime first - test
 children are spawned into their own process groups and not all of them are
 published to the lockfile, so neither a group signal nor the lockfile's
-`child_pid` would reach them all. Two `[error]` lines say which ceiling fired
+published children would reach them all. Two `[error]` lines say which ceiling fired
 and how many processes were killed.
 
 brokkr itself is not killed. The watchdog raises the shutdown flag and keeps
@@ -190,6 +191,65 @@ How the watchdog wakes and freezes a run, what the cap can prove on a shared
 stream, the fail-closed rule for missing evidence, and the per-lane clock table
 are in `reference/check-internals.md`.
 
+## Lock status
+
+`brokkr lock` says who holds the lock and what it is doing right now. It asks
+the holder itself over its control socket, so it works from the host against a
+sandboxed holder and between sandboxes:
+
+```
+[lock]    brokkr (holding 29m24s, own CPU 1.2s, own RSS 19 MB): pbfhogg verify merge ...
+[lock]    root: ...
+[lock]    doing: verify merge (29m10s)
+[lock]      osmium apply-changes (3m02s)
+[lock]    processes: 1 observed (sampled 248ms ago over 254ms): 0.98 cores, summed RSS 4.1 GB
+[lock]      PID 4242 osmium apply-changes ... - 0.98 cores, CPU 2m55s, RSS 4.1 GB, up 3m02s, io r 2.1 GB w 800 MB [launched: osmium apply-changes under verify merge]
+[lock]    cgroup brokkr-...: CPU 1h02m since entry 29m ago, now 1.01 cores, 3 member process(es)
+[lock]    last marker: STAGE2_START (12s ago)
+```
+
+- **The first line is brokkr itself.** Its CPU and RSS are the holder's own -
+  mostly a process waiting on its children. The work is in the lines below.
+- **`doing:`** lists the holder's open activities, nested: the `check` phase
+  in flight (with the lane's status line beside it), a parallel lane with its
+  binaries done out of total and each binary in flight, a verify check and the
+  tool step it is running, measured runs with run N of total, a cargo build, a
+  download. A long non-verbose `verify` also keeps that step as a live status
+  line on its own terminal.
+- **`processes:`** are the holder's processes, from two `/proc` scans about a
+  quarter second apart: its descendants, plus every process carrying the hold's
+  launch token. Every child brokkr spawns under a hold carries
+  `BROKKR_EXEC=<acquisition id>.<sequence>`, inherited by everything below it,
+  so a grandchild that reparented or outlived its parent is still found, and
+  each row names the step it was launched under. Treat it as observed, not
+  complete: a process that cleared its environment, or work a daemon does on
+  the hold's behalf, is not in it, and "environment(s) not inspectable" counts
+  processes whose membership could not be checked. A row's CPU rate needs the
+  process in both scans with the same token; the summed RSS counts shared
+  pages once per process; IO counters include children the process has
+  already waited for. PIDs are printed only when they mean the same thing to
+  the caller as to the holder.
+- **`cgroup`** appears only where the holder's cgroup is delegated to the user
+  (under the systemd user manager - not a plain ssh or tty login session, whose
+  scope belongs to the system). Each hold then runs in its own
+  `brokkr-<acquisition id>` cgroup, and the line is everything charged to it
+  since entry: exited and reparented processes included, the holder itself
+  included.
+- **`last marker`** is the latest sidecar phase marker the holder has seen in
+  this hold, with how long ago - a marker observed, not proof of the child's
+  current step.
+
+The holder never waits on this: the socket serves the latest sample and starts
+a fresh one, and `brokkr lock` asks once more a moment later when the first
+answer had none. An older holder answers without any of the new lines. When
+the holder does not answer (an older brokkr, or a stopped one) and runs in the
+caller's namespace, `brokkr lock` samples its processes from the caller's side
+with the same scanner, and says so if the hold ended meanwhile; activities and
+the marker live in the holder's memory and are not available then.
+
+`BROKKR_EXEC` is reserved like the hold variables below: a sweep env value for
+it is ignored. A nextest lane's processes share one launch token for the lane.
+
 ## Strays
 
 brokkr assumes every cargo on a development host runs through it. A cargo
@@ -232,8 +292,9 @@ because cargo caches a refused probe and replays it to later, legitimate cargos.
   sets it on its own children.
 - A poisoned probe cache seen outside brokkr is cured by
   `CARGO_CACHE_RUSTC_INFO=0 BROKKR_CARGO=1 cargo ...`.
-- `BROKKR_HOLD_NONCE`, `BROKKR_COMPILE_LEASE` and `CARGO_CACHE_RUSTC_INFO` are
-  reserved: configs, `[[check]] env` and build scripts must not set them.
+- `BROKKR_HOLD_NONCE`, `BROKKR_COMPILE_LEASE`, `CARGO_CACHE_RUSTC_INFO` and
+  `BROKKR_EXEC` (the launch token above) are reserved: configs, `[[check]] env`
+  and build scripts must not set them.
 - A fresh acquisition drains compiles admitted earlier, and can **fail** if they
   do not drain in time. It reports that rather than measuring alongside them.
 - The guarantee is conditional: compiles that take part in the lease protocol

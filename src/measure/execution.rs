@@ -113,11 +113,19 @@ impl MeasurementLoop<'_> {
             error: None,
             recorded: false,
         };
+        let activity = crate::lockfile::activity::Activity::begin(format!(
+            "measured runs{}",
+            program
+                .and_then(Path::file_name)
+                .map(|name| format!(" of {}", name.to_string_lossy()))
+                .unwrap_or_default()
+        ));
         for i in 0..self.runs.get() {
             announce_run(i, self.runs.get());
             self.harness
                 .lock
                 .set_progress(clamp_u32(i + 1), clamp_u32(self.runs.get()));
+            activity.progress(i as u64 + 1, self.runs.get() as u64);
             if i > 0
                 && let Some(fifo) = &mut self.fifo
                 && let Err(error) = fifo.reopen()

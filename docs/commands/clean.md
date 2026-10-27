@@ -98,8 +98,9 @@ Bare `brokkr clean`, in order:
   `.brokkr/dellingr/`, `.brokkr/mogwai/`, `.brokkr/test-hung/`, and, for
   litehtml, `.brokkr/prepare-cache/`. `.brokkr/artifacts/` (the `brokkr build`
   snapshots) goes only in a clean run by hand, never in the cleanup after an
-  interrupted command, since a script may still be running one. The per-user
-  `~/.brokkr/sidecar-status` file is removed with the project scratch.
+  interrupted command, since a script may still be running one. A per-user
+  `~/.brokkr/sidecar-status` file an older brokkr left (the last marker now
+  lives in the holder's memory) is removed with the project scratch.
   Other directories under `.brokkr/ratatoskr/` are preserved. Hung-test snapshots
   also prune their oldest directories as new diagnostics arrive, keeping a
   bounded recent history even between cleans.

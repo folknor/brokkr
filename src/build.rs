@@ -753,6 +753,7 @@ fn with_published_cargo<T>(
     // killing brokkr and orphaning cargo in its process group. Guards nest, so
     // callers that already hold one are unaffected.
     let _interrupts = crate::shutdown::SigtermGuard::install();
+    let _activity = crate::lockfile::activity::Activity::begin("cargo build");
     let publish = |pid: u32| {
         hold.set_child_pid(pid);
         if let Some(cb) = on_spawn {

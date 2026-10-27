@@ -354,11 +354,12 @@ The FIFO carries two line types (parsed in `SidecarFifo::drain`,
 `src/sidecar.rs`):
 
 - **Marker** - `<ts_us> <name>`. Assigned a monotonic `marker_idx` in arrival
-  order; the last name seen is also mirrored to a status file so `brokkr lock`
-  can show the live phase. That file has one location on every harness path -
-  `~/.brokkr/sidecar-status`, beside the global lock (`sidecar::status_path`) -
-  and carries the writer's PID, so `brokkr lock` ignores one left behind by an
-  earlier holder. Markers are point-in-time bookmarks - the protocol
+  order; the last name seen is also recorded, with the time it was seen, on
+  the live hold's in-memory observation table, so `brokkr lock` shows it as
+  `last marker: NAME (12s ago)` over the holder's control socket. It is
+  cleared whenever a FIFO is created or dropped, so an earlier run's marker in
+  the same hold never stands in for the current run's. Markers are
+  point-in-time bookmarks - the protocol
   itself knows nothing about spans or pairs. The name is untrusted text; every
   JSONL view encodes it with serde_json, so control characters are escaped.
 - **Counter** - `<ts_us> @<name>=<value>`. The value **must parse as `i64`**
@@ -456,9 +457,11 @@ switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`.
   numeric SIGTERM, and only when the holder's recorded PID and time
   namespaces match the caller's and `/proc` numbers processes for the
   caller's own namespace. `brokkr lock` asks the same socket for the
-  holder's own account of itself (invocation, how long it has held, CPU, RSS,
-  progress), and both it and the lock wait print an advisory line when the
-  holder recorded the caller's own `CODEX_THREAD_ID`.
+  holder's own account of itself (invocation, how long it has held, its own
+  CPU and RSS, run progress, its open activities, its processes and the last
+  sidecar marker - see `brokkr man hygiene lock`), and both it and the
+  lock wait print an advisory line when the holder recorded the caller's own
+  `CODEX_THREAD_ID`.
 - **SIGTERM and Ctrl-C (SIGINT)** are caught by a
   `SigtermGuard` (`src/shutdown.rs`), installed for every tracked-child
   window: each sidecar run, a passthrough child, every cargo build, an

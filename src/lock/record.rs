@@ -30,7 +30,8 @@ pub struct LockInfo {
     pub command: String,
     pub args: String,
     pub project_root: String,
-    pub child: Option<(u32, String)>,
+    /// Every published workload child (one per spawning thread).
+    pub children: Vec<(u32, String)>,
     pub mocks: Vec<(u32, String)>,
     pub progress: Option<(u32, u32)>,
 }
@@ -96,7 +97,7 @@ fn invalidate_mutable_metadata(fd: RawFd, state: &LockState) {
         codex_session: state.codex_session.clone(),
         auth: state.auth.clone(),
         draining: state.draining,
-        child: None,
+        children: Vec::new(),
         mocks: Vec::new(),
         progress: None,
     };
@@ -162,7 +163,11 @@ pub(super) fn rewrite_from_state(fd: RawFd, state: &LockState) -> std::io::Resul
         codex_session: state.codex_session.clone(),
         auth: state.auth.as_ref().map_or("", AuthHash::as_str).to_owned(),
         draining: state.draining,
-        child: state.child.as_ref().map(super::TrackedProcess::wire),
+        children: state
+            .children
+            .iter()
+            .map(|(_, tracked)| tracked.wire())
+            .collect(),
         mocks: state
             .mocks
             .iter()
@@ -286,7 +291,7 @@ pub(super) fn parse_lock_contents(text: &str) -> Option<LockInfo> {
         command: record.command,
         args: record.args,
         project_root: record.root,
-        child: record.child,
+        children: record.children,
         mocks: record.mocks,
         progress: record.progress,
     })

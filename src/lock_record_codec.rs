@@ -14,6 +14,7 @@ const CODEX_SESSION: &str = "codex_session";
 const DRAINING: &str = "draining";
 const CHILD_PID: &str = "child_pid";
 const CHILD_STARTTIME: &str = "child_starttime";
+const CHILD_PIDS: &str = "child_pids";
 const MOCK_PIDS: &str = "mock_pids";
 const PROGRESS: &str = "progress";
 const PROJECT: &str = "project";
@@ -33,7 +34,10 @@ pub struct Record {
     pub codex_session: String,
     pub auth: String,
     pub draining: bool,
-    pub child: Option<(u32, String)>,
+    /// Every published workload child, one per spawning thread. The first is
+    /// also written as `child_pid`/`child_starttime`, the single slot older
+    /// readers know.
+    pub children: Vec<(u32, String)>,
     pub mocks: Vec<(u32, String)>,
     pub progress: Option<(u32, u32)>,
     pub project: String,
@@ -58,7 +62,7 @@ impl Record {
             self.auth,
             u8::from(self.draining),
         );
-        match &self.child {
+        match self.children.first() {
             Some((pid, starttime)) => {
                 contents.push_str(&format!("{CHILD_PID}={pid}\n{CHILD_STARTTIME}={starttime}\n"));
             }
@@ -66,13 +70,15 @@ impl Record {
                 contents.push_str(&format!("{CHILD_PID}=\n{CHILD_STARTTIME}=\n"));
             }
         }
-        let mocks = self
-            .mocks
-            .iter()
-            .map(|(pid, starttime)| format!("{pid}:{starttime}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        contents.push_str(&format!("{MOCK_PIDS}={mocks}\n"));
+        let list = |entries: &[(u32, String)]| {
+            entries
+                .iter()
+                .map(|(pid, starttime)| format!("{pid}:{starttime}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        contents.push_str(&format!("{CHILD_PIDS}={}\n", list(&self.children)));
+        contents.push_str(&format!("{MOCK_PIDS}={}\n", list(&self.mocks)));
         match self.progress {
             Some((run, total)) => contents.push_str(&format!("{PROGRESS}={run}/{total}\n")),
             None => contents.push_str(&format!("{PROGRESS}=\n")),
@@ -102,14 +108,23 @@ impl Record {
             .parse()
             .ok()
             .map(|pid| (pid, raw(CHILD_STARTTIME).to_owned()));
-        let mocks = raw(MOCK_PIDS)
-            .split(',')
-            .filter(|entry| !entry.is_empty())
-            .filter_map(|entry| {
-                let (pid, starttime) = entry.split_once(':')?;
-                Some((pid.trim().parse().ok()?, starttime.trim().to_owned()))
-            })
-            .collect();
+        let list = |key: &str| -> Vec<(u32, String)> {
+            raw(key)
+                .split(',')
+                .filter(|entry| !entry.is_empty())
+                .filter_map(|entry| {
+                    let (pid, starttime) = entry.split_once(':')?;
+                    Some((pid.trim().parse().ok()?, starttime.trim().to_owned()))
+                })
+                .collect()
+        };
+        let mocks = list(MOCK_PIDS);
+        let mut children = list(CHILD_PIDS);
+        if children.is_empty()
+            && let Some(only) = child
+        {
+            children.push(only);
+        }
         let progress = raw(PROGRESS)
             .split_once('/')
             .and_then(|(run, total)| Some((run.parse::<u32>().ok()?, total.parse::<u32>().ok()?)));
@@ -125,7 +140,7 @@ impl Record {
             codex_session: decoded(CODEX_SESSION),
             auth: raw(AUTH).to_owned(),
             draining: raw(DRAINING) == "1",
-            child,
+            children,
             mocks,
             progress,
             project,

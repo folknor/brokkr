@@ -22,6 +22,7 @@ pub(crate) fn cmd_lock() -> Result<(), DevError> {
     if !info.acq_id.is_empty() {
         match crate::lock_service::request(&info.acq_id, "status") {
             crate::lock_service::Reply::Status(s) => {
+                let s = fresher_status(&info.acq_id, s);
                 print_holder_status(&info, &s);
                 return Ok(());
             }
@@ -91,49 +92,80 @@ pub(crate) fn cmd_lock() -> Result<(), DevError> {
     }
     output::lock_msg(&format!("root: {}", info.project_root));
 
-    // Line 3: child process stats (if brokkr is currently running one).
-    let boot = crate::process::BootId::new(&info.boot_id);
-    if let Some((child_pid, child_starttime)) = &info.child
-        && let Some(identity) = typed_process_identity(*child_pid, child_starttime)
-        && let Some(boot) = boot.as_ref()
-        && let Some(summary) = lockfile::verified_summary_for(identity, boot)
-    {
-        let prefix = info
-            .progress
-            .map(|(r, t)| format!("run {r}/{t}, "))
-            .unwrap_or_default();
-        output::lock_msg(&format!("{prefix}child PID {child_pid} {summary}"));
+    if let Some((r, t)) = info.progress {
+        output::lock_msg(&format!("run {r}/{t}"));
     }
 
-    // Lines 3b...: one per auxiliary mock-server (`service --all` keeps
-    // one mock per distinct fixture alive for the whole cohort, so this
-    // can be more than one line; sync / single-script service
-    // emit at most one).
-    for (mock_pid, mock_starttime) in &info.mocks {
-        if let (Some(identity), Some(boot)) = (
-            typed_process_identity(*mock_pid, mock_starttime),
-            boot.as_ref(),
-        ) && let Some(summary) = lockfile::verified_summary_for(identity, boot)
-        {
-            output::lock_msg(&format!("mock PID {mock_pid} {summary}"));
-        }
+    if let Some((identity, _)) = verified_holder {
+        print_observed_processes(&info, identity);
     }
-
-    // Line 4: most recent sidecar marker, if any. The location and format
-    // are owned by `sidecar::status_path` / `read_status`, which the writer
-    // uses too - a reader-side path of its own drifted from the writer once.
-    if info.pid > 0
-        && let Some(marker) = crate::sidecar::read_status(info.pid)
-    {
-        output::lock_msg(&format!("last marker: {marker}"));
-    }
-
     Ok(())
 }
 
+/// The holder's processes, observed from here with the same sampler and
+/// renderer the holder uses: its descendants, plus everything carrying its
+/// acquisition's launch token. Only for a verified holder, whose PID means the
+/// same thing here. Activities and the sidecar marker live in the holder's
+/// memory, so they are not available on this path.
+fn print_observed_processes(info: &lockfile::LockInfo, holder: crate::process::ProcIdentity) {
+    let acq = (!info.acq_id.is_empty()).then_some(info.acq_id.as_str());
+    let sample = lockfile::collector::sample(&lockfile::collector::SampleSpec {
+        acq,
+        root: holder.pid().get(),
+        pids_meaningful: true,
+        observed: None,
+    });
+    // The sample took a quarter second: the hold it describes must still be
+    // the one that holds the lock, or the rows are another's.
+    let still = lockfile::status()
+        .ok()
+        .flatten()
+        .is_some_and(|now| now.acq_id == info.acq_id && now.pid == info.pid);
+    if !still {
+        output::lock_msg("the hold ended while its processes were being sampled");
+        return;
+    }
+    let ext = lockfile::report::Extension {
+        activities: Some(Vec::new()),
+        sample: Some(sample),
+        ..Default::default()
+    };
+    for line in lockfile::report::render(&ext, true) {
+        output::lock_msg(&line);
+    }
+}
+
+/// Ask once more when the first reply carries no process sample yet, or only
+/// an old one: the first request starts a collection the holder serves from
+/// cache, so a second request a moment later gets a current sample. Keeps
+/// the first reply when the second fails.
+fn fresher_status(
+    acq_id: &str,
+    first: Box<crate::lock_service::HolderStatus>,
+) -> Box<crate::lock_service::HolderStatus> {
+    let Some(ext) = &first.ext else {
+        return first;
+    };
+    let stale = ext.sample.as_ref().is_none_or(|s| s.age_ms > 2_000);
+    if !stale {
+        return first;
+    }
+    std::thread::sleep(
+        lockfile::collector::SAMPLE_GAP + std::time::Duration::from_millis(250),
+    );
+    match crate::lock_service::request(acq_id, "status") {
+        crate::lock_service::Reply::Status(second)
+            if second.identity.args == first.identity.args =>
+        {
+            second
+        }
+        _ => first,
+    }
+}
+
 /// Render the holder's own answer. Everything here is the holder speaking
-/// about itself; the one PID-keyed line (the sidecar marker) is printed only
-/// when the PID means the same thing here as it did to the holder.
+/// about itself; process PIDs are printed only when they mean the same thing
+/// here as they did to the holder.
 fn print_holder_status(info: &lockfile::LockInfo, s: &crate::lock_service::HolderStatus) {
     let invocation = if s.identity.args.is_empty() {
         format!("{} {}", s.identity.project, s.identity.command)
@@ -142,11 +174,16 @@ fn print_holder_status(info: &lockfile::LockInfo, s: &crate::lock_service::Holde
     };
     let mut facts = Vec::new();
     facts.push(format!("holding {}", output::format_duration(s.held)));
-    if let Some(cpu) = s.cpu {
-        facts.push(format!("{} CPU", output::format_duration(cpu)));
+    // The holder's own figures: brokkr itself, which mostly waits on its
+    // children - their work is in the process lines below.
+    match (s.own_cpu, s.cpu) {
+        (Some(cpu), _) | (None, Some(cpu)) => {
+            facts.push(format!("own CPU {}", output::format_duration(cpu)));
+        }
+        (None, None) => {}
     }
     if let Some(kb) = s.rss_kb {
-        facts.push(format!("RSS {} MB", kb / 1024));
+        facts.push(format!("own RSS {} MB", kb / 1024));
     }
     if s.snapshot.draining {
         facts.push("draining earlier compilers".into());
@@ -163,7 +200,8 @@ fn print_holder_status(info: &lockfile::LockInfo, s: &crate::lock_service::Holde
     if let Some((run, total)) = s.snapshot.progress {
         work.push(format!("run {run}/{total}"));
     }
-    if s.snapshot.has_child {
+    // An older holder has no extension: its coarse flags are all there is.
+    if s.ext.is_none() && s.snapshot.has_child {
         work.push("a child process is running".into());
     }
     if s.snapshot.mocks > 0 {
@@ -171,6 +209,12 @@ fn print_holder_status(info: &lockfile::LockInfo, s: &crate::lock_service::Holde
     }
     if !work.is_empty() {
         output::lock_msg(&work.join(", "));
+    }
+    if let Some(ext) = &s.ext {
+        let same_ns = crate::process::shares_namespace_tokens(&info.pid_ns, &info.time_ns);
+        for line in lockfile::report::render(ext, same_ns) {
+            output::lock_msg(&line);
+        }
     }
 
     if crate::process::foreign_pid_namespace(&info.pid_ns).is_some() {
@@ -181,12 +225,6 @@ fn print_holder_status(info: &lockfile::LockInfo, s: &crate::lock_service::Holde
     }
     if let Some(hint) = lockfile::same_agent_hint(info) {
         output::lock_msg(&hint);
-    }
-    if crate::process::shares_namespace_tokens(&info.pid_ns, &info.time_ns)
-        && info.pid > 0
-        && let Some(marker) = crate::sidecar::read_status(info.pid)
-    {
-        output::lock_msg(&format!("last marker: {marker}"));
     }
 }
 
@@ -333,7 +371,7 @@ fn hard_kill(info: &lockfile::LockInfo) -> Result<(), DevError> {
     // leaders included), re-verify. Any failure refuses the whole hard kill
     // with no signal sent.
     let mut targets = Vec::new();
-    if let Some((child_pid, child_starttime)) = &info.child {
+    for (child_pid, child_starttime) in &info.children {
         targets.push(
             preflight_target("child", *child_pid, child_starttime, &info.boot_id)
                 .map_err(|why| refuse_kill(&why))?,

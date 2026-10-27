@@ -8,6 +8,8 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+pub(crate) use crate::lockfile::observe::EXEC_ENV;
+
 use crate::cargo_env::{self, Phase, SpawnProfile as CargoProfile};
 use crate::error::DevError;
 use crate::shutdown::ChildIsolation;
@@ -72,8 +74,21 @@ impl ChildPolicy {
 
     /// The brokkr-owned environment carried by this policy. Used when a
     /// subprocess engine, such as nextest, constructs the child itself.
-    pub(crate) fn render_env(self) -> Vec<(String, String)> {
+    ///
+    /// The engine starts every process from this one rendering, so they all
+    /// share one launch cohort (`BROKKR_EXEC`), labelled `label`: `brokkr
+    /// lock` attributes them to the lane, not to each process.
+    pub(crate) fn render_env(self, label: &str) -> Vec<(String, String)> {
+        let launch = crate::lockfile::activity::launch_context(label);
         let mut env = crate::hold::child_env();
+        if let Some(launch) = launch {
+            // The capability of the same hold the cohort names.
+            env.retain(|(name, _)| name != crate::hold::CAPABILITY_ENV);
+            if let Some(nonce) = launch.capability {
+                env.push((crate::hold::CAPABILITY_ENV.to_owned(), nonce.expose().to_owned()));
+            }
+            env.push((EXEC_ENV.to_owned(), launch.exec));
+        }
         if self.carries_orphan_token()
             && let Some((name, value)) = crate::test_orphans::child_env()
         {
@@ -144,11 +159,25 @@ impl ChildPolicy {
 /// Spawn a configured child and publish its PID to the caller immediately.
 /// The caller's callback owns the lifetime of that publication and clears it
 /// after the child has been reaped.
+///
+/// Under a hold, this is where the child's launch cohort is allocated and
+/// stamped (`BROKKR_EXEC`), together with the capability of the same hold -
+/// at the final boundary, so a command built earlier and spawned later is
+/// attributed to the activity and acquisition it actually ran under. Without
+/// a hold, both are left as the command already carries them (an inherited
+/// cohort stays: the child still belongs to it).
 pub(crate) fn spawn(
     mut command: Command,
     on_spawn: Option<&dyn Fn(u32)>,
 ) -> Result<std::process::Child, DevError> {
     let program = command.get_program().to_string_lossy().into_owned();
+    if let Some(launch) = crate::lockfile::activity::launch_context(&launch_label(&command)) {
+        command.env(EXEC_ENV, launch.exec);
+        match launch.capability {
+            Some(nonce) => command.env(crate::hold::CAPABILITY_ENV, nonce.expose()),
+            None => command.env_remove(crate::hold::CAPABILITY_ENV),
+        };
+    }
     let child = command
         .spawn()
         .map_err(|error| DevError::Spawn { program, error })?;
@@ -156,6 +185,23 @@ pub(crate) fn spawn(
         on_spawn(child.id());
     }
     Ok(child)
+}
+
+/// The launch label `brokkr lock` shows for a child: the program's file name
+/// and its first few arguments.
+fn launch_label(command: &Command) -> String {
+    let program = command.get_program().to_string_lossy();
+    let name = program.rsplit('/').next().unwrap_or(&program).to_owned();
+    let args: Vec<String> = command
+        .get_args()
+        .take(3)
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    if args.is_empty() {
+        name
+    } else {
+        format!("{name} {}", args.join(" "))
+    }
 }
 
 /// Configure a captured command's streams after the common process policy.

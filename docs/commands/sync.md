@@ -153,14 +153,15 @@ is configured under `[ratatoskr]` (HTTP origins for
 jmap/graph/gmail/caldav/carddav/people/gcal, `host:port` for imap/smtp).
 
 During the run brokkr publishes both PIDs into the lockfile - sæhrimnir
-joins the auxiliary `mock_pids` set, the harness binary lands in
-`child_pid` - so `brokkr lock` from another shell shows live RSS/CPU for
-both. Tracked sæhrimnir, cargo-build, and harness children use their own
+joins the auxiliary `mock_pids` set, the harness binary takes the spawning
+thread's child slot - so `brokkr kill --hard` reaches both. `brokkr lock`
+from another shell finds both among the holder's processes (by its launch
+token, not the lockfile) and shows each one's CPU rate, RSS and age. Tracked sæhrimnir, cargo-build, and harness children use their own
 process groups across service and sync. Deadline, cooperative shutdown, and
 `--hard` cleanup target the child group, including helper descendants.
 Terminal Ctrl-C and `brokkr kill` are bridged by the captured runner: it
 forwards SIGTERM to the active group, waits up to 1.5s, and then escalates.
-After the harness exits, `child_pid` is cleared so a recycled PID cannot be
+After the harness exits, its child slot is cleared so a recycled PID cannot be
 SIGKILLed by `--hard`. Every mock is unregistered when its shared lifecycle
 shuts it down; if a later step fails, the service cohort drains its mocks
 before propagating the original failure.
@@ -252,9 +253,9 @@ build; it would hard-error on a path mismatch otherwise.
 
 Lockfile / kill semantics: sæhrimnir joins the auxiliary `mock_pids` set
 for the lifetime of the bench, and each iteration's harness PID rotates
-through `child_pid` (cleared between iterations so PID-recycling can't
-trip `--hard`), so `brokkr lock` shows both and `brokkr kill --hard`
-SIGKILLs every entry.
+through the published child slot (cleared between iterations so
+PID-recycling can't trip `--hard`), so `brokkr kill --hard` SIGKILLs every
+entry; `brokkr lock` shows both among the holder's processes.
 
 Cooperative `brokkr kill` (SIGTERM) is covered by one *phase* guard held
 for the whole bench path - cargo build, sæhrimnir spawn and readiness

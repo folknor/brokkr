@@ -36,10 +36,9 @@ pub(crate) fn harness_dir() -> Option<PathBuf> {
     brokkr_state_dir().map(|dir| dir.join("harness"))
 }
 
-/// The last marker reported by the current sidecar, beside the global lock.
-/// Unit tests never resolve it (`sidecar::status_path` is `None` there, since
-/// the file is host-global).
-#[cfg_attr(test, allow(dead_code))]
+/// The sidecar's former last-marker status file, beside the global lock. No
+/// longer written - the marker lives on the holder's observation table - and
+/// only `brokkr clean` still names it, to remove one an older brokkr left.
 pub(crate) fn sidecar_status() -> Option<PathBuf> {
     brokkr_state_dir().map(|dir| dir.join("sidecar-status"))
 }

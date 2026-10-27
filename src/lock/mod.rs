@@ -6,13 +6,18 @@ use std::sync::{Arc, Mutex, Weak};
 use crate::error::{DevError, LockError};
 use crate::process::{HostScope, Pid, ProcIdentity, StartTicks};
 
+pub(crate) mod activity;
+pub(crate) mod cgroup;
+pub(crate) mod collector;
 mod hold_protocol;
+pub(crate) mod observe;
 pub(super) mod presentation;
 mod record;
+pub(crate) mod report;
 use self::hold_protocol::{HOST_EFFECTS, HOST_EFFECTS_WITHOUT_TREE, acquire_at};
 #[cfg(test)]
 use self::hold_protocol::{HoldEffects, LOCK_POLL, wait_for_flock};
-pub use self::presentation::{same_agent_hint, verified_summary_for, verified_uptime_for};
+pub use self::presentation::{same_agent_hint, verified_uptime_for};
 pub use self::record::LockInfo;
 use self::record::{invalidate_metadata, publish, read_lock_contents};
 
@@ -72,13 +77,14 @@ struct LockState {
     /// Published in the control-service snapshot so `brokkr lock` can distinguish
     /// acquisition from work.
     draining: bool,
-    /// PID of the most recent child process brokkr spawned under the lock,
+    /// The workload children brokkr published under the lock, one slot per
+    /// spawning thread so concurrent lanes do not overwrite each other, each
     /// paired with its starttime token (captured when recorded; empty if
     /// unreadable, which fails verification closed). Updated by the harness
     /// each iteration of a bench run; cleared by the orchestrator after the
     /// captured runner returns so a stale PID can't be SIGKILLed by
     /// `--hard` after the kernel has recycled it.
-    child: Option<TrackedProcess>,
+    children: Vec<(std::thread::ThreadId, TrackedProcess)>,
     /// Auxiliary long-running child PIDs - mock-servers (sæhrimnir) that
     /// live across many `child` rotations, each paired with its starttime
     /// token. Plural because `service --all` keeps one mock per distinct
@@ -105,6 +111,16 @@ impl TrackedProcess {
             .ok()
             .map(|stat| stat.start());
         Some(Self { pid, start })
+    }
+
+    /// Whether the recorded process generation is still running (a zombie
+    /// counts as gone). An unreadable start token reads as gone.
+    fn alive(&self) -> bool {
+        let Some(start) = self.start else {
+            return false;
+        };
+        crate::process::ProcStat::read(self.pid)
+            .is_ok_and(|stat| stat.start() == start && !matches!(stat.state(), 'Z' | 'X'))
     }
 
     fn wire(&self) -> (u32, String) {
@@ -142,6 +158,12 @@ struct LockInner {
     /// This acquisition's control socket. Dropped first on release, while the
     /// flock is still held: a stop that has not committed by then is refused.
     service: Option<crate::lock_service::Service>,
+    /// What the hold says about its work (`observe`), shared with the
+    /// service; `None` for a hold that runs no service (tests).
+    observed: Option<Arc<observe::Observed>>,
+    /// The per-acquisition accounting cgroup, where delegation allows one.
+    /// Restored on release, before the flock goes.
+    cgroup: Option<cgroup::HoldCgroup>,
 }
 
 impl LockInner {
@@ -158,7 +180,7 @@ fn snapshot_of(state: &LockState) -> crate::lock_service::Snapshot {
     crate::lock_service::Snapshot {
         draining: state.draining,
         progress: state.progress,
-        has_child: state.child.is_some(),
+        has_child: !state.children.is_empty(),
         mocks: state.mocks.len(),
     }
 }
@@ -177,6 +199,9 @@ impl Drop for LockInner {
         // but the kernel has released the flock so `status()`'s probe
         // reports no holder and the next acquirer rewrites it.
         invalidate_metadata(self.fd.as_raw_fd());
+        // Move the holder back out of its accounting cgroup while the flock
+        // is still held, so the next acquisition's sweep never races it.
+        drop(self.cgroup.take());
         // Undo the tree edits (if any) while we still hold the flock, then
         // release. Doing it before LOCK_UN keeps the edited window inside the
         // locked window, so a concurrent brokkr can never observe it.
@@ -241,12 +266,18 @@ impl LockGuard {
     /// Record the PID of the child process currently running under the lock
     /// (with its starttime identity token), and rewrite the lock file so
     /// concurrent `brokkr lock` invocations can see it.
+    ///
+    /// One slot per calling thread: a second call from the same thread
+    /// replaces its earlier child, and concurrent lanes on other threads keep
+    /// theirs. Slots whose process has gone are pruned on every update.
     pub fn set_child_pid(&self, pid: u32) {
         let Some(child) = TrackedProcess::capture(pid) else {
             return;
         };
+        let me = std::thread::current().id();
         if let Ok(mut state) = self.inner.state.lock() {
-            state.child = Some(child);
+            state.children.retain(|(thread, tracked)| *thread != me && tracked.alive());
+            state.children.push((me, child));
             self.inner.publish(&state);
         }
     }
@@ -288,12 +319,15 @@ impl LockGuard {
         }
     }
 
-    /// Drop the workload child PID. Called by orchestrators after the
-    /// captured runner returns so a stale PID can't be SIGKILLed by
-    /// `--hard` once the kernel has recycled it.
+    /// Drop this thread's workload child PID. Called by orchestrators after
+    /// the captured runner returns so a stale PID can't be SIGKILLed by
+    /// `--hard` once the kernel has recycled it. Other threads' slots stay,
+    /// except any whose process has gone - so a slot set on one thread and
+    /// cleared from another cannot outlive its process either.
     pub fn clear_child_pid(&self) {
+        let me = std::thread::current().id();
         if let Ok(mut state) = self.inner.state.lock() {
-            state.child = None;
+            state.children.retain(|(thread, tracked)| *thread != me && tracked.alive());
             self.inner.publish(&state);
         }
     }
@@ -490,6 +524,25 @@ pub(crate) fn current_capability() -> Option<Nonce> {
         .find_map(|inner| inner.capability.clone())
 }
 
+/// The live hold's observation table, without the admission check: an
+/// activity or a narration during shutdown still describes the hold.
+pub(crate) fn current_observed() -> Option<Arc<observe::Observed>> {
+    current_observed_and_capability().map(|(observed, _)| observed)
+}
+
+/// The live hold's observation table and capability, from the same
+/// `LockInner`, so a child stamped with both names one acquisition.
+pub(crate) fn current_observed_and_capability() -> Option<(Arc<observe::Observed>, Option<Nonce>)> {
+    let mut held = held_registry();
+    held.retain(|w| w.strong_count() > 0);
+    held.iter().filter_map(Weak::upgrade).find_map(|inner| {
+        inner
+            .observed
+            .clone()
+            .map(|observed| (observed, inner.capability.clone()))
+    })
+}
+
 /// Edited tree paths attached to the active global hold, or `None` if no such
 /// hold exists. `Some([])` is meaningful: the live hold intentionally edits
 /// nothing, so a watchdog must not fall back to the command's armed path.
@@ -571,7 +624,7 @@ pub fn status() -> Result<Option<LockInfo>, DevError> {
             command: "unknown".into(),
             args: String::new(),
             project_root: "unknown".into(),
-            child: None,
+            children: Vec::new(),
             mocks: Vec::new(),
             progress: None,
         }));
@@ -690,7 +743,12 @@ mod tests {
         tree: no_tree,
         capability: no_capability,
         after_fresh_hold: nothing_after,
+        cgroup: no_cgroup,
     };
+
+    fn no_cgroup(_: &AcqId) -> Option<(cgroup::HoldCgroup, cgroup::CgroupView)> {
+        None
+    }
 
     /// A holder on `path` publishing `auth`, as a second descriptor of this
     /// process stands in for another process: flock locks are per open file
@@ -995,6 +1053,37 @@ mod tests {
         assert!(contents.contains("mock_pids=\n"), "got: {contents}");
     }
 
+    /// Concurrent lanes publish one child each; clearing on one thread leaves
+    /// the other's slot, and the first slot stays readable as `child_pid` by
+    /// readers that know only the single key.
+    #[test]
+    fn child_slots_are_per_thread() {
+        let path = tmp_lock("child-slots.lock");
+        let guard = acquire_at(&path, &ctx(), &INERT).unwrap();
+        let me = std::process::id();
+        let parent = crate::process::ProcStat::read_self()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .get();
+        guard.set_child_pid(me);
+        let other = LockGuard {
+            inner: Arc::clone(&guard.inner),
+        };
+        std::thread::spawn(move || other.set_child_pid(parent))
+            .join()
+            .unwrap();
+        let info = parse_lock_contents(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let pids: Vec<u32> = info.children.iter().map(|(pid, _)| *pid).collect();
+        assert_eq!(pids, vec![me, parent]);
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains(&format!("child_pid={me}\n")), "{contents}");
+        guard.clear_child_pid();
+        let info = parse_lock_contents(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let pids: Vec<u32> = info.children.iter().map(|(pid, _)| *pid).collect();
+        assert_eq!(pids, vec![parent]);
+    }
+
     /// Re-entry matches on the lock *path* - a hold on one file must not
     /// satisfy an acquire on another (the test seam depends on this, and it
     /// keeps the registry honest if a second lock file ever exists).
@@ -1076,7 +1165,7 @@ mod tests {
         let info = parse_lock_contents(text).unwrap();
         assert_eq!(info.pid, 100);
         assert_eq!(info.project, "fresh");
-        assert!(info.child.is_none(), "stale child_pid tail must not win");
+        assert!(info.children.is_empty(), "stale child_pid tail must not win");
     }
 
     /// Escaping round-trips values containing newlines and percent signs -

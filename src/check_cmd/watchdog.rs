@@ -84,7 +84,24 @@ fn watchdog_fired_lock() -> std::sync::MutexGuard<'static, Option<String>> {
 pub(crate) fn begin_phase(failing_phase: &mut Option<Phase>, phase: Phase) {
     begin_phase_with(failing_phase, phase, enter_phase);
     output::detail(&format!("phase {}: started", phase.as_str()));
+    // The phase in flight as a holder activity: one per thread, replaced by
+    // the next phase, so `brokkr lock` shows "phase test (3m)" with the
+    // lane's status narration beneath it. The previous phase closes first,
+    // so the new one is not opened as its child.
+    PHASE_ACTIVITY.with(|slot| {
+        drop(slot.borrow_mut().take());
+        *slot.borrow_mut() = Some(crate::lockfile::activity::Activity::begin(format!(
+            "phase {}",
+            phase.as_str()
+        )));
+    });
     output::status(phase.as_str());
+}
+
+thread_local! {
+    /// The open activity for the phase in flight on this thread.
+    static PHASE_ACTIVITY: std::cell::RefCell<Option<crate::lockfile::activity::Activity>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// The two bookkeeping updates with an injected clock entry for unit tests.

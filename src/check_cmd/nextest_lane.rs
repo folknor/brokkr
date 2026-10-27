@@ -128,8 +128,9 @@ fn write_synthesized_config(state_root: &Path, ceiling: std::time::Duration) -> 
 /// apply to every process it starts is cargo's `[env]` table. A private generated
 /// config file carries:
 ///
-/// - the compilation capability, rustc-info cache switch and orphan-reap
-///   token (the shared child policy);
+/// - the compilation capability, rustc-info cache switch, orphan-reap token
+///   and the lane's one `BROKKR_EXEC` launch cohort (the shared child
+///   policy), none of which a sweep value can displace;
 /// - the sweep env - `[[check]] env`, a profile's `env`, `BROKKR_TEST_BIN_DIR`,
 ///   nidhogg's `CARGO_TARGET_TMPDIR`: the same pairs the libtest lanes set on
 ///   `cargo test`. Before this file existed those pairs reached only
@@ -171,6 +172,7 @@ fn sweep_env_config_body(env: &[(&str, &str)]) -> String {
         if *key == crate::hold::CAPABILITY_ENV
             || *key == crate::hold::RUSTC_INFO_CACHE_ENV
             || *key == crate::test_orphans::MARKER_ENV
+            || *key == crate::process::spawn::EXEC_ENV
         {
             continue;
         }
@@ -182,7 +184,7 @@ fn sweep_env_config_body(env: &[(&str, &str)]) -> String {
     }
     // Match the spawn boundary: process policy, including the capability,
     // wins over caller values and is captured in this reader's private file.
-    for (key, value) in crate::process::spawn::ChildPolicy::test_process().render_env() {
+    for (key, value) in crate::process::spawn::ChildPolicy::test_process().render_env("nextest lane") {
         let mut entry = toml_edit::InlineTable::new();
         entry.insert("value", value.into());
         entry.insert("force", true.into());
@@ -1271,7 +1273,9 @@ mod nextest_lane_tests {
             ("WEIRD.KEY", "a \"quoted\" value"),
             (crate::hold::CAPABILITY_ENV, "stale"),
             (crate::test_orphans::MARKER_ENV, "stale"),
+            (crate::process::spawn::EXEC_ENV, "stale"),
         ]);
+        assert!(!body.contains("\"stale\""), "a reserved name took a sweep value: {body}");
         let parsed: toml::Table = toml::from_str(&body).unwrap();
         let env = parsed["env"].as_table().unwrap();
         let platform = env["BROKKR_TEST_PLATFORM"].as_table().unwrap();
@@ -1279,7 +1283,7 @@ mod nextest_lane_tests {
         assert_eq!(platform["force"].as_bool(), Some(true));
         assert_eq!(platform["relative"].as_bool(), Some(false));
         assert_eq!(env["WEIRD.KEY"]["value"].as_str(), Some("a \"quoted\" value"));
-        let policy = crate::process::spawn::ChildPolicy::test_process().render_env();
+        let policy = crate::process::spawn::ChildPolicy::test_process().render_env("nextest lane");
         for key in [crate::hold::CAPABILITY_ENV, crate::test_orphans::MARKER_ENV, crate::hold::RUSTC_INFO_CACHE_ENV] {
             let expected = policy.iter().find(|(name, _)| name == key).map(|(_, value)| value.as_str());
             let actual = env.get(key).and_then(|entry| entry.get("value")).and_then(toml::Value::as_str);

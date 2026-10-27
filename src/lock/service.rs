@@ -54,6 +54,9 @@ use std::time::{Duration, Instant};
 
 use crate::error::{AcquireRefusal, DevError, LockError};
 use crate::lockfile::AcqId;
+use crate::lockfile::collector::Collector;
+use crate::lockfile::observe::Observed;
+use crate::lockfile::report::Extension;
 
 /// Longest request line accepted. `stop <32 hex>` is 37 bytes.
 const MAX_REQUEST: usize = 256;
@@ -93,6 +96,10 @@ struct Shared {
     identity: Identity,
     snapshot: Mutex<Snapshot>,
     started: Instant,
+    /// The hold's activities, launch cohorts and marker.
+    observed: Arc<Observed>,
+    /// The process sampler; status replies serve its cache and kick it.
+    collector: Arc<Collector>,
 }
 
 /// A running control socket, owned by one acquisition. Dropping it ends the
@@ -162,6 +169,7 @@ impl Service {
         })?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).ok();
         listener.set_nonblocking(true)?;
+        let observed = Arc::new(Observed::new(id.clone()));
         let shared = Arc::new(Shared {
             id: id.clone(),
             live: Mutex::new(true),
@@ -171,6 +179,8 @@ impl Service {
                 ..Snapshot::default()
             }),
             started: Instant::now(),
+            collector: Arc::new(Collector::new(Arc::clone(&observed))),
+            observed,
         });
         let serving = Arc::clone(&shared);
         let spawned = thread::Builder::new()
@@ -183,6 +193,11 @@ impl Service {
             )));
         }
         Ok(Self { shared, path })
+    }
+
+    /// The acquisition's observation table, shared with the `LockInner`.
+    pub(crate) fn observed(&self) -> Arc<Observed> {
+        Arc::clone(&self.shared.observed)
     }
 
     /// Republish the mutable snapshot status replies are built from.
@@ -325,11 +340,41 @@ fn status_reply(shared: &Shared) -> String {
         identity: shared.identity.clone(),
         snapshot,
         held: shared.started.elapsed(),
-        cpu: self_cpu_secs().map(Duration::from_secs),
+        cpu: self_cpu().map(|cpu| Duration::from_secs(cpu.as_secs())),
         rss_kb,
         threads,
+        own_cpu: self_cpu(),
+        ext: Some(extension(shared)),
     }
     .encode()
+}
+
+/// The report extension: activities and marker from memory, the cached
+/// process sample (a fresh one is kicked off, never waited for).
+fn extension(shared: &Shared) -> Extension {
+    let snap = shared.observed.snapshot();
+    let ms = |at: Instant| u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let activities = snap.activities.map(|open| {
+        open.into_iter()
+            .map(|a| crate::lockfile::report::ActivityRow {
+                id: a.id,
+                parent: a.parent,
+                elapsed_ms: ms(a.started),
+                progress: a.progress,
+                label: a.label,
+                narration: a.narration,
+            })
+            .collect()
+    });
+    shared.collector.kick();
+    Extension {
+        activities,
+        activities_omitted: 0,
+        narration: snap.narration.map(|(text, at)| (text, ms(at))),
+        marker: snap.marker.map(|(name, at)| (name, ms(at))),
+        sample: shared.collector.cached(),
+        collecting: shared.collector.collecting(),
+    }
 }
 
 /// `VmRSS` (kB) and `Threads` of this process.
@@ -349,12 +394,13 @@ fn self_status() -> (Option<u64>, Option<u64>) {
     (rss, threads)
 }
 
-/// User plus system CPU seconds of this process (`utime` + `stime`).
-fn self_cpu_secs() -> Option<u64> {
+/// User plus system CPU of this process (`utime` + `stime`), at tick
+/// resolution.
+fn self_cpu() -> Option<Duration> {
     let stat = crate::process::ProcStat::read_self().ok()?;
     let ticks = stat.user_ticks().checked_add(stat.system_ticks())?;
     let tick_rate = crate::process::clock_ticks_per_second()?;
-    Some(ticks / tick_rate)
+    Some(Duration::from_millis(ticks.saturating_mul(1000) / tick_rate))
 }
 
 /// Read one `\n`-terminated line under an absolute deadline.
@@ -422,6 +468,7 @@ const STATUS_DRAINING: &str = "draining";
 const STATUS_PROGRESS: &str = "progress";
 const STATUS_CHILD: &str = "child";
 const STATUS_MOCKS: &str = "mocks";
+const STATUS_OWN_CPU_MS: &str = "own_cpu_ms";
 
 /// The typed answer the holder returns to `status`.
 pub struct HolderStatus {
@@ -431,6 +478,12 @@ pub struct HolderStatus {
     pub cpu: Option<Duration>,
     pub rss_kb: Option<u64>,
     pub threads: Option<u64>,
+    /// The holder's own CPU at millisecond resolution (`own_cpu_ms`, absent
+    /// from older holders, which send whole seconds only).
+    pub own_cpu: Option<Duration>,
+    /// The report extension (`crate::lockfile::report`), absent from older
+    /// holders or dropped when malformed.
+    pub(crate) ext: Option<Extension>,
 }
 
 impl HolderStatus {
@@ -486,6 +539,15 @@ impl HolderStatus {
             if self.snapshot.has_child { "1" } else { "0" },
         );
         field(STATUS_MOCKS, &self.snapshot.mocks.to_string());
+        field(
+            STATUS_OWN_CPU_MS,
+            &self
+                .own_cpu
+                .map_or_else(String::new, |cpu| cpu.as_millis().to_string()),
+        );
+        if let Some(ext) = &self.ext {
+            out.push_str(&ext.encode());
+        }
         out
     }
 
@@ -512,6 +574,11 @@ impl HolderStatus {
         let threads = parse_optional(value(STATUS_THREADS)?, |raw| raw.parse::<u64>().ok())?;
         let held = Duration::from_secs(value(STATUS_HELD_SECS)?.parse().ok()?);
         let mocks = value(STATUS_MOCKS)?.parse().ok()?;
+        // Optional: an older holder sends neither.
+        let own_cpu = value(STATUS_OWN_CPU_MS)
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .map(Duration::from_millis);
+        let ext = Extension::decode(lines);
 
         Some(Self {
             identity: Identity {
@@ -534,6 +601,8 @@ impl HolderStatus {
             cpu,
             rss_kb,
             threads,
+            own_cpu,
+            ext,
         })
     }
 }
@@ -721,12 +790,51 @@ mod tests {
     }
 
     fn shared() -> Shared {
+        let id = mint_id().unwrap();
+        let observed = Arc::new(Observed::new(id.clone()));
         Shared {
-            id: mint_id().unwrap(),
+            id,
             live: Mutex::new(true),
             identity: Identity::default(),
             snapshot: Mutex::new(Snapshot::default()),
             started: Instant::now(),
+            collector: Arc::new(Collector::new(Arc::clone(&observed))),
+            observed,
+        }
+    }
+
+    /// A reply from a holder older than the report extension still decodes,
+    /// with no extension; a newer holder's extension rides the same reply,
+    /// and the legacy keys an older client requires are all still present.
+    #[test]
+    fn the_extension_is_optional_and_additive() {
+        let Reply::Status(old) = parse_reply(
+            "ok\nproject=p\ncommand=run\nargs=\nroot=/r\npid_ns=1\ntime_ns=2\ncodex_thread=\n\
+             codex_session=\nheld_secs=3\ncpu_secs=4\nrss_kb=5\nthreads=6\ndraining=0\n\
+             progress=\nchild=0\nmocks=0\n",
+        ) else {
+            panic!("status");
+        };
+        assert!(old.ext.is_none() && old.own_cpu.is_none());
+
+        let shared = shared();
+        let activity = shared.observed.open(None, "verify merge").unwrap();
+        shared.observed.set_progress(activity, 2, 9);
+        let text = status_reply(&shared);
+        let Reply::Status(new) = parse_reply(&text) else {
+            panic!("status");
+        };
+        let ext = new.ext.unwrap();
+        let rows = ext.activities.unwrap();
+        assert_eq!(rows[0].label, "verify merge");
+        assert_eq!(rows[0].progress, Some((2, 9)));
+        assert!(new.own_cpu.is_some());
+        for key in [
+            "project=", "command=", "args=", "root=", "pid_ns=", "time_ns=", "codex_thread=",
+            "codex_session=", "held_secs=", "cpu_secs=", "rss_kb=", "threads=", "draining=",
+            "progress=", "child=", "mocks=",
+        ] {
+            assert!(text.contains(&format!("\n{key}")), "legacy key {key} missing");
         }
     }
 

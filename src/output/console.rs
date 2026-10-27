@@ -168,7 +168,12 @@ pub fn disable_status_line() {
 
 /// Show `msg` as the transient status line (a no-op off a terminal). Replaced
 /// by the next status, and cleared from under every persistent line.
+///
+/// On or off a terminal, the text is also narration on the calling thread's
+/// innermost activity on the live hold (`lockfile::activity::narrate`), which
+/// is how `brokkr lock` from another shell sees the same line.
 pub fn status(msg: &str) {
+    crate::lockfile::activity::narrate(msg);
     if !STATUS_ENABLED.load(Ordering::Relaxed) {
         return;
     }

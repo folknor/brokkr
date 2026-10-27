@@ -40,7 +40,14 @@ pub(super) struct HoldEffects {
     /// Runs once the fresh hold is registered: the stray reap and the stale
     /// guard warning.
     pub(super) after_fresh_hold: fn(),
+    /// Enter the per-acquisition accounting cgroup where delegation allows
+    /// (`super::cgroup`), before the hold goes live and spawns anything.
+    pub(super) cgroup: CgroupEntry,
 }
+
+/// The accounting-cgroup effect: the hold's ownership and a read-only view.
+pub(super) type CgroupEntry =
+    fn(&AcqId) -> Option<(super::cgroup::HoldCgroup, super::cgroup::CgroupView)>;
 
 /// The effects a real acquisition has.
 pub(super) const HOST_EFFECTS: HoldEffects = HoldEffects {
@@ -50,6 +57,7 @@ pub(super) const HOST_EFFECTS: HoldEffects = HoldEffects {
     tree: activate_tree,
     capability: Some,
     after_fresh_hold: host_after_fresh_hold,
+    cgroup: super::cgroup::enter,
 };
 
 fn activate_tree(ctx: &LockContext<'_>) -> Result<Option<crate::tree_policy::HeldTree>, DevError> {
@@ -67,6 +75,7 @@ pub(super) const HOST_EFFECTS_WITHOUT_TREE: HoldEffects = HoldEffects {
     tree: no_tree,
     capability: Some,
     after_fresh_hold: host_after_fresh_hold,
+    cgroup: super::cgroup::enter,
 };
 
 fn host_service(
@@ -204,7 +213,7 @@ pub(super) fn acquire_at_with(
     let gated = flocked.gate(ctx, effects.disk_gate)?;
     let drained = gated.drain(ctx, effects.drain)?;
     let authorized = drained.authorize(effects.tree, ctx)?;
-    Ok(authorized.into_live(effects.capability, effects.after_fresh_hold))
+    Ok(authorized.into_live(effects.capability, effects.after_fresh_hold, effects.cgroup))
 }
 
 /// A fresh exclusive flock, before the free-space gate has admitted work.
@@ -336,11 +345,22 @@ impl Authorized {
         self,
         attach_capability: fn(Nonce) -> Option<Nonce>,
         after_fresh_hold: fn(),
+        enter_cgroup: CgroupEntry,
     ) -> LockGuard {
+        let acq = self.flocked.service.as_ref().map(|(id, _)| id.clone());
         let service = self.flocked.service.map(|(_, service)| service);
         if let Some(service) = &service {
             service.update(snapshot_of(&self.state));
         }
+        let observed = service.as_ref().map(crate::lock_service::Service::observed);
+        // Before anything is spawned under the hold, so every child is born
+        // inside the group. Optional: `None` wherever delegation is absent.
+        let cgroup = acq.as_ref().and_then(enter_cgroup).map(|(hold, view)| {
+            if let Some(observed) = &observed {
+                observed.set_cgroup(view);
+            }
+            hold
+        });
         let mut active_tree_dirs = HashMap::new();
         if let Some(held) = &self.tree {
             active_tree_dirs.insert(held.directory().to_owned(), 1);
@@ -353,6 +373,8 @@ impl Authorized {
             capability: attach_capability(self.nonce),
             active_tree_dirs: Mutex::new(active_tree_dirs),
             service,
+            observed,
+            cgroup,
         });
         held_registry().push(Arc::downgrade(&inner));
         let guard = LockGuard { inner };
@@ -620,7 +642,7 @@ fn build_state(ctx: &LockContext<'_>, acq_id: Option<&AcqId>) -> LockState {
         codex_session: identity.codex_session,
         auth: None,
         draining: true,
-        child: None,
+        children: Vec::new(),
         mocks: Vec::new(),
         progress: None,
     }

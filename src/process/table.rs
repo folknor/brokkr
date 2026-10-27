@@ -16,6 +16,7 @@ pub struct ProcStat {
     major_faults: u64,
     num_threads: u64,
     virtual_bytes: u64,
+    rss_pages: u64,
 }
 
 impl ProcStat {
@@ -64,6 +65,7 @@ impl ProcStat {
         let num_threads = fields.get(17)?.parse().ok()?;
         let start = StartTicks::new(fields.get(19)?.parse().ok()?);
         let virtual_bytes = fields.get(20)?.parse().ok()?;
+        let rss_pages = fields.get(21).and_then(|v| v.parse().ok()).unwrap_or(0);
         Some(Self {
             identity: ProcIdentity::new(pid, start),
             comm,
@@ -75,6 +77,7 @@ impl ProcStat {
             major_faults,
             num_threads,
             virtual_bytes,
+            rss_pages,
         })
     }
 
@@ -120,6 +123,11 @@ impl ProcStat {
 
     pub const fn virtual_bytes(&self) -> u64 {
         self.virtual_bytes
+    }
+
+    /// Resident set size in pages (`rss`, field 24).
+    pub const fn rss_pages(&self) -> u64 {
+        self.rss_pages
     }
 }
 

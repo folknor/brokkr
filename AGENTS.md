@@ -27,7 +27,7 @@ A doc with 8+ `##` sections is **section-addressed**: `brokkr man conventions sc
 - `docs/commands/check.md` - using `brokkr check`: flags, output, invocation selection, feature projection, the markdown-only shortcut, the convention/clippy/rustdoc phases, `certifies` and exit codes, log lines, sweep selection.
 - `docs/commands/check.test-lanes.md` - check's test phase: serial/parallel/process-isolated/nextest/doctest lanes, the coverage audit, diagnostic continuation, feature unification, member-check, dead filters, `BROKKR_TEST_BIN_DIR`.
 - `docs/commands/test.md` - `brokkr test`: discovery, matching, `-N`, `--timeout`.
-- `docs/commands/check.hygiene.md` - time ceilings and the per-test cap, strays and orphan reaping, the rustc guard.
+- `docs/commands/check.hygiene.md` - time ceilings and the per-test cap, what `brokkr lock` shows about a holder, strays and orphan reaping, the rustc guard.
 - `reference/check-internals.md` - how the check/test pipeline is built: invocation selection, harness isolation and the failure roster, direct execution, the prepare plan, journal and execution accounting, diagnostic inventory, watchdog attribution, the stray/orphan reapers, the guard's lease protocol, rustflags sink selection. Read before changing any of them.
 - `docs/commands/clippy.md` - `brokkr clippy`.
 - `docs/commands/deps.md` - `brokkr deps`.
@@ -70,7 +70,7 @@ Single crate, single binary (plus the `brokkr-rustc-guard` bin). No workspace. T
 - `env` - host facts, tool versions, dataset status and digests.
 - `wc [threshold]` - tracked `.rs` files over `threshold` lines (default 800).
 - `history` - global command history.
-- `strays [--kill]`, `guard [--install|--remove]`, `kill [--hard]` - process hygiene (see `docs/commands/check.hygiene.md`).
+- `lock`, `strays [--kill]`, `guard [--install|--remove]`, `kill [--hard]` - lock status and process hygiene (see `docs/commands/check.hygiene.md`).
 - `sidecar <uuid>` - sidecar profiler data (see `docs/commands/measure.md`).
 - `fmt` - locked `cargo fmt` wrapper.
 - Project-specific: `corpus-results`, `dellingr`, `mogwai`, `hotpath`, `pmtiles-stats`, `pmtiles-corpus`, `ocean-build` - see the project docs.

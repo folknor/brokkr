@@ -127,8 +127,8 @@ Each run reports exactly one line - `[N/total] PASS <name> in <X>ms`, with
 a `[cycle c/C]` prefix in soak mode - and nothing invariant repeats in the
 loop (no per-script "running" line, no build echo; a 550-run soak is read
 by scanning verdicts). The ceiling bounds how long a hung script can stay
-silent, and `brokkr lock` from another shell shows live progress + PID for
-the in-flight script.
+silent, and `brokkr lock` from another shell shows live progress and the
+in-flight script's process (see `brokkr man hygiene lock`).
 
 Default is stop-on-first-failure so the failing script's artefacts land fast
 for triage; `--keep-going` runs every selected script and the trailing summary
@@ -167,10 +167,11 @@ the cohort alike. Both service trees sit one level below
 `.brokkr/ratatoskr/` so a script stem or fixture name can never collide
 with brokkr's own entries there (`sync/`, mock-serve's `mock/`, `gate.db`).
 
-`brokkr lock` from another shell shows the live harness PID (and progress
-`run R/T,` when the run set has more than one entry - soak with `--repeat
-> 1`, or any `--all` invocation that runs multiple scripts / cycles),
-plus one `mock PID …` line per live sæhrimnir. `brokkr kill --hard`
+`brokkr lock` from another shell shows progress `run R/T` when the run set
+has more than one entry - soak with `--repeat > 1`, or any `--all` invocation
+that runs multiple scripts / cycles - and the harness and every live sæhrimnir
+among the holder's processes, each with its CPU rate, RSS and age.
+`brokkr kill --hard`
 SIGKILLs every recorded child + mock alongside brokkr; `brokkr kill`
 (SIGTERM) is caught by a guard installed right after the lockfile and
 held through build + run + teardown - the captured runner (used for both

@@ -2,18 +2,20 @@
 //!
 //! Samples `/proc/{pid}/*` at fixed intervals, reads application phase markers
 //! from a FIFO, and hands everything back to the harness, which stores it in
-//! SQLite after the child exits. The only write during the benchmark itself
-//! is the status file below.
+//! SQLite after the child exits. Nothing is written during the benchmark
+//! itself.
 //!
-//! # Status file
+//! # Last marker
 //!
-//! Each drain that saw a phase marker writes
-//! the latest marker name to the status file ([`status_path`]) so `brokkr
-//! lock` can show it. The file has one fixed location beside the global lock,
-//! derived by one function that both the writer and the reader call - it used
-//! to sit beside the FIFO, whose directory varies by harness path, while the
-//! reader looked in `<project>/.brokkr/`, so every path whose FIFO lived
-//! elsewhere (`--hotpath`/`--alloc`, the ratatoskr sync bench) was invisible.
+//! Each drain that saw a phase marker records the latest name, with the time
+//! it was seen, on the live hold's observation table
+//! (`lockfile::activity::note_marker`), which `brokkr lock` reads over the
+//! holder's control socket as "last marker ... ago". It is cleared when a
+//! FIFO is created and dropped, so a marker from an earlier run in the same
+//! hold is never shown as the current one. It is the last marker *observed*:
+//! FIFO draining lags the child, so it does not prove the child's current
+//! step. This replaced a PID-keyed status file beside the lock, which a
+//! reader in another PID namespace could not trust.
 //!
 //! # Deadlines
 //!
@@ -624,58 +626,6 @@ impl SidecarSampler for ProcSidecarSampler {
 // FIFO management
 // ---------------------------------------------------------------------------
 
-/// Where the last-marker status file lives: `~/.brokkr/sidecar-status`,
-/// beside the global lock. The single definition both [`SidecarFifo`] (the
-/// writer) and `brokkr lock` (the reader, via [`read_status`]) use.
-///
-/// Beside the lock, not under a project or scratch dir, because the reader
-/// starts from the lock and nothing else: only the lock holder runs a
-/// measured child, so one fixed file is unambiguous. `None` when the lock
-/// directory cannot be resolved (`$HOME` unset) - the status line is a
-/// convenience and is simply skipped.
-///
-/// Always `None` in unit tests: the file is host-global, so a test that
-/// creates a [`SidecarFifo`] would otherwise delete or overwrite the status
-/// of a real brokkr measuring on this machine. The pure halves
-/// ([`format_status`]/[`parse_status`]) carry the tested logic.
-#[cfg(not(test))]
-pub(crate) fn status_path() -> Option<PathBuf> {
-    crate::user_dirs::sidecar_status()
-}
-
-#[cfg(test)]
-#[allow(clippy::unnecessary_wraps)]
-pub(crate) fn status_path() -> Option<PathBuf> {
-    None
-}
-
-/// Render the status file body: the writer's PID on the first line, the
-/// marker name on the second. The PID lets the reader reject a file left
-/// behind by an earlier holder that died before its `Drop` ran.
-fn format_status(pid: u32, marker_name: &str) -> String {
-    format!("{pid}\n{marker_name}")
-}
-
-/// Parse a status file body, returning the marker only when it was written
-/// by `holder_pid`. Both PIDs come from the holder's own PID namespace (the
-/// lock file records the holder's `getpid()`, and the holder is the process
-/// running the sidecar), so plain equality is the right test here.
-fn parse_status(body: &str, holder_pid: u32) -> Option<&str> {
-    let (pid, marker) = body.split_once('\n')?;
-    if pid.trim().parse::<u32>().ok()? != holder_pid {
-        return None;
-    }
-    let marker = marker.trim();
-    (!marker.is_empty()).then_some(marker)
-}
-
-/// The most recent phase marker the lock holder's sidecar has seen, if it
-/// has seen one. Reader half of [`status_path`], used by `brokkr lock`.
-pub(crate) fn read_status(holder_pid: u32) -> Option<String> {
-    let body = fs::read_to_string(status_path()?).ok()?;
-    parse_status(&body, holder_pid).map(str::to_owned)
-}
-
 /// FIFO handle: path + read end for the sidecar.
 ///
 /// Implements `Drop` to clean up the FIFO file on panic or early error return.
@@ -687,8 +637,6 @@ pub(crate) struct SidecarFifo {
     samples_remaining: usize,
     markers_remaining: usize,
     counters_remaining: usize,
-    /// Resolved once at creation; see [`status_path`].
-    status: Option<PathBuf>,
 }
 
 impl SidecarFifo {
@@ -719,12 +667,9 @@ impl SidecarFifo {
 
         let file = Self::open_read_end(&path)?;
 
-        // A status file left by a holder that died before its Drop ran must
-        // not be shown as this run's marker until this run emits one.
-        let status = status_path();
-        if let Some(p) = &status {
-            drop(fs::remove_file(p));
-        }
+        // A marker from an earlier run in this hold must not be shown as this
+        // run's until this run emits one.
+        crate::lockfile::activity::note_marker(None);
 
         Ok(Self {
             path,
@@ -734,7 +679,6 @@ impl SidecarFifo {
             samples_remaining: tunables.max_samples,
             markers_remaining: tunables.max_markers,
             counters_remaining: tunables.max_counters,
-            status,
         })
     }
 
@@ -758,20 +702,6 @@ impl SidecarFifo {
         self.pending_line.clear();
         self.pending_line_too_long = false;
         Ok(())
-    }
-
-    /// Write the last marker name to the status file so `brokkr lock` can show it.
-    fn update_status(&self, marker_name: &str) {
-        if let Some(p) = &self.status {
-            drop(fs::write(p, format_status(std::process::id(), marker_name)));
-        }
-    }
-
-    /// Clean up the status file.
-    fn cleanup_status(&self) {
-        if let Some(p) = &self.status {
-            drop(fs::remove_file(p));
-        }
     }
 
     /// Drain all pending lines from the FIFO, parsing markers and counters.
@@ -870,7 +800,7 @@ impl SidecarFifo {
             ));
         }
         if let Some(name) = last_name {
-            self.update_status(&name);
+            crate::lockfile::activity::note_marker(Some(&name));
         }
         preferred_stop.or(fallback_stop)
     }
@@ -958,7 +888,7 @@ enum BoundedLine {
 impl Drop for SidecarFifo {
     fn drop(&mut self) {
         drop(fs::remove_file(&self.path));
-        self.cleanup_status();
+        crate::lockfile::activity::note_marker(None);
     }
 }
 
@@ -1305,28 +1235,6 @@ mod tests {
         assert_eq!(counters[0].value, -7);
         assert_eq!(next_marker_idx, 1);
         assert!(!truncated);
-    }
-
-    #[test]
-    fn status_round_trips_for_its_writer() {
-        let body = format_status(4242, "STAGE2_START");
-        assert_eq!(parse_status(&body, 4242), Some("STAGE2_START"));
-    }
-
-    /// A file left by a holder that died before its Drop ran names a PID
-    /// other than the current holder's, and must not be shown.
-    #[test]
-    fn status_from_another_pid_is_rejected() {
-        let body = format_status(4242, "STAGE2_START");
-        assert_eq!(parse_status(&body, 7), None);
-    }
-
-    #[test]
-    fn status_rejects_legacy_and_empty_bodies() {
-        // The pre-fix format was the bare marker name, no PID line.
-        assert_eq!(parse_status("STAGE2_START", 4242), None);
-        assert_eq!(parse_status("4242\n", 4242), None);
-        assert_eq!(parse_status("x\nSTAGE", 4242), None);
     }
 
     #[test]

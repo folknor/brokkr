@@ -110,6 +110,7 @@ impl VerifyHarness {
         args: &[&str],
         writes: Writes,
     ) -> Result<CapturedOutput, DevError> {
+        let _step = step(&format!("pbfhogg {}", args.first().copied().unwrap_or("")));
         self.handle
             .invocation_strs(args, writes)?
             .capture_in(&self.project_root)
@@ -123,6 +124,11 @@ impl VerifyHarness {
         tool: ExternalTool,
         args: &[&str],
     ) -> Result<CapturedOutput, DevError> {
+        let _step = step(&format!(
+            "{} {}",
+            tool.name(),
+            args.first().copied().unwrap_or("")
+        ));
         Invocation::tool(tool, args.iter().map(|&a| a.to_owned()).collect())
             .capture_in(&self.project_root)
     }
@@ -478,10 +484,20 @@ where
     O: CheckOutcome,
 {
     let start = std::time::Instant::now();
+    // The check as a holder activity, its tool runs as steps beneath it
+    // (`step`): what `brokkr lock` shows from another shell. On a terminal
+    // the buffered (non-verbose) run also keeps a live status line naming
+    // the step in flight, so a long check is not silent until its summary.
+    let _activity = crate::lockfile::activity::Activity::begin(format!("verify {name}"));
     if !verbose {
         crate::output::verify_buffer_begin();
+        crate::output::enable_status_line();
+        crate::output::status(&format!("{name}: running"));
     }
     let result = f().and_then(|outcome| outcome.into_check_result(name));
+    if !verbose {
+        crate::output::disable_status_line();
+    }
     let ms = start.elapsed().as_millis();
     match &result {
         Ok(()) => {
@@ -508,6 +524,14 @@ where
             Err(DevError::ExitCode(1))
         }
     }
+}
+
+/// One verify step - a tool run - as a holder activity under the check's, and
+/// as the status line on a terminal. Closed when the guard drops.
+fn step(label: &str) -> crate::lockfile::activity::Activity {
+    let activity = crate::lockfile::activity::Activity::begin(label);
+    crate::output::status(label);
+    activity
 }
 
 /// Check whether an executable exists on `PATH`.
