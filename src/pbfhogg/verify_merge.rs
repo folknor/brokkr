@@ -110,16 +110,19 @@ pub fn run(
     // would otherwise keep this verdict from being recorded.
     if locations_on_ways {
         verify_msg("=== inline locations (pbfhogg check --locations) ===");
-        findings.record(
-            "pbfhogg apply-changes inline locations",
-            harness.check_locations("pbfhogg", &pbfhogg_out)?,
-        );
-        let osmium = harness.check_locations("osmium", &osmium_out)?;
+        let (pbfhogg_verdict, _) = harness.check_locations("pbfhogg", &pbfhogg_out)?;
+        findings.record("pbfhogg apply-changes inline locations", pbfhogg_verdict);
+        let (osmium, report) = harness.check_locations("osmium", &osmium_out)?;
         output::verify_summary(&format!(
             "  osmium apply-changes --locations-on-ways inline locations: {} \
              (informational: osmium's location index is not an oracle)",
             if osmium.is_pass() { "consistent" } else { "STALE" }
         ));
+        // The summary channel prints on a pass too, so the report's head is
+        // what makes a change in osmium's stale set visible run to run.
+        if !osmium.is_pass() {
+            print_report_head(&report);
+        }
     }
 
     // pbfhogg diff (the deep-compare below) is a merge-join and requires both
@@ -153,6 +156,24 @@ pub fn run(
     verify_pbfhogg_vs_osmium(harness, osc, &pbfhogg_out, &osmium_sorted, &outdir)?;
 
     Ok(findings)
+}
+
+/// Cap on report lines echoed for an informational `check --locations`.
+const MAX_REPORT_LINES: usize = 12;
+
+/// Echo the first [`MAX_REPORT_LINES`] lines of a `check --locations` report
+/// on the summary channel, noting how many were left out.
+fn print_report_head(report: &str) {
+    let lines: Vec<&str> = report.lines().filter(|l| !l.trim().is_empty()).collect();
+    for line in lines.iter().take(MAX_REPORT_LINES) {
+        output::verify_summary(&format!("    {line}"));
+    }
+    if lines.len() > MAX_REPORT_LINES {
+        output::verify_summary(&format!(
+            "    (+{} more report lines; -v prints them all)",
+            lines.len() - MAX_REPORT_LINES
+        ));
+    }
 }
 
 /// Run the optional osmosis and osmconvert merges, shown for context only.

@@ -161,7 +161,9 @@ diff cannot see a stale coordinate; instead pbfhogg's output must pass
 `pbfhogg check --locations` (each way's inline coordinates equal its nodes'
 records in the same file; exit 1 is a FAIL, any other non-zero exit an
 error). osmium's output gets the same check, reported on the summary channel
-only: its location index is searched before it is sorted and resolves
+only - a STALE result with the head of the check's report, so a change in
+what osmium gets wrong shows from run to run (`-v` streams the whole
+report): its location index is searched before it is sorted and resolves
 duplicate keys to the smallest location, so multi-version diffs can make
 osmium itself write stale coordinates. osmosis and osmconvert, which write no
 inline locations, are not run. The base must be LocationsOnWays and keep its

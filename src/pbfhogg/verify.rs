@@ -246,20 +246,26 @@ impl VerifyHarness {
     /// --locations`. Exit 0 is consistent, 1 is violations found (the report
     /// is printed), anything else - a signal, a usage error, an older pbfhogg
     /// without the flag - is an error, never a verdict.
-    pub fn check_locations(&self, label: &str, pbf: &Path) -> Result<Verdict, DevError> {
+    ///
+    /// Returns the verdict and the check's report (its stdout), which on a
+    /// FAIL is also written to the detail channel. A caller reporting an
+    /// informational result reads the report itself: detail is replayed only
+    /// when the check fails.
+    pub fn check_locations(&self, label: &str, pbf: &Path) -> Result<(Verdict, String), DevError> {
         let pbf_str = pbf.display().to_string();
         let captured = self.run_pbfhogg(&["check", "--locations", &pbf_str], Writes::Nothing)?;
+        let report = String::from_utf8_lossy(&captured.stdout).into_owned();
         match captured.code() {
             Some(0) => {
                 output::verify_msg(&format!("  {label}: inline locations consistent PASS"));
-                Ok(Verdict::Pass)
+                Ok((Verdict::Pass, report))
             }
             Some(1) => {
-                for line in String::from_utf8_lossy(&captured.stdout).lines() {
+                for line in report.lines() {
                     output::verify_msg(&format!("  {label}: {line}"));
                 }
                 output::verify_msg(&format!("  {label}: inline locations STALE FAIL"));
-                Ok(Verdict::Fail)
+                Ok((Verdict::Fail, report))
             }
             _ => {
                 self.check_exit(&captured, "pbfhogg check --locations")?;
