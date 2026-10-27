@@ -240,8 +240,9 @@ sandboxed holder and between sandboxes:
   current step.
 
 The holder never waits on this: the socket serves the latest sample and starts
-a fresh one, and `brokkr lock` asks once more a moment later when the first
-answer had none. An older holder answers without any of the new lines. When
+a fresh one, and `brokkr lock` asks once more half a second later when the
+first answer had no sample or said a fresh one was being collected - so the
+rows it prints are under a second old. An older holder answers without any of the new lines. When
 the holder does not answer (an older brokkr, or a stopped one) and runs in the
 caller's namespace, `brokkr lock` samples its processes from the caller's side
 with the same scanner, and says so if the hold ended meanwhile; activities and

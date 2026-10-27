@@ -135,10 +135,10 @@ fn print_observed_processes(info: &lockfile::LockInfo, holder: crate::process::P
     }
 }
 
-/// Ask once more when the first reply carries no process sample yet, or only
-/// an old one: the first request starts a collection the holder serves from
-/// cache, so a second request a moment later gets a current sample. Keeps
-/// the first reply when the second fails.
+/// Ask once more when the first reply carries no process sample yet, or the
+/// holder said a fresh one was being collected: the first request starts a
+/// collection the holder serves from cache, so a second request a moment
+/// later gets a current sample. Keeps the first reply when the second fails.
 fn fresher_status(
     acq_id: &str,
     first: Box<crate::lock_service::HolderStatus>,
@@ -146,7 +146,7 @@ fn fresher_status(
     let Some(ext) = &first.ext else {
         return first;
     };
-    let stale = ext.sample.as_ref().is_none_or(|s| s.age_ms > 2_000);
+    let stale = ext.collecting || ext.sample.as_ref().is_none_or(|s| s.age_ms > 2_000);
     if !stale {
         return first;
     }
