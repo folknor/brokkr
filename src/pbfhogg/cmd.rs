@@ -156,6 +156,48 @@ fn bbox_configured(
             .is_none_or(|ds| ds.bbox.is_some())
 }
 
+/// The base of `verify all`'s `--locations-on-ways` merge: the dataset's (or
+/// the named snapshot's) [`KEEP_UNTAGGED_VARIANT`] PBF. Skipped only when it
+/// cannot apply - a handcrafted `--input`, or no such variant registered; a
+/// registered variant that fails to resolve fails the command, like the OSC.
+///
+/// [`KEEP_UNTAGGED_VARIANT`]: super::verify_all::KEEP_UNTAGGED_VARIANT
+fn resolve_locations_base(
+    input: Option<&Path>,
+    dataset: &str,
+    snapshot: Option<&resolve::SnapshotRef>,
+    paths: &config::ResolvedPaths,
+    project_root: &Path,
+) -> Result<super::verify_all::LocationsBase, DevError> {
+    use super::verify_all::{KEEP_UNTAGGED_VARIANT, LocationsBase};
+    if input.is_some() {
+        return Ok(LocationsBase::Skipped(
+            "SKIPPED (--input given; verify merge --input --osc --locations-on-ways checks a fixture)",
+        ));
+    }
+    let snapshot_ref = resolve::SnapshotRef::from_opt(snapshot);
+    let registered = paths.datasets.get(dataset).is_none_or(|ds| match &snapshot_ref {
+        resolve::SnapshotRef::Base => ds.pbf.contains_key(KEEP_UNTAGGED_VARIANT),
+        resolve::SnapshotRef::Named(key) => ds
+            .snapshot
+            .get(key)
+            .is_none_or(|snap| snap.pbf.contains_key(KEEP_UNTAGGED_VARIANT)),
+    });
+    if !registered {
+        return Ok(LocationsBase::Skipped(
+            "SKIPPED (no altw-keep-untagged variant registered for the dataset)",
+        ));
+    }
+    let path = resolve::resolve_snapshot_pbf_path(
+        dataset,
+        &snapshot_ref,
+        KEEP_UNTAGGED_VARIANT,
+        paths,
+        project_root,
+    )?;
+    Ok(LocationsBase::Resolved(path))
+}
+
 /// Narrate which OSC chain a verify subcommand resolved, but only when the
 /// user actually passed `--snapshot` (the plain base case is unremarkable).
 fn narrate_osc_scope(snapshot: Option<&resolve::SnapshotRef>, scope: OscScope) {
@@ -411,11 +453,19 @@ pub(crate) fn verify(
         } else {
             None
         };
+        let locations_base = resolve_locations_base(
+            pbf.input.as_deref(),
+            &pbf.dataset,
+            pbf.snapshot.as_ref(),
+            &paths,
+            project_root,
+        )?;
         return super::verify_all::run(
             &harness,
             &pbf_path,
             osc_path.as_deref(),
             resolved_bbox.as_ref(),
+            &locations_base,
             &paths.data_dir,
             pbf.direct_io,
             &pbf.dataset,

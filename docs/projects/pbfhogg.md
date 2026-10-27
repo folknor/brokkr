@@ -169,8 +169,16 @@ osmium itself write stale coordinates. osmosis and osmconvert, which write no
 inline locations, are not run. The base must be LocationsOnWays and keep its
 untagged nodes (osmium's `--keep-untagged-nodes`): pbfhogg refuses `-l` with
 unresolved refs, and `check --locations` can only judge a ref whose node is
-in the file. `verify all` does not run this mode - its default input is not a
-LocationsOnWays file.
+in the file.
+
+`verify all` runs this mode as its own check, `apply-changes -l`, beside the
+plain merge: same OSC, but on the dataset's (or the `--snapshot`'s)
+`altw-keep-untagged` PBF variant, whatever `--variant` says, since a plain
+`altw` variant drops untagged nodes. It skips when no OSC is configured, when
+no `altw-keep-untagged` variant is registered, or under `--input` (a fixture
+has no keep-untagged partner; run `verify merge --input --osc
+--locations-on-ways` instead). A registered variant that fails to resolve
+fails the command, as a configured OSC does.
 
 `pbfhogg diff` is a merge-join and refuses an input that does not declare
 `Sort.Type_then_ID`. osmium's `apply-changes` output is content-sorted but does

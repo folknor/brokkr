@@ -36,6 +36,23 @@ const NO_OSC: &str = "SKIPPED (dataset has no osc configured; pass --osc-seq to 
 /// Why the bbox-consuming checks skip; same contract as [`NO_OSC`].
 const NO_BBOX: &str = "SKIPPED (no --bbox and the dataset has no bbox configured)";
 
+/// Result-line name of the `apply-changes --locations-on-ways` merge, which
+/// runs on its own base and so is a check of its own.
+const APPLY_CHANGES_LOCATIONS: &str = "apply-changes -l";
+
+/// The base of the suite's `--locations-on-ways` merge: a LocationsOnWays
+/// variant that keeps its untagged nodes, registered under
+/// [`KEEP_UNTAGGED_VARIANT`]. A variant that is registered but fails to
+/// resolve is an error in the caller, never a skip.
+pub enum LocationsBase {
+    Resolved(std::path::PathBuf),
+    Skipped(&'static str),
+}
+
+/// The variant name `verify all` looks for. A plain `altw` variant drops
+/// untagged nodes, so `-l` cannot resolve every ref on it.
+pub const KEEP_UNTAGGED_VARIANT: &str = "altw-keep-untagged";
+
 /// Run all verify commands sequentially.
 ///
 /// Each check runs under [`run_check`], so a failure is reported (with its
@@ -54,6 +71,7 @@ pub fn run(
     pbf: &Path,
     osc: Option<&Path>,
     bbox: Option<&Bbox>,
+    locations_base: &LocationsBase,
     data_dir: &Path,
     direct_io: bool,
     dataset: &str,
@@ -166,6 +184,25 @@ pub fn run(
     } else {
         verify_summary(&format!("apply-changes: {NO_OSC}"));
         skipped += 1;
+    }
+
+    // 8b. apply-changes --locations-on-ways, on the keep-untagged base with
+    // the same OSC (see verify_merge for the oracle).
+    match (osc, locations_base) {
+        (Some(osc_path), LocationsBase::Resolved(base)) => tally(
+            &mut counts,
+            &run_check(APPLY_CHANGES_LOCATIONS, verbose, || {
+                verify_merge::run(harness, base, osc_path, None, direct_io, true)
+            }),
+        )?,
+        (None, _) => {
+            verify_summary(&format!("{APPLY_CHANGES_LOCATIONS}: {NO_OSC}"));
+            skipped += 1;
+        }
+        (Some(_), LocationsBase::Skipped(why)) => {
+            verify_summary(&format!("{APPLY_CHANGES_LOCATIONS}: {why}"));
+            skipped += 1;
+        }
     }
 
     // 9. diff --format osc
