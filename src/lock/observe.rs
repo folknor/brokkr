@@ -70,11 +70,15 @@ pub(crate) struct Observed {
     marker: Mutex<Option<(String, Instant)>>,
     narration: Mutex<Option<(String, Instant)>>,
     cgroup: OnceLock<super::cgroup::CgroupView>,
+    /// When the table was made, which is no later than the first spawn under
+    /// the hold: no process older than this can carry the hold's token.
+    began: Instant,
 }
 
 impl Observed {
     pub(crate) fn new(acq: AcqId) -> Self {
         Self {
+            began: Instant::now(),
             acq,
             activities: Mutex::new(Activities::default()),
             launches: Mutex::new(VecDeque::new()),
@@ -83,6 +87,10 @@ impl Observed {
             narration: Mutex::new(None),
             cgroup: OnceLock::new(),
         }
+    }
+
+    pub(crate) fn began(&self) -> Instant {
+        self.began
     }
 
     pub(crate) fn acq(&self) -> &AcqId {

@@ -228,7 +228,13 @@ sandboxed holder and between sandboxes:
   "exited awaiting reap", not listed. Treat it as observed, not
   complete: a process that cleared its environment, or work a daemon does on
   the hold's behalf, is not in it, and "environment(s) not inspectable" counts
-  processes whose membership could not be checked. A row's CPU rate needs the
+  processes whose membership could not be checked and could still be the
+  hold's: not already listed, and started after the hold began (an older
+  process cannot carry its token), so the long-lived unrelated processes of the
+  same user do not show up there. Rows form a tree: a process comes before the
+  processes it started, indented beneath it, and a process whose parent is not
+  in the sample (or was cut by the size bound) stands at the top level. Siblings
+  stay busiest first. A row's CPU rate needs the
   process in both scans with the same token; the summed RSS counts shared
   pages once per process; IO counters include children the process has
   already waited for. PIDs are printed only when they mean the same thing to

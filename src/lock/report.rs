@@ -26,8 +26,11 @@
 //!   given only when the same process carried the same token in both;
 //! - the summed RSS is the sum of per-process RSS, shared pages counted once
 //!   per process; IO counters include children the process has waited for;
-//! - "unreadable" counts environments that could not be inspected - those
-//!   processes may or may not belong to the hold;
+//! - "unreadable" counts environments that could not be inspected and whose
+//!   process could still belong to the hold: not already a row, and not older
+//!   than the hold itself - those may or may not belong to it;
+//! - rows are a forest: a process precedes the ones it started, which are
+//!   indented beneath it; a row whose parent is not among the rows is a root;
 //! - the cgroup line is everything charged to the hold's cgroup since entry.
 
 use super::observe::sanitize;
@@ -465,6 +468,45 @@ fn render_activities(rows: &[ActivityRow], out: &mut Vec<String>) {
     walk(None, 0, &sorted, &ids, out);
 }
 
+/// Rows as a forest, a process before the processes it started. Rows come in
+/// the sender's order (busiest first) and keep it among siblings and roots, so
+/// the result is deterministic. A row whose parent is not among the rows -
+/// reparented, left out by the size bound, or never observed - is a root. The
+/// PID and PPID are both from the holder's one procfs, so the relation holds
+/// even when the numbers are not shown.
+fn tree_order<'a>(rows: &[&'a ProcRow]) -> Vec<(&'a ProcRow, usize)> {
+    let pids: std::collections::HashSet<u32> = rows.iter().map(|r| r.pid).collect();
+    let mut kids: std::collections::HashMap<u32, Vec<usize>> = std::collections::HashMap::new();
+    let mut roots = Vec::new();
+    for (i, r) in rows.iter().enumerate() {
+        if r.ppid != r.pid && pids.contains(&r.ppid) {
+            kids.entry(r.ppid).or_default().push(i);
+        } else {
+            roots.push(i);
+        }
+    }
+    let mut out = Vec::with_capacity(rows.len());
+    let mut seen = vec![false; rows.len()];
+    let mut stack: Vec<(usize, usize)> = roots.into_iter().rev().map(|i| (i, 0)).collect();
+    while let Some((i, depth)) = stack.pop() {
+        if std::mem::replace(&mut seen[i], true) {
+            continue;
+        }
+        out.push((rows[i], depth));
+        if let Some(k) = kids.get(&rows[i].pid) {
+            stack.extend(k.iter().rev().map(|c| (*c, depth + 1)));
+        }
+    }
+    // A parent cycle (PID reuse between the two scans) leaves rows unreached
+    // from any root; show them rather than drop them.
+    for (i, r) in rows.iter().enumerate() {
+        if !seen[i] {
+            out.push((r, 0));
+        }
+    }
+    out
+}
+
 fn render_sample(s: &SampleView, show_pids: bool, out: &mut Vec<String>) {
     let mut head = format!(
         "processes: {} observed (sampled {} ago over {}): {}, summed RSS {}",
@@ -485,8 +527,9 @@ fn render_sample(s: &SampleView, show_pids: bool, out: &mut Vec<String>) {
     }
     out.push(head);
     let pids = show_pids && s.pids_meaningful;
-    for r in s.rows.iter().filter(|r| r.state != 'Z') {
-        let mut line = String::from("  ");
+    let shown: Vec<&ProcRow> = s.rows.iter().filter(|r| r.state != 'Z').collect();
+    for (r, depth) in tree_order(&shown) {
+        let mut line = "  ".repeat(depth + 1);
         if pids {
             put!(line, "PID {} ", r.pid);
         }
@@ -607,6 +650,28 @@ mod tests {
         let mut want = ext;
         want.activities.as_mut().unwrap()[1].narration = Some("step with tab".into());
         assert_eq!(back, want);
+    }
+
+    #[test]
+    fn rows_read_as_a_tree_parent_first() {
+        let mut ext = sample_ext();
+        let base = ext.sample.as_ref().unwrap().rows[0].clone();
+        let row = |pid: u32, ppid: u32, argv: &str| ProcRow {
+            pid,
+            ppid,
+            argv: argv.into(),
+            ..base.clone()
+        };
+        // Busiest first, as the sender orders them: child, then parent, then
+        // an unrelated root whose parent is not in the sample.
+        ext.sample.as_mut().unwrap().rows =
+            vec![row(30, 20, "child"), row(20, 10, "parent"), row(50, 1, "other")];
+        let text = render(&ext, true).join("\n");
+        let at = |s: &str| text.find(s).unwrap();
+        assert!(at("PID 20 parent") < at("PID 30 child"), "{text}");
+        assert!(text.contains("\n    PID 30 child"), "{text}");
+        assert!(text.contains("\n  PID 20 parent"), "{text}");
+        assert!(text.contains("\n  PID 50 other"), "{text}");
     }
 
     #[test]

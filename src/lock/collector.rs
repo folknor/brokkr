@@ -144,6 +144,10 @@ pub(crate) fn sample(spec: &SampleSpec<'_>) -> SampleView {
     }
 }
 
+fn stat_start(stat: &crate::process::ProcStat) -> u64 {
+    stat.start().get()
+}
+
 fn millis(d: Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
@@ -153,7 +157,9 @@ fn scan(spec: &SampleSpec<'_>, cgroup: Option<&super::cgroup::CgroupView>) -> Sc
     let my_uid = unsafe { libc::geteuid() };
     let mut stats: HashMap<u32, Seen> = HashMap::new();
     let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-    let mut unreadable = 0usize;
+    // Same-user processes whose environment could not be checked, with start
+    // times in clock ticks since boot.
+    let mut unreadable: Vec<(u32, u64)> = Vec::new();
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return Scan {
             members: HashMap::new(),
@@ -181,7 +187,7 @@ fn scan(spec: &SampleSpec<'_>, cgroup: Option<&super::cgroup::CgroupView>) -> Sc
                 Environ::Found(value) => Some(value),
                 Environ::Absent => None,
                 Environ::Unreadable => {
-                    unreadable += 1;
+                    unreadable.push((pid.get(), stat_start(&stat)));
                     None
                 }
             },
@@ -226,6 +232,25 @@ fn scan(spec: &SampleSpec<'_>, cgroup: Option<&super::cgroup::CgroupView>) -> Sc
         }
     }
     via.remove(&spec.root);
+    // Only an unreadable process that the token could have been the proof for
+    // still matters: one that is already a member (descendant or cgroup) is
+    // counted as a row, the holder is not a member of itself, and one that
+    // started before the hold began cannot carry a token minted by it. The
+    // age cut needs the hold's start, so the reader-side fallback keeps them.
+    let cutoff_ms = spec.observed.and_then(|o| {
+        let boot_to_now = uptime_ms()?;
+        let began = boot_to_now.saturating_sub(millis(o.began().elapsed()));
+        Some(began.saturating_sub(1000))
+    });
+    let clk = crate::process::clock_ticks_per_second().unwrap_or(100).max(1);
+    let unreadable = unreadable
+        .into_iter()
+        .filter(|(pid, start)| {
+            *pid != spec.root
+                && !via.contains_key(pid)
+                && cutoff_ms.is_none_or(|c| start.saturating_mul(1000) / clk >= c)
+        })
+        .count();
     let members = via
         .into_iter()
         .filter_map(|(pid, how)| {
