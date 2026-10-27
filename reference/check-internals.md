@@ -315,6 +315,16 @@ whether it held anything. Beyond the shared boundary, the stray reaper
 recognizes **the verified current lock holder** (checked through the lock
 file's starttime and boot-id tokens) and its owned subtree.
 
+Every verification by PID - this one, `brokkr kill`'s numeric path, `brokkr
+lock`'s fallback and its PID column - first asks whether this `/proc` numbers
+processes for the caller's own PID namespace (`process::procfs_is_own_namespace`):
+`NSpid` in `/proc/self/status` must hold exactly one entry, our own PID. The
+rule used to compare `/proc/1/ns/pid` with our namespace, but reading init's
+namespace link needs ptrace access to it, so for every non-root user on a host
+it failed and no holder ever verified: PIDs were never shown, the fallback
+refused, `kill --hard` refused and a hand-run `brokkr strays` did not protect
+the holder's subtree.
+
 A holder in **another PID namespace** (a sandboxed command, seen from the host)
 cannot be verified by pid at all, so its namespace stands in for it: while it
 holds, every process in that namespace or nested below it is treated as its own

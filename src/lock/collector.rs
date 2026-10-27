@@ -54,6 +54,11 @@ pub(crate) struct SampleSpec<'a> {
     pub(crate) pids_meaningful: bool,
     /// The holder's observation table, for launch labels.
     pub(crate) observed: Option<&'a Observed>,
+    /// Milliseconds since boot no later than the hold began, for a sampler
+    /// without the observation table: the reader-side fallback passes the
+    /// holder process's own start, which no process carrying its token can
+    /// predate.
+    pub(crate) began_ms: Option<u64>,
 }
 
 struct Seen {
@@ -232,25 +237,7 @@ fn scan(spec: &SampleSpec<'_>, cgroup: Option<&super::cgroup::CgroupView>) -> Sc
         }
     }
     via.remove(&spec.root);
-    // Only an unreadable process that the token could have been the proof for
-    // still matters: one that is already a member (descendant or cgroup) is
-    // counted as a row, the holder is not a member of itself, and one that
-    // started before the hold began cannot carry a token minted by it. The
-    // age cut needs the hold's start, so the reader-side fallback keeps them.
-    let cutoff_ms = spec.observed.and_then(|o| {
-        let boot_to_now = uptime_ms()?;
-        let began = boot_to_now.saturating_sub(millis(o.began().elapsed()));
-        Some(began.saturating_sub(1000))
-    });
-    let clk = crate::process::clock_ticks_per_second().unwrap_or(100).max(1);
-    let unreadable = unreadable
-        .into_iter()
-        .filter(|(pid, start)| {
-            *pid != spec.root
-                && !via.contains_key(pid)
-                && cutoff_ms.is_none_or(|c| start.saturating_mul(1000) / clk >= c)
-        })
-        .count();
+    let unreadable = count_unreadable(spec, &unreadable, &via);
     let members = via
         .into_iter()
         .filter_map(|(pid, how)| {
@@ -262,6 +249,36 @@ fn scan(spec: &SampleSpec<'_>, cgroup: Option<&super::cgroup::CgroupView>) -> Sc
         members,
         unreadable,
     }
+}
+
+/// How many uninspectable environments could still be the hold's. Only one
+/// the token could have been the proof for still matters: one that is already
+/// a member (descendant or cgroup) is counted as a row, the holder is not a
+/// member of itself, and one that started before the hold began cannot carry a
+/// token minted by it. The reader-side fallback has no table and cuts at the
+/// holder's own start.
+fn count_unreadable(
+    spec: &SampleSpec<'_>,
+    unreadable: &[(u32, u64)],
+    members: &HashMap<u32, String>,
+) -> usize {
+    let cutoff_ms = spec
+        .observed
+        .and_then(|o| {
+            let boot_to_now = uptime_ms()?;
+            let began = boot_to_now.saturating_sub(millis(o.began().elapsed()));
+            Some(began.saturating_sub(1000))
+        })
+        .or(spec.began_ms);
+    let clk = crate::process::clock_ticks_per_second().unwrap_or(100).max(1);
+    unreadable
+        .iter()
+        .filter(|(pid, start)| {
+            *pid != spec.root
+                && !members.contains_key(pid)
+                && cutoff_ms.is_none_or(|c| start.saturating_mul(1000) / clk >= c)
+        })
+        .count()
 }
 
 /// The rest of a row: command line, IO, age. `None` when the PID changed
@@ -457,6 +474,7 @@ impl Collector {
                     root,
                     pids_meaningful: meaningful,
                     observed: Some(&me.observed),
+                    began_ms: None,
                 });
                 *me.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
                     Some((view, Instant::now()));
@@ -525,6 +543,7 @@ mod tests {
             root: u32::MAX,
             pids_meaningful: true,
             observed: None,
+            began_ms: None,
         });
         child.kill().ok();
         child.wait().ok();
@@ -543,6 +562,7 @@ mod tests {
             root: std::process::id(),
             pids_meaningful: true,
             observed: None,
+            began_ms: None,
         });
         child.kill().ok();
         child.wait().ok();

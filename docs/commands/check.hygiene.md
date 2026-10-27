@@ -256,7 +256,12 @@ rows it prints are under a second old. An older holder answers without any of th
 the holder does not answer (an older brokkr, or a stopped one) and runs in the
 caller's namespace, `brokkr lock` samples its processes from the caller's side
 with the same scanner, and says so if the hold ended meanwhile; activities and
-the marker live in the holder's memory and are not available then.
+the marker live in the holder's memory and are not available then. That output
+opens with `brokkr PID N`, not `brokkr (holding ...)`, and a line saying the
+socket gave no status, why, and whether the holder is stopped. Rows name their launch
+by cohort number only, and "not inspectable" counts processes started after
+the holder process itself, the nearest start this side knows. A holder in
+another PID namespace cannot be sampled from here, and `brokkr lock` says so.
 
 `BROKKR_EXEC` is reserved like the hold variables below: a sweep env value for
 it is ignored. A nextest lane's processes share one launch token for the lane.

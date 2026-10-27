@@ -19,6 +19,7 @@ pub(crate) fn cmd_lock() -> Result<(), DevError> {
     // First ask the holder itself, over its control socket. It answers about
     // its own process, so no PID crosses a namespace boundary - this works
     // from the host, from a sibling sandbox, from anywhere the socket is.
+    let mut unanswered = "it records no control socket (an older brokkr)".to_owned();
     if !info.acq_id.is_empty() {
         match crate::lock_service::request(&info.acq_id, "status") {
             crate::lock_service::Reply::Status(s) => {
@@ -36,13 +37,18 @@ pub(crate) fn cmd_lock() -> Result<(), DevError> {
                 output::lock_msg(&format!(
                     "the holder's status reply could not be decoded ({reason}); showing lock-file details"
                 ));
+                unanswered = format!("its status reply could not be decoded ({reason})");
             }
             // Released between the flock probe and the request, or stale
             // metadata: say what the file says, then try the local view.
-            crate::lock_service::Reply::Gone
-            | crate::lock_service::Reply::Accepted { .. }
-            | crate::lock_service::Reply::NoAnswer(_)
-            | crate::lock_service::Reply::Unconfirmed(_) => {}
+            crate::lock_service::Reply::Gone => {
+                unanswered = "it said this acquisition is over".into();
+            }
+            crate::lock_service::Reply::Accepted { .. } => {
+                unanswered = "it gave an unexpected answer".into();
+            }
+            crate::lock_service::Reply::NoAnswer(why)
+            | crate::lock_service::Reply::Unconfirmed(why) => unanswered = why,
         }
     }
     if let Some(hint) = lockfile::same_agent_hint(&info) {
@@ -61,7 +67,7 @@ pub(crate) fn cmd_lock() -> Result<(), DevError> {
             "the holder did not answer its control socket, and it runs in {} - its process cannot \
              be inspected from here",
             if crate::process::foreign_pid_namespace(&info.pid_ns).is_some() {
-                "another PID namespace (a sandboxed command)"
+                "another PID namespace than this command (one of them is sandboxed)"
             } else {
                 "a PID or time namespace this process cannot verify"
             }
@@ -83,6 +89,14 @@ pub(crate) fn cmd_lock() -> Result<(), DevError> {
         output::lock_msg(&format!(
             "brokkr PID {}{}: {}",
             info.pid, uptime_suffix, invocation,
+        ));
+        let stopped = verified_holder
+            .and_then(|(identity, _)| crate::process::ProcStat::read(identity.pid()).ok())
+            .filter(|stat| matches!(stat.state(), 'T' | 't'))
+            .map_or("", |_| " - it is stopped (SIGSTOP or a debugger)");
+        output::lock_msg(&format!(
+            "no status from the holder's control socket ({unanswered}){stopped}; what follows is \
+             observed from here, without its activities or last marker"
         ));
     } else {
         output::lock_msg(&invocation);
@@ -109,11 +123,16 @@ pub(crate) fn cmd_lock() -> Result<(), DevError> {
 /// memory, so they are not available on this path.
 fn print_observed_processes(info: &lockfile::LockInfo, holder: crate::process::ProcIdentity) {
     let acq = (!info.acq_id.is_empty()).then_some(info.acq_id.as_str());
+    // The holder's start: nothing carrying its token is older, so an
+    // uninspectable process from before it is not counted as possibly its.
+    let began_ms = crate::process::clock_ticks_per_second()
+        .map(|clk| holder.start().get().saturating_mul(1000) / clk);
     let sample = lockfile::collector::sample(&lockfile::collector::SampleSpec {
         acq,
         root: holder.pid().get(),
         pids_meaningful: true,
         observed: None,
+        began_ms,
     });
     // The sample took a quarter second: the hold it describes must still be
     // the one that holds the lock, or the rows are another's.
@@ -219,7 +238,8 @@ fn print_holder_status(info: &lockfile::LockInfo, s: &crate::lock_service::Holde
 
     if crate::process::foreign_pid_namespace(&info.pid_ns).is_some() {
         output::lock_msg(
-            "the holder runs in another PID namespace (a sandboxed command); `brokkr kill` asks it \
+            "the holder runs in another PID namespace than this command (one of them is \
+             sandboxed), so its PIDs are not shown; `brokkr kill` asks it \
              to stop over its control socket, `brokkr kill --hard` cannot reach it from here",
         );
     }

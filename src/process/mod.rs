@@ -34,13 +34,35 @@ pub fn proc_starttime(pid: u32) -> Option<StartTicks> {
     ProcStat::read(pid).ok().map(|stat| stat.identity().start())
 }
 
+/// Whether this `/proc` numbers processes in this process's own PID namespace.
+///
+/// `NSpid` in `/proc/self/status` lists this process's PID in every namespace
+/// from the procfs's own down to ours, so a procfs mounted for an ancestor
+/// namespace shows more than one entry, and one for an unrelated namespace has
+/// no `/proc/self` at all. Readable by anyone, unlike `/proc/1/ns/pid`, which
+/// needs ptrace access to init: comparing that link was the earlier rule, and
+/// on a host it failed for every non-root user, so no recorded PID ever
+/// verified there.
+pub fn procfs_is_own_namespace() -> bool {
+    std::fs::read_to_string("/proc/self/status")
+        .is_ok_and(|status| nspid_is_own(&status, std::process::id()))
+}
+
+fn nspid_is_own(status: &str, pid: u32) -> bool {
+    let Some(line) = status.lines().find_map(|l| l.strip_prefix("NSpid:")) else {
+        return false;
+    };
+    let mut entries = line.split_whitespace();
+    entries.next().and_then(|p| p.parse::<u32>().ok()) == Some(pid) && entries.next().is_none()
+}
+
 /// Compare the namespace tokens from a lock record with this process.
 /// Records predating namespace fields retain the previous procfs-only rule.
 pub fn shares_namespace_tokens(pid_ns: &str, time_ns: &str) -> bool {
     let Some(local_scope) = HostScope::current() else {
         return false;
     };
-    if namespace_inode("/proc/1/ns/pid") != Some(local_scope.pid_ns()) {
+    if !procfs_is_own_namespace() {
         return false;
     }
     if pid_ns.is_empty() && time_ns.is_empty() {
@@ -76,4 +98,20 @@ pub fn identity_matches(identity: ProcIdentity) -> bool {
 /// meaning.
 pub fn verify_identity(identity: ProcIdentity, boot: &BootId) -> bool {
     local_boot_id().as_ref() == Some(boot) && identity_matches(identity)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::nspid_is_own;
+
+    /// One `NSpid` entry equal to our PID: the procfs is ours. An ancestor's
+    /// procfs lists the outer PIDs first; a missing line proves nothing.
+    #[test]
+    fn nspid_decides_whose_procfs_this_is() {
+        assert!(nspid_is_own("Name:\tx\nNSpid:\t4242\n", 4242));
+        assert!(!nspid_is_own("NSpid:\t9001\t2\n", 2));
+        assert!(!nspid_is_own("NSpid:\t9001\t2\n", 9001));
+        assert!(!nspid_is_own("NSpid:\t17\n", 4242));
+        assert!(!nspid_is_own("Name:\tx\nPid:\t4242\n", 4242));
+    }
 }
