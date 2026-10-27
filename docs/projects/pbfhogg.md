@@ -76,6 +76,25 @@ whole is outside that claim.
 flag and a line saying it is added at run time. Recorded `cli_args` include
 `--overwrite` whenever it was passed.
 
+## Answer exit codes
+
+pbfhogg exits 0 or 1 for a completed command's answer and 2 or above for a
+failure: 1 is `diff` finding differences, `check` finding violations,
+`inspect --indexed` finding no index, `inspect --show` finding no element.
+The measured commands that give such an answer - `diff`, `diff-snapshots`,
+`check-refs`, `check-ids` - accept exit 1 as a completed run, so a
+`--bench` cell on a file that rightly fails its check (a ways-only snapshot
+under `check-refs`) reaches results.db, with `meta.exit_code` recording which
+answer was measured (see `docs/commands/results.md`). Exit 2 and signals stay
+failures. brokkr's `inspect` never passes `--indexed` or `--show`, so it
+accepts nothing but 0.
+
+The set is per command, not "1 is always an answer": pbfhogg commits from
+before this contract exited 1 on every failure, and a `--commit` baseline of
+`sort` or `cat` must not store a crash as a run. A `--commit` baseline of one
+of the four answer commands from that era cannot tell a failure from a
+negative answer either way; its `meta.exit_code` of 1 is the only hint.
+
 ## Verify subcommands
 
 `brokkr verify` holds the brokkr command lock for the whole invocation,

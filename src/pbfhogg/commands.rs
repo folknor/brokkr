@@ -569,11 +569,20 @@ impl PbfhoggCommand {
         matches!(self, Self::Diff { .. })
     }
 
-    /// Non-zero exit codes that should be treated as success for this command.
-    /// `diff` follows standard diff convention: exit 1 = differences found (not an error).
+    /// Non-zero exit codes that should be treated as a completed run.
+    ///
+    /// pbfhogg exits 1 for a completed negative answer and 2 for a failure:
+    /// `diff` found differences, `check` found violations (`check-refs` on a
+    /// ways-only file, `check-ids` on a duplicated one). Those runs are
+    /// stored, with `meta.exit_code` saying which answer was measured. Only
+    /// the commands that give such an answer accept 1: pbfhogg commits from
+    /// before that contract exited 1 on every failure, and a `--commit`
+    /// baseline must not store those as runs. `inspect` would answer
+    /// negatively only under `--indexed` or `--show`, which brokkr never
+    /// passes.
     pub fn ok_exit_codes(&self) -> &'static [i32] {
         match self {
-            Self::Diff { .. } | Self::DiffSnapshots { .. } => &[1],
+            Self::Diff { .. } | Self::DiffSnapshots { .. } | Self::CheckRefs | Self::CheckIds { .. } => &[1],
             _ => &[],
         }
     }

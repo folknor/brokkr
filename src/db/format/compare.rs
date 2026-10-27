@@ -151,6 +151,10 @@ struct ComparisonPair {
     /// Work-size counters on each side. See [`format_counter_diff`].
     a_counters: std::collections::BTreeMap<String, String>,
     b_counters: std::collections::BTreeMap<String, String>,
+    /// `meta.exit_code` on each side, for a command whose exit status is its
+    /// answer. See [`format_answer_diff`].
+    a_exit: Option<String>,
+    b_exit: Option<String>,
     /// Build provenance on each side (`provenance.*`, bare names); empty
     /// for a row that recorded none. See [`format_provenance_diff`].
     a_provenance: std::collections::BTreeMap<String, String>,
@@ -257,7 +261,17 @@ struct RowData {
     host: HostEnv,
     /// Every non-provenance counter on this row, stringified for comparison.
     counters: std::collections::BTreeMap<String, String>,
+    exit: Option<String>,
     provenance: std::collections::BTreeMap<String, String>,
+}
+
+/// A row's recorded answer exit code (`meta.exit_code`), when it has one.
+fn recorded_exit(kv: &[KvPair]) -> Option<String> {
+    kv.iter()
+        .find(|p| {
+            p.class() == KvClass::Metadata && p.key.name() == crate::measure::capture::EXIT_CODE_KEY
+        })
+        .map(|p| p.value.to_string())
 }
 
 /// A row's build provenance, by bare name. Empty when it recorded none.
@@ -344,6 +358,7 @@ fn make_row_data(row: &StoredRow, matcher: &DatasetMatcher) -> RowData {
         input_display: format_input(&row.input_file, row.input_mb, matcher),
         captured_env: row.captured_env.clone(),
         counters: collect_counters(&row.kv),
+        exit: recorded_exit(&row.kv),
         provenance: collect_provenance(&row.kv),
         host: HostEnv {
             memory_mb: row.avail_memory_mb,
@@ -433,6 +448,8 @@ fn build_comparison_pairs(
             let b_host = b.as_ref().map(|r| r.host.clone()).unwrap_or_default();
             let a_counters = a.as_ref().map(|r| r.counters.clone()).unwrap_or_default();
             let b_counters = b.as_ref().map(|r| r.counters.clone()).unwrap_or_default();
+            let a_exit = a.as_ref().and_then(|r| r.exit.clone());
+            let b_exit = b.as_ref().and_then(|r| r.exit.clone());
             ComparisonPair {
                 key: k,
                 a_wall: a.as_ref().map(|r| r.elapsed),
@@ -454,6 +471,8 @@ fn build_comparison_pairs(
                 b_host,
                 a_counters,
                 b_counters,
+                a_exit,
+                b_exit,
                 a_provenance,
                 b_provenance,
                 like_for_like,
@@ -481,6 +500,10 @@ fn append_pair_annotations(out: &mut String, pair: &ComparisonPair) {
         out.push('\n');
     }
     if let Some(annotation) = format_host_diff(&pair.a_host, &pair.b_host) {
+        out.push_str(&annotation);
+        out.push('\n');
+    }
+    if let Some(annotation) = format_answer_diff(pair.a_exit.as_deref(), pair.b_exit.as_deref()) {
         out.push_str(&annotation);
         out.push('\n');
     }
@@ -577,6 +600,20 @@ fn format_counter_diff(
         return None;
     }
     Some(format!("    counters: {}", moved.join(", ")))
+}
+
+/// Flag a pair whose two sides measured different answers: one `check` found
+/// violations and the other did not, one `diff` found differences and the
+/// other none. Their walls time different work. Only a value on both sides is
+/// compared - a row stored before exit codes were recorded has none, and a
+/// one-sided key says nothing about the answer.
+fn format_answer_diff(a: Option<&str>, b: Option<&str>) -> Option<String> {
+    match (a, b) {
+        (Some(a), Some(b)) if a != b => Some(format!(
+            "    answer: exit {a} -> {b} (the sides measured different answers)"
+        )),
+        _ => None,
+    }
 }
 
 /// Format a per-pair env annotation when A and B captured different
@@ -1433,6 +1470,25 @@ mod tests {
         // Unmoved counters are not news; listing them would bury the one that
         // moved.
         assert!(!out.contains("parents"), "{out}");
+    }
+
+    #[test]
+    fn answer_diff_flags_only_two_recorded_different_answers() {
+        let out = format_answer_diff(Some("1"), Some("0")).expect("different answers");
+        assert!(out.contains("exit 1 -> 0"), "{out}");
+        assert_eq!(format_answer_diff(Some("1"), Some("1")), None);
+        assert_eq!(format_answer_diff(None, Some("1")), None);
+        assert_eq!(format_answer_diff(None, None), None);
+    }
+
+    #[test]
+    fn recorded_exit_reads_the_metadata_key_only() {
+        let kv = vec![
+            KvPair::int("exit_code", 9),
+            KvPair::int(crate::db::KvKey::metadata("exit_code"), 1),
+        ];
+        assert_eq!(recorded_exit(&kv).as_deref(), Some("1"));
+        assert_eq!(recorded_exit(&kv[..1]), None);
     }
 
     #[test]

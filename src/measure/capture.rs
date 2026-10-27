@@ -10,6 +10,10 @@ use crate::output::child;
 use std::path::Path;
 use std::time::Duration;
 
+/// The metadata key (`meta.exit_code`) recording the exit status of a
+/// counted iteration whose command accepts a non-zero answer code.
+pub(crate) const EXIT_CODE_KEY: &str = "exit_code";
+
 impl BenchHarness {
     /// Capture one child under the loop's FIFO and the session's held lock.
     #[allow(clippy::too_many_arguments)]
@@ -87,11 +91,24 @@ impl BenchHarness {
                 child::IterationVerdict::Interrupted => Some(DevError::Interrupted),
             }
         };
-        let (_, kv) = if incomplete_output {
+        let (_, mut kv) = if incomplete_output {
             (None, Vec::new())
         } else {
             parse_kv_lines_us(&capture.stderr)
         };
+        // A command whose exit status is its answer (`diff` found differences,
+        // `check` found violations) stores both answers as completed runs, so
+        // the row says which one it measured. Commands without accepted
+        // non-zero codes keep their rows as they were.
+        if !ok_codes.is_empty()
+            && error.is_none()
+            && let Some(code) = ending.exit_code()
+        {
+            kv.push(db::KvPair::int(
+                db::KvKey::metadata(EXIT_CODE_KEY),
+                i64::from(code),
+            ));
+        }
         Ok(Iteration {
             result: Some(BenchResult {
                 elapsed_ms: elapsed_to_ms(&capture.elapsed),
