@@ -151,6 +151,25 @@ outputs - osmium-only IDs that appear in the input OSC's delete set are
 exempt (osmium does version-based deletes; pbfhogg/osmosis/osmconvert delete
 unconditionally), everything else fails.
 
+`verify merge --osc <PATH>` takes a handcrafted change file instead of
+resolving one (it conflicts with `--osc-seq`), the partner of `--input` for a
+fixture whose base and diff are built together.
+
+`verify merge --locations-on-ways` runs both tools with `-l`. `pbfhogg diff`
+treats inline way coordinates as derived data, not content, so the element
+diff cannot see a stale coordinate; instead pbfhogg's output must pass
+`pbfhogg check --locations` (each way's inline coordinates equal its nodes'
+records in the same file; exit 1 is a FAIL, any other non-zero exit an
+error). osmium's output gets the same check, reported on the summary channel
+only: its location index is searched before it is sorted and resolves
+duplicate keys to the smallest location, so multi-version diffs can make
+osmium itself write stale coordinates. osmosis and osmconvert, which write no
+inline locations, are not run. The base must be LocationsOnWays and keep its
+untagged nodes (osmium's `--keep-untagged-nodes`): pbfhogg refuses `-l` with
+unresolved refs, and `check --locations` can only judge a ref whose node is
+in the file. `verify all` does not run this mode - its default input is not a
+LocationsOnWays file.
+
 `pbfhogg diff` is a merge-join and refuses an input that does not declare
 `Sort.Type_then_ID`. osmium's `apply-changes` output is content-sorted but does
 not stamp the feature, so `verify_merge` and `verify_derive_changes` pass it
@@ -209,9 +228,11 @@ schema-universal flags (`--variant`, `--osc-seq`, `--tiles`) see
   outside `build_pbfhogg_context` but share `resolve_snapshot_pbf_path` via
   `SnapshotRef::from_opt`); the synthetic `write`/`merge-bench`/etc. benches
   do not.
-- `--as-snapshot <key>` / `--replace-snapshot` - (`repack` and `degrade` only)
-  promote the final iteration's scratch artifact into the dataset graph as a
-  new snapshot. `--replace-snapshot` allows overwriting an existing key;
+- `--as-snapshot <key>` / `--replace-snapshot` - (`repack`, `degrade` and
+  `cat` only) promote the final iteration's scratch artifact into the dataset
+  graph as a new snapshot. `cat --type way --as-snapshot ways-only` is how a
+  single-kind input (every way ref dangling) is made addressable as
+  `--snapshot ways-only`. `--replace-snapshot` allows overwriting an existing key;
   without it, an existing key errors out. Both flags are validated up-front
   via `download::preflight_snapshot_collision` (called from the top of
   `run_command_with_params`), so a forgotten `--replace-snapshot` errors
@@ -271,7 +292,9 @@ compare pairs automatically, no suffix required.
   intended cell: `brokkr add-locations-to-ways --dataset europe --variant raw
   --index-type sparse --compression zstd:1 --force-altw --bench 3`.
 - `--locations-on-ways` - (`apply-changes` only) passes through to the child
-  pbfhogg invocation.
+  pbfhogg invocation. Like `verify merge --locations-on-ways`, it needs a
+  LocationsOnWays base that keeps its untagged nodes; a default altw variant
+  drops them and pbfhogg refuses the run.
 
 ### Durable enriched output (re-enrichment workflow)
 
@@ -302,8 +325,12 @@ the last path component.
 Checks configured filenames in `brokkr.toml` before downloading. `--osc-seq N`
 downloads all missing diffs from `last_configured_seq + 1` through N. After
 downloading, computes xxh128 hashes and registers the new entries in
-`brokkr.toml`. Filenames follow project convention: `{key}-{YYYYMMDD}-seq{N}.osc.gz`,
-`{key}-{YYYYMMDD}.osm.pbf`. The indexed variant is generated with plain
+`brokkr.toml`. PBFs are named `{key}-{YYYYMMDD}.osm.pbf` (the download day)
+or `{key}-{snapshot}.osm.pbf`. OSCs are named `{key}-seq{N}.osc.gz` in every
+flow: the only date at hand is the download day or the snapshot key, neither
+says what edits a diff holds, and a dated name invited applying a diff to the
+base of that date. Files registered under the older `{key}-{date}-seq{N}`
+names keep working - resolution reads the registered filename. The indexed variant is generated with plain
 `pbfhogg cat <raw> -o <indexed>` (`generate_indexed_pbf`, shared by the
 primary, `--as-snapshot` and `--refresh` flows).
 

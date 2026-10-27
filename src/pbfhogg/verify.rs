@@ -241,6 +241,35 @@ impl VerifyHarness {
         }
     }
 
+    /// Check that every way's inline coordinates in a LocationsOnWays PBF
+    /// match the records of the nodes it references, through `pbfhogg check
+    /// --locations`. Exit 0 is consistent, 1 is violations found (the report
+    /// is printed), anything else - a signal, a usage error, an older pbfhogg
+    /// without the flag - is an error, never a verdict.
+    pub fn check_locations(&self, label: &str, pbf: &Path) -> Result<Verdict, DevError> {
+        let pbf_str = pbf.display().to_string();
+        let captured = self.run_pbfhogg(&["check", "--locations", &pbf_str], Writes::Nothing)?;
+        match captured.code() {
+            Some(0) => {
+                output::verify_msg(&format!("  {label}: inline locations consistent PASS"));
+                Ok(Verdict::Pass)
+            }
+            Some(1) => {
+                for line in String::from_utf8_lossy(&captured.stdout).lines() {
+                    output::verify_msg(&format!("  {label}: {line}"));
+                }
+                output::verify_msg(&format!("  {label}: inline locations STALE FAIL"));
+                Ok(Verdict::Fail)
+            }
+            _ => {
+                self.check_exit(&captured, "pbfhogg check --locations")?;
+                Err(DevError::Internal(
+                    "pbfhogg check --locations exited 0 after a non-zero status".into(),
+                ))
+            }
+        }
+    }
+
     /// Write `input` without its blob-level indexdata to `output`, through
     /// `pbfhogg degrade --strip-indexdata` (element content and order kept),
     /// so a check can drive the unindexed code path of a command whose

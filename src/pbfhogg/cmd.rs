@@ -28,25 +28,28 @@ fn resolve_verify_input(
     project_root: &Path,
 ) -> Result<PathBuf, DevError> {
     if let Some(p) = input {
-        // Canonicalise so downstream tools see a consistent absolute
-        // path regardless of where brokkr was invoked from. `canonicalize`
-        // also surfaces a "no such file" error here rather than letting
-        // pbfhogg / osmium fail mid-pipeline.
-        let abs = if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            project_root.join(p)
-        };
-        let canonical = abs
-            .canonicalize()
-            .map_err(|e| DevError::Config(format!("--input {p}: {e}", p = p.display())))?;
-        return Ok(canonical);
+        return canonical_fixture(p, project_root, "--input");
     }
     // `--snapshot base` / omitted → primary data (identical to the legacy
     // `resolve_pbf_path`); a named key reads the snapshot's pbf table.
     let snapshot_ref = resolve::SnapshotRef::from_opt(snapshot);
     resolve::resolve_snapshot_pbf_path(dataset, &snapshot_ref, variant, paths, project_root)
         .map_err(Into::into)
+}
+
+/// A handcrafted fixture path (`--input`, `--osc`), relative to the project
+/// root. Canonicalised so downstream tools see a consistent absolute path
+/// regardless of where brokkr was invoked from; `canonicalize` also surfaces
+/// a "no such file" error here rather than letting pbfhogg / osmium fail
+/// mid-pipeline.
+fn canonical_fixture(p: &Path, project_root: &Path, flag: &str) -> Result<PathBuf, DevError> {
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        project_root.join(p)
+    };
+    abs.canonicalize()
+        .map_err(|e| DevError::Config(format!("{flag} {p}: {e}", p = p.display())))
 }
 
 /// Resolve the `read` benchmark's input PBF and its size, honouring an
@@ -545,7 +548,12 @@ pub(crate) fn verify(
             )?;
             super::verify_check_refs::run(&harness, &pbf_path, pbf.direct_io)
         }
-        VerifyCommand::Merge { pbf, osc_seq } => {
+        VerifyCommand::Merge {
+            pbf,
+            osc_seq,
+            osc,
+            locations_on_ways,
+        } => {
             let pbf_path = resolve_verify_input(
                 pbf.input.as_deref(),
                 &pbf.dataset,
@@ -554,19 +562,31 @@ pub(crate) fn verify(
                 &paths,
                 project_root,
             )?;
-            let (osc_path, scope) = resolve_verify_osc(
-                &pbf.dataset,
-                pbf.snapshot.as_ref(),
-                osc_seq.as_deref(),
-                &paths,
-                project_root,
-            )?;
-            narrate_osc_scope(pbf.snapshot.as_ref(), scope);
-            let osmosis = match tools::ensure_osmosis(&paths.data_dir) {
-                Ok(tools) => Some(tools),
-                Err(e) => {
-                    output::verify_msg(&format!("osmosis not available (non-fatal): {e}"));
-                    None
+            let osc_path = if let Some(p) = osc.as_deref() {
+                canonical_fixture(p, project_root, "--osc")?
+            } else {
+                let (path, scope) = resolve_verify_osc(
+                    &pbf.dataset,
+                    pbf.snapshot.as_ref(),
+                    osc_seq.as_deref(),
+                    &paths,
+                    project_root,
+                )?;
+                narrate_osc_scope(pbf.snapshot.as_ref(), scope);
+                path
+            };
+            // osmosis and osmconvert write no inline locations, so an -l run
+            // has nothing to ask them.
+            let osmosis = if locations_on_ways {
+                None
+            } else {
+                match tools::ensure_osmosis(&paths.data_dir) {
+                    Ok(tools) => Some(tools),
+                    Err(DevError::Interrupted) => return Err(DevError::Interrupted),
+                    Err(e) => {
+                        output::verify_msg(&format!("osmosis not available (non-fatal): {e}"));
+                        None
+                    }
                 }
             };
             super::verify_merge::run(
@@ -575,6 +595,7 @@ pub(crate) fn verify(
                 &osc_path,
                 osmosis.as_ref(),
                 pbf.direct_io,
+                locations_on_ways,
             )
         }
         VerifyCommand::DeriveChanges { pbf, osc_seq } => {

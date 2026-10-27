@@ -650,6 +650,11 @@ In depth: `brokkr man clippy`."
     ///     combination supports `--io-uring`);
     ///   `--clean` forces the full-decode / re-frame Framed path
     ///     instead of Raw passthrough.
+    ///
+    /// Default writes to scratch and is overwritten on each `--bench`
+    /// iteration. Pass `--as-snapshot KEY` to promote the final iteration's
+    /// artifact into the dataset graph under `pbf.indexed` (cat keeps
+    /// indexdata), e.g. a ways-only file from `--type way`.
     #[command(name = "cat", display_order = 2)]
     Cat {
         #[command(flatten)]
@@ -674,6 +679,14 @@ In depth: `brokkr man clippy`."
         /// `[dataset.snapshot.<key>]` for a historical snapshot.
         #[arg(long)]
         snapshot: Option<crate::datasets::resolve::SnapshotRef>,
+        /// Promote the final iteration's artifact to a snapshot under the
+        /// dataset (writes a [..snapshot.<KEY>.pbf.indexed] entry).
+        #[arg(long, value_name = "KEY")]
+        as_snapshot: Option<String>,
+        /// Overwrite an existing snapshot of the same key. Without this,
+        /// `--as-snapshot KEY` errors when KEY is already registered.
+        #[arg(long, requires = "as_snapshot")]
+        replace_snapshot: bool,
     },
     /// Tags filter. Orthogonal flags:
     ///   `--filter EXPR` - pbfhogg filter expression (default
@@ -3059,8 +3072,19 @@ pub(crate) enum VerifyCommand {
     Merge {
         #[command(flatten)]
         pbf: VerifyPbfArgs,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "osc")]
         osc_seq: Option<String>,
+        /// Path to a handcrafted change file (skips OSC resolution), the
+        /// partner of `--input` for a fixture whose base and diff are built
+        /// together.
+        #[arg(long, value_name = "PATH")]
+        osc: Option<std::path::PathBuf>,
+        /// Run both tools with `--locations-on-ways` and hold pbfhogg's output
+        /// to `pbfhogg check --locations` (every way's inline coordinates
+        /// match its nodes' records). Needs a LocationsOnWays base that keeps
+        /// its untagged nodes. osmosis and osmconvert are skipped.
+        #[arg(long)]
+        locations_on_ways: bool,
     },
     /// Cross-validate diff --format osc roundtrip against osmium
     #[command(display_order = 8)]

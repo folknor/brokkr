@@ -160,7 +160,7 @@ pub fn run(
         tally(
             &mut counts,
             &run_check(labels::APPLY_CHANGES, verbose, || {
-                verify_merge::run(harness, pbf, osc_path, osmosis.as_ref(), direct_io)
+                verify_merge::run(harness, pbf, osc_path, osmosis.as_ref(), direct_io, false)
             }),
         )?;
     } else {

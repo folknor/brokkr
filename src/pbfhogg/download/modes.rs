@@ -127,7 +127,7 @@ pub fn run(
                 }
 
                 let url = source.osc_url(seq);
-                let dest = data_dir.join(osc_filename(dataset_key, &date, seq));
+                let dest = data_dir.join(osc_filename(dataset_key, seq));
 
                 if dest.exists() && is_nonempty(&dest) {
                     output::download_msg(&format!("  SKIP (exists): {}", dest.display()));
@@ -276,7 +276,7 @@ fn run_as_snapshot(
         // a tighter range. Simplest: download just `target_seq` itself.
         // (Future enhancement: --osc-from N --osc-to M for snapshot-scoped ranges.)
         let url = source.osc_url(target_seq);
-        let dest = data_dir.join(osc_filename(dataset_key, snap_key, target_seq));
+        let dest = data_dir.join(osc_filename(dataset_key, target_seq));
         if is_nonempty(&dest) {
             output::download_msg(&format!("  SKIP (exists): {}", dest.display()));
         } else {

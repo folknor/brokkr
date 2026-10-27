@@ -1,7 +1,7 @@
 //! Verify: apply-changes - strict pbfhogg/osmium comparison, with optional
 //! osmosis and osmconvert outputs shown for additional context.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::verify::{self, ExternalTool, Findings, VerifyHarness, Writes};
 use crate::error::DevError;
@@ -18,18 +18,32 @@ const MAX_REPORTED_IDS: usize = 10;
 
 /// Cross-validate `pbfhogg apply-changes` against osmium; print optional
 /// osmosis and osmconvert output for additional context.
+///
+/// With `locations_on_ways`, both tools run with `--locations-on-ways` and
+/// pbfhogg's output must pass `pbfhogg check --locations`. The element diff
+/// cannot see inline coordinates (`pbfhogg diff` treats them as derived
+/// data, not content), so that check is the only one that catches a stale
+/// coordinate - a way the diff leaves untouched under a node it moves.
+/// osmium's output is checked the same way but only reported: its location
+/// index can itself write stale coordinates (several versions of one node,
+/// unsorted lookups), so it is not the oracle. osmosis and osmconvert, which
+/// write no inline locations, are not run.
 pub fn run(
     harness: &VerifyHarness,
     pbf: &Path,
     osc: &Path,
     osmosis: Option<&OsmosisTools>,
     direct_io: bool,
+    locations_on_ways: bool,
 ) -> Result<Findings, DevError> {
     let outdir = harness.subdir("merge")?;
 
     verify_msg("=== verify apply-changes ===");
     verify_msg(&format!("  base: {}", pbf.display()));
     verify_msg(&format!("  diff: {}", osc.display()));
+    if locations_on_ways {
+        verify_msg("  mode: --locations-on-ways");
+    }
 
     let pbf_str = pbf.display().to_string();
     let osc_str = osc.display().to_string();
@@ -43,6 +57,9 @@ pub fn run(
     if direct_io {
         pbfhogg_args.push("--direct-io");
     }
+    if locations_on_ways {
+        pbfhogg_args.push("--locations-on-ways");
+    }
     let captured = harness.run_pbfhogg(&pbfhogg_args, Writes::OwnedOutput)?;
     harness.check_exit(&captured, "pbfhogg apply-changes")?;
 
@@ -51,86 +68,33 @@ pub fn run(
     let osmium_out_str = osmium_out.display().to_string();
 
     verify_msg("--- osmium apply-changes ---");
-    let captured = harness.run_tool(
-        ExternalTool::Osmium,
-        &[
-            "apply-changes",
-            &pbf_str,
-            &osc_str,
-            "-o",
-            &osmium_out_str,
-            "--overwrite",
-        ],
-    )?;
+    let mut osmium_args = vec![
+        "apply-changes",
+        &pbf_str,
+        &osc_str,
+        "-o",
+        &osmium_out_str,
+        "--overwrite",
+    ];
+    if locations_on_ways {
+        osmium_args.push("--locations-on-ways");
+    }
+    let captured = harness.run_tool(ExternalTool::Osmium, &osmium_args)?;
     harness.check_exit(&captured, "osmium apply-changes")?;
 
-    // --- osmosis (optional) ---
-    let osmosis_out = outdir.join("osmosis.osm.pbf");
-    if let Some(tools) = osmosis {
-        verify_msg("--- osmosis --apply-change ---");
-        let osmosis_out_str = osmosis_out.display().to_string();
-        match run_osmosis(
-            tools,
-            &[
-                "--read-xml-change",
-                &format!("file={osc_str}"),
-                "--read-pbf",
-                &format!("file={pbf_str}"),
-                "--apply-change",
-                "--write-pbf",
-                &format!("file={osmosis_out_str}"),
-            ],
-            &harness.project_root,
-        ) {
-            Ok(captured) => {
-                if let Err(e) = harness.check_exit(&captured, "osmosis") {
-                    verify_msg(&format!("  osmosis failed: {e}"));
-                    // A failed run may leave a partial file; the element-count
-                    // section below reads `exists()` as "osmosis produced this".
-                    drop(std::fs::remove_file(&osmosis_out));
-                }
-            }
-            // A stop is not a skipped tool: carry on and the rest of the
-            // check would run against a half-killed comparison.
-            Err(DevError::Interrupted) => return Err(DevError::Interrupted),
-            Err(e) => {
-                verify_msg(&format!("  osmosis skipped: {e}"));
-            }
-        }
-    }
-
-    // --- osmconvert (optional) ---
-    let osmconvert_out = outdir.join("osmconvert.osm.pbf");
-    if verify::which_exists("osmconvert") {
-        verify_msg("--- osmconvert ---");
-        let osmconvert_out_str = osmconvert_out.display().to_string();
-        let out_arg = format!("-o={osmconvert_out_str}");
-        match harness.run_tool(ExternalTool::Osmconvert, &[&pbf_str, &osc_str, &out_arg]) {
-            Ok(captured) => {
-                if let Err(e) = harness.check_exit(&captured, "osmconvert") {
-                    verify_msg(&format!("  osmconvert failed: {e}"));
-                    drop(std::fs::remove_file(&osmconvert_out));
-                }
-            }
-            Err(DevError::Interrupted) => return Err(DevError::Interrupted),
-            Err(e) => {
-                verify_msg(&format!("  osmconvert skipped: {e}"));
-            }
-        }
-    }
+    // --- osmosis / osmconvert (optional context) ---
+    let context_outputs = if locations_on_ways {
+        Vec::new()
+    } else {
+        run_context_tools(harness, osmosis, &pbf_str, &osc_str, &outdir)?
+    };
 
     // --- Element counts ---
-    // `exists()` is sound here only because `subdir` hands back an emptied
-    // directory and a failed tool run removes its partial output above - a
-    // file present now was written by this run.
     verify_msg("=== element counts ===");
     harness.print_inspect("pbfhogg", &pbfhogg_out)?;
     harness.print_inspect("osmium", &osmium_out)?;
-    if osmosis_out.exists() {
-        harness.print_inspect("osmosis", &osmosis_out)?;
-    }
-    if osmconvert_out.exists() {
-        harness.print_inspect("osmconvert", &osmconvert_out)?;
+    for (label, path) in &context_outputs {
+        harness.print_inspect(label, path)?;
     }
 
     let mut findings = Findings::new();
@@ -140,6 +104,23 @@ pub fn run(
         "pbfhogg apply-changes output order",
         harness.check_sorted("pbfhogg apply-changes", &pbfhogg_out)?,
     );
+
+    // --- Inline locations (-l only) ---
+    // Before the element diff, which reports its failure as an `Err` and so
+    // would otherwise keep this verdict from being recorded.
+    if locations_on_ways {
+        verify_msg("=== inline locations (pbfhogg check --locations) ===");
+        findings.record(
+            "pbfhogg apply-changes inline locations",
+            harness.check_locations("pbfhogg", &pbfhogg_out)?,
+        );
+        let osmium = harness.check_locations("osmium", &osmium_out)?;
+        output::verify_summary(&format!(
+            "  osmium apply-changes --locations-on-ways inline locations: {} \
+             (informational: osmium's location index is not an oracle)",
+            if osmium.is_pass() { "consistent" } else { "STALE" }
+        ));
+    }
 
     // pbfhogg diff (the deep-compare below) is a merge-join and requires both
     // inputs to declare the Sort.Type_then_ID optional feature. pbfhogg's
@@ -172,6 +153,76 @@ pub fn run(
     verify_pbfhogg_vs_osmium(harness, osc, &pbfhogg_out, &osmium_sorted, &outdir)?;
 
     Ok(findings)
+}
+
+/// Run the optional osmosis and osmconvert merges, shown for context only.
+/// Returns the `(label, output)` of each tool that wrote one.
+///
+/// `exists()` is sound here only because `subdir` hands back an emptied
+/// directory and a failed tool run removes its partial output - a file
+/// present after a run was written by it.
+fn run_context_tools(
+    harness: &VerifyHarness,
+    osmosis: Option<&OsmosisTools>,
+    pbf_str: &str,
+    osc_str: &str,
+    outdir: &Path,
+) -> Result<Vec<(&'static str, PathBuf)>, DevError> {
+    let osmosis_out = outdir.join("osmosis.osm.pbf");
+    if let Some(tools) = osmosis {
+        verify_msg("--- osmosis --apply-change ---");
+        let osmosis_out_str = osmosis_out.display().to_string();
+        match run_osmosis(
+            tools,
+            &[
+                "--read-xml-change",
+                &format!("file={osc_str}"),
+                "--read-pbf",
+                &format!("file={pbf_str}"),
+                "--apply-change",
+                "--write-pbf",
+                &format!("file={osmosis_out_str}"),
+            ],
+            &harness.project_root,
+        ) {
+            Ok(captured) => {
+                if let Err(e) = harness.check_exit(&captured, "osmosis") {
+                    verify_msg(&format!("  osmosis failed: {e}"));
+                    drop(std::fs::remove_file(&osmosis_out));
+                }
+            }
+            // A stop is not a skipped tool: carry on and the rest of the
+            // check would run against a half-killed comparison.
+            Err(DevError::Interrupted) => return Err(DevError::Interrupted),
+            Err(e) => {
+                verify_msg(&format!("  osmosis skipped: {e}"));
+            }
+        }
+    }
+
+    let osmconvert_out = outdir.join("osmconvert.osm.pbf");
+    if verify::which_exists("osmconvert") {
+        verify_msg("--- osmconvert ---");
+        let osmconvert_out_str = osmconvert_out.display().to_string();
+        let out_arg = format!("-o={osmconvert_out_str}");
+        match harness.run_tool(ExternalTool::Osmconvert, &[pbf_str, osc_str, &out_arg]) {
+            Ok(captured) => {
+                if let Err(e) = harness.check_exit(&captured, "osmconvert") {
+                    verify_msg(&format!("  osmconvert failed: {e}"));
+                    drop(std::fs::remove_file(&osmconvert_out));
+                }
+            }
+            Err(DevError::Interrupted) => return Err(DevError::Interrupted),
+            Err(e) => {
+                verify_msg(&format!("  osmconvert skipped: {e}"));
+            }
+        }
+    }
+
+    Ok([("osmosis", osmosis_out), ("osmconvert", osmconvert_out)]
+        .into_iter()
+        .filter(|(_, path)| path.exists())
+        .collect())
 }
 
 /// Run `pbfhogg diff --format osc` on `(pbfhogg_out, osmium_out)`,

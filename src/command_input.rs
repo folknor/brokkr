@@ -118,10 +118,14 @@ impl Command {
                 dedupe,
                 clean,
                 snapshot,
+                as_snapshot,
+                replace_snapshot,
             } => {
                 let tf = type_filter.as_deref().map(CatTypeFilter::from_cli);
                 let params = CommandParams {
                     snapshot,
+                    as_snapshot,
+                    replace_snapshot,
                     ..Default::default()
                 };
                 RoutedCommand::Pbf {

@@ -97,9 +97,15 @@ pub(super) fn indexed_pbf_path(
     data_dir.join(indexed_pbf_filename(dataset_key, date))
 }
 
-/// Build the OSC destination filename using the project naming convention.
-pub(super) fn osc_filename(dataset_key: &str, date: &str, seq: u64) -> String {
-    format!("{dataset_key}-{date}-seq{seq}.osc.gz")
+/// Build the OSC destination filename: dataset and replication sequence only.
+///
+/// No date: the only one at hand is the download day (or, for a snapshot
+/// download, the snapshot key), neither of which says what the diff holds,
+/// and a dated name invites applying it to the base of that date. The
+/// sequence alone identifies the file within one dataset's replication
+/// stream, so the primary chain and every snapshot share one copy of it.
+pub(super) fn osc_filename(dataset_key: &str, seq: u64) -> String {
+    format!("{dataset_key}-seq{seq}.osc.gz")
 }
 
 /// Check that a file exists and is not empty (guards against partial downloads).
