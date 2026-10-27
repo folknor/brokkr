@@ -474,12 +474,18 @@ fn render_sample(s: &SampleView, show_pids: bool, out: &mut Vec<String>) {
         cores(s.cpu_milli_total),
         bytes(s.rss_kb_total * 1024),
     );
+    // An exited child its parent has not reaped yet has no memory, no CPU
+    // rate and no command line: a row for it is noise, a count is enough.
+    let zombies = s.rows.iter().filter(|r| r.state == 'Z').count();
+    if zombies > 0 {
+        put!(head, ", {zombies} exited awaiting reap");
+    }
     if s.unreadable > 0 {
         put!(head, ", {} environment(s) not inspectable", s.unreadable);
     }
     out.push(head);
     let pids = show_pids && s.pids_meaningful;
-    for r in &s.rows {
+    for r in s.rows.iter().filter(|r| r.state != 'Z') {
         let mut line = String::from("  ");
         if pids {
             put!(line, "PID {} ", r.pid);
@@ -503,7 +509,7 @@ fn render_sample(s: &SampleView, show_pids: bool, out: &mut Vec<String>) {
         }
         put!(line, " - {}", facts.join(", "));
         if let Some(l) = &r.launched {
-            put!(line, " [launched: {l}]");
+            put!(line, " [{l}]");
         }
         out.push(line);
     }

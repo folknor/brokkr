@@ -203,7 +203,7 @@ sandboxed holder and between sandboxes:
 [lock]    doing: verify merge (29m10s)
 [lock]      osmium apply-changes (3m02s)
 [lock]    processes: 1 observed (sampled 248ms ago over 254ms): 0.98 cores, summed RSS 4.1 GB
-[lock]      PID 4242 osmium apply-changes ... - 0.98 cores, CPU 2m55s, RSS 4.1 GB, up 3m02s, io r 2.1 GB w 800 MB [launched: osmium apply-changes under verify merge]
+[lock]      PID 4242 osmium apply-changes ... - 0.98 cores, CPU 2m55s, RSS 4.1 GB, up 3m02s, io r 2.1 GB w 800 MB [under verify merge]
 [lock]    cgroup brokkr-...: CPU 1h02m since entry 29m ago, now 1.01 cores, 3 member process(es)
 [lock]    last marker: STAGE2_START (12s ago)
 ```
@@ -221,7 +221,11 @@ sandboxed holder and between sandboxes:
   launch token. Every child brokkr spawns under a hold carries
   `BROKKR_EXEC=<acquisition id>.<sequence>`, inherited by everything below it,
   so a grandchild that reparented or outlived its parent is still found, and
-  each row names the step it was launched under. Treat it as observed, not
+  each row names the step it was launched under: `[under STEP]` on the
+  process brokkr spawned, `[from LAUNCH under STEP]` on one that process
+  started (LAUNCH is the spawned program and its first arguments). A child
+  that exited and waits for its parent to reap it is counted in the header as
+  "exited awaiting reap", not listed. Treat it as observed, not
   complete: a process that cleared its environment, or work a daemon does on
   the hold's behalf, is not in it, and "environment(s) not inspectable" counts
   processes whose membership could not be checked. A row's CPU rate needs the

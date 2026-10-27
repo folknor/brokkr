@@ -274,9 +274,14 @@ fn describe(
     let launched = seen.token.as_deref().and_then(parse_exec).map(|(acq, seq)| {
         match spec.observed {
             Some(o) if o.acq().as_str() == acq => match o.launch_record(seq) {
-                Some(r) => match r.under {
-                    Some(under) => format!("{} under {under}", r.label),
-                    None => r.label,
+                // The launch's label is its own (shortened) command line, so
+                // on the launched process itself only the activity is news;
+                // a descendant names the launch it came from.
+                Some(r) => match (is_the_launch(&argv, &r.label), r.under) {
+                    (true, Some(under)) => format!("under {under}"),
+                    (true, None) => "launched directly".to_owned(),
+                    (false, Some(under)) => format!("from {} under {under}", r.label),
+                    (false, None) => format!("from {}", r.label),
                 },
                 None => format!("cohort {seq}, label not kept"),
             },
@@ -297,6 +302,22 @@ fn describe(
         launched,
         argv,
     })
+}
+
+/// Whether a process's command line is the launch a cohort label names. The
+/// label (`spawn::launch_label`) is the program's file name and its first
+/// few arguments, so the row's argv with its program shortened the same way
+/// starts with it. An exec'd wrapper or a forked child does not match and is
+/// shown as coming from the launch.
+fn is_the_launch(argv: &str, label: &str) -> bool {
+    let (program, rest) = argv.split_once(' ').unwrap_or((argv, ""));
+    let name = program.rsplit('/').next().unwrap_or(program);
+    let shortened = if rest.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{name} {rest}")
+    };
+    !label.is_empty() && shortened.starts_with(label)
 }
 
 enum Environ {
@@ -439,6 +460,23 @@ impl Collector {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+
+    /// The launched process matches its own label (program shortened to its
+    /// file name, first arguments); a child it started does not.
+    #[test]
+    fn the_launch_is_told_from_its_children() {
+        let label = "all-e54d --skip tier2:: --skip";
+        assert!(is_the_launch(
+            "/target/debug/out/all-e54d --skip tier2:: --skip tier3:: --test-threads=2",
+            label
+        ));
+        assert!(!is_the_launch(
+            "/target/debug/pbfhogg add-locations-to-ways in.pbf -o out.pbf",
+            label
+        ));
+        assert!(is_the_launch("/usr/bin/sleep", "sleep"));
+        assert!(!is_the_launch("/usr/bin/sleep", ""));
+    }
 
     /// A child stamped with a token is found by the token scan even though the
     /// sample is rooted somewhere that is not its ancestor.
