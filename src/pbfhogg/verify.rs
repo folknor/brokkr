@@ -110,21 +110,59 @@ impl VerifyHarness {
         self.handle.invocation(argv)?.capture_in(&self.project_root)
     }
 
-    /// Run a reference tool with the given arguments.
+    /// Run the pbfhogg CLI with its stdout written to the file `stdout`
+    /// rather than held in memory: for a step whose output scales with the
+    /// data (a diff listing). The returned output's `stdout` is empty; stderr
+    /// is captured bounded, and a truncated or uncloseable stderr is an error.
     ///
     /// Does **not** check the exit status.
+    pub(crate) fn run_pbfhogg_to(
+        &self,
+        argv: PbfArgv,
+        stdout: &Path,
+    ) -> Result<CapturedOutput, DevError> {
+        let subcommand = argv.args().first().cloned().unwrap_or_default();
+        let label = format!("pbfhogg {subcommand}");
+        let _step = step(&label);
+        let run = self
+            .handle
+            .invocation(argv)?
+            .run_to_file(&self.project_root, stdout)?;
+        if let Some(failure) = run.capture_failure(&label) {
+            return Err(failure);
+        }
+        Ok(run.captured)
+    }
+
+    /// Run a reference tool with the given arguments, its stdout written to
+    /// the file `stdout` (every reference run does this, so none holds its
+    /// stdout in memory and every one reaches the ending classification).
+    ///
+    /// A reference tool killed by `SIGKILL` - which brokkr never sends one;
+    /// its own stop is a SIGTERM that comes back as `Interrupted` - is a
+    /// [`DevError::VerifyEnvironment`]: the comparison could not be made, and
+    /// that says nothing about pbfhogg. The kill is classified before any
+    /// capture failure, so a tool that flooded stderr and was then killed is
+    /// still reported as killed.
+    ///
+    /// Does **not** check the exit status otherwise.
     pub(crate) fn run_tool(
         &self,
         tool: ExternalTool,
         args: &[&str],
+        stdout: &Path,
     ) -> Result<CapturedOutput, DevError> {
-        let _step = step(&format!(
-            "{} {}",
-            tool.name(),
-            args.first().copied().unwrap_or("")
-        ));
-        Invocation::tool(tool, args.iter().map(|&a| a.to_owned()).collect())
-            .capture_in(&self.project_root)
+        let label = format!("{} {}", tool.name(), args.first().copied().unwrap_or(""));
+        let _step = step(&label);
+        let run = Invocation::tool(tool, args.iter().map(|&a| a.to_owned()).collect())
+            .run_to_file(&self.project_root, stdout)?;
+        if let Some(why) = reference_kill(run.captured.signal(), &label) {
+            return Err(DevError::VerifyEnvironment(why));
+        }
+        if let Some(failure) = run.capture_failure(&label) {
+            return Err(failure);
+        }
+        Ok(run.captured)
     }
 
     // -- Common verify operations ------------------------------------------
@@ -157,17 +195,22 @@ impl VerifyHarness {
     /// signal kill or any other exit code. The exit status is load-bearing:
     /// a crashed diff prints nothing on stdout, which read as "identical"
     /// back when only stdout was consulted.
-    pub fn diff_pbfs(&self, a: &Path, b: &Path) -> Result<Verdict, DevError> {
+    ///
+    /// The listing goes to the file `listing` (in the calling check's
+    /// directory), never into memory: a real mismatch at planet scale lists
+    /// as many elements as differ. A FAIL replays only a bounded head of it
+    /// and names the file.
+    pub fn diff_pbfs(&self, a: &Path, b: &Path, listing: &Path) -> Result<Verdict, DevError> {
         // A text diff with automatic jobs: it makes run scratch.
         let argv = PbfArgv::new("diff")
             .arg("--suppress-common")
             .input(a)?
             .input(b)?
             .scratch(&self.output_dir);
-        let captured = self.run_pbfhogg(argv)?;
-        let stdout = String::from_utf8_lossy(&captured.stdout);
+        let captured = self.run_pbfhogg_to(argv, listing)?;
+        let listed = super::verify_stream::has_content(listing)?;
         let verdict =
-            diff_verdict(captured.code(), &stdout).map_err(|why| DevError::Subprocess {
+            diff_verdict(captured.code(), listed).map_err(|why| DevError::Subprocess {
                 program: format!("pbfhogg diff ({why})"),
                 ending: captured
                     .ending
@@ -176,10 +219,8 @@ impl VerifyHarness {
                 stderr: String::from_utf8_lossy(&captured.stderr).into_owned(),
             })?;
         if verdict == Verdict::Fail {
-            for line in stdout.lines() {
-                output::verify_msg(line);
-            }
-            if stdout.trim().is_empty() {
+            replay_listing(listing)?;
+            if !listed {
                 // Exit 1 with no listing: the stderr summary is the only
                 // evidence of what differs.
                 let stderr = String::from_utf8_lossy(&captured.stderr);
@@ -405,14 +446,20 @@ impl Findings {
     /// the summary line).
     pub fn record(&mut self, what: &str, verdict: Verdict) {
         if verdict == Verdict::Fail {
-            self.failures.push(what.to_owned());
+            self.fail(what);
         }
     }
 
     /// Record an unconditional failure (a comparison that could not be made
     /// counts as failed, never as passed).
+    ///
+    /// Also written to the check's ledger ([`FailureLedger`]), so a failure
+    /// stays on record when a later step's error unwinds the check past this
+    /// value - an environment kill must not erase a mismatch already seen.
     pub fn fail(&mut self, what: impl Into<String>) {
-        self.failures.push(what.into());
+        let what = what.into();
+        FailureLedger::add(&what);
+        self.failures.push(what);
     }
 
     /// True when no comparison has failed so far.
@@ -469,13 +516,51 @@ impl CheckOutcome for Findings {
 /// `DevError::Interrupted` unchanged, so `main` runs the scratch cleanup and
 /// `verify all` stops instead of starting checks that would be interrupted
 /// at once.
+///
+/// A check that could not be completed for a reason outside pbfhogg (a
+/// [`DevError::VerifyEnvironment`], with no comparison failure on record)
+/// prints `ENVIRONMENT` and returns `ExitCode(ENVIRONMENT_EXIT_CODE)`.
 pub(crate) fn run_check<F, O>(name: &str, verbose: bool, f: F) -> Result<(), DevError>
+where
+    F: FnOnce() -> Result<O, DevError>,
+    O: CheckOutcome,
+{
+    match run_check_status(name, verbose, f)? {
+        CheckStatus::Passed => Ok(()),
+        CheckStatus::Failed => Err(DevError::ExitCode(1)),
+        CheckStatus::Environment => Err(DevError::ExitCode(ENVIRONMENT_EXIT_CODE)),
+    }
+}
+
+/// Exit code of a verify run whose only non-passing checks could not be
+/// completed for environmental reasons: `EX_TEMPFAIL` from sysexits, "try
+/// again" - distinct from 1, which always means pbfhogg failed a check.
+pub(crate) const ENVIRONMENT_EXIT_CODE: i32 = 75;
+
+/// How one check ended, for a caller that tallies (`verify all`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CheckStatus {
+    Passed,
+    Failed,
+    /// Not completed for a reason outside the code under test, with no
+    /// comparison failure recorded before it.
+    Environment,
+}
+
+/// [`run_check`]'s body, reporting how the check ended rather than mapping
+/// it onto an exit code. `Err` is only `Interrupted`.
+pub(crate) fn run_check_status<F, O>(
+    name: &str,
+    verbose: bool,
+    f: F,
+) -> Result<CheckStatus, DevError>
 where
     F: FnOnce() -> Result<O, DevError>,
     O: CheckOutcome,
 {
     let start = std::time::Instant::now();
     StepTimes::reset();
+    FailureLedger::reset();
     // The check as a holder activity, its tool runs as steps beneath it
     // (`step`): what `brokkr lock` shows from another shell. On a terminal
     // the buffered (non-verbose) run also keeps a live status line naming
@@ -497,13 +582,24 @@ where
     } else {
         format!("{ms}ms; {steps}")
     };
+    let recorded = FailureLedger::take();
+    // The ledger is authoritative: a failure recorded in findings the check
+    // then dropped still fails it.
+    let result = match result {
+        Ok(()) if !recorded.is_empty() => Err(DevError::Verify(format!(
+            "{name}: {} comparison(s) failed: {}",
+            recorded.len(),
+            recorded.join("; ")
+        ))),
+        other => other,
+    };
     match &result {
         Ok(()) => {
             if !verbose {
                 crate::output::verify_buffer_discard();
             }
             crate::output::verify_summary(&format!("{name}: PASS ({ms})"));
-            Ok(())
+            Ok(CheckStatus::Passed)
         }
         Err(DevError::Interrupted) => {
             if !verbose {
@@ -512,16 +608,106 @@ where
             crate::output::verify_summary(&format!("{name}: INTERRUPTED ({ms})"));
             Err(DevError::Interrupted)
         }
+        Err(e @ DevError::VerifyEnvironment(_)) if recorded.is_empty() => {
+            if !verbose {
+                crate::output::verify_buffer_flush();
+            }
+            crate::output::verify_summary(&format!("{name}: ENVIRONMENT ({ms}): {e}"));
+            Ok(CheckStatus::Environment)
+        }
         Err(e) => {
             if !verbose {
                 // Replay the captured detail so the failure is debuggable
                 // without re-running the check.
                 crate::output::verify_buffer_flush();
             }
-            crate::output::verify_summary(&format!("{name}: FAIL ({ms}): {e}"));
-            Err(DevError::ExitCode(1))
+            // A failure recorded before an error that unwound the check is
+            // still the verdict; the error is named beside it.
+            if matches!(e, DevError::VerifyEnvironment(_)) {
+                crate::output::verify_summary(&format!(
+                    "{name}: FAIL ({ms}): {} comparison(s) failed before the check \
+                     stopped: {}; then {e}",
+                    recorded.len(),
+                    recorded.join("; ")
+                ));
+            } else {
+                crate::output::verify_summary(&format!("{name}: FAIL ({ms}): {e}"));
+            }
+            Ok(CheckStatus::Failed)
         }
     }
+}
+
+/// The comparison failures recorded in the check in flight, written by
+/// [`Findings::fail`] and read by [`run_check_status`]: the copy of a check's
+/// findings that an early `?` cannot drop. Process-wide, because checks run
+/// one at a time.
+struct FailureLedger;
+
+static FAILURE_LEDGER: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+impl FailureLedger {
+    fn lock() -> std::sync::MutexGuard<'static, Vec<String>> {
+        FAILURE_LEDGER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn add(what: &str) {
+        Self::lock().push(what.to_owned());
+    }
+
+    fn reset() {
+        Self::lock().clear();
+    }
+
+    fn take() -> Vec<String> {
+        std::mem::take(&mut *Self::lock())
+    }
+}
+
+/// The environment reason for a reference tool's ending, when it was killed
+/// by `SIGKILL`. brokkr never sends a reference tool SIGKILL (its own stop
+/// arrives as SIGTERM and is classified `Interrupted`), so the kill came from
+/// outside: commonly the kernel OOM killer, though the signal alone does not
+/// prove which. Any other signal stays a tool failure.
+fn reference_kill(signal: Option<i32>, label: &str) -> Option<String> {
+    (signal == Some(libc::SIGKILL)).then(|| {
+        format!(
+            "{label} was killed by SIGKILL, which brokkr did not send (commonly the kernel \
+             OOM killer); the comparison could not be made and says nothing about pbfhogg"
+        )
+    })
+}
+
+/// Where [`VerifyHarness::diff_pbfs`] writes the listing for a comparison
+/// involving `output` (a file in the calling check's directory): beside it,
+/// as `<stem>.diff.txt`, so each compared output has its own listing.
+pub(crate) fn listing_beside(output: &Path) -> PathBuf {
+    output.with_extension("diff.txt")
+}
+
+/// Replay a bounded head of a diff listing into the check detail, naming the
+/// file that holds all of it.
+pub(super) fn replay_listing(listing: &Path) -> Result<(), DevError> {
+    let (lines, more) = super::verify_stream::preview(
+        listing,
+        super::verify_stream::PREVIEW_LINES,
+        super::verify_stream::PREVIEW_LINE_BYTES,
+    )?;
+    for line in &lines {
+        output::verify_msg(line);
+    }
+    let shown = if more {
+        "a bounded head"
+    } else {
+        "lines cut to a bound"
+    };
+    output::verify_msg(&format!(
+        "  (listing above is {shown}; all of it is in {})",
+        listing.display()
+    ));
+    Ok(())
 }
 
 /// One verify step - a tool run - as a holder activity under the check's, and
@@ -621,11 +807,11 @@ pub fn which_exists(name: &str) -> bool {
 /// cannot tell "differences" from "diff refused its inputs". Both are a FAIL,
 /// which is the safe side; [`VerifyHarness::diff_pbfs`] replays stderr when
 /// the listing is empty so the reader can tell which it was.
-fn diff_verdict(code: Option<i32>, stdout: &str) -> Result<Verdict, &'static str> {
+fn diff_verdict(code: Option<i32>, listed: bool) -> Result<Verdict, &'static str> {
     match code {
         // Exit 0 with a listing is contradictory; the listing wins, since a
         // false FAIL is investigated and a false PASS is not.
-        Some(0) => Ok(Verdict::from_pass(stdout.trim().is_empty())),
+        Some(0) => Ok(Verdict::from_pass(!listed)),
         Some(1) => Ok(Verdict::Fail),
         Some(_) => Err("unexpected exit code"),
         None => Err("killed by signal"),
@@ -727,28 +913,91 @@ mod tests {
 
     #[test]
     fn diff_verdict_exit_zero_empty_is_pass() {
-        assert_eq!(diff_verdict(Some(0), ""), Ok(Verdict::Pass));
-        assert_eq!(diff_verdict(Some(0), "  \n"), Ok(Verdict::Pass));
+        assert_eq!(diff_verdict(Some(0), false), Ok(Verdict::Pass));
     }
 
     #[test]
     fn diff_verdict_listing_is_fail_whatever_the_exit() {
-        assert_eq!(diff_verdict(Some(0), "*n1\n"), Ok(Verdict::Fail));
-        assert_eq!(diff_verdict(Some(1), "*n1\n"), Ok(Verdict::Fail));
+        assert_eq!(diff_verdict(Some(0), true), Ok(Verdict::Fail));
+        assert_eq!(diff_verdict(Some(1), true), Ok(Verdict::Fail));
         // Exit 1 with nothing on stdout still reports differences.
-        assert_eq!(diff_verdict(Some(1), ""), Ok(Verdict::Fail));
+        assert_eq!(diff_verdict(Some(1), false), Ok(Verdict::Fail));
     }
 
     #[test]
     fn diff_verdict_crash_is_an_error_not_identical() {
         // The bug: a crashed diff with empty stdout read as "identical".
-        assert!(diff_verdict(None, "").is_err());
-        assert!(diff_verdict(Some(2), "").is_err());
-        assert!(diff_verdict(Some(101), "").is_err());
+        assert!(diff_verdict(None, false).is_err());
+        assert!(diff_verdict(Some(2), false).is_err());
+        assert!(diff_verdict(Some(101), false).is_err());
+    }
+
+    #[test]
+    fn only_a_sigkill_is_an_environment_kill() {
+        let why = super::reference_kill(Some(libc::SIGKILL), "osmium sort").unwrap();
+        assert!(why.contains("osmium sort"), "{why}");
+        assert!(why.contains("OOM"), "{why}");
+        assert!(super::reference_kill(Some(libc::SIGSEGV), "osmium sort").is_none());
+        assert!(super::reference_kill(None, "osmium sort").is_none());
+    }
+
+    /// Serialises the tests that write the process-wide failure ledger, so
+    /// one test's recorded failure never lands in another's check.
+    static LEDGER_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn ledger_lock() -> std::sync::MutexGuard<'static, ()> {
+        LEDGER_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[test]
+    fn a_failure_in_dropped_findings_still_fails_a_clean_return() {
+        let _serial = ledger_lock();
+        let status =
+            super::run_check_status("x", true, || -> Result<(), crate::error::DevError> {
+                let mut f = Findings::new();
+                f.fail("lost");
+                drop(f);
+                Ok(())
+            });
+        assert!(matches!(status, Ok(super::CheckStatus::Failed)));
+    }
+
+    #[test]
+    fn an_environment_error_cannot_erase_a_recorded_failure() {
+        let _serial = ledger_lock();
+        // The bug this guards: a check records a mismatch, then a later
+        // reference run is OOM-killed and `?` unwinds past the findings.
+        let failed = super::run_check_status("x", true, || -> Result<Findings, _> {
+            let mut f = Findings::new();
+            f.record("ways-only counts", Verdict::Fail);
+            drop(f);
+            Err(crate::error::DevError::VerifyEnvironment(
+                "osmium killed".into(),
+            ))
+        });
+        assert!(matches!(failed, Ok(super::CheckStatus::Failed)));
+
+        let env = super::run_check_status("x", true, || -> Result<Findings, _> {
+            Err(crate::error::DevError::VerifyEnvironment(
+                "osmium killed".into(),
+            ))
+        });
+        assert!(matches!(env, Ok(super::CheckStatus::Environment)));
+        assert!(matches!(
+            super::run_check("x", true, || -> Result<(), _> {
+                Err(crate::error::DevError::VerifyEnvironment("killed".into()))
+            }),
+            Err(crate::error::DevError::ExitCode(
+                super::ENVIRONMENT_EXIT_CODE
+            ))
+        ));
     }
 
     #[test]
     fn findings_fold_to_fail_on_any_recorded_failure() {
+        let _serial = ledger_lock();
         let mut f = Findings::new();
         f.record("diff", Verdict::Pass);
         assert!(f.into_check_result("sort").is_ok());
@@ -773,6 +1022,7 @@ mod tests {
 
     #[test]
     fn run_check_passes_an_interrupt_through_rather_than_failing() {
+        let _serial = ledger_lock();
         // The bug: an interrupted check folded into a FAIL like any error,
         // so `main` never ran the interrupt cleanup and `verify all` went on
         // to start the next check.

@@ -31,6 +31,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
     let captured = harness.run_tool(
         ExternalTool::Osmium,
         &["sort", &pbf_str, "-o", &osmium_out_str, "--overwrite"],
+        &outdir.join("osmium.stdout"),
     )?;
     harness.check_exit(&captured, "osmium sort")?;
 
@@ -41,7 +42,11 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
     let mut findings = Findings::new();
 
     // --- Diff ---
-    let diff = harness.diff_pbfs(&pbfhogg_out, &osmium_out)?;
+    let diff = harness.diff_pbfs(
+        &pbfhogg_out,
+        &osmium_out,
+        &super::verify::listing_beside(&pbfhogg_out),
+    )?;
     if diff.is_pass() {
         verify_msg("  diff: PASS (identical)");
     } else {

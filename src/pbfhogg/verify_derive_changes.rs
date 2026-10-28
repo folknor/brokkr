@@ -80,6 +80,7 @@ pub fn run(
             &osmium_osc_str,
             "--overwrite",
         ],
+        &outdir.join("osmium-derive-changes.stdout"),
     )?;
     harness.check_exit(&captured, "osmium derive-changes")?;
 
@@ -119,6 +120,7 @@ pub fn run(
             &rt_osmium_str,
             "--overwrite",
         ],
+        &outdir.join("osmium-roundtrip.stdout"),
     )?;
     harness.check_exit(&captured, "osmium apply-changes (roundtrip)")?;
 
@@ -145,17 +147,29 @@ pub fn run(
 
     let mut findings = Findings::new();
 
-    for (label, a, b) in [
-        ("pbfhogg roundtrip vs new", &rt_pbfhogg, &new_pbf),
-        ("osmium roundtrip vs new", &rt_osmium_sorted, &new_pbf),
+    for (label, listing, a, b) in [
+        (
+            "pbfhogg roundtrip vs new",
+            "pbfhogg-vs-new",
+            &rt_pbfhogg,
+            &new_pbf,
+        ),
+        (
+            "osmium roundtrip vs new",
+            "osmium-vs-new",
+            &rt_osmium_sorted,
+            &new_pbf,
+        ),
         (
             "pbfhogg roundtrip vs osmium roundtrip",
+            "pbfhogg-vs-osmium",
             &rt_pbfhogg,
             &rt_osmium_sorted,
         ),
     ] {
         verify_msg(&format!("=== diff: {label} ==="));
-        let diff = harness.diff_pbfs(a, b)?;
+        let diff =
+            harness.diff_pbfs(a, b, &outdir.join(format!("roundtrip-{listing}.diff.txt")))?;
         if diff.is_pass() {
             verify_msg("  PASS (identical)");
         } else {

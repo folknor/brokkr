@@ -13,6 +13,7 @@ pub mod commands;
 pub mod context;
 pub mod download;
 pub(crate) mod inspect_report;
+pub(crate) mod pbf_frames;
 pub(crate) mod plan;
 pub mod verify;
 pub mod verify_add_locations;
@@ -27,6 +28,7 @@ pub mod verify_merge;
 pub mod verify_multi_extract;
 pub mod verify_renumber;
 pub mod verify_sort;
+pub(crate) mod verify_stream;
 pub mod verify_tags_filter;
 
 use std::fmt;

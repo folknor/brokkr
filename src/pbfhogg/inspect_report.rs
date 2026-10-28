@@ -62,14 +62,6 @@ impl InspectReport {
 
         report
     }
-
-    pub fn counts(self) -> Option<InspectCounts> {
-        Some(InspectCounts {
-            nodes: self.nodes?,
-            ways: self.ways?,
-            relations: self.relations?,
-        })
-    }
 }
 
 fn parse_count(token: &str) -> Option<u64> {

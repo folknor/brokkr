@@ -44,6 +44,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
                 &osmium_out_str,
                 "--overwrite",
             ],
+            &outdir.join(format!("osmium-{elem_type}.stdout")),
         )?;
         harness.check_exit(&captured, "osmium cat")?;
 
@@ -52,7 +53,11 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
         harness.print_inspect("osmium", &osmium_out)?;
 
         // --- Diff ---
-        let diff = harness.diff_pbfs(&pbfhogg_out, &osmium_out)?;
+        let diff = harness.diff_pbfs(
+            &pbfhogg_out,
+            &osmium_out,
+            &super::verify::listing_beside(&pbfhogg_out),
+        )?;
         if diff.is_pass() {
             verify_msg(&format!("  diff ({elem_type}): PASS (identical)"));
         } else {

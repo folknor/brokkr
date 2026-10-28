@@ -255,6 +255,43 @@ The buffer lives in `output.rs` (`verify_buffer_begin/flush/discard`, fed by
 failure `run_check` returns `DevError::ExitCode(1)` so `main` exits non-zero
 without re-printing an error it already reported.
 
+**Environment outcomes.** A reference tool (osmium, osmconvert) killed by
+`SIGKILL` is not a pbfhogg failure: brokkr never sends a reference tool
+SIGKILL (its own stop is a SIGTERM that ends as INTERRUPTED), so the kill
+came from outside, commonly the kernel OOM killer on a host too small for
+the reference tool at that scale. `run_tool` raises it as
+`DevError::VerifyEnvironment`, classified from the child's ending before any
+capture failure, and the check prints `<name>: ENVIRONMENT (<ms>; <steps>):
+<reason>` with its detail replayed. A comparison failure recorded earlier in
+the same check still wins: `Findings::fail` also writes a check-scoped
+ledger that an early `?` cannot drop, so the check is a FAIL naming both.
+Only `SIGKILL` of a reference tool is environmental; another signal, a
+non-zero exit, or pbfhogg itself being killed (its memory at scale is under
+test) stays a FAIL. A single check exits 75 (`EX_TEMPFAIL`) on ENVIRONMENT;
+`verify all` tallies `environment` beside passed, failed and skipped and
+exits 1 if any check failed, else 75 if any was environmental. An
+environment kill of osmconvert, which `verify merge` runs for context only,
+is reported on the summary channel and changes no verdict.
+
+**Output that scales with the data.** No verify step holds a listing in
+memory. Every reference-tool run, and every pbfhogg step whose stdout is a
+listing (`diff_pbfs`, renumber's `diff -s -c -v`, `verify diff`'s text
+diffs), writes stdout to a file in the check's directory
+(`Invocation::run_to_file`, `output::run_stdout_to_file`); stderr stays a
+bounded capture. Such a child dies with brokkr (`PR_SET_PDEATHSIG`, refused at
+spawn if it cannot be armed), since a file, unlike a pipe, gives an orphaned
+writer no reason to stop. Consumers read the files through fixed buffers
+(`verify_stream`): per-line heads for renumber's block count, byte-wise
+comparison and line counts for `verify diff`, emptiness for `diff_pbfs`'s
+verdict. A FAIL replays a bounded head of a listing (lines and bytes per
+line) and always names the file holding all of it. Element counts of a
+check's outputs come from `inspect --json` written to a file and read by a
+streaming parser that keeps only the counts (an inverted getid output keeps
+its input's order, so its report is not bounded by being sorted). The human
+`inspect` reports that `print_inspect` and `check_sorted` read stay captured,
+as do `check --refs` counts; every report consumer still requires its
+documented exit codes before trusting what it parsed.
+
 **Verdicts.** A check fails by returning `Err` (a tool crashed, output could
 not be parsed) or by returning `Findings` that carry a failed comparison;
 `run_check` folds the latter into a FAIL exactly like the former, detail
@@ -262,7 +299,8 @@ replay included. The comparison helpers on `VerifyHarness` (`diff_pbfs`,
 `check_sorted`, `compare_sort_feature`) return a `#[must_use]` `Verdict`
 rather than a `bool`, so a comparison whose result is dropped is a compile
 warning instead of a silent PASS - the only way to consume one is
-`findings.record(...)`. `diff_pbfs` reads `pbfhogg diff`'s exit status: 0 with
+`findings.record(...)`. `diff_pbfs` writes its listing to a file the caller
+names in the check's directory and reads `pbfhogg diff`'s exit status: 0 with
 no listing is identical, 1 is different, anything else (a signal, another
 code) is an error - never "identical". Two comparisons are deliberately not
 verdicts: `extract`'s element diff against osmium (known to differ; reported
@@ -273,8 +311,9 @@ failure on hosts without `vm.overcommit_memory=1` and skipped.
 **Fresh outputs.** `VerifyHarness::subdir` empties `target/verify/<check>/`
 before handing it back, so every file a check finds there was written by this
 run. Checks rely on that: `verify_merge` treats the diff OSC's existence as
-proof the diff ran and prints the optional osmosis/osmconvert outputs only if
-present, and a failed optional tool's partial output is removed.
+proof the diff ran. The optional osmosis/osmconvert outputs are printed only
+for a tool whose run succeeded (tracked from the run, not from the file
+existing), and a failed optional tool's partial output is removed.
 
 **`verify all` inputs.** The OSC- and bbox-consuming checks skip only when
 the input is not configured at all (no `--osc-seq` and no OSC registered for
@@ -355,6 +394,32 @@ the same summary classes. The indexed answer is the one held to osmium, so
 the match holds the unindexed path to osmium too. Both treat exit 1 from
 `pbfhogg diff`, text or OSC, as "the inputs differ", and 2 and above as a
 failed run.
+
+`verify renumber` requires the comparison diff to exit 0 or 1 and its `-s`
+summary (on stderr) to carry all four of `left`, `right`, `same` and
+`different`; `same + different` must equal both totals, so equal totals
+cannot hide one-sided elements, and the block headers classified by kind in
+the listing must number exactly `different` (pbfhogg writes one per modified
+element), so a listing the classifier does not fully read fails rather than
+passing node or way differences as tolerated relation ones.
+
+`verify getid-removeid` chooses its IDs from the input, not from a fixed
+list: a header-only walk of the PBF's blob framing (`pbf_frames`) reads each
+`BlobHeader` and its indexdata and seeks past every data payload, so the
+choice costs the blob count, never the data, at any scale. For each kind
+present it takes the lowest and highest ID the indexdata claims, which exist
+in any input whose claims are true, drops either if negative (pbfhogg getid
+does not accept negative IDs), and asserts per kind that getid selected
+exactly as many as were requested. The walk decodes indexdata in
+pbfhogg's wire format (versions 1 to 3) and refuses whatever pbfhogg could not
+read through it - a data blob without indexdata, two non-empty indexdata
+fields, an unknown version, a length the version does not declare, an
+unknown kind, an inverted range - as well as malformed framing; an unknown
+future version is refused by name. The one payload it reads is the
+`OSMHeader`'s, and a header declaring `HistoricalInformation` is refused,
+since the cardinality assertion needs one object per kind and ID. The
+original's counts for the complement test are the indexdata claims from the
+same walk. The input must not change on disk while the check runs.
 
 `verify add-locations-to-ways` runs osmium with `--keep-member-nodes`: pbfhogg
 keeps untagged relation-member nodes unconditionally (a documented pbfhogg

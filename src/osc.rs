@@ -130,7 +130,9 @@ pub fn first_content_difference(a: &Path, b: &Path) -> Result<Option<u64>, DevEr
     })
 }
 
-fn first_stream_difference(a: impl Read, b: impl Read) -> io::Result<Option<u64>> {
+/// The offset at which two byte streams first differ, read through fixed
+/// buffers; a length difference counts at the shorter stream's end.
+pub(crate) fn first_stream_difference(a: impl Read, b: impl Read) -> io::Result<Option<u64>> {
     let mut a = io::BufReader::new(a);
     let mut b = io::BufReader::new(b);
     let mut offset: u64 = 0;

@@ -745,7 +745,7 @@ values are not copied here.
 
 | Area | Tunable owners |
 | --- | --- |
-| Child output and supervision | `STATUS_WIDTH` in `src/output/console.rs`; deadline polling, output-drain settling, capture limits, and forwarded-SIGTERM budget in `src/output/child.rs` |
+| Child output and supervision | `STATUS_WIDTH` in `src/output/console.rs`; deadline polling, output-drain settling, capture limits, the stdout-to-file runner, and forwarded-SIGTERM budget in `src/output/child.rs` |
 | Lock acquisition and status service | lock polling and compile-lease drain policy in `src/lock/hold_protocol.rs`; request size, service polling, and request/reply budgets in `src/lock/service.rs`; stable lock-record read retries in `src/lock/record.rs` |
 | Guard protocol | handshake probe budget in `src/guard.rs`; protocol fields shared with `src/bin/rustc_guard.rs` |
 | Process cleanup | ancestry and descendant depth limits in `src/stray.rs`; orphan grace and reap policy in `src/test_orphans.rs`; child OOM adjustment in `src/oom.rs` |

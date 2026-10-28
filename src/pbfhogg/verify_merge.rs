@@ -77,7 +77,11 @@ pub fn run(
     if locations_on_ways {
         osmium_args.push("--locations-on-ways");
     }
-    let captured = harness.run_tool(ExternalTool::Osmium, &osmium_args)?;
+    let captured = harness.run_tool(
+        ExternalTool::Osmium,
+        &osmium_args,
+        &outdir.join("osmium.stdout"),
+    )?;
     harness.check_exit(&captured, "osmium apply-changes")?;
 
     // --- osmosis / osmconvert (optional context) ---
@@ -182,11 +186,13 @@ fn print_report_head(report: &str) {
 }
 
 /// Run the optional osmosis and osmconvert merges, shown for context only.
-/// Returns the `(label, output)` of each tool that wrote one.
+/// Returns the `(label, output)` of each tool that completed successfully:
+/// production is tracked from each run's outcome, not inferred from a file
+/// being present. A failed run's partial output is still removed.
 ///
-/// `exists()` is sound here only because `subdir` hands back an emptied
-/// directory and a failed tool run removes its partial output - a file
-/// present after a run was written by it.
+/// No comparison depends on these tools, so an environment kill of one
+/// (osmconvert through `run_tool`) does not change the check's verdict; it is
+/// reported on the summary channel, where a passing check still shows it.
 fn run_context_tools(
     harness: &VerifyHarness,
     osmosis: Option<&OsmosisTools>,
@@ -194,6 +200,7 @@ fn run_context_tools(
     osc_str: &str,
     outdir: &Path,
 ) -> Result<Vec<(&'static str, PathBuf)>, DevError> {
+    let mut produced = Vec::new();
     let osmosis_out = outdir.join("osmosis.osm.pbf");
     if let Some(tools) = osmosis {
         verify_msg("--- osmosis --apply-change ---");
@@ -211,17 +218,19 @@ fn run_context_tools(
             ],
             &harness.project_root,
         ) {
-            Ok(captured) => {
-                if let Err(e) = harness.check_exit(&captured, "osmosis") {
+            Ok(captured) => match harness.check_exit(&captured, "osmosis") {
+                Ok(()) => produced.push(("osmosis", osmosis_out)),
+                Err(e) => {
                     verify_msg(&format!("  osmosis failed: {e}"));
                     drop(crate::reservations::remove_file(&osmosis_out));
                 }
-            }
+            },
             // A stop is not a skipped tool: carry on and the rest of the
             // check would run against a half-killed comparison.
             Err(DevError::Interrupted) => return Err(DevError::Interrupted),
             Err(e) => {
                 verify_msg(&format!("  osmosis skipped: {e}"));
+                drop(crate::reservations::remove_file(&osmosis_out));
             }
         }
     }
@@ -231,24 +240,33 @@ fn run_context_tools(
         verify_msg("--- osmconvert ---");
         let osmconvert_out_str = osmconvert_out.display().to_string();
         let out_arg = format!("-o={osmconvert_out_str}");
-        match harness.run_tool(ExternalTool::Osmconvert, &[pbf_str, osc_str, &out_arg]) {
-            Ok(captured) => {
-                if let Err(e) = harness.check_exit(&captured, "osmconvert") {
+        match harness.run_tool(
+            ExternalTool::Osmconvert,
+            &[pbf_str, osc_str, &out_arg],
+            &outdir.join("osmconvert.stdout"),
+        ) {
+            Ok(captured) => match harness.check_exit(&captured, "osmconvert") {
+                Ok(()) => produced.push(("osmconvert", osmconvert_out)),
+                Err(e) => {
                     verify_msg(&format!("  osmconvert failed: {e}"));
                     drop(crate::reservations::remove_file(&osmconvert_out));
                 }
-            }
+            },
             Err(DevError::Interrupted) => return Err(DevError::Interrupted),
+            Err(e @ DevError::VerifyEnvironment(_)) => {
+                output::verify_summary(&format!(
+                    "  osmconvert (context only, no verdict depends on it): {e}"
+                ));
+                drop(crate::reservations::remove_file(&osmconvert_out));
+            }
             Err(e) => {
                 verify_msg(&format!("  osmconvert skipped: {e}"));
+                drop(crate::reservations::remove_file(&osmconvert_out));
             }
         }
     }
 
-    Ok([("osmosis", osmosis_out), ("osmconvert", osmconvert_out)]
-        .into_iter()
-        .filter(|(_, path)| path.exists())
-        .collect())
+    Ok(produced)
 }
 
 /// Run `pbfhogg diff --format osc` on `(pbfhogg_out, osmium_out)`,

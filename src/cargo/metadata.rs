@@ -158,6 +158,7 @@ pub(crate) fn clone_error(error: &DevError) -> DevError {
         ),
         DevError::Database(message) => DevError::Database(message.clone()),
         DevError::Verify(message) => DevError::Verify(message.clone()),
+        DevError::VerifyEnvironment(message) => DevError::VerifyEnvironment(message.clone()),
         DevError::ExitCode(code) => DevError::ExitCode(*code),
         DevError::CargoEnv(label) => DevError::CargoEnv(label.clone()),
         DevError::Interrupted => DevError::Interrupted,

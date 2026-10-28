@@ -205,7 +205,9 @@ self-reported.
 | degrade | run_external_ok | yes | counters |
 
 (`verify` subcommands are correctness checks, not benchmarks - they don't
-record to either DB.)
+record to either DB. Their listing-producing steps and every reference-tool
+run write stdout to a file under `target/verify/<check>/` rather than a
+capture; see "Verify subcommands" in `docs/projects/pbfhogg.md`.)
 
 ### elivagar
 

@@ -42,6 +42,7 @@ pub fn run(
             &osmium_out_str,
             "--overwrite",
         ],
+        &outdir.join("osmium.stdout"),
     )?;
     harness.check_exit(&captured, "osmium add-locations-to-ways")?;
     harness.print_inspect("osmium", &osmium_out)?;
@@ -231,7 +232,7 @@ fn report_diff(
     b: &Path,
     label: &str,
 ) -> Result<Verdict, DevError> {
-    let verdict = harness.diff_pbfs(a, b)?;
+    let verdict = harness.diff_pbfs(a, b, &super::verify::listing_beside(b))?;
     if verdict.is_pass() {
         verify_msg(&format!("  diff ({label}): PASS (identical)"));
     } else {

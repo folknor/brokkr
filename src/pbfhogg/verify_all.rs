@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::time::Instant;
 
-use super::verify::{VerifyHarness, labels, run_check};
+use super::verify::{CheckStatus, ENVIRONMENT_EXIT_CODE, VerifyHarness, labels, run_check_status};
 use super::{
     verify_add_locations, verify_cat, verify_check_refs, verify_derive_changes, verify_diff,
     verify_extract, verify_getid_removeid, verify_merge, verify_multi_extract, verify_renumber,
@@ -13,20 +13,41 @@ use crate::datasets::Bbox;
 use crate::error::DevError;
 use crate::output::verify_summary;
 
-/// Tally a check's outcome into `(passed, failed)`. Kept a free function (not
-/// a closure) so it doesn't hold a mutable borrow of the counters across the
-/// suite - the final banner reads them directly.
+/// The suite's tally. Environment outcomes are their own column: a check a
+/// reference tool could not finish is neither a pass nor a pbfhogg failure.
+#[derive(Default)]
+struct Counts {
+    passed: u32,
+    failed: u32,
+    environment: u32,
+}
+
+/// Tally a check's outcome. Kept a free function (not a closure) so it
+/// doesn't hold a mutable borrow of the counters across the suite - the
+/// final banner reads them directly.
 ///
 /// An interrupted check is not counted: it is returned, so the suite stops
 /// there and `main` runs the interrupt cleanup. Every later check would only
 /// have been interrupted at its first child.
-fn tally(counts: &mut (u32, u32), result: &Result<(), DevError>) -> Result<(), DevError> {
-    match result {
-        Ok(()) => counts.0 += 1,
-        Err(DevError::Interrupted) => return Err(DevError::Interrupted),
-        Err(_) => counts.1 += 1,
+fn tally(counts: &mut Counts, result: Result<CheckStatus, DevError>) -> Result<(), DevError> {
+    match result? {
+        CheckStatus::Passed => counts.passed += 1,
+        CheckStatus::Failed => counts.failed += 1,
+        CheckStatus::Environment => counts.environment += 1,
     }
     Ok(())
+}
+
+/// The suite's exit: any pbfhogg failure is 1, else any environment outcome
+/// is [`ENVIRONMENT_EXIT_CODE`], else success.
+fn suite_result(counts: &Counts) -> Result<(), DevError> {
+    if counts.failed > 0 {
+        Err(DevError::ExitCode(1))
+    } else if counts.environment > 0 {
+        Err(DevError::ExitCode(ENVIRONMENT_EXIT_CODE))
+    } else {
+        Ok(())
+    }
 }
 
 /// Why the OSC-consuming checks skip. `osc` is `None` only when nothing is
@@ -55,11 +76,13 @@ pub const KEEP_UNTAGGED_VARIANT: &str = "altw-keep-untagged";
 
 /// Run all verify commands sequentially.
 ///
-/// Each check runs under [`run_check`], so a failure is reported (with its
-/// detail replayed unless `verbose`) but does not stop the remaining checks.
-/// Passing checks print a single line; failures replay their captured detail.
-/// Returns `Err(ExitCode(1))` when one or more checks failed - the per-check
-/// lines and the banner have already reported everything. A shutdown request
+/// Each check runs under [`run_check_status`], so a failure is reported (with
+/// its detail replayed unless `verbose`) but does not stop the remaining
+/// checks. Passing checks print a single line; failures replay their captured
+/// detail. Returns `Err(ExitCode(1))` when one or more checks failed, else
+/// `Err(ExitCode(ENVIRONMENT_EXIT_CODE))` when one or more could not be
+/// completed for environmental reasons - the per-check lines and the banner
+/// have already reported everything. A shutdown request
 /// stops the suite at the interrupted check and returns `Err(Interrupted)`,
 /// with no banner.
 ///
@@ -78,13 +101,13 @@ pub fn run(
     verbose: bool,
 ) -> Result<(), DevError> {
     let suite_start = Instant::now();
-    let mut counts = (0u32, 0u32); // (passed, failed)
+    let mut counts = Counts::default();
     let mut skipped: u32 = 0;
 
     // 1. sort
     tally(
         &mut counts,
-        &run_check(labels::SORT, verbose, || {
+        run_check_status(labels::SORT, verbose, || {
             verify_sort::run(harness, pbf, direct_io)
         }),
     )?;
@@ -92,7 +115,7 @@ pub fn run(
     // 2. cat
     tally(
         &mut counts,
-        &run_check(labels::CAT, verbose, || {
+        run_check_status(labels::CAT, verbose, || {
             verify_cat::run(harness, pbf, direct_io)
         }),
     )?;
@@ -101,7 +124,7 @@ pub fn run(
     if let Some(b) = bbox {
         tally(
             &mut counts,
-            &run_check(labels::EXTRACT, verbose, || {
+            run_check_status(labels::EXTRACT, verbose, || {
                 verify_extract::run(harness, pbf, b, direct_io)
             }),
         )?;
@@ -114,7 +137,7 @@ pub fn run(
     if let Some(b) = bbox {
         tally(
             &mut counts,
-            &run_check(labels::MULTI_EXTRACT, verbose, || {
+            run_check_status(labels::MULTI_EXTRACT, verbose, || {
                 verify_multi_extract::run(
                     harness,
                     pbf,
@@ -132,7 +155,7 @@ pub fn run(
     // 4. tags-filter
     tally(
         &mut counts,
-        &run_check(labels::TAGS_FILTER, verbose, || {
+        run_check_status(labels::TAGS_FILTER, verbose, || {
             verify_tags_filter::run(harness, pbf, direct_io)
         }),
     )?;
@@ -140,7 +163,7 @@ pub fn run(
     // 5. getid-removeid
     tally(
         &mut counts,
-        &run_check(labels::GETID_REMOVEID, verbose, || {
+        run_check_status(labels::GETID_REMOVEID, verbose, || {
             verify_getid_removeid::run(harness, pbf, direct_io)
         }),
     )?;
@@ -148,7 +171,7 @@ pub fn run(
     // 6. add-locations-to-ways
     tally(
         &mut counts,
-        &run_check(labels::ADD_LOCATIONS_TO_WAYS, verbose, || {
+        run_check_status(labels::ADD_LOCATIONS_TO_WAYS, verbose, || {
             verify_add_locations::run(harness, pbf, crate::cli::AltwMode::All, direct_io)
         }),
     )?;
@@ -156,7 +179,7 @@ pub fn run(
     // 7. check-refs
     tally(
         &mut counts,
-        &run_check(labels::CHECK_REFS, verbose, || {
+        run_check_status(labels::CHECK_REFS, verbose, || {
             verify_check_refs::run(harness, pbf, direct_io)
         }),
     )?;
@@ -177,7 +200,7 @@ pub fn run(
         };
         tally(
             &mut counts,
-            &run_check(labels::APPLY_CHANGES, verbose, || {
+            run_check_status(labels::APPLY_CHANGES, verbose, || {
                 verify_merge::run(harness, pbf, osc_path, osmosis.as_ref(), direct_io, false)
             }),
         )?;
@@ -191,7 +214,7 @@ pub fn run(
     match (osc, locations_base) {
         (Some(osc_path), LocationsBase::Resolved(base)) => tally(
             &mut counts,
-            &run_check(APPLY_CHANGES_LOCATIONS, verbose, || {
+            run_check_status(APPLY_CHANGES_LOCATIONS, verbose, || {
                 verify_merge::run(harness, base, osc_path, None, direct_io, true)
             }),
         )?,
@@ -209,7 +232,7 @@ pub fn run(
     if let Some(osc_path) = osc {
         tally(
             &mut counts,
-            &run_check(labels::DIFF_OSC, verbose, || {
+            run_check_status(labels::DIFF_OSC, verbose, || {
                 verify_derive_changes::run(harness, pbf, osc_path, direct_io)
             }),
         )?;
@@ -221,7 +244,7 @@ pub fn run(
     // 10. renumber
     tally(
         &mut counts,
-        &run_check(labels::RENUMBER, verbose, || {
+        run_check_status(labels::RENUMBER, verbose, || {
             verify_renumber::run(harness, pbf, dataset, None, false)
         }),
     )?;
@@ -230,7 +253,7 @@ pub fn run(
     if let Some(osc_path) = osc {
         tally(
             &mut counts,
-            &run_check(labels::DIFF, verbose, || {
+            run_check_status(labels::DIFF, verbose, || {
                 verify_diff::run(harness, pbf, osc_path)
             }),
         )?;
@@ -240,17 +263,37 @@ pub fn run(
     }
 
     // Summary
-    let (passed, failed) = counts;
-    let total = passed + failed + skipped;
+    let total = counts.passed + counts.failed + counts.environment + skipped;
     let total_ms = suite_start.elapsed().as_millis();
     verify_summary(&format!(
-        "all done: {passed} passed, {failed} failed, {skipped} skipped out of {total} ({total_ms}ms)"
+        "all done: {} passed, {} failed, {} environment, {skipped} skipped out of {total} \
+         ({total_ms}ms)",
+        counts.passed, counts.failed, counts.environment
     ));
 
-    if failed > 0 {
-        // Failures were already reported per-check + in the banner; exit
-        // non-zero without main re-printing an error.
-        return Err(DevError::ExitCode(1));
+    // Outcomes were already reported per-check + in the banner; exit
+    // non-zero without main re-printing an error.
+    suite_result(&counts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Counts, suite_result};
+    use crate::error::DevError;
+
+    #[test]
+    fn a_pbfhogg_failure_outranks_an_environment_outcome() {
+        let code = |passed, failed, environment| match suite_result(&Counts {
+            passed,
+            failed,
+            environment,
+        }) {
+            Ok(()) => 0,
+            Err(DevError::ExitCode(code)) => code,
+            Err(e) => panic!("unexpected {e}"),
+        };
+        assert_eq!(code(3, 0, 0), 0);
+        assert_eq!(code(3, 1, 1), 1);
+        assert_eq!(code(3, 0, 2), super::ENVIRONMENT_EXIT_CODE);
     }
-    Ok(())
 }

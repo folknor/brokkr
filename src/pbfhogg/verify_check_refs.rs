@@ -171,6 +171,10 @@ enum Side<'a> {
     Osmium(&'a [&'a str]),
 }
 
+/// Largest osmium check-refs report accepted: it prints a handful of count
+/// lines, whatever the input's size.
+const REPORT_CAP: u64 = 1024 * 1024;
+
 /// Capture output from one side, save to file, and print with prefix.
 fn capture_and_log(
     harness: &VerifyHarness,
@@ -178,16 +182,27 @@ fn capture_and_log(
     out_file: &Path,
     label: &str,
 ) -> Result<String, DevError> {
-    let captured = match side {
+    let (captured, stdout) = match side {
         // check --refs reports to stdout; the log file is brokkr's own write.
-        Side::Pbfhogg(argv) => harness.run_pbfhogg(argv)?,
-        Side::Osmium(args) => harness.run_tool(ExternalTool::Osmium, args)?,
+        Side::Pbfhogg(argv) => {
+            let captured = harness.run_pbfhogg(argv)?;
+            let stdout = String::from_utf8_lossy(&captured.stdout).into_owned();
+            (captured, stdout)
+        }
+        // A reference run writes its stdout to a file; check-refs without
+        // --show-ids prints counts only, so its report is read whole.
+        Side::Osmium(args) => {
+            let sink = out_file.with_extension("stdout");
+            let captured = harness.run_tool(ExternalTool::Osmium, args, &sink)?;
+            let stdout = super::verify_stream::read_bounded(&sink, REPORT_CAP)?;
+            (captured, stdout)
+        }
     };
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&captured.stdout),
-        String::from_utf8_lossy(&captured.stderr),
-    );
+    // Both tools exit 1 when they find missing refs; any other non-zero exit
+    // or a signal means the report cannot be trusted, however complete it
+    // looks.
+    captured.check_success_or(label, &[1])?;
+    let text = format!("{stdout}{}", String::from_utf8_lossy(&captured.stderr));
     fs::write(out_file, &text)?;
     verify_msg(&format!("  {label}:"));
     for line in text.lines() {

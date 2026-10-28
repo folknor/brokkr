@@ -219,6 +219,41 @@ impl<'a> Invocation<'a> {
         Ok(captured)
     }
 
+    /// Run to completion in `cwd` with stdout written to a new file at
+    /// `stdout` (created, or truncated, here) and stderr captured bounded;
+    /// see [`output::run_stdout_to_file`]. The launch lease is released (and
+    /// a lease the child left held is this run's failure) before this
+    /// returns, so the file is complete when the caller reads it.
+    pub(crate) fn run_to_file(
+        &self,
+        cwd: &Path,
+        stdout: &Path,
+    ) -> Result<output::FileSinkRun, DevError> {
+        let program = self.program_string();
+        let sink = std::fs::File::create(stdout)
+            .map_err(|e| DevError::Config(format!("cannot create {}: {e}", stdout.display())))?;
+        let launched = self.launch(cwd)?;
+        let args = launched.arg_refs();
+        let env: Vec<(&str, &str)> = self
+            .env
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let run = output::run_stdout_to_file(&program, &args, cwd, &env, sink);
+        let finished = launched.finish();
+        let run = match run {
+            Ok(run) => run,
+            Err(e) => {
+                if let Err(release) = finished {
+                    output::warn(&release.to_string());
+                }
+                return Err(e);
+            }
+        };
+        finished?;
+        Ok(run)
+    }
+
     /// Fail unless `captured` (this invocation's output) succeeded, naming
     /// the program.
     pub(crate) fn check(&self, captured: &CapturedOutput) -> Result<(), DevError> {

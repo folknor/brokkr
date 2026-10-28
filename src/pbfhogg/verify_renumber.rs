@@ -46,50 +46,81 @@ fn parse_summary(text: &str) -> Option<DiffSummary> {
     let line = text
         .lines()
         .find(|l| l.trim_start().starts_with("Summary:"))?;
-    let mut s = DiffSummary::default();
-    let mut saw_any = false;
+    let (mut left, mut right, mut same, mut different) = (None, None, None, None);
     for field in line.split_whitespace() {
         if let Some(v) = field.strip_prefix("left=") {
-            s.left = v.parse().ok()?;
-            saw_any = true;
+            left = Some(v.parse().ok()?);
         } else if let Some(v) = field.strip_prefix("right=") {
-            s.right = v.parse().ok()?;
-            saw_any = true;
+            right = Some(v.parse().ok()?);
         } else if let Some(v) = field.strip_prefix("same=") {
-            s.same = v.parse().ok()?;
-            saw_any = true;
+            same = Some(v.parse().ok()?);
         } else if let Some(v) = field.strip_prefix("different=") {
-            s.different = v.parse().ok()?;
-            saw_any = true;
+            different = Some(v.parse().ok()?);
         }
     }
-    if saw_any { Some(s) } else { None }
+    // All four or nothing: a field missing from a partial summary must not
+    // read as zero.
+    Some(DiffSummary {
+        left: left?,
+        right: right?,
+        same: same?,
+        different: different?,
+    })
 }
 
-/// Scan the detailed diff output for per-element-type block headers.
+/// Elements present on one side only: `left` and `right` each count `same +
+/// different` plus their one-sided elements, which a renumber of the same
+/// input by both tools must not produce.
+fn one_sided(s: &DiffSummary) -> Option<(u64, u64)> {
+    let paired = s.same.checked_add(s.different)?;
+    let left_only = s.left.checked_sub(paired)?;
+    let right_only = s.right.checked_sub(paired)?;
+    Some((left_only, right_only))
+}
+
+/// Bytes of a line [`block_kind`] needs: `*`, the kind, an optional `-`, a
+/// digit.
+const BLOCK_HEAD: usize = 4;
+
+/// The element kind of a diff block header line, or `None` for any other
+/// line.
 ///
 /// Block headers look like `*n<id>`, `*w<id>`, `*r<id>` at the start of a
-/// line (the `*` marks a changed element). Lines that don't match are
-/// context, member lists, or tags and are ignored.
+/// line (the `*` marks a changed element), the ID possibly negative. Lines
+/// that don't match are context, member lists, or tags and are ignored.
+fn block_kind(head: &[u8]) -> Option<u8> {
+    let (&star, rest) = head.split_first()?;
+    let (&kind, rest) = rest.split_first()?;
+    let rest = rest.strip_prefix(b"-").unwrap_or(rest);
+    let digit = rest.first().is_some_and(u8::is_ascii_digit);
+    (star == b'*' && digit && matches!(kind, b'n' | b'w' | b'r')).then_some(kind)
+}
+
+fn count_block(c: &mut TypeCounts, head: &[u8]) {
+    match block_kind(head) {
+        Some(b'n') => c.nodes += 1,
+        Some(b'w') => c.ways += 1,
+        Some(b'r') => c.relations += 1,
+        _ => {}
+    }
+}
+
+/// Count block headers per kind in the diff listing file, reading only the
+/// first few bytes of each line through a fixed buffer.
+fn categorize_listing(listing: &Path) -> Result<TypeCounts, DevError> {
+    let mut c = TypeCounts::default();
+    super::verify_stream::for_each_line_head(listing, BLOCK_HEAD, |head| {
+        count_block(&mut c, head);
+    })?;
+    Ok(c)
+}
+
+#[cfg(test)]
 fn categorize_blocks(detail: &str) -> TypeCounts {
     let mut c = TypeCounts::default();
     for line in detail.lines() {
-        let Some(rest) = line.strip_prefix('*') else {
-            continue;
-        };
-        let mut chars = rest.chars();
-        let Some(type_char) = chars.next() else {
-            continue;
-        };
-        if !chars.next().is_some_and(|c| c.is_ascii_digit()) {
-            continue;
-        }
-        match type_char {
-            'n' => c.nodes += 1,
-            'w' => c.ways += 1,
-            'r' => c.relations += 1,
-            _ => {}
-        }
+        let head = &line.as_bytes()[..line.len().min(BLOCK_HEAD)];
+        count_block(&mut c, head);
     }
     c
 }
@@ -179,7 +210,11 @@ pub fn run(
         osmium_args.push("--start-id");
         osmium_args.push(sid);
     }
-    let captured = harness.run_tool(ExternalTool::Osmium, &osmium_args)?;
+    let captured = harness.run_tool(
+        ExternalTool::Osmium,
+        &osmium_args,
+        &outdir.join("osmium-renumber.stdout"),
+    )?;
     harness.check_exit(&captured, "osmium renumber")?;
     let osmium_elapsed = captured.elapsed;
     let osmium_size = fs::metadata(&osmium_out).map(|m| m.len()).unwrap_or(0);
@@ -205,9 +240,12 @@ pub fn run(
     ));
 
     // --- pbfhogg diff (summary + context + verbose) ---------------------
-    // diff exits non-zero when mismatches exist, so do not check_exit.
+    // The listing goes to a file: with -v it prints every differing
+    // element's members, which outgrew any in-memory capture at germany
+    // scale. Exit 1 means "differences", 0 "identical"; anything else (a
+    // signal, a refusal) means the listing and summary cannot be trusted.
     // A verbose text diff still makes run scratch with automatic jobs.
-    let captured = harness.run_pbfhogg(
+    let captured = harness.run_pbfhogg_to(
         PbfArgv::new("diff")
             .arg("-s")
             .arg("-c")
@@ -215,20 +253,16 @@ pub fn run(
             .input(&osmium_out)?
             .input(&pbfhogg_out)?
             .scratch(&harness.output_dir),
+        &diff_log,
     )?;
-    let stdout = String::from_utf8_lossy(&captured.stdout).into_owned();
+    captured.check_success_or("pbfhogg diff", &[1])?;
     let stderr = String::from_utf8_lossy(&captured.stderr).into_owned();
-    fs::write(&diff_log, format!("{stdout}{stderr}"))?;
-
-    // The Summary line may be on stdout or stderr depending on pbfhogg's
-    // version; try both.
-    let summary = parse_summary(&stdout)
-        .or_else(|| parse_summary(&stderr))
-        .ok_or_else(|| {
-            DevError::Verify(
-                "renumber: could not parse 'Summary:' line from pbfhogg diff output".into(),
-            )
-        })?;
+    // pbfhogg's -s summary is written to stderr.
+    let summary = parse_summary(&stderr).ok_or_else(|| {
+        DevError::Verify(
+            "renumber: could not parse a complete 'Summary:' line from pbfhogg diff stderr".into(),
+        )
+    })?;
 
     // --- Total relation count (for threshold) ---------------------------
     // A parse failure here is a hard error rather than a silent fallback:
@@ -284,7 +318,7 @@ pub fn run(
     ));
 
     // --- Categorize diff blocks by element type -------------------------
-    let counts = categorize_blocks(&stdout);
+    let counts = categorize_listing(&diff_log)?;
     if summary.different > 0 {
         verify_msg(&format!(
             "    diff blocks: {} node(s), {} way(s), {} relation(s)",
@@ -305,6 +339,21 @@ pub fn run(
             "element counts diverge (osmium={}, pbfhogg={})",
             summary.left, summary.right,
         ))
+    } else if one_sided(&summary) != Some((0, 0)) {
+        Some(format!(
+            "summary does not pair every element (left={} right={} same={} different={})",
+            summary.left, summary.right, summary.same, summary.different,
+        ))
+    } else if counts.nodes + counts.ways + counts.relations != summary.different {
+        // pbfhogg writes one block header per modified element, and the
+        // check above rules out created and deleted ones, so every
+        // difference must have been classified by kind; a gap means the
+        // listing or its header format is not what this check reads.
+        Some(format!(
+            "classified {} diff block(s) but the summary reports {} difference(s)",
+            counts.nodes + counts.ways + counts.relations,
+            summary.different,
+        ))
     } else if counts.nodes > 0 || counts.ways > 0 {
         Some(format!(
             "node/way diffs detected (nodes={}, ways={})",
@@ -321,7 +370,12 @@ pub fn run(
 
     if verbose && summary.different > 0 {
         verify_msg(&format!("  diff log: {}", diff_log.display()));
-        for line in stdout.lines().take(50) {
+        let (lines, _) = super::verify_stream::preview(
+            &diff_log,
+            super::verify_stream::PREVIEW_LINES,
+            super::verify_stream::PREVIEW_LINE_BYTES,
+        )?;
+        for line in lines {
             verify_msg(&format!("    {line}"));
         }
     }
@@ -399,6 +453,37 @@ mod tests {
     #[test]
     fn parse_summary_missing() {
         assert!(parse_summary("no summary here\n").is_none());
+    }
+
+    #[test]
+    fn parse_summary_refuses_a_partial_line() {
+        // A field missing from a cut-short summary must not read as zero.
+        assert!(parse_summary("Summary: left=5 right=5 same=5").is_none());
+    }
+
+    #[test]
+    fn one_sided_elements_are_found_from_the_summary() {
+        let s = parse_summary("Summary: left=10 right=10 same=7 different=3").unwrap();
+        assert_eq!(one_sided(&s), Some((0, 0)));
+        // Equal totals can still hide one element on each side.
+        let s = parse_summary("Summary: left=10 right=10 same=7 different=2").unwrap();
+        assert_eq!(one_sided(&s), Some((1, 1)));
+        let s = parse_summary("Summary: left=1 right=1 same=7 different=2").unwrap();
+        assert_eq!(one_sided(&s), None);
+    }
+
+    #[test]
+    fn categorize_listing_reads_signed_headers_from_a_file() {
+        let dir = crate::test_scratch::scratch("pbfhogg-verify-renumber", "listing");
+        let listing = dir.join("diff.txt");
+        let long_member_line = format!("  -member {}\n", "w1 ".repeat(10_000));
+        std::fs::write(
+            &listing,
+            format!("*r12\n{long_member_line}*r-3\n*n-\n*w9 tags\n"),
+        )
+        .unwrap();
+        let c = categorize_listing(&listing).unwrap();
+        assert_eq!((c.nodes, c.ways, c.relations), (0, 1, 2));
     }
 
     #[test]

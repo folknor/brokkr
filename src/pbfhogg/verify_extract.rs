@@ -52,6 +52,7 @@ pub fn run(
                 &osmium_out_str,
                 "--overwrite",
             ],
+            &outdir.join(format!("osmium-{strategy_name}.stdout")),
         )?;
         harness.check_exit(&captured, "osmium extract")?;
 
@@ -70,7 +71,11 @@ pub fn run(
         // `diff_pbfs`) and that the output is sorted. Because a quiet run
         // discards detail on pass, the difference is surfaced on the summary
         // channel rather than left in the buffer where nobody sees it.
-        let diff = harness.diff_pbfs(&pbfhogg_out, &osmium_out)?;
+        let diff = harness.diff_pbfs(
+            &pbfhogg_out,
+            &osmium_out,
+            &super::verify::listing_beside(&pbfhogg_out),
+        )?;
         if diff.is_pass() {
             verify_msg(&format!("  diff ({strategy_name}): PASS (identical)"));
         } else {

@@ -21,10 +21,11 @@ pub(crate) mod child;
 pub(crate) mod console;
 
 pub(crate) use child::{
-    CapturedOutput, DeadlineCapture, Ending, Replay, SpawnProfile, run_captured,
+    CapturedOutput, DeadlineCapture, Ending, FileSinkRun, Replay, SpawnProfile, run_captured,
     run_captured_observed, run_captured_with_env, run_captured_with_env_and_deadline,
     run_captured_with_env_and_deadline_allow_output_cut,
     run_captured_with_env_and_deadline_with_options, run_captured_with_idle_deadline, run_cargo,
-    run_cargo_unsetting, run_passthrough_in, run_passthrough_timed, run_streamed,
+    run_cargo_unsetting, run_passthrough_in, run_passthrough_timed, run_stdout_to_file,
+    run_streamed,
 };
 pub(crate) use console::*;

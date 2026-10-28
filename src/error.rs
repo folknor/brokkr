@@ -358,6 +358,10 @@ pub enum DevError {
     Database(String),
     /// A verification check found a mismatch or unexpected result.
     Verify(String),
+    /// A verification could not be completed for a reason outside the code
+    /// under test: a reference tool was killed by a signal brokkr did not
+    /// send (commonly the kernel OOM killer). Never a verdict on pbfhogg.
+    VerifyEnvironment(String),
     /// A subprocess completed and the process should exit with this code.
     /// Used by passthrough commands (run, elivagar) to propagate exit codes
     /// without calling `process::exit` in handlers.
@@ -433,7 +437,9 @@ impl fmt::Display for DevError {
             DevError::Reported(label) | DevError::Refused(label) => write!(f, "{label}"),
             DevError::Lock(msg) => write_message(f, policy, &msg.to_string()),
             DevError::Database(msg) => write_message(f, policy, msg),
-            DevError::Verify(msg) => write_message(f, policy, msg),
+            DevError::Verify(msg) | DevError::VerifyEnvironment(msg) => {
+                write_message(f, policy, msg)
+            }
             DevError::CargoEnv(label) => write!(f, "{label}"),
             DevError::ExitCode(_) => Ok(()),
             DevError::Interrupted => write!(f, "interrupted by shutdown request"),
@@ -464,6 +470,7 @@ impl DevError {
             Self::Lock(_) => RenderingPolicy::Prefixed("lock"),
             Self::Database(_) => RenderingPolicy::Prefixed("database"),
             Self::Verify(_) => RenderingPolicy::Prefixed("verify"),
+            Self::VerifyEnvironment(_) => RenderingPolicy::Prefixed("environment"),
         }
     }
 }
@@ -502,6 +509,7 @@ impl StdError for DevError {
             | DevError::ChildFailure { .. }
             | DevError::Database(_)
             | DevError::Verify(_)
+            | DevError::VerifyEnvironment(_)
             | DevError::CargoEnv(_)
             | DevError::Reported(_)
             | DevError::Refused(_)
