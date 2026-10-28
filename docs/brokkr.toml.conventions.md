@@ -815,6 +815,8 @@ forbid = "rusqlite"
 - `except` (optional) - workspace packages to drop from the `from` set. Pairs
   with `from = "*"` to express "no crate may depend on X, except these". Every
   entry must match a package selected by `from`; unmatched entries are refused.
+  The phase refuses on the first bad `from` or `except` name; `brokkr check
+  --audit` lists every one across all rules (see `brokkr man check audit`).
 - `kinds` (optional) - dependency kinds the rule applies to: `normal`, `dev`,
   `build` (string or array). Empty = every kind (the default; never flips to
   silently ignore a kind you used to catch). `kinds = ["normal"]` means a

@@ -58,20 +58,15 @@ const SELECTION_CONFLICTS: [&str; 11] = [
     "args",
 ];
 
-// What `check --audit` refuses: it runs no phase, so everything that selects,
-// shapes or certifies one.
-const AUDIT_CONFLICTS: [&str; 13] = [
-    "features",
-    "no_default_features",
-    "package",
-    "profile",
-    "gate",
-    "force_rust",
+// What `check --audit` refuses: it runs no phase, so every flag that acts on a
+// run (rewriting, timing, logging, a verdict trailer, a selection). The flags
+// that shape a run - profile, gate, features, `-p`, `--force-rust`, forwarded
+// args - are accepted: they name the check the audit's plan explains.
+const AUDIT_CONFLICTS: [&str; 6] = [
     "json",
     "fix_gremlins",
     "timings",
     "commands",
-    "args",
     "textlint_names",
     "script_names",
 ];
@@ -212,11 +207,14 @@ In depth: `brokkr man check` (one section at a time, e.g. `man check clippy`)."
             conflicts_with_all = SELECTION_CONFLICTS)]
         script_names: Vec<String>,
 
-        /// Report configuration hygiene and run nothing else: `paths`,
-        /// `include`, `exclude` and `exempt` globs that select no tracked file, and
-        /// exclusions that excuse everything their selector picked, across
-        /// `[gremlins]`, `[header]`, `[[textlint]]` and `[manifest]`. An
-        /// ordinary check never prints these. Exits 0 whatever it finds.
+        /// Explain the check this invocation would run, and run nothing: its
+        /// plan (profile, lanes and their shapes, each phase's disposition,
+        /// textlint rule file counts), then configuration findings - dead
+        /// selector globs, `[[check]]` entries no profile references,
+        /// `[[dependency_rule]]` and `[[quarantine]]` package selectors
+        /// naming no workspace package, `allow_exact` paths that are absent.
+        /// Accepts the flags that shape a run; builds nothing. Exits 0
+        /// whatever it finds.
         #[arg(long, conflicts_with_all = AUDIT_CONFLICTS)]
         audit: bool,
 

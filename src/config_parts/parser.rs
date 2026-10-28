@@ -2344,7 +2344,8 @@ fn validate_complete_profile(name: &str, def: &ProfileDef) -> Result<(), DevErro
 /// in the chain wins, matching resolution). A visited set guards against a
 /// `lanes` cycle, and the inner walk against an `extends` cycle, so a
 /// malformed config cannot spin here ahead of the resolver's own checks.
-fn referenced_check_entries(
+/// `brokkr check --audit` unions it over every profile.
+pub(crate) fn referenced_check_entries(
     profiles: &BTreeMap<String, ProfileDef>,
     name: &str,
     visited: &mut BTreeSet<String>,

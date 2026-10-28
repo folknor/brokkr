@@ -20,6 +20,7 @@ use verdict::{FinishInput, finish_check, run_stop};
 pub(crate) use verdict::{TestTiming, emit_timings};
 
 include!("check_cmd/phase_type.rs");
+include!("check_cmd/check_plan.rs");
 include!("check_cmd/phase.rs");
 include!("check_cmd/diagnostics.rs");
 include!("check_cmd/clippy_cmd.rs");
@@ -39,8 +40,8 @@ pub(crate) use crate::build_purpose::requests::SupportRequest;
 pub(crate) use selection::{
     AdmissionNote, AdmissionRule, Attempt, CheckSelections, DeclaredShape, ForwardedArgs,
     GatedPhases, LaneEntry, MemberSelection, PackageSource, PhaseSelection, ReachLedger, ReproLine,
-    Resolution, ResolutionRun, RunSweeps, Selection, SelectionPhase, ShapeId, derive_doctest_carriers,
-    feature_drop_lines, join_notes, reject_direct_execution_args,
+    Resolution, ResolutionRun, RunSweeps, Selection, SelectionPhase, ShapeId,
+    derive_doctest_carriers, feature_drop_lines, join_notes, reject_direct_execution_args,
     reject_forwarded_package_selectors, resolve_invocation_sweeps, resolve_planned_sweep,
 };
 #[cfg(test)]

@@ -671,11 +671,12 @@ allow_exact = ["clippy::unused_async_trait_impl@crates/system/src/kernel.rs"]
   diagnostic's location) are dropped at brokkr's JSON ingestion, after the
   compiler has spoken, so no attribute at the site can defeat them. One lint
   in one file - every occurrence in that file, but never workspace-wide, and
-  no `-A` is injected, so other sites of the same lint still fail. Each
+  no `-A` is injected, so other sites of the same lint still fail. The
   entries are announced up front, grouped by lint with a file count (a lint
   with one site keeps its path); one that suppressed nothing draws a stale
   notice, and that one is reported per entry, since it is the part a reader
-  has to act on. Parse-time rejection mirrors `allow`, plus the `@` split:
+  has to act on. An entry whose path is absent suppresses nothing, and
+  `brokkr check --audit` names it without a build. Parse-time rejection mirrors `allow`, plus the `@` split:
   exactly one `@`, non-empty halves, no whitespace, and a relative path.
   Absolute paths are rejected. See `docs/commands/check.md`.
 

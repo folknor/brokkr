@@ -406,10 +406,47 @@ skip a workspace-wide gate.
 
 ## Audit
 
-`brokkr check --audit` reports configuration hygiene and runs nothing else.
-No phase runs, nothing is built, and no file content is scanned. The
-configured selectors are resolved against the tracked file list, and each
-finding is printed as a warning:
+`brokkr check --audit` explains the check this invocation would run, then
+reports configuration findings. No phase runs, nothing is built, and no file
+content is scanned. Planning reads what a run's planning reads - `cargo
+metadata --no-deps`, git status for the markdown-only shortcut, the cargo
+config chain - under the lock, so the toolchain and rustflags policy apply.
+
+**The plan.** The run and the audit share one planner, so the audit cannot
+describe a run the check would not make. `check plan: profile NAME
+(certifies ...)` heads it, followed by:
+
+- every line the run would announce before its first phase, in order -
+  including the run-log-only ones (profile header, lint lanes, script checks
+  and lint sweeps ruled out by `when`, serial-build reasons), the
+  markdown-only and skipped-phase lines, derived or quarantined doctest
+  carriers, and the `-p` package-rule and feature-drop announcements;
+- one `lane LABEL (tested | lint only): configured ...` line per lane: its
+  packages (or the `test_exclude_packages` workspace, or the default
+  members), features, target, pinned unification and support builds. These
+  are the configured shape; a narrowed or per-package resolution can carry
+  less, and the feature-drop lines name every drop;
+- one `phase NAME: ...` line per phase: `skipped` (profile `skip_phases` or
+  the markdown-only tree), `not configured`, `none owed` (every entry ruled
+  out by its `when`), `refuses` (a `-p` that reaches no lane), `not run`
+  (with the reason), or `planned` with its eligible-lane, rule or check count
+  (`script_check` also names the post-test checks a skipped test phase takes
+  with it).
+  Planned means planned: an earlier failure can still end a run first.
+
+Then `textlint: N rules (files selected by path)` and one count per rule: the
+files its `paths` select and its `exclude` leaves, out of the scanner's own
+list (tracked plus untracked files git does not ignore). A path count, not
+a scan count - `test_code`, `only_if_file_matches` and binary content can
+still keep a selected file from being matched.
+
+The audit takes the flags that shape a run (`--profile`, `--gate`,
+`--features`, `--no-default-features`, `-p`, `--force-rust`, forwarded `--
+ARGS`) and explains that run. Clap refuses it beside the flags that act on
+one: `--json`, `--fix-gremlins`, `--timings`, `--commands`, `--textlint` and
+`--script`.
+
+**The findings**, each printed as a warning:
 
 - a `paths`, `exclude` or `exempt` glob in `[header]`, `[[textlint]]` or
   `[manifest]` (including `shape_exclude`) that selects no tracked file;
@@ -418,14 +455,39 @@ finding is printed as a warning:
 - a `[gremlins].include` glob that matches no tracked file, and a
   `[gremlins].exclude` entry that matches no scannable file (built-in
   extension or `include`), or that removes every one (all skipped under
-  `[gremlins].disable = true`).
+  `[gremlins].disable = true`);
+- a `[[check]]` entry no `[test.profiles]` entry references through `sweeps`,
+  `extends` or `lanes`, said only where profiles exist. It is not dead:
+  without a `default_profile` a bare check and `brokkr test` select every
+  entry, and `brokkr clippy --sweep` replays any entry;
+- every `[[dependency_rule]]` `from` name that is not a workspace package
+  and `except` name that `from` does not select - all of them, where the
+  dependency-rules phase refuses on the first. Names in `forbid`/`allow` are
+  never findings: absence is never a violation;
+- a `[[quarantine]]` `package` that is not a workspace package, so the entry
+  justifies nothing;
+- a `[lints] allow_exact` entry whose path is absent under the build root (a
+  dangling symlink counts as absent). This is an absence, not a staleness
+  verdict: a generated file may be missing until a build makes it;
+- `check plan refused: ...` when planning itself refuses (an unknown
+  profile, a `-p` under a complete claim); the plan lines said before the
+  refusal still print, under `check plan (incomplete - planning refused)`.
 
-An ordinary check prints none of this. A user-wide rule legitimately names
-paths most trees lack, and an exclusion may reserve a path that is absent
-today, so a warning on every run would be noise. The audit is where a real
-typo gets found. It ends with `audit: N findings` and exits 0 whatever it
-finds. Clap refuses it beside every flag that selects, shapes or certifies
-a run (`--textlint`/`--script` included).
+A `cargo metadata` failure is a finding wherever it stops something - the
+plan, the package selectors, or both - and the other findings still print. A
+stop (Ctrl-C, `brokkr kill`) ends the audit as it ends a run.
+
+Not reported, because no build-free answer exists: a `[[quarantine]]`
+pattern justifying no pair and a sited allow that suppressed nothing (both
+need a run's enumeration or diagnostics, and a complete run reports them),
+and the `test_code` classifier's notes and refusals (they need the Rust
+sources parsed, and every textlint run already prints them).
+
+An ordinary check prints none of the findings. A user-wide rule legitimately
+names paths most trees lack, and an exclusion may reserve a path that is
+absent today, so a warning on every run would be noise. The audit is where a
+real typo gets found. It ends with `audit: N findings` and exits 0 whatever it
+finds.
 
 ## The markdown-only shortcut
 

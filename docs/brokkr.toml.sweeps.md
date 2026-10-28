@@ -820,7 +820,9 @@ reason   = "42/55 persistence doctests fail to compile"
 - `package = "<pkg>"` (optional, `pattern` entries only) restricts the
   entry to one package's pairs. Without it, a name-only pattern absorbs
   same-named pairs in every package, so a test that later stops running
-  for an unrelated reason lands as accounted instead of orphaned.
+  for an unrelated reason lands as accounted instead of orphaned. A `package`
+  that is not a workspace package justifies nothing; `brokkr check --audit`
+  names it without a build.
 - A `pattern` entry justifying zero non-run pairs fails the check (delete it
   when the bug closes). A `doctests` entry suppresses the doctest carriers a
   complete run derives, whatever `[test] doctests` says, so no combination

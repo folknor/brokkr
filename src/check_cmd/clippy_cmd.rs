@@ -49,7 +49,7 @@ pub(crate) fn cmd_clippy(
         .expect("one declaration plans one sweep");
     // The same serial-builds rule `check` resolves: a configured cargo build
     // dir makes one chain of the probe's runs too.
-    let serial_builds = resolve_serial_builds(project_root, false, std::slice::from_ref(&sweep), "clippy");
+    let serial_builds = resolve_serial_builds(project_root, false, std::slice::from_ref(&sweep), "clippy", &Narrator::live());
 
     // One sweep -> run_clippy_phase runs `multi = false`, so output carries no
     // sweep-label tags. The selection has no CLI override: ad-hoc `-p` is

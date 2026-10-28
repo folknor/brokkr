@@ -94,42 +94,13 @@ pub fn check_metadata(
         // An edge is judged by `dep.name`, the real package name - never the
         // rename key - so `foo = { package = "bar" }` can't dodge either list.
         let polarity = rule_polarity(rule)?;
-        let except: BTreeSet<&str> = rule.except.iter().map(String::as_str).collect();
 
         // The kind filter, parsed at config load. Empty = every kind.
         let kinds = &rule.kinds;
 
-        // Resolve the `from` set. `"*"` expands to every workspace package;
-        // otherwise each named package is looked up. Validate every exception
-        // against this set before applying it, so a typo cannot silently leave
-        // the intended package in scope.
-        let candidates: Vec<&CargoPackage> = if rule.from.iter().any(|f| f == "*") {
-            workspace_packages.clone()
-        } else {
-            let mut pkgs = Vec::new();
-            for from in &rule.from {
-                let Some(pkg) = by_name.get(from.as_str()) else {
-                    return Err(DevError::Config(format!(
-                        "[[dependency_rule]] references package '{from}' in `from`, \
-                         but cargo metadata has no workspace package with that name"
-                    )));
-                };
-                pkgs.push(*pkg);
-            }
-            pkgs
-        };
-
-        for name in &rule.except {
-            if !candidates.iter().any(|pkg| pkg.name == *name) {
-                return Err(DevError::Config(format!(
-                    "[[dependency_rule]] except entry {name:?} matches no package selected by `from`"
-                )));
-            }
-        }
-        let from_pkgs: Vec<&CargoPackage> = candidates
-            .into_iter()
-            .filter(|pkg| !except.contains(pkg.name.as_str()))
-            .collect();
+        // The first selector error is the refusal, as it always was.
+        let from_pkgs = resolve_selectors(rule, &workspace_packages, &by_name)
+            .map_err(|errors| DevError::Config(errors.into_iter().next().unwrap_or_default()))?;
 
         for pkg in from_pkgs {
             for dep in &pkg.dependencies {
@@ -176,6 +147,76 @@ pub fn check_metadata(
         packages: workspace_packages.len(),
         violations,
     })
+}
+
+/// One rule's `from` set, `except` applied, or every selector error in it.
+///
+/// `"*"` anywhere in `from` expands to every workspace package and the other
+/// names are not looked up; otherwise each name must be a workspace package.
+/// Every `except` must name a package `from` selected, so a typo cannot
+/// silently leave the intended package in scope. It is judged against the
+/// `from` names that did resolve, so a missing `from` name cannot hide a bad
+/// `except`; missing `from` names come first, as the phase's refusal.
+fn resolve_selectors<'m>(
+    rule: &DependencyRule,
+    workspace: &[&'m CargoPackage],
+    by_name: &BTreeMap<&str, &'m CargoPackage>,
+) -> Result<Vec<&'m CargoPackage>, Vec<String>> {
+    let mut errors = Vec::new();
+    let candidates: Vec<&CargoPackage> = if rule.from.iter().any(|f| f == "*") {
+        workspace.to_vec()
+    } else {
+        let mut pkgs = Vec::new();
+        for from in &rule.from {
+            match by_name.get(from.as_str()) {
+                Some(pkg) => pkgs.push(*pkg),
+                None => errors.push(format!(
+                    "[[dependency_rule]] references package '{from}' in `from`, \
+                     but cargo metadata has no workspace package with that name"
+                )),
+            }
+        }
+        pkgs
+    };
+    errors.extend(
+        rule.except
+            .iter()
+            .filter(|name| !candidates.iter().any(|pkg| pkg.name == **name))
+            .map(|name| {
+                format!(
+                    "[[dependency_rule]] except entry {name:?} matches no package selected by `from`"
+                )
+            }),
+    );
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+    let except: BTreeSet<&str> = rule.except.iter().map(String::as_str).collect();
+    Ok(candidates
+        .into_iter()
+        .filter(|pkg| !except.contains(pkg.name.as_str()))
+        .collect())
+}
+
+/// Every selector error across `rules`, for `brokkr check --audit`: the
+/// refusals the dependency-rules phase would raise, all of them rather than
+/// the first. Names in `forbid`/`allow` matching no dependency are not
+/// findings - absence is never a violation.
+pub fn selector_findings(metadata: &CargoMetadata, rules: &[DependencyRule]) -> Vec<String> {
+    let workspace: Vec<&CargoPackage> = metadata
+        .packages
+        .iter()
+        .filter(|pkg| metadata.is_member(&pkg.id))
+        .collect();
+    let by_name: BTreeMap<&str, &CargoPackage> = workspace
+        .iter()
+        .map(|pkg| (pkg.name.as_str(), *pkg))
+        .collect();
+    rules
+        .iter()
+        .filter_map(|rule| resolve_selectors(rule, &workspace, &by_name).err())
+        .flatten()
+        .collect()
 }
 
 pub fn format_violation(v: &DependencyViolation) -> String {
@@ -265,6 +306,38 @@ mod tests {
         assert_eq!(violation.from, "app");
         assert_eq!(violation.to, "db");
         assert_eq!(violation.kind, DependencyKind::Normal);
+    }
+
+    fn selector_rule(from: &[&str], except: &[&str]) -> DependencyRule {
+        DependencyRule {
+            name: None,
+            from: from.iter().map(|s| (*s).to_owned()).collect(),
+            forbid: Some(vec!["db".into()]),
+            allow: None,
+            except: except.iter().map(|s| (*s).to_owned()).collect(),
+            kinds: Vec::new(),
+            optional: None,
+        }
+    }
+
+    #[test]
+    fn selector_findings_report_every_bad_selector_and_keep_the_wildcard() {
+        let rules = vec![
+            // Two missing `from` names, and an except outside what did resolve.
+            selector_rule(&["ghost", "app", "phantom"], &["nowhere"]),
+            // `*` is the whole workspace; the extra name is not looked up.
+            selector_rule(&["*", "ghost"], &["db"]),
+            // An except outside `from`.
+            selector_rule(&["app"], &["db"]),
+        ];
+        let findings = selector_findings(&metadata(), &rules);
+        assert_eq!(findings.len(), 4, "{findings:?}");
+        assert!(findings[0].contains("'ghost'") && findings[1].contains("'phantom'"));
+        assert!(findings[2].contains("except entry \"nowhere\""));
+        assert!(findings[3].contains("except entry \"db\""));
+        // The phase still refuses with the first of them.
+        let err = check_metadata(&metadata(), &rules).unwrap_err().to_string();
+        assert!(err.contains("'ghost'"), "{err}");
     }
 
     #[test]

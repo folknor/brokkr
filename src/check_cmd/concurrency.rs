@@ -27,7 +27,13 @@
 /// over every lane and once for preparation over the tested lanes, so a lint
 /// lane's env never reschedules a test build - and passed to every
 /// [`run_grouped`] call of those phases. `phases` names them in the log line.
-fn resolve_serial_builds(project_root: &Path, configured: bool, sweeps: &[PlannedSweep], phases: &str) -> bool {
+fn resolve_serial_builds(
+    project_root: &Path,
+    configured: bool,
+    sweeps: &[PlannedSweep],
+    phases: &str,
+    narrate: &Narrator,
+) -> bool {
     let sweep_probes: Vec<(bool, bool)> = sweeps.iter().map(|sweep| {
         let env: Vec<(&str, &str)> = sweep
             .env
@@ -54,7 +60,7 @@ fn resolve_serial_builds(project_root: &Path, configured: bool, sweeps: &[Planne
         } else {
             "a cargo build dir is configured"
         };
-        output::detail(&format!("{phases}: one cargo chain ({reason})"));
+        narrate.detail(&format!("{phases}: one cargo chain ({reason})"));
     }
     serial
 }

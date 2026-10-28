@@ -319,6 +319,27 @@ fn textlint_scopes(
     Ok(())
 }
 
+/// Each `[[textlint]]` rule's name and the number of tracked files its `paths`
+/// select and its `exclude` leaves - the textlint scanner's own path test,
+/// before any content predicate.
+pub(super) fn textlint_path_counts(
+    tree: &LazyTree<'_>,
+    rules: &[TextlintRule],
+) -> Result<Vec<(String, usize)>, DevError> {
+    let files = tree.get()?.files();
+    let mut out = Vec::with_capacity(rules.len());
+    for rule in rules {
+        let paths = globs::build_set(&rule.paths, "[[textlint]] paths")?;
+        let exclude = globs::build_set(&rule.exclude, "[[textlint]] exclude")?;
+        let n = files
+            .iter()
+            .filter(|path| globs::matches(&paths, path) && !globs::matches(&exclude, path))
+            .count();
+        out.push((rule.name.clone(), n));
+    }
+    Ok(out)
+}
+
 fn manifest_scope(
     files: &[PathBuf],
     config: Option<&ManifestConfig>,

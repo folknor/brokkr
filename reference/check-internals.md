@@ -18,6 +18,11 @@ and with which packages, is decided once, before any phase runs
 and rustdoc, the test phase, `prepare`, the lane runners (serial, parallel,
 isolated, nextest), member-check, `brokkr clippy`, `brokkr test`, and the
 `package rules` and `brokkr test` plan announcements. Nothing re-derives it.
+For `check` it is built inside `plan_check` (`src/check_cmd/check_plan.rs`),
+the one planning prefix that `cmd_check` executes and `check --audit`
+renders; planning's announcements go through a `Narrator`, printed as they
+are decided on a run and collected by the audit, so a refusal mid-plan leaves
+the same partial narration in both.
 It is invocation selection only: it never predicts binaries, tests, inventory
 or outcomes. The prepared inventory and the runtime record (journal,
 accounting) keep their own models.

@@ -702,11 +702,31 @@ pub(super) fn run_check(
     let lints = clippy_cfg.unwrap_or(&no_lints);
     if audit {
         return check_cmd::cmd_check_audit(
-            project_root,
-            gremlins_cfg,
-            header_cfg,
-            textlint_rules,
-            manifest_cfg,
+            &check_cmd::PlanInputs {
+                project_root,
+                check_entries,
+                lint_sweeps,
+                quarantine,
+                test_cfg,
+                gated,
+                script_checks,
+                rustdoc_configured: rustdoc_cfg.is_some(),
+                features,
+                no_default_features: *no_default_features,
+                packages: package,
+                profile_name: profile.as_deref(),
+                gate: *gate,
+                force_rust: *force_rust,
+                extra_args: args,
+            },
+            &check_cmd::AuditInputs {
+                gremlins_cfg,
+                header_cfg,
+                textlint_rules,
+                manifest_cfg,
+                dependency_rules,
+                lints,
+            },
         );
     }
     if !textlint_names.is_empty() || !script_names.is_empty() {
