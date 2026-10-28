@@ -1,11 +1,20 @@
-//! Parser for the human-readable `pbfhogg inspect` report.
+//! What verify reads from `pbfhogg inspect --json`.
 //!
-//! The parser follows `pbfhogg/src/commands/inspect.rs::print_elements`:
-//! counts live in the `Elements:` section, comma separators are formatting,
-//! and an extended ID-range section can repeat element labels. `Ordered:` is
-//! an independent optional summary field.
+//! Every reader runs inspect with its stdout written to a file beside the
+//! inspected output (`<stem>.inspect.json`, or `<stem>.inspect-extended.json`
+//! under `--extended`) and reads it back through a buffered streaming
+//! deserializer that keeps only the fields below. Every other field - the
+//! ordering sequence among them, one entry per ordering segment, so as long
+//! as a noncanonically ordered file has blobs - is skipped as it streams past
+//! and never retained. The file stays in the check's directory as the full
+//! report.
 
-/// Element counts printed by the `Elements:` section.
+use std::path::{Path, PathBuf};
+
+use super::verify::{PbfArgv, SORT_TYPE_THEN_ID, VerifyHarness};
+use crate::error::DevError;
+
+/// Element counts of one PBF.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct InspectCounts {
     pub nodes: u64,
@@ -13,62 +22,282 @@ pub(super) struct InspectCounts {
     pub relations: u64,
 }
 
-/// Parsed fields from one `pbfhogg inspect` stdout stream.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(super) struct InspectReport {
-    pub nodes: Option<u64>,
-    pub ways: Option<u64>,
-    pub relations: Option<u64>,
-    pub ordered: Option<bool>,
+/// The bounded part of one `inspect --json` report.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub(super) struct InspectSummary {
+    header: Header,
+    pub(super) elements: Elements,
+    ordering: Ordering,
+    /// Present only under `--extended`.
+    #[serde(default)]
+    data: Option<ExtendedData>,
 }
 
-impl InspectReport {
-    /// Parse element counts and the optional order summary from one report.
-    pub fn parse(stdout: &str) -> Self {
-        let mut report = Self::default();
-        let mut in_elements = false;
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+struct Header {
+    required_features: Vec<String>,
+    optional_features: Vec<String>,
+}
 
-        for line in stdout.lines() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("Elements:") {
-                in_elements = true;
-                continue;
-            }
-            if in_elements && trimmed.is_empty() {
-                in_elements = false;
-            } else if in_elements {
-                let Some((label, rest)) = trimmed.split_once(':') else {
-                    continue;
-                };
-                let Some(count) = rest.split_whitespace().next().and_then(parse_count) else {
-                    continue;
-                };
-                match label.trim() {
-                    "Nodes" => report.nodes = Some(count),
-                    "Ways" => report.ways = Some(count),
-                    "Relations" => report.relations = Some(count),
-                    _ => {}
-                }
-            }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+pub(super) struct Elements {
+    nodes: u64,
+    ways: u64,
+    relations: u64,
+}
 
-            if let Some(rest) = trimmed.strip_prefix("Ordered:") {
-                match rest.trim() {
-                    "yes" => report.ordered = Some(true),
-                    "no" => report.ordered = Some(false),
-                    _ => {}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+struct Ordering {
+    standard: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+struct ExtendedData {
+    /// `[min_lon, min_lat, max_lon, max_lat]`, null for a file without nodes.
+    bbox: Option<[f64; 4]>,
+    timestamp: Option<Timestamps>,
+    objects_ordered: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+struct Timestamps {
+    first: String,
+    last: String,
+}
+
+impl InspectSummary {
+    pub(super) fn counts(&self) -> InspectCounts {
+        InspectCounts {
+            nodes: self.elements.nodes,
+            ways: self.elements.ways,
+            relations: self.elements.relations,
+        }
+    }
+
+    /// Whether the header declares `Sort.Type_then_ID`, in either feature
+    /// list (the human report's `Features:` line merges both).
+    pub(super) fn declares_sorted(&self) -> bool {
+        self.header
+            .required_features
+            .iter()
+            .chain(&self.header.optional_features)
+            .any(|f| f == SORT_TYPE_THEN_ID)
+    }
+
+    /// The computed element order (standard ordering and per-kind ID
+    /// monotonicity), `None` unless the report is extended.
+    pub(super) fn objects_ordered(&self) -> Option<bool> {
+        self.data.as_ref().map(|d| d.objects_ordered)
+    }
+
+    /// The summary as operator lines, each prefixed with `label`.
+    pub(super) fn lines(&self, label: &str) -> Vec<String> {
+        let e = &self.elements;
+        let mut features: Vec<&str> = self
+            .header
+            .required_features
+            .iter()
+            .chain(&self.header.optional_features)
+            .map(String::as_str)
+            .collect();
+        features.dedup();
+        let mut lines = vec![
+            format!(
+                "{label}: elements: {} nodes, {} ways, {} relations",
+                e.nodes, e.ways, e.relations
+            ),
+            format!("{label}: features: {}", features.join(", ")),
+            format!(
+                "{label}: ordering: {}",
+                if self.ordering.standard {
+                    "standard"
+                } else {
+                    "NON-STANDARD"
                 }
+            ),
+        ];
+        if let Some(data) = &self.data {
+            lines.push(format!(
+                "{label}: ordered: {}",
+                if data.objects_ordered { "yes" } else { "no" }
+            ));
+            if let Some([min_lon, min_lat, max_lon, max_lat]) = data.bbox {
+                lines.push(format!(
+                    "{label}: data bbox: {min_lon},{min_lat},{max_lon},{max_lat}"
+                ));
+            }
+            if let Some(t) = &data.timestamp {
+                lines.push(format!("{label}: timestamps: {} .. {}", t.first, t.last));
             }
         }
-
-        report
+        lines
     }
 }
 
-fn parse_count(token: &str) -> Option<u64> {
-    token
-        .chars()
-        .filter(|ch| *ch != ',')
-        .collect::<String>()
-        .parse()
-        .ok()
+fn parse_summary(reader: impl std::io::Read) -> serde_json::Result<InspectSummary> {
+    serde_json::from_reader(reader)
+}
+
+/// Where the report of `pbf` is written: beside it, in its check's directory.
+pub(super) fn report_path(pbf: &Path, extended: bool) -> PathBuf {
+    pbf.with_extension(if extended {
+        "inspect-extended.json"
+    } else {
+        "inspect.json"
+    })
+}
+
+/// Run `pbfhogg inspect --json` (with `--extended` when asked) on `pbf`, its
+/// report written to [`report_path`], and read the bounded summary back.
+/// A non-zero exit is an error naming the program; an unreadable report is
+/// an error naming the file. An extended report without
+/// `data.objects_ordered` is refused, never read as unordered.
+pub(super) fn inspect(
+    harness: &VerifyHarness,
+    pbf: &Path,
+    extended: bool,
+) -> Result<InspectSummary, DevError> {
+    let report = report_path(pbf, extended);
+    let argv = PbfArgv::new("inspect")
+        .arg("--json")
+        .arg_if(extended, "--extended")
+        .input(pbf)?;
+    let program = if extended {
+        "pbfhogg inspect --json --extended"
+    } else {
+        "pbfhogg inspect --json"
+    };
+    let captured = harness.run_pbfhogg_to(argv, &report)?;
+    harness.check_exit(&captured, program)?;
+    read_report(&report, extended)
+}
+
+fn read_report(report: &Path, extended: bool) -> Result<InspectSummary, DevError> {
+    let file = std::fs::File::open(report)
+        .map_err(|e| DevError::Verify(format!("cannot open {}: {e}", report.display())))?;
+    let summary = parse_summary(std::io::BufReader::new(file)).map_err(|e| {
+        DevError::Verify(format!(
+            "cannot read the inspect report {}: {e}",
+            report.display()
+        ))
+    })?;
+    if extended && summary.data.is_none() {
+        return Err(DevError::Verify(format!(
+            "the inspect report {} has no data.objects_ordered although --extended was \
+             passed; this pbfhogg does not compute element order",
+            report.display()
+        )));
+    }
+    Ok(summary)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+
+    const PLAIN: &str = r#"{"schema_version":1,"file":"x.osm.pbf","file_size":10,
+        "header":{"writing_program":"pbfhogg","required_features":["OsmSchema-V0.6","DenseNodes"],
+          "optional_features":["Sort.Type_then_ID"],"bbox":null,
+          "replication":{"sequence":null,"timestamp":null,"url":null}},
+        "indexed":true,"blocks":{"total":3},
+        "elements":{"nodes":5,"tagged_nodes":1,"ways":2,"relations":0,"total":7},
+        "ordering":{"sequence":["n","w","n","w"],"standard":false},
+        "id_ranges":null,"anomalies_only":false,"blocks_detail":null,"locations":null}"#;
+
+    #[test]
+    fn plain_report_reads_counts_flag_and_ordering_and_skips_the_rest() {
+        let s = parse_summary(PLAIN.as_bytes()).unwrap();
+        assert_eq!(
+            s.counts(),
+            InspectCounts {
+                nodes: 5,
+                ways: 2,
+                relations: 0
+            }
+        );
+        assert!(s.declares_sorted());
+        assert!(!s.ordering.standard);
+        assert_eq!(s.objects_ordered(), None);
+        assert!(
+            s.lines("p")
+                .iter()
+                .any(|l| l == "p: ordering: NON-STANDARD")
+        );
+    }
+
+    #[test]
+    fn sorted_flag_is_an_exact_feature_not_a_substring() {
+        // The old reader tested the whole human report for the substring, so
+        // a file or program name carrying it read as sorted.
+        let text = PLAIN
+            .replace(
+                r#""optional_features":["Sort.Type_then_ID"]"#,
+                r#""optional_features":[]"#,
+            )
+            .replace(
+                r#""file":"x.osm.pbf""#,
+                r#""file":"Sort.Type_then_ID.osm.pbf""#,
+            );
+        assert!(!parse_summary(text.as_bytes()).unwrap().declares_sorted());
+        let required = PLAIN
+            .replace(
+                r#""optional_features":["Sort.Type_then_ID"]"#,
+                r#""optional_features":[]"#,
+            )
+            .replace(r#""DenseNodes"]"#, r#""DenseNodes","Sort.Type_then_ID"]"#);
+        assert!(
+            parse_summary(required.as_bytes())
+                .unwrap()
+                .declares_sorted()
+        );
+    }
+
+    #[test]
+    fn extended_report_carries_the_computed_order() {
+        let text = PLAIN.replace(
+            r#""locations":null}"#,
+            r#""locations":null,"data":{"bbox":[8.0,54.5,15.2,57.8],
+              "timestamp":{"first":"2010-01-01T00:00:00Z","last":"2026-10-01T00:00:00Z"},
+              "objects_ordered":false},"metadata":{"all_objects":{}}}"#,
+        );
+        let s = parse_summary(text.as_bytes()).unwrap();
+        assert_eq!(s.objects_ordered(), Some(false));
+        let lines = s.lines("p");
+        assert!(lines.contains(&"p: ordered: no".to_owned()), "{lines:?}");
+        assert!(lines.iter().any(|l| l.starts_with("p: data bbox: 8,54.5,")));
+    }
+
+    #[test]
+    fn missing_counts_are_refused_not_zero() {
+        let text = PLAIN.replace(r#""relations":0,"#, "");
+        assert!(parse_summary(text.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn an_extended_report_without_order_is_refused_with_its_path() {
+        let dir = crate::test_scratch::scratch("pbfhogg-verify", "inspect-report");
+        let path = dir.join("out.inspect-extended.json");
+        std::fs::write(&path, PLAIN).unwrap();
+        let err = read_report(&path, true).unwrap_err().to_string();
+        assert!(err.contains("out.inspect-extended.json"), "{err}");
+        assert!(read_report(&path, false).is_ok());
+        let bad = dir.join("bad.inspect.json");
+        std::fs::write(&bad, "{").unwrap();
+        let err = read_report(&bad, false).unwrap_err().to_string();
+        assert!(err.contains("bad.inspect.json"), "{err}");
+    }
+
+    #[test]
+    fn report_sits_beside_the_output() {
+        let p = Path::new("/v/merge/pbfhogg.osm.pbf");
+        assert_eq!(
+            report_path(p, false),
+            Path::new("/v/merge/pbfhogg.osm.inspect.json")
+        );
+        assert_eq!(
+            report_path(p, true),
+            Path::new("/v/merge/pbfhogg.osm.inspect-extended.json")
+        );
+    }
 }

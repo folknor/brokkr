@@ -16,49 +16,12 @@ use crate::output::verify_msg;
 
 pub(super) use super::inspect_report::InspectCounts as Counts;
 
-/// The part of `pbfhogg inspect --json` this reads. Every other field (the
-/// ordering sequence, which grows with the blob count of a noncanonically
-/// ordered file, among them) is skipped by the deserializer as it streams
-/// past, never retained.
-#[derive(serde::Deserialize)]
-struct InspectJson {
-    elements: InspectJsonElements,
-}
-
-#[derive(serde::Deserialize)]
-struct InspectJsonElements {
-    nodes: u64,
-    ways: u64,
-    relations: u64,
-}
-
-fn parse_inspect_json(reader: impl std::io::Read) -> serde_json::Result<Counts> {
-    let json: InspectJson = serde_json::from_reader(reader)?;
-    Ok(Counts {
-        nodes: json.elements.nodes,
-        ways: json.elements.ways,
-        relations: json.elements.relations,
-    })
-}
-
-/// Get element counts for a PBF file (an output in a check's directory) via
-/// `pbfhogg inspect --json`, written to `<stem>.inspect.json` beside it and
-/// read back through a buffered streaming parser: an inverted getid output
-/// keeps its input's ordering, so its report's size is not bounded by the
-/// output being sorted.
+/// Element counts for a PBF file (an output in a check's directory), from a
+/// plain `inspect --json` report written beside it
+/// ([`super::inspect_report`]): an inverted getid output keeps its input's
+/// ordering, so its report's size is not bounded by the output being sorted.
 pub(super) fn inspect_counts(harness: &VerifyHarness, pbf: &Path) -> Result<Counts, DevError> {
-    let report = pbf.with_extension("inspect.json");
-    let captured =
-        harness.run_pbfhogg_to(PbfArgv::new("inspect").arg("--json").input(pbf)?, &report)?;
-    harness.check_exit(&captured, "pbfhogg inspect --json")?;
-    let file = std::fs::File::open(&report)
-        .map_err(|e| DevError::Verify(format!("cannot open {}: {e}", report.display())))?;
-    parse_inspect_json(std::io::BufReader::new(file)).map_err(|e| {
-        DevError::Verify(format!(
-            "could not parse element counts from inspect --json for {}: {e}",
-            pbf.display()
-        ))
-    })
+    Ok(super::inspect_report::inspect(harness, pbf, false)?.counts())
 }
 
 /// Cross-validate single-pass multi-extract against sequential extracts.
@@ -160,18 +123,4 @@ pub fn run(
         verify_msg("  multi-extract: PASS (all regions match)");
     }
     Ok(findings)
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used)]
-
-    #[test]
-    fn inspect_json_reads_counts_and_skips_the_rest() {
-        let text = br#"{"schema_version":1,"ordering":{"sequence":["n","w","n","w"],"standard":false},
-            "elements":{"nodes":5,"tagged_nodes":1,"ways":2,"relations":0,"total":7},"id_ranges":null}"#;
-        let counts = super::parse_inspect_json(&text[..]).unwrap();
-        assert_eq!((counts.nodes, counts.ways, counts.relations), (5, 2, 0));
-        assert!(super::parse_inspect_json(&br#"{"elements":{"nodes":1}}"#[..]).is_err());
-    }
 }

@@ -139,10 +139,9 @@ pub fn run(
     )?;
     harness.check_exit(&captured, "pbfhogg sort (normalise osmium roundtrip)")?;
 
-    // Element counts.
+    // Element counts. `new` and `roundtrip-pbfhogg` are summarised by their
+    // sort checks below.
     verify_msg("=== element counts ===");
-    harness.print_inspect("new", &new_pbf)?;
-    harness.print_inspect("roundtrip-pbfhogg", &rt_pbfhogg)?;
     harness.print_inspect("roundtrip-osmium", &rt_osmium)?;
 
     let mut findings = Findings::new();

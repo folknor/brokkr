@@ -255,11 +255,15 @@ The buffer lives in `output.rs` (`verify_buffer_begin/flush/discard`, fed by
 failure `run_check` returns `DevError::ExitCode(1)` so `main` exits non-zero
 without re-printing an error it already reported.
 
-**Environment outcomes.** A reference tool (osmium, osmconvert) killed by
-`SIGKILL` is not a pbfhogg failure: brokkr never sends a reference tool
-SIGKILL (its own stop is a SIGTERM that ends as INTERRUPTED), so the kill
-came from outside, commonly the kernel OOM killer on a host too small for
-the reference tool at that scale. `run_tool` raises it as
+**Environment outcomes.** A reference tool (osmium, osmconvert, osmosis)
+killed by `SIGKILL` is not a pbfhogg failure: brokkr never sends a reference
+tool SIGKILL (its own stop is a SIGTERM that ends as INTERRUPTED), so the
+kill came from outside, commonly the kernel OOM killer on a host too small
+for the reference tool at that scale. osmosis's start script `exec`s java,
+so an OOM-killed JVM ends as that signal too, while a Java
+`OutOfMemoryError` is an ordinary non-zero exit. `run_tool`, and
+`run_reference` for a launcher that is not a `PATH` tool (osmosis with its
+`JAVA_HOME`), raise it as
 `DevError::VerifyEnvironment`, classified from the child's ending before any
 capture failure, and the check prints `<name>: ENVIRONMENT (<ms>; <steps>):
 <reason>` with its detail replayed. A comparison failure recorded earlier in
@@ -270,8 +274,8 @@ non-zero exit, or pbfhogg itself being killed (its memory at scale is under
 test) stays a FAIL. A single check exits 75 (`EX_TEMPFAIL`) on ENVIRONMENT;
 `verify all` tallies `environment` beside passed, failed and skipped and
 exits 1 if any check failed, else 75 if any was environmental. An
-environment kill of osmconvert, which `verify merge` runs for context only,
-is reported on the summary channel and changes no verdict.
+environment kill of osmosis or osmconvert, which `verify merge` runs for
+context only, is reported on the summary channel and changes no verdict.
 
 **Output that scales with the data.** No verify step holds a listing in
 memory. Every reference-tool run, and every pbfhogg step whose stdout is a
@@ -280,17 +284,31 @@ diffs), writes stdout to a file in the check's directory
 (`Invocation::run_to_file`, `output::run_stdout_to_file`); stderr stays a
 bounded capture. Such a child dies with brokkr (`PR_SET_PDEATHSIG`, refused at
 spawn if it cannot be armed), since a file, unlike a pipe, gives an orphaned
-writer no reason to stop. Consumers read the files through fixed buffers
+writer no reason to stop. The signal reaches the process brokkr spawned; a
+launcher that `exec`s its program passes it on, while helpers a launcher
+forks first (osmosis's start-script preamble) are left to the orphan
+reaper. Consumers read the files through fixed buffers
 (`verify_stream`): per-line heads for renumber's block count, byte-wise
 comparison and line counts for `verify diff`, emptiness for `diff_pbfs`'s
 verdict. A FAIL replays a bounded head of a listing (lines and bytes per
-line) and always names the file holding all of it. Element counts of a
-check's outputs come from `inspect --json` written to a file and read by a
-streaming parser that keeps only the counts (an inverted getid output keeps
-its input's order, so its report is not bounded by being sorted). The human
-`inspect` reports that `print_inspect` and `check_sorted` read stay captured,
-as do `check --refs` counts; every report consumer still requires its
-documented exit codes before trusting what it parsed.
+line) and always names the file holding all of it. Every `inspect` verify
+reads - element counts, the header's sort flag, the computed order
+(`check_sorted`) and the summary `print_inspect` shows - is `inspect --json`
+(with `--extended` where the order or the extended summary is needed)
+written to a file beside the inspected output and read by a streaming
+parser that keeps only those fields; the per-segment ordering sequence,
+unbounded for a noncanonically ordered file such as an inverted getid
+output, is skipped as it streams. The file stays as the full report and the
+printed summary names it. An extended report without `data.objects_ordered`
+is an error, never read as unordered. `check --refs` counts stay captured;
+every report consumer still requires its documented exit codes before
+trusting what it parsed. (pbfhogg itself still builds the whole report,
+ordering sequence included, in memory before writing it.)
+`verify merge`'s element diff OSC is classified as it streams into per-class
+counts and the ten smallest IDs; the one structure it holds is the input
+OSC's delete set, O(delete entries in the change file), which the osmium
+apply-changes step before it dominates by holding every change as a full
+object.
 
 **Verdicts.** A check fails by returning `Err` (a tool crashed, output could
 not be parsed) or by returning `Findings` that carry a failed comparison;
@@ -343,7 +361,7 @@ vs `[verify] osc: base fallback (<key> has no osc table)`), but only when
 a valid tool-vs-tool check - both pbfhogg and osmium apply the same changes to
 the same input - so the fallback never invalidates the cross-check.
 
-`verify_merge` parses the input OSC's delete set via `osc::parse_osc_file` and
+`verify_merge` reads the input OSC's delete set via `osc::scan_osc_file` and
 runs a strict `pbfhogg diff --format osc` between pbfhogg's and osmium's
 outputs - osmium-only IDs that appear in the input OSC's delete set are
 exempt (osmium does version-based deletes; pbfhogg/osmosis/osmconvert delete
@@ -427,9 +445,11 @@ deviation), osmium only with that flag.
 
 ## OSC parser (`src/osc.rs`)
 
-Minimal `.osc` / `.osc.gz` reader. Returns `OscDiff` with sorted ID sets per
-(`<create>` / `<modify>` / `<delete>`) section per element kind. Used by
-`verify_merge` for the delete-set carve-out.
+Minimal `.osc` / `.osc.gz` reader. `scan_osc_file` calls back once per
+element entry with its (`<create>` / `<modify>` / `<delete>`) action, kind
+and ID, in file order, and keeps nothing between entries; what is retained
+is the caller's choice. Used by `verify_merge` for the delete-set carve-out
+and the streamed classification of the element diff.
 
 Streaming hand-rolled tag scanner; gzip and plain XML are consumed in bounded
 chunks, and the scanner retains only its current tag rather than the entire
@@ -439,8 +459,9 @@ bodies (tags / refs / members / coords / metadata) are deliberately skipped -
 only IDs are needed. The document itself is checked: the first element must
 be the `<osmChange>` root and the root must be closed, with nothing after it.
 An empty file, a non-OSC document or a truncated diff is an error, not an
-empty `OscDiff` - `verify_merge` would otherwise report it as
-"element-identical PASS".
+empty scan - `verify_merge` would otherwise report it as
+"element-identical PASS". Entries are delivered before the document is known
+to be whole, so a caller acts on them only once the scan returns `Ok`.
 
 ## Snapshots and variant selection
 

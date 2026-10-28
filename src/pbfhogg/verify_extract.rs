@@ -56,8 +56,7 @@ pub fn run(
         )?;
         harness.check_exit(&captured, "osmium extract")?;
 
-        // --- Element counts ---
-        harness.print_inspect("pbfhogg", &pbfhogg_out)?;
+        // --- Element counts (pbfhogg's output is summarised by its sort check) ---
         harness.print_inspect("osmium", &osmium_out)?;
 
         // --- Diff (informational) ---

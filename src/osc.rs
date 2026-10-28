@@ -15,7 +15,6 @@
 //! would be churn. It scans incrementally and retains only the current tag,
 //! so large Planet or regional diffs do not need to fit in memory.
 
-use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{self, BufRead, Cursor, Read};
 use std::path::Path;
@@ -24,43 +23,39 @@ use flate2::read::MultiGzDecoder;
 
 use crate::error::DevError;
 
-/// Per-element-type sets of IDs partitioned by OSC operation.
-///
-/// The IDs are stored sorted (`BTreeSet`) so iteration is
-/// deterministic - useful when the carve-out reports unexplained
-/// failures, and when this struct is used to pretty-print summaries.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct OscDiff {
-    pub created_nodes: BTreeSet<i64>,
-    pub created_ways: BTreeSet<i64>,
-    pub created_relations: BTreeSet<i64>,
-
-    pub modified_nodes: BTreeSet<i64>,
-    pub modified_ways: BTreeSet<i64>,
-    pub modified_relations: BTreeSet<i64>,
-
-    pub deleted_nodes: BTreeSet<i64>,
-    pub deleted_ways: BTreeSet<i64>,
-    pub deleted_relations: BTreeSet<i64>,
+/// The `<create>` / `<modify>` / `<delete>` container an element sits in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OscAction {
+    Create,
+    Modify,
+    Delete,
 }
 
-impl OscDiff {
-    /// Total number of element IDs across every section. Useful for
-    /// "no deltas at all" check in callers.
-    pub fn is_empty(&self) -> bool {
-        self.created_nodes.is_empty()
-            && self.created_ways.is_empty()
-            && self.created_relations.is_empty()
-            && self.modified_nodes.is_empty()
-            && self.modified_ways.is_empty()
-            && self.modified_relations.is_empty()
-            && self.deleted_nodes.is_empty()
-            && self.deleted_ways.is_empty()
-            && self.deleted_relations.is_empty()
+/// The element kind of one OSC entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OscKind {
+    Node,
+    Way,
+    Relation,
+}
+
+impl OscKind {
+    /// Index into a per-kind `[_; 3]` array: node, way, relation.
+    pub fn index(self) -> usize {
+        match self {
+            Self::Node => 0,
+            Self::Way => 1,
+            Self::Relation => 2,
+        }
     }
 }
 
-/// Parse an OSC file from disk. Gzip is detected by magic bytes (not the
+/// Scan an OSC file from disk, calling `each` once per element entry inside
+/// an action container, in file order. Nothing is retained between entries:
+/// what a caller keeps is its own choice, so a diff the size of a planet
+/// costs only what the caller accumulates. Every entry has been delivered
+/// before the document is known to be complete, so a caller must not act on
+/// what it saw until this returns `Ok`. Gzip is detected by magic bytes (not the
 /// filename): pbfhogg's `diff --format osc` always gzips its output regardless
 /// of the chosen extension, so a `.osc` file can still be gzip-compressed.
 ///
@@ -68,9 +63,12 @@ impl OscDiff {
 /// OSC is a concatenation of independently-gzipped members (pbfhogg splices
 /// the create/modify/delete sections). Plain `GzDecoder` stops silently at the
 /// first member boundary and would yield a truncated-but-valid-looking OSC.
-pub fn parse_osc_file(path: &Path) -> Result<OscDiff, DevError> {
+pub fn scan_osc_file(
+    path: &Path,
+    each: impl FnMut(OscAction, OscKind, i64),
+) -> Result<(), DevError> {
     let (input, compressed) = open_osc(path)?;
-    parse_osc_reader(input).map_err(|error| match error {
+    scan_osc_reader(input, each).map_err(|error| match error {
         OscReadError::Read(error) if compressed => {
             DevError::Verify(format!("cannot decompress OSC {}: {error}", path.display()))
         }
@@ -89,7 +87,7 @@ pub fn parse_osc_file(path: &Path) -> Result<OscDiff, DevError> {
 }
 
 /// Open an OSC file as its decompressed byte stream, gzip detected by magic
-/// as in [`parse_osc_file`]. The flag says whether it was gzip.
+/// as in [`scan_osc_file`]. The flag says whether it was gzip.
 fn open_osc(path: &Path) -> Result<(Box<dyn Read>, bool), DevError> {
     let mut file = File::open(path)
         .map_err(|e| DevError::Verify(format!("cannot open OSC {}: {e}", path.display())))?;
@@ -211,8 +209,11 @@ impl Utf8Validator {
     }
 }
 
-fn parse_osc_reader<R: Read>(mut reader: R) -> Result<OscDiff, OscReadError> {
-    let mut parser = OscParser::default();
+fn scan_osc_reader<R: Read>(
+    mut reader: R,
+    each: impl FnMut(OscAction, OscKind, i64),
+) -> Result<(), OscReadError> {
+    let mut parser = OscParser::new(each);
     let mut validator = Utf8Validator::default();
     let mut chunk = [0; 16 * 1024];
     loop {
@@ -227,7 +228,7 @@ fn parse_osc_reader<R: Read>(mut reader: R) -> Result<OscDiff, OscReadError> {
     parser.finish().map_err(OscReadError::Parse)
 }
 
-/// Parse already-decompressed OSC XML text. Tolerant of whitespace,
+/// Scan already-decompressed OSC XML text, as [`scan_osc_file`] does. Tolerant of whitespace,
 /// XML comments, and self-closing elements (`<node id="1" .../>`).
 /// Element-body content (tags / refs / members) is silently skipped.
 ///
@@ -237,15 +238,14 @@ fn parse_osc_reader<R: Read>(mut reader: R) -> Result<OscDiff, OscReadError> {
 /// mid-write - parsed as an empty diff, which `verify_merge` reports as
 /// "element-identical PASS".
 #[cfg(test)]
-pub fn parse_osc_text(text: &str) -> Result<OscDiff, String> {
-    let mut parser = OscParser::default();
+pub fn scan_osc_text(text: &str, each: impl FnMut(OscAction, OscKind, i64)) -> Result<(), String> {
+    let mut parser = OscParser::new(each);
     parser.feed(text.as_bytes())?;
     parser.finish()
 }
 
-#[derive(Default)]
-struct OscParser {
-    out: OscDiff,
+struct OscParser<F> {
+    each: F,
     section: Section,
     root: Root,
     scan: ScanState,
@@ -261,7 +261,16 @@ enum ScanState {
     Declaration,
 }
 
-impl OscParser {
+impl<F: FnMut(OscAction, OscKind, i64)> OscParser<F> {
+    fn new(each: F) -> Self {
+        Self {
+            each,
+            section: Section::None,
+            root: Root::Before,
+            scan: ScanState::Text,
+        }
+    }
+
     fn feed(&mut self, bytes: &[u8]) -> Result<(), String> {
         for &byte in bytes {
             let state = std::mem::take(&mut self.scan);
@@ -343,8 +352,10 @@ impl OscParser {
             "modify" => self.section = Section::Modify,
             "delete" => self.section = Section::Delete,
             "node" | "way" | "relation" => {
-                if let Some(id) = extract_id(attrs) {
-                    record(&mut self.out, self.section, name, id);
+                if let (Some(id), Some(action), Some(kind)) =
+                    (extract_id(attrs), self.section.action(), kind_of(name))
+                {
+                    (self.each)(action, kind, id);
                 }
             }
             _ => {}
@@ -352,7 +363,7 @@ impl OscParser {
         Ok(())
     }
 
-    fn finish(self) -> Result<OscDiff, String> {
+    fn finish(self) -> Result<(), String> {
         match self.scan {
             ScanState::Text => {}
             ScanState::Comment(_) => return Err("unterminated XML comment".to_owned()),
@@ -362,7 +373,7 @@ impl OscParser {
             }
         }
         match self.root {
-            Root::Closed => Ok(self.out),
+            Root::Closed => Ok(()),
             Root::Before => Err("no <osmChange> root element".to_owned()),
             Root::Open => Err("missing closing </osmChange> (truncated?)".to_owned()),
         }
@@ -435,26 +446,111 @@ fn extract_id(attrs: &str) -> Option<i64> {
     None
 }
 
-fn record(out: &mut OscDiff, section: Section, kind: &str, id: i64) {
-    let target = match (section, kind) {
-        (Section::Create, "node") => &mut out.created_nodes,
-        (Section::Create, "way") => &mut out.created_ways,
-        (Section::Create, "relation") => &mut out.created_relations,
-        (Section::Modify, "node") => &mut out.modified_nodes,
-        (Section::Modify, "way") => &mut out.modified_ways,
-        (Section::Modify, "relation") => &mut out.modified_relations,
-        (Section::Delete, "node") => &mut out.deleted_nodes,
-        (Section::Delete, "way") => &mut out.deleted_ways,
-        (Section::Delete, "relation") => &mut out.deleted_relations,
-        _ => return,
-    };
-    target.insert(id);
+fn kind_of(name: &str) -> Option<OscKind> {
+    match name {
+        "node" => Some(OscKind::Node),
+        "way" => Some(OscKind::Way),
+        "relation" => Some(OscKind::Relation),
+        _ => None,
+    }
+}
+
+impl Section {
+    fn action(self) -> Option<OscAction> {
+        match self {
+            Self::None => None,
+            Self::Create => Some(OscAction::Create),
+            Self::Modify => Some(OscAction::Modify),
+            Self::Delete => Some(OscAction::Delete),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
+    use std::collections::BTreeSet;
+
+    /// Every entry a scan delivered, by action and kind.
+    #[derive(Debug, Default)]
+    struct Seen {
+        created_nodes: BTreeSet<i64>,
+        created_ways: BTreeSet<i64>,
+        created_relations: BTreeSet<i64>,
+        modified_nodes: BTreeSet<i64>,
+        deleted_nodes: BTreeSet<i64>,
+        deleted_ways: BTreeSet<i64>,
+        deleted_relations: BTreeSet<i64>,
+        other: usize,
+    }
+
+    impl Seen {
+        fn record(&mut self, action: OscAction, kind: OscKind, id: i64) {
+            let set = match (action, kind) {
+                (OscAction::Create, OscKind::Node) => &mut self.created_nodes,
+                (OscAction::Create, OscKind::Way) => &mut self.created_ways,
+                (OscAction::Create, OscKind::Relation) => &mut self.created_relations,
+                (OscAction::Modify, OscKind::Node) => &mut self.modified_nodes,
+                (OscAction::Delete, OscKind::Node) => &mut self.deleted_nodes,
+                (OscAction::Delete, OscKind::Way) => &mut self.deleted_ways,
+                (OscAction::Delete, OscKind::Relation) => &mut self.deleted_relations,
+                _ => {
+                    self.other += 1;
+                    return;
+                }
+            };
+            set.insert(id);
+        }
+
+        fn is_empty(&self) -> bool {
+            self.created_nodes.is_empty()
+                && self.created_ways.is_empty()
+                && self.created_relations.is_empty()
+                && self.modified_nodes.is_empty()
+                && self.deleted_nodes.is_empty()
+                && self.deleted_ways.is_empty()
+                && self.deleted_relations.is_empty()
+                && self.other == 0
+        }
+    }
+
+    fn parse_osc_text(text: &str) -> Result<Seen, String> {
+        let mut seen = Seen::default();
+        scan_osc_text(text, |a, k, id| seen.record(a, k, id))?;
+        Ok(seen)
+    }
+
+    fn parse_osc_file(path: &Path) -> Result<Seen, DevError> {
+        let mut seen = Seen::default();
+        scan_osc_file(path, |a, k, id| seen.record(a, k, id))?;
+        Ok(seen)
+    }
+
+    fn parse_osc_reader(input: impl Read) -> Result<Seen, OscReadError> {
+        let mut seen = Seen::default();
+        scan_osc_reader(input, |a, k, id| seen.record(a, k, id))?;
+        Ok(seen)
+    }
+
+    #[test]
+    fn entries_arrive_in_file_order_with_duplicates_kept() {
+        let mut seen = Vec::new();
+        scan_osc_text(
+            r#"<osmChange><delete><way id="5"/><node id="3"/><node id="3"/></delete><modify><relation id="1"/></modify></osmChange>"#,
+            |a, k, id| seen.push((a, k, id)),
+        )
+        .unwrap();
+        assert_eq!(
+            seen,
+            vec![
+                (OscAction::Delete, OscKind::Way, 5),
+                (OscAction::Delete, OscKind::Node, 3),
+                (OscAction::Delete, OscKind::Node, 3),
+                (OscAction::Modify, OscKind::Relation, 1),
+            ]
+        );
+    }
 
     const SAMPLE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <osmChange version="0.6" generator="test">

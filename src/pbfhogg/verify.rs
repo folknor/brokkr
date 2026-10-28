@@ -153,13 +153,31 @@ impl VerifyHarness {
         stdout: &Path,
     ) -> Result<CapturedOutput, DevError> {
         let label = format!("{} {}", tool.name(), args.first().copied().unwrap_or(""));
-        let _step = step(&label);
-        let run = Invocation::tool(tool, args.iter().map(|&a| a.to_owned()).collect())
-            .run_to_file(&self.project_root, stdout)?;
-        if let Some(why) = reference_kill(run.captured.signal(), &label) {
+        let invocation = Invocation::tool(tool, args.iter().map(|&a| a.to_owned()).collect());
+        self.run_reference(&invocation, &label, stdout)
+    }
+
+    /// [`run_tool`](Self::run_tool) for a reference program that is not a
+    /// `PATH` tool (osmosis, a resolved launcher with its own environment):
+    /// the same file sink, death signal, orphan token and ending
+    /// classification, under the step `label`.
+    ///
+    /// The death signal reaches the program brokkr spawned. A launcher that
+    /// `exec`s its real program (osmosis's start script execs java) passes it
+    /// on; helpers it forks first (its preamble's subshells) do not inherit
+    /// it, and are left to the orphan reaper.
+    pub(crate) fn run_reference(
+        &self,
+        invocation: &Invocation<'_>,
+        label: &str,
+        stdout: &Path,
+    ) -> Result<CapturedOutput, DevError> {
+        let _step = step(label);
+        let run = invocation.run_to_file(&self.project_root, stdout)?;
+        if let Some(why) = reference_kill(run.captured.signal(), label) {
             return Err(DevError::VerifyEnvironment(why));
         }
-        if let Some(failure) = run.capture_failure(&label) {
+        if let Some(failure) = run.capture_failure(label) {
             return Err(failure);
         }
         Ok(run.captured)
@@ -167,23 +185,20 @@ impl VerifyHarness {
 
     // -- Common verify operations ------------------------------------------
 
-    /// Print extended inspect output for a PBF, prefixed with `label`.
+    /// Print the extended inspect summary of a PBF, prefixed with `label`,
+    /// and name the file holding the full report.
     ///
-    /// Runs `pbfhogg inspect --extended <pbf>`. On failure, prints the
-    /// error but does **not** propagate it (informational only).
+    /// Runs `pbfhogg inspect --json --extended <pbf>` with its report written
+    /// to a file ([`super::inspect_report`]). A failed inspect or unreadable
+    /// report is printed but **not** propagated (informational only); an
+    /// interrupt still is. An output whose order a check judges is
+    /// summarised by [`check_sorted`](Self::check_sorted) instead.
     pub fn print_inspect(&self, label: &str, pbf: &Path) -> Result<(), DevError> {
-        let captured = self.run_pbfhogg(PbfArgv::new("inspect").arg("--extended").input(pbf)?)?;
-
-        if captured.success() {
-            let stdout = String::from_utf8_lossy(&captured.stdout);
-            for line in stdout.lines() {
-                output::verify_msg(&format!("  {label}: {line}"));
-            }
-        } else {
-            let stderr = String::from_utf8_lossy(&captured.stderr);
-            output::error(&format!("inspect failed for {label}: {stderr}"));
+        match super::inspect_report::inspect(self, pbf, true) {
+            Ok(summary) => print_summary(label, &summary, pbf),
+            Err(DevError::Interrupted) => return Err(DevError::Interrupted),
+            Err(e) => output::error(&format!("inspect failed for {label}: {e}")),
         }
-
         Ok(())
     }
 
@@ -234,51 +249,36 @@ impl VerifyHarness {
 
     /// Check whether a PBF's elements are actually in sorted order.
     ///
-    /// Runs `pbfhogg inspect --extended <pbf>` and reads the computed
-    /// `Ordered: yes|no` line (derived from ordering segments + ID
-    /// monotonicity), NOT the header `Sort.Type_then_ID` optional feature.
-    /// The header is only a claim - a blob-level stamp that can be blind to
-    /// intra-blob disorder - so a degraded/unsorted file can carry the flag
-    /// while its elements are out of order. We trust the computed order and
-    /// report the header only for context. Prints a PASS/FAIL message and
-    /// returns the verdict. A failed `inspect` is an error, not a FAIL: its
-    /// empty stdout would otherwise read as "NOT sorted".
+    /// Runs `pbfhogg inspect --json --extended <pbf>` (report to a file,
+    /// [`super::inspect_report`]), prints its summary as
+    /// [`print_inspect`](Self::print_inspect) does, and reads the computed
+    /// `data.objects_ordered` (ordering segments + ID monotonicity), NOT the
+    /// header `Sort.Type_then_ID` feature. The header is only a claim - a
+    /// blob-level stamp that can be blind to intra-blob disorder - so a
+    /// degraded/unsorted file can carry the flag while its elements are out
+    /// of order. We trust the computed order and report the header only for
+    /// context. Prints a PASS/FAIL message and returns the verdict. A failed
+    /// `inspect`, or a report without the computed order, is an error, not a
+    /// FAIL.
     pub fn check_sorted(&self, label: &str, pbf: &Path) -> Result<Verdict, DevError> {
-        let captured = self.run_pbfhogg(PbfArgv::new("inspect").arg("--extended").input(pbf)?)?;
-        self.check_exit(&captured, "pbfhogg inspect --extended")?;
-
-        let stdout = String::from_utf8_lossy(&captured.stdout);
-        let has_flag = stdout.contains(SORT_TYPE_THEN_ID);
-
-        match parse_ordered(&stdout) {
-            Some(true) => {
-                output::verify_msg(&format!("  {label}: ordered (element order verified) PASS"));
-                Ok(Verdict::Pass)
-            }
-            Some(false) => {
-                let hint = if has_flag {
-                    format!(" - header declares {SORT_TYPE_THEN_ID} but element order disagrees")
-                } else {
-                    String::new()
-                };
-                output::verify_msg(&format!(
-                    "  {label}: NOT ordered (inspect Ordered: no){hint} FAIL"
-                ));
-                Ok(Verdict::Fail)
-            }
-            None => {
-                // No `Ordered:` line (older pbfhogg without --extended support):
-                // fall back to the header feature so the check still runs.
-                if has_flag {
-                    output::verify_msg(&format!(
-                        "  {label}: sorted ({SORT_TYPE_THEN_ID} header; order not computed) PASS"
-                    ));
-                } else {
-                    output::verify_msg(&format!("  {label}: NOT sorted FAIL"));
-                }
-                Ok(Verdict::from_pass(has_flag))
-            }
+        let summary = super::inspect_report::inspect(self, pbf, true)?;
+        print_summary(label, &summary, pbf);
+        let ordered = summary.objects_ordered().ok_or_else(|| {
+            DevError::Internal("an extended inspect summary without its order".into())
+        })?;
+        if ordered {
+            output::verify_msg(&format!("  {label}: ordered (element order verified) PASS"));
+            return Ok(Verdict::Pass);
         }
+        let hint = if summary.declares_sorted() {
+            format!(" - header declares {SORT_TYPE_THEN_ID} but element order disagrees")
+        } else {
+            String::new()
+        };
+        output::verify_msg(&format!(
+            "  {label}: NOT ordered (inspect objects_ordered: false){hint} FAIL"
+        ));
+        Ok(Verdict::Fail)
     }
 
     /// Check that every way's inline coordinates in a LocationsOnWays PBF
@@ -385,13 +385,11 @@ impl VerifyHarness {
 
     // -- Internal helpers --------------------------------------------------
 
-    /// Run `inspect` and return whether stdout contains [`SORT_TYPE_THEN_ID`].
-    /// A failed `inspect` is an error - its empty stdout is not "unsorted".
+    /// Whether `pbf`'s header declares [`SORT_TYPE_THEN_ID`], from a plain
+    /// `inspect --json` (report to a file). A failed `inspect` is an error,
+    /// not "unsorted".
     fn has_sort_flag(&self, pbf: &Path) -> Result<bool, DevError> {
-        let captured = self.run_pbfhogg(PbfArgv::new("inspect").input(pbf)?)?;
-        self.check_exit(&captured, "pbfhogg inspect")?;
-        let stdout = String::from_utf8_lossy(&captured.stdout);
-        Ok(stdout.contains(SORT_TYPE_THEN_ID))
+        Ok(super::inspect_report::inspect(self, pbf, false)?.declares_sorted())
     }
 }
 
@@ -847,22 +845,24 @@ fn is_plain_component(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\'])
 }
 
-/// Parse the `Ordered:` line emitted by `pbfhogg inspect --extended`.
-///
-/// Returns `Some(true)` for `Ordered:  yes`, `Some(false)` for `Ordered: no`,
-/// and `None` when no such line is present (e.g. plain, non-extended output).
-/// The per-kind `(monotonic: yes|no)` id-range lines are deliberately ignored
-/// - the top-level `Ordered:` value already folds in monotonicity.
-fn parse_ordered(inspect_text: &str) -> Option<bool> {
-    super::inspect_report::InspectReport::parse(inspect_text).ordered
+/// Print an inspect summary into the check detail, naming the report file
+/// that holds all of it.
+fn print_summary(label: &str, summary: &super::inspect_report::InspectSummary, pbf: &Path) {
+    for line in summary.lines(label) {
+        output::verify_msg(&format!("  {line}"));
+    }
+    output::verify_msg(&format!(
+        "  {label}: full report in {}",
+        output::path(&super::inspect_report::report_path(pbf, true))
+    ));
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::{
-        CheckOutcome, Findings, SORT_TYPE_THEN_ID, Verdict, diff_verdict, fresh_subdir,
-        is_plain_component, parse_ordered, render_step_times,
+        CheckOutcome, Findings, Verdict, diff_verdict, fresh_subdir, is_plain_component,
+        render_step_times,
     };
 
     #[test]
@@ -1048,32 +1048,5 @@ mod tests {
         assert!(!is_plain_component(".."));
         assert!(!is_plain_component("a/b"));
         assert!(!is_plain_component("../x"));
-    }
-
-    #[test]
-    fn parse_ordered_yes() {
-        let text = format!("Features: {SORT_TYPE_THEN_ID}\nOrdered:  yes\nTimestamps: ..\n");
-        assert_eq!(parse_ordered(&text), Some(true));
-    }
-
-    #[test]
-    fn parse_ordered_no() {
-        // The degraded-unsorted case: header still claims the feature, but the
-        // computed order says no. check_sorted must trust this line.
-        let text = format!("Features: {SORT_TYPE_THEN_ID}\nOrdered:  no\n");
-        assert_eq!(parse_ordered(&text), Some(false));
-    }
-
-    #[test]
-    fn parse_ordered_absent() {
-        // Plain (non-extended) inspect has no Ordered: line.
-        let text = format!("Features: {SORT_TYPE_THEN_ID}\nElements: 100 total\n");
-        assert_eq!(parse_ordered(&text), None);
-    }
-
-    #[test]
-    fn parse_ordered_ignores_monotonic_lines() {
-        let text = "Ordered:  no\nID ranges:\n  Nodes:  1 .. 9   (monotonic: yes)\n";
-        assert_eq!(parse_ordered(text), Some(false));
     }
 }

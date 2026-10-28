@@ -35,8 +35,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
     )?;
     harness.check_exit(&captured, "osmium sort")?;
 
-    // --- Element counts ---
-    harness.print_inspect("pbfhogg", &pbfhogg_out)?;
+    // --- Element counts (pbfhogg's output is summarised by its sort check) ---
     harness.print_inspect("osmium", &osmium_out)?;
 
     let mut findings = Findings::new();

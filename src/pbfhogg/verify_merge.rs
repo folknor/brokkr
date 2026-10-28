@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use super::verify::{self, ExternalTool, Findings, PbfArgv, VerifyHarness};
 use crate::error::DevError;
 use crate::measure::Invocation;
-use crate::osc::{self, OscDiff};
+use crate::osc::{self, OscAction, OscKind};
 use crate::output;
 use crate::output::verify_msg;
 use crate::tools::OsmosisTools;
@@ -92,8 +92,8 @@ pub fn run(
     };
 
     // --- Element counts ---
+    // pbfhogg's output is summarised by its sort check below.
     verify_msg("=== element counts ===");
-    harness.print_inspect("pbfhogg", &pbfhogg_out)?;
     harness.print_inspect("osmium", &osmium_out)?;
     for (label, path) in &context_outputs {
         harness.print_inspect(label, path)?;
@@ -190,8 +190,9 @@ fn print_report_head(report: &str) {
 /// production is tracked from each run's outcome, not inferred from a file
 /// being present. A failed run's partial output is still removed.
 ///
-/// No comparison depends on these tools, so an environment kill of one
-/// (osmconvert through `run_tool`) does not change the check's verdict; it is
+/// Both run through the reference-run path (stdout to a file, death with
+/// brokkr, SIGKILL classified). No comparison depends on these tools, so an
+/// environment kill of one does not change the check's verdict; it is
 /// reported on the summary channel, where a passing check still shows it.
 fn run_context_tools(
     harness: &VerifyHarness,
@@ -206,6 +207,7 @@ fn run_context_tools(
         verify_msg("--- osmosis --apply-change ---");
         let osmosis_out_str = osmosis_out.display().to_string();
         match run_osmosis(
+            harness,
             tools,
             &[
                 "--read-xml-change",
@@ -216,7 +218,7 @@ fn run_context_tools(
                 "--write-pbf",
                 &format!("file={osmosis_out_str}"),
             ],
-            &harness.project_root,
+            &outdir.join("osmosis.stdout"),
         ) {
             Ok(captured) => match harness.check_exit(&captured, "osmosis") {
                 Ok(()) => produced.push(("osmosis", osmosis_out)),
@@ -228,6 +230,12 @@ fn run_context_tools(
             // A stop is not a skipped tool: carry on and the rest of the
             // check would run against a half-killed comparison.
             Err(DevError::Interrupted) => return Err(DevError::Interrupted),
+            Err(e @ DevError::VerifyEnvironment(_)) => {
+                output::verify_summary(&format!(
+                    "  osmosis (context only, no verdict depends on it): {e}"
+                ));
+                drop(crate::reservations::remove_file(&osmosis_out));
+            }
             Err(e) => {
                 verify_msg(&format!("  osmosis skipped: {e}"));
                 drop(crate::reservations::remove_file(&osmosis_out));
@@ -282,12 +290,12 @@ fn verify_pbfhogg_vs_osmium(
 ) -> Result<(), DevError> {
     verify_msg("=== pbfhogg vs osmium element diff ===");
 
-    let applied = osc::parse_osc_file(input_osc)?;
+    let applied = DeleteSet::read(input_osc)?;
     verify_msg(&format!(
         "  input OSC delete set: {} nodes, {} ways, {} relations",
-        applied.deleted_nodes.len(),
-        applied.deleted_ways.len(),
-        applied.deleted_relations.len(),
+        applied.ids[0].len(),
+        applied.ids[1].len(),
+        applied.ids[2].len(),
     ));
 
     let diff_path = outdir.join("pbfhogg-vs-osmium.osc");
@@ -336,19 +344,23 @@ fn verify_pbfhogg_vs_osmium(
         )));
     }
 
-    let delta = osc::parse_osc_file(&diff_path)?;
-    if delta.is_empty() {
+    // Classified as it streams: only counters and bounded samples are kept,
+    // so a regression the size of the planet costs no more than a pass. The
+    // verdict waits for the scan to return, which proves the document whole.
+    let mut report = MergeDiffReport::default();
+    osc::scan_osc_file(&diff_path, |action, kind, id| {
+        report.classify(action, kind, id, &applied);
+    })?;
+    drop(applied);
+    if report.is_empty() {
         verify_msg("  pbfhogg and osmium outputs are element-identical PASS");
         return Ok(());
     }
-
-    let mut report = MergeDiffReport::default();
-    classify_diff(&delta, &applied, &mut report);
     report.print();
 
     if report.is_failure() {
         return Err(DevError::Verify(format!(
-            "pbfhogg vs osmium: {} unexplained differences \
+            "pbfhogg vs osmium: {} unexplained difference entries \
              (see element diff above)",
             report.total_failures()
         )));
@@ -356,10 +368,46 @@ fn verify_pbfhogg_vs_osmium(
     Ok(())
 }
 
-/// Outcome buckets for the per-element diff. Sorted IDs (BTreeSet
-/// from `OscDiff`) keep the printed report deterministic. Capped at
-/// `MAX_REPORTED_IDS` per category so a runaway 10k-mismatch doesn't
-/// bury the summary.
+/// The input OSC's `<delete>` IDs per kind (node, way, relation), sorted and
+/// deduplicated for binary search: the carve-out's membership test.
+///
+/// Held in memory, O(delete entries in the input change): 8-byte IDs plus
+/// vector capacity while it is read. That is the one input-sized structure
+/// here, and the step before it dominates it: osmium apply-changes, which must
+/// have succeeded first, holds every change in the file as a full object.
+/// Nothing sized by the PBF or by the difference is retained.
+struct DeleteSet {
+    ids: [Vec<i64>; 3],
+}
+
+impl DeleteSet {
+    fn read(osc_path: &Path) -> Result<Self, DevError> {
+        let mut ids: [Vec<i64>; 3] = Default::default();
+        osc::scan_osc_file(osc_path, |action, kind, id| {
+            if action == OscAction::Delete {
+                ids[kind.index()].push(id);
+            }
+        })?;
+        Ok(Self::from_unsorted(ids))
+    }
+
+    fn from_unsorted(mut ids: [Vec<i64>; 3]) -> Self {
+        for kind in &mut ids {
+            kind.sort_unstable();
+            kind.dedup();
+            kind.shrink_to_fit();
+        }
+        Self { ids }
+    }
+
+    fn contains(&self, kind: OscKind, id: i64) -> bool {
+        self.ids[kind.index()].binary_search(&id).is_ok()
+    }
+}
+
+/// Outcome classes for the per-element diff, each a count of diff entries
+/// per kind plus the smallest few distinct IDs ([`MAX_REPORTED_IDS`]), so the
+/// report is bounded and deterministic whatever the diff's size or order.
 #[derive(Default)]
 struct MergeDiffReport {
     /// osmium-only IDs accounted for by the input OSC's delete set.
@@ -376,21 +424,60 @@ struct MergeDiffReport {
     content_mismatch: PerType,
 }
 
+/// One outcome class, per kind (node, way, relation).
 #[derive(Default)]
 struct PerType {
-    nodes: Vec<i64>,
-    ways: Vec<i64>,
-    relations: Vec<i64>,
+    kinds: [Sampled; 3],
 }
 
 impl PerType {
-    fn total(&self) -> usize {
-        self.nodes.len() + self.ways.len() + self.relations.len()
+    fn total(&self) -> u64 {
+        self.kinds.iter().map(|k| k.count).sum()
+    }
+}
+
+/// A count of entries and the smallest [`MAX_REPORTED_IDS`] distinct IDs
+/// among them.
+#[derive(Default)]
+struct Sampled {
+    count: u64,
+    smallest: std::collections::BTreeSet<i64>,
+}
+
+impl Sampled {
+    fn add(&mut self, id: i64) {
+        self.count += 1;
+        self.smallest.insert(id);
+        if self.smallest.len() > MAX_REPORTED_IDS {
+            self.smallest.pop_last();
+        }
+    }
+
+    #[cfg(test)]
+    fn ids(&self) -> Vec<i64> {
+        self.smallest.iter().copied().collect()
     }
 }
 
 impl MergeDiffReport {
-    fn total_failures(&self) -> usize {
+    /// Bucket one diff entry. pbfhogg is the diff's old side and osmium its
+    /// new side, so `<create>` is osmium-only (exempt when the input deleted
+    /// it), `<delete>` pbfhogg-only and `<modify>` a content mismatch.
+    fn classify(&mut self, action: OscAction, kind: OscKind, id: i64, applied: &DeleteSet) {
+        let class = match action {
+            OscAction::Create if applied.contains(kind, id) => &mut self.osmium_only_explained,
+            OscAction::Create => &mut self.osmium_only_unexplained,
+            OscAction::Delete => &mut self.pbfhogg_only,
+            OscAction::Modify => &mut self.content_mismatch,
+        };
+        class.kinds[kind.index()].add(id);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.osmium_only_explained.total() == 0 && self.total_failures() == 0
+    }
+
+    fn total_failures(&self) -> u64 {
         self.osmium_only_unexplained.total()
             + self.pbfhogg_only.total()
             + self.content_mismatch.total()
@@ -402,11 +489,10 @@ impl MergeDiffReport {
 
     fn print(&self) {
         if self.osmium_only_explained.total() > 0 {
+            let [n, w, r] = &self.osmium_only_explained.kinds;
             verify_msg(&format!(
                 "  osmium-only explained by delete set: {} nodes, {} ways, {} relations OK",
-                self.osmium_only_explained.nodes.len(),
-                self.osmium_only_explained.ways.len(),
-                self.osmium_only_explained.relations.len(),
+                n.count, w.count, r.count,
             ));
         }
         print_failure_class(
@@ -422,216 +508,152 @@ fn print_failure_class(label: &str, p: &PerType) {
     if p.total() == 0 {
         return;
     }
+    let [n, w, r] = &p.kinds;
     verify_msg(&format!(
         "  FAIL {label}: {} nodes, {} ways, {} relations",
-        p.nodes.len(),
-        p.ways.len(),
-        p.relations.len(),
+        n.count, w.count, r.count,
     ));
-    print_id_sample("nodes", &p.nodes);
-    print_id_sample("ways", &p.ways);
-    print_id_sample("relations", &p.relations);
+    print_id_sample("nodes", n);
+    print_id_sample("ways", w);
+    print_id_sample("relations", r);
 }
 
-fn print_id_sample(kind: &str, ids: &[i64]) {
-    if ids.is_empty() {
+fn print_id_sample(kind: &str, sampled: &Sampled) {
+    if sampled.count == 0 {
         return;
     }
-    let shown = ids.iter().take(MAX_REPORTED_IDS);
-    let suffix = if ids.len() > MAX_REPORTED_IDS {
-        format!(" (+{} more)", ids.len() - MAX_REPORTED_IDS)
+    let shown = sampled.smallest.len() as u64;
+    let suffix = if sampled.count > shown {
+        format!(" (smallest IDs; {} entries in all)", sampled.count)
     } else {
         String::new()
     };
-    let list = shown.map(i64::to_string).collect::<Vec<_>>().join(", ");
+    let list = sampled
+        .smallest
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
     verify_msg(&format!("    {kind}: {list}{suffix}"));
 }
 
-/// Walk every section of `delta` and bucket each ID into the
-/// appropriate report class, using `applied`'s delete set for
-/// the carve-out.
-fn classify_diff(delta: &OscDiff, applied: &OscDiff, report: &mut MergeDiffReport) {
-    classify_osmium_only(
-        &delta.created_nodes,
-        &applied.deleted_nodes,
-        &mut report.osmium_only_explained.nodes,
-        &mut report.osmium_only_unexplained.nodes,
-    );
-    classify_osmium_only(
-        &delta.created_ways,
-        &applied.deleted_ways,
-        &mut report.osmium_only_explained.ways,
-        &mut report.osmium_only_unexplained.ways,
-    );
-    classify_osmium_only(
-        &delta.created_relations,
-        &applied.deleted_relations,
-        &mut report.osmium_only_explained.relations,
-        &mut report.osmium_only_unexplained.relations,
-    );
-
-    report
-        .pbfhogg_only
-        .nodes
-        .extend(delta.deleted_nodes.iter().copied());
-    report
-        .pbfhogg_only
-        .ways
-        .extend(delta.deleted_ways.iter().copied());
-    report
-        .pbfhogg_only
-        .relations
-        .extend(delta.deleted_relations.iter().copied());
-
-    report
-        .content_mismatch
-        .nodes
-        .extend(delta.modified_nodes.iter().copied());
-    report
-        .content_mismatch
-        .ways
-        .extend(delta.modified_ways.iter().copied());
-    report
-        .content_mismatch
-        .relations
-        .extend(delta.modified_relations.iter().copied());
-}
-
-fn classify_osmium_only(
-    osmium_only: &std::collections::BTreeSet<i64>,
-    applied_deletes: &std::collections::BTreeSet<i64>,
-    explained: &mut Vec<i64>,
-    unexplained: &mut Vec<i64>,
-) {
-    for &id in osmium_only {
-        if applied_deletes.contains(&id) {
-            explained.push(id);
-        } else {
-            unexplained.push(id);
-        }
-    }
-}
-
-/// Run osmosis with `JAVA_HOME` set through the shared child supervisor.
+/// Run osmosis with `JAVA_HOME` set through the reference-run path, its stdout
+/// written to `stdout` (see [`VerifyHarness::run_reference`]).
 fn run_osmosis(
+    harness: &VerifyHarness,
     tools: &OsmosisTools,
     args: &[&str],
-    cwd: &Path,
+    stdout: &Path,
 ) -> Result<output::CapturedOutput, DevError> {
     let osmosis = tools.osmosis_executable();
     let java_home = tools.java_home.display().to_string();
-    let _step = super::verify::step("osmosis");
-    Invocation::resolved(&osmosis, args.iter().map(|&a| a.to_owned()).collect())
-        .with_env("JAVA_HOME", &java_home)
-        .capture_in(cwd)
+    let invocation = Invocation::resolved(&osmosis, args.iter().map(|&a| a.to_owned()).collect())
+        .with_env("JAVA_HOME", &java_home);
+    harness.run_reference(&invocation, "osmosis", stdout)
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
-    use std::collections::BTreeSet;
 
-    fn s(ids: &[i64]) -> BTreeSet<i64> {
-        ids.iter().copied().collect()
+    fn deletes(nodes: &[i64], ways: &[i64], relations: &[i64]) -> DeleteSet {
+        DeleteSet::from_unsorted([nodes.to_vec(), ways.to_vec(), relations.to_vec()])
+    }
+
+    fn classify_all(entries: &[(OscAction, OscKind, i64)], applied: &DeleteSet) -> MergeDiffReport {
+        let mut report = MergeDiffReport::default();
+        for &(action, kind, id) in entries {
+            report.classify(action, kind, id, applied);
+        }
+        report
+    }
+
+    use OscAction::{Create, Delete, Modify};
+    use OscKind::{Node, Relation, Way};
+
+    #[test]
+    fn delete_set_is_sorted_deduplicated_and_searchable() {
+        let set = deletes(&[9, 1, 9, 4], &[], &[7]);
+        assert_eq!(set.ids[0], vec![1, 4, 9]);
+        assert!(set.contains(Node, 4));
+        assert!(!set.contains(Way, 4));
+        assert!(set.contains(Relation, 7));
     }
 
     #[test]
-    fn classify_partitions_osmium_only_by_delete_set() {
-        let mut explained = Vec::new();
-        let mut unexplained = Vec::new();
-        let osmium_only = s(&[1, 2, 3, 4]);
-        let applied_deletes = s(&[1, 3]);
-        classify_osmium_only(
-            &osmium_only,
-            &applied_deletes,
-            &mut explained,
-            &mut unexplained,
+    fn classify_buckets_each_action() {
+        let applied = deletes(&[10], &[], &[]);
+        let report = classify_all(
+            &[
+                (Create, Node, 10),
+                (Create, Node, 20),
+                (Create, Way, 30),
+                (Modify, Node, 40),
+                (Delete, Way, 50),
+            ],
+            &applied,
         );
-        assert_eq!(explained, vec![1, 3]);
-        assert_eq!(unexplained, vec![2, 4]);
-    }
-
-    #[test]
-    fn classify_diff_buckets_each_section() {
-        let delta = OscDiff {
-            created_nodes: s(&[10, 20]),
-            created_ways: s(&[30]),
-            modified_nodes: s(&[40]),
-            deleted_ways: s(&[50]),
-            ..OscDiff::default()
-        };
-        let applied = OscDiff {
-            deleted_nodes: s(&[10]),
-            ..OscDiff::default()
-        };
-        let mut report = MergeDiffReport::default();
-        classify_diff(&delta, &applied, &mut report);
-
-        assert_eq!(report.osmium_only_explained.nodes, vec![10]);
-        assert_eq!(report.osmium_only_unexplained.nodes, vec![20]);
-        assert_eq!(report.osmium_only_unexplained.ways, vec![30]);
-        assert_eq!(report.content_mismatch.nodes, vec![40]);
-        assert_eq!(report.pbfhogg_only.ways, vec![50]);
+        assert_eq!(report.osmium_only_explained.kinds[0].ids(), vec![10]);
+        assert_eq!(report.osmium_only_unexplained.kinds[0].ids(), vec![20]);
+        assert_eq!(report.osmium_only_unexplained.kinds[1].ids(), vec![30]);
+        assert_eq!(report.content_mismatch.kinds[0].ids(), vec![40]);
+        assert_eq!(report.pbfhogg_only.kinds[1].ids(), vec![50]);
         assert!(report.is_failure());
-        assert_eq!(report.total_failures(), 4); // 20, 30, 40, 50
+        assert_eq!(report.total_failures(), 4);
     }
 
     #[test]
-    fn classify_diff_clean_when_all_explained() {
-        let delta = OscDiff {
-            created_nodes: s(&[1, 2, 3]),
-            created_ways: s(&[10]),
-            created_relations: s(&[100]),
-            ..OscDiff::default()
-        };
-        let applied = OscDiff {
-            deleted_nodes: s(&[1, 2, 3]),
-            deleted_ways: s(&[10]),
-            deleted_relations: s(&[100]),
-            ..OscDiff::default()
-        };
-        let mut report = MergeDiffReport::default();
-        classify_diff(&delta, &applied, &mut report);
-
+    fn classify_clean_when_all_explained() {
+        let applied = deletes(&[1, 2, 3], &[10], &[100]);
+        let report = classify_all(
+            &[
+                (Create, Node, 1),
+                (Create, Node, 2),
+                (Create, Node, 3),
+                (Create, Way, 10),
+                (Create, Relation, 100),
+            ],
+            &applied,
+        );
         assert!(!report.is_failure());
-        assert_eq!(report.osmium_only_explained.nodes, vec![1, 2, 3]);
-        assert_eq!(report.osmium_only_explained.ways, vec![10]);
-        assert_eq!(report.osmium_only_explained.relations, vec![100]);
+        assert!(!report.is_empty());
+        assert_eq!(report.osmium_only_explained.kinds[0].ids(), vec![1, 2, 3]);
+        assert_eq!(report.osmium_only_explained.total(), 5);
     }
 
     #[test]
-    fn classify_diff_pbfhogg_only_always_fails() {
-        // pbfhogg-only entries are always failures, even when the
-        // input OSC requested those deletes (because in that case,
-        // osmium also deleted them and pbfhogg shouldn't be holding
-        // on to them either).
-        let delta = OscDiff {
-            deleted_nodes: s(&[7, 8]),
-            ..OscDiff::default()
-        };
-        let applied = OscDiff {
-            deleted_nodes: s(&[7, 8]),
-            ..OscDiff::default()
-        };
-        let mut report = MergeDiffReport::default();
-        classify_diff(&delta, &applied, &mut report);
-
-        assert!(report.is_failure());
-        assert_eq!(report.pbfhogg_only.nodes, vec![7, 8]);
+    fn pbfhogg_only_and_modify_always_fail() {
+        // pbfhogg-only entries fail even when the input requested the delete:
+        // osmium deleted them too, so pbfhogg should not be holding them.
+        let applied = deletes(&[7, 8], &[], &[]);
+        let report = classify_all(
+            &[(Delete, Node, 7), (Delete, Node, 8), (Modify, Node, 42)],
+            &applied,
+        );
+        assert_eq!(report.pbfhogg_only.kinds[0].ids(), vec![7, 8]);
+        assert_eq!(report.content_mismatch.kinds[0].ids(), vec![42]);
+        assert_eq!(report.total_failures(), 3);
     }
 
     #[test]
-    fn classify_diff_modify_always_fails() {
-        let delta = OscDiff {
-            modified_nodes: s(&[42]),
-            ..OscDiff::default()
-        };
-        let applied = OscDiff::default();
+    fn a_huge_regression_keeps_exact_counts_and_bounded_samples() {
+        // The bug: every differing ID was copied into report vectors, so the
+        // failure path held a planet-sized regression in memory.
+        let applied = deletes(&[], &[], &[]);
         let mut report = MergeDiffReport::default();
-        classify_diff(&delta, &applied, &mut report);
+        for id in (0..100_000).rev() {
+            report.classify(Create, Node, id, &applied);
+        }
+        let sampled = &report.osmium_only_unexplained.kinds[0];
+        assert_eq!(sampled.count, 100_000);
+        assert_eq!(sampled.ids(), (0..10).collect::<Vec<i64>>());
+        assert_eq!(MAX_REPORTED_IDS, 10);
+        assert_eq!(report.total_failures(), 100_000);
+    }
 
-        assert!(report.is_failure());
-        assert_eq!(report.content_mismatch.nodes, vec![42]);
+    #[test]
+    fn an_empty_report_is_identical() {
+        assert!(MergeDiffReport::default().is_empty());
     }
 }
