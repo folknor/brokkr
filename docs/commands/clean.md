@@ -85,10 +85,15 @@ Bare `brokkr clean`, in order:
   `bench-ingest-output/` directory is removed. Pbfhogg removes its known
   bench/hotpath PBF and OSC outputs, `multi-extract/`, the `geocode-<dataset>/`
   dirs for configured datasets, merged-PBF cache names constructed from
-  configured PBF/OSC entries, and the `.brokkr-pbfhogg/` private directories
-  in scratch and in the data dir (what pbfhogg children killed along with brokkr
-  left; see "Private directory" in `docs/projects/pbfhogg.md`). Other pbfhogg scratch files survive, and so does any
-  `.pbfhogg-backup-*` pbfhogg kept beside a replaced output. Sidecar
+  configured PBF/OSC entries. First it reclaims every free pbfhogg launch
+  lease with its private directory, wherever that sits, and names each lease
+  it keeps and why (see "Launch reservations" in `docs/projects/pbfhogg.md`).
+  Its removals of pbfhogg's verify output and scratch go through the
+  reservation gate, so a path a running pbfhogg launch still uses is named,
+  kept and skipped while the rest of the clean goes on, and a tree holding a
+  `.pbfhogg-backup-*` is never removed; it also removes the fixed-name
+  `.brokkr-pbfhogg/` directories one earlier brokkr left in scratch and the
+  data dir. Other pbfhogg scratch files survive. Sidecar
   marker FIFOs in the configured scratch root are removed only when both their
   reserved `.sidecar-*.fifo` name shape and FIFO type match; clean does not
   parse a PID from the name.

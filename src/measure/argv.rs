@@ -99,6 +99,9 @@ pub(crate) struct Invocation<'a> {
     program: &'a Path,
     args: Vec<String>,
     env: Vec<(String, String)>,
+    /// What each launch reserves (`crate::reservations`); `None` runs the
+    /// argv as given.
+    spec: Option<crate::reservations::LaunchSpec>,
 }
 
 impl<'a> Invocation<'a> {
@@ -107,7 +110,43 @@ impl<'a> Invocation<'a> {
             program,
             args,
             env: Vec::new(),
+            spec: None,
         }
+    }
+
+    /// An invocation each of whose launches reserves `spec`. Its argv may
+    /// carry [`crate::reservations::PRIVATE_DIR_PLACEHOLDER`], replaced per
+    /// launch by that launch's own private directory.
+    pub(crate) fn reserved(program: &'a Path, args: Vec<String>, spec: crate::reservations::LaunchSpec) -> Self {
+        Self {
+            spec: Some(spec),
+            ..Self::new(program, args)
+        }
+    }
+
+    /// Admit one launch in `cwd`: its argv, and the reservation to finish
+    /// once the child has been reaped.
+    pub(in crate::measure) fn launch(&self, cwd: &Path) -> Result<crate::reservations::Launched, DevError> {
+        self.launch_with(cwd, &[])
+    }
+
+    /// [`launch`](Self::launch), with `disposable` files the launcher adds
+    /// beside the argv, such as a profiler's report: reserved while the
+    /// launch lives and removed with its lease.
+    pub(in crate::measure) fn launch_with(
+        &self,
+        cwd: &Path,
+        disposable: &[std::path::PathBuf],
+    ) -> Result<crate::reservations::Launched, DevError> {
+        match &self.spec {
+            Some(spec) => spec.launch(self.program, &self.args, cwd, disposable),
+            None => Ok(crate::reservations::Launched::bare(self.args.clone())),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spec_for_test(&self) -> Option<&crate::reservations::LaunchSpec> {
+        self.spec.as_ref()
     }
 
     /// The runner's built executable with a plan's argv. A pbfhogg
@@ -145,8 +184,9 @@ impl<'a> Invocation<'a> {
     /// exit status; see [`check`](Self::check).
     pub(crate) fn capture_in(&self, cwd: &Path) -> Result<CapturedOutput, DevError> {
         let program = self.program_string();
-        let args = self.arg_refs();
-        if self.env.is_empty() {
+        let launched = self.launch(cwd)?;
+        let args = launched.arg_refs();
+        let captured = if self.env.is_empty() {
             output::run_captured(&program, &args, cwd)
         } else {
             let env: Vec<(&str, &str)> = self
@@ -155,7 +195,21 @@ impl<'a> Invocation<'a> {
                 .map(|(k, v)| (k.as_str(), v.as_str()))
                 .collect();
             output::run_captured_with_env(&program, &args, cwd, &env)
-        }
+        };
+        // The child has been reaped (or never spawned); a lease it left held
+        // is this run's failure even when the run itself succeeded.
+        let finished = launched.finish();
+        let captured = match captured {
+            Ok(captured) => captured,
+            Err(e) => {
+                if let Err(release) = finished {
+                    output::warn(&release.to_string());
+                }
+                return Err(e);
+            }
+        };
+        finished?;
+        Ok(captured)
     }
 
     /// Fail unless `captured` (this invocation's output) succeeded, naming

@@ -114,7 +114,7 @@ pub(crate) fn promote_snapshot(
         std::process::id()
     ));
     let parked = if replaced.is_some() && target_path.exists() {
-        std::fs::rename(&target_path, &parked)?;
+        crate::reservations::rename(&target_path, &parked)?;
         Some(parked)
     } else {
         None
@@ -140,10 +140,10 @@ pub(crate) fn promote_snapshot(
     if let Some(parked) = &parked {
         match &committed {
             Ok(()) => {
-                std::fs::remove_file(parked).ok();
+                crate::reservations::remove_file(parked).ok();
             }
             Err(_) => {
-                if let Err(e) = std::fs::rename(parked, &target_path) {
+                if let Err(e) = crate::reservations::rename(parked, &target_path) {
                     output::warn(&format!(
                         "could not restore the replaced snapshot file from {}: {e}",
                         parked.display()
@@ -196,7 +196,7 @@ pub(super) fn remove_replaced_snapshot_files(
             continue;
         }
         let path = data_dir.join(file);
-        match std::fs::remove_file(&path) {
+        match crate::reservations::remove_file(&path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => output::warn(&format!(

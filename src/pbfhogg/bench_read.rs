@@ -65,9 +65,11 @@ pub fn run(
     let mode_names: Vec<&str> = modes.iter().map(|m| m.name()).collect();
 
     crate::bench_variants::run_variants("mode", &mode_names, |mode_name| {
-        let invocation = binary.invocation_strs(
-            &["bench-read", pbf_str, "--mode", mode_name],
-            crate::pbfhogg::binary::Writes::Nothing,
+        let invocation = binary.invocation(
+            crate::pbfhogg::argv::PbfArgv::new("bench-read")
+                .input(pbf_str)?
+                .arg("--mode")
+                .arg(mode_name),
         )?;
 
         let config = BenchConfig {

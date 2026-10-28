@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use super::commands::{ExtractStrategy, PbfhoggCommand};
-use super::verify::{ExternalTool, Findings, VerifyHarness, Writes};
+use super::verify::{ExternalTool, Findings, VerifyHarness};
 use crate::datasets::Bbox;
 use crate::error::DevError;
 use crate::output::{verify_msg, verify_summary};
@@ -27,16 +27,13 @@ pub fn run(
 
         // --- pbfhogg extract ---
         let pbfhogg_out = outdir.join(format!("pbfhogg-{strategy_name}.osm.pbf"));
-        let pbfhogg_out_str = pbfhogg_out.display().to_string();
         let command = PbfhoggCommand::Extract {
             strategy: *strategy,
         };
-        let mut pbfhogg_args = command.extract_args_for(&pbf_str, bbox, &pbfhogg_out_str)?;
-        if direct_io {
-            pbfhogg_args.push("--direct-io".into());
-        }
-        let pbfhogg_arg_refs: Vec<&str> = pbfhogg_args.iter().map(String::as_str).collect();
-        let captured = harness.run_pbfhogg(&pbfhogg_arg_refs, Writes::OwnedOutput)?;
+        let pbfhogg_args = command
+            .extract_args_for(pbf, bbox, &pbfhogg_out)?
+            .arg_if(direct_io, "--direct-io");
+        let captured = harness.run_pbfhogg(pbfhogg_args)?;
         harness.check_exit(&captured, "pbfhogg extract")?;
 
         // --- osmium extract ---

@@ -16,7 +16,7 @@
 use std::fs;
 use std::path::Path;
 
-use super::verify::{ExternalTool, Findings, VerifyHarness, Writes};
+use super::verify::{ExternalTool, Findings, PbfArgv, VerifyHarness};
 use crate::error::DevError;
 use crate::output::verify_msg;
 
@@ -171,7 +171,6 @@ pub fn run(
     let pbfhogg_out = outdir.join(format!("pbfhogg-renumber-{dataset}.osm.pbf"));
     let diff_log = outdir.join(format!("verify-renumber-{dataset}-diff.txt"));
     let osmium_out_str = osmium_out.display().to_string();
-    let pbfhogg_out_str = pbfhogg_out.display().to_string();
 
     // --- osmium renumber ------------------------------------------------
     let mut osmium_args: Vec<&str> =
@@ -191,12 +190,11 @@ pub fn run(
     ));
 
     // --- pbfhogg renumber -----------------------------------------------
-    let mut pbfhogg_args: Vec<&str> = vec!["renumber", &pbf_str, "-o", &pbfhogg_out_str];
+    let mut pbfhogg_args = PbfArgv::new("renumber").input(pbf)?.output(&pbfhogg_out)?;
     if let Some(sid) = start_id {
-        pbfhogg_args.push("--start-id");
-        pbfhogg_args.push(sid);
+        pbfhogg_args = pbfhogg_args.arg("--start-id").arg(sid);
     }
-    let captured = harness.run_pbfhogg(&pbfhogg_args, Writes::OwnedOutput)?;
+    let captured = harness.run_pbfhogg(pbfhogg_args)?;
     harness.check_exit(&captured, "pbfhogg renumber")?;
     let pbfhogg_elapsed = captured.elapsed;
     let pbfhogg_size = fs::metadata(&pbfhogg_out).map(|m| m.len()).unwrap_or(0);
@@ -208,9 +206,15 @@ pub fn run(
 
     // --- pbfhogg diff (summary + context + verbose) ---------------------
     // diff exits non-zero when mismatches exist, so do not check_exit.
+    // A verbose text diff still makes run scratch with automatic jobs.
     let captured = harness.run_pbfhogg(
-        &["diff", "-s", "-c", "-v", &osmium_out_str, &pbfhogg_out_str],
-        Writes::Nothing,
+        PbfArgv::new("diff")
+            .arg("-s")
+            .arg("-c")
+            .arg("-v")
+            .input(&osmium_out)?
+            .input(&pbfhogg_out)?
+            .scratch(&harness.output_dir),
     )?;
     let stdout = String::from_utf8_lossy(&captured.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&captured.stderr).into_owned();
@@ -231,7 +235,7 @@ pub fn run(
     // if we can't recover total_relations, the sanity-threshold check is
     // effectively disabled, which would let arbitrarily large relation-only
     // regressions sneak through as PASS.
-    let inspect = harness.run_pbfhogg(&["inspect", &osmium_out_str], Writes::Nothing)?;
+    let inspect = harness.run_pbfhogg(PbfArgv::new("inspect").input(&osmium_out)?)?;
     harness.check_exit(&inspect, "pbfhogg inspect")?;
     let inspect_text = String::from_utf8_lossy(&inspect.stdout);
     let total_relations = parse_total_relations(&inspect_text).ok_or_else(|| {
@@ -342,9 +346,9 @@ pub fn run(
                 );
             }
             // Clean up scratch files on success (best effort).
-            drop(fs::remove_file(&osmium_out));
-            drop(fs::remove_file(&pbfhogg_out));
-            drop(fs::remove_file(&diff_log));
+            drop(crate::reservations::remove_file(&osmium_out));
+            drop(crate::reservations::remove_file(&pbfhogg_out));
+            drop(crate::reservations::remove_file(&diff_log));
             // Every failure above is an `Err`; nothing is left to fold.
             Ok(Findings::new())
         }

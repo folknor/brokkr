@@ -2,10 +2,22 @@
 
 use std::path::Path;
 
-use super::verify::{ExternalTool, Findings, Verdict, VerifyHarness, Writes};
+use super::verify::{ExternalTool, Findings, PbfArgv, Verdict, VerifyHarness};
 use crate::error::DevError;
 use crate::osc;
 use crate::output::verify_msg;
+
+/// `pbfhogg diff --format osc OLD NEW -o OUT`, which writes run scratch on
+/// every path, kept in the check's own directory.
+fn osc_diff(outdir: &Path, old: &Path, new: &Path, out: &Path) -> Result<PbfArgv, DevError> {
+    Ok(PbfArgv::new("diff")
+        .arg("--format")
+        .arg("osc")
+        .input(old)?
+        .input(new)?
+        .output(out)?
+        .scratch(outdir))
+}
 
 /// Cross-validate `pbfhogg diff --format osc` against `osmium derive-changes`.
 ///
@@ -30,37 +42,26 @@ pub fn run(
     ));
 
     let pbf_str = pbf.display().to_string();
-    let osc_str = osc.display().to_string();
 
     // Step 1: Create "new" PBF by applying the OSC.
     let new_pbf = outdir.join("new.osm.pbf");
     let new_pbf_str = new_pbf.display().to_string();
 
     verify_msg("--- creating 'new' PBF via apply-changes ---");
-    let mut ac_args = vec!["apply-changes", &pbf_str, &osc_str, "-o", &new_pbf_str];
-    if direct_io {
-        ac_args.push("--direct-io");
-    }
-    let captured = harness.run_pbfhogg(&ac_args, Writes::OwnedOutput)?;
+    let captured = harness.run_pbfhogg(
+        PbfArgv::new("apply-changes")
+            .input(pbf)?
+            .input(osc)?
+            .output(&new_pbf)?
+            .arg_if(direct_io, "--direct-io"),
+    )?;
     harness.check_exit(&captured, "pbfhogg apply-changes")?;
 
     // Step 2: Derive changes with both tools.
     let pbfhogg_osc = outdir.join("pbfhogg.osc.gz");
-    let pbfhogg_osc_str = pbfhogg_osc.display().to_string();
 
     verify_msg("--- pbfhogg diff --format osc ---");
-    let captured = harness.run_pbfhogg(
-        &[
-            "diff",
-            "--format",
-            "osc",
-            &pbf_str,
-            &new_pbf_str,
-            "-o",
-            &pbfhogg_osc_str,
-        ],
-        Writes::OwnedOutput,
-    )?;
+    let captured = harness.run_pbfhogg(osc_diff(&outdir, pbf, &new_pbf, &pbfhogg_osc)?)?;
     // Like a text diff, it exits 1 when the inputs differ - the normal case
     // here - and still writes its OSC; 2 and above are real failures.
     captured.check_success_or("pbfhogg diff --format osc", &[1])?;
@@ -93,20 +94,15 @@ pub fn run(
 
     // Step 4: Roundtrip - apply each derived OSC back to old.
     let rt_pbfhogg = outdir.join("roundtrip-pbfhogg.osm.pbf");
-    let rt_pbfhogg_str = rt_pbfhogg.display().to_string();
 
     verify_msg("--- roundtrip: apply pbfhogg OSC ---");
-    let mut rt_args = vec![
-        "apply-changes",
-        &pbf_str,
-        &pbfhogg_osc_str,
-        "-o",
-        &rt_pbfhogg_str,
-    ];
-    if direct_io {
-        rt_args.push("--direct-io");
-    }
-    let captured = harness.run_pbfhogg(&rt_args, Writes::OwnedOutput)?;
+    let captured = harness.run_pbfhogg(
+        PbfArgv::new("apply-changes")
+            .input(pbf)?
+            .input(&pbfhogg_osc)?
+            .output(&rt_pbfhogg)?
+            .arg_if(direct_io, "--direct-io"),
+    )?;
     harness.check_exit(&captured, "pbfhogg apply-changes (roundtrip)")?;
 
     let rt_osmium = outdir.join("roundtrip-osmium.osm.pbf");
@@ -132,17 +128,9 @@ pub fn run(
     // passthrough plus flag stamp, content unchanged - before comparing.
     // `--force` because osmium writes no blob-level indexdata.
     let rt_osmium_sorted = outdir.join("roundtrip-osmium-sorted.osm.pbf");
-    let rt_osmium_sorted_str = rt_osmium_sorted.display().to_string();
     verify_msg("--- pbfhogg sort (normalise osmium roundtrip for merge-join diff) ---");
     let captured = harness.run_pbfhogg(
-        &[
-            "sort",
-            "--force",
-            &rt_osmium_str,
-            "-o",
-            &rt_osmium_sorted_str,
-        ],
-        Writes::OwnedOutput,
+        PbfArgv::new("sort").arg("--force").input(&rt_osmium)?.output(&rt_osmium_sorted)?,
     )?;
     harness.check_exit(&captured, "pbfhogg sort (normalise osmium roundtrip)")?;
 
@@ -211,22 +199,8 @@ fn unindexed_osc_matches(
     harness.strip_indexdata(new, &new_raw)?;
 
     let raw_osc = outdir.join("pbfhogg-unindexed.osc.gz");
-    let old_raw_str = old_raw.display().to_string();
-    let new_raw_str = new_raw.display().to_string();
-    let raw_osc_str = raw_osc.display().to_string();
     verify_msg("--- pbfhogg diff --format osc (unindexed inputs) ---");
-    let captured = harness.run_pbfhogg(
-        &[
-            "diff",
-            "--format",
-            "osc",
-            &old_raw_str,
-            &new_raw_str,
-            "-o",
-            &raw_osc_str,
-        ],
-        Writes::OwnedOutput,
-    )?;
+    let captured = harness.run_pbfhogg(osc_diff(outdir, &old_raw, &new_raw, &raw_osc)?)?;
     captured.check_success_or("pbfhogg diff --format osc (unindexed inputs)", &[1])?;
 
     verify_msg("=== diff: unindexed OSC vs indexed OSC ===");

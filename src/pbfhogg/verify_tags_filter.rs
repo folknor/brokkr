@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use super::verify::{ExternalTool, Findings, VerifyHarness, Writes};
+use super::verify::{ExternalTool, Findings, PbfArgv, VerifyHarness};
 use crate::error::DevError;
 use crate::output::verify_msg;
 
@@ -24,12 +24,14 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
 
         // pbfhogg: tags-filter <pbf> -R <expr> -o <out>
         let pbfhogg_out = outdir.join(format!("pbfhogg-{label}.osm.pbf"));
-        let pbfhogg_out_str = pbfhogg_out.display().to_string();
-        let mut pbfhogg_args = vec!["tags-filter", &pbf_str, "-R", expr, "-o", &pbfhogg_out_str];
-        if direct_io {
-            pbfhogg_args.push("--direct-io");
-        }
-        let captured = harness.run_pbfhogg(&pbfhogg_args, Writes::OwnedOutput)?;
+        let captured = harness.run_pbfhogg(
+            PbfArgv::new("tags-filter")
+                .input(pbf)?
+                .arg("-R")
+                .arg(*expr)
+                .output(&pbfhogg_out)?
+                .arg_if(direct_io, "--direct-io"),
+        )?;
         harness.check_exit(&captured, "pbfhogg tags-filter")?;
 
         // osmium: tags-filter <pbf> <expr> -R -o <out> --overwrite

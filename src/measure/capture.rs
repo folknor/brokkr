@@ -128,8 +128,24 @@ impl BenchHarness {
         })
     }
 
+    /// A fresh path for one instrumented child's hotpath report, unique per
+    /// launch, so a child that outlived its run can never write the next
+    /// run's report. A reserved launch declares it as an output
+    /// (`Invocation::launch_with`) and removes it once released.
+    pub(crate) fn new_hotpath_report_path(&self) -> Result<std::path::PathBuf, DevError> {
+        let token = crate::lockfile::RunToken::mint()
+            .ok_or_else(|| DevError::Internal("no entropy for a hotpath report name".into()))?;
+        let name = crate::sidecar::DEFAULT_MEASUREMENT_TUNABLES.hotpath_report_filename;
+        let (stem, ext) = name.rsplit_once('.').unwrap_or((name, "json"));
+        Ok(self.state.root().join(format!("{stem}-{}.{ext}", token.as_str())))
+    }
+
     /// Capture an instrumented child. A missing or malformed report fails the
     /// iteration, while its output and sidecar remain available for diagnosis.
+    /// An unreserved launch: the report has one fixed name, cleared before and
+    /// after, so a killed run leaves at most that one file; a reserved launch
+    /// uses [`capture_hotpath_into`](Self::capture_hotpath_into) with a fresh
+    /// name it declares.
     #[allow(clippy::too_many_arguments)]
     pub fn capture_hotpath(
         &self,
@@ -146,11 +162,33 @@ impl BenchHarness {
             .state
             .root()
             .join(crate::sidecar::DEFAULT_MEASUREMENT_TUNABLES.hotpath_report_filename);
-        match std::fs::remove_file(&report) {
+        match std::fs::remove_file(&report) { // gate: brokkr's own state file
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(DevError::Io(error)),
         }
+        let iteration = self.capture_hotpath_into(
+            program, args, cwd, extra_env, ok_codes, fifo, index, ceiling, &report,
+        );
+        std::fs::remove_file(&report).ok(); // gate: brokkr's own state file
+        iteration
+    }
+
+    /// [`capture_hotpath`](Self::capture_hotpath) writing the report to
+    /// `report`, a fresh path the caller removes afterwards.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn capture_hotpath_into(
+        &self,
+        program: &Path,
+        args: &[&str],
+        cwd: &Path,
+        extra_env: &[(&str, &str)],
+        ok_codes: &[i32],
+        fifo: &mut crate::sidecar::SidecarFifo,
+        index: usize,
+        ceiling: Option<Duration>,
+        report: &Path,
+    ) -> Result<Iteration, DevError> {
         let report_str = report.display().to_string();
         let mut env = extra_env.to_vec();
         env.extend_from_slice(&[
@@ -162,7 +200,7 @@ impl BenchHarness {
             self.capture(program, args, cwd, &env, ok_codes, fifo, index, ceiling)?;
         if iteration.error.is_none() {
             let profile = (|| {
-                let text = std::fs::read_to_string(&report).map_err(|error| {
+                let text = std::fs::read_to_string(report).map_err(|error| {
                     DevError::Config(format!(
                         "cannot read hotpath report {}: {error}",
                         report.display()
@@ -184,7 +222,6 @@ impl BenchHarness {
                 Err(error) => iteration.fail(error),
             }
         }
-        std::fs::remove_file(report).ok();
         Ok(iteration)
     }
 }

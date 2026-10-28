@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use super::commands::GETID_BENCH_IDS;
-use super::verify::{ExternalTool, Findings, Verdict, VerifyHarness, Writes};
+use super::verify::{ExternalTool, Findings, PbfArgv, Verdict, VerifyHarness};
 use super::verify_multi_extract::inspect_counts;
 use crate::error::DevError;
 use crate::output::verify_msg;
@@ -18,13 +18,13 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
 
     // pbfhogg getid <pbf> -o <out> <ids...>
     let pbfhogg_getid = outdir.join("pbfhogg-getid.osm.pbf");
-    let pbfhogg_getid_str = pbfhogg_getid.display().to_string();
-    let mut pbfhogg_args: Vec<&str> = vec!["getid", &pbf_str, "-o", &pbfhogg_getid_str];
-    if direct_io {
-        pbfhogg_args.push("--direct-io");
-    }
-    pbfhogg_args.extend_from_slice(GETID_BENCH_IDS);
-    let captured = harness.run_pbfhogg(&pbfhogg_args, Writes::OwnedOutput)?;
+    let captured = harness.run_pbfhogg(
+        PbfArgv::new("getid")
+            .input(pbf)?
+            .output(&pbfhogg_getid)?
+            .arg_if(direct_io, "--direct-io")
+            .args_from(GETID_BENCH_IDS.iter().copied()),
+    )?;
     harness.check_exit(&captured, "pbfhogg getid")?;
 
     let selected = inspect_counts(harness, &pbfhogg_getid)?;
@@ -76,13 +76,14 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
     verify_msg("--- getid --invert: complement test ---");
 
     let pbfhogg_invert = outdir.join("pbfhogg-getid-invert.osm.pbf");
-    let pbfhogg_invert_str = pbfhogg_invert.display().to_string();
-    let mut invert_args: Vec<&str> = vec!["getid", "--invert", &pbf_str, "-o", &pbfhogg_invert_str];
-    if direct_io {
-        invert_args.push("--direct-io");
-    }
-    invert_args.extend_from_slice(GETID_BENCH_IDS);
-    let captured = harness.run_pbfhogg(&invert_args, Writes::OwnedOutput)?;
+    let captured = harness.run_pbfhogg(
+        PbfArgv::new("getid")
+            .arg("--invert")
+            .input(pbf)?
+            .output(&pbfhogg_invert)?
+            .arg_if(direct_io, "--direct-io")
+            .args_from(GETID_BENCH_IDS.iter().copied()),
+    )?;
     harness.check_exit(&captured, "pbfhogg getid --invert")?;
 
     // The complement assertion: getid selects exactly the listed IDs (the

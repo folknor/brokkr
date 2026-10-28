@@ -579,16 +579,44 @@ impl BenchHarness {
     {
         invocation.require_no_env("the external wall-clock runner")?;
         let config = config_for(config, invocation);
-        let mut measurement = self.measure_external(
-            &config,
-            invocation.program(),
-            &invocation.arg_refs(),
-            cwd,
-            ok_codes,
-            WallSource::External,
-            prepare,
-        )?;
+        let mut measurement =
+            self.measure_invocation(&config, invocation, cwd, ok_codes, WallSource::External, prepare)?;
         self.record(&config, &mut measurement, |_, _| Ok(()))
+    }
+
+    /// [`measure_external`](Self::measure_external) over an invocation: each
+    /// iteration is its own launch, reserved and released around its child.
+    fn measure_invocation<F>(
+        &self,
+        config: &BenchConfig,
+        invocation: &Invocation<'_>,
+        cwd: &Path,
+        ok_codes: &[i32],
+        source: WallSource,
+        prepare: F,
+    ) -> Result<Measurement, DevError>
+    where
+        F: Fn() -> Result<(), DevError>,
+    {
+        let program = invocation.program();
+        self.measure(config, Some(program), source, true, |i, fifo| {
+            prepare()?;
+            let launched = invocation.launch(cwd)?;
+            let mut iteration = self.capture(
+                program,
+                &launched.arg_refs(),
+                cwd,
+                &[],
+                ok_codes,
+                fifo.expect("external loop owns a FIFO"),
+                i,
+                None,
+            )?;
+            if let Err(error) = launched.finish() {
+                iteration.fail(error);
+            }
+            Ok(iteration)
+        })
     }
 
     /// Collect all closure durations and summarize the same ordered iterations.
@@ -628,15 +656,8 @@ impl BenchHarness {
     ) -> Result<BenchResult, DevError> {
         invocation.require_no_env("the self-reported external runner")?;
         let config = config_for(config, invocation);
-        let mut measurement = self.measure_external(
-            &config,
-            invocation.program(),
-            &invocation.arg_refs(),
-            cwd,
-            &[],
-            WallSource::SelfReported,
-            || Ok(()),
-        )?;
+        let mut measurement =
+            self.measure_invocation(&config, invocation, cwd, &[], WallSource::SelfReported, || Ok(()))?;
         self.record(&config, &mut measurement, |_, _| Ok(()))
     }
 

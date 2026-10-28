@@ -9,7 +9,7 @@ use crate::harness::{self, BenchConfig};
 use crate::measure::runner::{CommandPlan, PlanTarget, PlannedCommand, RowSubject};
 use crate::measure::{Executable, Invocation, MeasureMode, MeasureRequest};
 use crate::output;
-use crate::pbfhogg::binary::{OVERWRITE_FLAG, PbfhoggBinary, STAGING_DIR_FLAG, TMP_DIR_FLAG, Writes};
+use crate::pbfhogg::binary::{OVERWRITE_FLAG, PbfhoggBinary, STAGING_DIR_FLAG, TMP_DIR_FLAG};
 use crate::pbfhogg::commands::{
     ArgMode, CommandArgv, OutputKind, PbfhoggCommand, TagsFilterInput,
 };
@@ -155,7 +155,7 @@ impl PlannedCommand for PbfhoggPlan<'_> {
             .handle
             .as_ref()
             .ok_or_else(|| DevError::Internal("pbfhogg plan was resolved without a binary".into()))?
-            .command_invocation(plan.argv.clone())
+            .invocation(plan.argv.clone())
     }
     fn describe(
         &self,
@@ -180,10 +180,10 @@ impl PlannedCommand for PbfhoggPlan<'_> {
                 "{OVERWRITE_FLAG}: added at run time if the built binary accepts it"
             ));
         }
-        if plan.argv.writes_output() {
+        if plan.argv.writes_output() || plan.argv.writes_scratch() {
             lines.push(format!(
-                "{STAGING_DIR_FLAG}, {TMP_DIR_FLAG}: a private directory beside the output, \
-                 added at run time where the built binary accepts them"
+                "{STAGING_DIR_FLAG}, {TMP_DIR_FLAG}: a private directory per launch, added at run \
+                 time where the built binary accepts them"
             ));
         }
         let state = &plan.state.ctx;
@@ -317,7 +317,7 @@ pub(crate) fn run_wallclock_core(
     project_root: &Path,
     announce: bool,
 ) -> Result<(), DevError> {
-    let invocation = binary.command_invocation(command.build_args(cmd_ctx, ArgMode::Bench)?)?;
+    let invocation = binary.invocation(command.build_args(cmd_ctx, ArgMode::Bench)?)?;
 
     let (basename, file_mb) = result_input_metadata(cmd_ctx)?;
 
@@ -665,13 +665,13 @@ pub(crate) fn cleanup_output(
 ) -> Result<(), DevError> {
     match command.output_kind() {
         OutputKind::ScratchPbf | OutputKind::ScratchOsc => {
-            std::fs::remove_file(crate::pbfhogg::commands::scratch_output_path(
+            crate::reservations::remove_file(&crate::pbfhogg::commands::scratch_output_path(
                 ctx, command, mode,
             )?)
             .ok();
         }
         OutputKind::ScratchDir { .. } => {
-            std::fs::remove_dir_all(crate::pbfhogg::commands::scratch_output_path(
+            crate::reservations::remove_dir_all(&crate::pbfhogg::commands::scratch_output_path(
                 ctx, command, mode,
             )?)
             .ok();
@@ -679,7 +679,7 @@ pub(crate) fn cleanup_output(
         OutputKind::None => {}
     }
     if matches!(command, PbfhoggCommand::MultiExtract { .. }) {
-        std::fs::remove_file(crate::pbfhogg::commands::multi_extract_config_path(
+        crate::reservations::remove_file(&crate::pbfhogg::commands::multi_extract_config_path(
             &ctx.scratch_dir,
         ))
         .ok();
@@ -739,7 +739,7 @@ pub(crate) fn ensure_merged_pbf(
         output::bench_msg(&format!(
             "force-rebuilding merged PBF (cache nuked by measured mode): {merged_name}"
         ));
-        std::fs::remove_file(&merged_path)
+        crate::reservations::remove_file(&merged_path)
             .map_err(|e| DevError::Config(format!("failed to remove cached merged PBF: {e}")))?;
     }
 
@@ -760,16 +760,13 @@ pub(crate) fn ensure_merged_pbf(
         .map_err(|e| DevError::Config(format!("failed to create scratch dir: {e}")))?;
 
     output::bench_msg(&format!("generating merged PBF: {merged_name}"));
-    let pbf_str = crate::utf8_path::path_str(pbf_path)?;
-    let osc_str = crate::utf8_path::path_str(osc_path)?;
     // Write under a partial name and rename into the cache slot only on
     // success: the cache test above is bare existence, so an apply-changes
     // killed mid-write must not leave a truncated file for the next
     // non-measured run to accept as a hit. The partial name keeps the
     // `.osm.pbf` suffix so the output format is unchanged. Dropping `staged`
     // on any error removes the partial file.
-    let staged = crate::atomic_write::Staged::stable_keeping(&merged_path, ".osm.pbf")?;
-    let partial_str = crate::utf8_path::path_str(staged.tmp_path())?.to_owned();
+    let staged = crate::atomic_write::Staged::stable_keeping_for_child(&merged_path, ".osm.pbf")?;
 
     let start = std::time::Instant::now();
     // The merged cache is the default apply-changes output for this PBF/OSC
@@ -777,15 +774,12 @@ pub(crate) fn ensure_merged_pbf(
     // job, compression or I/O parameters inherited from the diff invocation.
     // The partial name is owned: a killed run leaves it for the retry to
     // replace.
-    let invocation = binary.invocation(
-        PbfhoggCommand::apply_changes_args(
-            pbf_str,
-            osc_str,
-            &partial_str,
-            &CommandParams::default(),
-        ),
-        Writes::OwnedOutput,
-    )?;
+    let invocation = binary.invocation(PbfhoggCommand::apply_changes_args(
+        pbf_path,
+        osc_path,
+        staged.tmp_path(),
+        &CommandParams::default(),
+    )?)?;
     let captured = invocation.capture_in(project_root)?;
     invocation.check(&captured)?;
     staged.commit().map_err(|e| {

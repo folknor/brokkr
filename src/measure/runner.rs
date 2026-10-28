@@ -218,10 +218,11 @@ pub(crate) fn run(req: &MeasureRequest<'_>, command: &impl PlannedCommand) -> Re
         &ctx.paths,
         binary.map_or(PlanTarget::Unbound, PlanTarget::Built),
     )?;
+    let gated = gated_for(req);
     let prepare = || -> Result<(), DevError> {
         for dir in &plan.scratch_dirs {
             if dir.exists() {
-                std::fs::remove_dir_all(dir)?;
+                remove_tree(gated, dir)?;
             }
             std::fs::create_dir_all(dir)?;
         }
@@ -237,9 +238,32 @@ pub(crate) fn run(req: &MeasureRequest<'_>, command: &impl PlannedCommand) -> Re
     // Promotion is part of success. If it fails, preserve the current output.
     command.finish(req, &ctx, &plan)?;
     for dir in &plan.scratch_dirs {
-        std::fs::remove_dir_all(dir).ok();
+        remove_tree(gated, dir).ok();
     }
     Ok(())
+}
+
+/// Whether a measured run's scratch removals go through the reservation gate
+/// (`crate::reservations`): for pbfhogg, whose launches they can reach; any
+/// other project's are its own and stay outside the lease store.
+pub(crate) fn gated_for(req: &MeasureRequest<'_>) -> bool {
+    req.project == crate::project::Project::Pbfhogg
+}
+
+fn remove_tree(gated: bool, dir: &Path) -> std::io::Result<()> {
+    if gated {
+        crate::reservations::remove_dir_all(dir)
+    } else {
+        std::fs::remove_dir_all(dir) // gate: another project's own scratch
+    }
+}
+
+fn remove_one_file(gated: bool, file: &Path) -> std::io::Result<()> {
+    if gated {
+        crate::reservations::remove_file(file)
+    } else {
+        std::fs::remove_file(file) // gate: another project's own scratch
+    }
 }
 
 /// Run a binary plan's materialised invocation in the request's mode. Only
@@ -256,14 +280,27 @@ fn execute_invocation<C: PlannedCommand, P: Fn() -> Result<(), DevError>>(
     invocation.require_no_env("the measure runner")?;
     let binary = invocation.program();
     let program = invocation.program_string();
-    let args = invocation.arg_refs();
+    let cwd = req.project_root.as_path();
     let mut config = plan.subject.config(req.runs());
     config.cli_args = Some(invocation.cli_args());
     match req.mode {
         MeasureMode::Run => {
             prepare()?;
+            let launched = invocation.launch(cwd)?;
+            let args = launched.arg_refs();
             output::run_msg(&format!("{program} {}", args.join(" ")));
-            let out = output::run_passthrough_timed(&program, &args, Some(ctx.harness.lock()))?;
+            let out = output::run_passthrough_timed(&program, &args, Some(ctx.harness.lock()));
+            let finished = launched.finish();
+            let out = match out {
+                Ok(out) => out,
+                Err(e) => {
+                    if let Err(release) = finished {
+                        output::warn(&release.to_string());
+                    }
+                    return Err(e);
+                }
+            };
+            finished?;
             if let Some(code) = out.failed_code(command.ok_codes()) {
                 return Err(DevError::ExitCode(code));
             }
@@ -288,16 +325,31 @@ fn execute_invocation<C: PlannedCommand, P: Fn() -> Result<(), DevError>>(
             }
             ctx.harness.run_hotpath(&config, binary, |i, fifo| {
                 prepare()?;
-                let mut iteration = ctx.harness.capture_hotpath(
+                // The report is this launch's disposable output: reserved
+                // with it and removed with its lease, here or, if the child
+                // outlives this run, by a later scan. A launch with no
+                // reservation (an unreserved invocation) is removed here.
+                let report = ctx.harness.new_hotpath_report_path()?;
+                let launched = invocation.launch_with(cwd, std::slice::from_ref(&report))?;
+                let iteration = ctx.harness.capture_hotpath_into(
                     binary,
-                    &args,
-                    req.project_root.as_path(),
+                    &launched.arg_refs(),
+                    cwd,
                     &command.env(),
                     command.ok_codes(),
                     fifo,
                     i,
                     None,
-                )?;
+                    &report,
+                );
+                let finished = launched.finish();
+                if finished.is_ok() {
+                    crate::reservations::remove_file(&report).ok();
+                }
+                let mut iteration = iteration?;
+                if let Err(error) = finished {
+                    iteration.fail(error);
+                }
                 if iteration.error.is_none()
                     && let Some(result) = &mut iteration.result
                 {
@@ -326,9 +378,11 @@ impl ExternalInvocation {
         Invocation::new(&self.program, self.args.clone())
     }
 
-    pub(crate) fn prepare_sample(&self) -> Result<(), DevError> {
+    /// Clear the outputs and scratch before a sample; `gated` routes the
+    /// removals through the reservation gate ([`gated_for`]).
+    pub(crate) fn prepare_sample(&self, gated: bool) -> Result<(), DevError> {
         for file in &self.output_files {
-            match std::fs::remove_file(file) {
+            match remove_one_file(gated, file) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
@@ -336,19 +390,19 @@ impl ExternalInvocation {
         }
         for dir in &self.scratch_dirs {
             if dir.exists() {
-                std::fs::remove_dir_all(dir)?;
+                remove_tree(gated, dir)?;
             }
             std::fs::create_dir_all(dir)?;
         }
         Ok(())
     }
 
-    pub(crate) fn cleanup(&self) {
+    pub(crate) fn cleanup(&self, gated: bool) {
         for file in &self.output_files {
-            std::fs::remove_file(file).ok();
+            remove_one_file(gated, file).ok();
         }
         for dir in &self.scratch_dirs {
-            std::fs::remove_dir_all(dir).ok();
+            remove_tree(gated, dir).ok();
         }
     }
 }
@@ -360,7 +414,8 @@ pub(crate) fn execute_external(
 ) -> Result<(), DevError> {
     let args: Vec<&str> = invocation.args.iter().map(String::as_str).collect();
     let run = invocation.invocation();
-    let prepare = || invocation.prepare_sample();
+    let gated = gated_for(req);
+    let prepare = || invocation.prepare_sample(gated);
     match req.mode {
         MeasureMode::Run => {
             prepare()?;
@@ -390,7 +445,7 @@ pub(crate) fn execute_external(
             ));
         }
     }
-    invocation.cleanup();
+    invocation.cleanup(gated);
     Ok(())
 }
 

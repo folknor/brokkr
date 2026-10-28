@@ -546,7 +546,15 @@ pub(crate) fn run_curl(args: &[&str], cwd: &Path) -> Result<Vec<u8>, DevError> {
 /// the daily-regenerated ocean archives. What is guaranteed is that `dest` is
 /// absent or a complete transfer.
 pub(crate) fn download_file(url: &str, dest: &Path) -> Result<(), DevError> {
-    download_file_inner(url, dest, None)
+    download_file_inner(url, dest, None, false)
+}
+
+/// [`download_file`] for a dataset a pbfhogg launch reads: the staged write
+/// is reserved (`crate::reservations`) and curl, its writer, carries the
+/// reservation, so no launch reads the file while it is written, even past a
+/// brokkr killed under the transfer.
+pub(crate) fn download_dataset_file(url: &str, dest: &Path) -> Result<(), DevError> {
+    download_file_inner(url, dest, None, true)
 }
 
 /// Download a versioned archive and verify its pinned XXH128 before it is
@@ -559,20 +567,27 @@ pub(crate) fn download_file_verified(
     let expected: Xxh128 = expected_xxh128
         .parse()
         .map_err(|error| DevError::Config(format!("invalid XXH128 pin: {error}")))?;
-    download_file_inner(url, dest, Some(expected))
+    download_file_inner(url, dest, Some(expected), false)
 }
 
 fn download_file_inner(
     url: &str,
     dest: &Path,
     expected_xxh128: Option<Xxh128>,
+    reserved: bool,
 ) -> Result<(), DevError> {
     // Download to a staged sibling and rename on success, so a partial file
     // never sits at `dest` to block future retries. The stable `.partial`
     // name (not a per-process one) means a killed multi-gigabyte transfer is
     // overwritten by the retry instead of leaked; downloads run under the
     // global lock, so no second writer shares it.
-    let staged = crate::atomic_write::Staged::stable(dest)?;
+    let staged = if reserved {
+        let staged = crate::atomic_write::Staged::stable_reserved(dest)?;
+        staged.lend_to_child("curl");
+        staged
+    } else {
+        crate::atomic_write::Staged::stable(dest)?
+    };
     let tmp_str = staged.tmp_path().display().to_string();
     let _activity = crate::lockfile::activity::Activity::begin(format!("download {url}"));
 

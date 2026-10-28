@@ -4,7 +4,8 @@ use std::path::Path;
 
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
-use crate::pbfhogg::binary::{PbfhoggBinary, Writes};
+use crate::pbfhogg::argv::PbfArgv;
+use crate::pbfhogg::binary::PbfhoggBinary;
 
 /// Run the write benchmark for each compression mode (sync + pipelined).
 pub fn run(
@@ -29,16 +30,13 @@ pub fn run(
         let (writer_mode, compression) = variant.split_once('-').unwrap_or(("sync", variant));
 
         // bench-write encodes in memory and names no output path.
-        let invocation = binary.invocation_strs(
-            &[
-                "bench-write",
-                pbf_str,
-                "--compression",
-                compression,
-                "--writer",
-                writer_mode,
-            ],
-            Writes::Nothing,
+        let invocation = binary.invocation(
+            PbfArgv::new("bench-write")
+                .input(pbf_str)?
+                .arg("--compression")
+                .arg(compression)
+                .arg("--writer")
+                .arg(writer_mode),
         )?;
 
         let config = BenchConfig {

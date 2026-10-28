@@ -342,15 +342,17 @@ fn min_table_position(item: &toml_edit::Item) -> Option<isize> {
 /// this does not depend on `ErrorKind::CrossesDevices`.
 pub(super) fn move_file_into_place(src: &Path, dest: &Path) -> Result<(), DevError> {
     // A plain rename *moves* a finished file; it is not a temp-and-replace, so
-    // it stays raw. Only the cross-filesystem copy needs staging.
-    match std::fs::rename(src, dest) {
+    // it is no staged write. Only the cross-filesystem copy needs staging. Both
+    // go through the reservation gate.
+    match crate::reservations::rename(src, dest) {
         Ok(()) => Ok(()),
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
-            // Dropping `staged` on an error removes the partial copy.
-            let staged = crate::atomic_write::Staged::stable(dest)?;
+            // Dropping `staged` on an error removes the partial copy. A
+            // dataset file: reserved while it is written.
+            let staged = crate::atomic_write::Staged::stable_reserved(dest)?;
             std::fs::copy(src, staged.tmp_path())?;
             staged.commit()?;
-            std::fs::remove_file(src).ok();
+            crate::reservations::remove_file(src).ok();
             Ok(())
         }
         Err(e) => Err(DevError::Io(e)),
@@ -379,18 +381,17 @@ pub(super) fn generate_indexed_pbf(
         build_root,
         project_root,
     )?;
-    let input_str = input.display().to_string();
     // Stable temp name, as for downloads: runs under the global lock, and a
     // killed multi-gigabyte `cat` is overwritten by the retry, not leaked -
     // which is why the partial is an owned output pbfhogg must be allowed to
     // replace. It keeps the `.osm.pbf` suffix pbfhogg reads the output format
     // from. Dropping `staged` on any error removes the partial output.
-    let staged = crate::atomic_write::Staged::stable_keeping(dest, ".osm.pbf")?;
-    let tmp_str = staged.tmp_path().display().to_string();
+    let staged = crate::atomic_write::Staged::stable_keeping_for_child(dest, ".osm.pbf")?;
 
-    let invocation = binary.invocation_strs(
-        &["cat", &input_str, "-o", &tmp_str],
-        crate::pbfhogg::binary::Writes::OwnedOutput,
+    let invocation = binary.invocation(
+        crate::pbfhogg::argv::PbfArgv::new("cat")
+            .input(input)?
+            .output(staged.tmp_path())?,
     )?;
     let captured = invocation.capture_in(project_root)?;
     invocation.check(&captured)?;

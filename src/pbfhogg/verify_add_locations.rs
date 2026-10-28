@@ -213,16 +213,14 @@ fn run_pbfhogg_mode(
     index_type: Option<&str>,
     direct_io: bool,
 ) -> Result<CapturedOutput, DevError> {
-    let out_str = out_path.display().to_string();
-    let mut args = vec!["add-locations-to-ways", pbf_str, "-o", &out_str];
+    let mut argv = super::verify::PbfArgv::new("add-locations-to-ways")
+        .input(pbf_str)?
+        .output(out_path)?
+        .scratch(&harness.output_dir);
     if let Some(it) = index_type {
-        args.push("--index-type");
-        args.push(it);
+        argv = argv.arg("--index-type").arg(it);
     }
-    if direct_io {
-        args.push("--direct-io");
-    }
-    harness.run_pbfhogg(&args, super::verify::Writes::OwnedOutput)
+    harness.run_pbfhogg(argv.arg_if(direct_io, "--direct-io"))
 }
 
 /// Diff `a` against `b`, narrate the outcome, and hand the verdict back for

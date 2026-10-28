@@ -152,6 +152,22 @@ expect = "all guard decision paths behaved as specified"
 match = "last-line"
 stage = "pre-test"
 
+# A deletion, rename or replacement of a path a pbfhogg launch can use goes
+# through the reservation gate (src/reservations), which refuses while a
+# launch's lease covers the path. The code that deletes pbfhogg's inputs,
+# outputs and scratch must not reach std::fs around it.
+[[textlint]]
+name = "pbfhogg-mutations-through-the-gate"
+pattern = '\bfs::(?:remove_file|remove_dir_all|rename)\b'
+paths = ["src/pbfhogg/**/*.rs", "src/measure/**/*.rs", "src/measure.rs", "src/atomic_write.rs"]
+region = "code"
+test_code = "skip"
+# A raw call carries this marker with its reason: the operation a
+# crate::reservations::mutate or Hold::release_then closure performs under the
+# gate, or a file that is brokkr's own state, which no launch uses.
+allow_marker = "// gate:"
+message = "delete, rename or replace through crate::reservations, which refuses while a launch's lease covers the path"
+
 # Even data-printer lint exceptions must not hand-roll operator prefixes.
 [[textlint]]
 name = "operator-prefixes-use-output"

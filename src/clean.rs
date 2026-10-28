@@ -63,19 +63,24 @@ impl Cleaner {
     }
 
     fn dir(&self, path: &Path) -> Result<bool, DevError> {
-        let removed = if self.dry_run {
-            match std::fs::symlink_metadata(path) {
-                Ok(metadata) => metadata.file_type().is_dir() || metadata.file_type().is_symlink(),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-                Err(error) => return Err(clean_io_error("cannot inspect", path, &error)),
-            }
-        } else {
-            match std::fs::remove_dir_all(path) {
-                Ok(()) => true,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-                Err(error) => return Err(clean_io_error("cannot remove directory", path, &error)),
-            }
+        self.dir_by(path, |p| std::fs::remove_dir_all(p))
+    }
+
+    /// [`dir`](Self::dir) for a pbfhogg target, through the reservation gate
+    /// (`crate::reservations`): a tree a running pbfhogg launch uses, or one
+    /// holding a pbfhogg backup, is named and skipped, not removed, and the
+    /// rest of the clean goes on.
+    fn guarded_dir(&self, path: &Path) -> Result<bool, DevError> {
+        self.dir_by(path, crate::reservations::remove_dir_all)
+    }
+
+    fn dir_by(&self, path: &Path, remove: impl Fn(&Path) -> std::io::Result<()>) -> Result<bool, DevError> {
+        let present = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata.file_type().is_dir() || metadata.file_type().is_symlink(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(clean_io_error("cannot inspect", path, &error)),
         };
+        let removed = present && (self.dry_run || self.removed(path, remove(path), "cannot remove directory")?);
         if removed {
             self.hits.set(self.hits.get() + 1);
         }
@@ -83,23 +88,40 @@ impl Cleaner {
     }
 
     fn file(&self, path: &Path) -> Result<bool, DevError> {
-        let removed = if self.dry_run {
-            match std::fs::symlink_metadata(path) {
-                Ok(metadata) => !metadata.file_type().is_dir() || metadata.file_type().is_symlink(),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-                Err(error) => return Err(clean_io_error("cannot inspect", path, &error)),
-            }
-        } else {
-            match std::fs::remove_file(path) {
-                Ok(()) => true,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-                Err(error) => return Err(clean_io_error("cannot remove file", path, &error)),
-            }
+        self.file_by(path, |p| std::fs::remove_file(p))
+    }
+
+    /// [`file`](Self::file) for a pbfhogg target, through the reservation
+    /// gate, skipping a refused one as [`guarded_dir`](Self::guarded_dir) does.
+    fn guarded_file(&self, path: &Path) -> Result<bool, DevError> {
+        self.file_by(path, crate::reservations::remove_file)
+    }
+
+    fn file_by(&self, path: &Path, remove: impl Fn(&Path) -> std::io::Result<()>) -> Result<bool, DevError> {
+        let present = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => !metadata.file_type().is_dir() || metadata.file_type().is_symlink(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(clean_io_error("cannot inspect", path, &error)),
         };
+        let removed = present && (self.dry_run || self.removed(path, remove(path), "cannot remove file")?);
         if removed {
             self.hits.set(self.hits.get() + 1);
         }
         Ok(removed)
+    }
+
+    /// Whether a removal of a present `path` happened: gone meanwhile is
+    /// false, a reservation refusal is named and false, any other error fails.
+    fn removed(&self, path: &Path, result: std::io::Result<()>, action: &str) -> Result<bool, DevError> {
+        match result {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) if crate::reservations::is_refusal(&error) => {
+                output::warn(&format!("kept {}: {error}", path.display()));
+                Ok(false)
+            }
+            Err(error) => Err(clean_io_error(action, path, &error)),
+        }
     }
 
     /// Verb for "N files" style messages.
@@ -118,6 +140,15 @@ impl Cleaner {
         } else {
             "cleaned"
         }
+    }
+}
+
+/// Reclaim every free pbfhogg launch lease (`crate::reservations`), with its
+/// private directories, and say what is kept and why.
+fn reclaim_launch_leases() {
+    let report = crate::reservations::reclaim();
+    for line in report {
+        output::warn(&line);
     }
 }
 
@@ -165,8 +196,11 @@ pub(crate) fn cmd_clean(
 
     // The verify harness writes only under target/verify.
     if *project == Project::Pbfhogg {
+        if !dry_run {
+            reclaim_launch_leases();
+        }
         let verify_dir = layout::PbfhoggLayout::new(&paths).verify_output();
-        if c.dir(&verify_dir)? {
+        if c.guarded_dir(&verify_dir)? {
             output::run_msg(&format!("{} verify output", c.verb()));
         }
     }
@@ -342,10 +376,10 @@ fn clean_scratch(
         let pbfhogg = layout::PbfhoggLayout::new(paths);
         let mut removed = 0usize;
         for file in pbfhogg.scratch_files() {
-            removed += usize::from(c.file(&file)?);
+            removed += usize::from(c.guarded_file(&file)?);
         }
         for dir in pbfhogg.scratch_dirs() {
-            removed += usize::from(c.dir(&dir)?);
+            removed += usize::from(c.guarded_dir(&dir)?);
         }
         if removed > 0 {
             output::run_msg(&format!(

@@ -513,8 +513,9 @@ pub fn purge_all(git_root: &Path) -> Result<usize, DevError> {
             "removing worktree {}",
             record_name(&slot).unwrap_or_else(|| slot.display().to_string())
         ));
-        remove_one(git_root, &slot)?;
-        removed += 1;
+        if kept_if_reserved(remove_one(git_root, &slot), &slot)? {
+            removed += 1;
+        }
     }
     for path in list_legacy(git_root)? {
         let name = path
@@ -522,10 +523,27 @@ pub fn purge_all(git_root: &Path) -> Result<usize, DevError> {
             .and_then(|n| n.to_str())
             .unwrap_or("(unnamed)");
         output::run_msg(&format!("removing legacy worktree {name}"));
-        remove_checkout(git_root, &path)?;
-        removed += 1;
+        // Overlap only: a legacy checkout predates `verify --commit` outputs.
+        let gated = crate::reservations::mutate(&[&path], &[], || remove_checkout(git_root, &path));
+        if kept_if_reserved(gated, &path)? {
+            removed += 1;
+        }
     }
     Ok(removed)
+}
+
+/// Whether a worktree went: a refusal by the reservation gate (a pbfhogg
+/// launch still uses it, or it holds a pbfhogg backup) is named and skipped,
+/// so the purge goes on with the others; any other error stops it.
+fn kept_if_reserved(result: Result<(), DevError>, path: &Path) -> Result<bool, DevError> {
+    match result {
+        Ok(()) => Ok(true),
+        Err(DevError::Io(e)) if crate::reservations::is_refusal(&e) => {
+            output::warn(&format!("kept worktree {}: {e}", path.display()));
+            Ok(false)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Remove one slot: its isolated target dir, the git worktree, the slot.
@@ -540,19 +558,37 @@ pub fn purge_all(git_root: &Path) -> Result<usize, DevError> {
 /// (`brokkr-worktrees/<key>/<short>`). A link someone repointed is removed as a
 /// link and its destination left alone.
 pub fn remove_one(git_root: &Path, slot: &Path) -> Result<(), DevError> {
-    if let Ok(dest) = std::fs::read_link(slot.join(TARGET_LINK))
-        && let (Some(key), Some(short)) =
-            (slot.parent().and_then(Path::file_name), slot.file_name())
-        && dest.ends_with(Path::new(TARGET_SUBDIR).join(key).join(short))
-        && dest.exists()
-    {
-        std::fs::remove_dir_all(&dest).map_err(|e| {
-            DevError::Io(std::io::Error::new(
-                e.kind(),
-                format!("cannot remove worktree target dir {}: {e}", dest.display()),
-            ))
-        })?;
-    }
+    let dest = std::fs::read_link(slot.join(TARGET_LINK)).ok().filter(|dest| {
+        matches!(
+            (slot.parent().and_then(Path::file_name), slot.file_name()),
+            (Some(key), Some(short)) if dest.ends_with(Path::new(TARGET_SUBDIR).join(key).join(short))
+        ) && dest.exists()
+    });
+    // A running pbfhogg launch can read inputs or write outputs anywhere, a
+    // worktree included (`crate::reservations`): the whole removal runs under
+    // the gate, refused while a lease overlaps the slot or its target dir.
+    // pbfhogg outputs land in a worktree only under its target dir's
+    // `verify` (`verify --commit`), so that is the one tree searched for a
+    // pbfhogg backup, rather than the whole checkout and cargo target dir.
+    let mut targets: Vec<&Path> = vec![slot];
+    targets.extend(dest.as_deref());
+    let verify_out = dest.as_ref().map(|dest| dest.join(crate::target_namespace::VERIFY));
+    let trees: Vec<&Path> = verify_out.iter().map(PathBuf::as_path).collect();
+    crate::reservations::mutate(&targets, &trees, || -> Result<(), DevError> {
+        if let Some(dest) = &dest {
+            std::fs::remove_dir_all(dest).map_err(|e| {
+                DevError::Io(std::io::Error::new(
+                    e.kind(),
+                    format!("cannot remove worktree target dir {}: {e}", dest.display()),
+                ))
+            })?;
+        }
+        remove_slot(git_root, slot)
+    })
+}
+
+/// The git worktree and the slot of [`remove_one`], inside its gate.
+fn remove_slot(git_root: &Path, slot: &Path) -> Result<(), DevError> {
     remove_checkout(git_root, &checkout_in(git_root, slot))?;
     // `remove_dir_all` does not follow symlinks: the dependency links go, the
     // live checkouts they point at stay.
@@ -574,6 +610,7 @@ pub fn remove_one(git_root: &Path, slot: &Path) -> Result<(), DevError> {
 /// expected answer for a directory git has lost track of, which is exactly
 /// what the filesystem fallback is for - but it is carried into the error when
 /// the fallback fails too, since it is usually the more telling of the two.
+/// Not gated itself: its callers run it under `crate::reservations::mutate`.
 fn remove_checkout(git_root: &Path, path: &Path) -> Result<(), DevError> {
     let git = run_git(
         git_root,

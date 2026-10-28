@@ -460,7 +460,7 @@ fn run_osmium_baseline(
 
     harness.run_external(&altw_config, &altw, project_root)?;
 
-    std::fs::remove_file(&altw_output).ok();
+    crate::reservations::remove_file(&altw_output).ok();
 
     Ok(())
 }

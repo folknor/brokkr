@@ -124,61 +124,9 @@ impl ArgMode {
     }
 }
 
-/// What a command's argv needs for pbfhogg to replace its output. Decided by
-/// the same `build_body` arm that builds the argv, never by a caller.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Overwrite {
-    /// Reads only.
-    NoOutput,
-    /// Writes a brokkr-owned output: pass `--overwrite` when the executable
-    /// accepts it.
-    Negotiate,
-    /// Writes a brokkr-owned output, and a flag the arm already emitted
-    /// (`build-geocode-index --force`) replaces it in every pbfhogg version.
-    ImpliedByForce,
-}
-
-/// A typed command's argv, still without the executable-dependent
-/// `--overwrite`. Only [`PbfhoggCommand::build_args`] makes one, so its
-/// overwrite decision always comes from the arm that built the arguments.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CommandArgv {
-    args: Vec<String>,
-    overwrite: Overwrite,
-}
-
-impl CommandArgv {
-    pub(crate) fn args(&self) -> &[String] {
-        &self.args
-    }
-
-    #[cfg(test)]
-    pub(crate) fn overwrite(&self) -> Overwrite {
-        self.overwrite
-    }
-
-    pub(crate) fn negotiates_overwrite(&self) -> bool {
-        self.overwrite == Overwrite::Negotiate
-    }
-
-    /// Whether the argv writes a brokkr-owned output at all, negotiated or
-    /// replaced by the arm's own flag.
-    pub(crate) fn writes_output(&self) -> bool {
-        self.overwrite != Overwrite::NoOutput
-    }
-
-    pub(crate) fn into_args(self) -> Vec<String> {
-        self.args
-    }
-}
-
-/// For observation (dry run prints it); running it goes through
-/// [`PbfhoggBinary::command_invocation`](crate::pbfhogg::binary::PbfhoggBinary::command_invocation).
-impl AsRef<[String]> for CommandArgv {
-    fn as_ref(&self) -> &[String] {
-        &self.args
-    }
-}
+/// A typed command's argv: the argv and what it reads, writes and
+/// scratches, all decided by the `build_body` arm that built it.
+pub(crate) use crate::pbfhogg::argv::PbfArgv as CommandArgv;
 
 // ---------------------------------------------------------------------------
 // Sub-enums for multi-variant commands
@@ -662,13 +610,14 @@ impl PbfhoggCommand {
     /// resolving the returned [`CommandArgv`].
     #[allow(clippy::too_many_lines)]
     pub fn build_args(&self, ctx: &CommandContext, mode: ArgMode) -> Result<CommandArgv, DevError> {
-        let (mut args, overwrite) = self.build_body(ctx, mode)?;
-        args.extend(ctx.params.io.args());
-        if let Some(compression) = &ctx.params.compression {
-            args.push("--compression".into());
-            args.push(compression.to_string());
+        let mut argv = self.build_body(ctx, mode)?;
+        for arg in ctx.params.io.args() {
+            argv = argv.arg(arg);
         }
-        Ok(CommandArgv { args, overwrite })
+        if let Some(compression) = &ctx.params.compression {
+            argv = argv.arg("--compression").arg(compression.to_string());
+        }
+        Ok(argv)
     }
 
     /// Build the core argv for an extract command with an explicit output
@@ -676,95 +625,70 @@ impl PbfhoggCommand {
     /// keeping the strategy flag and single-token `-b=<bbox>` spelling alike.
     pub(crate) fn extract_args_for(
         &self,
-        pbf: &str,
+        pbf: &Path,
         bbox: &Bbox,
-        output: &str,
-    ) -> Result<Vec<String>, DevError> {
+        output: &Path,
+    ) -> Result<CommandArgv, DevError> {
         let Self::Extract { strategy } = self else {
             return Err(DevError::Config(
                 "extract_args_for requires an extract command".into(),
             ));
         };
 
-        let mut args = vec!["extract".into(), pbf.into()];
+        let mut argv = CommandArgv::new("extract").input(pbf)?;
         if let Some(flag) = strategy.flag() {
-            args.push(flag.into());
+            argv = argv.arg(flag);
         }
-        args.push(bbox.to_pbfhogg_arg());
-        args.push("-o".into());
-        args.push(output.into());
-        Ok(args)
+        argv.arg(bbox.to_pbfhogg_arg()).output(output)
     }
 
-    /// Build the body of the argument vector (no binary prefix), together
-    /// with what the same arm decided about replacing its output.
+    /// Build the body of the argument vector (no binary prefix), with what it
+    /// reads, writes and scratches, all from the same calls.
     #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
-    fn build_body(
-        &self,
-        ctx: &CommandContext,
-        mode: ArgMode,
-    ) -> Result<(Vec<String>, Overwrite), DevError> {
-        use Overwrite::{ImpliedByForce, Negotiate, NoOutput};
+    fn build_body(&self, ctx: &CommandContext, mode: ArgMode) -> Result<CommandArgv, DevError> {
+        let jobs = |argv: CommandArgv| match ctx.params.jobs {
+            Some(j) => argv.arg("-j").arg(j.to_string()),
+            None => argv,
+        };
         match self {
             // -----------------------------------------------------------------
             // Tool CLI commands (26 from bench_commands.rs)
             // -----------------------------------------------------------------
             Self::Inspect { mode: inspect_mode } => {
-                let mut args: Vec<String> = vec!["inspect".into()];
+                let mut argv = CommandArgv::new("inspect");
                 match inspect_mode {
                     InspectMode::Tags { type_filter } => {
-                        args.push("tags".into());
-                        args.push(ctx.pbf_str()?.into());
+                        argv = argv.arg("tags").input(ctx.pbf_str()?)?;
                         if let Some(tf) = type_filter {
-                            args.push("--type".into());
-                            args.push(tf.as_str()?.into());
+                            argv = argv.arg("--type").arg(tf.as_str()?);
                         }
-                        args.push("--min-count".into());
-                        args.push(INSPECT_ALL_TAGS_MIN_COUNT.into());
+                        argv = argv.arg("--min-count").arg(INSPECT_ALL_TAGS_MIN_COUNT);
                     }
                     InspectMode::Nodes => {
-                        args.push("--nodes".into());
-                        args.push(ctx.pbf_str()?.into());
+                        argv = argv.arg("--nodes").input(ctx.pbf_str()?)?;
                     }
                     InspectMode::Default { extended } => {
-                        args.push(ctx.pbf_str()?.into());
+                        argv = argv.input(ctx.pbf_str()?)?;
                         if *extended {
-                            args.push("--extended".into());
+                            argv = argv.arg("--extended");
                         }
                     }
                 }
                 // pbfhogg's default inspect (metadata) doesn't accept -j;
                 // drop the flag silently rather than let pbfhogg reject.
-                if matches!(inspect_mode, InspectMode::Nodes | InspectMode::Tags { .. })
-                    && let Some(j) = ctx.params.jobs
-                {
-                    args.push("-j".into());
-                    args.push(j.to_string());
+                if matches!(inspect_mode, InspectMode::Nodes | InspectMode::Tags { .. }) {
+                    argv = jobs(argv);
                 }
-                Ok((args, NoOutput))
+                Ok(argv)
             }
-            Self::CheckRefs => Ok((
-                vec!["check".into(), "--refs".into(), ctx.pbf_str()?.into()],
-                NoOutput,
-            )),
+            Self::CheckRefs => CommandArgv::new("check").arg("--refs").input(ctx.pbf_str()?),
             Self::CheckIds { full } => {
-                let mut args = vec!["check".into(), "--ids".into(), ctx.pbf_str()?.into()];
-                if *full {
-                    args.push("--full".into());
-                }
-                Ok((args, NoOutput))
+                let argv = CommandArgv::new("check").arg("--ids").input(ctx.pbf_str()?)?;
+                Ok(if *full { argv.arg("--full") } else { argv })
             }
             Self::Sort => {
                 let output = scratch_output_path(ctx, self, mode)?;
-                Ok((
-                    vec![
-                        "sort".into(),
-                        ctx.pbf_str()?.into(),
-                        "-o".into(),
-                        crate::utf8_path::path_string(&output)?,
-                    ],
-                    Negotiate,
-                ))
+                CommandArgv::new("sort").input(ctx.pbf_str()?)?.output(&output)
             }
             Self::Cat {
                 type_filter,
@@ -773,40 +697,35 @@ impl PbfhoggCommand {
             } => {
                 let output = scratch_output_path(ctx, self, mode)?;
                 let pbf = ctx.pbf_str()?;
-                let mut args: Vec<String> = vec!["cat".into()];
+                let mut argv = CommandArgv::new("cat");
                 if *dedupe {
-                    args.push("--dedupe".into());
+                    argv = argv.arg("--dedupe");
                 }
                 if *clean {
                     // pbfhogg's --clean takes an ATTR value
                     // (version|changeset|timestamp|uid|user). For bench purposes
                     // we just need to force the full-decode / Framed path -
                     // `version` is the lightest-weight strip and always present.
-                    args.push("--clean".into());
-                    args.push("version".into());
+                    argv = argv.arg("--clean").arg("version");
                 }
                 // Input(s). `--dedupe` takes two PBFs (we pass the same
                 // file twice for a deterministic bench shape).
-                args.push(pbf.into());
+                argv = argv.input(pbf)?;
                 if *dedupe {
-                    args.push(pbf.into());
+                    argv = argv.input(pbf)?;
                 }
                 if let Some(tf) = type_filter {
-                    args.push("--type".into());
-                    args.push(tf.as_str()?.into());
+                    argv = argv.arg("--type").arg(tf.as_str()?);
                 }
-                args.push("-o".into());
-                args.push(crate::utf8_path::path_string(&output)?);
-                Ok((args, Negotiate))
+                argv.output(&output)
             }
             Self::TagsFilter { filter, input } => {
                 let output = scratch_output_path(ctx, self, mode)?;
-                let mut args: Vec<String> = vec!["tags-filter".into()];
+                let mut argv = CommandArgv::new("tags-filter");
                 let input_path = match input {
                     TagsFilterInput::Osc => {
-                        args.push("--input-kind".into());
-                        args.push("osc".into());
-                        ctx.osc_str()?.to_owned()
+                        argv = argv.arg("--input-kind").arg("osc");
+                        ctx.osc_str()?
                     }
                     TagsFilterInput::Pbf {
                         omit_referenced,
@@ -814,161 +733,119 @@ impl PbfhoggCommand {
                         remove_tags,
                     } => {
                         if *omit_referenced {
-                            args.push("-R".into());
+                            argv = argv.arg("-R");
                         }
                         if *invert {
-                            args.push("-i".into());
+                            argv = argv.arg("-i");
                         }
                         if *remove_tags {
-                            args.push("-t".into());
+                            argv = argv.arg("-t");
                         }
-                        ctx.pbf_str()?.to_owned()
+                        ctx.pbf_str()?
                     }
                     TagsFilterInput::Invalid(message) => {
                         return Err(DevError::Config(message.clone()));
                     }
                 };
-                args.push(input_path);
-                args.push(filter.clone());
-                args.push("-o".into());
-                args.push(crate::utf8_path::path_string(&output)?);
-                if let Some(j) = ctx.params.jobs {
-                    args.push("-j".into());
-                    args.push(j.to_string());
-                }
-                Ok((args, Negotiate))
+                let argv = argv.input(input_path)?.arg(filter.clone()).output(&output)?;
+                Ok(jobs(argv))
             }
             Self::Getid {
                 add_referenced,
                 invert,
             } => {
                 let output = scratch_output_path(ctx, self, mode)?;
-                let mut args: Vec<String> = vec!["getid".into()];
+                let mut argv = CommandArgv::new("getid");
                 if *invert {
-                    args.push("--invert".into());
+                    argv = argv.arg("--invert");
                 }
-                args.push(ctx.pbf_str()?.into());
+                argv = argv.input(ctx.pbf_str()?)?;
                 if *add_referenced {
-                    args.push("--add-referenced".into());
+                    argv = argv.arg("--add-referenced");
                 }
                 for id in GETID_BENCH_IDS {
-                    args.push((*id).into());
+                    argv = argv.arg(*id);
                 }
-                args.push("-o".into());
-                args.push(crate::utf8_path::path_string(&output)?);
-                Ok((args, Negotiate))
+                argv.output(&output)
             }
             Self::Getparents => {
                 let output = scratch_output_path(ctx, self, mode)?;
-                let mut args: Vec<String> = vec!["getparents".into(), ctx.pbf_str()?.into()];
+                let mut argv = CommandArgv::new("getparents").input(ctx.pbf_str()?)?;
                 for id in GETPARENTS_BENCH_IDS {
-                    args.push((*id).into());
+                    argv = argv.arg(*id);
                 }
-                args.push("-o".into());
-                args.push(crate::utf8_path::path_string(&output)?);
-                Ok((args, Negotiate))
+                argv.output(&output)
             }
             Self::Renumber => {
                 let output = scratch_output_path(ctx, self, mode)?;
-                Ok((
-                    vec![
-                        "renumber".into(),
-                        ctx.pbf_str()?.into(),
-                        "-o".into(),
-                        crate::utf8_path::path_string(&output)?,
-                    ],
-                    Negotiate,
-                ))
+                CommandArgv::new("renumber").input(ctx.pbf_str()?)?.output(&output)
             }
             Self::MergeChanges { simplify } => {
                 let output = scratch_output_path(ctx, self, mode)?;
-                let oscs = ctx.osc_strs()?;
-                let mut args = vec!["merge-changes".into()];
-                for o in oscs {
-                    args.push(o.into());
+                let mut argv = CommandArgv::new("merge-changes");
+                for o in ctx.osc_strs()? {
+                    argv = argv.input(o)?;
                 }
-                args.push("-o".into());
-                args.push(crate::utf8_path::path_string(&output)?);
-                if *simplify {
-                    args.push("--simplify".into());
-                }
-                Ok((args, Negotiate))
+                let argv = argv.output(&output)?;
+                Ok(if *simplify { argv.arg("--simplify") } else { argv })
             }
             Self::ApplyChanges => {
                 let output = scratch_output_path(ctx, self, mode)?;
-                let osc = ctx.osc_str()?;
-                Ok((
-                    Self::apply_changes_args(
-                        ctx.pbf_str()?,
-                        osc,
-                        &crate::utf8_path::path_string(&output)?,
-                        &ctx.params,
-                    ),
-                    Negotiate,
-                ))
+                Self::apply_changes_args(
+                    Path::new(ctx.pbf_str()?),
+                    Path::new(ctx.osc_str()?),
+                    &output,
+                    &ctx.params,
+                )
             }
             Self::AddLocationsToWays => {
                 let output = scratch_output_path(ctx, self, mode)?;
-                let mut args = vec![
-                    "add-locations-to-ways".into(),
-                    ctx.pbf_str()?.into(),
-                    "-o".into(),
-                    crate::utf8_path::path_string(&output)?,
-                ];
+                let mut argv = CommandArgv::new("add-locations-to-ways")
+                    .input(ctx.pbf_str()?)?
+                    .output(&output)?
+                    .scratch(&ctx.scratch_dir);
                 if let Some(it) = &ctx.params.index_type {
-                    args.push("--index-type".into());
-                    args.push(it.clone());
+                    argv = argv.arg("--index-type").arg(it.clone());
                 }
                 if ctx.params.inject_prepass {
-                    args.push("--inject-prepass".into());
+                    argv = argv.arg("--inject-prepass");
                 }
                 if ctx.params.force_altw {
-                    args.push("--force".into());
+                    argv = argv.arg("--force");
                 }
-                Ok((args, Negotiate))
+                Ok(argv)
             }
             Self::TimeFilter => {
                 let output = scratch_output_path(ctx, self, mode)?;
-                Ok((
-                    vec![
-                        "time-filter".into(),
-                        ctx.pbf_str()?.into(),
-                        "2024-01-01T00:00:00Z".into(),
-                        "-o".into(),
-                        crate::utf8_path::path_string(&output)?,
-                    ],
-                    Negotiate,
-                ))
+                CommandArgv::new("time-filter")
+                    .input(ctx.pbf_str()?)?
+                    .arg("2024-01-01T00:00:00Z")
+                    .output(&output)
             }
             Self::Diff { format } | Self::DiffSnapshots { format } => {
                 let from = ctx.pbf_str()?;
                 let to = ctx.pbf_b_str()?;
-                let (mut args, overwrite) = match format {
-                    DiffFormat::Default => (
-                        vec!["diff".into(), from.into(), to.into(), "-c".into()],
-                        NoOutput,
-                    ),
+                let argv = match format {
+                    DiffFormat::Default => {
+                        let argv = CommandArgv::new("diff").input(from)?.input(to)?.arg("-c");
+                        if crate::pbfhogg::argv::text_diff_writes_scratch(ctx.params.jobs, false) {
+                            argv.scratch(&ctx.scratch_dir)
+                        } else {
+                            argv
+                        }
+                    }
                     DiffFormat::Osc => {
                         let output = scratch_output_path(ctx, self, mode)?;
-                        (
-                            vec![
-                                "diff".into(),
-                                "--format".into(),
-                                "osc".into(),
-                                from.into(),
-                                to.into(),
-                                "-o".into(),
-                                crate::utf8_path::path_string(&output)?,
-                            ],
-                            Negotiate,
-                        )
+                        CommandArgv::new("diff")
+                            .arg("--format")
+                            .arg("osc")
+                            .input(from)?
+                            .input(to)?
+                            .output(&output)?
+                            .scratch(&ctx.scratch_dir)
                     }
                 };
-                if let Some(j) = ctx.params.jobs {
-                    args.push("-j".into());
-                    args.push(j.to_string());
-                }
-                Ok((args, overwrite))
+                Ok(jobs(argv))
             }
 
             Self::Repack {
@@ -976,20 +853,11 @@ impl PbfhoggCommand {
                 force,
             } => {
                 let output = scratch_output_path(ctx, self, mode)?;
-                let mut args = vec![
-                    "repack".into(),
-                    ctx.pbf_str()?.into(),
-                    "-o".into(),
-                    crate::utf8_path::path_string(&output)?,
-                ];
+                let mut argv = CommandArgv::new("repack").input(ctx.pbf_str()?)?.output(&output)?;
                 if let Some(n) = elements_per_blob {
-                    args.push("--elements-per-blob".into());
-                    args.push(n.to_string());
+                    argv = argv.arg("--elements-per-blob").arg(n.to_string());
                 }
-                if *force {
-                    args.push("--force".into());
-                }
-                Ok((args, Negotiate))
+                Ok(if *force { argv.arg("--force") } else { argv })
             }
             Self::Degrade {
                 unsort,
@@ -997,22 +865,17 @@ impl PbfhoggCommand {
                 strip_indexdata,
             } => {
                 let output = scratch_output_path(ctx, self, mode)?;
-                let mut args = vec![
-                    "degrade".into(),
-                    ctx.pbf_str()?.into(),
-                    "-o".into(),
-                    crate::utf8_path::path_string(&output)?,
-                ];
+                let mut argv = CommandArgv::new("degrade").input(ctx.pbf_str()?)?.output(&output)?;
                 if *unsort {
-                    args.push("--unsort".into());
+                    argv = argv.arg("--unsort");
                 }
                 if *strip_locations {
-                    args.push("--strip-locations".into());
+                    argv = argv.arg("--strip-locations");
                 }
                 if *strip_indexdata {
-                    args.push("--strip-indexdata".into());
+                    argv = argv.arg("--strip-indexdata");
                 }
-                Ok((args, Negotiate))
+                Ok(argv)
             }
 
             // -----------------------------------------------------------------
@@ -1023,16 +886,12 @@ impl PbfhoggCommand {
                 // pbfhogg's `--force` here means overwrite plus allow-unindexed,
                 // in every version brokkr builds, so it replaces the output on
                 // its own and the negotiated flag is not needed.
-                Ok((
-                    vec![
-                        "build-geocode-index".into(),
-                        ctx.pbf_str()?.into(),
-                        "--output-dir".into(),
-                        crate::utf8_path::path_string(&output_dir)?,
-                        "--force".into(),
-                    ],
-                    ImpliedByForce,
-                ))
+                Ok(CommandArgv::new("build-geocode-index")
+                    .input(ctx.pbf_str()?)?
+                    .output_dir("--output-dir", &output_dir)?
+                    .arg("--force")
+                    .forces_overwrite()
+                    .scratch(&ctx.scratch_dir))
             }
 
             // -----------------------------------------------------------------
@@ -1049,20 +908,15 @@ impl PbfhoggCommand {
                     .bbox()
                     .ok_or_else(|| DevError::Config("multi-extract requires a bbox".into()))?;
                 let plan = multi_extract_plan(ctx, output_dir, bbox, *regions)?;
-                let config_path = plan.config_path;
-
-                let mut args: Vec<String> = vec![
-                    "extract".into(),
-                    ctx.pbf_str()?.into(),
-                    "--config".into(),
-                    crate::utf8_path::path_string(&config_path)?,
-                ];
-                if let Some(flag) = strategy.flag() {
-                    args.push(flag.into());
-                }
                 // The outputs are named in the config file; one argv
                 // `--overwrite` covers every one of them.
-                Ok((args, Negotiate))
+                let argv = CommandArgv::new("extract")
+                    .input(ctx.pbf_str()?)?
+                    .extract_config(&plan.config_path, plan.outputs)?;
+                Ok(match strategy.flag() {
+                    Some(flag) => argv.arg(flag),
+                    None => argv,
+                })
             }
 
             // -----------------------------------------------------------------
@@ -1074,11 +928,7 @@ impl PbfhoggCommand {
                     .bbox()
                     .ok_or_else(|| DevError::Config("extract requires a bbox".into()))?;
                 let output = scratch_output_path(ctx, self, mode)?;
-                let output_str = crate::utf8_path::path_string(&output)?;
-                Ok((
-                    self.extract_args_for(ctx.pbf_str()?, bbox, &output_str)?,
-                    Negotiate,
-                ))
+                self.extract_args_for(Path::new(ctx.pbf_str()?), bbox, &output)
             }
         }
     }
@@ -1087,22 +937,19 @@ impl PbfhoggCommand {
     /// uses default settings to build a cache input; measured apply-changes
     /// commands pass their resolved parameters here.
     pub(crate) fn apply_changes_args(
-        pbf: &str,
-        osc: &str,
-        output: &str,
+        pbf: &Path,
+        osc: &Path,
+        output: &Path,
         params: &CommandParams,
-    ) -> Vec<String> {
-        let mut args = vec!["apply-changes".into(), pbf.into(), osc.into()];
+    ) -> Result<CommandArgv, DevError> {
+        let mut argv = CommandArgv::new("apply-changes").input(pbf)?.input(osc)?;
         if params.locations_on_ways {
-            args.push("--locations-on-ways".into());
+            argv = argv.arg("--locations-on-ways");
         }
         if let Some(jobs) = params.jobs {
-            args.push("-j".into());
-            args.push(jobs.to_string());
+            argv = argv.arg("-j").arg(jobs.to_string());
         }
-        args.push("-o".into());
-        args.push(output.into());
-        args
+        argv.output(output)
     }
 
     /// Materialise the on-disk inputs `build_args` only names.
@@ -1123,7 +970,9 @@ impl PbfhoggCommand {
             .ok_or_else(|| DevError::Config("multi-extract requires a bbox".into()))?;
         let plan = multi_extract_plan(ctx, output_dir, bbox, *regions)?;
         std::fs::create_dir_all(&plan.output_dir)?;
-        std::fs::write(&plan.config_path, plan.config_json)?;
+        // A launch reading the config is reserved; the gate refuses to
+        // rewrite it under one.
+        crate::reservations::write(&plan.config_path, plan.config_json.as_bytes())?;
         Ok(())
     }
 }
@@ -1133,6 +982,7 @@ struct MultiExtractPlan {
     output_dir: PathBuf,
     config_path: PathBuf,
     config_json: String,
+    outputs: Vec<PathBuf>,
 }
 
 /// Compute multi-extract's config without touching the filesystem.
@@ -1147,29 +997,37 @@ fn multi_extract_plan(
     regions: usize,
 ) -> Result<MultiExtractPlan, DevError> {
     let strips = bbox.strips(regions)?;
-    let config_json = multi_extract_config(&output_dir, &strips)?;
+    let config = multi_extract_config(&output_dir, &strips)?;
     Ok(MultiExtractPlan {
         output_dir,
         config_path: multi_extract_config_path(&ctx.scratch_dir),
-        config_json,
+        config_json: config.json,
+        outputs: config.outputs,
     })
+}
+
+/// A multi-extract config and the outputs it names, from one construction.
+pub(crate) struct MultiExtractConfig {
+    pub(crate) json: String,
+    pub(crate) outputs: Vec<PathBuf>,
 }
 
 /// Encode shared multi-extract strips for a resolved output path. Both the
 /// measured command and `verify multi-extract` use serde_json for escaping.
-pub(crate) fn multi_extract_config(output_dir: &Path, strips: &[Bbox]) -> Result<String, DevError> {
+pub(crate) fn multi_extract_config(output_dir: &Path, strips: &[Bbox]) -> Result<MultiExtractConfig, DevError> {
     if strips.is_empty() {
         return Err(DevError::Config(
             "multi-extract requires at least 1 region".into(),
         ));
     }
     let output_dir_str = crate::utf8_path::path_string(output_dir)?;
+    let names: Vec<String> = (0..strips.len()).map(|i| format!("strip-{i}.osm.pbf")).collect();
     let extracts: Vec<serde_json::Value> = strips
         .iter()
-        .enumerate()
-        .map(|(i, bbox)| {
+        .zip(&names)
+        .map(|(bbox, name)| {
             serde_json::json!({
-                "output": format!("strip-{i}.osm.pbf"),
+                "output": name,
                 "bbox": bbox.coordinates(),
             })
         })
@@ -1181,7 +1039,10 @@ pub(crate) fn multi_extract_config(output_dir: &Path, strips: &[Bbox]) -> Result
     let config_json = serde_json::to_string_pretty(&config)
         .map_err(|e| DevError::Config(format!("failed to encode multi-extract config: {e}")))?;
 
-    Ok(config_json)
+    Ok(MultiExtractConfig {
+        json: config_json,
+        outputs: names.iter().map(|name| output_dir.join(name)).collect(),
+    })
 }
 
 /// Stable config filename shared by measured multi-extract and verification.
@@ -1393,6 +1254,7 @@ mod tests {
 
     #[test]
     fn the_arm_building_the_argv_decides_overwrite_consistently_with_the_descriptor() {
+        use crate::pbfhogg::argv::Overwrite;
         // An output-producing command whose arm forgot to negotiate would
         // fail on its second iteration once pbfhogg refuses existing outputs.
         for cmd in every_command_state() {
@@ -1416,6 +1278,28 @@ mod tests {
                         .any(|a| a == crate::pbfhogg::binary::OVERWRITE_FLAG || a == "-O"),
                     "{cmd:?}"
                 );
+            }
+        }
+    }
+
+    /// Run scratch is declared by exactly the commands pbfhogg makes it
+    /// for: add-locations-to-ways, build-geocode-index, an OSC diff on every
+    /// path, and a text diff unless it runs with `-j 1`.
+    #[test]
+    fn scratch_is_declared_by_the_commands_that_write_it() {
+        for cmd in every_command_state() {
+            let mut ctx = ctx_for(&cmd);
+            for jobs in [None, Some(1), Some(4)] {
+                ctx.params.jobs = jobs;
+                let argv = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+                let expected = match &cmd {
+                    PbfhoggCommand::AddLocationsToWays | PbfhoggCommand::BuildGeocodeIndex => true,
+                    PbfhoggCommand::Diff { format } | PbfhoggCommand::DiffSnapshots { format } => {
+                        *format == DiffFormat::Osc || jobs != Some(1)
+                    }
+                    _ => false,
+                };
+                assert_eq!(argv.writes_scratch(), expected, "{cmd:?} with -j {jobs:?}");
             }
         }
     }

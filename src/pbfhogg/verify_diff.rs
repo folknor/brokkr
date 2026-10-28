@@ -3,9 +3,19 @@
 use std::fs;
 use std::path::Path;
 
-use super::verify::{ExternalTool, Findings, Verdict, VerifyHarness, Writes};
+use super::verify::{ExternalTool, Findings, PbfArgv, Verdict, VerifyHarness};
 use crate::error::DevError;
 use crate::output::verify_msg;
+
+/// `pbfhogg diff -c OLD NEW`, a text diff to stdout with automatic jobs:
+/// its run scratch goes under the verify directory.
+fn text_diff(harness: &VerifyHarness, old: &Path, new: &Path) -> Result<PbfArgv, DevError> {
+    Ok(PbfArgv::new("diff")
+        .arg("-c")
+        .input(old)?
+        .input(new)?
+        .scratch(&harness.output_dir))
+}
 
 /// Cross-validate `pbfhogg diff` against `osmium diff --summary`.
 ///
@@ -23,24 +33,20 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<Findings, 
     ));
 
     let pbf_str = pbf.display().to_string();
-    let osc_str = osc.display().to_string();
 
     // Create "new" PBF by applying the OSC.
     let new_pbf = outdir.join("new.osm.pbf");
     let new_pbf_str = new_pbf.display().to_string();
 
     verify_msg("--- creating 'new' PBF via apply-changes ---");
-    let captured = harness.run_pbfhogg(
-        &["apply-changes", &pbf_str, &osc_str, "-o", &new_pbf_str],
-        Writes::OwnedOutput,
-    )?;
+    let captured =
+        harness.run_pbfhogg(PbfArgv::new("apply-changes").input(pbf)?.input(osc)?.output(&new_pbf)?)?;
     harness.check_exit(&captured, "pbfhogg apply-changes")?;
 
     // pbfhogg diff exits 1 when differences exist; 2 and above mean it did
     // not complete, and its missing summary must not reach the parser.
     verify_msg("--- pbfhogg diff ---");
-    let captured_indexed =
-        harness.run_pbfhogg(&["diff", "-c", &pbf_str, &new_pbf_str], Writes::Nothing)?;
+    let captured_indexed = harness.run_pbfhogg(text_diff(harness, pbf, &new_pbf)?)?;
     captured_indexed.check_success_or("pbfhogg diff", &[1])?;
 
     fs::write(outdir.join("pbfhogg-diff.txt"), &captured_indexed.stdout)?;
@@ -135,10 +141,7 @@ fn unindexed_diff_matches(
     harness.strip_indexdata(new, &new_raw)?;
 
     verify_msg("--- pbfhogg diff (unindexed inputs) ---");
-    let old_raw_str = old_raw.display().to_string();
-    let new_raw_str = new_raw.display().to_string();
-    let captured =
-        harness.run_pbfhogg(&["diff", "-c", &old_raw_str, &new_raw_str], Writes::Nothing)?;
+    let captured = harness.run_pbfhogg(text_diff(harness, &old_raw, &new_raw)?)?;
     captured.check_success_or("pbfhogg diff (unindexed inputs)", &[1])?;
     fs::write(outdir.join("pbfhogg-unindexed-diff.txt"), &captured.stdout)?;
     fs::write(

@@ -8,31 +8,25 @@
 //! asked of that executable, never inferred from a commit range.
 //!
 //! [`PbfhoggBinary`] is the one place that knows about the flag. Every pbfhogg
-//! spawn brokkr makes is an [`Invocation`] it produced: the caller states
-//! whether the argv writes an output brokkr owns ([`Writes`], or the typed
-//! command's own [`CommandArgv`]), and the handle appends `--overwrite` when
-//! the output is owned and the subcommand accepts it. No caller passes the
-//! flag itself.
+//! spawn brokkr makes is an [`Invocation`] it produced from a [`PbfArgv`],
+//! which carries the argv and what it reads, writes and scratches; the handle
+//! appends `--overwrite` when the argv writes an output it does not force and
+//! the subcommand accepts it. No caller passes the flag itself.
 //!
 //! # The private directory
 //!
-//! A pbfhogg child killed mid-write (`brokkr kill`, a timeout, SIGKILL) leaves
-//! its staging file and run scratch behind, and pbfhogg reports such leftovers
-//! but never removes them. So every argv that writes an owned output also gets
-//! a directory brokkr owns: `.brokkr-pbfhogg` in the directory the output
-//! lands in (the parent of `-o`, `--output-dir` or `--config`), passed as
-//! `--staging-dir` and `--tmp-dir` where the subcommand accepts them. Anything
-//! disposable a killed child leaves is then in there, and brokkr removes the
-//! directory whole when the handle drops. pbfhogg requires a staging dir on the
-//! output's mount and not containing the output's directory, and for
-//! `build-geocode-index` not inside `--output-dir`: a directory beside the
-//! output meets all three. The name is fixed, not per child, so a recorded
-//! `cli_args` does not change between runs. That is safe because the brokkr
-//! lock keeps every other brokkr's children out: on the first claim in this
-//! process, whatever the directory holds is a killed run's and is removed
-//! first. Old pbfhogg builds that accept neither flag get neither, and an argv
-//! that already names one of them is left alone. A backup pbfhogg keeps beside
-//! a replaced output is outside the directory and is never removed.
+//! Every invocation is reserved (`crate::reservations`): each launch holds a
+//! lease on what the argv reads and writes. An argv that writes an output, or
+//! run scratch, also gets a fresh private directory per launch, passed as
+//! `--staging-dir` (an argv with outputs) and `--tmp-dir` (an argv with
+//! scratch), each only where the subcommand accepts it. The directory goes
+//! beside the first output - the directory holding it, which for a geocode
+//! `--output-dir` is that directory's parent - or, for scratch with no
+//! output, in the root the argv names; the argv carries
+//! [`PRIVATE_DIR_PLACEHOLDER`] until the launch. An executable that accepts a needed flag gets the
+//! redirection; one that does not (an old `--commit` baseline) runs with the
+//! lease alone, its leftovers where pbfhogg puts them by default, and the
+//! handle says so once.
 //!
 //! # The probe
 //!
@@ -101,7 +95,8 @@ use crate::build::executable_guard::{self, HandleToken};
 use crate::error::DevError;
 use crate::measure::{Executable, Invocation};
 use crate::output;
-use crate::pbfhogg::commands::CommandArgv;
+use crate::pbfhogg::argv::PbfArgv;
+use crate::reservations::PRIVATE_DIR_PLACEHOLDER;
 
 /// pbfhogg's opt-in for replacing an existing output path.
 pub(crate) const OVERWRITE_FLAG: &str = "--overwrite";
@@ -156,16 +151,6 @@ const PROBE_PROTOCOL: u32 = 1;
 /// Most recent answers kept in the store; older ones are dropped on save.
 const STORE_CAP: usize = 512;
 
-/// Whether a hand-built pbfhogg argv writes an output path brokkr owns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Writes {
-    /// Reads only, or writes nothing brokkr reuses.
-    Nothing,
-    /// Writes a scratch, cache or staged output brokkr reuses or retries, so
-    /// pbfhogg must be allowed to replace it.
-    OwnedOutput,
-}
-
 /// The capability to read an [`Executable`]'s path. Its field is private to
 /// this module, so no other code can make one: the runner's executable
 /// becomes a path only inside a `PbfhoggBinary`.
@@ -179,9 +164,8 @@ pub(crate) struct PbfhoggBinary {
     digest: String,
     project_root: PathBuf,
     answers: RefCell<BTreeMap<String, bool>>,
-    /// The private directories this handle gave its children, removed when it
-    /// drops. Declared before the hold, so the lock is still held then.
-    private_dirs: RefCell<Vec<private_dir::Claim>>,
+    /// Subcommands already told they run without the private directory.
+    unguarded: RefCell<std::collections::BTreeSet<String>>,
     /// Keeps the brokkr lock held for the handle's life (`None` only for
     /// test fixtures, which run without the lock).
     _hold: Option<crate::lockfile::LockGuard>,
@@ -277,7 +261,7 @@ impl PbfhoggBinary {
             digest,
             project_root: project_root.to_path_buf(),
             answers: RefCell::new(answers),
-            private_dirs: RefCell::new(Vec::new()),
+            unguarded: RefCell::new(std::collections::BTreeSet::new()),
             _hold: hold,
             _registered: registered,
         })
@@ -288,90 +272,62 @@ impl PbfhoggBinary {
         self.path.display().to_string()
     }
 
-    /// Resolve a hand-built argv. `writes` is the caller's declaration.
-    pub(crate) fn invocation(
-        &self,
-        args: Vec<String>,
-        writes: Writes,
-    ) -> Result<Invocation<'_>, DevError> {
-        let owned = writes == Writes::OwnedOutput;
-        self.resolve(args, owned, owned)
-    }
-
-    /// [`invocation`](Self::invocation) for a borrowed `&str` argv.
-    pub(crate) fn invocation_strs(
-        &self,
-        args: &[&str],
-        writes: Writes,
-    ) -> Result<Invocation<'_>, DevError> {
-        self.invocation(args.iter().map(|&a| a.to_owned()).collect(), writes)
-    }
-
-    /// Resolve a typed command's argv. Whether it negotiates the flag was
-    /// decided by the same match arm that built the arguments.
-    pub(crate) fn command_invocation(&self, argv: CommandArgv) -> Result<Invocation<'_>, DevError> {
-        let negotiate = argv.negotiates_overwrite();
-        let owned = argv.writes_output();
-        self.resolve(argv.into_args(), negotiate, owned)
-    }
-
-    /// `negotiate`: pass `--overwrite` where accepted. `owned`: the argv writes
-    /// an owned output, so it gets the private directory (module docs).
-    fn resolve(
-        &self,
-        mut args: Vec<String>,
-        negotiate: bool,
-        owned: bool,
-    ) -> Result<Invocation<'_>, DevError> {
-        let Some(subcommand) = args.first().cloned() else {
+    /// Resolve an argv into the invocation that runs it: `--overwrite` where
+    /// negotiated and accepted, the private directory's flags where needed
+    /// and accepted, and the reservation each launch makes (module docs).
+    /// The invocation runs in the project root.
+    pub(crate) fn invocation(&self, argv: PbfArgv) -> Result<Invocation<'_>, DevError> {
+        let Some(subcommand) = argv.args().first().filter(|s| !s.is_empty()).cloned() else {
             return Err(DevError::Internal(
                 "empty pbfhogg argv has no subcommand".into(),
             ));
         };
         self.check_identity()?;
-        if negotiate && self.supports(&subcommand, Flag::Overwrite)? {
+        let negotiate = argv.negotiates_overwrite() && self.supports(&subcommand, Flag::Overwrite)?;
+        let staging = argv.writes_output() && self.supports(&subcommand, Flag::StagingDir)?;
+        let tmp = argv.writes_scratch() && self.supports(&subcommand, Flag::TmpDir)?;
+        if (argv.writes_output() && !staging) || (argv.writes_scratch() && !tmp) {
+            self.say_unguarded(&subcommand);
+        }
+        let cwd = self.project_root.clone();
+        let private_in = if staging || tmp {
+            match (argv.writes().first(), argv.scratch_root()) {
+                (Some(output), _) => cwd.join(output).parent().map(Path::to_path_buf),
+                (None, Some(root)) => Some(cwd.join(root)),
+                (None, None) => None,
+            }
+        } else {
+            None
+        };
+        let reads = argv.reads().to_vec();
+        let writes = argv.writes().to_vec();
+        let mut args = argv.into_args();
+        if negotiate {
             args.push(OVERWRITE_FLAG.into());
         }
-        if owned {
-            self.give_private_dir(&subcommand, &mut args)?;
+        if private_in.is_some() {
+            for (needed, flag) in [(staging, STAGING_DIR_FLAG), (tmp, TMP_DIR_FLAG)] {
+                if needed {
+                    args.push(flag.into());
+                    args.push(PRIVATE_DIR_PLACEHOLDER.into());
+                }
+            }
         }
-        Ok(Invocation::new(&self.path, args))
+        let spec = crate::reservations::LaunchSpec::new(cwd, reads, writes, private_in);
+        Ok(Invocation::reserved(&self.path, args, spec))
     }
 
-    /// Append `--staging-dir` and `--tmp-dir` naming the private directory
-    /// beside the argv's output, for the flags the subcommand accepts.
-    fn give_private_dir(&self, subcommand: &str, args: &mut Vec<String>) -> Result<(), DevError> {
-        let names_one = |arg: &String| {
-            [STAGING_DIR_FLAG, TMP_DIR_FLAG]
-                .iter()
-                .any(|flag| arg == flag || arg.strip_prefix(flag).is_some_and(|rest| rest.starts_with('=')))
-        };
-        if args.iter().any(names_one) {
-            return Ok(());
+    /// Once per subcommand per handle: this executable cannot take the
+    /// private directory, so a killed child's leftovers stay where pbfhogg
+    /// puts them by default.
+    fn say_unguarded(&self, subcommand: &str) {
+        if self.unguarded.borrow_mut().insert(subcommand.to_owned()) {
+            output::warn(&format!(
+                "this pbfhogg build's `{subcommand}` predates {STAGING_DIR_FLAG}/{TMP_DIR_FLAG}: \
+                 a child killed mid-write leaves its staging or scratch beside its output, and \
+                 brokkr does not remove it"
+            ));
         }
-        let Some(anchor) = output_anchor(args, &self.project_root) else {
-            return Ok(());
-        };
-        let staging = self.supports(subcommand, Flag::StagingDir)?;
-        let tmp = self.supports(subcommand, Flag::TmpDir)?;
-        if !staging && !tmp {
-            return Ok(());
-        }
-        let dir = crate::clean::layout::PbfhoggLayout::child_dir(&anchor);
-        {
-            let mut claims = self.private_dirs.borrow_mut();
-            if !claims.iter().any(|claim| claim.dir() == dir) {
-                claims.push(private_dir::Claim::take(dir.clone())?);
-            }
-        }
-        let dir = crate::utf8_path::path_string(&dir)?;
-        for (accepted, flag) in [(staging, STAGING_DIR_FLAG), (tmp, TMP_DIR_FLAG)] {
-            if accepted {
-                args.push(flag.into());
-                args.push(dir.clone());
-            }
-        }
-        Ok(())
     }
 
     /// Refuse an executable replaced since this handle was made: its cached
@@ -446,112 +402,6 @@ impl PbfhoggBinary {
                 Ok((flag, supported))
             })
             .collect()
-    }
-}
-
-/// Where an argv's output lands: the directory holding the path given to
-/// `-o`/`--output` (a file or a directory output), `--output-dir` (the
-/// geocode index, which publication replaces whole) or `--config` (whose
-/// outputs brokkr writes beside it). Relative paths are against `cwd`, the
-/// directory pbfhogg runs in. `None` for an argv naming none, or naming a
-/// device such as `/dev/null`.
-fn output_anchor(args: &[String], cwd: &Path) -> Option<PathBuf> {
-    let mut rest = args.iter();
-    while let Some(arg) = rest.next() {
-        let (flag, attached) = match arg.split_once('=') {
-            Some((flag, value)) if flag.starts_with("--") => (flag, Some(value)),
-            _ => (arg.as_str(), None),
-        };
-        if !matches!(flag, "-o" | "--output" | "--output-dir" | "--config") {
-            continue;
-        }
-        let value = match attached {
-            Some(value) => value,
-            None => rest.next()?.as_str(),
-        };
-        let path = Path::new(value);
-        if path.starts_with("/dev") {
-            return None;
-        }
-        let path = if path.is_absolute() { path.to_path_buf() } else { cwd.join(path) };
-        return path.parent().map(Path::to_path_buf);
-    }
-    None
-}
-
-/// The process-wide claims on private directories (module docs). Several
-/// handles in one process may hand out the same directory; it is emptied on
-/// its first claim and removed when its last claim drops.
-mod private_dir {
-    use std::collections::BTreeMap;
-    use std::path::{Path, PathBuf};
-    use std::sync::{Mutex, PoisonError};
-
-    use crate::error::DevError;
-    use crate::output;
-
-    static CLAIMS: Mutex<BTreeMap<PathBuf, usize>> = Mutex::new(BTreeMap::new());
-
-    pub(super) struct Claim {
-        dir: PathBuf,
-    }
-
-    impl Claim {
-        /// Claim `dir`, creating it empty when this process holds no other
-        /// claim on it: no child of this process uses it then, and the brokkr
-        /// lock keeps every other brokkr's out, so whatever it holds is a
-        /// killed run's.
-        pub(super) fn take(dir: PathBuf) -> Result<Self, DevError> {
-            let mut claims = CLAIMS.lock().unwrap_or_else(PoisonError::into_inner);
-            let count = claims.entry(dir.clone()).or_insert(0);
-            if *count == 0 {
-                remove(&dir).map_err(|e| {
-                    DevError::Io(std::io::Error::new(
-                        e.kind(),
-                        format!("cannot empty the pbfhogg private directory {}: {e}", dir.display()),
-                    ))
-                })?;
-                std::fs::create_dir_all(&dir).map_err(|e| {
-                    DevError::Io(std::io::Error::new(
-                        e.kind(),
-                        format!("cannot create the pbfhogg private directory {}: {e}", dir.display()),
-                    ))
-                })?;
-            }
-            *count += 1;
-            Ok(Self { dir })
-        }
-
-        pub(super) fn dir(&self) -> &Path {
-            &self.dir
-        }
-    }
-
-    impl Drop for Claim {
-        fn drop(&mut self) {
-            let mut claims = CLAIMS.lock().unwrap_or_else(PoisonError::into_inner);
-            let Some(count) = claims.get_mut(&self.dir) else {
-                return;
-            };
-            *count = count.saturating_sub(1);
-            if *count > 0 {
-                return;
-            }
-            claims.remove(&self.dir);
-            if let Err(e) = remove(&self.dir) {
-                output::warn(&format!(
-                    "could not remove the pbfhogg private directory {}: {e}",
-                    self.dir.display()
-                ));
-            }
-        }
-    }
-
-    fn remove(dir: &Path) -> std::io::Result<()> {
-        match std::fs::remove_dir_all(dir) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            other => other,
-        }
     }
 }
 

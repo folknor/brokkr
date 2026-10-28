@@ -11,7 +11,9 @@
   `src/measure/runner.rs`; execution uses one `MeasurementSession`.
 - `src/pbfhogg/binary.rs` - `PbfhoggBinary`, through which every pbfhogg
   spawn is made; see [Output overwrite](#output-overwrite) and
-  [Private directory](#private-directory).
+  [Launch reservations](#launch-reservations-and-the-private-directory).
+- `src/pbfhogg/argv.rs` - `PbfArgv`, an argv with what it reads, writes and
+  scratches.
 - `src/pbfhogg/...` - benchmarks (read, write, merge, commands, extract,
   blob-filter, planetiler, all), verify (one check per
   cross-validated command, plus `all`),
@@ -44,10 +46,14 @@ different bytes never reuse an answer. `build-geocode-index` keeps its own
 `--force`, which pbfhogg defines as overwrite plus allow-unindexed.
 
 Every pbfhogg spawn is an invocation produced by a `PbfhoggBinary` for one
-build; the typed commands' argv carries its overwrite decision from the arm
-that built it, and hand-built argv declares whether it writes an owned
-output. A measured plan carries that one argv value: dry run prints it, and
-the runner resolves the same value through the handle.
+build from a `PbfArgv` (`src/pbfhogg/argv.rs`), the argv and what it reads,
+writes and scratches built by the same calls: a path goes in as an input, an
+output, a directory output or an extract config with the outputs it names, and
+only arguments naming no path go in bare. The overwrite decision follows from
+that (an argv with outputs negotiates `--overwrite` unless it forces its own),
+so the typed commands' arms and the hand-built verify and bench argvs decide it
+the same way. A measured plan carries that one argv value: dry run prints it,
+and the runner resolves the same value through the handle.
 
 A handle runs the bytes it probed for as long as it exists. It holds the
 brokkr lock, so no other cooperating brokkr command can build, and while any
@@ -77,40 +83,131 @@ whole is outside that claim.
 flag and a line saying it is added at run time. Recorded `cli_args` include
 `--overwrite` whenever it was passed.
 
-## Private directory
+## Launch reservations and the private directory
 
 A pbfhogg child killed mid-write (`brokkr kill`, a timeout, SIGKILL) leaves its
-staging file and run scratch behind. pbfhogg reports such leftovers on later
-runs and never deletes them. So every invocation that writes an owned output
-also gets a directory brokkr owns, `.brokkr-pbfhogg/`, in the directory the
-output lands in: beside the `-o` path, beside a `build-geocode-index`
-`--output-dir` (never inside it, since publication replaces the index
-directory), or beside an `extract --config` file. It is passed as both
-`--staging-dir` and `--tmp-dir`, so everything disposable a child writes is
-in there. These two flags are negotiated like `--overwrite`, probed per
-subcommand as `SUB --staging-dir=. --help` and `SUB --tmp-dir=. --help`
-(one run of the two controls serves all three flags). An executable that
-accepts neither gets neither, and an argv that already names one of them is
-left alone. The answers sit in the same store under `SUB --staging-dir` and
-`SUB --tmp-dir` keys, while `--overwrite` keeps the bare subcommand key it
-always had.
+staging file and run scratch behind; pbfhogg reports such leftovers on later
+runs and never deletes them. Every pbfhogg launch is therefore reserved
+(`src/reservations/`), and one that writes an output or run scratch gets a
+private directory of its own.
 
-The directory is emptied on its first claim in the process and removed when
-the last handle that claimed it drops, after every child it served has
-exited. The name is fixed rather than per child, so a recorded `cli_args`
-stays the same between runs. That is safe because the brokkr lock keeps every
-other brokkr's children out: whatever the directory holds at its first claim
-is a killed run's. If brokkr itself is killed, the next run writing to the
-same place empties it, and `brokkr clean` removes the ones in scratch and the
-data dir. A `.pbfhogg-backup-*` that pbfhogg keeps beside a replaced output
-can hold the only copy of the previous output; it sits outside the private
-directory and brokkr never removes it.
+**The private directory.** Each launch - each child, so every `--bench`
+iteration separately - gets a fresh `.brokkr-pbfhogg-<128-bit token>`
+directory, passed as `--staging-dir` when the argv writes an output and as
+`--tmp-dir` when it writes scratch, so everything disposable the child writes
+is in there. It goes in the directory holding the first output (for a
+`build-geocode-index --output-dir`, the index directory's parent, never inside
+the directory publication replaces), or for scratch with no output (a parallel
+text `diff` to stdout) in the root the argv names: the scratch dir for
+measured commands, the verify directory for checks. Before anything is
+created, every output's directory must be on the same mount as that location,
+or the launch is refused, since pbfhogg publishes by rename. Scratch is
+declared by what pbfhogg's implementation actually does:
+`add-locations-to-ways`, `build-geocode-index`, `diff --format osc` on every
+path, and every text `diff` except a quiet one and one with an explicit
+`-j 1`, which make no run directory and refuse `--tmp-dir`. A verbose text diff
+and one with automatic jobs make one at startup whether or not they write a
+shard, which pbfhogg's prose reference does not say. Such a text `diff` to
+stdout used to put that run directory in the project root, its working
+directory; it now goes to the scratch dir, which can shift measured `diff`
+timings when the two are on different filesystems. The argv carries
+`@brokkr-private-dir@` until the launch, and the recorded `cli_args` keep that
+placeholder (no shell metacharacter, so a pasted line runs), so a row does not
+change with the random name; the column differs from rows recorded before
+brokkr passed the flags, which carry neither flag.
 
-pbfhogg refuses a staging dir on another mount than the output's directory,
-or one that is or contains it, with exit 2 (`OutputError::StagingDir`). A
-directory beside the output cannot hit either case, so such a refusal is a
-brokkr bug. Recorded `cli_args` include both flags with their directory. That
-changes the column once, against rows recorded before brokkr passed them.
+Both flags are negotiated like `--overwrite`, probed per subcommand as
+`SUB --staging-dir=. --help` and `SUB --tmp-dir=. --help` (one run of the two
+controls serves all three flags), and kept in the same store under
+`SUB --staging-dir` and `SUB --tmp-dir` keys while `--overwrite` keeps the bare
+subcommand key it always had. A build that lacks a needed flag (an old
+`--commit` baseline) still runs, reserved, without the redirection: its
+leftovers land where pbfhogg puts them by default, and the handle says so once
+per subcommand.
+
+**The lease.** Before the spawn, brokkr creates `<id>.lock` in
+`~/.brokkr/launch-leases/`, flocks it, and writes a durable record of every
+path the launch declared - inputs read, outputs written, the private
+directory - all synced before the private directory exists. The child, and
+only that child, inherits the locked description (it is made inheritable in
+the child between fork and exec; every other descriptor brokkr opens stays
+close-on-exec), and gets the parent-death signal and the orphan token test
+processes carry. After the child is reaped, brokkr gives up its own hold and
+takes the lock exclusively from an independent open: that succeeds only when
+no process anywhere holds the description, whatever PID namespace it is in.
+Then the private directory goes - the one whose identity matches the record,
+or, when a crash came between its creation and the record of its identity, the
+one at its 128-bit random name - then the record, then the lock file. If the lock is still held after a two-second
+window, some process kept the descriptor: the launch fails, naming the lease,
+and the record stays as a live reservation. A brokkr killed under a launch
+leaves its lease to the next scan, which reclaims it once its child is gone;
+the orphan reap at the next hold stops that child, but only the lease proves
+it stopped.
+
+A profiled launch (`--hotpath`, `--alloc`) also reserves its hotpath report,
+at a path unique per launch, so a profiled child that outlived its run can
+never write the next run's report. The report is recorded as disposable, like
+the private directory: it goes with the lease, at the release or, if the child
+outlived its run, at a later scan.
+
+**What the reservation protects.** Every brokkr deletion, rename or
+replacement that can touch these paths - `brokkr clean`'s removals of
+pbfhogg's verify output and scratch, a pbfhogg measured run's scratch dirs,
+verify's per-check directories, the plan and bench cleanups, the staged
+writes of dataset files and of a child's output, snapshot promotion, a
+generated extract config, a `--commit` worktree's removal (its target dir,
+checkout and slot, `git worktree remove` included, under one exclusive
+section) - goes through one gate, which scans the store (reclaiming free
+leases on the way) and refuses when a reservation's path is the target, lies
+inside it or encloses it, whatever its access: a live reader's input is as
+protected as a writer's output. Paths are compared as the kernel resolves
+them, every symlink expanded where it is met, and every symlink a reserved
+path's resolution goes through counts as part of it, so removing a directory
+that holds an intermediate link is refused too; a path that cannot be resolved
+is refused. A recursive removal also refuses a tree holding a
+`.pbfhogg-backup-*` (matched on the name's bytes), which can be the only copy
+of a replaced output; brokkr never deletes one. For a worktree the tree
+searched is its target dir's `verify`, where `verify --commit` writes pbfhogg
+outputs, not the whole checkout and cargo target dir. `brokkr clean` names a
+refused target or worktree and goes on with the rest.
+
+The layer is scoped to pbfhogg. brokkr's own state and config files
+(brokkr.toml, journals, caches) are staged plainly, and other projects'
+scratch and `brokkr clean` targets are removed plainly, so a lease store
+problem never stops them.
+
+A staged write of a file a launch can use is a reservation of its own
+(`Staged::stable_reserved`, for dataset downloads and the data dir's
+cross-filesystem copy): from before its first byte until its commit or drop it
+holds a write reservation on its temp file and its target, so no launch
+reading or writing either is admitted meanwhile, and its rename or removal
+runs as that reservation is released. `curl`, the download's writer, inherits
+the reservation as a pbfhogg child inherits its lease, so a `curl` that
+outlives a killed brokkr keeps it held. A temp file a pbfhogg launch writes
+itself (the merged-PBF cache, a download's indexed PBF) is staged with
+`stable_keeping_for_child`, which holds nothing: the launch reserves it.
+
+Each scan and the admission, release or mutation it decides run in one
+critical section: a process-wide mutex and an exclusive flock on the store's
+`.serial` lock, so they are atomic across brokkr processes too. A section that
+waits two minutes for another process's fails rather than hang outside every
+time ceiling. The store directory and every directory newly created above it
+are synced before a lease is published. A launch is refused when one of its
+paths overlaps a reservation's and either side writes it. A lease store that
+cannot be read, or a lease whose record cannot be read, blocks every pbfhogg
+launch and gated mutation until a human resolves it; a lease kept after a
+failed cleanup blocks what overlaps it. Neither is dropped automatically:
+`brokkr clean` names each one with the two files to remove by hand once
+nothing uses its paths. The rule `pbfhogg-mutations-through-the-gate` in
+brokkr's own `brokkr.toml` keeps raw deletions out of `src/pbfhogg`,
+`src/measure` and the staged writer; a raw call there carries a `// gate:`
+comment saying why it may.
+
+The guarantee covers cooperating brokkr processes of one user on one host
+sharing one `HOME` on a local filesystem with kernel `flock` semantics, the
+scope of the global lock and the compile lease, and rests on pbfhogg starting
+no helper process that outlives it. Other users, other hosts, bind-mount
+aliases of one directory and an NFS `HOME` are outside it.
 
 ## Answer exit codes
 

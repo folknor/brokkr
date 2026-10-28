@@ -13,7 +13,7 @@ pub(crate) use crate::measure::ExternalTool;
 use crate::measure::Invocation;
 use crate::output;
 use crate::output::CapturedOutput;
-pub(crate) use crate::pbfhogg::binary::Writes;
+pub(crate) use crate::pbfhogg::argv::PbfArgv;
 use crate::pbfhogg::binary::PbfhoggBinary;
 
 pub(crate) const SORT_TYPE_THEN_ID: &str = "Sort.Type_then_ID";
@@ -99,21 +99,15 @@ impl VerifyHarness {
 
     // -- Subprocess runners ------------------------------------------------
 
-    /// Run the pbfhogg CLI with the given arguments. `writes` states whether
-    /// the argv writes an output under the verify directory, which pbfhogg
-    /// must then be allowed to replace.
+    /// Run the pbfhogg CLI with `argv`, whose outputs under the verify
+    /// directory pbfhogg is allowed to replace.
     ///
     /// Does **not** check the exit status - the caller decides whether
     /// non-zero is an error (some commands exit non-zero normally).
-    pub(crate) fn run_pbfhogg(
-        &self,
-        args: &[&str],
-        writes: Writes,
-    ) -> Result<CapturedOutput, DevError> {
-        let _step = step(&format!("pbfhogg {}", args.first().copied().unwrap_or("")));
-        self.handle
-            .invocation_strs(args, writes)?
-            .capture_in(&self.project_root)
+    pub(crate) fn run_pbfhogg(&self, argv: PbfArgv) -> Result<CapturedOutput, DevError> {
+        let subcommand = argv.args().first().cloned().unwrap_or_default();
+        let _step = step(&format!("pbfhogg {subcommand}"));
+        self.handle.invocation(argv)?.capture_in(&self.project_root)
     }
 
     /// Run a reference tool with the given arguments.
@@ -140,8 +134,7 @@ impl VerifyHarness {
     /// Runs `pbfhogg inspect --extended <pbf>`. On failure, prints the
     /// error but does **not** propagate it (informational only).
     pub fn print_inspect(&self, label: &str, pbf: &Path) -> Result<(), DevError> {
-        let pbf_str = pbf.display().to_string();
-        let captured = self.run_pbfhogg(&["inspect", "--extended", &pbf_str], Writes::Nothing)?;
+        let captured = self.run_pbfhogg(PbfArgv::new("inspect").arg("--extended").input(pbf)?)?;
 
         if captured.success() {
             let stdout = String::from_utf8_lossy(&captured.stdout);
@@ -165,12 +158,13 @@ impl VerifyHarness {
     /// a crashed diff prints nothing on stdout, which read as "identical"
     /// back when only stdout was consulted.
     pub fn diff_pbfs(&self, a: &Path, b: &Path) -> Result<Verdict, DevError> {
-        let a_str = a.display().to_string();
-        let b_str = b.display().to_string();
-        let captured = self.run_pbfhogg(
-            &["diff", "--suppress-common", &a_str, &b_str],
-            Writes::Nothing,
-        )?;
+        // A text diff with automatic jobs: it makes run scratch.
+        let argv = PbfArgv::new("diff")
+            .arg("--suppress-common")
+            .input(a)?
+            .input(b)?
+            .scratch(&self.output_dir);
+        let captured = self.run_pbfhogg(argv)?;
         let stdout = String::from_utf8_lossy(&captured.stdout);
         let verdict =
             diff_verdict(captured.code(), &stdout).map_err(|why| DevError::Subprocess {
@@ -209,8 +203,7 @@ impl VerifyHarness {
     /// returns the verdict. A failed `inspect` is an error, not a FAIL: its
     /// empty stdout would otherwise read as "NOT sorted".
     pub fn check_sorted(&self, label: &str, pbf: &Path) -> Result<Verdict, DevError> {
-        let pbf_str = pbf.display().to_string();
-        let captured = self.run_pbfhogg(&["inspect", "--extended", &pbf_str], Writes::Nothing)?;
+        let captured = self.run_pbfhogg(PbfArgv::new("inspect").arg("--extended").input(pbf)?)?;
         self.check_exit(&captured, "pbfhogg inspect --extended")?;
 
         let stdout = String::from_utf8_lossy(&captured.stdout);
@@ -258,8 +251,7 @@ impl VerifyHarness {
     /// informational result reads the report itself: detail is replayed only
     /// when the check fails.
     pub fn check_locations(&self, label: &str, pbf: &Path) -> Result<(Verdict, String), DevError> {
-        let pbf_str = pbf.display().to_string();
-        let captured = self.run_pbfhogg(&["check", "--locations", &pbf_str], Writes::Nothing)?;
+        let captured = self.run_pbfhogg(PbfArgv::new("check").arg("--locations").input(pbf)?)?;
         let report = String::from_utf8_lossy(&captured.stdout).into_owned();
         match captured.code() {
             Some(0) => {
@@ -287,11 +279,8 @@ impl VerifyHarness {
     /// so a check can drive the unindexed code path of a command whose
     /// indexed run it already verifies.
     pub fn strip_indexdata(&self, input: &Path, output: &Path) -> Result<(), DevError> {
-        let input_str = input.display().to_string();
-        let output_str = output.display().to_string();
         let captured = self.run_pbfhogg(
-            &["degrade", "--strip-indexdata", &input_str, "-o", &output_str],
-            Writes::OwnedOutput,
+            PbfArgv::new("degrade").arg("--strip-indexdata").input(input)?.output(output)?,
         )?;
         self.check_exit(&captured, "pbfhogg degrade --strip-indexdata")
     }
@@ -355,8 +344,7 @@ impl VerifyHarness {
     /// Run `inspect` and return whether stdout contains [`SORT_TYPE_THEN_ID`].
     /// A failed `inspect` is an error - its empty stdout is not "unsorted".
     fn has_sort_flag(&self, pbf: &Path) -> Result<bool, DevError> {
-        let pbf_str = pbf.display().to_string();
-        let captured = self.run_pbfhogg(&["inspect", &pbf_str], Writes::Nothing)?;
+        let captured = self.run_pbfhogg(PbfArgv::new("inspect").input(pbf)?)?;
         self.check_exit(&captured, "pbfhogg inspect")?;
         let stdout = String::from_utf8_lossy(&captured.stdout);
         Ok(stdout.contains(SORT_TYPE_THEN_ID))
@@ -636,7 +624,7 @@ fn fresh_subdir(root: &Path, name: &str) -> Result<PathBuf, DevError> {
         )));
     }
     let dir = root.join(name);
-    match fs::remove_dir_all(&dir) {
+    match crate::reservations::remove_dir_all(&dir) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {

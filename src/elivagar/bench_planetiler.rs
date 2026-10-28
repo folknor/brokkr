@@ -32,9 +32,9 @@ pub fn run(
         &invocation.invocation(),
         project_root,
         &[],
-        || invocation.prepare_sample(),
+        || invocation.prepare_sample(false),
     )?;
-    invocation.cleanup();
+    invocation.cleanup(false);
     Ok(())
 }
 

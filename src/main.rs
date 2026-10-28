@@ -72,6 +72,7 @@ mod profile;
 mod project;
 mod ratatoskr;
 mod request;
+mod reservations;
 mod results_cmd;
 mod run_invocation;
 mod run_log;

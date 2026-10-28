@@ -51,7 +51,7 @@ pub fn run(
         // Every strategy and every iteration writes the same output path, so
         // the argv carries the negotiated overwrite flag.
         let invocation =
-            binary.command_invocation(command.build_args(&command_ctx, ArgMode::Bench)?)?;
+            binary.invocation(command.build_args(&command_ctx, ArgMode::Bench)?)?;
 
         let config = BenchConfig {
             command: command.id().to_owned(),
@@ -71,7 +71,7 @@ pub fn run(
             .map(|_| ())
     });
 
-    std::fs::remove_file(&output_path).ok();
+    crate::reservations::remove_file(&output_path).ok();
 
     result
 }

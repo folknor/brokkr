@@ -5,7 +5,8 @@ use std::path::Path;
 use crate::clean::layout::PbfhoggLayout;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
-use crate::pbfhogg::binary::{PbfhoggBinary, Writes};
+use crate::pbfhogg::argv::PbfArgv;
+use crate::pbfhogg::binary::PbfhoggBinary;
 
 /// Run the merge benchmark for each compression x I/O variant.
 #[allow(clippy::too_many_arguments)]
@@ -44,19 +45,15 @@ pub fn run(
         let (io_mode, compression) = variant.split_once('+').unwrap_or(("buffered", variant));
 
         // Every variant and iteration writes the same output file.
-        let invocation = binary.invocation_strs(
-            &[
-                "bench-merge",
-                pbf_str,
-                osc_str,
-                "-o",
-                output_str,
-                "--compression",
-                compression,
-                "--io-mode",
-                io_mode,
-            ],
-            Writes::OwnedOutput,
+        let invocation = binary.invocation(
+            PbfArgv::new("bench-merge")
+                .input(pbf_str)?
+                .input(osc_str)?
+                .output(output_str)?
+                .arg("--compression")
+                .arg(compression)
+                .arg("--io-mode")
+                .arg(io_mode),
         )?;
 
         let config = BenchConfig {
@@ -78,7 +75,7 @@ pub fn run(
     });
 
     // Clean up
-    std::fs::remove_file(&output_path).ok();
+    crate::reservations::remove_file(&output_path).ok();
 
     result
 }

@@ -171,6 +171,15 @@ pub(crate) fn spawn(
     on_spawn: Option<&dyn Fn(u32)>,
 ) -> Result<std::process::Child, DevError> {
     let program = command.get_program().to_string_lossy().into_owned();
+    // A reserved launch (`crate::reservations`): this child, and only this
+    // one, inherits the lease, dies with its parent where the kernel allows,
+    // and carries the orphan token, so a brokkr SIGKILLed under it leaves an
+    // orphan the next hold reaps rather than one that runs on.
+    if let Some(fd) = crate::reservations::take_armed(command.get_program()) {
+        crate::reservations::inherit_in_child(&mut command, fd);
+        crate::shutdown::die_with_parent(&mut command);
+        crate::test_orphans::stamp(&mut command);
+    }
     if let Some(launch) = crate::lockfile::activity::launch_context(&launch_label(&command)) {
         command.env(EXEC_ENV, launch.exec);
         match launch.capability {

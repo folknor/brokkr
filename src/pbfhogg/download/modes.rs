@@ -98,7 +98,7 @@ pub fn run(
         output::download_msg(&format!("  SKIP (exists): {}", pbf_dest.display()));
     } else {
         output::download_msg(&format!("  GET: {pbf_url} -> {}", pbf_dest.display()));
-        tools::download_file(&pbf_url, &pbf_dest)?;
+        tools::download_dataset_file(&pbf_url, &pbf_dest)?;
         downloaded_pbf = true;
     }
 
@@ -133,7 +133,7 @@ pub fn run(
                     output::download_msg(&format!("  SKIP (exists): {}", dest.display()));
                 } else {
                     output::download_msg(&format!("  GET: {url} -> {}", dest.display()));
-                    tools::download_file(&url, &dest)?;
+                    tools::download_dataset_file(&url, &dest)?;
                     osc_downloaded.push((seq, dest));
                 }
             }
@@ -263,7 +263,7 @@ fn run_as_snapshot(
     } else {
         let url = source.pbf_url();
         output::download_msg(&format!("  GET: {url} -> {}", pbf_dest.display()));
-        tools::download_file(&url, &pbf_dest)?;
+        tools::download_dataset_file(&url, &pbf_dest)?;
         downloaded_pbf = true;
     }
 
@@ -281,7 +281,7 @@ fn run_as_snapshot(
             output::download_msg(&format!("  SKIP (exists): {}", dest.display()));
         } else {
             output::download_msg(&format!("  GET: {url} -> {}", dest.display()));
-            tools::download_file(&url, &dest)?;
+            tools::download_dataset_file(&url, &dest)?;
         }
         osc_downloaded.push((target_seq, dest));
     }
@@ -514,7 +514,7 @@ fn run_refresh(
         ));
     } else {
         output::download_msg(&format!("  GET: {pbf_url}"));
-        tools::download_file(&pbf_url, &new_pbf_dest)?;
+        tools::download_dataset_file(&pbf_url, &new_pbf_dest)?;
     }
 
     // -- Step 4: generate the new indexed PBF --

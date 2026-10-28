@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::verify::{self, ExternalTool, Findings, VerifyHarness, Writes};
+use super::verify::{self, ExternalTool, Findings, PbfArgv, VerifyHarness};
 use crate::error::DevError;
 use crate::osc::{self, OscDiff};
 use crate::output;
@@ -50,17 +50,15 @@ pub fn run(
 
     // --- pbfhogg apply-changes ---
     let pbfhogg_out = outdir.join("pbfhogg.osm.pbf");
-    let pbfhogg_out_str = pbfhogg_out.display().to_string();
 
     verify_msg("--- pbfhogg apply-changes ---");
-    let mut pbfhogg_args = vec!["apply-changes", &pbf_str, &osc_str, "-o", &pbfhogg_out_str];
-    if direct_io {
-        pbfhogg_args.push("--direct-io");
-    }
-    if locations_on_ways {
-        pbfhogg_args.push("--locations-on-ways");
-    }
-    let captured = harness.run_pbfhogg(&pbfhogg_args, Writes::OwnedOutput)?;
+    let pbfhogg_args = PbfArgv::new("apply-changes")
+        .input(pbf)?
+        .input(osc)?
+        .output(&pbfhogg_out)?
+        .arg_if(direct_io, "--direct-io")
+        .arg_if(locations_on_ways, "--locations-on-ways");
+    let captured = harness.run_pbfhogg(pbfhogg_args)?;
     harness.check_exit(&captured, "pbfhogg apply-changes")?;
 
     // --- osmium apply-changes ---
@@ -133,14 +131,14 @@ pub fn run(
     // flag stamp on already-sorted content - so the compare sees two sorted
     // inputs. Content is unchanged, so the element diff is unaffected.
     let osmium_sorted = outdir.join("osmium-sorted.osm.pbf");
-    let osmium_sorted_str = osmium_sorted.display().to_string();
     verify_msg("--- pbfhogg sort (normalise osmium output for merge-join diff) ---");
     // `--force`: osmium's output never carries blob-level indexdata, which
     // pbfhogg sort requires by default. With --force it decodes payloads to
     // scan IDs (slower pass 1) but produces content-identical output, so the
     // cross-check's independence is untouched.
-    let sort_args = ["sort", "--force", &osmium_out_str, "-o", &osmium_sorted_str];
-    let captured = harness.run_pbfhogg(&sort_args, Writes::OwnedOutput)?;
+    let captured = harness.run_pbfhogg(
+        PbfArgv::new("sort").arg("--force").input(&osmium_out)?.output(&osmium_sorted)?,
+    )?;
     harness.check_exit(&captured, "pbfhogg sort (normalise osmium output)")?;
 
     // --- Strict pbfhogg-vs-osmium element diff (with delete-set tolerance) ---
@@ -209,7 +207,7 @@ fn run_context_tools(
             Ok(captured) => {
                 if let Err(e) = harness.check_exit(&captured, "osmosis") {
                     verify_msg(&format!("  osmosis failed: {e}"));
-                    drop(std::fs::remove_file(&osmosis_out));
+                    drop(crate::reservations::remove_file(&osmosis_out));
                 }
             }
             // A stop is not a skipped tool: carry on and the rest of the
@@ -230,7 +228,7 @@ fn run_context_tools(
             Ok(captured) => {
                 if let Err(e) = harness.check_exit(&captured, "osmconvert") {
                     verify_msg(&format!("  osmconvert failed: {e}"));
-                    drop(std::fs::remove_file(&osmconvert_out));
+                    drop(crate::reservations::remove_file(&osmconvert_out));
                 }
             }
             Err(DevError::Interrupted) => return Err(DevError::Interrupted),
@@ -268,9 +266,6 @@ fn verify_pbfhogg_vs_osmium(
     ));
 
     let diff_path = outdir.join("pbfhogg-vs-osmium.osc");
-    let diff_path_str = diff_path.display().to_string();
-    let pbfhogg_str = pbfhogg_out.display().to_string();
-    let osmium_str = osmium_out.display().to_string();
 
     // pbfhogg diff old new: <delete> blocks = old-only, <create>
     // blocks = new-only, <modify> blocks = same id different content.
@@ -282,16 +277,13 @@ fn verify_pbfhogg_vs_osmium(
     // `--format osc` (the OSC diff only emits differing elements anyway, so
     // it would be redundant even if accepted).
     let captured = harness.run_pbfhogg(
-        &[
-            "diff",
-            "--format",
-            "osc",
-            "-o",
-            &diff_path_str,
-            &pbfhogg_str,
-            &osmium_str,
-        ],
-        Writes::OwnedOutput,
+        PbfArgv::new("diff")
+            .arg("--format")
+            .arg("osc")
+            .output(&diff_path)?
+            .input(pbfhogg_out)?
+            .input(osmium_out)?
+            .scratch(outdir),
     )?;
 
     // pbfhogg diff exits 1 when differences are found - that's expected.

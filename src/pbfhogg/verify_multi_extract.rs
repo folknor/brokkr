@@ -10,7 +10,7 @@ use std::path::Path;
 
 use super::commands::{ExtractStrategy, PbfhoggCommand};
 use super::inspect_report::InspectReport;
-use super::verify::{Findings, VerifyHarness, Writes};
+use super::verify::{Findings, PbfArgv, VerifyHarness};
 use crate::datasets::Bbox;
 use crate::error::DevError;
 use crate::output::verify_msg;
@@ -24,8 +24,7 @@ fn parse_inspect_counts(stdout: &str) -> Option<Counts> {
 
 /// Get element counts for a PBF file via `pbfhogg inspect`.
 pub(super) fn inspect_counts(harness: &VerifyHarness, pbf: &Path) -> Result<Counts, DevError> {
-    let pbf_str = pbf.display().to_string();
-    let captured = harness.run_pbfhogg(&["inspect", &pbf_str], Writes::Nothing)?;
+    let captured = harness.run_pbfhogg(PbfArgv::new("inspect").input(pbf)?)?;
     harness.check_exit(&captured, "pbfhogg inspect")?;
 
     let stdout = String::from_utf8_lossy(&captured.stdout);
@@ -48,34 +47,25 @@ pub fn run(
 ) -> Result<Findings, DevError> {
     let strips = bbox.strips(regions)?;
     let outdir = harness.subdir("multi-extract")?;
-    let pbf_str = pbf.display().to_string();
 
     verify_msg(&format!("=== verify multi-extract ({regions} regions) ==="));
 
     // --- Single-pass multi-extract via --config ---
     let multi_dir = outdir.join("multi");
     std::fs::create_dir_all(&multi_dir)?;
-    let config_json = super::commands::multi_extract_config(&multi_dir, &strips)?;
+    let config = super::commands::multi_extract_config(&multi_dir, &strips)?;
     let config_path = super::commands::multi_extract_config_path(&outdir);
-    std::fs::write(&config_path, config_json)?;
+    crate::reservations::write(&config_path, config.json.as_bytes())?;
 
     verify_msg("  running single-pass multi-extract...");
-    let config_path_str = config_path.display().to_string();
-    let mut multi_args = vec![
-        "extract".to_owned(),
-        pbf_str.clone(),
-        "--config".into(),
-        config_path_str,
-    ];
+    let mut multi_args = PbfArgv::new("extract")
+        .input(pbf)?
+        .extract_config(&config_path, config.outputs)?;
     if let Some(flag) = ExtractStrategy::Simple.flag() {
-        multi_args.push(flag.into());
+        multi_args = multi_args.arg(flag);
     }
-    if direct_io {
-        multi_args.push("--direct-io".into());
-    }
-    let multi_arg_refs: Vec<&str> = multi_args.iter().map(String::as_str).collect();
     // The outputs are named in the config; one --overwrite covers them all.
-    let captured = harness.run_pbfhogg(&multi_arg_refs, Writes::OwnedOutput)?;
+    let captured = harness.run_pbfhogg(multi_args.arg_if(direct_io, "--direct-io"))?;
     harness.check_exit(&captured, "pbfhogg multi-extract")?;
 
     // --- Sequential single-region extracts ---
@@ -85,16 +75,13 @@ pub fn run(
     verify_msg("  running sequential extracts...");
     for (i, strip) in strips.iter().enumerate() {
         let seq_out = seq_dir.join(format!("strip-{i}.osm.pbf"));
-        let seq_out_str = seq_out.display().to_string();
         let command = PbfhoggCommand::Extract {
             strategy: ExtractStrategy::Simple,
         };
-        let mut seq_args = command.extract_args_for(&pbf_str, strip, &seq_out_str)?;
-        if direct_io {
-            seq_args.push("--direct-io".into());
-        }
-        let seq_arg_refs: Vec<&str> = seq_args.iter().map(String::as_str).collect();
-        let captured = harness.run_pbfhogg(&seq_arg_refs, Writes::OwnedOutput)?;
+        let seq_args = command
+            .extract_args_for(pbf, strip, &seq_out)?
+            .arg_if(direct_io, "--direct-io");
+        let captured = harness.run_pbfhogg(seq_args)?;
         harness.check_exit(&captured, &format!("pbfhogg extract strip-{i}"))?;
     }
 

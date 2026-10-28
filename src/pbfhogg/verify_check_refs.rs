@@ -14,7 +14,7 @@
 use std::fs;
 use std::path::Path;
 
-use super::verify::{ExternalTool, Findings, Verdict, VerifyHarness, Writes};
+use super::verify::{ExternalTool, Findings, PbfArgv, Verdict, VerifyHarness};
 use crate::error::DevError;
 use crate::output::verify_msg;
 
@@ -165,25 +165,23 @@ fn parse_osmium(text: &str) -> CheckRefCounts {
     counts
 }
 
-/// Which side of the comparison a captured run is.
-#[derive(Clone, Copy)]
-enum Side {
-    Pbfhogg,
-    Osmium,
+/// One side of the comparison and what it runs.
+enum Side<'a> {
+    Pbfhogg(PbfArgv),
+    Osmium(&'a [&'a str]),
 }
 
 /// Capture output from one side, save to file, and print with prefix.
 fn capture_and_log(
     harness: &VerifyHarness,
-    side: Side,
-    args: &[&str],
+    side: Side<'_>,
     out_file: &Path,
     label: &str,
 ) -> Result<String, DevError> {
     let captured = match side {
         // check --refs reports to stdout; the log file is brokkr's own write.
-        Side::Pbfhogg => harness.run_pbfhogg(args, Writes::Nothing)?,
-        Side::Osmium => harness.run_tool(ExternalTool::Osmium, args)?,
+        Side::Pbfhogg(argv) => harness.run_pbfhogg(argv)?,
+        Side::Osmium(args) => harness.run_tool(ExternalTool::Osmium, args)?,
     };
     let text = format!(
         "{}{}",
@@ -209,21 +207,17 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
 
     // --- Ways only ---
     verify_msg("--- check --refs (ways only) ---");
-    let mut pbf_ways_args = vec!["check", "--refs", &pbf_str];
-    if direct_io {
-        pbf_ways_args.push("--direct-io");
-    }
+    let pbf_ways_args =
+        PbfArgv::new("check").arg("--refs").input(pbf)?.arg_if(direct_io, "--direct-io");
     let pbfhogg_text = capture_and_log(
         harness,
-        Side::Pbfhogg,
-        &pbf_ways_args,
+        Side::Pbfhogg(pbf_ways_args),
         &outdir.join("pbfhogg-ways.txt"),
         "pbfhogg (ways only)",
     )?;
     let osmium_text = capture_and_log(
         harness,
-        Side::Osmium,
-        &["check-refs", &pbf_str],
+        Side::Osmium(&["check-refs", &pbf_str]),
         &outdir.join("osmium-ways.txt"),
         "osmium (ways only)",
     )?;
@@ -242,21 +236,20 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
 
     // --- With relations ---
     verify_msg("--- check --refs (with relations) ---");
-    let mut pbf_all_args = vec!["check", "--refs", &pbf_str, "--check-relations"];
-    if direct_io {
-        pbf_all_args.push("--direct-io");
-    }
+    let pbf_all_args = PbfArgv::new("check")
+        .arg("--refs")
+        .input(pbf)?
+        .arg("--check-relations")
+        .arg_if(direct_io, "--direct-io");
     let pbfhogg_text = capture_and_log(
         harness,
-        Side::Pbfhogg,
-        &pbf_all_args,
+        Side::Pbfhogg(pbf_all_args),
         &outdir.join("pbfhogg-all.txt"),
         "pbfhogg (with relations)",
     )?;
     let osmium_text = capture_and_log(
         harness,
-        Side::Osmium,
-        &["check-refs", "-r", &pbf_str],
+        Side::Osmium(&["check-refs", "-r", &pbf_str]),
         &outdir.join("osmium-all.txt"),
         "osmium (with relations)",
     )?;
