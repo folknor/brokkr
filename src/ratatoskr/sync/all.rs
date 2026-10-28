@@ -136,7 +136,10 @@ pub fn run_sync_all(req: &SyncAllRequest<'_>) -> Result<(), DevError> {
             Err(DevError::Interrupted) => {
                 output::ratatoskr_msg(&format!("{}: INTERRUPTED{}", script.name, outcome.summary));
                 if let Some(path) = outcome.preserved {
-                    output::ratatoskr_msg(&format!("  artefacts preserved at {}", path.display()));
+                    output::ratatoskr_msg(&format!(
+                        "  artefacts preserved at {}",
+                        output::path(&path)
+                    ));
                     any_preserved = true;
                 }
                 interrupted_at = Some(idx);
@@ -145,7 +148,10 @@ pub fn run_sync_all(req: &SyncAllRequest<'_>) -> Result<(), DevError> {
             Err(e) => {
                 output::ratatoskr_msg(&format!("{}: FAIL{} - {e}", script.name, outcome.summary));
                 if let Some(path) = outcome.preserved {
-                    output::ratatoskr_msg(&format!("  artefacts preserved at {}", path.display()));
+                    output::ratatoskr_msg(&format!(
+                        "  artefacts preserved at {}",
+                        output::path(&path)
+                    ));
                     any_preserved = true;
                 }
                 failures.push(script.name.as_str());

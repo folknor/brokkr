@@ -705,7 +705,7 @@ pub(super) fn replay_listing(listing: &Path) -> Result<(), DevError> {
     };
     output::verify_msg(&format!(
         "  (listing above is {shown}; all of it is in {})",
-        listing.display()
+        output::path(listing)
     ));
     Ok(())
 }

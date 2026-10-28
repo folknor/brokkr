@@ -98,6 +98,7 @@ Single crate, single binary. No workspace.
 - `src/sidecar.rs` - Monitoring sidecar: `/proc` sampling, FIFO marker protocol. Always-on for measured modes. The latest marker goes to the hold's observation table (`lockfile::activity::note_marker`) for `brokkr lock`
 - `src/output.rs` - Declares the console and child-process modules and re-exports both, so `output::run_msg` / `output::run_captured` stay the call paths
 - `src/output/console.rs` - Prefixed console output (`[build]`, `[bench]`, `[verify]`, `[hotpath]`, `[run]`, `[sidecar]`, `[error]`)
+- `src/output/paths.rs` - `output::path`: a project path for an operator line, relative to the invocation directory (anchor fixed once in `main`), absolute otherwise
 - `src/output/child.rs` - Captured and passthrough child runners, the shared supervisor and its `Ending` verdict. Every spawn names its `cargo_env::SpawnProfile`: the plain runners are `Plain`, `run_cargo` (and the profile-taking passthrough, idle and sidecar spawns) carry `Cargo { phase }`; a bounded variant caps how much of each stream a capture keeps
 - `src/run_invocation.rs` - the brokkr invocation a results row records: the exact argv and the arm key `results --compare` pairs by (argv minus `--commit`, `--verbose` and iteration counts), captured once at the CLI boundary
 - `src/fs_probe.rs` - cancellable polling reads from process output descriptors

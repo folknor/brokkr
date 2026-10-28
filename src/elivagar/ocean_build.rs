@@ -103,7 +103,7 @@ pub fn run(
 
     if dry_run {
         output::dry_run_msg(&format!("elivagar {}", args.join(" ")));
-        output::dry_run_msg(&format!("output: {}", output_path.display()));
+        output::dry_run_msg(&format!("output: {}", output::path(&output_path)));
         output::dry_run_msg("ok");
         return Ok(());
     }

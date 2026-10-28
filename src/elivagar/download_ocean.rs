@@ -157,7 +157,7 @@ fn download_variant(data_dir: &Path, variant: &OceanVariant) -> Result<(), DevEr
         Err(error) => return Err(error.into()),
     }
 
-    output::download_msg(&format!("done: {}", shp_path.display()));
+    output::download_msg(&format!("done: {}", output::path(&shp_path)));
 
     Ok(())
 }
@@ -244,7 +244,7 @@ pub fn ensure_ocean_4326(data_dir: &Path) -> Result<(), DevError> {
         captured.check_success("ogr2ogr")?;
         std::fs::write(&simplified_marker, b"")?;
 
-        output::download_msg(&format!("done: {}", simplified.display()));
+        output::download_msg(&format!("done: {}", output::path(&simplified)));
     }
 
     Ok(())

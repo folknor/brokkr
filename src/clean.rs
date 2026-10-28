@@ -132,7 +132,7 @@ impl Cleaner {
             Ok(()) => Ok(true),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(error) if crate::reservations::is_refusal(&error) => {
-                output::warn(&format!("kept {}: {error}", path.display()));
+                output::warn(&format!("kept {}: {error}", output::path(path)));
                 Ok(false)
             }
             Err(error) => Err(clean_io_error(action, path, &error)),

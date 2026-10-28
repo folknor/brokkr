@@ -40,6 +40,19 @@ counts. Numeric measurement fields, data tables and the positive-integer
 frontmatter duration grammar are separate wire formats. Allocation-profile
 caveats are emitted by `measure::ProfiledMode::print_note`.
 
+Operator lines name a location with `output::path`, never `Path::display`. A
+path inside the project tree prints relative to the invocation directory
+(`.brokkr/...`, or `../.brokkr/...` when `brokkr.toml` sits one level up);
+every other path prints absolute. The decision is lexical over path
+components: containment is by spelling, a remainder with `..` stays absolute,
+and a leading `-` or `~` gains `./`. The printers never rewrite rendered text,
+because a tagged line can carry captured child output or opaque values that
+only look like paths; a caller that holds a `Path` it means as a location is
+the one that asks. Argv, stored values, JSON and other data keep the absolute
+spelling. The anchor is fixed once at startup; before that, and in unit tests,
+every path prints absolute. The run log's own header records the absolute
+invocation cwd, so its relative lines stay resolvable.
+
 Unknown cargo diagnostic levels are schema extensions: they are skipped as
 findings, with the level and stdout line number recorded through
 `output::detail` in an open run log. Cargo exit status still determines failure.

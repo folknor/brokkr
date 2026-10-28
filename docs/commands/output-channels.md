@@ -61,7 +61,10 @@ streams. Direct print macros are denied by this crate's Clippy configuration;
 function-scoped exceptions identify genuine data and subprocess protocols.
 Captured raw replay uses the output renderer without adding a newline. The
 shared elapsed-duration formatter affects operator prose, not numeric stored
-metrics or table formats. Allocation-profile notes have one owner in
+metrics or table formats. Likewise, a path inside the project prints relative
+to the directory brokkr was invoked from in operator lines (and in the run
+log, whose header records that directory), while stored values, argv and data
+output keep it absolute. Allocation-profile notes have one owner in
 `measure::ProfiledMode`.
 
 Captured and passthrough subprocesses run through `src/output/child.rs`, which

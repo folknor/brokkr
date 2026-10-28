@@ -94,7 +94,7 @@ pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
         Err(e) => {
             output::ratatoskr_msg(&format!("FAIL{}: {e}", outcome.summary));
             if let Some(path) = outcome.preserved {
-                output::ratatoskr_msg(&format!("artefacts preserved at {}", path.display()));
+                output::ratatoskr_msg(&format!("artefacts preserved at {}", output::path(&path)));
                 artefacts::emit_clean_hint(output::ratatoskr_msg);
             }
             Err(e)

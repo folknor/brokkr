@@ -390,16 +390,6 @@ Makes performance triage easier without external tooling.
 ### Help output lacks section headers
 With 55+ top-level commands, `--help` is a wall of text. `display_order` groups by project but there are no visual separators. Clap's `next_help_heading` could inject section headers like "Visual Testing Commands:", "Litehtml Commands:", etc.
 
-### Print artefact paths relative to the project root
-Operator lines name absolute paths under the project's own `.brokkr/`, which wrap and bury the part that matters:
-
-```
-[corpus]  run 1865 -> /home/folk/Programs/piners/.brokkr/piners/corpus/run-1865
-[corpus]  manifest: 884 probes -> /home/folk/Programs/piners/.brokkr/piners/corpus/run-1865/manifest.json
-```
-
-Print them relative when they sit under the project root (`.brokkr/piners/corpus/run-1865/manifest.json`), absolute otherwise. Best as one shared display helper in `output` so every prefix gets it, not a fix in the corpus printer alone.
-
 ---
 
 ## CLI sync backlog

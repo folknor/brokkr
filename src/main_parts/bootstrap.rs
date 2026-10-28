@@ -178,6 +178,12 @@ pub(crate) fn main() {
         Ok(detection) => (detection, None),
         Err(error) => (None, Some(error)),
     };
+    if let Ok(cwd) = std::env::current_dir() {
+        let root = detection
+            .as_ref()
+            .map_or(cwd.as_path(), |d| d.project_root.as_path());
+        output::set_path_anchor(&cwd, root);
+    }
     let (cli, command_id) = parse_cli(detection.as_ref().map(|d| &d.project));
     cli::set_invocation(command_id);
     // `build`'s stdout is its value - the snapshot path - so everything else

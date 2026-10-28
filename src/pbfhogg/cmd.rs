@@ -299,8 +299,8 @@ pub(crate) fn bench_merge(
         let (pbf_path, _file_mb) =
             resolve_pbf_with_size(req.dataset, req.variant, &paths, req.project_root.as_path())?;
         let osc_path = resolve_bench_osc(req.dataset, osc_seq, &paths, req.project_root.as_path())?;
-        output::dry_run_msg(&format!("pbf: {}", pbf_path.display()));
-        output::dry_run_msg(&format!("osc: {}", osc_path.display()));
+        output::dry_run_msg(&format!("pbf: {}", output::path(&pbf_path)));
+        output::dry_run_msg(&format!("osc: {}", output::path(&osc_path)));
         output::dry_run_msg("ok (bench merge)");
         return Ok(());
     }

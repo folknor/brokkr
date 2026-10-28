@@ -196,7 +196,7 @@ pub fn apply(
     registry.pins_text = text;
     output::corpus_msg(&format!(
         "blessed {blessed} (changed {changed}) -> {}",
-        pins_path.display()
+        output::path(pins_path)
     ));
     Ok(())
 }

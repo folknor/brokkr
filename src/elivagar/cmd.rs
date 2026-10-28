@@ -463,7 +463,7 @@ pub(crate) fn corpus(
             };
             let target = tile.as_deref().map(parse_tile).transpose()?;
             gate::mutate::mutate(&path, &out_path, target, *op).map_err(DevError::Io)?;
-            crate::output::result_msg(&format!("mutated -> {}", out_path.display()));
+            crate::output::result_msg(&format!("mutated -> {}", crate::output::path(&out_path)));
             Ok(())
         }
     }

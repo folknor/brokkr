@@ -39,8 +39,8 @@ pub fn run(
     let outdir = harness.subdir("merge")?;
 
     verify_msg("=== verify apply-changes ===");
-    verify_msg(&format!("  base: {}", pbf.display()));
-    verify_msg(&format!("  diff: {}", osc.display()));
+    verify_msg(&format!("  base: {}", crate::output::path(pbf)));
+    verify_msg(&format!("  diff: {}", crate::output::path(osc)));
     if locations_on_ways {
         verify_msg("  mode: --locations-on-ways");
     }

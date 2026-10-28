@@ -226,7 +226,7 @@ pub fn corpus(
         "harness build ok (profile={}, features={}, binary={})",
         built.profile,
         built.features_label,
-        built.binary.display()
+        output::path(&built.binary)
     ));
     // The row records the profile the build returned: a run's wall is
     // comparable only against runs built the same way.
@@ -257,7 +257,10 @@ pub fn corpus(
         run_id,
         args.keep_artefacts,
     )?;
-    output::corpus_msg(&format!("run {run_id} -> {}", artefacts.path().display()));
+    output::corpus_msg(&format!(
+        "run {run_id} -> {}",
+        output::path(artefacts.path())
+    ));
     // Slowest first, frozen here: isolation attempts filter this same vector,
     // and the selector records the order the harness was actually handed.
     let schedule = crate::piners::schedule::slowest_first(
@@ -298,7 +301,7 @@ pub fn corpus(
     output::corpus_msg(&format!(
         "manifest: {} -> {}",
         output::count(verified.len(), "probe"),
-        manifest_path.display()
+        output::path(&manifest_path)
     ));
 
     // A run is let finish, bounded only by the hang backstop. PID is tracked
@@ -498,7 +501,7 @@ pub fn corpus(
     if let Err(e) = ingest_run(&corpus_db_path, &record, report, &expected, &gate) {
         output::warn(&format!(
             "failed to persist run to {}: {e}",
-            corpus_db_path.display()
+            output::path(&corpus_db_path)
         ));
         artefacts.finalize_failure();
         return Err(e);
@@ -576,7 +579,7 @@ pub fn corpus(
         } else if diagnosis.is_some() {
             output::corpus_msg(&format!(
                 "artefacts preserved: {}",
-                artefacts.path().display()
+                output::path(artefacts.path())
             ));
             crate::artefacts::emit_clean_hint(output::corpus_msg);
             artefacts.finalize_failure();
@@ -644,7 +647,7 @@ fn diagnose(
         "isolating: bisecting only the {} the original run left unreported \
          (same binary, env, flags and forwarded args; attempt dirs under {})",
         output::count(unreported.len(), "selected probe"),
-        attempts.run_dir.display()
+        output::path(attempts.run_dir)
     ));
     let d = isolate::bisect(unreported, |subset, n| attempts.run(subset, n));
     for line in d.lines() {
@@ -824,7 +827,7 @@ fn preserved_incomplete_line(dir: &Path, errors: &[String]) -> String {
     format!(
         "artefacts preserved with incomplete evidence (failed: {}): {}",
         failed.join(", "),
-        dir.display()
+        output::path(dir)
     )
 }
 
@@ -1035,12 +1038,12 @@ fn record_unfinished(
         output::warn(&format!(
             "run {} could not be recorded in {}: {e}",
             envelope.run_id,
-            db_path.display()
+            output::path(db_path)
         ));
     }
     output::corpus_msg(&format!(
         "artefacts preserved: {}",
-        artefacts.path().display()
+        output::path(artefacts.path())
     ));
     crate::artefacts::emit_clean_hint(output::corpus_msg);
     artefacts.finalize_failure();

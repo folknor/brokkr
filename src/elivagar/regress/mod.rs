@@ -116,7 +116,10 @@ pub fn run(
             },
         )
         .map_err(|e| failed(&format!("write overlays: {e}")))?;
-        output::run_msg(&format!("overlay: {written} tile(s) -> {}", dir.display()));
+        output::run_msg(&format!(
+            "overlay: {written} tile(s) -> {}",
+            output::path(dir)
+        ));
     }
 
     if passed {

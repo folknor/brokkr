@@ -15,10 +15,12 @@
 //! `[result]` framing belongs to console, including unretrievable quiet results.
 //! Data printers keep their exact streams and bytes with function-scoped Clippy
 //! exceptions; raw captured streams can use `raw_stdout` / `raw_stderr` without
-//! newline conversion. See `reference/output.md` for the channel contract.
+//! newline conversion. `paths` renders a project path for an operator line
+//! (`output::path`), relative to the invocation directory. See `reference/output.md` for the channel contract.
 
 pub(crate) mod child;
 pub(crate) mod console;
+pub(crate) mod paths;
 
 pub(crate) use child::{
     CapturedOutput, DeadlineCapture, Ending, FileSinkRun, Replay, SpawnProfile, run_captured,
@@ -29,3 +31,4 @@ pub(crate) use child::{
     run_streamed,
 };
 pub(crate) use console::*;
+pub(crate) use paths::{path, set_path_anchor};

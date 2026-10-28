@@ -35,10 +35,10 @@ pub fn run(
     let outdir = harness.subdir("derive-changes")?;
 
     verify_msg("=== verify diff --format osc ===");
-    verify_msg(&format!("  old: {}", pbf.display()));
+    verify_msg(&format!("  old: {}", crate::output::path(pbf)));
     verify_msg(&format!(
         "  osc: {} (used to create 'new' via apply-changes)",
-        osc.display()
+        crate::output::path(osc)
     ));
 
     let pbf_str = pbf.display().to_string();

@@ -190,7 +190,7 @@ pub fn run(
 
     verify_msg("--- renumber cross-validation ---");
     verify_msg(&format!("  dataset: {dataset}"));
-    verify_msg(&format!("  input: {}", pbf.display()));
+    verify_msg(&format!("  input: {}", crate::output::path(pbf)));
     if let Some(sid) = start_id {
         verify_msg(&format!("  start-id: {sid}"));
     }
@@ -369,7 +369,7 @@ pub fn run(
     };
 
     if verbose && summary.different > 0 {
-        verify_msg(&format!("  diff log: {}", diff_log.display()));
+        verify_msg(&format!("  diff log: {}", crate::output::path(&diff_log)));
         let (lines, _) = super::verify_stream::preview(
             &diff_log,
             super::verify_stream::PREVIEW_LINES,
@@ -383,7 +383,10 @@ pub fn run(
     match fail_reason {
         Some(reason) => {
             verify_msg(&format!("  result: FAIL ({reason})"));
-            verify_msg(&format!("  diff log preserved: {}", diff_log.display()));
+            verify_msg(&format!(
+                "  diff log preserved: {}",
+                crate::output::path(&diff_log)
+            ));
             Err(DevError::Verify(format!("renumber: {reason}")))
         }
         None => {

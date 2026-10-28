@@ -58,7 +58,7 @@ pub(crate) fn rename_elivagar_output(
     let tmp_dir = layout.tilegen_tmp();
     for path in &output_files {
         let dest = store.admit(path, &key, &[layout.scratch(), &tmp_dir])?;
-        output::run_msg(&format!("output: {}", dest.display()));
+        output::run_msg(&format!("output: {}", output::path(&dest)));
     }
     Ok(())
 }

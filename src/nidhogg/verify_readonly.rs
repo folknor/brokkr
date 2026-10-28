@@ -66,7 +66,7 @@ pub fn run(
     let signals = SigtermGuard::install();
 
     // Make read-only.
-    output::verify_msg(&format!("making read-only: {}", geocode_dir.display()));
+    output::verify_msg(&format!("making read-only: {}", output::path(&geocode_dir)));
     let mut readonly = ReadOnlyGuard::apply(&geocode_dir)?;
 
     // Run tests; the guard restores on every exit path from here on.

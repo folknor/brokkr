@@ -27,10 +27,10 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<Findings, 
     let outdir = harness.subdir("diff")?;
 
     verify_msg("=== verify diff ===");
-    verify_msg(&format!("  old: {}", pbf.display()));
+    verify_msg(&format!("  old: {}", crate::output::path(pbf)));
     verify_msg(&format!(
         "  osc: {} (used to create 'new' via apply-changes)",
-        osc.display()
+        crate::output::path(osc)
     ));
 
     let pbf_str = pbf.display().to_string();

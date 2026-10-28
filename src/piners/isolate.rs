@@ -419,7 +419,7 @@ impl Diagnosis {
         {
             out.push_str(&format!("; {}", reason.describe()));
         }
-        out.push_str(&format!("; artefacts {}", artefacts.display()));
+        out.push_str(&format!("; artefacts {}", crate::output::path(artefacts)));
         out
     }
 }

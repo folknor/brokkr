@@ -137,7 +137,7 @@ pub fn run(project_root: &Path, cfg: &PinersConfig, args: &CorpusArgs) -> Result
         "reseed: {}, {} -> {} (added={} changed={} removed={}; feed file hashes changed={})",
         output::count(plan.probes, "probe"),
         output::count(plan.feeds, "feed group"),
-        pins_path.display(),
+        output::path(&pins_path),
         plan.diff.added,
         plan.diff.changed,
         plan.diff.removed,

@@ -20,7 +20,7 @@ pub fn run(
     let binary_str = binary.display().to_string();
     let pmtiles_str = pmtiles_path.display().to_string();
 
-    output::verify_msg(&format!("elivagar verify: {}", pmtiles_path.display()));
+    output::verify_msg(&format!("elivagar verify: {}", output::path(pmtiles_path)));
 
     let mut args = vec!["verify", &pmtiles_str];
     if geometry_stats {

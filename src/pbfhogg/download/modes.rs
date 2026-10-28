@@ -95,9 +95,9 @@ pub fn run(
              beside it"
         ));
     } else if is_nonempty(&pbf_dest) {
-        output::download_msg(&format!("  SKIP (exists): {}", pbf_dest.display()));
+        output::download_msg(&format!("  SKIP (exists): {}", output::path(&pbf_dest)));
     } else {
-        output::download_msg(&format!("  GET: {pbf_url} -> {}", pbf_dest.display()));
+        output::download_msg(&format!("  GET: {pbf_url} -> {}", output::path(&pbf_dest)));
         tools::download_dataset_file(&pbf_url, &pbf_dest)?;
         downloaded_pbf = true;
     }
@@ -130,9 +130,9 @@ pub fn run(
                 let dest = data_dir.join(osc_filename(dataset_key, seq));
 
                 if dest.exists() && is_nonempty(&dest) {
-                    output::download_msg(&format!("  SKIP (exists): {}", dest.display()));
+                    output::download_msg(&format!("  SKIP (exists): {}", output::path(&dest)));
                 } else {
-                    output::download_msg(&format!("  GET: {url} -> {}", dest.display()));
+                    output::download_msg(&format!("  GET: {url} -> {}", output::path(&dest)));
                     tools::download_dataset_file(&url, &dest)?;
                     osc_downloaded.push((seq, dest));
                 }
@@ -145,7 +145,7 @@ pub fn run(
     let mut generated_indexed = false;
 
     if indexed_dest.exists() && is_nonempty(&indexed_dest) {
-        output::download_msg(&format!("  SKIP (exists): {}", indexed_dest.display()));
+        output::download_msg(&format!("  SKIP (exists): {}", output::path(&indexed_dest)));
     } else {
         let cat_input = has_existing_pbf(dataset, data_dir).unwrap_or_else(|| pbf_dest.clone());
         generate_indexed_pbf(&cat_input, &indexed_dest, project_root, build_root)?;
@@ -259,10 +259,10 @@ fn run_as_snapshot(
     // -- Download PBF --
     let mut downloaded_pbf = false;
     if is_nonempty(&pbf_dest) {
-        output::download_msg(&format!("  SKIP (exists): {}", pbf_dest.display()));
+        output::download_msg(&format!("  SKIP (exists): {}", output::path(&pbf_dest)));
     } else {
         let url = source.pbf_url();
-        output::download_msg(&format!("  GET: {url} -> {}", pbf_dest.display()));
+        output::download_msg(&format!("  GET: {url} -> {}", output::path(&pbf_dest)));
         tools::download_dataset_file(&url, &pbf_dest)?;
         downloaded_pbf = true;
     }
@@ -278,9 +278,9 @@ fn run_as_snapshot(
         let url = source.osc_url(target_seq);
         let dest = data_dir.join(osc_filename(dataset_key, target_seq));
         if is_nonempty(&dest) {
-            output::download_msg(&format!("  SKIP (exists): {}", dest.display()));
+            output::download_msg(&format!("  SKIP (exists): {}", output::path(&dest)));
         } else {
-            output::download_msg(&format!("  GET: {url} -> {}", dest.display()));
+            output::download_msg(&format!("  GET: {url} -> {}", output::path(&dest)));
             tools::download_dataset_file(&url, &dest)?;
         }
         osc_downloaded.push((target_seq, dest));
@@ -289,7 +289,7 @@ fn run_as_snapshot(
     // -- Generate indexed PBF --
     let mut generated_indexed = false;
     if is_nonempty(&indexed_dest) {
-        output::download_msg(&format!("  SKIP (exists): {}", indexed_dest.display()));
+        output::download_msg(&format!("  SKIP (exists): {}", output::path(&indexed_dest)));
     } else {
         generate_indexed_pbf(&pbf_dest, &indexed_dest, project_root, build_root)?;
         generated_indexed = true;
@@ -510,7 +510,7 @@ fn run_refresh(
         // half-completed refresh attempt.
         output::download_msg(&format!(
             "  SKIP download (exists): {}",
-            new_pbf_dest.display()
+            output::path(&new_pbf_dest)
         ));
     } else {
         output::download_msg(&format!("  GET: {pbf_url}"));
@@ -551,10 +551,13 @@ fn run_refresh(
     // -- Summary --
     output::download_msg("=== Refresh complete ===");
     output::download_msg(&format!("  archived primary as snapshot.{snap_key}"));
-    output::download_msg(&format!("  new primary PBF: {}", new_pbf_dest.display()));
+    output::download_msg(&format!(
+        "  new primary PBF: {}",
+        output::path(&new_pbf_dest)
+    ));
     output::download_msg(&format!(
         "  new primary indexed: {}",
-        new_indexed_dest.display()
+        output::path(&new_indexed_dest)
     ));
     output::download_msg(&format!(
         "  Use: brokkr diff-snapshots --dataset {dataset_key} --from {snap_key} --to base"

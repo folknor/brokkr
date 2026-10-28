@@ -686,7 +686,7 @@ fn capture_fixture(
         )));
     }
 
-    output::litehtml_msg(&format!("    \u{2192} {}", fixture_dir.display()));
+    output::litehtml_msg(&format!("    \u{2192} {}", output::path(&fixture_dir)));
     Ok(())
 }
 

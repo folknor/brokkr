@@ -116,6 +116,6 @@ pub(crate) fn backup_sidecar_to(
     // link to the same inode, so the data is preserved regardless).
     staged.commit()?;
 
-    crate::output::sidecar_msg(&format!("backup: {}", base.display()));
+    crate::output::sidecar_msg(&format!("backup: {}", crate::output::path(&base)));
     Ok(())
 }

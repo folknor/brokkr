@@ -62,7 +62,7 @@ pub(super) fn run_gremlins(
                 output::count(fixed.len(), "file")
             ));
             for f in &fixed {
-                output::run_msg(&format!("  {} ({})", f.path.display(), f.count));
+                output::run_msg(&format!("  {} ({})", output::path(&f.path), f.count));
             }
         }
     }
