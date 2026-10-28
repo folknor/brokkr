@@ -193,8 +193,8 @@ sweeps = ["default"]
 # default sweep - clippy dedupes on build shape, the test phase runs both,
 # and the coverage phase audits the skipme skip against [[quarantine]].
 # The serial lane runs every harness through the strict shim (attributable,
-# so a complete profile accepts it - cargo-mediated `test_threads = 0` is
-# refused, see gate-threaded) and is the doctest carrier.
+# so a complete profile accepts it - cargo-mediated `test_threads = 0` is a
+# load-time error, see the gate-threaded scenario) and is the doctest carrier.
 [test.profiles.lane-serial]
 sweeps = ["default"]
 skip = ["skipme", "shared::"]
@@ -240,15 +240,6 @@ include_ignored = true
 [test.profiles.gate-ignored]
 certifies = "complete"
 lanes = ["lane-serial-ig", "lane-iso-ig"]
-
-# Cargo-mediated parallelism shares one stream across tests and harnesses,
-# so no execution on it can be attributed: a complete profile refuses it in
-# `prepare`, pointing at `parallel = { budget = N }`.
-[test.profiles.gate-threaded]
-certifies = "complete"
-sweeps = ["default"]
-test_threads = 0
-skip = ["skipme", "shared::"]
 
 # Coverage failure modes, driven below: an unjustified skip (orphan) and
 # a quarantine entry justifying nothing (stale).
@@ -415,15 +406,24 @@ expect "include_ignored complete = exit 0" 0 $rc
 # expected execution on both lanes, and it passed.
 expect_json "gate-ignored prepared, ran and certified" "$green"
 
-echo "=== --profile gate-threaded: cargo-mediated parallelism is refused ==="
-check_json check --profile gate-threaded --json
-expect "test_threads = 0 under complete = exit 1" 1 $rc
-# Refused in `prepare`, before any test runs: the plan is incomplete, and the
-# accounting blocks still report it rather than going null.
-expect_json "gate-threaded refused in prepare with an incomplete plan" \
-  '.failed_phase == "prepare" and .policy_coverage.plan_complete == false
-   and .policy_coverage.status == "incomplete"
-   and .execution_accounting.status == "incomplete"'
+echo "=== gate-threaded: cargo-mediated parallelism under complete is a load-time error ==="
+# Cargo-mediated parallelism shares one stream across tests and harnesses, so
+# no execution on it can be attributed: a complete profile naming a plain
+# libtest entry with `test_threads` other than 1 fails at load, before any
+# phase, for every invocation of the config. So it is appended for this one
+# scenario and taken out again, like the degenerate filter below.
+cp brokkr.toml brokkr.toml.bak
+printf '\n[test.profiles.gate-threaded]\ncertifies = "complete"\nsweeps = ["default"]\ntest_threads = 0\nskip = ["skipme", "shared::"]\n' >> brokkr.toml
+threaded_out="$smoke/gate-threaded.out"
+"$brokkr_bin" check --profile edit >"$threaded_out" 2>&1
+expect "test_threads = 0 under complete = config error" 1 $?
+if grep -q "gate-threaded" "$threaded_out"; then
+  echo "ok   the load error names the profile"
+else
+  echo "FAIL the load error names the profile: $(cat "$threaded_out")"
+  fail=1
+fi
+mv brokkr.toml.bak brokkr.toml
 
 echo "=== --profile gate-orphan: unjustified skip fails coverage ==="
 check_json check --profile gate-orphan --json
@@ -474,12 +474,12 @@ expect "dead only = exit 1" 1 $rc
 expect_json "gate-dead-only failed on coverage with one dead filter" \
   '.failed_phase == "coverage" and .policy_coverage.dead_filters == 1'
 
-echo "=== --profile hang-partial: a watchdog kill names what it left, and the replay works ==="
+echo "=== --profile hang-partial: a watchdog kill names what it left ==="
 # Proves the downstream's real case end to end: a hang on a serial lane under
 # a partial profile (no policy universe, nothing certified) must still name
-# every test the kill left without a verdict, print a command that reaches
-# them, and that command must run exactly them. Takes about the per-test cap
-# (20s) because the hang is real.
+# every test the kill left without a verdict, in the text report and in the
+# summary. The report is diagnostic only: it reruns nothing. Takes about the
+# per-test cap (20s) because the hang is real.
 check_json check --profile hang-partial --json
 if [ "$rc" -ne 0 ]; then
   echo "ok   hang-partial fails (exit $rc)"
@@ -499,96 +499,27 @@ expect_json "queued tests are unobserved candidates" \
 expect_json "the timed-out test is not a candidate; every candidate is unresolved" \
   '.diagnostic_continuation.candidates
    | all(.test != "hang_probe" and (.outcome == "unobserved" or .outcome == "interrupted"))'
-expect_json "the replay command is test --from-run with the run id" \
+expect_json "the continuation names its source run and carries no replay" \
   '.diagnostic_continuation as $d
-   | ($d.source_run_id | test("^[0-9]+-[0-9]+$"))
-     and $d.replay.available == true
-     and $d.replay.command.argv == ["brokkr", "test", "--from-run", $d.source_run_id]
-     and $d.replay.command.display == "brokkr test --from-run \($d.source_run_id)"'
+   | ($d.source_run_id | test("^[0-9]+-[0-9]+$")) and ($d | has("replay") | not)'
 
-run_id="$(printf '%s' "$summary" | jq -r '.diagnostic_continuation.source_run_id')"
+# The text report names the same candidates the summary does. Candidate
+# lines: after the optional output prefix, two spaces, the outcome word, then
+# the test name. The closing notes also say "unobserved" but never start that
+# way.
 want_names="$(printf '%s' "$summary" | jq -r '.diagnostic_continuation.candidates[].test' | sort)"
-want_count="$(printf '%s' "$summary" | jq -r '.diagnostic_continuation.candidates | length')"
-# The recovery path: the original run's captured output is gone (here
-# deleted; in life a hard exit that never printed it), and only the persisted
-# record remains.
-rm -f "$smoke/check.stdout"
-
-# Candidate lines of the text report: after the optional output prefix, two
-# spaces, the outcome word, then the test name. The closing notes also say
-# "unobserved" but never start that way.
 candidate_re='^(\[[a-z]+\] +)?  (unobserved|interrupted) +([^ ]+)'
-list_names() {
-  local line
+got_names="$(
   while IFS= read -r line; do
     if [[ "$line" =~ $candidate_re ]]; then
       printf '%s\n' "${BASH_REMATCH[3]}"
     fi
-  done <"$1" | sort
-}
-
-echo "--- replay --list: executes nothing, same candidates, from the record alone ---"
-cp -r ".brokkr/accounting/$run_id" "$smoke/source-record"
-list1="$smoke/replay-list1.out"
-"$brokkr_bin" test --from-run "$run_id" --list >"$list1" 2>&1
-expect "--from-run --list = exit 0" 0 $?
-cat "$list1"
-got_names="$(list_names "$list1")"
+  done <"$smoke/check.stdout" | sort
+)"
 if [ -n "$want_names" ] && [ "$got_names" = "$want_names" ]; then
-  echo "ok   --list prints the summary's candidates ($want_count)"
+  echo "ok   the text report names the summary's candidates"
 else
-  echo "FAIL --list prints the summary's candidates: want [$want_names], got [$got_names]"
-  fail=1
-fi
-# --list writes no record of its own: the run count is the baseline the
-# replay's single new record is measured against below.
-runs=(.brokkr/accounting/*)
-runs_before_replay="${#runs[@]}"
-
-echo "--- replay: runs exactly the unresolved tests, diagnostic_completed ---"
-replay_out="$smoke/replay.out"
-"$brokkr_bin" test --from-run "$run_id" >"$replay_out" 2>&1
-expect "replay = exit 0" 0 $?
-cat "$replay_out"
-if [[ "$(<"$replay_out")" =~ diagnostic_completed\ -\ ([0-9]+)\ execution ]] \
-   && [ "${BASH_REMATCH[1]}" -eq "$want_count" ]; then
-  echo "ok   replay reported diagnostic_completed over exactly $want_count executions"
-else
-  echo "FAIL replay reported diagnostic_completed over $want_count executions"
-  fail=1
-fi
-# SMOKE_HANG rides the recorded environment, so re-running the timed-out test
-# would have hung again: the zero exit above already says it was not
-# selected. This is the same fact read off the output.
-if grep -q hang_probe "$replay_out"; then
-  echo "FAIL replay did not re-run the timed-out test: hang_probe appears in its output"
-  fail=1
-else
-  echo "ok   replay did not re-run the timed-out test"
-fi
-# The continuation wrote its own record, and the source's is byte-identical
-# (plan and journal) and still reports the same candidates.
-runs=(.brokkr/accounting/*)
-runs_after_replay="${#runs[@]}"
-if [ "$runs_after_replay" -eq $((runs_before_replay + 1)) ]; then
-  echo "ok   the continuation wrote its own record"
-else
-  echo "FAIL the continuation wrote its own record: $runs_before_replay runs before, $runs_after_replay after"
-  fail=1
-fi
-if cmp -s "$smoke/source-record/plan.json" ".brokkr/accounting/$run_id/plan.json" \
-   && cmp -s "$smoke/source-record/journal.jsonl" ".brokkr/accounting/$run_id/journal.jsonl"; then
-  echo "ok   the source run's plan and journal are unchanged"
-else
-  echo "FAIL the source run's plan or journal changed under the replay"
-  fail=1
-fi
-list2="$smoke/replay-list2.out"
-"$brokkr_bin" test --from-run "$run_id" --list >"$list2" 2>&1
-if cmp -s "$list1" "$list2"; then
-  echo "ok   the source run still reports the same continuation"
-else
-  echo "FAIL the source run's --list report changed after the replay"
+  echo "FAIL the text report names the summary's candidates: want [$want_names], got [$got_names]"
   fail=1
 fi
 
