@@ -57,8 +57,19 @@ thread (`src/check_cmd/watchdog.rs`) SIGKILLs every descendant of the brokkr
 process found in `/proc`, each checked against its starttime first - test
 children are spawned into their own process groups and not all of them are
 published to the lockfile, so neither a group signal nor the lockfile's
-published children would reach them all. Two `[error]` lines say which ceiling fired
+published children would reach them all. `[error]` lines say which ceiling fired
 and how many processes were killed.
+
+Between the two, before anything is killed, a third lists what was in flight:
+every live descendant as a tree, with its PID, age and command line, and under
+any process blocked on a file lock (brokkr included), the locked file and the
+process holding it, read from `/proc/locks`. The ceiling names only the phase
+whose clock ran out. The listing names what the run was waiting on, which can
+be something else: a `background` script check running beside the phases, or
+a cargo parked on another cargo's lock, whose `Blocking waiting for file lock`
+line went into a captured stream. The listing has two seconds to be collected,
+since reading `/proc` can block behind a process wedged in the kernel. Past
+that the kill goes ahead and the line says the listing could not be made.
 
 brokkr itself is not killed. The watchdog raises the shutdown flag and keeps
 the subtree dead while the main thread unwinds through its normal exit path,

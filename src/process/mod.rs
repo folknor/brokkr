@@ -2,6 +2,7 @@
 
 mod helpers;
 mod identity;
+pub(crate) mod inflight;
 mod reap;
 pub(crate) mod spawn;
 mod table;

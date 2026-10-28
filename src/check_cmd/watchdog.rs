@@ -254,6 +254,7 @@ fn fire(why: &str, disarm: &std::sync::atomic::AtomicBool) {
 /// shutdown flag or marking it fired for every other test.
 struct FireEffects {
     mark: fn(&str),
+    report: fn(),
     shutdown: fn(),
     kill: fn() -> usize,
     backstop: fn(),
@@ -264,6 +265,7 @@ impl FireEffects {
         mark: |why| {
             *watchdog_fired_lock() = Some(why.to_owned());
         },
+        report: report_in_flight,
         shutdown: crate::shutdown::request_shutdown,
         kill: || crate::shutdown::kill_descendants(std::process::id()),
         backstop: || backstop_exit(),
@@ -285,6 +287,9 @@ fn fire_with(why: &str, disarm: &std::sync::atomic::AtomicBool, fx: &FireEffects
     output::error_forced(&format!(
         "{why} - killing every process it started (as `brokkr kill --hard` would)"
     ));
+    // What the run was actually waiting on, while it still exists: the phase
+    // named above is only the one whose clock ran out.
+    (fx.report)();
     // Runners polling the flag return `Interrupted`, and no new test group is
     // spawned; the exit path reads `watchdog_fired()` first, so this unwinds
     // as 124, not as an interrupt.
@@ -311,6 +316,70 @@ fn fire_with(why: &str, disarm: &std::sync::atomic::AtomicBool, fx: &FireEffects
         return;
     }
     (fx.backstop)();
+}
+
+/// How long the in-flight report may take before the kill goes ahead without
+/// it. Reading a process's `/proc` entries can block behind a process wedged
+/// in the kernel, and nothing may hold up a fired ceiling's kill for long.
+const REPORT_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Print every process the run started that is still alive, with its age and
+/// command line, and the file lock any of them (brokkr included) is blocked
+/// on, with its holder. A ceiling names the phase whose clock ran out; this
+/// names what was running when it did - a background script check, a cargo
+/// waiting on another cargo's lock. Collected on its own thread under
+/// [`REPORT_BUDGET`]; past it the report is skipped and says so.
+fn report_in_flight() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("check-watchdog-report".into())
+        .spawn(move || {
+            tx.send(crate::process::inflight::subtree(std::process::id())).ok();
+        });
+    if spawned.is_err() {
+        return;
+    }
+    match rx.recv_timeout(REPORT_BUDGET) {
+        Ok((rows, own_wait)) => output::error_forced(&render_in_flight(&rows, own_wait.as_ref())),
+        Err(_) => output::error_forced(&format!(
+            "the processes in flight could not be listed within {}s",
+            REPORT_BUDGET.as_secs()
+        )),
+    }
+}
+
+fn render_in_flight(
+    rows: &[crate::process::inflight::InFlight],
+    own_wait: Option<&crate::process::inflight::LockWait>,
+) -> String {
+    let mut out = if rows.is_empty() {
+        "in flight when the ceiling fired: no child process".to_owned()
+    } else {
+        format!("in flight when the ceiling fired, {}:", output::count(rows.len(), "process"))
+    };
+    if let Some(wait) = own_wait {
+        out.push_str(&format!("\n  brokkr itself {}", render_wait(wait)));
+    }
+    for row in rows {
+        let indent = "  ".repeat(row.depth + 1);
+        let age = row
+            .age_secs
+            .map(|secs| format!(" {}", output::format_duration(std::time::Duration::from_secs(secs))))
+            .unwrap_or_default();
+        out.push_str(&format!("\n{indent}{}{age} {}", row.pid, row.command));
+        if let Some(wait) = &row.waits_on {
+            out.push_str(&format!("\n{indent}  {}", render_wait(wait)));
+        }
+    }
+    out
+}
+
+fn render_wait(wait: &crate::process::inflight::LockWait) -> String {
+    let path = wait.path.as_deref().unwrap_or("an unnamed file");
+    match &wait.holder {
+        Some((pid, command)) => format!("waits on a file lock on {path}, held by {pid} {command}"),
+        None => format!("waits on a file lock on {path}"),
+    }
 }
 
 /// The main thread did not unwind: do the two things its exit path owed and
@@ -424,7 +493,7 @@ mod watchdog_tests {
         fire_with(
             "test's prepare phase exceeded its ceiling",
             &disarmed,
-            &FireEffects { mark: |_| {}, shutdown: || {}, kill: || 0, backstop: || {} },
+            &FireEffects { mark: |_| {}, report: || {}, shutdown: || {}, kill: || 0, backstop: || {} },
         );
         release_tx.send(()).expect("release");
         wedged.join().expect("wedged thread");
@@ -452,6 +521,27 @@ mod watchdog_tests {
         // orders of magnitude.
         let age = process_age_ms();
         assert!(age < 24 * 3600 * 1000, "age {age}ms");
+    }
+
+    /// The report nests children under their parents and puts a lock wait
+    /// under the process blocked on it, naming the file and the holder.
+    #[test]
+    fn in_flight_report_names_the_waiter_the_lock_and_its_holder() {
+        use crate::process::inflight::{InFlight, LockWait};
+        let rows = vec![
+            InFlight { depth: 0, pid: 10, age_secs: Some(120), command: "cargo metadata --no-deps".into(),
+                waits_on: Some(LockWait { path: Some("/c/.package-cache".into()), holder: Some((20, "cargo miri test".into())) }) },
+            InFlight { depth: 0, pid: 11, age_secs: None, command: "sh -c cargo miri test".into(), waits_on: None },
+            InFlight { depth: 1, pid: 20, age_secs: Some(119), command: "cargo miri test".into(), waits_on: None },
+        ];
+        let text = render_in_flight(&rows, None);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "in flight when the ceiling fired, 3 processes:");
+        assert!(lines[1].starts_with("  10 ") && lines[1].ends_with(" cargo metadata --no-deps"), "{text}");
+        assert_eq!(lines[2], "    waits on a file lock on /c/.package-cache, held by 20 cargo miri test");
+        assert_eq!(lines[3], "  11 sh -c cargo miri test");
+        assert!(lines[4].starts_with("    20 "), "{text}");
+        assert_eq!(render_in_flight(&[], None), "in flight when the ceiling fired: no child process");
     }
 
     #[test]
