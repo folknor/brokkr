@@ -173,8 +173,7 @@ impl TreeState {
         let tree_edits = brokkr_tree_edits(&self.root, &self.entries);
         self.entries.iter().any(|entry| {
             entry.paths.iter().any(|path| {
-                !tree_edits.contains(&path.path)
-                    && path.class != PathClass::BrokkrStore
+                !tree_edits.contains(&path.path) && path.class != PathClass::BrokkrStore
             })
         })
     }
@@ -352,7 +351,9 @@ fn unchanged_cargo_config_strips(root: &Path, entries: &[Entry]) -> HashSet<Path
         {
             continue;
         }
-        let Some(live_str) = live.to_str() else { continue };
+        let Some(live_str) = live.to_str() else {
+            continue;
+        };
         let Some((mode, head)) = head_blob(root, live_str) else {
             continue;
         };

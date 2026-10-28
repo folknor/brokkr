@@ -408,7 +408,10 @@ pub fn cmd_build(
 /// itself for siblings or resources sees the snapshot directory.
 fn snapshot_executable(exe: &Path, store: &Path) -> Result<PathBuf, DevError> {
     let file_name = exe.file_name().ok_or_else(|| {
-        DevError::Build(format!("built executable has no file name: {}", exe.display()))
+        DevError::Build(format!(
+            "built executable has no file name: {}",
+            exe.display()
+        ))
     })?;
     std::fs::create_dir_all(store)?;
     let staging = Staging(store.join(format!(
@@ -676,7 +679,11 @@ mod tests {
         let digest = crate::preflight::compute_file_digest(&exe).unwrap();
         std::fs::write(store.join(digest.to_string()), b"in the way").unwrap();
         assert!(snapshot_executable(&exe, &store).is_err());
-        assert_eq!(staged(&store), 0, "a failed snapshot leaves no staging copy");
+        assert_eq!(
+            staged(&store),
+            0,
+            "a failed snapshot leaves no staging copy"
+        );
     }
 
     #[test]

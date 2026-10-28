@@ -37,10 +37,9 @@ impl StripSpec {
     /// taken verbatim (for an operand containing whitespace).
     pub fn parse(value: &toml::Value) -> Result<Self, DevError> {
         let (raw, tokens): (String, Vec<String>) = match value {
-            toml::Value::String(s) => (
-                s.clone(),
-                s.split_whitespace().map(str::to_owned).collect(),
-            ),
+            toml::Value::String(s) => {
+                (s.clone(), s.split_whitespace().map(str::to_owned).collect())
+            }
             toml::Value::Array(items) => {
                 let tokens = items
                     .iter()
@@ -48,8 +47,7 @@ impl StripSpec {
                     .collect::<Option<Vec<_>>>()
                     .ok_or_else(|| {
                         DevError::Config(
-                            "strip_rustflags: an array entry must hold only strings"
-                                .into(),
+                            "strip_rustflags: an array entry must hold only strings".into(),
                         )
                     })?;
                 (format!("{tokens:?}"), tokens)
@@ -126,7 +124,10 @@ fn may_take_operand(unit: &str) -> bool {
     if bytes.len() == 2 && bytes[0] == b'-' && bytes[1].is_ascii_alphabetic() {
         return !OPERANDLESS_SHORT.contains(&unit);
     }
-    unit.len() > 2 && unit.starts_with("--") && !unit.contains('=') && !OPERANDLESS_LONG.contains(&unit)
+    unit.len() > 2
+        && unit.starts_with("--")
+        && !unit.contains('=')
+        && !OPERANDLESS_LONG.contains(&unit)
 }
 
 /// What filtering one value found.
@@ -140,7 +141,11 @@ pub struct ValueEdit {
 
 /// Match `specs` against one value's elements. `key` names the value in
 /// refusals.
-pub fn match_value(elements: &[&str], specs: &[StripSpec], key: &str) -> Result<ValueEdit, DevError> {
+pub fn match_value(
+    elements: &[&str],
+    specs: &[StripSpec],
+    key: &str,
+) -> Result<ValueEdit, DevError> {
     let units = units(elements);
     let mut counts = vec![0; specs.len()];
     // (first unit, unit count, spec index), in discovery order.
@@ -220,7 +225,11 @@ pub struct DocumentEdit {
 /// Filter every rustflags value of a cargo config document: `build.rustflags`,
 /// `host.rustflags`, `host.<triple>.rustflags` and `target.<any>.rustflags`.
 /// Only values with a match are rewritten, each keeping its type and decor.
-pub fn filter_document(text: &str, specs: &[StripSpec], file: &str) -> Result<DocumentEdit, DevError> {
+pub fn filter_document(
+    text: &str,
+    specs: &[StripSpec],
+    file: &str,
+) -> Result<DocumentEdit, DevError> {
     let mut doc: toml_edit::DocumentMut = text.parse().map_err(|error| {
         DevError::Config(format!("could not parse Cargo config {file}: {error}"))
     })?;
@@ -309,7 +318,9 @@ fn rustflags_value<'a>(
     for segment in path {
         item = item.as_table_like_mut()?.get_mut(segment)?;
     }
-    item.as_table_like_mut()?.get_mut("rustflags")?.as_value_mut()
+    item.as_table_like_mut()?
+        .get_mut("rustflags")?
+        .as_value_mut()
 }
 
 #[cfg(test)]
@@ -367,7 +378,10 @@ rustflags = [
     fn a_string_value_stays_a_string() {
         let text = "[build]\nrustflags = \"-Cfoo  -C bar -Cbaz\" # keep\n";
         let edit = filter_document(text, &[spec("-Cbar")], "c").unwrap();
-        assert_eq!(edit.text.unwrap(), "[build]\nrustflags = \"-Cfoo -Cbaz\" # keep\n");
+        assert_eq!(
+            edit.text.unwrap(),
+            "[build]\nrustflags = \"-Cfoo -Cbaz\" # keep\n"
+        );
     }
 
     #[test]
@@ -395,7 +409,8 @@ rustflags = [
 
     #[test]
     fn removal_does_not_create_new_matches() {
-        let edit = match_value(&["-Ca", "-Cb", "-Ca"], &[spec("-Cb"), spec("-Ca -Ca")], "k").unwrap();
+        let edit =
+            match_value(&["-Ca", "-Cb", "-Ca"], &[spec("-Cb"), spec("-Ca -Ca")], "k").unwrap();
         assert_eq!(edit.removed, vec![1]);
     }
 
@@ -409,10 +424,20 @@ rustflags = [
             vec!["-o", "-Cx"],
             vec!["--emit", "-Cx"],
         ] {
-            assert!(match_value(&elements, &[spec("-Cx")], "k").is_err(), "{elements:?}");
+            assert!(
+                match_value(&elements, &[spec("-Cx")], "k").is_err(),
+                "{elements:?}"
+            );
         }
-        for elements in [vec!["-O", "-Cx"], vec!["--test", "-Cx"], vec!["--cfg=foo", "-Cx"]] {
-            assert!(match_value(&elements, &[spec("-Cx")], "k").is_ok(), "{elements:?}");
+        for elements in [
+            vec!["-O", "-Cx"],
+            vec!["--test", "-Cx"],
+            vec!["--cfg=foo", "-Cx"],
+        ] {
+            assert!(
+                match_value(&elements, &[spec("-Cx")], "k").is_ok(),
+                "{elements:?}"
+            );
         }
     }
 

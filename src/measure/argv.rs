@@ -117,7 +117,11 @@ impl<'a> Invocation<'a> {
     /// An invocation each of whose launches reserves `spec`. Its argv may
     /// carry [`crate::reservations::PRIVATE_DIR_PLACEHOLDER`], replaced per
     /// launch by that launch's own private directory.
-    pub(crate) fn reserved(program: &'a Path, args: Vec<String>, spec: crate::reservations::LaunchSpec) -> Self {
+    pub(crate) fn reserved(
+        program: &'a Path,
+        args: Vec<String>,
+        spec: crate::reservations::LaunchSpec,
+    ) -> Self {
         Self {
             spec: Some(spec),
             ..Self::new(program, args)
@@ -126,7 +130,10 @@ impl<'a> Invocation<'a> {
 
     /// Admit one launch in `cwd`: its argv, and the reservation to finish
     /// once the child has been reaped.
-    pub(in crate::measure) fn launch(&self, cwd: &Path) -> Result<crate::reservations::Launched, DevError> {
+    pub(in crate::measure) fn launch(
+        &self,
+        cwd: &Path,
+    ) -> Result<crate::reservations::Launched, DevError> {
         self.launch_with(cwd, &[])
     }
 

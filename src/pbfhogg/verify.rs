@@ -280,7 +280,10 @@ impl VerifyHarness {
     /// indexed run it already verifies.
     pub fn strip_indexdata(&self, input: &Path, output: &Path) -> Result<(), DevError> {
         let captured = self.run_pbfhogg(
-            PbfArgv::new("degrade").arg("--strip-indexdata").input(input)?.output(output)?,
+            PbfArgv::new("degrade")
+                .arg("--strip-indexdata")
+                .input(input)?
+                .output(output)?,
         )?;
         self.check_exit(&captured, "pbfhogg degrade --strip-indexdata")
     }
@@ -489,7 +492,11 @@ where
     }
     let ms = start.elapsed().as_millis();
     let steps = StepTimes::render();
-    let ms = if steps.is_empty() { format!("{ms}ms") } else { format!("{ms}ms; {steps}") };
+    let ms = if steps.is_empty() {
+        format!("{ms}ms")
+    } else {
+        format!("{ms}ms; {steps}")
+    };
     match &result {
         Ok(()) => {
             if !verbose {
@@ -523,7 +530,11 @@ where
 pub(super) fn step(label: &str) -> Step {
     let activity = crate::lockfile::activity::Activity::begin(label);
     crate::output::status(label);
-    Step { _activity: activity, label: label.to_owned(), started: std::time::Instant::now() }
+    Step {
+        _activity: activity,
+        label: label.to_owned(),
+        started: std::time::Instant::now(),
+    }
 }
 
 pub(super) struct Step {
@@ -550,7 +561,9 @@ static STEP_TIMES: std::sync::Mutex<Vec<(String, std::time::Duration, usize)>> =
 
 impl StepTimes {
     fn lock() -> std::sync::MutexGuard<'static, Vec<(String, std::time::Duration, usize)>> {
-        STEP_TIMES.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        STEP_TIMES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn add(label: String, took: std::time::Duration) {
@@ -582,7 +595,11 @@ fn render_step_times(times: &mut [(String, std::time::Duration, usize)]) -> Stri
     times
         .iter()
         .map(|(label, total, runs)| {
-            let runs = if *runs > 1 { format!(" ({runs} runs)") } else { String::new() };
+            let runs = if *runs > 1 {
+                format!(" ({runs} runs)")
+            } else {
+                String::new()
+            };
             format!("{label} {}{runs}", output::format_duration(*total))
         })
         .collect::<Vec<_>>()
@@ -675,7 +692,10 @@ mod tests {
         assert_eq!(labels.len(), 3, "{text}");
         assert!(labels[0].starts_with("osmium sort "), "{text}");
         assert!(labels[1].starts_with("pbfhogg sort "), "{text}");
-        assert!(labels[2].starts_with("pbfhogg diff ") && labels[2].ends_with(" (2 runs)"), "{text}");
+        assert!(
+            labels[2].starts_with("pbfhogg diff ") && labels[2].ends_with(" (2 runs)"),
+            "{text}"
+        );
         assert_eq!(render_step_times(&mut []), "");
     }
 

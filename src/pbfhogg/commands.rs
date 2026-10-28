@@ -536,7 +536,10 @@ impl PbfhoggCommand {
     /// passes.
     pub fn ok_exit_codes(&self) -> &'static [i32] {
         match self {
-            Self::Diff { .. } | Self::DiffSnapshots { .. } | Self::CheckRefs | Self::CheckIds { .. } => &[1],
+            Self::Diff { .. }
+            | Self::DiffSnapshots { .. }
+            | Self::CheckRefs
+            | Self::CheckIds { .. } => &[1],
             _ => &[],
         }
     }
@@ -681,14 +684,20 @@ impl PbfhoggCommand {
                 }
                 Ok(argv)
             }
-            Self::CheckRefs => CommandArgv::new("check").arg("--refs").input(ctx.pbf_str()?),
+            Self::CheckRefs => CommandArgv::new("check")
+                .arg("--refs")
+                .input(ctx.pbf_str()?),
             Self::CheckIds { full } => {
-                let argv = CommandArgv::new("check").arg("--ids").input(ctx.pbf_str()?)?;
+                let argv = CommandArgv::new("check")
+                    .arg("--ids")
+                    .input(ctx.pbf_str()?)?;
                 Ok(if *full { argv.arg("--full") } else { argv })
             }
             Self::Sort => {
                 let output = scratch_output_path(ctx, self, mode)?;
-                CommandArgv::new("sort").input(ctx.pbf_str()?)?.output(&output)
+                CommandArgv::new("sort")
+                    .input(ctx.pbf_str()?)?
+                    .output(&output)
             }
             Self::Cat {
                 type_filter,
@@ -747,7 +756,10 @@ impl PbfhoggCommand {
                         return Err(DevError::Config(message.clone()));
                     }
                 };
-                let argv = argv.input(input_path)?.arg(filter.clone()).output(&output)?;
+                let argv = argv
+                    .input(input_path)?
+                    .arg(filter.clone())
+                    .output(&output)?;
                 Ok(jobs(argv))
             }
             Self::Getid {
@@ -778,7 +790,9 @@ impl PbfhoggCommand {
             }
             Self::Renumber => {
                 let output = scratch_output_path(ctx, self, mode)?;
-                CommandArgv::new("renumber").input(ctx.pbf_str()?)?.output(&output)
+                CommandArgv::new("renumber")
+                    .input(ctx.pbf_str()?)?
+                    .output(&output)
             }
             Self::MergeChanges { simplify } => {
                 let output = scratch_output_path(ctx, self, mode)?;
@@ -787,7 +801,11 @@ impl PbfhoggCommand {
                     argv = argv.input(o)?;
                 }
                 let argv = argv.output(&output)?;
-                Ok(if *simplify { argv.arg("--simplify") } else { argv })
+                Ok(if *simplify {
+                    argv.arg("--simplify")
+                } else {
+                    argv
+                })
             }
             Self::ApplyChanges => {
                 let output = scratch_output_path(ctx, self, mode)?;
@@ -853,7 +871,9 @@ impl PbfhoggCommand {
                 force,
             } => {
                 let output = scratch_output_path(ctx, self, mode)?;
-                let mut argv = CommandArgv::new("repack").input(ctx.pbf_str()?)?.output(&output)?;
+                let mut argv = CommandArgv::new("repack")
+                    .input(ctx.pbf_str()?)?
+                    .output(&output)?;
                 if let Some(n) = elements_per_blob {
                     argv = argv.arg("--elements-per-blob").arg(n.to_string());
                 }
@@ -865,7 +885,9 @@ impl PbfhoggCommand {
                 strip_indexdata,
             } => {
                 let output = scratch_output_path(ctx, self, mode)?;
-                let mut argv = CommandArgv::new("degrade").input(ctx.pbf_str()?)?.output(&output)?;
+                let mut argv = CommandArgv::new("degrade")
+                    .input(ctx.pbf_str()?)?
+                    .output(&output)?;
                 if *unsort {
                     argv = argv.arg("--unsort");
                 }
@@ -1014,14 +1036,19 @@ pub(crate) struct MultiExtractConfig {
 
 /// Encode shared multi-extract strips for a resolved output path. Both the
 /// measured command and `verify multi-extract` use serde_json for escaping.
-pub(crate) fn multi_extract_config(output_dir: &Path, strips: &[Bbox]) -> Result<MultiExtractConfig, DevError> {
+pub(crate) fn multi_extract_config(
+    output_dir: &Path,
+    strips: &[Bbox],
+) -> Result<MultiExtractConfig, DevError> {
     if strips.is_empty() {
         return Err(DevError::Config(
             "multi-extract requires at least 1 region".into(),
         ));
     }
     let output_dir_str = crate::utf8_path::path_string(output_dir)?;
-    let names: Vec<String> = (0..strips.len()).map(|i| format!("strip-{i}.osm.pbf")).collect();
+    let names: Vec<String> = (0..strips.len())
+        .map(|i| format!("strip-{i}.osm.pbf"))
+        .collect();
     let extracts: Vec<serde_json::Value> = strips
         .iter()
         .zip(&names)

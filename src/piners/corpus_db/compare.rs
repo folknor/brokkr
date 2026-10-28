@@ -308,7 +308,7 @@ mod tests {
             &BTreeMap::new(),
             &GateVerdict::from(diffs),
         )
-            .unwrap()
+        .unwrap()
     }
 
     fn line(probe: &str, tier: &str, m: i64, o: i64, t: i64) -> String {

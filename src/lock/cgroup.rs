@@ -160,7 +160,11 @@ impl Drop for HoldCgroup {
         // SAFETY: valid dirfd and NUL-terminated name; EBUSY (processes the
         // hold leaked are still inside) leaves it for a later sweep.
         unsafe {
-            libc::unlinkat(self.parent.as_raw_fd(), self.name.as_ptr(), libc::AT_REMOVEDIR);
+            libc::unlinkat(
+                self.parent.as_raw_fd(),
+                self.name.as_ptr(),
+                libc::AT_REMOVEDIR,
+            );
         }
     }
 }
@@ -176,7 +180,10 @@ impl CgroupView {
 
     /// `memory.current`, when the memory controller is enabled for the group.
     pub(crate) fn memory_bytes(&self) -> Option<u64> {
-        read_at(self.dir.as_raw_fd(), "memory.current")?.trim().parse().ok()
+        read_at(self.dir.as_raw_fd(), "memory.current")?
+            .trim()
+            .parse()
+            .ok()
     }
 
     /// Member PIDs of the group and its descendants, numbered in the holder's
@@ -209,7 +216,9 @@ fn sweep_leftovers(dir: RawFd, depth: usize) {
         return;
     }
     for child in subdirs(dir) {
-        let Some(id) = child.strip_prefix(PREFIX) else { continue };
+        let Some(id) = child.strip_prefix(PREFIX) else {
+            continue;
+        };
         if AcqId::parse(id).is_none() {
             continue;
         }
@@ -266,8 +275,12 @@ fn cgroup2_mountpoint() -> Option<String> {
 
 fn parse_mountinfo(text: &str) -> Option<String> {
     for line in text.lines() {
-        let Some((pre, post)) = line.split_once(" - ") else { continue };
-        let Some(fstype) = post.split_whitespace().next() else { continue };
+        let Some((pre, post)) = line.split_once(" - ") else {
+            continue;
+        };
+        let Some(fstype) = post.split_whitespace().next() else {
+            continue;
+        };
         if fstype != "cgroup2" {
             continue;
         }
@@ -297,7 +310,11 @@ fn open_dir(at: Option<RawFd>, path: &str) -> Option<OwnedFd> {
 fn owned_by_me(dir: RawFd, file: Option<&str>) -> bool {
     let name = CString::new(file.unwrap_or("")).unwrap_or_default();
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    let flags = if file.is_none() { libc::AT_EMPTY_PATH } else { 0 };
+    let flags = if file.is_none() {
+        libc::AT_EMPTY_PATH
+    } else {
+        0
+    };
     // SAFETY: valid dirfd, NUL-terminated name, zeroed out-parameter.
     let rc = unsafe { libc::fstatat(dir, name.as_ptr(), &raw mut st, flags) };
     rc == 0 && st.st_uid == unsafe { libc::geteuid() }
@@ -317,7 +334,9 @@ fn read_at(dir: RawFd, file: &str) -> Option<String> {
 
 fn write_at(dir: RawFd, file: &str, bytes: &[u8]) -> bool {
     use std::io::Write;
-    let Ok(c) = CString::new(file) else { return false };
+    let Ok(c) = CString::new(file) else {
+        return false;
+    };
     // SAFETY: valid dirfd and NUL-terminated name.
     let fd = unsafe { libc::openat(dir, c.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
     if fd < 0 {

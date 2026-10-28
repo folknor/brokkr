@@ -739,10 +739,7 @@ fn read_raw(
     stmt: &mut rusqlite::Statement<'_>,
     params: impl rusqlite::Params,
 ) -> Result<RawTable, DevError> {
-    let columns: Vec<String> = stmt
-        .column_names()
-        .map(str::to_owned)
-        .collect();
+    let columns: Vec<String> = stmt.column_names().map(str::to_owned).collect();
     let n = columns.len();
     let rows = stmt.query_map(params, |row| {
         let mut cells = Vec::with_capacity(n);

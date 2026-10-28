@@ -572,7 +572,9 @@ pub fn remove_one(git_root: &Path, slot: &Path) -> Result<(), DevError> {
     // pbfhogg backup, rather than the whole checkout and cargo target dir.
     let mut targets: Vec<&Path> = vec![slot];
     targets.extend(dest.as_deref());
-    let verify_out = dest.as_ref().map(|dest| dest.join(crate::target_namespace::VERIFY));
+    let verify_out = dest
+        .as_ref()
+        .map(|dest| dest.join(crate::target_namespace::VERIFY));
     let trees: Vec<&Path> = verify_out.iter().map(PathBuf::as_path).collect();
     crate::reservations::mutate(&targets, &trees, || -> Result<(), DevError> {
         if let Some(dest) = &dest {

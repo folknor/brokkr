@@ -62,7 +62,11 @@ impl Home {
         let registry = Registry::at(crate::user_dirs::install_registry()?);
         let home = std::fs::canonicalize(&home).unwrap_or(home);
         let state_dir = std::fs::canonicalize(&state_dir).unwrap_or(state_dir);
-        Some(Self { home, state_dir, registry })
+        Some(Self {
+            home,
+            state_dir,
+            registry,
+        })
     }
 }
 
@@ -104,10 +108,26 @@ pub fn preflight<'a>(steps: Option<Steps<'a>>, build_root: &'a Path) -> Result<P
     preflight_with(steps, build_root, Home::from_env())
 }
 
-fn preflight_with<'a>(steps: Option<Steps<'a>>, build_root: &'a Path, home: Option<Home>) -> Result<Plan<'a>, DevError> {
+fn preflight_with<'a>(
+    steps: Option<Steps<'a>>,
+    build_root: &'a Path,
+    home: Option<Home>,
+) -> Result<Plan<'a>, DevError> {
     let plan = match steps {
-        Some(s) => Plan { steps: s.steps, project: s.project, project_root: s.project_root, build_root, home },
-        None => Plan { steps: &[], project: "", project_root: build_root, build_root, home },
+        Some(s) => Plan {
+            steps: s.steps,
+            project: s.project,
+            project_root: s.project_root,
+            build_root,
+            home,
+        },
+        None => Plan {
+            steps: &[],
+            project: "",
+            project_root: build_root,
+            build_root,
+            home,
+        },
     };
     if let Some(home) = &plan.home {
         transaction::recover_all(&home.registry)?;
@@ -130,7 +150,10 @@ fn preflight_with<'a>(steps: Option<Steps<'a>>, build_root: &'a Path, home: Opti
         {
             return Err(refused(
                 &step.name,
-                &format!("{} overlaps the destination of step '{other}'", resolved.path.display()),
+                &format!(
+                    "{} overlaps the destination of step '{other}'",
+                    resolved.path.display()
+                ),
             ));
         }
         destinations.push((&step.name, resolved.path));
@@ -140,9 +163,12 @@ fn preflight_with<'a>(steps: Option<Steps<'a>>, build_root: &'a Path, home: Opti
 
 impl Plan<'_> {
     fn home(&self, step: &str) -> Result<&Home, DevError> {
-        self.home
-            .as_ref()
-            .ok_or_else(|| refused(step, "HOME is not set, so there is no registry to record ownership in"))
+        self.home.as_ref().ok_or_else(|| {
+            refused(
+                step,
+                "HOME is not set, so there is no registry to record ownership in",
+            )
+        })
     }
 
     /// Run every step in order. The first failure stops the rest.
@@ -156,7 +182,12 @@ impl Plan<'_> {
         Ok(())
     }
 
-    fn run(&self, step: &str, command: &str, lock: Option<&crate::lockfile::LockGuard>) -> Result<(), DevError> {
+    fn run(
+        &self,
+        step: &str,
+        command: &str,
+        lock: Option<&crate::lockfile::LockGuard>,
+    ) -> Result<(), DevError> {
         output::install_msg(&format!("{step}: sh -c {command}"));
         let out = output::run_passthrough_in(
             "sh",
@@ -172,14 +203,20 @@ impl Plan<'_> {
         })?;
         match out.failed_code(&[]) {
             // The command printed its own output; this names the step.
-            Some(code) => Err(DevError::Reported(format!("install step '{step}' failed (exit code {code})"))),
+            Some(code) => Err(DevError::Reported(format!(
+                "install step '{step}' failed (exit code {code})"
+            ))),
             None => Ok(()),
         }
     }
 
     fn copy(&self, step: &str, from: &str, to: &str) -> Result<(), DevError> {
         output::install_msg(&format!("{step}: copy {from} -> {to}"));
-        let Admitted { resolved, source, admission } = self.admit(step, from, to, false, true)?;
+        let Admitted {
+            resolved,
+            source,
+            admission,
+        } = self.admit(step, from, to, false, true)?;
         let home = self.home(step)?;
         let (prior, displaced) = match admission {
             Admission::Unchanged => {
@@ -198,8 +235,20 @@ impl Plan<'_> {
             parent: &resolved.parent,
             name: &resolved.name,
         };
-        let owner_of = |fingerprint| Owner { project: self.project.to_owned(), step: step.to_owned(), fingerprint };
-        transaction::install(&home.registry, step, &target, &source, owner_of, prior.as_ref(), displaced.as_deref())
+        let owner_of = |fingerprint| Owner {
+            project: self.project.to_owned(),
+            step: step.to_owned(),
+            fingerprint,
+        };
+        transaction::install(
+            &home.registry,
+            step,
+            &target,
+            &source,
+            owner_of,
+            prior.as_ref(),
+            displaced.as_deref(),
+        )
     }
 
     /// Resolve and admit one copy step. `source_may_follow` lets a missing
@@ -207,13 +256,25 @@ impl Plan<'_> {
     /// `create`, every check passes on the uncreated path first, then the
     /// destination's missing parents are created and every check runs again
     /// on the created one - so a refused step creates nothing.
-    fn admit(&self, step: &str, from: &str, to: &str, source_may_follow: bool, create: bool) -> Result<Admitted, DevError> {
+    fn admit(
+        &self,
+        step: &str,
+        from: &str,
+        to: &str,
+        source_may_follow: bool,
+        create: bool,
+    ) -> Result<Admitted, DevError> {
         let home = self.home(step)?;
         let source = self.project_root.join(from);
         let source_fingerprint = match tree::observe(&source) {
             Ok(Observed::Tree(fingerprint)) => Some(fingerprint),
             Ok(Observed::Absent) if source_may_follow => None,
-            Ok(Observed::Absent) => return Err(refused(step, &format!("copy.from {} does not exist", source.display()))),
+            Ok(Observed::Absent) => {
+                return Err(refused(
+                    step,
+                    &format!("copy.from {} does not exist", source.display()),
+                ));
+            }
             Ok(Observed::Foreign(path)) => {
                 return Err(refused(
                     step,
@@ -223,7 +284,12 @@ impl Plan<'_> {
                     ),
                 ));
             }
-            Err(e) => return Err(refused(step, &format!("cannot read {}: {e}", source.display()))),
+            Err(e) => {
+                return Err(refused(
+                    step,
+                    &format!("cannot read {}: {e}", source.display()),
+                ));
+            }
         };
         let source = std::fs::canonicalize(&source).unwrap_or(source);
 
@@ -237,17 +303,29 @@ impl Plan<'_> {
         if create {
             (resolved, admission) = check(true)?;
         }
-        Ok(Admitted { resolved, source, admission })
+        Ok(Admitted {
+            resolved,
+            source,
+            admission,
+        })
     }
 
     /// Whether this step may write `dest`. Ownership is settled from the
     /// registry and the destination's existence before anything is read:
     /// only this step's own install is ever fingerprinted, so a `to` that
     /// names someone else's large directory is refused without walking it.
-    fn ownership(&self, step: &str, dest: &Resolved, source: Option<&str>) -> Result<Admission, DevError> {
+    fn ownership(
+        &self,
+        step: &str,
+        dest: &Resolved,
+        source: Option<&str>,
+    ) -> Result<Admission, DevError> {
         let home = self.home(step)?;
         let record_file = home.registry.file_for(&dest.key);
-        let record = home.registry.load(&dest.key).map_err(|e| refused(step, &e.to_string()))?;
+        let record = home
+            .registry
+            .load(&dest.key)
+            .map_err(|e| refused(step, &e.to_string()))?;
         if record.as_ref().is_some_and(|r| r.pending.is_some()) {
             return Err(refused(
                 step,
@@ -260,8 +338,15 @@ impl Plan<'_> {
         }
         let owner = record.and_then(|r| r.owner);
         match std::fs::symlink_metadata(&dest.path) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Admission::Fresh { prior: owner }),
-            Err(e) => return Err(refused(step, &format!("cannot inspect {}: {e}", dest.path.display()))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Admission::Fresh { prior: owner });
+            }
+            Err(e) => {
+                return Err(refused(
+                    step,
+                    &format!("cannot inspect {}: {e}", dest.path.display()),
+                ));
+            }
             Ok(_) => {}
         }
         let owner = match owner {
@@ -305,7 +390,10 @@ impl Plan<'_> {
                     dest.path.display()
                 ),
             )),
-            Err(e) => Err(refused(step, &format!("cannot read {}: {e}", dest.path.display()))),
+            Err(e) => Err(refused(
+                step,
+                &format!("cannot read {}: {e}", dest.path.display()),
+            )),
         }
     }
 
@@ -323,23 +411,42 @@ impl Plan<'_> {
         ];
         for (what, path) in &protected {
             if path.starts_with(&dest.path) {
-                return Err(refused(step, &format!("{} contains {what} ({})", dest.path.display(), path.display())));
+                return Err(refused(
+                    step,
+                    &format!(
+                        "{} contains {what} ({})",
+                        dest.path.display(),
+                        path.display()
+                    ),
+                ));
             }
         }
         if dest.path.starts_with(&home.state_dir) {
-            return Err(refused(step, &format!("{} is inside brokkr's state directory", dest.path.display())));
+            return Err(refused(
+                step,
+                &format!("{} is inside brokkr's state directory", dest.path.display()),
+            ));
         }
         if dest.path.starts_with(source) || source.starts_with(&dest.path) {
             return Err(refused(
                 step,
-                &format!("{} overlaps its own source {}", dest.path.display(), source.display()),
+                &format!(
+                    "{} overlaps its own source {}",
+                    dest.path.display(),
+                    source.display()
+                ),
             ));
         }
-        let scan = home.registry.all().map_err(|e| refused(step, &e.to_string()))?;
+        let scan = home
+            .registry
+            .all()
+            .map_err(|e| refused(step, &e.to_string()))?;
         if let Some(broken) = scan.broken.first() {
             return Err(refused(
                 step,
-                &format!("the install registry cannot be read whole, so a conflicting claim cannot be ruled out: {broken}"),
+                &format!(
+                    "the install registry cannot be read whole, so a conflicting claim cannot be ruled out: {broken}"
+                ),
             ));
         }
         for (_, record) in scan.records {
@@ -357,16 +464,24 @@ impl Plan<'_> {
                     && match std::fs::symlink_metadata(other) {
                         Ok(_) => true,
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-                        Err(e) => return Err(refused(step, &format!("cannot inspect {}: {e}", other.display()))),
+                        Err(e) => {
+                            return Err(refused(
+                                step,
+                                &format!("cannot inspect {}: {e}", other.display()),
+                            ));
+                        }
                     });
             if held {
-                let by = record
-                    .owner
-                    .as_ref()
-                    .map_or_else(String::new, |o| format!(", installed by project {} step '{}'", o.project, o.step));
+                let by = record.owner.as_ref().map_or_else(String::new, |o| {
+                    format!(", installed by project {} step '{}'", o.project, o.step)
+                });
                 return Err(refused(
                     step,
-                    &format!("{} nests with the managed destination {}{by}", dest.path.display(), other.display()),
+                    &format!(
+                        "{} nests with the managed destination {}{by}",
+                        dest.path.display(),
+                        other.display()
+                    ),
                 ));
             }
         }
@@ -384,22 +499,34 @@ fn resolve(to: &str, home: &Path, create: bool) -> Result<Resolved, String> {
         Some(rest) => home.join(rest),
         None => PathBuf::from(to),
     };
-    let name = expanded.file_name().ok_or_else(|| format!("copy.to {to:?} names no file"))?.to_owned();
-    let lexical_parent = expanded.parent().ok_or_else(|| format!("copy.to {to:?} has no parent"))?;
+    let name = expanded
+        .file_name()
+        .ok_or_else(|| format!("copy.to {to:?} names no file"))?
+        .to_owned();
+    let lexical_parent = expanded
+        .parent()
+        .ok_or_else(|| format!("copy.to {to:?} has no parent"))?;
     let mut base = lexical_parent.to_path_buf();
     let mut missing: Vec<OsString> = Vec::new();
     loop {
         match std::fs::symlink_metadata(&base) {
             Ok(_) => break,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let component = base.file_name().ok_or_else(|| format!("{} does not exist", base.display()))?.to_owned();
+                let component = base
+                    .file_name()
+                    .ok_or_else(|| format!("{} does not exist", base.display()))?
+                    .to_owned();
                 missing.push(component);
-                base = base.parent().ok_or_else(|| format!("{} does not exist", base.display()))?.to_path_buf();
+                base = base
+                    .parent()
+                    .ok_or_else(|| format!("{} does not exist", base.display()))?
+                    .to_path_buf();
             }
             Err(e) => return Err(format!("cannot inspect {}: {e}", base.display())),
         }
     }
-    let mut parent = std::fs::canonicalize(&base).map_err(|e| format!("cannot resolve {}: {e}", base.display()))?;
+    let mut parent = std::fs::canonicalize(&base)
+        .map_err(|e| format!("cannot resolve {}: {e}", base.display()))?;
     if !parent.is_dir() {
         return Err(format!("{} is not a directory", parent.display()));
     }
@@ -407,7 +534,8 @@ fn resolve(to: &str, home: &Path, create: bool) -> Result<Resolved, String> {
         let next = parent.join(component);
         if create {
             match std::fs::create_dir(&next) {
-                Ok(()) => tree::fsync_dir(&parent).map_err(|e| format!("cannot fsync {}: {e}", parent.display()))?,
+                Ok(()) => tree::fsync_dir(&parent)
+                    .map_err(|e| format!("cannot fsync {}: {e}", parent.display()))?,
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(e) => return Err(format!("cannot create {}: {e}", next.display())),
             }
@@ -415,14 +543,25 @@ fn resolve(to: &str, home: &Path, create: bool) -> Result<Resolved, String> {
         parent = next;
     }
     if create {
-        parent = std::fs::canonicalize(&parent).map_err(|e| format!("cannot resolve {}: {e}", parent.display()))?;
+        parent = std::fs::canonicalize(&parent)
+            .map_err(|e| format!("cannot resolve {}: {e}", parent.display()))?;
     }
     let path = parent.join(&name);
     let key = path
         .to_str()
-        .ok_or_else(|| format!("{} is not UTF-8, which the install registry cannot record", path.display()))?
+        .ok_or_else(|| {
+            format!(
+                "{} is not UTF-8, which the install registry cannot record",
+                path.display()
+            )
+        })?
         .to_owned();
-    Ok(Resolved { path, key, parent, name })
+    Ok(Resolved {
+        path,
+        key,
+        parent,
+        name,
+    })
 }
 
 #[cfg(test)]
@@ -438,13 +577,18 @@ mod tests {
     }
 
     fn world(name: &str) -> World {
-        let root = std::fs::canonicalize(crate::test_scratch::scratch("install_step", name)).unwrap();
+        let root =
+            std::fs::canonicalize(crate::test_scratch::scratch("install_step", name)).unwrap();
         let project = root.join("project");
         std::fs::create_dir_all(project.join("mod")).unwrap();
         std::fs::write(project.join("mod/SKILL.md"), "v1").unwrap();
         let home = root.join("home");
         std::fs::create_dir_all(home.join("state")).unwrap();
-        World { root, project, home }
+        World {
+            root,
+            project,
+            home,
+        }
     }
 
     impl World {
@@ -458,13 +602,23 @@ mod tests {
         }
 
         fn install(&self, project: &str, steps: &[InstallStep]) -> Result<(), DevError> {
-            let s = Steps { steps, project, project_root: &self.project };
+            let s = Steps {
+                steps,
+                project,
+                project_root: &self.project,
+            };
             preflight_with(Some(s), &self.project, Some(self.home()))?.execute(None)
         }
     }
 
     fn copy(name: &str, from: &str, to: &str) -> InstallStep {
-        InstallStep { name: name.into(), action: InstallAction::Copy { from: from.into(), to: to.into() } }
+        InstallStep {
+            name: name.into(),
+            action: InstallAction::Copy {
+                from: from.into(),
+                to: to.into(),
+            },
+        }
     }
 
     fn message(result: Result<(), DevError>) -> String {
@@ -483,7 +637,10 @@ mod tests {
         let resolved = resolve("~/.claude/skills/mod", &root, false).unwrap();
         let canonical_real = std::fs::canonicalize(&real).unwrap();
         assert_eq!(resolved.path, canonical_real.join("skills/mod"));
-        assert!(!canonical_real.join("skills").exists(), "resolution alone creates nothing");
+        assert!(
+            !canonical_real.join("skills").exists(),
+            "resolution alone creates nothing"
+        );
         let created = resolve("~/.claude/skills/mod", &root, true).unwrap();
         assert_eq!(created.path, resolved.path);
         assert!(canonical_real.join("skills").is_dir());
@@ -495,20 +652,29 @@ mod tests {
         let step = [copy("mod", "mod", "~/skills/mod")];
         w.install("p", &step).unwrap();
         let dest = w.home.join("skills/mod");
-        assert_eq!(std::fs::read_to_string(dest.join("SKILL.md")).unwrap(), "v1");
+        assert_eq!(
+            std::fs::read_to_string(dest.join("SKILL.md")).unwrap(),
+            "v1"
+        );
 
         // Unchanged: nothing is staged, so no container ever appears.
         w.install("p", &step).unwrap();
 
         std::fs::write(w.project.join("mod/SKILL.md"), "v2").unwrap();
         w.install("p", &step).unwrap();
-        assert_eq!(std::fs::read_to_string(dest.join("SKILL.md")).unwrap(), "v2");
+        assert_eq!(
+            std::fs::read_to_string(dest.join("SKILL.md")).unwrap(),
+            "v2"
+        );
         assert_eq!(std::fs::read_dir(w.home.join("skills")).unwrap().count(), 1);
 
         std::fs::write(dest.join("mine.md"), "hand edit").unwrap();
         std::fs::write(w.project.join("mod/SKILL.md"), "v3").unwrap();
         assert!(message(w.install("p", &step)).contains("changed since brokkr installed it"));
-        assert_eq!(std::fs::read_to_string(dest.join("mine.md")).unwrap(), "hand edit");
+        assert_eq!(
+            std::fs::read_to_string(dest.join("mine.md")).unwrap(),
+            "hand edit"
+        );
     }
 
     #[test]
@@ -535,12 +701,18 @@ mod tests {
             assert!(msg.contains(want), "{to}: {msg}");
         };
         refuse(w.root.to_str().unwrap(), "contains your home directory");
-        refuse(w.project.join("mod/inner").to_str().unwrap(), "overlaps its own source");
+        refuse(
+            w.project.join("mod/inner").to_str().unwrap(),
+            "overlaps its own source",
+        );
         refuse("~/state/x", "inside brokkr's state directory");
 
         let two = [copy("a", "mod", "~/out/a"), copy("b", "mod", "~/out/a/b")];
         assert!(message(w.install("p", &two)).contains("overlaps the destination of step 'a'"));
-        assert!(!w.home.join("out").exists(), "a refused preflight creates no parent");
+        assert!(
+            !w.home.join("out").exists(),
+            "a refused preflight creates no parent"
+        );
 
         w.install("p", &[copy("a", "mod", "~/out/a")]).unwrap();
         refuse("~/out", "nests with the managed destination");
@@ -551,10 +723,19 @@ mod tests {
     fn a_source_a_run_step_generates_may_be_missing_at_preflight_only() {
         let w = world("generated_source");
         let steps = [
-            InstallStep { name: "gen".into(), action: InstallAction::Run { command: "mkdir -p gen && echo x > gen/f".into() } },
+            InstallStep {
+                name: "gen".into(),
+                action: InstallAction::Run {
+                    command: "mkdir -p gen && echo x > gen/f".into(),
+                },
+            },
             copy("pub", "gen", "~/gen"),
         ];
-        let s = Steps { steps: &steps, project: "p", project_root: &w.project };
+        let s = Steps {
+            steps: &steps,
+            project: "p",
+            project_root: &w.project,
+        };
         preflight_with(Some(s), &w.project, Some(w.home())).unwrap();
         let missing = [copy("pub", "gen", "~/gen")];
         assert!(message(w.install("p", &missing)).contains("does not exist"));

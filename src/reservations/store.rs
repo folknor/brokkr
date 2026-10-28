@@ -91,7 +91,11 @@ impl Resource {
     }
 
     pub(crate) fn spelled(&self) -> Spelled {
-        Spelled::recorded(self.lexical.clone(), self.resolved.clone(), self.via.clone())
+        Spelled::recorded(
+            self.lexical.clone(),
+            self.resolved.clone(),
+            self.via.clone(),
+        )
     }
 }
 
@@ -241,7 +245,12 @@ impl Store {
         // a lease is never published on an inode no scan can open.
         std::fs::rename(&pending, &lock_path)?;
         sync_dir(&self.root)?;
-        let lease = Lease { store: self.clone(), id, file: Some(file), resources };
+        let lease = Lease {
+            store: self.clone(),
+            id,
+            file: Some(file),
+            resources,
+        };
         if let Err(e) = lease.publish() {
             // Nothing the record would describe exists yet. A record that did
             // reach its name - or may have, when it cannot be inspected - stays
@@ -263,7 +272,8 @@ impl Store {
             Ok(entries) => entries,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return scan,
             Err(e) => {
-                scan.unknown.push(("*".into(), format!("the lease store cannot be read: {e}")));
+                scan.unknown
+                    .push(("*".into(), format!("the lease store cannot be read: {e}")));
                 return scan;
             }
         };
@@ -275,13 +285,16 @@ impl Store {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(e) => {
-                    scan.unknown.push(("*".into(), format!("the lease store cannot be listed: {e}")));
+                    scan.unknown
+                        .push(("*".into(), format!("the lease store cannot be listed: {e}")));
                     continue;
                 }
             };
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
-            let Some((id, ext)) = name.split_once('.') else { continue };
+            let Some((id, ext)) = name.split_once('.') else {
+                continue;
+            };
             if crate::lockfile::RunToken::parse(id).is_none() {
                 continue;
             }
@@ -302,7 +315,8 @@ impl Store {
         // A record outlives its lock only outside this protocol: unknown.
         for id in stray_records {
             if !ids.contains(&id) && !absent(&self.path(&id, RECORD_EXT)) {
-                scan.unknown.push((id, "a lease record without its lock file".into()));
+                scan.unknown
+                    .push((id, "a lease record without its lock file".into()));
             }
         }
         // A temporary record is written only while its lock is held, so one
@@ -326,7 +340,10 @@ impl Store {
             .ok()
             .and_then(|t| t.elapsed().ok())
             .is_some_and(|age| age >= PENDING_GRACE);
-        if old && let Ok(file) = open_lock(&path) && matches!(try_exclusive(&file), Ok(true)) {
+        if old
+            && let Ok(file) = open_lock(&path)
+            && matches!(try_exclusive(&file), Ok(true))
+        {
             drop(std::fs::remove_file(&path));
         }
     }
@@ -337,7 +354,8 @@ impl Store {
             Ok(file) => file,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return,
             Err(e) => {
-                scan.unknown.push((id.to_owned(), format!("its lock cannot be opened: {e}")));
+                scan.unknown
+                    .push((id.to_owned(), format!("its lock cannot be opened: {e}")));
                 return;
             }
         };
@@ -347,7 +365,8 @@ impl Store {
                     // Never published: nothing it would name was created.
                     drop(std::fs::remove_file(self.path(id, TMP_EXT)));
                     if let Err(e) = remove_synced(&lock_path, &self.root) {
-                        scan.unknown.push((id.to_owned(), format!("its lock cannot be removed: {e}")));
+                        scan.unknown
+                            .push((id.to_owned(), format!("its lock cannot be removed: {e}")));
                     }
                 }
                 Ok(Some(resources)) => {
@@ -359,7 +378,9 @@ impl Store {
                         });
                     }
                 }
-                Err(e) => scan.unknown.push((id.to_owned(), format!("its record is unreadable: {e}"))),
+                Err(e) => scan
+                    .unknown
+                    .push((id.to_owned(), format!("its record is unreadable: {e}"))),
             },
             Ok(false) => match self.read_record(id) {
                 Ok(Some(resources)) => scan.reservations.push(Reservation {
@@ -367,10 +388,16 @@ impl Store {
                     resources,
                     retained: None,
                 }),
-                Ok(None) => scan.unknown.push((id.to_owned(), "a held lease not yet recorded".into())),
-                Err(e) => scan.unknown.push((id.to_owned(), format!("its record is unreadable: {e}"))),
+                Ok(None) => scan
+                    .unknown
+                    .push((id.to_owned(), "a held lease not yet recorded".into())),
+                Err(e) => scan
+                    .unknown
+                    .push((id.to_owned(), format!("its record is unreadable: {e}"))),
             },
-            Err(e) => scan.unknown.push((id.to_owned(), format!("its lock cannot be tested: {e}"))),
+            Err(e) => scan
+                .unknown
+                .push((id.to_owned(), format!("its lock cannot be tested: {e}"))),
         }
         drop(file);
     }
@@ -384,7 +411,10 @@ impl Store {
         };
         let record: Record = serde_json::from_str(&text).map_err(io::Error::other)?;
         if record.version != RECORD_VERSION {
-            return Err(io::Error::other(format!("record version {}", record.version)));
+            return Err(io::Error::other(format!(
+                "record version {}",
+                record.version
+            )));
         }
         Ok(Some(record.resources))
     }
@@ -392,7 +422,10 @@ impl Store {
     /// Remove a free lease: its private directories, then the record, then
     /// the lock file. Any failure keeps what is left, so a later scan retries.
     fn reclaim(&self, id: &str, resources: &[Resource]) -> io::Result<()> {
-        for resource in resources.iter().filter(|r| r.disposition == Disposition::Private) {
+        for resource in resources
+            .iter()
+            .filter(|r| r.disposition == Disposition::Private)
+        {
             remove_private(resource)?;
         }
         remove_synced(&self.path(id, RECORD_EXT), &self.root)?;
@@ -447,7 +480,10 @@ impl Lease {
     }
 
     fn publish(&self) -> io::Result<()> {
-        let record = Record { version: RECORD_VERSION, resources: self.resources.clone() };
+        let record = Record {
+            version: RECORD_VERSION,
+            resources: self.resources.clone(),
+        };
         let text = serde_json::to_vec(&record).map_err(io::Error::other)?;
         let tmp = self.store.path(&self.id, TMP_EXT);
         let mut file = OpenOptions::new()
@@ -505,7 +541,10 @@ fn open_lock(path: &Path) -> io::Result<File> {
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
         .open(path)?;
     if !file.metadata()?.is_file() {
-        return Err(io::Error::other(format!("{} is not a regular file", path.display())));
+        return Err(io::Error::other(format!(
+            "{} is not a regular file",
+            path.display()
+        )));
     }
     Ok(file)
 }
@@ -518,7 +557,11 @@ fn try_exclusive(file: &File) -> io::Result<bool> {
         return Ok(true);
     }
     let e = io::Error::last_os_error();
-    if e.raw_os_error() == Some(libc::EWOULDBLOCK) { Ok(false) } else { Err(e) }
+    if e.raw_os_error() == Some(libc::EWOULDBLOCK) {
+        Ok(false)
+    } else {
+        Err(e)
+    }
 }
 
 /// Whether `path` is certainly absent: only `NotFound` says so, any other
@@ -587,7 +630,11 @@ mod tests {
     use super::*;
 
     fn private(path: &Path) -> Resource {
-        Resource::new(&Spelled::of(path, Path::new("/")).unwrap(), Access::Write, Disposition::Private)
+        Resource::new(
+            &Spelled::of(path, Path::new("/")).unwrap(),
+            Access::Write,
+            Disposition::Private,
+        )
     }
 
     #[test]
@@ -597,7 +644,11 @@ mod tests {
         let dir = root.join("out").join(".brokkr-pbfhogg-x");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("staging"), b"").unwrap();
-        let output = Resource::new(&Spelled::of(&root.join("out/o.pbf"), &root).unwrap(), Access::Write, Disposition::Reserve);
+        let output = Resource::new(
+            &Spelled::of(&root.join("out/o.pbf"), &root).unwrap(),
+            Access::Write,
+            Disposition::Reserve,
+        );
         let mut lease = store.create(vec![output, private(&dir)]).unwrap();
         let meta = std::fs::metadata(&dir).unwrap();
         lease.set_identity(1, (meta.dev(), meta.ino())).unwrap();
@@ -609,7 +660,10 @@ mod tests {
 
         lease.release().unwrap();
         assert!(!dir.exists(), "the private directory goes with the lease");
-        assert!(root.join("out").exists(), "a reserved output's directory is never removed");
+        assert!(
+            root.join("out").exists(),
+            "a reserved output's directory is never removed"
+        );
         assert_eq!(std::fs::read_dir(store.root()).unwrap().count(), 0);
     }
 
@@ -629,7 +683,10 @@ mod tests {
         drop(lease);
         let scan = store.scan();
         assert_eq!(scan.reservations.len(), 1);
-        assert!(scan.reservations[0].retained.is_some(), "identity mismatch keeps it");
+        assert!(
+            scan.reservations[0].retained.is_some(),
+            "identity mismatch keeps it"
+        );
         assert!(dir.exists());
 
         // The same death with the directory's real identity recorded: the
@@ -659,12 +716,21 @@ mod tests {
         std::fs::write(store.path(&id, RECORD_EXT), b"{garbage").unwrap();
         let scan = store.scan();
         assert_eq!(scan.unknown.len(), 1, "{scan:?}");
-        assert!(store.path(&id, LOCK_EXT).exists(), "an unreadable record keeps its lock");
+        assert!(
+            store.path(&id, LOCK_EXT).exists(),
+            "an unreadable record keeps its lock"
+        );
 
         std::fs::remove_file(store.path(&id, RECORD_EXT)).unwrap();
         let scan = store.scan();
-        assert!(scan.unknown.is_empty() && scan.reservations.is_empty(), "{scan:?}");
-        assert!(!store.path(&id, LOCK_EXT).exists(), "an unpublished lease is removed");
+        assert!(
+            scan.unknown.is_empty() && scan.reservations.is_empty(),
+            "{scan:?}"
+        );
+        assert!(
+            !store.path(&id, LOCK_EXT).exists(),
+            "an unpublished lease is removed"
+        );
     }
 
     /// A forked child that inherits the description keeps the lease held

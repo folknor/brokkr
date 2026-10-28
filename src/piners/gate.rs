@@ -225,8 +225,11 @@ impl GateVerdict {
         let dispositions = evaluate(ids, registry, report);
         let deviating: HashSet<&str> = dispositions.iter().map(|d| d.probe.as_str()).collect();
         let tainted = report.tainted();
-        let lines: BTreeMap<&str, &ProbeLine> =
-            report.probes.iter().map(|p| (p.probe.as_str(), p)).collect();
+        let lines: BTreeMap<&str, &ProbeLine> = report
+            .probes
+            .iter()
+            .map(|p| (p.probe.as_str(), p))
+            .collect();
         let mut labels = Vec::new();
         let mut assessments = BTreeMap::new();
         let mut coverage = LabelCoverage::default();
@@ -260,13 +263,7 @@ impl GateVerdict {
             if let Some(ds) = &deviations {
                 labels.extend(ds.iter().map(|d| (id.clone(), d.clone())));
             }
-            assessments.insert(
-                id.clone(),
-                LabelAssessment {
-                    pinned,
-                    deviations,
-                },
-            );
+            assessments.insert(id.clone(), LabelAssessment { pinned, deviations });
         }
         Self {
             dispositions,
@@ -668,7 +665,10 @@ mod tests {
     fn a_parity_probe_from_a_harness_predating_the_census_counts_as_unpinned() {
         let ids = ["a".to_owned(), "b".to_owned()];
         let mut reg = labelled("a", "accepted", None);
-        reg.pins.insert("b".to_owned(), labelled("b", "compile_fail", None).pins["b"].clone());
+        reg.pins.insert(
+            "b".to_owned(),
+            labelled("b", "compile_fail", None).pins["b"].clone(),
+        );
         let rep = report(
             "{\"probe\":\"a\",\"outcome\":\"parity\",\"acceptance\":{\"tier\":\"accepted\"}}\n\
              {\"probe\":\"b\",\"outcome\":\"compile_fail\",\"error\":\"x\"}",
@@ -703,7 +703,10 @@ mod tests {
     fn an_invalid_line_is_not_label_checked_and_no_disposition_is_a_gate_miss_only() {
         let ids = ["a".to_owned(), "b".to_owned()];
         let mut reg = labelled("a", "accepted", Some((0, 0)));
-        reg.pins.insert("b".to_owned(), labelled("b", "accepted", Some((0, 0))).pins["b"].clone());
+        reg.pins.insert(
+            "b".to_owned(),
+            labelled("b", "accepted", Some((0, 0))).pins["b"].clone(),
+        );
         // `a` carries a census whose counts cannot describe one population;
         // `b` emitted nothing.
         let rep = report(&census_line("a", "accepted", 11, 0, 0));

@@ -503,7 +503,9 @@ impl BenchHarness {
     /// one arm is a clean worktree from reading as if both went unstored.
     pub(crate) fn note_unneeded_force(&self, force: bool) {
         if force && self.git.is_clean {
-            console::warn("clean tree - --force has no effect, results will be stored in results.db");
+            console::warn(
+                "clean tree - --force has no effect, results will be stored in results.db",
+            );
         }
     }
 
@@ -579,8 +581,14 @@ impl BenchHarness {
     {
         invocation.require_no_env("the external wall-clock runner")?;
         let config = config_for(config, invocation);
-        let mut measurement =
-            self.measure_invocation(&config, invocation, cwd, ok_codes, WallSource::External, prepare)?;
+        let mut measurement = self.measure_invocation(
+            &config,
+            invocation,
+            cwd,
+            ok_codes,
+            WallSource::External,
+            prepare,
+        )?;
         self.record(&config, &mut measurement, |_, _| Ok(()))
     }
 
@@ -656,8 +664,14 @@ impl BenchHarness {
     ) -> Result<BenchResult, DevError> {
         invocation.require_no_env("the self-reported external runner")?;
         let config = config_for(config, invocation);
-        let mut measurement =
-            self.measure_invocation(&config, invocation, cwd, &[], WallSource::SelfReported, || Ok(()))?;
+        let mut measurement = self.measure_invocation(
+            &config,
+            invocation,
+            cwd,
+            &[],
+            WallSource::SelfReported,
+            || Ok(()),
+        )?;
         self.record(&config, &mut measurement, |_, _| Ok(()))
     }
 
@@ -708,8 +722,8 @@ fn config_for(config: &BenchConfig, invocation: &Invocation<'_>) -> BenchConfig 
 }
 
 mod argv;
-pub(crate) use argv::{Executable, ExternalTool, Invocation, ResolvedExecutable};
 pub use argv::format_cli_args;
+pub(crate) use argv::{Executable, ExternalTool, Invocation, ResolvedExecutable};
 pub(crate) mod capture;
 pub(crate) mod execution;
 pub(crate) mod kv;

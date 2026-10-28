@@ -448,9 +448,11 @@ impl Refusal {
                 detail: detail.clone(),
             }),
             Self::RustdocWithoutCarrier => Some(AttributionRefusal::RustdocWithoutCarrier),
-            Self::UnidentifiedRustdoc { package_dir } => Some(AttributionRefusal::UnidentifiedRustdoc {
-                package_dir: package_dir.clone(),
-            }),
+            Self::UnidentifiedRustdoc { package_dir } => {
+                Some(AttributionRefusal::UnidentifiedRustdoc {
+                    package_dir: package_dir.clone(),
+                })
+            }
             Self::UnknownRole { role } => Some(AttributionRefusal::UnknownRole { role: *role }),
             Self::ExecutableHashFailed { executable, detail } => {
                 Some(AttributionRefusal::ExecutableHashFailed {
@@ -511,7 +513,11 @@ fn refuse(stream: &UnixStream, refusal: &Refusal, s: &SessionState) {
 /// library may be either run or declined. Sessions without a table (every
 /// other lane) admit any rustdoc the carrier flag allows.
 fn rustdoc_declined(s: &SessionState, package_dir: String) -> Result<Option<String>, Refusal> {
-    let Some(table) = s.strict.as_ref().and_then(|plan| plan.rustdoc_admission.as_ref()) else {
+    let Some(table) = s
+        .strict
+        .as_ref()
+        .and_then(|plan| plan.rustdoc_admission.as_ref())
+    else {
         return Ok(None);
     };
     let library = (!package_dir.is_empty())
@@ -537,7 +543,9 @@ fn await_verified_build(s: &SessionState) -> Result<(), Refusal> {
     match gate.wait(GATE_PENDING_BOUND, closed) {
         None => Err(Refusal::SessionClosing),
         Some(GateState::Clean) => Ok(()),
-        Some(state) if s.strict.is_some() => Err(Refusal::UnverifiedBuild { detail: state.describe() }),
+        Some(state) if s.strict.is_some() => Err(Refusal::UnverifiedBuild {
+            detail: state.describe(),
+        }),
         Some(_) => Ok(()),
     }
 }
@@ -644,7 +652,8 @@ fn accept_one(stream: &UnixStream, s: &Arc<SessionState>) -> Result<(), Refusal>
         .map_err(|_| Refusal::StatePoisoned("harness list"))?;
     // A strict session admits nothing once a stop is requested, even after a
     // clean verdict: the run is ending and certifies nothing past this point.
-    if !s.accepting.load(Ordering::Acquire) || (s.strict.is_some() && s.context.stop.is_requested()) {
+    if !s.accepting.load(Ordering::Acquire) || (s.strict.is_some() && s.context.stop.is_requested())
+    {
         return Err(Refusal::SessionClosing);
     }
     let (reader, writer) = pipe().map_err(Refusal::SessionIo)?;
@@ -1010,8 +1019,9 @@ fn rustdoc_runs_doctests(args: &[std::ffi::OsString]) -> bool {
         let Some(path) = bytes.strip_prefix(b"@") else {
             return false;
         };
-        fs::read(std::ffi::OsStr::from_bytes(path))
-            .map_or(true, |content| content.split(|b| *b == b'\n').any(|line| line == b"--test"))
+        fs::read(std::ffi::OsStr::from_bytes(path)).map_or(true, |content| {
+            content.split(|b| *b == b'\n').any(|line| line == b"--test")
+        })
     })
 }
 
@@ -1106,8 +1116,8 @@ mod tests {
     fn session_has_distinct_socket_and_rustdoc_entrypoint() {
         let stdout = Arc::new(Mutex::new(Vec::new()));
         let context = RunContext::new(super::super::StopSignal::new(|| false), |_| {});
-        let first =
-            Session::new(Arc::clone(&stdout), None, None, None, context.clone()).expect("first session");
+        let first = Session::new(Arc::clone(&stdout), None, None, None, context.clone())
+            .expect("first session");
         let second = Session::new(stdout, None, None, None, context).expect("second session");
         assert_ne!(first.socket(), second.socket());
         assert_eq!(
@@ -1212,7 +1222,10 @@ mod tests {
 
     /// A strict carrier session holding a derived carrier's admission table:
     /// `lib` doctested, `cli` opted out, both real directories.
-    fn admission_state(name: &str, sink: ObservationSink) -> (Arc<SessionState>, std::path::PathBuf) {
+    fn admission_state(
+        name: &str,
+        sink: ObservationSink,
+    ) -> (Arc<SessionState>, std::path::PathBuf) {
         let root = crate::test_scratch::scratch("harness_shim", name);
         for pkg in ["lib", "cli"] {
             fs::create_dir_all(root.join(pkg)).expect("package dir");
@@ -1222,7 +1235,10 @@ mod tests {
             .map(|(pkg, doctested)| {
                 (
                     super::super::canonical_package_dir(&root.join(pkg)),
-                    super::super::LibraryDoctest { package: pkg.to_owned(), doctested },
+                    super::super::LibraryDoctest {
+                        package: pkg.to_owned(),
+                        doctested,
+                    },
                 )
             })
             .collect();
@@ -1242,9 +1258,22 @@ mod tests {
         let (parent, shim) = UnixStream::pair().expect("socket pair");
         send_hello(&shim, ROLE_RUSTDOC, root.join("cli").as_os_str().as_bytes()).expect("send");
         assert!(accept_one(&parent, &state).is_ok());
-        assert!(matches!(recv_verdict(&shim).expect("verdict"), Verdict::Decline));
-        let events: Vec<ObsEvent> = observed.lock().expect("sink").iter().map(|o| o.event.clone()).collect();
-        assert_eq!(events, vec![ObsEvent::DoctestDeclined { package: "cli".into() }]);
+        assert!(matches!(
+            recv_verdict(&shim).expect("verdict"),
+            Verdict::Decline
+        ));
+        let events: Vec<ObsEvent> = observed
+            .lock()
+            .expect("sink")
+            .iter()
+            .map(|o| o.event.clone())
+            .collect();
+        assert_eq!(
+            events,
+            vec![ObsEvent::DoctestDeclined {
+                package: "cli".into()
+            }]
+        );
         release(&state);
 
         let (sink, observed) = collecting_sink();
@@ -1252,18 +1281,31 @@ mod tests {
         let (parent, shim) = UnixStream::pair().expect("socket pair");
         send_hello(&shim, ROLE_RUSTDOC, root.join("lib").as_os_str().as_bytes()).expect("send");
         assert!(accept_one(&parent, &state).is_ok());
-        assert!(matches!(recv_verdict(&shim).expect("verdict"), Verdict::Accept(_)));
+        assert!(matches!(
+            recv_verdict(&shim).expect("verdict"),
+            Verdict::Accept(_)
+        ));
         assert!(observed.lock().expect("sink").is_empty());
         release(&state);
 
-        for (case, named) in [("admission-unknown", "elsewhere"), ("admission-unnamed", "")] {
+        for (case, named) in [
+            ("admission-unknown", "elsewhere"),
+            ("admission-unnamed", ""),
+        ] {
             let (sink, _) = collecting_sink();
             let (state, root) = admission_state(case, sink);
-            let dir = if named.is_empty() { Vec::new() } else { root.join(named).as_os_str().as_bytes().to_vec() };
+            let dir = if named.is_empty() {
+                Vec::new()
+            } else {
+                root.join(named).as_os_str().as_bytes().to_vec()
+            };
             let (parent, shim) = UnixStream::pair().expect("socket pair");
             send_hello(&shim, ROLE_RUSTDOC, &dir).expect("send");
             assert!(
-                matches!(accept_one(&parent, &state), Err(Refusal::UnidentifiedRustdoc { .. })),
+                matches!(
+                    accept_one(&parent, &state),
+                    Err(Refusal::UnidentifiedRustdoc { .. })
+                ),
                 "{case}"
             );
             release(&state);
@@ -1424,8 +1466,12 @@ mod tests {
             (false, GateState::Drift(vec!["x was rebuilt".into()]), true),
         ] {
             let (sink, observed) = collecting_sink();
-            let mut state = Arc::into_inner(strict_state(&[(path.as_str(), hash.as_str())], false, Some(sink)))
-                .expect("sole owner");
+            let mut state = Arc::into_inner(strict_state(
+                &[(path.as_str(), hash.as_str())],
+                false,
+                Some(sink),
+            ))
+            .expect("sole owner");
             if !strict {
                 state.strict = None;
             }
@@ -1447,7 +1493,10 @@ mod tests {
             settler.join().expect("settler");
             if admitted {
                 assert!(answer.is_ok(), "strict={strict} {verdict:?}");
-                assert!(matches!(recv_verdict(&shim).expect("verdict"), Verdict::Accept(_)));
+                assert!(matches!(
+                    recv_verdict(&shim).expect("verdict"),
+                    Verdict::Accept(_)
+                ));
                 release(&state);
             } else {
                 let Err(refusal) = answer else {
@@ -1455,10 +1504,15 @@ mod tests {
                 };
                 assert!(matches!(&refusal, Refusal::UnverifiedBuild { .. }));
                 refuse(&parent, &refusal, &state);
-                assert!(matches!(recv_verdict(&shim).expect("verdict"), Verdict::Refuse));
+                assert!(matches!(
+                    recv_verdict(&shim).expect("verdict"),
+                    Verdict::Refuse
+                ));
                 assert!(observed.lock().expect("observed").iter().any(|o| matches!(
                     &o.event,
-                    ObsEvent::AttributionRefused { refusal: AttributionRefusal::UnverifiedBuild { .. } }
+                    ObsEvent::AttributionRefused {
+                        refusal: AttributionRefusal::UnverifiedBuild { .. }
+                    }
                 )));
             }
         }

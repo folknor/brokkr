@@ -33,8 +33,7 @@ pub(super) struct HoldEffects {
     /// exclusive lease held while the capability is published.
     pub(super) drain: fn() -> Result<Option<OwnedFd>, DevError>,
     /// Activate the context's tree policy, when one is carried.
-    pub(super) tree:
-        fn(&LockContext<'_>) -> Result<Option<crate::tree_policy::HeldTree>, DevError>,
+    pub(super) tree: fn(&LockContext<'_>) -> Result<Option<crate::tree_policy::HeldTree>, DevError>,
     /// Attach this hold's minted nonce to the live guard for child stamping.
     pub(super) capability: fn(Nonce) -> Option<Nonce>,
     /// Runs once the fresh hold is registered: the stray reap and the stale

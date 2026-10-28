@@ -1,8 +1,8 @@
 //! Top-level and project command dispatch.
 
 use super::bootstrap::{
-    refuse_unmeasured_force, require_detection, run_check, run_clippy, run_deps, run_fmt,
-    run_build, run_install, run_man, run_measured, run_program, run_sync, run_wc,
+    refuse_unmeasured_force, require_detection, run_build, run_check, run_clippy, run_deps,
+    run_fmt, run_install, run_man, run_measured, run_program, run_sync, run_wc,
 };
 use crate::clean::CleanOpts;
 use crate::clean::{cargo_clean_package, cmd_clean};
@@ -47,7 +47,8 @@ pub(super) fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<()
     // land in an ignored directory.
     if let Some(root) = state_root
         && spec.config != cli::ConfigNeed::None
-        && let Err(e) = crate::clean::layout::ProjectState::new(root.as_path()).ensure_self_ignored()
+        && let Err(e) =
+            crate::clean::layout::ProjectState::new(root.as_path()).ensure_self_ignored()
     {
         crate::output::warn(&format!(
             "could not write {}/.gitignore: {e}",
@@ -298,7 +299,9 @@ fn reject_unused_pbf_flags(
         )));
     }
     if pbf.direct_io {
-        return Err(DevError::Usage(format!("{command} does not support --direct-io")));
+        return Err(DevError::Usage(format!(
+            "{command} does not support --direct-io"
+        )));
     }
     if pbf.io_uring {
         return Err(DevError::Usage(match uring_flag {

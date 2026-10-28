@@ -930,8 +930,10 @@ pub(super) fn sweep_env(
 ) -> Result<SweepEnv, DevError> {
     let target = check_cmd::resolve_sweep_target(project_root, sweep)?;
     let sweep_only = check_cmd::merged_env(&sweep.env, &[]);
-    let sweep_refs: Vec<(&str, &str)> =
-        sweep_only.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let sweep_refs: Vec<(&str, &str)> = sweep_only
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
     let (env_allows, allow_args) = rustflags::plumbing(
         project_root,
         !sweep.rustflags.is_empty(),

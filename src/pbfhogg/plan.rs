@@ -10,9 +10,7 @@ use crate::measure::runner::{CommandPlan, PlanTarget, PlannedCommand, RowSubject
 use crate::measure::{Executable, Invocation, MeasureMode, MeasureRequest};
 use crate::output;
 use crate::pbfhogg::binary::{OVERWRITE_FLAG, PbfhoggBinary, STAGING_DIR_FLAG, TMP_DIR_FLAG};
-use crate::pbfhogg::commands::{
-    ArgMode, CommandArgv, OutputKind, PbfhoggCommand, TagsFilterInput,
-};
+use crate::pbfhogg::commands::{ArgMode, CommandArgv, OutputKind, PbfhoggCommand, TagsFilterInput};
 use crate::pbfhogg::context::{
     CommandContext, CommandObservations, CommandParams, MergedCacheState, ResolvedInputs,
     SnapshotSide, TwoPbfOrigin,

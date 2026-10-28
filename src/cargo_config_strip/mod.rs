@@ -51,7 +51,10 @@ pub fn activate(dir: &Path, specs: &[StripSpec]) -> Result<Option<Installed>, De
         )));
     }
     let text = std::fs::read_to_string(&live).map_err(|e| {
-        DevError::Io(std::io::Error::new(e.kind(), format!("cannot read {file}: {e}")))
+        DevError::Io(std::io::Error::new(
+            e.kind(),
+            format!("cannot read {file}: {e}"),
+        ))
     })?;
     let scan = matching::filter_document(&text, specs, &file)?;
     for (spec, count) in specs.iter().zip(&scan.counts) {

@@ -99,7 +99,10 @@ impl Observed {
 
     /// Open an activity. `None` when the table is full.
     pub(crate) fn open(&self, parent: Option<u64>, label: &str) -> Option<u64> {
-        let mut table = self.activities.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut table = self
+            .activities
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if table.open.len() >= MAX_ACTIVITIES {
             return None;
         }
@@ -117,7 +120,10 @@ impl Observed {
     }
 
     pub(crate) fn close(&self, id: u64) {
-        let mut table = self.activities.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut table = self
+            .activities
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         table.open.retain(|a| a.id != id);
     }
 
@@ -131,7 +137,10 @@ impl Observed {
     }
 
     fn edit(&self, id: u64, f: impl FnOnce(&mut ActivityRecord)) {
-        let mut table = self.activities.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut table = self
+            .activities
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(record) = table.open.iter_mut().find(|a| a.id == id) {
             f(record);
         }
@@ -139,7 +148,10 @@ impl Observed {
 
     /// The label of `id` and of each ancestor still open, outermost first.
     pub(crate) fn label_path(&self, id: u64) -> Option<String> {
-        let table = self.activities.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let table = self
+            .activities
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut parts = Vec::new();
         let mut cursor = Some(id);
         while let Some(current) = cursor {
@@ -162,14 +174,20 @@ impl Observed {
     /// The narration no activity claimed: the latest status line written on a
     /// thread with no open activity.
     pub(crate) fn narrate_root(&self, text: &str) {
-        *self.narration.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+        *self
+            .narration
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
             Some((clip(text), Instant::now()));
     }
 
     /// Allocate a launch cohort and return the `BROKKR_EXEC` value for it.
     pub(crate) fn launch(&self, label: &str, under: Option<String>) -> String {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-        let mut launches = self.launches.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut launches = self
+            .launches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if launches.len() >= MAX_LAUNCHES {
             launches.pop_front();
         }
@@ -182,12 +200,18 @@ impl Observed {
     }
 
     pub(crate) fn launch_record(&self, seq: u64) -> Option<LaunchRecord> {
-        let launches = self.launches.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let launches = self
+            .launches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         launches.iter().find(|l| l.seq == seq).cloned()
     }
 
     pub(crate) fn note_marker(&self, name: Option<&str>) {
-        *self.marker.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+        *self
+            .marker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
             name.map(|n| (clip(n), Instant::now()));
     }
 
@@ -252,7 +276,10 @@ mod tests {
         let o = observed();
         let outer = o.open(None, "verify merge").unwrap();
         let inner = o.open(Some(outer), "osmium\tapply-changes").unwrap();
-        assert_eq!(o.label_path(inner).unwrap(), "verify merge > osmium apply-changes");
+        assert_eq!(
+            o.label_path(inner).unwrap(),
+            "verify merge > osmium apply-changes"
+        );
         o.close(inner);
         assert!(o.label_path(inner).is_none());
         assert_eq!(o.snapshot().activities.unwrap().len(), 1);
@@ -275,8 +302,14 @@ mod tests {
         for _ in 0..MAX_LAUNCHES + 5 {
             o.launch("probe", None);
         }
-        assert!(o.launch_record(1).is_none(), "the oldest records are dropped");
-        assert!(o.launch_record(u64::try_from(MAX_LAUNCHES).unwrap() + 5).is_some());
+        assert!(
+            o.launch_record(1).is_none(),
+            "the oldest records are dropped"
+        );
+        assert!(
+            o.launch_record(u64::try_from(MAX_LAUNCHES).unwrap() + 5)
+                .is_some()
+        );
     }
 
     #[test]

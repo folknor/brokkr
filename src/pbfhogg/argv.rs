@@ -93,7 +93,11 @@ impl PbfArgv {
 
     /// `flag DIR`, a directory output publication replaces whole
     /// (`build-geocode-index --output-dir`).
-    pub(crate) fn output_dir(mut self, flag: &str, path: impl AsRef<Path>) -> Result<Self, DevError> {
+    pub(crate) fn output_dir(
+        mut self,
+        flag: &str,
+        path: impl AsRef<Path>,
+    ) -> Result<Self, DevError> {
         let path = path.as_ref();
         self.args.push(flag.to_owned());
         self.args.push(crate::utf8_path::path_string(path)?);
@@ -197,7 +201,10 @@ mod tests {
             .unwrap()
             .arg("-j")
             .arg("4");
-        assert_eq!(argv.args(), ["sort", "/d/in.pbf", "-o", "/s/out.pbf", "-j", "4"]);
+        assert_eq!(
+            argv.args(),
+            ["sort", "/d/in.pbf", "-o", "/s/out.pbf", "-j", "4"]
+        );
         assert_eq!(argv.reads(), [PathBuf::from("/d/in.pbf")]);
         assert_eq!(argv.writes(), [PathBuf::from("/s/out.pbf")]);
         assert_eq!(argv.overwrite(), Overwrite::Negotiate);
@@ -209,16 +216,25 @@ mod tests {
         let argv = PbfArgv::new("extract")
             .input("/d/in.pbf")
             .unwrap()
-            .extract_config("/s/c.json", [PathBuf::from("/s/m/0.pbf"), PathBuf::from("/s/m/1.pbf")])
+            .extract_config(
+                "/s/c.json",
+                [PathBuf::from("/s/m/0.pbf"), PathBuf::from("/s/m/1.pbf")],
+            )
             .unwrap();
-        assert_eq!(argv.args(), ["extract", "/d/in.pbf", "--config", "/s/c.json"]);
+        assert_eq!(
+            argv.args(),
+            ["extract", "/d/in.pbf", "--config", "/s/c.json"]
+        );
         assert_eq!(argv.reads().len(), 2);
         assert_eq!(argv.writes().len(), 2);
     }
 
     #[test]
     fn reads_and_forced_writes_decide_the_overwrite() {
-        assert_eq!(PbfArgv::new("inspect").input("a").unwrap().overwrite(), Overwrite::NoOutput);
+        assert_eq!(
+            PbfArgv::new("inspect").input("a").unwrap().overwrite(),
+            Overwrite::NoOutput
+        );
         let geocode = PbfArgv::new("build-geocode-index")
             .output_dir("--output-dir", "/s/g")
             .unwrap()
@@ -231,7 +247,10 @@ mod tests {
     fn a_text_diff_writes_scratch_unless_quiet_or_one_job() {
         assert!(!text_diff_writes_scratch(Some(1), false));
         assert!(!text_diff_writes_scratch(None, true));
-        assert!(text_diff_writes_scratch(None, false), "automatic jobs, whatever they resolve to");
+        assert!(
+            text_diff_writes_scratch(None, false),
+            "automatic jobs, whatever they resolve to"
+        );
         assert!(text_diff_writes_scratch(Some(0), false));
         assert!(text_diff_writes_scratch(Some(8), false));
     }

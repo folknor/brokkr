@@ -36,7 +36,13 @@ pub(crate) const OSMPBF_BASELINE_MANIFEST: &str = "bench/osmpbf-baseline/Cargo.t
 /// never build pbfhogg itself.
 pub(crate) fn osmpbf_baseline(
     build_root: &crate::project::BuildRoot,
-) -> Result<(crate::measure::ResolvedExecutable, crate::measure::BuildIdentity), DevError> {
+) -> Result<
+    (
+        crate::measure::ResolvedExecutable,
+        crate::measure::BuildIdentity,
+    ),
+    DevError,
+> {
     let manifest = build_root.as_path().join(OSMPBF_BASELINE_MANIFEST);
     let manifest_str = manifest.display().to_string();
     let captured = crate::build::run_cargo_for_root(
@@ -69,7 +75,10 @@ pub(crate) fn osmpbf_baseline(
             &artifact.unit_profile,
         ),
     };
-    Ok((crate::measure::ResolvedExecutable::new(artifact.path), identity))
+    Ok((
+        crate::measure::ResolvedExecutable::new(artifact.path),
+        identity,
+    ))
 }
 
 impl PlanetilerTools {

@@ -223,7 +223,10 @@ fn migrate_from(conn: &rusqlite::Connection, current: i64) -> Result<(), DevErro
     if current < 14 && has_table(conn, "disposition")? {
         for col in ["expected_labels", "label_gate"] {
             if !has_column(conn, "disposition", col)? {
-                conn.execute(&format!("ALTER TABLE disposition ADD COLUMN {col} TEXT"), [])?;
+                conn.execute(
+                    &format!("ALTER TABLE disposition ADD COLUMN {col} TEXT"),
+                    [],
+                )?;
             }
         }
     }
@@ -241,7 +244,10 @@ fn drop_retired_projections(conn: &rusqlite::Connection, current: i64) -> Result
         && has_table(conn, "disposition")?
         && has_column(conn, "disposition", "dynamic_builtin_calls")?
     {
-        conn.execute("ALTER TABLE disposition DROP COLUMN dynamic_builtin_calls", [])?;
+        conn.execute(
+            "ALTER TABLE disposition DROP COLUMN dynamic_builtin_calls",
+            [],
+        )?;
     }
     Ok(())
 }
@@ -904,7 +910,14 @@ mod tests {
         run_migrations(&conn).unwrap();
 
         assert!(!has_table(&conn, "trade_diff_v13").unwrap());
-        type Row = (i64, Option<i64>, Option<f64>, Option<String>, Option<String>, String);
+        type Row = (
+            i64,
+            Option<i64>,
+            Option<f64>,
+            Option<String>,
+            Option<String>,
+            String,
+        );
         let rows: Vec<Row> = conn
             .prepare(
                 "SELECT our_index, entry_ts_delta, our_exit_price, our_entry_id, breaches, \
@@ -912,7 +925,14 @@ mod tests {
             )
             .unwrap()
             .query_map([], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
             })
             .unwrap()
             .collect::<Result<_, _>>()
@@ -920,7 +940,14 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                (1, Some(-900), Some(1582.0), Some(String::new()), None, "reconstructed".to_owned()),
+                (
+                    1,
+                    Some(-900),
+                    Some(1582.0),
+                    Some(String::new()),
+                    None,
+                    "reconstructed".to_owned()
+                ),
                 (2, None, Some(10.0), None, None, "reconstructed".to_owned()),
             ]
         );

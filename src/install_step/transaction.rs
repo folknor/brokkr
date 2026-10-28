@@ -41,7 +41,8 @@ pub(super) struct Target<'a> {
 }
 
 fn cstr(bytes: &[u8]) -> std::io::Result<CString> {
-    CString::new(bytes).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "nul in path"))
+    CString::new(bytes)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "nul in path"))
 }
 
 fn open_dir(path: &Path) -> std::io::Result<std::fs::File> {
@@ -61,7 +62,11 @@ fn mkdirat(parent: &std::fs::File, name: &str) -> std::io::Result<()> {
     let name = cstr(name.as_bytes())?;
     // SAFETY: a valid directory descriptor and a NUL-terminated name.
     let rc = unsafe { libc::mkdirat(fd(parent), name.as_ptr(), 0o700) };
-    if rc == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 fn renameat2(
@@ -74,8 +79,13 @@ fn renameat2(
     let from = cstr(from.as_bytes())?;
     let to = cstr(to.as_bytes())?;
     // SAFETY: valid directory descriptors and NUL-terminated names.
-    let rc = unsafe { libc::renameat2(fd(from_dir), from.as_ptr(), fd(to_dir), to.as_ptr(), flags) };
-    if rc == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+    let rc =
+        unsafe { libc::renameat2(fd(from_dir), from.as_ptr(), fd(to_dir), to.as_ptr(), flags) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 fn random_name() -> std::io::Result<String> {
@@ -85,11 +95,17 @@ fn random_name() -> std::io::Result<String> {
     if usize::try_from(got).ok() != Some(bytes.len()) {
         return Err(std::io::Error::last_os_error());
     }
-    Ok(format!("{CONTAINER_PREFIX}{:032x}", u128::from_le_bytes(bytes)))
+    Ok(format!(
+        "{CONTAINER_PREFIX}{:032x}",
+        u128::from_le_bytes(bytes)
+    ))
 }
 
 fn dir_id(meta: &std::fs::Metadata) -> DirId {
-    DirId { dev: meta.dev(), ino: meta.ino() }
+    DirId {
+        dev: meta.dev(),
+        ino: meta.ino(),
+    }
 }
 
 fn failed(step: &str, msg: &str) -> DevError {
@@ -116,7 +132,10 @@ fn inspect(path: &Path, id: DirId) -> std::io::Result<Container> {
         Err(e) => return Err(e),
     };
     if !meta.is_dir() || dir_id(&meta) != id {
-        return Ok(Container::Foreign(format!("{} is not the container brokkr created", path.display())));
+        return Ok(Container::Foreign(format!(
+            "{} is not the container brokkr created",
+            path.display()
+        )));
     }
     for entry in std::fs::read_dir(path)? {
         let name = entry?.file_name();
@@ -146,7 +165,11 @@ pub(super) fn install(
 ) -> Result<(), DevError> {
     let parent = open_dir(target.parent).map_err(|e| io(step, "cannot open", target.parent, &e))?;
     let mut record = Record::new(target.key, prior.cloned());
-    let store = |record: &Record| registry.store(record).map_err(|e| failed(step, &e.to_string()));
+    let store = |record: &Record| {
+        registry
+            .store(record)
+            .map_err(|e| failed(step, &e.to_string()))
+    };
     let (container, id) = allocate(&store, &mut record, step, target, &parent, prior)?;
     let container_path = target.parent.join(&container);
 
@@ -158,28 +181,25 @@ pub(super) fn install(
         if !same_dir(&parent, target.parent) {
             return failed(
                 step,
-                &format!("{err}; {} was replaced, so the staging directory is left for recovery", target.parent.display()),
+                &format!(
+                    "{err}; {} was replaced, so the staging directory is left for recovery",
+                    target.parent.display()
+                ),
             );
         }
         match finish_cleanup(registry, record, &container_path, id, prior.cloned(), false) {
             Ok(()) => err,
-            Err(cleanup) => failed(step, &format!("{err}; and the staging directory was not removed: {cleanup}")),
+            Err(cleanup) => failed(
+                step,
+                &format!("{err}; and the staging directory was not removed: {cleanup}"),
+            ),
         }
     };
 
     // Prepare.
     let payload = container_path.join(PAYLOAD);
-    if let Err(e) = tree::stage(source, &payload) {
-        return Err(abort(&mut record, failed(step, &e.to_string())));
-    }
-    if let Err(e) = tree::fsync_dir(&container_path) {
-        return Err(abort(&mut record, io(step, "cannot fsync", &container_path, &e)));
-    }
-    let staged = match tree::observe(&payload) {
-        Ok(Observed::Tree(fingerprint)) => owner_of(fingerprint),
-        Ok(other) => return Err(abort(&mut record, failed(step, &format!("the staged copy is not a tree: {other:?}")))),
-        Err(e) => return Err(abort(&mut record, io(step, "cannot fingerprint", &payload, &e))),
-    };
+    let staged = stage_payload(step, source, &container_path, &payload, owner_of)
+        .map_err(|err| abort(&mut record, err))?;
     record.pending = Some(Pending::Prepared {
         container: container.clone(),
         id,
@@ -192,54 +212,138 @@ pub(super) fn install(
     // Publish. The destination is checked again first; the exchange itself
     // cannot be made conditional on it, which is why the displaced object is
     // verified before anything deletes it.
-    if !same_dir(&parent, target.parent) {
-        return Err(abort(&mut record, failed(step, "the destination's parent was replaced")));
-    }
     let expected = Observed::expected(displaced);
-    match tree::observe(target.path) {
-        Ok(live) if live == expected => {}
-        Ok(_) => {
-            return Err(abort(&mut record, failed(step, &format!("{} changed while the payload was staged", target.path.display()))));
-        }
-        Err(e) => return Err(abort(&mut record, io(step, "cannot fingerprint", target.path, &e))),
-    }
+    recheck_destination(step, target, &parent, &expected).map_err(|err| abort(&mut record, err))?;
     let container_dir = match open_dir(&container_path) {
         Ok(dir) if dir.metadata().is_ok_and(|m| dir_id(&m) == id) => dir,
-        Ok(_) => return Err(failed(step, &format!("{} was replaced while staging", container_path.display()))),
-        Err(e) => return Err(abort(&mut record, io(step, "cannot open", &container_path, &e))),
+        Ok(_) => {
+            return Err(failed(
+                step,
+                &format!("{} was replaced while staging", container_path.display()),
+            ));
+        }
+        Err(e) => {
+            return Err(abort(
+                &mut record,
+                io(step, "cannot open", &container_path, &e),
+            ));
+        }
     };
-    let flags = if displaced.is_some() { libc::RENAME_EXCHANGE } else { libc::RENAME_NOREPLACE };
+    let flags = if displaced.is_some() {
+        libc::RENAME_EXCHANGE
+    } else {
+        libc::RENAME_NOREPLACE
+    };
     if let Err(e) = renameat2(&container_dir, PAYLOAD, &parent, target.name, flags) {
-        return Err(abort(&mut record, io(step, "cannot publish at", target.path, &e)));
+        return Err(abort(
+            &mut record,
+            io(step, "cannot publish at", target.path, &e),
+        ));
     }
     // From here on the destination may hold the new payload; a failure leaves
     // the prepared record for recovery rather than guessing.
-    container_dir.sync_all().map_err(|e| io(step, "cannot fsync", &container_path, &e))?;
-    parent.sync_all().map_err(|e| io(step, "cannot fsync", target.parent, &e))?;
+    container_dir
+        .sync_all()
+        .map_err(|e| io(step, "cannot fsync", &container_path, &e))?;
+    parent
+        .sync_all()
+        .map_err(|e| io(step, "cannot fsync", target.parent, &e))?;
     if !same_dir(&parent, target.parent) {
         return Err(failed(
             step,
-            &format!("{} was replaced during publication; the install is left for recovery", target.parent.display()),
-        ));
-    }
-
-    let displaced_now = tree::observe(&payload).map_err(|e| io(step, "cannot fingerprint", &payload, &e))?;
-    if displaced_now != expected {
-        return Err(failed(
-            step,
             &format!(
-                "the object displaced from {} is not the one brokkr installed - something changed it \
-                 during the install. It is preserved at {}; inspect it, then remove {}, that directory \
-                 and the record {} to install afresh",
-                target.path.display(),
-                payload.display(),
-                target.path.display(),
-                registry.file_for(target.key).display()
+                "{} was replaced during publication; the install is left for recovery",
+                target.parent.display()
             ),
         ));
     }
-    finish_cleanup(registry, &mut record, &container_path, id, Some(staged), true)
-        .map_err(|e| failed(step, &format!("published, but cleanup failed: {e}")))
+
+    verify_displaced(registry, step, target, &payload, &expected)?;
+    finish_cleanup(
+        registry,
+        &mut record,
+        &container_path,
+        id,
+        Some(staged),
+        true,
+    )
+    .map_err(|e| failed(step, &format!("published, but cleanup failed: {e}")))
+}
+
+/// Copy `source` into the container as `payload`, make it durable and
+/// fingerprint it. Neither updates the record nor cleans up on failure; the
+/// caller aborts.
+fn stage_payload(
+    step: &str,
+    source: &Path,
+    container_path: &Path,
+    payload: &Path,
+    owner_of: impl Fn(String) -> Owner,
+) -> Result<Owner, DevError> {
+    tree::stage(source, payload).map_err(|e| failed(step, &e.to_string()))?;
+    tree::fsync_dir(container_path).map_err(|e| io(step, "cannot fsync", container_path, &e))?;
+    match tree::observe(payload) {
+        Ok(Observed::Tree(fingerprint)) => Ok(owner_of(fingerprint)),
+        Ok(other) => Err(failed(
+            step,
+            &format!("the staged copy is not a tree: {other:?}"),
+        )),
+        Err(e) => Err(io(step, "cannot fingerprint", payload, &e)),
+    }
+}
+
+/// Before publication, confirm the parent is still the directory the
+/// container was made in and the destination is still what admission saw.
+/// The caller aborts on failure.
+fn recheck_destination(
+    step: &str,
+    target: &Target<'_>,
+    parent: &std::fs::File,
+    expected: &Observed,
+) -> Result<(), DevError> {
+    if !same_dir(parent, target.parent) {
+        return Err(failed(step, "the destination's parent was replaced"));
+    }
+    match tree::observe(target.path) {
+        Ok(live) if live == *expected => Ok(()),
+        Ok(_) => Err(failed(
+            step,
+            &format!(
+                "{} changed while the payload was staged",
+                target.path.display()
+            ),
+        )),
+        Err(e) => Err(io(step, "cannot fingerprint", target.path, &e)),
+    }
+}
+
+/// After publication, confirm the object the exchange moved into the
+/// container is the one admission expected. A mismatch is never aborted:
+/// the displaced object is preserved for the operator to inspect.
+fn verify_displaced(
+    registry: &Registry,
+    step: &str,
+    target: &Target<'_>,
+    payload: &Path,
+    expected: &Observed,
+) -> Result<(), DevError> {
+    let displaced_now =
+        tree::observe(payload).map_err(|e| io(step, "cannot fingerprint", payload, &e))?;
+    if displaced_now == *expected {
+        return Ok(());
+    }
+    Err(failed(
+        step,
+        &format!(
+            "the object displaced from {} is not the one brokkr installed - something changed it \
+             during the install. It is preserved at {}; inspect it, then remove {}, that directory \
+             and the record {} to install afresh",
+            target.path.display(),
+            payload.display(),
+            target.path.display(),
+            registry.file_for(target.key).display()
+        ),
+    ))
 }
 
 /// Create the private container: the intent is durable before the directory
@@ -254,12 +358,17 @@ fn allocate(
     parent: &std::fs::File,
     prior: Option<&Owner>,
 ) -> Result<(String, DirId), DevError> {
-    let parent_meta = parent.metadata().map_err(|e| io(step, "cannot inspect", target.parent, &e))?;
+    let parent_meta = parent
+        .metadata()
+        .map_err(|e| io(step, "cannot inspect", target.parent, &e))?;
     record.parent = Some(dir_id(&parent_meta));
     let mut container = None;
     for _ in 0..4 {
         let name = random_name().map_err(|e| failed(step, &format!("no random bytes: {e}")))?;
-        record.pending = Some(Pending::Allocated { container: name.clone(), prior: prior.cloned() });
+        record.pending = Some(Pending::Allocated {
+            container: name.clone(),
+            prior: prior.cloned(),
+        });
         store(record)?;
         match mkdirat(parent, &name) {
             Ok(()) => {
@@ -271,7 +380,12 @@ fn allocate(
                 store(record)?;
                 record.parent = Some(dir_id(&parent_meta));
                 if e.kind() != std::io::ErrorKind::AlreadyExists {
-                    return Err(io(step, "cannot create a staging directory in", target.parent, &e));
+                    return Err(io(
+                        step,
+                        "cannot create a staging directory in",
+                        target.parent,
+                        &e,
+                    ));
                 }
             }
         }
@@ -280,13 +394,26 @@ fn allocate(
         return Err(failed(step, "four random staging names were all taken"));
     };
     let container_path = target.parent.join(&container);
-    parent.sync_all().map_err(|e| io(step, "cannot fsync", target.parent, &e))?;
+    parent
+        .sync_all()
+        .map_err(|e| io(step, "cannot fsync", target.parent, &e))?;
     if !same_dir(parent, target.parent) {
-        return Err(failed(step, &format!("{} was replaced during the install", target.parent.display())));
+        return Err(failed(
+            step,
+            &format!(
+                "{} was replaced during the install",
+                target.parent.display()
+            ),
+        ));
     }
-    let meta = std::fs::symlink_metadata(&container_path).map_err(|e| io(step, "cannot inspect", &container_path, &e))?;
+    let meta = std::fs::symlink_metadata(&container_path)
+        .map_err(|e| io(step, "cannot inspect", &container_path, &e))?;
     let id = dir_id(&meta);
-    record.pending = Some(Pending::Preparing { container: container.clone(), id, prior: prior.cloned() });
+    record.pending = Some(Pending::Preparing {
+        container: container.clone(),
+        id,
+        prior: prior.cloned(),
+    });
     store(record)?;
     Ok((container, id))
 }
@@ -319,9 +446,21 @@ fn finish_cleanup(
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let phase = match (retiring, owner.clone()) {
-        (true, Some(owner)) => Pending::Retiring { container, id, owner },
-        (true, None) => return Err(DevError::Internal("a retiring install has no owner to commit".into())),
-        (false, prior) => Pending::Aborting { container, id, prior },
+        (true, Some(owner)) => Pending::Retiring {
+            container,
+            id,
+            owner,
+        },
+        (true, None) => {
+            return Err(DevError::Internal(
+                "a retiring install has no owner to commit".into(),
+            ));
+        }
+        (false, prior) => Pending::Aborting {
+            container,
+            id,
+            prior,
+        },
     };
     let state = inspect(container_path, id).map_err(DevError::Io)?;
     if let Container::Foreign(why) = state {
@@ -354,7 +493,9 @@ fn finish_cleanup(
 pub(super) fn recover_all(registry: &Registry) -> Result<(), DevError> {
     let scan = registry.all()?;
     for broken in &scan.broken {
-        output::warn(&format!("{broken}; copy steps refuse until it is repaired or removed"));
+        output::warn(&format!(
+            "{broken}; copy steps refuse until it is repaired or removed"
+        ));
     }
     for (file, mut record) in scan.records {
         if record.pending.is_none() {
@@ -372,9 +513,14 @@ pub(super) fn recover_all(registry: &Registry) -> Result<(), DevError> {
 }
 
 fn recover(registry: &Registry, record: &mut Record) -> Result<(), String> {
-    let Some(pending) = record.pending.clone() else { return Ok(()) };
+    let Some(pending) = record.pending.clone() else {
+        return Ok(());
+    };
     let destination = PathBuf::from(&record.destination);
-    let parent = destination.parent().ok_or("the destination has no parent")?.to_path_buf();
+    let parent = destination
+        .parent()
+        .ok_or("the destination has no parent")?
+        .to_path_buf();
     let container_path = parent.join(pending.container());
     // Every absence below means "gone" only while the parent path still
     // names the directory the transaction ran in; a container missing from
@@ -387,7 +533,8 @@ fn recover(registry: &Registry, record: &mut Record) -> Result<(), String> {
         ));
     }
     let finish = |record: &mut Record, id, owner, retiring| {
-        finish_cleanup(registry, record, &container_path, id, owner, retiring).map_err(|e| e.to_string())
+        finish_cleanup(registry, record, &container_path, id, owner, retiring)
+            .map_err(|e| e.to_string())
     };
     match pending {
         Pending::Allocated { prior, .. } => {
@@ -397,13 +544,16 @@ fn recover(registry: &Registry, record: &mut Record) -> Result<(), String> {
             match std::fs::remove_dir(&container_path) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => output::warn(&format!(
-                    "left {} in place: it is not empty, so brokkr did not create it as it stands",
-                    container_path.display()
-                )),
+                Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+                    output::warn(&format!(
+                        "left {} in place: it is not empty, so brokkr did not create it as it stands",
+                        container_path.display()
+                    ));
+                }
                 Err(e) => return Err(format!("cannot remove {}: {e}", container_path.display())),
             }
-            tree::fsync_dir(&parent).map_err(|e| format!("cannot fsync {}: {e}", parent.display()))?;
+            tree::fsync_dir(&parent)
+                .map_err(|e| format!("cannot fsync {}: {e}", parent.display()))?;
             record.settle(prior);
             registry.store(record).map_err(|e| e.to_string())
         }
@@ -414,7 +564,13 @@ fn recover(registry: &Registry, record: &mut Record) -> Result<(), String> {
         Pending::Preparing { id, prior, .. } => finish(record, id, prior, false),
         Pending::Aborting { id, prior, .. } => finish(record, id, prior, false),
         Pending::Retiring { id, owner, .. } => finish(record, id, Some(owner), true),
-        Pending::Prepared { id, prior, staged, displaced, .. } => {
+        Pending::Prepared {
+            id,
+            prior,
+            staged,
+            displaced,
+            ..
+        } => {
             // Both outcomes need their full evidence: the container with the
             // object the other side of the rename left in it. The namespace
             // just observed is made durable before a cleanup phase acts on it.
@@ -422,13 +578,19 @@ fn recover(registry: &Registry, record: &mut Record) -> Result<(), String> {
                 Container::Ours => {}
                 Container::Foreign(why) => return Err(why),
                 Container::Absent => {
-                    return Err(format!("{} is gone, so neither outcome can be proven", container_path.display()));
+                    return Err(format!(
+                        "{} is gone, so neither outcome can be proven",
+                        container_path.display()
+                    ));
                 }
             }
-            tree::fsync_dir(&parent).map_err(|e| format!("cannot fsync {}: {e}", parent.display()))?;
-            tree::fsync_dir(&container_path).map_err(|e| format!("cannot fsync {}: {e}", container_path.display()))?;
+            tree::fsync_dir(&parent)
+                .map_err(|e| format!("cannot fsync {}: {e}", parent.display()))?;
+            tree::fsync_dir(&container_path)
+                .map_err(|e| format!("cannot fsync {}: {e}", container_path.display()))?;
             let live = tree::observe(&destination).map_err(|e| e.to_string())?;
-            let in_container = tree::observe(&container_path.join(PAYLOAD)).map_err(|e| e.to_string())?;
+            let in_container =
+                tree::observe(&container_path.join(PAYLOAD)).map_err(|e| e.to_string())?;
             let new = Observed::Tree(staged.fingerprint.clone());
             let old = Observed::expected(displaced.as_deref());
             if live == new && in_container == old {
@@ -468,16 +630,39 @@ mod tests {
         std::fs::create_dir_all(&parent).unwrap();
         let dest = parent.join("mod");
         let key = dest.to_str().unwrap().to_owned();
-        Fixture { registry: Registry::at(root.join("state/install")), source, parent, dest, key }
+        Fixture {
+            registry: Registry::at(root.join("state/install")),
+            source,
+            parent,
+            dest,
+            key,
+        }
     }
 
     fn owner(fingerprint: String) -> Owner {
-        Owner { project: "p".into(), step: "s".into(), fingerprint }
+        Owner {
+            project: "p".into(),
+            step: "s".into(),
+            fingerprint,
+        }
     }
 
     fn run(f: &Fixture, prior: Option<&Owner>, displaced: Option<&str>) -> Result<(), DevError> {
-        let target = Target { path: &f.dest, key: &f.key, parent: &f.parent, name: f.dest.file_name().unwrap() };
-        install(&f.registry, "s", &target, &f.source, owner, prior, displaced)
+        let target = Target {
+            path: &f.dest,
+            key: &f.key,
+            parent: &f.parent,
+            name: f.dest.file_name().unwrap(),
+        };
+        install(
+            &f.registry,
+            "s",
+            &target,
+            &f.source,
+            owner,
+            prior,
+            displaced,
+        )
     }
 
     fn fingerprint(path: &Path) -> String {
@@ -488,14 +673,20 @@ mod tests {
     }
 
     fn siblings(f: &Fixture) -> Vec<String> {
-        std::fs::read_dir(&f.parent).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect()
+        std::fs::read_dir(&f.parent)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect()
     }
 
     #[test]
     fn a_fresh_install_then_a_replacement_leave_only_the_destination() {
         let f = fixture("fresh_then_replace");
         run(&f, None, None).unwrap();
-        assert_eq!(std::fs::read_to_string(f.dest.join("SKILL.md")).unwrap(), "v1");
+        assert_eq!(
+            std::fs::read_to_string(f.dest.join("SKILL.md")).unwrap(),
+            "v1"
+        );
         let first = f.registry.load(&f.key).unwrap().unwrap();
         assert_eq!(first.pending, None);
         let p = first.owner.clone().unwrap();
@@ -505,8 +696,14 @@ mod tests {
         std::fs::remove_file(f.source.join("SKILL.md")).unwrap();
         std::fs::write(f.source.join("NEW.md"), "v2").unwrap();
         run(&f, Some(&p), Some(&p.fingerprint)).unwrap();
-        assert!(!f.dest.join("SKILL.md").exists(), "a file removed from the source is gone");
-        assert_eq!(std::fs::read_to_string(f.dest.join("NEW.md")).unwrap(), "v2");
+        assert!(
+            !f.dest.join("SKILL.md").exists(),
+            "a file removed from the source is gone"
+        );
+        assert_eq!(
+            std::fs::read_to_string(f.dest.join("NEW.md")).unwrap(),
+            "v2"
+        );
         assert_eq!(siblings(&f), vec!["mod".to_owned()]);
         let second = f.registry.load(&f.key).unwrap().unwrap();
         assert_eq!(second.owner.unwrap().fingerprint, fingerprint(&f.dest));
@@ -519,8 +716,15 @@ mod tests {
         let p = f.registry.load(&f.key).unwrap().unwrap().owner.unwrap();
         std::fs::write(f.dest.join("mine.txt"), "user edit").unwrap();
         assert!(run(&f, Some(&p), Some(&p.fingerprint)).is_err());
-        assert_eq!(std::fs::read_to_string(f.dest.join("mine.txt")).unwrap(), "user edit");
-        assert_eq!(siblings(&f), vec!["mod".to_owned()], "the aborted container is cleaned up");
+        assert_eq!(
+            std::fs::read_to_string(f.dest.join("mine.txt")).unwrap(),
+            "user edit"
+        );
+        assert_eq!(
+            siblings(&f),
+            vec!["mod".to_owned()],
+            "the aborted container is cleaned up"
+        );
         let record = f.registry.load(&f.key).unwrap().unwrap();
         assert_eq!(record.owner, Some(p), "the prior owner is restored");
         assert_eq!(record.pending, None);
@@ -544,13 +748,17 @@ mod tests {
         tree::remove_tree(&old).unwrap();
         std::fs::rename(&staged_tmp, &old).unwrap();
         let id = dir_id(&std::fs::symlink_metadata(&container).unwrap());
-        journal(&f, Some(p.clone()), Pending::Prepared {
-            container: format!("{CONTAINER_PREFIX}feed"),
-            id,
-            prior: Some(p.clone()),
-            staged: owner(s.clone()),
-            displaced: Some(p.fingerprint.clone()),
-        });
+        journal(
+            &f,
+            Some(p.clone()),
+            Pending::Prepared {
+                container: format!("{CONTAINER_PREFIX}feed"),
+                id,
+                prior: Some(p.clone()),
+                staged: owner(s.clone()),
+                displaced: Some(p.fingerprint.clone()),
+            },
+        );
 
         recover_all(&f.registry).unwrap();
         let done = f.registry.load(&f.key).unwrap().unwrap();
@@ -565,11 +773,15 @@ mod tests {
         let container = f.parent.join(format!("{CONTAINER_PREFIX}beef"));
         std::fs::create_dir(&container).unwrap();
         std::fs::write(container.join("notes.txt"), "keep").unwrap();
-        journal(&f, None, Pending::Retiring {
-            container: format!("{CONTAINER_PREFIX}beef"),
-            id: DirId { dev: 0, ino: 0 },
-            owner: owner("00".into()),
-        });
+        journal(
+            &f,
+            None,
+            Pending::Retiring {
+                container: format!("{CONTAINER_PREFIX}beef"),
+                id: DirId { dev: 0, ino: 0 },
+                owner: owner("00".into()),
+            },
+        );
         recover_all(&f.registry).unwrap();
         assert!(container.join("notes.txt").exists());
         assert!(f.registry.load(&f.key).unwrap().unwrap().pending.is_some());
@@ -581,9 +793,19 @@ mod tests {
         let container = f.parent.join(format!("{CONTAINER_PREFIX}cafe"));
         std::fs::create_dir(&container).unwrap();
         std::fs::write(container.join("x"), "").unwrap();
-        journal(&f, None, Pending::Allocated { container: format!("{CONTAINER_PREFIX}cafe"), prior: None });
+        journal(
+            &f,
+            None,
+            Pending::Allocated {
+                container: format!("{CONTAINER_PREFIX}cafe"),
+                prior: None,
+            },
+        );
         recover_all(&f.registry).unwrap();
-        assert!(container.join("x").exists(), "a non-empty directory is left alone");
+        assert!(
+            container.join("x").exists(),
+            "a non-empty directory is left alone"
+        );
         assert_eq!(f.registry.load(&f.key).unwrap(), None);
     }
 
@@ -593,7 +815,15 @@ mod tests {
         let container = f.parent.join(format!("{CONTAINER_PREFIX}d00d"));
         std::fs::create_dir(&container).unwrap();
         let id = dir_id(&std::fs::symlink_metadata(&container).unwrap());
-        journal(&f, None, Pending::Preparing { container: format!("{CONTAINER_PREFIX}d00d"), id, prior: None });
+        journal(
+            &f,
+            None,
+            Pending::Preparing {
+                container: format!("{CONTAINER_PREFIX}d00d"),
+                id,
+                prior: None,
+            },
+        );
         // The parent moves away and a new one takes its path: the container
         // is missing from the path, not gone.
         let moved = f.parent.with_file_name("skills.old");

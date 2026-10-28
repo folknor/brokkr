@@ -385,7 +385,8 @@ mod clippy_sweep_tests {
         let entries = vec![entry("core", &[("CODEGEN", "1")])];
         let features = vec!["ffi".to_owned()];
         let check = decide_active_sweeps(&entries, None, None, &features, true).unwrap();
-        let clippy = build_clippy_sweep(&entries, &[], &[], false, &features, true, None, &[]).unwrap();
+        let clippy =
+            build_clippy_sweep(&entries, &[], &[], false, &features, true, None, &[]).unwrap();
         assert_eq!(
             check[0].features.configured_key(),
             clippy.features.configured_key()
@@ -446,8 +447,8 @@ mod clippy_sweep_tests {
     #[test]
     fn sweep_unknown_name_errors() {
         let entries = [entry("known", &[])];
-        let err =
-            build_clippy_sweep(&entries, &[], &[], false, &[], false, Some("missing"), &[]).unwrap_err();
+        let err = build_clippy_sweep(&entries, &[], &[], false, &[], false, Some("missing"), &[])
+            .unwrap_err();
         assert!(err.to_string().contains("missing"), "got: {err}");
     }
 
@@ -457,7 +458,8 @@ mod clippy_sweep_tests {
         e.features = vec!["ffi".into()];
         e.packages = vec!["nautilus-model".into()];
         let entries = [e];
-        let s = build_clippy_sweep(&entries, &[], &[], false, &[], false, Some("ffi"), &[]).unwrap();
+        let s =
+            build_clippy_sweep(&entries, &[], &[], false, &[], false, Some("ffi"), &[]).unwrap();
         assert_eq!(s.features.configured_key(), vec!["--features", "ffi"]);
         // A replayed entry's features are the entry's: projected like any
         // gate sweep's (an identity here, over the entry's own selection).
@@ -479,7 +481,8 @@ mod clippy_sweep_tests {
         // A probe that did not name it compiles none of its shape.
         let adhoc = build_clippy_sweep(&[], &lint, &[], false, &[], false, None, &[]).unwrap();
         assert!(adhoc.env.is_empty() && adhoc.target.is_none());
-        let err = build_clippy_sweep(&[], &lint, &[], false, &[], false, Some("x"), &[]).unwrap_err();
+        let err =
+            build_clippy_sweep(&[], &lint, &[], false, &[], false, Some("x"), &[]).unwrap_err();
         assert!(err.to_string().contains("[[lint_sweep]]"), "{err}");
     }
 
@@ -487,7 +490,8 @@ mod clippy_sweep_tests {
     fn sweep_env_override_wins_over_entry() {
         let entries = [entry("ffi", &[("HP", "1")])];
         let ov = overrides(&[("HP", "0")]);
-        let s = build_clippy_sweep(&entries, &[], &[], false, &[], false, Some("ffi"), &ov).unwrap();
+        let s =
+            build_clippy_sweep(&entries, &[], &[], false, &[], false, Some("ffi"), &ov).unwrap();
         assert_eq!(s.env.get("HP").map(String::as_str), Some("0"));
     }
 }

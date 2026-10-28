@@ -21,7 +21,11 @@ use crate::reservations::PRIVATE_DIR_PLACEHOLDER;
 // ---------------------------------------------------------------------------
 
 /// [`decide`] for `--overwrite`.
-fn decide_overwrite(help: Option<i32>, control: Option<i32>, probed: Option<i32>) -> Result<bool, String> {
+fn decide_overwrite(
+    help: Option<i32>,
+    control: Option<i32>,
+    probed: Option<i32>,
+) -> Result<bool, String> {
     decide(help, control, probed, OVERWRITE_FLAG)
 }
 
@@ -86,7 +90,10 @@ fn clap_value_flags_are_probed_with_an_attached_value() {
             .arg(Arg::new("staging-dir").long("staging-dir")),
     );
     assert_eq!(probe_clap_flag(&with, "sort", "--staging-dir=."), Ok(true));
-    assert_eq!(probe_clap_flag(&cli(), "sort", "--staging-dir=."), Ok(false));
+    assert_eq!(
+        probe_clap_flag(&cli(), "sort", "--staging-dir=."),
+        Ok(false)
+    );
 }
 
 fn output_arg() -> Arg {
@@ -239,7 +246,11 @@ fn spawns(path: &Path) -> usize {
 
 /// `SUB in.pbf -o OUT`.
 fn writing(sub: &str, out: impl AsRef<Path>) -> PbfArgv {
-    PbfArgv::new(sub).input("in.pbf").unwrap().output(out).unwrap()
+    PbfArgv::new(sub)
+        .input("in.pbf")
+        .unwrap()
+        .output(out)
+        .unwrap()
 }
 
 /// `SUB in.pbf`.
@@ -254,8 +265,14 @@ fn outputs_get_the_flags_exactly_where_the_subcommand_accepts_them() {
 
     let sort = binary.invocation(writing("sort", "out.pbf")).unwrap();
     assert!(has(sort.args_for_test(), OVERWRITE_FLAG));
-    assert_eq!(value_of(sort.args_for_test(), STAGING_DIR_FLAG), Some(PRIVATE_DIR_PLACEHOLDER));
-    assert!(!has(sort.args_for_test(), TMP_DIR_FLAG), "sort declares no scratch");
+    assert_eq!(
+        value_of(sort.args_for_test(), STAGING_DIR_FLAG),
+        Some(PRIVATE_DIR_PLACEHOLDER)
+    );
+    assert!(
+        !has(sort.args_for_test(), TMP_DIR_FLAG),
+        "sort declares no scratch"
+    );
     assert_eq!(sort.program_for_test(), path.as_path());
 
     let cat = binary.invocation(writing("cat", "out.pbf")).unwrap();
@@ -270,7 +287,10 @@ fn has(args: &[String], flag: &str) -> bool {
 
 /// The value following `flag` in `args`.
 fn value_of<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
-    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).map(String::as_str)
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .map(String::as_str)
 }
 
 /// Each launch gets its own private directory beside the output, named in
@@ -282,7 +302,9 @@ fn every_launch_gets_a_fresh_private_directory_beside_its_output() {
     let outdir = root.join("out");
     std::fs::create_dir_all(&outdir).unwrap();
     let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
-    let sort = binary.invocation(writing("sort", outdir.join("out.pbf"))).unwrap();
+    let sort = binary
+        .invocation(writing("sort", outdir.join("out.pbf")))
+        .unwrap();
     assert!(sort.cli_args().contains(PRIVATE_DIR_PLACEHOLDER));
     let spec = sort.spec_for_test().unwrap();
     assert_eq!(spec.private_in(), Some(outdir.as_path()));
@@ -296,14 +318,22 @@ fn every_launch_gets_a_fresh_private_directory_beside_its_output() {
     let dirs: Vec<&str> = log
         .lines()
         .filter(|line| line.starts_with("sort in.pbf"))
-        .filter_map(|line| line.split_whitespace().skip_while(|a| *a != STAGING_DIR_FLAG).nth(1))
+        .filter_map(|line| {
+            line.split_whitespace()
+                .skip_while(|a| *a != STAGING_DIR_FLAG)
+                .nth(1)
+        })
         .collect();
     assert_eq!(dirs.len(), 2, "{log}");
     assert_ne!(dirs[0], dirs[1], "each launch has its own directory");
     for dir in &dirs {
         let dir = Path::new(dir);
         assert_eq!(dir.parent(), Some(outdir.as_path()));
-        assert!(!dir.exists(), "released after its launch: {}", dir.display());
+        assert!(
+            !dir.exists(),
+            "released after its launch: {}",
+            dir.display()
+        );
     }
 }
 
@@ -314,10 +344,18 @@ fn scratch_without_an_output_goes_to_its_root() {
     let (root, path) = install("scratch-root", FAKE_PBFHOGG);
     let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
     let scratch = root.join("scratch");
-    let diff = binary.invocation(reading("sort").scratch(&scratch)).unwrap();
-    assert_eq!(value_of(diff.args_for_test(), TMP_DIR_FLAG), Some(PRIVATE_DIR_PLACEHOLDER));
+    let diff = binary
+        .invocation(reading("sort").scratch(&scratch))
+        .unwrap();
+    assert_eq!(
+        value_of(diff.args_for_test(), TMP_DIR_FLAG),
+        Some(PRIVATE_DIR_PLACEHOLDER)
+    );
     assert!(!has(diff.args_for_test(), STAGING_DIR_FLAG));
-    assert_eq!(diff.spec_for_test().unwrap().private_in(), Some(scratch.as_path()));
+    assert_eq!(
+        diff.spec_for_test().unwrap().private_in(),
+        Some(scratch.as_path())
+    );
 
     let old = binary.invocation(writing("cat", "out.pbf")).unwrap();
     assert_eq!(old.spec_for_test().unwrap().private_in(), None);
@@ -328,12 +366,8 @@ fn each_subcommand_is_probed_once_per_handle_and_once_per_build() {
     let (root, path) = install("probe-once", FAKE_PBFHOGG);
     let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
     for _ in 0..3 {
-        binary
-            .invocation(writing("sort", "x"))
-            .unwrap();
-        binary
-            .invocation(writing("cat", "x"))
-            .unwrap();
+        binary.invocation(writing("sort", "x")).unwrap();
+        binary.invocation(writing("cat", "x")).unwrap();
     }
     // Five probes for each of the two subcommands - two controls and one per
     // negotiated flag - no more.
@@ -341,12 +375,8 @@ fn each_subcommand_is_probed_once_per_handle_and_once_per_build() {
 
     // A second handle on the same bytes reads the recorded answers.
     let again = PbfhoggBinary::fixture(&path, &root).unwrap();
-    let sort = again
-        .invocation(writing("sort", "x"))
-        .unwrap();
-    let cat = again
-        .invocation(writing("cat", "x"))
-        .unwrap();
+    let sort = again.invocation(writing("sort", "x")).unwrap();
+    let cat = again.invocation(writing("cat", "x")).unwrap();
     assert_eq!(spawns(&path), 10);
     assert!(sort.args_for_test().iter().any(|a| a == OVERWRITE_FLAG));
     assert!(!cat.args_for_test().iter().any(|a| a == OVERWRITE_FLAG));
@@ -364,9 +394,7 @@ fn different_bytes_never_reuse_a_recorded_answer() {
     // The rebuild no longer accepts the flag on sort.
     publish(&path, &FAKE_PBFHOGG.replace("sort) ok=0", "sort) ok=2"));
     let rebuilt = PbfhoggBinary::fixture(&path, &root).unwrap();
-    let sort = rebuilt
-        .invocation(writing("sort", "x"))
-        .unwrap();
+    let sort = rebuilt.invocation(writing("sort", "x")).unwrap();
     assert_eq!(spawns(&path), 10);
     assert!(!sort.args_for_test().iter().any(|a| a == OVERWRITE_FLAG));
 }
@@ -378,7 +406,11 @@ fn reads_and_forced_commands_never_probe_or_get_the_flag() {
     let inspect = binary.invocation(reading("sort")).unwrap();
     assert_eq!(inspect.args_for_test(), ["sort", "in.pbf"]);
     assert_eq!(spawns(&path), 0);
-    assert_eq!(inspect.spec_for_test().unwrap().reads(), [PathBuf::from("in.pbf")], "reads are reserved");
+    assert_eq!(
+        inspect.spec_for_test().unwrap().reads(),
+        [PathBuf::from("in.pbf")],
+        "reads are reserved"
+    );
 }
 
 #[test]
@@ -398,11 +430,7 @@ fn a_broken_binary_is_an_error_not_a_cached_unsupported() {
 fn an_unknown_subcommand_is_an_error() {
     let (root, path) = install("unknown-sub", FAKE_PBFHOGG);
     let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
-    assert!(
-        binary
-            .invocation(writing("no-such", "x"))
-            .is_err()
-    );
+    assert!(binary.invocation(writing("no-such", "x")).is_err());
 }
 
 #[test]
@@ -462,7 +490,11 @@ fn typed_commands_resolve_through_the_negotiation_their_arm_chose() {
     // A writing command is negotiated and survives a reused output.
     for _ in 0..2 {
         let sort = binary
-            .invocation(PbfhoggCommand::Sort.build_args(&ctx, ArgMode::Bench).unwrap())
+            .invocation(
+                PbfhoggCommand::Sort
+                    .build_args(&ctx, ArgMode::Bench)
+                    .unwrap(),
+            )
             .unwrap();
         assert!(has(sort.args_for_test(), OVERWRITE_FLAG));
         assert_eq!(execute(&sort, &root), Some(0));
@@ -479,7 +511,10 @@ fn typed_commands_resolve_through_the_negotiation_their_arm_chose() {
         )
         .unwrap();
     assert!(!has(geocode.args_for_test(), OVERWRITE_FLAG));
-    assert!(has(geocode.args_for_test(), STAGING_DIR_FLAG) && has(geocode.args_for_test(), TMP_DIR_FLAG));
+    assert!(
+        has(geocode.args_for_test(), STAGING_DIR_FLAG)
+            && has(geocode.args_for_test(), TMP_DIR_FLAG)
+    );
     assert_eq!(
         geocode.spec_for_test().unwrap().private_in(),
         Some(ctx.scratch_dir.as_path()),
@@ -488,7 +523,11 @@ fn typed_commands_resolve_through_the_negotiation_their_arm_chose() {
     let probes = spawns(&path);
     // A read-only command: no probe, no flag.
     let check = binary
-        .invocation(PbfhoggCommand::CheckRefs.build_args(&ctx, ArgMode::Bench).unwrap())
+        .invocation(
+            PbfhoggCommand::CheckRefs
+                .build_args(&ctx, ArgMode::Bench)
+                .unwrap(),
+        )
         .unwrap();
     assert!(!check.args_for_test().iter().any(|a| a == OVERWRITE_FLAG));
     assert_eq!(spawns(&path), probes);
@@ -571,5 +610,8 @@ fn store_keeps_the_newest_answers_and_replaces_a_repeated_key() {
     let entries = store.read();
     assert_eq!(entries.len(), STORE_CAP);
     assert!(!entries.iter().any(|(d, _, _)| d == "old"));
-    assert_eq!(entries.last().map(|(d, _, _)| d.clone()), Some(format!("d{}", STORE_CAP - 1)));
+    assert_eq!(
+        entries.last().map(|(d, _, _)| d.clone()),
+        Some(format!("d{}", STORE_CAP - 1))
+    );
 }

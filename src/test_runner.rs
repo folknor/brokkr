@@ -41,7 +41,8 @@ pub(crate) use output::{
     Completeness, ParsedTestResults, filter_test, parse_test_output, parse_test_output_with_stderr,
 };
 pub(crate) use plan::{
-    BuildGate, GATE_PENDING_BOUND, GateState, LibraryDoctest, StrictPlan, canonical_package_dir, hash_file,
+    BuildGate, GATE_PENDING_BOUND, GateState, LibraryDoctest, StrictPlan, canonical_package_dir,
+    hash_file,
 };
 pub(crate) use procgroup::{Chunk, read_chunk};
 pub(crate) use run::{

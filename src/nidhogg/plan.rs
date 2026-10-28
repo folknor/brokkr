@@ -1,7 +1,9 @@
 //! Nidhogg binary and HTTP/server lifecycle plans.
 use crate::context::MeasurementSession;
 use crate::error::DevError;
-use crate::measure::runner::{CommandPlan, PlanKind, PlannedCommand, RowSubject, not_a_binary_plan};
+use crate::measure::runner::{
+    CommandPlan, PlanKind, PlannedCommand, RowSubject, not_a_binary_plan,
+};
 use crate::measure::{Executable, Invocation, MeasureMode, MeasureRequest};
 use crate::nidhogg::commands::NidhoggCommand;
 use crate::project::Project;

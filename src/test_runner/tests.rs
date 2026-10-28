@@ -377,8 +377,14 @@ fn ringing_the_doorbell_wakes_a_sleeping_watchdog() {
     let rung = Instant::now();
     done.ring();
     watchdog.join().expect("watchdog thread");
-    assert!(rung.elapsed() < Duration::from_secs(5), "the ring woke the sleep");
-    assert!(hung.lock().unwrap().is_none(), "a rung watchdog enforces nothing");
+    assert!(
+        rung.elapsed() < Duration::from_secs(5),
+        "the ring woke the sleep"
+    );
+    assert!(
+        hung.lock().unwrap().is_none(),
+        "a rung watchdog enforces nothing"
+    );
 }
 
 /// A pidfd wait returns when the child exits, not when the timeout runs out.
@@ -398,7 +404,10 @@ fn a_pidfd_wait_wakes_on_child_exit() {
         harness_shim::pidfd_wait(&fd, Duration::from_secs(30)),
         "the exit makes the pidfd readable"
     );
-    assert!(started.elapsed() < Duration::from_secs(10), "woken by the exit");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "woken by the exit"
+    );
     child.wait().ok();
 }
 

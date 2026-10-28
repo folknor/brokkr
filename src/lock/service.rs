@@ -400,7 +400,9 @@ fn self_cpu() -> Option<Duration> {
     let stat = crate::process::ProcStat::read_self().ok()?;
     let ticks = stat.user_ticks().checked_add(stat.system_ticks())?;
     let tick_rate = crate::process::clock_ticks_per_second()?;
-    Some(Duration::from_millis(ticks.saturating_mul(1000) / tick_rate))
+    Some(Duration::from_millis(
+        ticks.saturating_mul(1000) / tick_rate,
+    ))
 }
 
 /// Read one `\n`-terminated line under an absolute deadline.
@@ -830,11 +832,27 @@ mod tests {
         assert_eq!(rows[0].progress, Some((2, 9)));
         assert!(new.own_cpu.is_some());
         for key in [
-            "project=", "command=", "args=", "root=", "pid_ns=", "time_ns=", "codex_thread=",
-            "codex_session=", "held_secs=", "cpu_secs=", "rss_kb=", "threads=", "draining=",
-            "progress=", "child=", "mocks=",
+            "project=",
+            "command=",
+            "args=",
+            "root=",
+            "pid_ns=",
+            "time_ns=",
+            "codex_thread=",
+            "codex_session=",
+            "held_secs=",
+            "cpu_secs=",
+            "rss_kb=",
+            "threads=",
+            "draining=",
+            "progress=",
+            "child=",
+            "mocks=",
         ] {
-            assert!(text.contains(&format!("\n{key}")), "legacy key {key} missing");
+            assert!(
+                text.contains(&format!("\n{key}")),
+                "legacy key {key} missing"
+            );
         }
     }
 
@@ -855,7 +873,11 @@ mod tests {
                 let mut buf = [0_u8; 16];
                 client.set_nonblocking(true).unwrap();
                 let n = (&client).read(&mut buf).unwrap();
-                assert_eq!(&buf[..n], b"accepted\n", "the answer must precede the signal");
+                assert_eq!(
+                    &buf[..n],
+                    b"accepted\n",
+                    "the answer must precede the signal"
+                );
                 client.set_nonblocking(false).unwrap();
                 None
             },
@@ -880,7 +902,9 @@ mod tests {
         let text = read_reply(&client, Instant::now() + IO_DEADLINE).unwrap();
         assert!(matches!(
             parse_reply(&text),
-            Reply::Accepted { signal_error: Some(_) }
+            Reply::Accepted {
+                signal_error: Some(_)
+            }
         ));
 
         *shared.live.lock().unwrap() = false;

@@ -269,7 +269,10 @@ mod tests {
     #[test]
     fn cargo_minor_reads_release_and_nightly_spellings() {
         assert_eq!(cargo_minor("cargo 1.89.0 (abc 2025-06-01)\n"), Some(89));
-        assert_eq!(cargo_minor("cargo 1.101.0-nightly (e9bbadf68 2026-10-12)"), Some(101));
+        assert_eq!(
+            cargo_minor("cargo 1.101.0-nightly (e9bbadf68 2026-10-12)"),
+            Some(101)
+        );
         assert_eq!(cargo_minor("cargo 2.0.0"), None);
         assert_eq!(cargo_minor("garbage"), None);
     }

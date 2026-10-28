@@ -404,12 +404,16 @@ mod tests {
         assert!(!absent_with_test(&attrs("#[cfg(test)]")));
         assert!(!absent_with_test(&attrs("#[cfg(feature = \"x\")]")));
         // cfg_attr(G, cfg(P)) removes the node when G holds and P does not.
-        assert!(absent_with_test(&attrs("#[cfg_attr(test, cfg(not(test)))]")));
+        assert!(absent_with_test(&attrs(
+            "#[cfg_attr(test, cfg(not(test)))]"
+        )));
         assert!(absent_with_test(&attrs(
             "#[cfg_attr(all(), cfg_attr(test, cfg(any())))]"
         )));
         // An unknown guard proves nothing.
-        assert!(!absent_with_test(&attrs("#[cfg_attr(unix, cfg(not(test)))]")));
+        assert!(!absent_with_test(&attrs(
+            "#[cfg_attr(unix, cfg(not(test)))]"
+        )));
         // Correlations between atoms are not tracked: this pair is
         // impossible, yet neither attribute alone is False.
         assert!(!absent_with_test(&attrs(

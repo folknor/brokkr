@@ -486,8 +486,7 @@ fn is_selected(rel: &Path, config: Option<&GremlinsConfig>) -> bool {
 /// which judges each exclude entry against this set - judging it against the
 /// selected set would make every effective exclusion look dead.
 pub(crate) fn is_candidate(rel: &Path, config: Option<&GremlinsConfig>) -> bool {
-    has_scanned_extension(rel)
-        || config.is_some_and(|c| crate::globs::matches(&c.include_set, rel))
+    has_scanned_extension(rel) || config.is_some_and(|c| crate::globs::matches(&c.include_set, rel))
 }
 
 fn has_scanned_extension(rel: &Path) -> bool {

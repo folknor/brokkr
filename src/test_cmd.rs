@@ -381,7 +381,10 @@ mod tests {
     fn a_selecting_sweep_prebuilds_only_its_targets() {
         let sweep = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             filters: crate::profile::LaneFilters {
-                targets: vec![test_target("native_stack"), crate::profile::TargetSelector::Lib],
+                targets: vec![
+                    test_target("native_stack"),
+                    crate::profile::TargetSelector::Lib,
+                ],
                 ..Default::default()
             },
             ..crate::profile::SweepDecl::default()
@@ -395,7 +398,10 @@ mod tests {
             profile: crate::config::SweepProfile::Dev,
         };
         let pre = prebuild_argv(&shape);
-        assert!(pre.ends_with(&["--test".into(), "native_stack".into(), "--lib".into()]), "{pre:?}");
+        assert!(
+            pre.ends_with(&["--test".into(), "native_stack".into(), "--lib".into()]),
+            "{pre:?}"
+        );
         assert!(!pre.contains(&"--tests".to_owned()), "{pre:?}");
     }
 
@@ -422,7 +428,11 @@ mod tests {
         serde_json::from_str(&json).unwrap()
     }
 
-    fn selecting(label: &str, packages: &[&str], targets: Vec<crate::profile::TargetSelector>) -> PlannedSweep {
+    fn selecting(
+        label: &str,
+        packages: &[&str],
+        targets: Vec<crate::profile::TargetSelector>,
+    ) -> PlannedSweep {
         crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             label: label.into(),
             packages: packages.iter().map(|p| (*p).to_owned()).collect(),
@@ -439,13 +449,20 @@ mod tests {
         let meta = two_package_metadata();
         let sweeps = vec![
             selecting("plain", &[], Vec::new()),
-            selecting("stack", &["a", "b"], vec![test_target("native_*"), test_target("cli")]),
+            selecting(
+                "stack",
+                &["a", "b"],
+                vec![test_target("native_*"), test_target("cli")],
+            ),
             selecting("cli-only", &["a", "b"], vec![test_target("cli")]),
         ];
         let (projected, untargeted) = project_targets_with(sweeps, "a", &meta).unwrap();
         assert_eq!(untargeted, [false, false, true]);
         // `cli` is b's: it drops out for a run of `a`, `native_*` stays.
-        assert_eq!(projected[1].lane_filters().targets, [test_target("native_*")]);
+        assert_eq!(
+            projected[1].lane_filters().targets,
+            [test_target("native_*")]
+        );
         assert!(projected[0].lane_filters().targets.is_empty());
     }
 
@@ -460,7 +477,11 @@ mod tests {
         assert!(project_targets_with(only_a, "a", &meta).is_err());
         let bare = vec![selecting("x", &[], vec![test_target("cli")])];
         assert!(project_targets_with(bare, "a", &meta).is_err());
-        let lib_in_b = vec![selecting("x", &["b"], vec![crate::profile::TargetSelector::Lib])];
+        let lib_in_b = vec![selecting(
+            "x",
+            &["b"],
+            vec![crate::profile::TargetSelector::Lib],
+        )];
         assert!(project_targets_with(lib_in_b, "b", &meta).is_err());
     }
 
@@ -510,7 +531,9 @@ mod tests {
         assert!(entries[0].attempt().is_some());
         assert!(entries[1].attempt().is_some());
         assert!(matches!(entries[2], LaneEntry::Excluded(_)));
-        assert!(sweep_plan_line(&sweeps, &sel, "pkg").contains("none of their test targets here: none"));
+        assert!(
+            sweep_plan_line(&sweeps, &sel, "pkg").contains("none of their test targets here: none")
+        );
     }
 
     /// A directly run harness gets the filter first and the focused-run flags
@@ -1056,7 +1079,10 @@ include_ignored = false
         assert!(!filters.include_ignored);
         assert_eq!(
             filters.targets,
-            [test_target("native_stack"), crate::profile::TargetSelector::Lib]
+            [
+                test_target("native_stack"),
+                crate::profile::TargetSelector::Lib
+            ]
         );
     }
 

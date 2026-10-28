@@ -300,8 +300,16 @@ mod tests {
     fn a_capture_records_absence_explicitly() {
         let root = crate::test_scratch::scratch("bench_stamp", "absence");
         let stamp = Stamp::capture(&root);
-        for key in ["rustflags", "cargo_encoded_rustflags", "repo_cargo_config_d0"] {
-            assert!(stamp.fields.contains_key(key), "{key} missing: {}", stamp.render());
+        for key in [
+            "rustflags",
+            "cargo_encoded_rustflags",
+            "repo_cargo_config_d0",
+        ] {
+            assert!(
+                stamp.fields.contains_key(key),
+                "{key} missing: {}",
+                stamp.render()
+            );
         }
         assert_eq!(stamp.fields["repo_cargo_config_d0"], super::ABSENT);
     }

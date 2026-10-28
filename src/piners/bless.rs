@@ -333,10 +333,7 @@ mod tests {
         let err = apply(&pins_path, &mut reg, &rep, &["a".to_owned()]).unwrap_err();
         assert!(err.to_string().contains("no label census"));
         assert_eq!(std::fs::read_to_string(&pins_path).unwrap(), LOADED);
-        assert_eq!(
-            reg.pins["a"].labels,
-            Some(LabelPin { entry: 0, exit: 2 })
-        );
+        assert_eq!(reg.pins["a"].labels, Some(LabelPin { entry: 0, exit: 2 }));
     }
 
     #[test]

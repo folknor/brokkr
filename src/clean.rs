@@ -74,13 +74,18 @@ impl Cleaner {
         self.dir_by(path, crate::reservations::remove_dir_all)
     }
 
-    fn dir_by(&self, path: &Path, remove: impl Fn(&Path) -> std::io::Result<()>) -> Result<bool, DevError> {
+    fn dir_by(
+        &self,
+        path: &Path,
+        remove: impl Fn(&Path) -> std::io::Result<()>,
+    ) -> Result<bool, DevError> {
         let present = match std::fs::symlink_metadata(path) {
             Ok(metadata) => metadata.file_type().is_dir() || metadata.file_type().is_symlink(),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
             Err(error) => return Err(clean_io_error("cannot inspect", path, &error)),
         };
-        let removed = present && (self.dry_run || self.removed(path, remove(path), "cannot remove directory")?);
+        let removed = present
+            && (self.dry_run || self.removed(path, remove(path), "cannot remove directory")?);
         if removed {
             self.hits.set(self.hits.get() + 1);
         }
@@ -97,13 +102,18 @@ impl Cleaner {
         self.file_by(path, crate::reservations::remove_file)
     }
 
-    fn file_by(&self, path: &Path, remove: impl Fn(&Path) -> std::io::Result<()>) -> Result<bool, DevError> {
+    fn file_by(
+        &self,
+        path: &Path,
+        remove: impl Fn(&Path) -> std::io::Result<()>,
+    ) -> Result<bool, DevError> {
         let present = match std::fs::symlink_metadata(path) {
             Ok(metadata) => !metadata.file_type().is_dir() || metadata.file_type().is_symlink(),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
             Err(error) => return Err(clean_io_error("cannot inspect", path, &error)),
         };
-        let removed = present && (self.dry_run || self.removed(path, remove(path), "cannot remove file")?);
+        let removed =
+            present && (self.dry_run || self.removed(path, remove(path), "cannot remove file")?);
         if removed {
             self.hits.set(self.hits.get() + 1);
         }
@@ -112,7 +122,12 @@ impl Cleaner {
 
     /// Whether a removal of a present `path` happened: gone meanwhile is
     /// false, a reservation refusal is named and false, any other error fails.
-    fn removed(&self, path: &Path, result: std::io::Result<()>, action: &str) -> Result<bool, DevError> {
+    fn removed(
+        &self,
+        path: &Path,
+        result: std::io::Result<()>,
+        action: &str,
+    ) -> Result<bool, DevError> {
         match result {
             Ok(()) => Ok(true),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),

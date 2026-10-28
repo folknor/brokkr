@@ -137,7 +137,10 @@ impl BenchHarness {
             .ok_or_else(|| DevError::Internal("no entropy for a hotpath report name".into()))?;
         let name = crate::sidecar::DEFAULT_MEASUREMENT_TUNABLES.hotpath_report_filename;
         let (stem, ext) = name.rsplit_once('.').unwrap_or((name, "json"));
-        Ok(self.state.root().join(format!("{stem}-{}.{ext}", token.as_str())))
+        Ok(self
+            .state
+            .root()
+            .join(format!("{stem}-{}.{ext}", token.as_str())))
     }
 
     /// Capture an instrumented child. A missing or malformed report fails the
@@ -162,7 +165,8 @@ impl BenchHarness {
             .state
             .root()
             .join(crate::sidecar::DEFAULT_MEASUREMENT_TUNABLES.hotpath_report_filename);
-        match std::fs::remove_file(&report) { // gate: brokkr's own state file
+        let stale = std::fs::remove_file(&report); // gate: brokkr's own state file
+        match stale {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(DevError::Io(error)),

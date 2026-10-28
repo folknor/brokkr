@@ -333,7 +333,11 @@ mod tests {
         }
         assert!(toml.exists());
 
-        assert!(crate::tree_policy::activate_for_lock(None).unwrap().is_none());
+        assert!(
+            crate::tree_policy::activate_for_lock(None)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

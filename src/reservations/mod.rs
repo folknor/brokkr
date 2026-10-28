@@ -72,13 +72,18 @@ pub(crate) fn reclaim() -> Vec<String> {
     // A kept lease is never dropped automatically; these say what to remove
     // by hand, once whatever it names is no longer in use.
     let by_hand = |id: &str| {
-        format!("once nothing uses its paths, remove {root}/{id}.lock and {root}/{id}.record by hand")
+        format!(
+            "once nothing uses its paths, remove {root}/{id}.lock and {root}/{id}.record by hand"
+        )
     };
     let mut lines: Vec<String> = scan
         .reservations
         .iter()
         .map(|r| match &r.retained {
-            None => format!("launch lease {} is still held by a running process; kept", r.id),
+            None => format!(
+                "launch lease {} is still held by a running process; kept",
+                r.id
+            ),
             Some(why) => format!("launch lease {} kept: {why}; {}", r.id, by_hand(&r.id)),
         })
         .collect();
@@ -113,11 +118,17 @@ fn serialize() -> std::io::Result<Serial> {
     let mutex = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
     let flock = match store() {
         Some(store) => Some(store.serial_lock().map_err(|e| {
-            std::io::Error::new(e.kind(), format!("the launch lease store's serial lock: {e}"))
+            std::io::Error::new(
+                e.kind(),
+                format!("the launch lease store's serial lock: {e}"),
+            )
         })?),
         None => None,
     };
-    Ok(Serial { _flock: flock, _mutex: mutex })
+    Ok(Serial {
+        _flock: flock,
+        _mutex: mutex,
+    })
 }
 
 /// The lease store: the per-user one, or in unit tests one scratch store for
@@ -126,7 +137,8 @@ fn store() -> Option<store::Store> {
     #[cfg(test)]
     {
         static TEST_STORE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
-        let root = TEST_STORE.get_or_init(|| crate::test_scratch::scratch("reservations", "process-store"));
+        let root = TEST_STORE
+            .get_or_init(|| crate::test_scratch::scratch("reservations", "process-store"));
         Some(store::Store::at(root.clone()))
     }
     #[cfg(not(test))]

@@ -39,8 +39,12 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<Findings, 
     let new_pbf_str = new_pbf.display().to_string();
 
     verify_msg("--- creating 'new' PBF via apply-changes ---");
-    let captured =
-        harness.run_pbfhogg(PbfArgv::new("apply-changes").input(pbf)?.input(osc)?.output(&new_pbf)?)?;
+    let captured = harness.run_pbfhogg(
+        PbfArgv::new("apply-changes")
+            .input(pbf)?
+            .input(osc)?
+            .output(&new_pbf)?,
+    )?;
     harness.check_exit(&captured, "pbfhogg apply-changes")?;
 
     // pbfhogg diff exits 1 when differences exist; 2 and above mean it did

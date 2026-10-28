@@ -1093,7 +1093,10 @@ mod tests {
         // A whitespace-shaped pattern never fires on hidden production lines.
         let mut blank = rule(r"^\s*$");
         blank.test_code = TestCode::Only;
-        assert_eq!(run_selected(blank, "fn p() {}\n\n", &[]).0, Vec::<usize>::new());
+        assert_eq!(
+            run_selected(blank, "fn p() {}\n\n", &[]).0,
+            Vec::<usize>::new()
+        );
     }
 
     #[test]
@@ -1234,7 +1237,13 @@ mod tests {
         let compiled = compile(&[rule]).unwrap();
         let refs: Vec<&Compiled> = compiled.iter().collect();
         let mut out = Vec::new();
-        scan_file(Path::new("t.rs"), src, &refs, FileClass::default(), &mut out);
+        scan_file(
+            Path::new("t.rs"),
+            src,
+            &refs,
+            FileClass::default(),
+            &mut out,
+        );
         out.iter().map(|v| (v.line, v.rule.clone())).collect()
     }
 

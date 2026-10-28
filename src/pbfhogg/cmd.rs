@@ -176,13 +176,16 @@ fn resolve_locations_base(
         ));
     }
     let snapshot_ref = resolve::SnapshotRef::from_opt(snapshot);
-    let registered = paths.datasets.get(dataset).is_none_or(|ds| match &snapshot_ref {
-        resolve::SnapshotRef::Base => ds.pbf.contains_key(KEEP_UNTAGGED_VARIANT),
-        resolve::SnapshotRef::Named(key) => ds
-            .snapshot
-            .get(key)
-            .is_none_or(|snap| snap.pbf.contains_key(KEEP_UNTAGGED_VARIANT)),
-    });
+    let registered = paths
+        .datasets
+        .get(dataset)
+        .is_none_or(|ds| match &snapshot_ref {
+            resolve::SnapshotRef::Base => ds.pbf.contains_key(KEEP_UNTAGGED_VARIANT),
+            resolve::SnapshotRef::Named(key) => ds
+                .snapshot
+                .get(key)
+                .is_none_or(|snap| snap.pbf.contains_key(KEEP_UNTAGGED_VARIANT)),
+        });
     if !registered {
         return Ok(LocationsBase::Skipped(
             "SKIPPED (no altw-keep-untagged variant registered for the dataset)",

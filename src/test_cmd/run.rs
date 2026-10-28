@@ -120,8 +120,14 @@ pub(super) fn run_sweeps(
     let sweeps = resolve_sweeps(dev_config.test.as_ref(), &dev_config.check, sweep_filter)?;
 
     let (pkg, source) = resolve_package(package, dev_config, &project)?;
-    let (sweeps, selection) =
-        select_for_package(sweeps, &pkg, source, dev_config, profile_override, project_root)?;
+    let (sweeps, selection) = select_for_package(
+        sweeps,
+        &pkg,
+        source,
+        dev_config,
+        profile_override,
+        project_root,
+    )?;
     check_cmd::announce_feature_drops(&[(&sweeps[..], &selection)]);
     // A deduped sweep is not a sweep this run goes through.
     let multi = selection

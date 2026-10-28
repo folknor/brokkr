@@ -15,7 +15,9 @@ use std::ffi::OsString;
 use std::fs::Metadata;
 use std::io::Read as _;
 use std::os::unix::ffi::OsStrExt as _;
-use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+use std::os::unix::fs::{
+    DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _,
+};
 use std::path::{Path, PathBuf};
 
 use crate::error::DevError;
@@ -81,7 +83,12 @@ fn header(hasher: &mut Sha256, rel: &[u8], kind: u8, mode: u32) {
     hasher.update(&mode.to_le_bytes());
 }
 
-fn walk(path: &Path, rel: &[u8], meta: &Metadata, hasher: &mut Sha256) -> std::io::Result<Option<PathBuf>> {
+fn walk(
+    path: &Path,
+    rel: &[u8],
+    meta: &Metadata,
+    hasher: &mut Sha256,
+) -> std::io::Result<Option<PathBuf>> {
     let kind = meta.file_type();
     let mode = meta.permissions().mode() & 0o7777;
     if kind.is_file() {
@@ -110,7 +117,11 @@ fn walk(path: &Path, rel: &[u8], meta: &Metadata, hasher: &mut Sha256) -> std::i
 /// Hash a regular file's length and bytes. Opened without following a link
 /// and without blocking, then checked to be the object that was listed, so a
 /// fifo swapped in after the listing is reported, never read.
-fn hash_file(path: &Path, listed: &Metadata, hasher: &mut Sha256) -> std::io::Result<Option<PathBuf>> {
+fn hash_file(
+    path: &Path,
+    listed: &Metadata,
+    hasher: &mut Sha256,
+) -> std::io::Result<Option<PathBuf>> {
     let file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -150,7 +161,10 @@ fn hash_file(path: &Path, listed: &Metadata, hasher: &mut Sha256) -> std::io::Re
 }
 
 fn io_at(what: &str, path: &Path, e: &std::io::Error) -> DevError {
-    DevError::Io(std::io::Error::new(e.kind(), format!("{what} {}: {e}", path.display())))
+    DevError::Io(std::io::Error::new(
+        e.kind(),
+        format!("{what} {}: {e}", path.display()),
+    ))
 }
 
 /// Copy the payload `src` to the absent path `dst`: regular files and
@@ -167,7 +181,9 @@ pub(super) fn stage(src: &Path, dst: &Path) -> Result<(), DevError> {
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(src)
             .map_err(|e| io_at("cannot open", src, &e))?;
-        let opened = input.metadata().map_err(|e| io_at("cannot inspect", src, &e))?;
+        let opened = input
+            .metadata()
+            .map_err(|e| io_at("cannot inspect", src, &e))?;
         if !opened.is_file() || opened.dev() != meta.dev() || opened.ino() != meta.ino() {
             return Err(DevError::Refused(format!(
                 "{} changed type while it was copied; an install payload holds regular files and \
@@ -185,7 +201,9 @@ pub(super) fn stage(src: &Path, dst: &Path) -> Result<(), DevError> {
         output
             .set_permissions(std::fs::Permissions::from_mode(mode))
             .map_err(|e| io_at("cannot set the mode of", dst, &e))?;
-        output.sync_all().map_err(|e| io_at("cannot fsync", dst, &e))?;
+        output
+            .sync_all()
+            .map_err(|e| io_at("cannot fsync", dst, &e))?;
         return Ok(());
     }
     if !meta.is_dir() {
@@ -228,7 +246,10 @@ pub(super) fn remove_tree(path: &Path) -> std::io::Result<()> {
     if !meta.is_dir() {
         return gone(std::fs::remove_file(path));
     }
-    gone(std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)))?;
+    gone(std::fs::set_permissions(
+        path,
+        std::fs::Permissions::from_mode(0o700),
+    ))?;
     for name in sorted_children(path)? {
         remove_tree(&path.join(name))?;
     }
@@ -263,8 +284,13 @@ mod tests {
         std::fs::create_dir_all(src.join("assets")).unwrap();
         std::fs::write(src.join("SKILL.md"), "body").unwrap();
         std::fs::write(src.join("assets/hook.sh"), "#!/bin/sh\n").unwrap();
-        std::fs::set_permissions(src.join("assets/hook.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::fs::set_permissions(src.join("assets"), std::fs::Permissions::from_mode(0o555)).unwrap();
+        std::fs::set_permissions(
+            src.join("assets/hook.sh"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        std::fs::set_permissions(src.join("assets"), std::fs::Permissions::from_mode(0o555))
+            .unwrap();
 
         let dst = dir.join("dst");
         let staged = stage(&src, &dst);
@@ -273,7 +299,8 @@ mod tests {
         let removed = remove_tree(&dst);
         // Restored before any assertion, so a failure cannot leave a
         // read-only directory the next run's scratch reset trips over.
-        std::fs::set_permissions(src.join("assets"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(src.join("assets"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
         staged.unwrap();
         let (src_fp, dst_fp) = (fingerprints.0.unwrap(), fingerprints.1.unwrap());
         assert!(matches!(src_fp, Observed::Tree(_)));

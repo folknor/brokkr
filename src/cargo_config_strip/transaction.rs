@@ -44,7 +44,9 @@ static TXN: Mutex<()> = Mutex::new(());
 static TAKEN_OVER: AtomicBool = AtomicBool::new(false);
 
 fn txn() -> Option<std::sync::MutexGuard<'static, ()>> {
-    let guard = TXN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let guard = TXN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     (!TAKEN_OVER.load(Ordering::SeqCst)).then_some(guard)
 }
 
@@ -73,7 +75,10 @@ fn marker_line(original: &[u8], body: &[u8]) -> String {
 }
 
 fn io_error(context: &str, error: &std::io::Error) -> DevError {
-    DevError::Io(std::io::Error::new(error.kind(), format!("{context}: {error}")))
+    DevError::Io(std::io::Error::new(
+        error.kind(),
+        format!("{context}: {error}"),
+    ))
 }
 
 fn exists(path: &Path) -> Result<bool, DevError> {
@@ -101,13 +106,21 @@ fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
             libc::RENAME_NOREPLACE,
         )
     };
-    if rc == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 fn mv(from: &Path, to: &Path) -> Result<(), DevError> {
     rename_noreplace(from, to).map_err(|e| {
         io_error(
-            &format!("cargo config strip: cannot move {} to {}", from.display(), to.display()),
+            &format!(
+                "cargo config strip: cannot move {} to {}",
+                from.display(),
+                to.display()
+            ),
             &e,
         )
     })
@@ -117,7 +130,10 @@ fn remove(path: &Path) -> Result<(), DevError> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(io_error(&format!("cargo config strip: cannot remove {}", path.display()), &e)),
+        Err(e) => Err(io_error(
+            &format!("cargo config strip: cannot remove {}", path.display()),
+            &e,
+        )),
     }
 }
 
@@ -177,7 +193,10 @@ fn conflict(cargo_dir: &Path, base: &str) -> DevError {
         (&n.live, "the file cargo reads"),
         (&n.original, "the original brokkr moved aside"),
         (&n.installing, "brokkr scratch"),
-        (&n.displaced, "the object on the live path when a restore began"),
+        (
+            &n.displaced,
+            "the object on the live path when a restore began",
+        ),
     ]
     .iter()
     .filter(|(path, _)| exists(path).unwrap_or(true))
@@ -197,7 +216,11 @@ fn conflict(cargo_dir: &Path, base: &str) -> DevError {
 /// left it in. Policy-independent; the caller holds [`TXN`].
 fn recover_name(cargo_dir: &Path, base: &str) -> Result<(), DevError> {
     let n = names(cargo_dir, base);
-    let (live, original, displaced) = (exists(&n.live)?, exists(&n.original)?, exists(&n.displaced)?);
+    let (live, original, displaced) = (
+        exists(&n.live)?,
+        exists(&n.original)?,
+        exists(&n.displaced)?,
+    );
     let resolved = match (live, original, displaced) {
         (false, false, false) => true,
         // A filtered copy whose original is gone cannot be undone here.
@@ -378,7 +401,10 @@ pub fn install(
         if e.kind() == std::io::ErrorKind::AlreadyExists {
             conflict(cargo_dir, base)
         } else {
-            io_error(&format!("cargo config strip: cannot move {} aside", n.live.display()), &e)
+            io_error(
+                &format!("cargo config strip: cannot move {} aside", n.live.display()),
+                &e,
+            )
         }
     })?;
     // From here every exit either installs or puts the original back.
@@ -429,7 +455,10 @@ pub fn install(
             discard_scratch(&n.installing);
         }
         return Err(put_back(io_error(
-            &format!("cargo config strip: cannot write {}", n.installing.display()),
+            &format!(
+                "cargo config strip: cannot write {}",
+                n.installing.display()
+            ),
             &e,
         )));
     }
@@ -448,7 +477,10 @@ pub fn install(
     if let Ok(dir) = std::fs::File::open(cargo_dir)
         && let Err(e) = dir.sync_all()
     {
-        output::warn(&format!("cargo config strip: cannot sync {}: {e}", cargo_dir.display()));
+        output::warn(&format!(
+            "cargo config strip: cannot sync {}: {e}",
+            cargo_dir.display()
+        ));
     }
     crate::build_provenance::forget_host_cache();
     Ok(Some(Installed {
@@ -536,7 +568,10 @@ mod tests {
         std::fs::write(dir.join("config.toml.brokkr-original"), "o\n").unwrap();
         std::fs::write(dir.join("config.toml.brokkr-installing"), "scratch").unwrap();
         recover(dir.parent().unwrap()).unwrap();
-        assert_eq!(std::fs::read_to_string(dir.join("config.toml")).unwrap(), "o\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.toml")).unwrap(),
+            "o\n"
+        );
         assert!(!dir.join("config.toml.brokkr-installing").exists());
 
         // Installed, process died.

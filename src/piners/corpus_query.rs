@@ -282,7 +282,9 @@ fn note_absent_probes(db: &CorpusDb, run_id: i64, probes: &[String]) -> Result<(
             Presence::SelectionUnknown => "has no disposition (selection unknown) in",
         };
         let elsewhere = match db.latest_run_with_disposition(&probe)? {
-            Some(other) => format!("its newest stored disposition is in run {other} (--run {other})"),
+            Some(other) => {
+                format!("its newest stored disposition is in run {other} (--run {other})")
+            }
             None => "no retained run holds a disposition for it".to_owned(),
         };
         output::result_msg(&format!("probe '{probe}' {why} run {run_id}; {elsewhere}"));

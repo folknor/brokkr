@@ -84,7 +84,10 @@ impl Staged {
     /// dataset download): reserved for writing from now until commit or drop.
     pub(crate) fn stable_reserved(path: &Path) -> std::io::Result<Self> {
         let mut staged = Self::with_suffix(path, "partial")?;
-        staged.mode = Mode::Reserved(Some(crate::reservations::hold(&[&staged.tmp, &staged.target])?));
+        staged.mode = Mode::Reserved(Some(crate::reservations::hold(&[
+            &staged.tmp,
+            &staged.target,
+        ])?));
         Ok(staged)
     }
 
@@ -105,7 +108,9 @@ impl Staged {
         if let Some(rest) = name.strip_suffix(keep).filter(|r| !r.is_empty()) {
             staged.tmp = staged.dir.join(format!(".{rest}.partial{keep}"));
         }
-        crate::reservations::mutate(&[&staged.tmp, &staged.target], &[], || Ok::<_, std::io::Error>(()))?;
+        crate::reservations::mutate(&[&staged.tmp, &staged.target], &[], || {
+            Ok::<_, std::io::Error>(())
+        })?;
         staged.mode = Mode::ForChild;
         Ok(staged)
     }
@@ -273,7 +278,8 @@ mod tests {
     #[test]
     fn a_kept_suffix_survives_into_the_temp_name() {
         let dir = crate::test_scratch::scratch("atomic_write", "keeping");
-        let pbf = Staged::stable_keeping_for_child(&dir.join("dk-merged.osm.pbf"), ".osm.pbf").unwrap();
+        let pbf =
+            Staged::stable_keeping_for_child(&dir.join("dk-merged.osm.pbf"), ".osm.pbf").unwrap();
         assert_eq!(
             pbf.tmp_path().file_name().unwrap(),
             ".dk-merged.partial.osm.pbf"

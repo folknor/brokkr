@@ -167,7 +167,12 @@ fn open_run_log_with(
         // Prune only after creating it: a failed open must not evict history.
         let prune_failures = if retention_ready {
             before.push(current.clone());
-            remove_logs(logs_to_prune_with(before, kind, &current, tunables.retained))
+            remove_logs(logs_to_prune_with(
+                before,
+                kind,
+                &current,
+                tunables.retained,
+            ))
         } else {
             Vec::new()
         };

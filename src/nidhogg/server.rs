@@ -493,8 +493,13 @@ mod tests {
     fn readiness_poll_reports_ready_and_timeout() {
         let mut child = spawn_sleeper();
         let tick = Duration::from_millis(1);
-        let ready =
-            poll_until_ready(&mut child, Duration::from_secs(5), tick, || false, || Ok(true));
+        let ready = poll_until_ready(
+            &mut child,
+            Duration::from_secs(5),
+            tick,
+            || false,
+            || Ok(true),
+        );
         assert_eq!(ready.unwrap(), Readiness::Ready);
         let late = poll_until_ready(
             &mut child,

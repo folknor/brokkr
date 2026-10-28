@@ -41,10 +41,17 @@ pub(super) struct DirId {
 #[serde(tag = "phase", rename_all = "lowercase")]
 pub(super) enum Pending {
     /// Written before the container is created.
-    Allocated { container: String, prior: Option<Owner> },
+    Allocated {
+        container: String,
+        prior: Option<Owner>,
+    },
     /// The container exists, is durable and has this identity; the payload
     /// is being copied into it.
-    Preparing { container: String, id: DirId, prior: Option<Owner> },
+    Preparing {
+        container: String,
+        id: DirId,
+        prior: Option<Owner>,
+    },
     /// The payload is complete with `staged`'s fingerprint; `displaced` is
     /// the fingerprint of the destination publication will displace (`None`
     /// for an absent destination).
@@ -57,10 +64,18 @@ pub(super) enum Pending {
     },
     /// Published and verified; the container is being removed, then `owner`
     /// is committed.
-    Retiring { container: String, id: DirId, owner: Owner },
+    Retiring {
+        container: String,
+        id: DirId,
+        owner: Owner,
+    },
     /// Not published; the container is being removed, then `prior` is
     /// restored.
-    Aborting { container: String, id: DirId, prior: Option<Owner> },
+    Aborting {
+        container: String,
+        id: DirId,
+        prior: Option<Owner>,
+    },
 }
 
 impl Pending {
@@ -90,7 +105,13 @@ pub(super) struct Record {
 
 impl Record {
     pub(super) fn new(destination: &str, owner: Option<Owner>) -> Self {
-        Self { version: VERSION, destination: destination.to_owned(), owner, pending: None, parent: None }
+        Self {
+            version: VERSION,
+            destination: destination.to_owned(),
+            owner,
+            pending: None,
+            parent: None,
+        }
     }
 
     /// End the transaction with `owner` holding the destination.
@@ -156,9 +177,13 @@ impl Registry {
             Err(e) => return Err(registry_error(&self.dir, &e.to_string())),
         };
         for entry in entries {
-            let path = entry.map_err(|e| registry_error(&self.dir, &e.to_string()))?.path();
+            let path = entry
+                .map_err(|e| registry_error(&self.dir, &e.to_string()))?
+                .path();
             let is_record = path.extension().is_some_and(|x| x == "json")
-                && !path.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.'));
+                && !path
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with('.'));
             if !is_record {
                 continue;
             }
@@ -166,16 +191,24 @@ impl Registry {
                 .map_err(|e| registry_error(&path, &e.to_string()))
                 .and_then(|text| parse(&path, &text));
             match parsed {
-                Ok(record) if self.file_for(&record.destination) == path => scan.records.push((path, record)),
-                Ok(record) => scan.broken.push(registry_error(
-                    &path,
-                    &format!("records {:?}, whose record file has another name", record.destination),
-                )
-                .to_string()),
+                Ok(record) if self.file_for(&record.destination) == path => {
+                    scan.records.push((path, record));
+                }
+                Ok(record) => scan.broken.push(
+                    registry_error(
+                        &path,
+                        &format!(
+                            "records {:?}, whose record file has another name",
+                            record.destination
+                        ),
+                    )
+                    .to_string(),
+                ),
                 Err(e) => scan.broken.push(e.to_string()),
             }
         }
-        scan.records.sort_by(|a, b| a.1.destination.cmp(&b.1.destination));
+        scan.records
+            .sort_by(|a, b| a.1.destination.cmp(&b.1.destination));
         Ok(scan)
     }
 
@@ -185,30 +218,37 @@ impl Registry {
         let path = self.file_for(&record.destination);
         if record.owner.is_none() && record.pending.is_none() {
             return match std::fs::remove_file(&path) {
-                Ok(()) => tree::fsync_dir(&self.dir).map_err(|e| registry_error(&self.dir, &e.to_string())),
+                Ok(()) => tree::fsync_dir(&self.dir)
+                    .map_err(|e| registry_error(&self.dir, &e.to_string())),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
                 Err(e) => Err(registry_error(&path, &e.to_string())),
             };
         }
         if !self.dir.is_dir() {
-            std::fs::create_dir_all(&self.dir).map_err(|e| registry_error(&self.dir, &e.to_string()))?;
+            std::fs::create_dir_all(&self.dir)
+                .map_err(|e| registry_error(&self.dir, &e.to_string()))?;
             if let Some(parent) = self.dir.parent() {
                 tree::fsync_dir(parent).map_err(|e| registry_error(parent, &e.to_string()))?;
             }
         }
         let json = serde_json::to_vec_pretty(record)
             .map_err(|e| DevError::Internal(format!("install record does not serialize: {e}")))?;
-        crate::atomic_write::replace(&path, &json).map_err(|e| registry_error(&path, &e.to_string()))?;
+        crate::atomic_write::replace(&path, &json)
+            .map_err(|e| registry_error(&path, &e.to_string()))?;
         tree::fsync_dir(&self.dir).map_err(|e| registry_error(&self.dir, &e.to_string()))
     }
 }
 
 fn parse(path: &Path, text: &str) -> Result<Record, DevError> {
-    let record: Record = serde_json::from_str(text).map_err(|e| registry_error(path, &e.to_string()))?;
+    let record: Record =
+        serde_json::from_str(text).map_err(|e| registry_error(path, &e.to_string()))?;
     if record.version != VERSION {
         return Err(registry_error(
             path,
-            &format!("record version {} is not {VERSION}, which this brokkr reads", record.version),
+            &format!(
+                "record version {} is not {VERSION}, which this brokkr reads",
+                record.version
+            ),
         ));
     }
     Ok(record)
@@ -227,9 +267,16 @@ mod tests {
     fn a_record_round_trips_and_an_empty_one_is_removed() {
         let state = crate::test_scratch::scratch("install_step_registry", "round_trip");
         let registry = Registry::at(state.join("install"));
-        let owner = Owner { project: "p".into(), step: "s".into(), fingerprint: "ab".into() };
+        let owner = Owner {
+            project: "p".into(),
+            step: "s".into(),
+            fingerprint: "ab".into(),
+        };
         let mut record = Record::new("/x/y", Some(owner.clone()));
-        record.pending = Some(Pending::Allocated { container: ".brokkr-install-1".into(), prior: Some(owner) });
+        record.pending = Some(Pending::Allocated {
+            container: ".brokkr-install-1".into(),
+            prior: Some(owner),
+        });
         registry.store(&record).unwrap();
         assert_eq!(registry.load("/x/y").unwrap(), Some(record.clone()));
         assert_eq!(registry.all().unwrap().records.len(), 1);
@@ -244,18 +291,29 @@ mod tests {
     fn a_record_for_another_destination_is_refused() {
         let state = crate::test_scratch::scratch("install_step_registry", "mismatch");
         let registry = Registry::at(state.join("install"));
-        registry.store(&Record::new("/a", Some(Owner {
-            project: "p".into(),
-            step: "s".into(),
-            fingerprint: "f".into(),
-        })))
-        .unwrap();
+        registry
+            .store(&Record::new(
+                "/a",
+                Some(Owner {
+                    project: "p".into(),
+                    step: "s".into(),
+                    fingerprint: "f".into(),
+                }),
+            ))
+            .unwrap();
         std::fs::rename(registry.file_for("/a"), registry.file_for("/b")).unwrap();
         assert!(registry.load("/b").is_err());
         let scan = registry.all().unwrap();
-        assert!(scan.records.is_empty(), "enumeration checks the file name too");
+        assert!(
+            scan.records.is_empty(),
+            "enumeration checks the file name too"
+        );
         assert_eq!(scan.broken.len(), 1);
         std::fs::write(registry.file_for("/c"), "not json").unwrap();
-        assert_eq!(registry.all().unwrap().broken.len(), 2, "an unparseable file is reported, not fatal");
+        assert_eq!(
+            registry.all().unwrap().broken.len(),
+            2,
+            "an unparseable file is reported, not fatal"
+        );
     }
 }

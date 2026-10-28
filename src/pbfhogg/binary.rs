@@ -283,7 +283,8 @@ impl PbfhoggBinary {
             ));
         };
         self.check_identity()?;
-        let negotiate = argv.negotiates_overwrite() && self.supports(&subcommand, Flag::Overwrite)?;
+        let negotiate =
+            argv.negotiates_overwrite() && self.supports(&subcommand, Flag::Overwrite)?;
         let staging = argv.writes_output() && self.supports(&subcommand, Flag::StagingDir)?;
         let tmp = argv.writes_scratch() && self.supports(&subcommand, Flag::TmpDir)?;
         if (argv.writes_output() && !staging) || (argv.writes_scratch() && !tmp) {
@@ -368,7 +369,9 @@ impl PbfhoggBinary {
             store.record(&self.digest, &key, *supported);
             cached.insert(key, *supported);
         }
-        Ok(answers.iter().any(|(probed, supported)| *probed == flag && *supported))
+        Ok(answers
+            .iter()
+            .any(|(probed, supported)| *probed == flag && *supported))
     }
 
     fn probe(&self, subcommand: &str) -> Result<Vec<(Flag, bool)>, DevError> {

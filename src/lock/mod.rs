@@ -276,7 +276,9 @@ impl LockGuard {
         };
         let me = std::thread::current().id();
         if let Ok(mut state) = self.inner.state.lock() {
-            state.children.retain(|(thread, tracked)| *thread != me && tracked.alive());
+            state
+                .children
+                .retain(|(thread, tracked)| *thread != me && tracked.alive());
             state.children.push((me, child));
             self.inner.publish(&state);
         }
@@ -327,7 +329,9 @@ impl LockGuard {
     pub fn clear_child_pid(&self) {
         let me = std::thread::current().id();
         if let Ok(mut state) = self.inner.state.lock() {
-            state.children.retain(|(thread, tracked)| *thread != me && tracked.alive());
+            state
+                .children
+                .retain(|(thread, tracked)| *thread != me && tracked.alive());
             self.inner.publish(&state);
         }
     }
@@ -1077,7 +1081,10 @@ mod tests {
         let pids: Vec<u32> = info.children.iter().map(|(pid, _)| *pid).collect();
         assert_eq!(pids, vec![me, parent]);
         let contents = std::fs::read_to_string(&path).unwrap();
-        assert!(contents.contains(&format!("child_pid={me}\n")), "{contents}");
+        assert!(
+            contents.contains(&format!("child_pid={me}\n")),
+            "{contents}"
+        );
         guard.clear_child_pid();
         let info = parse_lock_contents(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let pids: Vec<u32> = info.children.iter().map(|(pid, _)| *pid).collect();
@@ -1165,7 +1172,10 @@ mod tests {
         let info = parse_lock_contents(text).unwrap();
         assert_eq!(info.pid, 100);
         assert_eq!(info.project, "fresh");
-        assert!(info.children.is_empty(), "stale child_pid tail must not win");
+        assert!(
+            info.children.is_empty(),
+            "stale child_pid tail must not win"
+        );
     }
 
     /// Escaping round-trips values containing newlines and percent signs -

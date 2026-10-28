@@ -365,7 +365,10 @@ impl MeasurementSession {
     /// The built executable as the measure runner hands it to a plan, tagged
     /// with whether its flags are negotiated.
     pub(crate) fn executable(&self) -> Result<crate::measure::Executable<'_>, DevError> {
-        Ok(crate::measure::Executable::new(self.binary()?, self.negotiated))
+        Ok(crate::measure::Executable::new(
+            self.binary()?,
+            self.negotiated,
+        ))
     }
 }
 

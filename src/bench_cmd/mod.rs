@@ -621,7 +621,12 @@ mod tests {
         estimate(&dir, "group/new_bench", "abc123");
         let old = dir.join("group/old_bench/abc123/estimates.json");
         let later = SystemTime::now() + std::time::Duration::from_secs(5);
-        std::fs::File::options().write(true).open(&old).unwrap().set_modified(later).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
         assert_eq!(rewritten(&before, &saved_estimates(&dir, "abc123")), 2);
     }
 }

@@ -621,7 +621,10 @@ pub(crate) mod executable_guard {
                                 builds.fetch_add(1, Ordering::SeqCst);
                             }
                             barrier.wait();
-                            let (h, b) = (handles.load(Ordering::SeqCst), builds.load(Ordering::SeqCst));
+                            let (h, b) = (
+                                handles.load(Ordering::SeqCst),
+                                builds.load(Ordering::SeqCst),
+                            );
                             assert!(b <= 1, "two builds admitted at once");
                             assert!(h == 0 || b == 0, "{h} handle(s) beside a build");
                             barrier.wait();

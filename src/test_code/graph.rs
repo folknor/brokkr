@@ -650,7 +650,10 @@ mod tests {
                 ),
                 ("src/shared.rs", "fn s() {}\n"),
                 ("src/dead.rs", "fn d() {}\n"),
-                ("tests/it.rs", "#[path = \"../src/shared.rs\"]\nmod shared;\nfn t() {}\n"),
+                (
+                    "tests/it.rs",
+                    "#[path = \"../src/shared.rs\"]\nmod shared;\nfn t() {}\n",
+                ),
             ],
         );
         let c = run(
@@ -754,7 +757,10 @@ mod tests {
                     "use attrs::test;\n#[test]\nfn example() {\n    #[path = \"helper.rs\"]\n    mod helper;\n}\n",
                 ),
                 ("src/helper.rs", "\u{feff}#![cfg(test)]\nfn helper() {}\n"),
-                ("src/script.rs", "#!/usr/bin/env x\n#![cfg(test)]\nfn s() {}\n"),
+                (
+                    "src/script.rs",
+                    "#!/usr/bin/env x\n#![cfg(test)]\nfn s() {}\n",
+                ),
             ],
         );
         let c = run(&dir, &[("src/lib.rs", false)], &["src/helper.rs"]).unwrap();

@@ -169,9 +169,7 @@ fn fresher_status(
     if !stale {
         return first;
     }
-    std::thread::sleep(
-        lockfile::collector::SAMPLE_GAP + std::time::Duration::from_millis(250),
-    );
+    std::thread::sleep(lockfile::collector::SAMPLE_GAP + std::time::Duration::from_millis(250));
     match crate::lock_service::request(acq_id, "status") {
         crate::lock_service::Reply::Status(second)
             if second.identity.args == first.identity.args =>

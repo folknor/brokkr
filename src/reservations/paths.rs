@@ -33,14 +33,26 @@ pub(crate) struct Spelled {
 impl Spelled {
     /// Spell `path`, relative paths against `cwd`.
     pub(crate) fn of(path: &Path, cwd: &Path) -> io::Result<Self> {
-        let absolute = if path.is_absolute() { path.to_path_buf() } else { cwd.join(path) };
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            cwd.join(path)
+        };
         let (resolved, via) = resolve(&absolute)?;
-        Ok(Self { lexical: lexical(&absolute), resolved, via })
+        Ok(Self {
+            lexical: lexical(&absolute),
+            resolved,
+            via,
+        })
     }
 
     /// Spell an already absolute path recorded earlier.
     pub(crate) fn recorded(lexical: PathBuf, resolved: PathBuf, via: Vec<PathBuf>) -> Self {
-        Self { lexical, resolved, via }
+        Self {
+            lexical,
+            resolved,
+            via,
+        }
     }
 
     /// Whether either path's forms equal, contain or enclose the other's, or
@@ -52,7 +64,9 @@ impl Spelled {
             .iter()
             .any(|a| theirs.iter().any(|b| a.starts_with(b) || b.starts_with(a)));
         let cuts = |forms: &[&PathBuf; 2], links: &[PathBuf]| {
-            links.iter().any(|link| forms.iter().any(|form| link.starts_with(form)))
+            links
+                .iter()
+                .any(|link| forms.iter().any(|form| link.starts_with(form)))
         };
         ends || cuts(&theirs, &self.via) || cuts(&mine, &other.via)
     }
@@ -145,7 +159,10 @@ mod tests {
 
     #[test]
     fn lexical_form_folds_dots() {
-        assert_eq!(lexical(Path::new("/w/p/a/./b/../c")), PathBuf::from("/w/p/a/c"));
+        assert_eq!(
+            lexical(Path::new("/w/p/a/./b/../c")),
+            PathBuf::from("/w/p/a/c")
+        );
         assert_eq!(lexical(Path::new("/x/../y")), PathBuf::from("/y"));
     }
 
@@ -200,8 +217,16 @@ mod tests {
         std::os::unix::fs::symlink(aliases.join("second"), work.join("link")).unwrap();
 
         let input = Spelled::of(&work.join("link").join("in.pbf"), &root).unwrap();
-        assert!(input.via.iter().any(|v| v.ends_with("work/link")), "{:?}", input.via);
-        assert!(input.via.iter().any(|v| v.ends_with("aliases/second")), "{:?}", input.via);
+        assert!(
+            input.via.iter().any(|v| v.ends_with("work/link")),
+            "{:?}",
+            input.via
+        );
+        assert!(
+            input.via.iter().any(|v| v.ends_with("aliases/second")),
+            "{:?}",
+            input.via
+        );
         let removal = Spelled::of(&aliases, &root).unwrap();
         assert!(input.overlaps(&removal) && removal.overlaps(&input));
         let unrelated = Spelled::of(&root.join("other"), &root).unwrap();
@@ -223,8 +248,14 @@ mod tests {
         std::os::unix::fs::symlink(parents.join("parent").join("sub"), work.join("link")).unwrap();
 
         let input = Spelled::of(&work.join("link").join("in.pbf"), &root).unwrap();
-        assert_eq!(input.resolved, std::fs::canonicalize(&data).unwrap().join("in.pbf"));
+        assert_eq!(
+            input.resolved,
+            std::fs::canonicalize(&data).unwrap().join("in.pbf")
+        );
         let removal = Spelled::of(&parents, &root).unwrap();
-        assert!(input.overlaps(&removal), "removing the directory holding the inner link cuts the path");
+        assert!(
+            input.overlaps(&removal),
+            "removing the directory holding the inner link cuts the path"
+        );
     }
 }

@@ -39,7 +39,12 @@ impl LaunchSpec {
         writes: Vec<PathBuf>,
         private_in: Option<PathBuf>,
     ) -> Self {
-        Self { cwd, reads, writes, private_in }
+        Self {
+            cwd,
+            reads,
+            writes,
+            private_in,
+        }
     }
 
     #[cfg(test)]
@@ -88,28 +93,44 @@ impl LaunchSpec {
                 .map_err(|e| io_error(&format!("cannot resolve launch path {}", path.display()), e))
         };
         let mut resources: Vec<Resource> = Vec::new();
-        for (path, access) in self.reads.iter().map(|p| (p, Access::Read)).chain(self.writes.iter().map(|p| (p, Access::Write))) {
+        for (path, access) in self
+            .reads
+            .iter()
+            .map(|p| (p, Access::Read))
+            .chain(self.writes.iter().map(|p| (p, Access::Write)))
+        {
             resources.push(Resource::new(&spell(path)?, access, Disposition::Reserve));
         }
         for path in disposable {
-            resources.push(Resource::new(&spell(path)?, Access::Write, Disposition::Private));
+            resources.push(Resource::new(
+                &spell(path)?,
+                Access::Write,
+                Disposition::Private,
+            ));
         }
         let private = match &self.private_in {
             Some(location) => {
                 check_placement(location, &self.writes, &self.cwd)?;
-                let token = crate::lockfile::RunToken::mint()
-                    .ok_or_else(|| DevError::Internal("no entropy for a private directory name".into()))?;
+                let token = crate::lockfile::RunToken::mint().ok_or_else(|| {
+                    DevError::Internal("no entropy for a private directory name".into())
+                })?;
                 let dir = location.join(format!("{PRIVATE_DIR_PREFIX}{}", token.as_str()));
                 // Its argv spelling first: nothing after the lease exists may
                 // fail without releasing it.
                 let spelled = crate::utf8_path::path_string(&dir)?;
-                resources.push(Resource::new(&spell(&dir)?, Access::Write, Disposition::Private));
+                resources.push(Resource::new(
+                    &spell(&dir)?,
+                    Access::Write,
+                    Disposition::Private,
+                ));
                 Some((dir, spelled))
             }
             None => None,
         };
         refuse_conflicts(&scan, &resources)?;
-        let mut lease = store.create(resources).map_err(|e| io_error("cannot create a launch lease", e))?;
+        let mut lease = store
+            .create(resources)
+            .map_err(|e| io_error("cannot create a launch lease", e))?;
         if let Some((dir, _)) = &private {
             let index = lease.resources().len() - 1;
             match std::fs::create_dir(dir) {
@@ -140,14 +161,23 @@ impl LaunchSpec {
         let args = match &private {
             Some((_, dir)) => args
                 .iter()
-                .map(|a| if a == PRIVATE_DIR_PLACEHOLDER { dir.clone() } else { a.clone() })
+                .map(|a| {
+                    if a == PRIVATE_DIR_PLACEHOLDER {
+                        dir.clone()
+                    } else {
+                        a.clone()
+                    }
+                })
                 .collect(),
             None => args.to_vec(),
         };
         if let Some(fd) = lease.fd() {
             arm(fd, program);
         }
-        Ok(Launched { args, lease: Some(lease) })
+        Ok(Launched {
+            args,
+            lease: Some(lease),
+        })
     }
 }
 
@@ -191,8 +221,11 @@ impl Launched {
         if let Some(fd) = lease.fd() {
             disarm(fd);
         }
-        let _serial = super::serialize().map_err(|e| io_error("the launch could not release its lease", e))?;
-        lease.release().map_err(|e| io_error("the launch could not release its lease", e))
+        let _serial = super::serialize()
+            .map_err(|e| io_error("the launch could not release its lease", e))?;
+        lease
+            .release()
+            .map_err(|e| io_error("the launch could not release its lease", e))
     }
 }
 
@@ -236,7 +269,11 @@ fn conflict(scan: &super::store::Scan, ours: &[Resource]) -> Option<String> {
                         mine.lexical.display(),
                         theirs.lexical.display(),
                         reservation.id,
-                        if reservation.retained.is_some() { "kept after a failed cleanup" } else { "held" },
+                        if reservation.retained.is_some() {
+                            "kept after a failed cleanup"
+                        } else {
+                            "held"
+                        },
                     ));
                 }
             }
@@ -266,12 +303,16 @@ pub(crate) fn hold(paths: &[&Path]) -> io::Result<Hold> {
     let scan = store.scan();
     let resources = paths
         .iter()
-        .map(|path| Spelled::of(path, &cwd).map(|s| Resource::new(&s, Access::Write, Disposition::Reserve)))
+        .map(|path| {
+            Spelled::of(path, &cwd).map(|s| Resource::new(&s, Access::Write, Disposition::Reserve))
+        })
         .collect::<io::Result<Vec<_>>>()?;
     if let Some(why) = conflict(&scan, &resources) {
         return Err(super::guard::busy(format!("refusing to write: {why}")));
     }
-    Ok(Hold { lease: Some(store.create(resources)?) })
+    Ok(Hold {
+        lease: Some(store.create(resources)?),
+    })
 }
 
 impl Hold {
@@ -287,7 +328,11 @@ impl Hold {
 
     /// Release the reservation and run `op`, a mutation of `targets`, under
     /// the gate, with no launch admitted in between.
-    pub(crate) fn release_then<T>(mut self, targets: &[&Path], op: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    pub(crate) fn release_then<T>(
+        mut self,
+        targets: &[&Path],
+        op: impl FnOnce() -> io::Result<T>,
+    ) -> io::Result<T> {
         let lease = self.lease.take();
         if let Some(fd) = lease.as_ref().and_then(Lease::fd) {
             disarm(fd);
@@ -303,7 +348,9 @@ impl Hold {
 
 impl Drop for Hold {
     fn drop(&mut self) {
-        let Some(lease) = self.lease.take() else { return };
+        let Some(lease) = self.lease.take() else {
+            return;
+        };
         if let Some(fd) = lease.fd() {
             disarm(fd);
         }
@@ -311,7 +358,9 @@ impl Drop for Hold {
         // descriptor closes, so a later scan finds it free and reclaims it.
         let released = super::serialize().and_then(|_serial| lease.release());
         if let Err(e) = released {
-            crate::output::warn(&format!("a staged write could not release its reservation: {e}"));
+            crate::output::warn(&format!(
+                "a staged write could not release its reservation: {e}"
+            ));
         }
     }
 }
@@ -320,13 +369,24 @@ impl Drop for Hold {
 /// every output's directory, or a rename from it could not publish.
 fn check_placement(location: &Path, writes: &[PathBuf], cwd: &Path) -> Result<(), DevError> {
     let here = mount_identity(location).map_err(|e| {
-        io_error(&format!("cannot place a private directory in {}", location.display()), e)
+        io_error(
+            &format!("cannot place a private directory in {}", location.display()),
+            e,
+        )
     })?;
     for output in writes {
         let absolute = cwd.join(output);
-        let Some(parent) = absolute.parent() else { continue };
+        let Some(parent) = absolute.parent() else {
+            continue;
+        };
         let there = mount_identity(parent).map_err(|e| {
-            io_error(&format!("cannot inspect the directory of output {}", output.display()), e)
+            io_error(
+                &format!(
+                    "cannot inspect the directory of output {}",
+                    output.display()
+                ),
+                e,
+            )
         })?;
         if !here.same_mount(&there) {
             return Err(DevError::Config(format!(
@@ -356,7 +416,8 @@ struct MountIdentity {
 
 impl MountIdentity {
     fn same_mount(&self, other: &Self) -> bool {
-        self.dev == other.dev && (self.mount.is_none() || other.mount.is_none() || self.mount == other.mount)
+        self.dev == other.dev
+            && (self.mount.is_none() || other.mount.is_none() || self.mount == other.mount)
     }
 }
 
@@ -365,15 +426,29 @@ fn mount_identity(path: &Path) -> io::Result<MountIdentity> {
     use std::os::unix::ffi::OsStrExt as _;
     let meta = std::fs::metadata(path)?;
     if !meta.is_dir() {
-        return Err(io::Error::other(format!("{} is not a directory", path.display())));
+        return Err(io::Error::other(format!(
+            "{} is not a directory",
+            path.display()
+        )));
     }
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(io::Error::other)?;
     // SAFETY: a zeroed statx is a valid output buffer; the path is a valid C
     // string for the call's duration.
     let mut stx: libc::statx = unsafe { std::mem::zeroed() };
-    let rc = unsafe { libc::statx(libc::AT_FDCWD, c_path.as_ptr(), 0, libc::STATX_MNT_ID, &raw mut stx) };
+    let rc = unsafe {
+        libc::statx(
+            libc::AT_FDCWD,
+            c_path.as_ptr(),
+            0,
+            libc::STATX_MNT_ID,
+            &raw mut stx,
+        )
+    };
     let mount = (rc == 0 && stx.stx_mask & libc::STATX_MNT_ID != 0).then_some(stx.stx_mnt_id);
-    Ok(MountIdentity { dev: meta.dev(), mount })
+    Ok(MountIdentity {
+        dev: meta.dev(),
+        mount,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -392,7 +467,12 @@ thread_local! {
 }
 
 fn arm(fd: RawFd, program: &Path) {
-    ARMED.with(|slot| *slot.borrow_mut() = Some(Armed { fd, program: program.to_path_buf() }));
+    ARMED.with(|slot| {
+        *slot.borrow_mut() = Some(Armed {
+            fd,
+            program: program.to_path_buf(),
+        });
+    });
 }
 
 /// Clear the slot if it still holds `fd`, a lease about to be released whose
@@ -411,7 +491,10 @@ fn disarm(fd: RawFd) {
 pub(crate) fn take_armed(program: &std::ffi::OsStr) -> Option<RawFd> {
     ARMED.with(|slot| {
         let mut slot = slot.borrow_mut();
-        if slot.as_ref().is_some_and(|armed| armed.program.as_os_str() == program) {
+        if slot
+            .as_ref()
+            .is_some_and(|armed| armed.program.as_os_str() == program)
+        {
             slot.take().map(|armed| armed.fd)
         } else {
             None
@@ -452,7 +535,12 @@ mod tests {
         let _serial = crate::test_scratch::process_global_lock();
         let root = crate::test_scratch::scratch("reservations", "launch-cycle");
         let out = root.join("out.pbf");
-        let spec = LaunchSpec::new(root.clone(), Vec::new(), vec![out.clone()], Some(root.clone()));
+        let spec = LaunchSpec::new(
+            root.clone(),
+            Vec::new(),
+            vec![out.clone()],
+            Some(root.clone()),
+        );
         let program = Path::new("/bin/sh");
         let args = vec![
             "-c".to_owned(),
@@ -466,7 +554,10 @@ mod tests {
         let mut cmd = std::process::Command::new(program);
         cmd.args(&launched.args);
         let mut child = crate::process::spawn::spawn(cmd, None).unwrap();
-        assert!(take_armed(program.as_os_str()).is_none(), "the spawn took the descriptor");
+        assert!(
+            take_armed(program.as_os_str()).is_none(),
+            "the spawn took the descriptor"
+        );
         launched.close_own_hold_for_test();
 
         let rival = LaunchSpec::new(root.clone(), vec![out.clone()], Vec::new(), None);
@@ -475,10 +566,19 @@ mod tests {
             "the child's inherited descriptor alone keeps the lease held"
         );
 
-        assert!(child.wait().unwrap().success(), "the child saw its private directory");
+        assert!(
+            child.wait().unwrap().success(),
+            "the child saw its private directory"
+        );
         launched.finish().unwrap();
         assert!(!dir.exists(), "released after the child exited");
-        assert!(rival.launch(program, &[], &root, &[]).unwrap().finish().is_ok());
+        assert!(
+            rival
+                .launch(program, &[], &root, &[])
+                .unwrap()
+                .finish()
+                .is_ok()
+        );
     }
 
     /// A disposable file the launcher names is reserved while the launch
@@ -490,7 +590,9 @@ mod tests {
         let report = root.join("report.json");
         let program = Path::new("/bin/true");
         let spec = LaunchSpec::new(root.clone(), Vec::new(), Vec::new(), None);
-        let launched = spec.launch(program, &[], &root, std::slice::from_ref(&report)).unwrap();
+        let launched = spec
+            .launch(program, &[], &root, std::slice::from_ref(&report))
+            .unwrap();
         std::fs::write(&report, b"{}").unwrap();
         let err = super::super::guard::remove_file(&report).unwrap_err();
         assert!(super::super::guard::is_refusal(&err), "{err}");
@@ -503,6 +605,10 @@ mod tests {
         arm(42, Path::new("/x/pbfhogg"));
         assert_eq!(take_armed(std::ffi::OsStr::new("/x/osmium")), None);
         assert_eq!(take_armed(std::ffi::OsStr::new("/x/pbfhogg")), Some(42));
-        assert_eq!(take_armed(std::ffi::OsStr::new("/x/pbfhogg")), None, "taken once");
+        assert_eq!(
+            take_armed(std::ffi::OsStr::new("/x/pbfhogg")),
+            None,
+            "taken once"
+        );
     }
 }

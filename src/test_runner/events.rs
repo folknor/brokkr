@@ -98,29 +98,53 @@ pub(crate) enum KillCause {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub(crate) enum AttributionRefusal {
-    HandshakeIo { detail: String },
-    AuthenticationIo { detail: String },
-    SessionIo { detail: String },
-    UnplannedExecutable { executable: String },
-    RebuiltExecutable { executable: String },
+    HandshakeIo {
+        detail: String,
+    },
+    AuthenticationIo {
+        detail: String,
+    },
+    SessionIo {
+        detail: String,
+    },
+    UnplannedExecutable {
+        executable: String,
+    },
+    RebuiltExecutable {
+        executable: String,
+    },
     /// The build cargo was about to run did not verify against the plan
     /// (drifted, failed, or never seen): every connection of the run is
     /// refused before any test executes.
-    UnverifiedBuild { detail: String },
-    MissingPlannedStream { executable: String, unit: String },
+    UnverifiedBuild {
+        detail: String,
+    },
+    MissingPlannedStream {
+        executable: String,
+        unit: String,
+    },
     RustdocWithoutCarrier,
     /// A derived doctest carrier's rustdoc named a package directory its
     /// admission table does not hold (or named none): neither run nor
     /// declined, since only a positively identified library may be either.
-    UnidentifiedRustdoc { package_dir: String },
-    UnknownRole { role: u8 },
-    ExecutableHashFailed { executable: String, detail: String },
+    UnidentifiedRustdoc {
+        package_dir: String,
+    },
+    UnknownRole {
+        role: u8,
+    },
+    ExecutableHashFailed {
+        executable: String,
+        detail: String,
+    },
     RunnerMismatch,
     RunnerExitedDuringHandshake,
     ProcessIdentityUnavailable,
     DuplicateConnection,
     SessionClosing,
-    StatePoisoned { name: String },
+    StatePoisoned {
+        name: String,
+    },
 }
 
 impl AttributionRefusal {

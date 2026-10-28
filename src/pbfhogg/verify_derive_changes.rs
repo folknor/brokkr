@@ -130,7 +130,10 @@ pub fn run(
     let rt_osmium_sorted = outdir.join("roundtrip-osmium-sorted.osm.pbf");
     verify_msg("--- pbfhogg sort (normalise osmium roundtrip for merge-join diff) ---");
     let captured = harness.run_pbfhogg(
-        PbfArgv::new("sort").arg("--force").input(&rt_osmium)?.output(&rt_osmium_sorted)?,
+        PbfArgv::new("sort")
+            .arg("--force")
+            .input(&rt_osmium)?
+            .output(&rt_osmium_sorted)?,
     )?;
     harness.check_exit(&captured, "pbfhogg sort (normalise osmium roundtrip)")?;
 

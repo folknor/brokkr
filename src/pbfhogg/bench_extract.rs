@@ -50,8 +50,7 @@ pub fn run(
         let command = PbfhoggCommand::Extract { strategy };
         // Every strategy and every iteration writes the same output path, so
         // the argv carries the negotiated overwrite flag.
-        let invocation =
-            binary.invocation(command.build_args(&command_ctx, ArgMode::Bench)?)?;
+        let invocation = binary.invocation(command.build_args(&command_ctx, ArgMode::Bench)?)?;
 
         let config = BenchConfig {
             command: command.id().to_owned(),

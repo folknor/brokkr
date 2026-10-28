@@ -336,7 +336,10 @@ mod tests {
 
         // The hotpath variant and a re-registered generation are each a
         // different input, so none of the three rows pair with another.
-        let hotpath = resolved("examples/calls/method.lua", "6372dbfbd4aea331f0642f73b0662aa5");
+        let hotpath = resolved(
+            "examples/calls/method.lua",
+            "6372dbfbd4aea331f0642f73b0662aa5",
+        );
         let regenerated = resolved("bench/method.lua", "51b15378000000000000000000000000");
         let inputs: Vec<String> = [&bench, &hotpath, &regenerated]
             .iter()

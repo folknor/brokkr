@@ -85,7 +85,10 @@ impl ChildPolicy {
             // The capability of the same hold the cohort names.
             env.retain(|(name, _)| name != crate::hold::CAPABILITY_ENV);
             if let Some(nonce) = launch.capability {
-                env.push((crate::hold::CAPABILITY_ENV.to_owned(), nonce.expose().to_owned()));
+                env.push((
+                    crate::hold::CAPABILITY_ENV.to_owned(),
+                    nonce.expose().to_owned(),
+                ));
             }
             env.push((EXEC_ENV.to_owned(), launch.exec));
         }

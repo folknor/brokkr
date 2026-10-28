@@ -246,7 +246,9 @@ impl ForwardedArgs {
         self.unsupported_direct_options()
             .into_iter()
             .filter(|token| {
-                let head = token.split_once('=').map_or(token.as_str(), |(head, _)| head);
+                let head = token
+                    .split_once('=')
+                    .map_or(token.as_str(), |(head, _)| head);
                 head != "--no-run"
             })
             .collect()
@@ -1340,7 +1342,11 @@ pub(crate) fn derive_doctest_carriers(
         let Some(attempt) = test.attempt(LaneIdx::new(i)) else {
             continue;
         };
-        if !attempt.runs().iter().any(|run| facts.obliges(&run.selection)) {
+        if !attempt
+            .runs()
+            .iter()
+            .any(|run| facts.obliges(&run.selection))
+        {
             continue;
         }
         let build = attempt.effective_build(sweep, sweep.profile, SupportIdentity::Include);
@@ -1459,8 +1465,7 @@ impl PhaseSelection {
             SelectionPhase::Clippy | SelectionPhase::Rustdoc => Dedupe::BuildShape,
         };
         let provenance = (!cli.is_empty()).then_some(Provenance::Cli);
-        let mut selection =
-            Self::construct(phase, sweeps, cli, provenance, &[], &dedupe, oracle)?;
+        let mut selection = Self::construct(phase, sweeps, cli, provenance, &[], &dedupe, oracle)?;
         selection.refusal = selection.nothing_reached(sweeps);
         Ok(selection)
     }
@@ -1847,8 +1852,14 @@ impl RunSweeps {
     /// Refuses a lint label equal to a tested one: the two would read as one
     /// sweep in the `--json` trailer. Load validation and carrier label
     /// reservation leave only the legacy `all-features` sweep to reach this.
-    pub(crate) fn new(tested: Vec<PlannedSweep>, lint: Vec<PlannedSweep>) -> Result<Self, DevError> {
-        if let Some(clash) = lint.iter().find(|l| tested.iter().any(|t| t.label == l.label)) {
+    pub(crate) fn new(
+        tested: Vec<PlannedSweep>,
+        lint: Vec<PlannedSweep>,
+    ) -> Result<Self, DevError> {
+        if let Some(clash) = lint
+            .iter()
+            .find(|l| tested.iter().any(|t| t.label == l.label))
+        {
             return Err(DevError::Config(format!(
                 "[[lint_sweep]] '{}' has the label of a sweep this run tests; rename the lint sweep",
                 clash.label
@@ -1857,14 +1868,20 @@ impl RunSweeps {
         let count = tested.len();
         let mut lanes = tested;
         lanes.extend(lint);
-        Ok(Self { lanes, tested: count })
+        Ok(Self {
+            lanes,
+            tested: count,
+        })
     }
 
     /// A run with no lint lanes: every lane is tested.
     #[cfg(test)]
     pub(crate) fn tested_only(tested: Vec<PlannedSweep>) -> Self {
         let count = tested.len();
-        Self { lanes: tested, tested: count }
+        Self {
+            lanes: tested,
+            tested: count,
+        }
     }
 
     /// The sweeps the test machinery runs: the lanes before the lint lanes.
@@ -2349,11 +2366,16 @@ mod tests {
         let facts = crate::check_cmd::DocFacts::for_members(&[("a", true)]);
         let a = listed("a", &["a"]);
         let labels = |reserved: &[&str]| -> Vec<String> {
-            derive_doctest_carriers(std::slice::from_ref(&a), reserved, &facts, &FeatureOracle::unavailable())
-                .unwrap()
-                .into_iter()
-                .map(|c| c.label.clone())
-                .collect()
+            derive_doctest_carriers(
+                std::slice::from_ref(&a),
+                reserved,
+                &facts,
+                &FeatureOracle::unavailable(),
+            )
+            .unwrap()
+            .into_iter()
+            .map(|c| c.label.clone())
+            .collect()
         };
         assert_eq!(labels(&[]), ["a (doctests)"]);
         assert_eq!(labels(&["a (doctests)"]), ["a (doctests 2)"]);
@@ -2367,11 +2389,18 @@ mod tests {
     /// member, and a curated one, owe nothing.
     #[test]
     fn a_complete_claim_derives_one_carrier_per_tested_build_without_one() {
-        let facts = crate::check_cmd::DocFacts::for_members(&[("a", true), ("b", true), ("bin", false)]);
-        let a = with_sweep(with_exec(listed("a", &["a"]), LaneExec::Parallel { budget: 4 }), |d| {
-            d.filters.include_ignored = true;
-        });
-        let a_twin = with_exec(listed("a-serial", &["a"]), LaneExec::Nextest { threads: None });
+        let facts =
+            crate::check_cmd::DocFacts::for_members(&[("a", true), ("b", true), ("bin", false)]);
+        let a = with_sweep(
+            with_exec(listed("a", &["a"]), LaneExec::Parallel { budget: 4 }),
+            |d| {
+                d.filters.include_ignored = true;
+            },
+        );
+        let a_twin = with_exec(
+            listed("a-serial", &["a"]),
+            LaneExec::Nextest { threads: None },
+        );
         let b = with_exec(listed("b", &["b"]), LaneExec::Parallel { budget: 4 });
         let b_doc = with_exec(listed("b-doc", &["b"]), LaneExec::doc_only());
         let bin = listed("bin", &["bin"]);
@@ -2381,13 +2410,29 @@ mod tests {
         });
         let sweeps = vec![a.clone(), a_twin, b, b_doc, bin, curated];
         let derived = derive(&sweeps, &facts);
-        assert_eq!(derived.len(), 1, "{:?}", derived.iter().map(|s| &s.label).collect::<Vec<_>>());
+        assert_eq!(
+            derived.len(),
+            1,
+            "{:?}",
+            derived.iter().map(|s| &s.label).collect::<Vec<_>>()
+        );
         let carrier = &derived[0];
         assert_eq!(carrier.label, "a (doctests)");
-        assert_eq!(carrier.origin, crate::profile::SweepOrigin::DoctestCarrier { source: "a".into() });
+        assert_eq!(
+            carrier.origin,
+            crate::profile::SweepOrigin::DoctestCarrier { source: "a".into() }
+        );
         assert!(carrier.lane_exec().is_doc_only());
-        assert!(!carrier.lane_exec().threads().is_some_and(crate::profile::Threads::is_cargo_mediated));
-        assert_eq!(carrier.lane_filters(), &crate::profile::LaneFilters::default());
+        assert!(
+            !carrier
+                .lane_exec()
+                .threads()
+                .is_some_and(crate::profile::Threads::is_cargo_mediated)
+        );
+        assert_eq!(
+            carrier.lane_filters(),
+            &crate::profile::LaneFilters::default()
+        );
         assert_eq!(carrier.packages, a.packages);
         assert_eq!(carrier.effective_unification(), a.effective_unification());
 
@@ -2397,9 +2442,17 @@ mod tests {
         let last = LaneIdx::new(all.len() - 1);
         for phase in [SelectionPhase::Clippy, SelectionPhase::Rustdoc] {
             let sel = for_check(phase, &all, &[]).unwrap();
-            assert!(matches!(sel.entry(last), Some(LaneEntry::NotApplicable(_))), "{phase:?}");
+            assert!(
+                matches!(sel.entry(last), Some(LaneEntry::NotApplicable(_))),
+                "{phase:?}"
+            );
         }
-        assert!(for_check(SelectionPhase::Test, &all, &[]).unwrap().attempt(last).is_some());
+        assert!(
+            for_check(SelectionPhase::Test, &all, &[])
+                .unwrap()
+                .attempt(last)
+                .is_some()
+        );
 
         // Once derived, a build is carried: a second derivation adds nothing.
         assert!(derive(&all, &facts).is_empty());
@@ -2416,7 +2469,10 @@ mod tests {
                 d.env.insert("X".into(), "1".into());
             }),
         ];
-        let labels: Vec<String> = derive(&sweeps, &facts).iter().map(|s| s.label.clone()).collect();
+        let labels: Vec<String> = derive(&sweeps, &facts)
+            .iter()
+            .map(|s| s.label.clone())
+            .collect();
         assert_eq!(labels, s(&["a (doctests 2)", "a (doctests) (doctests)"]));
     }
 
@@ -2427,12 +2483,19 @@ mod tests {
     #[test]
     fn a_package_mode_carrier_owes_doctests_per_resolution() {
         let facts = crate::check_cmd::DocFacts::for_members(&[("a", true), ("bin", false)]);
-        let lane = package_mode(with_exec(listed("pkg", &["a", "bin"]), LaneExec::Parallel { budget: 2 }));
+        let lane = package_mode(with_exec(
+            listed("pkg", &["a", "bin"]),
+            LaneExec::Parallel { budget: 2 },
+        ));
         let derived = derive(std::slice::from_ref(&lane), &facts);
         assert_eq!(derived.len(), 1);
         let sel = for_check(SelectionPhase::Test, &derived, &[]).unwrap();
         let attempt = sel.attempt(LaneIdx::new(0)).unwrap();
-        assert_eq!(attempt.runs().len(), 2, "one resolution per package, as the source lane");
+        assert_eq!(
+            attempt.runs().len(),
+            2,
+            "one resolution per package, as the source lane"
+        );
         assert_eq!(
             facts.obliged_resolutions(attempt),
             vec![Resolution::Package(PkgName("a".into()))]
@@ -2498,23 +2561,33 @@ mod tests {
         assert_eq!(lanes.tested().len(), 1);
         assert_eq!(lanes.lint().len(), 2);
         let oracle = FeatureOracle::unavailable();
-        let all = CheckSelections::build(&lanes, &[], &|_| false, true, GatedPhases::default(), None, &oracle)
-            .unwrap();
+        let all = CheckSelections::build(
+            &lanes,
+            &[],
+            &|_| false,
+            true,
+            GatedPhases::default(),
+            None,
+            &oracle,
+        )
+        .unwrap();
         assert_eq!(all.test.entries().len(), 1);
         for phase in [&all.clippy, &all.rustdoc] {
             assert_eq!(phase.entries().len(), 3);
             assert!(phase.attempt(LaneIdx::new(0)).is_some());
-            assert!(matches!(phase.entry(LaneIdx::new(1)), Some(LaneEntry::Deduped(d)) if d.onto() == LaneIdx::new(0)));
+            assert!(
+                matches!(phase.entry(LaneIdx::new(1)), Some(LaneEntry::Deduped(d)) if d.onto() == LaneIdx::new(0))
+            );
             assert!(phase.attempt(LaneIdx::new(2)).is_some());
         }
         // Each selection is read against the lanes it was built over.
-        assert!(feature_drop_lines(&[
-            (lanes.linted(), &all.clippy),
-            (lanes.tested(), &all.test),
-        ])
-        .is_empty());
+        assert!(
+            feature_drop_lines(&[(lanes.linted(), &all.clippy), (lanes.tested(), &all.test),])
+                .is_empty()
+        );
         // A lint label equal to a tested one would be one name for two sweeps.
-        let err = RunSweeps::new(vec![sweep("all-features")], vec![sweep("all-features")]).unwrap_err();
+        let err =
+            RunSweeps::new(vec![sweep("all-features")], vec![sweep("all-features")]).unwrap_err();
         assert!(err.to_string().contains("'all-features'"), "{err}");
     }
 

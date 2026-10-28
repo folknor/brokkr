@@ -120,7 +120,13 @@ fn parse_locks(text: &str) -> Vec<LockRow> {
             let major = u32::from_str_radix(location.next()?, 16).ok()?;
             let minor = u32::from_str_radix(location.next()?, 16).ok()?;
             let inode = location.next()?.parse().ok()?;
-            Some(LockRow { id, blocked, pid, dev: (major, minor), inode })
+            Some(LockRow {
+                id,
+                blocked,
+                pid,
+                dev: (major, minor),
+                inode,
+            })
         })
         .collect()
 }
@@ -132,8 +138,16 @@ fn lock_wait(pid: u32, locks: &[LockRow]) -> Option<LockWait> {
     let holder = locks
         .iter()
         .find(|row| !row.blocked && row.id == request.id)
-        .map(|row| (row.pid, command_line(row.pid).unwrap_or_else(|| "?".to_owned())));
-    Some(LockWait { path: locked_path(pid, request.dev, request.inode), holder })
+        .map(|row| {
+            (
+                row.pid,
+                command_line(row.pid).unwrap_or_else(|| "?".to_owned()),
+            )
+        });
+    Some(LockWait {
+        path: locked_path(pid, request.dev, request.inode),
+        holder,
+    })
 }
 
 /// The path of the descriptor of `pid` open on the file `dev`/`inode`.
@@ -145,7 +159,9 @@ fn locked_path(pid: u32, dev: (u32, u32), inode: u64) -> Option<String> {
             continue;
         };
         if meta.ino() == inode && dev_numbers(meta.dev()) == dev {
-            return std::fs::read_link(fd.path()).ok().map(|p| p.display().to_string());
+            return std::fs::read_link(fd.path())
+                .ok()
+                .map(|p| p.display().to_string());
         }
     }
     None
@@ -196,7 +212,13 @@ mod tests {
         assert_eq!(rows.len(), 3, "{rows:?}");
         assert_eq!(
             rows[2],
-            LockRow { id: 3, blocked: true, pid: 4243, dev: (8, 2), inode: 1234 }
+            LockRow {
+                id: 3,
+                blocked: true,
+                pid: 4243,
+                dev: (8, 2),
+                inode: 1234
+            }
         );
         assert!(!rows[1].blocked);
         assert_eq!(rows[0].dev, (0, 0x1f));
@@ -210,14 +232,20 @@ mod tests {
         );
         let wait = lock_wait(4243, &rows).unwrap();
         assert_eq!(wait.holder.map(|(pid, _)| pid), Some(4242));
-        assert!(lock_wait(4242, &rows).is_none(), "the holder waits on nothing");
+        assert!(
+            lock_wait(4242, &rows).is_none(),
+            "the holder waits on nothing"
+        );
     }
 
     #[test]
     fn dev_numbers_match_procfs_rendering() {
         // makedev(8, 2) and a large minor in the extended encoding.
         assert_eq!(dev_numbers((8 << 8) | 2), (8, 2));
-        assert_eq!(dev_numbers((259 << 8) | (0x12300 << 12) | 0x45), (259, 0x12345));
+        assert_eq!(
+            dev_numbers((259 << 8) | (0x12300 << 12) | 0x45),
+            (259, 0x12345)
+        );
     }
 
     /// A real flock wait between two processes of this test is reported, with
@@ -239,16 +267,25 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let row = loop {
             let (rows, _) = subtree(me);
-            if let Some(row) = rows.into_iter().find(|r| r.pid == child.id() && r.waits_on.is_some()) {
+            if let Some(row) = rows
+                .into_iter()
+                .find(|r| r.pid == child.id() && r.waits_on.is_some())
+            {
                 break row;
             }
-            assert!(std::time::Instant::now() < deadline, "the child never showed as blocked");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child never showed as blocked"
+            );
             std::thread::sleep(std::time::Duration::from_millis(20));
         };
         drop(file);
         child.wait().unwrap();
         let wait = row.waits_on.unwrap();
-        assert_eq!(wait.path.as_deref(), Some(path.display().to_string().as_str()));
+        assert_eq!(
+            wait.path.as_deref(),
+            Some(path.display().to_string().as_str())
+        );
         assert_eq!(wait.holder.map(|(pid, _)| pid), Some(me));
         assert!(row.command.contains("flock"), "{}", row.command);
     }

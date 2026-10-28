@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 
 use super::harness_shim;
 use super::{
-    BuildGate, Ceilings, Doorbell, ExecutionOutcome, HungTest, KillCause, ObsEvent, Observation, ObservationSink,
-    RunContext, StreamSource, StreamTap, StrictPlan, TestTracker, WATCHDOG_POLL, clone_buffer,
-    clone_hung, drain_libtest_json, drain_stderr, drain_to_buffer, join_drains,
+    BuildGate, Ceilings, Doorbell, ExecutionOutcome, HungTest, KillCause, ObsEvent, Observation,
+    ObservationSink, RunContext, StreamSource, StreamTap, StrictPlan, TestTracker, WATCHDOG_POLL,
+    clone_buffer, clone_hung, drain_libtest_json, drain_stderr, drain_to_buffer, join_drains,
     spawn_cargo_process_group, spawn_process_group, watchdog_loop,
 };
 use crate::error::DevError;
@@ -81,12 +81,18 @@ pub(crate) struct LibtestRun {
 /// The `--target` triple on a cargo argv, before the `--` that hands the rest
 /// to libtest.
 fn cargo_target<'a>(args: &[&'a str]) -> Option<&'a str> {
-    let cargo_side = args.iter().position(|a| *a == "--").map_or(args, |end| &args[..end]);
-    cargo_side.iter().enumerate().find_map(|(i, arg)| match arg.strip_prefix("--target") {
-        Some("") => cargo_side.get(i + 1).copied(),
-        Some(rest) => rest.strip_prefix('='),
-        None => None,
-    })
+    let cargo_side = args
+        .iter()
+        .position(|a| *a == "--")
+        .map_or(args, |end| &args[..end]);
+    cargo_side
+        .iter()
+        .enumerate()
+        .find_map(|(i, arg)| match arg.strip_prefix("--target") {
+            Some("") => cargo_side.get(i + 1).copied(),
+            Some(rest) => rest.strip_prefix('='),
+            None => None,
+        })
 }
 
 /// Run one libtest invocation. Cargo and direct launches share process
@@ -533,10 +539,20 @@ mod tests {
     #[test]
     fn cargo_target_reads_the_cargo_side_only() {
         assert_eq!(
-            cargo_target(&["test", "--target", "x86_64-unknown-linux-musl", "--", "--target", "x"]),
+            cargo_target(&[
+                "test",
+                "--target",
+                "x86_64-unknown-linux-musl",
+                "--",
+                "--target",
+                "x"
+            ]),
             Some("x86_64-unknown-linux-musl")
         );
-        assert_eq!(cargo_target(&["test", "--target=aarch64-apple-darwin"]), Some("aarch64-apple-darwin"));
+        assert_eq!(
+            cargo_target(&["test", "--target=aarch64-apple-darwin"]),
+            Some("aarch64-apple-darwin")
+        );
         assert_eq!(cargo_target(&["test", "--target-dir", "/t"]), None);
         assert_eq!(cargo_target(&["test", "--", "--target", "x"]), None);
     }

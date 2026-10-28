@@ -504,7 +504,10 @@ fn config_source(files: &[(PathBuf, toml::Table)], table: &str, key: &str) -> Op
     })
 }
 
-fn config_runner_source(files: &[(PathBuf, toml::Table)], platform: Platform<'_>) -> Option<Source> {
+fn config_runner_source(
+    files: &[(PathBuf, toml::Table)],
+    platform: Platform<'_>,
+) -> Option<Source> {
     files.iter().find_map(|(path, doc)| {
         let targets = doc.get("target")?.as_table()?;
         targets.iter().find_map(|(selector, value)| {
@@ -725,7 +728,12 @@ fn target_source_live(
     let flags_of = |selector: &str| {
         let selector = selector.to_owned();
         merged_config_flags(files, move |doc: &toml::Table| {
-            doc.get("target")?.as_table()?.get(&selector)?.as_table()?.get("rustflags").cloned()
+            doc.get("target")?
+                .as_table()?
+                .get(&selector)?
+                .as_table()?
+                .get("rustflags")
+                .cloned()
         })
     };
     let non_empty = |merged: Option<Option<Vec<String>>>| matches!(merged, Some(Some(flags)) if !flags.is_empty());
@@ -788,7 +796,11 @@ pub(crate) fn effective_rustflags(build_root: &Path, env: EffectiveEnv<'_>) -> E
             return undecided;
         };
         let flags = if key == "CARGO_ENCODED_RUSTFLAGS" {
-            value.split('\u{1f}').filter(|f| !f.is_empty()).map(str::to_owned).collect()
+            value
+                .split('\u{1f}')
+                .filter(|f| !f.is_empty())
+                .map(str::to_owned)
+                .collect()
         } else {
             value.split_whitespace().map(str::to_owned).collect()
         };
@@ -854,10 +866,16 @@ fn target_table_flags(
     let target_key = |selector: &str| {
         let selector = selector.to_owned();
         move |doc: &toml::Table| -> Option<toml::Value> {
-            doc.get("target")?.as_table()?.get(&selector)?.as_table()?.get("rustflags").cloned()
+            doc.get("target")?
+                .as_table()?
+                .get(&selector)?
+                .as_table()?
+                .get("rustflags")
+                .cloned()
         }
     };
-    let mut flags: Vec<String> = merged_config_flags(files, target_key(triple))?.unwrap_or_default();
+    let mut flags: Vec<String> =
+        merged_config_flags(files, target_key(triple))?.unwrap_or_default();
     if let Some(value) = env.get_os(&target_rustflags_env_var(triple)) {
         flags.extend(value.to_str()?.split_whitespace().map(str::to_owned));
     }
@@ -871,7 +889,9 @@ fn target_table_flags(
         let Some(cfg_flags) = merged_config_flags(files, target_key(selector))? else {
             continue;
         };
-        let expr = selector.strip_prefix("cfg(").and_then(|s| s.strip_suffix(')'))?;
+        let expr = selector
+            .strip_prefix("cfg(")
+            .and_then(|s| s.strip_suffix(')'))?;
         if eval_cfg_on(expr, platform)? {
             flags.extend(cfg_flags);
         }
@@ -1322,7 +1342,9 @@ mod tests {
         let live = |files: &[(PathBuf, toml::Table)]| target_source_live(files, &triples, host);
 
         // A string value counts, not only a non-empty array.
-        assert!(live(&[doc("[target.'cfg(all())']\nrustflags = \"-Dwarnings\"\n")]));
+        assert!(live(&[doc(
+            "[target.'cfg(all())']\nrustflags = \"-Dwarnings\"\n"
+        )]));
         // A higher layer's empty string replaces the lower array: nothing left.
         assert!(!live(&[
             doc("[target.'cfg(all())']\nrustflags = \"\"\n"),
@@ -1337,15 +1359,15 @@ mod tests {
         // Replacement and an undecided table together: the replaced lower
         // layer's flags prove nothing (the review's counterexample).
         assert!(!live(&[
-            doc(
-                "[build]\nrustflags = [\"-Ctarget-cpu=native\"]\n\
+            doc("[build]\nrustflags = [\"-Ctarget-cpu=native\"]\n\
                  [target.'cfg(all())']\nrustflags = \"\"\n\
-                 [target.'cfg(all(windows, target_has_atomic = \"128\"))']\nrustflags = [\"-Cx\"]\n"
-            ),
+                 [target.'cfg(all(windows, target_has_atomic = \"128\"))']\nrustflags = [\"-Cx\"]\n"),
             doc("[target.'cfg(all())']\nrustflags = [\"-Dwarnings\"]\n"),
         ]));
         // The triple key counts like a matching cfg.
-        assert!(live(&[doc("[target.x86_64-unknown-linux-gnu]\nrustflags = [\"-Cx\"]\n")]));
+        assert!(live(&[doc(
+            "[target.x86_64-unknown-linux-gnu]\nrustflags = [\"-Cx\"]\n"
+        )]));
     }
 
     #[test]
@@ -1391,12 +1413,15 @@ mod tests {
         std::fs::create_dir_all(root.join(".cargo")).unwrap();
         let home = ("CARGO_HOME", "no-cargo-home");
         // The environment wins outright, whatever the config says.
-        std::fs::write(root.join(".cargo/config.toml"), "[build]\nrustflags = [\"-Cbuild\"]\n").unwrap();
+        std::fs::write(
+            root.join(".cargo/config.toml"),
+            "[build]\nrustflags = [\"-Cbuild\"]\n",
+        )
+        .unwrap();
         let env = [home, ("RUSTFLAGS", "-Cfrom-env  -Cmore")];
         let got = effective_rustflags(&root, EffectiveEnv::new(&env));
         assert_eq!(got.source, "env:RUSTFLAGS");
         assert_eq!(got.flags.unwrap(), ["-Cfrom-env", "-Cmore"]);
-
     }
 
     /// The config sources over an explicit chain (highest precedence first),
@@ -1414,15 +1439,24 @@ mod tests {
         let host = Platform::Host(Some("x86_64-unknown-linux-gnu"));
         let triple = "x86_64-unknown-linux-gnu";
         // Arrays from two files join, lowest precedence first...
-        let files = chain(&["[build]\nrustflags = [\"-Chigh\"]\n", "[build]\nrustflags = [\"-Clow\"]\n"]);
-        assert_eq!(build_table_flags(&files, env), Some(Some(vec!["-Clow".into(), "-Chigh".into()])));
+        let files = chain(&[
+            "[build]\nrustflags = [\"-Chigh\"]\n",
+            "[build]\nrustflags = [\"-Clow\"]\n",
+        ]);
+        assert_eq!(
+            build_table_flags(&files, env),
+            Some(Some(vec!["-Clow".into(), "-Chigh".into()]))
+        );
         assert_eq!(target_table_flags(&files, triple, host, env), Some(None));
         // ...while a string replaces whatever lies below it.
         let files = chain(&[
             "[build]\nrustflags = \"-Ctarget-cpu=x86-64\"\n",
             "[build]\nrustflags = [\"-Ctarget-cpu=native\"]\n",
         ]);
-        assert_eq!(build_table_flags(&files, env), Some(Some(vec!["-Ctarget-cpu=x86-64".into()])));
+        assert_eq!(
+            build_table_flags(&files, env),
+            Some(Some(vec!["-Ctarget-cpu=x86-64".into()]))
+        );
         // The triple key comes first, merged across files, then the matching
         // cfg keys; a bare triple must equal the platform's.
         let files = chain(&[
@@ -1433,17 +1467,28 @@ mod tests {
         ]);
         assert_eq!(
             target_table_flags(&files, triple, host, env),
-            Some(Some(vec!["-Ctriple-low".into(), "-Ctriple-high".into(), "-Ccfg".into()]))
+            Some(Some(vec![
+                "-Ctriple-low".into(),
+                "-Ctriple-high".into(),
+                "-Ccfg".into()
+            ]))
         );
         // An empty target result falls through to `build.rustflags`.
         let files = chain(&[
             "[target.x86_64-unknown-linux-gnu]\nrustflags = []\n[build]\nrustflags = [\"-Cbuild\"]\n",
         ]);
         assert_eq!(target_table_flags(&files, triple, host, env), Some(None));
-        assert_eq!(build_table_flags(&files, env), Some(Some(vec!["-Cbuild".into()])));
+        assert_eq!(
+            build_table_flags(&files, env),
+            Some(Some(vec!["-Cbuild".into()]))
+        );
         // A flagged table this evaluator cannot judge is an admission, not a guess.
-        let files = chain(&["[target.'cfg(target_has_atomic = \"128\")']\nrustflags = [\"-Cx\"]\n"]);
-        assert_eq!(target_table_flags(&files, "x86_64-unknown-linux-gnu", host, env), None);
+        let files =
+            chain(&["[target.'cfg(target_has_atomic = \"128\")']\nrustflags = [\"-Cx\"]\n"]);
+        assert_eq!(
+            target_table_flags(&files, "x86_64-unknown-linux-gnu", host, env),
+            None
+        );
     }
 
     #[test]

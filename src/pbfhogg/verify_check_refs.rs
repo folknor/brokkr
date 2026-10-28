@@ -207,8 +207,10 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
 
     // --- Ways only ---
     verify_msg("--- check --refs (ways only) ---");
-    let pbf_ways_args =
-        PbfArgv::new("check").arg("--refs").input(pbf)?.arg_if(direct_io, "--direct-io");
+    let pbf_ways_args = PbfArgv::new("check")
+        .arg("--refs")
+        .input(pbf)?
+        .arg_if(direct_io, "--direct-io");
     let pbfhogg_text = capture_and_log(
         harness,
         Side::Pbfhogg(pbf_ways_args),

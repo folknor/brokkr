@@ -56,7 +56,10 @@ impl BuildProvenance {
     #[cfg(test)]
     pub(crate) fn from_pairs(pairs: &[(&str, &str)]) -> Self {
         Self {
-            pairs: pairs.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect(),
+            pairs: pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
         }
     }
 }
@@ -82,7 +85,9 @@ pub(crate) fn host_pairs(build_root: &Path) -> Vec<(String, String)> {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     cache
         .entry(build_root.to_path_buf())
-        .or_insert_with(|| compute_host_pairs(build_root, EffectiveEnv::new(&[]), std::env::vars_os()))
+        .or_insert_with(|| {
+            compute_host_pairs(build_root, EffectiveEnv::new(&[]), std::env::vars_os())
+        })
         .clone()
 }
 
@@ -199,17 +204,22 @@ fn env_inputs(vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsSt
 /// Cargo's resolved profile for one compiled unit, from its
 /// compiler-artifact record's `profile` object.
 pub(crate) fn unit_pairs(profile: &serde_json::Value) -> Vec<(String, String)> {
-    ["opt_level", "debuginfo", "debug_assertions", "overflow_checks"]
-        .into_iter()
-        .filter_map(|key| {
-            let value = profile.get(key)?;
-            let text = match value {
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            Some((key.to_owned(), text))
-        })
-        .collect()
+    [
+        "opt_level",
+        "debuginfo",
+        "debug_assertions",
+        "overflow_checks",
+    ]
+    .into_iter()
+    .filter_map(|key| {
+        let value = profile.get(key)?;
+        let text = match value {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        Some((key.to_owned(), text))
+    })
+    .collect()
 }
 
 #[cfg(test)]
@@ -250,8 +260,14 @@ mod tests {
         .unwrap();
         let home = [("CARGO_HOME", "no-cargo-home")];
         let text = config_inputs(&root, EffectiveEnv::new(&home));
-        assert!(text.contains("build.rustflags=[\"-Ctarget-cpu=native\"]"), "{text}");
-        assert!(text.contains("target.x86_64-unknown-linux-gnu.linker=\"clang\""), "{text}");
+        assert!(
+            text.contains("build.rustflags=[\"-Ctarget-cpu=native\"]"),
+            "{text}"
+        );
+        assert!(
+            text.contains("target.x86_64-unknown-linux-gnu.linker=\"clang\""),
+            "{text}"
+        );
         assert!(text.contains("profile.dev="), "{text}");
         assert!(text.contains("build.incremental=false"), "{text}");
         assert!(!text.contains("jobs"), "not codegen: {text}");

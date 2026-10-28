@@ -164,7 +164,8 @@ impl Extension {
             Some(rows) => {
                 let mut omitted = rows.len().saturating_sub(MAX_ACTIVITY_ROWS);
                 for a in rows.iter().take(MAX_ACTIVITY_ROWS) {
-                    let (done, total) = a.progress.map_or((None, None), |(d, t)| (Some(d), Some(t)));
+                    let (done, total) =
+                        a.progress.map_or((None, None), |(d, t)| (Some(d), Some(t)));
                     let line = format!(
                         "x1.act={}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                         a.id,
@@ -187,58 +188,70 @@ impl Extension {
             }
         }
         if let Some(s) = &self.sample {
-            let mut rows = String::new();
-            let mut sent = 0usize;
-            for r in &s.rows {
-                let line = format!(
-                    "x1.proc={}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-                    r.pid,
-                    r.ppid,
-                    text(&r.via),
-                    opt(r.cpu_milli),
-                    r.cpu_ms,
-                    r.rss_kb,
-                    r.age_ms,
-                    if r.state.is_control() || r.state == '\t' { '?' } else { r.state },
-                    opt(r.read_bytes),
-                    opt(r.write_bytes),
-                    text(r.launched.as_deref().unwrap_or("")),
-                    text(&r.argv),
-                );
-                if out.len() + rows.len() + line.len() + RESERVE > EXT_BUDGET {
-                    break;
-                }
-                rows.push_str(&line);
-                sent += 1;
-            }
-            let omitted = s.omitted + (s.rows.len() - sent);
-            putln!(
-                out,
-                "x1.sample={}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                s.age_ms,
-                s.interval_ms,
-                u8::from(s.pids_meaningful),
-                s.observed,
-                omitted,
-                s.unreadable,
-                s.cpu_milli_total,
-                s.rss_kb_total,
-            );
-            out.push_str(&rows);
-            if let Some(c) = &s.cgroup {
-                putln!(
-                    out,
-                    "x1.cgroup={}\t{}\t{}\t{}\t{}\t{}",
-                    text(&c.name),
-                    c.since_entry_ms,
-                    c.cpu_usec,
-                    opt(c.cpu_milli),
-                    opt(c.memory_bytes),
-                    c.members,
-                );
-            }
+            Self::encode_sample(&mut out, s);
         }
         out
+    }
+
+    /// Append the sample header, as many process rows as the budget admits,
+    /// and the cgroup line. Rows are selected against the output so far plus
+    /// the rows already accepted, with [`RESERVE`] held for the header and
+    /// cgroup.
+    fn encode_sample(out: &mut String, s: &SampleView) {
+        let mut rows = String::new();
+        let mut sent = 0usize;
+        for r in &s.rows {
+            let line = format!(
+                "x1.proc={}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                r.pid,
+                r.ppid,
+                text(&r.via),
+                opt(r.cpu_milli),
+                r.cpu_ms,
+                r.rss_kb,
+                r.age_ms,
+                if r.state.is_control() || r.state == '\t' {
+                    '?'
+                } else {
+                    r.state
+                },
+                opt(r.read_bytes),
+                opt(r.write_bytes),
+                text(r.launched.as_deref().unwrap_or("")),
+                text(&r.argv),
+            );
+            if out.len() + rows.len() + line.len() + RESERVE > EXT_BUDGET {
+                break;
+            }
+            rows.push_str(&line);
+            sent += 1;
+        }
+        let omitted = s.omitted + (s.rows.len() - sent);
+        putln!(
+            out,
+            "x1.sample={}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            s.age_ms,
+            s.interval_ms,
+            u8::from(s.pids_meaningful),
+            s.observed,
+            omitted,
+            s.unreadable,
+            s.cpu_milli_total,
+            s.rss_kb_total,
+        );
+        out.push_str(&rows);
+        if let Some(c) = &s.cgroup {
+            putln!(
+                out,
+                "x1.cgroup={}\t{}\t{}\t{}\t{}\t{}",
+                text(&c.name),
+                c.since_entry_ms,
+                c.cpu_usec,
+                opt(c.cpu_milli),
+                opt(c.memory_bytes),
+                c.members,
+            );
+        }
     }
 
     /// Decode the `x1.*` lines of a reply. `None` when there is no extension
@@ -252,12 +265,16 @@ impl Extension {
         let mut rows = Vec::new();
         let mut cgroup = None;
         for line in lines {
-            let Some((key, value)) = line.split_once('=') else { continue };
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
             if key == VERSION_KEY {
                 seen_version = value == "1";
                 continue;
             }
-            let Some(field) = key.strip_prefix("x1.") else { continue };
+            let Some(field) = key.strip_prefix("x1.") else {
+                continue;
+            };
             let parts: Vec<&str> = value.split('\t').collect();
             match field {
                 "acts" => activities_busy = true,
@@ -416,10 +433,16 @@ pub(crate) fn render(ext: &Extension, show_pids: bool) -> Vec<String> {
         Some(rows) => render_activities(rows, &mut out),
     }
     if ext.activities_omitted > 0 {
-        out.push(format!("       ... and {} more activities not shown", ext.activities_omitted));
+        out.push(format!(
+            "       ... and {} more activities not shown",
+            ext.activities_omitted
+        ));
     }
     if let Some((text, age)) = &ext.narration
-        && ext.activities.as_ref().is_none_or(|r| r.iter().all(|a| a.narration.is_none()))
+        && ext
+            .activities
+            .as_ref()
+            .is_none_or(|r| r.iter().all(|a| a.narration.is_none()))
     {
         out.push(format!("last status: {text} ({} ago)", dur_ms(*age)));
     }
@@ -454,14 +477,23 @@ fn render_activities(rows: &[ActivityRow], out: &mut Vec<String>) {
             if depth > 12 {
                 return;
             }
-            let mut line = format!("{}{} ({})", "  ".repeat(depth), a.label, dur_ms(a.elapsed_ms));
+            let mut line = format!(
+                "{}{} ({})",
+                "  ".repeat(depth),
+                a.label,
+                dur_ms(a.elapsed_ms)
+            );
             if let Some((done, total)) = a.progress {
                 put!(line, ", {done}/{total}");
             }
             if let Some(n) = a.narration.as_ref().filter(|n| **n != a.label) {
                 put!(line, " - {n}");
             }
-            out.push(if depth == 0 { format!("doing: {line}") } else { format!("       {line}") });
+            out.push(if depth == 0 {
+                format!("doing: {line}")
+            } else {
+                format!("       {line}")
+            });
             walk(Some(a.id), depth + 1, rows, ids, out);
         }
     }
@@ -664,8 +696,11 @@ mod tests {
         };
         // Busiest first, as the sender orders them: child, then parent, then
         // an unrelated root whose parent is not in the sample.
-        ext.sample.as_mut().unwrap().rows =
-            vec![row(30, 20, "child"), row(20, 10, "parent"), row(50, 1, "other")];
+        ext.sample.as_mut().unwrap().rows = vec![
+            row(30, 20, "child"),
+            row(20, 10, "parent"),
+            row(50, 1, "other"),
+        ];
         let text = render(&ext, true).join("\n");
         let at = |s: &str| text.find(s).unwrap();
         assert!(at("PID 20 parent") < at("PID 30 child"), "{text}");

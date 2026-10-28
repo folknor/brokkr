@@ -187,9 +187,13 @@ impl PlannedSweep {
     /// the invocation gave this lane is the carrier's too.
     pub(crate) fn doctest_carrier(&self, label: String) -> Self {
         let mut declaration = self.declaration.clone();
-        declaration.origin = SweepOrigin::DoctestCarrier { source: self.label.clone() };
+        declaration.origin = SweepOrigin::DoctestCarrier {
+            source: self.label.clone(),
+        };
         declaration.label = label;
-        declaration.lane_exec = LaneExec::DocOnly { threads: Threads::Watchdogged };
+        declaration.lane_exec = LaneExec::DocOnly {
+            threads: Threads::Watchdogged,
+        };
         declaration.filters = LaneFilters::default();
         declaration.curated = false;
         Self {
@@ -361,7 +365,10 @@ impl LaneExec {
     /// rather than handing cargo a selection - the lanes that can drop a
     /// binary after the build (`exclude_tests`).
     pub fn runs_enumerated_binaries(self) -> bool {
-        matches!(self, Self::Parallel { .. } | Self::Isolated | Self::Nextest { .. })
+        matches!(
+            self,
+            Self::Parallel { .. } | Self::Isolated | Self::Nextest { .. }
+        )
     }
 
     /// The doctest-only lane (`[[check]] doc_only`): `cargo test --doc` and
@@ -651,8 +658,7 @@ impl TargetSelector {
 /// Whether `target` matches a target-name `pattern`, with cargo's glob
 /// support. A pattern that is not a valid glob is compared literally.
 pub(crate) fn target_glob_matches(pattern: &str, target: &str) -> bool {
-    globset::Glob::new(pattern)
-        .map_or(pattern == target, |g| g.compile_matcher().is_match(target))
+    globset::Glob::new(pattern).map_or(pattern == target, |g| g.compile_matcher().is_match(target))
 }
 
 /// Refuse an `exclude_tests` the sweep's lane cannot honour. A serial lane
@@ -745,7 +751,11 @@ impl LaneFilters {
     /// Only `test`-kind targets can be excluded; `kind` is the target's
     /// selector kind (`test`, `lib`, `bin`, ...).
     pub fn excludes(&self, kind: &str, name: &str) -> bool {
-        kind == "test" && self.exclude.iter().any(|e| target_glob_matches(e.as_str(), name))
+        kind == "test"
+            && self
+                .exclude
+                .iter()
+                .any(|e| target_glob_matches(e.as_str(), name))
     }
 
     /// Render libtest's configured `--skip` flags and ignored-test switch.
@@ -867,7 +877,12 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> SweepDecl {
     let filters = LaneFilters {
         filters: entry_filters(entry),
         targets: entry_selectors(entry),
-        exclude: entry.exclude_tests.iter().cloned().map(TargetName::new).collect(),
+        exclude: entry
+            .exclude_tests
+            .iter()
+            .cloned()
+            .map(TargetName::new)
+            .collect(),
         include_ignored: false,
     };
     let lane_exec = LaneExec::resolve(
@@ -1287,7 +1302,12 @@ fn shaping_from(profile: &ResolvedProfile, profile_name: &str) -> RunShaping {
     let filters = LaneFilters {
         filters,
         targets,
-        exclude: profile.exclude_tests.iter().cloned().map(TargetName::new).collect(),
+        exclude: profile
+            .exclude_tests
+            .iter()
+            .cloned()
+            .map(TargetName::new)
+            .collect(),
         include_ignored: profile.include_ignored,
     };
     RunShaping {
@@ -1447,11 +1467,22 @@ lib_tests = false
         // The inherited lib selection unions with the entry's `tests`, and the
         // exclusions of both levels apply.
         assert_eq!(child[0].filters.targets, [lib, boundary.clone()]);
-        assert_eq!(child[0].filters.cargo_args(), ["--lib", "--test", "error_boundary"]);
-        let excluded: Vec<&str> = child[0].filters.exclude.iter().map(TargetName::as_str).collect();
+        assert_eq!(
+            child[0].filters.cargo_args(),
+            ["--lib", "--test", "error_boundary"]
+        );
+        let excluded: Vec<&str> = child[0]
+            .filters
+            .exclude
+            .iter()
+            .map(TargetName::as_str)
+            .collect();
         assert_eq!(excluded, ["compiler", "slow_*"]);
         assert!(child[0].filters.excludes("test", "slow_parse"));
-        assert!(!child[0].filters.excludes("lib", "slow_parse"), "only test targets are excluded");
+        assert!(
+            !child[0].filters.excludes("lib", "slow_parse"),
+            "only test targets are excluded"
+        );
         // An explicit `false` clears the inherited selection.
         let cleared = resolve(&cfg, &checks, "cleared").unwrap();
         assert_eq!(cleared[0].filters.targets, [boundary]);
@@ -1475,13 +1506,20 @@ sweeps = ["default"]
 isolation = "process"
 "#,
         );
-        let err = crate::check_cmd::decide_active_sweeps(&checks, Some(&cfg), Some("serial"), &[], false)
-            .unwrap_err()
-            .to_string();
+        let err =
+            crate::check_cmd::decide_active_sweeps(&checks, Some(&cfg), Some("serial"), &[], false)
+                .unwrap_err()
+                .to_string();
         assert!(err.contains("exclude_tests"), "got: {err}");
         assert!(
-            crate::check_cmd::decide_active_sweeps(&checks, Some(&cfg), Some("isolated"), &[], false)
-                .is_ok()
+            crate::check_cmd::decide_active_sweeps(
+                &checks,
+                Some(&cfg),
+                Some("isolated"),
+                &[],
+                false
+            )
+            .is_ok()
         );
         // No profile at all: the entry alone is a serial lane.
         assert!(crate::check_cmd::decide_active_sweeps(&checks, None, None, &[], false).is_err());

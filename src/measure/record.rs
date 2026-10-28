@@ -109,10 +109,8 @@ pub(super) fn force_emit_result_lines(
     // A hotpath/alloc profile is otherwise only readable through `brokkr
     // results <uuid>`, and an unstored run has no uuid.
     if let Some(ref hotpath) = result.hotpath
-        && let Some(report) = crate::hotpath_fmt::format_hotpath_report(
-            hotpath,
-            crate::hotpath_fmt::DEFAULT_TOP,
-        )
+        && let Some(report) =
+            crate::hotpath_fmt::format_hotpath_report(hotpath, crate::hotpath_fmt::DEFAULT_TOP)
     {
         console::raw_stdout(&format!("\n{report}\n"));
     }
@@ -492,7 +490,10 @@ impl BenchHarness {
         // Appended after every other source: the insert keeps the last pair
         // per key, so nothing earlier can stand in for it.
         let identity = self.build_identity.borrow().clone();
-        kv.extend(row_provenance(config.external_build.as_ref(), identity.as_ref()));
+        kv.extend(row_provenance(
+            config.external_build.as_ref(),
+            identity.as_ref(),
+        ));
 
         // Harness-level values take precedence. The individual writers
         // don't have to know or care about the measurement mode or the
@@ -664,8 +665,14 @@ mod provenance_tests {
 
     #[test]
     fn a_program_cannot_write_into_the_provenance_namespace() {
-        assert!(is_harness_owned(&KvPair::text("provenance.rustflags", "-Cforged")));
+        assert!(is_harness_owned(&KvPair::text(
+            "provenance.rustflags",
+            "-Cforged"
+        )));
         assert!(!is_harness_owned(&KvPair::text("cells", "4")));
-        assert!(!is_harness_owned(&KvPair::text(KvKey::metadata("build"), "x")));
+        assert!(!is_harness_owned(&KvPair::text(
+            KvKey::metadata("build"),
+            "x"
+        )));
     }
 }

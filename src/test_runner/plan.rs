@@ -88,10 +88,15 @@ impl GateState {
         match self {
             Self::Pending | Self::Received => "the build has not been verified".into(),
             Self::Clean => "the build is the planned one".into(),
-            Self::Drift(lines) => format!("the build cargo is about to run is not the planned one - {}", lines.join("; ")),
+            Self::Drift(lines) => format!(
+                "the build cargo is about to run is not the planned one - {}",
+                lines.join("; ")
+            ),
             Self::BuildFailed => "cargo's build failed".into(),
             Self::Failed(detail) => format!("the build could not be verified: {detail}"),
-            Self::Expired => "the run's build stream was not seen before its first harness connected".into(),
+            Self::Expired => {
+                "the run's build stream was not seen before its first harness connected".into()
+            }
         }
     }
 }
@@ -114,7 +119,11 @@ pub(crate) struct BuildGate {
 
 impl Default for BuildGate {
     fn default() -> Self {
-        Self { state: Mutex::new(GateState::Pending), changed: Condvar::new(), on_expiry: Mutex::new(None) }
+        Self {
+            state: Mutex::new(GateState::Pending),
+            changed: Condvar::new(),
+            on_expiry: Mutex::new(None),
+        }
     }
 }
 
@@ -123,7 +132,10 @@ impl BuildGate {
     /// before that connection is answered, so whatever the caller records
     /// about an unverified build lands before anything it built runs.
     pub(crate) fn on_expiry(&self, hook: impl FnOnce() + Send + 'static) {
-        *self.on_expiry.lock().unwrap_or_else(PoisonError::into_inner) = Some(Box::new(hook));
+        *self
+            .on_expiry
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Box::new(hook));
     }
 
     /// `build-finished` was seen; the comparison starts.
@@ -149,7 +161,10 @@ impl BuildGate {
     }
 
     pub(crate) fn state(&self) -> GateState {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner).clone()
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Block until the gate is settled. While nothing has been received the
@@ -157,7 +172,11 @@ impl BuildGate {
     /// [`GateState::Expired`] (and the expiry hook runs). `closed` is checked
     /// first and throughout, a settled gate included; `None` when it says the
     /// wait is over (the session is closing, a stop was requested).
-    pub(crate) fn wait(&self, pending_bound: Duration, closed: impl Fn() -> bool) -> Option<GateState> {
+    pub(crate) fn wait(
+        &self,
+        pending_bound: Duration,
+        closed: impl Fn() -> bool,
+    ) -> Option<GateState> {
         let started = Instant::now();
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         loop {
@@ -171,7 +190,11 @@ impl BuildGate {
                 *state = GateState::Expired;
                 self.changed.notify_all();
                 drop(state);
-                let hook = self.on_expiry.lock().unwrap_or_else(PoisonError::into_inner).take();
+                let hook = self
+                    .on_expiry
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take();
                 if let Some(hook) = hook {
                     hook();
                 }
@@ -222,8 +245,14 @@ mod gate_tests {
         let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let hook = Arc::clone(&fired);
         gate.on_expiry(move || hook.store(true, std::sync::atomic::Ordering::Relaxed));
-        assert_eq!(gate.wait(Duration::ZERO, || false), Some(GateState::Expired));
-        assert!(fired.load(std::sync::atomic::Ordering::Relaxed), "the expiry hook runs before the waiter is answered");
+        assert_eq!(
+            gate.wait(Duration::ZERO, || false),
+            Some(GateState::Expired)
+        );
+        assert!(
+            fired.load(std::sync::atomic::Ordering::Relaxed),
+            "the expiry hook runs before the waiter is answered"
+        );
         assert!(!gate.settle(GateState::Clean));
         assert_eq!(gate.state(), GateState::Expired);
     }
@@ -243,7 +272,9 @@ mod gate_tests {
         let gate = BuildGate::default();
         gate.receive();
         let polls = std::sync::atomic::AtomicUsize::new(0);
-        let seen = gate.wait(Duration::ZERO, || polls.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 3);
+        let seen = gate.wait(Duration::ZERO, || {
+            polls.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 3
+        });
         assert_eq!(seen, None);
         assert_eq!(gate.state(), GateState::Received);
     }

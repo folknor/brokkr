@@ -21,8 +21,16 @@ const COMMANDS: &[&str] = &[
 /// proves it came from [`COMMANDS`].
 fn command_args(name: &str, pbf: &str, output: &str, force: bool) -> Result<PbfArgv, DevError> {
     let argv = match name {
-        "cat-way" => PbfArgv::new("cat").input(pbf)?.arg("--type").arg("way").output(output)?,
-        "cat-relation" => PbfArgv::new("cat").input(pbf)?.arg("--type").arg("relation").output(output)?,
+        "cat-way" => PbfArgv::new("cat")
+            .input(pbf)?
+            .arg("--type")
+            .arg("way")
+            .output(output)?,
+        "cat-relation" => PbfArgv::new("cat")
+            .input(pbf)?
+            .arg("--type")
+            .arg("relation")
+            .output(output)?,
         "inspect-tags-way" => PbfArgv::new("inspect")
             .arg("tags")
             .input(pbf)?

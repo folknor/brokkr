@@ -177,7 +177,10 @@ fn linker_failure_detail(stderr: &str) -> Option<String> {
         // `error: could not compile `pkg` (lib test)` names the crate whose
         // build cache is suspect; its symbols are `pkg`-with-underscores paths.
         let package = blocks[index + 1..].iter().find_map(|later| {
-            let rest = later.text.trim_start().strip_prefix("error: could not compile `")?;
+            let rest = later
+                .text
+                .trim_start()
+                .strip_prefix("error: could not compile `")?;
             let (pkg, _) = rest.split_once('`')?;
             Some(pkg.to_string())
         });
@@ -506,7 +509,10 @@ error: linking with `clang` failed: exit status: 1
 error: could not compile `mycrate` (lib) due to 1 previous error
 ";
         let result = filter_test("", stderr);
-        assert!(result.contains("invalid linker name in argument '-fuse-ld=lld'"), "got: {result}");
+        assert!(
+            result.contains("invalid linker name in argument '-fuse-ld=lld'"),
+            "got: {result}"
+        );
         assert!(!result.contains("PATH="), "got: {result}");
         assert!(!result.contains("arguments are omitted"), "got: {result}");
     }
@@ -527,8 +533,14 @@ error: linking with `clang` failed: exit status: 1
 error: could not compile `second` (lib test) due to 1 previous error
 ";
         let result = filter_test("", stderr);
-        assert!(result.contains("brokkr clean --cargo second"), "got: {result}");
-        assert!(!result.contains("brokkr clean --cargo first"), "got: {result}");
+        assert!(
+            result.contains("brokkr clean --cargo second"),
+            "got: {result}"
+        );
+        assert!(
+            !result.contains("brokkr clean --cargo first"),
+            "got: {result}"
+        );
     }
 
     #[test]

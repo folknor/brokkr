@@ -982,7 +982,10 @@ mod tests {
             "include!(choose!(\"OUT_DIR\", \"production.rs\"));\n",
         ] {
             assert_eq!(
-                analyze(bad, &entry(), Context::default(), false).unwrap().refusals.len(),
+                analyze(bad, &entry(), Context::default(), false)
+                    .unwrap()
+                    .refusals
+                    .len(),
                 1,
                 "{bad}"
             );

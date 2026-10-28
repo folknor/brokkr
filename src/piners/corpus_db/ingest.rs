@@ -93,11 +93,10 @@ impl CorpusDb {
         gate: &GateVerdict,
     ) -> Result<i64, DevError> {
         self.conn().execute("BEGIN", [])?;
-        let result =
-            record_inner(self.conn(), run, report, expected, gate).and_then(|run_id| {
-                prune_run_history(self.conn(), RUN_RETENTION_LIMIT)?;
-                Ok(run_id)
-            });
+        let result = record_inner(self.conn(), run, report, expected, gate).and_then(|run_id| {
+            prune_run_history(self.conn(), RUN_RETENTION_LIMIT)?;
+            Ok(run_id)
+        });
         match result {
             Ok(run_id) => {
                 self.conn().execute("COMMIT", [])?;

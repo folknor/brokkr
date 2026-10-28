@@ -31,12 +31,7 @@ pub fn format_compare_with_limit(
     limit: usize,
     matcher: &DatasetMatcher,
 ) -> String {
-    let matcher = &matcher.for_inputs(
-        rows_a
-            .iter()
-            .chain(rows_b)
-            .map(|r| r.input_file.as_str()),
-    );
+    let matcher = &matcher.for_inputs(rows_a.iter().chain(rows_b).map(|r| r.input_file.as_str()));
     let mut pairs = build_comparison_pairs(rows_a, rows_b, matcher);
     // The cap defaults to 20, so say when it bit: a comparison that silently
     // ends early reads as "these are all the commands that were measured".
@@ -278,7 +273,12 @@ fn recorded_exit(kv: &[KvPair]) -> Option<String> {
 fn collect_provenance(kv: &[KvPair]) -> std::collections::BTreeMap<String, String> {
     kv.iter()
         .filter(|p| p.class() == KvClass::Provenance)
-        .map(|p| (KvClass::Provenance.suffix(&p.key).to_owned(), p.value.to_string()))
+        .map(|p| {
+            (
+                KvClass::Provenance.suffix(&p.key).to_owned(),
+                p.value.to_string(),
+            )
+        })
         .collect()
 }
 
@@ -557,7 +557,10 @@ fn format_provenance_diff(
     if differing.is_empty() {
         return None;
     }
-    Some(format!("  build provenance differs: {}", differing.join(", ")))
+    Some(format!(
+        "  build provenance differs: {}",
+        differing.join(", ")
+    ))
 }
 
 /// Format the counter line: every work-size counter that moved between the two
@@ -1140,7 +1143,12 @@ mod tests {
         let mut r = row("render", "bench", "", wall);
         r.uuid = format!("{id}00000000");
         // Row ids follow the fixture id's digits, so recency is explicit.
-        r.id = id.chars().filter(char::is_ascii_digit).collect::<String>().parse().unwrap_or(0);
+        r.id = id
+            .chars()
+            .filter(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .unwrap_or(0);
         r.kv = provenance
             .iter()
             .map(|(k, v)| KvPair::text(crate::db::KvKey::provenance(*k), *v))
@@ -1156,10 +1164,19 @@ mod tests {
         let native = [("rustflags", "-Ctarget-cpu=native")];
         let generic = [("rustflags", "")];
         // One results.db numbers both sides: A rows 11, 10; B rows 21, 20.
-        let a = [built("aaaa0011", 100, &native), built("aaaa0010", 120, &generic)];
-        let b = [built("bbbb0021", 80, &generic), built("bbbb0020", 110, &generic)];
+        let a = [
+            built("aaaa0011", 100, &native),
+            built("aaaa0010", 120, &generic),
+        ];
+        let b = [
+            built("bbbb0021", 80, &generic),
+            built("bbbb0020", 110, &generic),
+        ];
         let out = format_compare("A", &a, "B", &b, 10, &DatasetMatcher::empty());
-        assert!(out.contains("build provenance differs: rustflags -Ctarget-cpu=native -> "), "{out}");
+        assert!(
+            out.contains("build provenance differs: rustflags -Ctarget-cpu=native -> "),
+            "{out}"
+        );
         assert!(
             out.contains("older pair with equal recorded build provenance: aaaa0010 vs bbbb0021"),
             "{out}"
@@ -1177,7 +1194,11 @@ mod tests {
         // candidates: (999, 99) and (998, 100). By position the first wins
         // (A's second row); by recency the second does - its older member,
         // B's row 100, is newer than row 99.
-        let a = [built("a1000", 1, &latest), built("a999", 1, &one), built("a998", 1, &two)];
+        let a = [
+            built("a1000", 1, &latest),
+            built("a999", 1, &one),
+            built("a998", 1, &two),
+        ];
         let b = [built("b100", 1, &two), built("b99", 1, &one)];
         let rows_a: Vec<&StoredRow> = a.iter().collect();
         let rows_b: Vec<&StoredRow> = b.iter().collect();
@@ -1194,10 +1215,30 @@ mod tests {
         let a = [built("aaaa0001", 100, &native), built("aaaa0002", 120, &[])];
         let b = [built("bbbb0001", 80, &generic), built("bbbb0002", 110, &[])];
         let out = format_compare("A", &a, "B", &b, 10, &DatasetMatcher::empty());
-        assert!(!out.contains("older pair"), "two unrecorded rows are not a match: {out}");
-        let one_sided = format_compare("A", &[built("a", 1, &native)], "B", &[built("b", 1, &[])], 10, &DatasetMatcher::empty());
-        assert!(one_sided.contains("build provenance: not recorded on B"), "{one_sided}");
-        let neither = format_compare("A", &[built("a", 1, &[])], "B", &[built("b", 1, &[])], 10, &DatasetMatcher::empty());
+        assert!(
+            !out.contains("older pair"),
+            "two unrecorded rows are not a match: {out}"
+        );
+        let one_sided = format_compare(
+            "A",
+            &[built("a", 1, &native)],
+            "B",
+            &[built("b", 1, &[])],
+            10,
+            &DatasetMatcher::empty(),
+        );
+        assert!(
+            one_sided.contains("build provenance: not recorded on B"),
+            "{one_sided}"
+        );
+        let neither = format_compare(
+            "A",
+            &[built("a", 1, &[])],
+            "B",
+            &[built("b", 1, &[])],
+            10,
+            &DatasetMatcher::empty(),
+        );
         assert!(!neither.contains("provenance"), "{neither}");
     }
 

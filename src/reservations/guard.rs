@@ -79,10 +79,16 @@ pub(super) fn busy(message: String) -> io::Error {
 
 /// Whether `error` is the reservation gate's refusal, not an I/O failure.
 pub(crate) fn is_refusal(error: &io::Error) -> bool {
-    error.get_ref().is_some_and(<dyn std::error::Error + Send + Sync>::is::<Refusal>)
+    error
+        .get_ref()
+        .is_some_and(<dyn std::error::Error + Send + Sync>::is::<Refusal>)
 }
 
-fn gated<T>(targets: &[&Path], tree: Option<&Path>, op: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+fn gated<T>(
+    targets: &[&Path],
+    tree: Option<&Path>,
+    op: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
     let _serial = super::serialize()?;
     refuse(targets, tree.as_slice())?;
     op()
@@ -124,7 +130,10 @@ pub(crate) fn refuse_overlaps(scan: &super::store::Scan, targets: &[&Path]) -> i
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     for target in targets {
         let target = Spelled::of(target, &cwd).map_err(|e| {
-            busy(format!("refusing to change {}: its identity cannot be resolved: {e}", target.display()))
+            busy(format!(
+                "refusing to change {}: its identity cannot be resolved: {e}",
+                target.display()
+            ))
         })?;
         for reservation in &scan.reservations {
             if let Some(resource) = reservation
@@ -211,12 +220,30 @@ mod tests {
         };
         let refused = refuse_overlaps(&scan, &[&input]).unwrap_err();
         assert!(is_refusal(&refused), "{refused}");
-        assert!(!is_refusal(&io::Error::from_raw_os_error(libc::EBUSY)), "a real EBUSY is no refusal");
-        assert!(refuse_overlaps(&scan, &[&root.join("data")]).is_err(), "an enclosing directory");
-        assert!(refuse_overlaps(&scan, &[&root.join("data/in.pbf/x")]).is_err(), "a path inside it");
-        assert!(refuse_overlaps(&scan, &[&root.join("other.pbf")]).is_ok(), "an unrelated path");
-        let unknown = Scan { reservations: Vec::new(), unknown: vec![("y".into(), "unreadable".into())] };
-        assert!(refuse_overlaps(&unknown, &[&root.join("other.pbf")]).is_err(), "an unknown lease blocks all");
+        assert!(
+            !is_refusal(&io::Error::from_raw_os_error(libc::EBUSY)),
+            "a real EBUSY is no refusal"
+        );
+        assert!(
+            refuse_overlaps(&scan, &[&root.join("data")]).is_err(),
+            "an enclosing directory"
+        );
+        assert!(
+            refuse_overlaps(&scan, &[&root.join("data/in.pbf/x")]).is_err(),
+            "a path inside it"
+        );
+        assert!(
+            refuse_overlaps(&scan, &[&root.join("other.pbf")]).is_ok(),
+            "an unrelated path"
+        );
+        let unknown = Scan {
+            reservations: Vec::new(),
+            unknown: vec![("y".into(), "unreadable".into())],
+        };
+        assert!(
+            refuse_overlaps(&unknown, &[&root.join("other.pbf")]).is_err(),
+            "an unknown lease blocks all"
+        );
     }
 
     #[test]
@@ -224,7 +251,11 @@ mod tests {
         let root = crate::test_scratch::scratch("reservations", "guard-backup");
         let tree = root.join("multi-extract");
         std::fs::create_dir_all(tree.join("a")).unwrap();
-        std::fs::write(tree.join("a").join(format!("{BACKUP_PREFIX}1-0.out.pbf")), b"").unwrap();
+        std::fs::write(
+            tree.join("a").join(format!("{BACKUP_PREFIX}1-0.out.pbf")),
+            b"",
+        )
+        .unwrap();
         let err = remove_dir_all(&tree).unwrap_err();
         assert!(is_refusal(&err), "{err}");
         assert!(err.to_string().contains(BACKUP_PREFIX), "{err}");

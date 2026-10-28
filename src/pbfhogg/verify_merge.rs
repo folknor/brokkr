@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 
 use super::verify::{self, ExternalTool, Findings, PbfArgv, VerifyHarness};
 use crate::error::DevError;
+use crate::measure::Invocation;
 use crate::osc::{self, OscDiff};
 use crate::output;
 use crate::output::verify_msg;
-use crate::measure::Invocation;
 use crate::tools::OsmosisTools;
 
 /// Cap on the number of failing IDs printed per category (nodes /
@@ -114,7 +114,11 @@ pub fn run(
         output::verify_summary(&format!(
             "  osmium apply-changes --locations-on-ways inline locations: {} \
              (informational: osmium's location index is not an oracle)",
-            if osmium.is_pass() { "consistent" } else { "STALE" }
+            if osmium.is_pass() {
+                "consistent"
+            } else {
+                "STALE"
+            }
         ));
         // The summary channel prints on a pass too, so the report's head is
         // what makes a change in osmium's stale set visible run to run.
@@ -137,7 +141,10 @@ pub fn run(
     // scan IDs (slower pass 1) but produces content-identical output, so the
     // cross-check's independence is untouched.
     let captured = harness.run_pbfhogg(
-        PbfArgv::new("sort").arg("--force").input(&osmium_out)?.output(&osmium_sorted)?,
+        PbfArgv::new("sort")
+            .arg("--force")
+            .input(&osmium_out)?
+            .output(&osmium_sorted)?,
     )?;
     harness.check_exit(&captured, "pbfhogg sort (normalise osmium output)")?;
 

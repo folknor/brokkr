@@ -412,7 +412,15 @@ fn run_osmium_baseline(
 
     let cat = Invocation::tool(
         ExternalTool::Osmium,
-        strings(&["cat", pbf_str, "-o", "/dev/null", "-f", "opl", "--overwrite"]),
+        strings(&[
+            "cat",
+            pbf_str,
+            "-o",
+            "/dev/null",
+            "-f",
+            "opl",
+            "--overwrite",
+        ]),
     );
 
     let config = BenchConfig {

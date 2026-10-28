@@ -17,7 +17,10 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
     let pbfhogg_out = outdir.join("pbfhogg.osm.pbf");
 
     let captured = harness.run_pbfhogg(
-        PbfArgv::new("sort").input(pbf)?.output(&pbfhogg_out)?.arg_if(direct_io, "--direct-io"),
+        PbfArgv::new("sort")
+            .input(pbf)?
+            .output(&pbfhogg_out)?
+            .arg_if(direct_io, "--direct-io"),
     )?;
     harness.check_exit(&captured, "pbfhogg sort")?;
 

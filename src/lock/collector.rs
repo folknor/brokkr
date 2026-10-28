@@ -100,7 +100,11 @@ pub(crate) fn sample(spec: &SampleSpec<'_>) -> SampleView {
             if dt <= 0.0 || ticks < earlier {
                 return None;
             }
-            #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            #[allow(
+                clippy::cast_precision_loss,
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss
+            )]
             let milli = ((ticks - earlier) as f64 / clk as f64 / dt * 1000.0).round() as u64;
             Some(milli)
         });
@@ -121,7 +125,11 @@ pub(crate) fn sample(spec: &SampleSpec<'_>) -> SampleView {
         let cpu_milli = match (cg_first, cg_second) {
             (Some((a, ta)), Some((b, tb))) if b >= a => {
                 let dt = tb.saturating_duration_since(ta).as_secs_f64();
-                #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                #[allow(
+                    clippy::cast_precision_loss,
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss
+                )]
                 (dt > 0.0).then(|| ((b - a) as f64 / 1000.0 / dt).round() as u64)
             }
             _ => None,
@@ -270,7 +278,9 @@ fn count_unreadable(
             Some(began.saturating_sub(1000))
         })
         .or(spec.began_ms);
-    let clk = crate::process::clock_ticks_per_second().unwrap_or(100).max(1);
+    let clk = crate::process::clock_ticks_per_second()
+        .unwrap_or(100)
+        .max(1);
     unreadable
         .iter()
         .filter(|(pid, start)| {
@@ -313,23 +323,27 @@ fn describe(
     }
     let ticks = seen.stat.user_ticks() + seen.stat.system_ticks();
     let start_ms = seen.stat.start().get().saturating_mul(1000) / clk.max(1);
-    let launched = seen.token.as_deref().and_then(parse_exec).map(|(acq, seq)| {
-        match spec.observed {
-            Some(o) if o.acq().as_str() == acq => match o.launch_record(seq) {
-                // The launch's label is its own (shortened) command line, so
-                // on the launched process itself only the activity is news;
-                // a descendant names the launch it came from.
-                Some(r) => match (is_the_launch(&argv, &r.label), r.under) {
-                    (true, Some(under)) => format!("under {under}"),
-                    (true, None) => "launched directly".to_owned(),
-                    (false, Some(under)) => format!("from {} under {under}", r.label),
-                    (false, None) => format!("from {}", r.label),
+    let launched = seen
+        .token
+        .as_deref()
+        .and_then(parse_exec)
+        .map(|(acq, seq)| {
+            match spec.observed {
+                Some(o) if o.acq().as_str() == acq => match o.launch_record(seq) {
+                    // The launch's label is its own (shortened) command line, so
+                    // on the launched process itself only the activity is news;
+                    // a descendant names the launch it came from.
+                    Some(r) => match (is_the_launch(&argv, &r.label), r.under) {
+                        (true, Some(under)) => format!("under {under}"),
+                        (true, None) => "launched directly".to_owned(),
+                        (false, Some(under)) => format!("from {} under {under}", r.label),
+                        (false, None) => format!("from {}", r.label),
+                    },
+                    None => format!("cohort {seq}, label not kept"),
                 },
-                None => format!("cohort {seq}, label not kept"),
-            },
-            _ => format!("cohort {seq}"),
-        }
-    });
+                _ => format!("cohort {seq}"),
+            }
+        });
     Some(ProcRow {
         pid,
         ppid: seen.stat.parent().map_or(0, crate::process::Pid::get),
@@ -389,7 +403,11 @@ fn exec_token(pid: u32) -> Environ {
             };
         }
     }
-    if cut { Environ::Unreadable } else { Environ::Absent }
+    if cut {
+        Environ::Unreadable
+    } else {
+        Environ::Absent
+    }
 }
 
 fn cmdline(pid: u32) -> Option<String> {
@@ -400,7 +418,11 @@ fn cmdline(pid: u32) -> Option<String> {
         return None;
     }
     let text = String::from_utf8_lossy(&buf);
-    let joined = text.split('\0').filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ");
+    let joined = text
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
     Some(sanitize(&joined).chars().take(300).collect())
 }
 
@@ -456,7 +478,10 @@ impl Collector {
             return;
         }
         {
-            let mut last = self.last_start.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut last = self
+                .last_start
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if last.is_some_and(|t| t.elapsed() < MIN_REFRESH) {
                 self.busy.store(false, Ordering::Release);
                 return;
@@ -476,7 +501,9 @@ impl Collector {
                     observed: Some(&me.observed),
                     began_ms: None,
                 });
-                *me.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                *me.cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
                     Some((view, Instant::now()));
                 me.busy.store(false, Ordering::Release);
             });
@@ -551,12 +578,18 @@ mod tests {
         assert_eq!(row.via, "T", "{row:?}");
         assert_eq!(row.launched.as_deref(), Some("cohort 7"));
         assert!(row.argv.starts_with("sleep 5"), "{row:?}");
-        assert!(row.cpu_milli.is_some(), "present in both scans with the same token");
+        assert!(
+            row.cpu_milli.is_some(),
+            "present in both scans with the same token"
+        );
     }
 
     #[test]
     fn descendants_of_the_root_are_observed_without_a_token() {
-        let mut child = std::process::Command::new("sleep").arg("5").spawn().unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .unwrap();
         let view = sample(&SampleSpec {
             acq: None,
             root: std::process::id(),
