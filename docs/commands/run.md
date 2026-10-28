@@ -372,7 +372,10 @@ are unaffected.
 
 Removing a step from the config does not uninstall what it installed; the
 artifact stays, and a later step targeting the same path is refused until it
-is removed.
+is removed. Its ownership record stays too, even once the artifact is gone:
+brokkr cannot tell an artifact deleted for good from one moved aside, and an
+unchanged one that comes back is still that step's to replace. A gone
+destination holds no claim, so the record blocks nothing.
 
 ## Profile
 

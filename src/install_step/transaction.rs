@@ -344,6 +344,13 @@ fn finish_cleanup(
 /// Finish or undo every interrupted install in the registry. A transaction
 /// that cannot be resolved stays journaled and is reported; admission refuses
 /// its destination until someone resolves it by hand.
+///
+/// A settled record is never pruned here, even when its destination is gone.
+/// Ownership is content-based, so an unchanged artifact moved away and back
+/// (a renamed parent, an unmounted filesystem, a restore) is still this
+/// step's to replace; absence observed by some install cannot tell that from
+/// abandonment, and the record costs a few hundred bytes per destination ever
+/// used. Records are removed only by `Registry::store` when nothing is owned.
 pub(super) fn recover_all(registry: &Registry) -> Result<(), DevError> {
     let scan = registry.all()?;
     for broken in &scan.broken {

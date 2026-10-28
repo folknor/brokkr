@@ -50,29 +50,9 @@ one:
 
 Keep its contract: never runs a phase, never builds, exits 0 on findings.
 
-## Open: should `brokkr run` release the lock while its program runs? (2026-10-08)
+## Maybe: should a focused `brokkr test` skip package-pinned sweeps by default? (2026-10-08)
 
-Today `run` holds the global lock through the program's whole run, so a locked
-brokkr cannot run beneath it (it now refuses; it used to deadlock). Releasing
-after the build would let `brokkr run brokkr -- test X` work, but it is not just
-dropping a guard:
-
-- loses serialization against benchmarks (the `run --commit` A/B example is
-  measurement-adjacent), `brokkr lock`/`kill` tracking of the program, and the
-  `disable_toolchain` window during execution;
-- plain `run` is one `cargo run`; releasing first means building, then executing
-  the binary directly under cargo's runtime envelope (`check_cmd::DirectRuntime`
-  has the test-specific half of that);
-- `--commit` runs inside `with_worktree`'s outer hold, which also protects
-  worktree eviction and `clean` - an unlocked run needs a usage lease on the
-  worktree's artifacts first;
-- the passthrough runner does not set `die_with_parent`, so a SIGKILLed brokkr
-  already orphans a `run` workload, lock or not.
-
-If done, it wants an explicit "protected execution" path for measurement users
-rather than a quiet change to `run`.
-
-## Open: should a focused `brokkr test` skip package-pinned sweeps by default? (2026-10-08)
+Ruled "maybe" 2026-10-28: not now, revisit if the cost keeps coming up.
 
 Reported from broadarrow once focused runs stopped paying a cargo invocation per
 harness: a focused daemon test still pays a second full build (about 35s) for
@@ -227,6 +207,16 @@ shape" was the principled call; the use case might suggest a different shape
 
 ## Won't fix
 
+### `brokkr run` releasing the lock while its program runs
+Ruled no 2026-10-28. `run` keeps the global lock through the program's whole
+run: it serializes against benchmarks, keeps `brokkr lock`/`kill` tracking and
+the `disable_toolchain` window, and protects `--commit` worktree artifacts.
+
+### A bare `check` naming `--gate` when `gate_profile` is set
+Ruled no 2026-10-28. A nag on the high-frequency loop path teaches people to
+stop reading output, and the failure it prevents is a documentation error,
+which the project's own docs fix.
+
 ### Inconsistent path-to-string conversion
 All paths are constructed from known UTF-8 components, so `.display().to_string()` won't corrupt in practice. 100+ occurrences across 30+ files - not worth the churn.
 
@@ -257,22 +247,6 @@ would churn every litehtml/sluggrs invocation in CI and docs.
 ---
 
 ## Backlog
-
-### Prune inert `[[install]]` registry records (2026-10-26)
-
-`~/.brokkr/install/` gets one record per distinct copy destination ever
-installed, and nothing ever deletes one: not removing the installed folder, not
-dropping the step from the config, not a `to` or parent-symlink change that
-moves the destination. A record with no install in flight whose destination no
-longer exists is already inert: it authorizes nothing, admission treats it as
-stale, and it holds no nesting claim. So growth is bounded only by the number
-of destinations ever used, a few hundred bytes each.
-
-Fix shape: in the registry scan `recover_all` already does on every install,
-delete each record with `pending` empty whose destination is genuinely absent
-(`NotFound` only, not any other lookup error), with a directory fsync
-afterwards. Add a test. The first run would also remove the record left by the
-end-to-end test of the feature.
 
 ### Inter-suite gap on the unisolated serial path
 
@@ -539,27 +513,6 @@ Not yet designed: price it against the two-mechanisms-one-question smell
 first, and note that the honest version may be a *review* affordance rather
 than a gate mechanism, since neither miscategorisation is mechanically
 detectable.
-
-### Should a bare `check` say a gate exists?
-
-Undesigned, and deliberately so. Reported 2026-07-22: nautilus had been
-gating PRs on plain `brokkr check` the whole time. With
-`default_profile = "tier1"` and `gate_profile = "pre-commit"`, bare `check`
-runs tier1 alone - no serial lane, no coverage audit - while their own
-`AGENTS.md` prescribed exactly that command as the gate. The incomplete gate
-was the *documented* one, and until the audit existed it could not have said
-so.
-
-A single line naming `--gate` on a bare `check` in a repo that sets
-`gate_profile` is cheap, and it is the one moment the tool knows the user may
-be reaching for the wrong command. It stays inside the non-goals because
-`gate_profile` is opt-in - a config without it sees nothing. But price it
-honestly first: an unconditional nag on the high-frequency loop path is how
-people learn to stop reading output, and the failure it prevents is a
-documentation error, which documentation can also fix. Note the verdict
-vocabulary already carries the honest signal for *certified* profiles
-(`partial`, exit 10); this would be for the uncertified default, which is
-deliberately outside that contract.
 
 ### Two mechanisms that were priced and not committed
 
