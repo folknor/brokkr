@@ -503,6 +503,7 @@ fn run_osmosis(
 ) -> Result<output::CapturedOutput, DevError> {
     let osmosis = tools.osmosis_executable();
     let java_home = tools.java_home.display().to_string();
+    let _step = super::verify::step("osmosis");
     Invocation::resolved(&osmosis, args.iter().map(|&a| a.to_owned()).collect())
         .with_env("JAVA_HOME", &java_home)
         .capture_in(cwd)

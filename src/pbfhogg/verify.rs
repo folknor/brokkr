@@ -484,6 +484,7 @@ where
     O: CheckOutcome,
 {
     let start = std::time::Instant::now();
+    StepTimes::reset();
     // The check as a holder activity, its tool runs as steps beneath it
     // (`step`): what `brokkr lock` shows from another shell. On a terminal
     // the buffered (non-verbose) run also keeps a live status line naming
@@ -499,19 +500,21 @@ where
         crate::output::disable_status_line();
     }
     let ms = start.elapsed().as_millis();
+    let steps = StepTimes::render();
+    let ms = if steps.is_empty() { format!("{ms}ms") } else { format!("{ms}ms; {steps}") };
     match &result {
         Ok(()) => {
             if !verbose {
                 crate::output::verify_buffer_discard();
             }
-            crate::output::verify_summary(&format!("{name}: PASS ({ms}ms)"));
+            crate::output::verify_summary(&format!("{name}: PASS ({ms})"));
             Ok(())
         }
         Err(DevError::Interrupted) => {
             if !verbose {
                 crate::output::verify_buffer_flush();
             }
-            crate::output::verify_summary(&format!("{name}: INTERRUPTED ({ms}ms)"));
+            crate::output::verify_summary(&format!("{name}: INTERRUPTED ({ms})"));
             Err(DevError::Interrupted)
         }
         Err(e) => {
@@ -520,18 +523,82 @@ where
                 // without re-running the check.
                 crate::output::verify_buffer_flush();
             }
-            crate::output::verify_summary(&format!("{name}: FAIL ({ms}ms): {e}"));
+            crate::output::verify_summary(&format!("{name}: FAIL ({ms}): {e}"));
             Err(DevError::ExitCode(1))
         }
     }
 }
 
 /// One verify step - a tool run - as a holder activity under the check's, and
-/// as the status line on a terminal. Closed when the guard drops.
-fn step(label: &str) -> crate::lockfile::activity::Activity {
+/// as the status line on a terminal. Closed when the guard drops, which also
+/// adds its wall time to the check's [`StepTimes`].
+pub(super) fn step(label: &str) -> Step {
     let activity = crate::lockfile::activity::Activity::begin(label);
     crate::output::status(label);
-    activity
+    Step { _activity: activity, label: label.to_owned(), started: std::time::Instant::now() }
+}
+
+pub(super) struct Step {
+    _activity: crate::lockfile::activity::Activity,
+    label: String,
+    started: std::time::Instant,
+}
+
+impl Drop for Step {
+    fn drop(&mut self) {
+        StepTimes::add(std::mem::take(&mut self.label), self.started.elapsed());
+    }
+}
+
+/// Wall time per step label within the check in flight, read by
+/// [`run_check`] into its summary line, so a `verify` run shows where each
+/// check spends its time: the pbfhogg command under test, the reference tool,
+/// and the comparisons (`pbfhogg diff`, `pbfhogg inspect`). Process-wide,
+/// because checks run one at a time.
+struct StepTimes;
+
+static STEP_TIMES: std::sync::Mutex<Vec<(String, std::time::Duration, usize)>> =
+    std::sync::Mutex::new(Vec::new());
+
+impl StepTimes {
+    fn lock() -> std::sync::MutexGuard<'static, Vec<(String, std::time::Duration, usize)>> {
+        STEP_TIMES.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn add(label: String, took: std::time::Duration) {
+        let mut times = Self::lock();
+        match times.iter_mut().find(|(l, _, _)| *l == label) {
+            Some((_, total, runs)) => {
+                *total += took;
+                *runs += 1;
+            }
+            None => times.push((label, took, 1)),
+        }
+    }
+
+    /// Forget every recorded step, at a check's start.
+    fn reset() {
+        Self::lock().clear();
+    }
+
+    /// The recorded steps, slowest first: `osmium sort 2m0s, pbfhogg diff
+    /// 15.1s (2 runs)`. Empty when nothing ran.
+    fn render() -> String {
+        let mut times = std::mem::take(&mut *Self::lock());
+        render_step_times(&mut times)
+    }
+}
+
+fn render_step_times(times: &mut [(String, std::time::Duration, usize)]) -> String {
+    times.sort_by_key(|(_, total, _)| std::cmp::Reverse(*total));
+    times
+        .iter()
+        .map(|(label, total, runs)| {
+            let runs = if *runs > 1 { format!(" ({runs} runs)") } else { String::new() };
+            format!("{label} {}{runs}", output::format_duration(*total))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Check whether an executable exists on `PATH`.
@@ -604,8 +671,25 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::{
         CheckOutcome, Findings, SORT_TYPE_THEN_ID, Verdict, diff_verdict, fresh_subdir,
-        is_plain_component, parse_ordered,
+        is_plain_component, parse_ordered, render_step_times,
     };
+
+    #[test]
+    fn step_times_render_slowest_first_with_run_counts() {
+        use std::time::Duration;
+        let mut times = vec![
+            ("pbfhogg diff".to_owned(), Duration::from_secs(15), 2),
+            ("osmium sort".to_owned(), Duration::from_secs(120), 1),
+            ("pbfhogg sort".to_owned(), Duration::from_secs(41), 1),
+        ];
+        let text = render_step_times(&mut times);
+        let labels: Vec<&str> = text.split(", ").collect();
+        assert_eq!(labels.len(), 3, "{text}");
+        assert!(labels[0].starts_with("osmium sort "), "{text}");
+        assert!(labels[1].starts_with("pbfhogg sort "), "{text}");
+        assert!(labels[2].starts_with("pbfhogg diff ") && labels[2].ends_with(" (2 runs)"), "{text}");
+        assert_eq!(render_step_times(&mut []), "");
+    }
 
     #[test]
     fn fresh_subdir_drops_a_previous_runs_outputs() {

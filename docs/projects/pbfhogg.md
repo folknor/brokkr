@@ -107,7 +107,12 @@ tally banner) and exits 130 through the interrupt cleanup.
 `verify::run_check`: by default a check's detail (`verify_msg` output - section
 headers, inspect dumps, element diffs) is captured into a buffer and only
 replayed if the check fails; a passing check prints just a one-line
-`<name>: PASS (<ms>ms)` summary. While a check runs on a terminal, a live
+`<name>: PASS (<ms>ms; <steps>)` summary. `<steps>` is the check's wall time
+per tool run label, slowest first, with a run count when a label ran more
+than once (`osmium sort 2m0s, pbfhogg sort 41.2s, pbfhogg diff 15.1s (2
+runs)`), so the summary says how a check's time splits between the pbfhogg
+command under test, the reference tool and the comparisons. INTERRUPTED and
+FAIL lines carry the same breakdown. While a check runs on a terminal, a live
 status line names the step in flight (the same activity `brokkr lock` shows),
 so a long osmium step is not silent. `-v`/`--verbose` skips the buffer so
 detail streams live even on pass. `verify all` applies this per check, so its default
