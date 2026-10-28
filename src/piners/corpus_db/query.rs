@@ -332,7 +332,6 @@ pub const DISPOSITION_COLUMNS: &[&str] = &[
     "ts_exit_shifted",
     "ts_exit_share_pct",
     "window_sensitive",
-    "dynamic_builtin_calls",
     "raw_json",
 ];
 

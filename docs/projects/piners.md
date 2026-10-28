@@ -286,8 +286,12 @@ The store has per-db `PRAGMA user_version` migrations and WAL, mirroring
   `rule_start_tv`/`rule_end_tv`, `clipped_ours`/`clipped_tv`,
   `history_prefix_bars`, `oracle_trimmed`/`oracle_realtime`, the
   timestamp-shift census `ts_{entry,exit}_{considered,shifted,share_pct}` (the
-  share is `NULL` when nothing was comparable, as the harness omits it),
-  `window_sensitive` (JSON array) and `dynamic_builtin_calls`. The v5
+  share is `NULL` when nothing was comparable, as the harness omits it) and
+  `window_sensitive` (JSON array). v15 dropped the `dynamic_builtin_calls`
+  projection once piners stopped reporting the counter, since it read `NULL` on
+  every new row and a filter on `= 0` silently stopped matching them; older
+  rows keep the value in `raw_json` (`json_extract(raw_json,
+  '$.dynamic_builtin_calls')` in a `--sql` query). The v5
   migration refuses to swap in the rebuilt table unless every projection
   reproduces the column it replaced, row for row.
   Durability covers the disposition lines the parser accepts. One it cannot

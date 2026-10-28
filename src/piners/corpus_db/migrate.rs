@@ -41,7 +41,7 @@ use crate::db::store::{column_exists as has_column, table_exists as has_table};
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding a migration below.
-pub(super) const SCHEMA_VERSION: i64 = 14;
+pub(super) const SCHEMA_VERSION: i64 = 15;
 
 /// Run pending migrations through the shared store policy. The v5 rebuild
 /// preserves historical orphan dispositions, so foreign-key enforcement is
@@ -228,6 +228,21 @@ fn migrate_from(conn: &rusqlite::Connection, current: i64) -> Result<(), DevErro
         }
     }
 
+    drop_retired_projections(conn, current)
+}
+
+/// v14 -> v15: piners no longer reports `dynamic_builtin_calls`, so its
+/// projection read NULL on every new row, and a filter on `= 0` silently
+/// stopped matching them. The column is a generated projection of `raw_json`,
+/// which keeps the value on every row that carried it, so dropping the column
+/// loses nothing.
+fn drop_retired_projections(conn: &rusqlite::Connection, current: i64) -> Result<(), DevError> {
+    if current < 15
+        && has_table(conn, "disposition")?
+        && has_column(conn, "disposition", "dynamic_builtin_calls")?
+    {
+        conn.execute("ALTER TABLE disposition DROP COLUMN dynamic_builtin_calls", [])?;
+    }
     Ok(())
 }
 
@@ -579,10 +594,46 @@ mod tests {
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
 
+        assert!(!has_column(&conn, "disposition", "dynamic_builtin_calls").unwrap());
+
         // Rerunning is a no-op (the version guard short-circuits; has_column
         // would also prevent a duplicate ALTER).
         run_migrations(&conn).unwrap();
         assert!(has_column(&conn, "disposition", "boundary_ours").unwrap());
+    }
+
+    /// A v14 store's `dynamic_builtin_calls` projection is dropped, and the
+    /// value it projected stays in the record it came from.
+    #[test]
+    fn v15_drops_the_dynamic_builtin_calls_projection_keeping_the_record() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(super::super::schema::SCHEMA).unwrap();
+        conn.execute_batch(&disposition_ddl("disposition")).unwrap();
+        conn.execute(
+            "ALTER TABLE disposition ADD COLUMN dynamic_builtin_calls INTEGER GENERATED ALWAYS AS \
+             (json_extract(raw_json, '$.dynamic_builtin_calls')) VIRTUAL",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO run (run_id, started_at, selector, gated, result, probe_count) \
+                 VALUES (1, 'then', '{}', 1, 'pass', 1);
+             INSERT INTO disposition (run_id, probe, disposition, gate_ok, raw_source, raw_json) \
+                 VALUES (1, 'p', 'accepted', 1, 'harness', '{\"dynamic_builtin_calls\":0}');",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 14).unwrap();
+
+        run_migrations(&conn).unwrap();
+        assert!(!has_column(&conn, "disposition", "dynamic_builtin_calls").unwrap());
+        let kept: i64 = conn
+            .query_row(
+                "SELECT json_extract(raw_json, '$.dynamic_builtin_calls') FROM disposition",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, 0);
     }
 
     #[test]

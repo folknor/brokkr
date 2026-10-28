@@ -143,7 +143,7 @@ impl Projection {
 /// NULL, `acc_failing` is `'[]'` when absent, and `sig_breaches` is present
 /// exactly when a signature object is. Declared types give the projections
 /// their affinity, so an integral p90 reads back REAL as it was stored.
-const PROJECTIONS: [(&str, Projection); 39] = [
+const PROJECTIONS: [(&str, Projection); 38] = [
     ("outcome", Projection::Text("$.outcome")),
     ("matched", Projection::CountOr0("$.matched")),
     ("ours_only", Projection::CountOr0("$.ours_only")),
@@ -218,10 +218,6 @@ const PROJECTIONS: [(&str, Projection); 39] = [
         Projection::Real("$.ts_shift.exit_share_pct"),
     ),
     ("window_sensitive", Projection::Array("$.window_sensitive")),
-    (
-        "dynamic_builtin_calls",
-        Projection::Count("$.dynamic_builtin_calls"),
-    ),
 ];
 
 /// The `disposition` DDL under `name` - `disposition` itself, or the v5
