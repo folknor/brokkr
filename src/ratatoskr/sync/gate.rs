@@ -895,6 +895,8 @@ mod tests {
             marker_idx: 0,
             timestamp_us: ts_us,
             name: name.to_owned(),
+            run_idx: 0,
+            call: None,
         }
     }
 
@@ -912,6 +914,39 @@ mod tests {
             crate::measure::wall::marker_span_us(&markers, "SYNC_START", "SYNC_END")
                 .map(|us| us / 1000),
             Some(7500)
+        );
+    }
+
+    #[test]
+    fn sync_span_ignores_call_streams() {
+        let mut tagged_end = marker("SYNC_END", 3_000_000);
+        tagged_end.call = Some("b".to_owned());
+        let markers = vec![
+            marker("SYNC_START", 1_000_000),
+            tagged_end,
+            marker("SYNC_END", 9_000_000),
+        ];
+        assert_eq!(
+            crate::measure::wall::marker_span_us(&markers, "SYNC_START", "SYNC_END")
+                .map(|us| us / 1000),
+            Some(8000)
+        );
+    }
+
+    #[test]
+    fn sync_span_reads_time_order_not_arrival_order() {
+        let mut markers = vec![
+            marker("SYNC_START", 20),
+            marker("SYNC_START", 10),
+            marker("SYNC_END", 40),
+            marker("SYNC_END", 30),
+        ];
+        for (i, m) in markers.iter_mut().enumerate() {
+            m.marker_idx = i32::try_from(i).unwrap();
+        }
+        assert_eq!(
+            crate::measure::wall::marker_span_us(&markers, "SYNC_START", "SYNC_END"),
+            Some(10)
         );
     }
 

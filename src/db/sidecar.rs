@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS sidecar_markers (
     marker_idx   INTEGER NOT NULL,
     timestamp_us INTEGER NOT NULL,
     name         TEXT NOT NULL,
+    -- The call stream; NULL is the process-wide stream.
+    call_id      TEXT,
     PRIMARY KEY (result_uuid, run_idx, marker_idx)
 );
 
@@ -38,7 +40,8 @@ CREATE TABLE IF NOT EXISTS sidecar_counters (
     run_idx      INTEGER NOT NULL DEFAULT 0,
     timestamp_us INTEGER NOT NULL,
     name         TEXT NOT NULL,
-    value        INTEGER NOT NULL
+    value        INTEGER NOT NULL,
+    call_id      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_counters_uuid ON sidecar_counters(result_uuid, run_idx);
 
@@ -90,7 +93,7 @@ fn sidecar_schema() -> String {
 /// Current sidecar schema version. This database is independently readable
 /// and can exist without results.db, so its steps are local; `db::store` still
 /// owns the version stamp, transaction, and upgrade policy.
-const SIDECAR_VERSION: i64 = 8;
+const SIDECAR_VERSION: i64 = 9;
 
 /// Apply migrations newer than `current`; version checks and stamping are
 /// centralized in `db::store`.
@@ -150,8 +153,22 @@ fn run_sidecar_migrations(conn: &rusqlite::Connection, current: i64) -> Result<(
             "ALTER TABLE sidecar_summary ADD COLUMN capture_truncated INTEGER NOT NULL DEFAULT 0",
         )?;
     }
+    // v8 -> v9: markers and counters name their call stream; every older
+    // row is process-wide (NULL).
+    if current < 9 {
+        for table in ["sidecar_markers", "sidecar_counters"] {
+            if !super::store::column_exists(conn, table, "call_id")? {
+                conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN call_id TEXT"))?;
+            }
+        }
+    }
 
     Ok(())
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn stored_run_idx(raw: i64) -> usize {
+    raw.max(0) as usize
 }
 
 fn drop_summary_payload(conn: &rusqlite::Connection) -> Result<(), DevError> {
@@ -317,8 +334,8 @@ impl SidecarDb {
         {
             let mut stmt = tx.prepare_cached(
                 "INSERT INTO sidecar_markers (
-                    result_uuid, run_idx, marker_idx, timestamp_us, name
-                ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    result_uuid, run_idx, marker_idx, timestamp_us, name, call_id
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?;
 
             for m in &data.markers {
@@ -328,6 +345,7 @@ impl SidecarDb {
                     m.marker_idx,
                     m.timestamp_us,
                     m.name,
+                    m.call,
                 ])?;
             }
         }
@@ -336,8 +354,8 @@ impl SidecarDb {
         {
             let mut stmt = tx.prepare_cached(
                 "INSERT INTO sidecar_counters (
-                    result_uuid, run_idx, timestamp_us, name, value
-                ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    result_uuid, run_idx, timestamp_us, name, value, call_id
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?;
 
             for c in &data.counters {
@@ -347,6 +365,7 @@ impl SidecarDb {
                     c.timestamp_us,
                     c.name,
                     c.value,
+                    c.call,
                 ])?;
             }
         }
@@ -575,14 +594,14 @@ impl SidecarDb {
         let uuid_prefix = id.as_str();
         let (sql, run_filter) = match run_idx {
             Some(idx) => (
-                "SELECT marker_idx, timestamp_us, name
+                "SELECT marker_idx, timestamp_us, name, run_idx, call_id
                  FROM sidecar_markers
                  WHERE result_uuid = ?1 AND run_idx = ?2
                  ORDER BY marker_idx",
                 Some(i64::try_from(idx).unwrap_or(0)),
             ),
             None => (
-                "SELECT marker_idx, timestamp_us, name
+                "SELECT marker_idx, timestamp_us, name, run_idx, call_id
                  FROM sidecar_markers
                  WHERE result_uuid = ?1
                  ORDER BY run_idx, marker_idx",
@@ -595,6 +614,8 @@ impl SidecarDb {
                 marker_idx: row.get(0)?,
                 timestamp_us: row.get(1)?,
                 name: row.get(2)?,
+                run_idx: stored_run_idx(row.get(3)?),
+                call: row.get(4)?,
             })
         };
         let rows = match run_filter {
@@ -613,14 +634,14 @@ impl SidecarDb {
         let uuid_prefix = id.as_str();
         let (sql, run_filter) = match run_idx {
             Some(idx) => (
-                "SELECT timestamp_us, name, value
+                "SELECT timestamp_us, name, value, run_idx, call_id
                  FROM sidecar_counters
                  WHERE result_uuid = ?1 AND run_idx = ?2
                  ORDER BY timestamp_us, name",
                 Some(i64::try_from(idx).unwrap_or(0)),
             ),
             None => (
-                "SELECT timestamp_us, name, value
+                "SELECT timestamp_us, name, value, run_idx, call_id
                  FROM sidecar_counters
                  WHERE result_uuid = ?1
                  ORDER BY run_idx, timestamp_us, name",
@@ -633,6 +654,8 @@ impl SidecarDb {
                 timestamp_us: row.get(0)?,
                 name: row.get(1)?,
                 value: row.get(2)?,
+                run_idx: stored_run_idx(row.get(3)?),
+                call: row.get(4)?,
             })
         };
         let rows = match run_filter {
@@ -837,11 +860,13 @@ mod tests {
              ALTER TABLE sidecar_summary ADD COLUMN vm_hwm_kb INTEGER;
              ALTER TABLE sidecar_summary ADD COLUMN sample_count INTEGER;
              ALTER TABLE sidecar_summary ADD COLUMN marker_count INTEGER;
-             ALTER TABLE sidecar_summary ADD COLUMN wall_time_ms INTEGER;",
+             ALTER TABLE sidecar_summary ADD COLUMN wall_time_ms INTEGER;
+             ALTER TABLE sidecar_markers DROP COLUMN call_id;
+             ALTER TABLE sidecar_counters DROP COLUMN call_id;",
         )
         .unwrap();
-        raw.pragma_update(None, "user_version", SIDECAR_VERSION - 3)
-            .unwrap();
+        // v5: before `ending`, the summary payload drop, and call streams.
+        raw.pragma_update(None, "user_version", 5).unwrap();
         drop(raw);
 
         let ro = SidecarDb::open_read_only(&path).unwrap();
@@ -863,6 +888,10 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM sidecar_markers", [], |row| row.get(0))
             .unwrap();
         assert_eq!(markers, 1, "existing rows survive the migration");
+        let id = super::super::RunId::new("old111".to_owned());
+        let read = ro.query_markers_for(&id, None).unwrap();
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].call, None, "an older row is process-wide");
     }
 
     // A store stamped newer than this brokkr knows is refused, and the stamp is

@@ -111,14 +111,20 @@ pub enum WallSource {
     },
 }
 
-/// Last start and first later end, preserving exact marker microseconds.
+/// Last start and first later end, in time order (arrival order breaking
+/// ties), preserving exact marker microseconds. Only the process stream
+/// counts: a call's START paired with another call's END would be a span
+/// nothing ran.
 pub(crate) fn marker_span_us(
     markers: &[crate::sidecar::Marker],
     start: &str,
     end: &str,
 ) -> Option<i64> {
-    let begin = markers.iter().rfind(|marker| marker.name == start)?;
-    let finish = markers
+    let mut process: Vec<&crate::sidecar::Marker> =
+        markers.iter().filter(|marker| marker.call.is_none()).collect();
+    process.sort_by_key(|marker| (marker.timestamp_us, marker.marker_idx));
+    let begin = process.iter().rfind(|marker| marker.name == start)?;
+    let finish = process
         .iter()
         .find(|marker| marker.name == end && marker.timestamp_us > begin.timestamp_us)?;
     finish.timestamp_us.checked_sub(begin.timestamp_us)

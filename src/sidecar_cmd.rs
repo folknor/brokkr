@@ -91,7 +91,10 @@ fn warn_if_capture_truncated(
     run_idx: Option<usize>,
 ) -> Result<(), DevError> {
     if store.query_sidecar_capture_truncated(id, run_idx)? {
-        output::warn("stored sidecar trajectory is incomplete because a capture limit was reached");
+        output::warn(
+            "stored sidecar trajectory is incomplete: a capture limit was reached or \
+             malformed FIFO lines were rejected",
+        );
     }
     Ok(())
 }
@@ -181,6 +184,49 @@ fn resolve_id(store: &db::RunStore, prefix: &str) -> Result<Option<db::RunId>, D
     }
 }
 
+/// A view whose answer is one process timeline: concatenated runs would make
+/// one timeline, and one wall, out of several processes.
+fn one_run(run_filter: Option<usize>, what: &str) -> Result<usize, DevError> {
+    run_filter.ok_or_else(|| {
+        DevError::Usage(format!("{what} reads one run; pass --run N instead of --run all"))
+    })
+}
+
+/// Refuse a `--call` that names no stream in the selected runs, looking at
+/// markers and counters alike, before any view filter narrows them.
+fn check_call(
+    store: &db::RunStore,
+    id: &db::RunId,
+    run_filter: Option<usize>,
+    call: Option<&str>,
+) -> Result<(), DevError> {
+    let Some(call) = call else {
+        return Ok(());
+    };
+    if !crate::sidecar::is_valid_call_id(call) {
+        return Err(DevError::Usage(format!(
+            "--call: '{call}' is not a call id (1 to {} bytes of A-Z a-z 0-9 _ . -)",
+            crate::sidecar::MAX_CALL_ID_BYTES
+        )));
+    }
+    let in_markers = store
+        .query_sidecar_markers(id, run_filter)?
+        .iter()
+        .any(|m| m.call.as_deref() == Some(call));
+    let in_counters = in_markers
+        || store
+            .query_sidecar_counters(id, run_filter)?
+            .iter()
+            .any(|c| c.call.as_deref() == Some(call));
+    if in_markers || in_counters {
+        Ok(())
+    } else {
+        Err(DevError::Config(format!(
+            "--call: no call '{call}' in the selected runs"
+        )))
+    }
+}
+
 fn run_phase_summary(
     store: &db::RunStore,
     id: &db::RunId,
@@ -188,29 +234,74 @@ fn run_phase_summary(
 ) -> Result<(), DevError> {
     print_resolved_run_info(store, id)?;
     let run_filter = resolve_run_filter(store, id, q.run.as_deref())?;
-    let samples = store.query_sidecar_samples(id, run_filter)?;
-    if samples.is_empty() {
-        output::result_msg("no sidecar data for this result");
+    one_run(run_filter, "the per-phase summary")?;
+    check_call(store, id, run_filter, q.call.as_deref())?;
+    let markers = store.query_sidecar_markers(id, run_filter)?;
+    if let Some(call) = q.call.as_deref() {
+        let stream = crate::sidecar_fmt::stream_markers(&markers, Some(call));
+        if stream.is_empty() {
+            output::result_msg(&format!("call '{call}' emitted no markers"));
+        } else {
+            crate::sidecar_fmt::print_call_timelines(&stream, q.human);
+        }
         return Ok(());
     }
+    // Samples gate the process resource table only; a call's marker
+    // intervals stand without them.
+    let samples = store.query_sidecar_samples(id, run_filter)?;
+    if samples.is_empty() {
+        output::result_msg("no sidecar samples for this result");
+    } else {
+        print_phase_summary(&samples, &markers, q.human);
+    }
+    crate::sidecar_fmt::print_call_timelines(&markers, q.human);
+    Ok(())
+}
+
+/// `--phase` for the sample and counter views, in the selected stream of one
+/// run. `--call` without `--phase` cannot select samples: no call window is
+/// known.
+fn phase_window(
+    store: &db::RunStore,
+    id: &db::RunId,
+    run_filter: Option<usize>,
+    q: &SidecarQuery,
+    samples: &[crate::sidecar::Sample],
+) -> Result<Option<(i64, i64)>, DevError> {
+    let Some(ref phase_name) = q.phase else {
+        return Ok(None);
+    };
+    one_run(run_filter, "--phase")?;
     let markers = store.query_sidecar_markers(id, run_filter)?;
-    print_phase_summary(&samples, &markers, q.human);
+    resolve_phase_range(phase_name, &markers, samples, q.call.as_deref()).map(Some)
+}
+
+fn sample_call_needs_phase(q: &SidecarQuery) -> Result<(), DevError> {
+    if q.call.is_some() && q.phase.is_none() {
+        return Err(DevError::Usage(
+            "--call with --samples or --stat needs --phase: samples are process-wide and \
+             no call window is known"
+                .into(),
+        ));
+    }
     Ok(())
 }
 
 #[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 fn run_samples(store: &db::RunStore, id: &db::RunId, q: &SidecarQuery) -> Result<(), DevError> {
     print_resolved_run_info(store, id)?;
+    sample_call_needs_phase(q)?;
     let run_filter = resolve_run_filter(store, id, q.run.as_deref())?;
+    check_call(store, id, run_filter, q.call.as_deref())?;
     let mut samples = store.query_sidecar_samples(id, run_filter)?;
+    // The phase is validated before any empty result can return.
+    let window = phase_window(store, id, run_filter, q, &samples)?;
     if samples.is_empty() {
         output::result_msg("no sidecar data for this result");
         return Ok(());
     }
 
-    if let Some(ref phase_name) = q.phase {
-        let markers = store.query_sidecar_markers(id, run_filter)?;
-        let (start_us, end_us) = resolve_phase_range(phase_name, &markers, &samples)?;
+    if let Some((start_us, end_us)) = window {
         samples.retain(|s| s.timestamp_us >= start_us && s.timestamp_us < end_us);
     }
     if let Some(ref range_str) = q.range {
@@ -234,7 +325,8 @@ fn run_samples(store: &db::RunStore, id: &db::RunId, q: &SidecarQuery) -> Result
 fn run_markers(store: &db::RunStore, id: &db::RunId, q: &SidecarQuery) -> Result<(), DevError> {
     print_resolved_run_info(store, id)?;
     let run_filter = resolve_run_filter(store, id, q.run.as_deref())?;
-    let markers = store.query_sidecar_markers(id, run_filter)?;
+    check_call(store, id, run_filter, q.call.as_deref())?;
+    let markers = call_markers(store, id, run_filter, q.call.as_deref())?;
     if markers.is_empty() {
         output::result_msg("no sidecar markers for this result");
         return Ok(());
@@ -245,28 +337,45 @@ fn run_markers(store: &db::RunStore, id: &db::RunId, q: &SidecarQuery) -> Result
     Ok(())
 }
 
+/// The selected runs' markers, narrowed to one call when `--call` is given.
+fn call_markers(
+    store: &db::RunStore,
+    id: &db::RunId,
+    run_filter: Option<usize>,
+    call: Option<&str>,
+) -> Result<Vec<crate::sidecar::Marker>, DevError> {
+    let mut markers = store.query_sidecar_markers(id, run_filter)?;
+    if let Some(call) = call {
+        markers.retain(|m| m.call.as_deref() == Some(call));
+    }
+    Ok(markers)
+}
+
 fn run_durations(store: &db::RunStore, id: &db::RunId, q: &SidecarQuery) -> Result<(), DevError> {
     print_resolved_run_info(store, id)?;
     let run_filter = resolve_run_filter(store, id, q.run.as_deref())?;
-    let markers = store.query_sidecar_markers(id, run_filter)?;
+    check_call(store, id, run_filter, q.call.as_deref())?;
+    let markers = call_markers(store, id, run_filter, q.call.as_deref())?;
     if markers.is_empty() {
         output::result_msg("no sidecar markers for this result");
         return Ok(());
     }
-    // Only collapse repeated names within a single run. `--run all` concatenates
-    // every run's markers and `Marker` carries no run_idx, so a once-per-run
-    // phase would look like a repeated span and get aggregated away.
-    let collapse = run_filter.is_some();
-    print_marker_durations(&markers, q.human, collapse);
+    // Pairing and collapsing run per (run, call) stream.
+    print_marker_durations(&markers, q.human);
     Ok(())
 }
 
 fn run_stalls(store: &db::RunStore, id: &db::RunId, q: &SidecarQuery) -> Result<(), DevError> {
     print_resolved_run_info(store, id)?;
     let run_filter = resolve_run_filter(store, id, q.run.as_deref())?;
+    one_run(run_filter, "--stalls")?;
+    check_call(store, id, run_filter, q.call.as_deref())?;
     // Stalls roll up cumulative `*_wait_ns` counters (not markers - markers are
     // reserved for phase boundaries). print_stalls handles the empty case.
-    let counters = store.query_sidecar_counters(id, run_filter)?;
+    let mut counters = store.query_sidecar_counters(id, run_filter)?;
+    if let Some(call) = q.call.as_deref() {
+        counters.retain(|c| c.call.as_deref() == Some(call));
+    }
     let samples = store.query_sidecar_samples(id, run_filter)?;
     let wall_us = samples
         .first()
@@ -279,7 +388,22 @@ fn run_stalls(store: &db::RunStore, id: &db::RunId, q: &SidecarQuery) -> Result<
 fn run_counters(store: &db::RunStore, id: &db::RunId, q: &SidecarQuery) -> Result<(), DevError> {
     print_resolved_run_info(store, id)?;
     let run_filter = resolve_run_filter(store, id, q.run.as_deref())?;
+    check_call(store, id, run_filter, q.call.as_deref())?;
+    // The phase is validated before any empty result can return.
+    let window = if q.phase.is_some() {
+        let samples = store.query_sidecar_samples(id, run_filter)?;
+        phase_window(store, id, run_filter, q, &samples)?
+    } else {
+        None
+    };
     let mut counters = store.query_sidecar_counters(id, run_filter)?;
+    if let Some(call) = q.call.as_deref() {
+        counters.retain(|c| c.call.as_deref() == Some(call));
+        if counters.is_empty() {
+            output::result_msg(&format!("call '{call}' emitted no counters"));
+            return Ok(());
+        }
+    }
     if counters.is_empty() {
         output::result_msg("no counters for this result");
         return Ok(());
@@ -291,12 +415,13 @@ fn run_counters(store: &db::RunStore, id: &db::RunId, q: &SidecarQuery) -> Resul
             return Ok(());
         }
     }
-    if let Some(ref phase_name) = q.phase {
-        let markers = store.query_sidecar_markers(id, run_filter)?;
-        let samples = store.query_sidecar_samples(id, run_filter)?;
-        let (start_us, end_us) =
-            crate::sidecar_fmt::resolve_phase_range(phase_name, &markers, &samples)?;
-        counters.retain(|c| c.timestamp_us >= start_us && c.timestamp_us < end_us);
+    if let Some((start_us, end_us)) = window {
+        // The window belongs to the stream it resolved in; another call's
+        // counters inside the same interval are not that phase's.
+        let stream = q.call.as_deref();
+        counters.retain(|c| {
+            c.call.as_deref() == stream && c.timestamp_us >= start_us && c.timestamp_us < end_us
+        });
     }
     print_counters(&counters, q.human);
     Ok(())
@@ -309,15 +434,16 @@ fn run_stat(
     q: &SidecarQuery,
 ) -> Result<(), DevError> {
     print_resolved_run_info(store, id)?;
+    sample_call_needs_phase(q)?;
     let run_filter = resolve_run_filter(store, id, q.run.as_deref())?;
+    check_call(store, id, run_filter, q.call.as_deref())?;
     let mut samples = store.query_sidecar_samples(id, run_filter)?;
+    let window = phase_window(store, id, run_filter, q, &samples)?;
     if samples.is_empty() {
         output::result_msg("no sidecar data for this result");
         return Ok(());
     }
-    if let Some(ref phase_name) = q.phase {
-        let markers = store.query_sidecar_markers(id, run_filter)?;
-        let (start_us, end_us) = resolve_phase_range(phase_name, &markers, &samples)?;
+    if let Some((start_us, end_us)) = window {
         samples.retain(|s| s.timestamp_us >= start_us && s.timestamp_us < end_us);
     }
     if let Some(ref range_str) = q.range {

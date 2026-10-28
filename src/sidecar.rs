@@ -212,9 +212,94 @@ define_sample! {
 /// A phase marker emitted by the target process.
 #[derive(Debug, Clone)]
 pub struct Marker {
+    /// Arrival order across every stream of one run.
     pub marker_idx: i32,
     pub timestamp_us: i64,
     pub name: String,
+    /// The iteration this marker belongs to. Capture leaves it 0; the store
+    /// fills it on read.
+    pub run_idx: usize,
+    /// The call stream (`%<call_id>` on the wire), or `None` for the
+    /// process-wide stream.
+    pub call: Option<String>,
+}
+
+/// Longest call id the FIFO accepts.
+pub(crate) const MAX_CALL_ID_BYTES: usize = 64;
+
+/// A call id is 1..=64 bytes of `[A-Za-z0-9_.-]`, so it needs no escaping on
+/// the wire, in JSON or on the command line.
+pub(crate) fn is_valid_call_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_CALL_ID_BYTES
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+}
+
+/// One parsed FIFO record.
+#[derive(Debug, PartialEq, Eq)]
+enum FifoRecord<'a> {
+    Blank,
+    Rejected,
+    Marker {
+        ts: i64,
+        call: Option<&'a str>,
+        name: &'a str,
+    },
+    Counter {
+        ts: i64,
+        call: Option<&'a str>,
+        name: &'a str,
+        value: i64,
+    },
+}
+
+/// Parse one FIFO line. `<ts> <name>` and `<ts> @<name>=<i64>` are
+/// process-wide; `<ts> %<call_id> <name>` and `<ts> %<call_id> @<name>=<i64>`
+/// belong to that call. A payload starting with `%` is only ever a tagged
+/// record: a malformed one is rejected, never read as an untagged marker.
+fn parse_fifo_record(line: &str) -> FifoRecord<'_> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return FifoRecord::Blank;
+    }
+    let Some((ts_str, payload)) = trimmed.split_once(' ') else {
+        return FifoRecord::Rejected;
+    };
+    let Ok(ts) = ts_str.parse::<i64>() else {
+        return FifoRecord::Rejected;
+    };
+    let (call, body) = if let Some(tagged) = payload.strip_prefix('%') {
+        let Some((call, body)) = tagged.split_once(' ') else {
+            return FifoRecord::Rejected;
+        };
+        if !is_valid_call_id(call) || body.is_empty() {
+            return FifoRecord::Rejected;
+        }
+        (Some(call), body)
+    } else {
+        (None, payload)
+    };
+    if let Some(counter_body) = body.strip_prefix('@') {
+        return match counter_body.split_once('=') {
+            Some((name, value)) if !name.is_empty() => match value.parse::<i64>() {
+                Ok(value) => FifoRecord::Counter {
+                    ts,
+                    call,
+                    name,
+                    value,
+                },
+                Err(_) => FifoRecord::Rejected,
+            },
+            _ => FifoRecord::Rejected,
+        };
+    }
+    FifoRecord::Marker {
+        ts,
+        call,
+        name: body,
+    }
 }
 
 /// A completed span derived from a matching `_START` and later `_END` marker.
@@ -230,33 +315,46 @@ pub(crate) struct TimelineSpan {
 pub(crate) struct TimelineSegment {
     pub name: String,
     pub start_us: i64,
-    pub end_us: i64,
+    /// `None` for a call stream's final segment: no call boundary is known.
+    pub end_us: Option<i64>,
 }
 
-/// A single interpretation surface for the marker stream.
+/// A single interpretation surface for one marker stream of one run.
 ///
 /// The FIFO protocol remains a sequence of point markers. This model exposes
 /// the documented projections over that sequence: adjacent-marker segments,
-/// `_START`/`_END` spans, and phase-name lookup.
+/// `_START`/`_END` spans, and phase-name lookup. Every projection orders the
+/// markers by `(timestamp_us, marker_idx)`: threads stamp a marker before
+/// competing for the write, so arrival order is not time order.
 pub(crate) struct Timeline<'a> {
-    markers: &'a [Marker],
-    final_us: i64,
+    markers: Vec<&'a Marker>,
+    final_us: Option<i64>,
     first_sample_us: Option<i64>,
 }
 
 impl<'a> Timeline<'a> {
-    /// Build a timeline for a stored run, using its sampled end as the final
+    /// The process stream of a stored run, using its sampled end as the final
     /// boundary and retaining the whole-run fallback for markerless runs.
     pub(crate) fn new(markers: &'a [Marker], samples: &[Sample]) -> Self {
         Self {
-            markers,
-            final_us: samples.last().map_or(0, |s| s.timestamp_us + 1),
+            markers: chronological(markers),
+            final_us: Some(samples.last().map_or(0, |s| s.timestamp_us + 1)),
             first_sample_us: samples.first().map(|s| s.timestamp_us),
         }
     }
 
+    /// A call stream. Process samples say nothing about when a call
+    /// returned, so its final segment is open rather than borrowed from them.
+    pub(crate) fn open(markers: &'a [Marker]) -> Self {
+        Self {
+            markers: chronological(markers),
+            final_us: None,
+            first_sample_us: None,
+        }
+    }
+
     /// Inter-marker segments. Every marker opens a segment ending at the next
-    /// marker; the last one ends at the final sample. With no markers, the
+    /// marker; the last one ends at the final boundary. With no markers, the
     /// sampled run is one `(all)` segment.
     pub(crate) fn segments(&self) -> Vec<TimelineSegment> {
         if self.markers.is_empty() {
@@ -275,12 +373,15 @@ impl<'a> Timeline<'a> {
             .map(|(i, marker)| TimelineSegment {
                 name: marker.name.clone(),
                 start_us: marker.timestamp_us,
-                end_us: self
-                    .markers
-                    .get(i + 1)
-                    .map_or(self.final_us, |next| next.timestamp_us),
+                end_us: self.segment_end(i),
             })
             .collect()
+    }
+
+    fn segment_end(&self, index: usize) -> Option<i64> {
+        self.markers
+            .get(index + 1)
+            .map_or(self.final_us, |next| Some(next.timestamp_us))
     }
 
     /// Derive completed `_START`/`_END` spans and the point markers that do
@@ -318,21 +419,17 @@ impl<'a> Timeline<'a> {
             .markers
             .iter()
             .enumerate()
-            .filter_map(|(i, marker)| (!consumed[i]).then_some(marker))
+            .filter_map(|(i, marker)| (!consumed[i]).then_some(*marker))
             .collect();
         (spans, standalone)
     }
 
     /// Resolve `--phase`: exact event segment, then a base-name span, then a
-    /// substring event segment.
-    pub(crate) fn resolve_phase_range(&self, phase: &str) -> Option<(i64, i64)> {
+    /// substring event segment, the first match in time order each time. The
+    /// end is `None` when the match is a call stream's final segment.
+    pub(crate) fn resolve_phase_range(&self, phase: &str) -> Option<(i64, Option<i64>)> {
         if let Some(index) = self.markers.iter().position(|m| m.name == phase) {
-            let marker = &self.markers[index];
-            let end = self
-                .markers
-                .get(index + 1)
-                .map_or(self.final_us, |next| next.timestamp_us);
-            return Some((marker.timestamp_us, end));
+            return Some((self.markers[index].timestamp_us, self.segment_end(index)));
         }
 
         if let Some(span) = self
@@ -341,20 +438,13 @@ impl<'a> Timeline<'a> {
             .into_iter()
             .find(|span| span.name == phase)
         {
-            return Some((span.start_us, span.end_us));
+            return Some((span.start_us, Some(span.end_us)));
         }
 
         self.markers
             .iter()
             .position(|m| m.name.contains(phase))
-            .map(|index| {
-                let marker = &self.markers[index];
-                let end = self
-                    .markers
-                    .get(index + 1)
-                    .map_or(self.final_us, |next| next.timestamp_us);
-                (marker.timestamp_us, end)
-            })
+            .map(|index| (self.markers[index].timestamp_us, self.segment_end(index)))
     }
 
     pub(crate) fn marker_names(&self) -> Vec<&str> {
@@ -365,12 +455,23 @@ impl<'a> Timeline<'a> {
     }
 }
 
+/// Markers in time order, arrival order breaking ties.
+fn chronological(markers: &[Marker]) -> Vec<&Marker> {
+    let mut sorted: Vec<&Marker> = markers.iter().collect();
+    sorted.sort_by_key(|m| (m.timestamp_us, m.marker_idx));
+    sorted
+}
+
 /// An application-level counter emitted by the target process.
 #[derive(Debug, Clone)]
 pub struct Counter {
     pub timestamp_us: i64,
     pub name: String,
     pub value: i64,
+    /// As on [`Marker`]: 0 at capture, filled on read.
+    pub run_idx: usize,
+    /// As on [`Marker`]: `None` is the process-wide stream.
+    pub call: Option<String>,
 }
 
 /// Summary of a sidecar run.
@@ -708,9 +809,10 @@ impl SidecarFifo {
     ///
     /// Non-blocking: returns immediately if no data is available.
     ///
-    /// Protocol:
+    /// Protocol (see [`parse_fifo_record`]):
     /// - `<timestamp_us> <name>\n` - phase marker
     /// - `<timestamp_us> @<name>=<value>\n` - counter
+    /// - either body after `%<call_id> ` - the same record in that call's stream
     fn drain(
         &mut self,
         markers: &mut Vec<Marker>,
@@ -731,63 +833,68 @@ impl SidecarFifo {
                     rejected_lines += 1;
                     *capture_truncated = true;
                 }
+                Ok(BoundedLine::Fragment) => {
+                    // A record cut off by the writer closing: damage, not data.
+                    rejected_lines += 1;
+                }
                 Ok(BoundedLine::Line(line)) => {
                     let Ok(line) = std::str::from_utf8(&line) else {
                         rejected_lines += 1;
                         continue;
                     };
-                    let trimmed = line.trim();
-                    if let Some((ts_str, payload)) = trimmed.split_once(' ') {
-                        let Ok(ts) = ts_str.parse::<i64>() else {
-                            rejected_lines += 1;
-                            continue;
-                        };
-                        if let Some(counter_body) = payload.strip_prefix('@') {
-                            // Counter: @name=value
-                            if let Some((name, val_str)) = counter_body.split_once('=')
-                                && let Ok(val) = val_str.parse::<i64>()
-                            {
-                                if self.counters_remaining > 0 {
-                                    counters.push(Counter {
-                                        timestamp_us: ts,
-                                        name: name.to_owned(),
-                                        value: val,
-                                    });
-                                    self.counters_remaining -= 1;
-                                } else {
-                                    *capture_truncated = true;
-                                }
+                    match parse_fifo_record(line) {
+                        FifoRecord::Blank => {}
+                        FifoRecord::Rejected => rejected_lines += 1,
+                        FifoRecord::Counter {
+                            ts,
+                            call,
+                            name,
+                            value,
+                        } => {
+                            if self.counters_remaining > 0 {
+                                counters.push(Counter {
+                                    timestamp_us: ts,
+                                    name: name.to_owned(),
+                                    value,
+                                    run_idx: 0,
+                                    call: call.map(str::to_owned),
+                                });
+                                self.counters_remaining -= 1;
                             } else {
-                                rejected_lines += 1;
+                                *capture_truncated = true;
                             }
-                        } else {
-                            // Phase marker
-                            last_name = Some(payload.to_owned());
+                        }
+                        FifoRecord::Marker { ts, call, name } => {
+                            last_name = Some(name.to_owned());
                             if self.markers_remaining > 0 {
                                 markers.push(Marker {
                                     marker_idx: *next_marker_idx,
                                     timestamp_us: ts,
-                                    name: payload.to_owned(),
+                                    name: name.to_owned(),
+                                    run_idx: 0,
+                                    call: call.map(str::to_owned),
                                 });
                                 self.markers_remaining -= 1;
                             } else {
                                 *capture_truncated = true;
                             }
                             *next_marker_idx = (*next_marker_idx).saturating_add(1);
-                            if let Some(spec) = stop_spec {
-                                match spec.match_priority(payload) {
+                            // `--stop` is scoped to the process stream: a
+                            // call's marker never kills the whole scenario.
+                            if let Some(spec) = stop_spec
+                                && call.is_none()
+                            {
+                                match spec.match_priority(name) {
                                     Some(true) if preferred_stop.is_none() => {
-                                        preferred_stop = Some(payload.to_owned());
+                                        preferred_stop = Some(name.to_owned());
                                     }
                                     Some(false) if fallback_stop.is_none() => {
-                                        fallback_stop = Some(payload.to_owned());
+                                        fallback_stop = Some(name.to_owned());
                                     }
                                     _ => {}
                                 }
                             }
                         }
-                    } else if !trimmed.is_empty() {
-                        rejected_lines += 1;
                     }
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
@@ -795,6 +902,8 @@ impl SidecarFifo {
             }
         }
         if rejected_lines > 0 {
+            // Stored, so a later query still says the trajectory is damaged.
+            *capture_truncated = true;
             console::warn(&format!(
                 "sidecar FIFO rejected {rejected_lines} malformed lines"
             ));
@@ -858,8 +967,13 @@ impl SidecarFifo {
             } else {
                 BoundedLine::Pending
             }
-        } else {
+        } else if complete {
             BoundedLine::Line(std::mem::take(&mut self.pending_line))
+        } else {
+            // An empty read on this O_NONBLOCK FIFO means every writer has
+            // closed, so a record still missing its newline never completes.
+            self.pending_line.clear();
+            BoundedLine::Fragment
         }
     }
 
@@ -882,6 +996,8 @@ impl SidecarFifo {
 enum BoundedLine {
     Pending,
     TooLong,
+    /// Bytes left without a newline when the writers closed.
+    Fragment,
     Line(Vec<u8>),
 }
 
@@ -1234,7 +1350,99 @@ mod tests {
         assert_eq!(counters[0].name, "nodes");
         assert_eq!(counters[0].value, -7);
         assert_eq!(next_marker_idx, 1);
-        assert!(!truncated);
+        assert!(truncated, "the two malformed lines mark the capture damaged");
+    }
+
+    #[test]
+    fn fifo_records_parse_by_stream() {
+        assert_eq!(
+            parse_fifo_record("7 %sort-1 PASS1_END\n"),
+            FifoRecord::Marker {
+                ts: 7,
+                call: Some("sort-1"),
+                name: "PASS1_END"
+            }
+        );
+        assert_eq!(
+            parse_fifo_record("7 %a.b_c @n=-3"),
+            FifoRecord::Counter {
+                ts: 7,
+                call: Some("a.b_c"),
+                name: "n",
+                value: -3
+            }
+        );
+        assert_eq!(
+            parse_fifo_record("7 PASS1 END"),
+            FifoRecord::Marker {
+                ts: 7,
+                call: None,
+                name: "PASS1 END"
+            }
+        );
+        // A malformed tagged record is rejected, never an untagged marker.
+        for bad in [
+            "7 %",
+            "7 %sort",
+            "7 % NAME",
+            "7 %so/rt NAME",
+            "7 %sort @n=x",
+            "7 @=1",
+            "x NAME",
+        ] {
+            assert_eq!(parse_fifo_record(bad), FifoRecord::Rejected, "{bad}");
+        }
+        let long = format!("7 %{} NAME", "a".repeat(MAX_CALL_ID_BYTES + 1));
+        assert_eq!(parse_fifo_record(&long), FifoRecord::Rejected);
+        assert_eq!(parse_fifo_record("  \n"), FifoRecord::Blank);
+    }
+
+    #[test]
+    fn fifo_discards_a_fragment_left_at_writer_close() {
+        use std::io::Write;
+        let dir = crate::test_scratch::scratch("sidecar", "fifo_fragment");
+        let mut fifo = SidecarFifo::create(&dir, &DEFAULT_MEASUREMENT_TUNABLES).unwrap();
+        let mut writer = fs::OpenOptions::new().write(true).open(&fifo.path).unwrap();
+        writer.write_all(b"1 %a START\n2 %a ST").unwrap();
+        drop(writer);
+
+        let (mut markers, mut counters, mut idx, mut truncated) =
+            (Vec::new(), Vec::new(), 0, false);
+        fifo.drain(
+            &mut markers,
+            &mut idx,
+            &mut counters,
+            None,
+            DEFAULT_MEASUREMENT_TUNABLES.max_fifo_line_bytes,
+            &mut truncated,
+        );
+        assert_eq!(markers.len(), 1);
+        assert_eq!(markers[0].call.as_deref(), Some("a"));
+        assert!(truncated);
+    }
+
+    fn marker(idx: i32, ts: i64, name: &str) -> Marker {
+        Marker {
+            marker_idx: idx,
+            timestamp_us: ts,
+            name: name.to_owned(),
+            run_idx: 0,
+            call: None,
+        }
+    }
+
+    #[test]
+    fn timeline_orders_by_time_and_leaves_a_call_end_open() {
+        // Arrival order 0, 1, 2 but time order B, A, C.
+        let markers = [marker(0, 20, "A"), marker(1, 10, "B"), marker(2, 30, "C")];
+        let open = Timeline::open(&markers);
+        let segments = open.segments();
+        let names: Vec<_> = segments.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["B", "A", "C"]);
+        assert_eq!(segments[0].end_us, Some(20));
+        assert_eq!(segments[2].end_us, None, "no call boundary is known");
+        assert_eq!(open.resolve_phase_range("C"), Some((30, None)));
+        assert_eq!(open.resolve_phase_range("B"), Some((10, Some(20))));
     }
 
     #[test]

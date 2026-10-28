@@ -1495,6 +1495,13 @@ In depth: `brokkr man measure`.",
         #[arg(long, requires = "counters", value_name = "SUBSTR")]
         grep: Option<String>,
 
+        /// Restrict the view to one call stream of a library-harness run
+        /// (the `%<call_id>` tag on its FIFO lines). With --samples or
+        /// --stat it needs --phase, resolved in that call's markers; the
+        /// samples stay process-wide.
+        #[arg(long, value_name = "CALL_ID", conflicts_with = "compare")]
+        call: Option<String>,
+
         /// Filter samples by time range in seconds (e.g. "10.0..82.0"). Requires --samples or --stat.
         #[arg(long, requires = "sample_view")]
         range: Option<String>,

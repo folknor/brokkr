@@ -95,7 +95,7 @@ Single crate, single binary. No workspace.
 - `src/harness.rs` - measurement session exports from `measure.rs`. `measure/execution.rs` owns iteration scheduling, `wall.rs` timing, `capture.rs` measured child capture, `kv.rs` the stderr protocol, and `record.rs` row building and persistence. `sidecar_backup.rs` rotates DB backups; `bench_variants.rs` dispatches variant sweeps
 - `src/request.rs` - `ResultsQuery` / `SidecarQuery` structs
 - `src/db/` - ResultsDb and SidecarDb, `store.rs`'s shared SQLite open policy, busy timeout and versioned migration owner, read-only query opens (an older schema is migrated first, a newer one refused), schemas, migrations, queries, formatting, comparison
-- `src/sidecar.rs` - Monitoring sidecar: `/proc` sampling, FIFO marker protocol. Always-on for measured modes. The latest marker goes to the hold's observation table (`lockfile::activity::note_marker`) for `brokkr lock`
+- `src/sidecar.rs` - Monitoring sidecar: `/proc` sampling, FIFO marker protocol (process-wide and `%<call_id>`-tagged call streams), and `Timeline`, the per-stream chronological projection every marker view reads. Always-on for measured modes. The latest marker goes to the hold's observation table (`lockfile::activity::note_marker`) for `brokkr lock`
 - `src/output.rs` - Declares the console and child-process modules and re-exports both, so `output::run_msg` / `output::run_captured` stay the call paths
 - `src/output/console.rs` - Prefixed console output (`[build]`, `[bench]`, `[verify]`, `[hotpath]`, `[run]`, `[sidecar]`, `[error]`)
 - `src/output/paths.rs` - `output::path`: a project path for an operator line, relative to the invocation directory (anchor fixed once in `main`), absolute otherwise

@@ -285,6 +285,9 @@ stored even when the child fails (OOM, signal, deadline, or non-zero exit).
 - `--durations` - START/END pair timings. In `--human`, repeated span names
   collapse to one aggregate row each (JSONL stays one object per span).
 - `--counters` - application counters; `--grep <SUBSTR>` filters by name
+- `--stalls` - `*_wait_ns` rollup (see below)
+- `--call <CALL_ID>` - not a view: restricts any view but `--compare` to one
+  call stream
 - `--stat <field>` - min/max/avg/p50/p95
 - `--compare <a> <b>` - phase-aligned
 
@@ -363,8 +366,38 @@ The FIFO carries two line types (parsed in `SidecarFifo::drain`,
   itself knows nothing about spans or pairs. The name is untrusted text; every
   JSONL view encodes it with serde_json, so control characters are escaped.
 - **Counter** - `<ts_us> @<name>=<value>`. The value **must parse as `i64`**
-  or the line is silently dropped. `<ts_us>` that doesn't parse is skipped for
+  or the line is rejected. `<ts_us>` that doesn't parse is rejected for
   either type. Timestamps are microseconds since process start.
+- **Call stream** - `<ts_us> %<call_id> <name>` and
+  `<ts_us> %<call_id> @<name>=<value>` are the same records in one call's
+  stream, for a library harness that runs several calls in one process.
+  `call_id` is 1 to 64 bytes of `A-Z a-z 0-9 _ . -`, so nothing is ever
+  escaped; it names one invocation within one process run, the producer
+  keeps it unique, and a human label belongs in the harness artefact, not
+  the stream. Lines without a tag are the process-wide stream, as before. A
+  payload starting with `%` is only ever a tagged record: a bad call id, a
+  missing name or a bad counter is rejected, never read as an untagged
+  marker, so an untagged marker name cannot start with `%`. The producer
+  writes each line, newline included, in one write of at most 512 bytes; the
+  reader's own line limit (`MeasurementTunables`) is a defence, not that
+  contract. A tag says which invocation emitted a line, not which resources
+  it measures: a whole-process reading (mallinfo, page faults) stays
+  whole-process when a call's sink emits it.
+
+Every rejected line, including invalid UTF-8 and a record cut off without a
+newline when the writers close, warns and marks the run's stored
+trajectory incomplete, so a later `brokkr sidecar` query still says so. A
+query that finds no fault does not mean every line arrived: the FIFO is best
+effort, and a library harness's own end-of-call snapshot is the
+authoritative figure.
+
+Every view groups markers and counters by `(run, call)` stream. `--call
+CALL_ID` restricts a view to one call; a call id that appears in neither the
+markers nor the counters of the selected runs is an error. Views that read
+one process timeline (the default summary, `--stalls`, and any `--phase`)
+refuse `--run all`, and a `--phase` is resolved, and refused if it does not
+resolve, before a view reports an empty result. With `--counters`, a phase
+keeps only the counters of the stream it resolved in.
 
 The marker protocol is convention-free. The sidecar timeline model applies
 these conventions to views that interpret marker names; `--markers` still
@@ -372,11 +405,17 @@ prints the raw events:
 
 | View | Marker interpretation |
 |---|---|
-| default summary / `--compare` | each marker opens a segment running to the **next** marker (no `_START`/`_END` meaning); with no markers, the sampled run is one `(all)` segment |
-| `--markers` | raw marker events in arrival order; no pairing or segment projection |
-| `--phase FOO` | exact marker name first (that marker to the next), then a completed `FOO_START`..`FOO_END` span, then the first marker name containing `FOO` (that marker to the next) |
-| `--durations` | each `FOO_START` pairs with the next later `FOO_END`; unmatched starts and markers not used by a span render as standalone points. `--human` collapses names seen more than once into a single aggregate row (`WAIT_P2_SEND x287  total 4200.0ms  min/avg/max`), sorted by total desc, under a "Repeated spans" heading - the split is on observed cardinality, not on the name, so nothing here knows what `WAIT_` means. Totals accumulate in microseconds so a crowd of sub-millisecond spans still sums correctly. Collapsing is **off under `--run all`**: markers carry no `run_idx`, so a once-per-run phase would otherwise look like a repeated span and be aggregated away. JSONL keeps one record per span and standalone point. |
-| `--stop` | `FOO_END` matches verbatim; `-FOO` resolves to `FOO_END`; bare `FOO` first checks for a marker named `FOO`, then falls back to `FOO_END`. Brokkr prints the resolved name whenever it differs from the requested spelling. |
+| default summary / `--compare` | the process stream only: each marker opens a segment running to the **next** marker (no `_START`/`_END` meaning); with no markers, the sampled run is one `(all)` segment. The summary then lists each call stream's marker intervals (`type: call_phase`) with no resource columns, since samples are process-wide; a call's last interval has no known end (`end_us: null`). With `--call` only that call's intervals print. A run with no samples still lists its call intervals |
+| `--markers` | raw marker events in arrival order, each with its `run` and, when tagged, `call`; no pairing or segment projection |
+| `--phase FOO` | resolved in one stream of one run - the process stream, or the `--call` stream - first match in time order: exact marker name first (that marker to the next), then a completed `FOO_START`..`FOO_END` span, then the first marker name containing `FOO` (that marker to the next). A match on a call's last marker has no known end and is an error. With `--samples`/`--stat`, `--call` needs `--phase` and the samples stay process-wide |
+| `--durations` | per `(run, call)` stream, each `FOO_START` pairs with the next later `FOO_END`; unmatched starts and markers not used by a span render as standalone points. Overlapping same-name spans in one stream pair by that rule, which is deterministic but does not identify which operation ended. `--human` collapses names seen more than once in a stream into a single aggregate row (`WAIT_P2_SEND x287  total 4200.0ms  min/avg/max`), sorted by total desc, under a "Repeated spans" heading - the split is on observed cardinality, not on the name, so nothing here knows what `WAIT_` means. Totals accumulate in microseconds so a crowd of sub-millisecond spans still sums correctly. Several streams print under a heading each. JSONL keeps one record per span and standalone point, with `run` and `call`. |
+| `--stop` | process stream only: a call's marker never stops the scenario. `FOO_END` matches verbatim; `-FOO` resolves to `FOO_END`; bare `FOO` first checks for a marker named `FOO`, then falls back to `FOO_END`. Brokkr prints the resolved name whenever it differs from the requested spelling. |
+
+Every chronological projection (segments, spans, phase lookup, and a
+marker-span wall source such as ratatoskr's `SYNC_START`..`SYNC_END`) orders
+a stream's markers by timestamp, arrival order breaking ties: a thread stamps
+a marker before it competes for the write. The marker-span wall reads the
+process stream only.
 
 Markers are reserved for the small set of **true phase boundaries** - a
 high-frequency span in the marker stream drowns every phase-oriented view at
@@ -385,8 +424,8 @@ concept instead:
 
 | View | Counter interpretation |
 |---|---|
-| `--stalls` | rolls up `*_wait_ns` counters: max value per name (strictly-monotonic, so max == cumulative total), category = name minus the `_wait_ns` suffix, reported as ms + `% of wall`. The `%` can exceed 100 for waits accumulated across concurrent threads (it's the avg threads parked in that category; single-threaded waits read as clean sub-100%). Unifies both projects - it picks up pbfhogg's `pipeline_*_wait_ns` and elivagar's `sort_chunk_write_wait_ns` etc. in one table. |
-| `--counters` | prints every counter point verbatim (`t=<sec> name=value`), no aggregation. `--grep <SUBSTR>` keeps only counters whose name contains the substring, and composes with `--phase`; a run emitting a progress counter every 64 blobs otherwise buries the lines that matter |
+| `--stalls` | rolls up `*_wait_ns` counters per stream: max value per name (strictly-monotonic, so max == cumulative total), category = name minus the `_wait_ns` suffix, reported as ms + `% of wall` for the process stream and as ms alone for a call stream (no call boundary is known, and the process wall would understate a short call; the observed max is a best-effort reading, not the call's total). The `%` can exceed 100 for waits accumulated across concurrent threads (it's the avg threads parked in that category; single-threaded waits read as clean sub-100%). Unifies both projects - it picks up pbfhogg's `pipeline_*_wait_ns` and elivagar's `sort_chunk_write_wait_ns` etc. in one table. |
+| `--counters` | prints every counter point verbatim (`t=<sec> name=value`, `[call]` before the name when tagged; JSONL carries `run` and `call`), no aggregation. `--grep <SUBSTR>` keeps only counters whose name contains the substring, and composes with `--phase`; a run emitting a progress counter every 64 blobs otherwise buries the lines that matter |
 
 See the README "Sidecar conventions" section for the emitter-side contract.
 

@@ -97,11 +97,13 @@ A running binary can hand data to brokkr three ways:
    (the `run_external_ok` path uses external best-of-N wall-clock instead).
 3. **FIFO markers + counters** - via `BROKKR_MARKER_FIFO`. The target writes
    `<us> name` (marker) or `<us> @name=value` (counter, value must parse as
-   `i64`). Drained by `SidecarFifo::drain` (`src/sidecar.rs`) into
-   sidecar.db. In pbfhogg these are emitted by `src/debug.rs`
-   (`emit_marker`, `emit_counter`, `emit_mallinfo2`); any project binary can
-   emit them by writing that line format to the FIFO. If the env var is
-   absent (no sidecar attached), emission is a silent no-op.
+   `i64`), optionally tagged with a call stream (`<us> %<call_id> ...`; see
+   "Marker & counter rules" in `docs/commands/measure.md`). Drained by
+   `SidecarFifo::drain` (`src/sidecar.rs`) into sidecar.db. Any project
+   binary can emit them by writing that line format to the FIFO. In pbfhogg
+   markers and counters go to the invocation's instrument sink; the CLI
+   opens the FIFO as that sink from `BROKKR_MARKER_FIFO` and passes no sink
+   when the variable is absent (no sidecar attached).
 
 ## Derived fields on the `[result]` line
 
@@ -162,14 +164,14 @@ Two consequences worth internalizing:
 
 - **Run mode (no `--bench`) stores nothing and attaches no sidecar.** stdio
   is inherited, so the binary's own prose reaches the terminal verbatim, and
-  `emit_counter` no-ops because `BROKKR_MARKER_FIFO` is unset.
+  FIFO emission has nowhere to go because `BROKKR_MARKER_FIFO` is unset.
 - In every captured path, the binary's stdout prose is **swallowed** - brokkr
   prints its own `[result]` line instead. To survive bench mode, data must
   go out as a FIFO counter or (on the kv path) an stderr `key=value` line.
 
 ## Per-command table
 
-`sidecar` = `emit_counter`/`emit_marker` reach sidecar.db (`brokkr sidecar`).
+`sidecar` = FIFO markers and counters reach sidecar.db (`brokkr sidecar`).
 `kv` = stderr `key=value` reaches results.db (`brokkr results`): `counters`
 means scraped into `kv` alongside brokkr's own wall-clock, with no
 `elapsed_ms=` contract. Both columns describe **bench mode** (`--bench N`);

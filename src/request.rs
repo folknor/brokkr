@@ -76,6 +76,9 @@ pub(crate) struct SidecarQuery {
     pub(crate) phase: Option<String>,
     /// Substring filter on counter names, for the `--counters` view.
     pub(crate) grep: Option<String>,
+    /// One call stream; `None` is the process stream plus, where the view
+    /// shows them, every call stream.
+    pub(crate) call: Option<String>,
     pub(crate) range: Option<String>,
     pub(crate) where_cond: Option<String>,
     pub(crate) fields: Vec<String>,

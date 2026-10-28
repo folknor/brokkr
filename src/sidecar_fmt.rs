@@ -155,20 +155,73 @@ pub(crate) fn print_run_info(store: &db::RunStore, id: &db::RunId) -> Result<(),
 /// 1. Exact marker name (e.g. "STAGE2_START" → that marker to the next)
 /// 2. Base name (e.g. "STAGE2" → STAGE2_START to STAGE2_END)
 /// 3. Substring match on marker name
+///
+/// The phase resolves inside one stream of one run: the process stream, or
+/// `call`'s. A call's final marker has no known end, so a phase that resolves
+/// to it is an error rather than an interval borrowed from the process end.
 pub(crate) fn resolve_phase_range(
     phase: &str,
     markers: &[sidecar::Marker],
     samples: &[sidecar::Sample],
+    call: Option<&str>,
 ) -> Result<(i64, i64), DevError> {
-    let timeline = sidecar::Timeline::new(markers, samples);
-    if let Some(range) = timeline.resolve_phase_range(phase) {
-        return Ok(range);
+    let stream = stream_markers(markers, call);
+    let timeline = match call {
+        None => sidecar::Timeline::new(&stream, samples),
+        Some(_) => sidecar::Timeline::open(&stream),
+    };
+    match timeline.resolve_phase_range(phase) {
+        Some((start, Some(end))) => Ok((start, end)),
+        Some((_, None)) => Err(DevError::Config(format!(
+            "--phase: '{phase}' resolves to the last marker of call '{}', which has no \
+             known end",
+            call.unwrap_or_default()
+        ))),
+        None => {
+            let available = timeline.marker_names();
+            Err(DevError::Config(format!(
+                "--phase: no marker matching '{phase}'. Available: {available:?}"
+            )))
+        }
     }
+}
 
-    let available = timeline.marker_names();
-    Err(DevError::Config(format!(
-        "--phase: no marker matching '{phase}'. Available: {available:?}"
-    )))
+/// The markers of one stream: the process stream for `None`, else one call's.
+pub(crate) fn stream_markers(markers: &[sidecar::Marker], call: Option<&str>) -> Vec<sidecar::Marker> {
+    markers
+        .iter()
+        .filter(|m| m.call.as_deref() == call)
+        .cloned()
+        .collect()
+}
+
+/// `(run, call)` stream keys in first-appearance order.
+fn stream_keys<'a>(calls: impl Iterator<Item = (usize, Option<&'a str>)>) -> Vec<(usize, Option<&'a str>)> {
+    let mut keys = Vec::new();
+    for key in calls {
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    keys
+}
+
+/// The JSON spelling of a stream: `run` always, `call` only when tagged.
+fn stream_fields(obj: &mut serde_json::Value, run_idx: usize, call: Option<&str>) {
+    if let Some(map) = obj.as_object_mut() {
+        map.insert("run".to_owned(), run_idx.into());
+        if let Some(call) = call {
+            map.insert("call".to_owned(), call.into());
+        }
+    }
+}
+
+/// A heading for a stream in a human table.
+fn stream_heading(run_idx: usize, call: Option<&str>) -> String {
+    match call {
+        Some(call) => format!("call {call} (run {run_idx})"),
+        None => format!("process (run {run_idx})"),
+    }
 }
 
 /// Parse a time range string like "10.0..82.0" (seconds) into (start_us, end_us).
@@ -397,10 +450,63 @@ pub(crate) fn sidecar_marker_json(m: &sidecar::Marker) -> String {
     #[allow(clippy::cast_precision_loss)]
     let t_sec = m.timestamp_us as f64 / 1_000_000.0;
     let name = serde_json::Value::String(m.name.clone());
+    let call = m.call.as_ref().map_or_else(String::new, |call| {
+        format!(",\"call\":{}", serde_json::Value::String(call.clone()))
+    });
     format!(
-        "{{\"i\":{},\"t\":{t_sec:.3},\"name\":{name}}}",
-        m.marker_idx
+        "{{\"i\":{},\"t\":{t_sec:.3},\"name\":{name},\"run\":{}{call}}}",
+        m.marker_idx, m.run_idx
     )
+}
+
+/// Each call stream's marker intervals, by time. No resource columns: the
+/// samples are process-wide and say nothing a call owns. A call's final
+/// interval has no known end (`end_us: null`, `-` in the table).
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
+pub(crate) fn print_call_timelines(markers: &[sidecar::Marker], human: bool) {
+    let keys = stream_keys(
+        markers
+            .iter()
+            .filter(|m| m.call.is_some())
+            .map(|m| (m.run_idx, m.call.as_deref())),
+    );
+    for (run_idx, call) in keys {
+        let stream: Vec<sidecar::Marker> = markers
+            .iter()
+            .filter(|m| m.run_idx == run_idx && m.call.as_deref() == call)
+            .cloned()
+            .collect();
+        let segments = sidecar::Timeline::open(&stream).segments();
+        if human {
+            println!();
+            println!("{}", stream_heading(run_idx, call));
+            for s in &segments {
+                let end = s
+                    .end_us
+                    .map_or_else(|| "-".to_owned(), |end| format!("{}ms", end / 1_000));
+                let dur = s
+                    .end_us
+                    .map_or_else(|| "-".to_owned(), |end| format!("{}ms", (end - s.start_us) / 1_000));
+                println!(
+                    "  {:<30} {:>9}ms {end:>11} {dur:>11}",
+                    s.name,
+                    s.start_us / 1_000
+                );
+            }
+            continue;
+        }
+        for s in &segments {
+            let mut obj = serde_json::json!({
+                "type": "call_phase",
+                "name": s.name,
+                "start_us": s.start_us,
+                "end_us": s.end_us,
+                "duration_ms": s.end_us.map(|end| (end - s.start_us) / 1_000),
+            });
+            stream_fields(&mut obj, run_idx, call);
+            println!("{obj}");
+        }
+    }
 }
 
 /// Print per-phase summary table from sidecar samples and markers.
@@ -691,40 +797,63 @@ fn print_phase_summary_jsonl(
 /// phases from the table while keeping them in JSONL: the table is for reading,
 /// and a few hundred rows of 0-3 ms spans is not readable.
 ///
-/// `collapse` must be false when the markers span more than one run. Collapsing
-/// keys on how often a name appears, and [`sidecar::Marker`] carries no
-/// `run_idx` - so under `--run all` an ordinary once-per-run phase appears N
-/// times, looks like a high-frequency event, and would be aggregated into a
-/// single row, destroying exactly the per-run timings that view exists to show.
-pub(crate) fn print_marker_durations(markers: &[sidecar::Marker], human: bool, collapse: bool) {
-    let timeline = sidecar::Timeline::new(markers, &[]);
-    let (spans, standalone) = timeline.durations();
-
-    if human {
-        print_marker_durations_human(&spans, &standalone, collapse);
-    } else {
-        print_marker_durations_jsonl(&spans, &standalone);
+/// Pairing and collapsing happen inside each `(run, call)` stream: a START in
+/// one call never pairs with another call's END, and a once-per-run phase seen
+/// under `--run all` is one span per run, not a repeated event. Same-name
+/// spans overlapping inside one stream still pair by the next-unmatched-END
+/// convention; that is deterministic, not an identification of which
+/// operation ended.
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
+pub(crate) fn print_marker_durations(markers: &[sidecar::Marker], human: bool) {
+    let keys = stream_keys(markers.iter().map(|m| (m.run_idx, m.call.as_deref())));
+    let headed = keys.len() > 1 || keys.iter().any(|(_, call)| call.is_some());
+    for (n, (run_idx, call)) in keys.into_iter().enumerate() {
+        let stream: Vec<sidecar::Marker> = markers
+            .iter()
+            .filter(|m| m.run_idx == run_idx && m.call.as_deref() == call)
+            .cloned()
+            .collect();
+        let timeline = sidecar::Timeline::open(&stream);
+        let (spans, standalone) = timeline.durations();
+        if human {
+            if headed {
+                if n > 0 {
+                    println!();
+                }
+                println!("{}", stream_heading(run_idx, call));
+            }
+            print_marker_durations_human(&spans, &standalone, true);
+        } else {
+            print_marker_durations_jsonl(&spans, &standalone, run_idx, call);
+        }
     }
 }
 
 #[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
-fn print_marker_durations_jsonl(pairs: &[sidecar::TimelineSpan], standalone: &[&sidecar::Marker]) {
+fn print_marker_durations_jsonl(
+    pairs: &[sidecar::TimelineSpan],
+    standalone: &[&sidecar::Marker],
+    run_idx: usize,
+    call: Option<&str>,
+) {
     for span in pairs {
-        let obj = serde_json::json!({
+        let mut obj = serde_json::json!({
             "type": "phase",
             "name": span.name,
             "start_us": span.start_us,
             "end_us": span.end_us,
             "duration_ms": (span.end_us - span.start_us) / 1_000,
         });
+        stream_fields(&mut obj, run_idx, call);
         println!("{obj}");
     }
     for m in standalone {
-        let obj = serde_json::json!({
+        let mut obj = serde_json::json!({
             "type": "standalone",
             "name": m.name,
             "timestamp_us": m.timestamp_us,
         });
+        stream_fields(&mut obj, run_idx, call);
         println!("{obj}");
     }
 }
@@ -1167,16 +1296,23 @@ fn phase_stats(samples: &[sidecar::Sample], start_us: i64, end_us: i64) -> Phase
     }
 }
 
-/// Build the phase-oriented projection of a marker timeline: inter-marker
-/// segments, or one `(all)` segment for a markerless sampled run.
+/// Build the phase-oriented projection of the process stream: inter-marker
+/// segments, or one `(all)` segment for a markerless sampled run. Call
+/// streams never enter it - their markers interleave and would cut the
+/// process phases at another call's boundaries.
 fn build_phases(
     markers: &[sidecar::Marker],
     samples: &[sidecar::Sample],
 ) -> Vec<(String, i64, i64)> {
-    sidecar::Timeline::new(markers, samples)
+    let process = stream_markers(markers, None);
+    sidecar::Timeline::new(&process, samples)
         .segments()
         .into_iter()
-        .map(|segment| (segment.name, segment.start_us, segment.end_us))
+        // The process timeline always has a final boundary.
+        .map(|segment| {
+            let end = segment.end_us.unwrap_or(segment.start_us);
+            (segment.name, segment.start_us, end)
+        })
         .collect()
 }
 
@@ -1216,10 +1352,27 @@ fn stall_totals_ns(counters: &[sidecar::Counter]) -> std::collections::BTreeMap<
     totals_ns
 }
 
+/// Stalls of one run, one table per stream. Process rows carry `% of wall`;
+/// call rows print the observed total only, since no call boundary is known
+/// to divide by and the process wall would understate a short call. The
+/// observed maximum is a best-effort reading of the stream, not the call's
+/// authoritative total.
 pub(crate) fn print_stalls(counters: &[sidecar::Counter], wall_us: i64, human: bool) {
-    let totals_ns = stall_totals_ns(counters);
+    let keys = stream_keys(counters.iter().map(|c| (c.run_idx, c.call.as_deref())));
+    let streams: Vec<_> = keys
+        .into_iter()
+        .filter_map(|(run_idx, call)| {
+            let stream: Vec<sidecar::Counter> = counters
+                .iter()
+                .filter(|c| c.run_idx == run_idx && c.call.as_deref() == call)
+                .cloned()
+                .collect();
+            let totals = stall_totals_ns(&stream);
+            (!totals.is_empty()).then_some((run_idx, call, totals))
+        })
+        .collect();
 
-    if totals_ns.is_empty() {
+    if streams.is_empty() {
         crate::output::result_msg(
             "no *_wait_ns counters in this run - see the \"Sidecar conventions\" \
              section of brokkr's README for the stall-attribution convention",
@@ -1227,38 +1380,85 @@ pub(crate) fn print_stalls(counters: &[sidecar::Counter], wall_us: i64, human: b
         return;
     }
 
-    if human {
-        print_stalls_human(&totals_ns, wall_us);
-    } else {
-        print_stalls_jsonl(&totals_ns, wall_us);
+    let headed = streams.len() > 1 || streams.iter().any(|(_, call, _)| call.is_some());
+    for (n, (run_idx, call, totals_ns)) in streams.iter().enumerate() {
+        let wall = if call.is_none() { Some(wall_us) } else { None };
+        if human {
+            if headed {
+                if n > 0 {
+                    print_blank_line();
+                }
+                print_heading(&stream_heading(*run_idx, *call));
+            }
+            print_stalls_human(totals_ns, wall);
+        } else {
+            print_stalls_jsonl(totals_ns, wall, *run_idx, *call);
+        }
     }
 }
 
 #[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
-fn print_stalls_human(totals_ns: &std::collections::BTreeMap<String, i64>, wall_us: i64) {
-    println!("{:<28} {:>12} {:>10}", "Category", "Total", "% of wall");
-    println!("{}", "-".repeat(52));
+fn print_blank_line() {
+    println!();
+}
+
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
+fn print_heading(heading: &str) {
+    println!("{heading}");
+}
+
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
+fn print_stalls_human(totals_ns: &std::collections::BTreeMap<String, i64>, wall_us: Option<i64>) {
+    match wall_us {
+        Some(_) => {
+            println!("{:<28} {:>12} {:>10}", "Category", "Total", "% of wall");
+            println!("{}", "-".repeat(52));
+        }
+        None => {
+            println!("{:<28} {:>12}", "Category", "Total");
+            println!("{}", "-".repeat(41));
+        }
+    }
     let mut entries: Vec<(&String, &i64)> = totals_ns.iter().collect();
     entries.sort_by(|a, b| b.1.cmp(a.1));
     for (cat, total_ns) in entries {
         let total_str = format!("{}ms", total_ns / 1_000_000);
-        let pct = wall_pct(*total_ns, wall_us);
-        let pct_str = pct.map_or_else(|| "-".to_owned(), |p| format!("{p:.2}%"));
-        println!("{cat:<28} {total_str:>12} {pct_str:>10}");
+        match wall_us {
+            Some(wall_us) => {
+                let pct = wall_pct(*total_ns, wall_us);
+                let pct_str = pct.map_or_else(|| "-".to_owned(), |p| format!("{p:.2}%"));
+                println!("{cat:<28} {total_str:>12} {pct_str:>10}");
+            }
+            None => println!("{cat:<28} {total_str:>12}"),
+        }
     }
 }
 
 #[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
-fn print_stalls_jsonl(totals_ns: &std::collections::BTreeMap<String, i64>, wall_us: i64) {
+fn print_stalls_jsonl(
+    totals_ns: &std::collections::BTreeMap<String, i64>,
+    wall_us: Option<i64>,
+    run_idx: usize,
+    call: Option<&str>,
+) {
     for (cat, total_ns) in totals_ns {
-        let obj = serde_json::json!({
-            "type": "stall",
-            "category": cat,
-            "total_ms": total_ns / 1_000_000,
-            "total_ns": total_ns,
-            "wall_us": wall_us,
-            "wall_fraction": wall_pct(*total_ns, wall_us).map(|p| p / 100.0),
-        });
+        let mut obj = match wall_us {
+            Some(wall_us) => serde_json::json!({
+                "type": "stall",
+                "category": cat,
+                "total_ms": total_ns / 1_000_000,
+                "total_ns": total_ns,
+                "wall_us": wall_us,
+                "wall_fraction": wall_pct(*total_ns, wall_us).map(|p| p / 100.0),
+            }),
+            None => serde_json::json!({
+                "type": "stall",
+                "category": cat,
+                "total_ms": total_ns / 1_000_000,
+                "total_ns": total_ns,
+            }),
+        };
+        stream_fields(&mut obj, run_idx, call);
         println!("{obj}");
     }
 }
@@ -1280,21 +1480,32 @@ fn wall_pct(total_ns: i64, wall_us: i64) -> Option<f64> {
 #[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 pub(crate) fn print_counters(counters: &[sidecar::Counter], human: bool) {
     if human {
+        let runs = counters.first().map(|first| first.run_idx);
+        let several_runs = counters.iter().any(|c| Some(c.run_idx) != runs);
         for c in counters {
             #[allow(clippy::cast_precision_loss)]
             let t_sec = c.timestamp_us as f64 / 1_000_000.0;
-            println!("t={t_sec:<10.3} {}={}", c.name, c.value);
+            let run = if several_runs {
+                format!("run={} ", c.run_idx)
+            } else {
+                String::new()
+            };
+            match &c.call {
+                Some(call) => println!("{run}t={t_sec:<10.3} [{call}] {}={}", c.name, c.value),
+                None => println!("{run}t={t_sec:<10.3} {}={}", c.name, c.value),
+            }
         }
         return;
     }
     for c in counters {
         #[allow(clippy::cast_precision_loss)]
         let t_sec = c.timestamp_us as f64 / 1_000_000.0;
-        let obj = serde_json::json!({
+        let mut obj = serde_json::json!({
             "t": t_sec,
             "name": c.name,
             "value": c.value,
         });
+        stream_fields(&mut obj, c.run_idx, c.call.as_deref());
         println!("{obj}");
     }
 }
@@ -1363,11 +1574,15 @@ mod timeline_arg_tests {
             marker_idx: 3,
             timestamp_us: 1_500_000,
             name: String::from("A\tB\u{1}\"q\"\\\n"),
+            run_idx: 2,
+            call: Some("c-1".to_owned()),
         };
         let line = sidecar_marker_json(&m);
         let v: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
         assert_eq!(v["name"], m.name.as_str());
         assert_eq!(v["i"], 3);
+        assert_eq!(v["run"], 2);
+        assert_eq!(v["call"], "c-1");
         assert!(
             line.contains("\"t\":1.500"),
             "t keeps three decimals: {line}"
@@ -1385,6 +1600,8 @@ mod stall_tests {
             timestamp_us: 0,
             name: name.to_owned(),
             value,
+            run_idx: 0,
+            call: None,
         }
     }
 
