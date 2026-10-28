@@ -161,6 +161,12 @@ impl CommandArgv {
         self.overwrite == Overwrite::Negotiate
     }
 
+    /// Whether the argv writes a brokkr-owned output at all, negotiated or
+    /// replaced by the arm's own flag.
+    pub(crate) fn writes_output(&self) -> bool {
+        self.overwrite != Overwrite::NoOutput
+    }
+
     pub(crate) fn into_args(self) -> Vec<String> {
         self.args
     }

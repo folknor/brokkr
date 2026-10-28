@@ -488,9 +488,20 @@ impl<'a> PbfhoggLayout<'a> {
         files.into_iter().collect()
     }
 
+    /// The private directory a pbfhogg child writing into `output_dir` gets
+    /// for its staging entries and run scratch (`src/pbfhogg/binary.rs`).
+    pub(crate) fn child_dir(output_dir: &Path) -> PathBuf {
+        output_dir.join(".brokkr-pbfhogg")
+    }
+
     pub(crate) fn scratch_dirs(&self) -> Vec<PathBuf> {
         let scratch_dir = self.scratch();
         let mut dirs = BTreeSet::new();
+        // What a child brokkr itself was killed under left in its private
+        // directories: the scratch outputs' and the data dir's (a download's
+        // indexed PBF).
+        dirs.insert(Self::child_dir(scratch_dir));
+        dirs.insert(Self::child_dir(&self.paths.data_dir));
         dirs.insert(Self::multi_extract_dir(scratch_dir));
         for dataset in self.paths.datasets.keys() {
             dirs.insert(Self::geocode_dir(scratch_dir, dataset));

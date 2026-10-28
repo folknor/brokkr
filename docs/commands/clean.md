@@ -84,8 +84,11 @@ Bare `brokkr clean`, in order:
   brokkr hands elivagar) is removed. Nidhogg's constructed
   `bench-ingest-output/` directory is removed. Pbfhogg removes its known
   bench/hotpath PBF and OSC outputs, `multi-extract/`, the `geocode-<dataset>/`
-  dirs for configured datasets, and merged-PBF cache names constructed from
-  configured PBF/OSC entries. Other pbfhogg scratch files survive. Sidecar
+  dirs for configured datasets, merged-PBF cache names constructed from
+  configured PBF/OSC entries, and the `.brokkr-pbfhogg/` private directories
+  in scratch and in the data dir (what pbfhogg children killed along with brokkr
+  left; see "Private directory" in `docs/projects/pbfhogg.md`). Other pbfhogg scratch files survive, and so does any
+  `.pbfhogg-backup-*` pbfhogg kept beside a replaced output. Sidecar
   marker FIFOs in the configured scratch root are removed only when both their
   reserved `.sidecar-*.fifo` name shape and FIFO type match; clean does not
   parse a PID from the name.

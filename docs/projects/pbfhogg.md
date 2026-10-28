@@ -10,7 +10,8 @@
 - `src/pbfhogg/plan.rs` - resolved command plans for the shared
   `src/measure/runner.rs`; execution uses one `MeasurementSession`.
 - `src/pbfhogg/binary.rs` - `PbfhoggBinary`, through which every pbfhogg
-  spawn is made; see [Output overwrite](#output-overwrite).
+  spawn is made; see [Output overwrite](#output-overwrite) and
+  [Private directory](#private-directory).
 - `src/pbfhogg/...` - benchmarks (read, write, merge, commands, extract,
   blob-filter, planetiler, all), verify (one check per
   cross-validated command, plus `all`),
@@ -75,6 +76,41 @@ whole is outside that claim.
 `--dry-run` builds nothing, so it cannot probe: it prints the argv without the
 flag and a line saying it is added at run time. Recorded `cli_args` include
 `--overwrite` whenever it was passed.
+
+## Private directory
+
+A pbfhogg child killed mid-write (`brokkr kill`, a timeout, SIGKILL) leaves its
+staging file and run scratch behind. pbfhogg reports such leftovers on later
+runs and never deletes them. So every invocation that writes an owned output
+also gets a directory brokkr owns, `.brokkr-pbfhogg/`, in the directory the
+output lands in: beside the `-o` path, beside a `build-geocode-index`
+`--output-dir` (never inside it, since publication replaces the index
+directory), or beside an `extract --config` file. It is passed as both
+`--staging-dir` and `--tmp-dir`, so everything disposable a child writes is
+in there. These two flags are negotiated like `--overwrite`, probed per
+subcommand as `SUB --staging-dir=. --help` and `SUB --tmp-dir=. --help`
+(one run of the two controls serves all three flags). An executable that
+accepts neither gets neither, and an argv that already names one of them is
+left alone. The answers sit in the same store under `SUB --staging-dir` and
+`SUB --tmp-dir` keys, while `--overwrite` keeps the bare subcommand key it
+always had.
+
+The directory is emptied on its first claim in the process and removed when
+the last handle that claimed it drops, after every child it served has
+exited. The name is fixed rather than per child, so a recorded `cli_args`
+stays the same between runs. That is safe because the brokkr lock keeps every
+other brokkr's children out: whatever the directory holds at its first claim
+is a killed run's. If brokkr itself is killed, the next run writing to the
+same place empties it, and `brokkr clean` removes the ones in scratch and the
+data dir. A `.pbfhogg-backup-*` that pbfhogg keeps beside a replaced output
+can hold the only copy of the previous output; it sits outside the private
+directory and brokkr never removes it.
+
+pbfhogg refuses a staging dir on another mount than the output's directory,
+or one that is or contains it, with exit 2 (`OutputError::StagingDir`). A
+directory beside the output cannot hit either case, so such a refusal is a
+brokkr bug. Recorded `cli_args` include both flags with their directory. That
+changes the column once, against rows recorded before brokkr passed them.
 
 ## Answer exit codes
 

@@ -39,7 +39,7 @@ fn materialize_runs_the_handles_resolved_argv_not_the_runners_binary() {
             .materialize(&plan, Executable::for_test(decoy, &Project::Pbfhogg))
             .unwrap();
         assert_eq!(invocation.program_for_test(), path.as_path());
-        assert!(invocation.cli_args().ends_with(OVERWRITE_FLAG));
+        assert!(invocation.cli_args().contains(&format!(" {OVERWRITE_FLAG}")));
         assert_eq!(execute(&invocation, &root), Some(0));
     }
 }

@@ -9,7 +9,7 @@ use crate::harness::{self, BenchConfig};
 use crate::measure::runner::{CommandPlan, PlanTarget, PlannedCommand, RowSubject};
 use crate::measure::{Executable, Invocation, MeasureMode, MeasureRequest};
 use crate::output;
-use crate::pbfhogg::binary::{OVERWRITE_FLAG, PbfhoggBinary, Writes};
+use crate::pbfhogg::binary::{OVERWRITE_FLAG, PbfhoggBinary, STAGING_DIR_FLAG, TMP_DIR_FLAG, Writes};
 use crate::pbfhogg::commands::{
     ArgMode, CommandArgv, OutputKind, PbfhoggCommand, TagsFilterInput,
 };
@@ -178,6 +178,12 @@ impl PlannedCommand for PbfhoggPlan<'_> {
         if plan.argv.negotiates_overwrite() {
             lines.push(format!(
                 "{OVERWRITE_FLAG}: added at run time if the built binary accepts it"
+            ));
+        }
+        if plan.argv.writes_output() {
+            lines.push(format!(
+                "{STAGING_DIR_FLAG}, {TMP_DIR_FLAG}: a private directory beside the output, \
+                 added at run time where the built binary accepts them"
             ));
         }
         let state = &plan.state.ctx;
