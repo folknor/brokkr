@@ -21,6 +21,7 @@ fn materialize_runs_the_handles_resolved_argv_not_the_runners_binary() {
             input_mb: None,
             cli_args: None,
             metadata: vec![],
+            arm_qualifier: None,
         },
         state: PbfhoggState {
             ctx,

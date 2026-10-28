@@ -711,6 +711,10 @@ pub struct RunRow {
 pub struct RunInvocation {
     pub argv: Vec<String>,
     pub arm_key: String,
+    /// Row-level identity beyond the argv (see
+    /// `crate::harness::BenchConfig::arm_qualifier`); the writer folds it
+    /// into the stored `arm_key`.
+    pub arm_qualifier: Option<String>,
 }
 
 /// A row read back from the database.
@@ -890,6 +894,7 @@ impl RunRowBuilder {
                 invocation: RunInvocation {
                     argv: Vec::new(),
                     arm_key: String::new(),
+                    arm_qualifier: None,
                 },
                 project: String::from("test"),
                 stop_marker: None,

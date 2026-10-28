@@ -124,6 +124,7 @@ pub(crate) fn prepare(
             &args_refs,
         )),
         metadata: vec![],
+        arm_qualifier: None,
     };
 
     Ok(crate::measure::runner::ExternalInvocation {

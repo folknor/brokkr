@@ -9,7 +9,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::error::DevError;
 use crate::project::Project;
-use crate::datasets::Bbox;
+use crate::datasets::{Bbox, ElementIdList};
 
 // ---------------------------------------------------------------------------
 // Data structures
@@ -1824,6 +1824,13 @@ pub struct Dataset {
     /// Validated longitude/latitude bounds in
     /// `lon_min,lat_min,lon_max,lat_max` order.
     pub bbox: Option<Bbox>,
+    /// IDs the pbfhogg getid bench requests on this dataset (every variant
+    /// and snapshot). Absent: the built-in Denmark list.
+    #[serde(default)]
+    pub getid_ids: Option<ElementIdList>,
+    /// IDs the pbfhogg getparents bench requests. Absent: the built-in list.
+    #[serde(default)]
+    pub getparents_ids: Option<ElementIdList>,
     pub data_dir: Option<String>,
     /// PBF variants keyed by name (e.g. "raw", "indexed", "locations").
     /// These are the variants of the dataset's primary (legacy / `base`) snapshot.

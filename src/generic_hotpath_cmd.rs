@@ -29,6 +29,7 @@ pub(crate) fn cmd_hotpath_generic(req: &measure::MeasureRequest) -> Result<(), D
         runs: req.runs(),
         cli_args: Some(harness::format_cli_args(&binary_str, &[])),
         metadata: vec![],
+        arm_qualifier: None,
     };
 
     ctx.harness.run_hotpath(&config, ctx.binary()?, |i, fifo| {

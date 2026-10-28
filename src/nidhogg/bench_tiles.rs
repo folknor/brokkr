@@ -131,6 +131,7 @@ pub fn run(
         runs,
         cli_args: None,
         metadata,
+        arm_qualifier: None,
     };
 
     let binary = binary.to_owned();

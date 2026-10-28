@@ -532,7 +532,12 @@ impl BenchHarness {
             avail_memory_mb: i64::try_from(self.host.memory_available_mb).ok(),
             storage_notes: self.storage_notes.clone(),
             cli_args: config.cli_args.clone(),
-            invocation: self.invocation.clone(),
+            // Per row, assigned (never accumulated): a suite records many
+            // rows under one harness invocation, each with its own selection.
+            invocation: crate::db::RunInvocation {
+                arm_qualifier: config.arm_qualifier.clone(),
+                ..self.invocation.clone()
+            },
             project: self.project.name().to_owned(),
             stop_marker: if self.stop_marker.is_some() || fired_stop_marker.is_some() {
                 Some((

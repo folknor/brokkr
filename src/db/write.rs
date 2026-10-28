@@ -70,8 +70,19 @@ fn insert_inner(conn: &rusqlite::Connection, row: &RunRow, uuid: &str) -> Result
     // An empty key would pair every such row with every other; store none,
     // which pairs by the stored argv like a historical row. Recompute from
     // its redacted form so credentials cannot escape through the opaque key.
-    let stored_arm_key =
-        (!row.invocation.arm_key.is_empty()).then(|| crate::run_invocation::arm_key(&stored_argv));
+    // A row qualifier (a configured selection the argv cannot show) is folded
+    // in; it cannot vanish with an empty key, which no qualified caller has.
+    if row.invocation.arm_key.is_empty() && row.invocation.arm_qualifier.is_some() {
+        return Err(DevError::Internal(
+            "a results row carries an arm qualifier but no arm key to qualify".into(),
+        ));
+    }
+    let stored_arm_key = (!row.invocation.arm_key.is_empty()).then(|| {
+        crate::run_invocation::qualified_arm_key(
+            &crate::run_invocation::arm_key(&stored_argv),
+            row.invocation.arm_qualifier.as_deref(),
+        )
+    });
     let arm_key = stored_arm_key.as_deref();
 
     // Envelope row.
@@ -423,6 +434,7 @@ mod tests {
                         String::from("--fast"),
                     ],
                     arm_key: String::from("test/fast"),
+                    arm_qualifier: None,
                 };
             })
             .build();
@@ -459,6 +471,60 @@ mod tests {
         assert_eq!(rows[0].arm_key.as_deref(), Some(expected_arm.as_str()));
 
         // Clean up.
+        drop(std::fs::remove_file(&db_path));
+        drop(std::fs::remove_dir(&dir));
+    }
+
+    #[test]
+    fn a_row_qualifier_is_folded_into_the_stored_arm_key() {
+        let dir = crate::test_scratch::scratch("db-write", "arm_qualifier_folded");
+        let db_path = dir.join("test.db");
+        drop(std::fs::remove_file(&db_path));
+        let db = ResultsDb::open(&db_path).expect("open db");
+        let argv = vec![String::from("brokkr"), String::from("getid")];
+        let row = |qualifier: Option<&str>| {
+            RunRowBuilder::new()
+                .update(|run| {
+                    run.invocation = RunInvocation {
+                        argv: argv.clone(),
+                        arm_key: String::from("x"),
+                        arm_qualifier: qualifier.map(str::to_owned),
+                    };
+                })
+                .build()
+        };
+        db.insert(&row(None)).expect("insert plain");
+        db.insert(&row(Some("ids=n1"))).expect("insert qualified");
+        let rows = db
+            .query(&QueryFilter {
+                commit: Some(String::from("aabbccdd")),
+                command: None,
+                mode: None,
+                dataset: None,
+                meta: vec![],
+                grep: Vec::new(),
+                grep_v: Vec::new(),
+                env: Vec::new(),
+                limit: 10,
+            })
+            .expect("query");
+        let mut keys: Vec<String> = rows.iter().filter_map(|r| r.arm_key.clone()).collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                String::from(r#"["qualified-v1","brokkr getid","ids=n1"]"#),
+                String::from("brokkr getid"),
+            ]
+        );
+
+        let orphan = RunRowBuilder::new()
+            .update(|run| {
+                run.invocation.arm_qualifier = Some(String::from("ids=n1"));
+            })
+            .build();
+        assert!(db.insert(&orphan).is_err());
+
         drop(std::fs::remove_file(&db_path));
         drop(std::fs::remove_dir(&dir));
     }

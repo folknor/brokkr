@@ -152,6 +152,7 @@ fn run_tilegen(
             &refs,
         )),
         metadata: vec![],
+        arm_qualifier: None,
     };
     // `bench all`'s self arm only measures output; clear any artifact left by
     // an earlier interrupted run before starting this sample.
@@ -236,6 +237,7 @@ fn run_example(
         runs: 1,
         cli_args: None,
         metadata: vec![],
+        arm_qualifier: None,
     };
 
     harness.run_internal(&config, |_| {

@@ -161,6 +161,7 @@ fn run(
         runs,
         cli_args: Some(harness::format_cli_args(&binary_str, &[])),
         metadata: vec![],
+        arm_qualifier: None,
     };
 
     // Keep the child in the same tree as the built example. `--commit` may

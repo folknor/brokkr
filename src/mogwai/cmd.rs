@@ -72,6 +72,7 @@ pub(crate) fn run(
         runs: req.runs(),
         cli_args: Some(harness::format_cli_args(&binary_str, &argv)),
         metadata: vec![],
+        arm_qualifier: None,
     };
 
     crate::measure_dispatch::dispatch_profiled(

@@ -17,6 +17,8 @@ pub(crate) struct RowSubject {
     pub input_mb: Option<f64>,
     pub cli_args: Option<String>,
     pub metadata: Vec<KvPair>,
+    /// See [`BenchConfig::arm_qualifier`].
+    pub arm_qualifier: Option<String>,
 }
 
 impl RowSubject {
@@ -30,6 +32,7 @@ impl RowSubject {
             runs,
             cli_args: self.cli_args.clone(),
             metadata: self.metadata.clone(),
+            arm_qualifier: self.arm_qualifier.clone(),
         }
     }
 }

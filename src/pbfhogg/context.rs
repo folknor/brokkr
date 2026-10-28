@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::OscRange;
-use crate::datasets::Bbox;
+use crate::datasets::{Bbox, ElementIdList};
 use crate::error::DevError;
 use crate::pbfhogg::Compression;
 
@@ -61,6 +61,28 @@ pub struct CommandParams {
     pub jobs: Option<usize>,
     pub as_snapshot: Option<String>,
     pub replace_snapshot: bool,
+    /// The dataset's configured getid/getparents bench IDs; `None` uses the
+    /// built-in lists.
+    pub selection: BenchSelection,
+}
+
+/// The element IDs a dataset configures for the getid and getparents
+/// benches (`getid_ids`, `getparents_ids`). An absent list means the
+/// built-in one, so a dataset without the keys measures what it always has.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct BenchSelection {
+    pub getid: Option<ElementIdList>,
+    pub getparents: Option<ElementIdList>,
+}
+
+impl BenchSelection {
+    /// The selection a configured dataset declares.
+    pub fn for_dataset(dataset: Option<&crate::config::Dataset>) -> Self {
+        dataset.map_or_else(Self::default, |dataset| Self {
+            getid: dataset.getid_ids.clone(),
+            getparents: dataset.getparents_ids.clone(),
+        })
+    }
 }
 
 /// Origin of a two-PBF command input.

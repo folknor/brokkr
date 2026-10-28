@@ -12,7 +12,8 @@ use crate::pbfhogg::commands::{
     CatTypeFilter, DiffFormat, InspectMode, PbfhoggCommand, TagsFilterInput,
 };
 use crate::pbfhogg::context::{
-    CommandContext, CommandObservations, CommandParams, ResolvedInputs, TwoPbfOrigin,
+    BenchSelection, CommandContext, CommandObservations, CommandParams, ResolvedInputs,
+    TwoPbfOrigin,
 };
 
 /// Preset commands included in the suite. Extract is benchmarked separately
@@ -176,6 +177,7 @@ pub fn run(
     scratch_dir: &Path,
     runs: usize,
     commands: &[&str],
+    selection: &BenchSelection,
     project_root: &Path,
 ) -> Result<(), DevError> {
     // Resolve OSC path once if any preset needs it.
@@ -227,7 +229,12 @@ pub fn run(
     crate::bench_variants::run_variants("command", commands, |name| {
         let cmd = preset_to_command(name)?;
 
-        let params = CommandParams::default();
+        // The dataset's configured getid/getparents IDs reach every preset
+        // context, getid-invert included; nothing else is configured here.
+        let params = CommandParams {
+            selection: selection.clone(),
+            ..CommandParams::default()
+        };
         let primary_pbf = pbf_path.to_path_buf();
         let inputs = match &cmd {
             PbfhoggCommand::MergeChanges { .. }

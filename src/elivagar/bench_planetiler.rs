@@ -218,6 +218,7 @@ pub(crate) fn prepare(
             &args_refs,
         )),
         metadata: vec![KvPair::int("meta.heap_mb", heap_mb)],
+        arm_qualifier: None,
     };
 
     Ok(crate::measure::runner::ExternalInvocation {

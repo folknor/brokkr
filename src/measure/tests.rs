@@ -182,6 +182,7 @@ mod persistence {
             runs: 1,
             cli_args: None,
             metadata: Vec::new(),
+            arm_qualifier: None,
         };
         let result = BenchResult {
             elapsed_ms: 12,
@@ -252,6 +253,7 @@ mod persistence {
             runs: 3,
             cli_args: None,
             metadata: Vec::new(),
+            arm_qualifier: None,
         };
         let (dist, min_us) = summarize_distribution(&[312, 298, 450]).unwrap();
         let result = BenchResult {

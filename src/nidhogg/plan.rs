@@ -173,6 +173,7 @@ impl PlannedCommand for NidhoggPlan<'_> {
                 input_mb: Some(file_mb),
                 cli_args: None,
                 metadata: vec![],
+                arm_qualifier: None,
             },
         })
     }
@@ -313,6 +314,7 @@ fn server_plan(
             input_mb: None,
             cli_args: None,
             metadata: vec![],
+            arm_qualifier: None,
         },
     })
 }

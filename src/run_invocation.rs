@@ -22,6 +22,11 @@
 //!   The flag itself stays - the mode is part of the pairing key anyway.
 //! - `argv[0]` is reduced to its basename: `brokkr` and `~/.cargo/bin/brokkr`
 //!   are the same program to the user.
+//!
+//! That argv key is the *base* key. A row whose measurement depends on a
+//! config-resolved selection the argv cannot show carries a per-row qualifier
+//! (`BenchConfig::arm_qualifier`), and the writer stores
+//! [`qualified_arm_key`] of the two.
 
 use crate::db::RunInvocation;
 
@@ -29,7 +34,22 @@ use crate::db::RunInvocation;
 pub(crate) fn capture() -> RunInvocation {
     let argv: Vec<String> = std::env::args().collect();
     let arm_key = arm_key(&argv);
-    RunInvocation { argv, arm_key }
+    RunInvocation {
+        argv,
+        arm_key,
+        arm_qualifier: None,
+    }
+}
+
+/// The stored pairing identity: the argv's key alone when there is no
+/// qualifier (byte-identical to every row before qualifiers existed), else a
+/// versioned JSON tuple, so a qualifier has a structural boundary and can
+/// never be read as one more argv token.
+pub(crate) fn qualified_arm_key(base: &str, qualifier: Option<&str>) -> String {
+    match qualifier {
+        None => base.to_owned(),
+        Some(qualifier) => serde_json::json!(["qualified-v1", base, qualifier]).to_string(),
+    }
 }
 
 /// The pairing identity of an argv (see the module doc), its kept tokens

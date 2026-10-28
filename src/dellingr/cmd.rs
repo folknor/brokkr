@@ -237,6 +237,7 @@ fn bench_config(
         runs,
         cli_args: Some(harness::format_cli_args(binary, args)),
         metadata: vec![],
+        arm_qualifier: None,
     })
 }
 

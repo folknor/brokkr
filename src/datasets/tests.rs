@@ -50,6 +50,8 @@ mod tests {
             origin: None,
             download_date: None,
             bbox: None,
+            getid_ids: None,
+            getparents_ids: None,
             data_dir: None,
             pbf: HashMap::new(),
             osc: HashMap::new(),

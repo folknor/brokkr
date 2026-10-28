@@ -155,6 +155,7 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
         runs: req.runs(),
         cli_args: Some(harness::format_cli_args(&binary_str, &subprocess_args)),
         metadata,
+        arm_qualifier: None,
     };
 
     let env = harness_env.as_pairs();

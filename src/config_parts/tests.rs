@@ -1210,6 +1210,8 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
             origin: None,
             download_date: None,
             bbox: None,
+            getid_ids: None,
+            getparents_ids: None,
             data_dir: None,
             pbf: HashMap::new(),
             osc: HashMap::new(),
@@ -1427,6 +1429,31 @@ xxhash = "cccccccccccccccccccccccccccccccc"
         // Upper-case hex is accepted and normalised to lower case.
         assert_eq!(dk.pbf.get("indexed").unwrap().xxhash, Some(pin('b')));
         assert_eq!(dk.osc.get("4705").unwrap().file, "dk-4705.osc.gz");
+        assert_eq!(dk.getid_ids, None);
+        assert_eq!(dk.getparents_ids, None);
+    }
+
+    #[test]
+    fn dataset_bench_id_lists_parse_and_refuse_bad_entries() {
+        let parse = |line: &str| {
+            let toml_str = format!("project = \"pbfhogg\"\n[h.datasets.de]\n{line}\n");
+            let root: toml::Value = toml::from_str(&toml_str).unwrap();
+            parse_hosts(root.as_table().unwrap())
+        };
+        let hosts = parse(r#"getid_ids = ["n1", "w2", "r3"]"#).unwrap();
+        let de = hosts.get("h").unwrap().datasets.get("de").unwrap();
+        assert_eq!(
+            de.getid_ids.as_ref().map(crate::datasets::ElementIdList::args),
+            Some(vec!["n1".to_owned(), "w2".to_owned(), "r3".to_owned()])
+        );
+        for bad in [
+            "getid_ids = []",
+            r#"getparents_ids = ["n-1"]"#,
+            r#"getparents_ids = ["n1", "n1"]"#,
+            r#"getid_ids = ["x1"]"#,
+        ] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
@@ -1490,6 +1517,8 @@ xxhash = "000000000000000000000000feedface"
             origin: None,
             download_date: None,
             bbox: None,
+            getid_ids: None,
+            getparents_ids: None,
             data_dir: None,
             pbf: HashMap::new(),
             osc: HashMap::new(),
@@ -1533,6 +1562,8 @@ xxhash = "000000000000000000000000feedface"
             origin: None,
             download_date: None,
             bbox: None,
+            getid_ids: None,
+            getparents_ids: None,
             data_dir: None,
             pbf: HashMap::new(),
             osc: HashMap::new(),

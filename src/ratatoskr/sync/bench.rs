@@ -319,6 +319,7 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
         runs: req.bench.get(),
         cli_args: Some(format!("{HARNESS_MODE_FLAG} {}", script_abs.display())),
         metadata: Vec::new(),
+        arm_qualifier: None,
     };
 
     // One mock serves every iteration; the shared measurement loop owns the

@@ -108,6 +108,7 @@ pub fn run(
             runs,
             cli_args: None,
             metadata: vec![],
+            arm_qualifier: None,
         };
 
         harness

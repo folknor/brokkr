@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::clean::layout::{PbfhoggFileKind, PbfhoggLayout};
-use crate::datasets::Bbox;
+use crate::datasets::{Bbox, ElementIdList};
 use crate::error::DevError;
 use crate::pbfhogg::context::{CommandContext, CommandObservations, CommandParams};
 
@@ -232,18 +232,39 @@ impl ExtractStrategy {
 // Hardcoded bench fixtures
 // ---------------------------------------------------------------------------
 
-/// Fixed ID set used by both `getid` and `getparents` suite presets. Includes
-/// three IDs of each object type (n/w/r) so the bench shape is reproducible.
-/// Some entries may not exist in very small test datasets - the pbfhogg
-/// binary tolerates missing IDs without erroring.
-pub(crate) const GETID_BENCH_IDS: &[&str] = &[
+/// Built-in ID list for the getid bench (`brokkr getid` and the suite's
+/// getid presets) on a dataset without `getid_ids`. Three IDs of each object
+/// type (n/w/r), chosen in Denmark: a dataset that does not contain Denmark
+/// may lack most of them, and its bench then times a mostly empty selection,
+/// which is why a dataset can configure its own. pbfhogg tolerates missing IDs. Changing
+/// this list changes what every existing unconfigured row measured without
+/// splitting the pairing, so it stays as it is.
+const GETID_BENCH_IDS: &[&str] = &[
     "n115722", "n115723", "n115724", "w2080", "w2081", "w2082", "r174", "r213", "r339",
 ];
 
-/// Subset of `GETID_BENCH_IDS` used by the `getparents` preset - fewer
-/// ids because getparents is a superset operation and more inputs would
-/// dominate with parent-traversal cost.
+/// Built-in ID list for the getparents bench on a dataset without
+/// `getparents_ids`: a subset of `GETID_BENCH_IDS`, fewer because
+/// getparents is a superset operation and more inputs would dominate with
+/// parent-traversal cost. Fixed for the same reason.
 const GETPARENTS_BENCH_IDS: &[&str] = &["n115722", "n115723", "w2080"];
+
+/// The ID argv a getid or getparents bench passes, and the pairing qualifier
+/// that keeps a configured list's rows apart: `None` when the resolved list
+/// is the built-in one (configured or not), so those rows keep the identity
+/// every existing row has.
+fn bench_ids(
+    configured: Option<&ElementIdList>,
+    builtin: &[&str],
+) -> (Vec<String>, Option<String>) {
+    let ids = configured.map_or_else(
+        || builtin.iter().map(|&id| id.to_owned()).collect(),
+        ElementIdList::args,
+    );
+    let qualifier = (ids.iter().map(String::as_str).ne(builtin.iter().copied()))
+        .then(|| format!("ids={}", ids.join(",")));
+    (ids, qualifier)
+}
 
 /// Min-count threshold used by the bench version of `inspect tags`. Set
 /// impossibly high so pbfhogg's default tag-frequency filter never trims
@@ -544,6 +565,27 @@ impl PbfhoggCommand {
         }
     }
 
+    /// The pairing qualifier a results row of this command carries beyond the
+    /// brokkr argv: the measured element selection when a dataset configures
+    /// getid or getparents IDs that differ from the built-in list. The IDs
+    /// live in the subprocess argv, which `arm_key` never sees, so without
+    /// this a configured list's rows would pair with rows that measured
+    /// another selection. `None` for every other command and for the
+    /// built-in lists, whose rows keep the identity they always had.
+    pub fn arm_qualifier(&self, ctx: &CommandContext) -> Option<String> {
+        match self {
+            Self::Getid { .. } => bench_ids(ctx.params.selection.getid.as_ref(), GETID_BENCH_IDS).1,
+            Self::Getparents => {
+                bench_ids(
+                    ctx.params.selection.getparents.as_ref(),
+                    GETPARENTS_BENCH_IDS,
+                )
+                .1
+            }
+            _ => None,
+        }
+    }
+
     /// Build metadata key-value pairs for the result DB.
     ///
     /// Post-v13, this holds only *runtime observations* - things the
@@ -775,16 +817,21 @@ impl PbfhoggCommand {
                 if *add_referenced {
                     argv = argv.arg("--add-referenced");
                 }
-                for id in GETID_BENCH_IDS {
-                    argv = argv.arg(*id);
+                let (ids, _) = bench_ids(ctx.params.selection.getid.as_ref(), GETID_BENCH_IDS);
+                for id in ids {
+                    argv = argv.arg(id);
                 }
                 argv.output(&output)
             }
             Self::Getparents => {
                 let output = scratch_output_path(ctx, self, mode)?;
                 let mut argv = CommandArgv::new("getparents").input(ctx.pbf_str()?)?;
-                for id in GETPARENTS_BENCH_IDS {
-                    argv = argv.arg(*id);
+                let (ids, _) = bench_ids(
+                    ctx.params.selection.getparents.as_ref(),
+                    GETPARENTS_BENCH_IDS,
+                );
+                for id in ids {
+                    argv = argv.arg(id);
                 }
                 argv.output(&output)
             }
@@ -1153,6 +1200,52 @@ mod tests {
             params: CommandParams::default(),
             observations: CommandObservations::default(),
         }
+    }
+
+    fn getid() -> PbfhoggCommand {
+        PbfhoggCommand::Getid {
+            add_referenced: false,
+            invert: false,
+        }
+    }
+
+    fn id_args(cmd: &PbfhoggCommand, ctx: &CommandContext) -> Vec<String> {
+        cmd.build_args(ctx, ArgMode::Bench)
+            .unwrap()
+            .into_args()
+            .into_iter()
+            .filter(|a| a.len() > 1 && a[1..].bytes().all(|b| b.is_ascii_digit()))
+            .collect()
+    }
+
+    #[test]
+    fn unconfigured_bench_ids_are_the_builtin_lists_and_unqualified() {
+        let ctx = test_ctx();
+        assert_eq!(id_args(&getid(), &ctx), GETID_BENCH_IDS);
+        assert_eq!(
+            id_args(&PbfhoggCommand::Getparents, &ctx),
+            GETPARENTS_BENCH_IDS
+        );
+        assert_eq!(getid().arm_qualifier(&ctx), None);
+        assert_eq!(PbfhoggCommand::Getparents.arm_qualifier(&ctx), None);
+    }
+
+    #[test]
+    fn configured_bench_ids_reach_the_argv_and_qualify_the_row() {
+        let mut ctx = test_ctx();
+        ctx.params.selection.getid = Some(ElementIdList::parse(&["n5", "w06"]).unwrap());
+        assert_eq!(id_args(&getid(), &ctx), ["n5", "w6"]);
+        assert_eq!(getid().arm_qualifier(&ctx).as_deref(), Some("ids=n5,w6"));
+        // getid_ids does not move getparents, and no other command qualifies.
+        assert_eq!(PbfhoggCommand::Getparents.arm_qualifier(&ctx), None);
+        assert_eq!(PbfhoggCommand::Sort.arm_qualifier(&ctx), None);
+    }
+
+    #[test]
+    fn configuring_the_builtin_list_keeps_the_legacy_identity() {
+        let mut ctx = test_ctx();
+        ctx.params.selection.getparents = Some(ElementIdList::parse(GETPARENTS_BENCH_IDS).unwrap());
+        assert_eq!(PbfhoggCommand::Getparents.arm_qualifier(&ctx), None);
     }
 
     fn use_pbf_and_osc(ctx: &mut CommandContext) {

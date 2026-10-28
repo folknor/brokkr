@@ -120,6 +120,7 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
                 input_mb,
                 cli_args: None,
                 metadata: vec![],
+                arm_qualifier: None,
             },
         })
     }
@@ -263,6 +264,7 @@ fn run_example(
         runs: 1,
         cli_args: None,
         metadata: vec![],
+        arm_qualifier: None,
     };
     runner::execute_example(req, ctx, binary, &refs, &config, || {
         use crate::db::KvPair;

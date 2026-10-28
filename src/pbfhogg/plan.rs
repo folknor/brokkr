@@ -12,8 +12,8 @@ use crate::output;
 use crate::pbfhogg::binary::{OVERWRITE_FLAG, PbfhoggBinary, STAGING_DIR_FLAG, TMP_DIR_FLAG};
 use crate::pbfhogg::commands::{ArgMode, CommandArgv, OutputKind, PbfhoggCommand, TagsFilterInput};
 use crate::pbfhogg::context::{
-    CommandContext, CommandObservations, CommandParams, MergedCacheState, ResolvedInputs,
-    SnapshotSide, TwoPbfOrigin,
+    BenchSelection, CommandContext, CommandObservations, CommandParams, MergedCacheState,
+    ResolvedInputs, SnapshotSide, TwoPbfOrigin,
 };
 use crate::project::Project;
 
@@ -135,6 +135,7 @@ impl PlannedCommand for PbfhoggPlan<'_> {
                 input_mb: Some(mb),
                 cli_args: None,
                 metadata: self.command.metadata(&ctx.observations),
+                arm_qualifier: self.command.arm_qualifier(&ctx),
             },
             state: PbfhoggState {
                 ctx,
@@ -328,6 +329,7 @@ pub(crate) fn run_wallclock_core(
         runs,
         cli_args: None,
         metadata: command.metadata(&cmd_ctx.observations),
+        arm_qualifier: command.arm_qualifier(cmd_ctx),
     };
 
     if announce {
@@ -495,11 +497,14 @@ fn build_pbfhogg_context(
         snapshot_to: None,
     };
 
+    let mut params = extra_params.clone();
+    params.selection = BenchSelection::for_dataset(paths.datasets.get(req.dataset));
+
     Ok(CommandContext {
         inputs,
         scratch_dir: paths.scratch_dir.clone(),
         dataset: req.dataset.to_owned(),
-        params: extra_params.clone(),
+        params,
         observations,
     })
 }

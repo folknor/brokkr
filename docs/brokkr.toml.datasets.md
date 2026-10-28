@@ -41,6 +41,20 @@ paths still resolve against each including project's root.
   `lon_min,lat_min,lon_max,lat_max` coordinates; longitude must be within
   -180..180, latitude within -90..90, and each minimum must not exceed its
   maximum.
+- `getid_ids`, `getparents_ids` (pbfhogg, optional) - the element IDs the
+  getid and getparents benches request on this dataset, every variant and
+  snapshot of it (`brokkr getid`/`getparents` in any measured mode, and the
+  suite's `getid`, `getid-invert` and `getparents` presets). Each entry is
+  `n`, `w` or `r` and a decimal ID from 0 to 9223372036854775807 (the
+  non-negative IDs pbfhogg getid accepts); the list must be non-empty and
+  free of duplicates (compared after parsing, so `n1` and `n01` collide), and
+  its order is the argv order. Absent, the bench uses the built-in lists,
+  which were chosen in Denmark: a dataset that does not contain Denmark may
+  lack most of them, and its bench then times a mostly empty selection. The IDs are a request,
+  not a guarantee: nothing checks that they exist in the file, and a
+  getparents seed without parents measures little. A list that differs from
+  the built-in one keeps its rows apart in `brokkr results --compare` (see
+  `brokkr man results`).
 
 ```toml
 [plantasjen.datasets.denmark]
@@ -48,6 +62,7 @@ origin = "Geofabrik"
 download_date = "2026-02-20"
 bbox = "12.4,55.6,12.7,55.8"
 data_dir = "denmark-data"          # nidhogg only
+getid_ids = ["n115722", "w2080", "r174"]    # pbfhogg only
 
 [plantasjen.datasets.denmark.pbf.indexed]
 file = "denmark-with-indexdata.osm.pbf"

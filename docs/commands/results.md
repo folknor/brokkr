@@ -185,6 +185,14 @@ treats it as an opaque identity and does not implement a second CLI grammar.
 Historical rows have no `arm_key`; those rows use their exact stored
 invocation string and can only pair when that spelling matches.
 
+A measurement-defining choice that reaches the subprocess argv from config
+rather than from the brokkr argv cannot show in the argv key, so the row
+carries it as a qualifier. Today that is a pbfhogg dataset's `getid_ids` or
+`getparents_ids` when it differs from the built-in list. A qualified row
+stores `["qualified-v1", <argv key>, <qualifier>]` (JSON) as its `arm_key`
+and pairs only with rows carrying the same qualifier; an unqualified row's
+key is the argv key alone, exactly as before qualifiers existed.
+
 Pairing is by parsed command identity: two different brokkr commands that
 happen to run the same subprocess stay separate rows.
 

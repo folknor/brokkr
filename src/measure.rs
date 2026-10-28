@@ -226,6 +226,13 @@ pub struct BenchConfig {
     /// the invocation they execute; other paths take it from dispatch.
     pub cli_args: Option<String>,
     pub metadata: Vec<KvPair>,
+    /// Measurement identity the brokkr argv cannot carry: a selection a
+    /// project command resolves from config into the subprocess argv (the
+    /// pbfhogg getid/getparents IDs a dataset configures). Recorded with the
+    /// row's own invocation and folded into its stored `arm_key`, so rows
+    /// that measured different selections never pair. `None` leaves the key
+    /// exactly the argv's.
+    pub arm_qualifier: Option<String>,
 }
 
 /// Result of a single benchmark measurement.
@@ -429,6 +436,7 @@ impl BenchHarness {
             invocation: crate::db::RunInvocation {
                 argv: Vec::new(),
                 arm_key: String::new(),
+                arm_qualifier: None,
             },
             measure_mode: crate::measure::RecordedMode::Bench,
             store_results: true,
@@ -718,6 +726,7 @@ fn config_for(config: &BenchConfig, invocation: &Invocation<'_>) -> BenchConfig 
         runs: config.runs,
         cli_args: Some(invocation.cli_args()),
         metadata: config.metadata.clone(),
+        arm_qualifier: config.arm_qualifier.clone(),
     }
 }
 

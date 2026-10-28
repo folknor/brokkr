@@ -101,6 +101,7 @@ fn run_suite_binary(
         &paths.scratch_dir,
         runs,
         bench_commands::ALL_COMMANDS,
+        &crate::pbfhogg::context::BenchSelection::for_dataset(paths.datasets.get(dataset)),
         project_root,
     )?;
 
@@ -377,6 +378,7 @@ fn run_osmpbf_baseline(
             runs: 1,
             cli_args: None,
             metadata: vec![],
+            arm_qualifier: None,
         };
 
         harness
@@ -432,6 +434,7 @@ fn run_osmium_baseline(
         runs,
         cli_args: None,
         metadata: vec![],
+        arm_qualifier: None,
     };
 
     harness.run_external(&config, &cat, project_root)?;
@@ -464,6 +467,7 @@ fn run_osmium_baseline(
         runs,
         cli_args: None,
         metadata: vec![],
+        arm_qualifier: None,
     };
 
     harness.run_external(&altw_config, &altw, project_root)?;
