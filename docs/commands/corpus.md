@@ -190,10 +190,27 @@ Probes are pinned in the registry (`registry_dir`), two file kinds:
   **`[probe_config."<prefix>"]` - how each probe runs.** Four optional
   fields, each flowing into the probe's manifest entry: `feed` (the `[feeds]`
   group its oracle was taken against - every probe must resolve one),
-  `bar_budget` (the harness's scan cap, default 10,000), `ohlcv_start_ms`
-  (the execution start) and `tv_trades_csv_tz` (the CSV oracle's timezone -
-  the harness accepts `utc`, `utc_plus_N`, `utc_minus_N` or an IANA zone
-  without DST, since it applies one constant offset).
+  `bar_budget` (the harness's scan cap, default 10,000), the execution start
+  and `tv_trades_csv_tz` (the CSV oracle's timezone - the harness accepts
+  `utc`, `utc_plus_N`, `utc_minus_N` or an IANA zone without DST, since it
+  applies one constant offset).
+
+  The start has two spellings, and a declaration sets at most one:
+  `ohlcv_start_ms`, a plain start, and `capture_origin_ms`, a start that is
+  also the bar TradingView's chart began on - the claim the harness scores
+  with its capture-origin comparison window. They are one field for every
+  rule below: a probe takes the start, with its kind, from the longest prefix
+  that sets either; a child restating its ancestor's value under the same
+  spelling is a restatement, while a child changing only the spelling
+  withdraws or asserts the origin; and an origin shadowed by plain starts for
+  every probe governs nothing. An origin on a prefix claims it for every
+  probe beneath it, a pending one included, and a child's plain start opts
+  out. Because the claim and its value are one statement, resolution cannot
+  combine an inherited start with a separately inherited origin claim;
+  editing the value asserts a new measured origin, which nothing else
+  checks. The manifest carries the start
+  as `ohlcv_start_ms` either way, and for an origin also
+  `capture_origin_ms` equal to it, in manifest version 4.
   A key is a directory prefix relative to `corpus_root`, and a probe takes
   **each field independently** from the longest prefix covering its
   directory that sets it: a root declares the shared feed and budget, one

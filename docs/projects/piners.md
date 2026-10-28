@@ -52,6 +52,15 @@ resolved. `feeds` holds the selection's referenced feed groups, roles
 resolved absolute. Semantics and precedence against `inputs.json`:
 `docs/commands/corpus.md`.
 
+**Capture origins (`version` 4).** A probe whose start resolves from a
+`capture_origin_ms` declaration also carries `capture_origin_ms`, equal to
+its `ohlcv_start_ms`. The version is chosen per manifest: 4 exactly when some
+selected probe carries the field, 3 otherwise, so a selection without an
+origin is unchanged and only a manifest that needs the new contract makes a
+harness that predates it refuse. Two fields rather than a flag, so a
+hand-written measurement manifest that moves `ohlcv_start_ms` leaves the
+origin behind and the harness sees the disagreement.
+
 **Feed group forms (`version` 3).** A group's role map takes one of two
 shapes, and the harness must branch on which. **Role form** - keys among
 `primary`/`warmup`/`lower`, each already at chart TF, consumed as-is.

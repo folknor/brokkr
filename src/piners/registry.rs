@@ -337,6 +337,14 @@ pub struct ProbeConfig {
     /// The execution start (epoch ms). Outranks an `inputs.json` start.
     #[serde(default)]
     pub ohlcv_start_ms: Option<i64>,
+    /// The other spelling of the start: an execution start (epoch ms) that is
+    /// also the bar TradingView's chart began on, which the harness scores
+    /// with the capture-origin comparison. A declaration sets at most one of
+    /// the two; resolution treats them as one slot, so the claim always
+    /// travels with the value it was made for. Editing the value asserts a
+    /// new measured origin - nothing else can catch that edit.
+    #[serde(default)]
+    pub capture_origin_ms: Option<i64>,
     /// The `tv_trades.csv` timezone. An `inputs.json` timezone outranks it,
     /// and a probe with a `record` may not resolve one: the harness then
     /// never reads the CSV, so the value would be dead.
@@ -344,15 +352,23 @@ pub struct ProbeConfig {
     pub tv_trades_csv_tz: Option<String>,
 }
 
-/// The [`ProbeConfig`] field names, in declaration order. Field-generic
-/// checks walk these through [`ProbeConfig::setting`].
+/// The [`ProbeConfig`] slots, in declaration order. Field-generic checks
+/// walk these through [`ProbeConfig::setting`]. Slot 2 is the start, spelled
+/// `ohlcv_start_ms` or `capture_origin_ms` ([`ProbeConfig::field_name`]).
 const CONFIG_FIELDS: [&str; 4] = ["feed", "bar_budget", "ohlcv_start_ms", "tv_trades_csv_tz"];
+
+/// The start slot's index in [`CONFIG_FIELDS`].
+const START_SLOT: usize = 2;
 
 /// One field's declared value, comparable across the field types.
 #[derive(Debug, PartialEq, Eq)]
 enum Setting<'a> {
     Text(&'a str),
     Int(i128),
+    /// The start slot: its value and whether it is a capture origin. A plain
+    /// start and an origin at the same value differ, so a child changing only
+    /// the kind is not a restatement.
+    Start { origin: bool, ms: i64 },
 }
 
 impl ProbeConfig {
@@ -361,11 +377,56 @@ impl ProbeConfig {
         match i {
             0 => self.feed.as_deref().map(Setting::Text),
             1 => self.bar_budget.map(|v| Setting::Int(i128::from(v))),
-            2 => self.ohlcv_start_ms.map(|v| Setting::Int(i128::from(v))),
+            START_SLOT => self
+                .ohlcv_start_ms
+                .map(|ms| Setting::Start { origin: false, ms })
+                .or_else(|| {
+                    self.capture_origin_ms
+                        .map(|ms| Setting::Start { origin: true, ms })
+                }),
             3 => self.tv_trades_csv_tz.as_deref().map(Setting::Text),
             _ => None,
         }
     }
+
+    /// The spelling this declaration uses for slot `i`.
+    fn field_name(&self, i: usize) -> &'static str {
+        if i == START_SLOT && self.ohlcv_start_ms.is_none() && self.capture_origin_ms.is_some() {
+            "capture_origin_ms"
+        } else {
+            CONFIG_FIELDS[i]
+        }
+    }
+
+    /// The execution start and whether it is a capture origin, read as one
+    /// slot: a value carrying both spellings (which validation refuses) reads
+    /// as its plain start, never as a plain start and an origin at once.
+    pub fn start(&self) -> Option<ExecutionStart> {
+        match self.setting(START_SLOT) {
+            Some(Setting::Start { origin: false, ms }) => Some(ExecutionStart::Plain(ms)),
+            Some(Setting::Start { origin: true, ms }) => Some(ExecutionStart::CaptureOrigin(ms)),
+            _ => None,
+        }
+    }
+
+    /// The execution start's value, whichever spelling declared it.
+    pub fn start_ms(&self) -> Option<i64> {
+        self.start().map(|start| match start {
+            ExecutionStart::Plain(ms) | ExecutionStart::CaptureOrigin(ms) => ms,
+        })
+    }
+}
+
+/// One probe's execution start, as [`ProbeConfig::start`] reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionStart {
+    /// `ohlcv_start_ms`.
+    Plain(i64),
+    /// `capture_origin_ms`: also the bar TradingView's chart began on.
+    CaptureOrigin(i64),
+}
+
+impl ProbeConfig {
 
     fn is_empty(&self) -> bool {
         (0..CONFIG_FIELDS.len()).all(|i| self.setting(i).is_none())
@@ -394,10 +455,20 @@ fn covering<'a>(
 /// The one resolver - the manifest, verification and lint all ask it.
 pub fn resolve(config: &BTreeMap<String, ProbeConfig>, dir: &Path) -> ProbeConfig {
     let chain = covering(config, dir);
+    // The start is one slot: the longest prefix that sets either spelling
+    // wins, and its kind comes with it.
+    let start = chain
+        .iter()
+        .find_map(|(_, c)| c.setting(START_SLOT))
+        .and_then(|setting| match setting {
+            Setting::Start { origin, ms } => Some((origin, ms)),
+            _ => None,
+        });
     ProbeConfig {
         feed: chain.iter().find_map(|(_, c)| c.feed.clone()),
         bar_budget: chain.iter().find_map(|(_, c)| c.bar_budget),
-        ohlcv_start_ms: chain.iter().find_map(|(_, c)| c.ohlcv_start_ms),
+        ohlcv_start_ms: start.and_then(|(origin, ms)| (!origin).then_some(ms)),
+        capture_origin_ms: start.and_then(|(origin, ms)| origin.then_some(ms)),
         tv_trades_csv_tz: chain.iter().find_map(|(_, c)| c.tv_trades_csv_tz.clone()),
     }
 }
@@ -835,13 +906,23 @@ fn check_probe_config(
             problems.push(format!("[probe_config.\"{prefix}\"]: declares no field"));
             continue;
         }
+        if entry.ohlcv_start_ms.is_some() && entry.capture_origin_ms.is_some() {
+            problems.push(format!(
+                "[probe_config.\"{prefix}\"]: sets both `ohlcv_start_ms` and \
+                 `capture_origin_ms`; they are two spellings of one start - keep \
+                 `capture_origin_ms` if the start is the bar TradingView's chart began on, \
+                 `ohlcv_start_ms` otherwise"
+            ));
+            continue;
+        }
         let inherited: BTreeMap<String, ProbeConfig> = config
             .iter()
             .filter(|(other, _)| *other != prefix)
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         let above = resolve(&inherited, Path::new(prefix));
-        for (i, name) in CONFIG_FIELDS.iter().enumerate() {
+        for i in 0..CONFIG_FIELDS.len() {
+            let name = entry.field_name(i);
             if let Some(value) = entry.setting(i)
                 && above.setting(i) == Some(value)
             {
@@ -882,7 +963,8 @@ fn check_probe_config(
         }
     }
     for (prefix, entry) in config {
-        for (i, name) in CONFIG_FIELDS.iter().enumerate() {
+        for i in 0..CONFIG_FIELDS.len() {
+            let name = entry.field_name(i);
             if entry.setting(i).is_some() && !winners.contains(&(prefix.as_str(), i)) {
                 problems.push(format!(
                     "[probe_config.\"{prefix}\"]: `{name}` governs no pinned or pending probe \
@@ -1473,6 +1555,65 @@ csv = { path = \"p/old/tv_trades.csv\", xxh128 = \"bb\" }
                 .iter()
                 .any(|p| p.contains("nests with"))
         );
+    }
+
+    fn start(ms: i64, origin: bool) -> ProbeConfig {
+        if origin {
+            ProbeConfig {
+                capture_origin_ms: Some(ms),
+                ..ProbeConfig::default()
+            }
+        } else {
+            ProbeConfig {
+                ohlcv_start_ms: Some(ms),
+                ..ProbeConfig::default()
+            }
+        }
+    }
+
+    #[test]
+    fn the_two_start_spellings_are_one_slot() {
+        let pins = pins_of(&[("a", "p/a"), ("b", "p/b")]);
+        let check = |parent: ProbeConfig, child: ProbeConfig| {
+            let mut config = BTreeMap::new();
+            config.insert("p".to_owned(), parent);
+            config.insert("p/a".to_owned(), child);
+            check_probe_config(&config, &pins, &BTreeMap::new())
+        };
+        // Same kind and value restates; a changed kind or value does not.
+        assert!(check(start(1, true), start(1, true))[0].contains("`capture_origin_ms` restates"));
+        assert!(check(start(1, false), start(1, false))[0].contains("`ohlcv_start_ms` restates"));
+        assert!(check(start(1, true), start(1, false)).is_empty(), "a withdrawal");
+        assert!(check(start(1, false), start(1, true)).is_empty(), "an assertion");
+        assert!(check(start(1, true), start(2, false)).is_empty(), "a replacement");
+
+        // The child's plain start shadows the root origin for `a`; `b` still
+        // inherits it, so it governs.
+        let mut config = BTreeMap::new();
+        config.insert("p".to_owned(), start(1, true));
+        config.insert("p/a".to_owned(), start(2, false));
+        assert_eq!(resolve(&config, Path::new("p/a")).start_ms(), Some(2));
+        assert_eq!(resolve(&config, Path::new("p/a")).capture_origin_ms, None);
+        assert_eq!(resolve(&config, Path::new("p/b")).capture_origin_ms, Some(1));
+        assert_eq!(resolve(&config, Path::new("p/b")).ohlcv_start_ms, None);
+        // Shadowed for every probe, the origin governs nothing.
+        config.insert("p/b".to_owned(), start(3, false));
+        let problems = check_probe_config(&config, &pins, &BTreeMap::new());
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("\"p\"]: `capture_origin_ms` governs no")),
+            "{problems:?}"
+        );
+
+        let both = ProbeConfig {
+            ohlcv_start_ms: Some(1),
+            capture_origin_ms: Some(1),
+            ..ProbeConfig::default()
+        };
+        let mut config = BTreeMap::new();
+        config.insert("p".to_owned(), both);
+        assert!(check_probe_config(&config, &pins, &BTreeMap::new())[0].contains("sets both"));
     }
 
     #[test]

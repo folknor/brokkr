@@ -38,6 +38,11 @@
 //! rather than consume a `base` feed as if it were already at chart TF. The
 //! role names are the only carrier - a group with a `base` role and no
 //! `primary` is the single-base form.
+//!
+//! Version 4 addition: a probe whose resolved start was declared as
+//! `capture_origin_ms` carries `capture_origin_ms` equal to its
+//! `ohlcv_start_ms`. Version 4 is written only when some selected probe
+//! carries it; every other manifest stays version 3, unchanged.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -45,7 +50,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::error::DevError;
-use crate::piners::registry::{FilePin, Registry, VerifiedProbe};
+use crate::piners::registry::{ExecutionStart, FilePin, Registry, VerifiedProbe};
 
 /// A pinned file in the manifest: path relative to `corpus_root` + xxh128.
 #[derive(Debug, Serialize)]
@@ -91,10 +96,16 @@ pub struct ManifestProbe {
     /// The harness's scan bar cap, when resolved.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bar_budget: Option<u64>,
-    /// The execution start (epoch ms), when resolved. Outranks an
-    /// `inputs.json` start harness-side.
+    /// The execution start (epoch ms), when resolved, whichever spelling
+    /// declared it. Outranks an `inputs.json` start harness-side.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ohlcv_start_ms: Option<i64>,
+    /// Equal to `ohlcv_start_ms` when the resolved start is a capture origin
+    /// (version 4 only). Two fields rather than a flag so a hand-written
+    /// measurement manifest that moves the start leaves the origin behind
+    /// and the harness sees the disagreement.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture_origin_ms: Option<i64>,
     /// The `tv_trades.csv` timezone, when resolved. An `inputs.json`
     /// timezone outranks it harness-side.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -114,10 +125,18 @@ pub struct Manifest {
     pub feeds: BTreeMap<String, BTreeMap<String, PathBuf>>,
 }
 
-/// Current manifest schema version. Bumped to 3 when the single-base feed
-/// form landed, so a harness that predates it hard-rejects rather than
-/// mistaking a `base` (lower-TF) feed for a chart-TF `primary`.
+/// Manifest schema version for a selection with no capture origin. Bumped to
+/// 3 when the single-base feed form landed, so a harness that predates it
+/// hard-rejects rather than mistaking a `base` (lower-TF) feed for a
+/// chart-TF `primary`.
 const MANIFEST_VERSION: u32 = 3;
+
+/// The version written when any selected probe resolves a capture origin.
+/// The version describes what the manifest requires, not what the registry
+/// can say: a selection without an origin stays byte-identical version 3,
+/// and only a manifest carrying `capture_origin_ms` makes a harness that
+/// cannot read it refuse, instead of scoring the probe as an ordinary window.
+const MANIFEST_VERSION_CAPTURE_ORIGIN: u32 = 4;
 
 impl Manifest {
     /// Build a manifest from the verified probe set. `corpus_root` is the
@@ -157,13 +176,22 @@ impl Manifest {
                     keywords: registry.keywords_for(&v.id),
                     feed,
                     bar_budget: v.config.bar_budget,
-                    ohlcv_start_ms: v.config.ohlcv_start_ms,
+                    ohlcv_start_ms: v.config.start_ms(),
+                    capture_origin_ms: match v.config.start() {
+                        Some(ExecutionStart::CaptureOrigin(ms)) => Some(ms),
+                        _ => None,
+                    },
                     tv_trades_csv_tz: v.config.tv_trades_csv_tz.clone(),
                 }
             })
-            .collect();
+            .collect::<Vec<ManifestProbe>>();
+        let version = if probes.iter().any(|p| p.capture_origin_ms.is_some()) {
+            MANIFEST_VERSION_CAPTURE_ORIGIN
+        } else {
+            MANIFEST_VERSION
+        };
         Self {
-            version: MANIFEST_VERSION,
+            version,
             corpus_root: corpus_root.to_path_buf(),
             probes,
             feeds,
@@ -247,6 +275,7 @@ mod tests {
             feed: Some("eth-15m".to_owned()),
             bar_budget: Some(38000),
             ohlcv_start_ms: None,
+            capture_origin_ms: None,
             tv_trades_csv_tz: Some("utc_minus_5".to_owned()),
         };
 
@@ -303,6 +332,42 @@ mod tests {
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"bar_budget\":38000"));
         assert!(!json.contains("ohlcv_start_ms"));
+    }
+
+    #[test]
+    fn a_capture_origin_writes_both_fields_and_version_4() {
+        let plain = {
+            let mut v = verified("plain-01");
+            v.config.ohlcv_start_ms = Some(5);
+            v
+        };
+        let m = Manifest::build(Path::new("/c"), &[plain], &Registry::default());
+        assert_eq!(m.version, 3, "a plain start needs nothing new");
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains("\"ohlcv_start_ms\":5"));
+        assert!(!json.contains("capture_origin_ms"));
+
+        let mut origin = verified("origin-01");
+        origin.config.capture_origin_ms = Some(7);
+        let m = Manifest::build(Path::new("/c"), &[origin], &Registry::default());
+        assert_eq!(m.version, 4);
+        assert_eq!(m.probes[0].ohlcv_start_ms, Some(7));
+        assert_eq!(m.probes[0].capture_origin_ms, Some(7));
+    }
+
+    // The version follows the selection, not the registry.
+    #[test]
+    fn the_version_follows_the_selected_probes() {
+        let mut plain = verified("plain-01");
+        plain.config.ohlcv_start_ms = Some(5);
+        let mut origin = verified("origin-01");
+        origin.config.capture_origin_ms = Some(7);
+        let registry = Registry::default();
+        let only_plain = Manifest::build(Path::new("/c"), std::slice::from_ref(&plain), &registry);
+        assert_eq!(only_plain.version, 3);
+        let both = Manifest::build(Path::new("/c"), &[plain, origin], &registry);
+        assert_eq!(both.version, 4);
+        assert_eq!(both.probes[0].capture_origin_ms, None);
     }
 
     #[test]
