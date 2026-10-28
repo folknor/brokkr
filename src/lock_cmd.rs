@@ -260,7 +260,9 @@ fn print_holder_status(info: &lockfile::LockInfo, s: &crate::lock_service::Holde
 /// signalling (`pidfd_send_signal` then cannot be redirected by recycling).
 /// Verification is all-or-nothing BEFORE the first signal: killing one
 /// verified target and then discovering another is unverifiable would leave
-/// a partially destroyed workload. Delivery itself is not transactional - a
+/// a partially destroyed workload. A recorded child or mock with positive
+/// evidence that its generation is gone is skipped rather than refused (see
+/// `provably_gone`); a merely unverifiable one still refuses. Delivery itself is not transactional - a
 /// target can exit naturally after preflight.
 pub(crate) fn cmd_kill(hard: bool) -> Result<(), DevError> {
     let Some(info) = lockfile::status()? else {
@@ -387,21 +389,33 @@ fn hard_kill(info: &lockfile::LockInfo) -> Result<(), DevError> {
     // Preflight every advertised target: verify identity, open and retain a
     // pidfd (pinning the process generation for the whole operation, PG
     // leaders included), re-verify. Any failure refuses the whole hard kill
-    // with no signal sent.
-    let mut targets = Vec::new();
-    for (child_pid, child_starttime) in &info.children {
-        targets.push(
-            preflight_target("child", *child_pid, child_starttime, &info.boot_id)
-                .map_err(|why| refuse_kill(&why))?,
-        );
-    }
-    for (mock_pid, mock_starttime) in &info.mocks {
-        targets.push(
-            preflight_target("mock", *mock_pid, mock_starttime, &info.boot_id)
-                .map_err(|why| refuse_kill(&why))?,
-        );
-    }
+    // with no signal sent - except a recorded child or mock that is provably
+    // gone (see `provably_gone`), which is skipped: a wedged holder keeps a
+    // slot whose process has exited, and refusing on it would leave exactly
+    // the holder `--hard` exists for unkillable.
     let holder = preflight_holder(info).map_err(|why| refuse_kill(&why))?;
+    let recorded = info
+        .children
+        .iter()
+        .map(|(pid, start)| ("child", *pid, start))
+        .chain(info.mocks.iter().map(|(pid, start)| ("mock", *pid, start)));
+    let mut targets = Vec::new();
+    let mut skipped = Vec::new();
+    for (role, pid, starttime) in recorded {
+        if provably_gone(info, pid, starttime) {
+            skipped.push((role, pid));
+            continue;
+        }
+        targets.push(
+            preflight_target(role, pid, starttime, &info.boot_id)
+                .map_err(|why| refuse_kill(&why))?,
+        );
+    }
+    for (role, pid) in skipped {
+        output::lock_msg(&format!(
+            "{role} PID {pid}: recorded process is gone (exited or PID reused); skipped"
+        ));
+    }
 
     // Freeze brokkr first, so it cannot start anything new (the next sweep,
     // a respawned mock) while its tree is being taken down.
@@ -512,6 +526,29 @@ fn preflight_target(
         format!("{role} PID {pid}: identity could not be verified from this namespace")
     })?;
     preflight_identity(role, pid, identity, &boot)
+}
+
+/// Whether a recorded child or mock is provably no longer the process brokkr
+/// recorded, so `--hard` may skip it instead of refusing. Needs the holder's
+/// namespace tokens (a legacy record without them keeps pure all-or-nothing:
+/// a matching holder pid and starttime there is no namespace proof), the
+/// recorded boot to be this kernel's, a parseable starttime, and positive
+/// evidence from `process::generation` - never a bare missing `/proc` entry,
+/// which `hidepid` produces for live processes. Callers have verified the
+/// holder and checked `shares_namespace_tokens`.
+fn provably_gone(info: &lockfile::LockInfo, pid: u32, starttime: &str) -> bool {
+    if info.pid_ns.is_empty() || info.time_ns.is_empty() {
+        return false;
+    }
+    let Some(boot) = crate::process::BootId::new(&info.boot_id) else {
+        return false;
+    };
+    if crate::process::local_boot_id().as_ref() != Some(&boot) {
+        return false;
+    }
+    typed_process_identity(pid, starttime).is_some_and(|identity| {
+        crate::process::generation(identity) == crate::process::Generation::Gone
+    })
 }
 
 fn typed_process_identity(pid: u32, starttime: &str) -> Option<crate::process::ProcIdentity> {

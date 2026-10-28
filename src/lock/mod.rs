@@ -82,8 +82,8 @@ struct LockState {
     /// paired with its starttime token (captured when recorded; empty if
     /// unreadable, which fails verification closed). Updated by the harness
     /// each iteration of a bench run; cleared by the orchestrator after the
-    /// captured runner returns so a stale PID can't be SIGKILLed by
-    /// `--hard` after the kernel has recycled it.
+    /// captured runner returns. A slot left behind is harmless to a recycled
+    /// PID: `--hard` signals only a generation whose starttime still matches.
     children: Vec<(std::thread::ThreadId, TrackedProcess)>,
     /// Auxiliary long-running child PIDs - mock-servers (sæhrimnir) that
     /// live across many `child` rotations, each paired with its starttime
@@ -113,14 +113,16 @@ impl TrackedProcess {
         Some(Self { pid, start })
     }
 
-    /// Whether the recorded process generation is still running (a zombie
-    /// counts as gone). An unreadable start token reads as gone.
-    fn alive(&self) -> bool {
-        let Some(start) = self.start else {
-            return false;
-        };
-        crate::process::ProcStat::read(self.pid)
-            .is_ok_and(|stat| stat.start() == start && !matches!(stat.state(), 'Z' | 'X'))
+    /// Whether the recorded generation is provably gone (`process::generation`).
+    /// Only positive evidence prunes a slot: an unreadable start token, a
+    /// procfs entry hidden from us, or a zombie leader (whose other threads
+    /// may still run) all keep it, so a live target is never dropped from
+    /// what `brokkr kill --hard` sees.
+    fn gone(&self) -> bool {
+        self.start.is_some_and(|start| {
+            crate::process::generation(crate::process::ProcIdentity::new(self.pid, start))
+                == crate::process::Generation::Gone
+        })
     }
 
     fn wire(&self) -> (u32, String) {
@@ -278,7 +280,8 @@ impl LockGuard {
         if let Ok(mut state) = self.inner.state.lock() {
             state
                 .children
-                .retain(|(thread, tracked)| *thread != me && tracked.alive());
+                .retain(|(thread, tracked)| *thread != me && !tracked.gone());
+            state.mocks.retain(|tracked| !tracked.gone());
             state.children.push((me, child));
             self.inner.publish(&state);
         }
@@ -294,6 +297,9 @@ impl LockGuard {
             return;
         };
         if let Ok(mut state) = self.inner.state.lock() {
+            // Prune first, so a recycled pid's new mock is not mistaken for
+            // the dead one it replaces.
+            state.mocks.retain(|tracked| !tracked.gone());
             if !state.mocks.iter().any(|tracked| tracked.pid == mock.pid) {
                 state.mocks.push(mock);
             }
@@ -306,7 +312,9 @@ impl LockGuard {
     /// fixture reuse model).
     pub fn remove_mock_pid(&self, pid: u32) {
         if let Ok(mut state) = self.inner.state.lock() {
-            state.mocks.retain(|tracked| tracked.pid.get() != pid);
+            state
+                .mocks
+                .retain(|tracked| tracked.pid.get() != pid && !tracked.gone());
             self.inner.publish(&state);
         }
     }
@@ -322,16 +330,17 @@ impl LockGuard {
     }
 
     /// Drop this thread's workload child PID. Called by orchestrators after
-    /// the captured runner returns so a stale PID can't be SIGKILLed by
-    /// `--hard` once the kernel has recycled it. Other threads' slots stay,
-    /// except any whose process has gone - so a slot set on one thread and
-    /// cleared from another cannot outlive its process either.
+    /// the captured runner returns, so `brokkr lock` stops showing it and
+    /// `--hard` does not have to classify it. Other threads' slots stay,
+    /// except any whose process is provably gone - so a slot set on one
+    /// thread and cleared from another does not linger either.
     pub fn clear_child_pid(&self) {
         let me = std::thread::current().id();
         if let Ok(mut state) = self.inner.state.lock() {
             state
                 .children
-                .retain(|(thread, tracked)| *thread != me && tracked.alive());
+                .retain(|(thread, tracked)| *thread != me && !tracked.gone());
+            state.mocks.retain(|tracked| !tracked.gone());
             self.inner.publish(&state);
         }
     }

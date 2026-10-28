@@ -161,8 +161,9 @@ process groups across service and sync. Deadline, cooperative shutdown, and
 `--hard` cleanup target the child group, including helper descendants.
 Terminal Ctrl-C and `brokkr kill` are bridged by the captured runner: it
 forwards SIGTERM to the active group, waits up to 1.5s, and then escalates.
-After the harness exits, its child slot is cleared so a recycled PID cannot be
-SIGKILLed by `--hard`. Every mock is unregistered when its shared lifecycle
+After the harness exits, its child slot is cleared; a slot left behind is never
+a hazard, since `--hard` signals only the recorded starttime and skips a target
+that is provably gone. Every mock is unregistered when its shared lifecycle
 shuts it down; if a later step fails, the service cohort drains its mocks
 before propagating the original failure.
 

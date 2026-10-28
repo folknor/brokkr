@@ -11,7 +11,8 @@ pub(crate) use self::helpers::signal_process_group_raw;
 pub use self::helpers::{signal_pid, signal_process_group, snapshot_proc};
 pub use self::identity::{BootId, HostScope, NsInode, Pid, ProcIdentity, StartTicks};
 pub use self::reap::{
-    Delivery, PidfdRefusal, ReaperExemptions, VerifiedProcess, kill_verified, pidfd_send_signal,
+    Delivery, Generation, PidfdRefusal, ReaperExemptions, VerifiedProcess, generation,
+    kill_verified, pidfd_send_signal,
 };
 pub use self::table::{ProcStat, ProcTable};
 

@@ -190,7 +190,11 @@ group before anything else: under `check`'s and `brokkr test`'s
 interrupted; outside a guard it re-raises the signal and brokkr dies as before,
 taking its tests with it. A SIGKILLed brokkr runs no handler. `brokkr kill
 --hard` therefore stops brokkr and SIGKILLs every process beneath it itself,
-which reaches a test binary under cargo. Against any other SIGKILL (the OOM
+which reaches a test binary under cargo. It verifies every recorded child and
+mock by starttime first and refuses the whole kill on one it cannot verify,
+except that a recorded process that has provably exited (or whose pid now
+names another process) is skipped with a line saying so, so a wedged holder
+whose child already died stays killable. Against any other SIGKILL (the OOM
 killer) the runners' direct child carries a parent-death SIGKILL, which
 reaches the test binary on the parallel lane but only cargo on the others;
 what survives below cargo - the test binary, a doctest, anything a test

@@ -104,15 +104,56 @@ fn matches_now(identity: ProcIdentity) -> bool {
     ProcStat::read(identity.pid()).is_ok_and(|stat| stat.identity() == identity)
 }
 
+/// What can be proved about a recorded process generation from here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Generation {
+    /// `/proc` shows the recorded start ticks: the generation still exists
+    /// (a zombie included - a zombie thread-group leader can still have
+    /// running threads, so it is not proof of exit).
+    Present,
+    /// Positive evidence that the recorded generation no longer exists: the
+    /// pid's stat shows different start ticks, or `pidfd_open` reports
+    /// `ESRCH` (no such pid in this namespace at all).
+    Gone,
+    /// Nothing provable: `/proc` could not be read (hidepid, permissions)
+    /// and the kernel still knows the pid. Callers must treat this as a
+    /// possibly live process of theirs.
+    Unknown,
+}
+
+/// Classify a recorded generation. A missing `/proc` entry alone is never
+/// `Gone`: procfs visibility filtering (`hidepid`) hides live processes, so
+/// absence is confirmed through `pidfd_open`, which does not go through
+/// procfs. The caller supplies the boot and namespace scope that give the
+/// numbers their meaning.
+pub fn generation(identity: ProcIdentity) -> Generation {
+    match ProcStat::read(identity.pid()) {
+        Ok(stat) if stat.identity() == identity => Generation::Present,
+        Ok(_) => Generation::Gone,
+        Err(_) => match pidfd_open_errno(identity.pid()) {
+            Err(libc::ESRCH) => Generation::Gone,
+            _ => Generation::Unknown,
+        },
+    }
+}
+
 fn pidfd_open(pid: Pid) -> Option<OwnedFd> {
-    let pid = libc::pid_t::try_from(pid.get()).ok()?;
+    pidfd_open_errno(pid).ok()
+}
+
+fn pidfd_open_errno(pid: Pid) -> Result<OwnedFd, libc::c_int> {
+    let pid = libc::pid_t::try_from(pid.get()).map_err(|_| libc::EINVAL)?;
     // SAFETY: `pidfd_open` takes scalar arguments and returns a new fd.
     let ret = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0u32) };
-    let fd = i32::try_from(ret).ok()?;
+    let Ok(fd) = i32::try_from(ret) else {
+        return Err(libc::EINVAL);
+    };
     if fd < 0 {
-        return None;
+        return Err(std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EINVAL));
     }
-    Some(unsafe { OwnedFd::from_raw_fd(fd) })
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 /// Shared process-tree exclusions for reapers.
@@ -156,5 +197,25 @@ impl ReaperExemptions {
 
     pub fn contains(&self, pid: u32) -> bool {
         self.pids.contains(&pid)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use crate::process::StartTicks;
+
+    /// This process is present; its pid under other start ticks is a gone
+    /// generation; a pid no process has is gone by `ESRCH`.
+    #[test]
+    fn generation_needs_positive_evidence() {
+        let me = ProcStat::read_self().unwrap().identity();
+        assert_eq!(generation(me), Generation::Present);
+        let other = ProcIdentity::new(me.pid(), StartTicks::new(me.start().get() + 1));
+        assert_eq!(generation(other), Generation::Gone);
+        let absent = ProcIdentity::new(Pid::new(2_147_483_646).unwrap(), me.start());
+        assert_eq!(generation(absent), Generation::Gone);
     }
 }

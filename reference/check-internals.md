@@ -359,8 +359,22 @@ that holder and its subtree are skipped and not recursed through.
 recorded at classification, and the SIGKILL is sent only if that pid still has
 that starttime. A bare pid is not an identity: between the scan and the signal
 the process can exit and the number be reused, and the reaper would then kill
-something it never classified. The lock code has paired pids with starttimes
-since it was written; this path did not.
+something it never classified. The lock file pairs every recorded pid with its
+starttime and the holder's boot id for the same reason.
+
+`brokkr kill --hard` verifies every recorded target before the first signal
+and refuses the whole kill on one it cannot verify. The one exception is a
+recorded child or mock with positive evidence that its generation is gone - its
+pid's stat shows a different starttime, or `pidfd_open` reports no such pid -
+under a record carrying namespace tokens that match and a boot id that is this
+kernel's, with the holder itself verified: that target is skipped with a line
+saying so. A missing `/proc` entry alone is not evidence, since `hidepid` hides
+live processes. The holder's own slot writers prune by the same positive rule,
+never by a zombie state (a zombie thread-group leader can still have running
+threads). A process-group leader is re-verified and then signalled by `kill(-pgid)`,
+since a group has no pidfd; the kernel keeps a pid number allocated while any
+task uses it as a pgid, so the residual sliver needs the whole group gone and a
+recycled pid that became a group leader in between, and is accepted.
 
 Containment is narrowed, not closed: a process can fork again between the `/proc`
 read and the signal, and a lease holder can be a detached process with a name no
