@@ -452,7 +452,9 @@ their pin`, and the summary always carries a `harness_abort=N` count.
 **`unevaluated`** is the harness's line for a probe whose experiment could
 not be conducted: the oracle does not read, holds no comparable round, fails
 its quantity witness contract, reaches past the executed feed, or never meets
-it (`reason`, below). It is never a pass, so it is never pinned: `pins.toml`
+it; the probe's setup cannot run the experiment; two provenance facts
+contradict each other; or the harness broke its own invariant while scoring
+(`reason`, below). It is never a pass, so it is never pinned: `pins.toml`
 refuses `expected = "unevaluated"` at load, and bless refuses its whole write
 when any selected probe reports one. Every `unevaluated` probe fails the run
 unconditionally - gated, `--no-gate` and bless alike - as `N unevaluated
@@ -531,15 +533,18 @@ separate categories:
   posing as an outcome), `parity` with tier `runtime_fail` and a retired
   `no_tv_data` or `no_overlap` are all invalid. An `unevaluated` line must
   also carry a `reason` - one of `invalid_evidence`, `insufficient_evidence`,
-  `witness_contract`, `feed_coverage`, `no_overlap` - and a nonempty one-line
-  `error`, and carry none of the parity fields piners defines (`matched`,
-  `ours_only`, `tv_only`, the boundary, clipped, history-prefix and oracle
-  counts, `tv_identity`, `boundary_anchor`, `boundary_rules`, `count_tier`,
-  `acceptance`, `signature`, `ts_shift`, `labels`, `dense_na_sites`,
-  `signal_extra_entries`, `window_sensitive`; the key alone, null included,
-  counts). A missing or unknown reason, a missing, blank or multi-line error,
-  or a parity field makes it invalid; `runtime_ms` and keys piners does not
-  define stay tolerated. The record must also agree with itself: when the harness's own
+  `witness_contract`, `feed_coverage`, `no_overlap`, `invalid_setup`,
+  `conflicting_provenance`, `harness_fault` - and a nonempty one-line
+  `error`, and its shape is closed: it carries no key but `kind`, `probe`,
+  `outcome`, `disposition`, `runtime_ms`, `reason` and `error`, and a
+  present `kind` is exactly `"disposition"`. Any other key - a parity field,
+  a diagnostic, one piners adds later - makes it invalid, the key alone, null
+  included. For a line that deserializes, the message names the unexpected
+  keys; a line whose values do not read into brokkr's typed fields
+  (`"matched": null`, a non-string `error`) is invalid with the
+  deserialization error instead. A missing or unknown reason, or a missing, blank
+  or multi-line error, makes it invalid too. Every other line tolerates keys
+  brokkr does not read. The record must also agree with itself: when the harness's own
   `disposition` field is **present** it must be exactly the derived label, as
   a string - a different label, a null, a number, an object or an empty
   string makes the record invalid, and the message prints both values. Only

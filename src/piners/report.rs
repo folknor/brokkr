@@ -5,7 +5,9 @@
 //! dense-na breakdown from the per-probe stream itself. brokkr is
 //! deliberately tolerant of unknown fields: the harness owns the schema and
 //! grows it (extra tiers, deltas, provenance) ahead of brokkr learning to
-//! render them, the same forward-compat posture as the cargo JSON parser. A
+//! render them, the same forward-compat posture as the cargo JSON parser. The
+//! one exception is an `unevaluated` line, whose shape is closed (its key
+//! allowlist below): a refused probe carries nothing a scored one would. A
 //! stray legacy `summary` line is skipped rather than mis-parsed as a probe.
 //! Tolerance covers unknown *fields*, not unusable *records*: a stdout line
 //! that is not JSON, or a disposition line that does not deserialize, is kept
@@ -161,7 +163,9 @@ where
 
 /// Why an `unevaluated` probe's experiment could not be conducted (piners
 /// `reference/corpus.md`, Harness output). Any other `reason`, or none, makes
-/// the line an invalid record.
+/// the line an invalid record. No consumer branches on a particular reason:
+/// every one fails the run and none is pinnable, so a reason piners adds needs
+/// only its spelling here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefusalReason {
     InvalidEvidence,
@@ -169,15 +173,27 @@ pub enum RefusalReason {
     WitnessContract,
     FeedCoverage,
     NoOverlap,
+    /// The probe's setup cannot run the experiment: a corpus declaration
+    /// missing, malformed, contradictory or short of the run, or a feed or
+    /// library the corpus supplies that the run cannot use.
+    InvalidSetup,
+    /// Two provenance facts contradict each other and the harness cannot tell
+    /// which is wrong.
+    ConflictingProvenance,
+    /// The harness broke its own invariant while scoring.
+    HarnessFault,
 }
 
 impl RefusalReason {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 8] = [
         Self::InvalidEvidence,
         Self::InsufficientEvidence,
         Self::WitnessContract,
         Self::FeedCoverage,
         Self::NoOverlap,
+        Self::InvalidSetup,
+        Self::ConflictingProvenance,
+        Self::HarnessFault,
     ];
 
     /// The wire spelling.
@@ -188,6 +204,9 @@ impl RefusalReason {
             Self::WitnessContract => "witness_contract",
             Self::FeedCoverage => "feed_coverage",
             Self::NoOverlap => "no_overlap",
+            Self::InvalidSetup => "invalid_setup",
+            Self::ConflictingProvenance => "conflicting_provenance",
+            Self::HarnessFault => "harness_fault",
         }
     }
 
@@ -314,50 +333,52 @@ pub fn record_label(
     }
 }
 
-/// The parity fields piners defines (`ParityDisposition` in its corpus
-/// harness). An `unevaluated` line carries none: the key alone, null
-/// included, makes it invalid. Keys outside this list stay tolerated.
-const PARITY_KEYS: [&str; 25] = [
-    "matched",
-    "ours_only",
-    "tv_only",
-    "boundary_ours",
-    "boundary_tv",
-    "clipped_ours",
-    "clipped_tv",
-    "history_prefix_bars",
-    "oracle_trimmed",
-    "oracle_realtime",
-    "oracle_fills",
-    "oracle_qty_witness",
-    "qty_witnessed",
-    "qty_display",
-    "tv_identity",
-    "boundary_anchor",
-    "boundary_rules",
-    "count_tier",
-    "acceptance",
-    "signature",
-    "ts_shift",
-    "labels",
-    "dense_na_sites",
-    "signal_extra_entries",
-    "window_sensitive",
+/// Every key an `unevaluated` line may carry: its identity, outcome, timing
+/// and refusal detail, plus the explicit `kind` of a disposition line. The
+/// shape is closed, unlike a parity line's: a refused probe was never scored,
+/// so any other key - a parity field, a diagnostic, null included - makes the
+/// line invalid. An allowlist rather than a copy of the parity fields piners
+/// defines, which would drift each time piners adds one.
+const UNEVALUATED_KEYS: [&str; 7] = [
+    "kind",
+    "probe",
+    "outcome",
+    "disposition",
+    "runtime_ms",
+    "reason",
+    "error",
 ];
 
-/// An `unevaluated` line's own contract, given its whole value: a known
-/// `reason`, a nonblank single-line `error`, and no parity field.
-fn refusal_of(value: &serde_json::Value) -> Result<Refusal, String> {
-    let present: Vec<&str> = PARITY_KEYS
+/// The closed shape of an `unevaluated` line, given its whole value: no key
+/// outside [`UNEVALUATED_KEYS`], and `kind`, when present, exactly
+/// `"disposition"` (`parse` routes a non-string kind here as if absent).
+fn unevaluated_shape(value: &serde_json::Value) -> Result<(), String> {
+    let foreign: Vec<&str> = value
+        .as_object()
         .into_iter()
-        .filter(|key| value.get(key).is_some())
+        .flat_map(|object| object.keys())
+        .map(String::as_str)
+        .filter(|key| !UNEVALUATED_KEYS.contains(key))
         .collect();
-    if !present.is_empty() {
+    if !foreign.is_empty() {
         return Err(format!(
-            "an unevaluated line carries parity fields ({})",
-            present.join(", ")
+            "an unevaluated line carries fields outside its shape ({})",
+            foreign.join(", ")
         ));
     }
+    match value.get("kind") {
+        None => Ok(()),
+        Some(serde_json::Value::String(kind)) if kind == "disposition" => Ok(()),
+        Some(other) => Err(format!(
+            "an unevaluated line's kind {other} is not \"disposition\""
+        )),
+    }
+}
+
+/// An `unevaluated` line's refusal, given its whole value: a known `reason`
+/// and a nonblank single-line `error`. Its closed shape is checked first, by
+/// [`unevaluated_shape`].
+fn refusal_of(value: &serde_json::Value) -> Result<Refusal, String> {
     let reason = match value.get("reason") {
         Some(serde_json::Value::String(s)) => RefusalReason::from_label(s),
         _ => None,
@@ -547,15 +568,23 @@ impl ProbeLine {
     }
 
     /// Validate this line, given the whole value it was read from and its
-    /// parsed `labels` census: the outcome, tier and declared label together
+    /// parsed `labels` census: on a line whose outcome is `unevaluated`, its
+    /// closed shape first ([`unevaluated_shape`]), keyed on the outcome string
+    /// so a stray tier or census on it is named rather than reported as some
+    /// later defect; then the outcome, tier and declared label together
     /// ([`record_label`]); a present census whole and consistent; and on an
-    /// `unevaluated` line, its reason, error and absence of parity fields
-    /// ([`refusal_of`]).
+    /// `unevaluated` line, its reason and error ([`refusal_of`]). A line
+    /// whose values fail typed deserialization, a foreign key's or an
+    /// allowed one's, never gets here: it is invalid with the serde message
+    /// instead.
     fn validate(
         &self,
         value: &serde_json::Value,
         census: Result<Option<LabelCensus>, String>,
     ) -> Result<ProbeOutcome, String> {
+        if self.outcome == UNEVALUATED {
+            unevaluated_shape(value)?;
+        }
         let label = record_label(
             &self.outcome,
             self.acceptance.as_ref().map(|a| a.tier.as_str()),
@@ -887,7 +916,8 @@ fn record_unparsable_disposition(
 /// is collected into [`HarnessReport::invalid`] rather than dropped: it is a
 /// protocol violation the integrity check fails the run on, and dropping it
 /// silently is how a probe used to vanish from a run that could still pass.
-/// Unknown *fields* stay tolerated (forward compat; see the module docs).
+/// Unknown *fields* stay tolerated (forward compat; see the module docs),
+/// except on an `unevaluated` line, whose shape is closed.
 pub fn parse(stdout: &[u8]) -> HarnessReport {
     let text = String::from_utf8_lossy(stdout);
     let mut report = HarnessReport {
@@ -1446,11 +1476,14 @@ mod tests {
         assert!(format_summary(&s, "x").contains("unevaluated=1 harness_abort=0"));
     }
 
+    /// An `unevaluated` line for probe `p` with `fields` appended.
+    fn unevaluated_line(fields: &str) -> HarnessReport {
+        parse(format!("{{\"probe\":\"p\",\"outcome\":\"unevaluated\"{fields}}}").as_bytes())
+    }
+
     #[test]
     fn an_unevaluated_line_needs_a_known_reason_and_a_one_line_error() {
-        let line = |fields: &str| {
-            parse(format!("{{\"probe\":\"p\",\"outcome\":\"unevaluated\"{fields}}}").as_bytes())
-        };
+        let line = unevaluated_line;
         let ok = line(
             r#","disposition":"unevaluated","reason":"feed_coverage","error":"past the feed""#,
         );
@@ -1463,9 +1496,6 @@ mod tests {
         assert_eq!(p.outcome(), Some(&ProbeOutcome::Unevaluated(want.clone())));
         assert_eq!(p.refusal(), Some(&want));
         assert!(format_probe(p).starts_with("p: unevaluated (feed_coverage) - past the feed"));
-        // runtime_ms and keys piners does not define stay tolerated.
-        let extra = line(r#","reason":"no_overlap","error":"x","runtime_ms":4,"future":1"#);
-        assert!(extra.invalid.is_empty(), "{:?}", extra.invalid);
         for bad in [
             r#","error":"x""#,
             r#","reason":"no_tv_data","error":"x""#,
@@ -1484,21 +1514,93 @@ mod tests {
             assert_eq!(r.probes[0].outcome(), None, "{bad}");
             assert_eq!(r.probes[0].refusal(), None, "{bad}");
         }
-        // Every parity key piners defines, null included, makes it invalid.
-        // (A null on a field the line deserializes as a number fails before
-        // the refusal check; invalid either way.)
-        for key in PARITY_KEYS {
-            let r = line(&format!(
-                r#","reason":"no_overlap","error":"x","{key}":null"#
-            ));
-            assert_eq!(r.invalid.len(), 1, "{key}");
-            assert!(r.probes.iter().all(|p| p.outcome().is_none()), "{key}");
-            assert!(r.refusals.is_empty(), "{key}");
-        }
         // A `reason` on any other line is ignored, whatever its type.
         let other = parse(br#"{"probe":"p","outcome":"compile_fail","error":"x","reason":3}"#);
         assert!(other.invalid.is_empty());
         assert_eq!(other.probes[0].refusal(), None);
+    }
+
+    #[test]
+    fn an_unevaluated_line_has_a_closed_shape() {
+        let line = unevaluated_line;
+        // Every allowed key together is valid, each reason included.
+        for reason in RefusalReason::ALL {
+            let full = parse(
+                format!(
+                    "{{\"kind\":\"disposition\",\"probe\":\"p\",\"outcome\":\"unevaluated\",\
+                     \"disposition\":\"unevaluated\",\"runtime_ms\":4.5,\
+                     \"reason\":\"{}\",\"error\":\"x\"}}",
+                    reason.label()
+                )
+                .as_bytes(),
+            );
+            assert!(full.invalid.is_empty(), "{:?}", full.invalid);
+            assert_eq!(full.probes[0].refusal().map(|r| r.reason), Some(reason));
+        }
+        // The shape is closed: any other key, null included, makes it
+        // invalid - a parity field, one piners adds later, a diagnostic.
+        for bad in [
+            r#","reason":"no_overlap","error":"x","future":1"#,
+            r#","reason":"no_overlap","error":"x","warm_replay_stop":null"#,
+            r#","reason":"no_overlap","error":"x","summary":true"#,
+        ] {
+            let r = line(bad);
+            assert_eq!(r.invalid.len(), 1, "{bad}");
+            assert!(
+                r.invalid[0].reason.contains("fields outside its shape"),
+                "{bad}: {}",
+                r.invalid[0].reason
+            );
+            assert!(r.refusals.is_empty(), "{bad}");
+        }
+        // Checked ahead of the label and census, so a stray tier or census
+        // is named as the foreign key it is.
+        for (bad, key) in [
+            (
+                r#","reason":"no_overlap","error":"x","acceptance":{"tier":"accepted"}"#,
+                "acceptance",
+            ),
+            (
+                r#","reason":"no_overlap","error":"x","labels":null"#,
+                "labels",
+            ),
+        ] {
+            let r = line(bad);
+            assert_eq!(r.invalid.len(), 1, "{bad}");
+            assert!(
+                r.invalid[0]
+                    .reason
+                    .contains(&format!("outside its shape ({key})")),
+                "{bad}: {}",
+                r.invalid[0].reason
+            );
+        }
+        // An explicit kind must be the disposition kind itself; a non-string
+        // one, which dispatch reads as absent, is refused here.
+        for kind in ["null", "3", "{}"] {
+            let r = line(&format!(
+                r#","kind":{kind},"reason":"no_overlap","error":"x""#
+            ));
+            assert_eq!(r.invalid.len(), 1, "{kind}");
+            assert!(r.invalid[0].reason.contains("kind"), "{kind}");
+        }
+        // A null on a field the line deserializes into a typed field fails
+        // before the shape check, with the serde message; invalid either way.
+        for key in ["matched", "dense_na_sites"] {
+            let r = line(&format!(
+                r#","reason":"no_overlap","error":"x","{key}":null"#
+            ));
+            assert_eq!(r.invalid.len(), 1, "{key}");
+            assert!(r.probes.is_empty(), "{key}");
+            assert!(
+                r.invalid[0]
+                    .reason
+                    .starts_with("unparsable disposition line:"),
+                "{key}: {}",
+                r.invalid[0].reason
+            );
+            assert!(r.refusals.is_empty(), "{key}");
+        }
     }
 
     #[test]
@@ -1835,6 +1937,9 @@ mod tests {
                 "witness_contract",
                 "feed_coverage",
                 "no_overlap",
+                "invalid_setup",
+                "conflicting_provenance",
+                "harness_fault",
             ]
         );
     }

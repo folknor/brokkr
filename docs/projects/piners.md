@@ -97,9 +97,11 @@ Emits **one NDJSON object per probe, no summary line** (brokkr aggregates):
   conducted, `{"probe":ID,"outcome":"unevaluated","disposition":"unevaluated",
   "reason":R,"error":E}` plus `runtime_ms`: `reason` is one of
   `invalid_evidence`, `insufficient_evidence`, `witness_contract`,
-  `feed_coverage`, `no_overlap`, `error` a nonempty one-line detail, and no
-  parity field may appear (the list: report integrity in
-  `docs/commands/corpus.md`); anything else makes the line invalid. It is a break (exit 1) that never
+  `feed_coverage`, `no_overlap`, `invalid_setup`, `conflicting_provenance`,
+  `harness_fault`, `error` a nonempty one-line detail, and the shape is
+  closed: no other key may appear beyond an explicit `"kind":"disposition"`
+  (report integrity in `docs/commands/corpus.md`), so brokkr keeps no copy of
+  piners' parity fields; anything else makes the line invalid. It is a break (exit 1) that never
   passes, is never pinned or blessed, and fails the run on its own (the gate
   and its consequences: `docs/commands/corpus.md`). Piners' account of each
   reason: its `reference/corpus.md`, Harness output.
