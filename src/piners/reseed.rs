@@ -702,7 +702,7 @@ mod tests {
     fn carry_expected_keeps_the_blessing_across_restamp() {
         let mut old = BTreeMap::new();
         let mut blessed = pin("keep", "old-hash");
-        blessed.expected = Some(registry::CorpusDisposition::Accepted);
+        blessed.expected = Some(registry::PinnedDisposition::Accepted);
         old.insert("keep".to_owned(), blessed);
         old.insert("vanished".to_owned(), pin("vanished", "x"));
 
@@ -714,7 +714,7 @@ mod tests {
 
         assert_eq!(
             new["keep"].expected,
-            Some(registry::CorpusDisposition::Accepted)
+            Some(registry::PinnedDisposition::Accepted)
         );
         assert_eq!(new["keep"].pine.xxh128, "new-hash"); // content still updated
         assert_eq!(new["fresh"].expected, None); // unblessed newcomer
@@ -878,7 +878,7 @@ bar_budget = 20200
         let data = registry::parse_pins(&again.text, &pins_path).unwrap();
         assert_eq!(
             data.probes["live-01"].expected,
-            Some(registry::CorpusDisposition::Accepted)
+            Some(registry::PinnedDisposition::Accepted)
         );
         assert!(
             !first.text.contains("\n\n\n"),
@@ -1060,7 +1060,7 @@ bar_budget = 20200
         assert!(p.text.contains("# alpha is the flagship"));
         let data = registry::parse_pins(&p.text, &pins_path).unwrap();
         let alpha = &data.probes["alpha"];
-        assert_eq!(alpha.expected, Some(registry::CorpusDisposition::Accepted)); // carried
+        assert_eq!(alpha.expected, Some(registry::PinnedDisposition::Accepted)); // carried
         assert!(alpha.csv.is_none());
         assert!(alpha.record.is_some());
 
@@ -1095,7 +1095,7 @@ bar_budget = 20200
         assert!(data.probes["alpha"].csv.is_some());
         assert_eq!(
             data.probes["alpha"].expected,
-            Some(registry::CorpusDisposition::Accepted)
+            Some(registry::PinnedDisposition::Accepted)
         );
     }
 

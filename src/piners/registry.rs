@@ -62,47 +62,37 @@ pub const RECORD_FILE: &str = "tv_record.json";
 /// present, so it is pinned like the oracle.
 pub const INPUTS_FILE: &str = "inputs.json";
 
-/// The single disposition vocabulary: parity tiers followed by non-parity
-/// outcomes. The harness and SQLite store use these stable spellings at their
-/// boundaries; inside brokkr the pinned expectation stays typed.
+/// A disposition a pin may expect and a bless may stamp: the four parity
+/// tiers and the three engine-side breaks. The harness and SQLite store use
+/// these stable spellings at their boundaries; inside brokkr the pinned
+/// expectation stays typed.
 ///
-/// Three nested sets, so stored history stays readable while new lines and
-/// pins are held to the current contract:
-///
-/// - every variant is a label stored history may carry;
-/// - [`CorpusDisposition::is_live`]: what a new harness line may report.
-///   `no_tv_data` and `no_overlap` are history only: piners retired them,
-///   since both passed their pin inertly whatever the engine did, and reports
-///   any experiment it cannot conduct as `unevaluated` instead;
-/// - [`CorpusDisposition::is_pinnable`]: what a pin may expect and a bless
-///   may stamp - the live labels except `unevaluated`, which never passes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CorpusDisposition {
+/// Only an evaluated probe has one. An experiment the harness could not
+/// conduct is `unevaluated` ([`crate::piners::report::ProbeOutcome`]), which
+/// is no value of this type, so no pin, gate comparison or bless stamp can
+/// hold it. `no_tv_data` and `no_overlap` are retired ([`RETIRED_LABELS`]):
+/// both passed their pin inertly whatever the engine did, and piners reports
+/// those cases as `unevaluated` now. Stored history keeps every spelling as
+/// text, so it needs none of them here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinnedDisposition {
     ByteExact,
     Accepted,
     ActionableDrift,
     CountDivergent,
     CompileFail,
     RuntimeFail,
-    NoTvData,
-    NoOverlap,
     HarnessAbort,
-    Unevaluated,
 }
 
-/// The `reason` an `unevaluated` line must carry, one of these spellings
-/// (piners `reference/corpus.md`, Harness output). Any other value, or none,
-/// makes the line an invalid record.
-pub(crate) const UNEVALUATED_REASONS: [&str; 5] = [
-    "invalid_evidence",
-    "insufficient_evidence",
-    "witness_contract",
-    "feed_coverage",
-    "no_overlap",
-];
+/// The label an `unevaluated` line carries.
+pub const UNEVALUATED: &str = "unevaluated";
 
-impl CorpusDisposition {
+/// Labels piners no longer reports. A new line or a pin carrying one is
+/// refused; stored runs still display them.
+pub const RETIRED_LABELS: [&str; 2] = ["no_tv_data", "no_overlap"];
+
+impl PinnedDisposition {
     /// The stable spelling used by pins, harness records, and the run store.
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -112,46 +102,15 @@ impl CorpusDisposition {
             Self::CountDivergent => "count_divergent",
             Self::CompileFail => "compile_fail",
             Self::RuntimeFail => "runtime_fail",
-            Self::NoTvData => "no_tv_data",
-            Self::NoOverlap => "no_overlap",
             Self::HarnessAbort => "harness_abort",
-            Self::Unevaluated => "unevaluated",
         }
     }
 
-    /// Parse one label, historical ones included.
+    /// Parse one pinnable label.
     pub fn from_label(label: &str) -> Option<Self> {
-        ALL_DISPOSITIONS
+        ALL_PINNED
             .into_iter()
             .find(|disposition| disposition.as_str() == label)
-    }
-
-    /// Validate the harness's outcome/tier pair and return its gate value.
-    /// Only a live label: a new line reporting a retired outcome is invalid.
-    pub fn from_fields(outcome: &str, tier: Option<&str>) -> Option<Self> {
-        let tier = tier.filter(|value| !value.is_empty());
-        if outcome == "parity" {
-            let disposition = Self::from_label(tier?)?;
-            disposition.is_parity().then_some(disposition)
-        } else if tier.is_none() {
-            Self::from_label(outcome)
-                .filter(|disposition| !disposition.is_parity() && disposition.is_live())
-        } else {
-            None
-        }
-    }
-
-    /// Whether a new harness line may report this label. `no_tv_data` and
-    /// `no_overlap` survive only in stored history.
-    pub const fn is_live(self) -> bool {
-        !matches!(self, Self::NoTvData | Self::NoOverlap)
-    }
-
-    /// Whether a pin may expect this label and a bless may stamp it: a live
-    /// label other than `unevaluated`, an experiment that was never conducted
-    /// and so can never be where a probe is meant to be.
-    pub const fn is_pinnable(self) -> bool {
-        self.is_live() && !matches!(self, Self::Unevaluated)
     }
 
     pub const fn is_parity(self) -> bool {
@@ -163,25 +122,56 @@ impl CorpusDisposition {
 
     /// Whether this outcome is one the harness signals with exit code 1.
     pub const fn is_break(self) -> bool {
-        matches!(
-            self,
-            Self::CompileFail | Self::RuntimeFail | Self::HarnessAbort | Self::Unevaluated
-        )
+        matches!(self, Self::CompileFail | Self::RuntimeFail | Self::HarnessAbort)
     }
 }
 
-/// Every corpus disposition, historical ones included, in its stable order.
-pub(crate) const ALL_DISPOSITIONS: [CorpusDisposition; 10] = [
-    CorpusDisposition::ByteExact,
-    CorpusDisposition::Accepted,
-    CorpusDisposition::ActionableDrift,
-    CorpusDisposition::CountDivergent,
-    CorpusDisposition::CompileFail,
-    CorpusDisposition::RuntimeFail,
-    CorpusDisposition::NoTvData,
-    CorpusDisposition::NoOverlap,
-    CorpusDisposition::HarnessAbort,
-    CorpusDisposition::Unevaluated,
+/// Why a label cannot be an `expected`, for the one deserializer and its
+/// messages: `None` when it can.
+fn unpinnable(label: &str) -> Option<String> {
+    if label == UNEVALUATED {
+        Some(
+            "`unevaluated` can never be pinned - an experiment the harness could not conduct \
+             never passes; fix the oracle or the feed, then re-bless"
+                .to_owned(),
+        )
+    } else if RETIRED_LABELS.contains(&label) {
+        Some(format!(
+            "`{label}` is retired - piners now reports that case as `unevaluated`, which no \
+             pin can hold; fix the oracle or the feed, then re-bless"
+        ))
+    } else {
+        None
+    }
+}
+
+impl<'de> Deserialize<'de> for PinnedDisposition {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let label = String::deserialize(deserializer)?;
+        if let Some(why) = unpinnable(&label) {
+            return Err(serde::de::Error::custom(why));
+        }
+        Self::from_label(&label).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "unknown disposition `{label}`, expected one of {}",
+                ALL_PINNED.map(Self::as_str).join(", ")
+            ))
+        })
+    }
+}
+
+/// Every pinnable disposition, in its stable order.
+pub(crate) const ALL_PINNED: [PinnedDisposition; 7] = [
+    PinnedDisposition::ByteExact,
+    PinnedDisposition::Accepted,
+    PinnedDisposition::ActionableDrift,
+    PinnedDisposition::CountDivergent,
+    PinnedDisposition::CompileFail,
+    PinnedDisposition::RuntimeFail,
+    PinnedDisposition::HarnessAbort,
 ];
 
 /// One pinned file: a path relative to the corpus root plus its xxh128.
@@ -534,10 +524,10 @@ pub struct Pin {
     /// The blessed disposition. `None`
     /// means never blessed: the gate treats that as a hard "must bless"
     /// failure rather than passing silently. Stamped by `--bless`, preserved
-    /// across `--reseed` (which touches the pinned files only). Only a
-    /// pinnable label loads ([`check_pins`]).
+    /// across `--reseed` (which touches the pinned files only). `unevaluated`
+    /// and the retired labels fail to deserialize, naming why.
     #[serde(default)]
-    pub expected: Option<CorpusDisposition>,
+    pub expected: Option<PinnedDisposition>,
     /// The blessed per-leg displayed-label mismatch counts, the label
     /// ratchet (`gate.rs`). `None` means never stamped: labels are ungated
     /// for the probe until a bless of a parity line carrying the census.
@@ -709,27 +699,13 @@ pub fn parse_pins_unchecked(text: &str, origin: &Path) -> Result<PinsData, DevEr
     toml::from_str(text).map_err(|e| DevError::Config(format!("piners: {}: {e}", origin.display())))
 }
 
-/// The structural rules every pin obeys: an `expected` that is pinnable
-/// ([`CorpusDisposition::is_pinnable`]), at least one oracle, a probe dir
+/// The structural rules every pin obeys: at least one oracle, a probe dir
 /// below the corpus root, and every pinned file in that dir under its fixed
-/// name. Returns every violation, one per line.
+/// name. Returns every violation, one per line. (An unpinnable `expected`
+/// never gets this far: [`PinnedDisposition`] refuses it while parsing.)
 fn check_pins(probes: &BTreeMap<String, Pin>) -> Vec<String> {
     let mut problems: Vec<String> = Vec::new();
     for (id, pin) in probes {
-        match pin.expected {
-            Some(CorpusDisposition::Unevaluated) => problems.push(format!(
-                "{id}: `expected = \"unevaluated\"` can never be pinned - an experiment the \
-                 harness could not conduct never passes; fix the oracle or the feed, then \
-                 re-bless"
-            )),
-            Some(d) if !d.is_pinnable() => problems.push(format!(
-                "{id}: `expected = \"{}\"` is retired - piners now reports that case as \
-                 `unevaluated`, which no pin can hold; fix the oracle or the feed, then \
-                 re-bless",
-                d.as_str()
-            )),
-            _ => {}
-        }
         if pin.csv.is_none() && pin.record.is_none() {
             problems.push(format!(
                 "{id}: pins no oracle - needs `csv` ({CSV_FILE}), `record` ({RECORD_FILE}), \
@@ -1083,7 +1059,7 @@ impl Registry {
     /// Structural lint: every id referenced by a keyword file must exist
     /// in `pins.toml`, every pinned probe must resolve a feed, and every
     /// `feed` in `[probe_config]` must name a `[feeds]` group. `expected` is
-    /// deserialized as [`CorpusDisposition`], so an unknown label is refused
+    /// deserialized as [`PinnedDisposition`], so an unknown label is refused
     /// while loading rather than checked again here.
     pub fn lint(&self) -> Result<(), DevError> {
         let dangling = registry_io::dangling_keywords(&self.keywords, |id| {
@@ -1586,7 +1562,7 @@ csv = { path = \"p/old/tv_trades.csv\", xxh128 = \"bb\" }
         };
         for ok in ["accepted", "compile_fail", "harness_abort"] {
             let data = parse_pins(&text(ok), Path::new("pins.toml")).unwrap();
-            assert_eq!(data.probes["p"].expected.map(CorpusDisposition::as_str), Some(ok));
+            assert_eq!(data.probes["p"].expected.map(PinnedDisposition::as_str), Some(ok));
         }
         for (bad, says) in [
             ("unevaluated", "can never be pinned"),

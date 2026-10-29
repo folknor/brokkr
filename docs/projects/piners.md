@@ -95,10 +95,11 @@ Emits **one NDJSON object per probe, no summary line** (brokkr aggregates):
   carrying either is an invalid record, while stored history still displays
   them. `unevaluated` is the line for a probe whose experiment could not be
   conducted, `{"probe":ID,"outcome":"unevaluated","disposition":"unevaluated",
-  "reason":R,"error":E}` with no parity fields: `reason` is one of
+  "reason":R,"error":E}` plus `runtime_ms`: `reason` is one of
   `invalid_evidence`, `insufficient_evidence`, `witness_contract`,
-  `feed_coverage`, `no_overlap`, and `error` a nonempty one-line detail;
-  anything else makes the line invalid. It is a break (exit 1) that never
+  `feed_coverage`, `no_overlap`, `error` a nonempty one-line detail, and no
+  parity field may appear (the list: report integrity in
+  `docs/commands/corpus.md`); anything else makes the line invalid. It is a break (exit 1) that never
   passes, is never pinned or blessed, and fails the run on its own (the gate
   and its consequences: `docs/commands/corpus.md`). Piners' account of each
   reason: its `reference/corpus.md`, Harness output.
@@ -310,9 +311,11 @@ The store has per-db `PRAGMA user_version` migrations and WAL, mirroring
   `history_prefix_bars`, `oracle_trimmed`/`oracle_realtime`, the
   timestamp-shift census `ts_{entry,exit}_{considered,shifted,share_pct}` (the
   share is `NULL` when nothing was comparable, as the harness omits it),
-  `window_sensitive` (JSON array) and `reason` (v16: why an `unevaluated`
-  probe could not be evaluated; `NULL` on every other row; run detail shows it
-  ahead of the `error` detail). v15 dropped the `dynamic_builtin_calls`
+  `window_sensitive` (JSON array) and `reason` (v16: the raw `$.reason`
+  string - on an `unevaluated` row, why the probe could not be evaluated;
+  `NULL` wherever the line carried no string `reason`, which piners sends on
+  no other outcome, though a stray one on another line is tolerated and
+  projected as sent; run detail shows it ahead of the `error` detail). v15 dropped the `dynamic_builtin_calls`
   projection once piners stopped reporting the counter, since it read `NULL` on
   every new row and a filter on `= 0` silently stopped matching them; older
   rows keep the value in `raw_json` (`json_extract(raw_json,

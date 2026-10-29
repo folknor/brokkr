@@ -29,8 +29,8 @@
 use std::collections::{BTreeMap, HashSet};
 
 use crate::output;
-use crate::piners::registry::{CorpusDisposition, LabelPin, Registry};
-use crate::piners::report::{HarnessReport, LabelCensus, ProbeLine};
+use crate::piners::registry::{LabelPin, PinnedDisposition, Registry};
+use crate::piners::report::{HarnessReport, LabelCensus, ProbeLine, ProbeOutcome};
 
 /// One probe whose actual disposition does not satisfy its pinned `expected`.
 #[derive(Debug)]
@@ -53,19 +53,22 @@ pub fn evaluate(ids: &[String], registry: &Registry, report: &HarnessReport) -> 
     // satisfies a pin. The stored `gate_ok` is this verdict, so it carries
     // the taint to `corpus-results` too.
     let tainted = report.tainted();
-    let actual: BTreeMap<&str, String> = report
+    // Per probe: what the line shows, and the evaluated disposition it can
+    // satisfy a pin with - none for an invalid, tainted or unevaluated line.
+    let actual: BTreeMap<&str, (String, Option<PinnedDisposition>)> = report
         .probes
         .iter()
         .map(|p| {
-            let got = match p.valid_disposition() {
-                None => format!("invalid ({})", p.disposition()),
-                Some(_) if tainted.contains(p.probe.as_str()) => {
+            let got = match p.outcome() {
+                None => (format!("invalid ({})", p.disposition()), None),
+                Some(_) if tainted.contains(p.probe.as_str()) => (
                     format!(
                         "invalid (an occurrence was invalid; last {})",
                         p.disposition()
-                    )
-                }
-                Some(label) => label.as_str().to_owned(),
+                    ),
+                    None,
+                ),
+                Some(outcome) => (outcome.label().to_owned(), outcome.evaluated()),
             };
             (p.probe.as_str(), got)
         })
@@ -74,16 +77,13 @@ pub fn evaluate(ids: &[String], registry: &Registry, report: &HarnessReport) -> 
     let mut diffs = Vec::new();
     for id in ids {
         let expected = registry.pins.get(id).and_then(|p| p.expected);
-        let got = actual.get(id.as_str()).cloned();
-        // A pin the loader would refuse satisfies nothing, even if a registry
-        // were built around the loader.
-        let satisfied =
-            matches!((expected, &got), (Some(e), Some(g)) if e.is_pinnable() && e.as_str() == g);
+        let got = actual.get(id.as_str());
+        let satisfied = matches!((expected, got), (Some(e), Some((_, Some(g)))) if e == *g);
         if !satisfied {
             diffs.push(GateDiff {
                 probe: id.clone(),
                 expected: expected.map(|d| d.as_str().to_owned()),
-                actual: got,
+                actual: got.map(|(shown, _)| shown.clone()),
             });
         }
     }
@@ -240,12 +240,13 @@ impl GateVerdict {
             let pinned = registry.pins.get(id).and_then(|p| p.labels);
             let line = lines
                 .get(id.as_str())
-                .filter(|p| p.valid_disposition().is_some() && !tainted.contains(id.as_str()));
+                .filter(|p| p.outcome().is_some() && !tainted.contains(id.as_str()));
             let deviations = line.map(|p| {
-                let census = p.labels().ok().flatten();
+                let census = p.census;
                 let parity = p
-                    .valid_disposition()
-                    .is_some_and(CorpusDisposition::is_parity);
+                    .outcome()
+                    .and_then(ProbeOutcome::evaluated)
+                    .is_some_and(PinnedDisposition::is_parity);
                 // Unpinned counts every parity probe awaiting its first stamp,
                 // census or not, so a harness predating the census still
                 // shows up as ungated; a pinned probe missing its census is
@@ -357,9 +358,7 @@ fn check_labels(
 pub fn report_has_break(report: &HarnessReport) -> bool {
     let tainted = report.tainted();
     report.probes.iter().any(|p| {
-        !tainted.contains(p.probe.as_str())
-            && p.valid_disposition()
-                .is_some_and(CorpusDisposition::is_break)
+        !tainted.contains(p.probe.as_str()) && p.outcome().is_some_and(ProbeOutcome::is_break)
     })
 }
 
@@ -378,20 +377,17 @@ pub fn breaks_all_pinned(ids: &[String], registry: &Registry, report: &HarnessRe
     let tainted = report.tainted();
     let mut any = false;
     for p in &report.probes {
-        let Some(disp) = p
-            .valid_disposition()
-            .filter(|disposition| disposition.is_break())
-        else {
+        let Some(outcome) = p.outcome().filter(|outcome| outcome.is_break()) else {
             continue;
         };
         any = true;
         // A probe with an invalid occurrence explains nothing, and neither
-        // does an unevaluated one: no pin can hold it, and this must not
-        // lean on the loader alone to keep it so.
-        let pinned = disp.is_pinnable()
-            && !tainted.contains(p.probe.as_str())
-            && selected.contains(p.probe.as_str())
-            && registry.pins.get(&p.probe).and_then(|pin| pin.expected) == Some(disp);
+        // does an unevaluated one: it has no disposition a pin could hold.
+        let pinned = outcome.evaluated().is_some_and(|disp| {
+            !tainted.contains(p.probe.as_str())
+                && selected.contains(p.probe.as_str())
+                && registry.pins.get(&p.probe).and_then(|pin| pin.expected) == Some(disp)
+        });
         if !pinned {
             return false;
         }
@@ -441,7 +437,7 @@ mod tests {
             },
         );
         p.expected = expected.map(|label| {
-            CorpusDisposition::from_label(label).expect("test disposition is recognized")
+            PinnedDisposition::from_label(label).expect("test disposition is recognized")
         });
         p
     }
@@ -616,13 +612,15 @@ mod tests {
             r#"{"probe":"a","outcome":"unevaluated","reason":"invalid_evidence","error":"bad row"}"#,
         );
         let ids = ["a".to_owned()];
-        // Even a pin the loader would refuse, built around it.
-        let reg = registry(&[("a", Some("unevaluated"))]);
-        let diffs = evaluate(&ids, &reg, &rep);
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(diffs[0].actual.as_deref(), Some("unevaluated"));
-        assert!(report_has_break(&rep));
-        assert!(!breaks_all_pinned(&ids, &reg, &rep));
+        // No pin can name it, so every pin deviates, a pinned break included.
+        for expected in ["accepted", "runtime_fail"] {
+            let reg = registry(&[("a", Some(expected))]);
+            let diffs = evaluate(&ids, &reg, &rep);
+            assert_eq!(diffs.len(), 1, "{expected}");
+            assert_eq!(diffs[0].actual.as_deref(), Some("unevaluated"));
+            assert!(report_has_break(&rep));
+            assert!(!breaks_all_pinned(&ids, &reg, &rep), "{expected}");
+        }
     }
 
     fn labelled(id: &str, expected: &str, labels: Option<(u64, u64)>) -> Registry {

@@ -26,9 +26,9 @@ use std::path::Path;
 use crate::error::DevError;
 use crate::output;
 use crate::piners::pins_write;
-use crate::piners::registry::{LabelPin, Registry};
+use crate::piners::registry::{LabelPin, PinnedDisposition, Registry};
 use crate::piners::registry_io;
-use crate::piners::report::{HarnessReport, LabelCensus};
+use crate::piners::report::{HarnessReport, LabelCensus, ProbeOutcome};
 
 /// The label counts a bless stamps for one probe with a valid line, or
 /// `None` when it must refuse. A non-parity line has no labels to pin; a
@@ -130,20 +130,19 @@ pub fn apply(
         )));
     }
 
-    // Each line's derived label (for naming a refusal) and its validated one
-    // (`report::valid_label`, the validator integrity and the gate share).
-    let actual: BTreeMap<&str, (String, Option<crate::piners::registry::CorpusDisposition>)> =
-        report
-            .probes
-            .iter()
-            .map(|p| (p.probe.as_str(), (p.disposition(), p.valid_disposition())))
-            .collect();
+    // Each line's derived label (for naming a refusal) and its validated
+    // outcome (the parse-time verdict integrity and the gate share).
+    let actual: BTreeMap<&str, (String, Option<&ProbeOutcome>)> = report
+        .probes
+        .iter()
+        .map(|p| (p.probe.as_str(), (p.disposition(), p.outcome())))
+        .collect();
 
     // Each line's label census, already held valid by the record check.
     let census: BTreeMap<&str, Option<LabelCensus>> = report
         .probes
         .iter()
-        .map(|p| (p.probe.as_str(), p.labels().ok().flatten()))
+        .map(|p| (p.probe.as_str(), p.census))
         .collect();
 
     // Validate every stamp before mutating anything.
@@ -152,19 +151,21 @@ pub fn apply(
     let mut unevaluated: Vec<String> = Vec::new();
     let mut unpinned: Vec<&str> = Vec::new();
     let mut lost_labels: Vec<&str> = Vec::new();
-    let mut label_stamps: BTreeMap<&str, Option<LabelPin>> = BTreeMap::new();
+    let mut stamps: BTreeMap<&str, (PinnedDisposition, Option<LabelPin>)> = BTreeMap::new();
     for id in scope_ids {
         match actual.get(id.as_str()) {
             None => missing.push(id),
             Some((derived, None)) => rejected.push(format!("{id} ({derived})")),
-            Some((_, Some(disp))) if !disp.is_pinnable() => unevaluated.push(id.clone()),
+            Some((_, Some(ProbeOutcome::Unevaluated(r)))) => {
+                unevaluated.push(format!("{id} ({})", r.reason.label()));
+            }
             Some(_) if !registry.pins.contains_key(id) => unpinned.push(id),
-            Some((_, Some(disp))) => {
+            Some((_, Some(ProbeOutcome::Evaluated(disp)))) => {
                 let pinned = registry.pins.get(id).and_then(|p| p.labels);
                 let line = census.get(id.as_str()).copied().flatten();
                 match label_stamp(disp.is_parity(), line, pinned) {
                     Some(stamp) => {
-                        label_stamps.insert(id, stamp);
+                        stamps.insert(id, (*disp, stamp));
                     }
                     None => lost_labels.push(id),
                 }
@@ -181,17 +182,15 @@ pub fn apply(
     let mut blessed = 0usize;
     let mut changed = 0usize;
     for id in scope_ids {
-        let (Some((_, Some(disp))), Some(pin), Some(&labels)) = (
-            actual.get(id.as_str()),
-            registry.pins.get_mut(id),
-            label_stamps.get(id.as_str()),
-        ) else {
+        let (Some(pin), Some(&(disp, labels))) =
+            (registry.pins.get_mut(id), stamps.get(id.as_str()))
+        else {
             continue; // unreachable: validated above
         };
         blessed += 1;
-        if pin.expected != Some(*disp) || pin.labels != labels {
+        if pin.expected != Some(disp) || pin.labels != labels {
             changed += 1;
-            pin.expected = Some(*disp);
+            pin.expected = Some(disp);
             pin.labels = labels;
         }
     }
@@ -230,7 +229,7 @@ mod tests {
             },
         );
         p.expected = expected.map(|label| {
-            registry::CorpusDisposition::from_label(label).expect("test disposition is recognized")
+            registry::PinnedDisposition::from_label(label).expect("test disposition is recognized")
         });
         p
     }
@@ -271,30 +270,30 @@ mod tests {
 
         assert_eq!(
             reg.pins["a"].expected,
-            Some(registry::CorpusDisposition::CountDivergent)
+            Some(registry::PinnedDisposition::CountDivergent)
         );
         assert_eq!(
             reg.pins["b"].expected,
-            Some(registry::CorpusDisposition::CompileFail)
+            Some(registry::PinnedDisposition::CompileFail)
         );
         assert_eq!(
             reg.pins["untouched"].expected,
-            Some(registry::CorpusDisposition::ByteExact)
+            Some(registry::PinnedDisposition::ByteExact)
         );
 
         let written = std::fs::read_to_string(&pins_path).unwrap();
         let on_disk = registry::parse_pins(&written, &pins_path).unwrap();
         assert_eq!(
             on_disk.probes["a"].expected,
-            Some(registry::CorpusDisposition::CountDivergent)
+            Some(registry::PinnedDisposition::CountDivergent)
         );
         assert_eq!(
             on_disk.probes["b"].expected,
-            Some(registry::CorpusDisposition::CompileFail)
+            Some(registry::PinnedDisposition::CompileFail)
         );
         assert_eq!(
             on_disk.probes["untouched"].expected,
-            Some(registry::CorpusDisposition::ByteExact)
+            Some(registry::PinnedDisposition::ByteExact)
         );
     }
 
@@ -506,7 +505,7 @@ mod tests {
         let data = registry::parse_pins(&written, &pins_path).unwrap();
         assert_eq!(
             data.probes["a"].expected,
-            Some(registry::CorpusDisposition::Accepted)
+            Some(registry::PinnedDisposition::Accepted)
         );
         assert_eq!(reg.pins_text, written);
     }

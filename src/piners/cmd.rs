@@ -57,7 +57,7 @@ use crate::piners::contract::RunErrorRecord;
 use crate::piners::corpus_db::{CorpusDb, RunContext, RunRecord};
 use crate::piners::db_paths::corpus_runs_db_path;
 use crate::piners::integrity::{self, HarnessEnd, Reconciliation, Trigger};
-use crate::piners::isolate::{self, AttemptOutcome, StopReason};
+use crate::piners::isolate::{self, Attempt, AttemptOutcome, StopReason};
 use crate::piners::manifest::Manifest;
 use crate::piners::registry::{self, Registry, VerifiedProbe};
 use crate::piners::report;
@@ -700,15 +700,18 @@ impl AttemptEnv<'_> {
     /// its own manifest (built from the same verified probes), stdout,
     /// stderr and `BROKKR_HARNESS_ARTEFACT_DIR`. Judged by the same run
     /// assessment as the original run; see [`isolate::classify_attempt`].
-    fn run(&self, subset: &[String], n: usize) -> AttemptOutcome {
+    /// Carries every refusal the captured stream holds; an attempt that
+    /// produced no capture (not started, interrupted, capture failed) has
+    /// none to carry.
+    fn run(&self, subset: &[String], n: usize) -> Attempt {
         if crate::shutdown::is_shutdown_requested() {
-            return AttemptOutcome::Stop(StopReason::Interrupted);
+            return AttemptOutcome::Stop(StopReason::Interrupted).into();
         }
         let Some(remaining) = HARNESS_HANG_BACKSTOP
             .checked_sub(self.launched.elapsed())
             .filter(|d| !d.is_zero())
         else {
-            return AttemptOutcome::Stop(StopReason::Deadline);
+            return AttemptOutcome::Stop(StopReason::Deadline).into();
         };
         let dir = self.run_dir.join(format!("attempt-{n}"));
         let manifest_path = dir.join("manifest.json");
@@ -725,7 +728,8 @@ impl AttemptEnv<'_> {
                 Manifest::build(self.corpus_root, &probes, self.registry).write(&manifest_path)
             });
         if let Err(e) = prepared {
-            return AttemptOutcome::Stop(StopReason::Setup(format!("{}: {e}", dir.display())));
+            return AttemptOutcome::Stop(StopReason::Setup(format!("{}: {e}", dir.display())))
+                .into();
         }
         let manifest_str = manifest_path.display().to_string();
         let harness_env = crate::ratatoskr::harness_env(&dir, self.bin_dir);
@@ -749,45 +753,50 @@ impl AttemptEnv<'_> {
         lock.clear_child_pid();
         let capture = match capture {
             Ok(c) => c,
-            Err(DevError::Interrupted) => return AttemptOutcome::Stop(StopReason::Interrupted),
-            Err(e @ DevError::ChildFailure { .. }) => {
-                return AttemptOutcome::Stop(StopReason::CaptureIncomplete(e.to_string()));
+            Err(DevError::Interrupted) => {
+                return AttemptOutcome::Stop(StopReason::Interrupted).into();
             }
-            Err(e) => return AttemptOutcome::Stop(StopReason::SpawnFailed(e.to_string())),
+            Err(e @ DevError::ChildFailure { .. }) => {
+                return AttemptOutcome::Stop(StopReason::CaptureIncomplete(e.to_string())).into();
+            }
+            Err(e) => return AttemptOutcome::Stop(StopReason::SpawnFailed(e.to_string())).into(),
+        };
+        let end = HarnessEnd::from_ending(&capture.captured.ending);
+        // The same assessment the original run gets, over this subset, made
+        // before any stop below: every refusal the captured stream holds is
+        // kept with the attempt, whatever happens to it next.
+        let a = integrity::assess(subset, &capture.captured.stdout, end, capture.output_cut);
+        let attempt = |outcome| Attempt {
+            outcome,
+            refusals: a.refusals.clone(),
         };
         // The streams are the evidence the run will claim to preserve: a
         // failure to store them stops diagnosis rather than go on unrecorded.
         if let Err(reason) =
             store_attempt_streams(&dir, &capture.captured.stdout, &capture.captured.stderr)
         {
-            return AttemptOutcome::Stop(reason);
+            return attempt(AttemptOutcome::Stop(reason));
         }
         if capture.killed_on_deadline() {
             // Never attributed to a probe: the subset ran out of shared time.
-            return AttemptOutcome::Stop(StopReason::Deadline);
+            return attempt(AttemptOutcome::Stop(StopReason::Deadline));
         }
-        let end = HarnessEnd::from_ending(&capture.captured.ending);
-        // The same assessment the original run gets, over this subset.
-        let a = integrity::assess(subset, &capture.captured.stdout, end, capture.output_cut);
         output::corpus_msg(&format!(
             "attempt {n}: {} -> {}, {}",
             output::count(subset.len(), "probe"),
             end.short(),
             a.rec.summary()
         ));
-        match isolate::classify_attempt(&a) {
+        attempt(match isolate::classify_attempt(&a) {
             isolate::AttemptVerdict::Stop(stop) => AttemptOutcome::Stop(stop),
             isolate::AttemptVerdict::Completed => AttemptOutcome::Completed,
-            isolate::AttemptVerdict::CompletedUnevaluated(probes) => {
-                AttemptOutcome::CompletedUnevaluated(probes)
-            }
             isolate::AttemptVerdict::Failed(failure) => AttemptOutcome::Failed {
                 end,
                 failure,
                 stderr: String::from_utf8_lossy(&capture.captured.stderr).into_owned(),
                 dir,
             },
-        }
+        })
     }
 }
 
@@ -1419,10 +1428,22 @@ mod tests {
             classify(&["a"], crash, HarnessEnd::Code(1), false),
             isolate::AttemptVerdict::Completed
         );
-        // An unevaluated probe completes the attempt, and the verdict keeps it.
+        // An unevaluated probe completes the attempt; the refusal rides
+        // beside the verdict, on a failed attempt as on a completed one.
         assert_eq!(
             classify(&["a"], UNEVALUATED, HarnessEnd::Code(1), false),
-            isolate::AttemptVerdict::CompletedUnevaluated(vec!["a (no_overlap)".to_owned()])
+            isolate::AttemptVerdict::Completed
+        );
+        for (ids, end) in [
+            (&["a"][..], HarnessEnd::Code(1)),
+            (&["a", "b"][..], HarnessEnd::Signal(9)),
+        ] {
+            let a = assessed(ids, UNEVALUATED, end, false);
+            assert_eq!(a.refusal_names(), vec!["a (no_overlap)".to_owned()], "{end:?}");
+        }
+        assert_eq!(
+            classify(&["a", "b"], UNEVALUATED, HarnessEnd::Signal(9), false),
+            isolate::AttemptVerdict::Failed(isolate::Failure::Aborted)
         );
         // A run_error stops diagnosis with the harness's own failure.
         let run_error =

@@ -24,21 +24,45 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
-use crate::piners::integrity::HarnessEnd;
+use crate::piners::integrity::{HarnessEnd, RefusedProbe};
 
 /// Every diagnostic invocation counts against this, singletons included.
 pub const ATTEMPT_CAP: usize = 64;
+
+/// One diagnostic attempt: how it went, and every refusal its captured
+/// stream showed. The refusals ride beside the outcome rather than inside a
+/// status, so an attempt that aborted, broke protocol or stopped diagnosis
+/// keeps them as surely as one that completed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attempt {
+    pub outcome: AttemptOutcome,
+    pub refusals: Vec<RefusedProbe>,
+}
+
+impl From<AttemptOutcome> for Attempt {
+    fn from(outcome: AttemptOutcome) -> Self {
+        Self {
+            outcome,
+            refusals: Vec::new(),
+        }
+    }
+}
+
+/// A refusal one attempt reported, with the attempt it came from: its
+/// subset, stdout and stderr are under `attempt-<n>/`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefusalObservation {
+    pub attempt: usize,
+    pub refusal: RefusedProbe,
+}
 
 /// How one attempt went.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttemptOutcome {
     /// Exit 0 or 1, a valid disposition for every probe in the subset, no
-    /// protocol violation and an intact stream.
+    /// protocol violation and an intact stream. An `unevaluated` probe is a
+    /// valid disposition, so a subset holding one completes.
     Completed,
-    /// [`AttemptOutcome::Completed`], with these probes (`id (reason)`)
-    /// reported `unevaluated`: the subset is cleared like any completed one,
-    /// and the diagnosis keeps the refusals.
-    CompletedUnevaluated(Vec<String>),
     /// The subset did not complete; `failure` says how. `end` is how the
     /// harness ended.
     Failed {
@@ -98,6 +122,9 @@ pub enum StopReason {
     /// An attempt's harness reported a `run_error` (rendered): a failure of
     /// its own setup, not of the subset, so there is nothing to bisect.
     HarnessFailure(String),
+    /// An attempt ended at a `--stop` marker, which no diagnostic attempt
+    /// sets: an intentional stop is never an abort to attribute.
+    StopMarker,
 }
 
 /// The policy result for one diagnostic harness invocation.
@@ -106,9 +133,6 @@ pub enum AttemptVerdict {
     /// Every selected probe validly reported, the stream was whole, and the
     /// harness ended with an accepted status.
     Completed,
-    /// [`AttemptVerdict::Completed`], with these probes (`id (reason)`)
-    /// reported `unevaluated`.
-    CompletedUnevaluated(Vec<String>),
     /// The attempt did not complete and has an attribution or protocol result.
     Failed(Failure),
     /// Diagnosis cannot continue because the harness reported its own error.
@@ -137,6 +161,7 @@ impl StopReason {
                 format!("an attempt's evidence could not be stored: {e}")
             }
             StopReason::HarnessFailure(e) => format!("an attempt's harness failed: {e}"),
+            StopReason::StopMarker => "an attempt was ended at a --stop marker".to_owned(),
         }
     }
 
@@ -151,6 +176,7 @@ impl StopReason {
             StopReason::Setup(_) => "stopped on a setup failure",
             StopReason::EvidenceStorage(_) => "stopped on an evidence-storage failure",
             StopReason::HarnessFailure(_) => "stopped on a harness run_error",
+            StopReason::StopMarker => "stopped on a stop marker",
         }
     }
 }
@@ -171,6 +197,23 @@ pub struct NotReproduced {
     pub set: Vec<String>,
     /// How the set itself failed (the original run counts as an abort).
     pub failure: Failure,
+    /// For a one-element set, the attempt that ran its probe alone and
+    /// completed, with what that attempt itself said of it.
+    pub alone: Option<Alone>,
+}
+
+/// A singleton's own completed attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Alone {
+    pub attempt: usize,
+    /// The probe's refusal in this attempt, when it reported `unevaluated`.
+    pub refusal: Option<RefusedProbe>,
+}
+
+/// A completed attempt, for the set that ran it.
+struct Cleared {
+    attempt: usize,
+    refusals: Vec<RefusedProbe>,
 }
 
 /// What the isolation pass found.
@@ -189,10 +232,11 @@ pub struct Diagnosis {
     /// reproduce in either half. A singleton that completed alone is listed
     /// here as a one-element set.
     pub not_reproduced: Vec<NotReproduced>,
-    /// Probes a completed attempt reported `unevaluated` (`id (reason)`), in
-    /// discovery order: the experiment could not be conducted, which is not
-    /// an abort, and never a pass.
-    pub unevaluated: Vec<String>,
+    /// Every refusal any attempt reported, completed or not, in attempt
+    /// order, each with its attempt: the experiment could not be conducted,
+    /// which is not an abort, and never a pass. Never deduplicated, so one
+    /// probe refused for two reasons keeps both.
+    pub refusals: Vec<RefusalObservation>,
     /// Sets left unexamined when diagnosis stopped.
     pub unresolved: Vec<Vec<String>>,
     /// Why diagnosis stopped early, if it did.
@@ -202,10 +246,11 @@ pub struct Diagnosis {
 /// Bisect `unreported`, calling `run(subset, attempt_number)` for each
 /// attempt (numbered from 1). Stops at [`ATTEMPT_CAP`] or on the first
 /// [`AttemptOutcome::Stop`], leaving what is left as unresolved.
-pub fn bisect(
+pub fn bisect<A: Into<Attempt>>(
     unreported: Vec<String>,
-    mut run: impl FnMut(&[String], usize) -> AttemptOutcome,
+    mut run: impl FnMut(&[String], usize) -> A,
 ) -> Diagnosis {
+    let mut run = |subset: &[String], n: usize| run(subset, n).into();
     let mut d = Diagnosis {
         bisected: unreported.clone(),
         ..Diagnosis::default()
@@ -223,19 +268,36 @@ pub fn bisect(
         if set.len() == 1 {
             // Only reached when the original unreported set is one probe;
             // halves of size one are examined directly below.
-            if examine(&mut d, &mut run, set.clone(), &mut queue) {
-                d.not_reproduced.push(NotReproduced { set, failure });
+            if let Some(cleared) = examine(&mut d, &mut run, set.clone(), &mut queue) {
+                let alone = alone(&set[0], cleared);
+                d.not_reproduced.push(NotReproduced {
+                    set,
+                    failure,
+                    alone: Some(alone),
+                });
             }
             continue;
         }
         let mid = set.len() / 2;
         let first = examine(&mut d, &mut run, set[..mid].to_vec(), &mut queue);
         let second = examine(&mut d, &mut run, set[mid..].to_vec(), &mut queue);
-        if first && second {
-            d.not_reproduced.push(NotReproduced { set, failure });
+        if first.is_some() && second.is_some() {
+            d.not_reproduced.push(NotReproduced {
+                set,
+                failure,
+                alone: None,
+            });
         }
     }
     d
+}
+
+/// What a singleton's own completed attempt said of its probe.
+fn alone(probe: &str, cleared: Cleared) -> Alone {
+    Alone {
+        attempt: cleared.attempt,
+        refusal: cleared.refusals.into_iter().find(|r| r.probe == probe),
+    }
 }
 
 /// Sets awaiting a split, each with how it failed.
@@ -244,37 +306,35 @@ type Queue = VecDeque<(Vec<String>, Failure)>;
 /// Run `subset` as one attempt, under the cap, and file the outcome: a
 /// failing multi-probe subset is queued for splitting, a failing singleton is
 /// a failing probe (filed with how it failed), a stop parks the subset as
-/// unresolved. Returns whether
-/// the subset completed.
+/// unresolved. Every refusal the attempt reported is kept, whatever its
+/// outcome. Returns the completed attempt, or `None` when the subset did not
+/// complete.
 fn examine(
     d: &mut Diagnosis,
-    run: &mut impl FnMut(&[String], usize) -> AttemptOutcome,
+    run: &mut impl FnMut(&[String], usize) -> Attempt,
     subset: Vec<String>,
     queue: &mut Queue,
-) -> bool {
+) -> Option<Cleared> {
     if d.stopped.is_some() {
         d.unresolved.push(subset);
-        return false;
+        return None;
     }
     if d.attempts >= ATTEMPT_CAP {
         d.stopped = Some(StopReason::Cap);
         d.unresolved.push(subset);
-        return false;
+        return None;
     }
     d.attempts += 1;
-    match run(&subset, d.attempts) {
+    let attempt = d.attempts;
+    let Attempt { outcome, refusals } = run(&subset, attempt);
+    d.refusals
+        .extend(refusals.iter().cloned().map(|refusal| RefusalObservation { attempt, refusal }));
+    match outcome {
         AttemptOutcome::Completed => {
             if subset.len() == 1 {
                 d.singletons_tested += 1;
             }
-            true
-        }
-        AttemptOutcome::CompletedUnevaluated(probes) => {
-            if subset.len() == 1 {
-                d.singletons_tested += 1;
-            }
-            d.unevaluated.extend(probes);
-            true
+            Some(Cleared { attempt, refusals })
         }
         AttemptOutcome::Failed {
             end,
@@ -294,14 +354,45 @@ fn examine(
             } else {
                 queue.push_back((subset, failure));
             }
-            false
+            None
         }
         AttemptOutcome::Stop(reason) => {
             d.stopped = Some(reason);
             d.unresolved.push(subset);
-            false
+            None
         }
     }
+}
+
+/// Observations of one probe refused for one reason and detail, with every
+/// attempt that reported it, in first-seen order.
+struct RefusalGroup<'a> {
+    refusal: &'a RefusedProbe,
+    attempts: Vec<usize>,
+}
+
+fn group_refusals(observations: &[RefusalObservation]) -> Vec<RefusalGroup<'_>> {
+    let mut groups: Vec<RefusalGroup<'_>> = Vec::new();
+    for o in observations {
+        match groups.iter_mut().find(|g| *g.refusal == o.refusal) {
+            Some(g) => g.attempts.push(o.attempt),
+            None => groups.push(RefusalGroup {
+                refusal: &o.refusal,
+                attempts: vec![o.attempt],
+            }),
+        }
+    }
+    groups
+}
+
+fn attempt_list(attempts: &[usize]) -> String {
+    let numbers: Vec<String> = attempts.iter().map(usize::to_string).collect();
+    let noun = if attempts.len() == 1 {
+        "attempt"
+    } else {
+        "attempts"
+    };
+    format!("{noun} {}", numbers.join(", "))
 }
 
 impl Diagnosis {
@@ -361,23 +452,28 @@ impl Diagnosis {
         }
         for nr in &self.not_reproduced {
             let what = failure_noun(&nr.failure);
-            if nr.set.len() == 1 {
-                out.push(format!(
-                    "probe {} completed when run alone ({what} did not reproduce)",
-                    nr.set[0]
-                ));
-            } else {
-                out.push(format!(
+            match (&nr.alone, nr.set.as_slice()) {
+                (Some(Alone { refusal: Some(r), attempt }), [probe]) => out.push(format!(
+                    "probe {probe} reported unevaluated ({}) when run alone in attempt \
+                     {attempt} ({what} did not reproduce)",
+                    r.reason.label()
+                )),
+                (_, [probe]) => out.push(format!(
+                    "probe {probe} completed when run alone ({what} did not reproduce)"
+                )),
+                _ => out.push(format!(
                     "{what} did not reproduce in either half of {{{}}}",
                     nr.set.join(", ")
-                ));
+                )),
             }
         }
-        if !self.unevaluated.is_empty() {
+        for g in group_refusals(&self.refusals) {
             out.push(format!(
-                "unevaluated in a completed attempt (the experiment could not be conducted; \
-                 not an abort, never a pass): {}",
-                self.unevaluated.join(", ")
+                "unevaluated (the experiment could not be conducted; not an abort, never a \
+                 pass): {} in {}: {}",
+                g.refusal.short(),
+                attempt_list(&g.attempts),
+                g.refusal.error
             ));
         }
         if let Some(reason) = &self.stopped {
@@ -388,7 +484,7 @@ impl Diagnosis {
         }
         if self.failing.is_empty()
             && self.not_reproduced.is_empty()
-            && self.unevaluated.is_empty()
+            && self.refusals.is_empty()
             && self.stopped.is_none()
         {
             out.push("isolation found nothing to report".to_owned());
@@ -427,8 +523,12 @@ impl Diagnosis {
                 out.push_str(&format!("; {label}: {}", named.join(", ")));
             }
         }
-        if !self.unevaluated.is_empty() {
-            out.push_str(&format!("; unevaluated: {}", self.unevaluated.join(", ")));
+        let refused: Vec<String> = group_refusals(&self.refusals)
+            .iter()
+            .map(|g| format!("{} in {}", g.refusal.short(), attempt_list(&g.attempts)))
+            .collect();
+        if !refused.is_empty() {
+            out.push_str(&format!("; unevaluated: {}", refused.join(", ")));
         }
         if !self.not_reproduced.is_empty() {
             out.push_str(&format!(
@@ -570,7 +670,8 @@ mod tests {
             d.not_reproduced,
             vec![NotReproduced {
                 set: ids(4),
-                failure: Failure::Aborted
+                failure: Failure::Aborted,
+                alone: None
             }]
         );
         let lines = d.lines();
@@ -786,7 +887,130 @@ mod tests {
 
     #[test]
     fn nothing_unreported_runs_nothing() {
-        let d = bisect(Vec::new(), |_, _| panic!("must not run"));
+        let d = bisect(Vec::new(), |_, _| -> AttemptOutcome { panic!("must not run") });
         assert_eq!(d.attempts, 0);
+    }
+
+    fn refused(probe: &str, reason: crate::piners::report::RefusalReason) -> RefusedProbe {
+        RefusedProbe {
+            probe: probe.to_owned(),
+            reason,
+            error: format!("{probe} detail"),
+        }
+    }
+
+    #[test]
+    fn refusals_are_kept_with_their_attempt_whatever_it_ended_as() {
+        use crate::piners::report::RefusalReason;
+        // Attempt 1 over {p0, p1}: p0 refuses, then the harness crashes on
+        // p1. Attempt 3 runs p0 alone, where it evaluates.
+        let d = bisect(ids(4), |subset, n| {
+            let has = |p: &str| subset.iter().any(|s| s == p);
+            if subset.len() == 2 && has("p0") {
+                Attempt {
+                    outcome: failed(HarnessEnd::Signal(11), "segv", n),
+                    refusals: vec![refused("p0", RefusalReason::InvalidEvidence)],
+                }
+            } else if has("p1") {
+                failed(HarnessEnd::Signal(11), "segv", n).into()
+            } else {
+                AttemptOutcome::Completed.into()
+            }
+        });
+        assert_eq!(
+            d.refusals,
+            vec![RefusalObservation {
+                attempt: 1,
+                refusal: refused("p0", RefusalReason::InvalidEvidence),
+            }]
+        );
+        let lines = d.lines();
+        assert!(
+            lines.iter().any(|l| l.ends_with("p0 (invalid_evidence) in attempt 1: p0 detail")),
+            "{lines:?}"
+        );
+        assert!(
+            d.note(std::path::Path::new("r"))
+                .contains("; unevaluated: p0 (invalid_evidence) in attempt 1"),
+        );
+        // An attempt that stops diagnosis - evidence storage failed, or the
+        // deadline - keeps its refusals too.
+        for stop in [
+            StopReason::EvidenceStorage("disk full".to_owned()),
+            StopReason::Deadline,
+        ] {
+            let d = bisect(ids(4), |_, _| Attempt {
+                outcome: AttemptOutcome::Stop(stop.clone()),
+                refusals: vec![refused("p2", RefusalReason::NoOverlap)],
+            });
+            assert_eq!(d.stopped, Some(stop.clone()));
+            assert_eq!(
+                d.refusals,
+                vec![RefusalObservation {
+                    attempt: 1,
+                    refusal: refused("p2", RefusalReason::NoOverlap),
+                }]
+            );
+            assert!(d.note(std::path::Path::new("r")).contains("p2 (no_overlap) in attempt 1"));
+        }
+    }
+
+    #[test]
+    fn a_singleton_refused_alone_is_never_called_completed() {
+        use crate::piners::report::RefusalReason;
+        let d = bisect(ids(1), |_, _| Attempt {
+            outcome: AttemptOutcome::Completed,
+            refusals: vec![refused("p0", RefusalReason::NoOverlap)],
+        });
+        assert_eq!(
+            d.not_reproduced[0].alone,
+            Some(Alone {
+                attempt: 1,
+                refusal: Some(refused("p0", RefusalReason::NoOverlap)),
+            })
+        );
+        let lines = d.lines();
+        assert!(
+            lines.iter().any(|l| l
+                == "probe p0 reported unevaluated (no_overlap) when run alone in attempt 1 \
+                    (abort did not reproduce)"),
+            "{lines:?}"
+        );
+        assert!(!lines.iter().any(|l| l.contains("completed when run alone")), "{lines:?}");
+        // A clean singleton keeps its attempt number too.
+        let ok = bisect(ids(1), |_, _| AttemptOutcome::Completed);
+        assert_eq!(
+            ok.not_reproduced[0].alone,
+            Some(Alone {
+                attempt: 1,
+                refusal: None
+            })
+        );
+    }
+
+    #[test]
+    fn one_probe_refused_for_two_reasons_keeps_both() {
+        use crate::piners::report::RefusalReason;
+        // p0 refuses one way beside p1 and another way alone; every attempt
+        // holding it also crashes.
+        let d = bisect(ids(4), |subset, n| {
+            if !subset.iter().any(|s| s == "p0") {
+                return AttemptOutcome::Completed.into();
+            }
+            let reason = if subset.len() == 1 {
+                RefusalReason::WitnessContract
+            } else {
+                RefusalReason::FeedCoverage
+            };
+            Attempt {
+                outcome: failed(HarnessEnd::Code(2), "x", n),
+                refusals: vec![refused("p0", reason)],
+            }
+        });
+        let reasons: Vec<RefusalReason> = d.refusals.iter().map(|o| o.refusal.reason).collect();
+        assert_eq!(
+            reasons,
+            vec![RefusalReason::FeedCoverage, RefusalReason::WitnessContract]
+        );
     }
 }

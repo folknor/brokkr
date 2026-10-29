@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, HashSet};
 use serde::Deserialize;
 
 use crate::output;
-use crate::piners::registry::CorpusDisposition;
+use crate::piners::registry::{PinnedDisposition, UNEVALUATED};
 
 /// Acceptance detail, present only when `outcome == "parity"`. Models what
 /// brokkr reads for the gate and the console; the p90 magnitudes and anything
@@ -159,30 +159,145 @@ where
         .collect())
 }
 
-/// The one disposition validator: the gate label an `outcome` plus its
-/// acceptance `tier` (empty counts as absent) stand for, or `None` when the
-/// pair is not a valid disposition. `parity` needs a parity-tier variant of
-/// [`CorpusDisposition`]; any other outcome must be a non-parity variant and
-/// carry no tier. So `{"outcome":"accepted"}`
-/// (a tier posing as an outcome) and `parity` with tier `runtime_fail` are
-/// both invalid, though each derives a label that looks pinnable.
-pub fn valid_label(outcome: &str, tier: Option<&str>) -> Option<CorpusDisposition> {
-    CorpusDisposition::from_fields(outcome, tier)
+/// Why an `unevaluated` probe's experiment could not be conducted (piners
+/// `reference/corpus.md`, Harness output). Any other `reason`, or none, makes
+/// the line an invalid record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalReason {
+    InvalidEvidence,
+    InsufficientEvidence,
+    WitnessContract,
+    FeedCoverage,
+    NoOverlap,
 }
 
-/// The record-level disposition validator: the gate label a disposition
-/// record stands for, or why it stands for none. The outcome and tier must
-/// form a label ([`valid_label`], the primitive), and the harness's own
-/// `disposition` field, when the key is present, must be exactly that label
-/// as a string. A present null, number, object or empty string is a defect;
-/// only a missing key is tolerated (a harness predating the field). An
-/// invalid outcome/tier stays invalid even when the field agrees with the
-/// derived fallback.
+impl RefusalReason {
+    pub const ALL: [Self; 5] = [
+        Self::InvalidEvidence,
+        Self::InsufficientEvidence,
+        Self::WitnessContract,
+        Self::FeedCoverage,
+        Self::NoOverlap,
+    ];
+
+    /// The wire spelling.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::InvalidEvidence => "invalid_evidence",
+            Self::InsufficientEvidence => "insufficient_evidence",
+            Self::WitnessContract => "witness_contract",
+            Self::FeedCoverage => "feed_coverage",
+            Self::NoOverlap => "no_overlap",
+        }
+    }
+
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|reason| reason.label() == label)
+    }
+}
+
+/// An experiment the harness could not conduct: its reason and the
+/// harness's one-line detail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    pub reason: RefusalReason,
+    pub error: String,
+}
+
+/// A validated disposition record: an evaluated probe with the disposition a
+/// pin can hold, or a refused one, which no pin, gate comparison or bless
+/// stamp can hold by construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProbeOutcome {
+    Evaluated(PinnedDisposition),
+    Unevaluated(Refusal),
+}
+
+impl ProbeOutcome {
+    /// The gate label as stored and displayed.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Evaluated(d) => d.as_str(),
+            Self::Unevaluated(_) => UNEVALUATED,
+        }
+    }
+
+    /// Whether the harness signals this outcome with exit code 1.
+    pub fn is_break(&self) -> bool {
+        match self {
+            Self::Evaluated(d) => d.is_break(),
+            Self::Unevaluated(_) => true,
+        }
+    }
+
+    /// The disposition of an evaluated probe.
+    pub fn evaluated(&self) -> Option<PinnedDisposition> {
+        match self {
+            Self::Evaluated(d) => Some(*d),
+            Self::Unevaluated(_) => None,
+        }
+    }
+
+    /// The refusal of an unevaluated probe.
+    pub fn refusal(&self) -> Option<&Refusal> {
+        match self {
+            Self::Evaluated(_) => None,
+            Self::Unevaluated(r) => Some(r),
+        }
+    }
+}
+
+/// What a line's outcome and tier name, before an `unevaluated` line's own
+/// fields are read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineLabel {
+    Evaluated(PinnedDisposition),
+    Unevaluated,
+}
+
+impl LineLabel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Evaluated(d) => d.as_str(),
+            Self::Unevaluated => UNEVALUATED,
+        }
+    }
+}
+
+/// The one outcome/tier validator: the label an `outcome` plus its
+/// acceptance `tier` (empty counts as absent) stand for, or `None` when the
+/// pair is not a valid disposition. `parity` needs a parity tier; any other
+/// outcome must be a live non-parity label and carry no tier. So
+/// `{"outcome":"accepted"}` (a tier posing as an outcome), `parity` with tier
+/// `runtime_fail` and a retired `no_tv_data` are all invalid.
+pub fn valid_label(outcome: &str, tier: Option<&str>) -> Option<LineLabel> {
+    let tier = tier.filter(|value| !value.is_empty());
+    if outcome == "parity" {
+        let d = PinnedDisposition::from_label(tier?)?;
+        d.is_parity().then_some(LineLabel::Evaluated(d))
+    } else if tier.is_some() {
+        None
+    } else if outcome == UNEVALUATED {
+        Some(LineLabel::Unevaluated)
+    } else {
+        PinnedDisposition::from_label(outcome)
+            .filter(|d| !d.is_parity())
+            .map(LineLabel::Evaluated)
+    }
+}
+
+/// The record-level label validator: the label a disposition record stands
+/// for, or why it stands for none. The outcome and tier must form a label
+/// ([`valid_label`], the primitive), and the harness's own `disposition`
+/// field, when the key is present, must be exactly that label as a string. A
+/// present null, number, object or empty string is a defect; only a missing
+/// key is tolerated (a harness predating the field). An invalid outcome/tier
+/// stays invalid even when the field agrees with the derived fallback.
 pub fn record_label(
     outcome: &str,
     tier: Option<&str>,
     declared: Option<&serde_json::Value>,
-) -> Result<CorpusDisposition, String> {
+) -> Result<LineLabel, String> {
     let Some(label) = valid_label(outcome, tier) else {
         return Err(format!(
             "outcome '{outcome}' with tier '{}' is not a valid disposition",
@@ -196,6 +311,73 @@ pub fn record_label(
             "its disposition field {other} contradicts the derived label \"{}\"",
             label.as_str()
         )),
+    }
+}
+
+/// The parity fields piners defines (`ParityDisposition` in its corpus
+/// harness). An `unevaluated` line carries none: the key alone, null
+/// included, makes it invalid. Keys outside this list stay tolerated.
+const PARITY_KEYS: [&str; 25] = [
+    "matched",
+    "ours_only",
+    "tv_only",
+    "boundary_ours",
+    "boundary_tv",
+    "clipped_ours",
+    "clipped_tv",
+    "history_prefix_bars",
+    "oracle_trimmed",
+    "oracle_realtime",
+    "oracle_fills",
+    "oracle_qty_witness",
+    "qty_witnessed",
+    "qty_display",
+    "tv_identity",
+    "boundary_anchor",
+    "boundary_rules",
+    "count_tier",
+    "acceptance",
+    "signature",
+    "ts_shift",
+    "labels",
+    "dense_na_sites",
+    "signal_extra_entries",
+    "window_sensitive",
+];
+
+/// An `unevaluated` line's own contract, given its whole value: a known
+/// `reason`, a nonblank single-line `error`, and no parity field.
+fn refusal_of(value: &serde_json::Value) -> Result<Refusal, String> {
+    let present: Vec<&str> = PARITY_KEYS
+        .into_iter()
+        .filter(|key| value.get(key).is_some())
+        .collect();
+    if !present.is_empty() {
+        return Err(format!(
+            "an unevaluated line carries parity fields ({})",
+            present.join(", ")
+        ));
+    }
+    let reason = match value.get("reason") {
+        Some(serde_json::Value::String(s)) => RefusalReason::from_label(s),
+        _ => None,
+    }
+    .ok_or_else(|| match value.get("reason") {
+        None => "an unevaluated line carries no reason".to_owned(),
+        Some(other) => format!(
+            "an unevaluated line's reason {other} is not one of {}",
+            RefusalReason::ALL.map(RefusalReason::label).join(", ")
+        ),
+    })?;
+    match value.get("error") {
+        Some(serde_json::Value::String(e)) if !e.trim().is_empty() && !e.contains(['\n', '\r']) => {
+            Ok(Refusal {
+                reason,
+                error: e.clone(),
+            })
+        }
+        None => Err("an unevaluated line carries no error detail".to_owned()),
+        Some(_) => Err("an unevaluated line's error is not a nonempty single line".to_owned()),
     }
 }
 
@@ -311,26 +493,24 @@ pub struct ProbeLine {
     /// for a present null. Set by [`parse`]; checked by [`record_label`].
     #[serde(skip)]
     pub declared: Option<serde_json::Value>,
-    /// The `labels` census exactly as sent: `None` when the key is missing (a
-    /// harness predating it, or a non-parity line), `Some` - null included -
-    /// when present, which [`Self::labels`] then holds to a valid census. Set
-    /// by [`parse`].
+    /// The `labels` census, parsed once by [`parse`]: `None` when the key is
+    /// missing (a harness predating it, or a non-parity line) or present but
+    /// not a valid census - an explicit null included - which also makes the
+    /// whole record invalid, so a valid line's census is whatever it sent.
     #[serde(skip)]
-    pub labels_field: Option<serde_json::Value>,
-    /// The `reason` field exactly as sent, read only on an `unevaluated`
-    /// line, which [`Self::refusal`] holds to a known reason. Kept untyped so
-    /// a `reason` on any other line can never sink it. Set by [`parse`].
-    #[serde(skip)]
-    pub reason_field: Option<serde_json::Value>,
+    pub census: Option<LabelCensus>,
+    /// The record's validated outcome, or why it has none: computed once, by
+    /// [`parse`], from the whole line, and read by every consumer - the
+    /// reconciliation, the gate and its label ratchet, bless, the summary and
+    /// the render filter. No consumer revalidates the raw fields.
+    #[serde(skip, default = "unvalidated")]
+    pub verdict: Result<ProbeOutcome, String>,
 }
 
-/// Why an `unevaluated` line's experiment could not be conducted: one of
-/// [`crate::piners::registry::UNEVALUATED_REASONS`] and the harness's
-/// one-line detail.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Refusal<'a> {
-    pub reason: &'a str,
-    pub error: &'a str,
+/// The verdict of a line [`parse`] has not validated, which no line it
+/// returns carries.
+fn unvalidated() -> Result<ProbeOutcome, String> {
+    Err("not validated".to_owned())
 }
 
 impl ProbeLine {
@@ -351,21 +531,31 @@ impl ProbeLine {
         }
     }
 
-    /// The probe's gate label if the record is a *valid* disposition, `None`
-    /// otherwise: the record-level validator ([`record_label`]) - outcome and
-    /// tier together, and the harness's own `disposition` field, when
-    /// present, agreeing with them. Shared by integrity, the gate, the break
-    /// checks and bless.
-    pub fn valid_disposition(&self) -> Option<CorpusDisposition> {
-        self.record_check().ok()
+    /// The validated outcome, `None` for an invalid record.
+    pub fn outcome(&self) -> Option<&ProbeOutcome> {
+        self.verdict.as_ref().ok()
     }
 
-    /// Why the record is not a valid disposition, `None` when it is.
-    pub fn record_defect(&self) -> Option<String> {
-        self.record_check().err()
+    /// Why the record is invalid, `None` when it is valid.
+    pub fn record_defect(&self) -> Option<&str> {
+        self.verdict.as_ref().err().map(String::as_str)
     }
 
-    fn record_check(&self) -> Result<CorpusDisposition, String> {
+    /// The refusal of a valid `unevaluated` line.
+    pub fn refusal(&self) -> Option<&Refusal> {
+        self.outcome().and_then(ProbeOutcome::refusal)
+    }
+
+    /// Validate this line, given the whole value it was read from and its
+    /// parsed `labels` census: the outcome, tier and declared label together
+    /// ([`record_label`]); a present census whole and consistent; and on an
+    /// `unevaluated` line, its reason, error and absence of parity fields
+    /// ([`refusal_of`]).
+    fn validate(
+        &self,
+        value: &serde_json::Value,
+        census: Result<Option<LabelCensus>, String>,
+    ) -> Result<ProbeOutcome, String> {
         let label = record_label(
             &self.outcome,
             self.acceptance.as_ref().map(|a| a.tier.as_str()),
@@ -374,55 +564,11 @@ impl ProbeLine {
         // A present census is gate evidence: a malformed one makes the whole
         // record invalid, so it taints the probe like any other defect and a
         // clean repeat cannot launder it.
-        self.labels()?;
-        if label == CorpusDisposition::Unevaluated {
-            self.refusal_fields()?;
+        census?;
+        match label {
+            LineLabel::Evaluated(d) => Ok(ProbeOutcome::Evaluated(d)),
+            LineLabel::Unevaluated => refusal_of(value).map(ProbeOutcome::Unevaluated),
         }
-        Ok(label)
-    }
-
-    /// The reason and detail of a valid `unevaluated` line, `None` for any
-    /// other line or an invalid one.
-    pub fn refusal(&self) -> Option<Refusal<'_>> {
-        if self.valid_disposition() != Some(CorpusDisposition::Unevaluated) {
-            return None;
-        }
-        self.refusal_fields().ok()
-    }
-
-    /// An `unevaluated` line's contract: a `reason` among the known ones and
-    /// a nonempty one-line `error`. No parity fields are required or read.
-    fn refusal_fields(&self) -> Result<Refusal<'_>, String> {
-        let reason = match &self.reason_field {
-            Some(serde_json::Value::String(s))
-                if crate::piners::registry::UNEVALUATED_REASONS.contains(&s.as_str()) =>
-            {
-                s.as_str()
-            }
-            Some(other) => {
-                return Err(format!(
-                    "an unevaluated line's reason {other} is not one of {}",
-                    crate::piners::registry::UNEVALUATED_REASONS.join(", ")
-                ));
-            }
-            None => return Err("an unevaluated line carries no reason".to_owned()),
-        };
-        match self.error.as_deref() {
-            Some(e) if !e.trim().is_empty() && !e.contains(['\n', '\r']) => {
-                Ok(Refusal { reason, error: e })
-            }
-            Some(_) => Err("an unevaluated line's error is not a nonempty single line".to_owned()),
-            None => Err("an unevaluated line carries no error detail".to_owned()),
-        }
-    }
-
-    /// The label census, `None` when the line carries none; `Err` when the
-    /// key is present but not a valid census (an explicit null included).
-    pub fn labels(&self) -> Result<Option<LabelCensus>, String> {
-        self.labels_field
-            .as_ref()
-            .map(parse_label_census)
-            .transpose()
     }
 
     /// The effective `ours_only` count after discounting window-boundary
@@ -520,6 +666,10 @@ pub struct ContractLine {
 #[derive(Debug, Default)]
 pub struct HarnessReport {
     pub probes: Vec<ProbeLine>,
+    /// Every valid `unevaluated` occurrence in emission order, with its
+    /// probe id, gathered before repeats collapse: evidence, whether or not
+    /// the probe is selected, repeated or tainted by another occurrence.
+    pub refusals: Vec<(String, Refusal)>,
     /// Per-trade drill-down records (`kind == "trade_diff"`), collected for
     /// persistence. Empty for an exact run. Never feeds the summary or gate.
     pub trade_diffs: Vec<TradeDiffLine>,
@@ -671,6 +821,43 @@ fn record_not_json(
     });
 }
 
+/// A disposition line that deserialized: complete it from the whole `value`
+/// it was read from, validate it once, and file it. Every occurrence is
+/// validated here, before repeats collapse, so a later consistent duplicate
+/// cannot hide an earlier defective record; the record stays in `probes`
+/// (stored whole) either way, but an invalid one is never scored.
+fn record_disposition(
+    report: &mut HarnessReport,
+    mut p: ProbeLine,
+    value: &serde_json::Value,
+    position: usize,
+) {
+    p.raw = value.to_string();
+    p.line = position;
+    // Missing key and present null are different facts.
+    p.declared = value.get("disposition").cloned();
+    let census = value
+        .get("labels")
+        .map(parse_label_census)
+        .transpose();
+    p.census = census.clone().ok().flatten();
+    p.verdict = p.validate(value, census);
+    // Every valid refusal is evidence, kept here before repeats collapse or
+    // a taint unscores its probe.
+    if let Some(refusal) = p.refusal() {
+        report.refusals.push((p.probe.clone(), refusal.clone()));
+    }
+    if let Some(why) = p.record_defect() {
+        report.invalid.push(InvalidRecord {
+            probe: Some(p.probe.clone()),
+            reason: why.to_owned(),
+            line: position,
+            not_json: false,
+        });
+    }
+    report.probes.push(p);
+}
+
 /// A disposition line that does not deserialize: a warning, and an invalid
 /// record naming the probe when the line carried one.
 fn record_unparsable_disposition(
@@ -784,32 +971,8 @@ pub fn parse(stdout: &[u8]) -> HarnessReport {
             .map_or_else(String::new, |id| format!(" (probe {id})"));
         match value.get("kind").and_then(serde_json::Value::as_str) {
             None | Some("disposition") => {
-                let raw = value.to_string();
-                // Missing key and present null are different facts.
-                let declared = value.get("disposition").cloned();
-                let labels_field = value.get("labels").cloned();
-                let reason_field = value.get("reason").cloned();
-                match serde_json::from_value::<ProbeLine>(value) {
-                    Ok(mut p) => {
-                        p.raw = raw;
-                        p.line = position;
-                        p.declared = declared;
-                        p.labels_field = labels_field;
-                        p.reason_field = reason_field;
-                        // Every occurrence is validated here, before repeats
-                        // collapse, so a later consistent duplicate cannot
-                        // hide an earlier defective record. The record stays
-                        // in `probes` (stored whole), but is never scored.
-                        if let Some(why) = p.record_defect() {
-                            report.invalid.push(InvalidRecord {
-                                probe: Some(p.probe.clone()),
-                                reason: why,
-                                line: position,
-                                not_json: false,
-                            });
-                        }
-                        report.probes.push(p);
-                    }
+                match ProbeLine::deserialize(&value) {
+                    Ok(p) => record_disposition(&mut report, p, &value, position),
                     Err(e) => {
                         record_unparsable_disposition(&mut report, position, trimmed, probe_id, &e);
                     }
@@ -906,8 +1069,8 @@ pub fn summarize(probes: &[ProbeLine]) -> Summary {
         // The summary normally receives the reconciliation's scored set.
         // Keep its classification tied to the record validator as well, so
         // malformed raw outcomes cannot enter a disposition total directly.
-        match p.valid_disposition() {
-            Some(disposition) => {
+        match p.outcome() {
+            Some(ProbeOutcome::Evaluated(disposition)) => {
                 if disposition.is_parity() {
                     s.parity += 1;
                     match p.count_tier.as_deref() {
@@ -918,19 +1081,16 @@ pub fn summarize(probes: &[ProbeLine]) -> Summary {
                     }
                 }
                 match disposition {
-                    CorpusDisposition::ByteExact => s.byte_exact += 1,
-                    CorpusDisposition::Accepted => s.accepted += 1,
-                    CorpusDisposition::ActionableDrift => s.actionable_drift += 1,
-                    CorpusDisposition::CountDivergent => s.count_divergent += 1,
-                    CorpusDisposition::CompileFail => s.compile_fail += 1,
-                    CorpusDisposition::RuntimeFail => s.runtime_fail += 1,
-                    CorpusDisposition::Unevaluated => s.unevaluated += 1,
-                    CorpusDisposition::HarnessAbort => s.harness_abort += 1,
-                    // History-only labels: the validator never yields them
-                    // for a new line.
-                    CorpusDisposition::NoTvData | CorpusDisposition::NoOverlap => s.other += 1,
+                    PinnedDisposition::ByteExact => s.byte_exact += 1,
+                    PinnedDisposition::Accepted => s.accepted += 1,
+                    PinnedDisposition::ActionableDrift => s.actionable_drift += 1,
+                    PinnedDisposition::CountDivergent => s.count_divergent += 1,
+                    PinnedDisposition::CompileFail => s.compile_fail += 1,
+                    PinnedDisposition::RuntimeFail => s.runtime_fail += 1,
+                    PinnedDisposition::HarnessAbort => s.harness_abort += 1,
                 }
             }
+            Some(ProbeOutcome::Unevaluated(_)) => s.unevaluated += 1,
             None => s.other += 1,
         }
         // Window-boundary discounting is orthogonal to outcome: tally it for
@@ -1053,8 +1213,11 @@ impl<'a> RenderPlan<'a> {
             // raw outcome if that caller contract ever changes.
             if deviating.contains(p.probe.as_str())
                 || matches!(
-                    p.valid_disposition(),
-                    Some(CorpusDisposition::HarnessAbort | CorpusDisposition::Unevaluated)
+                    p.outcome(),
+                    Some(
+                        ProbeOutcome::Evaluated(PinnedDisposition::HarnessAbort)
+                            | ProbeOutcome::Unevaluated(_)
+                    )
                 )
             {
                 plan.shown.push(p);
@@ -1157,7 +1320,9 @@ fn format_probe(p: &ProbeLine) -> String {
     if let Some(refusal) = p.refusal() {
         return format!(
             "{}: unevaluated ({}) - {}",
-            p.probe, refusal.reason, refusal.error
+            p.probe,
+            refusal.reason.label(),
+            refusal.error
         );
     }
     if let Some(err) = &p.error {
@@ -1292,15 +1457,16 @@ mod tests {
         let ok = line(r#","disposition":"unevaluated","reason":"feed_coverage","error":"past the feed""#);
         assert!(ok.invalid.is_empty(), "{:?}", ok.invalid);
         let p = &ok.probes[0];
-        assert_eq!(p.valid_disposition(), Some(CorpusDisposition::Unevaluated));
-        assert_eq!(
-            p.refusal(),
-            Some(Refusal {
-                reason: "feed_coverage",
-                error: "past the feed"
-            })
-        );
+        let want = Refusal {
+            reason: RefusalReason::FeedCoverage,
+            error: "past the feed".to_owned(),
+        };
+        assert_eq!(p.outcome(), Some(&ProbeOutcome::Unevaluated(want.clone())));
+        assert_eq!(p.refusal(), Some(&want));
         assert!(format_probe(p).starts_with("p: unevaluated (feed_coverage) - past the feed"));
+        // runtime_ms and keys piners does not define stay tolerated.
+        let extra = line(r#","reason":"no_overlap","error":"x","runtime_ms":4,"future":1"#);
+        assert!(extra.invalid.is_empty(), "{:?}", extra.invalid);
         for bad in [
             r#","error":"x""#,
             r#","reason":"no_tv_data","error":"x""#,
@@ -1309,11 +1475,24 @@ mod tests {
             r#","reason":"no_overlap","error":"  ""#,
             r#","reason":"no_overlap","error":"two\nlines""#,
             r#","reason":"no_overlap","error":"x","acceptance":{"tier":"accepted"}"#,
+            r#","reason":"no_overlap","error":"x","acceptance":{"tier":""}"#,
+            r#","reason":"no_overlap","error":"x","matched":1"#,
+            r#","reason":"no_overlap","error":"x","boundary_ours":3"#,
+            r#","reason":"no_overlap","error":"x","signature":null"#,
         ] {
             let r = line(bad);
             assert_eq!(r.invalid.len(), 1, "{bad}");
-            assert_eq!(r.probes[0].valid_disposition(), None, "{bad}");
+            assert_eq!(r.probes[0].outcome(), None, "{bad}");
             assert_eq!(r.probes[0].refusal(), None, "{bad}");
+        }
+        // Every parity key piners defines, null included, makes it invalid.
+        // (A null on a field the line deserializes as a number fails before
+        // the refusal check; invalid either way.)
+        for key in PARITY_KEYS {
+            let r = line(&format!(r#","reason":"no_overlap","error":"x","{key}":null"#));
+            assert_eq!(r.invalid.len(), 1, "{key}");
+            assert!(r.probes.iter().all(|p| p.outcome().is_none()), "{key}");
+            assert!(r.refusals.is_empty(), "{key}");
         }
         // A `reason` on any other line is ignored, whatever its type.
         let other = parse(br#"{"probe":"p","outcome":"compile_fail","error":"x","reason":3}"#);
@@ -1326,9 +1505,8 @@ mod tests {
         for outcome in ["no_tv_data", "no_overlap"] {
             let r = parse(format!("{{\"probe\":\"p\",\"outcome\":\"{outcome}\"}}").as_bytes());
             assert_eq!(r.invalid.len(), 1, "{outcome}");
-            assert_eq!(r.probes[0].valid_disposition(), None, "{outcome}");
-            // Still a label stored history may carry.
-            assert!(CorpusDisposition::from_label(outcome).is_some());
+            assert_eq!(r.probes[0].outcome(), None, "{outcome}");
+            assert!(crate::piners::registry::RETIRED_LABELS.contains(&outcome));
         }
     }
 
@@ -1523,11 +1701,11 @@ mod tests {
         // Absent: valid, no census.
         let r = parse(line("").as_bytes());
         assert!(r.invalid.is_empty());
-        assert_eq!(r.probes[0].labels(), Ok(None));
+        assert_eq!(r.probes[0].census, None);
         // Whole and consistent: valid.
         let r = parse(line(&format!(",\"labels\":{{\"entry\":{leg},\"exit\":{leg}}}")).as_bytes());
         assert!(r.invalid.is_empty());
-        assert_eq!(r.probes[0].labels().unwrap().unwrap().exit.ambiguous, 2);
+        assert_eq!(r.probes[0].census.unwrap().exit.ambiguous, 2);
         // Each defect makes the whole record invalid.
         for bad in [
             ",\"labels\":null".to_owned(),
@@ -1547,7 +1725,7 @@ mod tests {
         ] {
             let r = parse(line(&bad).as_bytes());
             assert_eq!(r.invalid.len(), 1, "{bad}");
-            assert!(r.probes[0].valid_disposition().is_none(), "{bad}");
+            assert!(r.probes[0].outcome().is_none(), "{bad}");
         }
     }
 
@@ -1601,16 +1779,17 @@ mod tests {
     fn the_validator_checks_outcome_and_tier_together() {
         assert_eq!(
             valid_label("parity", Some("accepted")),
-            Some(CorpusDisposition::Accepted)
+            Some(LineLabel::Evaluated(PinnedDisposition::Accepted))
         );
         assert_eq!(
             valid_label("compile_fail", None),
-            Some(CorpusDisposition::CompileFail)
+            Some(LineLabel::Evaluated(PinnedDisposition::CompileFail))
         );
         assert_eq!(
             valid_label("unevaluated", Some("")),
-            Some(CorpusDisposition::Unevaluated)
+            Some(LineLabel::Unevaluated)
         );
+        assert_eq!(valid_label("unevaluated", Some("accepted")), None);
         // A retired outcome is no live label.
         assert_eq!(valid_label("no_overlap", None), None);
         // A tier posing as an outcome.
@@ -1627,14 +1806,13 @@ mod tests {
     fn harness_abort_is_a_valid_label_and_vocabulary_is_single_sourced() {
         assert_eq!(
             valid_label("harness_abort", None),
-            Some(CorpusDisposition::HarnessAbort)
+            Some(LineLabel::Evaluated(PinnedDisposition::HarnessAbort))
         );
         assert_eq!(valid_label("harness_abort", Some("accepted")), None);
-        let labels: Vec<&str> = crate::piners::registry::ALL_DISPOSITIONS
+        let labels: Vec<&str> = crate::piners::registry::ALL_PINNED
             .iter()
             .map(|disposition| disposition.as_str())
             .collect();
-        assert_eq!(labels.len(), 10);
         assert_eq!(
             labels,
             vec![
@@ -1644,25 +1822,20 @@ mod tests {
                 "count_divergent",
                 "compile_fail",
                 "runtime_fail",
-                "no_tv_data",
-                "no_overlap",
                 "harness_abort",
-                "unevaluated",
             ]
         );
-        // Live and pinnable are nested subsets of the history labels.
-        let history_only: Vec<&str> = crate::piners::registry::ALL_DISPOSITIONS
-            .iter()
-            .filter(|d| !d.is_live())
-            .map(|d| d.as_str())
-            .collect();
-        assert_eq!(history_only, vec!["no_tv_data", "no_overlap"]);
-        let unpinnable: Vec<&str> = crate::piners::registry::ALL_DISPOSITIONS
-            .iter()
-            .filter(|d| !d.is_pinnable())
-            .map(|d| d.as_str())
-            .collect();
-        assert_eq!(unpinnable, vec!["no_tv_data", "no_overlap", "unevaluated"]);
+        let reasons: Vec<&str> = RefusalReason::ALL.map(RefusalReason::label).to_vec();
+        assert_eq!(
+            reasons,
+            vec![
+                "invalid_evidence",
+                "insufficient_evidence",
+                "witness_contract",
+                "feed_coverage",
+                "no_overlap",
+            ]
+        );
     }
 
     #[test]
@@ -1733,11 +1906,11 @@ mod tests {
         );
         assert_eq!(r.probes[0].declared, None);
         assert_eq!(
-            r.probes[0].valid_disposition(),
-            Some(CorpusDisposition::CompileFail)
+            r.probes[0].outcome(),
+            Some(&ProbeOutcome::Evaluated(PinnedDisposition::CompileFail))
         );
         assert_eq!(r.probes[1].declared, Some(serde_json::Value::Null));
-        assert_eq!(r.probes[1].valid_disposition(), None);
+        assert_eq!(r.probes[1].outcome(), None);
         // The defective record is kept whole (stored) and listed invalid.
         assert_eq!(r.probes.len(), 2);
         assert!(r.probes[1].raw.contains("\"disposition\":null"));

@@ -41,9 +41,18 @@ and the `runs.db` ingest are parity-only and skipped.
   run with a `harness_abort` is never a timing sample. There is no isolation
   pass on this path. Any `harness_abort` or `unevaluated` disqualifies the
   iteration explicitly, even on exit 0 (a disposition-only stream, or a
-  `run_end` saying 0). The one exemption is an iteration whose `--stop` marker
-  actually fired (it ends early by design); a configured marker that never
-  fired is held to the selection like any other run.
+  `run_end` saying 0).
+- An iteration whose `--stop` marker actually fired ends early by design, so
+  it is excused only what the stop interrupted: full coverage and a terminal
+  record. Everything its stream already shows is held to the same rules: it
+  fails on a `run_error`, any `harness_abort`, any `unevaluated`, any other
+  break line from a selected probe, a `run_end` saying 1, an invalid,
+  repeated or extra record, a contract violation the prefix establishes (a
+  duplicate start, a malformed `run_error`, a record after a terminal one) or
+  a stream cut short. A fragment the stop cut off mid-write is context, not an
+  invalid record, and the stop leaves no process exit for `run_end` or
+  `run_error` to be compared against. A configured marker that never fired is
+  held to the selection like any other run.
 - `--force` carries its usual measured-run meaning (run on a dirty tree). A
   parity run refuses it: there is nothing there for it to override.
 - `--bench` is **not** supported - the harness emits NDJSON dispositions,
@@ -523,8 +532,14 @@ separate categories:
   `no_tv_data` or `no_overlap` are all invalid. An `unevaluated` line must
   also carry a `reason` - one of `invalid_evidence`, `insufficient_evidence`,
   `witness_contract`, `feed_coverage`, `no_overlap` - and a nonempty one-line
-  `error`; a missing or unknown reason, or a missing, blank or multi-line
-  error, makes it invalid. The record must also agree with itself: when the harness's own
+  `error`, and carry none of the parity fields piners defines (`matched`,
+  `ours_only`, `tv_only`, the boundary, clipped, history-prefix and oracle
+  counts, `tv_identity`, `boundary_anchor`, `boundary_rules`, `count_tier`,
+  `acceptance`, `signature`, `ts_shift`, `labels`, `dense_na_sites`,
+  `signal_extra_entries`, `window_sensitive`; the key alone, null included,
+  counts). A missing or unknown reason, a missing, blank or multi-line error,
+  or a parity field makes it invalid; `runtime_ms` and keys piners does not
+  define stay tolerated. The record must also agree with itself: when the harness's own
   `disposition` field is **present** it must be exactly the derived label, as
   a string - a different label, a null, a number, an object or an empty
   string makes the record invalid, and the message prints both values. Only
@@ -534,10 +549,13 @@ separate categories:
   satisfies its pin (the gate shows `invalid (an occurrence was invalid;
   ...)`), explains no exit-1 break, and is stored with `gate_ok = 0`, so
   `corpus-results` lists it as a deviation.
-  The record is still stored whole. This one record-level validator
-  (`report::record_label`, over the outcome/tier primitive
-  `report::valid_label`) is shared by the gate (an invalid record never
-  satisfies its pin, nor explains exit 1) and bless;
+  The record is still stored whole. The parser validates each line once,
+  into a `report::ProbeOutcome` - an evaluated disposition a pin can hold,
+  or a refusal no pin, gate comparison or bless stamp can - or the reason it
+  is invalid (`report::record_label`, over the outcome/tier primitive
+  `report::valid_label`, plus the `unevaluated` fields above). Every consumer
+  reads that verdict: the gate (an invalid record never satisfies its pin,
+  nor explains exit 1), bless, the summary and the reconciliation;
 - **missing** - selected ids with no record at all;
 - **invalid** - a line for a selected id whose disposition is not a gate
   label, a disposition line that does not deserialize, or a stdout line that
@@ -696,11 +714,17 @@ run alone (`src/piners/isolate.rs`). Evidence only, never scoring.
   `harness_abort` counts: the harness already attributed that crash), breaks
   no report protocol or contract, carries its `run_end` once the contract is
   observed, and its stdout was not cut short; a failing subset is split in
-  two and each half run alone. An `unevaluated` line is a valid report, so its
-  subset completes, but the diagnosis keeps it: the probes a completed
-  attempt reported `unevaluated` are listed, with their reasons, on the
-  console and in the stored note, never cleared as `completed when run
-  alone`. A failure is classified, in this order:
+  two and each half run alone. An `unevaluated` line is a valid report, so
+  its subset can complete, but every refusal an attempt's captured stream
+  holds is kept beside the attempt's outcome, whether the attempt completed,
+  failed or stopped diagnosis (an evidence-storage failure or the deadline
+  included; an attempt that never produced a capture has none). Each is kept
+  with the attempt that reported it, never merged across attempts, so one
+  probe refused for two reasons keeps both: the console lists `unevaluated
+  (...): id (reason) in attempt N: detail` and the stored note `unevaluated:
+  id (reason) in attempt N`. A singleton whose own attempt refused it reads
+  `probe X reported unevaluated (reason) when run alone in attempt N`, never
+  `completed when run alone`. A failure is classified, in this order:
   **protocol-invalid** (an invalid, repeated or extra record, a contract
   violation, or a cut stream - whatever the exit, so a malformed stream is
   never taken for a crash), an **abort** (exit 2, another unexpected code, a

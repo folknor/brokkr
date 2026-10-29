@@ -19,7 +19,9 @@
 //! - Terminal records. `run_end` carries `exit` 0 or 1, appears at most once,
 //!   is the last line, and equals the process exit. `run_error` appears at
 //!   most once, never with `run_end`, and means process exit 2 (unless brokkr
-//!   itself killed the harness: the hang backstop or an interrupt). A process
+//!   itself killed the harness: the hang backstop, an interrupt or a measured
+//!   iteration's `--stop` marker, which also leaves no exit for `run_end` to
+//!   equal). A process
 //!   that exited on its own with neither record broke the contract; one that
 //!   died of a signal with neither is an abort, not a malformed stream.
 //! - Lifecycle, per probe, in emission order: `probe_start` then `probe_end`,
@@ -413,9 +415,15 @@ pub fn assess_contract(
         b.add("run_end and run_error in one stream", "both present");
     }
 
-    // Terminal records against the process exit.
-    let brokkr_killed = matches!(end, HarnessEnd::Backstop | HarnessEnd::Interrupted);
+    // Terminal records against the process exit. A stop at a `--stop`
+    // marker is brokkr's own kill and leaves no natural exit to compare
+    // against; every other rule holds for what the stream already shows.
+    let brokkr_killed = matches!(
+        end,
+        HarnessEnd::Backstop | HarnessEnd::Interrupted | HarnessEnd::Stopped
+    );
     if let Some(exit) = a.run_end
+        && end != HarnessEnd::Stopped
         && end != HarnessEnd::Code(exit.code())
     {
         b.add(

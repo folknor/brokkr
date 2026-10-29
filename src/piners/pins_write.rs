@@ -413,7 +413,7 @@ b = \"piners/b\"
         feeds.insert("eth-15m".to_owned(), group);
         let mut probes = BTreeMap::new();
         let mut p = pin("alpha-01", "aa");
-        p.expected = Some(registry::CorpusDisposition::Accepted);
+        p.expected = Some(registry::PinnedDisposition::Accepted);
         probes.insert("alpha-01".to_owned(), p);
 
         let text = render(None, &feeds, &BTreeMap::new(), &probes).unwrap();
@@ -435,7 +435,7 @@ b = \"piners/b\"
             other => panic!("expected role form, got {other:?}"),
         }
         let p = &data.probes["alpha-01"];
-        assert_eq!(p.expected, Some(registry::CorpusDisposition::Accepted));
+        assert_eq!(p.expected, Some(registry::PinnedDisposition::Accepted));
         assert_eq!(p.pine.xxh128, "aa");
     }
 
@@ -481,7 +481,7 @@ csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
         let feeds = commented_feeds();
         let mut probes = BTreeMap::new();
         let mut alpha = pin("alpha-01", "a-new");
-        alpha.expected = Some(registry::CorpusDisposition::ByteExact); // changed by a bless
+        alpha.expected = Some(registry::PinnedDisposition::ByteExact); // changed by a bless
         probes.insert("alpha-01".to_owned(), alpha);
         probes.insert("mid-05".to_owned(), pin("mid-05", "mm")); // newly discovered
         // zulu-09 vanished from the corpus.
@@ -516,7 +516,7 @@ csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
         let data = reparse(&text);
         assert_eq!(
             data.probes["alpha-01"].expected,
-            Some(registry::CorpusDisposition::ByteExact)
+            Some(registry::PinnedDisposition::ByteExact)
         );
         assert_eq!(data.probes["mid-05"].expected, None);
         assert_eq!(data.feeds["eth-15m"].roles()[0].1.xxh128, "f-new");
@@ -542,10 +542,10 @@ csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
         let feeds = commented_feeds();
         let mut probes = BTreeMap::new();
         let mut alpha = pin("alpha-01", "a-old");
-        alpha.expected = Some(registry::CorpusDisposition::Accepted);
+        alpha.expected = Some(registry::PinnedDisposition::Accepted);
         probes.insert("alpha-01".to_owned(), alpha);
         let mut zulu = pin("zulu-09", "zz");
-        zulu.expected = Some(registry::CorpusDisposition::CompileFail); // first bless
+        zulu.expected = Some(registry::PinnedDisposition::CompileFail); // first bless
         probes.insert("zulu-09".to_owned(), zulu);
 
         let text = render(Some(COMMENTED), &feeds, &BTreeMap::new(), &probes).unwrap();
@@ -563,7 +563,7 @@ csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
         let feeds = commented_feeds();
         let mut probes = BTreeMap::new();
         let mut alpha = pin("alpha-01", "a-old");
-        alpha.expected = Some(registry::CorpusDisposition::Accepted);
+        alpha.expected = Some(registry::PinnedDisposition::Accepted);
         alpha.labels = Some(registry::LabelPin { entry: 0, exit: 4 });
         probes.insert("alpha-01".to_owned(), alpha);
         probes.insert("zulu-09".to_owned(), pin("zulu-09", "zz"));

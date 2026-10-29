@@ -330,10 +330,10 @@ fn render_probe(db: &CorpusDb, run_id: i64, probe: &str) -> Result<(), DevError>
 /// never folded into "matching their pin"; an `unevaluated` row likewise,
 /// whatever its stored `gate_ok`.
 fn shown_by_default(d: &DispositionRow) -> bool {
-    use crate::piners::registry::CorpusDisposition;
+    use crate::piners::registry::{PinnedDisposition, UNEVALUATED};
     !d.gate_ok
-        || d.disposition == CorpusDisposition::HarnessAbort.as_str()
-        || d.disposition == CorpusDisposition::Unevaluated.as_str()
+        || d.disposition == PinnedDisposition::HarnessAbort.as_str()
+        || d.disposition == UNEVALUATED
 }
 
 #[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.

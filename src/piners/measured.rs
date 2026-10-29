@@ -171,15 +171,13 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
             i,
             Some(crate::piners::cmd::HARNESS_HANG_BACKSTOP),
         )?;
-        if let Some(ending) = &iteration.ending
-            && !matches!(ending, crate::output::Ending::StopMarker(_))
-        {
+        // Every ending is judged, a fired --stop marker included: the stop
+        // excuses what it interrupted, never what the stream already shows.
+        if let Some(ending) = &iteration.ending {
             let end = HarnessEnd::from_ending(ending);
             if let Err(error) = check_iteration(i, &ids, end, &iteration.stdout, &iteration.stderr)
             {
-                // The protocol assessment explains the failure more precisely
-                // than the generic child verdict; keep its captured evidence.
-                iteration.error = Some(error);
+                keep_first_error(&mut iteration.error, error);
             }
         }
         Ok(iteration)
@@ -188,9 +186,21 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
     Ok(())
 }
 
+/// Record a protocol failure on an iteration. The protocol assessment
+/// explains a failure more precisely than the generic child verdict, so it
+/// fills an empty slot; a capture error already there stands - an
+/// interrupt, which shutdown handling keys on, or a truncation or drain
+/// failure, about which the assessment of incomplete output knows less.
+fn keep_first_error(slot: &mut Option<DevError>, error: DevError) {
+    if slot.is_none() {
+        *slot = Some(error);
+    }
+}
+
 /// The measured-iteration policy comes from the shared assessment: only an
 /// exit-0 completed run without a validly reported `harness_abort` or
-/// `unevaluated` is a sample.
+/// `unevaluated` is a sample, and an iteration ended at its `--stop` marker
+/// only when everything it reported before the stop is clean.
 /// On failure prints the reconciliation, context and whole stderr. No
 /// isolation on this path.
 fn check_iteration(
@@ -291,6 +301,16 @@ mod tests {
             err.to_string().contains("harness_abort in the run"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn a_protocol_failure_never_replaces_a_capture_error() {
+        let mut slot = Some(DevError::Interrupted);
+        keep_first_error(&mut slot, DevError::Verify("protocol".to_owned()));
+        assert!(matches!(slot, Some(DevError::Interrupted)));
+        let mut empty = None;
+        keep_first_error(&mut empty, DevError::Verify("protocol".to_owned()));
+        assert!(matches!(empty, Some(DevError::Verify(_))));
     }
 
     #[test]
