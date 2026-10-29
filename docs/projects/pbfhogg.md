@@ -46,9 +46,13 @@ reject it as an unknown argument. The flag is therefore passed only when the
 executable about to run accepts it, asked per subcommand of that executable:
 
 - `SUB --help` must exit 0 (the subcommand exists),
-- `SUB --hel --help` must exit 2 (an unknown flag there is rejected, so long
-  option inference is off and no positional swallows it),
-- then `SUB --overwrite --help` exiting 0 means supported, 2 means not.
+- `SUB --hel --help` must exit with a usage error (an unknown flag there is
+  rejected, so long option inference is off and no positional swallows it):
+  2, clap's own status, or 64 (`EX_USAGE`) from a pbfhogg build that splits
+  usage errors from runtime failures, which keep 2; the status it shows is
+  that build's usage error,
+- then `SUB --overwrite --help` exiting 0 means supported, and exiting with
+  that same usage error means not.
 
 Anything else is an error naming the probe, never a silent "unsupported".
 Each probe runs in its own process group with a 60-second wall and without

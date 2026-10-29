@@ -245,15 +245,22 @@ Each part below is tested, its whole path is not:
   reader, or of the startup shedding of inherited run variables through the
   production `main`.
 
-### A library refusal counterpart cannot tell a refusal from a usage error (2026-10-29)
+### A library refusal counterpart proves a status, not a reason (2026-10-29)
 
 A refusal counterpart's declared `exit` proves the CLI's status, not its
-reason: pbfhogg's failure status is 2, the same as clap's usage error, so an
-argv typo passes as the CLI refusing the same input. Closing it needs a
-machine-readable refusal kind from the pbfhogg CLI (its error kind, which
-the call document's `outcome.kind` could then be compared with); brokkr's
-side would be an optional field on the counterpart. Comparing stderr text
-was rejected as brittle.
+reason. Today pbfhogg's failure status is 2, the same as clap's usage
+error, so an argv typo passes as the CLI refusing the same input. pbfhogg
+is splitting usage errors out to 64 (`EX_USAGE`), runtime failures keeping
+2 (brokkr#59); the capability probe already reads either. When that pbfhogg
+commit lands: refuse `exit: 64` in a refusal counterpart, since a usage
+error is never a refusal, and reword the refusal paragraphs of
+`docs/commands/library.md` and `reference/library-internals.md`.
+
+What stays open after the split: exit 2 says a runtime failure, not which
+one. A machine-readable error kind from the pbfhogg CLI would close that
+(compared with the call document's `outcome.kind`); pbfhogg designs it if
+a scenario turns out to need the distinction. Comparing stderr text was
+rejected as brittle.
 
 ### Leftover sweeps for older brokkr binaries (2026-10-29)
 

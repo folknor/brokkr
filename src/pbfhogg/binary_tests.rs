@@ -48,6 +48,20 @@ fn decide_never_turns_a_broken_probe_into_unsupported() {
     assert!(decide_overwrite(Some(0), Some(2), None).is_err());
 }
 
+#[test]
+fn decide_reads_unsupported_as_the_usage_status_its_control_showed() {
+    // A build after pbfhogg's split: usage errors end 64, failures 2.
+    assert_eq!(decide_overwrite(Some(0), Some(64), Some(0)), Ok(true));
+    assert_eq!(decide_overwrite(Some(0), Some(64), Some(64)), Ok(false));
+    // The flag probe must agree with the control: a 2 beside a 64 control is
+    // a runtime failure, never unsupported, and the other way round.
+    assert!(decide_overwrite(Some(0), Some(64), Some(2)).is_err());
+    assert!(decide_overwrite(Some(0), Some(2), Some(64)).is_err());
+    // No other status is a usage error.
+    assert!(decide_overwrite(Some(0), Some(1), Some(1)).is_err());
+    assert!(decide_overwrite(Some(0), Some(3), Some(3)).is_err());
+}
+
 // ---------------------------------------------------------------------------
 // The clap behaviour the probe relies on, checked against real clap
 // ---------------------------------------------------------------------------
@@ -256,6 +270,52 @@ fn writing(sub: &str, out: impl AsRef<Path>) -> PbfArgv {
 /// `SUB in.pbf`.
 fn reading(sub: &str) -> PbfArgv {
     PbfArgv::new(sub).input("in.pbf").unwrap()
+}
+
+/// [`FAKE_PBFHOGG`] as a build after pbfhogg's split: every usage error
+/// ends 64 (`EX_USAGE`) instead of clap's 2.
+fn fake_pbfhogg_ex_usage() -> String {
+    let split = FAKE_PBFHOGG
+        .replacen("cat) ok=2 dirs=2", "cat) ok=64 dirs=64", 1)
+        .replacen("build-geocode-index) ok=2", "build-geocode-index) ok=64", 1)
+        .replacen("*) exit 2 ;;", "*) exit 64 ;;", 1)
+        .replacen("--hel) exit 2 ;;", "--hel) exit 64 ;;", 1);
+    assert!(!split.contains("exit 2") && !split.contains("=2 "), "{split}");
+    split
+}
+
+#[test]
+fn a_build_whose_usage_errors_end_64_is_probed_alike() {
+    let (root, path) = install("ex-usage", &fake_pbfhogg_ex_usage());
+    let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
+    let sort = binary.invocation(writing("sort", "out.pbf")).unwrap();
+    assert!(has(sort.args_for_test(), OVERWRITE_FLAG));
+    assert!(has(sort.args_for_test(), STAGING_DIR_FLAG));
+    let cat = binary.invocation(writing("cat", "out.pbf")).unwrap();
+    assert!(!has(cat.args_for_test(), OVERWRITE_FLAG));
+    assert!(!has(cat.args_for_test(), STAGING_DIR_FLAG));
+}
+
+#[test]
+fn a_declared_overwrite_is_required_and_a_declared_none_never_passed() {
+    let (root, path) = install("stance", FAKE_PBFHOGG);
+    let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
+    let sort = binary
+        .invocation(writing("sort", "out.pbf").overwrite_stance(false))
+        .unwrap();
+    assert!(!has(sort.args_for_test(), OVERWRITE_FLAG));
+    let sort = binary
+        .invocation(writing("sort", "out.pbf").overwrite_stance(true))
+        .unwrap();
+    assert!(has(sort.args_for_test(), OVERWRITE_FLAG));
+    // `cat` does not accept the flag: a required one refuses the launch.
+    let Err(e) = binary.invocation(writing("cat", "out.pbf").overwrite_stance(true)) else {
+        panic!("a required --overwrite the build lacks was not refused");
+    };
+    assert!(
+        e.to_string().contains("does not accept --overwrite"),
+        "{e}"
+    );
 }
 
 #[test]

@@ -35,11 +35,13 @@
 //! reliably (wrapped and next-line descriptions, custom headings, prose):
 //!
 //! - `SUB --help` must exit 0: the subcommand exists and help works.
-//! - `SUB --hel --help` must exit 2. `--hel` is a strict prefix of `--help`,
+//! - `SUB --hel --help` must exit with a usage error, 2 or 64 (see below).
+//!   `--hel` is a strict prefix of `--help`,
 //!   so clap rejects it as unknown only when long-option inference is off and
 //!   an unknown flag in that position is not swallowed as a positional value
 //!   - the two prerequisites for the next probe meaning what it says.
-//! - `SUB --overwrite --help`: 0 is supported, 2 is not. Clap parses in order
+//! - `SUB --overwrite --help`: 0 is supported, the control's usage error is
+//!   not. Clap parses in order
 //!   and errors on an unknown argument before the help action fires or
 //!   required arguments are checked. `--staging-dir=. --help` and
 //!   `--tmp-dir=. --help` are asked the same way, with a value attached so the
@@ -51,7 +53,10 @@
 //! "unsupported". Each probe runs in its own process group without the
 //! variables a running harness gets, so it never opens an inherited marker
 //! FIFO. The contract relied on is
-//! clap's: help exits 0, a usage error exits 2.
+//! clap's: help exits 0, a usage error exits one status. That status is
+//! clap's own 2, or 64 (`EX_USAGE`) from a pbfhogg build that splits usage
+//! errors from runtime failures (which keep 2); the control shows which, and
+//! the flag probe must answer with the same one to count as unsupported.
 //!
 //! # Caching
 //!
@@ -150,7 +155,13 @@ impl Flag {
 
 /// Bumped whenever the probe's decision rule changes, so answers recorded by
 /// an older rule are never consumed.
-const PROBE_PROTOCOL: u32 = 1;
+const PROBE_PROTOCOL: u32 = 2;
+
+/// The statuses a pbfhogg build ends a usage error with: clap's own 2, which
+/// every build before pbfhogg split usage errors from runtime failures
+/// returns, and `EX_USAGE`, which a build after the split returns. Which
+/// one a build uses is read from its control probe.
+const USAGE_STATUSES: [i32; 2] = [2, 64];
 
 /// Most recent answers kept in the store; older ones are dropped on save.
 const STORE_CAP: usize = 512;
@@ -916,7 +927,9 @@ fn stderr_tail(stderr: &[u8]) -> String {
 }
 
 /// The probe's decision from the three exit codes (`None` is a signal) for
-/// the flag named `flag`.
+/// the flag named `flag`. The control's status, one of [`USAGE_STATUSES`],
+/// is this build's usage error, and the flag probe is unsupported exactly
+/// when it ends with that same status.
 fn decide(
     help: Option<i32>,
     control: Option<i32>,
@@ -929,19 +942,23 @@ fn decide(
             show_code(help)
         ));
     }
-    if control != Some(2) {
-        return Err(format!(
-            "the unknown flag `--hel` exited {} instead of 2, so this parser does not \
-             reject unknown flags exactly (long-option inference, or a positional that \
-             takes hyphen values)",
-            show_code(control)
-        ));
-    }
+    let usage = match control {
+        Some(code) if USAGE_STATUSES.contains(&code) => code,
+        other => {
+            return Err(format!(
+                "the unknown flag `--hel` exited {} instead of a usage error (2, or 64 since \
+                 pbfhogg split usage errors out), so this parser does not reject unknown \
+                 flags exactly (long-option inference, or a positional that takes hyphen \
+                 values)",
+                show_code(other)
+            ));
+        }
+    };
     match probed {
         Some(0) => Ok(true),
-        Some(2) => Ok(false),
+        Some(code) if code == usage => Ok(false),
         other => Err(format!(
-            "`{flag} --help` exited {}, expected 0 or 2",
+            "`{flag} --help` exited {}, expected 0 or this build's usage error {usage}",
             show_code(other)
         )),
     }
