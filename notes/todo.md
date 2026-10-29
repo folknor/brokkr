@@ -228,17 +228,19 @@ would churn every litehtml/sluggrs invocation in CI and docs.
 
 ## Backlog
 
-### `atomic_write`: the directory fsync is best effort (2026-10-29)
+### Install: a destination parent outside the home has no durable anchor (2026-10-29)
 
-Found while placing the library certification record (brokkr 46 slice 5).
-`Staged::commit` ignores a failure to open or fsync the target's directory
-(a comment says so), and nothing syncs the parent of a directory the
-caller just created, so `replace` returning `Ok` proves the rename, not that
-it survives a crash. The module doc says both paths "fsync the directory"
-without the qualifier. Either surface the failure (callers that only want
-atomicity would ignore it) or say best effort in the module doc. No caller
-promises crash durability today; the certification record's doc promises
-atomic publication only.
+`atomic_write` now has an atomic and a durable tier, and the install
+registry, the lease store and destinations inside the home sync their whole
+directory chain from the home on every write. A copy destination outside the
+home still syncs only the parents the current call creates (`resolve` in
+`src/install_step/mod.rs`): a parent made by an install that died before its
+sync is never synced by a retry, and a crash that then loses it leaves a
+journaled install that recovery refuses (recorded parent gone), blocking the
+destination by hand. `run.md` states it. A fix needs an anchor outside the
+home that brokkr can justify - perhaps the nearest ancestor that existed
+before any install (recorded in the journal), or syncing up to the mount
+point of the destination's filesystem.
 
 ### Inter-suite gap on the unisolated serial path
 

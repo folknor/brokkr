@@ -358,9 +358,17 @@ The new copy is staged in a private `.brokkr-install-<random>` directory
 beside the destination and swapped in with one atomic rename, so the
 destination path always names either the old artifact or the new one. Every
 step of that exchange is journaled, and the next `install` - of any project -
-finishes or undoes one a crash interrupted. What is not promised: a reader
-that walks the artifact while it is swapped can see files of both versions;
-the destination must not be written while it is replaced, since a write
+finishes or undoes one a crash interrupted. For a destination inside the home
+directory, its parents and the registry under `~/.brokkr` are synced from the
+home down whenever an install writes them, taking the home itself (and any
+symlink on the way) as durable, so a crash never loses the destination's
+parent or the registry once a journal names them. Outside the home only the parents an install creates are synced, as it
+creates them: one created by an install that died before its sync stays
+unsynced for every retry, and a later crash that loses it leaves that
+destination's journaled install unresolvable, blocking it until it is cleaned
+up by hand. What is not promised: a reader that walks the artifact while it
+is swapped can see files of both versions; the destination must not be
+written while it is replaced, since a write
 through a file already open on the old copy can escape the check that
 otherwise preserves an unexpected object rather than deleting it; and nothing
 else may create `.brokkr-install-*` names. An install brokkr cannot resolve

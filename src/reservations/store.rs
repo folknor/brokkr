@@ -127,19 +127,25 @@ pub(crate) struct Reservation {
 /// The store in one directory.
 #[derive(Debug, Clone)]
 pub(crate) struct Store {
+    /// The directory the store's durability is anchored at: one assumed
+    /// durably reachable, the user's home for the per-user store.
+    anchor: PathBuf,
     root: PathBuf,
 }
 
 impl Store {
-    pub(crate) fn at(root: PathBuf) -> Self {
-        Self { root }
+    /// The store in `root`, below `anchor`.
+    pub(crate) fn at(anchor: PathBuf, root: PathBuf) -> Self {
+        Self { anchor, root }
     }
 
     /// The per-user store, beside the global lock and the compile lease.
     /// Unit tests use a scratch store instead (`super::store`).
     #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn user() -> Option<Self> {
-        crate::user_dirs::brokkr_state_dir().map(|dir| Self::at(dir.join("launch-leases")))
+        let home = crate::user_dirs::home()?;
+        let root = crate::user_dirs::brokkr_state_dir()?.join("launch-leases");
+        Some(Self::at(home, root))
     }
 
     pub(crate) fn root(&self) -> &Path {
@@ -182,39 +188,14 @@ impl Store {
         }
     }
 
-    /// Make the store directory exist durably: its entry in its parent is
-    /// synced on every creation of a lease, not only the call that made it,
-    /// since an earlier creation may have died before its sync, and a power
-    /// loss must not lose the store while a private directory it names
-    /// survives on another filesystem.
+    /// Make the store directory exist durably: the whole chain from the
+    /// anchor down to it is synced on every creation of a lease, not only the
+    /// call that made it, since an earlier creation may have died before its
+    /// syncs - existence is no evidence of durability - and a power loss must
+    /// not lose the store while a private directory it names survives on
+    /// another filesystem.
     fn ensure_root(&self) -> io::Result<()> {
-        // Every directory from the store up to the first one that already
-        // existed is new and needs its entry synced in its parent; the first
-        // existing one is synced too, for a creation an earlier call made
-        // without finishing its syncs.
-        let mut first_existing = self.root.as_path();
-        while !first_existing.is_dir() {
-            match first_existing.parent() {
-                Some(parent) => first_existing = parent,
-                None => break,
-            }
-        }
-        std::fs::create_dir_all(&self.root)?;
-        let mut dir = self.root.as_path();
-        loop {
-            sync_dir(dir)?;
-            if dir == first_existing {
-                break;
-            }
-            match dir.parent() {
-                Some(parent) => dir = parent,
-                None => break,
-            }
-        }
-        match first_existing.parent() {
-            Some(parent) => sync_dir(parent),
-            None => Ok(()),
-        }
+        crate::atomic_write::create_dir_all_durable(&self.anchor, &self.root)
     }
 
     /// Create a lease holding `resources`: the lock file, created under a
@@ -648,7 +629,7 @@ mod tests {
     #[test]
     fn a_held_lease_is_a_reservation_and_a_released_one_is_reclaimed() {
         let root = crate::test_scratch::scratch("reservations", "store-cycle");
-        let store = Store::at(root.join("leases"));
+        let store = Store::at(root.clone(), root.join("leases"));
         let dir = root.join("out").join(".brokkr-pbfhogg-x");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("staging"), b"").unwrap();
@@ -681,7 +662,7 @@ mod tests {
     #[test]
     fn a_dead_lease_is_reclaimed_unless_its_directory_was_replaced() {
         let root = crate::test_scratch::scratch("reservations", "store-dead");
-        let store = Store::at(root.join("leases"));
+        let store = Store::at(root.clone(), root.join("leases"));
         let dir = root.join(".brokkr-pbfhogg-y");
         std::fs::create_dir_all(&dir).unwrap();
         let mut lease = store.create(vec![private(&dir)]).unwrap();
@@ -717,7 +698,7 @@ mod tests {
     #[test]
     fn an_unreadable_record_is_unknown_and_a_missing_one_is_unpublished() {
         let root = crate::test_scratch::scratch("reservations", "store-unknown");
-        let store = Store::at(root.join("leases"));
+        let store = Store::at(root.clone(), root.join("leases"));
         let lease = store.create(Vec::new()).unwrap();
         let id = lease.id().to_owned();
         drop(lease);
@@ -746,7 +727,7 @@ mod tests {
     #[test]
     fn an_inherited_description_keeps_the_lease_held() {
         let root = crate::test_scratch::scratch("reservations", "store-inherit");
-        let store = Store::at(root.join("leases"));
+        let store = Store::at(root.clone(), root.join("leases"));
         let lease = store.create(Vec::new()).unwrap();
         let dup = lease.file.as_ref().unwrap().try_clone().unwrap();
         let err = lease.release().unwrap_err();

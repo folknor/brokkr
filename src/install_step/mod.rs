@@ -59,7 +59,9 @@ impl Home {
     fn from_env() -> Option<Self> {
         let home = crate::user_dirs::home()?;
         let state_dir = crate::user_dirs::brokkr_state_dir()?;
-        let registry = Registry::at(crate::user_dirs::install_registry()?);
+        // Anchored at the home as spelled, the spelling the registry path
+        // is derived from.
+        let registry = Registry::at(home.clone(), crate::user_dirs::install_registry()?);
         let home = std::fs::canonicalize(&home).unwrap_or(home);
         let state_dir = std::fs::canonicalize(&state_dir).unwrap_or(state_dir);
         Some(Self {
@@ -492,8 +494,8 @@ impl Plan<'_> {
 /// Resolve a `copy.to` (already lexically validated at config load) against
 /// the filesystem. The nearest existing ancestor of the parent is
 /// canonicalized and the missing rest appended; with `create`, the missing
-/// directories are made, each made durable in its parent, and the parent is
-/// canonicalized again.
+/// directories are made durably (below `home`, the whole chain from it), and
+/// the parent is canonicalized again.
 fn resolve(to: &str, home: &Path, create: bool) -> Result<Resolved, String> {
     let expanded = match to.strip_prefix("~/") {
         Some(rest) => home.join(rest),
@@ -530,9 +532,19 @@ fn resolve(to: &str, home: &Path, create: bool) -> Result<Resolved, String> {
     if !parent.is_dir() {
         return Err(format!("{} is not a directory", parent.display()));
     }
+    // Below the home, every directory from it down to the parent is created
+    // and synced on each creating call, so one an earlier install created and
+    // died before syncing is made durable now, before any record names it.
+    // Outside the home no directory is known to be durable, so only the ones
+    // this call creates are synced: an install that created a parent outside
+    // the home and died before its sync leaves that parent unsynced for every
+    // retry, and a crash that then loses it leaves a journaled install whose
+    // recorded parent is gone - refused by recovery, blocking its destination
+    // until resolved by hand.
+    let anchored = create && parent.starts_with(home);
     for component in missing.iter().rev() {
         let next = parent.join(component);
-        if create {
+        if create && !anchored {
             match std::fs::create_dir(&next) {
                 Ok(()) => tree::fsync_dir(&parent)
                     .map_err(|e| format!("cannot fsync {}: {e}", parent.display()))?,
@@ -541,6 +553,10 @@ fn resolve(to: &str, home: &Path, create: bool) -> Result<Resolved, String> {
             }
         }
         parent = next;
+    }
+    if anchored {
+        crate::atomic_write::create_dir_all_durable(home, &parent)
+            .map_err(|e| format!("cannot create {} durably: {e}", parent.display()))?;
     }
     if create {
         parent = std::fs::canonicalize(&parent)
@@ -597,7 +613,7 @@ mod tests {
             Home {
                 home: self.home.clone(),
                 state_dir: self.home.join("state"),
-                registry: Registry::at(self.home.join("state/install")),
+                registry: Registry::at(self.home.clone(), self.home.join("state/install")),
             }
         }
 

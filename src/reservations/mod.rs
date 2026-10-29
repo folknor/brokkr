@@ -139,7 +139,7 @@ fn store() -> Option<store::Store> {
         static TEST_STORE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
         let root = TEST_STORE
             .get_or_init(|| crate::test_scratch::scratch("reservations", "process-store"));
-        Some(store::Store::at(root.clone()))
+        Some(store::Store::at(root.clone(), root.clone()))
     }
     #[cfg(not(test))]
     {

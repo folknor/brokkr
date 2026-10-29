@@ -631,7 +631,7 @@ mod tests {
         let dest = parent.join("mod");
         let key = dest.to_str().unwrap().to_owned();
         Fixture {
-            registry: Registry::at(root.join("state/install")),
+            registry: Registry::at(root.clone(), root.join("state/install")),
             source,
             parent,
             dest,

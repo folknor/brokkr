@@ -635,12 +635,16 @@ the one place the project name enters the sidecar path. The default
 `MeasurementTunables.sidecar_backup_copies` value is 3, so it keeps `.db`
 (newest), `.db.1`, and `.db.2`.
 
-The sequence is crash-safe: SQLite's **online backup API** writes a
-self-contained DELETE-journal copy to a temp file, runs `quick_check`, fsyncs
-it, shifts older copies (`.1`->`.2`), hard-links the current primary to `.1`,
-then atomically renames the temp into the primary slot and fsyncs the
-directory. A failure before the final rename leaves the existing primary
-intact. Backup failure is logged but **non-fatal** to the run.
+The sequence is crash-safe, in that no crash leaves a partial primary:
+SQLite's **online backup API** writes a self-contained DELETE-journal copy to
+a temp file and runs `quick_check`; older copies shift (`.1`->`.2`) and the
+current primary is hard-linked to `.1`; then the temp is fsynced, atomically
+renamed into the primary slot and the directory fsynced. A failure before the
+final rename leaves the existing primary intact. The rotation is not one
+transaction - a crash mid-rotation can lose a retention slot - and the
+directory fsync is best effort: a failure of it is warned about (one the
+filesystem refuses outright is not), and the backup still counts as made.
+Backup failure is logged but **non-fatal** to the run.
 
 ## Hotpath JSON contract
 

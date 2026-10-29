@@ -221,8 +221,9 @@ Each scan and the admission, release or mutation it decides run in one
 critical section: a process-wide mutex and an exclusive flock on the store's
 `.serial` lock, so they are atomic across brokkr processes too. A section that
 waits two minutes for another process's fails rather than hang outside every
-time ceiling. The store directory and every directory newly created above it
-are synced before a lease is published. A launch is refused when one of its
+time ceiling. Every directory from the home down to the store is synced before
+each lease is published, whether this launch created it or an earlier one did.
+A launch is refused when one of its
 paths overlaps a reservation's and either side writes it. A lease store that
 cannot be read, or a lease whose record cannot be read, blocks every pbfhogg
 launch and gated mutation until a human resolves it; a lease kept after a

@@ -4,9 +4,10 @@
 //!
 //! A record's file is named by a hash of its destination, and the destination
 //! is stored inside it and compared on every read, so a name collision can
-//! never hand one destination's authority to another. Every write is a
-//! replace-and-fsync followed by a strict fsync of the registry directory: a
-//! phase is only acted on once its record is durable.
+//! never hand one destination's authority to another. Every write is an
+//! `atomic_write::replace_durable` below a directory chain synced from the
+//! home down, and every removal is followed by a strict fsync of the registry
+//! directory: a phase is only acted on once its record is durable.
 
 use std::path::{Path, PathBuf};
 
@@ -123,6 +124,9 @@ impl Record {
 }
 
 pub(super) struct Registry {
+    /// The directory the registry's durability is anchored at: one assumed
+    /// durably reachable, the user's home in production.
+    anchor: PathBuf,
     dir: PathBuf,
 }
 
@@ -136,9 +140,9 @@ pub(super) struct Scan {
 
 impl Registry {
     /// The registry kept in `dir` ([`crate::user_dirs::install_registry`]
-    /// in production).
-    pub(super) fn at(dir: PathBuf) -> Self {
-        Self { dir }
+    /// in production), below `anchor` (`$HOME`).
+    pub(super) fn at(anchor: PathBuf, dir: PathBuf) -> Self {
+        Self { anchor, dir }
     }
 
     pub(super) fn file_for(&self, destination: &str) -> PathBuf {
@@ -213,29 +217,35 @@ impl Registry {
     }
 
     /// Make `record` durable. A record with neither owner nor transaction
-    /// says nothing, so its file is removed instead.
+    /// says nothing, so its file is removed instead, durably too.
+    ///
+    /// Every call re-establishes what it relies on rather than trusting what
+    /// it finds, since an earlier call may have died between a change and its
+    /// sync: the directory chain from the anchor down is synced on every
+    /// write, and the directory is synced after a removal even when the
+    /// record was already gone. An absent directory holds no record, so its
+    /// absence needs no sync.
     pub(super) fn store(&self, record: &Record) -> Result<(), DevError> {
         let path = self.file_for(&record.destination);
         if record.owner.is_none() && record.pending.is_none() {
-            return match std::fs::remove_file(&path) {
-                Ok(()) => tree::fsync_dir(&self.dir)
-                    .map_err(|e| registry_error(&self.dir, &e.to_string())),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(e) => Err(registry_error(&path, &e.to_string())),
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(registry_error(&path, &e.to_string())),
+            }
+            return match tree::fsync_dir(&self.dir) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    Err(registry_error(&self.dir, &e.to_string()))
+                }
+                _ => Ok(()),
             };
         }
-        if !self.dir.is_dir() {
-            std::fs::create_dir_all(&self.dir)
-                .map_err(|e| registry_error(&self.dir, &e.to_string()))?;
-            if let Some(parent) = self.dir.parent() {
-                tree::fsync_dir(parent).map_err(|e| registry_error(parent, &e.to_string()))?;
-            }
-        }
+        crate::atomic_write::create_dir_all_durable(&self.anchor, &self.dir)
+            .map_err(|e| registry_error(&self.dir, &e.to_string()))?;
         let json = serde_json::to_vec_pretty(record)
             .map_err(|e| DevError::Internal(format!("install record does not serialize: {e}")))?;
-        crate::atomic_write::replace(&path, &json)
-            .map_err(|e| registry_error(&path, &e.to_string()))?;
-        tree::fsync_dir(&self.dir).map_err(|e| registry_error(&self.dir, &e.to_string()))
+        crate::atomic_write::replace_durable(&path, &json)
+            .map_err(|e| registry_error(&path, &e.to_string()))
     }
 }
 
@@ -266,7 +276,7 @@ mod tests {
     #[test]
     fn a_record_round_trips_and_an_empty_one_is_removed() {
         let state = crate::test_scratch::scratch("install_step_registry", "round_trip");
-        let registry = Registry::at(state.join("install"));
+        let registry = Registry::at(state.clone(), state.join("install"));
         let owner = Owner {
             project: "p".into(),
             step: "s".into(),
@@ -290,7 +300,7 @@ mod tests {
     #[test]
     fn a_record_for_another_destination_is_refused() {
         let state = crate::test_scratch::scratch("install_step_registry", "mismatch");
-        let registry = Registry::at(state.join("install"));
+        let registry = Registry::at(state.clone(), state.join("install"));
         registry
             .store(&Record::new(
                 "/a",

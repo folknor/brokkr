@@ -1,4 +1,4 @@
-//! Durable rotation of sidecar database backups.
+//! Crash-safe rotation of sidecar database backups.
 
 use crate::error::DevError;
 use std::path::{Path, PathBuf};
@@ -31,10 +31,14 @@ fn sidecar_backup_dir() -> Result<PathBuf, DevError> {
 /// logical database state regardless of WAL or concurrent readers.
 ///
 /// The sequence is: create temp backup via SQLite -> quick_check the
-/// temp -> fsync -> shift older copies -> hard-link primary to .1 ->
-/// atomic rename temp into primary slot -> fsync directory. The primary
-/// slot is only overwritten by the atomic rename, so a failure before
-/// that point leaves the current primary intact.
+/// temp -> shift older copies -> hard-link primary to .1 -> fsync the temp,
+/// atomically rename it into the primary slot and fsync the directory
+/// (`atomic_write::Staged::commit`). The primary slot is only overwritten by
+/// the atomic rename, so a failure before that point leaves the current
+/// primary intact, and the temp is in no slot until it has been fsynced. The
+/// rotation is not one transaction: a crash mid-rotation can lose a retention
+/// slot, never leave a partial primary. The directory fsync is the atomic
+/// tier's, best effort and warned about when it fails.
 ///
 /// Called while the benchmark lock is still held.
 pub(crate) fn backup_sidecar(
@@ -95,7 +99,8 @@ pub(crate) fn backup_sidecar_to(
     // This clears the .1 slot so the hard-link in the next step can
     // succeed without a prior remove. These renames *move* finished copies
     // between retention slots - not a temp-and-replace - so they stay raw;
-    // the final commit's directory fsync makes them durable.
+    // the final commit's best-effort directory fsync covers them too, unless
+    // a symlinked primary has the commit publish in another directory.
     for i in (2..SIDECAR_BACKUP_COPIES).rev() {
         let from = base.with_extension(format!("db.{}", i - 1));
         let to = base.with_extension(format!("db.{i}"));
