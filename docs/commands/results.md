@@ -140,6 +140,10 @@ does not say the child was killed.
 
 Any supplied row filters still apply to the UUID matches.
 
+A library measurement (`brokkr man library`, Measuring a scenario) stores
+one group of rows under one uuid, its scenario row and one per call; its
+uuid shows every row of the group as such a block, the scenario's first.
+
 A prefix matching several runs falls back to the table plus per-row details.
 UUID resolution considers both stores; results lists result rows and reports
 any matching sidecar-only UUIDs separately. `sidecar` requires a prefix to
@@ -195,7 +199,16 @@ from the dataset rather than `--bbox` (`bbox=...`, the parsed coordinates, so
 (`--strategy all`, which is `extract`'s default, or the suite;
 `strategy=...`), joined by `;`. An extract
 row from before the bbox and strategy qualifiers existed carries neither, so
-it does not pair with a newer row that does. A qualified row
+it does not pair with a newer row that does. A `brokkr library` row's
+qualifier is its library identity (the plan and context digests, the
+dataset and generated identities, the harness features; `brokkr man
+library`, Measuring a scenario), also stored as `meta.library.identity`.
+When such a row is left without a pair, a line beneath it names the other
+side's latest row of the same command, mode, input, captured env and build
+and the first place their identities differ, down to the plan or context
+field (the canonical documents are stored beside the rows), or says the
+identities are equal and the invocations differ; it explains, and never
+claims that difference is the only one. A qualified row
 stores `["qualified-v1", <argv key>, <qualifier>]` (JSON) as its `arm_key`
 and pairs only with rows carrying the same qualifier; an unqualified row's
 key is the argv key alone, exactly as before qualifiers existed.

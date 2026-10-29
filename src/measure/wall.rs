@@ -79,7 +79,7 @@ pub(super) fn bench_ordering_key(result: &BenchResult) -> i64 {
 /// is a display and back-compat value once `elapsed_us` exists, so being off
 /// by a whole millisecond in the direction of "faster than it was" is the
 /// one error worth avoiding.
-pub(super) fn us_to_ms(us: i64) -> i64 {
+pub(crate) fn us_to_ms(us: i64) -> i64 {
     // Saturating: `elapsed_to_us` saturates at `i64::MAX`, and the plain
     // addition would then overflow.
     us.saturating_add(500) / 1000

@@ -93,8 +93,8 @@ fn warn_if_capture_truncated(
     if store.query_sidecar_capture_truncated(id, run_idx)? {
         output::warn(
             "stored sidecar trajectory is incomplete: a capture limit was reached, FIFO \
-             lines were rejected or left unread, child output was cut, or sink-end records \
-             had no place to be stored",
+             lines were rejected or left unread, child output was cut, or (for a run stored \
+             before sidecar.db v10) sink-end records had no place to be stored",
         );
     }
     Ok(())
@@ -212,16 +212,26 @@ fn check_call(
             crate::sidecar::MAX_CALL_ID_BYTES
         )));
     }
-    let in_markers = store
-        .query_sidecar_markers(id, run_filter)?
+    // A call is known by its boundaries, its markers, its counters or its
+    // sink records: a sealed call with an empty snapshot may emit nothing
+    // but its terminal record.
+    let known = store
+        .query_sidecar_calls(id, run_filter)?
         .iter()
-        .any(|m| m.call.as_deref() == Some(call));
-    let in_counters = in_markers
+        .any(|s| s.call == call)
+        || store
+            .query_sidecar_markers(id, run_filter)?
+            .iter()
+            .any(|m| m.call.as_deref() == Some(call))
         || store
             .query_sidecar_counters(id, run_filter)?
             .iter()
-            .any(|c| c.call.as_deref() == Some(call));
-    if in_markers || in_counters {
+            .any(|c| c.call.as_deref() == Some(call))
+        || store
+            .query_sidecar_sink_ends(id, run_filter)?
+            .iter()
+            .any(|s| s.call == call);
+    if known {
         Ok(())
     } else {
         Err(DevError::Config(format!(
@@ -240,13 +250,23 @@ fn run_phase_summary(
     one_run(run_filter, "the per-phase summary")?;
     check_call(store, id, run_filter, q.call.as_deref())?;
     let markers = store.query_sidecar_markers(id, run_filter)?;
+    let calls = store.query_sidecar_calls(id, run_filter)?;
+    let sink_ends = store.query_sidecar_sink_ends(id, run_filter)?;
     if let Some(call) = q.call.as_deref() {
-        let stream = crate::sidecar_fmt::stream_markers(&markers, Some(call));
-        if stream.is_empty() {
-            output::result_msg(&format!("call '{call}' emitted no markers"));
-        } else {
-            crate::sidecar_fmt::print_call_timelines(&stream, q.human);
-        }
+        let streams = crate::sidecar_fmt::CallStreams {
+            markers: &crate::sidecar_fmt::stream_markers(&markers, Some(call)),
+            calls: &calls
+                .iter()
+                .filter(|s| s.call == call)
+                .cloned()
+                .collect::<Vec<_>>(),
+            sink_ends: &sink_ends
+                .iter()
+                .filter(|s| s.call == call)
+                .cloned()
+                .collect::<Vec<_>>(),
+        };
+        crate::sidecar_fmt::print_call_timelines(&streams, q.human);
         return Ok(());
     }
     // Samples gate the process resource table only; a call's marker
@@ -257,7 +277,14 @@ fn run_phase_summary(
     } else {
         print_phase_summary(&samples, &markers, q.human);
     }
-    crate::sidecar_fmt::print_call_timelines(&markers, q.human);
+    crate::sidecar_fmt::print_call_timelines(
+        &crate::sidecar_fmt::CallStreams {
+            markers: &markers,
+            calls: &calls,
+            sink_ends: &sink_ends,
+        },
+        q.human,
+    );
     Ok(())
 }
 
@@ -276,7 +303,12 @@ fn phase_window(
     };
     one_run(run_filter, "--phase")?;
     let markers = store.query_sidecar_markers(id, run_filter)?;
-    resolve_phase_range(phase_name, &markers, samples, q.call.as_deref()).map(Some)
+    let calls = store.query_sidecar_calls(id, run_filter)?;
+    let span = q
+        .call
+        .as_deref()
+        .and_then(|call| calls.iter().find(|s| s.call == call));
+    resolve_phase_range(phase_name, &markers, samples, q.call.as_deref(), span).map(Some)
 }
 
 fn sample_call_needs_phase(q: &SidecarQuery) -> Result<(), DevError> {
@@ -354,6 +386,10 @@ fn call_markers(
     Ok(markers)
 }
 
+/// START/END spans per stream. A library call's stored boundaries are not
+/// read here, deliberately: a span names its own two ends, so it needs no
+/// return to close it, and one that crosses the return is what the harness
+/// marked (`docs/commands/measure.md`, Marker and counter rules).
 fn run_durations(store: &db::RunStore, id: &db::RunId, q: &SidecarQuery) -> Result<(), DevError> {
     print_resolved_run_info(store, id)?;
     let run_filter = resolve_run_filter(store, id, q.run.as_deref())?;
@@ -384,7 +420,8 @@ fn run_stalls(store: &db::RunStore, id: &db::RunId, q: &SidecarQuery) -> Result<
         .first()
         .zip(samples.last())
         .map_or(0, |(a, b)| b.timestamp_us - a.timestamp_us);
-    crate::sidecar_fmt::print_stalls(&counters, wall_us, q.human);
+    let calls = store.query_sidecar_calls(id, run_filter)?;
+    crate::sidecar_fmt::print_stalls(&counters, wall_us, &calls, q.human);
     Ok(())
 }
 
@@ -457,6 +494,9 @@ fn run_stat(
     print_field_stat(&filtered, field)
 }
 
+/// Two sessions' process streams, phase-aligned. Call streams, their
+/// boundaries and sink ends are not compared here, deliberately: the view is
+/// process-only (`docs/commands/measure.md`, Marker and counter rules).
 fn run_compare(
     store: &db::RunStore,
     uuid_a: &str,

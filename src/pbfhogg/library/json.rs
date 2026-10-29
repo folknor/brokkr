@@ -332,11 +332,203 @@ impl<'a> Obj<'a> {
     }
 }
 
+impl<'a> Field<'a> {
+    /// The value itself, for a caller that keeps or canonicalizes it.
+    pub(crate) fn json(&self) -> &'a Json {
+        self.value
+    }
+}
+
+/// `value` in brokkr-json-v1, the canonical form plans and contexts are
+/// digested in (`brokkr man library`, Measuring a scenario): no whitespace,
+/// object keys sorted by their UTF-8 bytes, arrays in order, integers in
+/// shortest decimal, and strings escaping only `"`, `\` and U+0000 to
+/// U+001F (`\b \f \n \r \t` where one exists, else `\u00xx` in lowercase).
+/// A custom form, not RFC 8785, whose numbers are doubles. Refuses any
+/// number that is not an integer and a duplicate key, which no plain value
+/// holds.
+pub(crate) fn canonical(value: &Json) -> Result<String, String> {
+    let mut out = String::new();
+    write_canonical(value, &mut out)?;
+    Ok(out)
+}
+
+fn write_canonical(value: &Json, out: &mut String) -> Result<(), String> {
+    match value {
+        Json::Null => out.push_str("null"),
+        Json::Bool(true) => out.push_str("true"),
+        Json::Bool(false) => out.push_str("false"),
+        Json::Int(n) => out.push_str(&n.to_string()),
+        Json::NotInteger => {
+            return Err("a number that is not an integer has no canonical form".to_owned());
+        }
+        Json::Str(s) => write_canonical_string(s, out),
+        Json::Array(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_canonical(item, out)?;
+            }
+            out.push(']');
+        }
+        Json::Object(members) => {
+            let mut sorted: Vec<&(String, Json)> = members.iter().collect();
+            sorted.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+            if sorted.windows(2).any(|w| w[0].0 == w[1].0) {
+                return Err("a duplicate key has no canonical form".to_owned());
+            }
+            out.push('{');
+            for (i, (key, item)) in sorted.into_iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_canonical_string(key, out);
+                out.push(':');
+                write_canonical(item, out)?;
+            }
+            out.push('}');
+        }
+    }
+    Ok(())
+}
+
+fn write_canonical_string(s: &str, out: &mut String) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if u32::from(c) < 0x20 => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+/// The first place two canonical documents differ, as a path into them
+/// (`calls.a.threads`, `inputs[2]`) with both values, or `None` when they
+/// are equal. Objects are walked in canonical key order, so "first" is
+/// deterministic. Either text that is not a document is reported as such.
+pub(crate) fn canonical_difference(a: &str, b: &str) -> Option<String> {
+    match (parse("a", a.as_bytes()), parse("b", b.as_bytes())) {
+        (Ok(a), Ok(b)) => first_difference(&a, &b, ""),
+        _ if a == b => None,
+        _ => Some("(a stored document is not JSON)".to_owned()),
+    }
+}
+
+fn first_difference(a: &Json, b: &Json, path: &str) -> Option<String> {
+    let at = |p: &str| {
+        if p.is_empty() {
+            "(root)".to_owned()
+        } else {
+            p.to_owned()
+        }
+    };
+    match (a, b) {
+        (Json::Object(x), Json::Object(y)) => {
+            let mut keys: Vec<&str> = x.iter().chain(y).map(|(k, _)| k.as_str()).collect();
+            keys.sort_by(|p, q| p.as_bytes().cmp(q.as_bytes()));
+            keys.dedup();
+            for key in keys {
+                let inner = member_path(path, key);
+                let left = x.iter().find(|(k, _)| k == key).map(|(_, v)| v);
+                let right = y.iter().find(|(k, _)| k == key).map(|(_, v)| v);
+                match (left, right) {
+                    (Some(l), Some(r)) => {
+                        if let Some(found) = first_difference(l, r, &inner) {
+                            return Some(found);
+                        }
+                    }
+                    (Some(l), None) => return Some(format!("{inner} ({} vs absent)", shown(l))),
+                    (None, Some(r)) => return Some(format!("{inner} (absent vs {})", shown(r))),
+                    (None, None) => {}
+                }
+            }
+            None
+        }
+        (Json::Array(x), Json::Array(y)) => {
+            for (i, (l, r)) in x.iter().zip(y).enumerate() {
+                if let Some(found) = first_difference(l, r, &format!("{path}[{i}]")) {
+                    return Some(found);
+                }
+            }
+            (x.len() != y.len())
+                .then(|| format!("{} ({} vs {} elements)", at(path), x.len(), y.len()))
+        }
+        (l, r) if l == r => None,
+        (l, r) => Some(format!("{} ({} vs {})", at(path), shown(l), shown(r))),
+    }
+}
+
+fn member_path(path: &str, key: &str) -> String {
+    let plain = !key.is_empty()
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'));
+    match (path.is_empty(), plain) {
+        (true, true) => key.to_owned(),
+        (false, true) => format!("{path}.{key}"),
+        (_, false) => format!("{path}[{key:?}]"),
+    }
+}
+
+/// A value for a difference line: canonical, cut at 60 characters.
+fn shown(value: &Json) -> String {
+    let text = canonical(value).unwrap_or_else(|_| "?".to_owned());
+    if text.chars().count() > 60 {
+        format!("{}...", text.chars().take(60).collect::<String>())
+    } else {
+        text
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    #[test]
+    fn canonical_form_sorts_keys_by_bytes_and_escapes_only_what_it_must() {
+        let doc = root(
+            "{\"b\": [1, -2, 18446744073709551615], \"a\": {\"z\": null, \"\u{e9}\": true, \"Z\": \"t\\u0001\\n\\\"\\\\/\u{e9}\"}}",
+        );
+        assert_eq!(
+            canonical(&doc).unwrap(),
+            "{\"a\":{\"Z\":\"t\\u0001\\n\\\"\\\\/\u{e9}\",\"z\":null,\"\u{e9}\":true},\"b\":[1,-2,18446744073709551615]}"
+        );
+        assert!(canonical(&root("{\"n\": 1.5}")).is_err());
+        assert!(canonical(&root("{\"n\": 1, \"n\": 2}")).is_err());
+    }
+
+    #[test]
+    fn the_first_difference_names_its_path_and_both_values() {
+        let a = r#"{"calls":{"a":{"threads":4,"x":[1,2]}},"setup":"s"}"#;
+        assert_eq!(canonical_difference(a, a), None);
+        let b = r#"{"calls":{"a":{"threads":8,"x":[1,3]}},"setup":"t"}"#;
+        assert_eq!(
+            canonical_difference(a, b).unwrap(),
+            "calls.a.threads (4 vs 8)"
+        );
+        let c = r#"{"calls":{"a":{"threads":4,"x":[1]}},"setup":"s"}"#;
+        assert_eq!(
+            canonical_difference(a, c).unwrap(),
+            "calls.a.x (2 vs 1 elements)"
+        );
+        let d = r#"{"calls":{"a":{"threads":4,"x":[1,2]}}}"#;
+        assert_eq!(
+            canonical_difference(a, d).unwrap(),
+            "setup (\"s\" vs absent)"
+        );
+    }
 
     fn root(text: &str) -> Json {
         parse("doc", text.as_bytes()).unwrap()

@@ -6,8 +6,8 @@ scripted sequences of library calls in one process; pbfhogg writes it to the
 protocol below, and a pbfhogg commit without that member has nothing for this
 command to build. `brokkr library` builds the harness per commit (so
 `--commit` works), lists the scenarios it declares, runs one as a
-verification, and runs them all to certify the capabilities brokkr.toml
-requires.
+verification, measures one and records it, and runs them all to certify the
+capabilities brokkr.toml requires.
 
 pbfhogg owns what a call does: the scenarios, the library calls they make
 and the assertions about them that only the process itself can judge. brokkr
@@ -27,6 +27,7 @@ releases is not promised until it is.
 ```
 brokkr library [--commit REF] [--debug | --release | --profile NAME]
 brokkr library SCENARIO [--dataset NAME] [--snapshot KEY] [--commit REF] [...]
+brokkr library SCENARIO --bench [N] [--force] [...]
 brokkr library --all [--dataset NAME] [--snapshot KEY] [--commit REF] [...]
 ```
 
@@ -43,6 +44,11 @@ does not declare is refused, naming the ones it does. A run also builds the
 pbfhogg CLI of the same tree, release with default features whatever
 profile the harness gets, the reference its counterparts replay against
 (see CLI equality); both builds finish before either is used.
+
+With `SCENARIO --bench N` (bare `--bench` means the default count), runs
+it as N whole processes, each verified as `SCENARIO` verifies one and
+agreeing with the first, and records them (see Measuring a scenario).
+`--force` lets it measure a dirty tree, which stores no row.
 
 With `--all`, runs every scenario once, then classifies each capability
 `[pbfhogg.library.require]` names and writes a certification record (see
@@ -258,7 +264,8 @@ and canonical, the run directory's included.
 ```
 
 `bindings` names every role of the scenario and nothing else. `iteration`
-counts the processes of one run from 0; a verification makes one. The
+counts the processes of one run from 0: a verification makes one, a
+measurement N. The
 private directory is never in the request: its name is made at the launch,
 after the request is written.
 
@@ -586,6 +593,111 @@ and keeps the directory, naming it. Routine `brokkr clean` removes kept run
 directories through the gate (`brokkr man clean`); the cleanup after an
 interrupted command never does. An interrupted run, including one stopped
 after the harness exited, keeps its directory and exits as interrupted.
+
+## Measuring a scenario
+
+`brokkr library SCENARIO --bench N` measures the scenario as N processes,
+one after the other, under the brokkr lock, as every measured command is
+(`brokkr man measure`): a dirty tree is refused unless `--force`, and then
+the measurement runs and prints but stores no row; a clean tree, a
+`--commit` worktree included, stores. `--all` never measures.
+
+**Each process is a verification.** Process i gets its own run directory
+and a request with `iteration` i, and is judged exactly as `SCENARIO`
+judges a run, its directory removed on a pass and kept on a failure. The
+first failure ends the measurement: no row is stored. Each process's
+capture has the budgets a verification has; the FIFO, the call census and
+the trajectory limits are per process, not shared across the N.
+
+**Identity.** Once a process's documents are read and its run directory
+passed its layout check, and before any counterpart is replayed, brokkr
+identifies what it ran:
+
+- its `plan` and each call's `context` in **brokkr-json-v1**, a canonical
+  form of its own (not RFC 8785, whose numbers are doubles): no whitespace,
+  object keys sorted by their UTF-8 bytes, arrays in order, integers in
+  shortest decimal (never `-0`, no `+`, no leading zero), strings escaping
+  `"`, `\` and U+0000 to U+001F (`\b \f \n \r \t` where one exists, else
+  `\u00xx` in lowercase) and nothing else; digested as `plan-v1:` or
+  `context-v1:` and the XXH3-128 (seed 0, 32 lowercase hex digits) of the
+  canonical bytes;
+- each dataset role's file, `xxh128:` and its XXH128, read once before the
+  first process;
+- each generated role as the harness left it: `absent`; for a `file` or
+  `pbf` role `xxh128:` and its XXH128; for a `directory` role `tree-v1:`
+  and the XXH3-128 over its entries sorted by the raw bytes of their path
+  relative to it, each `<32 hex XXH3-128 of the path bytes><kind><value>`
+  and a newline, kind `d` (no value), `f` (the file's XXH128) or `l` (the
+  XXH3-128 of the link's raw target bytes). Nothing is followed through a
+  link; any other entry, or an entry not of the role's kind, cannot be
+  identified and fails the process;
+- the features the harness was built with.
+
+Every process must agree with the first on the plan, each call's context,
+the generated and dataset identities and the features; one that does not
+fails, naming the first difference (a field of the plan or a context, or a
+role), and its kept directory's `evidence/baseline.txt` holds the first
+process's identity and documents beside its own, since the first
+process's directory is gone. Producer obligation, which brokkr does not
+check: setup leaves every generated role as the calls and counterparts
+read it.
+
+**CLI digests are reused.** A counterpart whose reuse key equals one an
+earlier process of the same measurement passed under is not replayed: the
+CLI executable's XXH128, the argv as declared (placeholders by role, never
+resolved paths), the identity of every role an `input` or `files_in`
+placeholder names, and the scratch flag (the initial output state is
+always absent, a fresh path, so it is a constant of the key). Its
+`replay-<call>/` is still made, `cwd/` and an empty `outputs/`, every
+library output is still digested there and compared with the reused report,
+and every check after a launch runs as for a replay (`outputs/` must stay
+empty). The result's detail says which process's digests it reused.
+
+**The rows.** When every process passed, brokkr stores one group of rows
+under one uuid, in one transaction:
+
+- the scenario row, `library:<scenario>`: its wall the chosen process's
+  wall (spawn to the ending brokkr observed), its iterations every
+  process's wall in order, its peak RSS the chosen process's;
+- one row per call, `library:<call's scenario>/<call>`: its wall the chosen
+  process's `return_us - entry_us`, its iterations that call's wall in every
+  process in order, and the call's snapshot as counters, each
+  `snapshot.<name>`, exact (a value past 2^63-1 as decimal text).
+
+The chosen process is the fastest, ties to the lowest index. Every row
+carries `meta.library.plan` (the plan digest), `meta.library.iteration`
+(the chosen index) and `meta.library.identity`, the identity above as one
+canonical JSON text (the plan digest, each call's context digest, the
+dataset and generated identities, the features); a call row adds
+`meta.library.context`, its context digest. The canonical plan and context
+documents are stored once each, by digest, beside the rows. The scenario
+row is written last, so it is the group's newest: what `brokkr results`
+shows first, what the next row's `prev.*` names and what names the sidecar
+session. `brokkr results <uuid>` shows every row of the group in full.
+
+**Pairing.** The identity is also the rows' arm qualifier (`brokkr man
+results`, `--compare`), so a library row pairs with another exactly when
+everything a row of its command pairs on agrees and so does the identity:
+same plan, same contexts, same dataset and generated identities, same
+features. The commit is never part of it. A row that does not pair is
+followed by a line naming the other side's latest row of the same command,
+mode, input, captured environment and build, and where its identity first
+differs from it (a plan field, a call's context field, a role or the
+features), or that the identities are equal and the invocations differ. That
+line explains; it never says the named difference is the only one. A
+library call is never compared with its CLI counterpart's timing.
+
+**Trajectories.** Each process's capture is stored in sidecar.db, under the
+group's uuid with its iteration as the run, as soon as it is judged, pass or
+fail, with the session's metadata (the default run, the run count, the
+harness's XXH128, its ending) rewritten in the same transaction; brokkr
+holds at most one process's trajectory in memory, and every process's is
+stored. It holds the sealing and terminal records and each call's
+boundaries and sink account from its document, so a call's last phase ends
+at its return (`brokkr man measure`, Marker and counter rules). The rows
+come after the last trajectory and the final metadata, and they publish the
+measurement. When it fails, or the tree is dirty, the session is filed under
+the `dirty` alias and its id printed.
 
 ## Certification
 

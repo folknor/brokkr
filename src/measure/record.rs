@@ -302,6 +302,89 @@ impl BenchHarness {
     }
 }
 
+/// One row of a group [`BenchHarness::record_group`] writes: its config, its
+/// result (with its per-iteration millisecond walls), and the same walls in
+/// microseconds.
+pub(crate) struct GroupRow {
+    pub(crate) config: BenchConfig,
+    pub(crate) result: BenchResult,
+    pub(crate) iterations_us: Vec<i64>,
+}
+
+impl BenchHarness {
+    /// The sidecar store a session that persists its trajectories run by
+    /// run writes to.
+    pub(crate) fn open_sidecar(&self) -> Result<crate::db::sidecar::SidecarDb, DevError> {
+        crate::db::sidecar::SidecarDb::open(&self.state.sidecar_db())
+    }
+
+    /// Back the sidecar store up, as every stored measurement does; a
+    /// failure is a warning.
+    pub(crate) fn backup_sidecar(&self) {
+        if let Err(e) = backup_sidecar(&self.state.sidecar_db(), &self.project) {
+            console::warn(&format!("sidecar backup failed (non-fatal): {e}"));
+        }
+    }
+
+    /// The commit the measured tree is at.
+    pub(crate) fn commit(&self) -> &crate::git::ShortCommit {
+        &self.git.commit
+    }
+
+    /// Whether this session stores rows: its tree is clean.
+    pub(crate) fn stores_rows(&self) -> bool {
+        self.store_results && self.git.is_clean
+    }
+
+    /// Write one measured group under `uuid` in one transaction, call rows
+    /// and their scenario row (`ResultsDb::insert_group`), with the
+    /// canonical documents they name, and report each row's result line. A
+    /// dirty tree stores nothing and prints every result line. Every row is
+    /// built before any is inserted, so the group shares one predecessor.
+    /// Whether rows were stored.
+    pub(crate) fn record_group(
+        &self,
+        uuid: &str,
+        scenario: &GroupRow,
+        calls: &[GroupRow],
+        documents: &[(String, String)],
+    ) -> Result<bool, DevError> {
+        let mode = self.effective_mode();
+        let all = || std::iter::once(scenario).chain(calls);
+        if !self.stores_rows() {
+            for row in all() {
+                force_emit_result_lines(&row.config, mode.as_deref(), &row.result, &self.git);
+            }
+            return Ok(false);
+        }
+        let build =
+            |row: &GroupRow| self.build_row(&row.config, &row.result, &row.iterations_us, None);
+        let scenario_row = build(scenario)?;
+        let call_rows = calls.iter().map(build).collect::<Result<Vec<_>, _>>()?;
+        match self
+            .db
+            .insert_group(uuid, &scenario_row, &call_rows, documents)
+        {
+            Ok(short) => {
+                for row in all() {
+                    emit_result_lines(&row.config, mode.as_deref(), &row.result, &self.git);
+                }
+                console::run_msg(&format!("results.db {short}"));
+                Ok(true)
+            }
+            Err(e) => {
+                for row in all() {
+                    force_emit_result_lines(&row.config, mode.as_deref(), &row.result, &self.git);
+                }
+                console::error(&format!(
+                    "results.db insert failed - the group was not stored: {e}"
+                ));
+                Err(e)
+            }
+        }
+    }
+}
+
 impl BenchHarness {
     /// Write and report the winning row; `record` owns sidecar persistence.
     pub(super) fn record_measured(
@@ -406,13 +489,6 @@ impl BenchHarness {
         };
 
         for (i, data) in sidecar_runs.iter().enumerate() {
-            if data.has_sink_ends() {
-                crate::output::warn(&format!(
-                    "sidecar run {}: sidecar.db does not store sealing or terminal records, so \
-                     the stored trajectory is marked incomplete",
-                    i + 1
-                ));
-            }
             sidecar_db.store_run(&store_uuid, i, data)?;
         }
 

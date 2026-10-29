@@ -1075,6 +1075,8 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
         Command::Library {
             scenario,
             all,
+            bench,
+            force,
             dataset,
             snapshot,
             debug,
@@ -1130,6 +1132,14 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                         commit: commit.as_deref(),
                         profile,
                         run,
+                        bench: bench.map(|runs| crate::pbfhogg::library::BenchArgs {
+                            runs,
+                            force,
+                            dev_config,
+                            project_root: &detection.project_root,
+                            build_root,
+                            invocation: &invocation,
+                        }),
                     })
                 },
             )

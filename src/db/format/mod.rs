@@ -19,10 +19,11 @@
 mod compare;
 mod dataset;
 mod details;
+pub(crate) mod library;
 mod single;
 mod table;
 
-pub use compare::format_compare_with_limit;
+pub use compare::{Sides, format_compare_with_limit};
 pub use dataset::DatasetMatcher;
 pub use details::format_details;
 pub use single::format_single_result;

@@ -788,6 +788,10 @@ pub struct SidecarData {
     pub(crate) records: Vec<Record>,
     /// The call ids tagged records named, kept or not.
     pub(crate) calls_seen: CallCensus,
+    /// Each library call's boundaries and its sink's own account, from its
+    /// call document; empty for every other capture, whose call streams have
+    /// no known boundary.
+    pub(crate) calls: Vec<CallSpan>,
     /// Marker that actually ended the child, if a configured stop marker hit.
     /// This is `None` when the child exited naturally, even if a stop was
     /// requested.
@@ -814,18 +818,49 @@ impl SidecarData {
         })
     }
 
-    /// Whether the stored trajectory omits anything: a capture loss, or a
-    /// sealing or terminal record, which sidecar.db has no place for.
+    /// Whether the stored trajectory omits anything the capture saw: a
+    /// capture loss. Every kept record, sealing and terminal records
+    /// included, has a place in sidecar.db.
     pub(crate) fn stored_incomplete(&self) -> bool {
-        self.summary.loss.any() || self.has_sink_ends()
+        self.summary.loss.any()
     }
+}
 
-    /// Whether any sealing or terminal record was captured.
-    pub(crate) fn has_sink_ends(&self) -> bool {
-        self.records
-            .iter()
-            .any(|r| matches!(r, Record::Sealing(_) | Record::Terminal(_)))
-    }
+/// One library call's boundaries, from its call document (`brokkr man
+/// library`, The artefacts): `MarkerFifo::now_us()` readings on the clock its
+/// records carry, and how its sink ended by its own account. A call stream
+/// with one closes its last phase at `return_us`; markers stamped after it
+/// are the call's tail, not timed work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CallSpan {
+    pub call: String,
+    pub entry_us: i64,
+    pub return_us: i64,
+    pub seal_us: i64,
+    /// The artefact `stream.state`: `sealed`, `failed` or `open`.
+    pub stream_state: String,
+    /// The artefact `stream.drops`, exact.
+    pub stream_drops: u64,
+    /// As on [`Marker`]: 0 at capture, filled on read.
+    pub run_idx: usize,
+}
+
+/// A sealing emission or terminal record as stored, with the run it came
+/// from and its arrival position in that run's capture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredSinkEnd {
+    pub run_idx: usize,
+    pub record_idx: i64,
+    pub timestamp_us: i64,
+    pub call: String,
+    pub kind: SinkEndKind,
+}
+
+/// What a stored sink end says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SinkEndKind {
+    Sealing { name: String, value: i64 },
+    Terminal { end: SinkEnd, drops: u64 },
 }
 
 /// Result of a sidecar-monitored child process run.
@@ -1645,6 +1680,7 @@ pub(crate) fn run_sidecar_with_deadline(
             samples,
             records: capture.records,
             calls_seen: capture.calls_seen,
+            calls: Vec::new(),
             fired_stop_marker,
             ending: run.ending,
             summary: SidecarSummary {

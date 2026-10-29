@@ -393,11 +393,19 @@ The FIFO carries these line types (parsed in `SidecarFifo::drain`,
   Untagged lines read as before (`<ts> @@x=1` is a counter named `@x`). A
   library harness's call sink writes them when it is sealed; what they mean
   is `brokkr man library`, The call stream. They are never markers or
-  counters in any view, and sidecar.db does not store them, so a run that
-  carried any warns when stored and is stored as incomplete.
+  counters in any view. sidecar.db stores them (`sidecar_sink_records`,
+  since its v10, a terminal's drops as exact decimal text) and the default
+  summary reads them; a run stored before v10 had no place for them and
+  was stored as incomplete, which it stays.
 
 The capture keeps every record in the one order it arrived in, markers,
-counters and sink ends alike. Every rejected line, including invalid UTF-8
+counters and sink ends alike, and sidecar.db stores each record's position
+in it (`record_idx`, since v10; NULL on older rows, whose cross-kind order
+was never recorded): counters and sink ends read back in arrival order,
+markers in `marker_idx` order, the same order among markers. A library
+measurement also stores each call's boundaries and its sink's own account
+from its call document (`sidecar_calls`; `brokkr man library`, Measuring a
+scenario). Every rejected line, including invalid UTF-8
 and a record cut off without a newline when the writers close, warns and
 marks the run's stored trajectory incomplete, so a later `brokkr sidecar`
 query still says so. A query that finds no fault does not mean every line
@@ -407,8 +415,14 @@ FIFO buffer (the unprivileged default ceiling) so a producer between two
 drains drops fewer lines; where that is refused the default stays.
 
 Every view groups markers and counters by `(run, call)` stream. `--call
-CALL_ID` restricts a view to one call; a call id that appears in neither the
-markers nor the counters of the selected runs is an error. Views that read
+CALL_ID` restricts a view to one call; a call id that the selected runs know
+nothing of (no boundaries, markers, counters or sink ends) is an error.
+A call with known boundaries splits its markers at its return for the
+default summary and `--phase`: those stamped up to `return_us` are its
+phases, the last ending at the return, and the later ones are its tail,
+points that are not timed call work. `--durations` pairs a call's
+`_START`/`_END` markers over its whole stream, as before: a span names its
+own two ends and needs no boundary. Views that read
 one process timeline (the default summary, `--stalls`, and any `--phase`)
 refuse `--run all`, and a `--phase` is resolved, and refused if it does not
 resolve, before a view reports an empty result. With `--counters`, a phase
@@ -420,9 +434,9 @@ prints the raw events:
 
 | View | Marker interpretation |
 |---|---|
-| default summary / `--compare` | the process stream only: each marker opens a segment running to the **next** marker (no `_START`/`_END` meaning); with no markers, the sampled run is one `(all)` segment. The summary then lists each call stream's marker intervals (`type: call_phase`) with no resource columns, since samples are process-wide; a call's last interval has no known end (`end_us: null`). With `--call` only that call's intervals print. A run with no samples still lists its call intervals |
+| default summary / `--compare` | the process stream only: each marker opens a segment running to the **next** marker (no `_START`/`_END` meaning); with no markers, the sampled run is one `(all)` segment. The default summary (never `--compare`) then lists each call stream (any call with boundaries, markers or sink ends) with no resource columns, since samples are process-wide: for a call with boundaries first a `type: call` record (entry, return and seal readings, its wall, its sink's account by its own document, the terminal record that arrived or `null`, and the count of sealing emissions), then its phases (`type: call_phase`), the last ending at the return, and its tail (`type: call_tail`); without boundaries a call's last interval has no known end (`end_us: null`). With `--call` only that call prints. A run with no samples still lists its calls |
 | `--markers` | raw marker events in arrival order, each with its `run` and, when tagged, `call`; no pairing or segment projection |
-| `--phase FOO` | resolved in one stream of one run - the process stream, or the `--call` stream - first match in time order: exact marker name first (that marker to the next), then a completed `FOO_START`..`FOO_END` span, then the first marker name containing `FOO` (that marker to the next). A match on a call's last marker has no known end and is an error. With `--samples`/`--stat`, `--call` needs `--phase` and the samples stay process-wide |
+| `--phase FOO` | resolved in one stream of one run - the process stream, or the `--call` stream - first match in time order: exact marker name first (that marker to the next), then a completed `FOO_START`..`FOO_END` span, then the first marker name containing `FOO` (that marker to the next). For a call with boundaries only its phases match, the last ending at the return, and a name only its tail has is an error; without boundaries a match on a call's last marker has no known end and is an error. With `--samples`/`--stat`, `--call` needs `--phase` and the samples stay process-wide |
 | `--durations` | per `(run, call)` stream, each `FOO_START` pairs with the next later `FOO_END`; unmatched starts and markers not used by a span render as standalone points. Overlapping same-name spans in one stream pair by that rule, which is deterministic but does not identify which operation ended. `--human` collapses names seen more than once in a stream into a single aggregate row (`WAIT_P2_SEND x287  total 4200.0ms  min/avg/max`), sorted by total desc, under a "Repeated spans" heading - the split is on observed cardinality, not on the name, so nothing here knows what `WAIT_` means. Totals accumulate in microseconds so a crowd of sub-millisecond spans still sums correctly. Several streams print under a heading each. JSONL keeps one record per span and standalone point, with `run` and `call`. |
 | `--stop` | process stream only: a call's marker never stops the scenario. `FOO_END` matches verbatim; `-FOO` resolves to `FOO_END`; bare `FOO` first checks for a marker named `FOO`, then falls back to `FOO_END`. Brokkr prints the resolved name whenever it differs from the requested spelling. |
 
@@ -439,7 +453,7 @@ concept instead:
 
 | View | Counter interpretation |
 |---|---|
-| `--stalls` | rolls up `*_wait_ns` counters per stream: max value per name (strictly-monotonic, so max == cumulative total), category = name minus the `_wait_ns` suffix, reported as ms + `% of wall` for the process stream and as ms alone for a call stream (no call boundary is known, and the process wall would understate a short call; the observed max is a best-effort reading, not the call's total). The `%` can exceed 100 for waits accumulated across concurrent threads (it's the avg threads parked in that category; single-threaded waits read as clean sub-100%). Unifies both projects - it picks up pbfhogg's `pipeline_*_wait_ns` and elivagar's `sort_chunk_write_wait_ns` etc. in one table. |
+| `--stalls` | rolls up `*_wait_ns` counters per stream: max value per name (strictly-monotonic, so max == cumulative total), category = name minus the `_wait_ns` suffix, reported as ms + `% of wall` for the process stream, as ms + `%` of the call's own wall (return minus entry) for a call with boundaries, and as ms alone for any other call stream (the process wall would understate a short call). The observed max is a best-effort reading, not the call's total; a library measurement's call rows carry the call's authoritative snapshot (`brokkr man library`, Measuring a scenario). The `%` can exceed 100 for waits accumulated across concurrent threads (it's the avg threads parked in that category; single-threaded waits read as clean sub-100%). Unifies both projects - it picks up pbfhogg's `pipeline_*_wait_ns` and elivagar's `sort_chunk_write_wait_ns` etc. in one table. |
 | `--counters` | prints every counter point verbatim (`t=<sec> name=value`, `[call]` before the name when tagged; JSONL carries `run` and `call`), no aggregation. `--grep <SUBSTR>` keeps only counters whose name contains the substring, and composes with `--phase`; a run emitting a progress counter every 64 blobs otherwise buries the lines that matter |
 
 See the README "Sidecar conventions" section for the emitter-side contract.
@@ -565,7 +579,12 @@ switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`.
 Samples, markers, counters, and FIFO records have explicit limits in
 `MeasurementTunables`. The sample, marker, and counter budgets apply across
 all iterations in one measurement, so a large `--bench N` request cannot
-multiply the retained trajectory without bound. Overlong FIFO records are
+multiply the retained trajectory without bound. A library measurement is
+the exception (`brokkr man library`, Measuring a scenario): each of its
+processes is verified whole and has the budgets a verification has, and
+the bound is instead on memory, since each process's trajectory is stored
+as soon as it is judged and brokkr holds at most one; the stored volume
+grows with N, as it does not for other measurements. Overlong FIFO records are
 discarded through their newline without growing the temporary line buffer.
 Reading the FIFO is bounded too: each supervisor tick consumes at most 4 MiB
 of it, discarded bytes included, so a child writing without pause cannot

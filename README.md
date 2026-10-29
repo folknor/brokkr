@@ -320,7 +320,7 @@ The compare view shows timing, output size, peak RSS, rewrite ratio, and blob di
 
 ### Invalidating results
 
-A benchmark run under the wrong pretences (wrong dataset, wrong features, wrong git state, interrupted sidecar, …) produces numbers that will skew every future comparison. `brokkr invalidate` hard-deletes such runs from both `.brokkr/results.db` (runs + `run_distribution` + `run_iterations` + `run_kv` + `hotpath_functions` + `hotpath_threads`) and `.brokkr/sidecar.db` (samples, markers, summary, counters, meta, and any `sidecar_latest` pointer rows like `dirty` that resolve to a deleted UUID).
+A benchmark run under the wrong pretences (wrong dataset, wrong features, wrong git state, interrupted sidecar, …) produces numbers that will skew every future comparison. `brokkr invalidate` hard-deletes such runs from both `.brokkr/results.db` (runs + `run_distribution` + `run_iterations` + `run_kv` + `hotpath_functions` + `hotpath_threads`; every row of a library measurement's group, which shares one UUID; the content-addressed `library_documents` stay) and `.brokkr/sidecar.db` (samples, markers, summary, counters, sink records, call boundaries, meta, and any `sidecar_latest` pointer rows like `dirty` that resolve to a deleted UUID).
 
 Dry-run by default - the command prints each matched UUID and tags whether sidecar data is present, then exits. Pass `-f` / `--force` to actually delete.
 

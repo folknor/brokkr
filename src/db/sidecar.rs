@@ -25,6 +25,9 @@ CREATE TABLE IF NOT EXISTS sidecar_markers (
     name         TEXT NOT NULL,
     -- The call stream; NULL is the process-wide stream.
     call_id      TEXT,
+    -- Arrival position in the run's capture, shared with counters and sink
+    -- records; NULL for rows stored before v10.
+    record_idx   INTEGER,
     PRIMARY KEY (result_uuid, run_idx, marker_idx)
 );
 
@@ -41,7 +44,8 @@ CREATE TABLE IF NOT EXISTS sidecar_counters (
     timestamp_us INTEGER NOT NULL,
     name         TEXT NOT NULL,
     value        INTEGER NOT NULL,
-    call_id      TEXT
+    call_id      TEXT,
+    record_idx   INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_counters_uuid ON sidecar_counters(result_uuid, run_idx);
 
@@ -61,6 +65,37 @@ CREATE TABLE IF NOT EXISTS sidecar_meta (
     dataset        TEXT,
     exit_code      INTEGER,
     ending         TEXT
+);
+
+-- A library call sink's sealing emissions and terminal record, with their
+-- arrival position in the run's capture (record_idx, shared with markers and
+-- counters). Drops are exact decimal text: the protocol's range is a u64.
+CREATE TABLE IF NOT EXISTS sidecar_sink_records (
+    result_uuid  TEXT NOT NULL,
+    run_idx      INTEGER NOT NULL,
+    record_idx   INTEGER NOT NULL,
+    timestamp_us INTEGER NOT NULL,
+    call_id      TEXT NOT NULL,
+    kind         TEXT NOT NULL CHECK (kind IN ('sealing', 'terminal')),
+    name         TEXT,
+    value        INTEGER,
+    end_state    TEXT,
+    drops        TEXT,
+    PRIMARY KEY (result_uuid, run_idx, record_idx)
+);
+
+-- A library call's boundaries and its sink's own account, from its call
+-- document: what closes a call stream's last phase.
+CREATE TABLE IF NOT EXISTS sidecar_calls (
+    result_uuid  TEXT NOT NULL,
+    run_idx      INTEGER NOT NULL,
+    call_id      TEXT NOT NULL,
+    entry_us     INTEGER NOT NULL,
+    return_us    INTEGER NOT NULL,
+    seal_us      INTEGER NOT NULL,
+    stream_state TEXT NOT NULL,
+    stream_drops TEXT NOT NULL,
+    PRIMARY KEY (result_uuid, run_idx, call_id)
 );
 
 CREATE TABLE IF NOT EXISTS sidecar_latest (
@@ -93,7 +128,7 @@ fn sidecar_schema() -> String {
 /// Current sidecar schema version. This database is independently readable
 /// and can exist without results.db, so its steps are local; `db::store` still
 /// owns the version stamp, transaction, and upgrade policy.
-const SIDECAR_VERSION: i64 = 9;
+const SIDECAR_VERSION: i64 = 10;
 
 /// Apply migrations newer than `current`; version checks and stamping are
 /// centralized in `db::store`.
@@ -159,6 +194,19 @@ fn run_sidecar_migrations(conn: &rusqlite::Connection, current: i64) -> Result<(
         for table in ["sidecar_markers", "sidecar_counters"] {
             if !super::store::column_exists(conn, table, "call_id")? {
                 conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN call_id TEXT"))?;
+            }
+        }
+    }
+    // v9 -> v10: markers and counters keep their arrival position in the
+    // run's capture (one sequence with the sink records, whose table and
+    // sidecar_calls' are new in the DDL). Older rows stay NULL: their
+    // cross-kind order was never recorded and is not invented.
+    if current < 10 {
+        for table in ["sidecar_markers", "sidecar_counters"] {
+            if !super::store::column_exists(conn, table, "record_idx")? {
+                conn.execute_batch(&format!(
+                    "ALTER TABLE {table} ADD COLUMN record_idx INTEGER"
+                ))?;
             }
         }
     }
@@ -300,7 +348,6 @@ impl SidecarDb {
     /// Bulk-insert sidecar profile data for one benchmark run.
     /// Sidecar rows share the durable lifetime of results; only an explicit
     /// `invalidate` removes them, so the store has no age-based pruning.
-    #[allow(clippy::cast_possible_wrap)]
     pub fn store_run(
         &self,
         result_uuid: &str,
@@ -308,84 +355,24 @@ impl SidecarDb {
         data: &crate::sidecar::SidecarData,
     ) -> Result<(), DevError> {
         let tx = self.conn.unchecked_transaction()?;
+        insert_run(&tx, result_uuid, run_idx, data)?;
+        tx.commit()?;
+        Ok(())
+    }
 
-        {
-            let sample_columns = crate::sidecar::Sample::db_column_names();
-            let columns = sample_columns.join(", ");
-            let placeholders = (1..=sample_columns.len() + 2)
-                .map(|index| format!("?{index}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let sql = format!(
-                "INSERT INTO sidecar_samples (result_uuid, run_idx, {columns}) VALUES ({placeholders})"
-            );
-            let mut stmt = tx.prepare_cached(&sql)?;
-
-            for s in &data.samples {
-                let mut values = vec![
-                    rusqlite::types::Value::Text(result_uuid.to_owned()),
-                    rusqlite::types::Value::Integer(run_idx as i64),
-                ];
-                values.extend(s.db_values());
-                stmt.execute(rusqlite::params_from_iter(values))?;
-            }
-        }
-
-        {
-            let mut stmt = tx.prepare_cached(
-                "INSERT INTO sidecar_markers (
-                    result_uuid, run_idx, marker_idx, timestamp_us, name, call_id
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            )?;
-
-            for m in data.markers() {
-                stmt.execute(rusqlite::params![
-                    result_uuid,
-                    run_idx as i64,
-                    m.marker_idx,
-                    m.timestamp_us,
-                    m.name,
-                    m.call,
-                ])?;
-            }
-        }
-
-        // Insert counters.
-        {
-            let mut stmt = tx.prepare_cached(
-                "INSERT INTO sidecar_counters (
-                    result_uuid, run_idx, timestamp_us, name, value, call_id
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            )?;
-
-            for c in data.counters() {
-                stmt.execute(rusqlite::params![
-                    result_uuid,
-                    run_idx as i64,
-                    c.timestamp_us,
-                    c.name,
-                    c.value,
-                    c.call,
-                ])?;
-            }
-        }
-
-        tx.execute(
-            "INSERT INTO sidecar_summary (result_uuid, run_idx, capture_truncated)
-             VALUES (?1, ?2, ?3)",
-            rusqlite::params![
-                result_uuid,
-                run_idx as i64,
-                // Sealing and terminal records have no table, so a run that
-                // carried any is stored as incomplete too.
-                if data.stored_incomplete() {
-                    1_i64
-                } else {
-                    0_i64
-                }
-            ],
-        )?;
-
+    /// One run of a session stored as soon as it is judged, with the
+    /// session's metadata rewritten in the same transaction, so a session
+    /// stored run by run never names a run that was not stored.
+    pub(crate) fn store_session_run(
+        &self,
+        result_uuid: &str,
+        run_idx: usize,
+        data: &crate::sidecar::SidecarData,
+        meta: &SessionMeta<'_>,
+    ) -> Result<(), DevError> {
+        let tx = self.conn.unchecked_transaction()?;
+        insert_run(&tx, result_uuid, run_idx, data)?;
+        write_meta(&tx, result_uuid, meta)?;
         tx.commit()?;
         Ok(())
     }
@@ -401,41 +388,217 @@ impl SidecarDb {
         run_info: Option<&RunInfo>,
         sidecar_only: bool,
     ) -> Result<(), DevError> {
-        let command = if sidecar_only {
-            run_info.and_then(|run| run.command.as_deref())
-        } else {
-            None
-        };
-        self.conn.execute(
-            "INSERT OR REPLACE INTO sidecar_meta (
-                result_uuid, best_run_idx, total_runs,
-                run_start_epoch, pid, command, binary_path, binary_xxh128,
-                git_commit, mode, dataset, exit_code, ending
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            rusqlite::params![
-                result_uuid,
-                i64::try_from(best_run_idx).unwrap_or(0),
-                i64::try_from(total_runs).unwrap_or(1),
-                run_info.and_then(|r| r.run_start_epoch),
-                run_info.and_then(|r| r.pid),
-                command,
-                run_info.as_ref().and_then(|r| r.binary_path.as_deref()),
-                run_info.as_ref().and_then(|r| r.binary_xxh128.as_deref()),
-                run_info
-                    .as_ref()
-                    .and_then(|r| r.git_commit.as_ref())
-                    .map(crate::git::ShortCommit::as_str),
-                run_info.as_ref().and_then(|r| r.mode.as_deref()),
-                run_info.as_ref().and_then(|r| r.dataset.as_deref()),
-                run_info
-                    .and_then(|r| r.ending.as_ref())
-                    .and_then(legacy_exit_code),
-                run_info.and_then(|r| r.ending.as_ref()).map(encode_ending),
-            ],
-        )?;
-        Ok(())
+        write_meta(
+            &self.conn,
+            result_uuid,
+            &SessionMeta {
+                best_run_idx,
+                total_runs,
+                run_info,
+                sidecar_only,
+            },
+        )
+    }
+}
+
+/// A session's metadata as [`SidecarDb::store_meta`] writes it.
+pub(crate) struct SessionMeta<'a> {
+    pub(crate) best_run_idx: usize,
+    pub(crate) total_runs: usize,
+    pub(crate) run_info: Option<&'a RunInfo>,
+    pub(crate) sidecar_only: bool,
+}
+
+fn write_meta(
+    conn: &rusqlite::Connection,
+    result_uuid: &str,
+    meta: &SessionMeta<'_>,
+) -> Result<(), DevError> {
+    let SessionMeta {
+        best_run_idx,
+        total_runs,
+        run_info,
+        sidecar_only,
+    } = *meta;
+    let command = if sidecar_only {
+        run_info.and_then(|run| run.command.as_deref())
+    } else {
+        None
+    };
+    conn.execute(
+        "INSERT OR REPLACE INTO sidecar_meta (
+            result_uuid, best_run_idx, total_runs,
+            run_start_epoch, pid, command, binary_path, binary_xxh128,
+            git_commit, mode, dataset, exit_code, ending
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        rusqlite::params![
+            result_uuid,
+            i64::try_from(best_run_idx).unwrap_or(0),
+            i64::try_from(total_runs).unwrap_or(1),
+            run_info.and_then(|r| r.run_start_epoch),
+            run_info.and_then(|r| r.pid),
+            command,
+            run_info.as_ref().and_then(|r| r.binary_path.as_deref()),
+            run_info.as_ref().and_then(|r| r.binary_xxh128.as_deref()),
+            run_info
+                .as_ref()
+                .and_then(|r| r.git_commit.as_ref())
+                .map(crate::git::ShortCommit::as_str),
+            run_info.as_ref().and_then(|r| r.mode.as_deref()),
+            run_info.as_ref().and_then(|r| r.dataset.as_deref()),
+            run_info
+                .and_then(|r| r.ending.as_ref())
+                .and_then(legacy_exit_code),
+            run_info.and_then(|r| r.ending.as_ref()).map(encode_ending),
+        ],
+    )?;
+    Ok(())
+}
+
+/// One run's samples and records, inside the caller's transaction.
+#[allow(clippy::cast_possible_wrap, clippy::too_many_lines)]
+fn insert_run(
+    tx: &rusqlite::Connection,
+    result_uuid: &str,
+    run_idx: usize,
+    data: &crate::sidecar::SidecarData,
+) -> Result<(), DevError> {
+    {
+        let sample_columns = crate::sidecar::Sample::db_column_names();
+        let columns = sample_columns.join(", ");
+        let placeholders = (1..=sample_columns.len() + 2)
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "INSERT INTO sidecar_samples (result_uuid, run_idx, {columns}) VALUES ({placeholders})"
+        );
+        let mut stmt = tx.prepare_cached(&sql)?;
+
+        for s in &data.samples {
+            let mut values = vec![
+                rusqlite::types::Value::Text(result_uuid.to_owned()),
+                rusqlite::types::Value::Integer(run_idx as i64),
+            ];
+            values.extend(s.db_values());
+            stmt.execute(rusqlite::params_from_iter(values))?;
+        }
     }
 
+    // Every kept record, with its position in the one arrival order the
+    // capture kept, so counters and sink records read back in it.
+    {
+        let mut markers = tx.prepare_cached(
+            "INSERT INTO sidecar_markers (
+                    result_uuid, run_idx, marker_idx, timestamp_us, name, call_id, record_idx
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?;
+        let mut counters = tx.prepare_cached(
+            "INSERT INTO sidecar_counters (
+                    result_uuid, run_idx, timestamp_us, name, value, call_id, record_idx
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?;
+        let mut sink = tx.prepare_cached(
+            "INSERT INTO sidecar_sink_records (
+                    result_uuid, run_idx, record_idx, timestamp_us, call_id, kind, name,
+                    value, end_state, drops
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        )?;
+        for (idx, record) in data.records.iter().enumerate() {
+            let idx = i64::try_from(idx).unwrap_or(i64::MAX);
+            match record {
+                crate::sidecar::Record::Marker(m) => {
+                    markers.execute(rusqlite::params![
+                        result_uuid,
+                        run_idx as i64,
+                        m.marker_idx,
+                        m.timestamp_us,
+                        m.name,
+                        m.call,
+                        idx,
+                    ])?;
+                }
+                crate::sidecar::Record::Counter(c) => {
+                    counters.execute(rusqlite::params![
+                        result_uuid,
+                        run_idx as i64,
+                        c.timestamp_us,
+                        c.name,
+                        c.value,
+                        c.call,
+                        idx,
+                    ])?;
+                }
+                crate::sidecar::Record::Sealing(s) => {
+                    sink.execute(rusqlite::params![
+                        result_uuid,
+                        run_idx as i64,
+                        idx,
+                        s.timestamp_us,
+                        s.call,
+                        "sealing",
+                        s.name,
+                        s.value,
+                        Option::<&str>::None,
+                        Option::<String>::None,
+                    ])?;
+                }
+                crate::sidecar::Record::Terminal(t) => {
+                    sink.execute(rusqlite::params![
+                        result_uuid,
+                        run_idx as i64,
+                        idx,
+                        t.timestamp_us,
+                        t.call,
+                        "terminal",
+                        Option::<&str>::None,
+                        Option::<i64>::None,
+                        t.end.name(),
+                        t.drops.to_string(),
+                    ])?;
+                }
+            }
+        }
+    }
+
+    {
+        let mut stmt = tx.prepare_cached(
+            "INSERT INTO sidecar_calls (
+                    result_uuid, run_idx, call_id, entry_us, return_us, seal_us,
+                    stream_state, stream_drops
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )?;
+        for span in &data.calls {
+            stmt.execute(rusqlite::params![
+                result_uuid,
+                run_idx as i64,
+                span.call,
+                span.entry_us,
+                span.return_us,
+                span.seal_us,
+                span.stream_state,
+                span.stream_drops.to_string(),
+            ])?;
+        }
+    }
+
+    tx.execute(
+        "INSERT INTO sidecar_summary (result_uuid, run_idx, capture_truncated)
+             VALUES (?1, ?2, ?3)",
+        rusqlite::params![
+            result_uuid,
+            run_idx as i64,
+            if data.stored_incomplete() {
+                1_i64
+            } else {
+                0_i64
+            }
+        ],
+    )?;
+    Ok(())
+}
+
+impl SidecarDb {
     /// Query metadata for one identity already resolved by `RunStore`.
     /// Missing metadata keeps the historical default, while database errors
     /// remain visible to the caller.
@@ -639,14 +802,14 @@ impl SidecarDb {
                 "SELECT timestamp_us, name, value, run_idx, call_id
                  FROM sidecar_counters
                  WHERE result_uuid = ?1 AND run_idx = ?2
-                 ORDER BY timestamp_us, name",
+                 ORDER BY record_idx IS NULL, record_idx, timestamp_us, name",
                 Some(i64::try_from(idx).unwrap_or(0)),
             ),
             None => (
                 "SELECT timestamp_us, name, value, run_idx, call_id
                  FROM sidecar_counters
                  WHERE result_uuid = ?1
-                 ORDER BY run_idx, timestamp_us, name",
+                 ORDER BY run_idx, record_idx IS NULL, record_idx, timestamp_us, name",
                 None,
             ),
         };
@@ -667,6 +830,81 @@ impl SidecarDb {
         rows.collect::<Result<Vec<_>, _>>().map_err(DevError::from)
     }
 
+    /// The library call boundaries stored for an identity resolved by
+    /// `RunStore`, by run then call; none for any other session.
+    pub(crate) fn query_calls_for(
+        &self,
+        id: &RunId,
+        run_idx: Option<usize>,
+    ) -> Result<Vec<crate::sidecar::CallSpan>, DevError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT call_id, entry_us, return_us, seal_us, stream_state, stream_drops, run_idx
+             FROM sidecar_calls
+             WHERE result_uuid = ?1 AND (?2 IS NULL OR run_idx = ?2)
+             ORDER BY run_idx, call_id",
+        )?;
+        let filter = run_idx.map(|idx| i64::try_from(idx).unwrap_or(i64::MAX));
+        let rows = stmt.query_map(rusqlite::params![id.as_str(), filter], |row| {
+            let drops: String = row.get(5)?;
+            Ok(crate::sidecar::CallSpan {
+                call: row.get(0)?,
+                entry_us: row.get(1)?,
+                return_us: row.get(2)?,
+                seal_us: row.get(3)?,
+                stream_state: row.get(4)?,
+                stream_drops: drops.parse().unwrap_or(u64::MAX),
+                run_idx: stored_run_idx(row.get(6)?),
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(DevError::from)
+    }
+
+    /// The sealing emissions and terminal records stored for an identity,
+    /// in arrival order within each run.
+    pub(crate) fn query_sink_ends_for(
+        &self,
+        id: &RunId,
+        run_idx: Option<usize>,
+    ) -> Result<Vec<crate::sidecar::StoredSinkEnd>, DevError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT run_idx, record_idx, timestamp_us, call_id, kind, name, value, end_state, drops
+             FROM sidecar_sink_records
+             WHERE result_uuid = ?1 AND (?2 IS NULL OR run_idx = ?2)
+             ORDER BY run_idx, record_idx",
+        )?;
+        let filter = run_idx.map(|idx| i64::try_from(idx).unwrap_or(i64::MAX));
+        let rows = stmt.query_map(rusqlite::params![id.as_str(), filter], |row| {
+            let kind: String = row.get(4)?;
+            let kind = if kind == "sealing" {
+                crate::sidecar::SinkEndKind::Sealing {
+                    name: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                    value: row.get::<_, Option<i64>>(6)?.unwrap_or_default(),
+                }
+            } else {
+                let end = row.get::<_, Option<String>>(7)?;
+                crate::sidecar::SinkEndKind::Terminal {
+                    end: if end.as_deref() == Some("failed") {
+                        crate::sidecar::SinkEnd::Failed
+                    } else {
+                        crate::sidecar::SinkEnd::Sealed
+                    },
+                    drops: row
+                        .get::<_, Option<String>>(8)?
+                        .and_then(|d| d.parse().ok())
+                        .unwrap_or(u64::MAX),
+                }
+            };
+            Ok(crate::sidecar::StoredSinkEnd {
+                run_idx: stored_run_idx(row.get(0)?),
+                record_idx: row.get(1)?,
+                timestamp_us: row.get(2)?,
+                call: row.get(3)?,
+                kind,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(DevError::from)
+    }
+
     /// Delete one canonical session identity, along with any `sidecar_latest`
     /// pointer rows that resolve to it so `brokkr sidecar dirty` doesn't point
     /// at a ghost. Equality makes it impossible for a resolved UUID to be
@@ -680,6 +918,8 @@ impl SidecarDb {
             ("sidecar_samples", "result_uuid"),
             ("sidecar_markers", "result_uuid"),
             ("sidecar_counters", "result_uuid"),
+            ("sidecar_sink_records", "result_uuid"),
+            ("sidecar_calls", "result_uuid"),
             ("sidecar_meta", "result_uuid"),
             ("sidecar_latest", "uuid"),
         ] {
@@ -864,10 +1104,15 @@ mod tests {
              ALTER TABLE sidecar_summary ADD COLUMN marker_count INTEGER;
              ALTER TABLE sidecar_summary ADD COLUMN wall_time_ms INTEGER;
              ALTER TABLE sidecar_markers DROP COLUMN call_id;
-             ALTER TABLE sidecar_counters DROP COLUMN call_id;",
+             ALTER TABLE sidecar_counters DROP COLUMN call_id;
+             ALTER TABLE sidecar_markers DROP COLUMN record_idx;
+             ALTER TABLE sidecar_counters DROP COLUMN record_idx;
+             DROP TABLE sidecar_calls;
+             DROP TABLE sidecar_sink_records;",
         )
         .unwrap();
-        // v5: before `ending`, the summary payload drop, and call streams.
+        // v5: before `ending`, the summary payload drop, call streams,
+        // arrival positions, sink records and call boundaries.
         raw.pragma_update(None, "user_version", 5).unwrap();
         drop(raw);
 
@@ -894,6 +1139,122 @@ mod tests {
         let read = ro.query_markers_for(&id, None).unwrap();
         assert_eq!(read.len(), 1);
         assert_eq!(read[0].call, None, "an older row is process-wide");
+        assert!(ro.query_calls_for(&id, None).unwrap().is_empty());
+        assert!(ro.query_sink_ends_for(&id, None).unwrap().is_empty());
+        let positioned: Option<i64> = ro
+            .conn()
+            .query_row("SELECT record_idx FROM sidecar_markers", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            positioned, None,
+            "an older row's arrival position is never invented"
+        );
+    }
+
+    /// A library run's trajectory: a call's counters out of time order, its
+    /// sealing emission and terminal record, and its boundaries.
+    fn library_capture() -> crate::sidecar::SidecarData {
+        use crate::sidecar::{Counter, Record, Sealing, SinkEnd, Terminal};
+        let counter = |ts: i64, name: &str| {
+            Record::Counter(Counter {
+                timestamp_us: ts,
+                name: name.to_owned(),
+                value: 1,
+                run_idx: 0,
+                call: Some("a".to_owned()),
+            })
+        };
+        crate::sidecar::SidecarData {
+            samples: Vec::new(),
+            records: vec![
+                counter(30, "late"),
+                counter(20, "early"),
+                Record::Sealing(Sealing {
+                    timestamp_us: 40,
+                    call: "a".to_owned(),
+                    name: "n".to_owned(),
+                    value: 3,
+                }),
+                Record::Terminal(Terminal {
+                    timestamp_us: 41,
+                    call: "a".to_owned(),
+                    end: SinkEnd::Sealed,
+                    drops: u64::MAX,
+                }),
+            ],
+            calls_seen: crate::sidecar::CallCensus::default(),
+            calls: vec![crate::sidecar::CallSpan {
+                call: "a".to_owned(),
+                entry_us: 10,
+                return_us: 35,
+                seal_us: 45,
+                stream_state: "sealed".to_owned(),
+                stream_drops: u64::MAX,
+                run_idx: 0,
+            }],
+            fired_stop_marker: None,
+            ending: Ending::Exited(0),
+            summary: crate::sidecar::SidecarSummary {
+                vm_hwm_kb: 0,
+                sample_count: 0,
+                marker_count: 0,
+                wall_time_ms: 0,
+                loss: crate::sidecar::CaptureLoss::default(),
+            },
+        }
+    }
+
+    // A session stored run by run keeps every record kind in its arrival
+    // order, the call boundaries and the sink's account exact, is complete
+    // though it carried sink ends, and rewrites its metadata with each run.
+    #[test]
+    fn a_library_session_stores_sink_ends_boundaries_and_arrival_order() {
+        let path = crate::test_scratch::scratch("db-sidecar", "library").join("s.db");
+        let db = SidecarDb::open(&path).unwrap();
+        let data = library_capture();
+        for run in 0..2 {
+            db.store_session_run(
+                "lib111",
+                run,
+                &data,
+                &SessionMeta {
+                    best_run_idx: 0,
+                    total_runs: run + 1,
+                    run_info: None,
+                    sidecar_only: true,
+                },
+            )
+            .unwrap();
+        }
+        let id = super::super::RunId::new("lib111".to_owned());
+        assert_eq!(db.query_meta_for(&id).unwrap(), (0, 2));
+        let names: Vec<String> = db
+            .query_counters_for(&id, Some(1))
+            .unwrap()
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(names, ["late", "early"], "arrival order, not time order");
+        let ends = db.query_sink_ends_for(&id, Some(0)).unwrap();
+        assert_eq!(ends.len(), 2);
+        assert_eq!((ends[0].record_idx, ends[1].record_idx), (2, 3));
+        assert_eq!(
+            ends[1].kind,
+            crate::sidecar::SinkEndKind::Terminal {
+                end: crate::sidecar::SinkEnd::Sealed,
+                drops: u64::MAX
+            }
+        );
+        let calls = db.query_calls_for(&id, None).unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].run_idx, 1);
+        assert_eq!(calls[0].stream_drops, u64::MAX);
+        assert!(!db.query_capture_truncated_for(&id, None).unwrap());
+        assert_eq!(db.delete_by_run_id(&id).unwrap(), 2);
+        assert!(db.query_calls_for(&id, None).unwrap().is_empty());
+        assert!(db.query_sink_ends_for(&id, None).unwrap().is_empty());
     }
 
     // A store stamped newer than this brokkr knows is refused, and the stamp is

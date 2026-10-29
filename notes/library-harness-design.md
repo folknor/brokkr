@@ -654,7 +654,47 @@ equality" is the binding text.
   generated digests and each call's context digest, else the run fails
   naming the field.
 
-### R14 Concurrency is a claim (ledger)
+### R13a Amendments made by slice 6 (link 6, sparred with codex over three rounds)
+
+Each changes or sharpens R13 or R12/R12a; `docs/commands/library.md`
+"Measuring a scenario" is the binding text.
+
+- **The host fingerprint** in R13's identity was untrue: today's pairing key
+  holds the captured environment (`env_fingerprint`), and host conditions
+  (memory, governor, kernel) are annotations, never part of any key. The
+  identity rides with that key unchanged, so the captured environment is
+  what it means.
+- **Dataset identities** are not "the dataset digest brokkr already
+  records" (no row records one): each bound dataset file's XXH128 through
+  the hash cache, `xxh128:<hex>`, read once before the first process (a
+  configured `xxhash` was already checked equal to it at resolution).
+- **Generated identities**: `absent`, `xxh128:<hex>` for a file or PBF role,
+  `tree-v1:<hex>` for a directory, every record field fixed width
+  (`<XXH3-128 of the path bytes><kind><value>`, kind `d`, `f` with the
+  file's XXH128, `l` with the XXH3-128 of the raw link target), sorted by
+  raw path bytes, nothing followed, anything else unidentifiable and a
+  failure. Codex found the newline-framed first draft collides structurally
+  (a link target and a file name both holding a newline).
+  `preflight::compute_tree_digest` is not used: it refuses an empty
+  directory and is a pinning tool.
+- **The identity is the rows' arm qualifier** and also
+  `meta.library.identity` (the comparison layer reads the kv, so the arm key
+  stays opaque): one canonical JSON text of the plan digest, each call's
+  context digest, the dataset and generated identities and the harness
+  features. The features ride here because `cargo_features` is not a pairing
+  key. Agreement covers the features too.
+- **Agreement is part of each process's verdict** (inside `verify`), so a
+  disagreeing process fails like any verification failure, directory kept,
+  and `evidence/baseline.txt` holds iteration 0's identity and documents,
+  since iteration 0's directory is gone.
+- **Reuse** (R12, R12a): the key as R12 states; a hit still makes
+  `replay-<call>/` (`cwd/` and an empty `outputs/`) as the library digests'
+  working directory, checks the library outputs before and after every
+  digest launch with `outputs/` required empty, and the final whole-run
+  layout check runs because the directory was made. Only a counterpart that
+  passed is remembered.
+
+
 
 A concurrent group carries a required harness assertion that the calls'
 lifetimes intersect; nothing claims parallel execution. Per-call walls of a
@@ -677,8 +717,8 @@ headline.
   called a regression, and fails certification. Certification passes only
   when every scenario passed and every required capability passed. The
   applied requirement list and its digest are printed and stored with the
-  run (slice 6 stores it on measured rows; an `--all` run stores a
-  certification record, slice 5 decides where).
+  run (an `--all` run stores a certification record, R15a; slice 6
+  refused storing it on measured rows, R16a).
 
 ### R15a Amendments made by slice 5 (link 5, sparred with codex over three rounds)
 
@@ -760,6 +800,59 @@ binding text.
   plan digests differ are shown unpaired with the first differing plan field.
   Lib against CLI is never folded into `--compare`.
 
+### R16a Amendments made by slice 6 (link 6, sparred with codex over three rounds)
+
+Each changes or sharpens R16 or R15; `docs/commands/library.md`
+"Measuring a scenario" is the binding text.
+
+- **Capture budgets are per process**, revising the binding
+  measure.md rule that budgets span a measurement's iterations: a shared
+  budget would make a later process unverifiable for reasons not its own.
+  The bound becomes memory: the group uuid is made before iteration 0, each
+  process's trajectory is stored as soon as it is judged (pass or fail) and
+  dropped, so brokkr holds at most one; stored volume grows with N, which is
+  not true of other measurements, and measure.md says so.
+- **Publication order**: every trajectory with the session metadata in the
+  same transaction (the default run names a stored process, its ending
+  that process's), the final metadata, then the results.db group
+  transaction last, which publishes; a backup failure after it is a
+  warning. A failure stores no row and the session is aliased `dirty` and
+  printed. The session metadata exists before iteration 0, so a crash
+  leaves an identifiable partial session.
+- **One uuid for the group** is "the scenario row's id": every row of the
+  group shares it, invalidate removes the group whole, and the scenario row
+  is inserted last (enforced by `ResultsDb::insert_group`) so the group's
+  newest row is the scenario's, which `previous_run`, a preview and
+  `command_for_uuid` (now `ORDER BY id DESC`) read. `brokkr results <uuid>`
+  shows each row of a group whole.
+- **Call rows carry the sealed snapshot** as counters `snapshot.<name>`,
+  exact (decimal text past i64), beyond R16 (which left stalls in the
+  sidecar only): bz #46 point 4 asks for walls and stalls per call in
+  results.db, and the `snapshot.` prefix keeps any harness counter name from
+  overwriting or impersonating a brokkr key (`meta.`, `prev.`,
+  `provenance.`, `peak_rss_kb`), which codex showed plain names could.
+- **The unpaired line** is a diagnosis beside the pairing: the other side's
+  latest row of the same command, mode, input, captured environment and
+  known build, its identity's first difference (a plan or context field
+  from the stored canonical documents, a role, the features), or "the same
+  identity; the rows differ in their invocation". Never a claim that the
+  named difference is the only one.
+- **Sidecar v10**: `record_idx` (arrival position, one sequence over every
+  kind) on markers and counters, `sidecar_sink_records`, `sidecar_calls`
+  (boundaries plus the call document's own stream account, drops exact
+  decimal text); older rows keep NULL positions and their stored
+  incomplete flag. A call with boundaries splits its markers at
+  `return_us` into phases (the last closing there) and tail in the
+  default summary and `--phase` (`--durations` pairs START/END over the
+  whole call stream, a span naming its own ends; `--compare` stays
+  process-only); call discovery is the union of boundaries, markers, counters and
+  sink ends. No merged cross-kind reader is built: no view needs one.
+- **The requirement digest on measured rows is refused** (R15 said slice 6
+  stores it): `--bench` takes one SCENARIO, and library.md says SCENARIO
+  runs do not apply `[pbfhogg.library.require]`, so a stored digest would
+  claim a certification context that never existed. The certification
+  record keeps it for `--all`.
+
 ### R17 Hotpath and CLI timing (slice 7; finding 6)
 
 - `--hotpath`/`--alloc` only for a scenario whose describe sets `hotpath:
@@ -811,22 +904,16 @@ code. Sizes are rough source-plus-tests lines.
    `[pbfhogg.library.require]`, `--all`, classification, the certification
    record, with the amendments of R15a. Landed whole, nothing deferred out
    of it; about 900 source and test lines.
-6. **Recording.** `--bench N`, `brokkr-json-v1` canonicalization and the
-   plan and context digests (R13), iteration agreement, the results.db group
-   write and migration, sidecar.db call boundaries and the closed final
-   interval, `--compare` pairing. About 2200, one slice: a split would store
-   trajectories whose call ends no view can show. Moved here by slice 3, in
-   the same sidecar.db migration (about 150 more): store sink-end records
-   (sealing emissions and terminals, R11a) so a library trajectory with
-   them is no longer stored as incomplete, and store each record's arrival
-   position so counters read back in arrival order (`sidecar_counters`
-   today has no index and reads `ORDER BY timestamp_us, name`).
-   `Timeline::closed` exists for the closed final interval. Moved here by
-   slice 4 (about 150 more): generated-role content digests, computed after
-   the harness exits and before an iteration's first replay, which both the
-   R13 identity and the R12 reuse key read, and the reuse key itself, so an
-   iteration after the first reuses a counterpart's CLI digest when the key
-   matches (R12a).
+6. **Recording** (link 6, landed). `--bench N` and `--force`, brokkr-json-v1
+   and the plan and context digests, dataset and generated-role identities,
+   iteration agreement inside each verdict, the R12 reuse key, the
+   results.db group write (v26, `library_documents`), sidecar.db v10 (sink
+   records, call boundaries, arrival positions) with the closed final
+   interval and the tail in every call view, the `--compare` pairing by
+   identity and the unpaired line, with the amendments of R13a and R16a.
+   Landed whole, both moved-in items included, nothing deferred out of it;
+   the requirement digest on measured rows refused (R16a). About 2700
+   source and test lines.
 7. **Hotpath and close.** `hotpath` and `isolation` in describe,
    `--hotpath`/`--alloc`; then the chain's close: delete this file, file the
    pbfhogg list, comment on and close #46 naming slice 8 as not built. About
@@ -891,10 +978,23 @@ only carry a harness written after that.
   link starts: `certify.rs` holds `Requirements` (the applied list and its
   digest), `classify`, `certified` and `record`; `mod.rs` has `Target`
   (`One`/`All`), `certify_all` and `sweep`, and `show_report`, which prints a
-  run as `SCENARIO` does. Slice 6 stores the applied list and digest on
-  measured rows with `Requirements::digest` (`--bench` takes one SCENARIO,
-  never `--all`). `LibraryHarness::digest` and `PbfhoggBinary::digest` give
+  run as `SCENARIO` does. (Storing the applied list and digest on measured
+  rows was refused by slice 6, R16a: `--bench` takes one SCENARIO, which
+  applies no requirement list.) `LibraryHarness::digest` and `PbfhoggBinary::digest` give
   the executables' XXH128. `library.md` has twelve `##` sections.
+
+- Slice 6 (link 6): as planned, with the amendments of R13a and R16a.
+  Where a later link starts: `bench.rs` is the measured run (`measure`,
+  `rows`, `file_failed`); `run::verify` takes `Option<Measured>` and an
+  out-parameter for the trajectory, and its `Report` carries `identity`,
+  `spans` and `snapshots`; `identity.rs` holds the identity and its
+  disagreement; `counterpart::Reuse`/`Reusing` the reuse cache;
+  `BenchHarness::record_group` and `ResultsDb::insert_group` the group
+  write; `SidecarDb::store_session_run` the run-by-run store; the sidecar
+  views take `CallSpan`s (`sidecar_fmt::CallStreams`, `resolve_phase_range`'s
+  `span`, `print_stalls`' `calls`). Slice 7's hotpath scenario records one
+  scenario row and no call rows (R17), so it uses `record_group` with no
+  calls or the single-row `record`. `library.md` has thirteen `##` sections.
 
 ## The pbfhogg list
 

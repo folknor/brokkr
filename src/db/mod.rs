@@ -11,8 +11,10 @@ pub(crate) mod store;
 mod types;
 mod write;
 
+pub(crate) use format::library as library_rows;
 pub use format::{
-    DatasetMatcher, format_compare_with_limit, format_details, format_single_result, format_table,
+    DatasetMatcher, Sides, format_compare_with_limit, format_details, format_single_result,
+    format_table,
 };
 pub use hotpath::hotpath_data_from_json;
 pub(crate) use run_store::{Resolved, RunId, RunRef, RunSelector, RunStore};

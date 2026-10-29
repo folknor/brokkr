@@ -1,0 +1,566 @@
+//! `brokkr library SCENARIO --bench N` (`docs/commands/library.md`,
+//! Measuring a scenario): N whole processes of one scenario, each verified
+//! as a verification is and agreeing with the first, recorded as one group
+//! of rows (the scenario's and one per call) under one uuid, with every
+//! process's trajectory in sidecar.db under the same uuid.
+//!
+//! Publication order: each process's trajectory is stored as soon as it is
+//! judged (so brokkr holds at most one in memory), with the session's
+//! metadata in the same transaction; after the last process the metadata is
+//! final; the results.db group transaction comes last and is what publishes
+//! the measurement. Any failure before it stores no row, and the sidecar
+//! session is filed under the `dirty` alias and named.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use super::counterpart::Reuse;
+use super::describe::{RoleSource, Scenario};
+use super::identity::{self, Identity};
+use super::run::{self, Measured, Places};
+use crate::db::KvPair;
+use crate::error::DevError;
+use crate::harness::{BenchConfig, BenchHarness, BenchResult};
+use crate::measure::GroupRow;
+use crate::measure::execution::Iteration;
+use crate::output;
+use crate::pbfhogg::binary::{LibraryHarness, PbfhoggBinary};
+
+/// What one measured process came to, kept for the rows (its trajectory
+/// is already stored).
+struct Process {
+    wall: std::time::Duration,
+    /// Each call's `return_us - entry_us`, by call.
+    call_walls: BTreeMap<String, i64>,
+    snapshots: BTreeMap<String, BTreeMap<String, u64>>,
+    peak_rss_kb: i64,
+    identity: Identity,
+    ending: crate::output::Ending,
+}
+
+/// The handles and the session a measurement runs with.
+pub(crate) struct Bench<'a> {
+    pub(crate) harness: &'a LibraryHarness,
+    pub(crate) cli: &'a PbfhoggBinary,
+    pub(crate) session: &'a BenchHarness,
+    pub(crate) runs: std::num::NonZeroUsize,
+    pub(crate) dataset: &'a str,
+    pub(crate) project_root: &'a Path,
+}
+
+/// Measure `scenario`, its dataset roles bound to `datasets`.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn measure(
+    bench: &Bench<'_>,
+    scenario: &Scenario,
+    datasets: &BTreeMap<String, PathBuf>,
+    places: &Places<'_>,
+) -> Result<(), DevError> {
+    let session = bench.session;
+    let mut dataset_ids = BTreeMap::new();
+    for (role, path) in datasets {
+        dataset_ids.insert(role.clone(), identity::dataset(path, bench.project_root)?);
+    }
+    let build = bench.harness.build_identity().cloned();
+    let features = build
+        .as_ref()
+        .and_then(|b| b.features.clone())
+        .unwrap_or_default();
+    if let Some(build) = build {
+        session.note_build(build);
+    }
+    let command = format!("library:{}", scenario.id);
+    let uuid = crate::db::generate_uuid()?;
+    let short = crate::db::short_uuid(&uuid);
+    let sidecar = session.open_sidecar()?;
+    let start_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
+    let info = |ending: Option<crate::output::Ending>| crate::db::sidecar::RunInfo {
+        run_start_epoch: Some(start_epoch),
+        pid: None,
+        command: Some(command.clone()),
+        binary_path: None,
+        binary_xxh128: Some(bench.harness.digest().to_owned()),
+        git_commit: Some(session.commit().clone()),
+        mode: session.effective_mode(),
+        dataset: Some(bench.dataset.to_owned()),
+        ending,
+    };
+    // The session exists before its first process, so a crash leaves it
+    // identifiable, with what was stored.
+    sidecar.store_meta(&uuid, 0, 0, Some(&info(None)), true)?;
+
+    let config = BenchConfig {
+        command: command.clone(),
+        input_file: None,
+        input_mb: None,
+        cargo_features: None,
+        external_build: None,
+        runs: bench.runs.get(),
+        cli_args: None,
+        metadata: Vec::new(),
+        arm_qualifier: None,
+    };
+    let mut baseline: Option<Identity> = None;
+    let mut reuse = Reuse::default();
+    let mut processes: Vec<Process> = Vec::new();
+    // The default run a reader of the session sees: the fastest passing
+    // process so far (ties to the lowest index), else the last one stored.
+    let mut best: Option<(usize, std::time::Duration, crate::output::Ending)> = None;
+    let mut stored = 0usize;
+    let measured = session.measure(
+        &config,
+        None,
+        crate::measure::wall::WallSource::Closure,
+        false,
+        |i, _| {
+            let mut trajectory = None;
+            let verdict = run::verify(
+                bench.harness,
+                bench.cli,
+                scenario,
+                datasets,
+                places,
+                Some(Measured {
+                    iteration: i,
+                    baseline: baseline.as_ref(),
+                    reuse: &mut reuse,
+                    datasets: &dataset_ids,
+                    features: &features,
+                }),
+                &mut trajectory,
+            );
+            let passed = verdict.as_ref().is_ok_and(|r| r.passed);
+            if let Some(data) = trajectory {
+                let ending = data.ending.clone();
+                let wall = verdict
+                    .as_ref()
+                    .map_or(std::time::Duration::ZERO, |r| r.wall);
+                let candidate = if passed {
+                    match &best {
+                        Some((_, w, _)) if *w <= wall => best.clone(),
+                        _ => Some((i, wall, ending.clone())),
+                    }
+                } else {
+                    Some((i, wall, ending.clone()))
+                };
+                let (best_idx, _, best_ending) = candidate.clone().unwrap_or((i, wall, ending));
+                let meta_info = info(Some(best_ending));
+                sidecar
+                    .store_session_run(
+                        &uuid,
+                        i,
+                        &data,
+                        &crate::db::sidecar::SessionMeta {
+                            best_run_idx: best_idx,
+                            total_runs: stored + 1,
+                            run_info: Some(&meta_info),
+                            sidecar_only: true,
+                        },
+                    )
+                    .map_err(|e| {
+                        DevError::Verify(format!(
+                            "iteration {i}'s trajectory could not be stored in sidecar.db: {e}"
+                        ))
+                    })?;
+                stored += 1;
+                best = candidate;
+                if passed
+                    && let Ok(report) = &verdict
+                    && let Some(identity) = &report.identity
+                {
+                    processes.push(Process {
+                        wall: report.wall,
+                        call_walls: report
+                            .spans
+                            .iter()
+                            .map(|s| (s.call.clone(), s.return_us - s.entry_us))
+                            .collect(),
+                        snapshots: report.snapshots.clone(),
+                        peak_rss_kb: data.summary.vm_hwm_kb,
+                        identity: identity.clone(),
+                        ending: data.ending.clone(),
+                    });
+                }
+            }
+            let report = verdict?;
+            if !report.passed {
+                super::show_report(scenario, &report);
+                return Err(DevError::Verify(format!(
+                    "library scenario {} failed at iteration {i} ({})",
+                    scenario.id,
+                    output::count(report.failures.len(), "failure")
+                )));
+            }
+            if i == 0 {
+                baseline.clone_from(&report.identity);
+            }
+            let mut iteration = Iteration::from_result(BenchResult {
+                elapsed_ms: crate::measure::wall::elapsed_to_ms(&report.wall),
+                elapsed_us: Some(crate::measure::wall::elapsed_to_us(&report.wall)),
+                kv: Vec::new(),
+                iterations: Vec::new(),
+                distribution: None,
+                hotpath: None,
+            });
+            iteration.wall = Some(report.wall);
+            Ok(iteration)
+        },
+    );
+    let mut measurement = match measured {
+        Ok(measurement) => measurement,
+        Err(e) => return Err(file_failed(session, &sidecar, &uuid, stored, e)),
+    };
+
+    let failed = measurement.error.take().or_else(|| {
+        measurement
+            .iterations
+            .iter_mut()
+            .find_map(|i| i.error.take())
+    });
+    let winner = measurement.winner.filter(|_| failed.is_none());
+    let (Some(winner), true) = (winner, processes.len() == bench.runs.get()) else {
+        return Err(file_failed(
+            session,
+            &sidecar,
+            &uuid,
+            stored,
+            failed.unwrap_or_else(|| DevError::Verify("the measurement made no sample".into())),
+        ));
+    };
+
+    // The final metadata names the chosen process, before anything is
+    // published.
+    let chosen = &processes[winner];
+    let published = (|| -> Result<bool, DevError> {
+        sidecar.store_meta(
+            &uuid,
+            winner,
+            stored,
+            Some(&info(Some(chosen.ending.clone()))),
+            true,
+        )?;
+        let (scenario_row, call_rows) = rows(scenario, &config, &processes, winner, datasets)?;
+        // The publication boundary: a stop seen up to here stores no row.
+        if crate::shutdown::should_unwind() {
+            return Err(DevError::Interrupted);
+        }
+        session.record_group(
+            &uuid,
+            &scenario_row,
+            &call_rows,
+            &chosen.identity.documents(),
+        )
+    })();
+    let stored_rows = match published {
+        Ok(stored_rows) => stored_rows,
+        Err(e) => return Err(file_failed(session, &sidecar, &uuid, stored, e)),
+    };
+    if !stored_rows {
+        // A dirty tree: the trajectories are kept, filed as dirty.
+        if let Err(e) = sidecar.set_latest("dirty", &uuid) {
+            output::warn(&format!(
+                "could not alias the sidecar session as dirty: {e}"
+            ));
+        }
+    }
+    output::sidecar_msg(&format!(
+        "{} stored, best run {}/{} (sidecar.db{})",
+        output::count(stored, "process"),
+        winner + 1,
+        stored,
+        if stored_rows {
+            String::new()
+        } else {
+            format!(" {short}, filed as dirty")
+        }
+    ));
+    drop(sidecar);
+    session.backup_sidecar();
+    Ok(())
+}
+
+/// A measurement that stores no row: its sidecar session is aliased dirty
+/// and named, whatever the alias write did.
+fn file_failed(
+    session: &BenchHarness,
+    sidecar: &crate::db::sidecar::SidecarDb,
+    uuid: &str,
+    stored: usize,
+    error: DevError,
+) -> DevError {
+    let short = crate::db::short_uuid(uuid);
+    if let Err(e) = sidecar.set_latest("dirty", uuid) {
+        output::warn(&format!(
+            "could not alias the sidecar session as dirty: {e}"
+        ));
+    }
+    // Named whatever was stored: the session exists from before the first
+    // process, so even an empty one is found by its id.
+    output::error(&format!(
+        "no results row stored; {stored} of the measurement's process trajectories are in \
+         sidecar.db {short} (`brokkr sidecar {short}`)"
+    ));
+    if stored > 0 {
+        session.backup_sidecar();
+    }
+    error
+}
+
+/// The rows of a passing measurement: the scenario's, then one per call in
+/// describe order, each carrying the chosen process's identity.
+fn rows(
+    scenario: &Scenario,
+    config: &BenchConfig,
+    processes: &[Process],
+    winner: usize,
+    datasets: &BTreeMap<String, PathBuf>,
+) -> Result<(GroupRow, Vec<GroupRow>), DevError> {
+    let chosen = &processes[winner];
+    let qualifier = chosen.identity.qualifier();
+    let features = (!chosen.identity.features.is_empty()).then(|| chosen.identity.features.clone());
+    let (input_file, input_mb) = input(scenario, datasets);
+    let meta = |extra: &[(&str, &str)]| {
+        let mut kv = vec![
+            KvPair::text(
+                crate::db::KvKey::metadata("library.plan"),
+                &chosen.identity.plan.digest,
+            ),
+            KvPair::text(crate::db::KvKey::metadata("library.identity"), &qualifier),
+            KvPair::int(
+                crate::db::KvKey::metadata("library.iteration"),
+                i64::try_from(winner).unwrap_or(i64::MAX),
+            ),
+        ];
+        for (key, value) in extra {
+            kv.push(KvPair::text(crate::db::KvKey::metadata(*key), *value));
+        }
+        kv
+    };
+    let row_config = |command: String, metadata: Vec<KvPair>| BenchConfig {
+        command,
+        input_file: input_file.clone(),
+        input_mb,
+        cargo_features: features.clone(),
+        external_build: None,
+        runs: config.runs,
+        cli_args: None,
+        metadata,
+        arm_qualifier: Some(qualifier.clone()),
+    };
+    let walls = |us: Vec<i64>| -> (Vec<i64>, Vec<i64>) {
+        let ms = us
+            .iter()
+            .map(|u| crate::measure::wall::us_to_ms(*u))
+            .collect();
+        (ms, us)
+    };
+    let (ms, us) = walls(
+        processes
+            .iter()
+            .map(|p| crate::measure::wall::elapsed_to_us(&p.wall))
+            .collect(),
+    );
+    let scenario_row = GroupRow {
+        config: row_config(config.command.clone(), meta(&[])),
+        result: BenchResult {
+            elapsed_ms: ms[winner],
+            elapsed_us: Some(us[winner]),
+            kv: vec![KvPair::int("peak_rss_kb", chosen.peak_rss_kb)],
+            iterations: ms,
+            distribution: None,
+            hotpath: None,
+        },
+        iterations_us: us,
+    };
+    let mut calls = Vec::new();
+    for call in &scenario.calls {
+        let per: Vec<i64> = processes
+            .iter()
+            .map(|p| p.call_walls.get(&call.id).copied().unwrap_or(0))
+            .collect();
+        let context = chosen
+            .identity
+            .contexts
+            .get(&call.id)
+            .map(|d| d.digest.clone())
+            .unwrap_or_default();
+        let (ms, us) = walls(per);
+        let kv = chosen
+            .snapshots
+            .get(&call.id)
+            .map(snapshot_kv)
+            .unwrap_or_default();
+        calls.push(GroupRow {
+            config: row_config(
+                format!("{}/{}", config.command, call.id),
+                meta(&[("library.context", &context)]),
+            ),
+            result: BenchResult {
+                elapsed_ms: ms[winner],
+                elapsed_us: Some(us[winner]),
+                kv,
+                iterations: ms,
+                distribution: None,
+                hotpath: None,
+            },
+            iterations_us: us,
+        });
+    }
+    Ok((scenario_row, calls))
+}
+
+/// A sealed call's snapshot as its row's counters, each `snapshot.<name>`
+/// (a namespace no brokkr-owned key shares, so no counter can overwrite or
+/// impersonate one), exact: an integer when it fits, else its decimal text.
+fn snapshot_kv(snapshot: &BTreeMap<String, u64>) -> Vec<KvPair> {
+    snapshot
+        .iter()
+        .map(|(name, value)| {
+            let key = format!("snapshot.{name}");
+            match i64::try_from(*value) {
+                Ok(v) => KvPair::int(key, v),
+                Err(_) => KvPair::text(key, value.to_string()),
+            }
+        })
+        .collect()
+}
+
+/// The row's input: the bound file's name for a scenario with one dataset
+/// role (with its size), the names joined with `+` in role order for
+/// several, none for none.
+fn input(
+    scenario: &Scenario,
+    datasets: &BTreeMap<String, PathBuf>,
+) -> (Option<String>, Option<f64>) {
+    let files: Vec<&PathBuf> = scenario
+        .roles
+        .iter()
+        .filter(|r| matches!(r.source, RoleSource::Dataset { .. }))
+        .filter_map(|r| datasets.get(&r.id))
+        .collect();
+    let name = |p: &PathBuf| p.file_name().map(|n| n.to_string_lossy().into_owned());
+    match files.as_slice() {
+        [] => (None, None),
+        [one] => {
+            #[allow(clippy::cast_precision_loss)]
+            let mb = std::fs::metadata(one)
+                .ok()
+                .map(|m| m.len() as f64 / 1_000_000.0);
+            (name(one), mb)
+        }
+        many => (
+            Some(
+                many.iter()
+                    .filter_map(|p| name(p))
+                    .collect::<Vec<_>>()
+                    .join("+"),
+            ),
+            None,
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    fn process(wall_ms: u64, call_us: i64) -> Process {
+        let doc = |kind: &str, text: &str| {
+            identity::Document::of(
+                kind,
+                &super::super::json::parse("d", text.as_bytes()).unwrap(),
+            )
+            .unwrap()
+        };
+        Process {
+            wall: std::time::Duration::from_millis(wall_ms),
+            call_walls: BTreeMap::from([("a".to_owned(), call_us)]),
+            snapshots: BTreeMap::from([(
+                "a".to_owned(),
+                BTreeMap::from([
+                    ("writer_blocks".to_owned(), 3),
+                    ("big".to_owned(), u64::MAX),
+                    ("meta.library.identity".to_owned(), 1),
+                ]),
+            )]),
+            peak_rss_kb: 2048,
+            identity: Identity {
+                plan: doc("plan", r#"{"calls":{"a":{"n":1}}}"#),
+                contexts: BTreeMap::from([("a".to_owned(), doc("context", r#"{"p":1}"#))]),
+                datasets: BTreeMap::new(),
+                generated: BTreeMap::new(),
+                features: String::new(),
+            },
+            ending: crate::output::Ending::Exited(0),
+        }
+    }
+
+    #[test]
+    fn the_rows_carry_the_chosen_process_and_every_iteration_in_order() {
+        let scenario = super::super::describe::parse(
+            br#"{"protocol": 1, "scenarios": [{"id": "s", "description": "d", "deadline_s": 60,
+              "roles": [], "calls": [{"id": "a", "label": "l"}], "assertions": []}]}"#,
+        )
+        .unwrap()
+        .scenarios
+        .remove(0);
+        let config = BenchConfig {
+            command: "library:s".to_owned(),
+            input_file: None,
+            input_mb: None,
+            cargo_features: None,
+            external_build: None,
+            runs: 2,
+            cli_args: None,
+            metadata: Vec::new(),
+            arm_qualifier: None,
+        };
+        let processes = [process(30, 700), process(20, 900)];
+        let (scenario_row, calls) =
+            rows(&scenario, &config, &processes, 1, &BTreeMap::new()).unwrap();
+        assert_eq!(scenario_row.config.command, "library:s");
+        assert_eq!(scenario_row.result.iterations, [30, 20]);
+        assert_eq!(scenario_row.iterations_us, [30_000, 20_000]);
+        assert_eq!(scenario_row.result.elapsed_us, Some(20_000));
+        let qualifier = processes[1].identity.qualifier();
+        assert_eq!(
+            scenario_row.config.arm_qualifier.as_deref(),
+            Some(qualifier.as_str())
+        );
+        assert_eq!(calls.len(), 1);
+        let call = &calls[0];
+        assert_eq!(call.config.command, "library:s/a");
+        assert_eq!(call.iterations_us, [700, 900]);
+        assert_eq!(call.result.elapsed_us, Some(900));
+        let keys: Vec<&str> = call.result.kv.iter().map(|p| p.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "snapshot.big",
+                "snapshot.meta.library.identity",
+                "snapshot.writer_blocks"
+            ],
+            "every snapshot name stays a counter, none a brokkr-owned key"
+        );
+        assert_eq!(call.result.kv[0].value.to_string(), u64::MAX.to_string());
+        let meta: Vec<&str> = call
+            .config
+            .metadata
+            .iter()
+            .map(|p| p.key.as_str())
+            .collect();
+        assert_eq!(
+            meta,
+            [
+                "meta.library.plan",
+                "meta.library.identity",
+                "meta.library.iteration",
+                "meta.library.context"
+            ]
+        );
+    }
+}

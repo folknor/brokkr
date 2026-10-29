@@ -161,6 +161,22 @@ impl RunStore {
         self.sidecar_required()?.query_counters_for(id, run_idx)
     }
 
+    pub(crate) fn query_sidecar_calls(
+        &self,
+        id: &RunId,
+        run_idx: Option<usize>,
+    ) -> Result<Vec<crate::sidecar::CallSpan>, DevError> {
+        self.sidecar_required()?.query_calls_for(id, run_idx)
+    }
+
+    pub(crate) fn query_sidecar_sink_ends(
+        &self,
+        id: &RunId,
+        run_idx: Option<usize>,
+    ) -> Result<Vec<crate::sidecar::StoredSinkEnd>, DevError> {
+        self.sidecar_required()?.query_sink_ends_for(id, run_idx)
+    }
+
     /// Resolve a UUID or latest-key alias against the union of both stores.
     /// Candidate UUIDs are deduplicated when a run appears in both files.
     pub(crate) fn resolve(&self, run_ref: RunRef<'_>) -> Result<Resolved, DevError> {

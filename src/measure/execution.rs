@@ -78,7 +78,7 @@ pub struct Measurement {
     pub(super) start_epoch: i64,
     pub(super) program: Option<PathBuf>,
     pub(super) binary_xxh128: Option<String>,
-    pub(super) error: Option<DevError>,
+    pub(crate) error: Option<DevError>,
     pub(super) recorded: bool,
 }
 

@@ -1772,8 +1772,10 @@ Examples:
     /// Bare, lists each scenario with its calls, roles and assertions; with
     /// SCENARIO, runs that scenario once as a verification, quiet on pass
     /// and loud on fail, keeping a failed run's directory as evidence; with
-    /// `--all`, runs every scenario and certifies the capabilities
-    /// `[pbfhogg.library.require]` names, writing a certification record.
+    /// SCENARIO `--bench N`, measures it as N verified processes recorded as
+    /// one group of rows; with `--all`, runs every scenario and certifies
+    /// the capabilities `[pbfhogg.library.require]` names, writing a
+    /// certification record.
     ///
     /// In depth: `brokkr man library`.
     #[command(display_order = 12)]
@@ -1786,6 +1788,23 @@ Examples:
         /// Run every scenario, then certify the required capabilities.
         #[arg(long)]
         all: bool,
+
+        /// Measure SCENARIO: COUNT whole processes, each verified, recorded
+        /// as one group of rows (bare `--bench` means the default count).
+        #[arg(
+            long,
+            num_args = 0..=1,
+            default_missing_value = DEFAULT_BENCH_RUNS,
+            value_name = "COUNT",
+            requires = "scenario",
+            conflicts_with = "all"
+        )]
+        bench: Option<std::num::NonZeroUsize>,
+
+        /// Measure on a dirty tree: the measurement runs and prints, and
+        /// stores no results row.
+        #[arg(long, requires = "bench")]
+        force: bool,
 
         /// Dataset name from brokkr.toml whose files bind the scenario's
         /// dataset roles, each in the variant the role declares. Defaults

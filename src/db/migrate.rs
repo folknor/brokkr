@@ -4,7 +4,7 @@ use super::store::{column_exists, table_exists};
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding new migrations.
-pub(super) const SCHEMA_VERSION: i64 = 25;
+pub(super) const SCHEMA_VERSION: i64 = 26;
 
 /// Apply all migrations newer than `current`. Version checks and stamping are
 /// centralized in `db::store`.
@@ -84,6 +84,11 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection, current: i64) -> Resul
     if current < 22 {
         migrate_v21_to_v22(conn)?;
     }
+    run_migrations_from_v23(conn, current)
+}
+
+/// The steps from v23 on, kept apart so each function stays readable.
+fn run_migrations_from_v23(conn: &rusqlite::Connection, current: i64) -> Result<(), DevError> {
     if current < 23 {
         migrate_v22_to_v23(conn)?;
     }
@@ -93,7 +98,10 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection, current: i64) -> Resul
     if current < 25 {
         migrate_v24_to_v25(conn)?;
     }
-
+    if current < 26 {
+        // v25 -> v26: the canonical documents library rows name by digest.
+        conn.execute_batch(super::schema::LIBRARY_DOCUMENTS_DDL)?;
+    }
     Ok(())
 }
 

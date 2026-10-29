@@ -34,6 +34,18 @@ CREATE TABLE IF NOT EXISTS run_iterations (
 );
 ";
 
+/// DDL for the canonical plan and context documents of library rows
+/// (`brokkr man library`, Measuring a scenario), keyed by their digest
+/// (`plan-v1:...`, `context-v1:...`) so a document many rows share is stored
+/// once. Content-addressed and never deleted with a row. Referenced by both
+/// the fresh-database path and the v25->v26 migration.
+pub(super) const LIBRARY_DOCUMENTS_DDL: &str = "\
+CREATE TABLE IF NOT EXISTS library_documents (
+    digest      TEXT NOT NULL PRIMARY KEY,
+    canonical   TEXT NOT NULL
+);
+";
+
 const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS runs (
     id              INTEGER PRIMARY KEY,
@@ -234,6 +246,7 @@ impl ResultsDb {
                 conn.execute_batch(SCHEMA)?;
                 conn.execute_batch(HOTPATH_TYPED_DDL)?;
                 conn.execute_batch(RUN_ITERATIONS_DDL)?;
+                conn.execute_batch(LIBRARY_DOCUMENTS_DDL)?;
                 Ok(())
             },
         )?;

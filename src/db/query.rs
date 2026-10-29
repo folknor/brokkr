@@ -22,7 +22,9 @@ impl ResultsDb {
         Ok(self
             .conn
             .query_row(
-                "SELECT command FROM runs WHERE uuid = ?1",
+                // A library group shares one uuid; its scenario row, written
+                // last, names the session.
+                "SELECT command FROM runs WHERE uuid = ?1 ORDER BY id DESC LIMIT 1",
                 rusqlite::params![id.as_str()],
                 |row| row.get(0),
             )

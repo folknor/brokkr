@@ -23,6 +23,10 @@ fn doc() -> CallDoc {
         },
         diagnostics: Vec::new(),
         results: Vec::new(),
+        context: crate::pbfhogg::library::json::Json::Object(vec![(
+            "p".to_owned(),
+            crate::pbfhogg::library::json::Json::Int(1),
+        )]),
     }
 }
 

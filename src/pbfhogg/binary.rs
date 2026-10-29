@@ -528,6 +528,9 @@ pub(crate) struct LibraryHarness {
     /// The executable's XXH128, for records.
     digest: String,
     project_root: PathBuf,
+    /// How the harness was built, which a measured row records (`None` only
+    /// for test fixtures).
+    build: Option<crate::measure::BuildIdentity>,
     /// The brokkr lock for the handle's life, on which a running harness
     /// child's pid is published (`None` only for test fixtures).
     hold: Option<crate::lockfile::LockGuard>,
@@ -578,7 +581,8 @@ impl LibraryHarness {
         } else {
             None
         };
-        let harness = Self::open(&built.binary, project_root, Some(hold))?;
+        let mut harness = Self::open(&built.binary, project_root, Some(hold))?;
+        harness.build = Some(built.identity);
         let cli = match cli {
             Some(built) => Some(PbfhoggBinary::locked(&built.path, project_root)?),
             None => None,
@@ -618,6 +622,7 @@ impl LibraryHarness {
             identity: FileIdentity::of(&meta),
             digest,
             project_root: project_root.to_path_buf(),
+            build: None,
             hold,
             _registered: registered,
         })
@@ -626,6 +631,12 @@ impl LibraryHarness {
     /// The XXH128 of the harness executable, for records.
     pub(crate) fn digest(&self) -> &str {
         &self.digest
+    }
+
+    /// How the harness was built: its profile, canonical features and
+    /// provenance, for the rows a measurement records.
+    pub(crate) fn build_identity(&self) -> Option<&crate::measure::BuildIdentity> {
+        self.build.as_ref()
     }
 
     /// Refuse an executable replaced since this handle was made.
@@ -731,6 +742,8 @@ pub(crate) struct HarnessLaunch<'a> {
     pub(crate) writes: Vec<PathBuf>,
     pub(crate) deadline: std::time::Duration,
     pub(crate) fifo: &'a mut crate::sidecar::SidecarFifo,
+    /// The process's index in its run, from 0, for the capture's narration.
+    pub(crate) iteration: usize,
 }
 
 /// What one harness launch came to. The child has been reaped and the launch
@@ -745,12 +758,10 @@ pub(crate) struct HarnessRun {
     pub(crate) output_cut: bool,
     /// Spawn to the observed ending, before output settled or the release.
     pub(crate) elapsed: std::time::Duration,
-    /// Every FIFO record kept, in arrival order.
-    pub(crate) records: Vec<crate::sidecar::Record>,
-    /// What the capture omitted, by cause.
-    pub(crate) loss: crate::sidecar::CaptureLoss,
-    /// Every call id a tagged record named, kept or not.
-    pub(crate) calls_seen: crate::sidecar::CallCensus,
+    /// The trajectory: every FIFO record kept in arrival order, what the
+    /// capture omitted by cause, every call id a tagged record named, and
+    /// the process samples.
+    pub(crate) data: crate::sidecar::SidecarData,
     /// The launch's release: an error leaves the lease held by some process.
     pub(crate) released: Result<(), DevError>,
 }
@@ -809,7 +820,7 @@ impl LibraryHarness {
         let capture = crate::sidecar::run_sidecar_with_deadline(
             child,
             launch.fifo,
-            0,
+            launch.iteration,
             start,
             None,
             Some(launch.deadline),
@@ -826,15 +837,13 @@ impl LibraryHarness {
         drop(sigterm);
         let released = launched.finish();
         Ok(HarnessRun {
-            ending: capture.data.ending,
+            ending: capture.data.ending.clone(),
             stdout: capture.stdout,
             stderr: capture.stderr,
             output_truncated: capture.stdout_truncated || capture.stderr_truncated,
             output_cut: capture.output_cut,
             elapsed: capture.elapsed,
-            records: capture.data.records,
-            loss: capture.data.summary.loss,
-            calls_seen: capture.data.calls_seen,
+            data: capture.data,
             released,
         })
     }

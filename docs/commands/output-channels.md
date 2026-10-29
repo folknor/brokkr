@@ -9,15 +9,18 @@ binary itself never knows what mode it runs under. This file is the map.
 ## The two databases
 
 - `.brokkr/results.db` - **gitignored**, kept small. One row per bench
-  run: `command`, `elapsed_ms`, `commit`, `input`, and a `kv` column of
+  run (a library measurement stores one group of rows, see below):
+  `command`, `elapsed_ms`, `commit`, `input`, and a `kv` column of
   arbitrary `key=value` metrics. Queried with `brokkr results`. Two things
   brokkr records itself rather than receiving over a transport channel: the
   per-iteration walls of a `--bench N` run (`run_iterations`, in execution
   order) and the `prev.*` kv pairs naming the previously-recorded run. Neither
   comes from the binary - see `docs/commands/measure.md`.
-- `.brokkr/sidecar.db` - **gitignored** (split out of results.db in schema
-  v8->v9). Per-run `/proc` sample trajectories, phase markers, and
-  application counters. Queried with `brokkr sidecar <uuid>`.
+- `.brokkr/sidecar.db` - **gitignored** (split out of results.db when
+  results.db's schema went from v8 to v9). Per-run `/proc` sample
+  trajectories, phase markers, application counters, and for a library
+  measurement each call's sink ends and boundaries. Queried with `brokkr
+  sidecar <uuid>`.
 
 Both live under the project root's `.brokkr/` (never a `--commit` worktree's)
 and are resolved identically for every project by `BenchHarness::new_with_lock`
@@ -217,7 +220,11 @@ DB: the harness gets the FIFO, its records are judged as each call's stream
 and kept only as a failed run's evidence, and its stdout and stderr must
 stay empty. `brokkr library --all` records neither either; it writes one
 certification record, a JSON document under `.brokkr/library-certifications/`.
-See `brokkr man library`.)
+`brokkr library SCENARIO --bench N` does record: one group of rows (the
+scenario's and one per call, each call's sealed snapshot as `snapshot.*`
+counters) under one uuid in results.db, and every process's trajectory,
+with its sink ends and call boundaries, in sidecar.db under the same uuid;
+no stdout or stderr reaches either. See `brokkr man library`.)
 
 (`verify` subcommands are correctness checks, not benchmarks - they don't
 record to either DB. Their listing-producing steps and every reference-tool

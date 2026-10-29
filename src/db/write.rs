@@ -8,6 +8,7 @@ use super::types::{
 };
 use super::{generate_uuid, short_uuid};
 use crate::error::DevError;
+use rusqlite::OptionalExtension as _;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -52,6 +53,65 @@ impl ResultsDb {
         tx.commit()?;
         let short = short_uuid(&uuid);
         Ok((uuid, short))
+    }
+
+    /// Insert one library measurement's rows under `uuid` in one
+    /// transaction: the call rows first, then the scenario row, so the
+    /// group's newest row (what `previous_run`, a preview and the sidecar
+    /// session's command read) is the scenario's. `documents` are the
+    /// canonical plan and context texts by digest; one already stored must
+    /// hold exactly the same text, or nothing is written.
+    pub(crate) fn insert_group(
+        &self,
+        uuid: &str,
+        scenario: &RunRow,
+        calls: &[RunRow],
+        documents: &[(String, String)],
+    ) -> Result<String, DevError> {
+        let tx = self.conn.unchecked_transaction()?;
+        for (digest, canonical) in documents {
+            tx.execute(
+                "INSERT OR IGNORE INTO library_documents (digest, canonical) VALUES (?1, ?2)",
+                rusqlite::params![digest, canonical],
+            )?;
+            let stored: String = tx.query_row(
+                "SELECT canonical FROM library_documents WHERE digest = ?1",
+                rusqlite::params![digest],
+                |row| row.get(0),
+            )?;
+            if stored != *canonical {
+                return Err(DevError::Database(format!(
+                    "library_documents already holds another document under {digest}"
+                )));
+            }
+        }
+        for row in calls.iter().rev() {
+            insert_inner(&tx, row, uuid)?;
+        }
+        insert_inner(&tx, scenario, uuid)?;
+        tx.commit()?;
+        Ok(short_uuid(uuid))
+    }
+
+    /// The canonical documents stored under `digests`, by digest; a digest
+    /// with none is absent.
+    pub(crate) fn library_documents(
+        &self,
+        digests: &std::collections::BTreeSet<String>,
+    ) -> Result<std::collections::BTreeMap<String, String>, DevError> {
+        let mut out = std::collections::BTreeMap::new();
+        let mut stmt = self
+            .conn
+            .prepare("SELECT canonical FROM library_documents WHERE digest = ?1")?;
+        for digest in digests {
+            if let Some(text) = stmt
+                .query_row(rusqlite::params![digest], |row| row.get::<_, String>(0))
+                .optional()?
+            {
+                out.insert(digest.clone(), text);
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -710,5 +770,68 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    // A library group is one transaction under one uuid, its scenario row
+    // written last (the newest, which names the session), with documents
+    // stored once by digest; a digest holding other text writes nothing.
+    #[test]
+    fn a_library_group_is_written_whole_scenario_last() {
+        let dir = crate::test_scratch::scratch("db-write", "library_group");
+        let db_path = dir.join("test.db");
+        drop(std::fs::remove_file(&db_path));
+        let db = ResultsDb::open(&db_path).expect("open db");
+        let row = |command: &str| {
+            RunRowBuilder::new()
+                .update(|run| {
+                    run.command = command.to_owned();
+                    run.invocation = RunInvocation {
+                        argv: vec![String::from("brokkr"), String::from("library")],
+                        arm_key: String::from("library"),
+                        arm_qualifier: Some(String::from("{\"v\":1}")),
+                    };
+                })
+                .build()
+        };
+        let uuid = "0123456789abcdef0123456789abcdef";
+        let docs = vec![(String::from("plan-v1:x"), String::from("{}"))];
+        db.insert_group(
+            uuid,
+            &row("library:s"),
+            &[row("library:s/a"), row("library:s/b")],
+            &docs,
+        )
+        .expect("group");
+        let commands: Vec<String> = db
+            .conn
+            .prepare("SELECT command FROM runs WHERE uuid = ?1 ORDER BY id")
+            .unwrap()
+            .query_map([uuid], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(commands, ["library:s/b", "library:s/a", "library:s"]);
+        let id = super::super::RunId::new(uuid.to_owned());
+        assert_eq!(
+            db.command_for_uuid(&id).unwrap().as_deref(),
+            Some("library:s")
+        );
+        let wanted = std::collections::BTreeSet::from([String::from("plan-v1:x")]);
+        assert_eq!(db.library_documents(&wanted).unwrap()["plan-v1:x"], "{}");
+
+        let clash = vec![(String::from("plan-v1:x"), String::from("[]"))];
+        let other = "fedcba9876543210fedcba9876543210";
+        assert!(
+            db.insert_group(other, &row("library:s"), &[], &clash)
+                .is_err()
+        );
+        let count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM runs WHERE uuid = ?1", [other], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0, "a refused group writes nothing");
+        assert_eq!(db.delete_by_uuid(&id).unwrap(), 3);
     }
 }

@@ -157,19 +157,37 @@ pub(crate) fn print_run_info(store: &db::RunStore, id: &db::RunId) -> Result<(),
 /// 3. Substring match on marker name
 ///
 /// The phase resolves inside one stream of one run: the process stream, or
-/// `call`'s. A call's final marker has no known end, so a phase that resolves
-/// to it is an error rather than an interval borrowed from the process end.
+/// `call`'s. A call with known boundaries (`span`, from a library harness's
+/// call document) resolves in its phases, the markers up to its return, and
+/// its last phase ends there; a marker after the return is the call's tail,
+/// not timed work, and is refused as a phase. Without boundaries a call's
+/// final marker has no known end, so a phase that resolves to it is an error
+/// rather than an interval borrowed from the process end.
 pub(crate) fn resolve_phase_range(
     phase: &str,
     markers: &[sidecar::Marker],
     samples: &[sidecar::Sample],
     call: Option<&str>,
+    span: Option<&sidecar::CallSpan>,
 ) -> Result<(i64, i64), DevError> {
     let stream = stream_markers(markers, call);
-    let timeline = match call {
-        None => sidecar::Timeline::new(&stream, samples),
-        Some(_) => sidecar::Timeline::open(&stream),
+    let (phases, tail) = split_call(&stream, span);
+    let timeline = match (call, span) {
+        (None, _) => sidecar::Timeline::new(&stream, samples),
+        (Some(_), Some(span)) => sidecar::Timeline::closed(&phases, span.return_us),
+        (Some(_), None) => sidecar::Timeline::open(&stream),
     };
+    if timeline.resolve_phase_range(phase).is_none()
+        && sidecar::Timeline::open(&tail)
+            .resolve_phase_range(phase)
+            .is_some()
+    {
+        return Err(DevError::Config(format!(
+            "--phase: '{phase}' matches only markers call '{}' emitted after it returned, its \
+             tail, which is not timed call work",
+            call.unwrap_or_default()
+        )));
+    }
     match timeline.resolve_phase_range(phase) {
         Some((start, Some(end))) => Ok((start, end)),
         Some((_, None)) => Err(DevError::Config(format!(
@@ -184,6 +202,31 @@ pub(crate) fn resolve_phase_range(
             )))
         }
     }
+}
+
+/// A call stream's markers split at its return: the phases (stamped up to
+/// `return_us`) and the tail (after it). Without boundaries every marker is
+/// a phase, as before boundaries were known.
+fn split_call(
+    stream: &[sidecar::Marker],
+    span: Option<&sidecar::CallSpan>,
+) -> (Vec<sidecar::Marker>, Vec<sidecar::Marker>) {
+    match span {
+        Some(span) => stream
+            .iter()
+            .cloned()
+            .partition(|m| m.timestamp_us <= span.return_us),
+        None => (stream.to_vec(), Vec::new()),
+    }
+}
+
+/// What the default summary shows of the call streams of the selected
+/// runs: their markers, the boundaries and sink accounts the call documents
+/// gave, and the sealing and terminal records that arrived.
+pub(crate) struct CallStreams<'a> {
+    pub(crate) markers: &'a [sidecar::Marker],
+    pub(crate) calls: &'a [sidecar::CallSpan],
+    pub(crate) sink_ends: &'a [sidecar::StoredSinkEnd],
 }
 
 /// The markers of one stream: the process stream for `None`, else one call's.
@@ -464,16 +507,32 @@ pub(crate) fn sidecar_marker_json(m: &sidecar::Marker) -> String {
     )
 }
 
-/// Each call stream's marker intervals, by time. No resource columns: the
-/// samples are process-wide and say nothing a call owns. A call's final
+/// Each call stream of the selected runs (any call that has boundaries,
+/// markers or sink records), by time. No resource columns: the samples are
+/// process-wide and say nothing a call owns. With boundaries (a library
+/// call document's), a `call` record first gives them, the call's wall, its
+/// sink's own account and the terminal record that arrived (or none), and
+/// the phases are the markers up to the return, the last ending there; the
+/// markers after it are the tail, points. Without boundaries a call's final
 /// interval has no known end (`end_us: null`, `-` in the table).
-#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
-pub(crate) fn print_call_timelines(markers: &[sidecar::Marker], human: bool) {
+#[allow(clippy::print_stdout, clippy::too_many_lines)] // Data output; preserve its bytes and stdout stream.
+pub(crate) fn print_call_timelines(streams: &CallStreams<'_>, human: bool) {
+    let CallStreams {
+        markers,
+        calls,
+        sink_ends,
+    } = streams;
     let keys = stream_keys(
-        markers
+        calls
             .iter()
-            .filter(|m| m.call.is_some())
-            .map(|m| (m.run_idx, m.call.as_deref())),
+            .map(|s| (s.run_idx, Some(s.call.as_str())))
+            .chain(
+                markers
+                    .iter()
+                    .filter(|m| m.call.is_some())
+                    .map(|m| (m.run_idx, m.call.as_deref())),
+            )
+            .chain(sink_ends.iter().map(|s| (s.run_idx, Some(s.call.as_str())))),
     );
     for (run_idx, call) in keys {
         let stream: Vec<sidecar::Marker> = markers
@@ -481,10 +540,45 @@ pub(crate) fn print_call_timelines(markers: &[sidecar::Marker], human: bool) {
             .filter(|m| m.run_idx == run_idx && m.call.as_deref() == call)
             .cloned()
             .collect();
-        let segments = sidecar::Timeline::open(&stream).segments();
+        let span = calls
+            .iter()
+            .find(|s| s.run_idx == run_idx && Some(s.call.as_str()) == call);
+        let ends: Vec<&sidecar::StoredSinkEnd> = sink_ends
+            .iter()
+            .filter(|s| s.run_idx == run_idx && Some(s.call.as_str()) == call)
+            .collect();
+        let sealing = ends
+            .iter()
+            .filter(|s| matches!(s.kind, sidecar::SinkEndKind::Sealing { .. }))
+            .count();
+        let terminal = ends.iter().rev().find_map(|s| match &s.kind {
+            sidecar::SinkEndKind::Terminal { end, drops } => Some((end.name(), *drops)),
+            sidecar::SinkEndKind::Sealing { .. } => None,
+        });
+        let (phases, tail) = split_call(&stream, span);
+        let segments = match span {
+            Some(span) => sidecar::Timeline::closed(&phases, span.return_us).segments(),
+            None => sidecar::Timeline::open(&stream).segments(),
+        };
+        let observed = terminal.map_or_else(
+            || "none observed".to_owned(),
+            |(end, drops)| format!("{end} drops={drops}"),
+        );
         if human {
             println!();
             println!("{}", stream_heading(run_idx, call));
+            if let Some(span) = span {
+                println!(
+                    "  wall {}ms (entry {}ms, return {}ms, sealed {}ms); stream {} drops={} by \
+                     its account, terminal {observed}, {sealing} sealing emissions",
+                    (span.return_us - span.entry_us) / 1_000,
+                    span.entry_us / 1_000,
+                    span.return_us / 1_000,
+                    span.seal_us / 1_000,
+                    span.stream_state,
+                    span.stream_drops,
+                );
+            }
             for s in &segments {
                 let end = s
                     .end_us
@@ -499,7 +593,35 @@ pub(crate) fn print_call_timelines(markers: &[sidecar::Marker], human: bool) {
                     s.start_us / 1_000
                 );
             }
+            for m in &tail {
+                println!("  {:<30} {:>9}ms (tail)", m.name, m.timestamp_us / 1_000);
+            }
             continue;
+        }
+        if let Some(span) = span {
+            let mut obj = serde_json::json!({
+                "type": "call",
+                "entry_us": span.entry_us,
+                "return_us": span.return_us,
+                "seal_us": span.seal_us,
+                "wall_us": span.return_us - span.entry_us,
+                "stream": {"state": span.stream_state, "drops": span.stream_drops.to_string()},
+                "terminal": terminal.map(|(end, drops)| {
+                    serde_json::json!({"state": end, "drops": drops.to_string()})
+                }),
+                "sealing": sealing,
+            });
+            stream_fields(&mut obj, run_idx, call);
+            println!("{obj}");
+        }
+        for m in &tail {
+            let mut obj = serde_json::json!({
+                "type": "call_tail",
+                "name": m.name,
+                "t_us": m.timestamp_us,
+            });
+            stream_fields(&mut obj, run_idx, call);
+            println!("{obj}");
         }
         for s in &segments {
             let mut obj = serde_json::json!({
@@ -1359,11 +1481,16 @@ fn stall_totals_ns(counters: &[sidecar::Counter]) -> std::collections::BTreeMap<
 }
 
 /// Stalls of one run, one table per stream. Process rows carry `% of wall`;
-/// call rows print the observed total only, since no call boundary is known
-/// to divide by and the process wall would understate a short call. The
-/// observed maximum is a best-effort reading of the stream, not the call's
-/// authoritative total.
-pub(crate) fn print_stalls(counters: &[sidecar::Counter], wall_us: i64, human: bool) {
+/// a call with known boundaries carries `% of` its own wall (return minus
+/// entry); any other call row prints the observed total only, since the
+/// process wall would understate a short call. The observed maximum is a
+/// best-effort reading of the stream, not the call's authoritative total.
+pub(crate) fn print_stalls(
+    counters: &[sidecar::Counter],
+    wall_us: i64,
+    calls: &[sidecar::CallSpan],
+    human: bool,
+) {
     let keys = stream_keys(counters.iter().map(|c| (c.run_idx, c.call.as_deref())));
     let streams: Vec<_> = keys
         .into_iter()
@@ -1388,7 +1515,13 @@ pub(crate) fn print_stalls(counters: &[sidecar::Counter], wall_us: i64, human: b
 
     let headed = streams.len() > 1 || streams.iter().any(|(_, call, _)| call.is_some());
     for (n, (run_idx, call, totals_ns)) in streams.iter().enumerate() {
-        let wall = if call.is_none() { Some(wall_us) } else { None };
+        let wall = match call {
+            None => Some(wall_us),
+            Some(call) => calls
+                .iter()
+                .find(|s| s.run_idx == *run_idx && s.call == *call)
+                .map(|s| s.return_us - s.entry_us),
+        };
         if human {
             if headed {
                 if n > 0 {
@@ -1636,6 +1769,45 @@ mod stall_tests {
         // Single-thread wait reads as a clean sub-100% fraction.
         let single = wall_pct(1_800_000_000, 18_000_000).unwrap();
         assert!((single - 10.0).abs() < 0.01, "got {single}");
+    }
+
+    #[test]
+    fn a_call_with_boundaries_closes_its_last_phase_at_return_and_refuses_its_tail() {
+        let marker = |idx: i32, ts: i64, name: &str| sidecar::Marker {
+            marker_idx: idx,
+            timestamp_us: ts,
+            name: name.to_owned(),
+            run_idx: 0,
+            call: Some("a".to_owned()),
+        };
+        let markers = vec![
+            marker(0, 10, "READ"),
+            marker(1, 40, "WRITE"),
+            marker(2, 90, "CLEANUP"),
+        ];
+        let span = sidecar::CallSpan {
+            call: "a".to_owned(),
+            entry_us: 5,
+            return_us: 60,
+            seal_us: 100,
+            stream_state: "sealed".to_owned(),
+            stream_drops: 0,
+            run_idx: 0,
+        };
+        assert_eq!(
+            resolve_phase_range("WRITE", &markers, &[], Some("a"), Some(&span)).unwrap(),
+            (40, 60)
+        );
+        let tail = resolve_phase_range("CLEANUP", &markers, &[], Some("a"), Some(&span))
+            .unwrap_err()
+            .to_string();
+        assert!(tail.contains("after it returned"), "{tail}");
+        // Without boundaries the last marker still has no known end.
+        assert!(resolve_phase_range("CLEANUP", &markers, &[], Some("a"), None).is_err());
+        assert_eq!(
+            resolve_phase_range("WRITE", &markers, &[], Some("a"), None).unwrap(),
+            (40, 90)
+        );
     }
 
     #[test]

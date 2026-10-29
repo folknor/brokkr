@@ -41,6 +41,19 @@ fn render_single_or_multi(
         return;
     }
 
+    // One library measurement's group (`brokkr man library`, Measuring a
+    // scenario): its rows share one uuid, and each is shown whole, the
+    // scenario's first, iterations and provenance included.
+    if !force_table && rows.len() > 1 && rows.iter().all(|r| r.uuid == rows[0].uuid) {
+        for (i, row) in rows.iter().enumerate() {
+            if i > 0 {
+                println!();
+            }
+            println!("{}", db::format_single_result(row, has_sidecar(&row.uuid)));
+        }
+        return;
+    }
+
     // Multi-row result set - keep the compact table + per-row details.
     let table = db::format_table(rows, matcher);
     println!("{table}");
@@ -97,11 +110,22 @@ pub(crate) fn cmd_results(
                 .results_db()
                 .ok_or_else(|| DevError::Config("results database is not available".into()))?;
             let (rows_a, rows_b) = results_db.query_compare(commit_a, commit_b, &q.filter)?;
+            // The canonical plans and contexts library rows name, so an
+            // unpaired one can be explained down to the field.
+            let digests: std::collections::BTreeSet<String> = rows_a
+                .iter()
+                .chain(&rows_b)
+                .flat_map(db::library_rows::digests)
+                .collect();
+            let documents = results_db.library_documents(&digests)?;
             let table = db::format_compare_with_limit(
-                commit_a,
-                &rows_a,
-                commit_b,
-                &rows_b,
+                &db::Sides {
+                    commit_a,
+                    rows_a: &rows_a,
+                    commit_b,
+                    rows_b: &rows_b,
+                    documents: &documents,
+                },
                 q.top,
                 q.filter.limit,
                 &matcher,

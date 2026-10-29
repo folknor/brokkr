@@ -51,6 +51,53 @@ pub(crate) enum Stop {
     Interrupted,
 }
 
+/// What a measured run remembers about each counterpart between its
+/// iterations (`docs/commands/library.md`, Measuring a scenario): the CLI
+/// side's digest reports, under the reuse key they were made for.
+#[derive(Debug, Default)]
+pub(crate) struct Reuse {
+    entries: BTreeMap<String, Reused>,
+}
+
+#[derive(Debug)]
+struct Reused {
+    key: String,
+    iteration: usize,
+    /// The CLI output's report, by output role.
+    reports: BTreeMap<String, digest::Report>,
+}
+
+/// One measured iteration's view of the reuse cache: which iteration this
+/// is, and the identity of every dataset and generated role (`absent` or a
+/// digest), read after the harness exited and before any replay.
+pub(crate) struct Reusing<'a> {
+    pub(crate) reuse: &'a mut Reuse,
+    pub(crate) iteration: usize,
+    pub(crate) inputs: &'a BTreeMap<String, String>,
+}
+
+/// The reuse key of `counterpart` (R12): the CLI executable's XXH128, the
+/// argv as declared (placeholders by role, never resolved paths), the
+/// identity of every role an input or `files_in` placeholder names, and
+/// the scratch flag. The initial output state is always absent, a fresh
+/// brokkr path, so it is a constant of the key. `None` when an input has no
+/// identity, which never reuses.
+fn reuse_key(
+    cli: &PbfhoggBinary,
+    counterpart: &Cli,
+    inputs: &BTreeMap<String, String>,
+) -> Option<String> {
+    let mut key = format!("cli {}\n", cli.digest());
+    for token in &counterpart.argv {
+        key.push_str(&format!("argv {}\n", token.show()));
+        if let Token::Input(role) | Token::FilesIn(role) = token {
+            key.push_str(&format!("input {role} {}\n", inputs.get(role)?));
+        }
+    }
+    key.push_str(&format!("scratch {}\n", counterpart.scratch));
+    Some(key)
+}
+
 /// Every counterpart's result, and the replay directories made.
 #[derive(Debug, Default)]
 pub(crate) struct Equality {
@@ -62,13 +109,17 @@ pub(crate) struct Equality {
 /// Replay each counterpart of `scenario` and compare. `bindings` maps every
 /// role to its bound path; `layout_ok` says the run directory passed its
 /// layout check after the harness (nothing is replayed otherwise, so no
-/// role entry is opened unchecked).
+/// role entry is opened unchecked). With `reusing`, a counterpart whose
+/// reuse key matches an earlier iteration's is not replayed: its CLI
+/// reports are that iteration's, and the library outputs are digested as
+/// always.
 pub(crate) fn judge(
     cli: &PbfhoggBinary,
     scenario: &Scenario,
     run_dir: &Path,
     bindings: &BTreeMap<String, PathBuf>,
     layout_ok: bool,
+    mut reusing: Option<Reusing<'_>>,
 ) -> Result<Equality, Stop> {
     let mut equality = Equality::default();
     let mut breached: Option<String> = None;
@@ -90,12 +141,39 @@ pub(crate) fn judge(
                 run_dir,
                 bindings,
             };
-            if let Some(breach) = replay.run(&mut verdict, &mut equality.made)? {
+            let key = reusing
+                .as_ref()
+                .and_then(|r| reuse_key(cli, counterpart, r.inputs));
+            let cached = match (&reusing, &key) {
+                (Some(r), Some(key)) => r
+                    .reuse
+                    .entries
+                    .get(&call.id)
+                    .filter(|e| e.key == *key)
+                    .map(|e| (e.iteration, e.reports.clone())),
+                _ => None,
+            };
+            let (breach, reports) = replay.run(&mut verdict, &mut equality.made, cached)?;
+            if let Some(breach) = breach {
                 breached = Some(format!(
                     "the replay of call {} left the run directory breached",
                     call.id
                 ));
                 verdict.fail(breach);
+            }
+            // Only a counterpart that passed is remembered, under the key its
+            // replay was made for.
+            if let (Some(r), Some(key), Some(reports)) = (reusing.as_mut(), key, reports)
+                && !verdict.settled()
+            {
+                r.reuse.entries.insert(
+                    call.id.clone(),
+                    Reused {
+                        key,
+                        iteration: r.iteration,
+                        reports,
+                    },
+                );
             }
         }
         equality
@@ -156,10 +234,20 @@ struct Replay<'a> {
     bindings: &'a BTreeMap<String, PathBuf>,
 }
 
+/// What one counterpart came to: a breach that ends every later replay,
+/// and, when its replay ran and every output digested, the CLI reports by
+/// output role.
+type Ran = (Option<String>, Option<BTreeMap<String, digest::Report>>);
+
 impl Replay<'_> {
-    /// The replay and its digests; `Some` is a breach that ends every later
-    /// replay.
-    fn run(&self, verdict: &mut Verdict, made: &mut Vec<String>) -> Result<Option<String>, Stop> {
+    /// The replay and its digests, or with `cached` (the iteration whose CLI
+    /// reports are reused, and those reports) the library digests alone.
+    fn run(
+        &self,
+        verdict: &mut Verdict,
+        made: &mut Vec<String>,
+        cached: Option<(usize, BTreeMap<String, digest::Report>)>,
+    ) -> Result<Ran, Stop> {
         let outputs: Vec<&str> = self
             .counterpart
             .argv
@@ -188,10 +276,13 @@ impl Replay<'_> {
             }
         }
         if verdict.settled() {
-            return Ok(None);
+            return Ok((None, None));
+        }
+        if let Some((iteration, reports)) = cached {
+            return self.reused(&replay, made, name, iteration, &reports, &outputs, verdict);
         }
         let Some(argv) = self.argv(&out_dir, verdict) else {
-            return Ok(None);
+            return Ok((None, None));
         };
 
         made.push(name);
@@ -200,7 +291,7 @@ impl Replay<'_> {
             .try_for_each(std::fs::create_dir);
         if let Err(e) = created {
             verdict.fail(format!("cannot lay out {}: {e}", replay.display()));
-            return Ok(None);
+            return Ok((None, None));
         }
         let cwd_identity = identity(&cwd).map_err(|e| Stop::Unsafe(e.to_string()))?;
         let scope = RunScope {
@@ -219,8 +310,8 @@ impl Replay<'_> {
                 }
             }
         }
-        if let Some(breach) = self.validate(&replay, cwd_identity, &outputs, true)? {
-            return Ok(Some(breach));
+        if let Some(breach) = self.validate(&replay, cwd_identity, &outputs, &outputs, true)? {
+            return Ok((Some(breach), None));
         }
         for role in &outputs {
             match entry_kind(&out_dir.join(role)) {
@@ -230,44 +321,117 @@ impl Replay<'_> {
             }
         }
         if verdict.settled() {
-            return Ok(None);
+            return Ok((None, None));
         }
 
         let digest_scope = RunScope {
             stdout_kept: DIGEST_OUTPUT_KEPT,
             ..scope
         };
-        self.compare(&digest_scope, &replay, cwd_identity, &outputs, verdict)
+        self.compare(
+            &digest_scope,
+            &replay,
+            cwd_identity,
+            &outputs,
+            None,
+            verdict,
+        )
     }
 
-    /// Digest each output on both sides, library first, and compare.
+    /// A counterpart whose CLI reports iteration `iteration` already made
+    /// under the same reuse key: `replay-<call>/` is still laid out, empty,
+    /// as the library digests' working directory, and only the library
+    /// outputs are digested, each against its reused report.
+    #[allow(clippy::too_many_arguments)]
+    fn reused(
+        &self,
+        replay: &Path,
+        made: &mut Vec<String>,
+        name: String,
+        iteration: usize,
+        reports: &BTreeMap<String, digest::Report>,
+        outputs: &[&str],
+        verdict: &mut Verdict,
+    ) -> Result<Ran, Stop> {
+        let cwd = replay.join(CWD_DIR);
+        let out_dir = replay.join(OUTPUTS_DIR);
+        made.push(name);
+        let created = [replay, cwd.as_path(), out_dir.as_path()]
+            .into_iter()
+            .try_for_each(std::fs::create_dir);
+        if let Err(e) = created {
+            verdict.fail(format!("cannot lay out {}: {e}", replay.display()));
+            return Ok((None, None));
+        }
+        let cwd_identity = identity(&cwd).map_err(|e| Stop::Unsafe(e.to_string()))?;
+        verdict.note(format!(
+            "CLI digests reused from iteration {iteration}: the same executable, argv, inputs \
+             and scratch"
+        ));
+        let scope = RunScope {
+            run_dir: self.run_dir,
+            cwd: &cwd,
+            deadline: std::time::Duration::from_secs(u64::from(self.scenario.deadline_s)),
+            stdout_kept: DIGEST_OUTPUT_KEPT,
+        };
+        let breach = self
+            .compare(
+                &scope,
+                replay,
+                cwd_identity,
+                outputs,
+                Some(reports),
+                verdict,
+            )?
+            .0;
+        Ok((breach, None))
+    }
+
+    /// Digest each output on both sides, library first, and compare; with
+    /// `cached`, the CLI side's reports are those and only the library side
+    /// is digested. The CLI reports made, when every one was.
     fn compare(
         &self,
         digest_scope: &RunScope<'_>,
         replay: &Path,
         cwd_identity: (u64, u64),
         outputs: &[&str],
+        cached: Option<&BTreeMap<String, digest::Report>>,
         verdict: &mut Verdict,
-    ) -> Result<Option<String>, Stop> {
+    ) -> Result<Ran, Stop> {
         let roles = self.run_dir.join(ROLES_DIR);
         let out_dir = replay.join(OUTPUTS_DIR);
+        // A reused counterpart leaves outputs/ empty.
+        let replay_outputs: &[&str] = if cached.is_some() { &[] } else { outputs };
+        let mut made: BTreeMap<String, digest::Report> = BTreeMap::new();
         for role in outputs {
             let mut reports = Vec::new();
-            for (what, file) in [("library", roles.join(role)), ("CLI", out_dir.join(role))] {
+            let mut sides = vec![("library", roles.join(role))];
+            if cached.is_none() {
+                sides.push(("CLI", out_dir.join(role)));
+            }
+            for (what, file) in sides {
                 let report = self.digest(digest_scope, &file)?;
-                let breach = self.validate(replay, cwd_identity, outputs, false)?;
+                let breach = self.validate(replay, cwd_identity, replay_outputs, outputs, false)?;
                 // The digest's own defect stays beside a breach it caused.
                 match report {
                     Ok(report) => reports.push(report),
                     Err(e) => verdict.fail(format!("digest of the {what} output {role}: {e}")),
                 }
                 if breach.is_some() {
-                    return Ok(breach);
+                    return Ok((breach, None));
+                }
+            }
+            if let Some(cached) = cached {
+                match cached.get(*role) {
+                    Some(report) => reports.push(report.clone()),
+                    None => verdict.fail(format!("no reused CLI report for {role}")),
                 }
             }
             let [library, cli] = reports.as_slice() else {
                 continue;
             };
+            made.insert((*role).to_owned(), cli.clone());
             let differences = digest::differences(library, cli);
             if differences.is_empty() {
                 let [(nodes, _), (ways, _), (relations, _)] = &library.kinds;
@@ -281,7 +445,8 @@ impl Replay<'_> {
                 }
             }
         }
-        Ok(None)
+        let complete = made.len() == outputs.len();
+        Ok((None, complete.then_some(made)))
     }
 
     /// The counterpart's argv with every placeholder bound; `None` when an
@@ -422,15 +587,17 @@ impl Replay<'_> {
 
     /// After a released launch, whatever it came to: the run root is still a
     /// directory (else the run stops), the replay directory holds exactly
-    /// `cwd/` (the same directory, empty) and `outputs/` (only the declared
-    /// names, each a regular file, or absent while `missing_ok`), and every
-    /// library output named is still the regular file it was. `Some` names
-    /// the first breach.
+    /// `cwd/` (the same directory, empty) and `outputs/` (only the names in
+    /// `outputs`, each a regular file, or absent while `missing_ok`), and
+    /// every library output in `library` is still the regular file it was.
+    /// A reused counterpart's `outputs` is empty, its `library` the declared
+    /// roles. `Some` names the first breach.
     fn validate(
         &self,
         replay: &Path,
         cwd_identity: (u64, u64),
         outputs: &[&str],
+        library: &[&str],
         missing_ok: bool,
     ) -> Result<Option<String>, Stop> {
         root(self.run_dir)?;
@@ -482,7 +649,7 @@ impl Replay<'_> {
         if !missing_ok && inside.len() != outputs.len() {
             return breach(format!("an output in {shown}/outputs went missing"));
         }
-        for role in outputs {
+        for role in library {
             match role_kind(self.run_dir, role) {
                 Ok(Some(kind)) if kind.is_file() => {}
                 Ok(_) => {

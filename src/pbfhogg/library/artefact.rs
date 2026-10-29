@@ -135,6 +135,15 @@ pub(crate) struct CallDoc {
     pub(crate) stream: StreamAccount,
     pub(crate) diagnostics: Vec<Diagnostic>,
     pub(crate) results: Vec<Outcome>,
+    /// The call's `context`, as validated (a nonempty plain object).
+    pub(crate) context: json::Json,
+}
+
+/// A validated scenario document: its results and its `plan`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ScenarioDoc {
+    pub(crate) results: Vec<Outcome>,
+    pub(crate) plan: json::Json,
 }
 
 /// The documents of a well-formed artefact tree, unparsed.
@@ -263,12 +272,12 @@ pub(crate) fn read_tree(dir: &Path, scenario: &Scenario) -> Result<Tree, String>
     })
 }
 
-/// The scenario document: its results, after the plan's checks.
+/// The scenario document: its results and plan, after the plan's checks.
 pub(crate) fn parse_scenario(
     bytes: &[u8],
     scenario: &Scenario,
     forbidden: &[&str],
-) -> Result<Vec<Outcome>, String> {
+) -> Result<ScenarioDoc, String> {
     let doc = json::parse(SCENARIO_FILE, bytes)?;
     let root = Field::root(&doc, SCENARIO_FILE);
     let top = root.as_object()?;
@@ -294,7 +303,10 @@ pub(crate) fn parse_scenario(
     }
     let results = results(&top.required("assertions")?)?;
     top.finish()?;
-    Ok(results)
+    Ok(ScenarioDoc {
+        results,
+        plan: plan.json().clone(),
+    })
 }
 
 /// One call document, `call` its declared id.
@@ -355,6 +367,7 @@ pub(crate) fn parse_call(bytes: &[u8], call: &str, forbidden: &[&str]) -> Result
         stream,
         diagnostics,
         results,
+        context: context.json().clone(),
     })
 }
 

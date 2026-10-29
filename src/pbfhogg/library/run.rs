@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use super::artefact::{self, CallDoc, Outcome, Seal, Status};
 use super::counterpart::{self, Stop};
 use super::describe::{RoleKind, RoleSource, Scenario};
+use super::identity::{self, Identity};
 use crate::error::DevError;
 use crate::pbfhogg::binary::{HarnessLaunch, HarnessRun, LibraryHarness, PbfhoggBinary};
 
@@ -60,6 +61,29 @@ pub(crate) struct Report {
     pub(crate) run_dir: PathBuf,
     /// The directory was kept (a failure, or a refused removal).
     pub(crate) kept: bool,
+    /// What the process ran, for a measured run whose documents were read.
+    pub(crate) identity: Option<Identity>,
+    /// Each call's boundaries and sink account, from its document, in
+    /// describe order; empty when the documents were not read.
+    pub(crate) spans: Vec<crate::sidecar::CallSpan>,
+    /// Each sealed call's snapshot, by call.
+    pub(crate) snapshots: BTreeMap<String, BTreeMap<String, u64>>,
+}
+
+/// What a measured run hands each of its processes
+/// (`docs/commands/library.md`, Measuring a scenario).
+pub(crate) struct Measured<'a> {
+    /// This process's index in the run, from 0: the request's `iteration`.
+    pub(crate) iteration: usize,
+    /// Iteration 0's identity, which this one must agree with; `None` for
+    /// iteration 0 itself.
+    pub(crate) baseline: Option<&'a Identity>,
+    /// The CLI digests earlier iterations made.
+    pub(crate) reuse: &'a mut counterpart::Reuse,
+    /// Each dataset role's identity, read once before iteration 0.
+    pub(crate) datasets: &'a BTreeMap<String, String>,
+    /// The harness build's features.
+    pub(crate) features: &'a str,
 }
 
 impl Report {
@@ -74,31 +98,30 @@ impl Report {
             wall,
             run_dir,
             kept: true,
+            identity: None,
+            spans: Vec::new(),
+            snapshots: BTreeMap::new(),
         }
     }
 }
 
 /// Run `scenario` once, its dataset roles bound to `datasets` (role id to
-/// the resolved file); `cli` replays its calls' CLI counterparts.
+/// the resolved file); `cli` replays its calls' CLI counterparts. A
+/// measured process gets `measured`: its iteration, the agreement it owes
+/// iteration 0, and the reuse cache. Once the harness launch returned,
+/// `trajectory` holds its capture (with the calls' boundaries when the
+/// documents were read), whatever the run came to, an interrupt included.
 pub(crate) fn verify(
     harness: &LibraryHarness,
     cli: &PbfhoggBinary,
     scenario: &Scenario,
     datasets: &BTreeMap<String, PathBuf>,
     places: &Places<'_>,
+    measured: Option<Measured<'_>>,
+    trajectory: &mut Option<crate::sidecar::SidecarData>,
 ) -> Result<Report, DevError> {
-    let Prepared {
-        run_dir,
-        cwd,
-        artefacts,
-        request,
-        request_bytes,
-        cwd_identity,
-        reads,
-        writes,
-        forbidden,
-        paths,
-    } = prepare(scenario, datasets, places.library_root)?;
+    let iteration = measured.as_ref().map_or(0, |m| m.iteration);
+    let mut prepared = prepare(scenario, datasets, places.library_root, iteration)?;
 
     let mut fifo = crate::sidecar::SidecarFifo::create(
         places.fifo_dir,
@@ -108,22 +131,53 @@ pub(crate) fn verify(
     // undeclared one.
     fifo.limit_call_census(scenario.calls.len().saturating_add(1));
     let run = harness.run(HarnessLaunch {
-        run_dir: &run_dir,
-        request: &request,
-        cwd: &cwd,
-        artefacts: &artefacts,
-        reads,
-        writes,
+        run_dir: &prepared.run_dir,
+        request: &prepared.request,
+        cwd: &prepared.cwd,
+        artefacts: &prepared.artefacts,
+        reads: std::mem::take(&mut prepared.reads),
+        writes: std::mem::take(&mut prepared.writes),
         deadline: std::time::Duration::from_secs(u64::from(scenario.deadline_s)),
         fifo: &mut fifo,
+        iteration,
     });
     drop(fifo);
     let run = run.map_err(|e| {
         DevError::Verify(format!(
             "the library harness did not run: {e}; the run directory {} is kept",
-            crate::output::path(&run_dir)
+            crate::output::path(&prepared.run_dir)
         ))
     })?;
+    // The boundaries are kept once the documents were read, even when the
+    // run then stops (a counterpart interrupted, the final stop check).
+    let mut spans = Vec::new();
+    let judged = judge_run(&run, cli, scenario, &prepared, measured, &mut spans);
+    let mut data = run.data;
+    data.calls = spans;
+    *trajectory = Some(data);
+    judged
+}
+
+/// Everything after the harness launch returned: the verdict on `run`.
+#[allow(clippy::too_many_lines)]
+fn judge_run(
+    run: &HarnessRun,
+    cli: &PbfhoggBinary,
+    scenario: &Scenario,
+    prepared: &Prepared,
+    measured: Option<Measured<'_>>,
+    spans_out: &mut Vec<crate::sidecar::CallSpan>,
+) -> Result<Report, DevError> {
+    let Prepared {
+        run_dir,
+        artefacts,
+        request_bytes,
+        cwd_identity,
+        forbidden,
+        paths,
+        ..
+    } = prepared;
+    let (run_dir, cwd_identity) = (run_dir.clone(), *cwd_identity);
     if matches!(run.ending, crate::output::child::Ending::Interrupted) {
         if let Err(e) = &run.released {
             crate::output::warn(&e.to_string());
@@ -136,34 +190,81 @@ pub(crate) fn verify(
     // Whatever the exit and whatever became of the run directory: a record
     // of an undeclared call is a protocol failure no loss can explain, and
     // the census is in memory.
-    let undeclared = super::stream::undeclared_failure(scenario, &run.calls_seen);
-    if let Some(why) = untouchable(&run, &run_dir) {
+    let undeclared = super::stream::undeclared_failure(scenario, &run.data.calls_seen);
+    if let Some(why) = untouchable(run, &run_dir) {
         // A stop seen while the release waited is still this run's.
         if crate::shutdown::should_unwind() {
             return Err(DevError::Interrupted);
         }
         report.failures.push(why);
-        report.failures.extend(output_failures(&run));
+        report.failures.extend(output_failures(run));
         report.failures.extend(undeclared);
         return Ok(report);
     }
 
-    let layout = layout_failures(&run_dir, &request_bytes, cwd_identity, scenario, &[]);
+    let layout = layout_failures(&run_dir, request_bytes, cwd_identity, scenario, &[]);
     let layout_ok = layout.is_empty();
     report.failures.extend(layout);
-    report.failures.extend(output_failures(&run));
+    report.failures.extend(output_failures(run));
     report.failures.extend(undeclared);
     let mut untouched = false;
-    if let Some(judged) = judge_ending(&run, &artefacts, scenario, &forbidden, &mut report) {
+    let mut baseline_note: Option<String> = None;
+    if let Some(judged) = judge_ending(run, artefacts, scenario, &forbidden, &mut report) {
+        report.spans = spans(&judged);
+        spans_out.clone_from(&report.spans);
+        report.snapshots = judged
+            .calls
+            .iter()
+            .filter_map(|(id, doc)| doc.snapshot.clone().map(|s| (id.clone(), s)))
+            .collect();
+        // A measured process's identity, read before any replay (the reuse
+        // key reads it), and its agreement with iteration 0's.
+        let mut measured = measured;
+        let mut inputs = BTreeMap::new();
+        if let Some(m) = &measured
+            && layout_ok
+        {
+            match identify(&judged, scenario, paths, m) {
+                Ok(id) => {
+                    if let Some(base) = m.baseline
+                        && let Some(why) = id.disagreement(base)
+                    {
+                        report.failures.push(format!(
+                            "iteration {} disagrees with iteration 0: {}",
+                            m.iteration,
+                            printable(&why)
+                        ));
+                        baseline_note = Some(baseline_text(base, &id));
+                    }
+                    inputs.extend(id.datasets.clone());
+                    inputs.extend(id.generated.clone());
+                    report.identity = Some(id);
+                }
+                Err(why) => report.failures.push(format!(
+                    "the process cannot be identified: {}",
+                    printable(&why)
+                )),
+            }
+        }
+        let reusing = measured.as_mut().and_then(|m| {
+            report.identity.as_ref().map(|_| counterpart::Reusing {
+                reuse: &mut *m.reuse,
+                iteration: m.iteration,
+                inputs: &inputs,
+            })
+        });
         let relayout = |made: &[String]| {
-            layout_failures(&run_dir, &request_bytes, cwd_identity, scenario, made)
+            layout_failures(&run_dir, request_bytes, cwd_identity, scenario, made)
         };
         let cli_results = equality(
-            cli,
-            scenario,
-            &run_dir,
-            &paths,
-            layout_ok,
+            Equal {
+                cli,
+                scenario,
+                run_dir: &run_dir,
+                paths,
+                layout_ok,
+                reusing,
+            },
             relayout,
             &mut report,
         )?;
@@ -173,7 +274,7 @@ pub(crate) fn verify(
         untouched = cli_results.is_none();
         collect_results(
             &judged,
-            &run,
+            run,
             scenario,
             &cli_results.unwrap_or_default(),
             &mut report,
@@ -190,7 +291,7 @@ pub(crate) fn verify(
     }
     report.passed = report.failures.is_empty();
     if !report.passed {
-        write_evidence(&run_dir, &run, &report);
+        write_evidence(&run_dir, run, &report, baseline_note.as_deref());
     }
     if report.passed {
         match crate::reservations::remove_dir_all(&run_dir) {
@@ -223,6 +324,82 @@ fn untouchable(run: &HarnessRun, run_dir: &Path) -> Option<String> {
     }
 }
 
+/// Each call's boundaries and sink account, from its document.
+fn spans(judged: &Judged) -> Vec<crate::sidecar::CallSpan> {
+    let ts = |us: u64| i64::try_from(us).unwrap_or(i64::MAX);
+    judged
+        .calls
+        .iter()
+        .map(|(id, doc)| crate::sidecar::CallSpan {
+            call: id.clone(),
+            entry_us: ts(doc.entry_us),
+            return_us: ts(doc.return_us),
+            seal_us: ts(doc.seal_us),
+            stream_state: doc.stream.state.name().to_owned(),
+            stream_drops: doc.stream.drops,
+            run_idx: 0,
+        })
+        .collect()
+}
+
+/// A measured process's identity from its documents: the canonical plan
+/// and contexts, the generated roles as the harness left them, the dataset
+/// identities and the features. Any role that cannot be identified fails.
+fn identify(
+    judged: &Judged,
+    scenario: &Scenario,
+    paths: &BTreeMap<String, PathBuf>,
+    m: &Measured<'_>,
+) -> Result<Identity, String> {
+    let plan = identity::Document::of("plan", &judged.plan)?;
+    let mut contexts = BTreeMap::new();
+    for (id, doc) in &judged.calls {
+        contexts.insert(id.clone(), identity::Document::of("context", &doc.context)?);
+    }
+    let mut generated = BTreeMap::new();
+    for role in &scenario.roles {
+        if role.source != RoleSource::Generated {
+            continue;
+        }
+        let path = paths
+            .get(&role.id)
+            .ok_or_else(|| format!("generated role {} was never bound", role.id))?;
+        generated.insert(role.id.clone(), identity::generated(path, role.kind)?);
+    }
+    Ok(Identity {
+        plan,
+        contexts,
+        datasets: m.datasets.clone(),
+        generated,
+        features: m.features.to_owned(),
+    })
+}
+
+/// What `evidence/baseline.txt` holds after a disagreement: iteration 0's
+/// identity and documents beside this iteration's, since iteration 0's run
+/// directory is gone.
+fn baseline_text(base: &Identity, this: &Identity) -> String {
+    let mut text = String::new();
+    for (what, id) in [("iteration 0", base), ("this iteration", this)] {
+        text.push_str(&format!("# {what}\nidentity {}\n", id.qualifier()));
+        text.push_str(&format!("{} {}\n", id.plan.digest, id.plan.canonical));
+        for (call, doc) in &id.contexts {
+            text.push_str(&format!("{call} {} {}\n", doc.digest, doc.canonical));
+        }
+    }
+    text
+}
+
+/// What the counterparts are judged with.
+struct Equal<'a> {
+    cli: &'a PbfhoggBinary,
+    scenario: &'a Scenario,
+    run_dir: &'a Path,
+    paths: &'a BTreeMap<String, PathBuf>,
+    layout_ok: bool,
+    reusing: Option<counterpart::Reusing<'a>>,
+}
+
 /// The counterparts, run once the harness's documents were read, whatever
 /// the run's other results. Every counterpart's result by call, after the
 /// layout check `relayout`
@@ -230,15 +407,19 @@ fn untouchable(run: &HarnessRun, run_dir: &Path) -> Option<String> {
 /// directories. `None`: a launch left the run directory to some other
 /// process, the failure recorded, and nothing more may touch it.
 fn equality(
-    cli: &PbfhoggBinary,
-    scenario: &Scenario,
-    run_dir: &Path,
-    paths: &BTreeMap<String, PathBuf>,
-    layout_ok: bool,
+    on: Equal<'_>,
     relayout: impl Fn(&[String]) -> Vec<String>,
     report: &mut Report,
 ) -> Result<Option<BTreeMap<String, Outcome>>, DevError> {
-    let equality = match counterpart::judge(cli, scenario, run_dir, paths, layout_ok) {
+    let Equal {
+        cli,
+        scenario,
+        run_dir,
+        paths,
+        layout_ok,
+        reusing,
+    } = on;
+    let equality = match counterpart::judge(cli, scenario, run_dir, paths, layout_ok, reusing) {
         Ok(equality) => equality,
         Err(Stop::Interrupted) => return Err(DevError::Interrupted),
         Err(Stop::Unsafe(_)) if crate::shutdown::should_unwind() => {
@@ -278,6 +459,7 @@ fn prepare(
     scenario: &Scenario,
     datasets: &BTreeMap<String, PathBuf>,
     library_root: &Path,
+    iteration: usize,
 ) -> Result<Prepared, DevError> {
     let allocated = crate::artefacts::ArtefactDir::allocate(library_root, &scenario.id, true)?;
     let lexical = allocated.path().to_path_buf();
@@ -330,7 +512,7 @@ fn prepare(
         bindings.insert(role.id.clone(), crate::utf8_path::path_string(&path)?);
         paths.insert(role.id.clone(), path);
     }
-    let request_bytes = request_document(&scenario.id, &bindings)?;
+    let request_bytes = request_document(&scenario.id, iteration, &bindings)?;
     let request = run_dir.join(REQUEST_FILE);
     std::fs::write(&request, &request_bytes)?;
     let cwd_identity = identity(&cwd)?;
@@ -360,12 +542,13 @@ fn push_spelling(out: &mut Vec<String>, path: &Path) -> Result<(), DevError> {
 /// The request: `protocol`, `scenario`, `iteration` and `bindings`.
 fn request_document(
     scenario: &str,
+    iteration: usize,
     bindings: &BTreeMap<String, String>,
 ) -> Result<Vec<u8>, DevError> {
     let doc = serde_json::json!({
         "protocol": super::describe::PROTOCOL,
         "scenario": scenario,
-        "iteration": 0,
+        "iteration": iteration,
         "bindings": bindings,
     });
     let mut bytes = serde_json::to_vec_pretty(&doc)
@@ -505,10 +688,11 @@ fn output_failures(run: &HarnessRun) -> Vec<String> {
     failures
 }
 
-/// The harness's documents once read: the scenario-level results and each
-/// call's document, in describe order.
+/// The harness's documents once read: the scenario-level results, the
+/// plan and each call's document, in describe order.
 struct Judged {
     scenario_results: Vec<Outcome>,
+    plan: super::json::Json,
     calls: Vec<(String, CallDoc)>,
 }
 
@@ -592,8 +776,8 @@ fn judge_artefacts(
             return None;
         }
     };
-    let scenario_results = match artefact::parse_scenario(&tree.scenario, scenario, forbidden) {
-        Ok(results) => results,
+    let scenario_doc = match artefact::parse_scenario(&tree.scenario, scenario, forbidden) {
+        Ok(doc) => doc,
         Err(e) => {
             report.failures.push(invalid(e));
             return None;
@@ -610,6 +794,10 @@ fn judge_artefacts(
         }
     }
 
+    let artefact::ScenarioDoc {
+        results: scenario_results,
+        plan,
+    } = scenario_doc;
     let call_results: Vec<(String, Vec<Outcome>)> = calls
         .iter()
         .map(|(id, doc)| (id.clone(), doc.results.clone()))
@@ -656,6 +844,7 @@ fn judge_artefacts(
     }
     Some(Judged {
         scenario_results,
+        plan,
         calls,
     })
 }
@@ -674,6 +863,7 @@ fn collect_results(
     let Judged {
         scenario_results,
         calls,
+        ..
     } = judged;
     for result in scenario_results {
         report.results.push((None, result.clone()));
@@ -701,7 +891,7 @@ fn collect_results(
                 detail,
             },
         ));
-        let stream = super::stream::judge(id, doc, &run.records, &run.loss);
+        let stream = super::stream::judge(id, doc, &run.data.records, &run.data.summary.loss);
         let judged = scenario
             .calls
             .iter()
@@ -758,7 +948,7 @@ fn collect_results(
 /// Make evidence/ beside the run's documents and write what brokkr saw
 /// there; never following an entry that already exists. A failure to write
 /// it is a warning: the verdict does not depend on it.
-fn write_evidence(run_dir: &Path, run: &HarnessRun, report: &Report) {
+fn write_evidence(run_dir: &Path, run: &HarnessRun, report: &Report, baseline: Option<&str>) {
     let dir = run_dir.join(EVIDENCE_DIR);
     let written = (|| -> std::io::Result<()> {
         std::fs::create_dir(&dir)?;
@@ -773,6 +963,9 @@ fn write_evidence(run_dir: &Path, run: &HarnessRun, report: &Report) {
         put("stdout", &run.stdout)?;
         put("stderr", &run.stderr)?;
         put("stream.txt", stream_text(run).as_bytes())?;
+        if let Some(baseline) = baseline {
+            put("baseline.txt", baseline.as_bytes())?;
+        }
         let mut verdict = String::new();
         for line in &report.failures {
             verdict.push_str(line);
@@ -792,11 +985,11 @@ fn write_evidence(run_dir: &Path, run: &HarnessRun, report: &Report) {
 /// after one comment line per cause of capture loss.
 fn stream_text(run: &HarnessRun) -> String {
     let mut text = String::new();
-    for cause in run.loss.causes() {
+    for cause in run.data.summary.loss.causes() {
         text.push_str(&format!("# {cause}\n"));
     }
     text.push_str("# records, in arrival order\n");
-    for record in &run.records {
+    for record in &run.data.records {
         text.push_str(&record.wire());
         text.push('\n');
     }

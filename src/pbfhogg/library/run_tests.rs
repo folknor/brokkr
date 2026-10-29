@@ -170,6 +170,8 @@ fn run_described(f: &Fixture, describe_doc: &str) -> Report {
             library_root: &f.root.join("library"),
             fifo_dir: &f.root.join("state"),
         },
+        None,
+        &mut None,
     )
     .unwrap()
 }
@@ -537,6 +539,8 @@ fn a_harness_past_its_deadline_is_killed_and_fails() {
             library_root: &f.root.join("library"),
             fifo_dir: &f.root.join("state"),
         },
+        None,
+        &mut None,
     )
     .unwrap();
     assert!(!report.passed);
@@ -886,4 +890,115 @@ fn nothing_is_replayed_past_a_layout_breach() {
 #[test]
 fn printable_escapes_controls_but_tabs() {
     assert_eq!(printable("a\tb\nc\x1b[2J"), "a\tb\\nc\\u{1b}[2J");
+}
+
+/// One measured process of `describe_doc` as iteration `iteration`, against
+/// `baseline` and the shared `reuse` cache: its report and trajectory.
+fn measured(
+    f: &Fixture,
+    describe_doc: &str,
+    iteration: usize,
+    baseline: Option<&super::Identity>,
+    reuse: &mut super::counterpart::Reuse,
+) -> (Report, Option<crate::sidecar::SidecarData>) {
+    let scenario = describe::parse(describe_doc.as_bytes())
+        .unwrap()
+        .scenarios
+        .remove(0);
+    let datasets = BTreeMap::from([("input".to_owned(), f.input.clone())]);
+    let ids = BTreeMap::from([("input".to_owned(), "xxh128:0".to_owned())]);
+    let mut trajectory = None;
+    let report = verify(
+        &f.harness,
+        &f.cli,
+        &scenario,
+        &datasets,
+        &Places {
+            library_root: &f.root.join("library"),
+            fifo_dir: &f.root.join("state"),
+        },
+        Some(super::Measured {
+            iteration,
+            baseline,
+            reuse,
+            datasets: &ids,
+            features: "",
+        }),
+        &mut trajectory,
+    )
+    .unwrap();
+    (report, trajectory)
+}
+
+#[test]
+fn a_measured_process_carries_its_iteration_identity_and_trajectory() {
+    // The harness refuses any request but iteration 3's.
+    let body = format!(
+        "grep -q '\"iteration\": 3' \"$2\" || exit 9\n{}",
+        documents(SCENARIO_DOC, CALL_DOC)
+    );
+    let f = fixture("measured", &script(&body, 0));
+    let (report, trajectory) = measured(&f, DESCRIBE, 3, None, &mut Default::default());
+    assert!(report.passed, "{:?}", report.failures);
+    let identity = report.identity.expect("a measured process is identified");
+    assert_eq!(
+        identity.plan.canonical,
+        r#"{"calls":{"a":{"command":"cat","input":"input"}}}"#
+    );
+    assert_eq!(identity.datasets["input"], "xxh128:0");
+    assert_eq!(report.spans.len(), 1);
+    assert_eq!(
+        (report.spans[0].entry_us, report.spans[0].return_us),
+        (10, 20)
+    );
+    assert_eq!(report.snapshots["a"]["writer_blocks"], 3);
+    let trajectory = trajectory.expect("the capture is handed back");
+    assert_eq!(trajectory.calls, report.spans);
+    assert_eq!(trajectory.records.len(), 3);
+}
+
+#[test]
+fn a_process_disagreeing_with_iteration_0_fails_and_keeps_the_baseline() {
+    let f = fixture("measured-0", &script(&documents(SCENARIO_DOC, CALL_DOC), 0));
+    let (first, _) = measured(&f, DESCRIBE, 0, None, &mut Default::default());
+    let baseline = first.identity.expect("identified");
+    let other = SCENARIO_DOC.replacen("\"cat\"", "\"sort\"", 1);
+    let f = fixture("measured-1", &script(&documents(&other, CALL_DOC), 0));
+    let (report, trajectory) = measured(&f, DESCRIBE, 1, Some(&baseline), &mut Default::default());
+    assert!(!report.passed);
+    assert!(
+        has(
+            &report,
+            "iteration 1 disagrees with iteration 0: the plan differs"
+        ) && has(&report, "first at calls.a.command (\"cat\" vs \"sort\")"),
+        "{:?}",
+        report.failures
+    );
+    let kept = std::fs::read_to_string(report.run_dir.join("evidence/baseline.txt")).unwrap();
+    assert!(kept.contains("\"command\":\"cat\"") && kept.contains("\"command\":\"sort\""));
+    assert!(
+        trajectory.is_some(),
+        "a failed process's capture is handed back too"
+    );
+}
+
+#[test]
+fn a_later_iteration_reuses_the_cli_digest_and_still_digests_the_library_output() {
+    let f = fixture("measured-reuse", &equal_harness());
+    let mut reuse = Default::default();
+    let (first, _) = measured(&f, &with_cli(CAT_CLI), 0, None, &mut reuse);
+    assert!(first.passed, "{:?}", first.failures);
+    let before = cli_log(&f).len();
+    let baseline = first.identity.expect("identified");
+    let (second, _) = measured(&f, &with_cli(CAT_CLI), 1, Some(&baseline), &mut reuse);
+    assert!(second.passed, "{:?}", second.failures);
+    let log = cli_log(&f);
+    let added = &log[before..];
+    assert_eq!(added.len(), 1, "only the library digest ran: {added:?}");
+    assert!(added[0].starts_with("digest ") && added[0].ends_with("/roles/out-a"));
+    let detail = &cli_result(&second).detail;
+    assert!(
+        detail.contains("CLI digests reused from iteration 0") && detail.contains("out-a: equal"),
+        "{detail}"
+    );
 }

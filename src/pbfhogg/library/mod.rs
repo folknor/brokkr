@@ -10,17 +10,22 @@
 //! - [`counterpart`]: each call's CLI counterpart replayed and compared.
 //! - [`digest`]: the `pbfhogg digest` report the comparison reads.
 //! - [`certify`]: `--all`'s capability classification and its record.
+//! - [`identity`]: what a measured process ran, in brokkr-json-v1.
+//! - [`bench`](mod@bench): `--bench N`, the measured run and its recording.
 
 mod artefact;
+mod bench;
 mod certify;
 mod counterpart;
 mod describe;
 mod digest;
+mod identity;
 mod json;
 mod run;
 mod stream;
 
 pub(crate) use describe::is_capability;
+pub(crate) use json::canonical_difference;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -54,6 +59,18 @@ pub(crate) struct LibraryArgs<'a> {
     pub(crate) profile: Option<RustProfile>,
     /// What to run; `None` lists the scenarios.
     pub(crate) run: Option<RunArgs<'a>>,
+    /// `--bench N`: measure the one scenario `run` names.
+    pub(crate) bench: Option<BenchArgs<'a>>,
+}
+
+/// `--bench N` and what its measurement session is made from.
+pub(crate) struct BenchArgs<'a> {
+    pub(crate) runs: std::num::NonZeroUsize,
+    pub(crate) force: bool,
+    pub(crate) dev_config: &'a crate::config::DevConfig,
+    pub(crate) project_root: &'a crate::project::ProjectRoot,
+    pub(crate) build_root: &'a crate::project::BuildRoot,
+    pub(crate) invocation: &'a crate::db::RunInvocation,
 }
 
 /// Which scenarios a run covers.
@@ -102,6 +119,13 @@ pub(crate) fn library(args: &LibraryArgs<'_>) -> Result<(), DevError> {
     // nest inside it, so a stop between them or during parsing is seen, not
     // taken as the default action past the tree policy's restore.
     let _interrupts = crate::shutdown::SigtermGuard::install();
+    // A measurement's session first: a dirty tree is refused (or, with
+    // `--force`, unstored) before anything is built, as for every measured
+    // command.
+    let session = match (&args.bench, &args.run) {
+        (Some(bench), Some(run)) => Some(session(bench, run.paths)?),
+        _ => None,
+    };
     let profile = args
         .profile
         .clone()
@@ -130,7 +154,30 @@ pub(crate) fn library(args: &LibraryArgs<'_>) -> Result<(), DevError> {
         .as_ref()
         .ok_or_else(|| DevError::Internal("a library run was built without its CLI".into()))?;
     match (&run.target, &require) {
-        (Target::One(id), _) => run_one(&harness, cli, &doc, run, id, args.project_root),
+        (Target::One(id), _) => match (&session, &args.bench) {
+            (Some(session), Some(bench_args)) => {
+                let scenario = find_scenario(&doc, id)?;
+                let (datasets, _) = bind_datasets(scenario, run, args.project_root)?;
+                let (library_root, state_root) = places(run, args.project_root)?;
+                bench::measure(
+                    &bench::Bench {
+                        harness: &harness,
+                        cli,
+                        session,
+                        runs: bench_args.runs,
+                        dataset: run.dataset,
+                        project_root: args.project_root,
+                    },
+                    scenario,
+                    &datasets,
+                    &run::Places {
+                        library_root: &library_root,
+                        fifo_dir: &state_root,
+                    },
+                )
+            }
+            _ => run_one(&harness, cli, &doc, run, id, args.project_root),
+        },
         (Target::All, Some(require)) => certify_all(
             &Handles {
                 harness: &harness,
@@ -146,6 +193,31 @@ pub(crate) fn library(args: &LibraryArgs<'_>) -> Result<(), DevError> {
             "a library certification lost its requirement list".into(),
         )),
     }
+}
+
+/// The measurement session of `--bench N`: the results and sidecar stores,
+/// the tree's cleanliness under the measurement policy, the invocation and
+/// captured environment every row carries.
+fn session(
+    bench: &BenchArgs<'_>,
+    paths: &crate::config::ResolvedPaths,
+) -> Result<crate::harness::BenchHarness, DevError> {
+    let lock = crate::context::reenter_command_lock()?;
+    let session = crate::harness::BenchHarness::new_with_lock(
+        lock,
+        paths,
+        &bench.dev_config.included_config_files,
+        bench.build_root,
+        bench.project_root,
+        crate::project::Project::Pbfhogg,
+        bench.force,
+        None,
+    )?
+    .with_invocation(bench.invocation.clone())
+    .with_measure_mode(Some(crate::measure::RecordedMode::Bench))
+    .with_env_kv(crate::config::captured_env_pairs(bench.dev_config));
+    session.note_unneeded_force(bench.force);
+    Ok(session)
 }
 
 fn list(doc: &describe::Describe) -> Result<(), DevError> {
@@ -182,6 +254,8 @@ fn run_one(
             library_root: &library_root,
             fifo_dir: &state_root,
         },
+        None,
+        &mut None,
     )?;
     // No stop check here: `verify` made the last one before a passing run's
     // removal, which commits the verdict, so a stop after it never turns a
@@ -420,7 +494,16 @@ fn sweep<'a>(
             return Err(interrupted(i, total));
         }
         output::run_msg(&format!("scenario {}/{total}: {}", i + 1, scenario.id));
-        let attempt = match run::verify(handles.harness, handles.cli, scenario, &datasets, places) {
+        let verdict = run::verify(
+            handles.harness,
+            handles.cli,
+            scenario,
+            &datasets,
+            places,
+            None,
+            &mut None,
+        );
+        let attempt = match verdict {
             Ok(report) => {
                 show_report(scenario, &report);
                 certify::Attempt::of_report(scenario, bindings, &report)

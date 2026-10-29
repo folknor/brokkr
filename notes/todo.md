@@ -303,6 +303,21 @@ always accepted.
 
 The benchmark result row is committed first, then sidecar rows are inserted in separate per-run transactions. If sidecar storage fails after the result is committed, the DB has a result with partial/no sidecar data. Not catastrophic (partial data is better than none), but could be wrapped in a single transaction.
 
+A library measurement already orders the other way (trajectories and the
+session metadata first, the results group last, which publishes), so its
+rows never name a sidecar session that is missing; the ordinary `record`
+path is unchanged.
+
+### Credential scrub drops an arm qualifier (2026-10-29)
+
+`migrate_v24_to_v25` rewrites a row's `arm_key` from its redacted argv
+alone when redaction changed the argv, so a qualified row
+(`["qualified-v1", base, qualifier]`) whose argv held a credential would
+lose its qualifier and pair as unqualified. No qualified row predates v25
+(qualifiers came after it), so nothing is affected today; a future scrub of
+stored argv must refold the qualifier. Found while landing library rows,
+whose identity rides in the qualifier.
+
 ### Sidecar FIFOs: where they live, how they are named (2026-10-29)
 
 Found during brokkr#46 slice 2, not fixed there:

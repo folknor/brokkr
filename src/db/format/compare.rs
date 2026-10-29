@@ -16,23 +16,51 @@ pub fn format_compare(
     top: usize,
     matcher: &DatasetMatcher,
 ) -> String {
-    format_compare_with_limit(commit_a, rows_a, commit_b, rows_b, top, usize::MAX, matcher)
+    format_compare_with_limit(
+        &Sides {
+            commit_a,
+            rows_a,
+            commit_b,
+            rows_b,
+            documents: &std::collections::BTreeMap::new(),
+        },
+        top,
+        usize::MAX,
+        matcher,
+    )
+}
+
+/// The two sides of a comparison, and the canonical library documents
+/// their library rows name (by digest), for the unpaired-row diagnosis.
+pub struct Sides<'a> {
+    pub commit_a: &'a str,
+    pub rows_a: &'a [StoredRow],
+    pub commit_b: &'a str,
+    pub rows_b: &'a [StoredRow],
+    pub documents: &'a std::collections::BTreeMap<String, String>,
 }
 
 /// Format a comparison while capping the number of matched pairs shown.
 /// Pairing happens before the limit, so a row cap cannot remove one side of a
 /// pair and change the comparison result.
 pub fn format_compare_with_limit(
-    commit_a: &str,
-    rows_a: &[StoredRow],
-    commit_b: &str,
-    rows_b: &[StoredRow],
+    sides: &Sides<'_>,
     top: usize,
     limit: usize,
     matcher: &DatasetMatcher,
 ) -> String {
+    let Sides {
+        commit_a,
+        rows_a,
+        commit_b,
+        rows_b,
+        documents,
+    } = *sides;
     let matcher = &matcher.for_inputs(rows_a.iter().chain(rows_b).map(|r| r.input_file.as_str()));
     let mut pairs = build_comparison_pairs(rows_a, rows_b, matcher);
+    for pair in &mut pairs {
+        pair.library_note = library_note(pair, rows_a, rows_b, documents);
+    }
     // The cap defaults to 20, so say when it bit: a comparison that silently
     // ends early reads as "these are all the commands that were measured".
     let withheld = pairs.len().saturating_sub(limit);
@@ -158,6 +186,48 @@ struct ComparisonPair {
     /// recent older pair under the same key whose rows both recorded equal
     /// provenance, already rendered.
     like_for_like: Option<String>,
+    /// For a one-sided library row: where it differs from the other side's
+    /// latest comparable row (`super::library`), already rendered.
+    library_note: Option<String>,
+}
+
+/// The unpaired-library-row note of a one-sided pair: its row, and the
+/// other side's rows of the same command, mode, input, captured
+/// environment and known build, latest first.
+fn library_note(
+    pair: &ComparisonPair,
+    rows_a: &[StoredRow],
+    rows_b: &[StoredRow],
+    documents: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    let (mine, theirs, side, other) = match (pair.a_wall, pair.b_wall) {
+        (Some(_), None) => (rows_a, rows_b, "A", "B"),
+        (None, Some(_)) => (rows_b, rows_a, "B", "A"),
+        _ => return None,
+    };
+    let comparable = |row: &&StoredRow, other_side: Side| {
+        row.command == pair.key.command
+            && row.mode == pair.key.mode
+            && row.input_file == pair.key.input_file
+            && row.env_fingerprint() == pair.key.env_fingerprint
+            && matches!(pair.key.build, PairBuild::Known(_))
+            && PairBuild::of(row, other_side) == pair.key.build
+    };
+    let (this_side, other_side) = if side == "A" {
+        (Side::A, Side::B)
+    } else {
+        (Side::B, Side::A)
+    };
+    let row = mine.iter().find(|r| {
+        comparable(r, this_side)
+            && r.arm_key.as_deref().unwrap_or(r.brokkr_args.as_str()) == pair.key.arm_key
+    })?;
+    let mut candidates: Vec<&StoredRow> = theirs
+        .iter()
+        .filter(|r| comparable(r, other_side))
+        .collect();
+    candidates.sort_by_key(|r| std::cmp::Reverse(r.id));
+    super::library::unpaired_note(row, side, other, &candidates, documents)
 }
 
 /// The full identity of a comparison row. Keeping the components separate
@@ -368,6 +438,7 @@ fn make_row_data(row: &StoredRow, matcher: &DatasetMatcher) -> RowData {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn build_comparison_pairs(
     rows_a: &[StoredRow],
     rows_b: &[StoredRow],
@@ -476,6 +547,7 @@ fn build_comparison_pairs(
                 a_provenance,
                 b_provenance,
                 like_for_like,
+                library_note: None,
             }
         })
         .collect()
@@ -490,6 +562,10 @@ fn build_comparison_pairs(
 fn append_pair_annotations(out: &mut String, pair: &ComparisonPair) {
     if let Some(annotation) = pair.key.build.annotation() {
         out.push_str(&annotation);
+        out.push('\n');
+    }
+    if let Some(note) = &pair.library_note {
+        out.push_str(note);
         out.push('\n');
     }
     if pair.a_wall.is_none() || pair.b_wall.is_none() {
@@ -1267,6 +1343,67 @@ mod tests {
         let out = format_compare("aaa", &[a()], "bbb", &[b()], 10, &DatasetMatcher::empty());
         assert!(out.contains("method@12345678a"), "{out}");
         assert!(out.contains("method@12345678b"), "{out}");
+    }
+
+    #[test]
+    fn library_rows_of_another_identity_stay_unpaired_and_say_where_they_differ() {
+        let lib = |plan: &str, id: i64, key: &str| {
+            let mut r = row("library:s", "bench", "", 100);
+            r.id = id;
+            r.arm_key = Some(key.to_owned());
+            r.kv = vec![KvPair::text(
+                crate::db::KvKey::metadata("library.identity"),
+                format!(
+                    r#"{{"contexts":{{}},"datasets":{{}},"features":"","generated":{{}},"plan":"{plan}","v":1}}"#
+                ),
+            )];
+            r
+        };
+        let docs = std::collections::BTreeMap::from([
+            (
+                "plan-v1:a".to_owned(),
+                r#"{"calls":{"a":{"n":1}}}"#.to_owned(),
+            ),
+            (
+                "plan-v1:b".to_owned(),
+                r#"{"calls":{"a":{"n":2}}}"#.to_owned(),
+            ),
+        ]);
+        let (a, b) = ([lib("plan-v1:a", 1, "k-a")], [lib("plan-v1:b", 2, "k-b")]);
+        let out = format_compare_with_limit(
+            &Sides {
+                commit_a: "aaa",
+                rows_a: &a,
+                commit_b: "bbb",
+                rows_b: &b,
+                documents: &docs,
+            },
+            10,
+            usize::MAX,
+            &DatasetMatcher::empty(),
+        );
+        assert!(
+            out.contains("unpaired on A: B's latest library:s row abcdef12 has another library identity; first difference: plan field calls.a.n (1 vs 2)"),
+            "{out}"
+        );
+        // Equal identities that still did not pair differ in their invocation.
+        let (a, b) = ([lib("plan-v1:a", 1, "k-a")], [lib("plan-v1:a", 2, "k-b")]);
+        let out = format_compare_with_limit(
+            &Sides {
+                commit_a: "aaa",
+                rows_a: &a,
+                commit_b: "bbb",
+                rows_b: &b,
+                documents: &docs,
+            },
+            10,
+            usize::MAX,
+            &DatasetMatcher::empty(),
+        );
+        assert!(
+            out.contains("same library identity; the rows differ in their invocation"),
+            "{out}"
+        );
     }
 
     #[test]
