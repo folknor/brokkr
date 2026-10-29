@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use super::{Places, Report, printable, verify};
-use crate::pbfhogg::binary::LibraryHarness;
+use crate::pbfhogg::binary::{LibraryHarness, PbfhoggBinary};
 use crate::pbfhogg::library::describe;
 
 const DESCRIBE: &str = r#"{"protocol": 1, "scenarios": [
@@ -72,8 +72,43 @@ fn documents(scenario: &str, call: &str) -> String {
 struct Fixture {
     root: PathBuf,
     harness: LibraryHarness,
+    cli: PbfhoggBinary,
     input: PathBuf,
 }
+
+/// A fake pbfhogg CLI. `cat` (which accepts `--overwrite` and
+/// `--staging-dir`, not `--tmp-dir`) runs the `cat-extra` script beside it
+/// when there is one, then writes `pbf` to its `-o` path;
+/// `digest FILE` prints a four-line report whose hashes are the file's MD5,
+/// so equal files have equal reports. Every call is logged.
+const FAKE_CLI: &str = r#"#!/bin/sh
+echo "$*" >> "$0.log"
+case "$1" in
+  cat|digest) ;;
+  *) exit 2 ;;
+esac
+case "$2" in
+  --help) exit 0 ;;
+  --hel) exit 2 ;;
+  --overwrite|--staging-dir=.) exit 0 ;;
+  --tmp-dir=.) exit 2 ;;
+esac
+if [ "$1" = digest ]; then
+  if [ -x "$0.digest-extra" ]; then . "$0.digest-extra"; fi
+  [ -f "$2" ] || exit 2
+  h=$(md5sum < "$2" | cut -c1-32)
+  printf 'xxh128 v1 %s\nnode 1 %s\nway 0 %s\nrelation 0 %s\n' "$h" "$h" "$h" "$h"
+  exit 0
+fi
+out=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-o" ]; then out="$a"; fi
+  prev="$a"
+done
+if [ -x "$0.cat-extra" ]; then . "$0.cat-extra"; fi
+printf 'pbf' > "$out"
+"#;
 
 fn fixture(name: &str, body: &str) -> Fixture {
     use std::os::unix::fs::PermissionsExt;
@@ -81,17 +116,39 @@ fn fixture(name: &str, body: &str) -> Fixture {
     let path = root.join("harness");
     std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let cli_path = root.join("pbfhogg");
+    std::fs::write(&cli_path, FAKE_CLI).unwrap();
+    std::fs::set_permissions(&cli_path, std::fs::Permissions::from_mode(0o755)).unwrap();
     let input = root.join("input.osm.pbf");
     std::fs::write(&input, b"pbf").unwrap();
     for dir in ["library", "state"] {
         std::fs::create_dir_all(root.join(dir)).unwrap();
     }
     let harness = LibraryHarness::fixture(&path, &root).unwrap();
+    let cli = PbfhoggBinary::fixture(&cli_path, &root).unwrap();
     Fixture {
         root,
         harness,
+        cli,
         input,
     }
+}
+
+/// Give the fake CLI's `cat` an extra step, run before it writes its output.
+fn cat_extra(f: &Fixture, script: &str) {
+    extra(f, "cat", script);
+}
+
+/// The same for `digest`, run before it reads its file.
+fn digest_extra(f: &Fixture, script: &str) {
+    extra(f, "digest", script);
+}
+
+fn extra(f: &Fixture, sub: &str, script: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = f.root.join(format!("pbfhogg.{sub}-extra"));
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 fn run(f: &Fixture) -> Report {
@@ -106,6 +163,7 @@ fn run_described(f: &Fixture, describe_doc: &str) -> Report {
     let datasets = BTreeMap::from([("input".to_owned(), f.input.clone())]);
     verify(
         &f.harness,
+        &f.cli,
         &scenario,
         &datasets,
         &Places {
@@ -472,6 +530,7 @@ fn a_harness_past_its_deadline_is_killed_and_fails() {
     let datasets = BTreeMap::from([("input".to_owned(), f.input.clone())]);
     let report = verify(
         &f.harness,
+        &f.cli,
         &scenario,
         &datasets,
         &Places {
@@ -501,6 +560,280 @@ fn a_lease_held_past_the_harness_leaves_the_directory_untouched() {
     assert!(!has(&report, "artefacts"), "{:?}", report.failures);
     assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
     assert!(!report.run_dir.join("evidence").exists());
+}
+
+/// The describe document with call `a` declaring `cli` as its counterpart.
+fn with_cli(cli: &str) -> String {
+    DESCRIBE.replacen(
+        r#""label": "cat input -> out-a"}"#,
+        &format!(r#""label": "cat input -> out-a", "cli": {cli}}}"#),
+        1,
+    )
+}
+
+const CAT_CLI: &str = r#"{"argv": ["cat", {"input": "input"}, "-o", {"output": "out-a"}],
+  "policy_differences": ["the CLI raises NOFILE"]}"#;
+
+/// A harness whose output role holds what the fake CLI writes.
+fn equal_harness() -> String {
+    equal_harness_then("")
+}
+
+fn equal_harness_then(extra: &str) -> String {
+    script(
+        &format!(
+            "printf pbf > \"$R/roles/out-a\"\n{}\n{extra}",
+            documents(SCENARIO_DOC, CALL_DOC)
+        ),
+        0,
+    )
+}
+
+fn cli_log(f: &Fixture) -> Vec<String> {
+    std::fs::read_to_string(f.root.join("pbfhogg.log"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.contains("--help"))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn cli_result(report: &Report) -> &super::Outcome {
+    &report
+        .results
+        .iter()
+        .find(|(c, r)| c.as_deref() == Some("a") && r.id == "brokkr.cli")
+        .expect("a/brokkr.cli")
+        .1
+}
+
+#[test]
+fn an_equal_counterpart_passes_after_one_replay_and_two_digests() {
+    let f = fixture("cli-pass", &equal_harness());
+    let report = run_described(&f, &with_cli(CAT_CLI));
+    assert!(report.passed, "{:?}", report.failures);
+    assert!(!report.run_dir.exists(), "removed with the run");
+    let ids: Vec<&str> = report.results.iter().map(|(_, r)| r.id.as_str()).collect();
+    assert_eq!(ids, ["whole", "a.outcome", "brokkr.seal", "brokkr.cli"]);
+    let detail = &cli_result(&report).detail;
+    assert!(detail.contains("out-a: equal, 1 nodes"), "{detail}");
+    assert!(detail.contains("declared policy differences: the CLI raises NOFILE"));
+    let log = cli_log(&f);
+    assert_eq!(log.len(), 3, "{log:?}");
+    let replay = &log[0];
+    assert!(
+        replay.starts_with("cat ") && replay.contains("/input.osm.pbf -o "),
+        "{replay}"
+    );
+    assert!(
+        replay.contains("/replay-a/outputs/out-a --overwrite --staging-dir "),
+        "{replay}"
+    );
+    assert!(
+        replay.contains("/replay-a/outputs/.brokkr-pbfhogg-"),
+        "{replay}"
+    );
+    assert!(log[1].starts_with("digest ") && log[1].ends_with("/roles/out-a"));
+    assert!(log[2].starts_with("digest ") && log[2].ends_with("/replay-a/outputs/out-a"));
+}
+
+#[test]
+fn unequal_outputs_fail_naming_what_differs() {
+    // The harness leaves out-a empty; the CLI writes `pbf`.
+    let f = fixture(
+        "cli-unequal",
+        &script(&documents(SCENARIO_DOC, CALL_DOC), 0),
+    );
+    let report = run_described(&f, &with_cli(CAT_CLI));
+    assert!(!report.passed);
+    assert!(
+        has(
+            &report,
+            "a/brokkr.cli: fail\n    | out-a differs:\n    |   content hash: library"
+        ),
+        "{:?}",
+        report.failures
+    );
+    assert!(has(&report, "node: library 1 "), "{:?}", report.failures);
+    assert!(
+        !has(&report, "exited 0"),
+        "a brokkr result never makes the exit inconsistent"
+    );
+    assert!(
+        report.run_dir.join("replay-a/outputs/out-a").is_file(),
+        "kept as evidence"
+    );
+}
+
+#[test]
+fn a_failing_or_littering_replay_fails_before_any_digest() {
+    let f = fixture("cli-exit", &equal_harness());
+    cat_extra(&f, "echo broke >&2\nexit 1\n");
+    let report = run_described(&f, &with_cli(CAT_CLI));
+    assert!(
+        has(
+            &report,
+            "a/brokkr.cli: fail\n    | the counterpart exited 1, stderr:\n    | broke"
+        ),
+        "{:?}",
+        report.failures
+    );
+    assert_eq!(cli_log(&f).len(), 1, "no digest after a failed replay");
+
+    let f = fixture("cli-litter", &equal_harness());
+    cat_extra(&f, ": > leftover\n");
+    let report = run_described(&f, &with_cli(CAT_CLI));
+    assert!(has(&report, "cwd is not empty"), "{:?}", report.failures);
+    assert_eq!(cli_log(&f).len(), 1, "no digest after a breach");
+
+    // A failing replay is still checked for what it left.
+    let f = fixture("cli-exit-litter", &equal_harness());
+    cat_extra(&f, ": > leftover\nexit 1\n");
+    let report = run_described(&f, &with_cli(CAT_CLI));
+    assert!(
+        has(&report, "the counterpart exited 1"),
+        "{:?}",
+        report.failures
+    );
+    assert!(has(&report, "cwd is not empty"), "{:?}", report.failures);
+}
+
+#[test]
+fn a_refused_digest_fails_and_keeps_its_defect_beside_a_breach() {
+    let f = fixture("cli-digest-refused", &equal_harness());
+    digest_extra(&f, "echo unsorted >&2\nexit 2\n");
+    let report = run_described(&f, &with_cli(CAT_CLI));
+    for needle in [
+        "digest of the library output out-a: exited 2, stderr:\n    | unsorted",
+        "digest of the CLI output out-a: exited 2",
+    ] {
+        assert!(has(&report, needle), "{needle}: {:?}", report.failures);
+    }
+
+    let f = fixture("cli-digest-litter", &equal_harness());
+    digest_extra(&f, ": > leftover\nexit 2\n");
+    let report = run_described(&f, &with_cli(CAT_CLI));
+    assert!(
+        has(&report, "digest of the library output out-a: exited 2"),
+        "{:?}",
+        report.failures
+    );
+    assert!(has(&report, "cwd is not empty"), "{:?}", report.failures);
+    assert_eq!(cli_log(&f).len(), 2, "nothing launched after the breach");
+}
+
+/// The describe document with a generated directory `parts` beside the
+/// roles, call `a` declaring `cli`.
+fn with_parts(cli: &str) -> String {
+    with_cli(cli).replacen(
+        r#"{"id": "tmp-a", "kind": "directory", "source": "scratch", "owner": "a"}"#,
+        r#"{"id": "tmp-a", "kind": "directory", "source": "scratch", "owner": "a"},
+     {"id": "parts", "kind": "directory", "source": "generated"}"#,
+        1,
+    )
+}
+
+const PARTS_CLI: &str = r#"{"argv": ["cat", {"files_in": "parts"}, "-o", {"output": "out-a"}]}"#;
+
+#[test]
+fn files_in_expands_a_generated_directory_sorted_by_name() {
+    let f = fixture(
+        "cli-files-in",
+        &equal_harness_then(": > \"$R/roles/parts/b.pbf\"\n: > \"$R/roles/parts/a.pbf\""),
+    );
+    let report = run_described(&f, &with_parts(PARTS_CLI));
+    assert!(report.passed, "{:?}", report.failures);
+    let log = cli_log(&f);
+    let replay = &log[0];
+    let a = replay.find("/parts/a.pbf").unwrap();
+    let b = replay.find("/parts/b.pbf").unwrap();
+    assert!(a < b, "{replay}");
+
+    // Empty: not replayed, unevaluated.
+    let f = fixture("cli-files-in-empty", &equal_harness());
+    let report = run_described(&f, &with_parts(PARTS_CLI));
+    assert!(
+        has(
+            &report,
+            "a/brokkr.cli: unevaluated\n    | the generated directory parts is empty"
+        ),
+        "{:?}",
+        report.failures
+    );
+    assert!(cli_log(&f).is_empty());
+
+    // A missing library output outranks the missing input.
+    let f = fixture(
+        "cli-files-in-precedence",
+        &script(
+            &format!(
+                "rm \"$R/roles/out-a\"\n{}",
+                documents(SCENARIO_DOC, CALL_DOC)
+            ),
+            0,
+        ),
+    );
+    let report = run_described(&f, &with_parts(PARTS_CLI));
+    assert!(
+        has(
+            &report,
+            "a/brokkr.cli: fail\n    | the library left no output out-a"
+        ),
+        "{:?}",
+        report.failures
+    );
+}
+
+#[test]
+fn a_replay_that_changes_the_run_directory_is_caught_afterwards() {
+    let f = fixture("cli-request", &equal_harness());
+    cat_extra(&f, "echo x >> \"$(dirname \"$out\")/../../request.json\"\n");
+    let report = run_described(&f, &with_cli(CAT_CLI));
+    assert!(
+        has(&report, "request.json was changed"),
+        "{:?}",
+        report.failures
+    );
+    assert_eq!(cli_result(&report).status, super::Status::Pass);
+}
+
+#[test]
+fn a_missing_library_output_fails_without_a_replay() {
+    let f = fixture(
+        "cli-absent",
+        &script(
+            &format!(
+                "rm \"$R/roles/out-a\"\n{}",
+                documents(SCENARIO_DOC, CALL_DOC)
+            ),
+            0,
+        ),
+    );
+    let report = run_described(&f, &with_cli(CAT_CLI));
+    assert!(
+        has(
+            &report,
+            "a/brokkr.cli: fail\n    | the library left no output out-a"
+        ),
+        "{:?}",
+        report.failures
+    );
+    assert!(cli_log(&f).is_empty());
+}
+
+#[test]
+fn nothing_is_replayed_past_a_layout_breach() {
+    let f = fixture("cli-layout", &equal_harness_then(": > \"$R/stray\""));
+    let report = run_described(&f, &with_cli(CAT_CLI));
+    assert!(
+        has(
+            &report,
+            "a/brokkr.cli: unevaluated\n    | not replayed: the run directory failed"
+        ),
+        "{:?}",
+        report.failures
+    );
+    assert!(cli_log(&f).is_empty());
 }
 
 #[test]

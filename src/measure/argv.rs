@@ -254,6 +254,63 @@ impl<'a> Invocation<'a> {
         Ok(run)
     }
 
+    /// Run once in `cwd`, killed at `deadline`, each stream kept to `cap`
+    /// (silently past it, so a caller that must see a longer stream asks for
+    /// one byte more than it keeps), `unset` removed from the inherited
+    /// environment, in its own process group. Unlike
+    /// [`capture_in`](Self::capture_in), the release is never folded into a
+    /// spawn failure: a launch whose admission or release did not establish a
+    /// safe state is [`Supervised::Unsafe`], whatever else happened.
+    pub(crate) fn capture_supervised(
+        &self,
+        cwd: &Path,
+        deadline: std::time::Duration,
+        cap: output::child::CaptureCap,
+        unset: &[&str],
+    ) -> Supervised {
+        if crate::shutdown::should_unwind() {
+            return Supervised::Interrupted;
+        }
+        let launched = match self.launch(cwd) {
+            Ok(launched) => launched,
+            // A refusal may come after the lease was made (a private
+            // directory that could not be created), with its release in
+            // doubt: never taken as a clean refusal.
+            Err(e) => return Supervised::Unsafe(e),
+        };
+        let program = self.program_string();
+        let env: Vec<(&str, &str)> = self
+            .env
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let sigterm = crate::shutdown::SigtermGuard::install();
+        let run = output::child::run_captured_bounded_unsetting(
+            &program,
+            &launched.arg_refs(),
+            cwd,
+            &env,
+            unset,
+            deadline,
+            None,
+            crate::shutdown::ChildIsolation::ProcessGroup(&sigterm),
+            cap,
+        );
+        drop(sigterm);
+        let released = launched.finish();
+        match (run, released) {
+            (Err(DevError::Interrupted), released) => {
+                if let Err(e) = released {
+                    output::warn(&e.to_string());
+                }
+                Supervised::Interrupted
+            }
+            (_, Err(e)) => Supervised::Unsafe(e),
+            (Err(e), Ok(())) => Supervised::Failed(e),
+            (Ok(capture), Ok(())) => Supervised::Ran(capture),
+        }
+    }
+
     /// Fail unless `captured` (this invocation's output) succeeded, naming
     /// the program.
     pub(crate) fn check(&self, captured: &CapturedOutput) -> Result<(), DevError> {
@@ -298,6 +355,20 @@ impl<'a> Invocation<'a> {
     pub(crate) fn args_for_test(&self) -> &[String] {
         &self.args
     }
+}
+
+/// What one [`Invocation::capture_supervised`] launch came to.
+pub(crate) enum Supervised {
+    /// The child ran to an ending and the launch was released.
+    Ran(output::child::DeadlineCapture),
+    /// Nothing ran to an ending (resolution, a probe or the spawn failed),
+    /// and nothing was left admitted.
+    Failed(DevError),
+    /// Admission or release did not establish a safe state: some process
+    /// may still hold the launch's paths.
+    Unsafe(DevError),
+    /// A stop request ended it; the release was attempted.
+    Interrupted,
 }
 
 impl std::fmt::Debug for Invocation<'_> {

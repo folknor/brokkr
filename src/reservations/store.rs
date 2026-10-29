@@ -589,6 +589,14 @@ fn remove_synced(path: &Path, dir: &Path) -> io::Result<()> {
 /// directory nor a regular file, is not this lease's and is refused. The
 /// parent is synced in both cases, so a retry after a failed sync completes
 /// it rather than taking the absence as durable.
+///
+/// Adjudicated (brokkr#46 slice 4 audit): the path is not walked without
+/// following links, so a child that put a symlink in place of an ancestor
+/// (a library replay's `outputs/`) has this reach the directory through it.
+/// That is not a hazard: the release runs only once no process holds the
+/// lease, so nothing can swap the tree under it, and only the inode the
+/// lease created is removed, wherever a link led; the library's own checks
+/// after the release then report the link.
 fn remove_private(resource: &Resource) -> io::Result<()> {
     let path = &resource.resolved;
     match std::fs::symlink_metadata(path) {

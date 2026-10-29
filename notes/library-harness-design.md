@@ -533,13 +533,79 @@ is the binding text.
   CLI executable's XXH128, the token argv as declared (placeholders by role
   name, not resolved paths), the identity of every input role it reads (a
   dataset file's recorded digest; a generated role's content digest, XXH128
-  of a file or the tree digest of a directory, computed by slice 4 after the
-  harness exited and reused by slice 6; brokkr has no observation point
+  of a file or the tree digest of a directory, computed after the
+  harness exited, by slice 6 (R12a); brokkr has no observation point
   between setup and the calls, so this rests on the producer obligation that
   nothing changes a generated role after setup), and the scratch flag. The initial output
   state is always absent (a fresh brokkr path every replay), so it is a
   constant of the key, stated. The library output is digested every
   iteration.
+
+### R12a Amendments made by slice 4 (link 4, sparred with codex over three rounds)
+
+Each changes or sharpens R12, R3 or R9; `docs/commands/library.md` "CLI
+equality" is the binding text.
+
+- **The reuse key and generated-role content digests move to slice 6**
+  (about 150 lines there): a verification makes one process, so nothing in
+  slice 4 could consume either, and the user ruled out dead code. Slice 6
+  computes the generated identities after the harness exits and before the
+  first replay of an iteration, keyed as R12 says, and keeps the producer
+  obligation that setup leaves generated roles unchanged.
+- **Build** (R3): a `SCENARIO` run always builds the CLI, release with
+  default features whatever the harness profile (it is the reference;
+  content digests are profile-independent), from the same build root,
+  before either handle exists, through `LibraryHarness::build(.., with_cli,
+  ..)`; the listing builds the harness only. A lazy build (describe first,
+  then drop the harness handle and build the CLI only when a counterpart
+  exists) was sparred and rejected: two handle lifetimes over one run for a
+  near no-op cargo run.
+- **The run-scoped context** (R9) is `PbfhoggBinary::run_in`: cwd inside the
+  run directory, coverage the whole run directory, the private directory by
+  the existing rule (beside the first output, inside the run directory),
+  `BROKKR_MARKER_FIFO` and `BROKKR_HARNESS_ARTEFACT_DIR` removed, killed at
+  the scenario's `deadline_s`, the executable re-checked after the probes,
+  and an outcome (`measure::Supervised`) that keeps an admission or release
+  that did not establish a safe state (`Unsafe`) apart from a run that
+  failed. Any admission error counts as unsafe, a conflict refusal included:
+  the lease may have been made and its release be in doubt.
+- **Serial launches, explicitly** (slice 2's ruling): the counterparts run
+  in one loop whose every launch returns only after its release; an unsafe
+  launch stops the run as a held harness lease does (no evidence, no
+  removal, nothing read again).
+- **Every capability probe is bounded** (all callers): a 60 s wall, its own
+  process group, the run variables removed, an output left open refused and
+  never cached. Probes are pre-run discovery, not run launches: they never
+  touch the run directory.
+- **Stages per launch**: release, then a filesystem check without
+  following links from the run root down (`replay-<call>/` holding exactly
+  `cwd/`, the same empty directory, and `outputs/` with only declared
+  regular files; each library output still a regular file), whatever the
+  exit, then judgment. A run root that is no longer a directory stops the
+  run; any other breach fails that result and leaves later counterparts
+  `unevaluated`. After the last counterpart the slice 2 layout check runs
+  again, admitting the `replay-<call>/` directories.
+- **Gates and statuses**: replays run once the call documents are read,
+  whatever the inventory and statuses, and only when the layout check
+  passed (else `unevaluated`). A library output absent or not regular is
+  `fail` (checked first, so a missing input never turns it into
+  `unevaluated`); a generated input or `files_in` entry absent, not
+  regular, or (for `files_in`) a non-UTF-8 name or an empty directory is
+  `unevaluated`; a replay or digest exit other than 0, a deadline, a digest
+  with its output left open or past 4 KiB, a malformed report, another
+  algorithm or version, a missing replay output, unequal reports (naming
+  the content hash and each kind) are `fail`. The first defect sets the
+  status; every defect stays in the detail.
+- **Dialect additions**: `--`, `-O` and `@brokkr-private-dir@` are refused as
+  literals besides R12's list (the last because launch substitutes it); the
+  subcommand is a literal identifier; argv holds 2 to 1000 tokens, literals
+  1 to 1000 bytes without control characters; `scratch` and
+  `policy_differences` are optional (false, none). The narrowing is stated
+  as syntactic only. `PbfArgv::written` pushes an output path bare.
+- **policy_differences** lands here, shown in the listing and closing the
+  `brokkr.cli` detail, never judged; slice 8 records it with timings.
+- No digest capability probe: a commit that has the harness member
+  postdates `pbfhogg digest`.
 
 ### R13 Plan, context and identity (slice 6; findings 4, 5)
 
@@ -678,11 +744,12 @@ code. Sizes are rough source-plus-tests lines.
    per-call verdict, `brokkr.stream`, phases and tail in the report, the
    census of undeclared call ids. Landed whole with the amendments of R11a,
    nothing deferred out of it; about 1300 source and test lines.
-4. **CLI equality.** The second build before handles, call `cli` in
-   describe, the run-scoped `PbfhoggBinary` invocation context and the
-   pbfhogg.md placement-rule update, generated-role content digests, replay,
-   the digest runner and
-   its parser, `brokkr.cli`, the reuse key. About 1200.
+4. **CLI equality** (link 4, landed). The second build before handles, call
+   `cli` in describe, the run-scoped `PbfhoggBinary` context and the
+   pbfhogg.md placement-rule update, replay, the digest runner and its
+   parser, `brokkr.cli`, bounded probes, with the amendments of R12a.
+   Deferred to slice 6: generated-role content digests and the reuse key
+   (about 150). About 1300 source and test lines.
 5. **The gate.** Assertion `covers`, `[pbfhogg.library.require]`, `--all`,
    classification, the certification record. About 700.
 6. **Recording.** `--bench N`, `brokkr-json-v1` canonicalization and the
@@ -695,7 +762,12 @@ code. Sizes are rough source-plus-tests lines.
    them is no longer stored as incomplete, and store each record's arrival
    position so counters read back in arrival order (`sidecar_counters`
    today has no index and reads `ORDER BY timestamp_us, name`).
-   `Timeline::closed` exists for the closed final interval.
+   `Timeline::closed` exists for the closed final interval. Moved here by
+   slice 4 (about 150 more): generated-role content digests, computed after
+   the harness exits and before an iteration's first replay, which both the
+   R13 identity and the R12 reuse key read, and the reuse key itself, so an
+   iteration after the first reuses a counterpart's CLI digest when the key
+   matches (R12a).
 7. **Hotpath and close.** `hotpath` and `isolation` in describe,
    `--hotpath`/`--alloc`; then the chain's close: delete this file, file the
    pbfhogg list, comment on and close #46 naming slice 8 as not built. About
@@ -746,6 +818,16 @@ only carry a harness written after that.
   `calls_seen`. A measured library run (slice 6) gets the same
   `SidecarData.records`, so its per-iteration verdict can call `judge`
   unchanged. `library.md` has ten `##` sections.
+- Slice 4 (link 4): as planned, with the amendments of R12a, the reuse key
+  and generated digests moved to slice 6. Where a later link starts:
+  `counterpart::judge` runs every counterpart after `judge_ending` returned
+  the parsed documents (`Judged`), and `collect_results` adds `brokkr.cli`
+  after `brokkr.stream`; slice 5 reads no coverage from it (brokkr results
+  other than `brokkr.stream` cover nothing, R15). A measured run (slice 6)
+  calls `counterpart::judge` per iteration; the reuse key would skip the CLI
+  replay and its digest there, never the library digest. `run_in` and
+  `measure::Supervised` are the run-scoped launch; every new launch kind in a
+  run goes through it. `library.md` has eleven `##` sections.
 
 ## The pbfhogg list
 

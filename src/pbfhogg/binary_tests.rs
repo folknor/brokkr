@@ -570,6 +570,65 @@ fn a_handle_cannot_be_made_while_a_build_runs() {
     drop(crate::build::executable_guard::begin_build().unwrap());
 }
 
+/// A run-scoped launch runs in the cwd it is given, inside the run
+/// directory, with its private directory beside its output, and is killed
+/// at its deadline; both come back released.
+#[test]
+fn a_run_scoped_launch_runs_in_its_cwd_and_is_killed_at_its_deadline() {
+    use crate::measure::Supervised;
+    let script = r#"#!/bin/sh
+case "$2" in
+  --help) exit 0 ;;
+  --hel) exit 2 ;;
+  --overwrite|--staging-dir=.) exit 0 ;;
+  --tmp-dir=.) exit 2 ;;
+esac
+case "$1" in
+  sort) pwd -P > "$3"; echo "$6" >> "$3" ;;
+  slow) sleep 5 ;;
+esac
+"#;
+    let (root, path) = install("run-scoped", script);
+    let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
+    let run = root.join("run-1");
+    let cwd = run.join("replay/cwd");
+    let outputs = run.join("replay/outputs");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::create_dir_all(&outputs).unwrap();
+    let scope = super::RunScope {
+        run_dir: &run,
+        cwd: &cwd,
+        deadline: std::time::Duration::from_secs(1),
+        stdout_kept: 64,
+    };
+    let out = outputs.join("out");
+    let argv = PbfArgv::new("sort").arg("-o").written(&out).unwrap();
+    let Supervised::Ran(capture) = binary.run_in(argv, &scope) else {
+        panic!("the launch did not run");
+    };
+    assert!(capture.captured.success());
+    let seen = std::fs::read_to_string(&out).unwrap();
+    let mut lines = seen.lines();
+    assert_eq!(
+        lines.next().map(PathBuf::from),
+        Some(cwd.canonicalize().unwrap())
+    );
+    let private = PathBuf::from(lines.next().unwrap());
+    assert_eq!(private.parent(), Some(outputs.as_path()), "{seen}");
+    assert!(!private.exists(), "released with the launch");
+
+    let Supervised::Ran(capture) = binary.run_in(
+        PbfArgv::new("slow")
+            .arg("-o")
+            .written(outputs.join("slow"))
+            .unwrap(),
+        &scope,
+    ) else {
+        panic!("the launch did not run");
+    };
+    assert!(capture.captured.ending.is_deadline());
+}
+
 #[test]
 fn an_empty_argv_is_refused() {
     let (root, path) = install("empty-argv", FAKE_PBFHOGG);

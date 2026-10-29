@@ -91,6 +91,15 @@ impl PbfArgv {
         Ok(self)
     }
 
+    /// `PATH` alone, an output: for an argv whose flags someone else spelled
+    /// (a library CLI counterpart writes its own `-o` before the path).
+    pub(crate) fn written(mut self, path: impl AsRef<Path>) -> Result<Self, DevError> {
+        let path = path.as_ref();
+        self.args.push(crate::utf8_path::path_string(path)?);
+        self.writes.push(path.to_path_buf());
+        Ok(self)
+    }
+
     /// `flag DIR`, a directory output publication replaces whole
     /// (`build-geocode-index --output-dir`).
     pub(crate) fn output_dir(

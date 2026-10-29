@@ -3,18 +3,20 @@
 //! (`docs/commands/library.md`, "Running a scenario" onwards).
 //!
 //! The run holds the brokkr lock from allocation to removal (its caller
-//! takes it). It makes exactly one launch, released before anything is
-//! judged, so its launches are serial by construction: between launches no
-//! child exists, and during one the child's lease covers the whole run
-//! directory.
+//! takes it). Its launches - the harness, then each CLI counterpart's replay
+//! and digests ([`super::counterpart`]) - are strictly one at a time: each
+//! is released before anything it could have changed is judged and before
+//! the next is admitted, so between launches no child exists, and during
+//! one the child's lease covers the whole run directory.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use super::artefact::{self, CallDoc, Outcome, Seal, Status};
+use super::counterpart::{self, Stop};
 use super::describe::{RoleKind, RoleSource, Scenario};
 use crate::error::DevError;
-use crate::pbfhogg::binary::{HarnessLaunch, HarnessRun, LibraryHarness};
+use crate::pbfhogg::binary::{HarnessLaunch, HarnessRun, LibraryHarness, PbfhoggBinary};
 
 /// The request document's name in the run directory.
 pub(crate) const REQUEST_FILE: &str = "request.json";
@@ -60,10 +62,27 @@ pub(crate) struct Report {
     pub(crate) kept: bool,
 }
 
+impl Report {
+    /// A run not yet judged, its directory kept until a pass removes it.
+    fn kept(wall: std::time::Duration, run_dir: PathBuf) -> Self {
+        Self {
+            passed: false,
+            failures: Vec::new(),
+            results: Vec::new(),
+            diagnostics: Vec::new(),
+            streams: Vec::new(),
+            wall,
+            run_dir,
+            kept: true,
+        }
+    }
+}
+
 /// Run `scenario` once, its dataset roles bound to `datasets` (role id to
-/// the resolved file).
+/// the resolved file); `cli` replays its calls' CLI counterparts.
 pub(crate) fn verify(
     harness: &LibraryHarness,
+    cli: &PbfhoggBinary,
     scenario: &Scenario,
     datasets: &BTreeMap<String, PathBuf>,
     places: &Places<'_>,
@@ -78,6 +97,7 @@ pub(crate) fn verify(
         reads,
         writes,
         forbidden,
+        paths,
     } = prepare(scenario, datasets, places.library_root)?;
 
     let mut fifo = crate::sidecar::SidecarFifo::create(
@@ -112,52 +132,45 @@ pub(crate) fn verify(
     }
 
     let forbidden: Vec<&str> = forbidden.iter().map(String::as_str).collect();
-    let mut report = Report {
-        passed: false,
-        failures: Vec::new(),
-        results: Vec::new(),
-        diagnostics: Vec::new(),
-        streams: Vec::new(),
-        wall: run.elapsed,
-        run_dir: run_dir.clone(),
-        kept: true,
-    };
+    let mut report = Report::kept(run.elapsed, run_dir.clone());
     // Whatever the exit and whatever became of the run directory: a record
     // of an undeclared call is a protocol failure no loss can explain, and
     // the census is in memory.
     let undeclared = super::stream::undeclared_failure(scenario, &run.calls_seen);
-    if let Err(e) = &run.released {
-        // Some process still holds the lease and may still change the run
-        // directory: nothing in it is read, and nothing is written there.
-        report.failures.push(format!(
-            "the harness launch was not released: {e}; the run directory is left untouched"
-        ));
-        report.failures.extend(output_failures(&run));
-        report.failures.extend(undeclared);
-        return Ok(report);
-    }
-    // A run directory that is no longer a directory (a symlink put in its
-    // place) is never traversed: nothing below it is read or written.
-    let real = artefact::entry_kind(&run_dir).is_ok_and(|k| k.is_some_and(|k| k.is_dir()));
-    if !real {
-        report.failures.push(format!(
-            "{} is no longer the directory it was made as; nothing in it is read",
-            crate::output::path(&run_dir)
-        ));
+    if let Some(why) = untouchable(&run, &run_dir) {
+        // A stop seen while the release waited is still this run's.
+        if crate::shutdown::should_unwind() {
+            return Err(DevError::Interrupted);
+        }
+        report.failures.push(why);
         report.failures.extend(output_failures(&run));
         report.failures.extend(undeclared);
         return Ok(report);
     }
 
-    report.failures.extend(layout_failures(
-        &run_dir,
-        &request_bytes,
-        cwd_identity,
-        scenario,
-    ));
+    let layout = layout_failures(&run_dir, &request_bytes, cwd_identity, scenario, &[]);
+    let layout_ok = layout.is_empty();
+    report.failures.extend(layout);
     report.failures.extend(output_failures(&run));
     report.failures.extend(undeclared);
-    judge_ending(&run, &artefacts, scenario, &forbidden, &mut report);
+    if let Some(judged) = judge_ending(&run, &artefacts, scenario, &forbidden, &mut report) {
+        let relayout = |made: &[String]| {
+            layout_failures(&run_dir, &request_bytes, cwd_identity, scenario, made)
+        };
+        let Some(cli_results) = equality(
+            cli,
+            scenario,
+            &run_dir,
+            &paths,
+            layout_ok,
+            relayout,
+            &mut report,
+        )?
+        else {
+            return Ok(report);
+        };
+        collect_results(&judged, &run, scenario, &cli_results, &mut report);
+    }
     // A stop that landed after the child's ending was seen (while output
     // settled, the lease was released or the artefacts were read) still
     // interrupts the run, which keeps its directory.
@@ -180,6 +193,57 @@ pub(crate) fn verify(
     Ok(report)
 }
 
+/// Why nothing in the run directory may be read or written after the
+/// harness launch: some process still holds the lease and may still change
+/// it, or it is no longer a directory (a symlink put in its place; looked
+/// at only after a successful release).
+fn untouchable(run: &HarnessRun, run_dir: &Path) -> Option<String> {
+    match &run.released {
+        Err(e) => Some(format!(
+            "the harness launch was not released: {e}; the run directory is left untouched"
+        )),
+        Ok(()) if !artefact::entry_kind(run_dir).is_ok_and(|k| k.is_some_and(|k| k.is_dir())) => {
+            Some(format!(
+                "{} is no longer the directory it was made as; nothing in it is read",
+                crate::output::path(run_dir)
+            ))
+        }
+        Ok(()) => None,
+    }
+}
+
+/// The counterparts, run once the harness's documents were read, whatever
+/// the run's other results. Every counterpart's result by call, after the
+/// layout check `relayout`
+/// ran again over what the CLI could have changed beside its own
+/// directories. `None`: a launch left the run directory to some other
+/// process, the failure recorded, and nothing more may touch it.
+fn equality(
+    cli: &PbfhoggBinary,
+    scenario: &Scenario,
+    run_dir: &Path,
+    paths: &BTreeMap<String, PathBuf>,
+    layout_ok: bool,
+    relayout: impl Fn(&[String]) -> Vec<String>,
+    report: &mut Report,
+) -> Result<Option<BTreeMap<String, Outcome>>, DevError> {
+    let equality = match counterpart::judge(cli, scenario, run_dir, paths, layout_ok) {
+        Ok(equality) => equality,
+        Err(Stop::Interrupted) => return Err(DevError::Interrupted),
+        Err(Stop::Unsafe(_)) if crate::shutdown::should_unwind() => {
+            return Err(DevError::Interrupted);
+        }
+        Err(Stop::Unsafe(why)) => {
+            report.failures.push(why);
+            return Ok(None);
+        }
+    };
+    if !equality.made.is_empty() {
+        report.failures.extend(relayout(&equality.made));
+    }
+    Ok(Some(equality.results))
+}
+
 /// A laid-out run directory, before the launch.
 struct Prepared {
     run_dir: PathBuf,
@@ -192,6 +256,8 @@ struct Prepared {
     writes: Vec<PathBuf>,
     /// Spellings no plan or context string may contain.
     forbidden: Vec<String>,
+    /// Every role's bound path.
+    paths: BTreeMap<String, PathBuf>,
 }
 
 /// Allocate the run directory and lay it out: `cwd/`, `artefacts/`,
@@ -215,6 +281,7 @@ fn prepare(
     }
 
     let mut bindings: BTreeMap<String, String> = BTreeMap::new();
+    let mut paths: BTreeMap<String, PathBuf> = BTreeMap::new();
     let mut forbidden: Vec<String> = Vec::new();
     for spelling in [&lexical, &run_dir] {
         push_spelling(&mut forbidden, spelling)?;
@@ -250,6 +317,7 @@ fn prepare(
             }
         };
         bindings.insert(role.id.clone(), crate::utf8_path::path_string(&path)?);
+        paths.insert(role.id.clone(), path);
     }
     let request_bytes = request_document(&scenario.id, &bindings)?;
     let request = run_dir.join(REQUEST_FILE);
@@ -266,6 +334,7 @@ fn prepare(
         reads,
         writes,
         forbidden,
+        paths,
     })
 }
 
@@ -302,12 +371,16 @@ fn identity(path: &Path) -> Result<(u64, u64), DevError> {
 
 /// The run directory against its layout, after a released launch: exactly
 /// the request (bytes unchanged), the same empty `cwd/`, `artefacts/` and
-/// `roles/`; in `roles/` only bound role names, each absent or of its kind.
+/// `roles/`, plus the directories named in `made` (the replay directories,
+/// after the counterparts ran; each checked by its own launch, so only its
+/// type here); in `roles/` only bound role names, each absent or of its
+/// kind.
 fn layout_failures(
     run_dir: &Path,
     request: &[u8],
     cwd_identity: (u64, u64),
     scenario: &Scenario,
+    made: &[String],
 ) -> Vec<String> {
     let mut failures = Vec::new();
     let mut fail = |why: String| failures.push(format!("run directory: {why}"));
@@ -336,6 +409,7 @@ fn layout_failures(
         let fits = match name.as_str() {
             REQUEST_FILE => kind.is_file(),
             CWD_DIR | ARTEFACTS_DIR | ROLES_DIR => kind.is_dir(),
+            other if made.iter().any(|m| m == other) => kind.is_dir(),
             other => {
                 fail(format!("an unexpected entry {other:?}"));
                 continue;
@@ -420,14 +494,22 @@ fn output_failures(run: &HarnessRun) -> Vec<String> {
     failures
 }
 
-/// The exit, then on 0 and 1 the artefacts, on 2 the refusal.
+/// The harness's documents once read: the scenario-level results and each
+/// call's document, in describe order.
+struct Judged {
+    scenario_results: Vec<Outcome>,
+    calls: Vec<(String, CallDoc)>,
+}
+
+/// The exit, then on 0 and 1 the artefacts, on 2 the refusal. `Some` when
+/// every document was read, so the per-call results can be collected.
 fn judge_ending(
     run: &HarnessRun,
     artefacts: &Path,
     scenario: &Scenario,
     forbidden: &[&str],
     report: &mut Report,
-) {
+) -> Option<Judged> {
     use crate::output::child::Ending;
     let code = match &run.ending {
         Ending::Exited(code) => *code,
@@ -436,19 +518,19 @@ fn judge_ending(
                 "the harness was killed at its {} deadline",
                 crate::output::format_duration(*limit)
             ));
-            return;
+            return None;
         }
         Ending::Signalled(signal) => {
             report
                 .failures
                 .push(format!("the harness was killed by signal {signal}"));
-            return;
+            return None;
         }
         other => {
             report
                 .failures
                 .push(format!("the harness ended as {other:?}"));
-            return;
+            return None;
         }
     };
     match code {
@@ -472,10 +554,14 @@ fn judge_ending(
             report
                 .failures
                 .push(format!("the harness could not run the request, {why}"));
+            None
         }
-        other => report.failures.push(format!(
-            "the harness exited {other}, which the protocol does not define"
-        )),
+        other => {
+            report.failures.push(format!(
+                "the harness exited {other}, which the protocol does not define"
+            ));
+            None
+        }
     }
 }
 
@@ -486,20 +572,20 @@ fn judge_artefacts(
     scenario: &Scenario,
     forbidden: &[&str],
     report: &mut Report,
-) {
+) -> Option<Judged> {
     let invalid = |why: String| format!("the artefacts are invalid: {}", printable(&why));
     let tree = match artefact::read_tree(artefacts, scenario) {
         Ok(tree) => tree,
         Err(e) => {
             report.failures.push(invalid(e));
-            return;
+            return None;
         }
     };
     let scenario_results = match artefact::parse_scenario(&tree.scenario, scenario, forbidden) {
         Ok(results) => results,
         Err(e) => {
             report.failures.push(invalid(e));
-            return;
+            return None;
         }
     };
     let mut calls: Vec<(String, CallDoc)> = Vec::new();
@@ -508,7 +594,7 @@ fn judge_artefacts(
             Ok(doc) => calls.push((id.clone(), doc)),
             Err(e) => {
                 report.failures.push(invalid(e));
-                return;
+                return None;
             }
         }
     }
@@ -557,19 +643,27 @@ fn judge_artefacts(
                 .push("the harness exited 1 but every result it reported passed".to_owned());
         }
     }
-    collect_results(&scenario_results, &calls, run, scenario, report);
+    Some(Judged {
+        scenario_results,
+        calls,
+    })
 }
 
-/// Every result in report order, brokkr's seal and stream results among
-/// them, each call's stream line, diagnostics and returned outcome, and a
-/// failure line per result that did not pass.
+/// Every result in report order, brokkr's seal, stream and CLI results among
+/// them (`cli` holds each counterpart's, by call), each call's stream line,
+/// diagnostics and returned outcome, and a failure line per result that did
+/// not pass.
 fn collect_results(
-    scenario_results: &[Outcome],
-    calls: &[(String, CallDoc)],
+    judged: &Judged,
     run: &HarnessRun,
     scenario: &Scenario,
+    cli: &BTreeMap<String, Outcome>,
     report: &mut Report,
 ) {
+    let Judged {
+        scenario_results,
+        calls,
+    } = judged;
     for result in scenario_results {
         report.results.push((None, result.clone()));
     }
@@ -613,6 +707,9 @@ fn collect_results(
                     detail: stream.detail,
                 },
             ));
+        }
+        if let Some(result) = cli.get(id) {
+            report.results.push((Some(id.clone()), result.clone()));
         }
         for d in &doc.diagnostics {
             report.diagnostics.push(format!(

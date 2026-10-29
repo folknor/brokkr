@@ -99,6 +99,106 @@ fn a_call_stream_lists_unique_capability_ids() {
     assert!(e.contains("listed twice"), "{e}");
 }
 
+/// The example with call `b` declaring `cli`, plus a generated file and a
+/// generated directory role.
+fn with_cli(cli: &str) -> String {
+    edited(
+        r#"{"id": "b", "label": "cat input -> out-b"}"#,
+        &format!(r#"{{"id": "b", "label": "cat input -> out-b", "cli": {cli}}}"#),
+    )
+    .replacen(
+        r#"{"id": "out-b", "kind": "pbf", "source": "output", "owner": "b"}"#,
+        r#"{"id": "out-b", "kind": "pbf", "source": "output", "owner": "b"},
+        {"id": "seed", "kind": "file", "source": "generated"},
+        {"id": "parts", "kind": "directory", "source": "generated"},
+        {"id": "note-b", "kind": "file", "source": "output", "owner": "b"}"#,
+        1,
+    )
+}
+
+#[test]
+fn a_cli_counterpart_binds_its_placeholders_to_roles() {
+    let doc = parse(
+        with_cli(
+            r#"{"argv": ["cat", {"input": "input"}, {"input": "seed"}, {"files_in": "parts"},
+                "-o", {"output": "out-b"}, "--clean"], "scratch": true,
+                "policy_differences": ["the CLI raises NOFILE"]}"#,
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    let cli = doc.scenarios[0].calls[1].cli.as_ref().unwrap();
+    assert!(cli.scratch);
+    assert_eq!(cli.argv[0], Token::Literal("cat".into()));
+    assert_eq!(cli.argv[3], Token::FilesIn("parts".into()));
+    assert_eq!(cli.argv[5], Token::Output("out-b".into()));
+    assert_eq!(cli.policy_differences, ["the CLI raises NOFILE"]);
+    assert!(doc.scenarios[0].calls[0].cli.is_none());
+    let plain =
+        parse(with_cli(r#"{"argv": ["cat", "-o", {"output": "out-b"}]}"#).as_bytes()).unwrap();
+    let cli = plain.scenarios[0].calls[1].cli.as_ref().unwrap();
+    assert!(!cli.scratch && cli.policy_differences.is_empty());
+}
+
+#[test]
+fn a_cli_counterpart_refuses_paths_negotiated_flags_and_wrong_roles() {
+    let argv = |tokens: &str| with_cli(&format!(r#"{{"argv": [{tokens}]}}"#));
+    let out = r#"{"output": "out-b"}"#;
+    for (tokens, needle) in [
+        (format!(r#""cat", "/etc/x", {out}"#), "names a path"),
+        (format!(r#""cat", "..", {out}"#), "names a path"),
+        (format!(r#""cat", "--", {out}"#), "ends the options"),
+        (format!(r#""cat", "--overwrite", {out}"#), "negotiates"),
+        (format!(r#""cat", "--staging-dir=x", {out}"#), "negotiates"),
+        (format!(r#""cat", "-O", {out}"#), "negotiates"),
+        (format!(r#""cat", "-O=x", {out}"#), "negotiates"),
+        (
+            format!(r#""cat", "@brokkr-private-dir@", {out}"#),
+            "placeholder",
+        ),
+        (format!(r#""cat", "", {out}"#), "1 to 1000 bytes"),
+        (format!(r#"{out}, "cat""#), "first token is the subcommand"),
+        (format!(r#""Cat", {out}"#), "first token is the subcommand"),
+        (r#""cat", "-o""#.to_owned(), "names no output"),
+        (format!(r#""cat", {out}, {out}"#), "named twice"),
+        (
+            r#""cat", {"output": "out-a"}"#.to_owned(),
+            "an output pbf role this call owns",
+        ),
+        (
+            r#""cat", {"output": "note-b"}"#.to_owned(),
+            "an output pbf role this call owns",
+        ),
+        (
+            format!(r#""cat", {{"input": "out-a"}}, {out}"#),
+            "a dataset role",
+        ),
+        (
+            format!(r#""cat", {{"input": "parts"}}, {out}"#),
+            "a dataset role",
+        ),
+        (
+            format!(r#""cat", {{"files_in": "seed"}}, {out}"#),
+            "a generated directory role",
+        ),
+        (
+            format!(r#""cat", {{"input": "seed", "output": "out-b"}}, {out}"#),
+            "names one role",
+        ),
+        (
+            format!(r#""cat", {{"role": "seed"}}, {out}"#),
+            "unknown key",
+        ),
+        (format!(r#""cat", 7, {out}"#), "a token is a string"),
+    ] {
+        let e = refused(&argv(&tokens));
+        assert!(
+            e.starts_with("describe.scenarios[0].calls[1].cli") && e.contains(needle),
+            "{tokens}: {e}"
+        );
+    }
+}
+
 #[test]
 fn the_document_in_docs_matches_the_example_here() {
     // The protocol doc shows this example; keep the two in step.

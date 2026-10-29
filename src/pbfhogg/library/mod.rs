@@ -7,9 +7,13 @@
 //! - [`run`]: one verification run of a scenario and its verdict.
 //! - [`artefact`]: the artefact tree and documents a run leaves.
 //! - [`stream`]: each call's FIFO records judged against its document.
+//! - [`counterpart`]: each call's CLI counterpart replayed and compared.
+//! - [`digest`]: the `pbfhogg digest` report the comparison reads.
 
 mod artefact;
+mod counterpart;
 mod describe;
+mod digest;
 mod json;
 mod run;
 mod stream;
@@ -23,7 +27,7 @@ use crate::datasets::error::ResolveError;
 use crate::datasets::resolve::{self, SnapshotRef};
 use crate::error::DevError;
 use crate::output;
-use crate::pbfhogg::binary::LibraryHarness;
+use crate::pbfhogg::binary::{LibraryHarness, PbfhoggBinary};
 
 /// The config table the harness build comes from, for messages.
 const TABLE: &str = "[pbfhogg.library.harness]";
@@ -62,7 +66,15 @@ pub(crate) fn library(args: &LibraryArgs<'_>) -> Result<(), DevError> {
         .clone()
         .or_else(|| args.harness.configured_profile(TABLE))
         .unwrap_or(RustProfile::Release);
-    let harness = LibraryHarness::build(args.harness, profile, args.build_root, args.project_root)?;
+    // A run also needs the CLI its counterparts replay against, built
+    // before either handle exists; the listing does not.
+    let (harness, cli) = LibraryHarness::build(
+        args.harness,
+        profile,
+        args.run.is_some(),
+        args.build_root,
+        args.project_root,
+    )?;
     let bytes = harness.describe(describe::DESCRIBE_LIMIT)?;
     let doc = describe::parse(&bytes).map_err(|why| {
         DevError::ContractViolation(format!("the library harness's describe document: {why}"))
@@ -72,7 +84,12 @@ pub(crate) fn library(args: &LibraryArgs<'_>) -> Result<(), DevError> {
     }
     match &args.run {
         None => list(&doc),
-        Some(run) => run_one(&harness, &doc, run, args.project_root),
+        Some(run) => {
+            let cli = cli.as_ref().ok_or_else(|| {
+                DevError::Internal("a library run was built without its CLI".into())
+            })?;
+            run_one(&harness, cli, &doc, run, args.project_root)
+        }
     }
 }
 
@@ -92,6 +109,7 @@ fn list(doc: &describe::Describe) -> Result<(), DevError> {
 
 fn run_one(
     harness: &LibraryHarness,
+    cli: &PbfhoggBinary,
     doc: &describe::Describe,
     args: &RunArgs<'_>,
     project_root: &Path,
@@ -116,6 +134,7 @@ fn run_one(
     std::fs::create_dir_all(state.root())?;
     let report = run::verify(
         harness,
+        cli,
         scenario,
         &datasets,
         &run::Places {
@@ -131,6 +150,19 @@ fn run_one(
     }
     for line in &report.diagnostics {
         output::run_msg(&format!("diagnostic {line}"));
+    }
+    // A failing result's detail is printed with the failures; a passing CLI
+    // result's (its counts and declared policy differences) here.
+    for (call, result) in &report.results {
+        if result.id == counterpart::CLI_RESULT && result.status == artefact::Status::Pass {
+            for line in result.detail.lines() {
+                output::run_msg(&format!(
+                    "cli {} {}",
+                    call.as_deref().unwrap_or("-"),
+                    run::printable(line)
+                ));
+            }
+        }
     }
     if report.passed {
         let count = report.results.len();
@@ -228,6 +260,14 @@ fn listing(doc: &describe::Describe) -> Vec<String> {
                 line.push_str(&format!(" (stream: {})", call.stream.join(", ")));
             }
             lines.push(line);
+            if let Some(cli) = &call.cli {
+                let argv: Vec<String> = cli.argv.iter().map(describe::Token::show).collect();
+                let scratch = if cli.scratch { " (scratch)" } else { "" };
+                lines.push(format!("    cli    pbfhogg {}{scratch}", argv.join(" ")));
+                for difference in &cli.policy_differences {
+                    lines.push(format!("    policy {difference}"));
+                }
+            }
         }
         for role in &scenario.roles {
             let source = match &role.source {

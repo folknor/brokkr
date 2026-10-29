@@ -86,7 +86,55 @@ pub(crate) struct Call {
     /// The capability ids the call's stream verdict stands for; nonempty
     /// makes brokkr add `<call>/brokkr.stream`.
     pub(crate) stream: Vec<String>,
+    /// The CLI command whose outputs must equal the call's; present makes
+    /// brokkr add `<call>/brokkr.cli`.
+    pub(crate) cli: Option<Cli>,
 }
+
+/// A call's CLI counterpart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Cli {
+    /// The argv after the executable, the subcommand first.
+    pub(crate) argv: Vec<Token>,
+    /// The counterpart writes run scratch (`--tmp-dir` is negotiated).
+    pub(crate) scratch: bool,
+    /// How the CLI's process policy differs from the call's, as the
+    /// harness states it; shown, never judged.
+    pub(crate) policy_differences: Vec<String>,
+}
+
+/// One argv token of a counterpart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Token {
+    Literal(String),
+    /// The bound path of a dataset, or a generated file or PBF, role.
+    Input(String),
+    /// Every regular file directly inside a generated directory role.
+    FilesIn(String),
+    /// An output PBF role the call owns: brokkr passes a path of its own.
+    Output(String),
+}
+
+impl Token {
+    /// The token as the listing shows it.
+    pub(crate) fn show(&self) -> String {
+        match self {
+            Self::Literal(text) => text.clone(),
+            Self::Input(role) => format!("{{input:{role}}}"),
+            Self::FilesIn(role) => format!("{{files_in:{role}}}"),
+            Self::Output(role) => format!("{{output:{role}}}"),
+        }
+    }
+}
+
+/// The flags brokkr negotiates with the CLI, never in a counterpart's argv.
+const NEGOTIATED: [&str; 4] = ["--overwrite", "-O", "--staging-dir", "--tmp-dir"];
+
+/// Longest literal argv token, in bytes.
+const LITERAL_LIMIT: usize = 1000;
+
+/// Most tokens in a counterpart's argv.
+const ARGV_LIMIT: usize = 1000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Assertion {
@@ -180,6 +228,16 @@ fn scenario(item: &Field<'_>) -> Result<Scenario, String> {
         }
         roles.push(role);
     }
+    for (i, call) in calls.iter().enumerate() {
+        if let Some(cli) = &call.cli {
+            check_cli(
+                call,
+                cli,
+                &roles,
+                &format!("{}[{i}].cli", calls_field.path()),
+            )?;
+        }
+    }
 
     let mut assertions: Vec<Assertion> = Vec::new();
     for entry in obj.required("assertions")?.as_array()? {
@@ -228,8 +286,168 @@ fn call(item: &Field<'_>) -> Result<Call, String> {
             stream.push(capability);
         }
     }
+    let cli = match obj.optional("cli") {
+        Some(field) => Some(cli(&field)?),
+        None => None,
+    };
     obj.finish()?;
-    Ok(Call { id, label, stream })
+    Ok(Call {
+        id,
+        label,
+        stream,
+        cli,
+    })
+}
+
+/// A counterpart's shape; its placeholders are checked against the roles
+/// by [`check_cli`] once those are read.
+fn cli(field: &Field<'_>) -> Result<Cli, String> {
+    let obj = field.as_object()?;
+    let argv_field = obj.required("argv")?;
+    let items = argv_field.as_array()?;
+    if items.len() < 2 || items.len() > ARGV_LIMIT {
+        return Err(format!(
+            "{}: 2 to {ARGV_LIMIT} tokens, the subcommand and at least an output, has {}",
+            argv_field.path(),
+            items.len()
+        ));
+    }
+    let mut argv = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        let token = token(item)?;
+        if i == 0 && !matches!(&token, Token::Literal(sub) if is_identifier(sub)) {
+            return Err(format!(
+                "{}: the first token is the subcommand, a literal identifier",
+                item.path()
+            ));
+        }
+        argv.push(token);
+    }
+    let scratch = match obj.optional("scratch") {
+        Some(f) => f.as_bool()?,
+        None => false,
+    };
+    let mut policy_differences = Vec::new();
+    if let Some(list) = obj.optional("policy_differences") {
+        for item in list.as_array()? {
+            policy_differences.push(one_line(&item)?);
+        }
+    }
+    obj.finish()?;
+    Ok(Cli {
+        argv,
+        scratch,
+        policy_differences,
+    })
+}
+
+fn token(item: &Field<'_>) -> Result<Token, String> {
+    if let Ok(text) = item.as_str() {
+        return literal(item, text).map(Token::Literal);
+    }
+    let obj = item.as_object().map_err(|_| {
+        format!(
+            "{}: a token is a string or one of {{\"input\"}}, {{\"files_in\"}}, {{\"output\"}}",
+            item.path()
+        )
+    })?;
+    let mut found: Option<Token> = None;
+    for (key, make) in [
+        ("input", Token::Input as fn(String) -> Token),
+        ("files_in", Token::FilesIn),
+        ("output", Token::Output),
+    ] {
+        if let Some(role) = obj.optional(key) {
+            if found.is_some() {
+                return Err(format!("{}: a placeholder names one role", item.path()));
+            }
+            found = Some(make(identifier(&role)?));
+        }
+    }
+    obj.finish()?;
+    found.ok_or_else(|| {
+        format!(
+            "{}: a placeholder is {{\"input\"}}, {{\"files_in\"}} or {{\"output\"}}",
+            item.path()
+        )
+    })
+}
+
+/// A literal token: never a path, nor a flag brokkr negotiates. A syntactic
+/// narrowing only: aliases and short-option clusters stay the producer's
+/// obligation.
+fn literal(item: &Field<'_>, text: &str) -> Result<String, String> {
+    let refuse = |why: &str| Err(format!("{}: literal {text:?} {why}", item.path()));
+    if text.is_empty() || text.len() > LITERAL_LIMIT {
+        return refuse(&format!("must be 1 to {LITERAL_LIMIT} bytes"));
+    }
+    if text.chars().any(char::is_control) {
+        return refuse("holds a control character");
+    }
+    if text.contains('/') || matches!(text, "." | "..") {
+        return refuse("names a path; paths come only through placeholders");
+    }
+    if text == "--" {
+        return refuse("ends the options, so the flags brokkr negotiates would be positional");
+    }
+    if text == crate::reservations::PRIVATE_DIR_PLACEHOLDER {
+        return refuse("is the private directory's placeholder");
+    }
+    let negotiated = NEGOTIATED
+        .iter()
+        .any(|flag| text == *flag || text.strip_prefix(flag).is_some_and(|r| r.starts_with('=')));
+    if negotiated {
+        return refuse("is a flag brokkr negotiates with the CLI itself");
+    }
+    Ok(text.to_owned())
+}
+
+/// Each placeholder of `call`'s counterpart against the scenario's roles.
+fn check_cli(call: &Call, cli: &Cli, roles: &[Role], path: &str) -> Result<(), String> {
+    let find = |role: &str| roles.iter().find(|r| r.id == role);
+    let mut outputs: Vec<&str> = Vec::new();
+    for (i, token) in cli.argv.iter().enumerate() {
+        let at = format!("{path}.argv[{i}]");
+        let fits = match token {
+            Token::Literal(_) => continue,
+            Token::Input(role) => find(role).is_some_and(|r| match r.source {
+                RoleSource::Dataset { .. } => true,
+                RoleSource::Generated => r.kind != RoleKind::Directory,
+                _ => false,
+            }),
+            Token::FilesIn(role) => find(role).is_some_and(|r| {
+                r.source == RoleSource::Generated && r.kind == RoleKind::Directory
+            }),
+            Token::Output(role) => {
+                if outputs.contains(&role.as_str()) {
+                    return Err(format!("{at}: output {role:?} is named twice"));
+                }
+                outputs.push(role);
+                find(role).is_some_and(|r| {
+                    r.kind == RoleKind::Pbf
+                        && r.source
+                            == RoleSource::Output {
+                                owner: call.id.clone(),
+                            }
+                })
+            }
+        };
+        if !fits {
+            let wants = match token {
+                Token::Input(_) => "a dataset role, or a generated file or pbf role",
+                Token::FilesIn(_) => "a generated directory role",
+                _ => "an output pbf role this call owns",
+            };
+            return Err(format!(
+                "{at}: {} is not {wants} of this scenario",
+                token.show()
+            ));
+        }
+    }
+    if outputs.is_empty() {
+        return Err(format!("{path}.argv: names no output"));
+    }
+    Ok(())
 }
 
 /// A capability id: an identifier ending `.v<N>`, N a positive decimal

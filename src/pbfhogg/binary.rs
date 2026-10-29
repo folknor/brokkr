@@ -46,8 +46,11 @@
 //!   flag cannot take `--help` as its value; one run of the two controls
 //!   serves all three.
 //!
-//! Anything else - another exit code, a signal, a spawn failure - is an error
-//! naming the probe, never a cached "unsupported". The contract relied on is
+//! Anything else - another exit code, a signal, a spawn failure, the probe's
+//! wall, an output left open - is an error naming the probe, never a cached
+//! "unsupported". Each probe runs in its own process group without the
+//! variables a running harness gets, so it never opens an inherited marker
+//! FIFO. The contract relied on is
 //! clap's: help exits 0, a usage error exits 2.
 //!
 //! # Caching
@@ -94,7 +97,7 @@ use std::path::{Path, PathBuf};
 
 use crate::build::executable_guard::{self, HandleToken};
 use crate::error::DevError;
-use crate::measure::{Executable, Invocation};
+use crate::measure::{Executable, Invocation, Supervised};
 use crate::output;
 use crate::pbfhogg::argv::PbfArgv;
 use crate::reservations::PRIVATE_DIR_PLACEHOLDER;
@@ -151,6 +154,24 @@ const PROBE_PROTOCOL: u32 = 1;
 
 /// Most recent answers kept in the store; older ones are dropped on save.
 const STORE_CAP: usize = 512;
+
+/// How long one probe may take.
+const PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// What a probe's output is kept to; only its exit code is read.
+const PROBE_OUTPUT_KEPT: usize = 64 * 1024;
+
+/// Where a run-scoped launch ([`PbfhoggBinary::run_in`]) runs.
+pub(crate) struct RunScope<'a> {
+    /// The library run directory, reserved whole as coverage.
+    pub(crate) run_dir: &'a Path,
+    /// The launch's working directory, inside the run directory.
+    pub(crate) cwd: &'a Path,
+    /// The launch's wall.
+    pub(crate) deadline: std::time::Duration,
+    /// The stdout bytes kept; one more is captured, so a longer output shows.
+    pub(crate) stdout_kept: usize,
+}
 
 /// The capability to read an [`Executable`]'s path. Its field is private to
 /// this module, so no other code can make one: the runner's executable
@@ -278,6 +299,49 @@ impl PbfhoggBinary {
     /// and accepted, and the reservation each launch makes (module docs).
     /// The invocation runs in the project root.
     pub(crate) fn invocation(&self, argv: PbfArgv) -> Result<Invocation<'_>, DevError> {
+        self.resolve(argv, self.project_root.clone(), Vec::new())
+    }
+
+    /// Run `argv` once inside a library run directory (`brokkr man
+    /// library`, CLI equality): the run-scoped context. The launch runs in
+    /// `scope.cwd`, reserves the whole run directory as coverage beside the
+    /// argv's own paths, keeps the private directory's usual placement (beside
+    /// the first output, inside the run directory), sees neither of the
+    /// variables brokkr hands a running harness, and is killed at
+    /// `scope.deadline`. The executable is checked again after the probes that
+    /// resolving may run, immediately before the launch. The outcome says
+    /// whether the launch was released; one that was not leaves the run
+    /// directory to some other process.
+    pub(crate) fn run_in(&self, argv: PbfArgv, scope: &RunScope<'_>) -> Supervised {
+        let invocation = match self.resolve(
+            argv,
+            scope.cwd.to_path_buf(),
+            vec![scope.run_dir.to_path_buf()],
+        ) {
+            Ok(invocation) => invocation,
+            Err(DevError::Interrupted) => return Supervised::Interrupted,
+            Err(e) => return Supervised::Failed(e),
+        };
+        if let Err(e) = self.check_identity() {
+            return Supervised::Failed(e);
+        }
+        invocation.capture_supervised(
+            scope.cwd,
+            scope.deadline,
+            crate::output::child::CaptureCap {
+                stdout: scope.stdout_kept + 1,
+                stderr: RUN_OUTPUT_KEPT + 1,
+            },
+            &HARNESS_RUN_ENV,
+        )
+    }
+
+    fn resolve(
+        &self,
+        argv: PbfArgv,
+        cwd: PathBuf,
+        coverage: Vec<PathBuf>,
+    ) -> Result<Invocation<'_>, DevError> {
         let Some(subcommand) = argv.args().first().filter(|s| !s.is_empty()).cloned() else {
             return Err(DevError::Internal(
                 "empty pbfhogg argv has no subcommand".into(),
@@ -291,7 +355,6 @@ impl PbfhoggBinary {
         if (argv.writes_output() && !staging) || (argv.writes_scratch() && !tmp) {
             self.say_unguarded(&subcommand);
         }
-        let cwd = self.project_root.clone();
         let private_in = if staging || tmp {
             match (argv.writes().first(), argv.scratch_root()) {
                 (Some(output), _) => cwd.join(output).parent().map(Path::to_path_buf),
@@ -315,7 +378,8 @@ impl PbfhoggBinary {
                 }
             }
         }
-        let spec = crate::reservations::LaunchSpec::new(cwd, reads, writes, private_in);
+        let spec = crate::reservations::LaunchSpec::new(cwd, reads, writes, private_in)
+            .with_coverage(coverage);
         Ok(Invocation::reserved(&self.path, args, spec))
     }
 
@@ -378,17 +442,46 @@ impl PbfhoggBinary {
     fn probe(&self, subcommand: &str) -> Result<Vec<(Flag, bool)>, DevError> {
         let program = self.label();
         let flags = Flag::ALL.map(Flag::name).join(", ");
+        // Bounded like describe mode: a wall, the run variables removed (a
+        // probe must never open a marker FIFO it inherited), its own process
+        // group. Only exit codes are read, so help text cut at the cap does
+        // not matter; an output left open past the exit does, since the
+        // ending it came with cannot be trusted as the whole run.
+        let sigterm = crate::shutdown::SigtermGuard::install();
         let run = |extra: &[&str]| -> Result<Option<i32>, DevError> {
             let mut args = vec![subcommand];
             args.extend_from_slice(extra);
-            match output::run_captured(&program, &args, &self.project_root) {
-                Ok(captured) => Ok(captured.code()),
-                Err(DevError::Interrupted) => Err(DevError::Interrupted),
-                Err(e) => Err(DevError::Build(format!(
+            let failed = |why: String| {
+                DevError::Build(format!(
                     "cannot tell whether `{program} {subcommand}` accepts {flags}: \
-                     probe `{}` did not run: {e}",
+                     probe `{}` {why}",
                     args.join(" ")
+                ))
+            };
+            match crate::output::child::run_captured_bounded_unsetting(
+                &program,
+                &args,
+                &self.project_root,
+                &[],
+                &HARNESS_RUN_ENV,
+                PROBE_DEADLINE,
+                None,
+                crate::shutdown::ChildIsolation::ProcessGroup(&sigterm),
+                crate::output::child::CaptureCap {
+                    stdout: PROBE_OUTPUT_KEPT,
+                    stderr: PROBE_OUTPUT_KEPT,
+                },
+            ) {
+                Ok(capture) if capture.captured.ending.is_deadline() => Err(failed(format!(
+                    "was killed after {}",
+                    output::format_duration(PROBE_DEADLINE)
                 ))),
+                Ok(capture) if capture.output_cut => {
+                    Err(failed("left its output open after it exited".to_owned()))
+                }
+                Ok(capture) => Ok(capture.captured.code()),
+                Err(DevError::Interrupted) => Err(DevError::Interrupted),
+                Err(e) => Err(failed(format!("did not run: {e}"))),
             }
         };
         let help = run(&["--help"])?;
@@ -441,14 +534,19 @@ impl std::fmt::Debug for LibraryHarness {
 }
 
 impl LibraryHarness {
-    /// Build the harness `config` names from `build_root` under `profile`
-    /// and wrap it. `project_root` is the describe run's working directory.
+    /// Build the harness `config` names from `build_root` under `profile`,
+    /// and with `with_cli` the pbfhogg CLI of the same tree (release, default
+    /// features: the reference its counterparts replay against), then wrap
+    /// them. Both builds run before either handle exists, since a live
+    /// handle refuses a build. `project_root` is the describe run's working
+    /// directory.
     pub(crate) fn build(
         config: &crate::config::HarnessConfig,
         profile: crate::build::RustProfile,
+        with_cli: bool,
         build_root: &Path,
         project_root: &Path,
-    ) -> Result<Self, DevError> {
+    ) -> Result<(Self, Option<PbfhoggBinary>), DevError> {
         let hold = crate::lockfile::current_hold().ok_or_else(|| {
             DevError::Lock(
                 "a library harness handle needs the brokkr lock held for its whole life - \
@@ -465,7 +563,20 @@ impl LibraryHarness {
             Some(&|| hold.clear_child_pid()),
             crate::shutdown::ChildIsolation::ProcessGroup(&sigterm),
         )?;
-        Self::open(&built.binary, project_root, Some(hold))
+        let cli = if with_cli {
+            Some(crate::build::cargo_build(
+                &crate::build::BuildConfig::release(crate::project::Project::Pbfhogg.cli_package()),
+                build_root,
+            )?)
+        } else {
+            None
+        };
+        let harness = Self::open(&built.binary, project_root, Some(hold))?;
+        let cli = match cli {
+            Some(built) => Some(PbfhoggBinary::locked(&built.path, project_root)?),
+            None => None,
+        };
+        Ok((harness, cli))
     }
 
     /// A handle without the lock, for fixture executables in tests.

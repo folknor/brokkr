@@ -15,7 +15,8 @@
   Also `LibraryHarness`, the handle on the built library harness.
 - `src/pbfhogg/library/` - `brokkr library`, pbfhogg used as a library
   through a harness a pbfhogg workspace member provides: listing its
-  scenarios and verifying one; the command and its protocol are
+  scenarios and verifying one, its calls' CLI counterparts replayed and
+  compared by `pbfhogg digest`; the command and its protocol are
   `brokkr man library`.
 - `src/pbfhogg/argv.rs` - `PbfArgv`, an argv with what it reads, writes and
   scratches.
@@ -45,6 +46,10 @@ executable about to run accepts it, asked per subcommand of that executable:
 - then `SUB --overwrite --help` exiting 0 means supported, 2 means not.
 
 Anything else is an error naming the probe, never a silent "unsupported".
+Each probe runs in its own process group with a 60-second wall and without
+`BROKKR_MARKER_FIFO` or `BROKKR_HARNESS_ARTEFACT_DIR`, so a probe never
+opens a marker FIFO brokkr inherited; a probe killed at its wall, or whose
+output stays open after it exited, is such an error too.
 Answers are kept in `.brokkr/pbfhogg-capabilities`, keyed by probe protocol,
 the executable's XXH128 and the subcommand, so a build is probed once and
 different bytes never reuse an answer. `build-geocode-index` keeps its own
@@ -109,7 +114,13 @@ the directory publication replaces), or for scratch with no output (a parallel
 text `diff` to stdout) in the root the argv names: the scratch dir for
 measured commands, the verify directory for checks. Before anything is
 created, every output's directory must be on the same mount as that location,
-or the launch is refused, since pbfhogg publishes by rename. Scratch is
+or the launch is refused, since pbfhogg publishes by rename. A launch in a
+`brokkr library` run directory (a CLI counterpart's replay and the digests
+that compare it, `brokkr man library`, CLI equality) runs in a working
+directory inside the run directory rather than the project root and
+reserves the whole run directory as coverage; its private directory follows
+the same rule, so it goes beside the replay's first output, inside the run
+directory, and a digest, which writes nothing, gets none. Scratch is
 declared by what pbfhogg's implementation actually does:
 `add-locations-to-ways`, `build-geocode-index`, `diff --format osc` on every
 path, and every text `diff` except a quiet one and one with an explicit
@@ -138,9 +149,9 @@ per subcommand.
 path the launch declared - inputs read, outputs written, any coverage, the
 private directory - all synced before the private directory exists.
 Coverage is a tree reserved for writing around the launch's own paths: the
-library harness's launch covers its whole run directory (`brokkr man
-library`), so the lease protects the request and artefacts beside its
-outputs. It is reservation only: the private directory's placement compares
+library harness's launch, and every CLI launch of the same run, covers the
+whole run directory (`brokkr man library`), so the lease protects the
+request and artefacts beside its outputs. It is reservation only: the private directory's placement compares
 outputs alone, and the release never removes it. The child, and
 only that child, inherits the locked description (it is made inheritable in
 the child between fork and exec; every other descriptor brokkr opens stays

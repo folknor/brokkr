@@ -307,6 +307,12 @@ Found during brokkr#46 slice 2, not fixed there:
   namespaces sharing the project tree can share a pid and remove each
   other's FIFO. A random token in the name (as private directories have)
   would close it; clean already matches the name shape, not the pid.
+- Found in slice 4: plain captured children (verify's pbfhogg and
+  reference-tool runs through `Invocation::capture_in` and `run_to_file`)
+  inherit brokkr's whole environment, so a brokkr that itself runs under a
+  sidecar hands its own `BROKKR_MARKER_FIFO` to every pbfhogg CLI it starts
+  outside a measurement. Library CLI launches and every capability probe now
+  remove it; the other unmeasured pbfhogg spawns do not.
 
 ### Make default binary configurable per-project in brokkr.toml
 
