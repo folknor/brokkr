@@ -6,11 +6,13 @@
 //! - [`describe`]: the describe document and its validation.
 //! - [`run`]: one verification run of a scenario and its verdict.
 //! - [`artefact`]: the artefact tree and documents a run leaves.
+//! - [`stream`]: each call's FIFO records judged against its document.
 
 mod artefact;
 mod describe;
 mod json;
 mod run;
+mod stream;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -124,6 +126,9 @@ fn run_one(
     // No stop check here: `verify` made the last one before a passing run's
     // removal, which commits the verdict, so a stop after it never turns a
     // removed run into an interrupted one.
+    for line in &report.streams {
+        output::run_msg(&format!("stream {line}"));
+    }
     for line in &report.diagnostics {
         output::run_msg(&format!("diagnostic {line}"));
     }
@@ -218,7 +223,11 @@ fn listing(doc: &describe::Describe) -> Vec<String> {
         ));
         lines.push(format!("  {}", scenario.description));
         for call in &scenario.calls {
-            lines.push(format!("  call       {:<24} {}", call.id, call.label));
+            let mut line = format!("  call       {:<24} {}", call.id, call.label);
+            if !call.stream.is_empty() {
+                line.push_str(&format!(" (stream: {})", call.stream.join(", ")));
+            }
+            lines.push(line);
         }
         for role in &scenario.roles {
             let source = match &role.source {

@@ -198,8 +198,10 @@ fn apply_wall_source(source: WallSource, iteration: &mut Iteration) -> Result<()
             iteration.result = Some(result);
         }),
         WallSource::MarkerSpan { start, end } => {
-            let markers = iteration.sidecar.as_ref().map(|data| &data.markers);
-            let span = markers.and_then(|markers| marker_span_us(markers, start, end));
+            let span = iteration
+                .sidecar
+                .as_ref()
+                .and_then(|data| marker_span_us(data.markers(), start, end));
             match span {
                 Some(us) => {
                     if let Some(result) = &mut iteration.result {

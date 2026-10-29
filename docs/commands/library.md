@@ -29,8 +29,8 @@ brokkr library SCENARIO [--dataset NAME] [--snapshot KEY] [--commit REF] [...]
 ```
 
 Bare, builds the harness and lists the scenarios it declares: per scenario
-its id, call count, deadline and description, then one line per call, role
-and assertion. The listing is data on stdout; build narration goes where
+its id, call count, deadline and description, then one line per call (with
+the capabilities its stream claims), role and assertion. The listing is data on stdout; build narration goes where
 `brokkr man output-channels` says.
 
 With `SCENARIO`, runs that scenario once as a verification (see Running a
@@ -125,6 +125,10 @@ rules), a file name and a command-line word without escaping. `setup` is
 never a call id: it names the harness's own preparation. Assertion ids
 starting `brokkr.` are reserved for results brokkr adds itself.
 
+A capability id is an identifier ending `.v<N>`, N a positive decimal
+without a leading zero (`cancel.pre-decision.v1`); a capability whose
+meaning changes gets a new id.
+
 One-line text (a description or a label) is 1 to 200 bytes with no control
 character.
 
@@ -144,7 +148,7 @@ character.
         {"id": "out-b", "kind": "pbf", "source": "output", "owner": "b"}
       ],
       "calls": [
-        {"id": "a", "label": "cat input -> out-a"},
+        {"id": "a", "label": "cat input -> out-a", "stream": ["counters.v1"]},
         {"id": "b", "label": "cat input -> out-b"}
       ],
       "assertions": [
@@ -161,7 +165,10 @@ character.
 - `description`: one line.
 - `deadline_s`: 1 to 86400, the wall one process of the scenario gets.
 - `calls`: at least one, ids unique within the scenario, none `setup`. Each
-  has a one-line `label`.
+  has a one-line `label`, and may have `stream`: a list of capability ids,
+  each at most once, that the call's stream verdict stands for. A nonempty
+  list makes brokkr add `<call>/brokkr.stream` (see The call stream); absent
+  and `[]` mean the same. brokkr gives the ids no other meaning.
 - `roles`: every path the scenario uses, ids unique within the scenario;
   possibly none.
 - `assertions`: the scenario's assertion inventory, ids unique within the
@@ -302,8 +309,11 @@ Documents above.
   0 to 2^64-1, each name 1 to 400 bytes without `=` or a newline (so its
   sealing record fits a FIFO line); otherwise `null`.
 - `stream`: `{"state": "sealed"|"failed"|"open", "drops": N}` (N 0 to
-  2^64-1), the call sink's own account. brokkr validates its shape and does
-  not yet judge it.
+  2^64-1), the call sink's own account: how it ended, and every line it
+  dropped, its terminal record included. It is `open` exactly when `seal` is
+  not `sealed` (a sink is ended only by a successful seal of its call's
+  invocation); anything else fails the run. The call stream says how brokkr
+  holds it against the FIFO.
 - `context`: a nonempty object, every effective per-call setting.
 - `diagnostics`: the call's captured `host::Diagnostics` events, each
   `{"kind", "key", "message", "truncated"}`. `kind` is an identifier, the
@@ -330,6 +340,61 @@ absolute spelling or a bound dataset file's (as resolved, or canonical).
 That is a narrow check on the value domain, not proof that the plan is free
 of run-specific paths: relative spellings and split strings pass it.
 
+## The call stream
+
+Each call writes its markers and counters to the FIFO through a sink of its
+own, tagged with its call id (`<ts> %<call> <name>`, `<ts> %<call>
+@<name>=<value>`; `brokkr man measure`, Marker and counter rules). When the
+call's invocation seals, its sink ends the stream with two more record
+kinds, which only a tagged record can carry:
+
+- a **sealing emission** `<ts> %<call> @@<name>=<value>` for every counter
+  of the call's snapshot, zeros included, its value the snapshot's
+  saturated to 2^63-1 as the wire carries it;
+- then one **terminal record**, `<ts> %<call> !sealed drops=N` or
+  `<ts> %<call> !failed drops=N`, N the lines the sink dropped before it.
+
+Producer obligations: a sink is ended only by a successful seal of its
+invocation, and an invocation that does not seal leaves its sink `open`
+and writes neither kind; sealing begins after the sink stopped admitting
+ordinary records and every callback into it returned; one thread stamps and
+writes the sealing emissions and then the terminal record, in that order;
+nothing of the call follows the terminal record.
+
+A tagged record naming a call id the describe document does not declare
+fails the run, whatever its exit: lines arrive whole or not at all, so no
+loss can make one.
+
+brokkr judges each call's records, in the order they arrived, against its
+call document:
+
+- **Proven defects fail**, whatever was lost: a record stamped outside
+  `entry_us..seal_us`; a sealing or terminal record stamped before
+  `return_us`, or before the sealing record ahead of it; an ordinary record
+  stamped later than any sealing or terminal record, or arriving after
+  sealing began; a name emitted twice; a second terminal record, or any
+  record after it; a terminal record whose state or drops differ from the
+  artefact's `stream`; no terminal record from a sink the artefact reports
+  `sealed` or `failed`, although the reader lost nothing and the artefact
+  counts no drop; a sealing emission naming a counter the
+  snapshot lacks, or carrying another value; an ordinary counter of a
+  snapshot name above its final value; any sealing or terminal record of a
+  call that did not seal.
+- **Otherwise incomplete is unevaluated**: a call that did not seal, a
+  capture that may have lost a FIFO record (a rejected line, a read error,
+  records left unread, the marker or counter limit), no terminal record, or
+  one that reads `failed` or counts drops.
+- **Otherwise complete**: it passes when every snapshot counter has its
+  sealing emission, and fails naming the ones that have none.
+
+For a call whose `stream` lists capabilities, brokkr adds the verdict as
+`<call>/brokkr.stream`, with the reasons as its detail. For every call it
+prints one line, pass or fail: the verdict (`(not judged)` when nothing
+claims it), the call's phases and its tail. The phases are its markers
+stamped from `entry_us` to `return_us`, in time order, each running to the
+next and the last to `return_us`; the tail is its markers stamped after
+`return_us`.
+
 ## The verdict
 
 After the launch is released, brokkr checks the run directory against its
@@ -348,25 +413,28 @@ removal commits the pass.
 
 The run fails on a release that finds the lease still held (then nothing
 in the run directory is read or written: some process may still change
-it), a layout breach, any output, a bad exit or the deadline, an invalid or
+it), a layout breach, any output, a bad exit or the deadline, a FIFO record
+of an undeclared call, an invalid or
 incomplete artefact tree, an exit inconsistent with the harness's own
 results (0 with a result that is not `pass`, 1 with none), or any result
 that is not `pass`. `unevaluated` fails exactly as `fail` does; the report
 keeps them apart.
 
 brokkr adds one result per call, `<call>/brokkr.seal`: `pass` only for a
-sealed call, since the snapshot exists only then. A result brokkr adds
-never makes the harness's exit inconsistent.
+sealed call, since the snapshot exists only then; and `<call>/brokkr.stream`
+for a call that claims its stream (see The call stream). A result brokkr
+adds never makes the harness's exit inconsistent.
 
-On pass, brokkr prints each diagnostic and one result line, and removes the
-run directory through the reservation gate (a refused removal is a warning,
+On pass, brokkr prints each call's stream line, each diagnostic and one
+result line, and removes the run directory through the reservation gate (a
+refused removal is a warning,
 and the directory stays). On fail, it prints every failure, results as
 `<call>/<id>` or, for a scenario-level one, `<id>`, with any detail
 indented beneath; harness-supplied text is printed with control characters
 escaped. It writes `evidence/` into the run directory (`stdout`, `stderr`,
-`stream.txt` with the FIFO records as parsed, markers then counters, each in
-arrival order, `failures.txt`), and keeps
-the directory, naming it. Routine `brokkr clean` removes kept run
+`stream.txt` with every FIFO record kept, in arrival order and in its wire
+spelling, after a comment line per cause of capture loss, `failures.txt`),
+and keeps the directory, naming it. Routine `brokkr clean` removes kept run
 directories through the gate (`brokkr man clean`); the cleanup after an
 interrupted command never does. An interrupted run, including one stopped
 after the harness exited, keeps its directory and exits as interrupted.

@@ -612,10 +612,12 @@ pub(crate) struct HarnessRun {
     pub(crate) output_cut: bool,
     /// Spawn to the observed ending, before output settled or the release.
     pub(crate) elapsed: std::time::Duration,
-    pub(crate) markers: Vec<crate::sidecar::Marker>,
-    pub(crate) counters: Vec<crate::sidecar::Counter>,
-    /// The FIFO reader lost or may have missed records.
-    pub(crate) stream_incomplete: bool,
+    /// Every FIFO record kept, in arrival order.
+    pub(crate) records: Vec<crate::sidecar::Record>,
+    /// What the capture omitted, by cause.
+    pub(crate) loss: crate::sidecar::CaptureLoss,
+    /// Every call id a tagged record named, kept or not.
+    pub(crate) calls_seen: crate::sidecar::CallCensus,
     /// The launch's release: an error leaves the lease held by some process.
     pub(crate) released: Result<(), DevError>,
 }
@@ -697,9 +699,9 @@ impl LibraryHarness {
             output_truncated: capture.stdout_truncated || capture.stderr_truncated,
             output_cut: capture.output_cut,
             elapsed: capture.elapsed,
-            markers: capture.data.markers,
-            counters: capture.data.counters,
-            stream_incomplete: capture.data.summary.capture_truncated,
+            records: capture.data.records,
+            loss: capture.data.summary.loss,
+            calls_seen: capture.data.calls_seen,
             released,
         })
     }

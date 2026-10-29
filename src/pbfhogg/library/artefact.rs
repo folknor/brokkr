@@ -96,6 +96,32 @@ pub(crate) struct Diagnostic {
     pub(crate) truncated: bool,
 }
 
+/// How the call's sink ended, by its own account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SinkState {
+    Sealed,
+    Failed,
+    Open,
+}
+
+impl SinkState {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Sealed => "sealed",
+            Self::Failed => "failed",
+            Self::Open => "open",
+        }
+    }
+}
+
+/// The artefact `stream` object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StreamAccount {
+    pub(crate) state: SinkState,
+    /// Every line the sink dropped, its terminal record included.
+    pub(crate) drops: u64,
+}
+
 /// A validated call document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CallDoc {
@@ -104,6 +130,9 @@ pub(crate) struct CallDoc {
     pub(crate) seal_us: u64,
     pub(crate) outcome: CallOutcome,
     pub(crate) seal: Seal,
+    /// The final counters; present exactly when the call sealed.
+    pub(crate) snapshot: Option<std::collections::BTreeMap<String, u64>>,
+    pub(crate) stream: StreamAccount,
     pub(crate) diagnostics: Vec<Diagnostic>,
     pub(crate) results: Vec<Outcome>,
 }
@@ -291,8 +320,23 @@ pub(crate) fn parse_call(bytes: &[u8], call: &str, forbidden: &[&str]) -> Result
     let publications = publications(&top.required("publications")?)?;
     cancel(&top.required("cancel")?, &publications)?;
     let seal = seal(&top.required("seal")?)?;
-    snapshot(&top.required("snapshot")?, &seal)?;
-    stream(&top.required("stream")?)?;
+    let snapshot = snapshot(&top.required("snapshot")?, &seal)?;
+    let stream_field = top.required("stream")?;
+    let stream = stream(&stream_field)?;
+    // A sink is terminalized only by a successful seal of its invocation.
+    if (stream.state == SinkState::Open) != (seal != Seal::Sealed) {
+        return Err(format!(
+            "{}: a stream is open exactly when the call did not seal, but it is {} and the \
+             seal is {}",
+            stream_field.path(),
+            stream.state.name(),
+            match seal {
+                Seal::Sealed => "sealed",
+                Seal::Outstanding(_) => "outstanding",
+                Seal::Refused(_) => "refused",
+            }
+        ));
+    }
     let context = top.required("context")?;
     context.check_plain(forbidden)?;
     if context.as_members()?.is_empty() {
@@ -307,6 +351,8 @@ pub(crate) fn parse_call(bytes: &[u8], call: &str, forbidden: &[&str]) -> Result
         seal_us,
         outcome,
         seal,
+        snapshot,
+        stream,
         diagnostics,
         results,
     })
@@ -525,10 +571,13 @@ fn seal(field: &Field<'_>) -> Result<Seal, String> {
     Ok(seal)
 }
 
-fn snapshot(field: &Field<'_>, seal: &Seal) -> Result<(), String> {
+fn snapshot(
+    field: &Field<'_>,
+    seal: &Seal,
+) -> Result<Option<std::collections::BTreeMap<String, u64>>, String> {
     if *seal != Seal::Sealed {
         return if field.is_null() {
-            Ok(())
+            Ok(None)
         } else {
             Err(format!(
                 "{}: must be null unless the call sealed",
@@ -536,6 +585,7 @@ fn snapshot(field: &Field<'_>, seal: &Seal) -> Result<(), String> {
             ))
         };
     }
+    let mut out = std::collections::BTreeMap::new();
     for (name, value) in field.as_members()? {
         if name.is_empty()
             || name.len() > COUNTER_NAME_LIMIT
@@ -547,25 +597,32 @@ fn snapshot(field: &Field<'_>, seal: &Seal) -> Result<(), String> {
                 value.path()
             ));
         }
-        value.as_int_in(0, i128::from(u64::MAX))?;
+        let n = value.as_int_in(0, i128::from(u64::MAX))?;
+        out.insert(name.to_owned(), u64::try_from(n).unwrap_or(u64::MAX));
     }
-    Ok(())
+    Ok(Some(out))
 }
 
-fn stream(field: &Field<'_>) -> Result<(), String> {
+fn stream(field: &Field<'_>) -> Result<StreamAccount, String> {
     let obj = field.as_object()?;
-    let state = obj.required("state")?;
-    match state.as_str()? {
-        "sealed" | "failed" | "open" => {}
+    let state_field = obj.required("state")?;
+    let state = match state_field.as_str()? {
+        "sealed" => SinkState::Sealed,
+        "failed" => SinkState::Failed,
+        "open" => SinkState::Open,
         other => {
             return Err(format!(
                 "{}: unknown stream state {other:?} (expected sealed, failed or open)",
-                state.path()
+                state_field.path()
             ));
         }
-    }
-    obj.required("drops")?.as_int_in(0, i128::from(u64::MAX))?;
-    obj.finish()
+    };
+    let drops = obj.required("drops")?.as_int_in(0, i128::from(u64::MAX))?;
+    obj.finish()?;
+    Ok(StreamAccount {
+        state,
+        drops: u64::try_from(drops).unwrap_or(u64::MAX),
+    })
 }
 
 fn diagnostics(field: &Field<'_>) -> Result<Vec<Diagnostic>, String> {

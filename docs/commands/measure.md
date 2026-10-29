@@ -353,7 +353,7 @@ silently skipped filter or dropped column.
 
 ## Marker & counter rules
 
-The FIFO carries two line types (parsed in `SidecarFifo::drain`,
+The FIFO carries these line types (parsed in `SidecarFifo::drain`,
 `src/sidecar.rs`):
 
 - **Marker** - `<ts_us> <name>`. Assigned a monotonic `marker_idx` in arrival
@@ -383,13 +383,28 @@ The FIFO carries two line types (parsed in `SidecarFifo::drain`,
   contract. A tag says which invocation emitted a line, not which resources
   it measures: a whole-process reading (mallinfo, page faults) stays
   whole-process when a call's sink emits it.
+- **Sink end** - in a tagged record only, a body starting `@@` is a sealing
+  emission, `<ts_us> %<call_id> @@<name>=<value>` (name 1 to 400 bytes
+  without `=`, value an `i64`), and a body starting `!` is a terminal
+  record, exactly `<ts_us> %<call_id> !sealed drops=N` or `... !failed
+  drops=N` (N a `u64` in decimal, no sign, no leading zero). Any other
+  tagged body starting `@@` or `!` is rejected, so a tagged counter name
+  cannot start with `@` and a tagged marker name cannot start with `!`.
+  Untagged lines read as before (`<ts> @@x=1` is a counter named `@x`). A
+  library harness's call sink writes them when it is sealed; what they mean
+  is `brokkr man library`, The call stream. They are never markers or
+  counters in any view, and sidecar.db does not store them, so a run that
+  carried any warns when stored and is stored as incomplete.
 
-Every rejected line, including invalid UTF-8 and a record cut off without a
-newline when the writers close, warns and marks the run's stored
-trajectory incomplete, so a later `brokkr sidecar` query still says so. A
-query that finds no fault does not mean every line arrived: the FIFO is best
-effort, and a library harness's own end-of-call snapshot is the
-authoritative figure.
+The capture keeps every record in the one order it arrived in, markers,
+counters and sink ends alike. Every rejected line, including invalid UTF-8
+and a record cut off without a newline when the writers close, warns and
+marks the run's stored trajectory incomplete, so a later `brokkr sidecar`
+query still says so. A query that finds no fault does not mean every line
+arrived: the FIFO is best effort, and a library harness's own end-of-call
+snapshot is the authoritative figure. brokkr asks the kernel for a 1 MiB
+FIFO buffer (the unprivileged default ceiling) so a producer between two
+drains drops fewer lines; where that is refused the default stays.
 
 Every view groups markers and counters by `(run, call)` stream. `--call
 CALL_ID` restricts a view to one call; a call id that appears in neither the
@@ -557,10 +572,15 @@ of it, discarded bytes included, so a child writing without pause cannot
 hold off its deadline or a stop; a record the budget cuts resumes on the
 next tick. After the child ends, one last drain reads at most 16 MiB; a
 child's descendant still writing past that leaves records possibly unread,
-which counts as an omission like the limits above.
-When any limit omits data, the run warns and stores a truncation flag beside
-that iteration's sidecar rows; querying an affected run with `brokkr sidecar`
-warns that the stored trajectory is incomplete.
+which counts as an omission like the limits above. A sealing emission
+counts against the counter limit and a terminal record against the marker
+limit. A FIFO read error is an omission too.
+When anything is omitted, the run warns naming each cause (rejected lines,
+records possibly unread, the marker or counter limit, the sample limit, cut
+child output) and stores a truncation flag beside that iteration's sidecar
+rows; querying an affected run with `brokkr sidecar` warns that the stored
+trajectory is incomplete. A library verification tells the causes apart: only
+those that may have lost a FIFO record make a call stream incomplete.
 
 The shared child supervisor also bounds captured stdout and stderr: 16 MiB per
 stream for ordinary commands and sidecar measurements, 64 MiB for the ratatoskr

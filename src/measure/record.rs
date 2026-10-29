@@ -153,9 +153,9 @@ pub(super) fn sidecar_summary_line(
         format!(
             "{which}{} samples, {} markers, {} counters{} ",
             d.samples.len(),
-            d.markers.len(),
-            d.counters.len(),
-            if d.summary.capture_truncated {
+            d.markers().count(),
+            d.counters().count(),
+            if d.stored_incomplete() {
                 " (capture limited)"
             } else {
                 ""
@@ -406,6 +406,13 @@ impl BenchHarness {
         };
 
         for (i, data) in sidecar_runs.iter().enumerate() {
+            if data.has_sink_ends() {
+                crate::output::warn(&format!(
+                    "sidecar run {}: sidecar.db does not store sealing or terminal records, so \
+                     the stored trajectory is marked incomplete",
+                    i + 1
+                ));
+            }
             sidecar_db.store_run(&store_uuid, i, data)?;
         }
 

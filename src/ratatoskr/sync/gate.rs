@@ -626,7 +626,7 @@ fn sidecar_to_json(data: &sidecar::SidecarData) -> serde_json::Value {
         "sample_count": data.summary.sample_count,
         "marker_count": data.summary.marker_count,
         "wall_time_ms": data.summary.wall_time_ms,
-        "capture_truncated": data.summary.capture_truncated,
+        "capture_truncated": data.stored_incomplete(),
         "num_threads_max": max_threads,
         "read_bytes": read_bytes,
         "write_bytes": write_bytes,

@@ -16,7 +16,7 @@ const EXAMPLE: &str = r#"{
         {"id": "out-b", "kind": "pbf", "source": "output", "owner": "b"}
       ],
       "calls": [
-        {"id": "a", "label": "cat input -> out-a"},
+        {"id": "a", "label": "cat input -> out-a", "stream": ["counters.v1"]},
         {"id": "b", "label": "cat input -> out-b"}
       ],
       "assertions": [
@@ -61,6 +61,42 @@ fn the_documented_example_parses_into_its_scenario() {
         RoleSource::Output { owner: "b".into() }
     );
     assert_eq!(scenario.assertions[2].call, None);
+    assert_eq!(scenario.calls[0].stream, ["counters.v1"]);
+    assert!(scenario.calls[1].stream.is_empty());
+}
+
+#[test]
+fn a_call_stream_lists_unique_capability_ids() {
+    for good in ["[]", r#"["a.v1", "cancel.pre-decision.v12"]"#] {
+        let doc = edited(
+            r#""stream": ["counters.v1"]"#,
+            &format!(r#""stream": {good}"#),
+        );
+        assert!(parse(doc.as_bytes()).is_ok(), "{good}");
+    }
+    for bad in [
+        r#"["counters"]"#,
+        r#"["counters.v0"]"#,
+        r#"["counters.v01"]"#,
+        r#"["counters.vx"]"#,
+        r#"[".v1"]"#,
+        r#"["Counters.v1"]"#,
+        r#""counters.v1""#,
+    ] {
+        let e = refused(&edited(
+            r#""stream": ["counters.v1"]"#,
+            &format!(r#""stream": {bad}"#),
+        ));
+        assert!(
+            e.starts_with("describe.scenarios[0].calls[0].stream"),
+            "{bad}: {e}"
+        );
+    }
+    let e = refused(&edited(
+        r#""stream": ["counters.v1"]"#,
+        r#""stream": ["counters.v1", "counters.v1"]"#,
+    ));
+    assert!(e.contains("listed twice"), "{e}");
 }
 
 #[test]

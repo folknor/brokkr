@@ -338,7 +338,7 @@ impl SidecarDb {
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?;
 
-            for m in &data.markers {
+            for m in data.markers() {
                 stmt.execute(rusqlite::params![
                     result_uuid,
                     run_idx as i64,
@@ -358,7 +358,7 @@ impl SidecarDb {
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?;
 
-            for c in &data.counters {
+            for c in data.counters() {
                 stmt.execute(rusqlite::params![
                     result_uuid,
                     run_idx as i64,
@@ -376,7 +376,9 @@ impl SidecarDb {
             rusqlite::params![
                 result_uuid,
                 run_idx as i64,
-                if data.summary.capture_truncated {
+                // Sealing and terminal records have no table, so a run that
+                // carried any is stored as incomplete too.
+                if data.stored_incomplete() {
                     1_i64
                 } else {
                     0_i64

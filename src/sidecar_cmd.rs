@@ -92,8 +92,9 @@ fn warn_if_capture_truncated(
 ) -> Result<(), DevError> {
     if store.query_sidecar_capture_truncated(id, run_idx)? {
         output::warn(
-            "stored sidecar trajectory is incomplete: a capture limit was reached or \
-             malformed FIFO lines were rejected",
+            "stored sidecar trajectory is incomplete: a capture limit was reached, FIFO \
+             lines were rejected or left unread, child output was cut, or sink-end records \
+             had no place to be stored",
         );
     }
     Ok(())

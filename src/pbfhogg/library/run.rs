@@ -30,6 +30,10 @@ pub(crate) const EVIDENCE_DIR: &str = "evidence";
 /// The id brokkr gives its seal result on each call.
 const SEAL_RESULT: &str = "brokkr.seal";
 
+/// The id of the stream result brokkr adds to a call whose describe lists
+/// stream capabilities.
+const STREAM_RESULT: &str = "brokkr.stream";
+
 /// Where a run lives.
 pub(crate) struct Places<'a> {
     /// `<scratch>/library`: the run directory goes in `<scenario>/run-N/`.
@@ -47,6 +51,8 @@ pub(crate) struct Report {
     pub(crate) results: Vec<(Option<String>, Outcome)>,
     /// Each captured diagnostic, one line.
     pub(crate) diagnostics: Vec<String>,
+    /// Each call's stream verdict, phases and tail, one line.
+    pub(crate) streams: Vec<String>,
     pub(crate) wall: std::time::Duration,
     /// The run directory, kept on failure.
     pub(crate) run_dir: PathBuf,
@@ -78,6 +84,9 @@ pub(crate) fn verify(
         places.fifo_dir,
         &crate::sidecar::DEFAULT_MEASUREMENT_TUNABLES,
     )?;
+    // One id past the declared calls: a census that overflows it proves an
+    // undeclared one.
+    fifo.limit_call_census(scenario.calls.len().saturating_add(1));
     let run = harness.run(HarnessLaunch {
         run_dir: &run_dir,
         request: &request,
@@ -108,10 +117,15 @@ pub(crate) fn verify(
         failures: Vec::new(),
         results: Vec::new(),
         diagnostics: Vec::new(),
+        streams: Vec::new(),
         wall: run.elapsed,
         run_dir: run_dir.clone(),
         kept: true,
     };
+    // Whatever the exit and whatever became of the run directory: a record
+    // of an undeclared call is a protocol failure no loss can explain, and
+    // the census is in memory.
+    let undeclared = super::stream::undeclared_failure(scenario, &run.calls_seen);
     if let Err(e) = &run.released {
         // Some process still holds the lease and may still change the run
         // directory: nothing in it is read, and nothing is written there.
@@ -119,6 +133,7 @@ pub(crate) fn verify(
             "the harness launch was not released: {e}; the run directory is left untouched"
         ));
         report.failures.extend(output_failures(&run));
+        report.failures.extend(undeclared);
         return Ok(report);
     }
     // A run directory that is no longer a directory (a symlink put in its
@@ -130,6 +145,7 @@ pub(crate) fn verify(
             crate::output::path(&run_dir)
         ));
         report.failures.extend(output_failures(&run));
+        report.failures.extend(undeclared);
         return Ok(report);
     }
 
@@ -140,6 +156,7 @@ pub(crate) fn verify(
         scenario,
     ));
     report.failures.extend(output_failures(&run));
+    report.failures.extend(undeclared);
     judge_ending(&run, &artefacts, scenario, &forbidden, &mut report);
     // A stop that landed after the child's ending was seen (while output
     // settled, the lease was released or the artefacts were read) still
@@ -540,13 +557,19 @@ fn judge_artefacts(
                 .push("the harness exited 1 but every result it reported passed".to_owned());
         }
     }
-    collect_results(&scenario_results, &calls, report);
+    collect_results(&scenario_results, &calls, run, scenario, report);
 }
 
-/// Every result in report order, brokkr's seal results among them, each
-/// call's diagnostics and returned outcome, and a failure line per result
-/// that did not pass.
-fn collect_results(scenario_results: &[Outcome], calls: &[(String, CallDoc)], report: &mut Report) {
+/// Every result in report order, brokkr's seal and stream results among
+/// them, each call's stream line, diagnostics and returned outcome, and a
+/// failure line per result that did not pass.
+fn collect_results(
+    scenario_results: &[Outcome],
+    calls: &[(String, CallDoc)],
+    run: &HarnessRun,
+    scenario: &Scenario,
+    report: &mut Report,
+) {
     for result in scenario_results {
         report.results.push((None, result.clone()));
     }
@@ -573,6 +596,24 @@ fn collect_results(scenario_results: &[Outcome], calls: &[(String, CallDoc)], re
                 detail,
             },
         ));
+        let stream = super::stream::judge(id, doc, &run.records, &run.loss);
+        let judged = scenario
+            .calls
+            .iter()
+            .any(|c| c.id == *id && !c.stream.is_empty());
+        report
+            .streams
+            .push(super::stream::summary_line(id, &stream, judged));
+        if judged {
+            report.results.push((
+                Some(id.clone()),
+                Outcome {
+                    id: STREAM_RESULT.to_owned(),
+                    status: stream.status,
+                    detail: stream.detail,
+                },
+            ));
+        }
         for d in &doc.diagnostics {
             report.diagnostics.push(format!(
                 "{id} {} {}: {}{}",
@@ -639,28 +680,17 @@ fn write_evidence(run_dir: &Path, run: &HarnessRun, report: &Report) {
     }
 }
 
-/// The parsed FIFO records in the wire's own spelling: markers, then
-/// counters, each in arrival order. The capture keeps no order between a
-/// marker and a counter, so none is invented.
+/// The kept FIFO records in the wire's own spelling and in arrival order,
+/// after one comment line per cause of capture loss.
 fn stream_text(run: &HarnessRun) -> String {
-    let tag = |call: &Option<String>| call.as_ref().map_or_else(String::new, |c| format!("%{c} "));
     let mut text = String::new();
-    if run.stream_incomplete {
-        text.push_str("# the reader lost or may have missed records\n");
+    for cause in run.loss.causes() {
+        text.push_str(&format!("# {cause}\n"));
     }
-    text.push_str("# markers, in arrival order\n");
-    for m in &run.markers {
-        text.push_str(&format!("{} {}{}\n", m.timestamp_us, tag(&m.call), m.name));
-    }
-    text.push_str("# counters, in arrival order\n");
-    for c in &run.counters {
-        text.push_str(&format!(
-            "{} {}@{}={}\n",
-            c.timestamp_us,
-            tag(&c.call),
-            c.name,
-            c.value
-        ));
+    text.push_str("# records, in arrival order\n");
+    for record in &run.records {
+        text.push_str(&record.wire());
+        text.push('\n');
     }
     text
 }

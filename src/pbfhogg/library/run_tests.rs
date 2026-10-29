@@ -33,10 +33,14 @@ const CALL_DOC: &str = r#"{"protocol": 1, "call": "a", "entry_us": 10, "return_u
  "diagnostics": [{"kind": "note", "key": "sort.x", "message": "hello", "truncated": false}],
  "assertions": [{"id": "a.outcome", "status": "pass", "detail": ""}]}"#;
 
+/// The call stream a sealed call `a` of `CALL_DOC` emits: one phase marker,
+/// then its sealing emission and terminal record.
+const STREAM: &str = "15 %a CAT_START\n25 %a @@writer_blocks=3\n26 %a !sealed drops=0";
+
 /// A fixture harness: checks its argv and environment, writes its output
-/// role and one FIFO marker, then `body` (which writes the artefacts) and
-/// exits `code`.
-fn script(body: &str, code: i32) -> String {
+/// role and `stream` to the FIFO, then `body` (which writes the artefacts)
+/// and exits `code`.
+fn script_with(stream: &str, body: &str, code: i32) -> String {
     format!(
         r#"[ "$1" = "--test-harness" ] || exit 9
 [ "$3" = "--private-dir" ] && [ -d "$4" ] || exit 8
@@ -46,10 +50,16 @@ fn script(body: &str, code: i32) -> String {
 A="$BROKKR_HARNESS_ARTEFACT_DIR"
 R=$(dirname "$2")
 : > "$R/roles/out-a"
-echo "15 %a CAT_START" > "$BROKKR_MARKER_FIFO"
+cat > "$BROKKR_MARKER_FIFO" <<'EOF'
+{stream}
+EOF
 {body}
 exit {code}"#
     )
+}
+
+fn script(body: &str, code: i32) -> String {
+    script_with(STREAM, body, code)
 }
 
 /// Write the scenario and call documents given.
@@ -85,7 +95,11 @@ fn fixture(name: &str, body: &str) -> Fixture {
 }
 
 fn run(f: &Fixture) -> Report {
-    let scenario = describe::parse(DESCRIBE.as_bytes())
+    run_described(f, DESCRIBE)
+}
+
+fn run_described(f: &Fixture, describe_doc: &str) -> Report {
+    let scenario = describe::parse(describe_doc.as_bytes())
         .unwrap()
         .scenarios
         .remove(0);
@@ -127,6 +141,83 @@ fn a_passing_run_is_removed_and_reports_its_results() {
         .collect();
     assert_eq!(ids, ["-/whole", "a/a.outcome", "a/brokkr.seal"]);
     assert_eq!(report.diagnostics, ["a note sort.x: hello"]);
+    assert_eq!(report.streams.len(), 1);
+    assert!(
+        report.streams[0].starts_with("a pass (not judged); phases CAT_START "),
+        "{:?}",
+        report.streams
+    );
+}
+
+/// The describe document with call `a` claiming its stream.
+fn claimed() -> String {
+    DESCRIBE.replacen(
+        r#""label": "cat input -> out-a"}"#,
+        r#""label": "cat input -> out-a", "stream": ["counters.v1"]}"#,
+        1,
+    )
+}
+
+#[test]
+fn a_claimed_stream_adds_brokkr_stream_and_its_verdict_judges() {
+    let f = fixture(
+        "stream-pass",
+        &script(&documents(SCENARIO_DOC, CALL_DOC), 0),
+    );
+    let report = run_described(&f, &claimed());
+    assert!(report.passed, "{:?}", report.failures);
+    let ids: Vec<&str> = report.results.iter().map(|(_, r)| r.id.as_str()).collect();
+    assert_eq!(ids, ["whole", "a.outcome", "brokkr.seal", "brokkr.stream"]);
+
+    let wrong = STREAM.replacen("@@writer_blocks=3", "@@writer_blocks=4", 1);
+    let f = fixture(
+        "stream-fail",
+        &script_with(&wrong, &documents(SCENARIO_DOC, CALL_DOC), 0),
+    );
+    let report = run_described(&f, &claimed());
+    assert!(!report.passed);
+    assert!(
+        has(
+            &report,
+            "a/brokkr.stream: fail\n    | sealing emits \"writer_blocks\" = 4"
+        ),
+        "{:?}",
+        report.failures
+    );
+    assert!(
+        !has(&report, "exited 0"),
+        "a brokkr result never makes exit 0 inconsistent"
+    );
+
+    // The same defect in a call that claims nothing is reported, not judged.
+    let f = fixture(
+        "stream-unclaimed",
+        &script_with(&wrong, &documents(SCENARIO_DOC, CALL_DOC), 0),
+    );
+    let report = run(&f);
+    assert!(report.passed, "{:?}", report.failures);
+    assert!(report.streams[0].starts_with("a fail (not judged)"));
+}
+
+#[test]
+fn a_record_of_an_undeclared_call_fails_the_run_whatever_the_exit() {
+    let stream = format!("{STREAM}\n17 %other X");
+    let report = failing(
+        "undeclared",
+        &script_with(
+            &stream,
+            "cat > \"$A/refusal.json\" <<'EOF'\n{\"protocol\": 1, \"reason\": \"no\"}\nEOF",
+            2,
+        ),
+    );
+    assert!(
+        has(
+            &report,
+            "records of call \"other\", which describe does not declare"
+        ),
+        "{:?}",
+        report.failures
+    );
 }
 
 #[test]
@@ -162,10 +253,7 @@ fn the_request_binds_every_role_and_a_failed_run_keeps_its_evidence() {
     );
     let evidence = report.run_dir.join("evidence");
     let stream = std::fs::read_to_string(evidence.join("stream.txt")).unwrap();
-    assert_eq!(
-        stream,
-        "# markers, in arrival order\n15 %a CAT_START\n# counters, in arrival order\n"
-    );
+    assert_eq!(stream, format!("# records, in arrival order\n{STREAM}\n"));
     assert!(
         std::fs::read_to_string(evidence.join("failures.txt"))
             .unwrap()
@@ -213,8 +301,16 @@ fn a_seal_that_did_not_complete_fails_as_brokkr_seal() {
             r#""snapshot": {"writer_blocks": 3}"#,
             r#""snapshot": null"#,
             1,
+        )
+        .replacen(
+            r#""state": "sealed", "drops": 0"#,
+            r#""state": "open", "drops": 0"#,
+            1,
         );
-    let report = failing("seal", &script(&documents(SCENARIO_DOC, &call), 0));
+    let report = failing(
+        "seal",
+        &script_with("15 %a CAT_START", &documents(SCENARIO_DOC, &call), 0),
+    );
     assert!(has(&report, "a/brokkr.seal: fail"), "{:?}", report.failures);
     assert!(
         !has(&report, "exited 0"),

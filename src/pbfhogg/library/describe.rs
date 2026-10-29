@@ -83,6 +83,9 @@ pub(crate) struct Role {
 pub(crate) struct Call {
     pub(crate) id: String,
     pub(crate) label: String,
+    /// The capability ids the call's stream verdict stands for; nonempty
+    /// makes brokkr add `<call>/brokkr.stream`.
+    pub(crate) stream: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,8 +215,47 @@ fn call(item: &Field<'_>) -> Result<Call, String> {
         ));
     }
     let label = one_line(&obj.required("label")?)?;
+    let mut stream: Vec<String> = Vec::new();
+    if let Some(list) = obj.optional("stream") {
+        for item in list.as_array()? {
+            let capability = capability(&item)?;
+            if stream.contains(&capability) {
+                return Err(format!(
+                    "{}: capability {capability:?} is listed twice",
+                    item.path()
+                ));
+            }
+            stream.push(capability);
+        }
+    }
     obj.finish()?;
-    Ok(Call { id, label })
+    Ok(Call { id, label, stream })
+}
+
+/// A capability id: an identifier ending `.v<N>`, N a positive decimal
+/// without a leading zero, so a capability whose meaning changes gets a new
+/// id.
+fn is_capability(id: &str) -> bool {
+    is_identifier(id)
+        && id.rsplit_once(".v").is_some_and(|(base, n)| {
+            !base.is_empty()
+                && !n.is_empty()
+                && !n.starts_with('0')
+                && n.bytes().all(|b| b.is_ascii_digit())
+        })
+}
+
+fn capability(field: &Field<'_>) -> Result<String, String> {
+    let id = field.as_str()?;
+    if is_capability(id) {
+        Ok(id.to_owned())
+    } else {
+        Err(format!(
+            "{}: {id:?} is not a capability id (an identifier ending .v<N>, such as \
+             cancel.pre-decision.v1)",
+            field.path()
+        ))
+    }
 }
 
 fn role(item: &Field<'_>, calls: &BTreeSet<&str>) -> Result<Role, String> {

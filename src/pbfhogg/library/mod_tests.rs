@@ -13,7 +13,7 @@ const DOC: &str = r#"{"protocol": 1, "scenarios": [
      {"id": "seed", "kind": "directory", "source": "generated"},
      {"id": "tmp-a", "kind": "directory", "source": "scratch", "owner": "a"}
    ],
-   "calls": [{"id": "a", "label": "cat input -> out-a"}],
+   "calls": [{"id": "a", "label": "cat input -> out-a", "stream": ["counters.v1"]}],
    "assertions": [{"id": "a.outcome", "call": "a"}, {"id": "whole", "call": null}]}
 ]}"#;
 
@@ -48,9 +48,8 @@ fn a_harness_lists_the_scenarios_it_describes() {
     assert_eq!(lines[0], "repeat-cat  1 call, deadline 600s");
     assert_eq!(lines[1], "  cat the input twice in a row");
     assert!(
-        lines
-            .iter()
-            .any(|l| l.contains("call       a") && l.ends_with("cat input -> out-a"))
+        lines.iter().any(|l| l.contains("call       a")
+            && l.ends_with("cat input -> out-a (stream: counters.v1)"))
     );
     assert!(
         lines

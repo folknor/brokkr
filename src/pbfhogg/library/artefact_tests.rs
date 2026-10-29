@@ -75,12 +75,34 @@ fn a_seal_decides_its_snapshot() {
     );
     let e = call(&outstanding).unwrap_err();
     assert!(e.contains("must be null unless the call sealed"), "{e}");
-    let ok = outstanding.replacen(
+    let still_sealed = outstanding.replacen(
         r#""snapshot": {"writer_blocks": 3, "pipeline wait_ns": 18446744073709551615}"#,
         r#""snapshot": null"#,
         1,
     );
-    assert_eq!(call(&ok).unwrap().seal, Seal::Outstanding(2));
+    let e = call(&still_sealed).unwrap_err();
+    assert!(e.contains("open exactly when the call did not seal"), "{e}");
+    let ok = still_sealed.replacen(
+        r#""state": "sealed", "drops""#,
+        r#""state": "open", "drops""#,
+        1,
+    );
+    let doc = call(&ok).unwrap();
+    assert_eq!(doc.seal, Seal::Outstanding(2));
+    assert_eq!(doc.snapshot, None);
+    assert_eq!(doc.stream.state, SinkState::Open);
+    let e = call(&edited(
+        r#""state": "sealed", "drops""#,
+        r#""state": "open", "drops""#,
+    ))
+    .unwrap_err();
+    assert!(e.contains("but it is open and the seal is sealed"), "{e}");
+    let sealed = call(CALL).unwrap();
+    assert_eq!(
+        sealed.snapshot.unwrap()["pipeline wait_ns"],
+        u64::MAX,
+        "the snapshot keeps its values"
+    );
     let e = call(&edited(
         r#""outstanding_blocks": 0"#,
         r#""outstanding_blocks": 1"#,

@@ -97,9 +97,11 @@ A running binary can hand data to brokkr three ways:
    (the `run_external_ok` path uses external best-of-N wall-clock instead).
 3. **FIFO markers + counters** - via `BROKKR_MARKER_FIFO`. The target writes
    `<us> name` (marker) or `<us> @name=value` (counter, value must parse as
-   `i64`), optionally tagged with a call stream (`<us> %<call_id> ...`; see
+   `i64`), optionally tagged with a call stream (`<us> %<call_id> ...`,
+   which also carries a library call sink's sealing and terminal records; see
    "Marker & counter rules" in `docs/commands/measure.md`). Drained by
-   `SidecarFifo::drain` (`src/sidecar.rs`) into sidecar.db. Any project
+   `SidecarFifo::drain` (`src/sidecar.rs`) into one arrival-ordered capture,
+   then into sidecar.db. Any project
    binary can emit them by writing that line format to the FIFO. In pbfhogg
    markers and counters go to the invocation's instrument sink; the CLI
    opens the FIFO as that sink from `BROKKR_MARKER_FIFO` and passes no sink
@@ -211,8 +213,9 @@ self-reported.
 | degrade | run_external_ok | yes | counters |
 
 (`brokkr library SCENARIO` is a correctness check too and records to neither
-DB: the harness gets the FIFO, its records are parsed and kept only as a
-failed run's evidence, and its stdout and stderr must stay empty; see
+DB: the harness gets the FIFO, its records are judged as each call's stream
+and kept only as a failed run's evidence, and its stdout and stderr must
+stay empty; see
 `brokkr man library`.)
 
 (`verify` subcommands are correctness checks, not benchmarks - they don't

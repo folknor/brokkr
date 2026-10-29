@@ -237,6 +237,26 @@ pub(crate) fn is_valid_call_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
 }
 
+/// Longest sealing-emission name: the snapshot counter name domain of a
+/// library call document, so every sealing record fits the producer's line.
+pub(crate) const MAX_SEALING_NAME_BYTES: usize = 400;
+
+/// How a call sink ended, as its terminal record says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SinkEnd {
+    Sealed,
+    Failed,
+}
+
+impl SinkEnd {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Sealed => "sealed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 /// One parsed FIFO record.
 #[derive(Debug, PartialEq, Eq)]
 enum FifoRecord<'a> {
@@ -253,12 +273,124 @@ enum FifoRecord<'a> {
         name: &'a str,
         value: i64,
     },
+    /// `%CALL @@NAME=VALUE`: one final counter value a sealing sink emits.
+    Sealing {
+        ts: i64,
+        call: &'a str,
+        name: &'a str,
+        value: i64,
+    },
+    /// `%CALL !sealed drops=N` or `%CALL !failed drops=N`: a sink's last line.
+    Terminal {
+        ts: i64,
+        call: &'a str,
+        end: SinkEnd,
+        drops: u64,
+    },
+}
+
+impl FifoRecord<'_> {
+    /// The call a tagged record names.
+    fn call(&self) -> Option<&str> {
+        match self {
+            Self::Marker { call, .. } | Self::Counter { call, .. } => *call,
+            Self::Sealing { call, .. } | Self::Terminal { call, .. } => Some(call),
+            Self::Blank | Self::Rejected => None,
+        }
+    }
+
+    /// The record to keep; a marker takes `marker_idx`. `None` for a line
+    /// that carries none.
+    fn into_record(self, marker_idx: i32) -> Option<Record> {
+        Some(match self {
+            Self::Blank | Self::Rejected => return None,
+            Self::Marker { ts, call, name } => Record::Marker(Marker {
+                marker_idx,
+                timestamp_us: ts,
+                name: name.to_owned(),
+                run_idx: 0,
+                call: call.map(str::to_owned),
+            }),
+            Self::Counter {
+                ts,
+                call,
+                name,
+                value,
+            } => Record::Counter(Counter {
+                timestamp_us: ts,
+                name: name.to_owned(),
+                value,
+                run_idx: 0,
+                call: call.map(str::to_owned),
+            }),
+            Self::Sealing {
+                ts,
+                call,
+                name,
+                value,
+            } => Record::Sealing(Sealing {
+                timestamp_us: ts,
+                call: call.to_owned(),
+                name: name.to_owned(),
+                value,
+            }),
+            Self::Terminal {
+                ts,
+                call,
+                end,
+                drops,
+            } => Record::Terminal(Terminal {
+                timestamp_us: ts,
+                call: call.to_owned(),
+                end,
+                drops,
+            }),
+        })
+    }
+}
+
+/// `N` of a terminal record: a u64 in decimal, without sign or leading zero.
+fn parse_drops(text: &str) -> Option<u64> {
+    let canonical = !text.is_empty()
+        && text.bytes().all(|b| b.is_ascii_digit())
+        && (text == "0" || !text.starts_with('0'));
+    if canonical { text.parse().ok() } else { None }
+}
+
+/// The body of a tagged record that starts `@@` or `!`, which only sealing
+/// sinks write; anything else of those shapes is rejected.
+fn parse_sink_end<'a>(ts: i64, call: &'a str, body: &'a str) -> Option<FifoRecord<'a>> {
+    if let Some(sealing) = body.strip_prefix("@@") {
+        let (name, value) = sealing.split_once('=')?;
+        if name.is_empty() || name.len() > MAX_SEALING_NAME_BYTES {
+            return None;
+        }
+        return Some(FifoRecord::Sealing {
+            ts,
+            call,
+            name,
+            value: value.parse().ok()?,
+        });
+    }
+    let terminal = body.strip_prefix('!')?;
+    let (end, drops) = match terminal.strip_prefix("sealed drops=") {
+        Some(n) => (SinkEnd::Sealed, n),
+        None => (SinkEnd::Failed, terminal.strip_prefix("failed drops=")?),
+    };
+    Some(FifoRecord::Terminal {
+        ts,
+        call,
+        end,
+        drops: parse_drops(drops)?,
+    })
 }
 
 /// Parse one FIFO line. `<ts> <name>` and `<ts> @<name>=<i64>` are
 /// process-wide; `<ts> %<call_id> <name>` and `<ts> %<call_id> @<name>=<i64>`
 /// belong to that call. A payload starting with `%` is only ever a tagged
-/// record: a malformed one is rejected, never read as an untagged marker.
+/// record: a malformed one is rejected, never read as an untagged marker. In
+/// a tagged record a body starting `@@` is a sealing emission and one
+/// starting `!` a terminal record; untagged lines parse as they always did.
 fn parse_fifo_record(line: &str) -> FifoRecord<'_> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
@@ -276,6 +408,9 @@ fn parse_fifo_record(line: &str) -> FifoRecord<'_> {
         };
         if !is_valid_call_id(call) || body.is_empty() {
             return FifoRecord::Rejected;
+        }
+        if body.starts_with("@@") || body.starts_with('!') {
+            return parse_sink_end(ts, call, body).unwrap_or(FifoRecord::Rejected);
         }
         (Some(call), body)
     } else {
@@ -349,6 +484,16 @@ impl<'a> Timeline<'a> {
         Self {
             markers: chronological(markers),
             final_us: None,
+            first_sample_us: None,
+        }
+    }
+
+    /// A call stream whose return is known: its final segment ends at
+    /// `final_us`.
+    pub(crate) fn closed(markers: &'a [Marker], final_us: i64) -> Self {
+        Self {
+            markers: chronological(markers),
+            final_us: Some(final_us),
             first_sample_us: None,
         }
     }
@@ -474,6 +619,157 @@ pub struct Counter {
     pub call: Option<String>,
 }
 
+/// One final counter value a call's sink emitted while sealing,
+/// `%CALL @@NAME=VALUE` on the wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Sealing {
+    pub timestamp_us: i64,
+    pub call: String,
+    pub name: String,
+    pub value: i64,
+}
+
+/// A call sink's terminal record, `%CALL !sealed drops=N` on the wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Terminal {
+    pub timestamp_us: i64,
+    pub call: String,
+    pub end: SinkEnd,
+    /// Lines the sink dropped before this one.
+    pub drops: u64,
+}
+
+/// One captured FIFO record. A capture keeps them in one list in arrival
+/// order, so the order between a marker, a counter and a sink's last lines
+/// is never lost.
+#[derive(Debug, Clone)]
+pub(crate) enum Record {
+    Marker(Marker),
+    Counter(Counter),
+    Sealing(Sealing),
+    Terminal(Terminal),
+}
+
+impl Record {
+    /// The call stream it belongs to; `None` is the process-wide stream.
+    pub(crate) fn call(&self) -> Option<&str> {
+        match self {
+            Self::Marker(m) => m.call.as_deref(),
+            Self::Counter(c) => c.call.as_deref(),
+            Self::Sealing(s) => Some(&s.call),
+            Self::Terminal(t) => Some(&t.call),
+        }
+    }
+
+    pub(crate) fn timestamp_us(&self) -> i64 {
+        match self {
+            Self::Marker(m) => m.timestamp_us,
+            Self::Counter(c) => c.timestamp_us,
+            Self::Sealing(s) => s.timestamp_us,
+            Self::Terminal(t) => t.timestamp_us,
+        }
+    }
+
+    /// The record in its wire spelling, without the newline.
+    pub(crate) fn wire(&self) -> String {
+        let tag = self.call().map_or_else(String::new, |c| format!("%{c} "));
+        let ts = self.timestamp_us();
+        match self {
+            Self::Marker(m) => format!("{ts} {tag}{}", m.name),
+            Self::Counter(c) => format!("{ts} {tag}@{}={}", c.name, c.value),
+            Self::Sealing(s) => format!("{ts} {tag}@@{}={}", s.name, s.value),
+            Self::Terminal(t) => format!("{ts} {tag}!{} drops={}", t.end.name(), t.drops),
+        }
+    }
+}
+
+/// What a capture omitted, by cause. A record the FIFO reader may not hold
+/// (`stream_lost`) is a different fact from a sample or output byte it did
+/// not keep: a library verification's call-stream verdict reads the first
+/// only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct CaptureLoss {
+    /// FIFO lines the reader refused: malformed, overlong, invalid UTF-8,
+    /// or a fragment left without a newline when the writers closed.
+    pub rejected_lines: usize,
+    /// A FIFO read failed, or the last drain's byte budget left records
+    /// possibly unread.
+    pub fifo_unread: bool,
+    /// The marker or counter budget dropped a parsed record.
+    pub records_capped: bool,
+    /// The sample budget dropped a sample.
+    pub samples_capped: bool,
+    /// stdout or stderr went past its cap, or did not close in time.
+    pub output_truncated: bool,
+}
+
+impl CaptureLoss {
+    /// Some FIFO record may be missing from the capture.
+    pub(crate) fn stream_lost(&self) -> bool {
+        self.rejected_lines > 0 || self.fifo_unread || self.records_capped
+    }
+
+    pub(crate) fn any(&self) -> bool {
+        self.stream_lost() || self.samples_capped || self.output_truncated
+    }
+
+    /// Each cause, as a short phrase.
+    pub(crate) fn causes(&self) -> Vec<String> {
+        let mut out = self.stream_causes();
+        if self.samples_capped {
+            out.push("the sample limit dropped samples".to_owned());
+        }
+        if self.output_truncated {
+            out.push("child output was cut".to_owned());
+        }
+        out
+    }
+
+    /// Each cause that may have lost a FIFO record, as a short phrase.
+    pub(crate) fn stream_causes(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.rejected_lines > 0 {
+            out.push(format!(
+                "the FIFO reader rejected {}",
+                crate::output::count(self.rejected_lines, "line")
+            ));
+        }
+        if self.fifo_unread {
+            out.push("FIFO records may have been left unread".to_owned());
+        }
+        if self.records_capped {
+            out.push("the marker or counter limit dropped records".to_owned());
+        }
+        out
+    }
+}
+
+/// Every call id the tagged records of one capture named, whether or not
+/// the record budgets kept the record, up to a bound. Past the bound it
+/// only says that more ids arrived, so a caller that declared fewer calls
+/// than the bound knows some id was not one of them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct CallCensus {
+    pub ids: std::collections::BTreeSet<String>,
+    pub overflowed: bool,
+}
+
+impl CallCensus {
+    fn note(&mut self, call: &str, limit: usize) {
+        if self.ids.contains(call) {
+            return;
+        }
+        if self.ids.len() < limit {
+            self.ids.insert(call.to_owned());
+        } else {
+            self.overflowed = true;
+        }
+    }
+}
+
+/// The census bound a capture uses unless its caller sets one.
+const DEFAULT_CALL_CENSUS_LIMIT: usize = 4096;
+
 /// Summary of a sidecar run.
 #[derive(Debug, Clone)]
 pub struct SidecarSummary {
@@ -481,16 +777,17 @@ pub struct SidecarSummary {
     pub sample_count: i32,
     pub marker_count: i32,
     pub wall_time_ms: i64,
-    /// A configured storage or child-output limit omitted samples, markers,
-    /// counters, FIFO records, or stdout/stderr bytes.
-    pub capture_truncated: bool,
+    /// What the capture omitted, by cause.
+    pub(crate) loss: CaptureLoss,
 }
 
 /// Complete sidecar data for one run of a benchmark.
 pub struct SidecarData {
     pub samples: Vec<Sample>,
-    pub markers: Vec<Marker>,
-    pub counters: Vec<Counter>,
+    /// Every FIFO record kept, in arrival order.
+    pub(crate) records: Vec<Record>,
+    /// The call ids tagged records named, kept or not.
+    pub(crate) calls_seen: CallCensus,
     /// Marker that actually ended the child, if a configured stop marker hit.
     /// This is `None` when the child exited naturally, even if a stop was
     /// requested.
@@ -498,6 +795,37 @@ pub struct SidecarData {
     /// The termination cause assigned by the child supervisor.
     pub ending: Ending,
     pub summary: SidecarSummary,
+}
+
+impl SidecarData {
+    /// The phase markers, in arrival order.
+    pub(crate) fn markers(&self) -> impl Iterator<Item = &Marker> {
+        self.records.iter().filter_map(|r| match r {
+            Record::Marker(m) => Some(m),
+            _ => None,
+        })
+    }
+
+    /// The ordinary counters, in arrival order.
+    pub(crate) fn counters(&self) -> impl Iterator<Item = &Counter> {
+        self.records.iter().filter_map(|r| match r {
+            Record::Counter(c) => Some(c),
+            _ => None,
+        })
+    }
+
+    /// Whether the stored trajectory omits anything: a capture loss, or a
+    /// sealing or terminal record, which sidecar.db has no place for.
+    pub(crate) fn stored_incomplete(&self) -> bool {
+        self.summary.loss.any() || self.has_sink_ends()
+    }
+
+    /// Whether any sealing or terminal record was captured.
+    pub(crate) fn has_sink_ends(&self) -> bool {
+        self.records
+            .iter()
+            .any(|r| matches!(r, Record::Sealing(_) | Record::Terminal(_)))
+    }
 }
 
 /// Result of a sidecar-monitored child process run.
@@ -738,7 +1066,33 @@ pub(crate) struct SidecarFifo {
     samples_remaining: usize,
     markers_remaining: usize,
     counters_remaining: usize,
+    call_census_limit: usize,
 }
+
+/// What the drains of one child's run have gathered.
+#[derive(Default)]
+struct FifoCapture {
+    records: Vec<Record>,
+    next_marker_idx: i32,
+    loss: CaptureLoss,
+    calls_seen: CallCensus,
+}
+
+impl FifoCapture {
+    /// The markers and the ordinary counters kept.
+    fn kept_counts(&self) -> (usize, usize) {
+        self.records.iter().fold((0, 0), |(m, c), r| match r {
+            Record::Marker(_) => (m + 1, c),
+            Record::Counter(_) => (m, c + 1),
+            Record::Sealing(_) | Record::Terminal(_) => (m, c),
+        })
+    }
+}
+
+/// The pipe capacity asked for each FIFO instance, so a producer whose
+/// reader drains once a tick drops fewer lines; a refusal keeps the
+/// kernel's default and changes nothing else.
+const FIFO_PIPE_BYTES: libc::c_int = 1024 * 1024;
 
 impl SidecarFifo {
     /// Create the FIFO and open the read end.
@@ -780,16 +1134,31 @@ impl SidecarFifo {
             samples_remaining: tunables.max_samples,
             markers_remaining: tunables.max_markers,
             counters_remaining: tunables.max_counters,
+            call_census_limit: DEFAULT_CALL_CENSUS_LIMIT,
         })
     }
 
-    /// Open the FIFO read end with `O_RDONLY|O_NONBLOCK`.
+    /// Bound the census of call ids each capture keeps. A caller that
+    /// declared `n` calls sets `n + 1`: a census that overflows it proves
+    /// an id beyond the declared ones.
+    pub(crate) fn limit_call_census(&mut self, limit: usize) {
+        self.call_census_limit = limit;
+    }
+
+    /// Open the FIFO read end with `O_RDONLY|O_NONBLOCK`, asking for a
+    /// larger pipe (each open of a FIFO with no other end open is a fresh
+    /// pipe, so `reopen` asks again).
     fn open_read_end(path: &Path) -> Result<File, DevError> {
-        fs::OpenOptions::new()
+        use std::os::fd::AsRawFd as _;
+        let file = fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NONBLOCK)
             .open(path)
-            .map_err(DevError::Io)
+            .map_err(DevError::Io)?;
+        // A refusal (a per-user pipe limit) leaves the default capacity.
+        let _: libc::c_int =
+            unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETPIPE_SZ, FIFO_PIPE_BYTES) };
+        Ok(file)
     }
 
     /// Reopen the read end after a child exits.
@@ -818,90 +1187,67 @@ impl SidecarFifo {
     /// - `<timestamp_us> <name>\n` - phase marker
     /// - `<timestamp_us> @<name>=<value>\n` - counter
     /// - either body after `%<call_id> ` - the same record in that call's stream
-    #[allow(clippy::too_many_arguments)]
+    /// - `@@<name>=<value>` and `!sealed drops=N`/`!failed drops=N` after a
+    ///   tag - a call sink's sealing emission and terminal record
     fn drain(
         &mut self,
-        markers: &mut Vec<Marker>,
-        next_marker_idx: &mut i32,
-        counters: &mut Vec<Counter>,
+        capture: &mut FifoCapture,
         stop_spec: Option<&StopSpec>,
         max_line_bytes: usize,
         budget: usize,
-        capture_truncated: &mut bool,
     ) -> (Option<String>, DrainStop) {
         let mut rejected_lines = 0usize;
         let mut last_name: Option<String> = None;
         let mut preferred_stop: Option<String> = None;
         let mut fallback_stop: Option<String> = None;
         let mut budget = budget;
+        let census_limit = self.call_census_limit;
         let stop = loop {
             match self.read_bounded_line(max_line_bytes, &mut budget) {
                 Ok(BoundedLine::Pending) => break DrainStop::Closed,
                 Ok(BoundedLine::Budget) => break DrainStop::Budget,
-                Ok(BoundedLine::TooLong) => {
-                    rejected_lines += 1;
-                    *capture_truncated = true;
-                }
-                Ok(BoundedLine::Fragment) => {
-                    // A record cut off by the writer closing: damage, not data.
-                    rejected_lines += 1;
-                }
+                // An overlong record, or one cut off by the writers closing:
+                // damage, not data.
+                Ok(BoundedLine::TooLong | BoundedLine::Fragment) => rejected_lines += 1,
                 Ok(BoundedLine::Line(line)) => {
                     let Ok(line) = std::str::from_utf8(&line) else {
                         rejected_lines += 1;
                         continue;
                     };
-                    match parse_fifo_record(line) {
-                        FifoRecord::Blank => {}
-                        FifoRecord::Rejected => rejected_lines += 1,
-                        FifoRecord::Counter {
-                            ts,
-                            call,
-                            name,
-                            value,
-                        } => {
-                            if self.counters_remaining > 0 {
-                                counters.push(Counter {
-                                    timestamp_us: ts,
-                                    name: name.to_owned(),
-                                    value,
-                                    run_idx: 0,
-                                    call: call.map(str::to_owned),
-                                });
-                                self.counters_remaining -= 1;
-                            } else {
-                                *capture_truncated = true;
+                    let parsed = parse_fifo_record(line);
+                    // Every call id a tagged record names is counted before
+                    // any budget can drop the record.
+                    if let Some(call) = parsed.call() {
+                        capture.calls_seen.note(call, census_limit);
+                    }
+                    if let FifoRecord::Marker { call, name, .. } = &parsed {
+                        last_name = Some((*name).to_owned());
+                        // `--stop` is scoped to the process stream: a
+                        // call's marker never kills the whole scenario.
+                        if let Some(spec) = stop_spec
+                            && call.is_none()
+                        {
+                            match spec.match_priority(name) {
+                                Some(true) if preferred_stop.is_none() => {
+                                    preferred_stop = Some((*name).to_owned());
+                                }
+                                Some(false) if fallback_stop.is_none() => {
+                                    fallback_stop = Some((*name).to_owned());
+                                }
+                                _ => {}
                             }
                         }
-                        FifoRecord::Marker { ts, call, name } => {
-                            last_name = Some(name.to_owned());
-                            if self.markers_remaining > 0 {
-                                markers.push(Marker {
-                                    marker_idx: *next_marker_idx,
-                                    timestamp_us: ts,
-                                    name: name.to_owned(),
-                                    run_idx: 0,
-                                    call: call.map(str::to_owned),
-                                });
-                                self.markers_remaining -= 1;
-                            } else {
-                                *capture_truncated = true;
-                            }
-                            *next_marker_idx = (*next_marker_idx).saturating_add(1);
-                            // `--stop` is scoped to the process stream: a
-                            // call's marker never kills the whole scenario.
-                            if let Some(spec) = stop_spec
-                                && call.is_none()
-                            {
-                                match spec.match_priority(name) {
-                                    Some(true) if preferred_stop.is_none() => {
-                                        preferred_stop = Some(name.to_owned());
-                                    }
-                                    Some(false) if fallback_stop.is_none() => {
-                                        fallback_stop = Some(name.to_owned());
-                                    }
-                                    _ => {}
+                    }
+                    match parsed {
+                        FifoRecord::Blank => {}
+                        FifoRecord::Rejected => rejected_lines += 1,
+                        record => {
+                            let marker_idx = capture.next_marker_idx;
+                            if let Some(owned) = record.into_record(marker_idx) {
+                                if matches!(owned, Record::Marker(_)) {
+                                    capture.next_marker_idx = marker_idx.saturating_add(1);
                                 }
+                                self.keep(capture, owned);
                             }
                         }
                     }
@@ -911,7 +1257,7 @@ impl SidecarFifo {
                 }
                 Err(e) => {
                     // Records may be lost with the read: damage, not data.
-                    *capture_truncated = true;
+                    capture.loss.fifo_unread = true;
                     console::warn(&format!("sidecar FIFO read failed: {e}"));
                     break DrainStop::Failed;
                 }
@@ -919,7 +1265,8 @@ impl SidecarFifo {
         };
         if rejected_lines > 0 {
             // Stored, so a later query still says the trajectory is damaged.
-            *capture_truncated = true;
+            capture.loss.rejected_lines =
+                capture.loss.rejected_lines.saturating_add(rejected_lines);
             console::warn(&format!(
                 "sidecar FIFO rejected {rejected_lines} malformed lines"
             ));
@@ -934,45 +1281,33 @@ impl SidecarFifo {
     /// exhausted budget may leave records unread (possible, not proven
     /// drops: nothing is read past it to find out), which marks the capture
     /// incomplete.
-    fn drain_after_exit(
-        &mut self,
-        markers: &mut Vec<Marker>,
-        next_marker_idx: &mut i32,
-        counters: &mut Vec<Counter>,
-        max_line_bytes: usize,
-        capture_truncated: &mut bool,
-    ) {
-        self.drain_final(
-            markers,
-            next_marker_idx,
-            counters,
-            max_line_bytes,
-            FINAL_DRAIN_BUDGET,
-            capture_truncated,
-        );
+    fn drain_after_exit(&mut self, capture: &mut FifoCapture, max_line_bytes: usize) {
+        self.drain_final(capture, max_line_bytes, FINAL_DRAIN_BUDGET);
     }
 
     /// [`drain_after_exit`](Self::drain_after_exit) under `budget`.
-    fn drain_final(
-        &mut self,
-        markers: &mut Vec<Marker>,
-        next_marker_idx: &mut i32,
-        counters: &mut Vec<Counter>,
-        max_line_bytes: usize,
-        budget: usize,
-        capture_truncated: &mut bool,
-    ) {
-        let (_, stop) = self.drain(
-            markers,
-            next_marker_idx,
-            counters,
-            None,
-            max_line_bytes,
-            budget,
-            capture_truncated,
-        );
-        if stop == DrainStop::Budget {
-            *capture_truncated = true;
+    fn drain_final(&mut self, capture: &mut FifoCapture, max_line_bytes: usize, budget: usize) {
+        let (_, stop) = self.drain(capture, None, max_line_bytes, budget);
+        // A line still pending (a writer holds the FIFO open mid-line) is
+        // never read: the reader is dropped or reopened next.
+        let pending = !self.pending_line.is_empty() || self.pending_line_too_long;
+        if stop == DrainStop::Budget || pending {
+            capture.loss.fifo_unread = true;
+        }
+    }
+
+    /// Keep `record` if its budget allows (sealing emissions count as
+    /// counters, terminal records as markers), else mark the loss.
+    fn keep(&mut self, capture: &mut FifoCapture, record: Record) {
+        let remaining = match record {
+            Record::Marker(_) | Record::Terminal(_) => &mut self.markers_remaining,
+            Record::Counter(_) | Record::Sealing(_) => &mut self.counters_remaining,
+        };
+        if *remaining > 0 {
+            *remaining -= 1;
+            capture.records.push(record);
+        } else {
+            capture.loss.records_capped = true;
         }
     }
 
@@ -1196,11 +1531,12 @@ fn run_summary_line(
     )
 }
 
-fn warn_if_truncated(truncated: bool) {
-    if truncated {
-        console::warn(
-            "sidecar profile reached a storage limit; trajectory records or child output were omitted",
-        );
+fn warn_if_truncated(loss: &CaptureLoss) {
+    if loss.any() {
+        console::warn(&format!(
+            "sidecar capture is incomplete: {}",
+            loss.causes().join("; ")
+        ));
     }
 }
 
@@ -1228,12 +1564,9 @@ pub(crate) fn run_sidecar_with_deadline(
     let pid = child_process.id();
 
     let mut samples = Vec::new();
-    let mut markers = Vec::new();
-    let mut counters = Vec::new();
+    let mut capture = FifoCapture::default();
     let mut last_hwm = 0;
     let mut sample_idx = 0;
-    let mut marker_idx = 0;
-    let mut capture_truncated = false;
     let requested_stop = stop_marker.unwrap_or_default().to_owned();
     let stop_spec = stop_marker.map(StopSpec::parse);
     let mut fired_stop_marker = None;
@@ -1267,18 +1600,15 @@ pub(crate) fn run_sidecar_with_deadline(
                 if fifo.keep_sample() {
                     samples.push(sample);
                 } else {
-                    capture_truncated = true;
+                    capture.loss.samples_capped = true;
                 }
             }
 
             let (matched, _) = fifo.drain(
-                &mut markers,
-                &mut marker_idx,
-                &mut counters,
+                &mut capture,
                 stop_spec.as_ref(),
                 tunables.max_fifo_line_bytes,
                 TICK_DRAIN_BUDGET,
-                &mut capture_truncated,
             );
             let matched = matched?;
             fired_stop_marker = Some(matched.clone());
@@ -1287,16 +1617,11 @@ pub(crate) fn run_sidecar_with_deadline(
         },
     );
 
-    fifo.drain_after_exit(
-        &mut markers,
-        &mut marker_idx,
-        &mut counters,
-        tunables.max_fifo_line_bytes,
-        &mut capture_truncated,
-    );
+    fifo.drain_after_exit(&mut capture, tunables.max_fifo_line_bytes);
     let (stdout_truncated, stderr_truncated) = (run.stdout_truncated, run.stderr_truncated);
-    capture_truncated |= stdout_truncated || stderr_truncated || run.output_cut;
-    warn_if_truncated(capture_truncated);
+    capture.loss.output_truncated = stdout_truncated || stderr_truncated || run.output_cut;
+    warn_if_truncated(&capture.loss);
+    let (marker_total, counter_total) = capture.kept_counts();
     announce_ending(&run.ending);
 
     // The shared nearest-millisecond rule, so the sidecar summary agrees with
@@ -1304,11 +1629,11 @@ pub(crate) fn run_sidecar_with_deadline(
     let wall_time_ms = crate::harness::elapsed_to_ms(&run.elapsed);
     console::detail(&run_summary_line(
         run_idx,
-        [samples.len(), markers.len(), counters.len()],
+        [samples.len(), marker_total, counter_total],
         wall_time_ms,
     ));
     let count = |n: usize| i32::try_from(n).unwrap_or(i32::MAX);
-    let (sample_count, marker_count) = (count(samples.len()), count(markers.len()));
+    let (sample_count, marker_count) = (count(samples.len()), count(marker_total));
     SidecarRunResult {
         stdout: run.stdout,
         stderr: run.stderr,
@@ -1318,8 +1643,8 @@ pub(crate) fn run_sidecar_with_deadline(
         elapsed: run.elapsed,
         data: SidecarData {
             samples,
-            markers,
-            counters,
+            records: capture.records,
+            calls_seen: capture.calls_seen,
             fired_stop_marker,
             ending: run.ending,
             summary: SidecarSummary {
@@ -1327,7 +1652,7 @@ pub(crate) fn run_sidecar_with_deadline(
                 sample_count,
                 marker_count,
                 wall_time_ms,
-                capture_truncated,
+                loss: capture.loss,
             },
         },
     }
@@ -1427,33 +1752,143 @@ mod tests {
             .unwrap();
         drop(writer);
 
-        let mut markers = Vec::new();
-        let mut next_marker_idx = 0;
-        let mut counters = Vec::new();
-        let mut truncated = false;
+        let mut capture = FifoCapture::default();
         fifo.drain(
-            &mut markers,
-            &mut next_marker_idx,
-            &mut counters,
+            &mut capture,
             None,
             DEFAULT_MEASUREMENT_TUNABLES.max_fifo_line_bytes,
             TICK_DRAIN_BUDGET,
-            &mut truncated,
         );
 
-        assert_eq!(markers.len(), 1);
-        assert_eq!(markers[0].marker_idx, 0);
-        assert_eq!(markers[0].timestamp_us, 42);
-        assert_eq!(markers[0].name, "PASS1_END");
-        assert_eq!(counters.len(), 1);
-        assert_eq!(counters[0].timestamp_us, 42);
-        assert_eq!(counters[0].name, "nodes");
-        assert_eq!(counters[0].value, -7);
-        assert_eq!(next_marker_idx, 1);
-        assert!(
-            truncated,
+        let [Record::Marker(marker), Record::Counter(counter)] = capture.records.as_slice() else {
+            panic!("{:?}", capture.records);
+        };
+        assert_eq!(marker.marker_idx, 0);
+        assert_eq!(marker.timestamp_us, 42);
+        assert_eq!(marker.name, "PASS1_END");
+        assert_eq!(counter.timestamp_us, 42);
+        assert_eq!(counter.name, "nodes");
+        assert_eq!(counter.value, -7);
+        assert_eq!(capture.next_marker_idx, 1);
+        assert_eq!(
+            capture.loss.rejected_lines, 2,
             "the two malformed lines mark the capture damaged"
         );
+        assert!(capture.loss.stream_lost());
+    }
+
+    #[test]
+    fn tagged_sealing_and_terminal_records_parse_and_untagged_lines_do_not_change() {
+        assert_eq!(
+            parse_fifo_record("9 %a @@writer_blocks=-3"),
+            FifoRecord::Sealing {
+                ts: 9,
+                call: "a",
+                name: "writer_blocks",
+                value: -3
+            }
+        );
+        assert_eq!(
+            parse_fifo_record("9 %a !sealed drops=0"),
+            FifoRecord::Terminal {
+                ts: 9,
+                call: "a",
+                end: SinkEnd::Sealed,
+                drops: 0
+            }
+        );
+        assert_eq!(
+            parse_fifo_record("9 %a !failed drops=18446744073709551615"),
+            FifoRecord::Terminal {
+                ts: 9,
+                call: "a",
+                end: SinkEnd::Failed,
+                drops: u64::MAX
+            }
+        );
+        // The process stream keeps its old reading.
+        assert_eq!(
+            parse_fifo_record("9 @@x=1"),
+            FifoRecord::Counter {
+                ts: 9,
+                call: None,
+                name: "@x",
+                value: 1
+            }
+        );
+        assert_eq!(
+            parse_fifo_record("9 !sealed drops=0"),
+            FifoRecord::Marker {
+                ts: 9,
+                call: None,
+                name: "!sealed drops=0"
+            }
+        );
+        let long = format!("9 %a @@{}=1", "n".repeat(MAX_SEALING_NAME_BYTES + 1));
+        let edge = format!("9 %a @@{}=1", "n".repeat(MAX_SEALING_NAME_BYTES));
+        assert!(matches!(
+            parse_fifo_record(&edge),
+            FifoRecord::Sealing { .. }
+        ));
+        for bad in [
+            "9 %a @@x",
+            "9 %a @@=1",
+            "9 %a @@x=y",
+            "9 %a !sealed",
+            "9 %a !sealed drops=",
+            "9 %a !sealed drops=01",
+            "9 %a !sealed drops=+1",
+            "9 %a !sealed drops=-1",
+            "9 %a !sealed drops=18446744073709551616",
+            "9 %a !sealed  drops=0",
+            "9 %a !open drops=0",
+            "9 %a !done",
+            long.as_str(),
+        ] {
+            assert_eq!(parse_fifo_record(bad), FifoRecord::Rejected, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_capture_keeps_one_arrival_order_and_counts_every_call_it_saw() {
+        use std::io::Write;
+        let dir = crate::test_scratch::scratch("sidecar", "fifo_arrival");
+        let mut fifo = SidecarFifo::create(&dir, &DEFAULT_MEASUREMENT_TUNABLES).unwrap();
+        fifo.limit_call_census(2);
+        fifo.counters_remaining = 1;
+        let mut writer = fs::OpenOptions::new().write(true).open(&fifo.path).unwrap();
+        writer
+            .write_all(b"5 %a @n=1\n4 %a GO\n6 %a @@n=1\n7 %a !sealed drops=0\n8 %b @m=2\n9 %c X\n")
+            .unwrap();
+        drop(writer);
+        let mut capture = FifoCapture::default();
+        fifo.drain(&mut capture, None, 1024, TICK_DRAIN_BUDGET);
+        let wire: Vec<String> = capture.records.iter().map(Record::wire).collect();
+        assert_eq!(
+            wire,
+            ["5 %a @n=1", "4 %a GO", "7 %a !sealed drops=0", "9 %c X"],
+            "the sealing emission and %b's counter went past the counter budget"
+        );
+        assert!(capture.loss.records_capped);
+        assert_eq!(
+            capture.calls_seen.ids.iter().collect::<Vec<_>>(),
+            ["a", "b"],
+            "a dropped record's call is still counted"
+        );
+        assert!(capture.calls_seen.overflowed, "a third id passed the bound");
+    }
+
+    /// A read error ends the drain and marks records possibly unread.
+    #[test]
+    fn a_fifo_read_error_marks_the_capture_incomplete() {
+        let dir = crate::test_scratch::scratch("sidecar", "fifo_read_error");
+        let mut fifo = SidecarFifo::create(&dir, &DEFAULT_MEASUREMENT_TUNABLES).unwrap();
+        // Reading a directory fails with EISDIR.
+        fifo.reader = BufReader::new(File::open(&dir).unwrap());
+        let mut capture = FifoCapture::default();
+        let (_, stop) = fifo.drain(&mut capture, None, 1024, TICK_DRAIN_BUDGET);
+        assert_eq!(stop, DrainStop::Failed);
+        assert!(capture.loss.fifo_unread && capture.loss.stream_lost());
     }
 
     #[test]
@@ -1509,48 +1944,45 @@ mod tests {
         writer.write_all(b"1 %a START\n2 %a ST").unwrap();
         drop(writer);
 
-        let (mut markers, mut counters, mut idx, mut truncated) =
-            (Vec::new(), Vec::new(), 0, false);
+        let mut capture = FifoCapture::default();
         fifo.drain(
-            &mut markers,
-            &mut idx,
-            &mut counters,
+            &mut capture,
             None,
             DEFAULT_MEASUREMENT_TUNABLES.max_fifo_line_bytes,
             TICK_DRAIN_BUDGET,
-            &mut truncated,
         );
-        assert_eq!(markers.len(), 1);
-        assert_eq!(markers[0].call.as_deref(), Some("a"));
-        assert!(truncated);
+        assert_eq!(capture.records.len(), 1);
+        assert_eq!(capture.records[0].call(), Some("a"));
+        assert_eq!(capture.loss.rejected_lines, 1);
     }
 
-    /// One budgeted drain: the marker names it parsed and why it stopped.
+    fn marker_names(capture: FifoCapture) -> Vec<String> {
+        capture
+            .records
+            .into_iter()
+            .filter_map(|r| match r {
+                Record::Marker(m) => Some(m.name),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// One budgeted drain: the marker names it parsed, why it stopped, and
+    /// whether it marked a loss.
     fn drain_names(
         fifo: &mut SidecarFifo,
         budget: usize,
         max_line: usize,
     ) -> (Vec<String>, DrainStop, bool) {
-        let (mut markers, mut counters, mut idx, mut truncated) =
-            (Vec::new(), Vec::new(), 0, false);
-        let (_, stop) = fifo.drain(
-            &mut markers,
-            &mut idx,
-            &mut counters,
-            None,
-            max_line,
-            budget,
-            &mut truncated,
-        );
-        (
-            markers.into_iter().map(|m| m.name).collect(),
-            stop,
-            truncated,
-        )
+        let mut capture = FifoCapture::default();
+        let (_, stop) = fifo.drain(&mut capture, None, max_line, budget);
+        let lost = capture.loss.stream_lost();
+        (marker_names(capture), stop, lost)
     }
 
-    /// The last drain stops at its budget while a writer keeps writing, and
-    /// marks the capture incomplete; one that empties the FIFO does not.
+    /// The last drain stops at its budget with records left behind it, or
+    /// with a line pending while a writer stays open, and marks the capture
+    /// incomplete; one that empties the FIFO does not.
     #[test]
     fn the_last_drain_is_bounded_and_marks_what_it_left_unread() {
         use std::io::Write;
@@ -1558,25 +1990,31 @@ mod tests {
         let mut fifo = SidecarFifo::create(&dir, &DEFAULT_MEASUREMENT_TUNABLES).unwrap();
         let mut writer = fs::OpenOptions::new().write(true).open(&fifo.path).unwrap();
         writer.write_all(b"1 A\n2 B\n").unwrap();
-        let (mut markers, mut counters, mut idx, mut truncated) =
-            (Vec::new(), Vec::new(), 0, false);
-        fifo.drain_final(
-            &mut markers,
-            &mut idx,
-            &mut counters,
-            1024,
-            4,
-            &mut truncated,
+        let mut capture = FifoCapture::default();
+        fifo.drain_final(&mut capture, 1024, 4);
+        assert_eq!(capture.records.len(), 1);
+        assert!(
+            capture.loss.fifo_unread,
+            "records left past the budget may be unread"
         );
-        assert_eq!(markers.len(), 1);
-        assert!(truncated, "records left past the budget may be unread");
+
+        // A line left without its newline while a writer stays open is
+        // never read either.
+        writer.write_all(b"3 C").unwrap();
+        let mut capture = FifoCapture::default();
+        fifo.drain_after_exit(&mut capture, 1024);
+        assert_eq!(capture.records.len(), 1, "B is read");
+        assert!(capture.loss.fifo_unread, "the pending 3 C is lost");
 
         drop(writer);
-        let (mut markers, mut counters, mut idx, mut truncated) =
-            (Vec::new(), Vec::new(), 0, false);
-        fifo.drain_after_exit(&mut markers, &mut idx, &mut counters, 1024, &mut truncated);
-        assert_eq!(markers.len(), 1);
-        assert!(!truncated, "an emptied FIFO is complete");
+        fifo.reopen().unwrap();
+        let mut writer = fs::OpenOptions::new().write(true).open(&fifo.path).unwrap();
+        writer.write_all(b"4 D\n").unwrap();
+        drop(writer);
+        let mut capture = FifoCapture::default();
+        fifo.drain_after_exit(&mut capture, 1024);
+        assert_eq!(capture.records.len(), 1);
+        assert!(!capture.loss.any(), "an emptied FIFO is complete");
     }
 
     /// The budget counts every byte consumed and stops the drain at once,

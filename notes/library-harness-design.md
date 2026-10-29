@@ -401,10 +401,11 @@ Each changes R10 or R9 text above for a reason found while building it;
 - The artefact `stream` object: `{"state": "sealed"|"failed"|"open",
   "drops": <u64>}`; `open` is a sink that was never sealed (its call's
   `brokkr.seal` already fails the run).
-- Verification capture has no storage cap of its own: the caps of
-  docs/commands/measure.md "Trajectory capture limits" bound what a measured
-  run stores, and a verification run that hits one has lost records, so its
-  streams are incomplete. Completeness for the verdict and completeness of a
+- A verification capture uses the measured caps of
+  docs/commands/measure.md "Trajectory capture limits" (the default
+  `MeasurementTunables`; link 3 found the earlier wording here, "no storage
+  cap of its own", untrue), and a verification run that hits one has lost
+  records, so its streams are incomplete. Completeness for the verdict and completeness of a
   stored trajectory (slice 6) are separate facts.
 - In a tagged record, a body starting `@@` is a sealing emission
   `@@NAME=VALUE` (NAME nonempty, no `=` or newline; VALUE an i64), and a body
@@ -435,6 +436,61 @@ Each changes R10 or R9 text above for a reason found while building it;
   nonempty; for the others the verdict is reported and judges nothing.
 - Phases: a call's markers between `entry_us` and `return_us` are its
   phases, the last ending at `return_us`; markers after return are its tail.
+
+### R11a Amendments made by slice 3 (link 3, sparred with codex over three rounds)
+
+Each changes or sharpens R11; `docs/commands/library.md` "The call stream"
+is the binding text.
+
+- **Proven defects fail whatever was lost** (stricter than R11, which judged
+  values only when complete): losing records cannot manufacture a sealing
+  value that differs from the snapshot, a sealing name the snapshot lacks,
+  an ordinary observation above its final value, or a sealing or terminal
+  record of a call that did not seal, so each fails even on a lossy
+  capture. Only "every snapshot counter has its sealing emission" needs a
+  complete stream; incompleteness otherwise makes the verdict unevaluated.
+  Checked before any snapshot comparison: an unsealed call has no snapshot.
+- **Order violations**, from the producer contract (admission closes and
+  every callback returns, each line already written atomically, before the
+  first sealing write; the FIFO keeps write order; a line is stamped before
+  it is written): an ordinary record arriving after the first sealing
+  emission; any ordinary record stamped later than the earliest sealing or
+  terminal record; sealing and terminal records not stamped nondecreasing
+  in arrival order (one thread stamps and writes them, a new producer
+  obligation); a name emitted twice; a second terminal; anything after the
+  terminal.
+- **`drops` is the sink's final count, its own terminal record's drop
+  included**, and the terminal's `N` counts the drops before it. So a
+  terminal that arrived must equal the artefact (state and drops), and no
+  terminal with no reader loss and an artefact counting 0 drops is a
+  contradiction that fails, for `sealed` and `failed` alike (an `open`
+  sink, of a call that did not seal, writes no terminal and is
+  unevaluated).
+- **`stream.state` is `open` exactly when `seal.state` is not `sealed`**,
+  refused in the call document otherwise: a sink is terminalized only by a
+  successful seal of its invocation, and an invocation that does not seal
+  leaves it open and writes nothing terminal (a producer transition rule,
+  on the pbfhogg list).
+- **The census**: undeclared call ids are judged from a census the drain
+  keeps of every tagged record's call id, kept or not by the record
+  budgets, bounded at the declared call count plus one, so an overflow
+  proves an undeclared id. It is checked on every released run whatever
+  the exit, outside the artefact path.
+- **Sealing names** are 1 to 400 bytes at the parser (R10a's shared
+  domain): a longer one is a rejected line.
+- **Capture model**: one arrival-ordered `Vec<Record>` (marker, counter,
+  sealing, terminal) replaces the two typed vectors, so no index can
+  disagree with the order; `marker_idx` keeps its meaning (marker rank, a
+  dropped marker included). Sealing emissions count against the counter
+  budget and terminals against the marker budget, as budgets only: they
+  are never markers (no stop match, no last-marker note, no phase).
+- **Loss split**: `CaptureLoss` holds rejected lines, FIFO unread (read
+  error or exhausted final drain), records capped, samples capped, output
+  truncated. A call stream reads `stream_lost` (the first three); the
+  stored `capture_truncated` column holds `stored_incomplete`, which also
+  counts any sink-end record, since sidecar.db has no place for them yet.
+- **FIFO capacity**: each FIFO instance asks `F_SETPIPE_SZ` for 1 MiB and
+  ignores a refusal; nothing depends on it.
 
 ### R12 CLI equality (slice 4; findings 2, 7, 8)
 
@@ -616,17 +672,12 @@ code. Sizes are rough source-plus-tests lines.
    inventory, `brokkr.seal`, the post-run layout check, the verdict and kept
    evidence. Landed whole, nothing deferred, plus the bounded FIFO drain
    (R10a); about 2000 source and test lines.
-3. **Call streams.** The tagged-record extension in `parse_fifo_record`, the
-   split of `capture_truncated` into reader loss and its other causes (its
-   causes now also include a FIFO read error and an exhausted final drain,
-   R10a; `HarnessRun.stream_incomplete` carries the combined flag today), an
-   arrival order shared by markers and counters (the capture keeps one order
-   per record type only, so slice 2's `stream.txt` lists them in two
-   sections; R11's "nothing of the call arrived after the terminal" needs the
-   shared order, so slice 3 adds it to the capture), call
-   `stream` in describe, the per-call verdict over the artefact `stream`
-   object slice 2 already validates, and `brokkr.stream`, phases and tail in
-   the report. About 1000.
+3. **Call streams** (link 3, landed). The tagged-record extension in
+   `parse_fifo_record`, the split of `capture_truncated` into `CaptureLoss`,
+   one arrival order for every record kind, call `stream` in describe, the
+   per-call verdict, `brokkr.stream`, phases and tail in the report, the
+   census of undeclared call ids. Landed whole with the amendments of R11a,
+   nothing deferred out of it; about 1300 source and test lines.
 4. **CLI equality.** The second build before handles, call `cli` in
    describe, the run-scoped `PbfhoggBinary` invocation context and the
    pbfhogg.md placement-rule update, generated-role content digests, replay,
@@ -638,7 +689,13 @@ code. Sizes are rough source-plus-tests lines.
    plan and context digests (R13), iteration agreement, the results.db group
    write and migration, sidecar.db call boundaries and the closed final
    interval, `--compare` pairing. About 2200, one slice: a split would store
-   trajectories whose call ends no view can show.
+   trajectories whose call ends no view can show. Moved here by slice 3, in
+   the same sidecar.db migration (about 150 more): store sink-end records
+   (sealing emissions and terminals, R11a) so a library trajectory with
+   them is no longer stored as incomplete, and store each record's arrival
+   position so counters read back in arrival order (`sidecar_counters`
+   today has no index and reads `ORDER BY timestamp_us, name`).
+   `Timeline::closed` exists for the closed final interval.
 7. **Hotpath and close.** `hotpath` and `isolation` in describe,
    `--hotpath`/`--alloc`; then the chain's close: delete this file, file the
    pbfhogg list, comment on and close #46 naming slice 8 as not built. About
@@ -680,6 +737,15 @@ only carry a harness written after that.
   so it is serial by construction; slice 4's replays must keep R9's
   one-launch-at-a-time rule explicitly. `library.md` now has nine `##`
   sections and is section-addressed.
+- Slice 3 (link 3): as planned, with the amendments of R11a. Where a later
+  link starts: `stream.rs` holds the verdict (`judge`, `undeclared_failure`,
+  `summary_line`); `collect_results` in `run.rs` adds `brokkr.stream` after
+  `brokkr.seal` for a call whose `Call.stream` is nonempty, and slice 5
+  reads that list as the result's coverage; `CallDoc` now carries the
+  typed `snapshot` and `stream`; `HarnessRun` carries `records`, `loss` and
+  `calls_seen`. A measured library run (slice 6) gets the same
+  `SidecarData.records`, so its per-iteration verdict can call `judge`
+  unchanged. `library.md` has ten `##` sections.
 
 ## The pbfhogg list
 
@@ -699,7 +765,13 @@ Filed by the chain's last link with `bz new -p pbfhogg`, once settled.
 - Sink sealing: per-call state cell, `MarkerFifo::call` refusing an issued
   id, sealing emissions and the terminal record (R11), per-sink drop counts,
   and refusing tagged marker bodies starting `!` and counter names starting
-  `@`.
+  `@`. As R11a and `docs/commands/library.md` "The call stream" state: a
+  sink is terminalized only by a successful seal of its invocation (an
+  unsealed one stays `open` and writes nothing terminal); one thread stamps
+  and writes the sealing emissions, then the terminal, in order; the
+  artefact `stream.drops` is the final count including a dropped terminal,
+  the terminal's `N` the count before it; sealing names within the 400-byte
+  snapshot name domain.
 - `Invocation::cancel()` returning `BeforeDecision`, `AfterDecision` or
   `NoPublicationPending`, linearized with the publication decision.
 - A reserving fd provider shipped by the library, for concurrent
