@@ -5,7 +5,8 @@ workspace member that links the library at the commit under test and runs
 scripted sequences of library calls in one process; pbfhogg writes it to the
 protocol below, and a pbfhogg commit without that member has nothing for this
 command to build. `brokkr library` builds the harness per commit (so
-`--commit` works) and, today, lists the scenarios it declares.
+`--commit` works), lists the scenarios it declares, and runs one as a
+verification.
 
 pbfhogg owns what a call does: the scenarios, the library calls they make
 and the assertions about them that only the process itself can judge. brokkr
@@ -24,19 +25,32 @@ releases is not promised until it is.
 
 ```
 brokkr library [--commit REF] [--debug | --release | --profile NAME]
+brokkr library SCENARIO [--dataset NAME] [--snapshot KEY] [--commit REF] [...]
 ```
 
-Builds the harness and lists the scenarios it declares: per scenario its id,
-call count, deadline and description, then one line per call, role and
-assertion. The listing is data on stdout; build narration goes where
+Bare, builds the harness and lists the scenarios it declares: per scenario
+its id, call count, deadline and description, then one line per call, role
+and assertion. The listing is data on stdout; build narration goes where
 `brokkr man output-channels` says.
 
+With `SCENARIO`, runs that scenario once as a verification (see Running a
+scenario): quiet on pass, one result line; loud on fail, every failure and
+the kept run directory, exiting non-zero. A scenario the describe document
+does not declare is refused, naming the ones it does.
+
 - `--commit REF` builds the harness from a git worktree at REF. Config,
-  including `[pbfhogg.library]`, still comes from the current tree. A commit
-  that predates the harness member fails its build.
+  including `[pbfhogg.library]` and the host's datasets and scratch, still
+  comes from the current tree. A commit that predates the harness member
+  fails its build.
 - `--debug`, `--release`, `--profile NAME` choose the cargo profile,
   overriding the config's `debug`/`profile`. The default is release: the
   library is measured in release, and one build serves every use.
+- `--dataset NAME` (default the shared default dataset, as every pbfhogg
+  command) and `--snapshot KEY` (default `base`, the dataset's primary data)
+  choose the files the scenario's dataset roles bind. There is no
+  `--variant`: each dataset role names its own variant, resolved in the
+  chosen dataset and snapshot as `brokkr man datasets` describes, its
+  `xxhash` checked when one is configured. Both need `SCENARIO`.
 
 ## `[pbfhogg.library]`
 
@@ -66,9 +80,11 @@ names the CLI package only (`brokkr man run`).
 
 ## Running the harness
 
-The harness is invoked with one mode flag:
+The harness is invoked in one of two modes:
 
 - `HARNESS --describe-harness` prints the describe document.
+- `HARNESS --test-harness REQUEST --private-dir DIR` runs one scenario (see
+  The run protocol).
 
 ### Describe mode
 
@@ -170,3 +186,187 @@ character.
   run scratch. `owner` is a call id of this scenario, exactly one, so no two
   calls write one path.
 - `kind: pbf` declares a PBF file.
+
+## Running a scenario
+
+`brokkr library SCENARIO` holds the brokkr lock from before the run
+directory exists until it is removed, and makes one harness launch.
+
+**The run directory.** brokkr allocates `<scratch>/library/<scenario>/run-N/`
+(N one past the highest present) under the host's scratch directory and
+lays it out before the launch:
+
+- `request.json`, the request;
+- `cwd/`, empty: the harness's working directory;
+- `artefacts/`, empty: `BROKKR_HARNESS_ARTEFACT_DIR`;
+- `roles/`: each `output`, `scratch` and `generated` role is bound to
+  `roles/<role id>`. Output roles of every kind and generated file and PBF
+  roles start absent; scratch roles and generated directory roles start as
+  empty directories.
+
+Dataset roles bind the resolved dataset file. Every bound path is absolute
+and canonical, the run directory's included.
+
+**The request.**
+
+```json
+{"protocol": 1, "scenario": "repeat-cat", "iteration": 0,
+ "bindings": {"input": "/abs/data/denmark.osm.pbf", "out-a": "/abs/.../roles/out-a"}}
+```
+
+`bindings` names every role of the scenario and nothing else. `iteration`
+counts the processes of one run from 0; a verification makes one. The
+private directory is never in the request: its name is made at the launch,
+after the request is written.
+
+**The reservation.** The launch is reserved like every pbfhogg launch
+(`brokkr man pbfhogg`, Launch reservations and the private directory): it
+reads the bound dataset files, writes the bound role paths, and holds the
+whole run directory as write coverage, so the lease the harness inherits
+protects the request, `cwd/` and the artefacts too, for as long as any
+process holds it. Its private directory goes in the run directory. Nothing
+else is launched in the run, and the launch is released (its lease free)
+before anything in the directory is judged.
+
+## The run protocol
+
+`HARNESS --test-harness REQUEST --private-dir DIR` runs in `cwd/` with
+`BROKKR_HARNESS_ARTEFACT_DIR` (the `artefacts/` directory) and
+`BROKKR_MARKER_FIFO` set. The FIFO is always attached: a call's wall
+readings come from `MarkerFifo::now_us()`, a clock only an opened FIFO has.
+`DIR` is the launch's private directory, for the library's staging and
+scratch.
+
+- **Exit.** 0: it ran and every result it reported passed. 1: it ran and
+  some result it reported is `fail` or `unevaluated`. 2: it could not run
+  the request (one it cannot honour, a schedule that would break role
+  ownership); it may write `artefacts/refusal.json`,
+  `{"protocol": 1, "reason": ONE_LINE}` (1 to 1000 bytes). Any other exit,
+  a signal, or the scenario's `deadline_s` passing fails the run; at the
+  deadline brokkr kills the harness's process group.
+- **Output.** stdout and stderr stay empty on every exit; any byte fails
+  the run, and an output still open after the harness exited cannot be
+  shown empty and fails too. Diagnostics go through `host::Diagnostics`
+  into the call documents.
+- **Producer obligations**, which brokkr does not check: the harness reads
+  only the request, the bound input roles and the private directory, and
+  writes only its artefact directory, the roles its calls or setup own and
+  the private directory; setup is deterministic and runs before any call;
+  the call schedule honours ownership; it sets its own soft `RLIMIT_NOFILE`
+  where a scenario's plan says so, before any library work, and reports it
+  in the call context; it never resets `SIGPIPE` to its default; and no
+  process it started reads or writes the run directory after it exits.
+  What brokkr checks of the file system is detection under that last
+  obligation: it sees what survived, never a read, nor a write undone
+  before exit.
+
+## The artefacts
+
+Read on exit 0 and 1 only. `artefacts/` holds exactly `scenario.json` and
+`calls/`, and `calls/` exactly one `<call id>.json` per declared call; any
+other entry, a symlink, a special file, or a document over 16 MiB fails the
+run. No file is followed through a symlink. Every document follows
+Documents above.
+
+**`scenario.json`**: `protocol`, `scenario` (the scenario's id), `plan` and
+`assertions` (the scenario-level results).
+
+**`calls/<id>.json`**:
+
+- `protocol`; `call`, the file's call id.
+- `entry_us`, `return_us`, `seal_us`: `MarkerFifo::now_us()` at command
+  entry, at return, and when sealing ended; each 0 to 2^63-1, with
+  `entry_us <= return_us <= seal_us`. `return_us - entry_us` and
+  `seal_us - entry_us` must each be at most the process wall brokkr observed
+  (spawn to the ending it saw) plus one second. The bound is relative on
+  purpose: readings of one opened FIFO share its clock, whose origin is not
+  reliable. That the readings sit at those boundaries is the harness's
+  obligation.
+- `outcome`: `{"status": "ok"}`, `{"status": "cancelled"}`, or
+  `{"status": "error", "kind": ID, "message": ONE_LINE}` (an identifier,
+  and 0 to 1000 bytes). Reported; the harness's assertions judge it.
+- `publications`: every publication the call decided, in order, each
+  `{"ordinal", "decision", "installed"}`: ordinals 1, 2, ... without gaps;
+  `decision` `authorized`, `refused_cancelled` or `refused_error`;
+  `installed` a boolean, never true for a refused one.
+- `cancel`: `null`, or what `Invocation::cancel()` returned:
+  `{"result": "before_decision", "ordinal": K}` (K a `refused_cancelled`
+  publication), `{"result": "after_decision", "ordinal": K}` (K an
+  `authorized` one), or `{"result": "no_publication_pending"}`. After a
+  cancel's K, every publication is refused. brokkr checks this consistency
+  and nothing else of order; order judgments are the harness's assertions.
+- `seal`: `{"state": "sealed", "outstanding_blocks": 0}`,
+  `{"state": "outstanding", "outstanding_blocks": N}` (N at least 1), or
+  `{"state": "refused", "reason": ONE_LINE}` (1 to 1000 bytes).
+- `snapshot`: when sealed, the call's final counters, name to an integer
+  0 to 2^64-1, each name 1 to 400 bytes without `=` or a newline (so its
+  sealing record fits a FIFO line); otherwise `null`.
+- `stream`: `{"state": "sealed"|"failed"|"open", "drops": N}` (N 0 to
+  2^64-1), the call sink's own account. brokkr validates its shape and does
+  not yet judge it.
+- `context`: a nonempty object, every effective per-call setting.
+- `diagnostics`: the call's captured `host::Diagnostics` events, each
+  `{"kind", "key", "message", "truncated"}`. `kind` is an identifier, the
+  event kind's name in lower case (any kind, so a new one needs no brokkr
+  change); `key` is 1 to 200 bytes; `message` is at most 4000 bytes, and a
+  longer one is cut by the harness at a character boundary with `truncated`
+  true. brokkr prints them and never judges them.
+- `assertions`: this call's results.
+
+**Results**: `{"id", "status", "detail"}`, `status` `pass`, `fail` or
+`unevaluated`, `detail` any text of at most 4000 bytes. Across the
+documents the results are exactly the inventory: one per declared
+assertion, in `scenario.json` for `call: null`, else in its call's
+document. A missing, duplicate, undeclared or misplaced result fails the
+run, naming it.
+
+**Plan and context** are the harness's to define; brokkr interprets
+neither. Each stays in a plain value domain: objects with unique keys,
+arrays, strings without NUL, booleans, `null` and integers in -2^63 to
+2^64-1 (no other number, and not `-0`). `plan` holds `calls`, an object
+whose keys are exactly the declared call ids, each a nonempty object. No
+string in either, object keys included, may contain the run directory's
+absolute spelling or a bound dataset file's (as resolved, or canonical).
+That is a narrow check on the value domain, not proof that the plan is free
+of run-specific paths: relative spellings and split strings pass it.
+
+## The verdict
+
+After the launch is released, brokkr checks the run directory against its
+layout: exactly `request.json` (bytes unchanged), `cwd/` (the same
+directory, still empty), `artefacts/` and `roles/`, nothing else (the
+private directory went with the lease); in `roles/` only bound role names,
+each absent or of its kind (a regular file for `file` and `pbf`, a
+directory for `directory`), whatever its source, since a call that is
+cancelled or fails before publishing leaves its output absent. An entry
+that is not the directory it should be (a symlink in place of the run
+directory itself, `cwd/`, `roles/` or `artefacts/`) is a failure and is
+never traversed (in place of the run directory, nothing below it is read
+or written), and a directory that cannot be listed fails too. A stop seen
+up to a passing run's removal interrupts it, its directory kept; the
+removal commits the pass.
+
+The run fails on a release that finds the lease still held (then nothing
+in the run directory is read or written: some process may still change
+it), a layout breach, any output, a bad exit or the deadline, an invalid or
+incomplete artefact tree, an exit inconsistent with the harness's own
+results (0 with a result that is not `pass`, 1 with none), or any result
+that is not `pass`. `unevaluated` fails exactly as `fail` does; the report
+keeps them apart.
+
+brokkr adds one result per call, `<call>/brokkr.seal`: `pass` only for a
+sealed call, since the snapshot exists only then. A result brokkr adds
+never makes the harness's exit inconsistent.
+
+On pass, brokkr prints each diagnostic and one result line, and removes the
+run directory through the reservation gate (a refused removal is a warning,
+and the directory stays). On fail, it prints every failure, results as
+`<call>/<id>` or, for a scenario-level one, `<id>`, with any detail
+indented beneath; harness-supplied text is printed with control characters
+escaped. It writes `evidence/` into the run directory (`stdout`, `stderr`,
+`stream.txt` with the FIFO records as parsed, markers then counters, each in
+arrival order, `failures.txt`), and keeps
+the directory, naming it. Routine `brokkr clean` removes kept run
+directories through the gate (`brokkr man clean`); the cleanup after an
+interrupted command never does. An interrupted run, including one stopped
+after the harness exited, keeps its directory and exits as interrupted.

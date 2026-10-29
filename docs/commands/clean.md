@@ -93,7 +93,13 @@ Bare `brokkr clean`, in order:
   kept and skipped while the rest of the clean goes on, and a tree holding a
   `.pbfhogg-backup-*` is never removed; it also removes the fixed-name
   `.brokkr-pbfhogg/` directories one earlier brokkr left in scratch and the
-  data dir. Other pbfhogg scratch files survive. Sidecar
+  data dir. The run directories a failed `brokkr library` run kept
+  (`<scratch>/library/<scenario>/run-N/`) go each through the gate, so one
+  an orphaned harness still holds stays alone, and a scenario directory left
+  empty goes with them; only in a clean run by hand, never in the cleanup
+  after an interrupted command, which runs after the command released the
+  lock that protects a live run between its launches. Other pbfhogg scratch
+  files survive. Sidecar
   marker FIFOs in the configured scratch root are removed only when both their
   reserved `.sidecar-*.fifo` name shape and FIFO type match; clean does not
   parse a PID from the name.

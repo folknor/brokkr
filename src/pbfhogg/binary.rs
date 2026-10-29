@@ -411,10 +411,7 @@ impl PbfhoggBinary {
 
 /// The variables brokkr hands a running harness, which describe mode must not
 /// see even when brokkr itself inherited them.
-const HARNESS_RUN_ENV: [&str; 2] = [
-    crate::sidecar::MARKER_FIFO_ENV,
-    "BROKKR_HARNESS_ARTEFACT_DIR",
-];
+const HARNESS_RUN_ENV: [&str; 2] = [crate::sidecar::MARKER_FIFO_ENV, HARNESS_ARTEFACT_DIR_ENV];
 
 /// How long describe mode may take.
 const DESCRIBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
@@ -431,7 +428,9 @@ pub(crate) struct LibraryHarness {
     path: PathBuf,
     identity: FileIdentity,
     project_root: PathBuf,
-    _hold: Option<crate::lockfile::LockGuard>,
+    /// The brokkr lock for the handle's life, on which a running harness
+    /// child's pid is published (`None` only for test fixtures).
+    hold: Option<crate::lockfile::LockGuard>,
     _registered: HandleToken,
 }
 
@@ -491,7 +490,7 @@ impl LibraryHarness {
             path: path.to_path_buf(),
             identity: FileIdentity::of(&meta),
             project_root: project_root.to_path_buf(),
-            _hold: hold,
+            hold,
             _registered: registered,
         })
     }
@@ -574,6 +573,135 @@ impl LibraryHarness {
             )));
         }
         Ok(capture.captured.stdout)
+    }
+}
+
+/// The environment variable naming the run's artefact directory.
+pub(crate) const HARNESS_ARTEFACT_DIR_ENV: &str = "BROKKR_HARNESS_ARTEFACT_DIR";
+
+/// The stdout and stderr kept from a verification run for its report; any
+/// byte fails it.
+const RUN_OUTPUT_KEPT: usize = 64 * 1024;
+
+/// One launch of `HARNESS --test-harness REQUEST --private-dir DIR`
+/// (`docs/commands/library.md`), as the run directory lays it out.
+pub(crate) struct HarnessLaunch<'a> {
+    /// The run directory: reserved whole as coverage, and where the private
+    /// directory goes.
+    pub(crate) run_dir: &'a Path,
+    pub(crate) request: &'a Path,
+    pub(crate) cwd: &'a Path,
+    pub(crate) artefacts: &'a Path,
+    /// Bound dataset files, reserved for reading.
+    pub(crate) reads: Vec<PathBuf>,
+    /// Bound output, scratch and generated role paths, reserved for writing.
+    pub(crate) writes: Vec<PathBuf>,
+    pub(crate) deadline: std::time::Duration,
+    pub(crate) fifo: &'a mut crate::sidecar::SidecarFifo,
+}
+
+/// What one harness launch came to. The child has been reaped and the launch
+/// released, or the release failed (`released`).
+pub(crate) struct HarnessRun {
+    pub(crate) ending: crate::output::child::Ending,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
+    /// Either stream went past the kept bytes (it was not empty).
+    pub(crate) output_truncated: bool,
+    /// The child exited but its output did not close in time.
+    pub(crate) output_cut: bool,
+    /// Spawn to the observed ending, before output settled or the release.
+    pub(crate) elapsed: std::time::Duration,
+    pub(crate) markers: Vec<crate::sidecar::Marker>,
+    pub(crate) counters: Vec<crate::sidecar::Counter>,
+    /// The FIFO reader lost or may have missed records.
+    pub(crate) stream_incomplete: bool,
+    /// The launch's release: an error leaves the lease held by some process.
+    pub(crate) released: Result<(), DevError>,
+}
+
+impl LibraryHarness {
+    /// Run the harness on one request, reserved as `launch` lays it out:
+    /// the whole run directory as coverage, the dataset files read, the role
+    /// paths written, a private directory in the run directory. The FIFO
+    /// reader outlives the release, so a child that still writes is never
+    /// cut off by a closed reader.
+    pub(crate) fn run(&self, launch: HarnessLaunch<'_>) -> Result<HarnessRun, DevError> {
+        self.check_identity()?;
+        let program = crate::utf8_path::path_string(&self.path)?;
+        let request = crate::utf8_path::path_string(launch.request)?;
+        let artefacts = crate::utf8_path::path_string(launch.artefacts)?;
+        let spec = crate::reservations::LaunchSpec::new(
+            launch.cwd.to_path_buf(),
+            launch.reads,
+            launch.writes,
+            Some(launch.run_dir.to_path_buf()),
+        )
+        .with_coverage(vec![launch.run_dir.to_path_buf()]);
+        let args = vec![
+            "--test-harness".to_owned(),
+            request,
+            "--private-dir".to_owned(),
+            PRIVATE_DIR_PLACEHOLDER.to_owned(),
+        ];
+        let launched = spec.launch(&self.path, &args, launch.cwd, &[])?;
+        let fifo_path = launch.fifo.path_str()?.to_owned();
+        let env = [
+            (HARNESS_ARTEFACT_DIR_ENV, artefacts.as_str()),
+            (crate::sidecar::MARKER_FIFO_ENV, fifo_path.as_str()),
+        ];
+        let sigterm = crate::shutdown::SigtermGuard::install();
+        let start = std::time::Instant::now();
+        let child = match crate::output::child::spawn_captured(
+            &program,
+            &launched.arg_refs(),
+            launch.cwd,
+            &env,
+            crate::shutdown::ChildIsolation::ProcessGroup(&sigterm),
+            crate::output::SpawnProfile::Plain,
+        ) {
+            Ok(child) => child,
+            Err(e) => {
+                if let Err(release) = launched.finish() {
+                    output::warn(&release.to_string());
+                }
+                return Err(e);
+            }
+        };
+        if let Some(hold) = &self.hold {
+            hold.set_child_pid(child.id());
+        }
+        let capture = crate::sidecar::run_sidecar_with_deadline(
+            child,
+            launch.fifo,
+            0,
+            start,
+            None,
+            Some(launch.deadline),
+            &crate::sidecar::DEFAULT_MEASUREMENT_TUNABLES,
+            crate::output::child::CaptureCap {
+                stdout: RUN_OUTPUT_KEPT + 1,
+                stderr: RUN_OUTPUT_KEPT + 1,
+            },
+            &mut crate::sidecar::ProcSidecarSampler,
+        );
+        if let Some(hold) = &self.hold {
+            hold.clear_child_pid();
+        }
+        drop(sigterm);
+        let released = launched.finish();
+        Ok(HarnessRun {
+            ending: capture.data.ending,
+            stdout: capture.stdout,
+            stderr: capture.stderr,
+            output_truncated: capture.stdout_truncated || capture.stderr_truncated,
+            output_cut: capture.output_cut,
+            elapsed: capture.elapsed,
+            markers: capture.data.markers,
+            counters: capture.data.counters,
+            stream_incomplete: capture.data.summary.capture_truncated,
+            released,
+        })
     }
 }
 

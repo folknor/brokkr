@@ -54,6 +54,7 @@ impl BenchHarness {
             self.stop_marker.as_deref(),
             ceiling,
             &crate::sidecar::DEFAULT_MEASUREMENT_TUNABLES,
+            crate::output::child::CaptureCap::MEASUREMENT,
             &mut crate::sidecar::ProcSidecarSampler,
         );
         drop(signal_guard);

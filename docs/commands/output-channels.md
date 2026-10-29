@@ -179,8 +179,9 @@ run mode stores nothing for any command.
 
 ### pbfhogg
 
-All measurable pbfhogg commands share one dispatch path
-(`run_pbfhogg_wallclock` -> `run_external_ok`), so the answer is uniform:
+All measurable pbfhogg commands share one dispatch path (the shared measure
+runner, `src/measure/runner.rs`, through `run_external_prepared`, the body of
+`run_external_ok`), so the answer is uniform:
 sidecar **yes**, stderr-kv **no** in the sense of the `elapsed_ms=` timing
 contract - any stderr `key=value` lines are still scraped as counters (see
 above). `elapsed_ms` in the result is brokkr's own best-of-N wall-clock, not
@@ -208,6 +209,11 @@ self-reported.
 | diff-snapshots | run_external_ok | yes | counters |
 | repack | run_external_ok | yes | counters |
 | degrade | run_external_ok | yes | counters |
+
+(`brokkr library SCENARIO` is a correctness check too and records to neither
+DB: the harness gets the FIFO, its records are parsed and kept only as a
+failed run's evidence, and its stdout and stderr must stay empty; see
+`brokkr man library`.)
 
 (`verify` subcommands are correctness checks, not benchmarks - they don't
 record to either DB. Their listing-producing steps and every reference-tool

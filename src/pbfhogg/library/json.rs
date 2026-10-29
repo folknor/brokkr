@@ -159,6 +159,89 @@ impl<'a> Field<'a> {
         }
     }
 
+    pub(crate) fn as_bool(&self) -> Result<bool, String> {
+        match self.value {
+            Json::Bool(b) => Ok(*b),
+            _ => Err(self.wrong("a boolean")),
+        }
+    }
+
+    /// An object read as a map of free keys, in document order, each value
+    /// located as `path["key"]` (the key quoted, as it is arbitrary text).
+    /// A duplicate key is refused.
+    pub(crate) fn as_members(&self) -> Result<Vec<(&'a str, Field<'a>)>, String> {
+        let Json::Object(members) = self.value else {
+            return Err(self.wrong("an object"));
+        };
+        let mut seen = BTreeSet::new();
+        let mut out = Vec::with_capacity(members.len());
+        for (key, value) in members {
+            if !seen.insert(key.as_str()) {
+                return Err(format!("{}: duplicate key {key:?}", self.path));
+            }
+            out.push((
+                key.as_str(),
+                Field {
+                    value,
+                    path: format!("{}[{key:?}]", self.path),
+                },
+            ));
+        }
+        Ok(out)
+    }
+
+    /// Refuse anything outside the plain value domain anywhere below this
+    /// value: a number that is not an integer, a duplicate key, a string or
+    /// key holding NUL, or a string or key containing any of `forbidden`.
+    pub(crate) fn check_plain(&self, forbidden: &[&str]) -> Result<(), String> {
+        let text = |s: &str, what: &str| -> Result<(), String> {
+            if s.contains('\0') {
+                return Err(format!("{}: {what} holds a NUL character", self.path));
+            }
+            match forbidden.iter().find(|f| !f.is_empty() && s.contains(**f)) {
+                Some(found) => Err(format!(
+                    "{}: {what} contains the run-specific path {found:?}",
+                    self.path
+                )),
+                None => Ok(()),
+            }
+        };
+        match self.value {
+            Json::Null | Json::Bool(_) | Json::Int(_) => Ok(()),
+            Json::NotInteger => Err(self.wrong("an integer")),
+            Json::Str(s) => text(s, "the string"),
+            Json::Array(_) => self
+                .as_array()?
+                .iter()
+                .try_for_each(|item| item.check_plain(forbidden)),
+            Json::Object(_) => {
+                for (key, value) in self.as_members()? {
+                    value.check_key(key, forbidden)?;
+                    value.check_plain(forbidden)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// [`check_plain`](Self::check_plain)'s rule for the key that reaches
+    /// this value.
+    fn check_key(&self, key: &str, forbidden: &[&str]) -> Result<(), String> {
+        if key.contains('\0') {
+            return Err(format!("{}: the key holds a NUL character", self.path));
+        }
+        match forbidden
+            .iter()
+            .find(|f| !f.is_empty() && key.contains(**f))
+        {
+            Some(found) => Err(format!(
+                "{}: the key contains the run-specific path {found:?}",
+                self.path
+            )),
+            None => Ok(()),
+        }
+    }
+
     /// An integer in `min..=max`.
     pub(crate) fn as_int_in(&self, min: i128, max: i128) -> Result<i128, String> {
         match self.value {

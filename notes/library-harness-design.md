@@ -333,6 +333,57 @@ source, variant or owner). Data output on stdout; build narration through
   is not pass. A failed run is never a sample; its run directory (request,
   artefacts, captured stdout and stderr, the parsed stream) is kept and named.
 
+### R10a Amendments made by slice 2 (link 2, sparred with codex over three rounds)
+
+Each changes R10 or R9 text above for a reason found while building it;
+`docs/commands/library.md` states the result and is the binding text.
+
+- **Diagnostics** are `{"kind", "key", "message", "truncated"}`, not
+  `{"level", "message"}`: pbfhogg's `host::Event` carries a kind
+  (`EventKind`, non_exhaustive) and a static key, and dropping the key loses
+  what identifies the event. `kind` is an R6 identifier, the producer's
+  lowercased `EventKind` Debug name (a mapping that also covers variants it
+  does not know); `key` 1 to 200 bytes of any text; `message` at most 4000
+  bytes, cut by the harness at a character boundary with `truncated` true,
+  so a cut is visible. No control-character restriction: brokkr escapes on
+  print.
+- **Role layout after the run**: every role path is absent or of its kind,
+  for every source. R10's "a directory role is a directory" made an output
+  directory that a cancelled or failing call never created a layout breach,
+  so such scenarios could not be expressed.
+- **Release failure** is its own branch: a launch whose lease is still held
+  after the child exited fails the run at once, and brokkr neither runs the
+  layout check nor reads or writes anything in the run directory (some
+  process may still mutate it). The layout check runs only after a
+  successful release, so a leftover private directory is never reported as
+  a layout breach.
+- **Producer obligation added**: no process the harness started reads or
+  writes the run directory after it exits. brokkr's file-system checks
+  (unfollowed reads, `lstat` types) are detection under it, never
+  protection against a live mutator.
+- **Artefact `stream`** is accepted and shape-validated in slice 2 (state
+  `sealed`/`failed`/`open`, `drops` u64), judged by slice 3, so a producer
+  writing the R10 call document is not refused.
+- **Result detail** is any text of at most 4000 bytes (R10's only limit);
+  the report indents it and escapes control characters. `outcome` is an
+  object: `{"status": "ok"}`, `{"status": "cancelled"}`, or
+  `{"status": "error", "kind": ID, "message": ONE_LINE 0..1000}`. A seal
+  refusal's `reason` and a harness refusal's `reason` are one line, 1 to
+  1000 bytes. Snapshot counter names are 1 to 400 bytes without `=` or a
+  newline, so a sealing record `TS %CALL @@NAME=VALUE` fits the 512-byte line
+  whatever the call id and value (slice 3 must use the same name domain).
+- **Binding**: `--dataset` and `--snapshot` only. Each dataset role names
+  its variant, so a `--variant` flag would contradict the role; the slice
+  plan's `--variant` was a slip.
+- **The FIFO** lives in the project state root (`.brokkr/`, as measured
+  runs), never in the run directory, so R9's four-entry layout holds.
+- **FIFO drains are byte-bounded** (4 MiB per tick, 16 MiB for the last
+  drain after the child ended; exhausting the last marks the capture
+  incomplete): the existing drain read until the FIFO was empty, so a child
+  writing without pause starved the supervisor's deadline and shutdown
+  checks. Fixed in `SidecarFifo` itself, so measured runs have it too; a
+  drain read error now also marks the capture incomplete.
+
 ### R11 Call streams (slice 3; ledger, findings 3, 9, 14)
 
 - The extension applies to every tagged record in every capture; the
@@ -554,8 +605,8 @@ code. Sizes are rough source-plus-tests lines.
    `LibraryHarness` build and handle in `binary.rs`, describe capture,
    strict parse and validation of the R7 fields, the listing, the man topic
    `library`, config docs, a fixture harness script in tests. About 1400.
-2. **Verification run.** `brokkr library SCENARIO` with
-   `--dataset/--variant/--snapshot` binding, the run directory and its
+2. **Verification run** (link 2, landed). `brokkr library SCENARIO` with
+   `--dataset/--snapshot` binding, the run directory and its
    layout (R9), `LaunchSpec` coverage and the whole-directory reservation
    of the harness launch, the serial-launch rule, the wall bound, the
    interrupt-cleanup exemption and gated removal, the request,
@@ -563,12 +614,19 @@ code. Sizes are rough source-plus-tests lines.
    deadline, empty stdout/stderr, the artefact tree and documents (R10, the
    stream not yet judged), the plan and context domain checks (R13), the
    inventory, `brokkr.seal`, the post-run layout check, the verdict and kept
-   evidence. About 2300; the largest slice, not splittable without a dead
-   layer.
+   evidence. Landed whole, nothing deferred, plus the bounded FIFO drain
+   (R10a); about 2000 source and test lines.
 3. **Call streams.** The tagged-record extension in `parse_fifo_record`, the
-   split of `capture_truncated` into reader loss and its other causes, call
-   `stream` in describe, the per-call verdict and `brokkr.stream`, phases and
-   tail in the report. About 1000.
+   split of `capture_truncated` into reader loss and its other causes (its
+   causes now also include a FIFO read error and an exhausted final drain,
+   R10a; `HarnessRun.stream_incomplete` carries the combined flag today), an
+   arrival order shared by markers and counters (the capture keeps one order
+   per record type only, so slice 2's `stream.txt` lists them in two
+   sections; R11's "nothing of the call arrived after the terminal" needs the
+   shared order, so slice 3 adds it to the capture), call
+   `stream` in describe, the per-call verdict over the artefact `stream`
+   object slice 2 already validates, and `brokkr.stream`, phases and tail in
+   the report. About 1000.
 4. **CLI equality.** The second build before handles, call `cli` in
    describe, the run-scoped `PbfhoggBinary` invocation context and the
    pbfhogg.md placement-rule update, generated-role content digests, replay,
@@ -609,6 +667,19 @@ only carry a harness written after that.
   the example in `docs/commands/library.md` kept equal to the one in
   `describe_tests.rs` by a test. The doc has five `##` sections; at eight it
   becomes section-addressed, so keep one subject per `##`.
+- Slice 2 (link 2): as planned, with the amendments of R10a. Where a later
+  link starts: `pbfhogg::library::library` dispatches bare to the listing
+  and `SCENARIO` to `run_one` (dataset binding, `run::verify`, the report);
+  `run.rs` owns the run directory, the request, the post-run layout check
+  and the verdict (`judge_artefacts` is where slice 3 adds the stream
+  verdict beside `brokkr.seal`, slice 4 the replays after the release);
+  `artefact.rs` reads the tree and every document; `LibraryHarness::run` in
+  `binary.rs` is the one harness launch (`HarnessLaunch` in, `HarnessRun`
+  out, the launch released before it returns); `LaunchSpec::with_coverage`
+  is the reservation-only coverage. A run makes exactly one launch today,
+  so it is serial by construction; slice 4's replays must keep R9's
+  one-launch-at-a-time rule explicitly. `library.md` now has nine `##`
+  sections and is section-addressed.
 
 ## The pbfhogg list
 

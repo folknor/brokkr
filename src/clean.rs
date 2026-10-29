@@ -227,7 +227,7 @@ pub(crate) fn cmd_clean(
     // repoint). Routine scratch: reproducible, and nothing else reaches them.
     clean_rustflags_target_dirs(&pi.target_dir, &c)?;
 
-    clean_scratch(project, &paths, &c)?;
+    clean_scratch(project, &paths, &c, interrupted)?;
 
     // Elivagar's default `-o` target for `pmtiles-corpus mutate` is a
     // brokkr-designated scratch location. `ocean-build_tmp` is not passed by
@@ -362,6 +362,7 @@ fn clean_scratch(
     project: &Project,
     paths: &config::ResolvedPaths,
     c: &Cleaner,
+    interrupted: bool,
 ) -> Result<(), DevError> {
     if *project == Project::Elivagar {
         let elivagar = layout::ElivagarLayout::new(paths);
@@ -403,6 +404,13 @@ fn clean_scratch(
                 output::count(removed, "pbfhogg scratch output")
             ));
         }
+        // Only by hand: between two launches of a library run no lease
+        // covers its directory, and the cleanup after an interrupt runs after
+        // the command dropped the lock that does, so it could remove a live
+        // run of another brokkr.
+        if !interrupted {
+            clean_library_runs(paths, c)?;
+        }
     }
 
     // The reserved basename envelope and FIFO type identify a sidecar pipe;
@@ -418,6 +426,31 @@ fn clean_scratch(
             "{} {}",
             c.verb(),
             output::count(fifo_count, "sidecar FIFO")
+        ));
+    }
+    Ok(())
+}
+
+/// Remove the `brokkr library` run directories a failed run kept, each
+/// through the reservation gate, so a run an orphan still holds keeps only
+/// itself; a scenario directory left empty goes through the gate too.
+fn clean_library_runs(paths: &config::ResolvedPaths, c: &Cleaner) -> Result<(), DevError> {
+    let layout = layout::PbfhoggLayout::new(paths);
+    let mut removed = 0usize;
+    for (scenario, runs) in layout.library_run_dirs() {
+        for run in &runs {
+            removed += usize::from(c.guarded_dir(run)?);
+        }
+        let empty = std::fs::read_dir(&scenario).is_ok_and(|mut e| e.next().is_none());
+        if empty && !c.dry_run {
+            c.guarded_dir(&scenario)?;
+        }
+    }
+    if removed > 0 {
+        output::run_msg(&format!(
+            "{} {}",
+            c.verb(),
+            output::count(removed, "library run directory")
         ));
     }
     Ok(())

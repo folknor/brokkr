@@ -12,7 +12,7 @@ Invoked as `brokkr` from any project root. Reads `brokkr.toml` for project detec
 
 These files are not auto-loaded - read them on demand based on what the user asks. Don't `wc` them before reading - just Read them.
 
-They are also compiled into the binary and readable as `brokkr man <topic>` (bare `brokkr man` lists the topics available in the current project). Topics are project-filtered by the same `Visibility` the CLI uses. When editing this list, update `TOPICS` to match.
+The `docs/` files are also compiled into the binary and readable as `brokkr man <topic>` (bare `brokkr man` lists the topics available in the current project); the `reference/` files are not. Topics are project-filtered by the same `Visibility` the CLI uses. When editing this list, update `TOPICS` to match.
 
 A doc with 8+ `##` sections is **section-addressed**: `brokkr man conventions script_check` prints that section alone and bare `brokkr man conventions` lists the sections. Slugs derive from the headings (`src/man/sections.rs`), so a doc's `##` structure is its lookup surface - keep one subject per `##`, or it can't be reached.
 
@@ -44,6 +44,7 @@ A doc with 8+ `##` sections is **section-addressed**: `brokkr man conventions sc
 - `docs/commands/ratatoskr-gate.md` - ratatoskr `--gate` and gate.db.
 - `docs/commands/service.md` - ratatoskr `service`.
 - `docs/commands/corpus.md` - piners `brokkr corpus`.
+- `docs/commands/library.md` - pbfhogg `brokkr library` and the library harness protocol.
 - `docs/projects/pbfhogg-vs-elivagar.md` - how the two dispatch layers differ.
 - `docs/projects/pbfhogg.md`, `elivagar.md`, `nidhogg.md`, `dellingr.md`, `mogwai.md`, `litehtml.md`, `sluggrs.md`, `ratatoskr.md`, `piners.md` - per-project commands and internals.
 

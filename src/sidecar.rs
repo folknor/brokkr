@@ -805,7 +805,12 @@ impl SidecarFifo {
         Ok(())
     }
 
-    /// Drain all pending lines from the FIFO, parsing markers and counters.
+    /// Drain pending lines from the FIFO, parsing markers and counters, until
+    /// it is empty, closed, or `budget` bytes were consumed (discarded bytes
+    /// of an overlong line included), so a child writing without pause cannot
+    /// keep the supervisor from its shutdown and deadline checks. A line cut
+    /// by the budget resumes on the next drain. Returns the stop marker that
+    /// matched, if any, and why draining stopped.
     ///
     /// Non-blocking: returns immediately if no data is available.
     ///
@@ -813,6 +818,7 @@ impl SidecarFifo {
     /// - `<timestamp_us> <name>\n` - phase marker
     /// - `<timestamp_us> @<name>=<value>\n` - counter
     /// - either body after `%<call_id> ` - the same record in that call's stream
+    #[allow(clippy::too_many_arguments)]
     fn drain(
         &mut self,
         markers: &mut Vec<Marker>,
@@ -820,15 +826,18 @@ impl SidecarFifo {
         counters: &mut Vec<Counter>,
         stop_spec: Option<&StopSpec>,
         max_line_bytes: usize,
+        budget: usize,
         capture_truncated: &mut bool,
-    ) -> Option<String> {
+    ) -> (Option<String>, DrainStop) {
         let mut rejected_lines = 0usize;
         let mut last_name: Option<String> = None;
         let mut preferred_stop: Option<String> = None;
         let mut fallback_stop: Option<String> = None;
-        loop {
-            match self.read_bounded_line(max_line_bytes) {
-                Ok(BoundedLine::Pending) => break,
+        let mut budget = budget;
+        let stop = loop {
+            match self.read_bounded_line(max_line_bytes, &mut budget) {
+                Ok(BoundedLine::Pending) => break DrainStop::Closed,
+                Ok(BoundedLine::Budget) => break DrainStop::Budget,
                 Ok(BoundedLine::TooLong) => {
                     rejected_lines += 1;
                     *capture_truncated = true;
@@ -897,10 +906,17 @@ impl SidecarFifo {
                         }
                     }
                 }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(_) => break,
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    break DrainStop::Drained;
+                }
+                Err(e) => {
+                    // Records may be lost with the read: damage, not data.
+                    *capture_truncated = true;
+                    console::warn(&format!("sidecar FIFO read failed: {e}"));
+                    break DrainStop::Failed;
+                }
             }
-        }
+        };
         if rejected_lines > 0 {
             // Stored, so a later query still says the trajectory is damaged.
             *capture_truncated = true;
@@ -911,21 +927,80 @@ impl SidecarFifo {
         if let Some(name) = last_name {
             crate::lockfile::activity::note_marker(Some(&name));
         }
-        preferred_stop.or(fallback_stop)
+        (preferred_stop.or(fallback_stop), stop)
+    }
+
+    /// The last drain, once the child ended, under the final budget. An
+    /// exhausted budget may leave records unread (possible, not proven
+    /// drops: nothing is read past it to find out), which marks the capture
+    /// incomplete.
+    fn drain_after_exit(
+        &mut self,
+        markers: &mut Vec<Marker>,
+        next_marker_idx: &mut i32,
+        counters: &mut Vec<Counter>,
+        max_line_bytes: usize,
+        capture_truncated: &mut bool,
+    ) {
+        self.drain_final(
+            markers,
+            next_marker_idx,
+            counters,
+            max_line_bytes,
+            FINAL_DRAIN_BUDGET,
+            capture_truncated,
+        );
+    }
+
+    /// [`drain_after_exit`](Self::drain_after_exit) under `budget`.
+    fn drain_final(
+        &mut self,
+        markers: &mut Vec<Marker>,
+        next_marker_idx: &mut i32,
+        counters: &mut Vec<Counter>,
+        max_line_bytes: usize,
+        budget: usize,
+        capture_truncated: &mut bool,
+    ) {
+        let (_, stop) = self.drain(
+            markers,
+            next_marker_idx,
+            counters,
+            None,
+            max_line_bytes,
+            budget,
+            capture_truncated,
+        );
+        if stop == DrainStop::Budget {
+            *capture_truncated = true;
+        }
     }
 
     /// Read one FIFO line without allowing a child to make the sidecar's
     /// temporary line buffer grow beyond `max_bytes`. An overlong record is
-    /// consumed through its newline and reported as `TooLong`.
-    fn read_bounded_line(&mut self, max_bytes: usize) -> std::io::Result<BoundedLine> {
+    /// consumed through its newline and reported as `TooLong`. At most
+    /// `budget` bytes are consumed, and it is decreased by what was: a line
+    /// the budget cuts is kept pending and `Budget` returned, and a newline
+    /// counts only when it lies within the budget.
+    fn read_bounded_line(
+        &mut self,
+        max_bytes: usize,
+        budget: &mut usize,
+    ) -> std::io::Result<BoundedLine> {
         loop {
+            if *budget == 0 {
+                return Ok(BoundedLine::Budget);
+            }
             let next = {
                 let available = self.reader.fill_buf()?;
                 if available.is_empty() {
                     None
                 } else {
-                    let line_end = available.iter().position(|byte| *byte == b'\n');
-                    let consume = line_end.map_or(available.len(), |index| index + 1);
+                    let window = available
+                        .get(..(*budget).min(available.len()))
+                        .unwrap_or_default();
+                    let line_end = window.iter().position(|byte| *byte == b'\n');
+                    let consume = line_end.map_or(window.len(), |index| index + 1);
                     let body_len = line_end.unwrap_or(consume);
                     let copy_len = if self.pending_line_too_long {
                         0
@@ -950,6 +1025,7 @@ impl SidecarFifo {
                 self.pending_line.clear();
             }
             self.reader.consume(consume);
+            *budget = budget.saturating_sub(consume);
             if line_end {
                 return Ok(self.finish_pending_line(true));
             }
@@ -994,12 +1070,35 @@ impl SidecarFifo {
 }
 
 enum BoundedLine {
+    /// The writers closed with nothing pending.
     Pending,
+    /// The drain's byte budget ran out; any partial line stays pending.
+    Budget,
     TooLong,
     /// Bytes left without a newline when the writers closed.
     Fragment,
     Line(Vec<u8>),
 }
+
+/// Why one drain stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DrainStop {
+    /// Nothing more to read for now; writers are still open.
+    Drained,
+    /// Every writer closed and nothing is left.
+    Closed,
+    /// The byte budget ran out; records may remain unread.
+    Budget,
+    /// A read failed; the capture is marked incomplete.
+    Failed,
+}
+
+/// Bytes one supervisor tick may consume from the FIFO.
+const TICK_DRAIN_BUDGET: usize = 4 * 1024 * 1024;
+
+/// Bytes the drain after the child ended may consume. A descendant still
+/// writing past it leaves records unread, which marks the capture incomplete.
+const FINAL_DRAIN_BUDGET: usize = 16 * 1024 * 1024;
 
 impl Drop for SidecarFifo {
     fn drop(&mut self) {
@@ -1119,6 +1218,7 @@ pub(crate) fn run_sidecar_with_deadline(
     stop_marker: Option<&str>,
     deadline: Option<Duration>,
     tunables: &MeasurementTunables,
+    capture_cap: child::CaptureCap,
     sampler: &mut dyn SidecarSampler,
 ) -> SidecarRunResult {
     // The shared child supervisor owns process polling and process-group
@@ -1148,6 +1248,7 @@ pub(crate) fn run_sidecar_with_deadline(
     let label = format!("sidecar run {}", run_idx + 1);
     let options = child::ChildOptions {
         poll_interval: tick_interval,
+        capture_cap,
         ..child::ChildOptions::MEASUREMENT
     };
     let run = child::supervise_child(
@@ -1170,12 +1271,13 @@ pub(crate) fn run_sidecar_with_deadline(
                 }
             }
 
-            let matched = fifo.drain(
+            let (matched, _) = fifo.drain(
                 &mut markers,
                 &mut marker_idx,
                 &mut counters,
                 stop_spec.as_ref(),
                 tunables.max_fifo_line_bytes,
+                TICK_DRAIN_BUDGET,
                 &mut capture_truncated,
             );
             let matched = matched?;
@@ -1185,11 +1287,10 @@ pub(crate) fn run_sidecar_with_deadline(
         },
     );
 
-    fifo.drain(
+    fifo.drain_after_exit(
         &mut markers,
         &mut marker_idx,
         &mut counters,
-        None,
         tunables.max_fifo_line_bytes,
         &mut capture_truncated,
     );
@@ -1206,10 +1307,8 @@ pub(crate) fn run_sidecar_with_deadline(
         [samples.len(), markers.len(), counters.len()],
         wall_time_ms,
     ));
-
-    let sample_count = i32::try_from(samples.len()).unwrap_or(i32::MAX);
-    let marker_count = i32::try_from(markers.len()).unwrap_or(i32::MAX);
-
+    let count = |n: usize| i32::try_from(n).unwrap_or(i32::MAX);
+    let (sample_count, marker_count) = (count(samples.len()), count(markers.len()));
     SidecarRunResult {
         stdout: run.stdout,
         stderr: run.stderr,
@@ -1338,6 +1437,7 @@ mod tests {
             &mut counters,
             None,
             DEFAULT_MEASUREMENT_TUNABLES.max_fifo_line_bytes,
+            TICK_DRAIN_BUDGET,
             &mut truncated,
         );
 
@@ -1417,11 +1517,135 @@ mod tests {
             &mut counters,
             None,
             DEFAULT_MEASUREMENT_TUNABLES.max_fifo_line_bytes,
+            TICK_DRAIN_BUDGET,
             &mut truncated,
         );
         assert_eq!(markers.len(), 1);
         assert_eq!(markers[0].call.as_deref(), Some("a"));
         assert!(truncated);
+    }
+
+    /// One budgeted drain: the marker names it parsed and why it stopped.
+    fn drain_names(
+        fifo: &mut SidecarFifo,
+        budget: usize,
+        max_line: usize,
+    ) -> (Vec<String>, DrainStop, bool) {
+        let (mut markers, mut counters, mut idx, mut truncated) =
+            (Vec::new(), Vec::new(), 0, false);
+        let (_, stop) = fifo.drain(
+            &mut markers,
+            &mut idx,
+            &mut counters,
+            None,
+            max_line,
+            budget,
+            &mut truncated,
+        );
+        (
+            markers.into_iter().map(|m| m.name).collect(),
+            stop,
+            truncated,
+        )
+    }
+
+    /// The last drain stops at its budget while a writer keeps writing, and
+    /// marks the capture incomplete; one that empties the FIFO does not.
+    #[test]
+    fn the_last_drain_is_bounded_and_marks_what_it_left_unread() {
+        use std::io::Write;
+        let dir = crate::test_scratch::scratch("sidecar", "fifo_final_budget");
+        let mut fifo = SidecarFifo::create(&dir, &DEFAULT_MEASUREMENT_TUNABLES).unwrap();
+        let mut writer = fs::OpenOptions::new().write(true).open(&fifo.path).unwrap();
+        writer.write_all(b"1 A\n2 B\n").unwrap();
+        let (mut markers, mut counters, mut idx, mut truncated) =
+            (Vec::new(), Vec::new(), 0, false);
+        fifo.drain_final(
+            &mut markers,
+            &mut idx,
+            &mut counters,
+            1024,
+            4,
+            &mut truncated,
+        );
+        assert_eq!(markers.len(), 1);
+        assert!(truncated, "records left past the budget may be unread");
+
+        drop(writer);
+        let (mut markers, mut counters, mut idx, mut truncated) =
+            (Vec::new(), Vec::new(), 0, false);
+        fifo.drain_after_exit(&mut markers, &mut idx, &mut counters, 1024, &mut truncated);
+        assert_eq!(markers.len(), 1);
+        assert!(!truncated, "an emptied FIFO is complete");
+    }
+
+    /// The budget counts every byte consumed and stops the drain at once,
+    /// even right after a completed line; a line it cuts resumes intact on
+    /// the next drain, and a newline past the budget does not complete it.
+    #[test]
+    fn a_drain_stops_at_its_byte_budget_and_resumes_the_cut_line() {
+        use std::io::Write;
+        let dir = crate::test_scratch::scratch("sidecar", "fifo_budget");
+        let mut fifo = SidecarFifo::create(&dir, &DEFAULT_MEASUREMENT_TUNABLES).unwrap();
+        let mut writer = fs::OpenOptions::new().write(true).open(&fifo.path).unwrap();
+        // "1 A\n" is 4 bytes, "2 BB\n" 5, "3 CCC\n" 6.
+        writer.write_all(b"1 A\n2 BB\n3 CCC\n").unwrap();
+        let line = 1024;
+
+        // Budget ending on the first newline: one line, then stop.
+        assert_eq!(
+            drain_names(&mut fifo, 4, line),
+            (vec!["A".to_owned()], DrainStop::Budget, false)
+        );
+        // Budget ending just before the next newline: nothing completes.
+        assert_eq!(
+            drain_names(&mut fifo, 4, line),
+            (vec![], DrainStop::Budget, false)
+        );
+        // The cut line resumes; a budget past its newline completes it and
+        // the next, and stops inside the third.
+        assert_eq!(
+            drain_names(&mut fifo, 3, line),
+            (vec!["BB".to_owned()], DrainStop::Budget, false)
+        );
+        assert_eq!(
+            drain_names(&mut fifo, 100, line),
+            (vec!["CCC".to_owned()], DrainStop::Drained, false)
+        );
+
+        // A partial line pending at WouldBlock is kept, not a fragment.
+        writer.write_all(b"4 DD").unwrap();
+        assert_eq!(
+            drain_names(&mut fifo, 100, line),
+            (vec![], DrainStop::Drained, false)
+        );
+        writer.write_all(b"DD\n").unwrap();
+        assert_eq!(
+            drain_names(&mut fifo, 100, line),
+            (vec!["DDDD".to_owned()], DrainStop::Drained, false)
+        );
+
+        // An overlong line spanning several budgets is discarded whole.
+        writer
+            .write_all(format!("5 {}\n6 E\n", "x".repeat(40)).as_bytes())
+            .unwrap();
+        assert_eq!(
+            drain_names(&mut fifo, 10, 16),
+            (vec![], DrainStop::Budget, false)
+        );
+        assert_eq!(
+            drain_names(&mut fifo, 10, 16),
+            (vec![], DrainStop::Budget, false)
+        );
+        let (names, stop, truncated) = drain_names(&mut fifo, 100, 16);
+        assert_eq!((names, stop), (vec!["E".to_owned()], DrainStop::Drained));
+        assert!(truncated, "the overlong line marks the capture damaged");
+
+        drop(writer);
+        assert_eq!(
+            drain_names(&mut fifo, 100, line),
+            (vec![], DrainStop::Closed, false)
+        );
     }
 
     fn marker(idx: i32, ts: i64, name: &str) -> Marker {

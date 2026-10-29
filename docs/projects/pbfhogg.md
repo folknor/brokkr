@@ -14,8 +14,9 @@
   [Launch reservations](#launch-reservations-and-the-private-directory).
   Also `LibraryHarness`, the handle on the built library harness.
 - `src/pbfhogg/library/` - `brokkr library`, pbfhogg used as a library
-  through a harness a pbfhogg workspace member provides; the command and its
-  protocol are `brokkr man library`.
+  through a harness a pbfhogg workspace member provides: listing its
+  scenarios and verifying one; the command and its protocol are
+  `brokkr man library`.
 - `src/pbfhogg/argv.rs` - `PbfArgv`, an argv with what it reads, writes and
   scratches.
 - `src/pbfhogg/...` - benchmarks (read, write, merge, commands, extract,
@@ -134,8 +135,13 @@ per subcommand.
 
 **The lease.** Before the spawn, brokkr creates `<id>.lock` in
 `~/.brokkr/launch-leases/`, flocks it, and writes a durable record of every
-path the launch declared - inputs read, outputs written, the private
-directory - all synced before the private directory exists. The child, and
+path the launch declared - inputs read, outputs written, any coverage, the
+private directory - all synced before the private directory exists.
+Coverage is a tree reserved for writing around the launch's own paths: the
+library harness's launch covers its whole run directory (`brokkr man
+library`), so the lease protects the request and artefacts beside its
+outputs. It is reservation only: the private directory's placement compares
+outputs alone, and the release never removes it. The child, and
 only that child, inherits the locked description (it is made inheritable in
 the child between fork and exec; every other descriptor brokkr opens stays
 close-on-exec), and gets the parent-death signal and the orphan token test
@@ -159,7 +165,8 @@ outlived its run, at a later scan.
 
 **What the reservation protects.** Every brokkr deletion, rename or
 replacement that can touch these paths - `brokkr clean`'s removals of
-pbfhogg's verify output and scratch, a pbfhogg measured run's scratch dirs,
+pbfhogg's verify output and scratch, a `brokkr library` run directory's
+removal, a pbfhogg measured run's scratch dirs,
 verify's per-check directories, the plan and bench cleanups, the staged
 writes of dataset files and of a child's output, snapshot promotion, a
 generated extract config, a `--commit` worktree's removal (its target dir,

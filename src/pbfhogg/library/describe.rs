@@ -126,7 +126,7 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Describe, String> {
 }
 
 /// Refuse any protocol version but the one this brokkr implements.
-fn protocol(obj: &Obj<'_>) -> Result<(), String> {
+pub(super) fn protocol(obj: &Obj<'_>) -> Result<(), String> {
     let field = obj.required("protocol")?;
     let version = field.as_int_in(i128::from(i64::MIN), i128::from(u64::MAX))?;
     if version == PROTOCOL {
@@ -314,7 +314,7 @@ fn assertion(item: &Field<'_>, calls: &BTreeSet<&str>) -> Result<Assertion, Stri
 
 /// `[a-z0-9][a-z0-9_.-]{0,63}`: valid as a FIFO call id, a file name and a
 /// command-line word without escaping.
-fn is_identifier(id: &str) -> bool {
+pub(super) fn is_identifier(id: &str) -> bool {
     let bytes = id.as_bytes();
     !bytes.is_empty()
         && bytes.len() <= 64
@@ -324,7 +324,7 @@ fn is_identifier(id: &str) -> bool {
         })
 }
 
-fn identifier(field: &Field<'_>) -> Result<String, String> {
+pub(super) fn identifier(field: &Field<'_>) -> Result<String, String> {
     let id = field.as_str()?;
     if is_identifier(id) {
         Ok(id.to_owned())
@@ -355,10 +355,15 @@ fn variant(field: &Field<'_>) -> Result<String, String> {
 }
 
 fn one_line(field: &Field<'_>) -> Result<String, String> {
+    one_line_in(field, 1, TEXT_LIMIT)
+}
+
+/// One-line text (no control character) of `min..=max` bytes.
+pub(super) fn one_line_in(field: &Field<'_>, min: usize, max: usize) -> Result<String, String> {
     let text = field.as_str()?;
-    if text.is_empty() || text.len() > TEXT_LIMIT {
+    if text.len() < min || text.len() > max {
         return Err(format!(
-            "{}: must be 1 to {TEXT_LIMIT} bytes, is {}",
+            "{}: must be {min} to {max} bytes, is {}",
             field.path(),
             text.len()
         ));

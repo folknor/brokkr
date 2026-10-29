@@ -27,6 +27,9 @@ pub(crate) struct LaunchSpec {
     reads: Vec<PathBuf>,
     writes: Vec<PathBuf>,
     private_in: Option<PathBuf>,
+    /// Reserved for writing beside the argv's own paths, never outputs:
+    /// placement does not see them and release never removes them.
+    coverage: Vec<PathBuf>,
 }
 
 impl LaunchSpec {
@@ -44,7 +47,18 @@ impl LaunchSpec {
             reads,
             writes,
             private_in,
+            coverage: Vec::new(),
         }
+    }
+
+    /// Also reserve `coverage` for writing while the launch lives: a tree the
+    /// child's outputs, private directory and other files sit in (a library
+    /// run directory), so the lease the child carries protects all of it.
+    /// Reservation only: not an output, so the private directory's placement
+    /// never compares its mount, and the release keeps it.
+    pub(crate) fn with_coverage(mut self, coverage: Vec<PathBuf>) -> Self {
+        self.coverage = coverage;
+        self
     }
 
     #[cfg(test)]
@@ -98,6 +112,7 @@ impl LaunchSpec {
             .iter()
             .map(|p| (p, Access::Read))
             .chain(self.writes.iter().map(|p| (p, Access::Write)))
+            .chain(self.coverage.iter().map(|p| (p, Access::Write)))
         {
             resources.push(Resource::new(&spell(path)?, access, Disposition::Reserve));
         }
@@ -598,6 +613,49 @@ mod tests {
         assert!(super::super::guard::is_refusal(&err), "{err}");
         launched.finish().unwrap();
         assert!(!report.exists(), "removed with the lease");
+    }
+
+    /// Coverage reserves a whole tree around the launch's own paths, its
+    /// private directory inside it, without conflicting with them, and
+    /// outlives the release, which removes only the private directory.
+    #[test]
+    fn coverage_reserves_a_tree_and_survives_the_release() {
+        let _serial = crate::test_scratch::process_global_lock();
+        let root = crate::test_scratch::scratch("reservations", "launch-coverage");
+        let run = root.join("run-1");
+        let roles = run.join("roles");
+        std::fs::create_dir_all(&roles).unwrap();
+        std::fs::write(run.join("request.json"), b"{}").unwrap();
+        let spec = LaunchSpec::new(
+            run.clone(),
+            Vec::new(),
+            vec![roles.join("out")],
+            Some(run.clone()),
+        )
+        .with_coverage(vec![run.clone()]);
+        let program = Path::new("/bin/true");
+        let args = vec![PRIVATE_DIR_PLACEHOLDER.to_owned()];
+        let launched = spec.launch(program, &args, &run, &[]).unwrap();
+        let private = PathBuf::from(&launched.args[0]);
+        assert!(private.starts_with(&run) && private.is_dir());
+        let err = super::super::guard::remove_file(&run.join("request.json")).unwrap_err();
+        assert!(super::super::guard::is_refusal(&err), "{err}");
+        let rival = LaunchSpec::new(
+            root.clone(),
+            vec![run.join("request.json")],
+            Vec::new(),
+            None,
+        );
+        assert!(rival.launch(program, &[], &root, &[]).is_err());
+        launched.finish().unwrap();
+        assert!(
+            !private.exists(),
+            "the private directory goes with the lease"
+        );
+        assert!(
+            run.join("request.json").is_file(),
+            "coverage is never removed"
+        );
     }
 
     #[test]

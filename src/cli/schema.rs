@@ -1765,15 +1765,32 @@ Examples:
         #[command(subcommand)]
         verify: VerifyCommand,
     },
-    /// List the library-use scenarios the pbfhogg harness declares
+    /// List or verify the library-use scenarios of the pbfhogg harness
     ///
     /// Builds the harness member `[pbfhogg.library.harness]` names, asks it
-    /// for its describe document (`--describe-harness`), validates it, and
-    /// lists each scenario with its calls, roles and assertions.
+    /// for its describe document (`--describe-harness`) and validates it.
+    /// Bare, lists each scenario with its calls, roles and assertions; with
+    /// SCENARIO, runs that scenario once as a verification, quiet on pass
+    /// and loud on fail, keeping a failed run's directory as evidence.
     ///
     /// In depth: `brokkr man library`.
     #[command(display_order = 12)]
     Library {
+        /// The scenario to run, by id; omit to list them.
+        #[arg(value_name = "SCENARIO")]
+        scenario: Option<String>,
+
+        /// Dataset name from brokkr.toml whose files bind the scenario's
+        /// dataset roles, each in the variant the role declares. Defaults
+        /// to the shared default dataset.
+        #[arg(long, value_name = "NAME", requires = "scenario")]
+        dataset: Option<String>,
+
+        /// Snapshot key of the dataset to bind: `base` (or omit) for its
+        /// primary data, or a key under `[dataset.snapshot.<key>]`.
+        #[arg(long, value_name = "KEY", requires = "scenario")]
+        snapshot: Option<crate::datasets::resolve::SnapshotRef>,
+
         /// Build the harness with the dev profile (`<target>/debug/`).
         /// Overrides `[pbfhogg.library.harness] debug`.
         #[arg(long, conflicts_with = "release")]

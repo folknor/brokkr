@@ -401,6 +401,36 @@ impl<'a> PbfhoggLayout<'a> {
         scratch_dir.join(format!("{prefix}-{command}-output.{extension}"))
     }
 
+    /// `<scratch>/library`: `brokkr library` run directories, one
+    /// `<scenario>/run-N/` each, kept after a failed run.
+    pub(crate) fn library_runs(scratch_dir: &Path) -> PathBuf {
+        scratch_dir.join("library")
+    }
+
+    /// Every directory under [`library_runs`](Self::library_runs) that
+    /// holds runs, and the run directories in each, in name order.
+    pub(crate) fn library_run_dirs(&self) -> Vec<(PathBuf, Vec<PathBuf>)> {
+        let list = |dir: &Path| -> Vec<PathBuf> {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return Vec::new();
+            };
+            let mut dirs: Vec<PathBuf> = entries
+                .flatten()
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .map(|e| e.path())
+                .collect();
+            dirs.sort();
+            dirs
+        };
+        list(&Self::library_runs(self.scratch()))
+            .into_iter()
+            .map(|scenario| {
+                let runs = list(&scenario);
+                (scenario, runs)
+            })
+            .collect()
+    }
+
     pub(crate) fn multi_extract_dir(scratch_dir: &Path) -> PathBuf {
         scratch_dir.join("multi-extract")
     }

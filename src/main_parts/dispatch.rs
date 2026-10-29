@@ -1073,6 +1073,9 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             )
         }
         Command::Library {
+            scenario,
+            dataset,
+            snapshot,
             debug,
             release,
             profile,
@@ -1080,6 +1083,28 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
         } => {
             let library = project_config.pbfhogg_library()?;
             let profile = profile_choice(debug, release, profile.as_ref());
+            // Host paths come from the live tree, also under `--commit`.
+            let paths = match &scenario {
+                Some(_) => {
+                    let pi = context::bootstrap(&detection.build_root)?;
+                    Some(context::bootstrap_config(
+                        dev_config,
+                        &detection.project_root,
+                        &pi.target_dir,
+                    )?)
+                }
+                None => None,
+            };
+            let dataset = dataset.as_deref().unwrap_or(crate::cli::DEFAULT_DATASET);
+            let run = match (&scenario, &paths) {
+                (Some(scenario), Some(paths)) => Some(crate::pbfhogg::library::RunArgs {
+                    scenario,
+                    dataset,
+                    snapshot: crate::datasets::resolve::SnapshotRef::from_opt(snapshot.as_ref()),
+                    paths,
+                }),
+                _ => None,
+            };
             with_worktree(
                 Some(project),
                 &detection.project_root,
@@ -1089,11 +1114,12 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                 &crate::tree_policy::TreePolicy::of(dev_config),
                 context::worktree_keep(dev_config)?,
                 |build_root| {
-                    crate::pbfhogg::library::list(&crate::pbfhogg::library::LibraryArgs {
+                    crate::pbfhogg::library::library(&crate::pbfhogg::library::LibraryArgs {
                         project_root,
                         build_root: build_root.as_path(),
                         harness: &library.harness,
                         profile,
+                        run,
                     })
                 },
             )

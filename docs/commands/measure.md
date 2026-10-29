@@ -552,6 +552,12 @@ Samples, markers, counters, and FIFO records have explicit limits in
 all iterations in one measurement, so a large `--bench N` request cannot
 multiply the retained trajectory without bound. Overlong FIFO records are
 discarded through their newline without growing the temporary line buffer.
+Reading the FIFO is bounded too: each supervisor tick consumes at most 4 MiB
+of it, discarded bytes included, so a child writing without pause cannot
+hold off its deadline or a stop; a record the budget cuts resumes on the
+next tick. After the child ends, one last drain reads at most 16 MiB; a
+child's descendant still writing past that leaves records possibly unread,
+which counts as an omission like the limits above.
 When any limit omits data, the run warns and stores a truncation flag beside
 that iteration's sidecar rows; querying an affected run with `brokkr sidecar`
 warns that the stored trajectory is incomplete.
@@ -559,7 +565,9 @@ warns that the stored trajectory is incomplete.
 The shared child supervisor also bounds captured stdout and stderr: 16 MiB per
 stream for ordinary commands and sidecar measurements, 64 MiB for the ratatoskr
 harness and piners corpus report, and 128 MiB for Cargo output. The
-`[cargo_env]` evaluator and `script_check` have smaller contract-specific limits.
+`[cargo_env]` evaluator, `script_check` and a `brokkr library` verification
+run (whose harness must write nothing, so 64 KiB of each is kept for the
+report) have smaller contract-specific limits.
 The supervisor keeps reading after a limit so the child cannot block on a full
 pipe. A captured command that exceeds its limit fails with a capture error rather
 than returning partial bytes to a result parser. A sidecar measurement retains
