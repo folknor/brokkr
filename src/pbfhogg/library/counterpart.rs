@@ -113,11 +113,33 @@ fn reuse_key(
 }
 
 /// Every counterpart's result, and the replay directories made.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct Equality {
     pub(crate) results: BTreeMap<String, Outcome>,
     /// Names made in the run directory, for the final layout check.
     pub(crate) made: Vec<String>,
+    /// Each timed counterpart's CLI interval and capture, by call, when it
+    /// was valid.
+    pub(crate) timed: BTreeMap<String, CliTimed>,
+}
+
+/// How an isolation scenario's counterpart is timed (`docs/commands/library.md`,
+/// Isolation scenarios): its replay gets a marker FIFO in `fifo_dir`, its
+/// capture is run `iteration`, and with `prepare` its dataset inputs and the
+/// call's retained outputs go through the page-cache preparation first.
+pub(crate) struct Timing<'a> {
+    pub(crate) fifo_dir: &'a Path,
+    pub(crate) iteration: usize,
+    pub(crate) prepare: bool,
+    /// The timed CLI process's capture, kept as soon as its child ended,
+    /// whatever its interval, ending, release or the rest of the run came
+    /// to: its trajectory is stored as the library process's is.
+    pub(crate) captured: std::cell::RefCell<Option<crate::sidecar::SidecarData>>,
+}
+
+/// One timed counterpart's valid CLI command interval.
+pub(crate) struct CliTimed {
+    pub(crate) interval: super::interval::Interval,
 }
 
 /// Replay each counterpart of `scenario` and compare. `bindings` maps every
@@ -127,7 +149,9 @@ pub(crate) struct Equality {
 /// call, which a refusal's library side is judged from. With `reusing`, a
 /// counterpart whose reuse key matches an earlier iteration's is not
 /// replayed: its CLI side is that iteration's, and the library side is
-/// judged as always.
+/// judged as always. With `timing`, an isolation scenario's counterpart is
+/// timed (and never reused: every timed replay runs).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn judge(
     cli: &PbfhoggBinary,
     scenario: &Scenario,
@@ -136,7 +160,9 @@ pub(crate) fn judge(
     docs: &BTreeMap<&str, &CallDoc>,
     layout_ok: bool,
     mut reusing: Option<Reusing<'_>>,
+    timing: Option<&Timing<'_>>,
 ) -> Result<Equality, Stop> {
+    let timing = timing.filter(|_| scenario.isolation);
     let mut equality = Equality::default();
     let mut breached: Option<String> = None;
     for call in &scenario.calls {
@@ -157,9 +183,11 @@ pub(crate) fn judge(
                 run_dir,
                 bindings,
                 doc,
+                timing,
             };
             let key = reusing
                 .as_ref()
+                .filter(|_| timing.is_none())
                 .and_then(|r| reuse_key(cli, scenario, counterpart, r.inputs));
             let cached = match (&reusing, &key) {
                 (Some(r), Some(key)) => r
@@ -170,7 +198,12 @@ pub(crate) fn judge(
                     .map(|e| (e.iteration, e.reports.clone())),
                 _ => None,
             };
-            let (breach, reports) = replay.run(&mut verdict, &mut equality.made, cached)?;
+            let mut timed = None;
+            let (breach, reports) =
+                replay.run(&mut verdict, &mut equality.made, cached, &mut timed)?;
+            if let Some(timed) = timed {
+                equality.timed.insert(call.id.clone(), timed);
+            }
             if let Some(breach) = breach {
                 breached = Some(format!(
                     "the replay of call {} left the run directory breached",
@@ -253,6 +286,8 @@ struct Replay<'a> {
     bindings: &'a BTreeMap<String, PathBuf>,
     /// The call's document.
     doc: &'a CallDoc,
+    /// How the replay is timed, for an isolation scenario's counterpart.
+    timing: Option<&'a Timing<'a>>,
 }
 
 /// What one counterpart came to: a breach that ends every later replay,
@@ -274,12 +309,14 @@ impl Replay<'_> {
     }
 
     /// The replay and its digests, or with `cached` (the iteration whose CLI
-    /// reports are reused, and those reports) the library digests alone.
+    /// reports are reused, and those reports) the library digests alone. A
+    /// timed replay's valid interval and capture go in `timed`.
     fn run(
         &self,
         verdict: &mut Verdict,
         made: &mut Vec<String>,
         cached: Option<(usize, BTreeMap<String, digest::Report>)>,
+        timed: &mut Option<CliTimed>,
     ) -> Result<Ran, Stop> {
         if let Expect::Refusal { exit } = self.counterpart.expect {
             return self.refusal(exit, verdict, made, cached.map(|(i, _)| i));
@@ -324,13 +361,27 @@ impl Replay<'_> {
             deadline: std::time::Duration::from_secs(u64::from(self.scenario.deadline_s)),
             stdout_kept: REPLAY_OUTPUT_KEPT,
         };
-        match self.cli.run_in(argv, &scope) {
-            Supervised::Unsafe(e) => return Err(self.unsafe_launch("replay", &e)),
-            Supervised::Interrupted => return Err(Stop::Interrupted),
-            Supervised::Failed(e) => verdict.fail(format!("the counterpart did not run: {e}")),
-            Supervised::Ran(capture) => {
-                if let Some(why) = bad_ending(&capture.captured) {
-                    verdict.fail(format!("the counterpart {why}"));
+        if let Some(timing) = self.timing {
+            if timing.prepare {
+                match self.prepare() {
+                    Ok(()) => {}
+                    Err(super::prep::NotEstablished::Interrupted) => return Err(Stop::Interrupted),
+                    Err(e) => {
+                        verdict.fail(format!("not replayed: {e}"));
+                        return Ok((None, None));
+                    }
+                }
+            }
+            self.launch_timed(argv, &scope, timing, verdict, timed)?;
+        } else {
+            match self.cli.run_in(argv, &scope) {
+                Supervised::Unsafe(e) => return Err(self.unsafe_launch("replay", &e)),
+                Supervised::Interrupted => return Err(Stop::Interrupted),
+                Supervised::Failed(e) => verdict.fail(format!("the counterpart did not run: {e}")),
+                Supervised::Ran(capture) => {
+                    if let Some(why) = bad_ending(&capture.captured) {
+                        verdict.fail(format!("the counterpart {why}"));
+                    }
                 }
             }
         }
@@ -360,6 +411,101 @@ impl Replay<'_> {
             None,
             verdict,
         )
+    }
+
+    /// The CLI arm's page-cache preparation: its dataset inputs, and the
+    /// call's outputs the library left in `roles/`, which stay for the
+    /// digests.
+    fn prepare(&self) -> Result<(), super::prep::NotEstablished> {
+        let datasets: Vec<PathBuf> = self
+            .counterpart
+            .argv
+            .iter()
+            .filter_map(|t| match t {
+                Token::Input(role) => self
+                    .scenario
+                    .roles
+                    .iter()
+                    .any(|r| r.id == *role && matches!(r.source, RoleSource::Dataset { .. }))
+                    .then(|| self.bindings.get(role).cloned())
+                    .flatten(),
+                _ => None,
+            })
+            .collect();
+        let retained: Vec<PathBuf> = publication::outputs_of(self.scenario, &self.call.id)
+            .map(|r| self.run_dir.join(ROLES_DIR).join(&r.id))
+            .collect();
+        super::prep::prepare(&datasets, &retained)
+    }
+
+    /// Run the replay with a marker FIFO and read the CLI's command interval
+    /// from it: a bad ending fails the result as any replay's does, and an
+    /// invalid interval fails it as invalid timing evidence, never as an
+    /// output defect.
+    fn launch_timed(
+        &self,
+        argv: PbfArgv,
+        scope: &RunScope<'_>,
+        timing: &Timing<'_>,
+        verdict: &mut Verdict,
+        timed: &mut Option<CliTimed>,
+    ) -> Result<(), Stop> {
+        use crate::measure::Timed;
+        let mut fifo = match crate::sidecar::SidecarFifo::create(
+            timing.fifo_dir,
+            &crate::sidecar::DEFAULT_MEASUREMENT_TUNABLES,
+        ) {
+            Ok(fifo) => fifo,
+            Err(e) => {
+                verdict.fail(format!("the counterpart's marker FIFO could not be made: {e}"));
+                return Ok(());
+            }
+        };
+        let run = self.cli.run_in_timed(argv, scope, &mut fifo, timing.iteration);
+        drop(fifo);
+        let run = match run {
+            Timed::Unsafe(e) => return Err(self.unsafe_launch("replay", &e)),
+            Timed::Interrupted => return Err(Stop::Interrupted),
+            Timed::Failed(e) => {
+                verdict.fail(format!("the counterpart did not run: {e}"));
+                return Ok(());
+            }
+            Timed::Ran(run) => *run,
+        };
+        let crate::measure::TimedCapture {
+            capture,
+            data,
+            released,
+        } = run;
+        let interval = super::interval::read(&data, capture.captured.elapsed);
+        // Kept before anything can end the run: an interrupt, an unsafe
+        // release, a bad ending or a later breach still leaves the
+        // trajectory to store.
+        *timing.captured.borrow_mut() = Some(data);
+        let interrupted = matches!(capture.captured.ending, crate::output::Ending::Interrupted);
+        match released {
+            Err(e) if interrupted => {
+                crate::output::warn(&e.to_string());
+                return Err(Stop::Interrupted);
+            }
+            Err(e) => return Err(self.unsafe_launch("replay", &e)),
+            Ok(()) if interrupted => return Err(Stop::Interrupted),
+            Ok(()) => {}
+        }
+        if let Some(why) = bad_ending(&capture.captured) {
+            verdict.fail(format!("the counterpart {why}"));
+            return Ok(());
+        }
+        match interval {
+            Ok(interval) => {
+                #[allow(clippy::cast_precision_loss)]
+                let wall = super::vs_cli::duration(interval.wall_us() as f64);
+                verdict.note(format!("CLI command interval {wall}"));
+                *timed = Some(CliTimed { interval });
+            }
+            Err(why) => verdict.fail(format!("timing evidence invalid: {why}")),
+        }
+        Ok(())
     }
 
     /// Make `replay-<call>/` with an empty `cwd/` and `outputs/`, and in

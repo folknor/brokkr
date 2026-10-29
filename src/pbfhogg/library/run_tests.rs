@@ -173,6 +173,7 @@ fn run_described(f: &Fixture, describe_doc: &str) -> Report {
         },
         None,
         &mut None,
+        &mut None,
     )
     .unwrap()
 }
@@ -652,6 +653,7 @@ fn a_harness_past_its_deadline_is_killed_and_fails() {
             fifo_dir: &f.root.join("state"),
         },
         None,
+        &mut None,
         &mut None,
     )
     .unwrap();
@@ -1219,6 +1221,116 @@ fn diagnostics_show_post_seal_events_and_setup_s() {
     );
 }
 
+/// `with_cli(CAT_CLI)` as an isolation scenario.
+fn isolated() -> String {
+    with_cli(CAT_CLI).replacen(
+        r#""deadline_s": 60,"#,
+        r#""deadline_s": 60, "isolation": true,"#,
+        1,
+    )
+}
+
+/// A fake CLI step that writes the command interval pair to its FIFO.
+const INTERVAL: &str = "[ -p \"$BROKKR_MARKER_FIFO\" ] || exit 7\nprintf '5 CLI_COMMAND_START\\n45 CLI_COMMAND_END\\n' > \"$BROKKR_MARKER_FIFO\"\n";
+
+#[test]
+fn an_isolation_verification_times_its_replay_and_shows_one_line() {
+    let f = fixture("isolation-pass", &equal_harness());
+    cat_extra(&f, INTERVAL);
+    let report = run_described(&f, &isolated());
+    assert!(report.passed, "{:?}", report.failures);
+    assert_eq!(
+        report.timing.as_deref(),
+        Some("a: library call 10us, CLI command interval 40us (one process each, not a measurement)")
+    );
+    assert!(
+        cli_result(&report).detail.contains("CLI command interval 40us"),
+        "{}",
+        cli_result(&report).detail
+    );
+    // Not an isolation scenario: the replay gets no FIFO.
+    let f = fixture("isolation-none", &equal_harness());
+    cat_extra(&f, INTERVAL);
+    let report = run_described(&f, &with_cli(CAT_CLI));
+    assert!(has(&report, "the counterpart exited 7"), "{:?}", report.failures);
+}
+
+#[test]
+fn an_invalid_interval_fails_as_timing_evidence_never_as_inequality() {
+    let f = fixture("isolation-no-markers", &equal_harness());
+    let report = run_described(&f, &isolated());
+    assert!(
+        has(
+            &report,
+            "a/brokkr.cli: fail\n    | timing evidence invalid: the CLI wrote neither"
+        ),
+        "{:?}",
+        report.failures
+    );
+    assert!(!has(&report, "differs"), "{:?}", report.failures);
+    assert!(report.cli.is_none());
+
+    let f = fixture("isolation-two-ends", &equal_harness());
+    cat_extra(
+        &f,
+        "printf '5 CLI_COMMAND_START\\n6 CLI_COMMAND_END\\n7 CLI_COMMAND_END\\n' > \"$BROKKR_MARKER_FIFO\"\n",
+    );
+    let report = run_described(&f, &isolated());
+    assert!(
+        has(&report, "not exactly one of each"),
+        "{:?}",
+        report.failures
+    );
+}
+
+#[test]
+fn a_measured_isolation_process_prepares_both_arms_and_replays_every_iteration() {
+    let f = fixture("measured-isolation", &equal_harness());
+    cat_extra(&f, INTERVAL);
+    let mut reuse = Default::default();
+    let (first, _) = measured(&f, &isolated(), 0, None, &mut reuse);
+    assert!(first.passed, "{:?}", first.failures);
+    let identity = first.identity.clone().expect("identified");
+    assert!(
+        identity
+            .qualifier()
+            .contains(r#""prep":"dataset-page-cache-v1""#),
+        "{}",
+        identity.qualifier()
+    );
+    let (_, timed) = first.cli.as_ref().expect("the CLI interval");
+    assert_eq!(timed.interval.wall_us(), 40);
+    let before = cli_log(&f).len();
+    let (second, _) = measured(&f, &isolated(), 1, Some(&identity), &mut reuse);
+    assert!(second.passed, "{:?}", second.failures);
+    let added = &cli_log(&f)[before..];
+    assert_eq!(added.len(), 3, "a timed counterpart is never reused: {added:?}");
+    assert!(second.cli.is_some());
+}
+
+#[test]
+fn a_timed_cli_process_s_trajectory_survives_an_invalid_interval_or_a_bad_ending() {
+    for (name, extra, why) in [
+        ("cli-trajectory-no-markers", "", "timing evidence invalid"),
+        (
+            "cli-trajectory-exit",
+            "printf '5 CLI_COMMAND_START\\n6 CLI_COMMAND_END\\n' > \"$BROKKR_MARKER_FIFO\"\nexit 1\n",
+            "the counterpart exited 1",
+        ),
+    ] {
+        let f = fixture(name, &equal_harness());
+        if !extra.is_empty() {
+            cat_extra(&f, extra);
+        }
+        let (report, _, cli) =
+            measured_full(&f, &isolated(), 0, None, &mut Default::default(), None);
+        assert!(has(&report, why), "{name}: {:?}", report.failures);
+        assert!(report.cli.is_none(), "{name}: no sample from a failed replay");
+        let cli = cli.unwrap_or_else(|| panic!("{name}: the CLI capture was dropped"));
+        assert!(cli.markers().count() <= 2, "{name}");
+    }
+}
+
 #[test]
 fn printable_escapes_controls_but_tabs() {
     assert_eq!(printable("a\tb\nc\x1b[2J"), "a\tb\\nc\\u{1b}[2J");
@@ -1244,6 +1356,24 @@ fn measured_as(
     reuse: &mut super::counterpart::Reuse,
     profiled: Option<crate::measure::ProfiledMode>,
 ) -> (Report, Option<crate::sidecar::SidecarData>) {
+    let (report, trajectory, _) =
+        measured_full(f, describe_doc, iteration, baseline, reuse, profiled);
+    (report, trajectory)
+}
+
+/// [`measured_as`], with the timed CLI process's capture too.
+fn measured_full(
+    f: &Fixture,
+    describe_doc: &str,
+    iteration: usize,
+    baseline: Option<&super::Identity>,
+    reuse: &mut super::counterpart::Reuse,
+    profiled: Option<crate::measure::ProfiledMode>,
+) -> (
+    Report,
+    Option<crate::sidecar::SidecarData>,
+    Option<crate::sidecar::SidecarData>,
+) {
     let scenario = describe::parse(describe_doc.as_bytes())
         .unwrap()
         .scenarios
@@ -1251,6 +1381,7 @@ fn measured_as(
     let datasets = BTreeMap::from([("input".to_owned(), f.input.clone())]);
     let ids = BTreeMap::from([("input".to_owned(), "xxh128:0".to_owned())]);
     let mut trajectory = None;
+    let mut cli_trajectory = None;
     let report = verify(
         &f.harness,
         &f.cli,
@@ -1269,9 +1400,10 @@ fn measured_as(
             profiled,
         }),
         &mut trajectory,
+        &mut cli_trajectory,
     )
     .unwrap();
-    (report, trajectory)
+    (report, trajectory, cli_trajectory)
 }
 
 #[test]

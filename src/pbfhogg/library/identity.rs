@@ -48,6 +48,10 @@ pub(crate) struct Identity {
     /// Each seeded output role's seed recipe (`seed-v1:<kind>`); empty when
     /// the scenario seeds none.
     pub(crate) seeds: BTreeMap<String, String>,
+    /// The page-cache preparation each process went through
+    /// ([`super::prep::PROCEDURE`]), for a library against CLI measurement;
+    /// `None` for every other.
+    pub(crate) prep: Option<String>,
     /// The harness build's features, sorted, comma-joined; empty for none.
     pub(crate) features: String,
 }
@@ -81,6 +85,9 @@ impl Identity {
         ];
         if !self.seeds.is_empty() {
             members.push(("seeds".to_owned(), map(&self.seeds)));
+        }
+        if let Some(prep) = &self.prep {
+            members.push(("prep".to_owned(), Json::Str(prep.clone())));
         }
         json::canonical(&Json::Object(members)).unwrap_or_default()
     }
@@ -142,6 +149,12 @@ impl Identity {
                     ));
                 }
             }
+        }
+        if self.prep != baseline.prep {
+            return Some(format!(
+                "the page-cache preparation differs ({:?} vs {:?})",
+                baseline.prep, self.prep
+            ));
         }
         (self.features != baseline.features).then(|| {
             format!(

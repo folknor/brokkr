@@ -51,6 +51,14 @@ fn render_single_or_multi(
             }
             println!("{}", db::format_single_result(row, has_sidecar(&row.uuid)));
         }
+        // A library against CLI measurement's comparison, never folded into
+        // `--compare`.
+        if let Some(lines) = crate::pbfhogg::library::cli_comparison(rows) {
+            println!();
+            for line in lines {
+                println!("{line}");
+            }
+        }
         return;
     }
 

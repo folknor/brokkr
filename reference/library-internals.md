@@ -194,15 +194,49 @@ visible in the record, never hidden behind an equal digest.
 over a whole call stream; both are adjudicated at their code sites in
 `src/sidecar_cmd.rs`.
 
-## Not built
+## Library against CLI timing
 
-`isolation` is validated and listed although nothing times it yet: the
-library against CLI timing it is for needs nothing more from the harness
-(a call's `entry_us` and `return_us` exist already, and the boundary it
-lacks is the CLI's).
+The equality replay is the timed CLI run (`counterpart.rs`,
+`PbfhoggBinary::run_in_timed`): every timed CLI output is checked equal,
+the replay already has its reservation and breach checks, and running it
+right after its library process interleaves the arms, which spreads slow
+drift over both. Separate CLI launches after all N library processes were
+rejected: they add a block-order confound and either digest again or check
+nothing. A separate command was rejected too: it changes the surface and
+fixes no flaw.
 
-Library against CLI timing (timed counterpart runs, boundary matching,
-recording the declared policy differences, a comparison view, never folded
-into `--compare`) waits on the pbfhogg CLI marking its command's entry and
-return on the FIFO; it has a brokkr bz ticket of its own, blocked on the
-pbfhogg one for that marker pair.
+Interleaving alone is not fair, which is why the page-cache preparation
+(`prep.rs`) exists: pbfhogg evicts an input's consumed prefix behind its
+read head, so without it the CLI reads the input the library just warmed
+and leaves the next library process cold, a carryover no iteration count
+or median removes. Cold, not warm, because a clean read-only file can be
+dropped and checked, while warming needs the file to fit memory. The
+preparation evicts the library's retained outputs before the CLI arm, since
+the CLI otherwise starts under memory the library arm never faced, and
+syncs every filesystem, brokkr's own stores included, so neither arm meets
+the other's writeback. Generated roles are refused in isolation scenarios
+because setup writes them, dirty and resident, inside the library process,
+a state brokkr could only give the CLI with a separate materialization
+stage. The claim is kept to what is observed: a clear scan does not exclude
+a read in flight, and lower caches are untouched, so the order stays fixed
+and declared.
+
+A missing or invalid interval fails the process rather than dropping the
+sample or retrying: loss can correlate with load, and keeping only the
+captures that worked would bias the result. The `/cli` row's qualifier is
+the CLI workload because the library identity does not hold the
+counterpart; a changed argv with an unchanged plan must not pair, and an
+unchanged argv under a changed plan should. The executable digest stays
+out, since a CLI trend across commits measures exactly that change. The
+library and its CLI arm pair by group and call (one session, one commit,
+interleaved), which needs no structured-key lookup. The paired median
+ratio is kept apart from the arms' medians because the two answer
+different questions and can disagree.
+
+CLI trajectories get a sidecar session of their own rather than runs in
+the library session, whose runs are library processes; without them a
+later question (did the CLI read from disk, fault, or spend its time
+outside the library phases) would have no evidence.
+
+`isolation` needed nothing more from the harness: a call's `entry_us` and
+`return_us` existed already, and the boundary it lacked was the CLI's.

@@ -215,8 +215,9 @@ character.
 - `hotpath` (optional, default false): the scenario can be profiled (see
   Profiling a scenario). True requires exactly one call.
 - `isolation` (optional, default false): the scenario is an isolated call
-  (see Isolation scenarios). True requires exactly one call, and that call
-  has a `cli` counterpart.
+  whose timing is compared with its CLI counterpart's (see Isolation
+  scenarios). True requires exactly one call, with a `cli` counterpart that
+  expects an output, and no `generated` role.
 - `calls`: at least one, ids unique within the scenario, none `setup`. Each
   has a one-line `label`, and may have `stream`: a list of capability ids,
   each at most once, that the call's stream verdict stands for. A nonempty
@@ -610,9 +611,12 @@ counterparts below has a refusal's):
    and reservation as every pbfhogg launch (`brokkr man pbfhogg`, Output
    overwrite, and Launch reservations and the private directory): the
    private directory goes in `outputs/`, and the lease covers the whole run
-   directory. `BROKKR_MARKER_FIFO`, `BROKKR_HARNESS_ARTEFACT_DIR` and the
-   profiling variables are removed from its environment, and it is killed at the scenario's
-   `deadline_s`. It must exit 0.
+   directory. `BROKKR_HARNESS_ARTEFACT_DIR` and the profiling variables are
+   removed from its environment, and `BROKKR_MARKER_FIFO` too unless the
+   replay is timed (an isolation scenario's, unprofiled: it gets a fresh
+   marker FIFO, see Isolation scenarios); it is killed at the scenario's
+   `deadline_s`. It must exit 0, and a timed replay must also carry a valid
+   command interval.
 4. Then each output is digested, library first: `pbfhogg digest FILE`, the
    same CLI, in the same `cwd/`, killed at `deadline_s`. Each must exit 0
    with its output closed and print exactly four lines, `xxh128 v<N>
@@ -786,10 +790,13 @@ identifies what it ran:
   link; any other entry, or an entry not of the role's kind, cannot be
   identified and fails the process;
 - each seeded output role's seed recipe, `seed-v1:<kind>`;
+- for a library against CLI measurement, the page-cache preparation each
+  process went through, `dataset-page-cache-v1` (see Isolation scenarios);
 - the features the harness was built with.
 
 Every process must agree with the first on the plan, each call's context,
-the generated and dataset identities, the seeds and the features; one that does not
+the generated and dataset identities, the seeds, the preparation and the
+features; one that does not
 fails, naming the first difference (a field of the plan or a context, or a
 role), and its kept directory's `evidence/baseline.txt` holds the first
 process's identity and documents beside its own, since the first
@@ -810,7 +817,8 @@ library output is still digested there and compared with the reused report,
 and every check after a launch runs as for a replay (`outputs/` must stay
 empty). A reused refusal launches nothing and makes no `replay-<call>/`;
 its library side is judged as always. The result's detail says which
-process's replay it reused.
+process's replay it reused. A timed counterpart (an isolation scenario's)
+is never reused: every process's replay runs, and both sides are digested.
 
 **The rows.** When every process passed, brokkr stores one group of rows
 under one uuid, in one transaction:
@@ -821,7 +829,9 @@ under one uuid, in one transaction:
 - one row per call, `library:<call's scenario>/<call>`: its wall the chosen
   process's `return_us - entry_us`, its iterations that call's wall in every
   process in order, and the call's snapshot as counters, each
-  `snapshot.<name>`, exact (a value past 2^63-1 as decimal text).
+  `snapshot.<name>`, exact (a value past 2^63-1 as decimal text);
+- for a library against CLI measurement, one `/cli` row,
+  `library:<scenario>/<call>/cli` (see Isolation scenarios).
 
 The walls of calls that ran concurrently measure contention as much as
 the calls: for a concurrent group the scenario wall is the headline. The
@@ -829,26 +839,28 @@ chosen process is the fastest, ties to the lowest index. Every row
 carries `meta.library.plan` (the plan digest), `meta.library.iteration`
 (the chosen index) and `meta.library.identity`, the identity above as one
 canonical JSON text (the plan digest, each call's context digest, the
-dataset and generated identities, the features, and the seeds when a role
-is seeded); a call row adds
+dataset and generated identities, the features, the seeds when a role is
+seeded and the preparation when there is one); a call row adds
 `meta.library.context`, its context digest. The canonical plan and context
 documents are stored once each, by digest, beside the rows. The scenario
 row is written last, so it is the group's newest: what `brokkr results`
 shows first, what the next row's `prev.*` names and what names the sidecar
-session. `brokkr results <uuid>` shows every row of the group in full.
+session. `brokkr results <uuid>` shows every row of the group in full, and
+for a group with a `/cli` row its comparison after them.
 
 **Pairing.** The identity is also the rows' arm qualifier (`brokkr man
 results`, `--compare`), so a library row pairs with another exactly when
 everything a row of its command pairs on agrees and so does the identity:
 same plan, same contexts, same dataset and generated identities, same
-seeds, same features. The commit is never part of it. A row that does not pair is
+seeds, same preparation, same features. The commit is never part of it. A row that does not pair is
 followed by a line naming the other side's latest row of the same command,
 mode, input, captured environment and build, and where its identity first
 differs from it (a plan field, a call's context field, a role or the
 features), or that the identities are equal and the invocations differ. That
 line explains; it never says the named difference is the only one. A
-library call is never compared with its CLI counterpart's timing here, and
-`--compare` will not do it (see Isolation scenarios).
+library call is never compared with its CLI counterpart's timing here: a
+`/cli` row's command is not its call row's, so `--compare` pairs it only
+with `/cli` rows of other commits (see Isolation scenarios).
 
 **Trajectories.** Each process's capture is stored in sidecar.db, under the
 group's uuid with its iteration as the run, as soon as it is judged, pass or
@@ -923,13 +935,100 @@ meaningful, and its chosen process is still the fastest.
 ## Isolation scenarios
 
 A scenario declaring `isolation` is one call, the first library work in a
-fresh process, with a CLI counterpart: the shape a library call against its
-CLI counterpart's timing needs, since only then do the two start alike.
-That the call is the process's first library work is the producer's
-obligation; brokkr checks only the one call and the counterpart, and lists
-the flag. brokkr shows no library against CLI timing yet: it needs the
-pbfhogg CLI to mark its command's entry and return on the FIFO, which it
-does not, and until it does brokkr compares no timing of the two.
+fresh process, reading dataset inputs only, with a CLI counterpart that
+expects an output: the shape a library call against its CLI counterpart's
+timing needs. What is compared is **this declared library invocation
+against this declared CLI invocation**, never the CLI's overhead: equal
+output digests do not make the two do equal work (options, parallelism,
+passes), and the declared policy differences explain the experiment
+without proving it complete.
+
+**Producer obligations**, which brokkr does not check: the call is the
+process's first library work; and before `entry_us` setup neither reads
+dataset contents, nor starts input I/O, nor constructs readers or
+dataset-derived state for the call: opening and preparing the inputs
+belong inside the call. A `generated` role is refused outright, since
+setup writes it inside the library process, where brokkr cannot prepare it
+as it prepares the CLI's.
+
+**The CLI's command interval.** The pbfhogg CLI writes two untagged
+process-stream markers on its own process-start clock: `CLI_COMMAND_START`
+once the command line was parsed and accepted, immediately before the
+subcommand is dispatched, and `CLI_COMMAND_END` when the dispatch returns,
+before its end-of-run counters. The interval also holds what a library
+call does not: the CLI's option handling, its output and scratch setup,
+its process policy (the raised descriptor limit, the capped malloc arenas,
+input page-cache eviction, applied inside it), its publication and the
+summary it prints. A timed replay's interval is valid only as exactly one
+`CLI_COMMAND_START` and one `CLI_COMMAND_END`, `0 <= START <= END`, `END`
+at most the process wall brokkr observed plus one second, in a capture
+that lost no FIFO record (definition `cli-interval-v1`). Anything else,
+none or one alone or duplicates, fails `<call>/brokkr.cli` as invalid
+timing evidence, never as an output defect, and the process wall is never
+substituted.
+
+**Verification.** `brokkr library SCENARIO` of an isolation scenario times
+its replay (a marker FIFO attached) and requires a valid interval, then
+prints one `timing` line: the library call's `return_us - entry_us` beside
+the CLI interval, one process each, informational and not a measurement.
+
+**Measurement.** `brokkr library SCENARIO --bench N` of an isolation
+scenario measures both arms, interleaved, library first: each process's
+counterpart replay runs in its run directory right after it (never reused)
+and is timed. Before each arm, outside both intervals, brokkr runs the
+**dataset page-cache preparation** (`dataset-page-cache-v1`): `sync()` of
+every filesystem; `posix_fadvise(DONTNEED)` on the arm's dataset files and,
+before the CLI arm, on the library outputs the call left in `roles/`
+(which stay for the digests); then a scan of every dataset file, in bounded
+windows of an untouched read-only mapping with `mincore`, for resident
+pages. A resident page fails the process as preparation not established,
+naming the file and the count; a file whose residency brokkr may not
+observe (the kernel reports every page resident to a process that neither
+owns the file nor may write it) is reported as such. What this establishes
+is input page-cache residency checked clear before launch, assuming no
+competing reader. It does not prove that no read is in flight (the kernel
+reports a page under read as not resident), and it resets no device,
+controller, remote or metadata cache; the fixed order, library first, is
+part of the definition. The library rows of such a measurement carry the
+preparation in their identity. A passing process whose run directory could
+not be removed ends the measurement: its outputs would stay in memory
+before the next library arm, which no preparation evicts. `--hotpath` and
+`--alloc` time no CLI.
+
+The group gains the `/cli` row, `library:<scenario>/<call>/cli`: its
+iterations every process's CLI interval in order, its wall the fastest
+(ties to the lowest index, `meta.library.cli_iteration`), its
+`peak_rss_kb_sampled` that process's sampled peak RSS (a short process can
+exit between samples), its metadata the CLI session
+(`meta.library.cli_sidecar`), the interval definition, the preparation,
+both builds (`meta.library.build`, the harness's profile and features;
+`meta.library.cli_build`, always release with default features) and the
+declared policy differences. Its build columns are the CLI's (release,
+default features), never the harness build's, and it carries none of the
+harness's build provenance. Its arm qualifier, and its
+`meta.library.identity`, is the CLI workload: the counterpart as declared
+(argv by role, scratch, expectation, overwrite stance), the seed recipe of
+each seeded output it names, the identity of each dataset it reads, the
+preparation and the interval definition; never the executable's digest,
+the plan or a context. So `--compare` pairs a `/cli` row with the `/cli`
+rows of other commits running the same CLI workload, a CLI trend, and
+never with a call row. Each CLI process's trajectory is stored as the run
+of its iteration in a sidecar session of its own, the one
+`meta.library.cli_sidecar` names, as soon as its process is judged and
+whatever it came to (an invalid interval, a bad ending, an unsafe release
+or an interrupt included), as the library's is; a measurement that stores
+no row names that session beside the library one (the `dirty` alias holds
+only the library session). A group is shown with a comparison only when
+it holds exactly one `/cli` row, told by its interval definition and not
+by its name alone, and exactly one call row it extends.
+
+**The comparison** is printed after the rows are stored, and by `brokkr
+results <uuid>` after the group's rows: the claim and interval definition
+stated, then each arm's minimum and median over the N processes (library:
+`return_us - entry_us`; CLI: the interval), then the median of the paired
+ratios CLI/library, each process's pair taken together (unavailable, with
+the reason, when a pair has a zero reading; never a ratio of minima), both
+builds (marked when they differ) and the declared policy differences.
 
 ## Certification
 

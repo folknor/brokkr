@@ -11,6 +11,10 @@
 //!   output roles on disk.
 //! - [`seed`]: the seeds of seeded output roles, written and recognized.
 //! - [`counterpart`]: each call's CLI counterpart replayed and compared.
+//! - [`interval`]: the CLI's command interval read from a timed replay.
+//! - [`prep`]: the dataset page-cache preparation before each arm of a
+//!   library against CLI measurement.
+//! - [`vs_cli`]: the `/cli` row's workload qualifier and the comparison view.
 //! - [`digest`]: the `pbfhogg digest` report the comparison reads.
 //! - [`certify`]: `--all`'s capability classification and its record.
 //! - [`identity`]: what a measured process ran, in brokkr-json-v1.
@@ -25,15 +29,25 @@ mod describe;
 mod digest;
 mod identity;
 mod json;
+mod interval;
 mod measured;
+mod prep;
 mod profile;
 mod publication;
 mod run;
 mod seed;
 mod stream;
+mod vs_cli;
 
 pub(crate) use describe::is_capability;
 pub(crate) use json::canonical_difference;
+
+/// The library against CLI comparison a stored measurement group holds,
+/// one line each, for `brokkr results <uuid>`; `None` for a group without
+/// a `/cli` row.
+pub(crate) fn cli_comparison(rows: &[crate::db::StoredRow]) -> Option<Vec<String>> {
+    vs_cli::from_rows(rows).map(|c| c.lines())
+}
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -309,6 +323,7 @@ fn run_one(
         },
         None,
         &mut None,
+        &mut None,
     )?;
     // No stop check here: `verify` made the last one before a passing run's
     // removal, which commits the verdict, so a stop after it never turns a
@@ -341,6 +356,9 @@ fn show_report(scenario: &describe::Scenario, report: &run::Report) -> bool {
     }
     for line in &report.diagnostics {
         output::run_msg(&format!("diagnostic {line}"));
+    }
+    if let Some(line) = &report.timing {
+        output::run_msg(&format!("timing {line}"));
     }
     // A failing result's detail is printed with the failures; a passing CLI
     // result's (its counts and declared policy differences) here.
@@ -554,6 +572,7 @@ fn sweep<'a>(
             &datasets,
             places,
             None,
+            &mut None,
             &mut None,
         );
         let attempt = match verdict {

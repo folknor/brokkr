@@ -352,6 +352,43 @@ impl PbfhoggBinary {
         )
     }
 
+    /// [`run_in`](Self::run_in), timed: the launch gets `fifo` as its marker
+    /// FIFO (the one variable of [`HARNESS_RUN_ENV`] it keeps), so the CLI's
+    /// command interval and its process samples are captured as run
+    /// `run_idx` (`brokkr man library`, Isolation scenarios).
+    pub(crate) fn run_in_timed(
+        &self,
+        argv: PbfArgv,
+        scope: &RunScope<'_>,
+        fifo: &mut crate::sidecar::SidecarFifo,
+        run_idx: usize,
+    ) -> crate::measure::Timed {
+        use crate::measure::Timed;
+        let invocation = match self.resolve(
+            argv,
+            scope.cwd.to_path_buf(),
+            vec![scope.run_dir.to_path_buf()],
+        ) {
+            Ok(invocation) => invocation,
+            Err(DevError::Interrupted) => return Timed::Interrupted,
+            Err(e) => return Timed::Failed(e),
+        };
+        if let Err(e) = self.check_identity() {
+            return Timed::Failed(e);
+        }
+        invocation.capture_sidecar(
+            scope.cwd,
+            scope.deadline,
+            crate::output::child::CaptureCap {
+                stdout: scope.stdout_kept + 1,
+                stderr: RUN_OUTPUT_KEPT + 1,
+            },
+            &HARNESS_RUN_ENV,
+            fifo,
+            run_idx,
+        )
+    }
+
     fn resolve(
         &self,
         argv: PbfArgv,

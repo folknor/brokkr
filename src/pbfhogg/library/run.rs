@@ -70,6 +70,12 @@ pub(crate) struct Report {
     pub(crate) snapshots: BTreeMap<String, BTreeMap<String, u64>>,
     /// A profiled process's hotpath report, once judged valid.
     pub(crate) hotpath: Option<crate::db::HotpathData>,
+    /// An isolation scenario's timed counterpart, by call, when its interval
+    /// was valid.
+    pub(crate) cli: Option<(String, counterpart::CliTimed)>,
+    /// The one-process timing line a verification of an isolation scenario
+    /// prints: informational, not a measurement.
+    pub(crate) timing: Option<String>,
 }
 
 /// What a measured run hands each of its processes
@@ -107,6 +113,8 @@ impl Report {
             spans: Vec::new(),
             snapshots: BTreeMap::new(),
             hotpath: None,
+            cli: None,
+            timing: None,
         }
     }
 }
@@ -116,7 +124,10 @@ impl Report {
 /// measured process gets `measured`: its iteration, the agreement it owes
 /// iteration 0, and the reuse cache. Once the harness launch returned,
 /// `trajectory` holds its capture (with the calls' boundaries when the
-/// documents were read), whatever the run came to, an interrupt included.
+/// documents were read), whatever the run came to, an interrupt included;
+/// once a timed counterpart's child ended, `cli_trajectory` holds its
+/// capture the same way.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn verify(
     harness: &LibraryHarness,
     cli: &PbfhoggBinary,
@@ -125,10 +136,26 @@ pub(crate) fn verify(
     places: &Places<'_>,
     measured: Option<Measured<'_>>,
     trajectory: &mut Option<crate::sidecar::SidecarData>,
+    cli_trajectory: &mut Option<crate::sidecar::SidecarData>,
 ) -> Result<Report, DevError> {
     let iteration = measured.as_ref().map_or(0, |m| m.iteration);
     let profiled = measured.as_ref().and_then(|m| m.profiled);
     let mut prepared = prepare(scenario, datasets, places.library_root, iteration)?;
+    // The library arm of a library against CLI measurement starts from the
+    // same prepared dataset page cache as its CLI arm will.
+    if prepares(scenario, measured.as_ref()) {
+        let files: Vec<PathBuf> = datasets.values().cloned().collect();
+        match super::prep::prepare(&files, &[]) {
+            Ok(()) => {}
+            Err(super::prep::NotEstablished::Interrupted) => return Err(DevError::Interrupted),
+            Err(e) => {
+                return Err(DevError::Verify(format!(
+                    "iteration {iteration}: {e}; the run directory {} is kept",
+                    crate::output::path(&prepared.run_dir)
+                )));
+            }
+        }
+    }
     let report_path = prepared.run_dir.join(super::profile::REPORT_FILE);
 
     let mut fifo = crate::sidecar::SidecarFifo::create(
@@ -160,11 +187,32 @@ pub(crate) fn verify(
     // The boundaries are kept once the documents were read, even when the
     // run then stops (a counterpart interrupted, the final stop check).
     let mut spans = Vec::new();
-    let judged = judge_run(&run, cli, scenario, &prepared, measured, &mut spans);
+    let timing = (profiled.is_none()).then(|| counterpart::Timing {
+        fifo_dir: places.fifo_dir,
+        iteration,
+        prepare: prepares(scenario, measured.as_ref()),
+        captured: std::cell::RefCell::new(None),
+    });
+    let judged = judge_run(
+        &run,
+        cli,
+        scenario,
+        &prepared,
+        measured,
+        timing.as_ref(),
+        &mut spans,
+    );
+    *cli_trajectory = timing.and_then(|t| t.captured.into_inner());
     let mut data = run.data;
     data.calls = spans;
     *trajectory = Some(data);
     judged
+}
+
+/// Whether a run's arms go through the dataset page-cache preparation: the
+/// unprofiled measured processes of an isolation scenario.
+fn prepares(scenario: &Scenario, measured: Option<&Measured<'_>>) -> bool {
+    scenario.isolation && measured.is_some_and(|m| m.profiled.is_none())
 }
 
 /// Everything after the harness launch returned: the verdict on `run`.
@@ -175,6 +223,7 @@ fn judge_run(
     scenario: &Scenario,
     prepared: &Prepared,
     measured: Option<Measured<'_>>,
+    timing: Option<&counterpart::Timing<'_>>,
     spans_out: &mut Vec<crate::sidecar::CallSpan>,
 ) -> Result<Report, DevError> {
     let Prepared {
@@ -319,6 +368,7 @@ fn judge_run(
                 docs: &docs,
                 layout_ok,
                 reusing,
+                timing,
             },
             relayout,
             &mut report,
@@ -327,13 +377,21 @@ fn judge_run(
         // documents were read before it and the stream records are in
         // memory: those results stand, without any counterpart's.
         untouched = cli_results.is_none();
-        collect_results(
-            &judged,
-            run,
-            scenario,
-            &cli_results.unwrap_or_default(),
-            &mut report,
-        );
+        let (cli_results, mut timed) = cli_results.unwrap_or_default();
+        collect_results(&judged, run, scenario, &cli_results, &mut report);
+        report.cli = timed.pop_first();
+        if let Some((call, cli_timed)) = &report.cli
+            && let Some(span) = report.spans.iter().find(|s| s.call == *call)
+        {
+            #[allow(clippy::cast_precision_loss)]
+            let us = |v: i64| super::vs_cli::duration(v as f64);
+            report.timing = Some(format!(
+                "{call}: library call {}, CLI command interval {} (one process each, not a \
+                 measurement)",
+                us(span.return_us - span.entry_us),
+                us(cli_timed.interval.wall_us())
+            ));
+        }
     }
     // A stop that landed after the child's ending was seen (while output
     // settled, the lease was released or the artefacts were read) still
@@ -433,6 +491,7 @@ fn identify(
         datasets: m.datasets.clone(),
         generated,
         seeds,
+        prep: prepares(scenario, Some(m)).then(|| super::prep::PROCEDURE.to_owned()),
         features: m.features.to_owned(),
     })
 }
@@ -461,7 +520,14 @@ struct Equal<'a> {
     docs: &'a BTreeMap<&'a str, &'a CallDoc>,
     layout_ok: bool,
     reusing: Option<counterpart::Reusing<'a>>,
+    timing: Option<&'a counterpart::Timing<'a>>,
 }
+
+/// Every counterpart's result by call, and the timed ones' CLI intervals.
+type Counterparts = (
+    BTreeMap<String, Outcome>,
+    BTreeMap<String, counterpart::CliTimed>,
+);
 
 /// The counterparts, run once the harness's documents were read, whatever
 /// the run's other results. Every counterpart's result by call, after the
@@ -473,7 +539,7 @@ fn equality(
     on: Equal<'_>,
     relayout: impl Fn(&[String]) -> Vec<String>,
     report: &mut Report,
-) -> Result<Option<BTreeMap<String, Outcome>>, DevError> {
+) -> Result<Option<Counterparts>, DevError> {
     let Equal {
         cli,
         scenario,
@@ -482,9 +548,12 @@ fn equality(
         docs,
         layout_ok,
         reusing,
+        timing,
     } = on;
-    let equality = match counterpart::judge(cli, scenario, run_dir, paths, docs, layout_ok, reusing)
-    {
+    let judged = counterpart::judge(
+        cli, scenario, run_dir, paths, docs, layout_ok, reusing, timing,
+    );
+    let equality = match judged {
         Ok(equality) => equality,
         Err(Stop::Interrupted) => return Err(DevError::Interrupted),
         Err(Stop::Unsafe(_)) if crate::shutdown::should_unwind() => {
@@ -498,7 +567,7 @@ fn equality(
     if !equality.made.is_empty() {
         report.failures.extend(relayout(&equality.made));
     }
-    Ok(Some(equality.results))
+    Ok(Some((equality.results, equality.timed)))
 }
 
 /// A laid-out run directory, before the launch.

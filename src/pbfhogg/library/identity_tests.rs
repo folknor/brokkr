@@ -18,6 +18,7 @@ fn identity(plan_text: &str, context: &str, generated: &str) -> Identity {
         datasets: BTreeMap::from([("input".to_owned(), "xxh128:00".to_owned())]),
         generated: BTreeMap::from([("gen".to_owned(), generated.to_owned())]),
         seeds: BTreeMap::new(),
+        prep: None,
         features: String::new(),
     }
 }

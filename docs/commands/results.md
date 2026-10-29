@@ -142,9 +142,11 @@ Any supplied row filters still apply to the UUID matches.
 
 A library measurement (`brokkr man library`, Measuring a scenario) stores
 one group of rows under one uuid, its scenario row and one per call; its
-uuid shows every row of the group as such a block, the scenario's first. A
-profiled one (`--hotpath`, `--alloc`; Profiling a scenario) is the scenario
-row alone, with its profile.
+uuid shows every row of the group as such a block, the scenario's first.
+A library against CLI measurement (Isolation scenarios) adds a `/cli` row,
+and its uuid shows the comparison of the call with its CLI counterpart
+after the rows. A profiled one (`--hotpath`, `--alloc`; Profiling a
+scenario) is the scenario row alone, with its profile.
 
 A prefix matching several runs falls back to the table plus per-row details.
 UUID resolution considers both stores; results lists result rows and reports
@@ -203,8 +205,10 @@ from the dataset rather than `--bbox` (`bbox=...`, the parsed coordinates, so
 row from before the bbox and strategy qualifiers existed carries neither, so
 it does not pair with a newer row that does. A `brokkr library` row's
 qualifier is its library identity (the plan and context digests, the
-dataset and generated identities, the harness features; `brokkr man
-library`, Measuring a scenario), also stored as `meta.library.identity`.
+dataset and generated identities, the harness features, and any seeds or
+preparation; `brokkr man library`, Measuring a scenario), also stored as
+`meta.library.identity`; a `/cli` row's is its CLI workload instead
+(Isolation scenarios), so it pairs only with `/cli` rows.
 When such a row is left without a pair, a line beneath it names the other
 side's latest row of the same command, mode, input, captured env and build
 and the first place their identities differ, down to the plan or context

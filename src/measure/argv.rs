@@ -311,6 +311,93 @@ impl<'a> Invocation<'a> {
         }
     }
 
+    /// [`capture_supervised`](Self::capture_supervised) with the sidecar
+    /// attached: the child gets `fifo` as its marker FIFO, and its records
+    /// and process samples are captured as run `run_idx`. The FIFO reader
+    /// outlives the release, so a child that still writes is never cut off by
+    /// a closed reader.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn capture_sidecar(
+        &self,
+        cwd: &Path,
+        deadline: std::time::Duration,
+        cap: output::child::CaptureCap,
+        unset: &[&str],
+        fifo: &mut crate::sidecar::SidecarFifo,
+        run_idx: usize,
+    ) -> Timed {
+        if crate::shutdown::should_unwind() {
+            return Timed::Interrupted;
+        }
+        let launched = match self.launch(cwd) {
+            Ok(launched) => launched,
+            Err(e) => return Timed::Unsafe(e),
+        };
+        let program = self.program_string();
+        let fifo_path = match fifo.path_str() {
+            Ok(path) => path.to_owned(),
+            Err(e) => {
+                return match launched.finish() {
+                    Ok(()) => Timed::Failed(e),
+                    Err(release) => Timed::Unsafe(release),
+                };
+            }
+        };
+        let mut env: Vec<(&str, &str)> = self
+            .env
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        env.push((crate::sidecar::MARKER_FIFO_ENV, fifo_path.as_str()));
+        let sigterm = crate::shutdown::SigtermGuard::install();
+        let start = std::time::Instant::now();
+        let child = output::child::spawn_captured_unsetting(
+            &program,
+            &launched.arg_refs(),
+            cwd,
+            &env,
+            unset,
+            crate::shutdown::ChildIsolation::ProcessGroup(&sigterm),
+            output::SpawnProfile::Plain,
+        );
+        let child = match child {
+            Ok(child) => child,
+            Err(e) => {
+                drop(sigterm);
+                return match launched.finish() {
+                    Ok(()) => Timed::Failed(e),
+                    Err(release) => Timed::Unsafe(release),
+                };
+            }
+        };
+        let run = crate::sidecar::run_sidecar_with_deadline(
+            child,
+            fifo,
+            run_idx,
+            start,
+            None,
+            Some(deadline),
+            &crate::sidecar::DEFAULT_MEASUREMENT_TUNABLES,
+            cap,
+            &mut crate::sidecar::ProcSidecarSampler,
+        );
+        drop(sigterm);
+        let released = launched.finish();
+        Timed::Ran(Box::new(TimedCapture {
+            capture: output::child::DeadlineCapture {
+                captured: output::CapturedOutput {
+                    ending: run.data.ending.clone(),
+                    stdout: run.stdout,
+                    stderr: run.stderr,
+                    elapsed: run.elapsed,
+                },
+                output_cut: run.output_cut,
+            },
+            data: run.data,
+            released,
+        }))
+    }
+
     /// Fail unless `captured` (this invocation's output) succeeded, naming
     /// the program.
     pub(crate) fn check(&self, captured: &CapturedOutput) -> Result<(), DevError> {
@@ -369,6 +456,30 @@ pub(crate) enum Supervised {
     Unsafe(DevError),
     /// A stop request ended it; the release was attempted.
     Interrupted,
+}
+
+/// What one [`Invocation::capture_sidecar`] launch came to. Unlike
+/// [`Supervised`], a child that was spawned is always `Ran`, its capture kept
+/// whatever its release came to, so a trajectory is never lost to an
+/// interrupt or an unsafe release; the caller judges `released` and the
+/// ending.
+pub(crate) enum Timed {
+    Ran(Box<TimedCapture>),
+    /// Nothing was spawned, and nothing was left admitted.
+    Failed(DevError),
+    /// Admission did not establish a safe state; nothing was spawned.
+    Unsafe(DevError),
+    /// A stop request came before the spawn.
+    Interrupted,
+}
+
+/// A timed launch whose child ran to an ending.
+pub(crate) struct TimedCapture {
+    pub(crate) capture: output::child::DeadlineCapture,
+    /// Its FIFO records, process samples and capture loss.
+    pub(crate) data: crate::sidecar::SidecarData,
+    /// The launch's release: an error leaves the lease held by some process.
+    pub(crate) released: Result<(), DevError>,
 }
 
 impl std::fmt::Debug for Invocation<'_> {

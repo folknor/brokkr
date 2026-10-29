@@ -804,6 +804,26 @@ pub struct SidecarData {
 }
 
 impl SidecarData {
+    /// A capture holding `records` and nothing else, ended `Exited(0)`.
+    #[cfg(test)]
+    pub(crate) fn for_test(records: Vec<Record>) -> Self {
+        Self {
+            samples: Vec::new(),
+            records,
+            calls_seen: CallCensus::default(),
+            calls: Vec::new(),
+            fired_stop_marker: None,
+            ending: Ending::Exited(0),
+            summary: SidecarSummary {
+                vm_hwm_kb: 0,
+                sample_count: 0,
+                marker_count: 0,
+                wall_time_ms: 0,
+                loss: CaptureLoss::default(),
+            },
+        }
+    }
+
     /// The phase markers, in arrival order.
     pub(crate) fn markers(&self) -> impl Iterator<Item = &Marker> {
         self.records.iter().filter_map(|r| match r {

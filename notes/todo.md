@@ -235,7 +235,10 @@ Each part below is tested, its whole path is not:
 - `brokkr library --bench`, `--hotpath` and `--alloc` have no end-to-end test
   through a real `BenchHarness` (lock, git state, results.db); measured
   verification, row building, `insert_group`, the sidecar round trip and the
-  compare note are tested apart.
+  compare note are tested apart. For a library against CLI measurement that
+  also leaves untested the CLI sidecar session's storage through `measure`,
+  the stop when a passing run directory could not be removed (both
+  trajectories stored first), and the comparison printed after the rows.
 - Nothing asserts that describe mode runs without `BROKKR_MARKER_FIFO` and
   `BROKKR_HARNESS_ARTEFACT_DIR`; it rests on the shared constant and runner.
 - The `[pbfhogg.library]` claim and its tables are tested on parsed tables,

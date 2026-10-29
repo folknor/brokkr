@@ -32,7 +32,7 @@ pub use table::format_table;
 /// A stored row with neutral defaults, for the view tests: only the fields a
 /// pairing or label question turns on are arguments.
 #[cfg(test)]
-pub(super) fn fixture_row(
+pub(crate) fn fixture_row(
     command: &str,
     mode: &str,
     input_file: &str,
