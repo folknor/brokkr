@@ -575,8 +575,10 @@ own, or which must refuse the same input as it does:
   the CLI both to refuse and publish nothing (see Refusal counterparts), and
   requires `exit`.
 - `exit`: with `expect: "refusal"` only, the exit status the CLI refuses
-  with, 2 to 127. Never 0 or 1, which pbfhogg reserves for a completed
-  command's answer, and never 128 and up, the band a signal's status takes
+  with, 2 to 127 but not 64. Never 0 or 1, which pbfhogg reserves for a
+  completed command's answer; never 64, pbfhogg's usage error (`EX_USAGE`:
+  the command line was refused before the command ran, which never refuses
+  the input); and never 128 and up, the band a signal's status takes
   (pbfhogg exits 130 or 143 after a SIGINT or SIGTERM it caught).
 - `overwrite` (default: negotiated): `true` passes `--overwrite` and needs
   the CLI to accept it (if not, the replay fails without running); `false`
@@ -679,8 +681,12 @@ whole-call, library side first, nothing digested:
 
 The detail on a pass says so with the exit and the first nonblank line of
 the CLI's stderr. The status proves that the CLI refused, never why: exit 2
-is also a usage error (clap's), so that the CLI refused the same input for
-the reason the call did is the producer's obligation. Like every check
+is any failure or refusal at run time (a command line refused before the
+command ran exits 64, which no refusal declares), and a typo that still
+parses, such as a wrong input path, can exit 2 as well. That the CLI
+refused the same input for the reason the call did is the producer's
+obligation. A pbfhogg build from before it split usage errors out (a
+`--commit` baseline) exits 2 for a usage error too. Like every check
 here it sees final states only: a write undone before exit (publish, then
 put the old bytes back) passes.
 

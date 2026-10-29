@@ -115,17 +115,22 @@ commit that has the harness member postdates `pbfhogg digest`.
 
 ## Refusal counterparts
 
-A refusal's `exit` is required, and 2 to 127, though it cannot tell a
-refusal from a usage error: pbfhogg's failure status is 2, the same as
-clap's usage error, so a typo in the argv passes as a refusal. Requiring
-it still rejects any status the counterpart did not declare (an unexpected
-3, a platform feature missing, among them), and its range keeps out 1 (a
-completed negative answer, never a refusal) and 130 or 143 (a caught
-signal, which pbfhogg turns into a normal exit, so `Exited` alone would not
-keep a signal out). That the declared status is a refusal for the intended
-reason stays the producer's obligation.
-Comparing stderr text was rejected as brittle; a machine-readable refusal
-kind from the CLI would close the gap, and is pbfhogg's to add.
+A refusal's `exit` is required, 2 to 127 but not 64. pbfhogg exits 64
+(`EX_USAGE`) for a command line it refused before the command ran and
+keeps 2 for a failure or refusal at run time, so a declared 2 can no
+longer be met by an argv clap or the CLI's option validation rejected. 64
+is refused as a declaration because a usage error never refuses the
+input. Requiring the status still rejects any one the counterpart did not
+declare (an unexpected 3, a platform feature missing, among them), and the
+range keeps out 1 (a completed negative answer, never a refusal) and 130 or
+143 (a caught signal, which pbfhogg turns into a normal exit, so `Exited`
+alone would not keep a signal out).
+
+The status proves a refusal at run time, not which one: a typo that still
+parses (a wrong input path) exits 2 too, so that the declared status is a
+refusal for the intended reason stays the producer's obligation. Comparing
+stderr text was rejected as brittle; a machine-readable error kind from the
+CLI would close the gap, and is pbfhogg's to design if a scenario needs it.
 
 A refusal is judged whole-call: every output role the call owns stays
 initial, not only those the placeholders name, since a call that refused

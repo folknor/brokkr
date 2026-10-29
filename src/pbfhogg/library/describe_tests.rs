@@ -186,6 +186,7 @@ fn a_refusal_declares_its_exit_and_an_output_none() {
         (r#", "expect": "refusal", "exit": 1"#, "1 is outside 2 to 127"),
         (r#", "expect": "refusal", "exit": 130"#, "130 is outside 2 to 127"),
         (r#", "expect": "refusal", "exit": 0"#, "outside 2 to 127"),
+        (r#", "expect": "refusal", "exit": 64"#, "64 is pbfhogg's usage error"),
         (r#", "exit": 2"#, "not allowed unless the counterpart expects a refusal"),
         (r#", "expect": "output", "exit": 2"#, "not allowed unless"),
         (r#", "expect": "error""#, "unknown expectation"),

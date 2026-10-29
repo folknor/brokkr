@@ -152,8 +152,12 @@ impl Expect {
 /// The exit statuses a refusal may declare: never 0 or 1, which pbfhogg
 /// reserves for a completed command's answer, and never 128 and up, the
 /// band a signal's status takes (pbfhogg's own cancellation exits 130 or
-/// 143).
+/// 143). [`USAGE_EXIT`] is refused inside it.
 const REFUSAL_EXIT: std::ops::RangeInclusive<i128> = 2..=127;
+
+/// pbfhogg's usage error (`EX_USAGE`): the command line was refused before
+/// the command ran, so it never refuses the input.
+const USAGE_EXIT: i128 = 64;
 
 /// One argv token of a counterpart.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -443,6 +447,13 @@ fn expect(obj: &Obj<'_>) -> Result<Expect, String> {
     }
     let field = obj.required("exit")?;
     let code = field.as_int_in(*REFUSAL_EXIT.start(), *REFUSAL_EXIT.end())?;
+    if code == USAGE_EXIT {
+        return Err(format!(
+            "{}: {USAGE_EXIT} is pbfhogg's usage error (EX_USAGE), the command line refused \
+             before the command ran, which is never a refusal of the input",
+            field.path()
+        ));
+    }
     let exit = u8::try_from(code).map_err(|_| format!("{}: out of range", field.path()))?;
     Ok(Expect::Refusal { exit })
 }

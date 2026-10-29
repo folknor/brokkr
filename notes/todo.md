@@ -247,17 +247,10 @@ Each part below is tested, its whole path is not:
 
 ### A library refusal counterpart proves a status, not a reason (2026-10-29)
 
-A refusal counterpart's declared `exit` proves the CLI's status, not its
-reason. Today pbfhogg's failure status is 2, the same as clap's usage
-error, so an argv typo passes as the CLI refusing the same input. pbfhogg
-is splitting usage errors out to 64 (`EX_USAGE`), runtime failures keeping
-2 (brokkr#59); the capability probe already reads either. When that pbfhogg
-commit lands: refuse `exit: 64` in a refusal counterpart, since a usage
-error is never a refusal, and reword the refusal paragraphs of
-`docs/commands/library.md` and `reference/library-internals.md`.
-
-What stays open after the split: exit 2 says a runtime failure, not which
-one. A machine-readable error kind from the pbfhogg CLI would close that
+Since pbfhogg d2d8836a a usage error exits 64, which no refusal may
+declare, and exit 2 is a failure or refusal at run time; but not which
+one, and a typo that still parses (a wrong input path) exits 2 too. A
+machine-readable error kind from the pbfhogg CLI would close that
 (compared with the call document's `outcome.kind`); pbfhogg designs it if
 a scenario turns out to need the distinction. Comparing stderr text was
 rejected as brittle.
