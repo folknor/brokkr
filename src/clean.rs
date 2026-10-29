@@ -228,7 +228,7 @@ pub(crate) fn cmd_clean(
     clean_rustflags_target_dirs(&pi.target_dir, &c)?;
 
     clean_scratch(project, &paths, &c, interrupted)?;
-    clean_sidecar_fifos(&state, &paths.scratch_dir, &c, interrupted)?;
+    clean_sidecar_fifos(&state, &c, interrupted)?;
 
     // Elivagar's default `-o` target for `pmtiles-corpus mutate` is a
     // brokkr-designated scratch location. `ocean-build_tmp` is not passed by
@@ -417,50 +417,30 @@ fn clean_scratch(
 }
 
 /// Remove the marker FIFOs no process reads (`crate::sidecar::namespace`)
-/// from the state root, where they are made, and from scratch, where an
-/// older brokkr made them. Under the namespace lock, so no creation is
-/// mid-way; after an interrupt, when the command lock is gone and another
-/// brokkr may be creating one, a held lock skips the sweep rather than wait.
+/// from the state root, where they are made. Under the namespace lock, so no
+/// creation is mid-way; after an interrupt, when the command lock is gone and
+/// another brokkr may be creating one, a held lock skips the sweep rather than
+/// wait.
 fn clean_sidecar_fifos(
     state: &layout::ProjectState,
-    scratch: &Path,
     c: &Cleaner,
     interrupted: bool,
 ) -> Result<(), DevError> {
     use crate::sidecar::namespace;
     // The state root is scanned only under its lock: one absent now may be
     // made, with a FIFO in it, before the scan.
-    let lock = if state.root().is_dir() {
-        match namespace::NamespaceLock::acquire(
-            state.root(),
-            namespace::Access::Sweep,
-            !interrupted,
-        )? {
-            Some(lock) => Some(lock),
-            None => {
-                output::warn("sidecar FIFO sweep skipped: another brokkr is creating a FIFO");
-                return Ok(());
-            }
-        }
-    } else {
-        None
-    };
-    let mut roots = Vec::new();
-    if lock.is_some() {
-        roots.push(state.root().to_path_buf());
+    if !state.root().is_dir() {
+        return Ok(());
     }
-    let same = |a: &Path, b: &Path| {
-        a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
+    let Some(_lock) =
+        namespace::NamespaceLock::acquire(state.root(), namespace::Access::Sweep, !interrupted)?
+    else {
+        output::warn("sidecar FIFO sweep skipped: another brokkr is creating a FIFO");
+        return Ok(());
     };
-    // Scratch holds only what an older brokkr made, so it needs no lock.
-    if !same(state.root(), scratch) {
-        roots.push(scratch.to_path_buf());
-    }
     let mut removed = 0usize;
-    for root in &roots {
-        for fifo in namespace::abandoned(root) {
-            removed += usize::from(c.file(&fifo)?);
-        }
+    for fifo in namespace::abandoned(state.root()) {
+        removed += usize::from(c.file(&fifo)?);
     }
     if removed > 0 {
         output::run_msg(&format!(

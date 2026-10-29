@@ -102,6 +102,10 @@ Single crate, single binary (plus the `brokkr-rustc-guard` bin). No workspace. T
 
 New keys and tables are fine as long as every existing config behaves identically. When a feature seems to need a break, stop and ask, naming the configs it would affect.
 
+### Older brokkr binaries
+
+An older brokkr binary is never a design input. Do not add a sweep for what one left behind, a guard against one running beside this one, or a doc caveat about a gap only one could open. Stored data is a different matter: `brokkr.toml` (the config contract above) and the history in results.db, sidecar.db and runs.db keep reading as they do.
+
 ### Bash rules
 
 - Never read or write from `/tmp`. All data lives in the project.

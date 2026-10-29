@@ -228,6 +228,30 @@ would churn every litehtml/sluggrs invocation in CI and docs.
 
 ## Backlog
 
+### Untested paths in the library harness and FIFO work (2026-10-29)
+
+Each part below is tested, its whole path is not:
+
+- `brokkr library --bench`, `--hotpath` and `--alloc` have no end-to-end test
+  through a real `BenchHarness` (lock, git state, results.db); measured
+  verification, row building, `insert_group`, the sidecar round trip and the
+  compare note are tested apart.
+- Nothing asserts that describe mode runs without `BROKKR_MARKER_FIFO` and
+  `BROKKR_HARNESS_ARTEFACT_DIR`; it rests on the shared constant and runner.
+- The `[pbfhogg.library]` claim and its tables are tested on parsed tables,
+  never through `include` composition.
+- The sidecar FIFO namespace has no test of the interrupt cleanup skipping a
+  held lock, of a sweep interleaved with a creator between `mkfifo` and its
+  reader, or of the startup shedding of inherited run variables through the
+  production `main`.
+
+### Leftover sweeps for older brokkr binaries (2026-10-29)
+
+AGENTS.md now rules an older brokkr out as a design input. `brokkr clean`
+still removes two things only an older brokkr left: the fixed-name
+`.brokkr-pbfhogg/` directories in scratch and the data dir, and
+`~/.brokkr/sidecar-status`. Both, with their clean.md lines, can go.
+
 ### Install: a destination parent outside the home has no durable anchor (2026-10-29)
 
 `atomic_write` now has an atomic and a durable tier, and the install
