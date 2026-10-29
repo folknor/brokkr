@@ -273,7 +273,16 @@ Key files: `src/sidecar.rs` (sampler and FIFO),
 `src/db/sidecar.rs` (`SidecarDb`).
 
 The child process receives `BROKKR_MARKER_FIFO` env var pointing to a named
-pipe. The shared supervisor in `src/output/child.rs` polls the child, handles
+pipe, `.brokkr/.sidecar-<token>.fifo` with a fresh 128-bit random token per
+measurement or library run (`src/sidecar/namespace.rs`; what `brokkr clean`
+removes is in `brokkr man clean`). Only a child brokkr attaches a FIFO to
+gets the variable: brokkr drops `BROKKR_MARKER_FIFO` and
+`BROKKR_HARNESS_ARTEFACT_DIR` from its own environment when a command starts
+(not when it runs as the test harness shim, which forwards its environment
+unchanged to the program cargo meant to run), so a
+brokkr started under another brokkr's sidecar passes that FIFO to none of its
+children, measured or not (configured environment can still set the name
+explicitly). The shared supervisor in `src/output/child.rs` polls the child, handles
 stop markers, deadlines and interrupts, and drains stdout/stderr with a bounded
 settle period. It records one typed ending (`Exited`, `Signalled`, `StopMarker`,
 `Deadline`, `Interrupted`, or `WaitFailed`) before waiting for the drains. `src/sidecar.rs`

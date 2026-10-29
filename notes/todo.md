@@ -318,29 +318,6 @@ lose its qualifier and pair as unqualified. No qualified row predates v25
 stored argv must refold the qualifier. Found while landing library rows,
 whose identity rides in the qualifier.
 
-### Sidecar FIFOs: where they live, how they are named (2026-10-29)
-
-Found during brokkr#46 slice 2, not fixed there:
-
-- Measured runs and `brokkr library` runs make their FIFO in the project
-  state root (`.brokkr/.sidecar-<pid>.fifo`), but `brokkr clean` sweeps
-  `.sidecar-*.fifo` only in the configured scratch dir and
-  `docs/commands/clean.md` says "in the configured scratch root". A FIFO a
-  SIGKILLed brokkr leaves in `.brokkr/` is never swept (pbfhogg's session
-  saw such leftovers). Either sweep both or create in scratch.
-- `SidecarFifo::create` names the FIFO by brokkr's numeric pid and removes
-  any existing path of that name first. The global lock serializes
-  cooperating commands, but two brokkr processes in different PID
-  namespaces sharing the project tree can share a pid and remove each
-  other's FIFO. A random token in the name (as private directories have)
-  would close it; clean already matches the name shape, not the pid.
-- Found in slice 4: plain captured children (verify's pbfhogg and
-  reference-tool runs through `Invocation::capture_in` and `run_to_file`)
-  inherit brokkr's whole environment, so a brokkr that itself runs under a
-  sidecar hands its own `BROKKR_MARKER_FIFO` to every pbfhogg CLI it starts
-  outside a measurement. Library CLI launches and every capability probe now
-  remove it; the other unmeasured pbfhogg spawns do not.
-
 ### Make default binary configurable per-project in brokkr.toml
 
 Currently `find_executable` infers the expected binary name from `BuildConfig.bin` or `BuildConfig.package`. This should be configurable in `brokkr.toml` (e.g. a `default_bin` field per project) so projects with multiple binaries can declare which one brokkr should run by default.

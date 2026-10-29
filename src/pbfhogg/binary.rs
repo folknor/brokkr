@@ -508,7 +508,9 @@ impl PbfhoggBinary {
 }
 
 /// The variables brokkr hands a running harness, which describe mode must not
-/// see even when brokkr itself inherited them.
+/// see even when brokkr itself inherited them. brokkr drops the first two
+/// from its own environment at startup, so for them this list restates the
+/// protocol; the profiling ones it may still inherit.
 const HARNESS_RUN_ENV: [&str; 5] = [
     crate::sidecar::MARKER_FIFO_ENV,
     HARNESS_ARTEFACT_DIR_ENV,

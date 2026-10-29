@@ -5,7 +5,6 @@
 //! clean plan; clean does not infer ownership by decoding filenames.
 
 use std::collections::{BTreeSet, HashMap};
-use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 
 use crate::config;
@@ -594,37 +593,6 @@ impl<'a> PbfhoggLayout<'a> {
                 }
             }
         }
-    }
-}
-
-/// Sidecar marker pipes under a project's configured scratch directory.
-/// The reserved filename envelope plus FIFO type identifies the path; clean
-/// never extracts a process id from the name.
-pub(crate) struct SidecarFifos<'a> {
-    scratch: &'a Path,
-}
-
-impl<'a> SidecarFifos<'a> {
-    pub(crate) fn new(scratch: &'a Path) -> Self {
-        Self { scratch }
-    }
-
-    pub(crate) fn existing(&self) -> Vec<PathBuf> {
-        let Ok(entries) = std::fs::read_dir(self.scratch) else {
-            return Vec::new();
-        };
-        entries
-            .flatten()
-            .filter_map(|entry| {
-                if !entry.file_type().ok()?.is_fifo() {
-                    return None;
-                }
-                let name = entry.file_name();
-                let name = name.to_str()?;
-                let token = name.strip_prefix(".sidecar-")?.strip_suffix(".fifo")?;
-                (!token.is_empty()).then(|| entry.path())
-            })
-            .collect()
     }
 }
 

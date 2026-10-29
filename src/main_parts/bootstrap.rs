@@ -164,10 +164,29 @@ fn parse_cli(project: Option<&Project>) -> (Cli, cli::CommandId) {
     (cli, command_id)
 }
 
+/// Drop the variables brokkr hands the children it attaches a marker FIFO or
+/// a harness artefact directory to, when this brokkr inherited them: a FIFO
+/// is a contract between one brokkr and the children it attached it to, so
+/// one handed to this brokkr reaches no child of it, on any spawn path. A
+/// child that should have them gets them set explicitly. Not done for the
+/// harness shim, which forwards its environment to the program cargo meant
+/// to run unchanged.
+fn shed_inherited_run_env() {
+    for name in [
+        crate::sidecar::MARKER_FIFO_ENV,
+        crate::pbfhogg::binary::HARNESS_ARTEFACT_DIR_ENV,
+    ] {
+        // SAFETY: called from `main` before brokkr starts any thread, so no
+        // other thread can read or write the environment concurrently.
+        unsafe { std::env::remove_var(name) };
+    }
+}
+
 pub(crate) fn main() {
     if let Some(code) = test_runner::maybe_run_harness_shim() {
         std::process::exit(code);
     }
+    shed_inherited_run_env();
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
     let start = Instant::now();
 

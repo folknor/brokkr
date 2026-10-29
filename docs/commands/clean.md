@@ -100,10 +100,19 @@ Bare `brokkr clean`, in order:
   empty goes with them; only in a clean run by hand, never in the cleanup
   after an interrupted command, which runs after the command released the
   lock that protects a live run between its launches. Other pbfhogg scratch
-  files survive. Sidecar
-  marker FIFOs in the configured scratch root are removed only when both their
-  reserved `.sidecar-*.fifo` name shape and FIFO type match; clean does not
-  parse a PID from the name.
+  files survive.
+- **Sidecar marker FIFOs**, every project: in `.brokkr/`, where measured and
+  `brokkr library` runs make them, and in the configured scratch dir, where
+  an older brokkr made them. A FIFO is removed only when its name has the
+  reserved `.sidecar-<token>.fifo` shape, it is a FIFO, and no process holds
+  its read end (a non-blocking write open is refused with `ENXIO`); clean
+  never parses the token. A live brokkr always holds its FIFO's read end, and
+  the window before it opens one is covered by `.brokkr/.sidecar.lock`, which
+  each creator holds shared across it and the sweep exclusive; the lock file
+  stays. A clean run by hand waits for the lock; the cleanup after an
+  interrupted command skips the sweep, with a warning, when it is held. Not
+  covered: a FIFO an older brokkr that takes no lock is creating at that
+  instant, and elivagar's scratch, wiped whole before this sweep runs.
 - **Elivagar also**: `corpus-calibrands/` (the default `-o` for
   `pmtiles-corpus mutate`). The `ocean-build_tmp`, `.ingest_tmp`, and
   `.tilegen_tmp` names are not brokkr-designated paths and are left alone.

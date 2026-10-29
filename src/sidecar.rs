@@ -46,6 +46,8 @@ use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::time::{Duration, Instant};
 
+pub(crate) mod namespace;
+
 use crate::error::DevError;
 use crate::output::child::{self, ChildLimit, Ending};
 use crate::output::console;
@@ -1130,32 +1132,44 @@ impl FifoCapture {
 const FIFO_PIPE_BYTES: libc::c_int = 1024 * 1024;
 
 impl SidecarFifo {
-    /// Create the FIFO and open the read end.
+    /// Create a FIFO under a fresh name in `dir` (the project's `.brokkr`)
+    /// and open the read end, under `dir`'s namespace lock (see
+    /// [`namespace`]).
     ///
     /// Must be called BEFORE spawning the child so the reader exists when
     /// the child tries to open the write end with `O_NONBLOCK`.
-    pub(crate) fn create(
-        scratch_dir: &Path,
-        tunables: &MeasurementTunables,
-    ) -> Result<Self, DevError> {
-        let pid = std::process::id();
-        let path = scratch_dir.join(format!(".sidecar-{pid}.fifo"));
-
-        // Remove stale FIFO if it exists.
-        drop(fs::remove_file(&path));
-
+    pub(crate) fn create(dir: &Path, tunables: &MeasurementTunables) -> Result<Self, DevError> {
+        let token = crate::lockfile::RunToken::mint().ok_or_else(|| {
+            DevError::Config("cannot read /dev/urandom for a sidecar FIFO name".into())
+        })?;
+        let path = dir.join(namespace::fifo_name(token.as_str()));
         let c_path = std::ffi::CString::new(
             path.to_str()
-                .ok_or_else(|| DevError::Config("scratch path not UTF-8".into()))?,
+                .ok_or_else(|| DevError::Config("FIFO directory path not UTF-8".into()))?,
         )
         .map_err(|e| DevError::Config(format!("invalid FIFO path: {e}")))?;
 
+        let namespace = namespace::NamespaceLock::acquire(dir, namespace::Access::Create, true)?
+            .ok_or_else(|| DevError::Internal("a waiting namespace lock returned none".into()))?;
+        // A name is never removed before creation: an existing one belongs
+        // to someone else.
         let ret = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
         if ret != 0 {
-            return Err(DevError::Io(std::io::Error::last_os_error()));
+            let e = std::io::Error::last_os_error();
+            return Err(DevError::Io(std::io::Error::new(
+                e.kind(),
+                format!("cannot create FIFO {}: {e}", path.display()),
+            )));
         }
-
-        let file = Self::open_read_end(&path)?;
+        // Ours from here: a failed open removes it before the lock goes.
+        let file = match Self::open_read_end(&path) {
+            Ok(file) => file,
+            Err(e) => {
+                drop(fs::remove_file(&path));
+                return Err(e);
+            }
+        };
+        drop(namespace);
 
         // A marker from an earlier run in this hold must not be shown as this
         // run's until this run emits one.
@@ -1198,9 +1212,10 @@ impl SidecarFifo {
 
     /// Reopen the read end after a child exits.
     ///
-    /// When the child closes the write end, the reader gets EOF. For
-    /// multi-run benchmarks, we must reopen to accept the next child's
-    /// write end.
+    /// Called between runs of a multi-run measurement; it drops any partial
+    /// line the last child left. (A FIFO's EOF is not permanent: a later
+    /// writer would be read on the old end too.) The new end opens before
+    /// the old one closes, so the FIFO never lacks a reader (`namespace`).
     pub(crate) fn reopen(&mut self) -> Result<(), DevError> {
         let file = Self::open_read_end(&self.path)?;
         self.reader = BufReader::new(file);
@@ -1472,6 +1487,9 @@ const FINAL_DRAIN_BUDGET: usize = 16 * 1024 * 1024;
 
 impl Drop for SidecarFifo {
     fn drop(&mut self) {
+        // The name goes before the reader closes, so a name never outlives
+        // its reader while this process lives (a failed unlink leaves a FIFO
+        // the sweep reclaims).
         drop(fs::remove_file(&self.path));
         crate::lockfile::activity::note_marker(None);
     }
@@ -2120,6 +2138,29 @@ mod tests {
             drain_names(&mut fifo, 100, line),
             (vec![], DrainStop::Closed, false)
         );
+    }
+
+    #[test]
+    fn each_fifo_gets_a_fresh_name_the_sweep_leaves_while_it_lives() {
+        let dir = crate::test_scratch::scratch("sidecar", "fresh_names");
+        let a = SidecarFifo::create(&dir, &DEFAULT_MEASUREMENT_TUNABLES).unwrap();
+        let b = SidecarFifo::create(&dir, &DEFAULT_MEASUREMENT_TUNABLES).unwrap();
+        assert_ne!(a.path, b.path, "one process, two FIFOs, two names");
+        let name = a.path.file_name().unwrap().to_str().unwrap();
+        let token = name
+            .strip_prefix(".sidecar-")
+            .and_then(|rest| rest.strip_suffix(".fifo"))
+            .unwrap();
+        assert_eq!(token.len(), 32);
+        assert!(token.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert!(dir.join(namespace::LOCK_FILE).is_file());
+
+        assert!(namespace::abandoned(&dir).is_empty(), "both have readers");
+        let path = a.path.clone();
+        drop(a);
+        assert!(!path.exists(), "drop removes the name");
+        assert!(namespace::abandoned(&dir).is_empty());
+        drop(b);
     }
 
     fn marker(idx: i32, ts: i64, name: &str) -> Marker {
