@@ -38,6 +38,10 @@ via the same `MeasurementSession` path as everyone else. `corpus --bench` is ref
 - the parity harness emits NDJSON dispositions, not the `key=value` stderr
 timing contract `--bench` needs. The build-config seam both paths share is
 `MeasurementSession::with_build_config` + `BuildConfig::for_harness_with_profile`.
+Pbfhogg's `library SCENARIO` takes `--bench`, and `--hotpath`/`--alloc` for a
+scenario its harness declares hotpath, building the
+`[pbfhogg.library.harness]` member with the instrumentation feature added;
+every process is a full verification (`brokkr man library`).
 
 ## Command plans
 
@@ -579,8 +583,8 @@ switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`.
 Samples, markers, counters, and FIFO records have explicit limits in
 `MeasurementTunables`. The sample, marker, and counter budgets apply across
 all iterations in one measurement, so a large `--bench N` request cannot
-multiply the retained trajectory without bound. A library measurement is
-the exception (`brokkr man library`, Measuring a scenario): each of its
+multiply the retained trajectory without bound. A library measurement
+(`--bench`, `--hotpath` or `--alloc`) is the exception (`brokkr man library`, Measuring a scenario): each of its
 processes is verified whole and has the budgets a verification has, and
 the bound is instead on memory, since each process's trajectory is stored
 as soon as it is judged and brokkr holds at most one; the stored volume
@@ -642,5 +646,13 @@ results database keeps the old display-text columns and parses them when a
 typed metric is missing. Existing rows are not rewritten.
 
 Env vars brokkr sets on hotpath child processes:
-`HOTPATH_METRICS_SERVER_OFF=true`, `HOTPATH_OUTPUT_FORMAT=json`,
-`HOTPATH_OUTPUT_PATH=<scratch>/hotpath-report.json`.
+`HOTPATH_METRICS_SERVER_OFF=true`, `HOTPATH_OUTPUT_FORMAT=json` and
+`HOTPATH_OUTPUT_PATH`, a report path under the project's `.brokkr/`:
+`capture_hotpath` uses a fixed `hotpath-report.json`, cleared before and
+after; the shared measure runner gives every launch a name of its own,
+declares it to the launch's reservation where there is one, and removes it
+after the launch. A `brokkr library` profiled run is the
+exception: its report goes in the run directory, is judged by a stricter
+rule than the parse above (a called function of the requested dimension)
+and is removed with the directory (`brokkr man library`, Profiling a
+scenario).

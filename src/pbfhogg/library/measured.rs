@@ -4,6 +4,11 @@
 //! of rows (the scenario's and one per call) under one uuid, with every
 //! process's trajectory in sidecar.db under the same uuid.
 //!
+//! `--hotpath N` and `--alloc N` (Profiling a scenario) are the same loop on
+//! an instrumented harness: each process's valid hotpath report is part of
+//! its verdict, and the group is the scenario row alone, carrying the chosen
+//! process's report, since the profile is the process's, not a call's.
+//!
 //! Publication order: each process's trajectory is stored as soon as it is
 //! judged (so brokkr holds at most one in memory), with the session's
 //! metadata in the same transaction; after the last process the metadata is
@@ -36,14 +41,17 @@ struct Process {
     peak_rss_kb: i64,
     identity: Identity,
     ending: crate::output::Ending,
+    /// Its hotpath report, in a profiled measurement.
+    hotpath: Option<crate::db::HotpathData>,
 }
 
 /// The handles and the session a measurement runs with.
-pub(crate) struct Bench<'a> {
+pub(crate) struct Measurement<'a> {
     pub(crate) harness: &'a LibraryHarness,
     pub(crate) cli: &'a PbfhoggBinary,
     pub(crate) session: &'a BenchHarness,
-    pub(crate) runs: std::num::NonZeroUsize,
+    /// Bench, hotpath or alloc, with the process count.
+    pub(crate) mode: crate::measure::MeasureMode,
     pub(crate) dataset: &'a str,
     pub(crate) project_root: &'a Path,
 }
@@ -51,12 +59,14 @@ pub(crate) struct Bench<'a> {
 /// Measure `scenario`, its dataset roles bound to `datasets`.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn measure(
-    bench: &Bench<'_>,
+    bench: &Measurement<'_>,
     scenario: &Scenario,
     datasets: &BTreeMap<String, PathBuf>,
     places: &Places<'_>,
 ) -> Result<(), DevError> {
     let session = bench.session;
+    let runs = bench.mode.runs();
+    let profiled = bench.mode.profiled();
     let mut dataset_ids = BTreeMap::new();
     for (role, path) in datasets {
         dataset_ids.insert(role.clone(), identity::dataset(path, bench.project_root)?);
@@ -97,7 +107,7 @@ pub(crate) fn measure(
         input_mb: None,
         cargo_features: None,
         external_build: None,
-        runs: bench.runs.get(),
+        runs: runs.get(),
         cli_args: None,
         metadata: Vec::new(),
         arm_qualifier: None,
@@ -128,6 +138,7 @@ pub(crate) fn measure(
                     reuse: &mut reuse,
                     datasets: &dataset_ids,
                     features: &features,
+                    profiled,
                 }),
                 &mut trajectory,
             );
@@ -181,6 +192,7 @@ pub(crate) fn measure(
                         peak_rss_kb: data.summary.vm_hwm_kb,
                         identity: identity.clone(),
                         ending: data.ending.clone(),
+                        hotpath: report.hotpath.clone(),
                     });
                 }
             }
@@ -220,7 +232,7 @@ pub(crate) fn measure(
             .find_map(|i| i.error.take())
     });
     let winner = measurement.winner.filter(|_| failed.is_none());
-    let (Some(winner), true) = (winner, processes.len() == bench.runs.get()) else {
+    let (Some(winner), true) = (winner, processes.len() == runs.get()) else {
         return Err(file_failed(
             session,
             &sidecar,
@@ -241,7 +253,8 @@ pub(crate) fn measure(
             Some(&info(Some(chosen.ending.clone()))),
             true,
         )?;
-        let (scenario_row, call_rows) = rows(scenario, &config, &processes, winner, datasets)?;
+        let (scenario_row, call_rows) =
+            rows(scenario, &config, &processes, winner, datasets, profiled)?;
         // The publication boundary: a stop seen up to here stores no row.
         if crate::shutdown::should_unwind() {
             return Err(DevError::Interrupted);
@@ -309,13 +322,16 @@ fn file_failed(
 }
 
 /// The rows of a passing measurement: the scenario's, then one per call in
-/// describe order, each carrying the chosen process's identity.
+/// describe order, each carrying the chosen process's identity. A profiled
+/// measurement has the scenario row alone, with the chosen process's
+/// report: the profile is the process's, never a call's.
 fn rows(
     scenario: &Scenario,
     config: &BenchConfig,
     processes: &[Process],
     winner: usize,
     datasets: &BTreeMap<String, PathBuf>,
+    profiled: Option<crate::measure::ProfiledMode>,
 ) -> Result<(GroupRow, Vec<GroupRow>), DevError> {
     let chosen = &processes[winner];
     let qualifier = chosen.identity.qualifier();
@@ -370,10 +386,18 @@ fn rows(
             kv: vec![KvPair::int("peak_rss_kb", chosen.peak_rss_kb)],
             iterations: ms,
             distribution: None,
-            hotpath: None,
+            hotpath: chosen.hotpath.clone(),
         },
         iterations_us: us,
     };
+    if profiled.is_some() {
+        if scenario_row.result.hotpath.is_none() {
+            return Err(DevError::Internal(
+                "a profiled measurement chose a process without its report".into(),
+            ));
+        }
+        return Ok((scenario_row, Vec::new()));
+    }
     let mut calls = Vec::new();
     for call in &scenario.calls {
         let per: Vec<i64> = processes
@@ -496,6 +520,7 @@ mod tests {
                 features: String::new(),
             },
             ending: crate::output::Ending::Exited(0),
+            hotpath: None,
         }
     }
 
@@ -521,7 +546,7 @@ mod tests {
         };
         let processes = [process(30, 700), process(20, 900)];
         let (scenario_row, calls) =
-            rows(&scenario, &config, &processes, 1, &BTreeMap::new()).unwrap();
+            rows(&scenario, &config, &processes, 1, &BTreeMap::new(), None).unwrap();
         assert_eq!(scenario_row.config.command, "library:s");
         assert_eq!(scenario_row.result.iterations, [30, 20]);
         assert_eq!(scenario_row.iterations_us, [30_000, 20_000]);
@@ -562,5 +587,46 @@ mod tests {
                 "meta.library.context"
             ]
         );
+    }
+
+    #[test]
+    fn a_profiled_measurement_is_the_scenario_row_with_the_chosen_report() {
+        let scenario = super::super::describe::parse(
+            br#"{"protocol": 1, "scenarios": [{"id": "s", "description": "d", "deadline_s": 60,
+              "hotpath": true, "roles": [], "calls": [{"id": "a", "label": "l"}],
+              "assertions": []}]}"#,
+        )
+        .unwrap()
+        .scenarios
+        .remove(0);
+        let config = BenchConfig {
+            command: "library:s".to_owned(),
+            input_file: None,
+            input_mb: None,
+            cargo_features: None,
+            external_build: None,
+            runs: 2,
+            cli_args: None,
+            metadata: Vec::new(),
+            arm_qualifier: None,
+        };
+        let profile = |name: &str| {
+            crate::db::hotpath_data_from_json(&serde_json::json!({"functions_timing": {"data": [
+                {"name": name, "calls": 1, "total": "1 ms"}]}}))
+            .unwrap()
+        };
+        let mut processes = [process(30, 700), process(20, 900)];
+        processes[0].hotpath = Some(profile("slow"));
+        processes[1].hotpath = Some(profile("fast"));
+        let mode = Some(crate::measure::ProfiledMode::Hotpath);
+        let (row, calls) = rows(&scenario, &config, &processes, 1, &BTreeMap::new(), mode).unwrap();
+        assert!(
+            calls.is_empty(),
+            "no call rows: the profile is the process's"
+        );
+        assert_eq!(row.config.command, "library:s");
+        assert_eq!(row.result.hotpath.unwrap().functions[0].name, "fast");
+        processes[1].hotpath = None;
+        assert!(rows(&scenario, &config, &processes, 1, &BTreeMap::new(), mode).is_err());
     }
 }

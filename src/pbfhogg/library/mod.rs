@@ -11,16 +11,19 @@
 //! - [`digest`]: the `pbfhogg digest` report the comparison reads.
 //! - [`certify`]: `--all`'s capability classification and its record.
 //! - [`identity`]: what a measured process ran, in brokkr-json-v1.
-//! - [`bench`](mod@bench): `--bench N`, the measured run and its recording.
+//! - [`measured`]: `--bench`, `--hotpath` and `--alloc`, the measured run
+//!   and its recording.
+//! - [`profile`]: a profiled process's hotpath report and its validity.
 
 mod artefact;
-mod bench;
 mod certify;
 mod counterpart;
 mod describe;
 mod digest;
 mod identity;
 mod json;
+mod measured;
+mod profile;
 mod run;
 mod stream;
 
@@ -59,13 +62,15 @@ pub(crate) struct LibraryArgs<'a> {
     pub(crate) profile: Option<RustProfile>,
     /// What to run; `None` lists the scenarios.
     pub(crate) run: Option<RunArgs<'a>>,
-    /// `--bench N`: measure the one scenario `run` names.
-    pub(crate) bench: Option<BenchArgs<'a>>,
+    /// `--bench N`, `--hotpath N` or `--alloc N`: measure the one scenario
+    /// `run` names.
+    pub(crate) measure: Option<MeasureArgs<'a>>,
 }
 
-/// `--bench N` and what its measurement session is made from.
-pub(crate) struct BenchArgs<'a> {
-    pub(crate) runs: std::num::NonZeroUsize,
+/// A measurement and what its session is made from.
+pub(crate) struct MeasureArgs<'a> {
+    /// Bench, hotpath or alloc, with its process count; never run mode.
+    pub(crate) mode: crate::measure::MeasureMode,
     pub(crate) force: bool,
     pub(crate) dev_config: &'a crate::config::DevConfig,
     pub(crate) project_root: &'a crate::project::ProjectRoot,
@@ -122,20 +127,26 @@ pub(crate) fn library(args: &LibraryArgs<'_>) -> Result<(), DevError> {
     // A measurement's session first: a dirty tree is refused (or, with
     // `--force`, unstored) before anything is built, as for every measured
     // command.
-    let session = match (&args.bench, &args.run) {
-        (Some(bench), Some(run)) => Some(session(bench, run.paths)?),
+    let session = match (&args.measure, &args.run) {
+        (Some(measure), Some(run)) => Some(session(measure, run.paths)?),
         _ => None,
     };
+    let profiled = args.measure.as_ref().and_then(|m| m.mode.profiled());
+    if let Some(mode) = profiled {
+        mode.print_note();
+    }
     let profile = args
         .profile
         .clone()
         .or_else(|| args.harness.configured_profile(TABLE))
         .unwrap_or(RustProfile::Release);
     // A run also needs the CLI its counterparts replay against, built
-    // before either handle exists; the listing does not.
+    // before either handle exists; the listing does not. A profiled
+    // measurement builds the harness with its instrumentation feature.
     let (harness, cli) = LibraryHarness::build(
         args.harness,
         profile.clone(),
+        profiled,
         args.run.is_some(),
         args.build_root,
         args.project_root,
@@ -154,17 +165,20 @@ pub(crate) fn library(args: &LibraryArgs<'_>) -> Result<(), DevError> {
         .as_ref()
         .ok_or_else(|| DevError::Internal("a library run was built without its CLI".into()))?;
     match (&run.target, &require) {
-        (Target::One(id), _) => match (&session, &args.bench) {
-            (Some(session), Some(bench_args)) => {
+        (Target::One(id), _) => match (&session, &args.measure) {
+            (Some(session), Some(measure_args)) => {
                 let scenario = find_scenario(&doc, id)?;
+                if let Some(mode) = profiled {
+                    profiling_allowed(&doc, scenario, mode)?;
+                }
                 let (datasets, _) = bind_datasets(scenario, run, args.project_root)?;
                 let (library_root, state_root) = places(run, args.project_root)?;
-                bench::measure(
-                    &bench::Bench {
+                measured::measure(
+                    &measured::Measurement {
                         harness: &harness,
                         cli,
                         session,
-                        runs: bench_args.runs,
+                        mode: measure_args.mode,
                         dataset: run.dataset,
                         project_root: args.project_root,
                     },
@@ -195,11 +209,45 @@ pub(crate) fn library(args: &LibraryArgs<'_>) -> Result<(), DevError> {
     }
 }
 
-/// The measurement session of `--bench N`: the results and sidecar stores,
-/// the tree's cleanliness under the measurement policy, the invocation and
-/// captured environment every row carries.
+/// Refuse to profile a scenario its describe does not mark `hotpath`: the
+/// profile is the whole process's, so only a scenario declared to be one
+/// call and no other library work has a profile that is its call's.
+fn profiling_allowed(
+    doc: &describe::Describe,
+    scenario: &describe::Scenario,
+    mode: crate::measure::ProfiledMode,
+) -> Result<(), DevError> {
+    if scenario.hotpath {
+        return Ok(());
+    }
+    let capable: Vec<&str> = doc
+        .scenarios
+        .iter()
+        .filter(|s| s.hotpath)
+        .map(|s| s.id.as_str())
+        .collect();
+    let flag = match mode {
+        crate::measure::ProfiledMode::Hotpath => "--hotpath",
+        crate::measure::ProfiledMode::Alloc => "--alloc",
+    };
+    Err(DevError::Refused(format!(
+        "scenario {} is not declared hotpath in the describe document, so {flag} cannot \
+         profile it (the profile is the whole process's); {}",
+        scenario.id,
+        if capable.is_empty() {
+            "no scenario is declared hotpath".to_owned()
+        } else {
+            format!("declared hotpath: {}", capable.join(", "))
+        }
+    )))
+}
+
+/// The measurement session of `--bench`, `--hotpath` or `--alloc`: the
+/// results and sidecar stores, the tree's cleanliness under the measurement
+/// policy, the recorded mode, the invocation and captured environment every
+/// row carries.
 fn session(
-    bench: &BenchArgs<'_>,
+    bench: &MeasureArgs<'_>,
     paths: &crate::config::ResolvedPaths,
 ) -> Result<crate::harness::BenchHarness, DevError> {
     let lock = crate::context::reenter_command_lock()?;
@@ -214,7 +262,7 @@ fn session(
         None,
     )?
     .with_invocation(bench.invocation.clone())
-    .with_measure_mode(Some(crate::measure::RecordedMode::Bench))
+    .with_measure_mode(bench.mode.recorded())
     .with_env_kv(crate::config::captured_env_pairs(bench.dev_config));
     session.note_unneeded_force(bench.force);
     Ok(session)
@@ -625,10 +673,16 @@ fn listing(doc: &describe::Describe) -> Vec<String> {
             lines.push(String::new());
         }
         lines.push(format!(
-            "{}  {}, deadline {}s",
+            "{}  {}, deadline {}s{}{}",
             scenario.id,
             output::count(scenario.calls.len(), "call"),
             scenario.deadline_s,
+            if scenario.hotpath { ", hotpath" } else { "" },
+            if scenario.isolation {
+                ", isolation"
+            } else {
+                ""
+            },
         ));
         lines.push(format!("  {}", scenario.description));
         for call in &scenario.calls {

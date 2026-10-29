@@ -142,7 +142,9 @@ Any supplied row filters still apply to the UUID matches.
 
 A library measurement (`brokkr man library`, Measuring a scenario) stores
 one group of rows under one uuid, its scenario row and one per call; its
-uuid shows every row of the group as such a block, the scenario's first.
+uuid shows every row of the group as such a block, the scenario's first. A
+profiled one (`--hotpath`, `--alloc`; Profiling a scenario) is the scenario
+row alone, with its profile.
 
 A prefix matching several runs falls back to the table plus per-row details.
 UUID resolution considers both stores; results lists result rows and reports

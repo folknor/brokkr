@@ -24,8 +24,8 @@ The command is named for its default, not its only mode. It takes the shared
 
 | Mode | Cargo features | Harness path | `mode` column |
 | --- | --- | --- | --- |
-| `--hotpath N` | `hotpath` + host/CLI features | `run_hotpath_capture` | `hotpath` |
-| `--alloc N` | `hotpath-alloc` + host/CLI features | `run_hotpath_capture` | `alloc` |
+| `--hotpath N` | `hotpath` + host/CLI features | `run_hotpath` + `capture_hotpath` | `hotpath` |
+| `--alloc N` | `hotpath-alloc` + host/CLI features | `run_hotpath` + `capture_hotpath` | `alloc` |
 | `--bench N` | host/CLI features only (**bare**) | `run_external_with_kv` | `bench` |
 
 `--bench` builds the example **bare** on purpose. Instrumentation taxes every
@@ -124,9 +124,9 @@ brokkr results --command render --compare <old-uuid> <new-uuid>
 
 Use `--bench`, not `--hotpath`, for that comparison - see the modes table above.
 
-`--compare` pairs the two rows into a single delta row. Pairing keys on
-`(command, mode, input_file, arm_key, env_fingerprint)`, where the arm key is
-the recorded argv with `--commit`, `--verbose` and iteration counts removed
+`--compare` pairs the two rows into a single delta row. Pairing keys on the
+tuple `brokkr man results` (`--compare`) gives, among it the arm key: the
+recorded argv with `--commit`, `--verbose` and iteration counts removed
 (rows from before the key existed pair by their stored argv) - otherwise the retro row
 could never pair with the current-tree row, since `--commit` is precisely what
 distinguishes them. Any *other* flag difference between the two invocations

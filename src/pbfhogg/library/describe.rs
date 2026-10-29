@@ -37,6 +37,14 @@ pub(crate) struct Scenario {
     pub(crate) id: String,
     pub(crate) description: String,
     pub(crate) deadline_s: u32,
+    /// The scenario may be profiled (`--hotpath`, `--alloc`): it has exactly
+    /// one call, and no other library work runs in its process, so the
+    /// process-wide profile's functions are that call's.
+    pub(crate) hotpath: bool,
+    /// The scenario is an isolated call, the first library work in a fresh
+    /// process, with a CLI counterpart: what a library against CLI timing
+    /// needs. brokkr validates and lists it and times nothing yet.
+    pub(crate) isolation: bool,
     pub(crate) roles: Vec<Role>,
     pub(crate) calls: Vec<Call>,
     pub(crate) assertions: Vec<Assertion>,
@@ -253,11 +261,43 @@ fn scenario(item: &Field<'_>) -> Result<Scenario, String> {
         }
         assertions.push(assertion);
     }
+    let flag = |key: &str| -> Result<(bool, String), String> {
+        match obj.optional(key) {
+            Some(field) => Ok((field.as_bool()?, field.path().to_owned())),
+            None => Ok((false, String::new())),
+        }
+    };
+    let (hotpath, hotpath_path) = flag("hotpath")?;
+    if hotpath && calls.len() != 1 {
+        return Err(format!(
+            "{hotpath_path}: a hotpath scenario has exactly one call (the profile is the \
+             process's), this one has {}",
+            calls.len()
+        ));
+    }
+    let (isolation, isolation_path) = flag("isolation")?;
+    if isolation {
+        if calls.len() != 1 {
+            return Err(format!(
+                "{isolation_path}: an isolation scenario has exactly one call, this one has {}",
+                calls.len()
+            ));
+        }
+        if calls[0].cli.is_none() {
+            return Err(format!(
+                "{isolation_path}: an isolation scenario's call has a cli counterpart, and {:?} \
+                 has none",
+                calls[0].id
+            ));
+        }
+    }
     obj.finish()?;
     Ok(Scenario {
         id,
         description,
         deadline_s,
+        hotpath,
+        isolation,
         roles,
         calls,
         assertions,

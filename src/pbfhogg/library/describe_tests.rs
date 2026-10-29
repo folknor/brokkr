@@ -246,9 +246,9 @@ fn another_protocol_is_refused_by_name() {
 fn unknown_missing_and_duplicate_keys_are_refused_with_their_path() {
     let e = refused(&edited(
         "\"deadline_s\": 600,",
-        "\"deadline_s\": 600, \"hotpath\": true,",
+        "\"deadline_s\": 600, \"warmup\": true,",
     ));
-    assert_eq!(e, "describe.scenarios[0]: unknown key \"hotpath\"");
+    assert_eq!(e, "describe.scenarios[0]: unknown key \"warmup\"");
     let e = refused(&edited("\"deadline_s\": 600,", ""));
     assert_eq!(e, "describe.scenarios[0]: missing key \"deadline_s\"");
     let e = refused(&edited(
@@ -256,6 +256,55 @@ fn unknown_missing_and_duplicate_keys_are_refused_with_their_path() {
         "\"deadline_s\": 600, \"deadline_s\": 5,",
     ));
     assert_eq!(e, "describe.scenarios[0]: duplicate key \"deadline_s\"");
+}
+
+/// A one-call scenario, call `a` with a CLI counterpart, and `flags` after
+/// its deadline.
+fn single(flags: &str) -> String {
+    format!(
+        r#"{{"protocol": 1, "scenarios": [{{"id": "s", "description": "d", "deadline_s": 60, {flags}
+          "roles": [{{"id": "input", "kind": "pbf", "source": "dataset", "variant": "indexed"}},
+                    {{"id": "out", "kind": "pbf", "source": "output", "owner": "a"}}],
+          "calls": [{{"id": "a", "label": "cat",
+                      "cli": {{"argv": ["cat", {{"input": "input"}}, "-o", {{"output": "out"}}]}}}}],
+          "assertions": []}}]}}"#
+    )
+}
+
+#[test]
+fn hotpath_and_isolation_are_single_call_flags() {
+    let plain = parse(single("").as_bytes()).unwrap();
+    assert!(!plain.scenarios[0].hotpath && !plain.scenarios[0].isolation);
+    let both = parse(single(r#""hotpath": true, "isolation": true,"#).as_bytes()).unwrap();
+    assert!(both.scenarios[0].hotpath && both.scenarios[0].isolation);
+    let off = parse(single(r#""hotpath": false, "isolation": false,"#).as_bytes()).unwrap();
+    assert_eq!(off, plain);
+
+    // The example has two calls.
+    let e = refused(&edited(
+        "\"deadline_s\": 600,",
+        "\"deadline_s\": 600, \"hotpath\": true,",
+    ));
+    assert!(
+        e.starts_with("describe.scenarios[0].hotpath: ") && e.contains("exactly one call"),
+        "{e}"
+    );
+    let e = refused(&edited(
+        "\"deadline_s\": 600,",
+        "\"deadline_s\": 600, \"isolation\": true,",
+    ));
+    assert!(
+        e.starts_with("describe.scenarios[0].isolation: ") && e.contains("exactly one call"),
+        "{e}"
+    );
+    let cli = r#""cli": {"argv": ["cat", {"input": "input"}, "-o", {"output": "out"}]}"#;
+    let with_cli = single(r#""isolation": true,"#);
+    assert!(with_cli.contains(cli));
+    let no_cli = with_cli.replacen(cli, r#""stream": []"#, 1);
+    let e = refused(&no_cli);
+    assert!(e.contains("cli counterpart"), "{e}");
+    let e = refused(&single(r#""hotpath": 1,"#));
+    assert!(e.starts_with("describe.scenarios[0].hotpath"), "{e}");
 }
 
 #[test]

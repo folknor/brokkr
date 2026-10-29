@@ -1076,6 +1076,8 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             scenario,
             all,
             bench,
+            hotpath,
+            alloc,
             force,
             dataset,
             snapshot,
@@ -1084,7 +1086,13 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             profile,
             commit,
         } => {
+            use crate::measure::MeasureMode;
             use crate::pbfhogg::library::Target;
+            // Clap admits at most one of the three.
+            let mode = bench
+                .map(|runs| MeasureMode::Bench { runs })
+                .or(hotpath.map(|runs| MeasureMode::Hotpath { runs }))
+                .or(alloc.map(|runs| MeasureMode::Alloc { runs }));
             let library = project_config.pbfhogg_library()?;
             let profile = profile_choice(debug, release, profile.as_ref());
             let target = match &scenario {
@@ -1132,8 +1140,8 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                         commit: commit.as_deref(),
                         profile,
                         run,
-                        bench: bench.map(|runs| crate::pbfhogg::library::BenchArgs {
-                            runs,
+                        measure: mode.map(|mode| crate::pbfhogg::library::MeasureArgs {
+                            mode,
                             force,
                             dev_config,
                             project_root: &detection.project_root,

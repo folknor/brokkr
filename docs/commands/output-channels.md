@@ -140,7 +140,7 @@ from brokkr rather than stderr.
 | `run_external_ok` | captured, dropped | **yes** (counters only) | yes | every pbfhogg bench command + elivagar `tilegen` + `brokkr mogwai` |
 | `measure_external` | captured, dropped | **yes** | yes | elivagar `self` micro-bench; pbfhogg read/write/merge micro-benches (via `run_external_with_kv`) |
 | `run_internal` (+ `run_captured`) | captured, dropped | no | **no** (no FIFO) | elivagar example benches |
-| `capture_hotpath` (stored via `run_hotpath`) | captured | stderr counters + JSON profile | yes | `--hotpath` / `--alloc`, all projects |
+| `capture_hotpath` (stored via `run_hotpath`) | captured | stderr counters + JSON profile | yes | `--hotpath` / `--alloc`, all projects but `brokkr library`, whose measured runs are verifications (see below) |
 
 The two external paths differ in exactly one thing: **which clock the recorded
 `elapsed_ms` comes from.** `run_external_ok` measures the child from outside;
@@ -224,7 +224,10 @@ certification record, a JSON document under `.brokkr/library-certifications/`.
 scenario's and one per call, each call's sealed snapshot as `snapshot.*`
 counters) under one uuid in results.db, and every process's trajectory,
 with its sink ends and call boundaries, in sidecar.db under the same uuid;
-no stdout or stderr reaches either. See `brokkr man library`.)
+no stdout or stderr reaches either. `--hotpath N` and `--alloc N` record the
+same way, except that the group is the scenario row alone, carrying the
+chosen process's hotpath report, which the harness writes into its run
+directory rather than to any channel above. See `brokkr man library`.)
 
 (`verify` subcommands are correctness checks, not benchmarks - they don't
 record to either DB. Their listing-producing steps and every reference-tool

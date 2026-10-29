@@ -509,7 +509,25 @@ impl PbfhoggBinary {
 
 /// The variables brokkr hands a running harness, which describe mode must not
 /// see even when brokkr itself inherited them.
-const HARNESS_RUN_ENV: [&str; 2] = [crate::sidecar::MARKER_FIFO_ENV, HARNESS_ARTEFACT_DIR_ENV];
+const HARNESS_RUN_ENV: [&str; 5] = [
+    crate::sidecar::MARKER_FIFO_ENV,
+    HARNESS_ARTEFACT_DIR_ENV,
+    HOTPATH_OUTPUT_PATH_ENV,
+    HOTPATH_OUTPUT_FORMAT_ENV,
+    HOTPATH_METRICS_SERVER_OFF_ENV,
+];
+
+/// The hotpath crate's report path; a harness profiles only when it is set.
+const HOTPATH_OUTPUT_PATH_ENV: &str = "HOTPATH_OUTPUT_PATH";
+const HOTPATH_OUTPUT_FORMAT_ENV: &str = "HOTPATH_OUTPUT_FORMAT";
+const HOTPATH_METRICS_SERVER_OFF_ENV: &str = "HOTPATH_METRICS_SERVER_OFF";
+
+/// The profiling variables, which only a profiled launch carries.
+const HOTPATH_ENV: [&str; 3] = [
+    HOTPATH_OUTPUT_PATH_ENV,
+    HOTPATH_OUTPUT_FORMAT_ENV,
+    HOTPATH_METRICS_SERVER_OFF_ENV,
+];
 
 /// How long describe mode may take.
 const DESCRIBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
@@ -548,15 +566,23 @@ impl LibraryHarness {
     /// and with `with_cli` the pbfhogg CLI of the same tree (release, default
     /// features: the reference its counterparts replay against), then wrap
     /// them. Both builds run before either handle exists, since a live
-    /// handle refuses a build. `project_root` is the describe run's working
-    /// directory.
+    /// handle refuses a build. `profiled` adds its instrumentation feature
+    /// (`hotpath` or `hotpath-alloc`) to the configured ones, first, as the
+    /// harness member must define it; the CLI is never instrumented.
+    /// `project_root` is the describe run's working directory.
     pub(crate) fn build(
         config: &crate::config::HarnessConfig,
         profile: crate::build::RustProfile,
+        profiled: Option<crate::measure::ProfiledMode>,
         with_cli: bool,
         build_root: &Path,
         project_root: &Path,
     ) -> Result<(Self, Option<PbfhoggBinary>), DevError> {
+        let mut config = config.clone();
+        if let Some(mode) = profiled {
+            config.features.retain(|f| f != mode.feature());
+            config.features.insert(0, mode.feature().to_owned());
+        }
         let hold = crate::lockfile::current_hold().ok_or_else(|| {
             DevError::Lock(
                 "a library harness handle needs the brokkr lock held for its whole life - \
@@ -567,7 +593,7 @@ impl LibraryHarness {
         let sigterm = crate::shutdown::SigtermGuard::install();
         let built = crate::harness_build::build_for_harness(
             build_root,
-            config,
+            &config,
             profile,
             Some(&|pid| hold.set_child_pid(pid)),
             Some(&|| hold.clear_child_pid()),
@@ -744,6 +770,10 @@ pub(crate) struct HarnessLaunch<'a> {
     pub(crate) fifo: &'a mut crate::sidecar::SidecarFifo,
     /// The process's index in its run, from 0, for the capture's narration.
     pub(crate) iteration: usize,
+    /// A profiled launch's hotpath report path, inside the run directory
+    /// (so the coverage reserves it and the release keeps it): the
+    /// profiling variables are set to write it there. `None` removes them.
+    pub(crate) hotpath_report: Option<&'a Path>,
 }
 
 /// What one harness launch came to. The child has been reaped and the launch
@@ -777,6 +807,10 @@ impl LibraryHarness {
         let program = crate::utf8_path::path_string(&self.path)?;
         let request = crate::utf8_path::path_string(launch.request)?;
         let artefacts = crate::utf8_path::path_string(launch.artefacts)?;
+        let report = match launch.hotpath_report {
+            Some(path) => Some(crate::utf8_path::path_string(path)?),
+            None => None,
+        };
         let spec = crate::reservations::LaunchSpec::new(
             launch.cwd.to_path_buf(),
             launch.reads,
@@ -792,17 +826,25 @@ impl LibraryHarness {
         ];
         let launched = spec.launch(&self.path, &args, launch.cwd, &[])?;
         let fifo_path = launch.fifo.path_str()?.to_owned();
-        let env = [
+        let mut env = vec![
             (HARNESS_ARTEFACT_DIR_ENV, artefacts.as_str()),
             (crate::sidecar::MARKER_FIFO_ENV, fifo_path.as_str()),
         ];
+        if let Some(report) = &report {
+            env.extend([
+                (HOTPATH_METRICS_SERVER_OFF_ENV, "true"),
+                (HOTPATH_OUTPUT_FORMAT_ENV, "json"),
+                (HOTPATH_OUTPUT_PATH_ENV, report.as_str()),
+            ]);
+        }
         let sigterm = crate::shutdown::SigtermGuard::install();
         let start = std::time::Instant::now();
-        let child = match crate::output::child::spawn_captured(
+        let child = match crate::output::child::spawn_captured_unsetting(
             &program,
             &launched.arg_refs(),
             launch.cwd,
             &env,
+            &HOTPATH_ENV,
             crate::shutdown::ChildIsolation::ProcessGroup(&sigterm),
             crate::output::SpawnProfile::Plain,
         ) {

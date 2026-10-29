@@ -195,7 +195,8 @@ One row series per workload is what makes the query surface useful:
 
 - `brokkr results --command same_obj_read` - one workload across commits
 - `brokkr results --compare <a> <b>` - pairs per workload automatically (the
-  pair key is `(command, mode, input_file, arm_key, env_fingerprint)`)
+  pair key is the tuple `brokkr man results` gives under `--compare`, the
+  workload's `input_file` among it)
 - `brokkr results --command same_obj_read --mode bench` - keeps instrumented
   runs out of a wall-clock series
 - `brokkr results <uuid>` - per-iteration walls and `prev.*` provenance, and

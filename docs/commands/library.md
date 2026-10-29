@@ -6,8 +6,8 @@ scripted sequences of library calls in one process; pbfhogg writes it to the
 protocol below, and a pbfhogg commit without that member has nothing for this
 command to build. `brokkr library` builds the harness per commit (so
 `--commit` works), lists the scenarios it declares, runs one as a
-verification, measures one and records it, and runs them all to certify the
-capabilities brokkr.toml requires.
+verification, measures or profiles one and records it, and runs them all to
+certify the capabilities brokkr.toml requires.
 
 pbfhogg owns what a call does: the scenarios, the library calls they make
 and the assertions about them that only the process itself can judge. brokkr
@@ -16,11 +16,15 @@ knows no pbfhogg API semantics, only the identifiers the harness declares
 and the shapes below.
 
 This document is the protocol, binding on both sides. It describes protocol
-version 1 as this brokkr implements it, and grows as brokkr does more with
-it; a harness output it does not allow is refused, never guessed at. Version
-1 is not yet frozen: a document carrying a field this brokkr does not
-implement is refused as an unknown key, and compatibility between brokkr
-releases is not promised until it is.
+version 1, and a harness output it does not allow is refused, never guessed
+at. Version 1 is final: its schema and what brokkr makes of it stay as
+written here, and a later brokkr reads a version 1 document as this one
+does; a change to either comes with a new protocol number. The domains the
+producer defines stay open as they are: the contents of plans and contexts,
+snapshot counter names, marker names, diagnostic kinds and keys, capability
+ids and result details. A library call against its CLI counterpart's timing
+(see Isolation scenarios) needs nothing more from the harness, so its
+arrival does not change version 1.
 
 ## Usage
 
@@ -28,11 +32,13 @@ releases is not promised until it is.
 brokkr library [--commit REF] [--debug | --release | --profile NAME]
 brokkr library SCENARIO [--dataset NAME] [--snapshot KEY] [--commit REF] [...]
 brokkr library SCENARIO --bench [N] [--force] [...]
+brokkr library SCENARIO --hotpath [N] | --alloc [N] [--force] [...]
 brokkr library --all [--dataset NAME] [--snapshot KEY] [--commit REF] [...]
 ```
 
 Bare, builds the harness and lists the scenarios it declares: per scenario
-its id, call count, deadline and description, then one line per call (with
+its id, call count, deadline (and `hotpath` and `isolation` when it is
+declared so) and description, then one line per call (with
 the capabilities its stream claims, and beneath it its CLI counterpart and
 declared policy differences), role and assertion. The listing is data on
 stdout; build narration goes where `brokkr man output-channels` says.
@@ -50,6 +56,12 @@ it as N whole processes, each verified as `SCENARIO` verifies one and
 agreeing with the first, and records them (see Measuring a scenario).
 `--force` lets it measure a dirty tree, which stores no row.
 
+With `SCENARIO --hotpath N` or `--alloc N` (bare means one), profiles a
+scenario the describe document declares `hotpath`: the same N verified
+processes, of a harness built with the instrumentation feature, recorded
+with the profile (see Profiling a scenario). `--force` works as for
+`--bench`. `--bench`, `--hotpath` and `--alloc` exclude each other.
+
 With `--all`, runs every scenario once, then classifies each capability
 `[pbfhogg.library.require]` names and writes a certification record (see
 Certification). It never measures. `--all` and `SCENARIO` exclude each other.
@@ -60,7 +72,9 @@ Certification). It never measures. `--all` and `SCENARIO` exclude each other.
   harness member fails its build.
 - `--debug`, `--release`, `--profile NAME` choose the cargo profile,
   overriding the config's `debug`/`profile`. The default is release: the
-  library is measured in release, and one build serves every use.
+  library is measured in release. One build, with the configured features,
+  serves listing, verification, `--bench` and `--all`; `--hotpath` and
+  `--alloc` build it with their feature added (see Profiling a scenario).
 - `--dataset NAME` (default the shared default dataset, as every pbfhogg
   command) and `--snapshot KEY` (default `base`, the dataset's primary data)
   choose the files the scenario's dataset roles bind. There is no
@@ -119,9 +133,10 @@ The harness is invoked in one of two modes:
 
 ### Describe mode
 
-brokkr runs it in the project root with `BROKKR_MARKER_FIFO` and
-`BROKKR_HARNESS_ARTEFACT_DIR` removed from its environment, and kills it at
-60 seconds. It must exit 0, write nothing to stderr, and print exactly one describe
+brokkr runs it in the project root with `BROKKR_MARKER_FIFO`,
+`BROKKR_HARNESS_ARTEFACT_DIR` and the profiling variables (see Profiling a
+scenario) removed from its environment, and kills it at 60 seconds. Describe
+mode never profiles, whatever the build. It must exit 0, write nothing to stderr, and print exactly one describe
 document of at most 1 MiB on stdout. A longer output, any stderr, another
 exit, a signal or the deadline fails the command, naming which. In describe
 mode the harness writes nothing anywhere; brokkr does not check the file
@@ -147,6 +162,10 @@ column instead.
 
 Every document the harness writes carries `protocol`, an integer. This
 brokkr implements 1 and refuses any other value, naming both.
+
+A profiled run's hotpath report is not a protocol document: the hotpath
+crate writes it in its own JSON, without `protocol`, and these rules do not
+apply to it; Profiling a scenario says what brokkr requires of it.
 
 ### Identifiers
 
@@ -195,6 +214,11 @@ character.
 - `scenarios`: at least one, ids unique.
 - `description`: one line.
 - `deadline_s`: 1 to 86400, the wall one process of the scenario gets.
+- `hotpath` (optional, default false): the scenario can be profiled (see
+  Profiling a scenario). True requires exactly one call.
+- `isolation` (optional, default false): the scenario is an isolated call
+  (see Isolation scenarios). True requires exactly one call, and that call
+  has a `cli` counterpart.
 - `calls`: at least one, ids unique within the scenario, none `setup`. Each
   has a one-line `label`, and may have `stream`: a list of capability ids,
   each at most once, that the call's stream verdict stands for. A nonempty
@@ -286,7 +310,8 @@ same way.
 `BROKKR_MARKER_FIFO` set. The FIFO is always attached: a call's wall
 readings come from `MarkerFifo::now_us()`, a clock only an opened FIFO has.
 `DIR` is the launch's private directory, for the library's staging and
-scratch.
+scratch. The profiling variables are set only on a profiled launch and
+removed from every other (see Profiling a scenario).
 
 - **Exit.** 0: it ran and every result it reported passed. 1: it ran and
   some result it reported is `fail` or `unevaluated`. 2: it could not run
@@ -301,8 +326,8 @@ scratch.
   into the call documents.
 - **Producer obligations**, which brokkr does not check: the harness reads
   only the request, the bound input roles and the private directory, and
-  writes only its artefact directory, the roles its calls or setup own and
-  the private directory; setup is deterministic and runs before any call;
+  writes only its artefact directory, the roles its calls or setup own, the
+  private directory and, in a profiled run, its hotpath report; setup is deterministic and runs before any call;
   the call schedule honours ownership; it sets its own soft `RLIMIT_NOFILE`
   where a scenario's plan says so, before any library work, and reports it
   in the call context; it never resets `SIGPIPE` to its default; and no
@@ -383,6 +408,19 @@ string in either, object keys included, may contain the run directory's
 absolute spelling or a bound dataset file's (as resolved, or canonical).
 That is a narrow check on the value domain, not proof that the plan is free
 of run-specific paths: relative spellings and split strings pass it.
+
+Producer obligations, which brokkr does not check: the plan carries every
+choice that affects the workload (each call's command and options, its
+inputs by role, the Host each call gets, the order, grouping and
+concurrency of the calls, setup and every generated input's recipe), and
+each call's context every effective per-call setting (Resources figures,
+executor, page-cache policy, process actions, the soft `RLIMIT_NOFILE` at
+its start). Neither carries anything run-specific: no path, timestamp,
+iteration or pid. A measurement's identity is built from them (see
+Measuring a scenario), so a choice the plan leaves out lets two different
+workloads pair. Calls the plan runs concurrently come with a harness
+assertion that their lifetimes intersected; nothing claims they ran in
+parallel.
 
 ## The call stream
 
@@ -491,8 +529,8 @@ same tree:
    and reservation as every pbfhogg launch (`brokkr man pbfhogg`, Output
    overwrite, and Launch reservations and the private directory): the
    private directory goes in `outputs/`, and the lease covers the whole run
-   directory. `BROKKR_MARKER_FIFO` and `BROKKR_HARNESS_ARTEFACT_DIR` are
-   removed from its environment, and it is killed at the scenario's
+   directory. `BROKKR_MARKER_FIFO`, `BROKKR_HARNESS_ARTEFACT_DIR` and the
+   profiling variables are removed from its environment, and it is killed at the scenario's
    `deadline_s`. It must exit 0.
 4. Then each output is digested, library first: `pbfhogg digest FILE`, the
    same CLI, in the same `cwd/`, killed at `deadline_s`. Each must exit 0
@@ -544,8 +582,9 @@ anything but `pass`.
 
 After the launch is released, brokkr checks the run directory against its
 layout: exactly `request.json` (bytes unchanged), `cwd/` (the same
-directory, still empty), `artefacts/` and `roles/`, nothing else (the
-private directory went with the lease); in `roles/` only bound role names,
+directory, still empty), `artefacts/` and `roles/`, and in a profiled run
+`hotpath.json` (absent or a regular file), nothing else (the private
+directory went with the lease); in `roles/` only bound role names,
 each absent or of its kind (a regular file for `file` and `pbf`, a
 directory for `directory`), whatever its source, since a call that is
 cancelled or fails before publishing leaves its output absent. An entry
@@ -563,7 +602,8 @@ removal commits the pass.
 The run fails on a release that finds the lease still held (then nothing
 in the run directory is read or written: some process may still change
 it), a layout breach, any output, a bad exit or the deadline, a FIFO record
-of an undeclared call, an invalid or
+of an undeclared call, a profiled process's missing or invalid report, an
+invalid or
 incomplete artefact tree, an exit inconsistent with the harness's own
 results (0 with a result that is not `pass`, 1 with none), or any result
 that is not `pass`. `unevaluated` fails exactly as `fail` does; the report
@@ -664,7 +704,9 @@ under one uuid, in one transaction:
   process in order, and the call's snapshot as counters, each
   `snapshot.<name>`, exact (a value past 2^63-1 as decimal text).
 
-The chosen process is the fastest, ties to the lowest index. Every row
+The walls of calls that ran concurrently measure contention as much as
+the calls: for a concurrent group the scenario wall is the headline. The
+chosen process is the fastest, ties to the lowest index. Every row
 carries `meta.library.plan` (the plan digest), `meta.library.iteration`
 (the chosen index) and `meta.library.identity`, the identity above as one
 canonical JSON text (the plan digest, each call's context digest, the
@@ -685,7 +727,8 @@ mode, input, captured environment and build, and where its identity first
 differs from it (a plan field, a call's context field, a role or the
 features), or that the identities are equal and the invocations differ. That
 line explains; it never says the named difference is the only one. A
-library call is never compared with its CLI counterpart's timing.
+library call is never compared with its CLI counterpart's timing here, and
+`--compare` will not do it (see Isolation scenarios).
 
 **Trajectories.** Each process's capture is stored in sidecar.db, under the
 group's uuid with its iteration as the run, as soon as it is judged, pass or
@@ -698,6 +741,75 @@ at its return (`brokkr man measure`, Marker and counter rules). The rows
 come after the last trajectory and the final metadata, and they publish the
 measurement. When it fails, or the tree is dirty, the session is filed under
 the `dirty` alias and its id printed.
+
+## Profiling a scenario
+
+`brokkr library SCENARIO --hotpath N` profiles function-level timing, and
+`--alloc N` per-function allocation, of a scenario the describe document
+declares `hotpath`; any other is refused once the describe document is
+read, before anything runs, naming the scenarios that are. The hotpath
+crate's state is process-wide, so a profile is the whole process's; only a
+scenario of one call, with no other library work in its process, has a
+profile that is its call's.
+
+**The build.** The harness is built with the configured features and the
+instrumentation feature added first: `hotpath` for `--hotpath`,
+`hotpath-alloc` for `--alloc`. The harness member defines both, forwarding
+them to the library's features of the same names. The CLI the counterparts
+replay against stays release with default features, uninstrumented.
+
+**The launch.** A profiled launch carries `HOTPATH_OUTPUT_PATH` (the run
+directory's `hotpath.json`), `HOTPATH_OUTPUT_FORMAT=json` and
+`HOTPATH_METRICS_SERVER_OFF=true`; every other harness launch, describe
+mode, the counterparts and the digests have all three removed. The report
+lies in the run directory, so the launch's coverage reserves it and the
+release keeps it.
+
+**Producer obligations**, which brokkr does not check: the harness profiles
+only in `--test-harness` mode and only when `HOTPATH_OUTPUT_PATH` is set,
+whatever it was built with; on a run that passes, it creates the hotpath
+guard before any library work and drops it, writing the report, after the
+call returned and its invocation sealed, and before it exits 0, with
+nothing instrumented after it; built with `hotpath-alloc` it installs the
+hotpath crate's counting allocator as its global allocator; it instruments
+nothing of its own, and setup does no library work, so every instrumented
+function in the report ran under the declared call. A failing run need not
+write a report. The hotpath crate's error paths print to stderr, which fails
+the run as any output does.
+
+**The report**, read after the release and the layout check, before any
+counterpart, without following a link and at most 16 MiB, and judged only
+on exit 0 (any other exit fails the run already; a report it left is kept
+with the evidence). It is JSON whose section for the mode,
+`functions_timing` for `--hotpath` or `functions_alloc` for `--alloc`, holds
+a `data` array in which every entry is an object with a nonempty `name` and
+a `calls` count from 0 to 2^63-1, and at least one entry was called and has
+a nonnegative `total` of the mode's dimension (a duration, or a byte size).
+Anything else fails the process, naming what is wrong. The per-function
+figures are the call's; the thread and process summaries are the harness
+process's, its own work (the request, assertions, serialization) included.
+
+**The measurement** is `--bench`'s (see Measuring a scenario): N processes,
+each a full verification that agrees with the first, the report part of
+each verdict, trajectories stored as each is judged, the same identity
+(whose features name the instrumentation, so a profiled row never pairs
+with a `--bench` one; the mode is in the pairing key besides). The rows are
+the scenario row alone, mode `hotpath` or `alloc`, carrying the chosen
+process's report: no call rows, since the profile is the process's.
+`brokkr results <uuid>` shows the profile; a dirty tree's unstored row
+prints it after its result line. `--alloc` prints that its walls are not
+meaningful, and its chosen process is still the fastest.
+
+## Isolation scenarios
+
+A scenario declaring `isolation` is one call, the first library work in a
+fresh process, with a CLI counterpart: the shape a library call against its
+CLI counterpart's timing needs, since only then do the two start alike.
+That the call is the process's first library work is the producer's
+obligation; brokkr checks only the one call and the counterpart, and lists
+the flag. brokkr shows no library against CLI timing yet: it needs the
+pbfhogg CLI to mark its command's entry and return on the FIFO, which it
+does not, and until it does brokkr compares no timing of the two.
 
 ## Certification
 

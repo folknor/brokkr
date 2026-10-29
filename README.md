@@ -235,7 +235,7 @@ All benchmarks run through `BenchHarness`, which provides:
 
 ## Sidecar profiler
 
-Every measured run (bench, hotpath, alloc) automatically samples `/proc/{pid}/stat`, `/proc/{pid}/io`, and `/proc/{pid}/status` at 100ms intervals. Data is stored in `.brokkr/sidecar.db` (gitignored - local to the machine that ran it). The main results in `.brokkr/results.db` stay small and git-tracked.
+Every measured run (bench, hotpath, alloc) automatically samples `/proc/{pid}/stat`, `/proc/{pid}/io`, and `/proc/{pid}/status` at 100ms intervals. Data is stored in `.brokkr/sidecar.db` (gitignored - local to the machine that ran it). The main results in `.brokkr/results.db` stay small, and are gitignored too.
 
 The child process receives `BROKKR_MARKER_FIFO` env var pointing to a named pipe for application phase markers and counters. Markers are lines of the form `<timestamp_us> <name>`, counters are `<timestamp_us> @<name>=<value>`; a library harness running several calls in one process tags either with its call, `<timestamp_us> %<call_id> ...`, and `brokkr sidecar <uuid> --call <call_id>` reads one call's stream (see "Marker & counter rules" in `brokkr man measure`; a tagged body starting `@@` or `!` is reserved for a call sink's sealing and terminal records). Markers are point-in-time bookmarks - the protocol has no notion of spans or pairs. `--durations` and `--phase` read pair spans from a `FOO_START` / `FOO_END` convention if the emitter happens to follow it, and a marker-span wall (ratatoskr's `SYNC_START`..`SYNC_END`) names its two boundaries; nothing else assumes that structure.
 

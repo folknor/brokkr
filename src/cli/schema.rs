@@ -1773,13 +1773,19 @@ Examples:
     /// SCENARIO, runs that scenario once as a verification, quiet on pass
     /// and loud on fail, keeping a failed run's directory as evidence; with
     /// SCENARIO `--bench N`, measures it as N verified processes recorded as
-    /// one group of rows; with `--all`, runs every scenario and certifies
-    /// the capabilities `[pbfhogg.library.require]` names, writing a
-    /// certification record.
+    /// one group of rows; with SCENARIO `--hotpath N` or `--alloc N`,
+    /// profiles a scenario its describe marks hotpath the same way; with
+    /// `--all`, runs every scenario and certifies the capabilities
+    /// `[pbfhogg.library.require]` names, writing a certification record.
     ///
     /// In depth: `brokkr man library`.
     #[command(display_order = 12)]
     #[command(group(clap::ArgGroup::new("library_run").args(["scenario", "all"])))]
+    #[command(group(
+        clap::ArgGroup::new("library_measure")
+            .args(["bench", "hotpath", "alloc"])
+            .multiple(false)
+    ))]
     Library {
         /// The scenario to run, by id; omit to list them.
         #[arg(value_name = "SCENARIO")]
@@ -1797,13 +1803,39 @@ Examples:
             default_missing_value = DEFAULT_BENCH_RUNS,
             value_name = "COUNT",
             requires = "scenario",
-            conflicts_with = "all"
+            conflicts_with_all = ["all", "hotpath", "alloc"]
         )]
         bench: Option<std::num::NonZeroUsize>,
 
+        /// Profile SCENARIO, which its describe must mark hotpath: COUNT
+        /// whole processes of a harness built with the hotpath feature, each
+        /// verified, recorded as the scenario's row with its function-level
+        /// timing (default one).
+        #[arg(
+            long,
+            num_args = 0..=1,
+            default_missing_value = DEFAULT_SINGLE_RUNS,
+            value_name = "COUNT",
+            requires = "scenario",
+            conflicts_with_all = ["all", "bench", "alloc"]
+        )]
+        hotpath: Option<std::num::NonZeroUsize>,
+
+        /// As `--hotpath`, with per-function allocation tracking (the
+        /// hotpath-alloc feature); its walls are not meaningful.
+        #[arg(
+            long,
+            num_args = 0..=1,
+            default_missing_value = DEFAULT_SINGLE_RUNS,
+            value_name = "COUNT",
+            requires = "scenario",
+            conflicts_with_all = ["all", "bench", "hotpath"]
+        )]
+        alloc: Option<std::num::NonZeroUsize>,
+
         /// Measure on a dirty tree: the measurement runs and prints, and
         /// stores no results row.
-        #[arg(long, requires = "bench")]
+        #[arg(long, requires = "library_measure")]
         force: bool,
 
         /// Dataset name from brokkr.toml whose files bind the scenario's

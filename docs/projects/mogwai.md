@@ -49,8 +49,8 @@ features = ["hotpath"]
   entry per shape: the enumeration trap at one remove.
 - **`--bench`, `--hotpath` and `--alloc` apply uniformly to both kinds.** One row
   shape, one query surface. The instrumented modes run through
-  `run_hotpath_capture`, which points the child at a report file and reads it
-  back; `--bench` measures an external wall.
+  `run_hotpath` and `capture_hotpath`, which point the child at a report file
+  and read it back; `--bench` measures an external wall.
 
 `features` is the field that earns its place. `--hotpath` and `--alloc` are
 inert without the feature that compiles the instrumentation in, so a target that
@@ -107,8 +107,8 @@ row rather than prevented, and reading rules turn that into a verdict.
 
 Rows file under the target name, or the bin name for a CLI invocation. The
 subprocess and brokkr invocations are recorded in `cli_args` and `brokkr_args`.
-New rows pair on `(command, mode, input_file, arm_key, env_fingerprint)`;
-`arm_key` keeps measurement-affecting options while excluding commit, verbosity,
+New rows pair on the tuple `brokkr man results` gives under `--compare`;
+its `arm_key` keeps measurement-affecting options while excluding commit, verbosity,
 and iteration-count provenance. See `brokkr man results` for historical-row
 pairing behavior.
 

@@ -901,6 +901,17 @@ fn measured(
     baseline: Option<&super::Identity>,
     reuse: &mut super::counterpart::Reuse,
 ) -> (Report, Option<crate::sidecar::SidecarData>) {
+    measured_as(f, describe_doc, iteration, baseline, reuse, None)
+}
+
+fn measured_as(
+    f: &Fixture,
+    describe_doc: &str,
+    iteration: usize,
+    baseline: Option<&super::Identity>,
+    reuse: &mut super::counterpart::Reuse,
+    profiled: Option<crate::measure::ProfiledMode>,
+) -> (Report, Option<crate::sidecar::SidecarData>) {
     let scenario = describe::parse(describe_doc.as_bytes())
         .unwrap()
         .scenarios
@@ -923,6 +934,7 @@ fn measured(
             reuse,
             datasets: &ids,
             features: "",
+            profiled,
         }),
         &mut trajectory,
     )
@@ -1000,5 +1012,100 @@ fn a_later_iteration_reuses_the_cli_digest_and_still_digests_the_library_output(
     assert!(
         detail.contains("CLI digests reused from iteration 0") && detail.contains("out-a: equal"),
         "{detail}"
+    );
+}
+
+/// A harness that checks the profiling variables point into its run
+/// directory and writes `report` there, then its documents.
+fn profiling_harness(report: &str) -> String {
+    let body = format!(
+        r#"[ "$HOTPATH_OUTPUT_PATH" = "$R/hotpath.json" ] || exit 4
+[ "$HOTPATH_OUTPUT_FORMAT" = json ] && [ "$HOTPATH_METRICS_SERVER_OFF" = true ] || exit 3
+cat > "$HOTPATH_OUTPUT_PATH" <<'EOF'
+{report}
+EOF
+{}"#,
+        documents(SCENARIO_DOC, CALL_DOC)
+    );
+    script(&body, 0)
+}
+
+const PROFILE: &str =
+    r#"{"functions_timing": {"data": [{"name": "pbfhogg::cat", "calls": 1, "total": "3 ms"}]}}"#;
+
+#[test]
+fn a_profiled_process_carries_its_report_and_its_directory_admits_it() {
+    let f = fixture("profiled", &profiling_harness(PROFILE));
+    let (report, _) = measured_as(
+        &f,
+        DESCRIBE,
+        0,
+        None,
+        &mut Default::default(),
+        Some(crate::measure::ProfiledMode::Hotpath),
+    );
+    assert!(report.passed, "{:?}", report.failures);
+    let profile = report.hotpath.expect("the report is kept");
+    assert_eq!(profile.functions[0].name, "pbfhogg::cat");
+    assert!(!report.run_dir.exists(), "removed with the run directory");
+}
+
+#[test]
+fn a_profiled_process_without_a_valid_report_fails_and_keeps_it() {
+    let unmeasured = r#"{"functions_timing": {"data": [{"name": "f"}]}}"#;
+    let f = fixture("profiled-bad", &profiling_harness(unmeasured));
+    let (report, _) = measured_as(
+        &f,
+        DESCRIBE,
+        0,
+        None,
+        &mut Default::default(),
+        Some(crate::measure::ProfiledMode::Hotpath),
+    );
+    assert!(!report.passed);
+    assert!(
+        has(&report, "the hotpath report: "),
+        "{:?}",
+        report.failures
+    );
+    assert!(
+        report.run_dir.join("hotpath.json").is_file(),
+        "kept as evidence"
+    );
+
+    let f = fixture(
+        "profiled-none",
+        &script(&documents(SCENARIO_DOC, CALL_DOC), 0),
+    );
+    let (report, _) = measured_as(
+        &f,
+        DESCRIBE,
+        0,
+        None,
+        &mut Default::default(),
+        Some(crate::measure::ProfiledMode::Alloc),
+    );
+    assert!(
+        has(
+            &report,
+            "the hotpath report: the harness wrote no hotpath.json"
+        ),
+        "{:?}",
+        report.failures
+    );
+}
+
+#[test]
+fn an_unprofiled_run_sets_no_profiling_variable_and_admits_no_report() {
+    // Removal of inherited ones is `spawn_captured_unsetting`'s test.
+    let body = format!(
+        "[ -z \"${{HOTPATH_OUTPUT_PATH+x}}${{HOTPATH_OUTPUT_FORMAT+x}}${{HOTPATH_METRICS_SERVER_OFF+x}}\" ] || exit 4\necho '{{}}' > \"$R/hotpath.json\"\n{}",
+        documents(SCENARIO_DOC, CALL_DOC)
+    );
+    let report = failing("unprofiled-report", &script(&body, 0));
+    assert!(
+        has(&report, "an unexpected entry \"hotpath.json\""),
+        "{:?}",
+        report.failures
     );
 }

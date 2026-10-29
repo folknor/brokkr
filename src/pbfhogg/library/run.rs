@@ -68,6 +68,8 @@ pub(crate) struct Report {
     pub(crate) spans: Vec<crate::sidecar::CallSpan>,
     /// Each sealed call's snapshot, by call.
     pub(crate) snapshots: BTreeMap<String, BTreeMap<String, u64>>,
+    /// A profiled process's hotpath report, once judged valid.
+    pub(crate) hotpath: Option<crate::db::HotpathData>,
 }
 
 /// What a measured run hands each of its processes
@@ -84,6 +86,9 @@ pub(crate) struct Measured<'a> {
     pub(crate) datasets: &'a BTreeMap<String, String>,
     /// The harness build's features.
     pub(crate) features: &'a str,
+    /// `--hotpath` or `--alloc`: the process writes a hotpath report into
+    /// its run directory, and a valid one is part of its verdict.
+    pub(crate) profiled: Option<crate::measure::ProfiledMode>,
 }
 
 impl Report {
@@ -101,6 +106,7 @@ impl Report {
             identity: None,
             spans: Vec::new(),
             snapshots: BTreeMap::new(),
+            hotpath: None,
         }
     }
 }
@@ -121,7 +127,9 @@ pub(crate) fn verify(
     trajectory: &mut Option<crate::sidecar::SidecarData>,
 ) -> Result<Report, DevError> {
     let iteration = measured.as_ref().map_or(0, |m| m.iteration);
+    let profiled = measured.as_ref().and_then(|m| m.profiled);
     let mut prepared = prepare(scenario, datasets, places.library_root, iteration)?;
+    let report_path = prepared.run_dir.join(super::profile::REPORT_FILE);
 
     let mut fifo = crate::sidecar::SidecarFifo::create(
         places.fifo_dir,
@@ -140,6 +148,7 @@ pub(crate) fn verify(
         deadline: std::time::Duration::from_secs(u64::from(scenario.deadline_s)),
         fifo: &mut fifo,
         iteration,
+        hotpath_report: profiled.map(|_| report_path.as_path()),
     });
     drop(fifo);
     let run = run.map_err(|e| {
@@ -178,6 +187,7 @@ fn judge_run(
         ..
     } = prepared;
     let (run_dir, cwd_identity) = (run_dir.clone(), *cwd_identity);
+    let profiled = measured.as_ref().and_then(|m| m.profiled);
     if matches!(run.ending, crate::output::child::Ending::Interrupted) {
         if let Err(e) = &run.released {
             crate::output::warn(&e.to_string());
@@ -202,7 +212,14 @@ fn judge_run(
         return Ok(report);
     }
 
-    let layout = layout_failures(&run_dir, request_bytes, cwd_identity, scenario, &[]);
+    let layout = layout_failures(
+        &run_dir,
+        request_bytes,
+        cwd_identity,
+        scenario,
+        &[],
+        profiled.is_some(),
+    );
     let layout_ok = layout.is_empty();
     report.failures.extend(layout);
     report.failures.extend(output_failures(run));
@@ -210,6 +227,20 @@ fn judge_run(
     let mut untouched = false;
     let mut baseline_note: Option<String> = None;
     if let Some(judged) = judge_ending(run, artefacts, scenario, &forbidden, &mut report) {
+        // A profiled process's report, read after the release and the layout
+        // check and before any counterpart launch, on exit 0 only: any other
+        // exit fails the run already, so its report is not judged (and is
+        // kept with the evidence when it was written).
+        if let Some(mode) = profiled
+            && matches!(run.ending, crate::output::child::Ending::Exited(0))
+        {
+            match super::profile::read(&run_dir.join(super::profile::REPORT_FILE), mode) {
+                Ok(data) => report.hotpath = Some(data),
+                Err(why) => report
+                    .failures
+                    .push(format!("the hotpath report: {}", printable(&why))),
+            }
+        }
         report.spans = spans(&judged);
         spans_out.clone_from(&report.spans);
         report.snapshots = judged
@@ -254,7 +285,14 @@ fn judge_run(
             })
         });
         let relayout = |made: &[String]| {
-            layout_failures(&run_dir, request_bytes, cwd_identity, scenario, made)
+            layout_failures(
+                &run_dir,
+                request_bytes,
+                cwd_identity,
+                scenario,
+                made,
+                profiled.is_some(),
+            )
         };
         let cli_results = equality(
             Equal {
@@ -567,7 +605,8 @@ fn identity(path: &Path) -> Result<(u64, u64), DevError> {
 /// the request (bytes unchanged), the same empty `cwd/`, `artefacts/` and
 /// `roles/`, plus the directories named in `made` (the replay directories,
 /// after the counterparts ran; each checked by its own launch, so only its
-/// type here); in `roles/` only bound role names, each absent or of its
+/// type here), and in a `profiled` run the hotpath report, absent or a
+/// regular file; in `roles/` only bound role names, each absent or of its
 /// kind.
 fn layout_failures(
     run_dir: &Path,
@@ -575,6 +614,7 @@ fn layout_failures(
     cwd_identity: (u64, u64),
     scenario: &Scenario,
     made: &[String],
+    profiled: bool,
 ) -> Vec<String> {
     let mut failures = Vec::new();
     let mut fail = |why: String| failures.push(format!("run directory: {why}"));
@@ -603,6 +643,7 @@ fn layout_failures(
         let fits = match name.as_str() {
             REQUEST_FILE => kind.is_file(),
             CWD_DIR | ARTEFACTS_DIR | ROLES_DIR => kind.is_dir(),
+            super::profile::REPORT_FILE if profiled => kind.is_file(),
             other if made.iter().any(|m| m == other) => kind.is_dir(),
             other => {
                 fail(format!("an unexpected entry {other:?}"));

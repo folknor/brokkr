@@ -1170,8 +1170,27 @@ pub fn spawn_captured(
     isolation: ChildIsolation<'_>,
     profile: SpawnProfile,
 ) -> Result<std::process::Child, DevError> {
+    spawn_captured_unsetting(program, args, cwd, env, &[], isolation, profile)
+}
+
+/// [`spawn_captured`] with `unset` removed from the inherited environment
+/// (applied before `env`, so a name in both is set).
+pub fn spawn_captured_unsetting(
+    program: &str,
+    args: &[&str],
+    cwd: &Path,
+    env: &[(&str, &str)],
+    unset: &[&str],
+    isolation: ChildIsolation<'_>,
+    profile: SpawnProfile,
+) -> Result<std::process::Child, DevError> {
     let policy = crate::process::spawn::ChildPolicy::from_cargo_profile(profile);
     let mut cmd = policy.command(program, args, Some(cwd), env, isolation)?;
+    for name in unset {
+        if !env.iter().any(|(set, _)| set == name) {
+            cmd.env_remove(name);
+        }
+    }
     crate::process::spawn::capture_stdio(&mut cmd);
     crate::process::spawn::spawn(cmd, None)
 }
@@ -1339,6 +1358,41 @@ mod tests {
 
     fn cwd() -> &'static Path {
         Path::new(".")
+    }
+
+    /// An unset name is removed from what the child inherits, unless the
+    /// spawn sets it itself. `PATH` stands for any inherited variable: the
+    /// test process always has it, and changing its own environment would
+    /// race the other tests. The child is `env`, which prints exactly what it
+    /// was given: a shell would make up a `PATH` of its own.
+    #[test]
+    fn spawn_captured_unsetting_removes_inherited_names_but_not_set_ones() {
+        assert!(std::env::var_os("PATH").is_some());
+        let signal_guard = crate::shutdown::SigtermGuard::install();
+        let run = |env: &[(&str, &str)]| -> Vec<String> {
+            let child = spawn_captured_unsetting(
+                "/usr/bin/env",
+                &[],
+                cwd(),
+                env,
+                &["PATH"],
+                ChildIsolation::ProcessGroup(&signal_guard),
+                SpawnProfile::Plain,
+            )
+            .unwrap();
+            let out = child.wait_with_output().unwrap();
+            String::from_utf8(out.stdout)
+                .unwrap()
+                .lines()
+                .filter(|l| l.starts_with("PATH="))
+                .map(str::to_owned)
+                .collect()
+        };
+        assert!(
+            run(&[]).is_empty(),
+            "removed from the inherited environment"
+        );
+        assert_eq!(run(&[("PATH", "/x")]), ["PATH=/x"]);
     }
 
     /// A child that keeps printing outlives a wall time several idle windows

@@ -16,9 +16,10 @@
 - `src/pbfhogg/library/` - `brokkr library`, pbfhogg used as a library
   through a harness a pbfhogg workspace member provides: listing its
   scenarios and verifying one, its calls' CLI counterparts replayed and
-  compared by `pbfhogg digest`, and certifying every scenario against
-  `[pbfhogg.library.require]`; the command and its protocol are
-  `brokkr man library`.
+  compared by `pbfhogg digest`, measuring or profiling one, and certifying
+  every scenario against `[pbfhogg.library.require]`; the command and its
+  protocol are `brokkr man library`, its internals
+  `reference/library-internals.md`.
 - `src/pbfhogg/argv.rs` - `PbfArgv`, an argv with what it reads, writes and
   scratches.
 - `src/pbfhogg/...` - benchmarks (read, write, merge, commands, extract,
@@ -173,7 +174,10 @@ A profiled launch (`--hotpath`, `--alloc`) also reserves its hotpath report,
 at a path unique per launch, so a profiled child that outlived its run can
 never write the next run's report. The report is recorded as disposable, like
 the private directory: it goes with the lease, at the release or, if the child
-outlived its run, at a later scan.
+outlived its run, at a later scan. A profiled `brokkr library` harness launch
+is the exception: its report lies in its run directory, which the launch's
+coverage already reserves, so it survives the release to be judged and goes
+with the directory (`brokkr man library`, Profiling a scenario).
 
 **What the reservation protects.** Every brokkr deletion, rename or
 replacement that can touch these paths - `brokkr clean`'s removals of
