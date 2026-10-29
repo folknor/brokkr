@@ -28,7 +28,12 @@ pub fn run(
         },
         scratch_dir: scratch_dir.to_path_buf(),
         dataset: String::new(),
-        params: CommandParams::default(),
+        // The bbox comes from the dataset (no explicit `params.bbox`) and one
+        // suite argv covers every strategy, so both ride in the qualifier.
+        params: CommandParams {
+            strategy_fanout: true,
+            ..CommandParams::default()
+        },
         observations: CommandObservations::default(),
     };
     let output_path = scratch_output_path(
@@ -54,8 +59,9 @@ pub fn run(
 
         let config = BenchConfig {
             command: command.id().to_owned(),
-            // Strategy and bbox remain in cli_args, preserving the existing
-            // result-row shape for dataset-configured extract measurements.
+            // Strategy and bbox reach the row's cli_args through the
+            // invocation; pairing never reads cli_args, so they also ride in
+            // the arm qualifier.
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),
             cargo_features: None,
@@ -63,7 +69,7 @@ pub fn run(
             runs,
             cli_args: None,
             metadata: vec![],
-            arm_qualifier: None,
+            arm_qualifier: command.arm_qualifier(&command_ctx),
         };
 
         harness

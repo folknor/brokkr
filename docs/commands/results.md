@@ -187,8 +187,15 @@ invocation string and can only pair when that spelling matches.
 
 A measurement-defining choice that reaches the subprocess argv from config
 rather than from the brokkr argv cannot show in the argv key, so the row
-carries it as a qualifier. Today that is a pbfhogg dataset's `getid_ids` or
-`getparents_ids` when it differs from the built-in list. A qualified row
+carries it as a qualifier. For pbfhogg that is a dataset's `getid_ids` or
+`getparents_ids` when it differs from the built-in list (`ids=...`), and for
+`extract`, `multi-extract` and the suite's extract bench the bbox when it came
+from the dataset rather than `--bbox` (`bbox=...`, the parsed coordinates, so
+`12` and `12.0` pair) and the strategy when one argv ran every strategy
+(`--strategy all`, which is `extract`'s default, or the suite;
+`strategy=...`), joined by `;`. An extract
+row from before the bbox and strategy qualifiers existed carries neither, so
+it does not pair with a newer row that does. A qualified row
 stores `["qualified-v1", <argv key>, <qualifier>]` (JSON) as its `arm_key`
 and pairs only with rows carrying the same qualifier; an unqualified row's
 key is the argv key alone, exactly as before qualifiers existed.

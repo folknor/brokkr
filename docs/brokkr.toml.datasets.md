@@ -40,7 +40,9 @@ paths still resolve against each including project's root.
   (nidhogg only). `bbox` is parsed at config load as four finite
   `lon_min,lat_min,lon_max,lat_max` coordinates; longitude must be within
   -180..180, latitude within -90..90, and each minimum must not exceed its
-  maximum.
+  maximum. A pbfhogg extract row that took its bbox from here carries it as
+  an arm qualifier, so changing the box splits `results --compare` pairing
+  (see `docs/commands/results.md`).
 - `getid_ids`, `getparents_ids` (pbfhogg, optional) - the element IDs the
   getid and getparents benches request on this dataset, every variant and
   snapshot of it (`brokkr getid`/`getparents` in any measured mode, and the

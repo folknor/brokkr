@@ -442,6 +442,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             let params = crate::pbfhogg::context::CommandParams {
                 bbox: bbox.clone(),
                 snapshot: snapshot.clone(),
+                strategy_fanout: strategy == "all",
                 ..Default::default()
             };
             run_measured(
@@ -491,6 +492,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             let params = crate::pbfhogg::context::CommandParams {
                 bbox: bbox.clone(),
                 snapshot: snapshot.clone(),
+                strategy_fanout: strategy == "all",
                 ..Default::default()
             };
             run_measured(

@@ -64,6 +64,12 @@ pub struct CommandParams {
     /// The dataset's configured getid/getparents bench IDs; `None` uses the
     /// built-in lists.
     pub selection: BenchSelection,
+    /// The brokkr argv names a set of extract strategies (`--strategy all`,
+    /// or a suite that runs every strategy) rather than the one this row
+    /// measured, so the row's strategy must ride in its arm qualifier. Every
+    /// caller that fans one argv out over strategies must set it, or the
+    /// strategies' rows share one pairing key.
+    pub strategy_fanout: bool,
 }
 
 /// The element IDs a dataset configures for the getid and getparents

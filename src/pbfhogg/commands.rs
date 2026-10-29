@@ -286,6 +286,19 @@ fn bench_ids(
     (ids, qualifier)
 }
 
+/// A bbox's pairing identity: its parsed coordinates in Rust's shortest
+/// round-trip form, signed zero folded, so two spellings of one box (`12` and
+/// `12.0`) pair. pbfhogg parses each component as an f64 too, so equal
+/// coordinates here are equal boundaries in the child.
+fn canonical_bbox(bbox: &Bbox) -> String {
+    bbox.coordinates()
+        .iter()
+        // `-0.0 + 0.0` is `+0.0`; every other value is unchanged.
+        .map(|&c| (c + 0.0).to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// Min-count threshold used by the bench version of `inspect tags`. Set
 /// impossibly high so pbfhogg's default tag-frequency filter never trims
 /// anything - we want the full decode cost measured, not just popular tags.
@@ -585,10 +598,28 @@ impl PbfhoggCommand {
     /// getid or getparents IDs that differ from the built-in list. The IDs
     /// live in the subprocess argv, which `arm_key` never sees, so without
     /// this a configured list's rows would pair with rows that measured
-    /// another selection. `None` for every other command and for the
-    /// built-in lists, whose rows keep the identity they always had.
+    /// another selection. `None` for the built-in lists, whose rows keep the
+    /// identity they always had.
+    ///
+    /// Extract and multi-extract likewise qualify by what the brokkr argv
+    /// does not show: the bbox when it came from the dataset rather than
+    /// `--bbox`, and the strategy when one argv fans out over every strategy
+    /// (`CommandParams::strategy_fanout`). An explicit `--bbox` with a single
+    /// `--strategy` stays unqualified. `None` for every other command.
     pub fn arm_qualifier(&self, ctx: &CommandContext) -> Option<String> {
         match self {
+            Self::Extract { strategy } | Self::MultiExtract { strategy, .. } => {
+                let mut parts = Vec::new();
+                if ctx.params.bbox.is_none()
+                    && let Some(bbox) = ctx.inputs.bbox()
+                {
+                    parts.push(format!("bbox={}", canonical_bbox(bbox)));
+                }
+                if ctx.params.strategy_fanout {
+                    parts.push(format!("strategy={}", strategy.name()));
+                }
+                (!parts.is_empty()).then(|| parts.join(";"))
+            }
             Self::Getid { .. } => bench_ids(ctx.params.selection.getid.as_ref(), GETID_BENCH_IDS).1,
             Self::Getparents => {
                 bench_ids(
@@ -1251,6 +1282,47 @@ mod tests {
         // getid_ids does not move getparents, and no other command qualifies.
         assert_eq!(PbfhoggCommand::Getparents.arm_qualifier(&ctx), None);
         assert_eq!(PbfhoggCommand::Sort.arm_qualifier(&ctx), None);
+    }
+
+    #[test]
+    fn extract_qualifies_by_what_the_brokkr_argv_does_not_show() {
+        let smart = ExtractStrategy::parse("smart").unwrap();
+        let extract = PbfhoggCommand::Extract { strategy: smart };
+        let multi = PbfhoggCommand::MultiExtract {
+            regions: 2,
+            strategy: smart,
+        };
+        // Dataset bbox, single strategy: the bbox alone.
+        let mut ctx = test_ctx();
+        for cmd in [&extract, &multi] {
+            assert_eq!(
+                cmd.arm_qualifier(&ctx).as_deref(),
+                Some("bbox=12.4,55.6,12.7,55.8")
+            );
+        }
+        // Dataset bbox under a fan-out: bbox then strategy.
+        ctx.params.strategy_fanout = true;
+        assert_eq!(
+            extract.arm_qualifier(&ctx).as_deref(),
+            Some("bbox=12.4,55.6,12.7,55.8;strategy=smart")
+        );
+        // Explicit --bbox under a fan-out: the strategy alone.
+        ctx.params.bbox = ctx.inputs.bbox().cloned();
+        assert_eq!(multi.arm_qualifier(&ctx).as_deref(), Some("strategy=smart"));
+        // Explicit --bbox, single strategy: the argv key alone, as before.
+        ctx.params.strategy_fanout = false;
+        assert_eq!(extract.arm_qualifier(&ctx), None);
+        assert_eq!(multi.arm_qualifier(&ctx), None);
+    }
+
+    #[test]
+    fn bbox_qualifier_is_the_parsed_box_not_its_spelling() {
+        let a = Bbox::parse("12,55.60,13,56").unwrap();
+        let b = Bbox::parse("12.0,55.6,13.0,56.0").unwrap();
+        assert_eq!(canonical_bbox(&a), canonical_bbox(&b));
+        assert_eq!(canonical_bbox(&a), "12,55.6,13,56");
+        let neg = Bbox::parse("-0.0,0,1,1").unwrap();
+        assert_eq!(canonical_bbox(&neg), "0,0,1,1");
     }
 
     #[test]
