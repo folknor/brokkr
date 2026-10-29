@@ -319,11 +319,35 @@ warning instead of a silent PASS - the only way to consume one is
 `findings.record(...)`. `diff_pbfs` writes its listing to a file the caller
 names in the check's directory and reads `pbfhogg diff`'s exit status: 0 with
 no listing is identical, 1 is different, anything else (a signal, another
-code) is an error - never "identical". Two comparisons are deliberately not
-verdicts: `extract`'s element diff against osmium (known to differ; reported
-on the summary channel as informational), and the `dense` index variant of
-`add-locations-to-ways`, whose non-zero exit is taken as an allocation
-failure on hosts without `vm.overcommit_memory=1` and skipped.
+code) is an error - never "identical". A check whose PASS establishes less
+than its name suggests builds its findings with `Findings::claiming`, and the
+claim is printed in its PASS line, under `verify all` too.
+
+`extract` and `verify merge` classify a `pbfhogg diff --format osc` between
+pbfhogg's and osmium's outputs as it streams (`verify_element_diff`); the
+diff's exit status must agree with the OSC (0 with no entries, 1 with some),
+or it is an error. `extract` fails on a `<modify>`: an ID both tools emit
+with unequal content, which no strategy explains, since neither tool rewrites
+an element it extracts. Which elements each includes is not adjudicated:
+pbfhogg's extract contract states no per-strategy membership equivalence with
+osmium, and the two are known to differ in which relations, and under smart
+which nodes, they include. Both outputs go through the strict order check;
+an osmium output that fails it is an error, since a repeated ID could hide a
+content conflict from a by-ID comparison. The summary channel gets, per
+strategy, the shared coverage per kind (given only when pbfhogg's output is
+strictly ordered too, so every count is of distinct IDs, and an error when
+the arithmetic does not close) and the pbfhogg-only and osmium-only counts
+with their smallest IDs. A PASS
+line says `output order, and element content where pbfhogg and osmium hold
+the same ID; which elements each includes is not adjudicated`, so a selection
+bug that drops or invents elements passes. `multi-extract` holds each strip
+of a simple `--config` run to strict order and diffs it (not its counts)
+against a sequential pbfhogg extract of the strip; it never consults osmium
+and does not prove the single-pass path ran.
+
+The `dense` index variant of `add-locations-to-ways` is deliberately not a
+verdict: its non-zero exit is taken as an allocation failure on hosts without
+`vm.overcommit_memory=1` and skipped.
 
 **Fresh outputs.** `VerifyHarness::subdir` empties `target/verify/<check>/`
 before handing it back, so every file a check finds there was written by this

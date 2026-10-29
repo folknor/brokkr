@@ -56,8 +56,8 @@ impl OscKind {
 /// costs only what the caller accumulates. Every entry has been delivered
 /// before the document is known to be complete, so a caller must not act on
 /// what it saw until this returns `Ok`. Gzip is detected by magic bytes (not the
-/// filename): pbfhogg's `diff --format osc` always gzips its output regardless
-/// of the chosen extension, so a `.osc` file can still be gzip-compressed.
+/// filename), so the reader does not depend on how a producer ties
+/// compression to the extension it was given.
 ///
 /// Decompression goes through `MultiGzDecoder`, not `GzDecoder`, because that
 /// OSC is a concatenation of independently-gzipped members (pbfhogg splices

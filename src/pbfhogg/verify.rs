@@ -261,8 +261,30 @@ impl VerifyHarness {
     /// `inspect`, or a report without the computed order, is an error, not a
     /// FAIL.
     pub fn check_sorted(&self, label: &str, pbf: &Path) -> Result<Verdict, DevError> {
+        Ok(self.check_sorted_counted(label, pbf)?.0)
+    }
+
+    /// [`check_sorted`](Self::check_sorted), also returning the element
+    /// counts of the same extended report. Those are decoded counts, and a
+    /// `Pass` also proves IDs strictly ascend within each kind, so each count
+    /// is of distinct keys: what set arithmetic over an element diff needs.
+    pub(super) fn check_sorted_counted(
+        &self,
+        label: &str,
+        pbf: &Path,
+    ) -> Result<(Verdict, super::inspect_report::InspectCounts), DevError> {
         let summary = super::inspect_report::inspect(self, pbf, true)?;
-        print_summary(label, &summary, pbf);
+        let counts = summary.counts();
+        let verdict = Self::sorted_verdict(label, &summary, pbf)?;
+        Ok((verdict, counts))
+    }
+
+    fn sorted_verdict(
+        label: &str,
+        summary: &super::inspect_report::InspectSummary,
+        pbf: &Path,
+    ) -> Result<Verdict, DevError> {
+        print_summary(label, summary, pbf);
         let ordered = summary.objects_ordered().ok_or_else(|| {
             DevError::Internal("an extended inspect summary without its order".into())
         })?;
@@ -433,11 +455,25 @@ impl Verdict {
 #[derive(Debug, Default)]
 pub struct Findings {
     failures: Vec<String>,
+    /// What a PASS of this check establishes, when that is narrower than
+    /// the check's name suggests; printed in its PASS line.
+    claim: Option<&'static str>,
 }
 
 impl Findings {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Findings whose PASS line states `claim`: what the check's recorded
+    /// comparisons establish, so a PASS is not read as more (such as
+    /// equivalence with a reference tool whose output it does not gate on).
+    /// Set once here, never overwritten.
+    pub fn claiming(claim: &'static str) -> Self {
+        Self {
+            failures: Vec::new(),
+            claim: Some(claim),
+        }
     }
 
     /// Record one comparison's verdict under `what` (the failure's name in
@@ -459,11 +495,6 @@ impl Findings {
         FailureLedger::add(&what);
         self.failures.push(what);
     }
-
-    /// True when no comparison has failed so far.
-    pub fn is_clean(&self) -> bool {
-        self.failures.is_empty()
-    }
 }
 
 /// What a verify check closure may return to [`run_check`].
@@ -471,20 +502,21 @@ impl Findings {
 /// `Findings` is the form every pbfhogg check uses. `()` stays accepted for a
 /// check whose every failure is already an `Err` - it has no verdicts to fold.
 pub(crate) trait CheckOutcome {
-    /// Fold into the check's pass/fail result.
-    fn into_check_result(self, name: &str) -> Result<(), DevError>;
+    /// Fold into the check's pass/fail result; a pass carries the check's
+    /// claim ([`Findings::claiming`]), if it states one.
+    fn into_check_result(self, name: &str) -> Result<Option<&'static str>, DevError>;
 }
 
 impl CheckOutcome for () {
-    fn into_check_result(self, _name: &str) -> Result<(), DevError> {
-        Ok(())
+    fn into_check_result(self, _name: &str) -> Result<Option<&'static str>, DevError> {
+        Ok(None)
     }
 }
 
 impl CheckOutcome for Findings {
-    fn into_check_result(self, name: &str) -> Result<(), DevError> {
+    fn into_check_result(self, name: &str) -> Result<Option<&'static str>, DevError> {
         if self.failures.is_empty() {
-            return Ok(());
+            return Ok(self.claim);
         }
         Err(DevError::Verify(format!(
             "{name}: {} comparison(s) failed: {}",
@@ -584,7 +616,7 @@ where
     // The ledger is authoritative: a failure recorded in findings the check
     // then dropped still fails it.
     let result = match result {
-        Ok(()) if !recorded.is_empty() => Err(DevError::Verify(format!(
+        Ok(_) if !recorded.is_empty() => Err(DevError::Verify(format!(
             "{name}: {} comparison(s) failed: {}",
             recorded.len(),
             recorded.join("; ")
@@ -592,11 +624,11 @@ where
         other => other,
     };
     match &result {
-        Ok(()) => {
+        Ok(claim) => {
             if !verbose {
                 crate::output::verify_buffer_discard();
             }
-            crate::output::verify_summary(&format!("{name}: PASS ({ms})"));
+            crate::output::verify_summary(&pass_line(name, &ms, *claim));
             Ok(CheckStatus::Passed)
         }
         Err(DevError::Interrupted) => {
@@ -633,6 +665,15 @@ where
             }
             Ok(CheckStatus::Failed)
         }
+    }
+}
+
+/// A passing check's summary line, naming what it established when the check
+/// states a claim.
+fn pass_line(name: &str, ms: &str, claim: Option<&str>) -> String {
+    match claim {
+        Some(claim) => format!("{name}: PASS ({ms}): {claim}"),
+        None => format!("{name}: PASS ({ms})"),
     }
 }
 
@@ -1013,6 +1054,22 @@ mod tests {
         let err = f.into_check_result("sort").unwrap_err().to_string();
         assert!(err.contains("sort order"), "got: {err}");
         assert!(err.contains("complement"), "got: {err}");
+    }
+
+    #[test]
+    fn a_claim_rides_a_pass_and_never_a_fail() {
+        let _serial = ledger_lock();
+        let f = Findings::claiming("order only");
+        assert_eq!(f.into_check_result("x").unwrap(), Some("order only"));
+        assert_eq!(Findings::new().into_check_result("x").unwrap(), None);
+        let mut f = Findings::claiming("order only");
+        f.fail("order");
+        assert!(f.into_check_result("x").is_err());
+        assert_eq!(
+            super::pass_line("extract", "5ms", Some("order only")),
+            "extract: PASS (5ms): order only"
+        );
+        assert_eq!(super::pass_line("sort", "5ms", None), "sort: PASS (5ms)");
     }
 
     #[test]

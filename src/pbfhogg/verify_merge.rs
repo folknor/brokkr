@@ -4,17 +4,13 @@
 use std::path::{Path, PathBuf};
 
 use super::verify::{self, ExternalTool, Findings, PbfArgv, VerifyHarness};
+use super::verify_element_diff::{self as element_diff, PerType};
 use crate::error::DevError;
 use crate::measure::Invocation;
 use crate::osc::{self, OscAction, OscKind};
 use crate::output;
 use crate::output::verify_msg;
 use crate::tools::OsmosisTools;
-
-/// Cap on the number of failing IDs printed per category (nodes /
-/// ways / relations) per failure class so a runaway mismatch doesn't
-/// bury the verify summary. The full counts are still reported.
-const MAX_REPORTED_IDS: usize = 10;
 
 /// Cross-validate `pbfhogg apply-changes` against osmium; print optional
 /// osmosis and osmconvert output for additional context.
@@ -306,51 +302,19 @@ fn verify_pbfhogg_vs_osmium(
     //   diff.created_* = osmium-only (carve-out candidates)
     //   diff.deleted_* = pbfhogg-only (always failures)
     //   diff.modified_* = content mismatches (always failures)
-    // NB: no `--suppress-common` here - pbfhogg rejects it alongside
-    // `--format osc` (the OSC diff only emits differing elements anyway, so
-    // it would be redundant even if accepted).
-    let captured = harness.run_pbfhogg(
-        PbfArgv::new("diff")
-            .arg("--format")
-            .arg("osc")
-            .output(&diff_path)?
-            .input(pbfhogg_out)?
-            .input(osmium_out)?
-            .scratch(outdir),
-    )?;
-
-    // pbfhogg diff exits 1 when differences are found - that's expected.
-    // A signal kill or any other exit code means the diff did not complete,
-    // and whatever OSC it left behind is partial, so that is a hard error.
-    // The OSC's existence is then a real signal: `subdir` emptied the
-    // directory, so a file here was written by this run.
-    if !matches!(captured.code(), Some(0 | 1)) {
-        let stderr = String::from_utf8_lossy(&captured.stderr);
-        return Err(DevError::Subprocess {
-            program: "pbfhogg diff --format osc".into(),
-            ending: captured
-                .ending
-                .process_ending()
-                .unwrap_or(crate::error::ProcessEnding::Code(-1)),
-            stderr: stderr.into_owned(),
-        });
-    }
-    if !diff_path.exists() {
-        let stderr = String::from_utf8_lossy(&captured.stderr);
-        return Err(DevError::Verify(format!(
-            "pbfhogg diff produced no output OSC at {} - stderr: {}",
-            diff_path.display(),
-            stderr.trim()
-        )));
-    }
-
     // Classified as it streams: only counters and bounded samples are kept,
     // so a regression the size of the planet costs no more than a pass. The
-    // verdict waits for the scan to return, which proves the document whole.
+    // verdict waits for the scan to return, which proves the document whole
+    // and its entries in agreement with the diff's exit status.
     let mut report = MergeDiffReport::default();
-    osc::scan_osc_file(&diff_path, |action, kind, id| {
-        report.classify(action, kind, id, &applied);
-    })?;
+    element_diff::scan_osc_diff(
+        harness,
+        pbfhogg_out,
+        osmium_out,
+        &diff_path,
+        outdir,
+        |action, kind, id| report.classify(action, kind, id, &applied),
+    )?;
     drop(applied);
     if report.is_empty() {
         verify_msg("  pbfhogg and osmium outputs are element-identical PASS");
@@ -406,7 +370,8 @@ impl DeleteSet {
 }
 
 /// Outcome classes for the per-element diff, each a count of diff entries
-/// per kind plus the smallest few distinct IDs ([`MAX_REPORTED_IDS`]), so the
+/// per kind plus the smallest few distinct IDs
+/// ([`element_diff::MAX_REPORTED_IDS`]), so the
 /// report is bounded and deterministic whatever the diff's size or order.
 #[derive(Default)]
 struct MergeDiffReport {
@@ -424,41 +389,6 @@ struct MergeDiffReport {
     content_mismatch: PerType,
 }
 
-/// One outcome class, per kind (node, way, relation).
-#[derive(Default)]
-struct PerType {
-    kinds: [Sampled; 3],
-}
-
-impl PerType {
-    fn total(&self) -> u64 {
-        self.kinds.iter().map(|k| k.count).sum()
-    }
-}
-
-/// A count of entries and the smallest [`MAX_REPORTED_IDS`] distinct IDs
-/// among them.
-#[derive(Default)]
-struct Sampled {
-    count: u64,
-    smallest: std::collections::BTreeSet<i64>,
-}
-
-impl Sampled {
-    fn add(&mut self, id: i64) {
-        self.count += 1;
-        self.smallest.insert(id);
-        if self.smallest.len() > MAX_REPORTED_IDS {
-            self.smallest.pop_last();
-        }
-    }
-
-    #[cfg(test)]
-    fn ids(&self) -> Vec<i64> {
-        self.smallest.iter().copied().collect()
-    }
-}
-
 impl MergeDiffReport {
     /// Bucket one diff entry. pbfhogg is the diff's old side and osmium its
     /// new side, so `<create>` is osmium-only (exempt when the input deleted
@@ -470,7 +400,7 @@ impl MergeDiffReport {
             OscAction::Delete => &mut self.pbfhogg_only,
             OscAction::Modify => &mut self.content_mismatch,
         };
-        class.kinds[kind.index()].add(id);
+        class.add(kind, id);
     }
 
     fn is_empty(&self) -> bool {
@@ -489,52 +419,19 @@ impl MergeDiffReport {
 
     fn print(&self) {
         if self.osmium_only_explained.total() > 0 {
-            let [n, w, r] = &self.osmium_only_explained.kinds;
             verify_msg(&format!(
-                "  osmium-only explained by delete set: {} nodes, {} ways, {} relations OK",
-                n.count, w.count, r.count,
+                "  osmium-only explained by delete set: {} OK",
+                self.osmium_only_explained.counts_line()
             ));
         }
-        print_failure_class(
+        let fail = |label: &str, class: &PerType| class.print("FAIL ", label, verify_msg);
+        fail(
             "osmium-only NOT in delete set",
             &self.osmium_only_unexplained,
         );
-        print_failure_class("pbfhogg-only (osmium dropped)", &self.pbfhogg_only);
-        print_failure_class("content differs", &self.content_mismatch);
+        fail("pbfhogg-only (osmium dropped)", &self.pbfhogg_only);
+        fail("content differs", &self.content_mismatch);
     }
-}
-
-fn print_failure_class(label: &str, p: &PerType) {
-    if p.total() == 0 {
-        return;
-    }
-    let [n, w, r] = &p.kinds;
-    verify_msg(&format!(
-        "  FAIL {label}: {} nodes, {} ways, {} relations",
-        n.count, w.count, r.count,
-    ));
-    print_id_sample("nodes", n);
-    print_id_sample("ways", w);
-    print_id_sample("relations", r);
-}
-
-fn print_id_sample(kind: &str, sampled: &Sampled) {
-    if sampled.count == 0 {
-        return;
-    }
-    let shown = sampled.smallest.len() as u64;
-    let suffix = if sampled.count > shown {
-        format!(" (smallest IDs; {} entries in all)", sampled.count)
-    } else {
-        String::new()
-    };
-    let list = sampled
-        .smallest
-        .iter()
-        .map(i64::to_string)
-        .collect::<Vec<_>>()
-        .join(", ");
-    verify_msg(&format!("    {kind}: {list}{suffix}"));
 }
 
 /// Run osmosis with `JAVA_HOME` set through the reference-run path, its stdout
@@ -648,7 +545,7 @@ mod tests {
         let sampled = &report.osmium_only_unexplained.kinds[0];
         assert_eq!(sampled.count, 100_000);
         assert_eq!(sampled.ids(), (0..10).collect::<Vec<i64>>());
-        assert_eq!(MAX_REPORTED_IDS, 10);
+        assert_eq!(element_diff::MAX_REPORTED_IDS, 10);
         assert_eq!(report.total_failures(), 100_000);
     }
 

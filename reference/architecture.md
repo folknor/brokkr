@@ -78,6 +78,7 @@ Single crate, single binary. No workspace.
 - `src/pbfhogg/context.rs` - pbfhogg-only command parameters (including the dataset's getid/getparents bench selection), resolved-input shapes, I/O mode and typed runtime observations
 - `src/pbfhogg/inspect_report.rs` - runs `pbfhogg inspect --json [--extended]` to a file and streams back the bounded summary verify reads: counts, sort flag, ordering, computed order
 - `src/pbfhogg/pbf_frames.rs` - header-only walk of a PBF's blob framing and its blob-level indexdata (pbfhogg's wire format), refusing what pbfhogg cannot read through indexdata; `verify getid-removeid` chooses its IDs from it
+- `src/pbfhogg/verify_element_diff.rs` - the `pbfhogg diff --format osc` run whose exit status must agree with the OSC it wrote, streamed into per-kind classes of exact counts and bounded ID samples; `verify merge` and `verify extract` each apply their own policy to the classes
 - `src/pbfhogg/verify_stream.rs` - fixed-buffer readers over a verify step's stdout file (line heads, bounded preview, byte comparison, line count)
 - `src/elivagar/commands.rs` - `ElivagarCommand` split by execution kind: `Built` (`BuiltCommand::MainBinary` for tilegen, `BuiltCommand::Example` for the PmtilesWriter/NodeStore micro-benchmarks) and `External` (Planetiler, Tilemaker)
 - `src/context.rs` - `MeasurementSession` (one lock, paths and request provenance, with an optional built executable), typed `DirtyPolicy`, bootstrap helpers, worktree lifecycle

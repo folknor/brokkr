@@ -4,7 +4,17 @@
 //! Generates N non-overlapping longitude strips from the dataset bbox,
 //! runs `pbfhogg extract --config <json> --simple` (single-pass), then
 //! runs N individual `pbfhogg extract --simple -b=<strip>` calls
-//! (sequential reference). Compares element counts per region.
+//! (sequential reference). Per region, the multi output must be in strict
+//! order and element-content identical to its sequential extract
+//! (`pbfhogg diff`, which leaves metadata and headers out).
+//!
+//! Only the simple strategy is checked: it is the one with a single-pass
+//! implementation, while complete-ways and smart under `--config` run the
+//! per-region path, which would be compared with itself. Nothing here proves
+//! the single-pass path ran rather than pbfhogg's per-region fallback. The
+//! regions are adjacent strips, so overlapping or identical regions and a
+//! deliberately empty region are never constructed (an element can still
+//! fall in several strips, and a strip can still come out empty).
 
 use std::path::Path;
 
@@ -23,6 +33,11 @@ pub(super) use super::inspect_report::InspectCounts as Counts;
 pub(super) fn inspect_counts(harness: &VerifyHarness, pbf: &Path) -> Result<Counts, DevError> {
     Ok(super::inspect_report::inspect(harness, pbf, false)?.counts())
 }
+
+/// The claim a passing multi-extract check's summary line carries.
+const CLAIM: &str = "per strip, the simple multi-extract output is in strict order and \
+                     element-content identical to a sequential pbfhogg extract; osmium is \
+                     not consulted";
 
 /// Cross-validate single-pass multi-extract against sequential extracts.
 #[allow(clippy::too_many_lines)]
@@ -73,54 +88,39 @@ pub fn run(
         harness.check_exit(&captured, &format!("pbfhogg extract strip-{i}"))?;
     }
 
-    // --- Compare element counts ---
-    verify_msg("  comparing element counts...");
-    let mut findings = Findings::new();
+    // --- Compare each strip: order, then element content ---
+    //
+    // Counts alone let a strip with substituted IDs or changed content pass,
+    // so each strip is diffed against its sequential extract; the counts are
+    // printed as context. The diff does not see order (two equally
+    // misordered outputs can diff clean), so the multi output's order is a
+    // verdict of its own.
+    verify_msg("  comparing strips...");
+    let mut findings = Findings::claiming(CLAIM);
 
     for i in 0..regions {
         let multi_pbf = multi_dir.join(format!("strip-{i}.osm.pbf"));
         let seq_pbf = seq_dir.join(format!("strip-{i}.osm.pbf"));
 
-        let multi_counts = inspect_counts(harness, &multi_pbf)?;
-        let seq_counts = inspect_counts(harness, &seq_pbf)?;
-
-        let nodes_ok = multi_counts.nodes == seq_counts.nodes;
-        let ways_ok = multi_counts.ways == seq_counts.ways;
-        let rels_ok = multi_counts.relations == seq_counts.relations;
-
-        if nodes_ok && ways_ok && rels_ok {
-            verify_msg(&format!(
-                "  strip-{i}: PASS ({} nodes, {} ways, {} relations)",
-                multi_counts.nodes, multi_counts.ways, multi_counts.relations
-            ));
-        } else {
-            findings.fail(format!(
-                "strip-{i} element counts differ from sequential extract"
-            ));
-            verify_msg(&format!("  strip-{i}: FAIL"));
-            if !nodes_ok {
-                verify_msg(&format!(
-                    "    nodes: multi={}, seq={}",
-                    multi_counts.nodes, seq_counts.nodes
-                ));
-            }
-            if !ways_ok {
-                verify_msg(&format!(
-                    "    ways: multi={}, seq={}",
-                    multi_counts.ways, seq_counts.ways
-                ));
-            }
-            if !rels_ok {
-                verify_msg(&format!(
-                    "    relations: multi={}, seq={}",
-                    multi_counts.relations, seq_counts.relations
-                ));
-            }
-        }
+        let label = format!("multi-extract strip-{i}");
+        let (sorted, counts) = harness.check_sorted_counted(&label, &multi_pbf)?;
+        findings.record(&format!("{label} output order"), sorted);
+        let same = harness.diff_pbfs(
+            &multi_pbf,
+            &seq_pbf,
+            &super::verify::listing_beside(&multi_pbf),
+        )?;
+        findings.record(
+            &format!("{label} element content differs from the sequential extract"),
+            same,
+        );
+        let outcome = if same.is_pass() { "PASS" } else { "FAIL" };
+        verify_msg(&format!(
+            "  strip-{i}: same elements as sequential {outcome} ({} nodes, {} ways, {} \
+             relations)",
+            counts.nodes, counts.ways, counts.relations
+        ));
     }
 
-    if findings.is_clean() {
-        verify_msg("  multi-extract: PASS (all regions match)");
-    }
     Ok(findings)
 }

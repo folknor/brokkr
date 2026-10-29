@@ -22,6 +22,7 @@ pub mod verify_cat;
 pub mod verify_check_refs;
 pub mod verify_derive_changes;
 pub mod verify_diff;
+pub(crate) mod verify_element_diff;
 pub mod verify_extract;
 pub mod verify_getid_removeid;
 pub mod verify_merge;
