@@ -1765,6 +1765,37 @@ Examples:
         #[command(subcommand)]
         verify: VerifyCommand,
     },
+    /// List the library-use scenarios the pbfhogg harness declares
+    ///
+    /// Builds the harness member `[pbfhogg.library.harness]` names, asks it
+    /// for its describe document (`--describe-harness`), validates it, and
+    /// lists each scenario with its calls, roles and assertions.
+    ///
+    /// In depth: `brokkr man library`.
+    #[command(display_order = 12)]
+    Library {
+        /// Build the harness with the dev profile (`<target>/debug/`).
+        /// Overrides `[pbfhogg.library.harness] debug`.
+        #[arg(long, conflicts_with = "release")]
+        debug: bool,
+
+        /// Build the harness with the release profile, the default.
+        /// Overrides `[pbfhogg.library.harness] debug`.
+        #[arg(long)]
+        release: bool,
+
+        /// Build the harness under this cargo profile: `dev`, `release` or
+        /// a custom `[profile.<name>]`. Overrides
+        /// `[pbfhogg.library.harness] profile`/`debug`.
+        #[arg(long, value_name = "NAME", value_parser = crate::build::RustProfile::parse,
+              conflicts_with_all = ["debug", "release"])]
+        profile: Option<crate::build::RustProfile>,
+
+        /// Build the harness from a git worktree at REF instead of the
+        /// current tree. Config still comes from the current tree.
+        #[arg(long, value_name = "REF")]
+        commit: Option<String>,
+    },
     /// Download a dataset from Geofabrik or planet.openstreetmap.org
     #[command(display_order = 20)]
     Download {

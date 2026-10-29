@@ -37,6 +37,7 @@ A doc with 8+ `##` sections is **section-addressed**: `brokkr man conventions sc
 - `docs/commands/results.md` - `brokkr results`.
 - `docs/commands/measure.md` - `--bench`/`--hotpath`/`--alloc`/`--stop`, the sidecar profiler, markers, `brokkr sidecar`.
 - `docs/commands/output-channels.md` - where a run's output goes (stdout/stderr/FIFO, results.db vs sidecar.db).
+- `docs/commands/library.md` - pbfhogg `brokkr library`, `[pbfhogg.library]` and the library harness protocol.
 - `docs/commands/visual.md` - litehtml-rs/sluggrs visual commands.
 - `docs/commands/hotpath.md` - sluggrs `brokkr hotpath`.
 - `docs/commands/sync.md` - ratatoskr `sync` / `mock-serve`.
@@ -73,7 +74,7 @@ Single crate, single binary (plus the `brokkr-rustc-guard` bin). No workspace. T
 - `lock`, `strays [--kill]`, `guard [--install|--remove]`, `kill [--hard]` - lock status and process hygiene (see `docs/commands/check.hygiene.md`).
 - `sidecar <uuid>` - sidecar profiler data (see `docs/commands/measure.md`).
 - `fmt` - locked `cargo fmt` wrapper.
-- Project-specific: `corpus-results`, `dellingr`, `mogwai`, `hotpath`, `pmtiles-stats`, `pmtiles-corpus`, `ocean-build` - see the project docs.
+- Project-specific: `corpus-results`, `dellingr`, `mogwai`, `hotpath`, `library`, `pmtiles-stats`, `pmtiles-corpus`, `ocean-build` - see the project docs.
 
 ## Conventions
 

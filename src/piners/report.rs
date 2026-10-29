@@ -836,10 +836,7 @@ fn record_disposition(
     p.line = position;
     // Missing key and present null are different facts.
     p.declared = value.get("disposition").cloned();
-    let census = value
-        .get("labels")
-        .map(parse_label_census)
-        .transpose();
+    let census = value.get("labels").map(parse_label_census).transpose();
     p.census = census.clone().ok().flatten();
     p.verdict = p.validate(value, census);
     // Every valid refusal is evidence, kept here before repeats collapse or
@@ -1454,7 +1451,9 @@ mod tests {
         let line = |fields: &str| {
             parse(format!("{{\"probe\":\"p\",\"outcome\":\"unevaluated\"{fields}}}").as_bytes())
         };
-        let ok = line(r#","disposition":"unevaluated","reason":"feed_coverage","error":"past the feed""#);
+        let ok = line(
+            r#","disposition":"unevaluated","reason":"feed_coverage","error":"past the feed""#,
+        );
         assert!(ok.invalid.is_empty(), "{:?}", ok.invalid);
         let p = &ok.probes[0];
         let want = Refusal {
@@ -1489,7 +1488,9 @@ mod tests {
         // (A null on a field the line deserializes as a number fails before
         // the refusal check; invalid either way.)
         for key in PARITY_KEYS {
-            let r = line(&format!(r#","reason":"no_overlap","error":"x","{key}":null"#));
+            let r = line(&format!(
+                r#","reason":"no_overlap","error":"x","{key}":null"#
+            ));
             assert_eq!(r.invalid.len(), 1, "{key}");
             assert!(r.probes.iter().all(|p| p.outcome().is_none()), "{key}");
             assert!(r.refusals.is_empty(), "{key}");

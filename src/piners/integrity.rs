@@ -1114,7 +1114,11 @@ not json at all
         // Clean prefix: coverage and the terminal record are excused.
         let clean = stopped_prefix(&[("a", ok)]);
         let a = assess(&sel, clean.as_bytes(), HarnessEnd::Stopped, false);
-        assert!(a.contract.violations.is_empty(), "{:?}", a.contract.violations);
+        assert!(
+            a.contract.violations.is_empty(),
+            "{:?}",
+            a.contract.violations
+        );
         assert!(a.measured_verdict().is_ok(), "{:?}", a.measured_verdict());
         // A fragment the stop cut off is context, not an invalid record.
         let cut = format!("{clean}{{\"probe\":\"b\",\"outc");
@@ -1122,11 +1126,17 @@ not json at all
         assert!(a.measured_verdict().is_ok(), "{:?}", a.measured_verdict());
         assert!(a.truncated_tail.is_some());
         // Observed failure evidence is never excused.
-        let broke = stopped_prefix(&[("a", ok), ("b", r#"{"probe":"b","outcome":"compile_fail"}"#)]);
+        let broke = stopped_prefix(&[
+            ("a", ok),
+            ("b", r#"{"probe":"b","outcome":"compile_fail"}"#),
+        ]);
         let err = assess(&sel, broke.as_bytes(), HarnessEnd::Stopped, false)
             .measured_verdict()
             .unwrap_err();
-        assert!(err.starts_with("breaks reported before the --stop marker fired (b)"), "{err}");
+        assert!(
+            err.starts_with("breaks reported before the --stop marker fired (b)"),
+            "{err}"
+        );
         let refused = stopped_prefix(&[(
             "a",
             r#"{"probe":"a","outcome":"unevaluated","reason":"no_overlap","error":"d"}"#,
@@ -1134,14 +1144,22 @@ not json at all
         let err = assess(&sel, refused.as_bytes(), HarnessEnd::Stopped, false)
             .measured_verdict()
             .unwrap_err();
-        assert!(err.starts_with("unevaluated in the run (a (no_overlap))"), "{err}");
+        assert!(
+            err.starts_with("unevaluated in the run (a (no_overlap))"),
+            "{err}"
+        );
         let ended_one = format!(
             "{}{{\"kind\":\"probe_end\",{V1},\"probe\":\"a\"}}\n{{\"kind\":\"run_end\",{V1},\"exit\":1}}\n",
             stopped_prefix(&[("a", ok)])
         );
-        let err = assess(&ids(&["a"]), ended_one.as_bytes(), HarnessEnd::Stopped, false)
-            .measured_verdict()
-            .unwrap_err();
+        let err = assess(
+            &ids(&["a"]),
+            ended_one.as_bytes(),
+            HarnessEnd::Stopped,
+            false,
+        )
+        .measured_verdict()
+        .unwrap_err();
         assert!(err.starts_with("run_end exit 1 reported"), "{err}");
         // A defect the prefix already establishes fails too: a duplicate start.
         let dup = format!("{clean}{{\"kind\":\"probe_start\",{V1},\"probe\":\"a\"}}\n");
@@ -1158,23 +1176,34 @@ not json at all
         );
         // A whole clean stream with run_end 0 the stop then cut off is
         // accepted: with no process exit, run_end is compared with nothing.
-        let whole = clean_stream(&["a"], "compile_fail", 0)
-            .replace(r#""outcome":"compile_fail""#, r#""outcome":"parity","acceptance":{"tier":"accepted"}"#);
+        let whole = clean_stream(&["a"], "compile_fail", 0).replace(
+            r#""outcome":"compile_fail""#,
+            r#""outcome":"parity","acceptance":{"tier":"accepted"}"#,
+        );
         let a = assess(&ids(&["a"]), whole.as_bytes(), HarnessEnd::Stopped, false);
-        assert!(a.contract.violations.is_empty(), "{:?}", a.contract.violations);
+        assert!(
+            a.contract.violations.is_empty(),
+            "{:?}",
+            a.contract.violations
+        );
         assert!(a.measured_verdict().is_ok(), "{:?}", a.measured_verdict());
     }
 
     #[test]
     fn a_refusal_is_kept_as_evidence_whatever_else_its_probe_reported() {
-        let refusal = r#"{"probe":"a","outcome":"unevaluated","reason":"invalid_evidence","error":"e"}"#;
+        let refusal =
+            r#"{"probe":"a","outcome":"unevaluated","reason":"invalid_evidence","error":"e"}"#;
         let ok = r#"{"probe":"a","outcome":"parity","acceptance":{"tier":"accepted"}}"#;
         let bad = r#"{"probe":"a","outcome":"parity"}"#;
         // A refusal then an evaluated repeat (collapse keeps the last), and a
         // refusal beside an invalid occurrence (which unscores the probe).
         for nd in [format!("{refusal}\n{ok}\n"), format!("{refusal}\n{bad}\n")] {
             let a = assess(&ids(&["a"]), nd.as_bytes(), HarnessEnd::Code(1), false);
-            assert_eq!(a.refusal_names(), vec!["a (invalid_evidence)".to_owned()], "{nd}");
+            assert_eq!(
+                a.refusal_names(),
+                vec!["a (invalid_evidence)".to_owned()],
+                "{nd}"
+            );
             assert!(!a.completed(), "{nd}");
         }
         // An identical repeat is one observation.
@@ -1189,7 +1218,8 @@ not json at all
         assert!(
             parity_reasons(&a, true)
                 .iter()
-                .any(|r| r.starts_with("1 unevaluated probe (a (invalid_evidence), a (feed_coverage))")),
+                .any(|r| r
+                    .starts_with("1 unevaluated probe (a (invalid_evidence), a (feed_coverage))")),
             "{:?}",
             parity_reasons(&a, true)
         );

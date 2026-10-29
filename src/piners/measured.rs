@@ -244,7 +244,8 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
-    const A: &str = "{\"probe\":\"a\",\"outcome\":\"parity\",\"acceptance\":{\"tier\":\"accepted\"}}\n";
+    const A: &str =
+        "{\"probe\":\"a\",\"outcome\":\"parity\",\"acceptance\":{\"tier\":\"accepted\"}}\n";
 
     fn ids() -> Vec<String> {
         vec!["a".to_owned()]

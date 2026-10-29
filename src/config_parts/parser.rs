@@ -1088,6 +1088,11 @@ fn parse_hosts(
         if !value.is_table() && VALUE_KEYS.contains(&key.as_str()) {
             continue;
         }
+        // A `[pbfhogg]` table holding `library` is the pbfhogg project
+        // section; without it the name stays the hostname it always was.
+        if key == project_config::pbfhogg::SECTION && project_config::pbfhogg::claims(value) {
+            continue;
+        }
         if !value.is_table() {
             return Err(DevError::Config(format!(
                 "unknown top-level key '{key}' in brokkr.toml; expected a hostname table"

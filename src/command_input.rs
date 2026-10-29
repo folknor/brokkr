@@ -466,6 +466,7 @@ impl Command {
             | Self::History { .. }
             | Self::Invalidate { .. }
             | Self::Verify { .. }
+            | Self::Library { .. }
             | Self::Download { .. }
             | Self::CompareTiles { .. }
             | Self::DownloadOcean

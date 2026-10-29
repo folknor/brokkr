@@ -3181,4 +3181,62 @@ profile = "corpus"
         let path = user_config_path_from_override(Some(std::ffi::OsString::new()));
         assert!(path.is_none());
     }
+
+    #[test]
+    fn a_pbfhogg_table_without_library_stays_the_hostname_section_it_was() {
+        let table = root_table("project = \"pbfhogg\"\n[pbfhogg]\ndata = \"d\"\n");
+        let cfg = parse_dev_config(&table).unwrap();
+        assert_eq!(cfg.hosts["pbfhogg"].data.as_deref(), Some("d"));
+        let project = project_config::ProjectConfig::parse(&Project::Pbfhogg, &table).unwrap();
+        assert!(project.pbfhogg_library().is_err());
+        // Under another project too: a host named pbfhogg is not a section.
+        let elivagar = root_table("project = \"elivagar\"\n[pbfhogg]\ndata = \"d\"\n");
+        assert!(project_config::ProjectConfig::parse(&Project::Elivagar, &elivagar).is_ok());
+    }
+
+    #[test]
+    fn a_pbfhogg_table_holding_library_is_the_pbfhogg_section() {
+        let table = root_table(
+            "project = \"pbfhogg\"\n[pbfhogg.library.harness]\npackage = \"pbfhogg-harness\"\n\
+             [host.pbfhogg]\ndata = \"d\"\n",
+        );
+        let cfg = parse_dev_config(&table).unwrap();
+        // The claimed table is no host; [host.pbfhogg] still is.
+        assert_eq!(cfg.hosts.len(), 1);
+        assert_eq!(cfg.hosts["pbfhogg"].data.as_deref(), Some("d"));
+        let project = project_config::ProjectConfig::parse(&Project::Pbfhogg, &table).unwrap();
+        assert_eq!(project.pbfhogg_library().unwrap().harness.package, "pbfhogg-harness");
+    }
+
+    #[test]
+    fn the_claimed_pbfhogg_section_refuses_host_fields_other_projects_and_unknown_keys() {
+        let mixed = root_table(
+            "project = \"pbfhogg\"\n[pbfhogg]\ndata = \"d\"\n[pbfhogg.library.harness]\n\
+             package = \"h\"\n",
+        );
+        let e = project_config::ProjectConfig::parse(&Project::Pbfhogg, &mixed)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("[host.pbfhogg]") && e.contains("`data`"), "{e}");
+
+        let foreign = root_table(
+            "project = \"elivagar\"\n[pbfhogg.library.harness]\npackage = \"h\"\n",
+        );
+        let e = project_config::ProjectConfig::parse(&Project::Elivagar, &foreign)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("belongs to project \"pbfhogg\""), "{e}");
+
+        for bad in [
+            "[pbfhogg.library]\n",
+            "[pbfhogg.library]\nrequire = 1\n[pbfhogg.library.harness]\npackage = \"h\"\n",
+            "[pbfhogg.library.harness]\npackage = \"h\"\nbinaries = []\n",
+        ] {
+            let table = root_table(&format!("project = \"pbfhogg\"\n{bad}"));
+            assert!(
+                project_config::ProjectConfig::parse(&Project::Pbfhogg, &table).is_err(),
+                "{bad}"
+            );
+        }
+    }
 }

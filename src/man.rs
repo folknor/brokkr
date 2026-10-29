@@ -156,6 +156,12 @@ const TOPICS: &[Topic] = &[
         commands: &[CommandId::Read],
     },
     Topic {
+        name: "library",
+        summary: "brokkr library: the pbfhogg library harness, [pbfhogg.library], its protocol",
+        content: include_str!("../docs/commands/library.md"),
+        commands: &[CommandId::Library],
+    },
+    Topic {
         name: "elivagar",
         summary: "elivagar commands, regress, the pmtiles corpus, the durable tilegen output store",
         content: include_str!("../docs/projects/elivagar.md"),

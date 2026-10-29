@@ -30,6 +30,8 @@ reads the ones that apply to it:
   behaviour is in `docs/commands/corpus.md`
 - `[dellingr]` and `[dellingr.workloads.*]` -> `docs/projects/dellingr.md`
 - `[mogwai]` and `[mogwai.targets.*]` -> `docs/projects/mogwai.md`
+- `[pbfhogg.library]` and `[pbfhogg.library.harness]` ->
+  `docs/commands/library.md` (`brokkr man library`)
 
 For project-specific CLI flags that adjust dataset resolution or cargo
 features (`--snapshot`, `--as-snapshot`, `--direct-io`, `--io-uring`,
@@ -252,6 +254,12 @@ Reserved top-level keys parsed as config sections, or consumed by composition:
 non-table values: a `[strip_rustflags]`, `[lint_sweep]` or `[install]` table
 is still read as a hostname section, while the `strip_rustflags = [...]` array
 and the `[[lint_sweep]]` and `[[install]]` arrays of tables are brokkr's.
+
+`pbfhogg` is brokkr's only as a table holding `library`: such a table, as the
+composed config has it, is the pbfhogg project section (belonging to
+`project = "pbfhogg"` and holding nothing but `library`), and any other
+`[pbfhogg]` table is the hostname section it always was. A host table could
+never hold `library`, so the claim changes no config that loads.
 
 ## `worktree_keep`
 

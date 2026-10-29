@@ -1408,7 +1408,8 @@ mod tests {
         // Complete coverage with an extra line is not a completed attempt, and
         // a broken report is protocol-invalid even on an abnormal end - never
         // classified as a crash first.
-        let extra = format!("{A_OK}{{\"probe\":\"zz\",\"outcome\":\"compile_fail\",\"error\":\"x\"}}\n");
+        let extra =
+            format!("{A_OK}{{\"probe\":\"zz\",\"outcome\":\"compile_fail\",\"error\":\"x\"}}\n");
         assert!(matches!(
             classify(&["a"], &extra, HarnessEnd::Code(0), false),
             isolate::AttemptVerdict::Failed(isolate::Failure::ProtocolInvalid(_))
@@ -1439,7 +1440,11 @@ mod tests {
             (&["a", "b"][..], HarnessEnd::Signal(9)),
         ] {
             let a = assessed(ids, UNEVALUATED, end, false);
-            assert_eq!(a.refusal_names(), vec!["a (no_overlap)".to_owned()], "{end:?}");
+            assert_eq!(
+                a.refusal_names(),
+                vec!["a (no_overlap)".to_owned()],
+                "{end:?}"
+            );
         }
         assert_eq!(
             classify(&["a", "b"], UNEVALUATED, HarnessEnd::Signal(9), false),

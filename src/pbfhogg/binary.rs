@@ -8,7 +8,7 @@
 //! asked of that executable, never inferred from a commit range.
 //!
 //! [`PbfhoggBinary`] is the one place that knows about the flag. Every pbfhogg
-//! spawn brokkr makes is an [`Invocation`] it produced from a [`PbfArgv`],
+//! CLI spawn brokkr makes is an [`Invocation`] it produced from a [`PbfArgv`],
 //! which carries the argv and what it reads, writes and scratches; the handle
 //! appends `--overwrite` when the argv writes an output it does not force and
 //! the subcommand accepts it. No caller passes the flag itself.
@@ -75,7 +75,8 @@
 //! # Boundary
 //!
 //! Code in `src/pbfhogg` never holds the path of a pbfhogg build brokkr made
-//! except through this handle. The runner's [`Executable`] is guarded by
+//! except through this handle, or through [`LibraryHarness`], the handle on
+//! the library harness, which this module also makes. The runner's [`Executable`] is guarded by
 //! types: its path is readable only with a [`HandleKey`], which only this
 //! module can make, and `Invocation::built` refuses a pbfhogg executable.
 //! The other seams that hand out built paths (the build, harness-build and
@@ -405,6 +406,185 @@ impl PbfhoggBinary {
                 Ok((flag, supported))
             })
             .collect()
+    }
+}
+
+/// The variables brokkr hands a running harness, which describe mode must not
+/// see even when brokkr itself inherited them.
+const HARNESS_RUN_ENV: [&str; 2] = [
+    crate::sidecar::MARKER_FIFO_ENV,
+    "BROKKR_HARNESS_ARTEFACT_DIR",
+];
+
+/// How long describe mode may take.
+const DESCRIBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The stderr kept from a describe run for its report; any byte fails it.
+const DESCRIBE_STDERR_KEPT: usize = 64 * 1024;
+
+/// The built pbfhogg library harness (`docs/commands/library.md`): a bin of
+/// the workspace member `[pbfhogg.library.harness]` names. Like
+/// [`PbfhoggBinary`] it holds the brokkr lock and an
+/// [`executable_guard`] registration for its whole life, re-stats its
+/// executable before every spawn, and exposes no path.
+pub(crate) struct LibraryHarness {
+    path: PathBuf,
+    identity: FileIdentity,
+    project_root: PathBuf,
+    _hold: Option<crate::lockfile::LockGuard>,
+    _registered: HandleToken,
+}
+
+impl std::fmt::Debug for LibraryHarness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LibraryHarness").finish_non_exhaustive()
+    }
+}
+
+impl LibraryHarness {
+    /// Build the harness `config` names from `build_root` under `profile`
+    /// and wrap it. `project_root` is the describe run's working directory.
+    pub(crate) fn build(
+        config: &crate::config::HarnessConfig,
+        profile: crate::build::RustProfile,
+        build_root: &Path,
+        project_root: &Path,
+    ) -> Result<Self, DevError> {
+        let hold = crate::lockfile::current_hold().ok_or_else(|| {
+            DevError::Lock(
+                "a library harness handle needs the brokkr lock held for its whole life - \
+                 this is a brokkr bug: the command must take the lock first"
+                    .into(),
+            )
+        })?;
+        let sigterm = crate::shutdown::SigtermGuard::install();
+        let built = crate::harness_build::build_for_harness(
+            build_root,
+            config,
+            profile,
+            Some(&|pid| hold.set_child_pid(pid)),
+            Some(&|| hold.clear_child_pid()),
+            crate::shutdown::ChildIsolation::ProcessGroup(&sigterm),
+        )?;
+        Self::open(&built.binary, project_root, Some(hold))
+    }
+
+    /// A handle without the lock, for fixture executables in tests.
+    #[cfg(test)]
+    pub(crate) fn fixture(path: &Path, project_root: &Path) -> Result<Self, DevError> {
+        Self::open(path, project_root, None)
+    }
+
+    fn open(
+        path: &Path,
+        project_root: &Path,
+        hold: Option<crate::lockfile::LockGuard>,
+    ) -> Result<Self, DevError> {
+        let registered = executable_guard::reserve_handle()?;
+        let meta = std::fs::metadata(path).map_err(|e| {
+            DevError::Build(format!(
+                "library harness {} is unreadable: {e}",
+                path.display()
+            ))
+        })?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            identity: FileIdentity::of(&meta),
+            project_root: project_root.to_path_buf(),
+            _hold: hold,
+            _registered: registered,
+        })
+    }
+
+    /// Refuse an executable replaced since this handle was made.
+    fn check_identity(&self) -> Result<(), DevError> {
+        let now = std::fs::metadata(&self.path)
+            .map(|meta| FileIdentity::of(&meta))
+            .map_err(|e| {
+                DevError::Internal(format!(
+                    "library harness {} vanished under a live handle: {e}",
+                    self.path.display()
+                ))
+            })?;
+        if now == self.identity {
+            Ok(())
+        } else {
+            Err(DevError::Internal(format!(
+                "library harness {} was replaced under a live handle - something outside \
+                 brokkr's build seam rewrote it",
+                self.path.display()
+            )))
+        }
+    }
+
+    /// Run `HARNESS --describe-harness` and return its stdout, which must be
+    /// at most `limit` bytes: exit 0 within the deadline, nothing on stderr,
+    /// the run's variables absent from its environment.
+    pub(crate) fn describe(&self, limit: usize) -> Result<Vec<u8>, DevError> {
+        self.check_identity()?;
+        let program = crate::utf8_path::path_string(&self.path)?;
+        let sigterm = crate::shutdown::SigtermGuard::install();
+        let capture = crate::output::child::run_captured_bounded_unsetting(
+            &program,
+            &["--describe-harness"],
+            &self.project_root,
+            &[],
+            &HARNESS_RUN_ENV,
+            DESCRIBE_DEADLINE,
+            None,
+            crate::shutdown::ChildIsolation::ProcessGroup(&sigterm),
+            crate::output::child::CaptureCap {
+                stdout: limit + 1,
+                stderr: DESCRIBE_STDERR_KEPT + 1,
+            },
+        )?;
+        let fail = |why: String| {
+            DevError::ContractViolation(format!("`{program} --describe-harness` {why}"))
+        };
+        let captured = &capture.captured;
+        if captured.ending.is_deadline() {
+            return Err(fail(format!(
+                "was killed after {}",
+                output::format_duration(DESCRIBE_DEADLINE)
+            )));
+        }
+        if !captured.success() {
+            let ending = match (captured.ending.exit_code(), captured.ending.signal()) {
+                (Some(code), _) => format!("exited {code}"),
+                (None, Some(signal)) => format!("was killed by signal {signal}"),
+                (None, None) => format!("ended as {:?}", captured.ending),
+            };
+            return Err(fail(format!(
+                "{ending}, not 0{}",
+                stderr_tail(&captured.stderr)
+            )));
+        }
+        if !captured.stderr.is_empty() {
+            return Err(fail(format!(
+                "wrote to stderr, which describe mode must leave empty{}",
+                stderr_tail(&captured.stderr)
+            )));
+        }
+        if capture.output_cut {
+            return Err(fail("left its output open after it exited".into()));
+        }
+        if captured.stdout.len() > limit {
+            return Err(fail(format!(
+                "printed more than the {limit}-byte limit of a describe document"
+            )));
+        }
+        Ok(capture.captured.stdout)
+    }
+}
+
+/// `: <stderr>` for a report, lossy and trimmed; empty when there is none.
+fn stderr_tail(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let text = text.trim();
+    if text.is_empty() {
+        String::new()
+    } else {
+        format!(": {text}")
     }
 }
 

@@ -1072,6 +1072,32 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                 },
             )
         }
+        Command::Library {
+            debug,
+            release,
+            profile,
+            commit,
+        } => {
+            let library = project_config.pbfhogg_library()?;
+            let profile = profile_choice(debug, release, profile.as_ref());
+            with_worktree(
+                Some(project),
+                &detection.project_root,
+                &detection.build_root,
+                commit.as_deref(),
+                false,
+                &crate::tree_policy::TreePolicy::of(dev_config),
+                context::worktree_keep(dev_config)?,
+                |build_root| {
+                    crate::pbfhogg::library::list(&crate::pbfhogg::library::LibraryArgs {
+                        project_root,
+                        build_root: build_root.as_path(),
+                        harness: &library.harness,
+                        profile,
+                    })
+                },
+            )
+        }
         Command::Download {
             region,
             osc_seq,

@@ -13,6 +13,7 @@ pub mod commands;
 pub mod context;
 pub mod download;
 pub(crate) mod inspect_report;
+pub(crate) mod library;
 pub(crate) mod pbf_frames;
 pub(crate) mod plan;
 pub mod verify;

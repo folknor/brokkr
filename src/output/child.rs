@@ -319,15 +319,44 @@ pub(crate) fn run_captured_bounded(
     isolation: ChildIsolation<'_>,
     cap: CaptureCap,
 ) -> Result<DeadlineCapture, DevError> {
-    let options = ChildOptions {
-        capture_cap: cap,
-        ..ChildOptions::DEFAULT
-    };
-    run_captured_limited(
+    run_captured_bounded_unsetting(
         program,
         args,
         cwd,
         env,
+        &[],
+        deadline,
+        on_spawn,
+        isolation,
+        cap,
+    )
+}
+
+/// [`run_captured_bounded`] with `unset` removed from the inherited
+/// environment, for a child whose contract says a variable must not reach it
+/// (the library harness's describe mode, which must see no marker FIFO).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_captured_bounded_unsetting(
+    program: &str,
+    args: &[&str],
+    cwd: &Path,
+    env: &[(&str, &str)],
+    unset: &[&str],
+    deadline: Duration,
+    on_spawn: Option<&dyn Fn(u32)>,
+    isolation: ChildIsolation<'_>,
+    cap: CaptureCap,
+) -> Result<DeadlineCapture, DevError> {
+    let options = ChildOptions {
+        capture_cap: cap,
+        ..ChildOptions::DEFAULT
+    };
+    run_captured_limited_unsetting(
+        program,
+        args,
+        cwd,
+        env,
+        unset,
         ChildLimit::Wall(deadline),
         on_spawn,
         isolation,
@@ -784,6 +813,10 @@ fn supervise_child_capped(
             break ending;
         }
 
+        // Reaped before the expiry test on purpose: a wall limit is a kill
+        // ceiling, and a child found exited after the limit (brokkr
+        // descheduled across it) may well have exited before it, which no
+        // later reading can rule out. Its own ending stands.
         match child.try_wait() {
             Ok(Some(status)) => {
                 child_elapsed = Some(start.elapsed());

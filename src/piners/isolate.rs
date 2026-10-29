@@ -327,8 +327,12 @@ fn examine(
     d.attempts += 1;
     let attempt = d.attempts;
     let Attempt { outcome, refusals } = run(&subset, attempt);
-    d.refusals
-        .extend(refusals.iter().cloned().map(|refusal| RefusalObservation { attempt, refusal }));
+    d.refusals.extend(
+        refusals
+            .iter()
+            .cloned()
+            .map(|refusal| RefusalObservation { attempt, refusal }),
+    );
     match outcome {
         AttemptOutcome::Completed => {
             if subset.len() == 1 {
@@ -453,7 +457,13 @@ impl Diagnosis {
         for nr in &self.not_reproduced {
             let what = failure_noun(&nr.failure);
             match (&nr.alone, nr.set.as_slice()) {
-                (Some(Alone { refusal: Some(r), attempt }), [probe]) => out.push(format!(
+                (
+                    Some(Alone {
+                        refusal: Some(r),
+                        attempt,
+                    }),
+                    [probe],
+                ) => out.push(format!(
                     "probe {probe} reported unevaluated ({}) when run alone in attempt \
                      {attempt} ({what} did not reproduce)",
                     r.reason.label()
@@ -887,7 +897,9 @@ mod tests {
 
     #[test]
     fn nothing_unreported_runs_nothing() {
-        let d = bisect(Vec::new(), |_, _| -> AttemptOutcome { panic!("must not run") });
+        let d = bisect(Vec::new(), |_, _| -> AttemptOutcome {
+            panic!("must not run")
+        });
         assert_eq!(d.attempts, 0);
     }
 
@@ -926,7 +938,9 @@ mod tests {
         );
         let lines = d.lines();
         assert!(
-            lines.iter().any(|l| l.ends_with("p0 (invalid_evidence) in attempt 1: p0 detail")),
+            lines
+                .iter()
+                .any(|l| l.ends_with("p0 (invalid_evidence) in attempt 1: p0 detail")),
             "{lines:?}"
         );
         assert!(
@@ -951,7 +965,10 @@ mod tests {
                     refusal: refused("p2", RefusalReason::NoOverlap),
                 }]
             );
-            assert!(d.note(std::path::Path::new("r")).contains("p2 (no_overlap) in attempt 1"));
+            assert!(
+                d.note(std::path::Path::new("r"))
+                    .contains("p2 (no_overlap) in attempt 1")
+            );
         }
     }
 
@@ -976,7 +993,10 @@ mod tests {
                     (abort did not reproduce)"),
             "{lines:?}"
         );
-        assert!(!lines.iter().any(|l| l.contains("completed when run alone")), "{lines:?}");
+        assert!(
+            !lines.iter().any(|l| l.contains("completed when run alone")),
+            "{lines:?}"
+        );
         // A clean singleton keeps its attempt number too.
         let ok = bisect(ids(1), |_, _| AttemptOutcome::Completed);
         assert_eq!(

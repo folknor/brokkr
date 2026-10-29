@@ -122,7 +122,10 @@ impl PinnedDisposition {
 
     /// Whether this outcome is one the harness signals with exit code 1.
     pub const fn is_break(self) -> bool {
-        matches!(self, Self::CompileFail | Self::RuntimeFail | Self::HarnessAbort)
+        matches!(
+            self,
+            Self::CompileFail | Self::RuntimeFail | Self::HarnessAbort
+        )
     }
 }
 
@@ -1562,7 +1565,10 @@ csv = { path = \"p/old/tv_trades.csv\", xxh128 = \"bb\" }
         };
         for ok in ["accepted", "compile_fail", "harness_abort"] {
             let data = parse_pins(&text(ok), Path::new("pins.toml")).unwrap();
-            assert_eq!(data.probes["p"].expected.map(PinnedDisposition::as_str), Some(ok));
+            assert_eq!(
+                data.probes["p"].expected.map(PinnedDisposition::as_str),
+                Some(ok)
+            );
         }
         for (bad, says) in [
             ("unevaluated", "can never be pinned"),

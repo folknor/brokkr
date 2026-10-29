@@ -10,8 +10,12 @@
 - `src/pbfhogg/plan.rs` - resolved command plans for the shared
   `src/measure/runner.rs`; execution uses one `MeasurementSession`.
 - `src/pbfhogg/binary.rs` - `PbfhoggBinary`, through which every pbfhogg
-  spawn is made; see [Output overwrite](#output-overwrite) and
+  CLI spawn is made; see [Output overwrite](#output-overwrite) and
   [Launch reservations](#launch-reservations-and-the-private-directory).
+  Also `LibraryHarness`, the handle on the built library harness.
+- `src/pbfhogg/library/` - `brokkr library`, pbfhogg used as a library
+  through a harness a pbfhogg workspace member provides; the command and its
+  protocol are `brokkr man library`.
 - `src/pbfhogg/argv.rs` - `PbfArgv`, an argv with what it reads, writes and
   scratches.
 - `src/pbfhogg/...` - benchmarks (read, write, merge, commands, extract,
@@ -45,7 +49,7 @@ the executable's XXH128 and the subcommand, so a build is probed once and
 different bytes never reuse an answer. `build-geocode-index` keeps its own
 `--force`, which pbfhogg defines as overwrite plus allow-unindexed.
 
-Every pbfhogg spawn is an invocation produced by a `PbfhoggBinary` for one
+Every pbfhogg CLI spawn is an invocation produced by a `PbfhoggBinary` for one
 build from a `PbfArgv` (`src/pbfhogg/argv.rs`), the argv and what it reads,
 writes and scratches built by the same calls: a path goes in as an input, an
 output, a directory output or an extract config with the outputs it names, and
@@ -64,7 +68,10 @@ suite does before building the osmpbf baseline. Cargo started any other way
 is outside that protocol.
 
 Code under `src/pbfhogg` holds a pbfhogg executable brokkr built only as a
-`PbfhoggBinary`. The executable the runner hands a plan is guarded by types:
+`PbfhoggBinary`, or, for the library harness (`brokkr man library`), as a
+`LibraryHarness`, the same kind of handle made in the same module: it holds
+the lock and the build registration, re-stats its executable before each
+spawn and exposes no path. The executable the runner hands a plan is guarded by types:
 its path needs a key only the handle can make, and pairing it with argv
 directly is refused for a pbfhogg build. The handle and its invocations
 expose no path, and reference tools run by a closed name set or as
