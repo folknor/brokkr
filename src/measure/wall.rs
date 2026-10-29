@@ -120,8 +120,10 @@ pub(crate) fn marker_span_us(
     start: &str,
     end: &str,
 ) -> Option<i64> {
-    let mut process: Vec<&crate::sidecar::Marker> =
-        markers.iter().filter(|marker| marker.call.is_none()).collect();
+    let mut process: Vec<&crate::sidecar::Marker> = markers
+        .iter()
+        .filter(|marker| marker.call.is_none())
+        .collect();
     process.sort_by_key(|marker| (marker.timestamp_us, marker.marker_idx));
     let begin = process.iter().rfind(|marker| marker.name == start)?;
     let finish = process

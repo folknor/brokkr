@@ -1350,7 +1350,10 @@ mod tests {
         assert_eq!(counters[0].name, "nodes");
         assert_eq!(counters[0].value, -7);
         assert_eq!(next_marker_idx, 1);
-        assert!(truncated, "the two malformed lines mark the capture damaged");
+        assert!(
+            truncated,
+            "the two malformed lines mark the capture damaged"
+        );
     }
 
     #[test]

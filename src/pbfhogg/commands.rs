@@ -148,6 +148,26 @@ pub enum CatTypeFilter {
     Invalid(String),
 }
 
+/// What a `cat` run does. pbfhogg's `--dedupe` is blob-level passthrough and
+/// refuses `--type` and `--clean`, so the two shapes are separate variants and
+/// no `PbfhoggCommand::Cat` can carry the combination pbfhogg rejects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatMode {
+    /// Single-input `cat`.
+    ///   - `type_filter` → `--type way|relation` (restricts output to one
+    ///     object kind).
+    ///   - `clean` → `--clean version`: decode and re-encode each data
+    ///     blob cat keeps (every one without `type_filter`), stripping the
+    ///     version attribute.
+    Plain {
+        type_filter: Option<CatTypeFilter>,
+        clean: bool,
+    },
+    /// `cat --dedupe` with two PBF inputs (the same file twice), the only
+    /// `cat` flavour that supports `--io-uring`.
+    Dedupe,
+}
+
 impl CatTypeFilter {
     pub fn as_str(&self) -> Result<&'static str, DevError> {
         match self {
@@ -304,18 +324,8 @@ pub enum PbfhoggCommand {
         full: bool,
     },
     Sort,
-    /// Unified `cat` - all flags orthogonal:
-    ///   - `type_filter` → `--type way|relation` (restricts output to one
-    ///     object type; single-pass filter).
-    ///   - `dedupe` → `--dedupe` with two PBF inputs (merge-style dedupe,
-    ///     the only Cat flavour that supports `--io-uring`).
-    ///   - `clean` → `--clean`, forces the full-decode / re-frame Framed
-    ///     path (`cat_filtered`) rather than Raw passthrough.
-    Cat {
-        type_filter: Option<CatTypeFilter>,
-        dedupe: bool,
-        clean: bool,
-    },
+    /// `cat`, in one of the shapes `CatMode` admits.
+    Cat(CatMode),
     /// Unified `tags-filter`. Orthogonal flags:
     ///   - `filter` - the pbfhogg filter expression (e.g.
     ///     `w/highway=primary`, `amenity=restaurant`); defaults to
@@ -408,7 +418,12 @@ impl PbfhoggCommand {
             Self::CheckRefs => ("check-refs", None, PromotionVariant::Unsupported, false),
             Self::CheckIds { .. } => ("check-ids", None, PromotionVariant::Unsupported, false),
             Self::Sort => ("sort", ScratchPbf, PromotionVariant::Indexed, true),
-            Self::Cat { dedupe, .. } => ("cat", ScratchPbf, PromotionVariant::Indexed, *dedupe),
+            Self::Cat(cat) => (
+                "cat",
+                ScratchPbf,
+                PromotionVariant::Indexed,
+                matches!(cat, CatMode::Dedupe),
+            ),
             Self::TagsFilter { input, .. } => (
                 "tags-filter",
                 if matches!(input, TagsFilterInput::Osc) {
@@ -741,34 +756,31 @@ impl PbfhoggCommand {
                     .input(ctx.pbf_str()?)?
                     .output(&output)
             }
-            Self::Cat {
-                type_filter,
-                dedupe,
-                clean,
-            } => {
+            Self::Cat(cat) => {
                 let output = scratch_output_path(ctx, self, mode)?;
                 let pbf = ctx.pbf_str()?;
-                let mut argv = CommandArgv::new("cat");
-                if *dedupe {
-                    argv = argv.arg("--dedupe");
+                let argv = CommandArgv::new("cat");
+                match cat {
+                    // `--dedupe` takes two PBFs; the same file twice gives a
+                    // deterministic bench shape.
+                    CatMode::Dedupe => argv.arg("--dedupe").input(pbf)?.input(pbf)?,
+                    CatMode::Plain { type_filter, clean } => {
+                        let mut argv = argv;
+                        if *clean {
+                            // pbfhogg's --clean takes an ATTR value
+                            // (version|changeset|timestamp|uid|user). Any one
+                            // makes cat decode and re-encode each blob it keeps;
+                            // `version` is the one brokkr strips.
+                            argv = argv.arg("--clean").arg("version");
+                        }
+                        argv = argv.input(pbf)?;
+                        if let Some(tf) = type_filter {
+                            argv = argv.arg("--type").arg(tf.as_str()?);
+                        }
+                        argv
+                    }
                 }
-                if *clean {
-                    // pbfhogg's --clean takes an ATTR value
-                    // (version|changeset|timestamp|uid|user). For bench purposes
-                    // we just need to force the full-decode / Framed path -
-                    // `version` is the lightest-weight strip and always present.
-                    argv = argv.arg("--clean").arg("version");
-                }
-                // Input(s). `--dedupe` takes two PBFs (we pass the same
-                // file twice for a deterministic bench shape).
-                argv = argv.input(pbf)?;
-                if *dedupe {
-                    argv = argv.input(pbf)?;
-                }
-                if let Some(tf) = type_filter {
-                    argv = argv.arg("--type").arg(tf.as_str()?);
-                }
-                argv.output(&output)
+                .output(&output)
             }
             Self::TagsFilter { filter, input } => {
                 let output = scratch_output_path(ctx, self, mode)?;
@@ -1290,16 +1302,15 @@ mod tests {
             PbfhoggCommand::CheckIds { full: false },
             PbfhoggCommand::CheckIds { full: true },
             PbfhoggCommand::Sort,
-            PbfhoggCommand::Cat {
+            PbfhoggCommand::Cat(CatMode::Plain {
                 type_filter: Some(CatTypeFilter::Way),
-                dedupe: true,
                 clean: true,
-            },
-            PbfhoggCommand::Cat {
+            }),
+            PbfhoggCommand::Cat(CatMode::Plain {
                 type_filter: None,
-                dedupe: false,
                 clean: false,
-            },
+            }),
+            PbfhoggCommand::Cat(CatMode::Dedupe),
             PbfhoggCommand::TagsFilter {
                 filter: "w/highway=primary".into(),
                 input: TagsFilterInput::Pbf {
@@ -1422,6 +1433,57 @@ mod tests {
                 assert_eq!(argv.writes_scratch(), expected, "{cmd:?} with -j {jobs:?}");
             }
         }
+    }
+
+    #[test]
+    fn cat_plain_forwards_type_and_clean() {
+        let cmd = PbfhoggCommand::Cat(CatMode::Plain {
+            type_filter: Some(CatTypeFilter::Way),
+            clean: true,
+        });
+        let args = cmd
+            .build_args(&ctx_for(&cmd), ArgMode::Bench)
+            .unwrap()
+            .into_args();
+        assert_eq!(
+            args.get(..6),
+            Some(
+                &[
+                    "cat",
+                    "--clean",
+                    "version",
+                    "/data/denmark.osm.pbf",
+                    "--type",
+                    "way"
+                ]
+                .map(String::from)[..]
+            )
+        );
+        assert!(!args.iter().any(|a| a == "--dedupe"));
+        assert!(!cmd.supports_io_uring());
+    }
+
+    #[test]
+    fn cat_dedupe_takes_the_input_twice_and_nothing_else() {
+        let cmd = PbfhoggCommand::Cat(CatMode::Dedupe);
+        let args = cmd
+            .build_args(&ctx_for(&cmd), ArgMode::Bench)
+            .unwrap()
+            .into_args();
+        assert_eq!(
+            args.get(..4),
+            Some(
+                &[
+                    "cat",
+                    "--dedupe",
+                    "/data/denmark.osm.pbf",
+                    "/data/denmark.osm.pbf"
+                ]
+                .map(String::from)[..]
+            )
+        );
+        assert!(!args.iter().any(|a| a == "--clean" || a == "--type"));
+        assert!(cmd.supports_io_uring());
     }
 
     #[test]

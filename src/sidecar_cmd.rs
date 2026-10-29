@@ -188,7 +188,9 @@ fn resolve_id(store: &db::RunStore, prefix: &str) -> Result<Option<db::RunId>, D
 /// one timeline, and one wall, out of several processes.
 fn one_run(run_filter: Option<usize>, what: &str) -> Result<usize, DevError> {
     run_filter.ok_or_else(|| {
-        DevError::Usage(format!("{what} reads one run; pass --run N instead of --run all"))
+        DevError::Usage(format!(
+            "{what} reads one run; pass --run N instead of --run all"
+        ))
     })
 }
 

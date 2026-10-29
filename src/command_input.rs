@@ -1,7 +1,7 @@
 //! Route the parsed command into a concrete execution input.
 use crate::cli::{Command, ModeArgs, PbfArgs};
 use crate::pbfhogg::commands::{
-    CatTypeFilter, InspectMode, InspectTypeFilter, PbfhoggCommand, TagsFilterInput,
+    CatMode, CatTypeFilter, InspectMode, InspectTypeFilter, PbfhoggCommand, TagsFilterInput,
 };
 use crate::pbfhogg::context::CommandParams;
 
@@ -121,7 +121,16 @@ impl Command {
                 as_snapshot,
                 replace_snapshot,
             } => {
-                let tf = type_filter.as_deref().map(CatTypeFilter::from_cli);
+                // clap refuses `--dedupe` with `--type` or `--clean`, so a
+                // dedupe run carries neither.
+                let cat = if dedupe {
+                    CatMode::Dedupe
+                } else {
+                    CatMode::Plain {
+                        type_filter: type_filter.as_deref().map(CatTypeFilter::from_cli),
+                        clean,
+                    }
+                };
                 let params = CommandParams {
                     snapshot,
                     as_snapshot,
@@ -131,11 +140,7 @@ impl Command {
                 RoutedCommand::Pbf {
                     mode,
                     pbf,
-                    command: PbfhoggCommand::Cat {
-                        type_filter: tf,
-                        dedupe,
-                        clean,
-                    },
+                    command: PbfhoggCommand::Cat(cat),
                     osc: None,
                     params,
                 }

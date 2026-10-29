@@ -368,7 +368,10 @@ enum Setting<'a> {
     /// The start slot: its value and whether it is a capture origin. A plain
     /// start and an origin at the same value differ, so a child changing only
     /// the kind is not a restatement.
-    Start { origin: bool, ms: i64 },
+    Start {
+        origin: bool,
+        ms: i64,
+    },
 }
 
 impl ProbeConfig {
@@ -427,7 +430,6 @@ pub enum ExecutionStart {
 }
 
 impl ProbeConfig {
-
     fn is_empty(&self) -> bool {
         (0..CONFIG_FIELDS.len()).all(|i| self.setting(i).is_none())
     }
@@ -1583,9 +1585,18 @@ csv = { path = \"p/old/tv_trades.csv\", xxh128 = \"bb\" }
         // Same kind and value restates; a changed kind or value does not.
         assert!(check(start(1, true), start(1, true))[0].contains("`capture_origin_ms` restates"));
         assert!(check(start(1, false), start(1, false))[0].contains("`ohlcv_start_ms` restates"));
-        assert!(check(start(1, true), start(1, false)).is_empty(), "a withdrawal");
-        assert!(check(start(1, false), start(1, true)).is_empty(), "an assertion");
-        assert!(check(start(1, true), start(2, false)).is_empty(), "a replacement");
+        assert!(
+            check(start(1, true), start(1, false)).is_empty(),
+            "a withdrawal"
+        );
+        assert!(
+            check(start(1, false), start(1, true)).is_empty(),
+            "an assertion"
+        );
+        assert!(
+            check(start(1, true), start(2, false)).is_empty(),
+            "a replacement"
+        );
 
         // The child's plain start shadows the root origin for `a`; `b` still
         // inherits it, so it governs.
@@ -1594,7 +1605,10 @@ csv = { path = \"p/old/tv_trades.csv\", xxh128 = \"bb\" }
         config.insert("p/a".to_owned(), start(2, false));
         assert_eq!(resolve(&config, Path::new("p/a")).start_ms(), Some(2));
         assert_eq!(resolve(&config, Path::new("p/a")).capture_origin_ms, None);
-        assert_eq!(resolve(&config, Path::new("p/b")).capture_origin_ms, Some(1));
+        assert_eq!(
+            resolve(&config, Path::new("p/b")).capture_origin_ms,
+            Some(1)
+        );
         assert_eq!(resolve(&config, Path::new("p/b")).ohlcv_start_ms, None);
         // Shadowed for every probe, the origin governs nothing.
         config.insert("p/b".to_owned(), start(3, false));

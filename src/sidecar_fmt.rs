@@ -187,7 +187,10 @@ pub(crate) fn resolve_phase_range(
 }
 
 /// The markers of one stream: the process stream for `None`, else one call's.
-pub(crate) fn stream_markers(markers: &[sidecar::Marker], call: Option<&str>) -> Vec<sidecar::Marker> {
+pub(crate) fn stream_markers(
+    markers: &[sidecar::Marker],
+    call: Option<&str>,
+) -> Vec<sidecar::Marker> {
     markers
         .iter()
         .filter(|m| m.call.as_deref() == call)
@@ -196,7 +199,9 @@ pub(crate) fn stream_markers(markers: &[sidecar::Marker], call: Option<&str>) ->
 }
 
 /// `(run, call)` stream keys in first-appearance order.
-fn stream_keys<'a>(calls: impl Iterator<Item = (usize, Option<&'a str>)>) -> Vec<(usize, Option<&'a str>)> {
+fn stream_keys<'a>(
+    calls: impl Iterator<Item = (usize, Option<&'a str>)>,
+) -> Vec<(usize, Option<&'a str>)> {
     let mut keys = Vec::new();
     for key in calls {
         if !keys.contains(&key) {
@@ -484,9 +489,10 @@ pub(crate) fn print_call_timelines(markers: &[sidecar::Marker], human: bool) {
                 let end = s
                     .end_us
                     .map_or_else(|| "-".to_owned(), |end| format!("{}ms", end / 1_000));
-                let dur = s
-                    .end_us
-                    .map_or_else(|| "-".to_owned(), |end| format!("{}ms", (end - s.start_us) / 1_000));
+                let dur = s.end_us.map_or_else(
+                    || "-".to_owned(),
+                    |end| format!("{}ms", (end - s.start_us) / 1_000),
+                );
                 println!(
                     "  {:<30} {:>9}ms {end:>11} {dur:>11}",
                     s.name,

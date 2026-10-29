@@ -9,7 +9,7 @@ use std::path::Path;
 use crate::error::DevError;
 use crate::harness::BenchHarness;
 use crate::pbfhogg::commands::{
-    CatTypeFilter, DiffFormat, InspectMode, PbfhoggCommand, TagsFilterInput,
+    CatMode, CatTypeFilter, DiffFormat, InspectMode, PbfhoggCommand, TagsFilterInput,
 };
 use crate::pbfhogg::context::{
     BenchSelection, CommandContext, CommandObservations, CommandParams, ResolvedInputs,
@@ -71,26 +71,19 @@ pub(crate) fn preset_to_command(name: &str) -> Result<PbfhoggCommand, DevError> 
         "check-refs" => PbfhoggCommand::CheckRefs,
         "check-ids" => PbfhoggCommand::CheckIds { full: false },
         "sort" => PbfhoggCommand::Sort,
-        "cat" => PbfhoggCommand::Cat {
+        "cat" => PbfhoggCommand::Cat(CatMode::Plain {
             type_filter: None,
-            dedupe: false,
             clean: false,
-        },
-        "cat-way" => PbfhoggCommand::Cat {
+        }),
+        "cat-way" => PbfhoggCommand::Cat(CatMode::Plain {
             type_filter: Some(CatTypeFilter::Way),
-            dedupe: false,
             clean: false,
-        },
-        "cat-relation" => PbfhoggCommand::Cat {
+        }),
+        "cat-relation" => PbfhoggCommand::Cat(CatMode::Plain {
             type_filter: Some(CatTypeFilter::Relation),
-            dedupe: false,
             clean: false,
-        },
-        "cat-dedupe" => PbfhoggCommand::Cat {
-            type_filter: None,
-            dedupe: true,
-            clean: false,
-        },
+        }),
+        "cat-dedupe" => PbfhoggCommand::Cat(CatMode::Dedupe),
         "tags-filter-way" => PbfhoggCommand::TagsFilter {
             filter: "w/highway=primary".into(),
             input: TagsFilterInput::Pbf {

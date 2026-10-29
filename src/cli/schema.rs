@@ -642,12 +642,12 @@ In depth: `brokkr man clippy`."
         #[arg(long)]
         snapshot: Option<crate::datasets::resolve::SnapshotRef>,
     },
-    /// Cat passthrough. Flags are orthogonal:
+    /// Run pbfhogg cat:
     ///   `--type way|relation` restricts output to one object kind;
-    ///   `--dedupe` runs the two-input dedupe path (and only this
-    ///     combination supports `--io-uring`);
-    ///   `--clean` forces the full-decode / re-frame Framed path
-    ///     instead of Raw passthrough.
+    ///   `--clean` decodes and re-encodes each data blob cat keeps (every
+    ///     one without `--type`), stripping the version attribute;
+    ///   `--dedupe` runs the two-input dedupe path, the only one that
+    ///     supports `--io-uring`, and takes neither `--type` nor `--clean`.
     ///
     /// Default writes to scratch and is overwritten on each `--bench`
     /// iteration. Pass `--as-snapshot KEY` to promote the final iteration's
@@ -669,8 +669,9 @@ In depth: `brokkr man clippy`."
         /// Run `cat --dedupe` with two PBF inputs.
         #[arg(long, conflicts_with = "type_filter")]
         dedupe: bool,
-        /// Force the full-decode / re-frame Framed path (cat_filtered).
-        #[arg(long)]
+        /// Decode and re-encode each kept data blob, stripping the version
+        /// attribute.
+        #[arg(long, conflicts_with = "dedupe")]
         clean: bool,
         /// Snapshot key to read input from. Use `base` (or omit) for the
         /// dataset's primary data; pass a key registered under

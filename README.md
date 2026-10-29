@@ -107,7 +107,7 @@ Every pbfhogg CLI command is a top-level brokkr subcommand: `inspect`, `check-re
 Several commands are flag-driven umbrellas that previously had separate subcommand names:
 
 - `brokkr inspect` - no flag: metadata; `--nodes`: node stats; `--tags`: tag frequencies (narrow with `--type node|way|relation`)
-- `brokkr cat` - bare: indexdata-generation passthrough (no re-decode); `--type way|relation`: filtered full-decode; `--dedupe`: two-input dedupe path (supports `--io-uring`); `--clean`: full-decode / re-frame Framed path. Flags are orthogonal and combinable. Bare `cat` defaults to `--variant raw` since that's the natural bootstrap input.
+- `brokkr cat` - bare: adds missing indexdata, normally keeping compressed payloads (an unindexed mixed-kind block is rebuilt); `--type way|relation`: keep one object kind, selecting blobs on their indexdata kind; `--clean`: decode and re-encode each kept data blob (every one without `--type`), stripping the version attribute; `--dedupe`: two-input dedupe path (supports `--io-uring`), refused with `--type` or `--clean`, as pbfhogg refuses it. Bare `cat` defaults to `--variant raw` since that's the natural bootstrap input.
 - `brokkr tags-filter` - `--filter EXPR` (default `w/highway=primary`), `-R` for single-pass (drop referenced), `--input-kind osc` to read an OSC diff instead of a PBF
 - `brokkr getid` - hardcoded ID set; `--add-referenced` for two-pass, `--invert` to negate
 - `brokkr extract` - `--strategy simple|complete|smart` picks the extract algorithm

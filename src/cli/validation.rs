@@ -283,6 +283,29 @@ mod tests {
     }
 
     #[test]
+    fn cat_dedupe_conflicts_with_type_and_clean() {
+        for extra in [["--clean", ""], ["--type", "way"]] {
+            let mut argv = vec!["brokkr", "cat", "--dedupe"];
+            argv.extend(extra.into_iter().filter(|s| !s.is_empty()));
+            let rendered = argv.join(" ");
+            assert!(parse(argv).is_err(), "{rendered} should conflict");
+        }
+    }
+
+    #[test]
+    fn cat_accepts_type_with_clean() {
+        let parsed = parse(["brokkr", "cat", "--type", "way", "--clean"]).expect("parse");
+        let Command::Cat {
+            type_filter, clean, ..
+        } = parsed.command
+        else {
+            panic!("expected Cat");
+        };
+        assert_eq!(type_filter.as_deref(), Some("way"));
+        assert!(clean);
+    }
+
+    #[test]
     fn pmtiles_stats_requires_at_least_one_file() {
         let parsed = parse(["brokkr", "pmtiles-stats"]);
         assert!(parsed.is_err());
