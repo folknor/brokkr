@@ -8,10 +8,11 @@
 //! Bless is the sibling of `--reseed`: reseed adopts new corpus *content*
 //! (re-hashing the pinned probe files), bless adopts new *dispositions*. Both are
 //! deliberate human acts whose review surface is `git diff pins.toml`. Bless
-//! records reality - including `compile_fail`/`runtime_fail`/`no_tv_data`/
-//! `no_overlap` outcomes - so a probe known to exercise an unimplemented
-//! feature can pin `expected = "compile_fail"` and the gate will later catch
-//! it silently starting to compile.
+//! records reality - including `compile_fail`/`runtime_fail`/`harness_abort`
+//! outcomes - so a probe known to exercise an unimplemented feature can pin
+//! `expected = "compile_fail"` and the gate will later catch it silently
+//! starting to compile. The one outcome it refuses is `unevaluated`: an
+//! experiment that was not conducted records nothing about the engine.
 //!
 //! Unlike reseed, bless runs the harness first (the run pipeline is shared
 //! with [`crate::piners::cmd`]); it then merges dispositions for the
@@ -56,6 +57,7 @@ fn label_stamp(
 fn refusal(
     missing: &[&str],
     rejected: &[String],
+    unevaluated: &[String],
     unpinned: &[&str],
     lost_labels: &[&str],
 ) -> Option<String> {
@@ -67,6 +69,12 @@ fn refusal(
         why.push(format!(
             "unstampable disposition for {}",
             rejected.join(", ")
+        ));
+    }
+    if !unevaluated.is_empty() {
+        why.push(format!(
+            "unevaluated, which no pin can hold, for {}",
+            unevaluated.join(", ")
         ));
     }
     if !unpinned.is_empty() {
@@ -95,7 +103,8 @@ fn refusal(
 ///
 /// All or nothing: if any selected probe has no disposition line, or one
 /// that is not a known label (a malformed `parity` line with no tier, which
-/// would fail [`Registry::lint`] on the next load), the whole bless is
+/// would fail [`Registry::lint`] on the next load), or one reporting
+/// `unevaluated`, which no pin can hold, the whole bless is
 /// refused before a single pin is touched, naming every such probe. Blessing
 /// the rest would leave the file half-adopted with nothing in it saying so.
 /// The caller also refuses a run whose harness failed or broke protocol (see
@@ -140,6 +149,7 @@ pub fn apply(
     // Validate every stamp before mutating anything.
     let mut missing: Vec<&str> = Vec::new();
     let mut rejected: Vec<String> = Vec::new();
+    let mut unevaluated: Vec<String> = Vec::new();
     let mut unpinned: Vec<&str> = Vec::new();
     let mut lost_labels: Vec<&str> = Vec::new();
     let mut label_stamps: BTreeMap<&str, Option<LabelPin>> = BTreeMap::new();
@@ -147,6 +157,7 @@ pub fn apply(
         match actual.get(id.as_str()) {
             None => missing.push(id),
             Some((derived, None)) => rejected.push(format!("{id} ({derived})")),
+            Some((_, Some(disp))) if !disp.is_pinnable() => unevaluated.push(id.clone()),
             Some(_) if !registry.pins.contains_key(id) => unpinned.push(id),
             Some((_, Some(disp))) => {
                 let pinned = registry.pins.get(id).and_then(|p| p.labels);
@@ -160,7 +171,7 @@ pub fn apply(
             }
         }
     }
-    if let Some(why) = refusal(&missing, &rejected, &unpinned, &lost_labels) {
+    if let Some(why) = refusal(&missing, &rejected, &unevaluated, &unpinned, &lost_labels) {
         return Err(DevError::Config(format!(
             "corpus --bless: nothing blessed, pins.toml untouched - every selected probe needs \
              a stampable disposition ({why})"
@@ -373,7 +384,7 @@ mod tests {
         let mut reg = registry_of(pins);
         reg.pins_text = LOADED.to_owned();
         let rep = report(
-            "{\"probe\":\"a\",\"outcome\":\"no_tv_data\"}\n{\"probe\":\"b\",\"outcome\":\"parity\"}",
+            "{\"probe\":\"a\",\"outcome\":\"compile_fail\",\"error\":\"x\"}\n{\"probe\":\"b\",\"outcome\":\"parity\"}",
         );
         let err = apply(
             &pins_path,
@@ -391,7 +402,7 @@ mod tests {
         // A tier posing as an outcome derives a pinnable-looking label and is
         // still refused.
         let rep = report(
-            "{\"probe\":\"a\",\"outcome\":\"accepted\"}\n{\"probe\":\"b\",\"outcome\":\"no_tv_data\"}",
+            "{\"probe\":\"a\",\"outcome\":\"accepted\"}\n{\"probe\":\"b\",\"outcome\":\"compile_fail\",\"error\":\"x\"}",
         );
         let err = apply(
             &pins_path,
@@ -407,7 +418,24 @@ mod tests {
         );
         // A record whose own disposition field contradicts it is unstampable too.
         let rep = report(
-            "{\"probe\":\"a\",\"outcome\":\"no_tv_data\",\"disposition\":\"no_overlap\"}\n{\"probe\":\"b\",\"outcome\":\"no_tv_data\"}",
+            "{\"probe\":\"a\",\"outcome\":\"compile_fail\",\"error\":\"x\",\"disposition\":\"runtime_fail\"}\n{\"probe\":\"b\",\"outcome\":\"compile_fail\",\"error\":\"x\"}",
+        );
+        let err = apply(
+            &pins_path,
+            &mut reg,
+            &rep,
+            &["a".to_owned(), "b".to_owned()],
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unstampable disposition for a (compile_fail)"),
+            "{err}"
+        );
+        assert_eq!(reg.pins["a"].expected, None);
+        // A retired outcome on a new line is unstampable as well.
+        let rep = report(
+            "{\"probe\":\"a\",\"outcome\":\"no_tv_data\"}\n{\"probe\":\"b\",\"outcome\":\"compile_fail\",\"error\":\"x\"}",
         );
         let err = apply(
             &pins_path,
@@ -422,7 +450,39 @@ mod tests {
             "{err}"
         );
         assert_eq!(reg.pins["a"].expected, None);
-        assert_eq!(reg.pins["a"].expected, None);
+        assert_eq!(std::fs::read_to_string(&pins_path).unwrap(), LOADED);
+    }
+
+    #[test]
+    fn refuses_the_whole_bless_when_any_probe_is_unevaluated() {
+        let dir = crate::test_scratch::scratch("piners_bless", "refuses_unevaluated");
+        let pins_path = dir.join("pins.toml");
+        std::fs::write(&pins_path, LOADED).unwrap();
+        let mut pins = BTreeMap::new();
+        pins.insert("a".to_owned(), pin(None));
+        pins.insert("b".to_owned(), pin(None));
+        let mut reg = registry_of(pins);
+        reg.pins_text = LOADED.to_owned();
+        let rep = report(
+            "{\"probe\":\"a\",\"outcome\":\"unevaluated\",\"disposition\":\"unevaluated\",\
+             \"reason\":\"no_overlap\",\"error\":\"disjoint\"}\n\
+             {\"probe\":\"b\",\"outcome\":\"compile_fail\",\"error\":\"x\"}",
+        );
+        assert!(rep.invalid.is_empty(), "{:?}", rep.invalid);
+        let err = apply(
+            &pins_path,
+            &mut reg,
+            &rep,
+            &["a".to_owned(), "b".to_owned()],
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unevaluated, which no pin can hold, for a"),
+            "{err}"
+        );
+        // Nothing stamped, not even the stampable sibling.
+        assert_eq!(reg.pins["b"].expected, None);
         assert_eq!(std::fs::read_to_string(&pins_path).unwrap(), LOADED);
     }
 

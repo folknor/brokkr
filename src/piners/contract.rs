@@ -513,7 +513,9 @@ mod tests {
     }
 
     fn disp(probe: &str) -> String {
-        format!("{{\"probe\":\"{probe}\",\"outcome\":\"no_tv_data\"}}\n")
+        format!(
+            "{{\"probe\":\"{probe}\",\"outcome\":\"parity\",\"acceptance\":{{\"tier\":\"accepted\"}}}}\n"
+        )
     }
 
     fn start() -> String {

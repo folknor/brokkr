@@ -2697,7 +2697,8 @@ In depth: `brokkr man nidhogg`."
         /// disposition into its `expected` field in `pins.toml` (the gate's
         /// pinned contract). Sibling to `--reseed`: reseed adopts new corpus
         /// content, bless adopts new dispositions. Records reality, including
-        /// `compile_fail`/`runtime_fail`/`no_tv_data`/`no_overlap` outcomes.
+        /// `compile_fail`/`runtime_fail`/`harness_abort` outcomes, and refuses
+        /// the whole write when any selected probe is `unevaluated`.
         /// Prints `blessed N (changed M)`; review with `git diff pins.toml`.
         /// Combine with `--all`/`--keyword`/`--probe` to scope what is
         /// blessed. Not usable with `--verify-only` or `--reseed`.

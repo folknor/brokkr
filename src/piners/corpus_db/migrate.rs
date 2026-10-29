@@ -25,8 +25,10 @@
 //! `trade_diff` around the stored harness record, as v5 did `disposition`,
 //! so the fields the typed table dropped (`breaches`, `tv_side`, the labels)
 //! and every later one are kept; version 14 adds `disposition.expected_labels`
-//! and `disposition.label_gate`, the label ratchet's pin and verdict. On a
-//! fresh database,
+//! and `disposition.label_gate`, the label ratchet's pin and verdict; version
+//! 15 drops the retired `dynamic_builtin_calls` projection; version 16 adds
+//! the `disposition.reason` projection, why an `unevaluated` probe could not
+//! be evaluated. On a fresh database,
 //! the schema DDL in `schema.rs` creates the current tables (columns included)
 //! inside the shared migration transaction. Schema inspection uses the shared
 //! `db::store` helpers, which preserve errors and recognize generated columns.
@@ -35,13 +37,14 @@ use rusqlite::params;
 use serde_json::{Map, Value};
 
 use super::schema::{
-    Projection, TRADE_DIFF_PROJECTIONS, TRADE_DIFF_TYPED_FIELDS, disposition_ddl, trade_diff_ddl,
+    Projection, TRADE_DIFF_PROJECTIONS, TRADE_DIFF_TYPED_FIELDS, disposition_ddl,
+    disposition_projection_column, trade_diff_ddl,
 };
 use crate::db::store::{column_exists as has_column, table_exists as has_table};
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding a migration below.
-pub(super) const SCHEMA_VERSION: i64 = 15;
+pub(super) const SCHEMA_VERSION: i64 = 16;
 
 /// Run pending migrations through the shared store policy. The v5 rebuild
 /// preserves historical orphan dispositions, so foreign-key enforcement is
@@ -231,7 +234,23 @@ fn migrate_from(conn: &rusqlite::Connection, current: i64) -> Result<(), DevErro
         }
     }
 
-    drop_retired_projections(conn, current)
+    drop_retired_projections(conn, current)?;
+    add_reason_projection(conn, current)
+}
+
+/// v15 -> v16: the `reason` an `unevaluated` line carries, projected from
+/// the stored record. No older row has one, so it reads NULL there.
+fn add_reason_projection(conn: &rusqlite::Connection, current: i64) -> Result<(), DevError> {
+    if current < 16
+        && has_table(conn, "disposition")?
+        && !has_column(conn, "disposition", "reason")?
+    {
+        let column = disposition_projection_column("reason").ok_or_else(|| {
+            DevError::Database("corpus runs.db v16 migration: no `reason` projection".to_owned())
+        })?;
+        conn.execute(&format!("ALTER TABLE disposition ADD COLUMN {column}"), [])?;
+    }
+    Ok(())
 }
 
 /// v14 -> v15: piners no longer reports `dynamic_builtin_calls`, so its
@@ -640,6 +659,37 @@ mod tests {
             )
             .unwrap();
         assert_eq!(kept, 0);
+    }
+
+    /// A v15 store gains the `reason` projection, which reads every row
+    /// already stored.
+    #[test]
+    fn v16_adds_the_reason_projection_over_stored_rows() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(super::super::schema::SCHEMA).unwrap();
+        conn.execute_batch(&disposition_ddl("disposition")).unwrap();
+        conn.execute("ALTER TABLE disposition DROP COLUMN reason", [])
+            .unwrap();
+        conn.execute_batch(
+            "INSERT INTO run (run_id, started_at, selector, gated, result, probe_count) \
+                 VALUES (1, 'then', '{}', 1, 'fail', 2);
+             INSERT INTO disposition (run_id, probe, disposition, gate_ok, raw_source, raw_json) \
+                 VALUES (1, 'p', 'unevaluated', 0, 'harness', \
+                 '{\"outcome\":\"unevaluated\",\"reason\":\"no_overlap\",\"error\":\"x\"}'), \
+                 (1, 'q', 'no_tv_data', 1, 'harness', '{\"outcome\":\"no_tv_data\"}');",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 15).unwrap();
+
+        run_migrations(&conn).unwrap();
+        let reasons: Vec<Option<String>> = conn
+            .prepare("SELECT reason FROM disposition ORDER BY probe")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(reasons, vec![Some("no_overlap".to_owned()), None]);
     }
 
     #[test]

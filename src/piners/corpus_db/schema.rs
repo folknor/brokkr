@@ -143,7 +143,7 @@ impl Projection {
 /// NULL, `acc_failing` is `'[]'` when absent, and `sig_breaches` is present
 /// exactly when a signature object is. Declared types give the projections
 /// their affinity, so an integral p90 reads back REAL as it was stored.
-const PROJECTIONS: [(&str, Projection); 38] = [
+const PROJECTIONS: [(&str, Projection); 39] = [
     ("outcome", Projection::Text("$.outcome")),
     ("matched", Projection::CountOr0("$.matched")),
     ("ours_only", Projection::CountOr0("$.ours_only")),
@@ -218,7 +218,18 @@ const PROJECTIONS: [(&str, Projection); 38] = [
         Projection::Real("$.ts_shift.exit_share_pct"),
     ),
     ("window_sensitive", Projection::Array("$.window_sensitive")),
+    // Why an `unevaluated` probe could not be evaluated (v16).
+    ("reason", Projection::Text("$.reason")),
 ];
+
+/// The `ADD COLUMN` definition of the [`PROJECTIONS`] entry `name`, for a
+/// migration step that brings a projection to a store created before it.
+pub(super) fn disposition_projection_column(name: &str) -> Option<String> {
+    PROJECTIONS
+        .iter()
+        .find(|(col, _)| *col == name)
+        .map(|(col, p)| column_def(col, *p))
+}
 
 /// The `disposition` DDL under `name` - `disposition` itself, or the v5
 /// migration's staging table, which must be the same definition.
@@ -285,15 +296,17 @@ pub(super) const TRADE_DIFF_TYPED_FIELDS: usize = 23;
 fn generated(projections: &[(&str, Projection)]) -> String {
     projections
         .iter()
-        .map(|(col, p)| {
-            format!(
-                "    {col} {} GENERATED ALWAYS AS ({}) VIRTUAL",
-                p.sql_type(),
-                p.sql()
-            )
-        })
+        .map(|(col, p)| format!("    {}", column_def(col, *p)))
         .collect::<Vec<_>>()
         .join(",\n")
+}
+
+fn column_def(col: &str, p: Projection) -> String {
+    format!(
+        "{col} {} GENERATED ALWAYS AS ({}) VIRTUAL",
+        p.sql_type(),
+        p.sql()
+    )
 }
 
 /// The `trade_diff` DDL under `name` - `trade_diff` itself, or the v13

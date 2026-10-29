@@ -189,7 +189,8 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
 }
 
 /// The measured-iteration policy comes from the shared assessment: only an
-/// exit-0 completed run without a validly reported `harness_abort` is a sample.
+/// exit-0 completed run without a validly reported `harness_abort` or
+/// `unevaluated` is a sample.
 /// On failure prints the reconciliation, context and whole stderr. No
 /// isolation on this path.
 fn check_iteration(
@@ -233,7 +234,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
-    const A: &str = "{\"probe\":\"a\",\"outcome\":\"no_tv_data\"}\n";
+    const A: &str = "{\"probe\":\"a\",\"outcome\":\"parity\",\"acceptance\":{\"tier\":\"accepted\"}}\n";
 
     fn ids() -> Vec<String> {
         vec!["a".to_owned()]
@@ -256,7 +257,7 @@ mod tests {
     fn complete_coverage_with_protocol_violations_fails() {
         let dup = format!("{A}{A}");
         assert!(check_iteration(0, &ids(), OK, dup.as_bytes(), b"").is_err());
-        let extra = format!("{A}{{\"probe\":\"zz\",\"outcome\":\"no_tv_data\"}}\n");
+        let extra = format!("{A}{}", A.replace("\"a\"", "\"zz\""));
         assert!(check_iteration(0, &ids(), OK, extra.as_bytes(), b"").is_err());
         let invalid = format!("{A}not json\n");
         let err = check_iteration(0, &ids(), OK, invalid.as_bytes(), b"").unwrap_err();
@@ -290,6 +291,20 @@ mod tests {
             err.to_string().contains("harness_abort in the run"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn an_unevaluated_probe_is_never_a_timing_sample() {
+        let refused = "{\"probe\":\"a\",\"outcome\":\"unevaluated\",\"reason\":\"no_overlap\",\
+                       \"error\":\"disjoint\"}\n";
+        for end in [OK, HarnessEnd::Code(1)] {
+            let err = check_iteration(0, &ids(), end, refused.as_bytes(), b"").unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("unevaluated in the run (a (no_overlap))"),
+                "{end:?}: {err}"
+            );
+        }
     }
 
     #[test]

@@ -35,6 +35,10 @@ pub enum AttemptOutcome {
     /// Exit 0 or 1, a valid disposition for every probe in the subset, no
     /// protocol violation and an intact stream.
     Completed,
+    /// [`AttemptOutcome::Completed`], with these probes (`id (reason)`)
+    /// reported `unevaluated`: the subset is cleared like any completed one,
+    /// and the diagnosis keeps the refusals.
+    CompletedUnevaluated(Vec<String>),
     /// The subset did not complete; `failure` says how. `end` is how the
     /// harness ended.
     Failed {
@@ -102,6 +106,9 @@ pub enum AttemptVerdict {
     /// Every selected probe validly reported, the stream was whole, and the
     /// harness ended with an accepted status.
     Completed,
+    /// [`AttemptVerdict::Completed`], with these probes (`id (reason)`)
+    /// reported `unevaluated`.
+    CompletedUnevaluated(Vec<String>),
     /// The attempt did not complete and has an attribution or protocol result.
     Failed(Failure),
     /// Diagnosis cannot continue because the harness reported its own error.
@@ -182,6 +189,10 @@ pub struct Diagnosis {
     /// reproduce in either half. A singleton that completed alone is listed
     /// here as a one-element set.
     pub not_reproduced: Vec<NotReproduced>,
+    /// Probes a completed attempt reported `unevaluated` (`id (reason)`), in
+    /// discovery order: the experiment could not be conducted, which is not
+    /// an abort, and never a pass.
+    pub unevaluated: Vec<String>,
     /// Sets left unexamined when diagnosis stopped.
     pub unresolved: Vec<Vec<String>>,
     /// Why diagnosis stopped early, if it did.
@@ -256,6 +267,13 @@ fn examine(
             if subset.len() == 1 {
                 d.singletons_tested += 1;
             }
+            true
+        }
+        AttemptOutcome::CompletedUnevaluated(probes) => {
+            if subset.len() == 1 {
+                d.singletons_tested += 1;
+            }
+            d.unevaluated.extend(probes);
             true
         }
         AttemptOutcome::Failed {
@@ -355,13 +373,24 @@ impl Diagnosis {
                 ));
             }
         }
+        if !self.unevaluated.is_empty() {
+            out.push(format!(
+                "unevaluated in a completed attempt (the experiment could not be conducted; \
+                 not an abort, never a pass): {}",
+                self.unevaluated.join(", ")
+            ));
+        }
         if let Some(reason) = &self.stopped {
             out.push(format!("isolation stopped: {}", reason.describe()));
             for set in &self.unresolved {
                 out.push(format!("  unresolved: {{{}}}", set.join(", ")));
             }
         }
-        if self.failing.is_empty() && self.not_reproduced.is_empty() && self.stopped.is_none() {
+        if self.failing.is_empty()
+            && self.not_reproduced.is_empty()
+            && self.unevaluated.is_empty()
+            && self.stopped.is_none()
+        {
             out.push("isolation found nothing to report".to_owned());
         }
         out
@@ -397,6 +426,9 @@ impl Diagnosis {
             if !named.is_empty() {
                 out.push_str(&format!("; {label}: {}", named.join(", ")));
             }
+        }
+        if !self.unevaluated.is_empty() {
+            out.push_str(&format!("; unevaluated: {}", self.unevaluated.join(", ")));
         }
         if !self.not_reproduced.is_empty() {
             out.push_str(&format!(

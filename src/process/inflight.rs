@@ -282,9 +282,12 @@ mod tests {
         drop(file);
         child.wait().unwrap();
         let wait = row.waits_on.unwrap();
+        // The kernel names the lock by its resolved path, so a scratch dir
+        // reached through a symlinked target dir must be compared resolved.
+        let resolved = std::fs::canonicalize(&path).unwrap();
         assert_eq!(
             wait.path.as_deref(),
-            Some(path.display().to_string().as_str())
+            Some(resolved.display().to_string().as_str())
         );
         assert_eq!(wait.holder.map(|(pid, _)| pid), Some(me));
         assert!(row.command.contains("flock"), "{}", row.command);

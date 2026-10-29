@@ -39,9 +39,9 @@ and the `runs.db` ingest are parity-only and skipped.
   rendered `run_error` when there is one, and printing the reconciliation,
   the in-flight context and the whole harness stderr. Exit 1 fails too, so a
   run with a `harness_abort` is never a timing sample. There is no isolation
-  pass on this path. Any `harness_abort` disqualifies the iteration
-  explicitly, even on exit 0 (a disposition-only stream, or a `run_end`
-  saying 0). The one exemption is an iteration whose `--stop` marker
+  pass on this path. Any `harness_abort` or `unevaluated` disqualifies the
+  iteration explicitly, even on exit 0 (a disposition-only stream, or a
+  `run_end` saying 0). The one exemption is an iteration whose `--stop` marker
   actually fired (it ends early by design); a configured marker that never
   fired is held to the selection like any other run.
 - `--force` carries its usual measured-run meaning (run on a dirty tree). A
@@ -430,7 +430,7 @@ on one probe could hide behind another's improvement. Each probe pins an
 
 ```
 byte_exact | accepted | actionable_drift | count_divergent                  (parity tiers)
-compile_fail | runtime_fail | no_tv_data | no_overlap | harness_abort       (outcomes)
+compile_fail | runtime_fail | harness_abort                                 (outcomes)
 ```
 
 `harness_abort` is the harness's own verdict on a probe whose process died
@@ -439,6 +439,24 @@ crash containment in `docs/projects/piners.md`). It is a break like
 `runtime_fail` and is pinned and blessed the same way. A crash stays visible
 even when pinned: its line is always printed, never folded into `matching
 their pin`, and the summary always carries a `harness_abort=N` count.
+
+**`unevaluated`** is the harness's line for a probe whose experiment could
+not be conducted: the oracle does not read, holds no comparable round, fails
+its quantity witness contract, reaches past the executed feed, or never meets
+it (`reason`, below). It is never a pass, so it is never pinned: `pins.toml`
+refuses `expected = "unevaluated"` at load, and bless refuses its whole write
+when any selected probe reports one. Every `unevaluated` probe fails the run
+unconditionally - gated, `--no-gate` and bless alike - as `N unevaluated
+probes (id (reason), ...)`, on its own path rather than through the gate, and
+the exit-1 acceptance for pinned breaks below never covers it. Its line is
+always printed, with its reason and detail, and the summary always carries an
+`unevaluated=N` count.
+
+`no_tv_data` and `no_overlap` are retired: both passed their pin inertly
+whatever the engine did, and piners now reports those cases as
+`unevaluated`. A new harness line carrying either is an invalid record, and a
+pin expecting either is refused at load. Runs stored before the change still
+display them.
 
 A probe's *actual* disposition is its acceptance tier (`outcome == parity`)
 else the outcome. brokkr compares actual vs `expected` per selected probe;
@@ -476,10 +494,11 @@ count. `ambiguous` moves with the pairing and is shown, never gated.
 - Only a valid, untainted line is label-checked.
 
 **Pinned breaks.** The harness exits 1 whenever any probe breaks
-(`compile_fail`, `runtime_fail` or `harness_abort`), including a probe pinned
+(`compile_fail`, `runtime_fail`, `harness_abort` or `unevaluated`), including a probe pinned
 `expected = "compile_fail"` that is doing exactly what its pin says. brokkr therefore accepts exit 1 when every break line in the report
 belongs to a selected probe pinned to that same break; an unpinned, mispinned
-or unselected break still fails the run (gated or `--no-gate` alike).
+or unselected break still fails the run (gated or `--no-gate` alike), and so
+does an `unevaluated` line, which no pin can hold.
 
 **Repeated records.** The contract is one disposition line per probe and one
 `trade_diff` line per `(probe, our_index, tv_index)`. A repeat is kept as its
@@ -496,11 +515,16 @@ separate categories:
 - **selected** - the probes handed to the harness;
 - **scored** - selected ids with a *valid* disposition: the selected identity
   plus an outcome and tier that are valid **together** - `parity` with one of
-  the four acceptance tiers, or one of the five other outcomes with no tier.
-  Parseable JSON is not enough, nor is a derived label that merely looks
+  the four acceptance tiers, or one of the four other live outcomes
+  (`compile_fail`, `runtime_fail`, `harness_abort`, `unevaluated`) with no
+  tier. Parseable JSON is not enough, nor is a derived label that merely looks
   pinnable: a `parity` line with no tier, `{"outcome":"accepted"}` (a tier
-  posing as an outcome) and `parity` with tier `runtime_fail` are all
-  invalid. The record must also agree with itself: when the harness's own
+  posing as an outcome), `parity` with tier `runtime_fail` and a retired
+  `no_tv_data` or `no_overlap` are all invalid. An `unevaluated` line must
+  also carry a `reason` - one of `invalid_evidence`, `insufficient_evidence`,
+  `witness_contract`, `feed_coverage`, `no_overlap` - and a nonempty one-line
+  `error`; a missing or unknown reason, or a missing, blank or multi-line
+  error, makes it invalid. The record must also agree with itself: when the harness's own
   `disposition` field is **present** it must be exactly the derived label, as
   a string - a different label, a null, a number, an object or an empty
   string makes the record invalid, and the message prints both values. Only
@@ -672,7 +696,11 @@ run alone (`src/piners/isolate.rs`). Evidence only, never scoring.
   `harness_abort` counts: the harness already attributed that crash), breaks
   no report protocol or contract, carries its `run_end` once the contract is
   observed, and its stdout was not cut short; a failing subset is split in
-  two and each half run alone. A failure is classified, in this order:
+  two and each half run alone. An `unevaluated` line is a valid report, so its
+  subset completes, but the diagnosis keeps it: the probes a completed
+  attempt reported `unevaluated` are listed, with their reasons, on the
+  console and in the stored note, never cleared as `completed when run
+  alone`. A failure is classified, in this order:
   **protocol-invalid** (an invalid, repeated or extra record, a contract
   violation, or a cut stream - whatever the exit, so a malformed stream is
   never taken for a crash), an **abort** (exit 2, another unexpected code, a
@@ -788,9 +816,11 @@ protocol violation, and every selected id has a valid, stampable
 disposition. Exit 1 is acceptable only when the report carries the break
 lines it signals (recording them is the point); exit 2, any other code, a
 signal, the hang backstop, a `run_error`, a missing or invalid record, a
-repeated record, a report-only extra or a contract violation leaves
-`pins.toml` untouched and exits non-zero, naming why. A `harness_abort` is
-stampable like any break. The run row records `gated = no` - bless ignores the gate verdict.
+repeated record, a report-only extra, a contract violation or any
+`unevaluated` probe leaves `pins.toml` untouched and exits non-zero, naming
+why. A `harness_abort` is stampable like any break; an `unevaluated` line is
+not, since an experiment that was not conducted records nothing about the
+engine. The run row records `gated = no` - bless ignores the gate verdict.
 
 Bootstrap: `--reseed --all` -> hand-write `[feeds]` groups, any
 `[harness_files]` paths and the `[probe_config]` declarations -> `--reseed
@@ -800,9 +830,10 @@ Bootstrap: `--reseed --all` -> hand-write `[feeds]` groups, any
 ## Exit codes
 
 Harness exit: `0` every probe scored, `1` every probe scored and at least one
-break (`compile_fail`, `runtime_fail`, `harness_abort`), `2` a `run_error`.
-brokkr exits non-zero on a `run_error` (always, `--no-gate` and bless
-included), on a harness exit the pins do not explain - `1` with any break
+break (`compile_fail`, `runtime_fail`, `harness_abort`, `unevaluated`), `2` a
+`run_error`.
+brokkr exits non-zero on a `run_error` or any `unevaluated` probe (always,
+`--no-gate` and bless included), on a harness exit the pins do not explain - `1` with any break
 not pinned to itself (see pinned breaks, above), `2`, any other code, a
 signal (an abort after complete reporting included), or the hang backstop -
 on a contract violation, on a report-integrity failure (a selected probe

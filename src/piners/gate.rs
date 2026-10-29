@@ -75,7 +75,10 @@ pub fn evaluate(ids: &[String], registry: &Registry, report: &HarnessReport) -> 
     for id in ids {
         let expected = registry.pins.get(id).and_then(|p| p.expected);
         let got = actual.get(id.as_str()).cloned();
-        let satisfied = matches!((expected, &got), (Some(e), Some(g)) if e.as_str() == g);
+        // A pin the loader would refuse satisfies nothing, even if a registry
+        // were built around the loader.
+        let satisfied =
+            matches!((expected, &got), (Some(e), Some(g)) if e.is_pinnable() && e.as_str() == g);
         if !satisfied {
             diffs.push(GateDiff {
                 probe: id.clone(),
@@ -368,7 +371,8 @@ pub fn report_has_break(report: &HarnessReport) -> bool {
 /// `compile_fail` does on every passing run. Without this, a pinned break
 /// could never pass the gate - the exit code would fail the run the gate had
 /// just accepted. An unpinned, mispinned or unselected break still leaves the
-/// exit unexplained, so the exit code stays authoritative for those.
+/// exit unexplained, so the exit code stays authoritative for those, and an
+/// `unevaluated` line, a break no pin can hold, always does.
 pub fn breaks_all_pinned(ids: &[String], registry: &Registry, report: &HarnessReport) -> bool {
     let selected: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
     let tainted = report.tainted();
@@ -381,8 +385,11 @@ pub fn breaks_all_pinned(ids: &[String], registry: &Registry, report: &HarnessRe
             continue;
         };
         any = true;
-        // A probe with an invalid occurrence explains nothing.
-        let pinned = !tainted.contains(p.probe.as_str())
+        // A probe with an invalid occurrence explains nothing, and neither
+        // does an unevaluated one: no pin can hold it, and this must not
+        // lean on the loader alone to keep it so.
+        let pinned = disp.is_pinnable()
+            && !tainted.contains(p.probe.as_str())
             && selected.contains(p.probe.as_str())
             && registry.pins.get(&p.probe).and_then(|pin| pin.expected) == Some(disp);
         if !pinned {
@@ -601,6 +608,21 @@ mod tests {
         let unpinned = registry(&[("a", Some("accepted"))]);
         assert_eq!(evaluate(&ids, &unpinned, &rep).len(), 1);
         assert!(!breaks_all_pinned(&ids, &unpinned, &rep));
+    }
+
+    #[test]
+    fn an_unevaluated_line_never_satisfies_a_pin_or_explains_exit_one() {
+        let rep = report(
+            r#"{"probe":"a","outcome":"unevaluated","reason":"invalid_evidence","error":"bad row"}"#,
+        );
+        let ids = ["a".to_owned()];
+        // Even a pin the loader would refuse, built around it.
+        let reg = registry(&[("a", Some("unevaluated"))]);
+        let diffs = evaluate(&ids, &reg, &rep);
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].actual.as_deref(), Some("unevaluated"));
+        assert!(report_has_break(&rep));
+        assert!(!breaks_all_pinned(&ids, &reg, &rep));
     }
 
     fn labelled(id: &str, expected: &str, labels: Option<(u64, u64)>) -> Registry {

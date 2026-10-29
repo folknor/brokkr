@@ -90,8 +90,19 @@ Emits **one NDJSON object per probe, no summary line** (brokkr aggregates):
  "dense_na_sites":[{"name":"strategy.exit","call_site":"...","na_count":7}]}
 ```
 
-- `outcome`: `parity | compile_fail | runtime_fail | no_tv_data | no_overlap |
-  harness_abort`. `harness_abort` is the harness supervisor's line for a probe
+- `outcome`: `parity | compile_fail | runtime_fail | harness_abort |
+  unevaluated`. `no_tv_data` and `no_overlap` are retired: a new line
+  carrying either is an invalid record, while stored history still displays
+  them. `unevaluated` is the line for a probe whose experiment could not be
+  conducted, `{"probe":ID,"outcome":"unevaluated","disposition":"unevaluated",
+  "reason":R,"error":E}` with no parity fields: `reason` is one of
+  `invalid_evidence`, `insufficient_evidence`, `witness_contract`,
+  `feed_coverage`, `no_overlap`, and `error` a nonempty one-line detail;
+  anything else makes the line invalid. It is a break (exit 1) that never
+  passes, is never pinned or blessed, and fails the run on its own (the gate
+  and its consequences: `docs/commands/corpus.md`). Piners' account of each
+  reason: its `reference/corpus.md`, Harness output.
+  `harness_abort` is the harness supervisor's line for a probe
   whose process died or replied with no complete record set: its `error`
   carries the exit status or signal, the reason and the process's stderr
   tail. A break (exit 1), never retried, gated and blessed like
@@ -120,7 +131,8 @@ Emits **one NDJSON object per probe, no summary line** (brokkr aggregates):
 - `signature`: parity probes with a breached dimension - including a
   `byte_exact` probe whose only disagreement is a displayed label.
   `dense_na_sites`: when non-empty.
-- `*_fail`: carries `error` instead of the parity fields.
+- `*_fail`: carries `error` instead of the parity fields; so do
+  `harness_abort` and `unevaluated`.
 - `runtime_ms` (optional, any outcome): per-probe wall-clock milliseconds.
   brokkr can't time probes itself (the whole selection is one harness
   subprocess), so this is the only runtime source. Persisted, and rendered by
@@ -201,7 +213,9 @@ trimmed to the **deviations**: a probe sitting exactly on its pinned `expected`
 their pin (hidden)` line, so the surviving lines are the regressions/surprise
 improvements worth reading. On an unblessed corpus everything deviates, so
 nothing is hidden. A `harness_abort` line is never hidden, pinned or not, and
-the summary always carries `harness_abort=N`. The summary, both breakdowns
+the summary always carries `harness_abort=N`; likewise an `unevaluated` line,
+printed as `id: unevaluated (reason) - error`, with `unevaluated=N` in the
+summary. The summary, both breakdowns
 and the hidden count cover the scored set (valid dispositions of selected
 probes) only, and everything is listed sorted by probe id, since
 dispositions arrive in completion order.
@@ -295,8 +309,10 @@ The store has per-db `PRAGMA user_version` migrations and WAL, mirroring
   `rule_start_tv`/`rule_end_tv`, `clipped_ours`/`clipped_tv`,
   `history_prefix_bars`, `oracle_trimmed`/`oracle_realtime`, the
   timestamp-shift census `ts_{entry,exit}_{considered,shifted,share_pct}` (the
-  share is `NULL` when nothing was comparable, as the harness omits it) and
-  `window_sensitive` (JSON array). v15 dropped the `dynamic_builtin_calls`
+  share is `NULL` when nothing was comparable, as the harness omits it),
+  `window_sensitive` (JSON array) and `reason` (v16: why an `unevaluated`
+  probe could not be evaluated; `NULL` on every other row; run detail shows it
+  ahead of the `error` detail). v15 dropped the `dynamic_builtin_calls`
   projection once piners stopped reporting the counter, since it read `NULL` on
   every new row and a filter on `= 0` silently stopped matching them; older
   rows keep the value in `raw_json` (`json_extract(raw_json,
@@ -367,7 +383,7 @@ struct, no benchmark filters to reject. The corpus views:
   an error. Only the **deviations**
   (rows where the stored disposition misses its pin, `gate_ok = 0`) are shown,
   plus every `harness_abort` row even when pinned - a crash is never folded
-  away, as in the live rendering;
+  away, as in the live rendering - and every `unevaluated` row;
   the other pin-matchers fold into a `N probes matching their pin (hidden)` line - a
   200-probe `--all` run otherwise buries the few that moved. `--full` shows the
   complete table. The disposition table carries `b_ours`/`b_tv` columns (the

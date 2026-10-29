@@ -115,6 +115,24 @@ impl RunAssessment {
         ids
     }
 
+    /// Scored probes the harness reported as `unevaluated`, sorted, each as
+    /// `id (reason)`. Every one fails the run, whatever the gate and the exit
+    /// say, and none is ever a timing sample.
+    pub fn unevaluated(&self) -> Vec<String> {
+        let mut found: Vec<String> = self
+            .report
+            .probes
+            .iter()
+            .filter(|p| self.rec.valid.contains(&p.probe))
+            .filter_map(|p| {
+                p.refusal()
+                    .map(|r| format!("{} ({})", p.probe, r.reason))
+            })
+            .collect();
+        found.sort_unstable();
+        found
+    }
+
     /// The integrity count stored on the run row: every violation plus one
     /// for a cut stream.
     pub fn stored_violations(&self) -> usize {
@@ -144,7 +162,14 @@ impl RunAssessment {
         if let Some(error) = &self.contract.run_error {
             AttemptVerdict::Stop(StopReason::HarnessFailure(error.render()))
         } else if self.completed() {
-            AttemptVerdict::Completed
+            // An unevaluated probe is validly reported, so the subset
+            // completes, but the diagnosis keeps it rather than clear it.
+            let unevaluated = self.unevaluated();
+            if unevaluated.is_empty() {
+                AttemptVerdict::Completed
+            } else {
+                AttemptVerdict::CompletedUnevaluated(unevaluated)
+            }
         } else if self.violations() > 0 || self.output_cut {
             let mut what = Vec::new();
             if self.rec.protocol_violations() > 0 {
@@ -224,13 +249,29 @@ impl RunAssessment {
                 "contract violation",
             ));
         }
+        // An experiment that could not be conducted fails the run on its own,
+        // gated, --no-gate and bless alike: it never depends on what a pin
+        // expects, and no explained exit 1 covers it.
+        let unevaluated = self.unevaluated();
+        if !unevaluated.is_empty() {
+            reasons.push(format!(
+                "{} ({})",
+                output::count(unevaluated.len(), "unevaluated probe"),
+                unevaluated.join(", ")
+            ));
+        }
         reasons
     }
 
     /// Produce the measured-run failure reason, if the assessment is not a sample.
     fn measured_failure(&self) -> Result<(), String> {
         let aborts = self.harness_aborts();
-        if self.end == HarnessEnd::Code(0) && self.completed() && aborts.is_empty() {
+        let unevaluated = self.unevaluated();
+        if self.end == HarnessEnd::Code(0)
+            && self.completed()
+            && aborts.is_empty()
+            && unevaluated.is_empty()
+        {
             return Ok(());
         }
         let why = match &self.contract.run_error {
@@ -238,6 +279,11 @@ impl RunAssessment {
             None if !aborts.is_empty() => format!(
                 "harness_abort in the run ({}); a crashed probe is no timing sample",
                 aborts.join(", ")
+            ),
+            None if !unevaluated.is_empty() => format!(
+                "unevaluated in the run ({}); an experiment that was not conducted is no \
+                 timing sample",
+                unevaluated.join(", ")
             ),
             None if self.end != HarnessEnd::Code(0) => {
                 format!("harness {} ({})", self.end.describe(), self.rec.summary())
@@ -270,6 +316,14 @@ impl RunAssessment {
             lines.push(format!(
                 "harness_abort (the harness saw these probe processes die): {}",
                 aborts.join(", ")
+            ));
+        }
+        let unevaluated = self.unevaluated();
+        if !unevaluated.is_empty() {
+            lines.push(format!(
+                "unevaluated (the experiment could not be conducted; never a pass, no pin can \
+                 hold it): {}",
+                unevaluated.join(", ")
             ));
         }
         lines
@@ -705,7 +759,7 @@ not json at all
     #[test]
     fn an_extra_is_never_scored_and_a_clean_report_is_complete() {
         let report = parse(
-            br#"{"probe":"a","outcome":"no_tv_data"}
+            br#"{"probe":"a","outcome":"compile_fail","error":"e"}
 {"probe":"zz","outcome":"parity","acceptance":{"tier":"accepted"}}
 "#,
         );
@@ -749,7 +803,7 @@ not json at all
 
     fn complete() -> Reconciliation {
         let report = parse(
-            br#"{"probe":"a","outcome":"no_tv_data"}
+            br#"{"probe":"a","outcome":"compile_fail","error":"e"}
 "#,
         );
         Reconciliation::reconcile(&ids(&["a"]), &report, Vec::new())
@@ -887,7 +941,7 @@ not json at all
         // Exit 1 explained by pinned breaks is acceptable.
         assert!(parity_reasons(&a, true).is_empty());
         // The same stream without its run_end does not complete.
-        let cut = clean_stream(&["a"], "no_tv_data", 0)
+        let cut = clean_stream(&["a"], "compile_fail", 0)
             .replace(&format!("{{\"kind\":\"run_end\",{V1},\"exit\":0}}\n"), "");
         let a = assess(&ids(&["a"]), cut.as_bytes(), HarnessEnd::Code(0), false);
         assert!(!a.completed());
@@ -895,6 +949,45 @@ not json at all
             parity_reasons(&a, false)
                 .iter()
                 .any(|r| r == "1 contract violation")
+        );
+    }
+
+    #[test]
+    fn an_unevaluated_probe_completes_the_stream_but_never_passes() {
+        let stream = clean_stream(&["a", "b"], "harness_abort", 1).replace(
+            r#"{"probe":"a","outcome":"harness_abort"}"#,
+            r#"{"probe":"a","outcome":"unevaluated","reason":"witness_contract","error":"w"}"#,
+        );
+        let a = assess(
+            &ids(&["a", "b"]),
+            stream.as_bytes(),
+            HarnessEnd::Code(1),
+            false,
+        );
+        assert!(a.completed(), "{:?}", a.contract.violations);
+        assert_eq!(a.unevaluated(), vec!["a (witness_contract)".to_owned()]);
+        assert_eq!(a.harness_aborts(), vec!["b"]);
+        // Even with exit 1 explained, the run fails on the refusal alone.
+        assert_eq!(
+            parity_reasons(&a, true),
+            vec!["1 unevaluated probe (a (witness_contract))".to_owned()]
+        );
+        assert!(
+            a.detail_lines()
+                .iter()
+                .any(|l| l.starts_with("unevaluated (") && l.ends_with("a (witness_contract)"))
+        );
+        // Never a timing sample, on exit 0 as on exit 1.
+        let solo = clean_stream(&["a"], "unevaluated", 0).replace(
+            r#""outcome":"unevaluated""#,
+            r#""outcome":"unevaluated","reason":"no_overlap","error":"disjoint""#,
+        );
+        let a = assess(&ids(&["a"]), solo.as_bytes(), HarnessEnd::Code(0), false);
+        assert!(a.completed());
+        assert!(
+            a.measured_verdict()
+                .unwrap_err()
+                .starts_with("unevaluated in the run (a (no_overlap))")
         );
     }
 
@@ -1011,8 +1104,8 @@ not json at all
     #[test]
     fn an_earlier_contradiction_is_not_hidden_by_a_later_clean_repeat() {
         let sel = ids(&["a"]);
-        let nd = "{\"probe\":\"a\",\"outcome\":\"no_tv_data\",\"disposition\":\"accepted\"}\n\
-                  {\"probe\":\"a\",\"outcome\":\"no_tv_data\",\"disposition\":\"no_tv_data\"}\n";
+        let nd = "{\"probe\":\"a\",\"outcome\":\"compile_fail\",\"disposition\":\"accepted\"}\n\
+                  {\"probe\":\"a\",\"outcome\":\"compile_fail\",\"disposition\":\"compile_fail\"}\n";
         let a = assess(&sel, nd.as_bytes(), HarnessEnd::Code(0), false);
         assert_eq!(a.rec.invalid.len(), 1, "{:?}", a.rec.invalid);
         assert_eq!(a.rec.duplicates.len(), 1);
@@ -1023,11 +1116,11 @@ not json at all
     #[test]
     fn an_invalid_record_for_an_unselected_probe_is_an_extra_either_way() {
         let sel = ids(&["a"]);
-        let a_ok = "{\"probe\":\"a\",\"outcome\":\"no_tv_data\"}\n";
+        let a_ok = "{\"probe\":\"a\",\"outcome\":\"compile_fail\"}\n";
         // Unparsable, and parseable but contradictory: both invalid plus extra.
         for bad in [
             "{\"probe\":\"zz\"}\n",
-            "{\"probe\":\"zz\",\"outcome\":\"no_tv_data\",\"disposition\":\"x\"}\n",
+            "{\"probe\":\"zz\",\"outcome\":\"compile_fail\",\"disposition\":\"x\"}\n",
         ] {
             let nd = format!("{a_ok}{bad}");
             let a = assess(&sel, nd.as_bytes(), HarnessEnd::Code(0), false);
@@ -1040,7 +1133,7 @@ not json at all
     fn no_contract_is_said_and_keeps_the_old_rules() {
         let a = assess(
             &ids(&["a"]),
-            b"{\"probe\":\"a\",\"outcome\":\"no_tv_data\"}\n",
+            b"{\"probe\":\"a\",\"outcome\":\"compile_fail\"}\n",
             HarnessEnd::Code(0),
             false,
         );

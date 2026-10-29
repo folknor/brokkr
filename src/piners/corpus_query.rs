@@ -325,11 +325,15 @@ fn render_probe(db: &CorpusDb, run_id: i64, probe: &str) -> Result<(), DevError>
 }
 
 /// Whether the run-detail view lists a row without `--full`: a deviation
-/// from its pin, or a crash. A `harness_abort` stays visible even when pinned,
-/// as in the live rendering, so a crash is never folded into "matching their
-/// pin".
+/// from its pin, a crash, or an experiment not conducted. A `harness_abort`
+/// stays visible even when pinned, as in the live rendering, so a crash is
+/// never folded into "matching their pin"; an `unevaluated` row likewise,
+/// whatever its stored `gate_ok`.
 fn shown_by_default(d: &DispositionRow) -> bool {
-    !d.gate_ok || d.disposition == crate::piners::registry::CorpusDisposition::HarnessAbort.as_str()
+    use crate::piners::registry::CorpusDisposition;
+    !d.gate_ok
+        || d.disposition == CorpusDisposition::HarnessAbort.as_str()
+        || d.disposition == CorpusDisposition::Unevaluated.as_str()
 }
 
 #[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
@@ -447,6 +451,7 @@ mod tests {
             sig_domain: None,
             sig_dimension: None,
             error: None,
+            reason: None,
             label_gate: None,
         }
     }
@@ -457,5 +462,8 @@ mod tests {
         assert!(shown_by_default(&row("accepted", false)));
         assert!(!shown_by_default(&row("accepted", true)));
         assert!(!shown_by_default(&row("runtime_fail", true)));
+        assert!(shown_by_default(&row("unevaluated", true)));
+        // A retired label in history displays like any other.
+        assert!(!shown_by_default(&row("no_tv_data", true)));
     }
 }

@@ -778,6 +778,9 @@ impl AttemptEnv<'_> {
         match isolate::classify_attempt(&a) {
             isolate::AttemptVerdict::Stop(stop) => AttemptOutcome::Stop(stop),
             isolate::AttemptVerdict::Completed => AttemptOutcome::Completed,
+            isolate::AttemptVerdict::CompletedUnevaluated(probes) => {
+                AttemptOutcome::CompletedUnevaluated(probes)
+            }
             isolate::AttemptVerdict::Failed(failure) => AttemptOutcome::Failed {
                 end,
                 failure,
@@ -1270,7 +1273,9 @@ mod tests {
 
     #[test]
     fn protocol_violations_fail_a_complete_clean_run() {
-        let nd = format!("{A_OK}{A_OK}{{\"probe\":\"zz\",\"outcome\":\"no_tv_data\"}}\nnoise\n");
+        let nd = format!(
+            "{A_OK}{A_OK}{{\"probe\":\"zz\",\"outcome\":\"compile_fail\",\"error\":\"x\"}}\nnoise\n"
+        );
         let r = reasons(&["a"], &nd, HarnessEnd::Code(0), false, false);
         assert_eq!(
             r,
@@ -1280,6 +1285,24 @@ mod tests {
                 "1 report-only extra record".to_owned(),
             ]
         );
+    }
+
+    /// A valid `unevaluated` line for probe `a`.
+    const UNEVALUATED: &str = "{\"probe\":\"a\",\"outcome\":\"unevaluated\",\
+        \"disposition\":\"unevaluated\",\"reason\":\"no_overlap\",\"error\":\"disjoint\"}\n";
+
+    #[test]
+    fn an_unevaluated_probe_fails_the_run_even_with_exit_one_explained() {
+        // Explained exit 1 (bless, or a gate that somehow accepted it) and a
+        // clean exit alike: the refusal is its own reason.
+        for (end, explained) in [(HarnessEnd::Code(1), true), (HarnessEnd::Code(0), false)] {
+            let r = reasons(&["a"], UNEVALUATED, end, false, explained);
+            assert_eq!(
+                r,
+                vec!["1 unevaluated probe (a (no_overlap))".to_owned()],
+                "{end:?}"
+            );
+        }
     }
 
     #[test]
@@ -1376,7 +1399,7 @@ mod tests {
         // Complete coverage with an extra line is not a completed attempt, and
         // a broken report is protocol-invalid even on an abnormal end - never
         // classified as a crash first.
-        let extra = format!("{A_OK}{{\"probe\":\"zz\",\"outcome\":\"no_tv_data\"}}\n");
+        let extra = format!("{A_OK}{{\"probe\":\"zz\",\"outcome\":\"compile_fail\",\"error\":\"x\"}}\n");
         assert!(matches!(
             classify(&["a"], &extra, HarnessEnd::Code(0), false),
             isolate::AttemptVerdict::Failed(isolate::Failure::ProtocolInvalid(_))
@@ -1395,6 +1418,11 @@ mod tests {
         assert_eq!(
             classify(&["a"], crash, HarnessEnd::Code(1), false),
             isolate::AttemptVerdict::Completed
+        );
+        // An unevaluated probe completes the attempt, and the verdict keeps it.
+        assert_eq!(
+            classify(&["a"], UNEVALUATED, HarnessEnd::Code(1), false),
+            isolate::AttemptVerdict::CompletedUnevaluated(vec!["a (no_overlap)".to_owned()])
         );
         // A run_error stops diagnosis with the harness's own failure.
         let run_error =

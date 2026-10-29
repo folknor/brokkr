@@ -322,7 +322,12 @@ pub fn dispositions_table(rows: &[DispositionRow]) -> String {
                 ff(d.p90_exit),
                 ff(d.p90_pnl),
                 sig,
-                d.error.clone().unwrap_or_default(),
+                // An unevaluated row leads its detail with the reason.
+                match (&d.reason, &d.error) {
+                    (Some(reason), Some(error)) => format!("{reason}: {error}"),
+                    (Some(reason), None) => reason.clone(),
+                    (None, error) => error.clone().unwrap_or_default(),
+                },
             ]
         })
         .collect();
