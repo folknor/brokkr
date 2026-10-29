@@ -3,11 +3,12 @@
 //! Every reader runs inspect with its stdout written to a file beside the
 //! inspected output (`<stem>.inspect.json`, or `<stem>.inspect-extended.json`
 //! under `--extended`) and reads it back through a buffered streaming
-//! deserializer that keeps only the fields below. Every other field - the
-//! ordering sequence among them, one entry per ordering segment, so as long
-//! as a noncanonically ordered file has blobs - is skipped as it streams past
-//! and never retained. The file stays in the check's directory as the full
-//! report.
+//! deserializer that retains only the fields below and skips every other
+//! value as it streams past, without collecting its contents. The reader is
+//! keyed on fields, not on `schema_version`: a report missing a field read
+//! here is refused, but a read field whose meaning changes under a new
+//! schema is not detected. The file stays in the check's directory as the
+//! full report.
 
 use std::path::{Path, PathBuf};
 
@@ -196,13 +197,23 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
-    const PLAIN: &str = r#"{"schema_version":1,"file":"x.osm.pbf","file_size":10,
+    /// Mirrors pbfhogg's schema_version 2 shape: blocks 0 and 2 hold nodes,
+    /// 1 and 3 ways, so four ordering segments and a non-standard order.
+    const PLAIN: &str = r#"{"schema_version":2,"file":"x.osm.pbf","file_size":10,
         "header":{"writing_program":"pbfhogg","required_features":["OsmSchema-V0.6","DenseNodes"],
           "optional_features":["Sort.Type_then_ID"],"bbox":null,
           "replication":{"sequence":null,"timestamp":null,"url":null}},
-        "indexed":true,"blocks":{"total":3},
+        "indexed":true,"blocks":{"total":4,
+          "nodes":{"count":2,"compressed_bytes":4,"elements":5},
+          "ways":{"count":2,"compressed_bytes":3,"elements":2},
+          "relations":{"count":0,"compressed_bytes":0,"elements":0},
+          "mixed":{"count":0,"compressed_bytes":0,"elements":0}},
         "elements":{"nodes":5,"tagged_nodes":1,"ways":2,"relations":0,"total":7},
-        "ordering":{"sequence":["n","w","n","w"],"standard":false},
+        "ordering":{"standard":false,"segment_count":4,"segments_head":[
+          {"kind":"nodes","first_block":0,"last_block":0},
+          {"kind":"ways","first_block":1,"last_block":1},
+          {"kind":"nodes","first_block":2,"last_block":2},
+          {"kind":"ways","first_block":3,"last_block":3}]},
         "id_ranges":null,"anomalies_only":false,"blocks_detail":null,"locations":null}"#;
 
     #[test]

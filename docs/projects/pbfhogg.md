@@ -296,14 +296,13 @@ reads - element counts, the header's sort flag, the computed order
 (`check_sorted`) and the summary `print_inspect` shows - is `inspect --json`
 (with `--extended` where the order or the extended summary is needed)
 written to a file beside the inspected output and read by a streaming
-parser that keeps only those fields; the per-segment ordering sequence,
-unbounded for a noncanonically ordered file such as an inverted getid
-output, is skipped as it streams. The file stays as the full report and the
+parser that keeps only those fields and skips every other value as it
+streams, without collecting its contents. The file stays as the full report and the
 printed summary names it. An extended report without `data.objects_ordered`
 is an error, never read as unordered. `check --refs` counts stay captured;
 every report consumer still requires its documented exit codes before
-trusting what it parsed. (pbfhogg itself still builds the whole report,
-ordering sequence included, in memory before writing it.)
+trusting what it parsed. (pbfhogg itself builds the whole report as
+one JSON value in memory before writing it.)
 `verify merge`'s element diff OSC is classified as it streams into per-class
 counts and the ten smallest IDs; the one structure it holds is the input
 OSC's delete set, O(delete entries in the change file), which the osmium
