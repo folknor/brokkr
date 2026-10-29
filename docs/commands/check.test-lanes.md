@@ -904,8 +904,9 @@ The same staleness rule the ledger applies to `[[quarantine]]` entries
 applies to the filters themselves: **a filter that matches no test is a
 defect, not a no-op.** During the `prepare` phase every `skip` and every
 `only` declared on a `[test.profiles.*]` block or a `[[check]]` entry is
-asserted against the enumeration, and one that matched nothing fails the
-check in the `coverage` phase, named with the block it was written in:
+asserted against the enumeration. Under a `certifies = "complete"` profile
+one that matched nothing fails the check in the `coverage` phase, named with
+the block it was written in (any other run warns instead - see below):
 
 ```
 [error]   dead filter: only "read_market_latency" in [test.profiles.timing] - matches no test in any sweep it applies to (timing)
@@ -967,20 +968,50 @@ parsing Rust source - has to be taught every declaration form
 (`#[tokio::test]`, `macro_rules!`-generated tests, and so on), and a parser
 that has gone blind agrees with every filter list there is.
 
-### The two guards are complementary
+### Outside a complete profile: a warning
 
-The alive-check runs only under `certifies = "complete"`, because that is
-the only place the `coverage` phase runs. **That is not the same as "dead
-filters go unchecked elsewhere"** - a second guard covers the other
-direction. When a sweep actually runs and its filters collect no work, the
-test phase already refuses:
+The failing alive-check runs only under `certifies = "complete"`, because
+that is the only place the `coverage` phase runs. Every other run judges the
+same filters in `prepare`, by the same four rules, and **warns** about a dead
+one rather than failing - a profile that is not `complete` has always passed
+with one:
+
+```
+[warn]    dead filter: skip "sort_overlapping_blobs_uring" in [test.profiles.full] - matches no test in any sweep it applies to (all). A dead `skip` no longer excludes what it names; fix the substring or delete the filter.
+```
+
+There is no policy universe there, so the evidence is each lane's own: a
+lane whose sweep carries a `skip` or `only` takes two additional listings
+of each of its binaries, with no filters (the same two a universe takes). A filter is
+reported only where that evidence is sound; it is unknown, and silent, when
+any sweep it applies to is
+
+- not attempted by this invocation (a CLI `-p` that leaves it out), or could
+  not be prepared, or has no inventory (a serial lane whose harnesses cannot
+  be attributed);
+- a nextest lane - a lane's engine listing is never existence evidence
+  (a package-scoped filterset reports a whole suite as skipped with no
+  testcases) - or a `doc_only` lane;
+- a serial lane that also carries doctests, since its filters reach doctests
+  nobody listed;
+- run with forwarded libtest args (`brokkr check -- -- --exact ...`): the
+  verdict is about the configured filters under libtest's substring rule,
+  and a forwarded `--exact`, `--ignored` or `--include-ignored` changes
+  what they select;
+- holding a binary whose unfiltered listing failed or that cannot be listed.
+
+### The run-time guard is complementary
+
+A second guard covers the other direction. When a sweep actually runs and
+its filters collect no work, the test phase already refuses:
 
 ```
 cargo test: zero tests ran (sweep: timing) (1 suite, 99 filtered out)
   - a profile/filter combo collected no work; treat as a wrong-run.
 ```
 
-So a dead `only` is caught at **run time** in any sweep that runs, and the
+So an `only` that leaves its sweep no work is caught at **run time** in any
+sweep that runs (a live sibling `only` hides a dead one from this guard), and the
 alive-check covers the **enumerate-but-don't-run** case: a curated entry
 referenced by a complete profile, whose lane is enumerated by the audit.
 The residual between them is a sweep that is neither enumerated under a

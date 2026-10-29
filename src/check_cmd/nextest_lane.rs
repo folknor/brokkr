@@ -691,6 +691,11 @@ pub(crate) fn assemble_nextest_lane(
             selected: names,
             ignored,
             benchmarks: Vec::new(),
+            // A lane listing is never existence evidence on the engine path:
+            // a package-scoped filterset reports a whole suite as skipped
+            // with no testcases (see nextest.rs), so its filters stay unknown
+            // outside a certifying universe.
+            existence: None,
         });
     }
 
@@ -1248,6 +1253,7 @@ mod nextest_lane_tests {
                 selected: vec!["t".into()],
                 ignored: BTreeSet::new(),
                 benchmarks: Vec::new(),
+                existence: None,
             }],
         });
         let sweep = planned(crate::profile::SweepDecl { label: "engine".into(), ..Default::default() });

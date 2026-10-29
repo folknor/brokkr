@@ -243,6 +243,20 @@ pub(crate) struct PreparedBinary {
     /// The `#[bench]` functions the filters admit: outside the claim, but run
     /// once in test mode, so their records are expected.
     pub(crate) benchmarks: Vec<String>,
+    /// Every test the binary holds, unfiltered, for a non-certifying run's
+    /// filter-liveness judgement ([`existence_listing`]). `None` where it was
+    /// not taken or could not be: that binary's lane is then unknown, never
+    /// dead.
+    pub(crate) existence: Option<Existence>,
+}
+
+/// One binary's unfiltered listing: every test name, and the `#[ignore]`d
+/// ones among them - the per-binary slice of what a certifying run's universe
+/// holds.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Existence {
+    pub(crate) all: Vec<String>,
+    pub(crate) ignored: BTreeSet<String>,
 }
 
 impl PreparedBinary {
@@ -513,8 +527,49 @@ fn ignored_listing_args<'a>(filter_args: &[&'a str]) -> Vec<&'a str> {
     out
 }
 
+/// Whether a lane's binaries get the auxiliary unfiltered listing
+/// ([`existence_listing`]) a non-certifying run judges filter liveness on.
+///
+/// Only where the judgement can be sound: a certifying run judges against its
+/// policy universe instead; a sweep with no `skip`/`only` has nothing to judge;
+/// and a run with forwarded libtest args is left unjudged, because the verdict
+/// is about the CONFIGURED filters under libtest's default substring rule, and
+/// a forwarded `--exact`, `--ignored` or `--include-ignored` changes what the
+/// lane's filters actually select.
+fn wants_existence(certifying: bool, sweep: &PlannedSweep, libtest_extra: &[String]) -> bool {
+    !certifying && !sweep.lane_filters().filters.is_empty() && libtest_extra.is_empty()
+}
+
+/// One binary's unfiltered listing, the same two listings a certifying
+/// universe takes (`--include-ignored --list`, `--ignored --list`). Auxiliary:
+/// any failure is held back and yields `None`, which makes the lane's filters
+/// unknown and never touches its execution inventory. An interrupt still
+/// propagates.
+fn existence_listing(
+    binary: &TestBinary,
+    env_refs: &[(&str, &str)],
+    runtime: &DirectRuntime,
+) -> Result<Option<Existence>, DevError> {
+    let (listed, _held) = output::capture_errors(|| -> Result<Option<Existence>, DevError> {
+        let Some(all) = binary_list(binary, &["--include-ignored"], env_refs, runtime)? else {
+            return Ok(None);
+        };
+        let Some(ignored) = binary_list(binary, &["--ignored"], env_refs, runtime)? else {
+            return Ok(None);
+        };
+        Ok(Some(Existence { all: all.tests, ignored: ignored.tests.into_iter().collect() }))
+    });
+    match listed {
+        Ok(existence) => Ok(existence),
+        Err(DevError::Interrupted) => Err(DevError::Interrupted),
+        Err(_) if crate::shutdown::is_shutdown_requested() => Err(DevError::Interrupted),
+        Err(_) => Ok(None),
+    }
+}
+
 /// List one binary under a lane's filters: its selected names (qualified skips
-/// out) and its ignored ones. `Ok(None)` = a listing failed, already reported.
+/// out) and its ignored ones, plus its unfiltered listing when `existence`.
+/// `Ok(None)` = a listing failed, already reported.
 #[allow(clippy::too_many_arguments)]
 fn list_binary(
     sweep: &PlannedSweep,
@@ -523,6 +578,7 @@ fn list_binary(
     env_refs: &[(&str, &str)],
     runtime: &DirectRuntime,
     pkg_skipped: &mut usize,
+    existence: bool,
 ) -> Result<Option<PreparedBinary>, DevError> {
     let args: Vec<&str> = filter_args.iter().map(String::as_str).collect();
     let Some(listed) = binary_list(binary, &args, env_refs, runtime)? else {
@@ -547,6 +603,7 @@ fn list_binary(
     }
     let hash = hash_file(Path::new(&binary.executable))
         .map_err(|e| DevError::Build(format!("could not hash {}: {e}", binary.executable)))?;
+    let existence = if existence { existence_listing(binary, env_refs, runtime)? } else { None };
     Ok(Some(PreparedBinary {
         unit: BinaryUnit::of(binary),
         binary: binary.clone(),
@@ -555,6 +612,7 @@ fn list_binary(
         selected,
         ignored: ignored.tests.into_iter().collect(),
         benchmarks: listed.benchmarks,
+        existence,
     }))
 }
 
@@ -571,12 +629,13 @@ fn list_binary_or_unlisted(
     env_refs: &[(&str, &str)],
     runtime: &DirectRuntime,
     pkg_skipped: &mut usize,
+    existence: bool,
 ) -> Result<PreparedBinary, DevError> {
     if inputs.certifying {
         // A certifying lane cannot keep an unenumerable binary (its tests
         // would be outside the claim): it lists every binary, a custom harness
         // included, and a listing that is not a libtest one fails the lane.
-        return list_binary(sweep, binary, filter_args, env_refs, runtime, pkg_skipped)?
+        return list_binary(sweep, binary, filter_args, env_refs, runtime, pkg_skipped, false)?
             .ok_or_else(|| not_prepared(sweep));
     }
     // The one place preparation executes binaries where nothing listed them
@@ -589,7 +648,7 @@ fn list_binary_or_unlisted(
         return unlisted_binary(binary, why);
     }
     let (listed, held) = output::capture_errors(|| {
-        list_binary(sweep, binary, filter_args, env_refs, runtime, pkg_skipped)
+        list_binary(sweep, binary, filter_args, env_refs, runtime, pkg_skipped, existence)
     });
     if let Some(p) = listed? {
         return Ok(p);
@@ -626,6 +685,7 @@ fn unlisted_binary(binary: &TestBinary, why: String) -> Result<PreparedBinary, D
         selected: Vec::new(),
         ignored: BTreeSet::new(),
         benchmarks: Vec::new(),
+        existence: None,
     })
 }
 
@@ -1060,6 +1120,10 @@ fn prepare_serial(
     // one this build did not produce.
     prepared.target_filters = sweep.lane_filters().cargo_args();
     prepared.target_filters.extend(forwarded.partition_targets().0);
+    // A lane that also carries doctests applies its filters to them too, and
+    // doctests are not listed, so its filters can never be judged dead here.
+    let existence = wants_existence(inputs.certifying, sweep, libtest_extra)
+        && !lane_runs_doctests(sweep, inputs.doctests);
     for (resolution, selection, binaries) in built {
         prepared.enumerated += binaries.len();
         let mut out = Vec::new();
@@ -1072,6 +1136,7 @@ fn prepare_serial(
                 &env_refs,
                 &runtime,
                 &mut prepared.pkg_skipped,
+                existence,
             )?);
         }
         prepared.resolutions.push(PreparedResolution { resolution, selection, binaries: out });
@@ -1213,7 +1278,8 @@ fn prepare_direct(
     prepared.target_filters.extend(extra_selectors.iter().cloned());
     prepared.cargo_extra = cargo_extra;
     prepared.libtest_extra = libtest_extra.clone();
-    list_direct_binaries(sweep, built, &mut prepared, &libtest_extra, &env_refs, &runtime)?;
+    let existence = wants_existence(inputs.certifying, sweep, &libtest_extra);
+    list_direct_binaries(sweep, built, &mut prepared, &libtest_extra, &env_refs, &runtime, existence)?;
     prepared.runtime = Some(runtime);
     Ok(prepared)
 }
@@ -1235,6 +1301,7 @@ fn list_direct_binaries(
     libtest_extra: &[String],
     env_refs: &[(&str, &str)],
     runtime: &DirectRuntime,
+    existence: bool,
 ) -> Result<(), DevError> {
     let filter_args = lane_filter_args(sweep, libtest_extra);
     refuse_stale_exclusions(
@@ -1248,7 +1315,8 @@ fn list_direct_binaries(
         let mut out = Vec::new();
         let selected = filter_binaries(&binaries, &prepared.target_filters);
         for b in drop_excluded(selected, sweep.lane_filters()) {
-            let Some(p) = list_binary(sweep, b, &filter_args, env_refs, runtime, &mut prepared.pkg_skipped)?
+            let Some(p) =
+                list_binary(sweep, b, &filter_args, env_refs, runtime, &mut prepared.pkg_skipped, existence)?
             else {
                 return Err(not_prepared(sweep));
             };
@@ -1901,8 +1969,10 @@ pub(crate) struct ProfilePrep {
 /// what is known.
 ///
 /// `certifying` is whether the run is held to a `certifies = "complete"`
-/// claim: only then are policy universes enumerated and filters judged for
-/// liveness. Every run gets the execution inventory. A lane that fails to
+/// claim: only then are policy universes enumerated and dead filters policy.
+/// Any other run judges its filters from the lanes' own unfiltered listings
+/// and only warns ([`advisory_dead_filters`]). Every run gets the execution
+/// inventory. A lane that fails to
 /// prepare under a claim that does not need it is a lane with no inventory
 /// (its `unavailable` says why), not a refusal: it still runs.
 ///
@@ -2084,8 +2154,19 @@ pub(crate) fn prepare_profile(
 
     // Pass two is policy-only and runs only for a certifying profile. It reads
     // the inventories built above; it never changes a lane's selected pairs.
+    // A non-certifying run has no policy universe, so its filters are judged
+    // from the lanes' own unfiltered listings instead, and only warned about:
+    // a dead filter outside a complete profile has always passed.
     if certifying {
         prepare_policy_universes(sweeps, selection, &mut plan, &lanes, preparer, &mut error);
+    } else {
+        for d in &advisory_dead_filters(sweeps, selection, &lanes, doctests) {
+            output::warn(&format!(
+                "dead filter: {} in {} - matches no test in any sweep it applies to ({}). A dead \
+                 `skip` no longer excludes what it names; fix the substring or delete the filter.",
+                d.label, d.origin, d.sweeps
+            ));
+        }
     }
     plan.complete = plan.incomplete.is_empty() && plan.lanes.iter().all(|lane| lane.inventory.is_known());
     ProfilePrep { plan, lanes, error }
@@ -2178,6 +2259,7 @@ mod prepare_tests {
                     selected: vec!["a".into(), "slow".into()],
                     ignored: ["slow".to_owned()].into_iter().collect(),
                     benchmarks: Vec::new(),
+                    existence: None,
                 }],
             });
             Ok(p)
@@ -2223,6 +2305,7 @@ mod prepare_tests {
                     selected: Vec::new(),
                     ignored: BTreeSet::new(),
                     benchmarks: Vec::new(),
+                    existence: None,
                 }],
             });
             p
@@ -2376,6 +2459,7 @@ mod prepare_tests {
             selected: vec!["slow".into()],
             ignored: ["slow".to_owned()].into_iter().collect(),
             benchmarks: Vec::new(),
+            existence: None,
         };
         assert_eq!(b.executed(p.include_ignored).count(), 1);
     }
@@ -2424,7 +2508,7 @@ mod prepare_tests {
             universe_selectors: &NO_UNIVERSE_SELECTORS,
         };
         let mut skipped = 0;
-        let p = list_binary_or_unlisted(&inputs, &planned(crate::profile::SweepDecl::default()), &target, &[], &[], &runtime, &mut skipped)
+        let p = list_binary_or_unlisted(&inputs, &planned(crate::profile::SweepDecl::default()), &target, &[], &[], &runtime, &mut skipped, false)
             .unwrap();
         assert!(!marker.exists(), "the harness = false executable was run");
         let why = p.unlisted.expect("kept as unlisted");
@@ -2557,6 +2641,7 @@ mod prepare_tests {
             &[],
             &[],
             &runtime,
+            false,
         )
         .unwrap();
         let b = &prepared.resolutions[0].binaries[0];
@@ -2578,6 +2663,7 @@ mod prepare_tests {
             &[],
             &[],
             &runtime,
+            false,
         )
         .unwrap_err()
         .to_string();
@@ -2599,6 +2685,7 @@ mod prepare_tests {
             &[],
             &runtime,
             &mut skipped,
+            false,
         )
         .unwrap();
         assert_eq!(p.selected, vec!["alpha".to_owned()]);
@@ -2697,6 +2784,7 @@ mod prepare_tests {
                     selected: vec!["t".into()],
                     ignored: BTreeSet::new(),
                     benchmarks: Vec::new(),
+                    existence: None,
                 }],
             });
         }
@@ -2864,6 +2952,47 @@ mod prepare_tests {
         assert!(second.as_ref().is_ok() || second.unwrap_err().to_string().contains("cannot isolate"));
     }
 
+    /// brokkr#48 end to end: a non-certifying run whose lane carries an
+    /// unfiltered listing reports a skip naming a test that no longer exists,
+    /// as advisory and not as policy - the plan's dead filters stay empty.
+    #[test]
+    fn a_partial_run_reports_a_dead_skip_as_advisory() {
+        struct Listed(Fake);
+        impl Preparer for Listed {
+            fn support(&mut self, s: &PlannedSweep, a: &Attempt) -> Result<Vec<SupportArtifact>, DevError> {
+                self.0.support(s, a)
+            }
+            fn lane(&mut self, s: &PlannedSweep, a: &Attempt) -> Result<PreparedLane, DevError> {
+                let mut p = self.0.lane(s, a)?;
+                for b in p.resolutions.iter_mut().flat_map(|r| r.binaries.iter_mut()) {
+                    b.existence = Some(Existence { all: vec!["a".into(), "slow".into()], ignored: BTreeSet::new() });
+                }
+                Ok(p)
+            }
+            fn universe(&mut self, _: &PlannedSweep, _: &ResolutionRun, _: &LaneEnv) -> Result<Universe, DevError> {
+                Err(DevError::Build("asked for a universe".into()))
+            }
+        }
+        let skip = |pattern: &str| DeclaredFilter {
+            kind: FilterKind::Skip,
+            pattern: pattern.into(),
+            package: None,
+            origin: crate::profile::FilterOrigin::Profile("full".into()),
+        };
+        let serial = planned(crate::profile::SweepDecl {
+            label: "all".into(),
+            filters: crate::profile::LaneFilters { filters: vec![skip("renamed_away"), skip("slow")], ..Default::default() },
+            ..Default::default()
+        });
+        let sweeps = [serial];
+        let prep = prepare_all(&sweeps, false, &mut Listed(Fake::new(None)));
+        assert!(prep.error.is_none(), "{:?}", prep.error);
+        assert!(prep.plan.dead_filters.is_empty(), "advisory, not policy");
+        let advisory = advisory_dead_filters(&sweeps, &selected(&sweeps, &[]), &prep.lanes, false);
+        assert_eq!(advisory.len(), 1, "{advisory:?}");
+        assert!(advisory[0].label.to_string().contains("renamed_away"));
+    }
+
     /// A lane that cannot be attributed to binaries: inventory unavailable.
     struct Blind;
     impl Preparer for Blind {
@@ -2987,6 +3116,7 @@ mod prepare_tests {
                     selected: Vec::new(),
                     ignored: BTreeSet::new(),
                     benchmarks: Vec::new(),
+                    existence: None,
                 });
                 Ok(p)
             }

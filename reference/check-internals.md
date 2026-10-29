@@ -1367,6 +1367,20 @@ must never share the machine with a compile:
    judge filter liveness across the lanes. A skipped or unavailable inventory
    makes the relevant filters unknown, not dead. This pass writes the shape
    and dead-filter records; it does not alter the selected pairs.
+   Liveness is judged binary by binary (`FilterLedger::judge_lane`), each
+   binary against its own names and `#[ignore]`d subset, and every filter of
+   a listed lane is registered before any binary is, so a lane holding no
+   binary still reports its filters.
+4. **Advisory liveness (every other run).** No universe exists, so pass one
+   took a second, unfiltered pair of listings per binary (`existence_listing`)
+   on the libtest lanes whose sweep carries a filter and that forward no
+   libtest args (`wants_existence`), auxiliary to the inventory: a failure
+   leaves the binary without evidence and never fails the lane. The same
+   ledger then judges the lanes that gave sound evidence and treats every
+   other lane - unattempted, unavailable, nextest, doc-only, a serial lane
+   carrying doctests, forwarded libtest args, a binary without evidence - as
+   unknown (`advisory_dead_filters`). Dead filters are warned about and
+   change no exit status; they are not written to the plan.
 
 Listings must not modify the files they are listed from. Hashing either side of
 a listing catches a net change, not a file replaced and put back while it ran.

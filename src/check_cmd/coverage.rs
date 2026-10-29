@@ -480,6 +480,24 @@ impl FilterLedger {
         t.live |= live;
     }
 
+    /// Judge one listed lane, BINARY BY BINARY: each binary's candidates and
+    /// `#[ignore]`d names are its own, because two binaries of one package may
+    /// define the same test path with one copy ignored and the other not -
+    /// pooled by `(package, name)`, the ignored copy would hide the runnable
+    /// one from an `only`. Every filter of the sweep is registered first, so a
+    /// lane that listed and holds no binary at all still reports its filters
+    /// dead rather than dropping them.
+    fn judge_lane(&mut self, sweep: &PlannedSweep, binaries: Vec<LaneBinaryNames>) {
+        for filter in &sweep.lane_filters().filters {
+            self.record(filter, false, &sweep.label);
+        }
+        for (candidates, ignored) in binaries {
+            for (filter, live) in filter_liveness(sweep, &candidates, &ignored) {
+                self.record(&filter, live, &sweep.label);
+            }
+        }
+    }
+
     /// The filter applies to a sweep that could not be listed.
     fn record_unknown(&mut self, filter: &DeclaredFilter, sweep: &str) {
         self.tally(filter, sweep).unknown = true;
@@ -508,15 +526,29 @@ impl FilterLedger {
 /// `(package, test name)` pairs.
 type TestPairs = Vec<(String, String)>;
 
-/// The test names a lane's binaries expose in their shapes' universes, and
-/// which of them are `#[ignore]`d at the source.
+/// One binary's test names and its `#[ignore]`d ones, as `(package, name)`.
+type LaneBinaryNames = (TestPairs, BTreeSet<(String, String)>);
+
+/// One binary's names, package-qualified.
+fn binary_names<'a>(
+    package: &str,
+    all: impl IntoIterator<Item = &'a String>,
+    ignored: impl IntoIterator<Item = &'a String>,
+) -> LaneBinaryNames {
+    (
+        all.into_iter().map(|name| (package.to_owned(), name.clone())).collect(),
+        ignored.into_iter().map(|name| (package.to_owned(), name.clone())).collect(),
+    )
+}
+
+/// The test names each of a lane's binaries exposes in its shape's universe,
+/// and which of them are `#[ignore]`d at the source - one entry per binary.
 fn lane_candidates(
     prepared: &PreparedLane,
     shape: &ShapeId,
     universes: &BTreeMap<(ShapeId, Resolution), Option<Universe>>,
-) -> (TestPairs, BTreeSet<(String, String)>) {
-    let mut candidates: Vec<(String, String)> = Vec::new();
-    let mut ignored: BTreeSet<(String, String)> = BTreeSet::new();
+) -> Vec<LaneBinaryNames> {
+    let mut out = Vec::new();
     for resolution in &prepared.resolutions {
         let resolution_id = Resolution::from_option(resolution.resolution.as_deref());
         let Some(Some(universe)) = universes.get(&(shape.clone(), resolution_id)) else {
@@ -525,13 +557,78 @@ fn lane_candidates(
         for binary in &resolution.binaries {
             for (unit, all, ignored_names) in &universe.binaries {
                 if *unit == binary.unit {
-                    candidates.extend(all.iter().map(|name| (unit.package.clone(), name.clone())));
-                    ignored.extend(ignored_names.iter().map(|name| (unit.package.clone(), name.clone())));
+                    out.push(binary_names(&unit.package, all, ignored_names));
                 }
             }
         }
     }
-    (candidates, ignored)
+    out
+}
+
+/// A non-certifying run's filter liveness, from each lane's own unfiltered
+/// listings ([`PreparedBinary::existence`]) rather than a policy universe.
+///
+/// Advisory: the result is warned about, never fatal - a profile that is not
+/// `certifies = "complete"` passed with a dead filter before this existed.
+/// The rules are the certifying ones (scope union, `skip` against existence,
+/// `only` against what would be evaluated, package-qualified skips scoped),
+/// and a lane that cannot give sound evidence makes its filters unknown, not
+/// dead: a lane the selection does not attempt, one that failed to prepare or
+/// has no inventory, an engine (nextest) lane, a doc-only lane, a serial lane
+/// that also carries doctests (its filters reach doctests nobody listed), a
+/// lane run with forwarded libtest args, and any binary without an
+/// unfiltered listing. [`wants_existence`] decides where the listing is taken.
+pub(crate) fn advisory_dead_filters(
+    sweeps: &[PlannedSweep],
+    selection: &PhaseSelection,
+    lanes: &Lanes<Option<PreparedLane>>,
+    doctests: bool,
+) -> Vec<DeadFilterRecord> {
+    let mut ledger = FilterLedger::default();
+    for (lane_idx, sweep) in sweeps.iter().enumerate().map(|(i, sweep)| (LaneIdx::new(i), sweep)) {
+        if sweep.lane_filters().filters.is_empty() {
+            continue;
+        }
+        let prepared = lanes
+            .get(lane_idx)
+            .and_then(Option::as_ref)
+            .filter(|p| p.unavailable.is_none() && p.prepare_failed.is_none());
+        let judgeable = match (prepared, selection.attempt(lane_idx)) {
+            (Some(prepared), Some(_)) => {
+                matches!(lane_kind(sweep), LaneKind::Serial | LaneKind::Parallel | LaneKind::Isolated)
+                    && !lane_runs_doctests(sweep, doctests)
+                    && prepared.libtest_extra.is_empty()
+                    && prepared
+                        .resolutions
+                        .iter()
+                        .flat_map(|r| r.binaries.iter())
+                        .all(|b| b.unlisted.is_none() && b.existence.is_some())
+            }
+            _ => false,
+        };
+        let Some(prepared) = prepared.filter(|_| judgeable) else {
+            ledger.record_all_unknown(sweep);
+            continue;
+        };
+        let binaries = prepared
+            .resolutions
+            .iter()
+            .flat_map(|r| r.binaries.iter())
+            .filter_map(|b| {
+                b.existence.as_ref().map(|e| binary_names(&b.unit.package, &e.all, &e.ignored))
+            })
+            .collect();
+        ledger.judge_lane(sweep, binaries);
+    }
+    ledger
+        .dead()
+        .into_iter()
+        .map(|dead| DeadFilterRecord {
+            sweeps: dead.sweeps.into(),
+            origin: dead.origin.into(),
+            label: dead.label.into(),
+        })
+        .collect()
 }
 
 /// One `ShapeRecord` per enumerated shape resolution, in first-seen order.
@@ -663,10 +760,7 @@ fn prepare_policy_universes(
         }
 
         if lane_ok {
-            let (candidates, ignored) = lane_candidates(prepared, &shape, &universes);
-            for (filter, live) in filter_liveness(sweep, &candidates, &ignored) {
-                ledger.record(&filter, live, &sweep.label);
-            }
+            ledger.judge_lane(sweep, lane_candidates(prepared, &shape, &universes));
         } else {
             ledger.record_all_unknown(sweep);
         }
@@ -916,6 +1010,103 @@ mod coverage_tests {
             }
         }
         ledger.dead().into_iter().map(|d| d.label).collect()
+    }
+
+    /// Two binaries of one package defining the same test path, one copy
+    /// ignored: judged per binary, the runnable copy keeps an `only` live.
+    /// Pooled by `(package, name)`, the ignored copy hid it.
+    #[test]
+    fn an_ignored_copy_in_one_binary_does_not_hide_a_runnable_copy_in_another() {
+        let sweep = sweep_with_filters("lane", vec![filter(FilterKind::Only, "slow_case")], false);
+        let names = candidates(&[("core", "tests::slow_case")]);
+        let ignored: BTreeSet<(String, String)> = names.iter().cloned().collect();
+        let mut ledger = FilterLedger::default();
+        ledger.judge_lane(&sweep, vec![(names.clone(), ignored), (names, BTreeSet::new())]);
+        assert!(ledger.dead().is_empty());
+    }
+
+    /// A lane that listed and holds no binary still reports its filters,
+    /// rather than dropping them for want of a binary to judge against.
+    #[test]
+    fn a_listed_lane_with_no_binary_reports_its_filters_dead() {
+        let sweep = sweep_with_filters("lane", vec![filter(FilterKind::Skip, "gone_test")], false);
+        let mut ledger = FilterLedger::default();
+        ledger.judge_lane(&sweep, Vec::new());
+        assert_eq!(ledger.dead().len(), 1);
+    }
+
+    /// A non-certifying lane with one binary's unfiltered listing.
+    fn advisory_lane(
+        sweep: &PlannedSweep,
+        existence: Option<&[&str]>,
+        libtest_extra: &[&str],
+    ) -> super::Lanes<Option<super::PreparedLane>> {
+        let b = super::test_binary_for_tests("core", "test", "suite");
+        let mut p = super::PreparedLane::bare(super::LaneEnv::default());
+        p.libtest_extra = libtest_extra.iter().map(|a| (*a).to_owned()).collect();
+        p.resolutions.push(super::PreparedResolution {
+            resolution: None,
+            selection: Vec::new(),
+            binaries: vec![super::PreparedBinary {
+                unit: BinaryUnit::of(&b),
+                binary: b,
+                hash: "h".into(),
+                unlisted: None,
+                selected: Vec::new(),
+                ignored: BTreeSet::new(),
+                benchmarks: Vec::new(),
+                existence: existence.map(|all| super::Existence {
+                    all: all.iter().map(|n| (*n).to_owned()).collect(),
+                    ignored: BTreeSet::new(),
+                }),
+            }],
+        });
+        let mut lanes = super::Lanes::from_sweeps(std::slice::from_ref(sweep), |_, _| None);
+        *lanes.get_mut(LaneIdx::new(0)).unwrap() = Some(p);
+        lanes
+    }
+
+    fn advisory(sweep: &PlannedSweep, lanes: &super::Lanes<Option<super::PreparedLane>>, doctests: bool) -> Vec<String> {
+        let sel = PhaseSelection::for_check(
+            SelectionPhase::Test,
+            std::slice::from_ref(sweep),
+            &[],
+            &FeatureOracle::unavailable(),
+        )
+        .unwrap();
+        super::advisory_dead_filters(std::slice::from_ref(sweep), &sel, lanes, doctests)
+            .into_iter()
+            .map(|d| d.label.to_string())
+            .collect()
+    }
+
+    /// brokkr#48: a non-certifying run judges its skips from the lane's own
+    /// unfiltered listing - the renamed test's skip reports, the live one
+    /// does not, and an `#[ignore]`d name counts as existing.
+    #[test]
+    fn a_partial_run_reports_a_skip_that_matches_no_listed_test() {
+        let sweep = sweep_with_filters(
+            "all",
+            vec![filter(FilterKind::Skip, "renamed_away"), filter(FilterKind::Skip, "still_here")],
+            false,
+        );
+        let dead = advisory(&sweep, &advisory_lane(&sweep, Some(&["mod::still_here_test"]), &[]), false);
+        assert_eq!(dead.len(), 1, "{dead:?}");
+        assert!(dead[0].contains("renamed_away"), "{dead:?}");
+    }
+
+    /// Where the evidence is not sound the filters are unknown, never dead:
+    /// no unfiltered listing, forwarded libtest args (a forwarded `--exact`
+    /// changes what a skip removes), or a serial lane carrying doctests its
+    /// filters also reach.
+    #[test]
+    fn a_partial_run_leaves_filters_unknown_without_sound_evidence() {
+        let sweep = sweep_with_filters("all", vec![filter(FilterKind::Skip, "renamed_away")], false);
+        assert!(advisory(&sweep, &advisory_lane(&sweep, None, &[]), false).is_empty());
+        assert!(advisory(&sweep, &advisory_lane(&sweep, Some(&["other"]), &["--exact"]), false).is_empty());
+        assert!(advisory(&sweep, &advisory_lane(&sweep, Some(&["other"]), &[]), true).is_empty());
+        let unprepared = super::Lanes::from_sweeps(std::slice::from_ref(&sweep), |_, _| None);
+        assert!(advisory(&sweep, &unprepared, false).is_empty());
     }
 
     fn dead_labels(
