@@ -622,12 +622,19 @@ counterparts below has a refusal's):
    with its output closed and print exactly four lines, `xxh128 v<N>
    <hash>`, then `node`, `way` and `relation`, each `<kind> <count> <hash>`,
    every hash 32 lowercase hex digits, every count decimal without a leading
-   zero, every line ending in a newline. brokkr implements `xxh128 v1` only:
-   another algorithm or version fails naming it. A refusal (a file outside
-   digest's domain: unsorted, mixed-kind blocks, inconsistent indexdata) is
-   an exit other than 0 and fails; there is no fallback. The two outputs are
-   equal when their reports are; a difference fails, naming the content
-   hash and every kind line that differs.
+   zero, every line ending in a newline. brokkr implements `xxh128 v1` and
+   `v2`, which share that grammar and differ in what the hashes cover (`v2`
+   adds metadata, `visible`, the header fields, folded into the content
+   hash, and `LocationsOnWays` way coordinates); another algorithm or
+   version fails naming it. A refusal (a file outside digest's domain:
+   unsorted, mixed-kind blocks, inconsistent indexdata) is an exit other
+   than 0 and fails; there is no fallback. The two outputs are equal when
+   their reports are: reports of different versions are a defect, since one
+   CLI digests both, never compared; a difference fails, naming the content
+   hash and every kind line that differs. A pass names the version. A
+   reused CLI report is always the same executable's (its digest is in the
+   reuse key), so of the same version. Moving to `v2` strengthens the
+   equality, so a certification made under `v1` holds for `v1` only.
 
 After every one of these launches, released, whatever it came to, brokkr
 checks without following a link what it could have changed before reading

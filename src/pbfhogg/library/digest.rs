@@ -1,26 +1,32 @@
-//! `pbfhogg digest FILE`'s report, the equality `digest-v1` reads
+//! `pbfhogg digest FILE`'s report, the equality CLI equality reads
 //! (`docs/commands/library.md`, CLI equality): exactly four lines,
 //! `xxh128 v<N> <hex>`, then `node`, `way` and `relation`, each
 //! `<kind> <count> <hex>`, the hex 32 lowercase digits, every line ending in
-//! a newline, nothing else. brokkr implements canonical version 1 of the
-//! `xxh128` algorithm only: any other is refused naming it, never compared,
-//! since a new canonical version means a new content definition.
+//! a newline, nothing else. brokkr implements canonical versions 1 and 2 of
+//! the `xxh128` algorithm, which share that grammar and differ in what the
+//! hashes cover (v2 adds metadata, `visible`, header fields and
+//! `LocationsOnWays` coordinates); any other is refused naming it, never
+//! compared, since a new canonical version means a new content definition.
 
-/// The algorithm and canonical version brokkr compares.
+/// The algorithm brokkr compares, and its canonical versions.
 const ALGORITHM: &str = "xxh128";
-const VERSION: &str = "v1";
+const VERSIONS: [&str; 2] = ["v1", "v2"];
 
 /// The kinds of the per-kind lines, in report order.
 pub(crate) const KINDS: [&str; 3] = ["node", "way", "relation"];
 
-/// A parsed report: the whole-content hash and each kind's count and hash.
+/// A parsed report: its canonical version, the whole-content hash and each
+/// kind's count and hash.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Report {
+    /// `v1` or `v2`.
+    pub(crate) version: String,
     pub(crate) all: String,
     pub(crate) kinds: [(u64, String); 3],
 }
 
-/// Read a report, refusing anything but the four-line `xxh128 v1` shape.
+/// Read a report, refusing anything but the four-line `xxh128 v1` or `v2`
+/// shape.
 pub(crate) fn parse(stdout: &[u8]) -> Result<Report, String> {
     let text = std::str::from_utf8(stdout).map_err(|_| "the report is not UTF-8".to_owned())?;
     let Some(body) = text.strip_suffix('\n') else {
@@ -34,9 +40,10 @@ pub(crate) fn parse(stdout: &[u8]) -> Result<Report, String> {
     let [algorithm, version, all] = head.as_slice() else {
         return Err(format!("line 1 {first:?} is not `<algorithm> v<N> <hash>`"));
     };
-    if *algorithm != ALGORITHM || *version != VERSION {
+    if *algorithm != ALGORITHM || !VERSIONS.contains(version) {
         return Err(format!(
-            "the report is {algorithm} {version}; brokkr implements {ALGORITHM} {VERSION} only"
+            "the report is {algorithm} {version}; brokkr implements {ALGORITHM} {} only",
+            VERSIONS.join(" and ")
         ));
     }
     let all =
@@ -51,7 +58,11 @@ pub(crate) fn parse(stdout: &[u8]) -> Result<Report, String> {
         kinds[i] = parsed
             .ok_or_else(|| format!("line {} {line:?} is not `{kind} <count> <hash>`", i + 2))?;
     }
-    Ok(Report { all, kinds })
+    Ok(Report {
+        version: (*version).to_owned(),
+        all,
+        kinds,
+    })
 }
 
 fn hash(text: &str) -> Option<String> {
@@ -71,7 +82,16 @@ fn count_of(text: &str) -> Option<u64> {
 }
 
 /// Each way `library` and `cli` differ, one line each; empty when equal.
+/// Reports of two canonical versions differ by that alone: one CLI digests
+/// both outputs, so a mismatch is a defect, never compared across versions.
 pub(crate) fn differences(library: &Report, cli: &Report) -> Vec<String> {
+    if library.version != cli.version {
+        return vec![format!(
+            "canonical version: library {ALGORITHM} {}, CLI {ALGORITHM} {}, which one CLI never \
+             reports for two outputs",
+            library.version, cli.version
+        )];
+    }
     let mut out = Vec::new();
     if library.all != cli.all {
         out.push(format!(
@@ -99,22 +119,37 @@ mod tests {
     }
 
     #[test]
-    fn the_four_line_report_parses() {
+    fn the_four_line_report_parses_in_either_version() {
         let r = parse(report(&format!("xxh128 v1 {H}")).as_bytes()).unwrap();
+        assert_eq!(r.version, "v1");
         assert_eq!(r.all, H);
         assert_eq!(r.kinds[0], (12, H.to_owned()));
         assert_eq!(r.kinds[2].0, 0);
+        let r = parse(report(&format!("xxh128 v2 {H}")).as_bytes()).unwrap();
+        assert_eq!(r.version, "v2");
     }
 
     #[test]
     fn another_algorithm_or_version_is_refused_by_name() {
-        let e = parse(report(&format!("xxh128 v2 {H}")).as_bytes()).unwrap_err();
+        let e = parse(report(&format!("xxh128 v3 {H}")).as_bytes()).unwrap_err();
         assert!(
-            e.contains("xxh128 v2; brokkr implements xxh128 v1 only"),
+            e.contains("xxh128 v3; brokkr implements xxh128 v1 and v2 only"),
             "{e}"
         );
         let e = parse(report(&format!("sha256 v1 {H}")).as_bytes()).unwrap_err();
         assert!(e.contains("sha256 v1"), "{e}");
+    }
+
+    #[test]
+    fn reports_of_two_versions_are_a_defect_whatever_their_hashes() {
+        let v1 = parse(report(&format!("xxh128 v1 {H}")).as_bytes()).unwrap();
+        let v2 = parse(report(&format!("xxh128 v2 {H}")).as_bytes()).unwrap();
+        let d = differences(&v1, &v2);
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert!(
+            d[0].contains("library xxh128 v1, CLI xxh128 v2"),
+            "{d:?}"
+        );
     }
 
     #[test]

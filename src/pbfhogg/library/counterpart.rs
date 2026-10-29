@@ -784,7 +784,9 @@ impl Replay<'_> {
             if differences.is_empty() {
                 let [(nodes, _), (ways, _), (relations, _)] = &library.kinds;
                 verdict.note(format!(
-                    "{role}: equal, {nodes} nodes, {ways} ways, {relations} relations"
+                    "{role}: equal under xxh128 {}, {nodes} nodes, {ways} ways, {relations} \
+                     relations",
+                    library.version
                 ));
             } else {
                 verdict.fail(format!("{role} differs:"));

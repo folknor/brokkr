@@ -781,7 +781,10 @@ fn an_equal_counterpart_passes_after_one_replay_and_two_digests() {
     let ids: Vec<&str> = report.results.iter().map(|(_, r)| r.id.as_str()).collect();
     assert_eq!(ids, ["whole", "a.outcome", "brokkr.seal", "brokkr.cli"]);
     let detail = &cli_result(&report).detail;
-    assert!(detail.contains("out-a: equal, 1 nodes"), "{detail}");
+    assert!(
+        detail.contains("out-a: equal under xxh128 v1, 1 nodes"),
+        "{detail}"
+    );
     assert!(detail.contains("declared policy differences: the CLI raises NOFILE"));
     let log = cli_log(&f);
     assert_eq!(log.len(), 3, "{log:?}");
