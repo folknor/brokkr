@@ -54,7 +54,12 @@ paths still resolve against each including project's root.
   which were chosen in Denmark: a dataset that does not contain Denmark may
   lack most of them, and its bench then times a mostly empty selection. The IDs are a request,
   not a guarantee: nothing checks that they exist in the file, and a
-  getparents seed without parents measures little. A list that differs from
+  getparents seed without parents measures little. The built-in getparents
+  way seed `w2080` is such a seed where it was checked: on the europe and
+  planet inputs of 2026-10-28 the built-in list selected two ways and no
+  relations, so `w2080` adds lookup work but no parent (Denmark is
+  unverified). Set `getparents_ids` on a dataset to measure a seed with
+  relation parents there. A list that differs from
   the built-in one keeps its rows apart in `brokkr results --compare` (see
   `brokkr man results`).
 

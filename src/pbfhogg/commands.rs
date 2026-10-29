@@ -266,7 +266,11 @@ const GETID_BENCH_IDS: &[&str] = &[
 /// Built-in ID list for the getparents bench on a dataset without
 /// `getparents_ids`: a subset of `GETID_BENCH_IDS`, fewer because
 /// getparents is a superset operation and more inputs would dominate with
-/// parent-traversal cost. Fixed for the same reason.
+/// parent-traversal cost. Fixed for the same reason: a changed list would
+/// pair unlike rows under one key unless the key moved too. `w2080` had no
+/// relation parent on the europe and planet inputs checked on 2026-10-28, so
+/// there it adds lookup work but selects nothing; a dataset that needs a way
+/// seed with parents configures `getparents_ids`.
 const GETPARENTS_BENCH_IDS: &[&str] = &["n115722", "n115723", "w2080"];
 
 /// The ID argv a getid or getparents bench passes, and the pairing qualifier
