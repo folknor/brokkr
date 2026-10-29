@@ -16,15 +16,12 @@ knows no pbfhogg API semantics, only the identifiers the harness declares
 and the shapes below.
 
 This document is the protocol, binding on both sides. It describes protocol
-version 1, and a harness output it does not allow is refused, never guessed
-at. Version 1 is final: its schema and what brokkr makes of it stay as
-written here, and a later brokkr reads a version 1 document as this one
-does; a change to either comes with a new protocol number. The domains the
-producer defines stay open as they are: the contents of plans and contexts,
-snapshot counter names, marker names, diagnostic kinds and keys, capability
-ids and result details. A library call against its CLI counterpart's timing
-(see Isolation scenarios) needs nothing more from the harness, so its
-arrival does not change version 1.
+version 1. The guarantee is the strict reader: a harness output this
+document does not describe is refused, never guessed at or half read, so a
+harness and a brokkr that disagree on the schema fail loudly. The domains
+the producer defines stay open: the contents of plans and contexts,
+snapshot counter names, held value kinds, marker names, diagnostic kinds
+and keys, capability ids and result details.
 
 ## Usage
 
@@ -39,8 +36,9 @@ brokkr library --all [--dataset NAME] [--snapshot KEY] [--commit REF] [...]
 Bare, builds the harness and lists the scenarios it declares: per scenario
 its id, call count, deadline (and `hotpath` and `isolation` when it is
 declared so) and description, then one line per call (with
-the capabilities its stream claims, and beneath it its CLI counterpart and
-declared policy differences), role and assertion. The listing is data on
+the capabilities its stream claims, and beneath it its CLI counterpart, with
+its scratch flag, an expected refusal and a declared overwrite stance, and
+its declared policy differences), role (a seeded one marked) and assertion. The listing is data on
 stdout; build narration goes where `brokkr man output-channels` says.
 
 With `SCENARIO`, runs that scenario once as a verification (see Running a
@@ -238,12 +236,12 @@ character.
 
 ### Roles
 
-| `source` | `kind` | `owner` | `variant` |
-|---|---|---|---|
-| `dataset` | `pbf` | forbidden | required |
-| `generated` | `pbf`, `file`, `directory` | forbidden | forbidden |
-| `output` | `pbf`, `file`, `directory` | required | forbidden |
-| `scratch` | `directory` | required | forbidden |
+| `source` | `kind` | `owner` | `variant` | `seeded` |
+|---|---|---|---|---|
+| `dataset` | `pbf` | forbidden | required | forbidden |
+| `generated` | `pbf`, `file`, `directory` | forbidden | forbidden | forbidden |
+| `output` | `pbf`, `file`, `directory` | required | forbidden | optional |
+| `scratch` | `directory` | required | forbidden | forbidden |
 
 - A `dataset` role is a dataset file of the run in the named variant: read
   only, and shareable between calls. `variant` is a variant name
@@ -253,9 +251,21 @@ character.
 - An `output` role is written by its owner; a `scratch` role is its owner's
   run scratch. `owner` is a call id of this scenario, exactly one, so no two
   calls write one path.
-- `kind: pbf` declares a PBF file; one a counterpart's output placeholder
-  names must also be in `pbfhogg digest`'s domain (sorted, see CLI
-  equality), or its comparison fails.
+- A `seeded` output role (`seeded: true`; default false) starts as its
+  **seed**, which brokkr writes before the launch, so its call meets an
+  existing destination: replacing one, or refusing to. The seed of role R
+  is `brokkr-library-seed-v1 R` and a newline: a regular file holding
+  those bytes for a `file` or `pbf` role, a directory holding only the
+  regular file `seed` with those bytes for a `directory` role. It is no PBF;
+  the role id in it makes one member's seed restored in another's place
+  visible. A seed is reserved content: no call publishes a destination
+  byte-identical to its role's seed (producer obligation), so a destination
+  that holds it holds no published generation: it was never replaced, or a
+  rollback put the seed back.
+- `kind: pbf` declares a PBF file; one an output-expecting counterpart's
+  output placeholder names must also be in `pbfhogg digest`'s domain
+  (sorted, see CLI equality), or its comparison fails. A refusal
+  counterpart digests nothing.
 
 ## Running a scenario
 
@@ -274,8 +284,8 @@ lays it out before the launch:
 - `artefacts/`, empty: `BROKKR_HARNESS_ARTEFACT_DIR`;
 - `roles/`: each `output`, `scratch` and `generated` role is bound to
   `roles/<role id>`. Output roles of every kind and generated file and PBF
-  roles start absent; scratch roles and generated directory roles start as
-  empty directories.
+  roles start absent, a seeded output role as its seed; scratch roles and
+  generated directory roles start as empty directories.
 
 Dataset roles bind the resolved dataset file. Every bound path is absolute
 and canonical, the run directory's included.
@@ -323,12 +333,16 @@ removed from every other (see Profiling a scenario).
 - **Output.** stdout and stderr stay empty on every exit; any byte fails
   the run, and an output still open after the harness exited cannot be
   shown empty and fails too. Diagnostics go through `host::Diagnostics`
-  into the call documents.
+  into the documents: a call's into its call document, setup's and the
+  harness's own into `scenario.json`.
 - **Producer obligations**, which brokkr does not check: the harness reads
   only the request, the bound input roles and the private directory, and
   writes only its artefact directory, the roles its calls or setup own, the
   private directory and, in a profiled run, its hotpath report; setup is deterministic and runs before any call;
-  the call schedule honours ownership; it sets its own soft `RLIMIT_NOFILE`
+  the call schedule honours ownership; a call changes its output roles only
+  through its publications, and publications whose members share a role
+  run one after the other in ordinal order, rollback included (disjoint
+  ones are unconstrained); no call publishes its role's seed; it sets its own soft `RLIMIT_NOFILE`
   where a scenario's plan says so, before any library work, and reports it
   in the call context; it never resets `SIGPIPE` to its default; and no
   process it started reads or writes the run directory after it exits.
@@ -344,8 +358,11 @@ other entry, a symlink, a special file, or a document over 16 MiB fails the
 run. No file is followed through a symlink. Every document follows
 Documents above.
 
-**`scenario.json`**: `protocol`, `scenario` (the scenario's id), `plan` and
-`assertions` (the scenario-level results).
+**`scenario.json`**: `protocol`, `scenario` (the scenario's id), `plan`,
+`assertions` (the scenario-level results) and `diagnostics`, setup's and the
+harness's own events (never a call's), in the call documents' shape. Its
+collection closes after setup and every call document; its `at_us` readings
+are held to their range only, since no call reading anchors them.
 
 **`calls/<id>.json`**:
 
@@ -362,18 +379,37 @@ Documents above.
   `{"status": "error", "kind": ID, "message": ONE_LINE}` (an identifier,
   and 0 to 1000 bytes). Reported; the harness's assertions judge it.
 - `publications`: every publication the call decided, in order, each
-  `{"ordinal", "decision", "installed"}`: ordinals 1, 2, ... without gaps;
+  `{"ordinal", "decision", "members"}`: ordinals 1, 2, ... without gaps;
   `decision` `authorized`, `refused_cancelled` or `refused_error`;
-  `installed` a boolean, never true for a refused one.
+  `members` the destinations it covers, at least one, each
+  `{"role", "effect"}`: `role` an output role this call owns, at most once
+  per publication (an output set is one publication of several members, an
+  output directory one member of a `directory` role); `effect` what that
+  attempt left at the destination when it finished, relative to the
+  destination just before it:
+  - `none`: as it was, a rollback to absence included;
+  - `installed`: the new generation is there, an incomplete rollback
+    included;
+  - `restored`: the previous generation was moved aside and put back;
+  - `displaced`: the previous generation was moved aside and not put back,
+    so the destination is absent. The moved-aside generation lives in the
+    private directory and goes with the release; brokkr never sees it.
+
+  Every member of a refused publication is `none`. See Publications on
+  disk for what brokkr holds them against.
 - `cancel`: `null`, or what `Invocation::cancel()` returned:
   `{"result": "before_decision", "ordinal": K}` (K a `refused_cancelled`
   publication), `{"result": "after_decision", "ordinal": K}` (K an
   `authorized` one), or `{"result": "no_publication_pending"}`. After a
   cancel's K, every publication is refused. brokkr checks this consistency
   and nothing else of order; order judgments are the harness's assertions.
-- `seal`: `{"state": "sealed", "outstanding_blocks": 0}`,
-  `{"state": "outstanding", "outstanding_blocks": N}` (N at least 1), or
-  `{"state": "refused", "reason": ONE_LINE}` (1 to 1000 bytes).
+- `seal`: `{"state": "sealed"}`, `{"state": "outstanding", "held":
+  {KIND: N, ...}}`, or `{"state": "refused", "reason": ONE_LINE}` (1 to 1000
+  bytes). `held` is the census at the seal attempt: every value the caller
+  still held (a session, a buffer, a bound output, an escaped writer, ...),
+  each counted once under one producer-defined kind, an identifier, N 1 to
+  2^64-1; at least one kind. The harness keeps the census it took then,
+  although it drops those values before writing the document.
 - `snapshot`: when sealed, the call's final counters, name to an integer
   0 to 2^64-1, each name 1 to 400 bytes without `=` or a newline (so its
   sealing record fits a FIFO line); otherwise `null`.
@@ -384,12 +420,23 @@ Documents above.
   invocation); anything else fails the run. The call stream says how brokkr
   holds it against the FIFO.
 - `context`: a nonempty object, every effective per-call setting.
-- `diagnostics`: the call's captured `host::Diagnostics` events, each
-  `{"kind", "key", "message", "truncated"}`. `kind` is an identifier, the
-  event kind's name in lower case (any kind, so a new one needs no brokkr
+- `diagnostics`: the call's captured `host::Diagnostics` events, in capture
+  order, each `{"at_us", "kind", "key", "message", "truncated"}`. `at_us`
+  is `MarkerFifo::now_us()` when it was captured, 0 to 2^63-1, never before
+  `entry_us` (an earlier event is setup's, which goes in `scenario.json`),
+  and `at_us - entry_us` within the process wall brokkr observed plus one
+  second, as for the other readings. `kind` is an identifier, the event
+  kind's name in lower case (any kind, so a new one needs no brokkr
   change); `key` is 1 to 200 bytes; `message` is at most 4000 bytes, and a
   longer one is cut by the harness at a character boundary with `truncated`
-  true. brokkr prints them and never judges them.
+  true. brokkr prints them, marking one captured strictly after `seal_us` as
+  after the seal (equal readings establish no order), and never judges
+  them. **The cut-off is the document**: a call's values can still report
+  after its seal (a writer dropping, an unused output cleaning up), so the
+  harness drops every value of the call, waits for every callback
+  attributable to it to return, then closes and snapshots the call's
+  collection, and only then writes the call document. An attributable event
+  that misses that is a producer defect; it never moves to `scenario.json`.
 - `assertions`: this call's results.
 
 **Results**: `{"id", "status", "detail"}`, `status` `pass`, `fail` or
@@ -398,6 +445,20 @@ documents the results are exactly the inventory: one per declared
 assertion, in `scenario.json` for `call: null`, else in its call's
 document. A missing, duplicate, undeclared or misplaced result fails the
 run, naming it.
+
+**Publications on disk.** Once the run directory passed its layout check,
+brokkr replays each output role of each call from its initial state
+(absent, or its seed) through the members naming it, in ordinal order:
+`installed` leaves a published generation, `restored` and `displaced`
+need a destination to move aside (one reported on an absent destination
+fails), `displaced` leaves it absent, `none` leaves it alone. The state that
+leaves must be what `roles/<role>` holds: absent; byte-identical to its
+seed; or a published generation, present, of the role's kind and not its
+seed. Any other fails the run, naming the call and the role. This proves
+the destination is in the state the effects describe, never which
+generation a published one holds: that a restore after an earlier
+installation put back the right generation, and that a displaced
+generation's backup survived, are the harness's assertions to make.
 
 **Plan and context** are the harness's to define; brokkr interprets
 neither. Each stays in a plain value domain: objects with unique keys,
@@ -480,7 +541,7 @@ next and the last to `return_us`; the tail is its markers stamped after
 ## CLI equality
 
 A call may declare the pbfhogg CLI command whose outputs must equal its
-own:
+own, or which must refuse the same input as it does:
 
 ```
 {"id": "a", "label": "cat input -> out-a",
@@ -495,8 +556,9 @@ own:
   dataset role or a generated `file` or `pbf` role; `{"files_in": ROLE}`, every
   entry of a generated `directory` role, one argument each, sorted by the
   bytes of its name; `{"output": ROLE}`, an `output` role of kind `pbf` this
-  call owns, for which brokkr passes a fresh path of its own and compares
-  the two files. A placeholder is the path alone: the argv spells any flag
+  call owns, for which brokkr passes a path of its own, absent or holding
+  the role's seed as the call's destination did, and compares the two
+  files. A placeholder is the path alone: the argv spells any flag
   before it (`"-o"`). At least one output placeholder, none twice.
 - A literal is 1 to 1000 bytes without a control character, and is refused
   when it holds `/`, is `.`, `..` or `--`, is `@brokkr-private-dir@`, or is
@@ -508,6 +570,21 @@ own:
   it reads and writes exactly its placeholders and its private directory.
 - `scratch` (default false): the command writes run scratch, so `--tmp-dir`
   is negotiated for it.
+- `expect` (default `output`): `output` needs the replay to exit 0 with
+  every output equal to the library's (below); `refusal` needs the call and
+  the CLI both to refuse and publish nothing (see Refusal counterparts), and
+  requires `exit`.
+- `exit`: with `expect: "refusal"` only, the exit status the CLI refuses
+  with, 2 to 127. Never 0 or 1, which pbfhogg reserves for a completed
+  command's answer, and never 128 and up, the band a signal's status takes
+  (pbfhogg exits 130 or 143 after a SIGINT or SIGTERM it caught).
+- `overwrite` (default: negotiated): `true` passes `--overwrite` and needs
+  the CLI to accept it (if not, the replay fails without running); `false`
+  never passes it; absent, brokkr negotiates it as for every pbfhogg launch
+  (`brokkr man pbfhogg`, Output overwrite), so a counterpart meant to refuse
+  an existing seeded destination says `false`. With `false`, that no argv
+  option or combination grants replacement either is the producer's
+  obligation.
 - `policy_differences` (default none): one-line texts, each how the CLI's
   process policy differs from the call's. brokkr prints them with the
   listing and the result and never judges them.
@@ -515,7 +592,8 @@ own:
 **The replay.** After the harness's documents are read, whatever its other
 results, and only when the run directory passed its layout check, brokkr
 replays each call's counterpart, in describe order, with the CLI of the
-same tree:
+same tree; these are the steps for `expect: "output"` (Refusal
+counterparts below has a refusal's):
 
 1. Each library output an output placeholder names must be a regular file
    at `roles/<role>`; one that is absent or of another type fails the result
@@ -524,7 +602,8 @@ same tree:
    directory of regular files only, at least one, every name UTF-8; else the
    result is `unevaluated`, nothing replayed.
 3. brokkr makes `replay-<call>/` in the run directory holding `cwd/` and
-   `outputs/`, both empty, and runs the argv in `cwd/` with each output
+   `outputs/`, both empty but for the seed of each seeded output role at
+   `outputs/<role>`, and runs the argv in `cwd/` with each output
    placeholder bound to `outputs/<role>`, through the same flag negotiation
    and reservation as every pbfhogg launch (`brokkr man pbfhogg`, Output
    overwrite, and Launch reservations and the private directory): the
@@ -550,7 +629,8 @@ anything below it again: the run directory is still a directory (if not,
 the run stops there and nothing in it is read or written, evidence
 included); `replay-<call>/` holds exactly `cwd/` (the same directory, still
 empty) and `outputs/` (only the declared output names, each a regular
-file); each library output is still a regular file. A breach fails that
+file); each library output is still a regular file (for a refusal, the
+library side as step 1 of Refusal counterparts found it). A breach fails that
 result, and every later counterpart is `unevaluated`, nothing more
 launched. (The release itself, which runs only once no process holds the
 lease, removes the launch's private directory by the identity the lease
@@ -572,11 +652,37 @@ counterpart started touches the run directory after it exits (pbfhogg's
 CLI starts no helper process).
 
 `<call>/brokkr.cli` is `pass` when every output is equal (its detail lists
-each with its counts), `fail` on the first defect above (every defect found
-stays in its detail), and `unevaluated` when nothing could be replayed: the
-layout check failed, an input was missing, or an earlier counterpart left a
-breach. Declared policy differences close its detail. The run fails on
-anything but `pass`.
+each with its counts) or the refusal held, `fail` on the first defect above
+(every defect found stays in its detail), and `unevaluated` when nothing
+could be replayed: the layout check failed, an input was missing, or an
+earlier counterpart left a breach. Declared policy differences close its
+detail. The run fails on anything but `pass`.
+
+**Refusal counterparts.** A counterpart with `expect: "refusal"` is judged
+whole-call, library side first, nothing digested:
+
+1. The call returned an error (`ok` fails; so does `cancelled`, since the
+   CLI has no cancel), no member of any of its publications was left
+   `installed`, and every output role the call owns, not only those its
+   placeholders name, is in its initial state on disk: absent, or
+   byte-identical to its seed. Any defect fails the result without a
+   replay.
+2. The replay runs as in step 3 above and must end `Exited` with the
+   declared `exit`; another status fails, and so does a signal or the
+   deadline, which are never a refusal.
+3. After its release, the checks after every launch run (above), and the
+   library side must still be as step 1 found it, `roles/` still the
+   directory it was: either change is a breach. Then every
+   `outputs/<role>` must still be in its initial state, absent or its
+   seed, else the result fails (the CLI changed a destination: a failed
+   refusal, not a breach).
+
+The detail on a pass says so with the exit and the first nonblank line of
+the CLI's stderr. The status proves that the CLI refused, never why: exit 2
+is also a usage error (clap's), so that the CLI refused the same input for
+the reason the call did is the producer's obligation. Like every check
+here it sees final states only: a write undone before exit (publish, then
+put the old bytes back) passes.
 
 ## The verdict
 
@@ -587,7 +693,8 @@ directory, still empty), `artefacts/` and `roles/`, and in a profiled run
 directory went with the lease); in `roles/` only bound role names,
 each absent or of its kind (a regular file for `file` and `pbf`, a
 directory for `directory`), whatever its source, since a call that is
-cancelled or fails before publishing leaves its output absent. An entry
+cancelled or fails before publishing leaves its output in its initial
+state, absent or its seed. An entry
 that is not the directory it should be (a symlink in place of the run
 directory itself, `cwd/`, `roles/` or `artefacts/`) is a failure and is
 never traversed (in place of the run directory, nothing below it is read
@@ -604,7 +711,8 @@ in the run directory is read or written: some process may still change
 it), a layout breach, any output, a bad exit or the deadline, a FIFO record
 of an undeclared call, a profiled process's missing or invalid report, an
 invalid or
-incomplete artefact tree, an exit inconsistent with the harness's own
+incomplete artefact tree, publications that disagree with the output roles
+on disk, an exit inconsistent with the harness's own
 results (0 with a result that is not `pass`, 1 with none), or any result
 that is not `pass`. `unevaluated` fails exactly as `fail` does; the report
 keeps them apart.
@@ -671,10 +779,11 @@ identifies what it ran:
   XXH3-128 of the link's raw target bytes). Nothing is followed through a
   link; any other entry, or an entry not of the role's kind, cannot be
   identified and fails the process;
+- each seeded output role's seed recipe, `seed-v1:<kind>`;
 - the features the harness was built with.
 
 Every process must agree with the first on the plan, each call's context,
-the generated and dataset identities and the features; one that does not
+the generated and dataset identities, the seeds and the features; one that does not
 fails, naming the first difference (a field of the plan or a context, or a
 role), and its kept directory's `evidence/baseline.txt` holds the first
 process's identity and documents beside its own, since the first
@@ -686,12 +795,16 @@ read it.
 earlier process of the same measurement passed under is not replayed: the
 CLI executable's XXH128, the argv as declared (placeholders by role, never
 resolved paths), the identity of every role an `input` or `files_in`
-placeholder names, and the scratch flag (the initial output state is
-always absent, a fresh path, so it is a constant of the key). Its
+placeholder names, the scratch flag, the expectation with a refusal's exit,
+the overwrite stance, and the seed recipe of every seeded output
+placeholder (an output's state is otherwise absent at a fresh path, so a
+constant of the key). Its
 `replay-<call>/` is still made, `cwd/` and an empty `outputs/`, every
 library output is still digested there and compared with the reused report,
 and every check after a launch runs as for a replay (`outputs/` must stay
-empty). The result's detail says which process's digests it reused.
+empty). A reused refusal launches nothing and makes no `replay-<call>/`;
+its library side is judged as always. The result's detail says which
+process's replay it reused.
 
 **The rows.** When every process passed, brokkr stores one group of rows
 under one uuid, in one transaction:
@@ -710,7 +823,8 @@ chosen process is the fastest, ties to the lowest index. Every row
 carries `meta.library.plan` (the plan digest), `meta.library.iteration`
 (the chosen index) and `meta.library.identity`, the identity above as one
 canonical JSON text (the plan digest, each call's context digest, the
-dataset and generated identities, the features); a call row adds
+dataset and generated identities, the features, and the seeds when a role
+is seeded); a call row adds
 `meta.library.context`, its context digest. The canonical plan and context
 documents are stored once each, by digest, beside the rows. The scenario
 row is written last, so it is the group's newest: what `brokkr results`
@@ -721,7 +835,7 @@ session. `brokkr results <uuid>` shows every row of the group in full.
 results`, `--compare`), so a library row pairs with another exactly when
 everything a row of its command pairs on agrees and so does the identity:
 same plan, same contexts, same dataset and generated identities, same
-features. The commit is never part of it. A row that does not pair is
+seeds, same features. The commit is never part of it. A row that does not pair is
 followed by a line naming the other side's latest row of the same command,
 mode, input, captured environment and build, and where its identity first
 differs from it (a plan field, a call's context field, a role or the

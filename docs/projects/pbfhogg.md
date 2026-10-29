@@ -36,7 +36,10 @@ writes the same scratch file, and a killed staged write (the merged diff
 cache, the indexed PBF a download generates) leaves its partial file for the
 retry. So brokkr passes `--overwrite` on every pbfhogg invocation that writes
 an output brokkr owns - measured commands, the suite, the benches and every
-verify check - and on nothing that only reads.
+verify check - and on nothing that only reads. The one exception is a
+`brokkr library` CLI counterpart that declares its own `overwrite` stance
+(`brokkr man library`, CLI equality): `true` requires the flag, `false`
+never passes it.
 
 Old pbfhogg commits, which `--commit` baselines build, predate the flag and
 reject it as an unknown argument. The flag is therefore passed only when the
@@ -62,7 +65,8 @@ build from a `PbfArgv` (`src/pbfhogg/argv.rs`), the argv and what it reads,
 writes and scratches built by the same calls: a path goes in as an input, an
 output, a directory output or an extract config with the outputs it names, and
 only arguments naming no path go in bare. The overwrite decision follows from
-that (an argv with outputs negotiates `--overwrite` unless it forces its own),
+that (an argv with outputs negotiates `--overwrite` unless it forces its own
+or declares its stance, as a library counterpart may),
 so the typed commands' arms and the hand-built verify and bench argvs decide it
 the same way. A measured plan carries that one argv value: dry run prints it,
 and the runner resolves the same value through the handle.

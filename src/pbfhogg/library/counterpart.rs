@@ -15,10 +15,12 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use super::artefact::{self, Outcome, Status};
-use super::describe::{Call, Cli, RoleSource, Scenario, Token};
+use super::artefact::{self, CallDoc, CallOutcome, Effect, Outcome, Status};
+use super::describe::{Call, Cli, Expect, RoleKind, RoleSource, Scenario, Token};
 use super::digest;
+use super::publication;
 use super::run::{CWD_DIR, ROLES_DIR, printable};
+use super::seed::{self, State};
 use crate::measure::Supervised;
 use crate::pbfhogg::argv::PbfArgv;
 use crate::pbfhogg::binary::{PbfhoggBinary, RunScope};
@@ -76,25 +78,37 @@ pub(crate) struct Reusing<'a> {
     pub(crate) inputs: &'a BTreeMap<String, String>,
 }
 
-/// The reuse key of `counterpart` (R12): the CLI executable's XXH128, the
-/// argv as declared (placeholders by role, never resolved paths), the
-/// identity of every role an input or `files_in` placeholder names, and
-/// the scratch flag. The initial output state is always absent, a fresh
-/// brokkr path, so it is a constant of the key. `None` when an input has no
-/// identity, which never reuses.
+/// The reuse key of `counterpart`: the CLI executable's XXH128, the argv as
+/// declared (placeholders by role, never resolved paths), the identity of
+/// every role an input or `files_in` placeholder names, the scratch flag,
+/// the expectation (a refusal's exit included), the overwrite stance, and
+/// the seed recipe of every seeded output placeholder. An output's initial
+/// state is otherwise absent at a fresh brokkr path, so it is a constant of
+/// the key. `None` when an input has no identity, which never reuses.
 fn reuse_key(
     cli: &PbfhoggBinary,
+    scenario: &Scenario,
     counterpart: &Cli,
     inputs: &BTreeMap<String, String>,
 ) -> Option<String> {
     let mut key = format!("cli {}\n", cli.digest());
     for token in &counterpart.argv {
         key.push_str(&format!("argv {}\n", token.show()));
-        if let Token::Input(role) | Token::FilesIn(role) = token {
-            key.push_str(&format!("input {role} {}\n", inputs.get(role)?));
+        match token {
+            Token::Input(role) | Token::FilesIn(role) => {
+                key.push_str(&format!("input {role} {}\n", inputs.get(role)?));
+            }
+            Token::Output(role) => {
+                if let Some(r) = scenario.roles.iter().find(|r| r.id == *role && r.seeded()) {
+                    key.push_str(&format!("seed {role} {}\n", seed::recipe(r.kind)));
+                }
+            }
+            Token::Literal(_) => {}
         }
     }
     key.push_str(&format!("scratch {}\n", counterpart.scratch));
+    key.push_str(&format!("expect {}\n", counterpart.expect.show()));
+    key.push_str(&format!("overwrite {:?}\n", counterpart.overwrite));
     Some(key)
 }
 
@@ -109,15 +123,17 @@ pub(crate) struct Equality {
 /// Replay each counterpart of `scenario` and compare. `bindings` maps every
 /// role to its bound path; `layout_ok` says the run directory passed its
 /// layout check after the harness (nothing is replayed otherwise, so no
-/// role entry is opened unchecked). With `reusing`, a counterpart whose
-/// reuse key matches an earlier iteration's is not replayed: its CLI
-/// reports are that iteration's, and the library outputs are digested as
-/// always.
+/// role entry is opened unchecked); `docs` holds each call's document, by
+/// call, which a refusal's library side is judged from. With `reusing`, a
+/// counterpart whose reuse key matches an earlier iteration's is not
+/// replayed: its CLI side is that iteration's, and the library side is
+/// judged as always.
 pub(crate) fn judge(
     cli: &PbfhoggBinary,
     scenario: &Scenario,
     run_dir: &Path,
     bindings: &BTreeMap<String, PathBuf>,
+    docs: &BTreeMap<&str, &CallDoc>,
     layout_ok: bool,
     mut reusing: Option<Reusing<'_>>,
 ) -> Result<Equality, Stop> {
@@ -132,7 +148,7 @@ pub(crate) fn judge(
             verdict.unevaluated("not replayed: the run directory failed its layout check".into());
         } else if let Some(why) = &breached {
             verdict.unevaluated(format!("not replayed: {why}"));
-        } else {
+        } else if let Some(doc) = docs.get(call.id.as_str()) {
             let replay = Replay {
                 cli,
                 scenario,
@@ -140,10 +156,11 @@ pub(crate) fn judge(
                 counterpart,
                 run_dir,
                 bindings,
+                doc,
             };
             let key = reusing
                 .as_ref()
-                .and_then(|r| reuse_key(cli, counterpart, r.inputs));
+                .and_then(|r| reuse_key(cli, scenario, counterpart, r.inputs));
             let cached = match (&reusing, &key) {
                 (Some(r), Some(key)) => r
                     .reuse
@@ -175,6 +192,8 @@ pub(crate) fn judge(
                     },
                 );
             }
+        } else {
+            verdict.unevaluated(format!("not replayed: call {} has no document", call.id));
         }
         equality
             .results
@@ -232,14 +251,28 @@ struct Replay<'a> {
     counterpart: &'a Cli,
     run_dir: &'a Path,
     bindings: &'a BTreeMap<String, PathBuf>,
+    /// The call's document.
+    doc: &'a CallDoc,
 }
 
 /// What one counterpart came to: a breach that ends every later replay,
-/// and, when its replay ran and every output digested, the CLI reports by
-/// output role.
+/// and, when its replay ran and passed its checks, the CLI reports by
+/// output role (none for a refusal).
 type Ran = (Option<String>, Option<BTreeMap<String, digest::Report>>);
 
 impl Replay<'_> {
+    /// The output roles the counterpart's placeholders name, in argv order.
+    fn outputs(&self) -> Vec<&str> {
+        self.counterpart
+            .argv
+            .iter()
+            .filter_map(|t| match t {
+                Token::Output(role) => Some(role.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The replay and its digests, or with `cached` (the iteration whose CLI
     /// reports are reused, and those reports) the library digests alone.
     fn run(
@@ -248,15 +281,10 @@ impl Replay<'_> {
         made: &mut Vec<String>,
         cached: Option<(usize, BTreeMap<String, digest::Report>)>,
     ) -> Result<Ran, Stop> {
-        let outputs: Vec<&str> = self
-            .counterpart
-            .argv
-            .iter()
-            .filter_map(|t| match t {
-                Token::Output(role) => Some(role.as_str()),
-                _ => None,
-            })
-            .collect();
+        if let Expect::Refusal { exit } = self.counterpart.expect {
+            return self.refusal(exit, verdict, made, cached.map(|(i, _)| i));
+        }
+        let outputs = self.outputs();
         let name = replay_dir_name(&self.call.id);
         let replay = self.run_dir.join(&name);
         let cwd = replay.join(CWD_DIR);
@@ -286,11 +314,7 @@ impl Replay<'_> {
         };
 
         made.push(name);
-        let created = [&replay, &cwd, &out_dir]
-            .into_iter()
-            .try_for_each(std::fs::create_dir);
-        if let Err(e) = created {
-            verdict.fail(format!("cannot lay out {}: {e}", replay.display()));
+        if !self.lay_out(&replay, &outputs, verdict) {
             return Ok((None, None));
         }
         let cwd_identity = identity(&cwd).map_err(|e| Stop::Unsafe(e.to_string()))?;
@@ -336,6 +360,184 @@ impl Replay<'_> {
             None,
             verdict,
         )
+    }
+
+    /// Make `replay-<call>/` with an empty `cwd/` and `outputs/`, and in
+    /// `outputs/` the seed of every seeded role among `outputs`, so the CLI
+    /// meets the destination the call met. Whether it was laid out (the
+    /// result settled when not).
+    fn lay_out(&self, replay: &Path, outputs: &[&str], verdict: &mut Verdict) -> bool {
+        let out_dir = replay.join(OUTPUTS_DIR);
+        let created = [replay, replay.join(CWD_DIR).as_path(), out_dir.as_path()]
+            .into_iter()
+            .try_for_each(std::fs::create_dir)
+            .and_then(|()| {
+                outputs.iter().try_for_each(|role| {
+                    if self.seeded(role) {
+                        seed::write(&out_dir.join(role), RoleKind::Pbf, role)
+                    } else {
+                        Ok(())
+                    }
+                })
+            });
+        match created {
+            Ok(()) => true,
+            Err(e) => {
+                verdict.fail(format!("cannot lay out {}: {e}", replay.display()));
+                false
+            }
+        }
+    }
+
+    fn seeded(&self, role: &str) -> bool {
+        self.scenario
+            .roles
+            .iter()
+            .any(|r| r.id == role && r.seeded())
+    }
+
+    /// The state a CLI output destination starts in.
+    fn initial(&self, role: &str) -> State {
+        if self.seeded(role) {
+            State::Seed
+        } else {
+            State::Absent
+        }
+    }
+
+    /// A counterpart that expects a refusal: the call returned an error and
+    /// left every output role it owns as it started, no member installed;
+    /// then the CLI, its seeded outputs laid out, must exit `exit` and leave
+    /// every output destination as it started. Nothing is digested. With
+    /// `cached` (the iteration that already saw this refusal under the same
+    /// reuse key) only the library side is judged.
+    fn refusal(
+        &self,
+        exit: u8,
+        verdict: &mut Verdict,
+        made: &mut Vec<String>,
+        cached: Option<usize>,
+    ) -> Result<Ran, Stop> {
+        root(self.run_dir)?;
+        self.library_refused(verdict);
+        if verdict.settled() {
+            return Ok((None, None));
+        }
+        if let Some(iteration) = cached {
+            verdict.note(format!(
+                "CLI refusal reused from iteration {iteration}: the same executable, argv, \
+                 inputs, expectation and seeds"
+            ));
+            return Ok((None, Some(BTreeMap::new())));
+        }
+        let outputs = self.outputs();
+        let name = replay_dir_name(&self.call.id);
+        let replay = self.run_dir.join(&name);
+        let cwd = replay.join(CWD_DIR);
+        let out_dir = replay.join(OUTPUTS_DIR);
+        let Some(argv) = self.argv(&out_dir, verdict) else {
+            return Ok((None, None));
+        };
+        made.push(name);
+        if !self.lay_out(&replay, &outputs, verdict) {
+            return Ok((None, None));
+        }
+        let cwd_identity = identity(&cwd).map_err(|e| Stop::Unsafe(e.to_string()))?;
+        let scope = RunScope {
+            run_dir: self.run_dir,
+            cwd: &cwd,
+            deadline: std::time::Duration::from_secs(u64::from(self.scenario.deadline_s)),
+            stdout_kept: REPLAY_OUTPUT_KEPT,
+        };
+        match self.cli.run_in(argv, &scope) {
+            Supervised::Unsafe(e) => return Err(self.unsafe_launch("replay", &e)),
+            Supervised::Interrupted => return Err(Stop::Interrupted),
+            Supervised::Failed(e) => verdict.fail(format!("the counterpart did not run: {e}")),
+            Supervised::Ran(capture) => match refused_ending(&capture.captured, exit) {
+                Ok(note) => verdict.note(note),
+                Err(why) => verdict.fail(format!("the counterpart {why}")),
+            },
+        }
+        if let Some(breach) = self.validate(&replay, cwd_identity, &outputs, &[], true)? {
+            return Ok((Some(breach), None));
+        }
+        // Something changed under the library side since it was judged: a
+        // breach, since only the counterpart ran in between. `roles/` is
+        // established as the directory first, never read through a link.
+        if let Err(e) = roles_dir(self.run_dir) {
+            return Ok((Some(format!("after a launch, {e}")), None));
+        }
+        let mut after = Verdict::default();
+        self.library_refused(&mut after);
+        if after.settled() {
+            return Ok((
+                Some(format!(
+                    "after the replay, the library side changed: {}",
+                    after.lines.join("; ")
+                )),
+                None,
+            ));
+        }
+        for role in &outputs {
+            let initial = self.initial(role);
+            match seed::state(&out_dir.join(role), RoleKind::Pbf, role) {
+                Ok(found) if found == initial => {}
+                Ok(found) => verdict.fail(format!(
+                    "the counterpart left {role} {}, not {} as it started",
+                    found.name(),
+                    initial.name()
+                )),
+                Err(e) => verdict.fail(e),
+            }
+        }
+        if verdict.settled() {
+            return Ok((None, None));
+        }
+        Ok((None, Some(BTreeMap::new())))
+    }
+
+    /// The library side of a refusal: the call returned an error, no member
+    /// of its publications was left installed, and every output role it
+    /// owns is in its initial state on disk.
+    fn library_refused(&self, verdict: &mut Verdict) {
+        match &self.doc.outcome {
+            CallOutcome::Error { .. } => {}
+            CallOutcome::Ok => verdict.fail(
+                "the call returned ok, but its counterpart expects a refusal".to_owned(),
+            ),
+            CallOutcome::Cancelled => verdict.fail(
+                "the call was cancelled: a refusal counterpart needs a call that returned an \
+                 error, since the CLI has no cancel"
+                    .to_owned(),
+            ),
+        }
+        for (i, publication) in self.doc.publications.iter().enumerate() {
+            for (role, effect) in &publication.members {
+                if *effect == Effect::Installed {
+                    verdict.fail(format!("publication {} installed {role}", i + 1));
+                }
+            }
+        }
+        let roles = match roles_dir(self.run_dir) {
+            Ok(roles) => roles,
+            Err(e) => {
+                verdict.fail(e);
+                return;
+            }
+        };
+        for role in publication::outputs_of(self.scenario, &self.call.id) {
+            let initial = publication::initial(role);
+            match seed::state(&roles.join(&role.id), role.kind, &role.id) {
+                Ok(found) if found == initial => {}
+                Ok(found) => verdict.fail(format!(
+                    "the library left {} {}, not {} as it started",
+                    role.id,
+                    found.name(),
+                    initial.name()
+                )),
+                Err(e) => verdict.fail(e),
+            }
+        }
     }
 
     /// A counterpart whose CLI reports iteration `iteration` already made
@@ -505,6 +707,9 @@ impl Replay<'_> {
         }
         if self.counterpart.scratch {
             argv = argv.scratch(out_dir);
+        }
+        if let Some(overwrite) = self.counterpart.overwrite {
+            argv = argv.overwrite_stance(overwrite);
         }
         Some(argv)
     }
@@ -679,9 +884,15 @@ fn root(run_dir: &Path) -> Result<(), Stop> {
 /// The kind of `roles/<role>`, `roles/` itself established as a directory
 /// first, nothing followed. The caller has checked the root.
 fn role_kind(run_dir: &Path, role: &str) -> Result<Option<std::fs::FileType>, String> {
+    entry_kind(&roles_dir(run_dir)?.join(role))
+}
+
+/// `roles/`, established as a directory, never followed. The caller has
+/// checked the root.
+fn roles_dir(run_dir: &Path) -> Result<PathBuf, String> {
     let roles = run_dir.join(ROLES_DIR);
     match entry_kind(&roles)? {
-        Some(kind) if kind.is_dir() => entry_kind(&roles.join(role)),
+        Some(kind) if kind.is_dir() => Ok(roles),
         _ => Err(format!("{} is no longer a directory", roles.display())),
     }
 }
@@ -696,19 +907,53 @@ fn identity(path: &Path) -> std::io::Result<(u64, u64)> {
     Ok((meta.dev(), meta.ino()))
 }
 
+/// The captured stderr as a detail suffix, raw: the report frames and
+/// escapes a result's detail line by line.
+fn stderr_suffix(captured: &crate::output::CapturedOutput) -> String {
+    let text = String::from_utf8_lossy(&captured.stderr);
+    let text = text.trim_end();
+    if text.trim().is_empty() {
+        String::new()
+    } else {
+        format!(", stderr:\n{text}")
+    }
+}
+
+/// A refusal counterpart's ending: `Ok` with the note to keep when it
+/// exited `exit`, else what is wrong. A signal or the deadline is never a
+/// refusal; the status shows that the CLI refused, never why (exit 2 is a
+/// usage error too).
+fn refused_ending(captured: &crate::output::CapturedOutput, exit: u8) -> Result<String, String> {
+    use crate::output::child::Ending;
+    match &captured.ending {
+        Ending::Exited(code) if *code == i32::from(exit) => {
+            let text = String::from_utf8_lossy(&captured.stderr);
+            let first = text.lines().find(|l| !l.trim().is_empty());
+            Ok(match first {
+                Some(line) => format!("refused as declared, exit {exit}: {line}"),
+                None => format!("refused as declared, exit {exit}"),
+            })
+        }
+        Ending::Exited(code) => Err(format!(
+            "exited {code}, not the declared refusal {exit}{}",
+            stderr_suffix(captured)
+        )),
+        Ending::Deadline(limit) => Err(format!(
+            "was killed at its {} deadline, which is never a refusal",
+            crate::output::format_duration(*limit)
+        )),
+        Ending::Signalled(signal) => Err(format!(
+            "was killed by signal {signal}, which is never a refusal{}",
+            stderr_suffix(captured)
+        )),
+        other => Err(format!("ended as {other:?}, which is never a refusal")),
+    }
+}
+
 /// What is wrong with a CLI child's ending, `None` for exit 0.
 fn bad_ending(captured: &crate::output::CapturedOutput) -> Option<String> {
     use crate::output::child::Ending;
-    // Raw: the report frames and escapes a result's detail line by line.
-    let stderr = || {
-        let text = String::from_utf8_lossy(&captured.stderr);
-        let text = text.trim_end();
-        if text.trim().is_empty() {
-            String::new()
-        } else {
-            format!(", stderr:\n{text}")
-        }
-    };
+    let stderr = || stderr_suffix(captured);
     match &captured.ending {
         Ending::Exited(0) => None,
         Ending::Exited(code) => Some(format!("exited {code}{}", stderr())),

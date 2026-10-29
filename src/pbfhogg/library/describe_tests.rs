@@ -58,7 +58,10 @@ fn the_documented_example_parses_into_its_scenario() {
     );
     assert_eq!(
         scenario.roles[2].source,
-        RoleSource::Output { owner: "b".into() }
+        RoleSource::Output {
+            owner: "b".into(),
+            seeded: false
+        }
     );
     assert_eq!(scenario.assertions[2].call, None);
     assert_eq!(scenario.assertions[2].covers, ["repeat.equal-outputs.v1"]);
@@ -158,6 +161,63 @@ fn a_cli_counterpart_binds_its_placeholders_to_roles() {
         parse(with_cli(r#"{"argv": ["cat", "-o", {"output": "out-b"}]}"#).as_bytes()).unwrap();
     let cli = plain.scenarios[0].calls[1].cli.as_ref().unwrap();
     assert!(!cli.scratch && cli.policy_differences.is_empty());
+    assert_eq!(cli.expect, Expect::Output);
+    assert_eq!(cli.overwrite, None);
+}
+
+#[test]
+fn a_refusal_declares_its_exit_and_an_output_none() {
+    let cli = |extra: &str| {
+        with_cli(&format!(
+            r#"{{"argv": ["cat", "-o", {{"output": "out-b"}}]{extra}}}"#
+        ))
+    };
+    let doc = parse(cli(r#", "expect": "refusal", "exit": 2, "overwrite": false"#).as_bytes())
+        .unwrap();
+    let declared = doc.scenarios[0].calls[1].cli.as_ref().unwrap();
+    assert_eq!(declared.expect, Expect::Refusal { exit: 2 });
+    assert_eq!(declared.overwrite, Some(false));
+    let explicit = parse(cli(r#", "expect": "output", "overwrite": true"#).as_bytes()).unwrap();
+    let declared = explicit.scenarios[0].calls[1].cli.as_ref().unwrap();
+    assert_eq!(declared.expect, Expect::Output);
+    assert_eq!(declared.overwrite, Some(true));
+    for (extra, needle) in [
+        (r#", "expect": "refusal""#, "missing key \"exit\""),
+        (r#", "expect": "refusal", "exit": 1"#, "1 is outside 2 to 127"),
+        (r#", "expect": "refusal", "exit": 130"#, "130 is outside 2 to 127"),
+        (r#", "expect": "refusal", "exit": 0"#, "outside 2 to 127"),
+        (r#", "exit": 2"#, "not allowed unless the counterpart expects a refusal"),
+        (r#", "expect": "output", "exit": 2"#, "not allowed unless"),
+        (r#", "expect": "error""#, "unknown expectation"),
+        (r#", "overwrite": "yes""#, "overwrite"),
+    ] {
+        let e = refused(&cli(extra));
+        assert!(
+            e.starts_with("describe.scenarios[0].calls[1].cli") && e.contains(needle),
+            "{extra}: {e}"
+        );
+    }
+}
+
+#[test]
+fn only_an_output_role_starts_seeded() {
+    let seeded = edited(
+        r#""source": "output", "owner": "b"}"#,
+        r#""source": "output", "owner": "b", "seeded": true}"#,
+    );
+    let doc = parse(seeded.as_bytes()).unwrap();
+    assert!(doc.scenarios[0].roles[2].seeded());
+    assert!(!doc.scenarios[0].roles[1].seeded());
+    let e = refused(&edited(
+        r#""variant": "indexed"}"#,
+        r#""variant": "indexed", "seeded": true}"#,
+    ));
+    assert!(e.contains("only an output role starts seeded"), "{e}");
+    let e = refused(&edited(
+        r#""source": "output", "owner": "b"}"#,
+        r#""source": "output", "owner": "b", "seeded": 1}"#,
+    ));
+    assert!(e.contains("roles[2].seeded"), "{e}");
 }
 
 #[test]

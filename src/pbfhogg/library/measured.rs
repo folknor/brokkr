@@ -517,6 +517,7 @@ mod tests {
                 contexts: BTreeMap::from([("a".to_owned(), doc("context", r#"{"p":1}"#))]),
                 datasets: BTreeMap::new(),
                 generated: BTreeMap::new(),
+                seeds: BTreeMap::new(),
                 features: String::new(),
             },
             ending: crate::output::Ending::Exited(0),

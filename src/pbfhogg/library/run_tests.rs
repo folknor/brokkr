@@ -20,17 +20,18 @@ const DESCRIBE: &str = r#"{"protocol": 1, "scenarios": [
 
 const SCENARIO_DOC: &str = r#"{"protocol": 1, "scenario": "repeat-cat",
  "plan": {"calls": {"a": {"command": "cat", "input": "input"}}},
- "assertions": [{"id": "whole", "status": "pass", "detail": ""}]}"#;
+ "assertions": [{"id": "whole", "status": "pass", "detail": ""}],
+ "diagnostics": []}"#;
 
 const CALL_DOC: &str = r#"{"protocol": 1, "call": "a", "entry_us": 10, "return_us": 20, "seal_us": 30,
  "outcome": {"status": "ok"},
- "publications": [{"ordinal": 1, "decision": "authorized", "installed": true}],
+ "publications": [{"ordinal": 1, "decision": "authorized", "members": [{"role": "out-a", "effect": "installed"}]}],
  "cancel": null,
- "seal": {"state": "sealed", "outstanding_blocks": 0},
+ "seal": {"state": "sealed"},
  "snapshot": {"writer_blocks": 3},
  "stream": {"state": "sealed", "drops": 0},
  "context": {"parallelism": 4},
- "diagnostics": [{"kind": "note", "key": "sort.x", "message": "hello", "truncated": false}],
+ "diagnostics": [{"at_us": 12, "kind": "note", "key": "sort.x", "message": "hello", "truncated": false}],
  "assertions": [{"id": "a.outcome", "status": "pass", "detail": ""}]}"#;
 
 /// The call stream a sealed call `a` of `CALL_DOC` emits: one phase marker,
@@ -353,8 +354,8 @@ fn any_output_fails_and_is_printed_framed() {
 fn a_seal_that_did_not_complete_fails_as_brokkr_seal() {
     let call = CALL_DOC
         .replacen(
-            r#""state": "sealed", "outstanding_blocks": 0"#,
-            r#""state": "outstanding", "outstanding_blocks": 2"#,
+            r#""seal": {"state": "sealed"}"#,
+            r#""seal": {"state": "outstanding", "held": {"session": 1, "writer": 2}}"#,
             1,
         )
         .replacen(
@@ -371,7 +372,14 @@ fn a_seal_that_did_not_complete_fails_as_brokkr_seal() {
         "seal",
         &script_with("15 %a CAT_START", &documents(SCENARIO_DOC, &call), 0),
     );
-    assert!(has(&report, "a/brokkr.seal: fail"), "{:?}", report.failures);
+    assert!(
+        has(
+            &report,
+            "a/brokkr.seal: fail\n    | still held at the seal: 1 session, 2 writer"
+        ),
+        "{:?}",
+        report.failures
+    );
     assert!(
         !has(&report, "exited 0"),
         "a brokkr result never makes exit 0 inconsistent"
@@ -479,14 +487,118 @@ fn the_layout_check_catches_what_survived_in_the_run_directory() {
     }
 }
 
+/// `CALL_DOC` with call `a` publishing nothing.
+fn unpublished() -> String {
+    CALL_DOC.replacen(
+        r#"[{"ordinal": 1, "decision": "authorized", "members": [{"role": "out-a", "effect": "installed"}]}]"#,
+        "[]",
+        1,
+    )
+}
+
 #[test]
 fn an_output_role_never_created_is_legal() {
     let body = format!(
         "rm \"$R/roles/out-a\"\n{}",
-        documents(SCENARIO_DOC, CALL_DOC)
+        documents(SCENARIO_DOC, &unpublished())
     );
     let f = fixture("absent-output", &script(&body, 0));
-    assert!(run(&f).passed);
+    let report = run(&f);
+    assert!(report.passed, "{:?}", report.failures);
+}
+
+#[test]
+fn publications_must_agree_with_the_output_roles_on_disk() {
+    // Installed, but the role is absent.
+    let body = format!(
+        "rm \"$R/roles/out-a\"\n{}",
+        documents(SCENARIO_DOC, CALL_DOC)
+    );
+    let report = failing("installed-absent", &script(&body, 0));
+    assert!(
+        has(
+            &report,
+            "call a: by its publications output out-a holds a published generation, but it is \
+             absent"
+        ),
+        "{:?}",
+        report.failures
+    );
+
+    // Nothing published, but the role exists: written outside a publication.
+    let report = failing(
+        "unpublished-present",
+        &script(&documents(SCENARIO_DOC, &unpublished()), 0),
+    );
+    assert!(
+        has(&report, "output out-a holds absent, but it is present"),
+        "{:?}",
+        report.failures
+    );
+
+    // A displacement needs a destination to move aside.
+    let call = CALL_DOC.replacen(r#""effect": "installed""#, r#""effect": "displaced""#, 1);
+    let body = format!("rm \"$R/roles/out-a\"\n{}", documents(SCENARIO_DOC, &call));
+    let report = failing("displaced-nothing", &script(&body, 0));
+    assert!(
+        has(
+            &report,
+            "publication 1 reports displaced out-a, which had no destination"
+        ),
+        "{:?}",
+        report.failures
+    );
+}
+
+/// `DESCRIBE` with `out-a` seeded.
+fn seeded(describe_doc: &str) -> String {
+    describe_doc.replacen(
+        r#""source": "output", "owner": "a"}"#,
+        r#""source": "output", "owner": "a", "seeded": true}"#,
+        1,
+    )
+}
+
+/// A harness that checks out-a starts as its seed, then runs `then` and
+/// writes `call` as a's document.
+fn seed_harness(name: &str, then: &str, call: &str) -> Fixture {
+    let body = format!(
+        "[ \"$(cat \"$R/roles/out-a\")\" = 'brokkr-library-seed-v1 out-a' ] || exit 4\n{then}\n{}",
+        documents(SCENARIO_DOC, call)
+    );
+    // `script` empties out-a first; this harness must meet the seed.
+    fixture(
+        name,
+        &script(&body, 0).replacen(": > \"$R/roles/out-a\"\n", "", 1),
+    )
+}
+
+#[test]
+fn a_seeded_role_starts_as_its_seed_and_its_effects_are_held_against_it() {
+    // Replaced: installed, and no longer the seed.
+    let f = seed_harness("seed-replaced", "printf pbf > \"$R/roles/out-a\"", CALL_DOC);
+    let report = run_described(&f, &seeded(DESCRIBE));
+    assert!(report.passed, "{:?}", report.failures);
+
+    // Untouched: nothing published, still the seed.
+    let f = seed_harness("seed-kept", "", &unpublished());
+    let report = run_described(&f, &seeded(DESCRIBE));
+    assert!(report.passed, "{:?}", report.failures);
+
+    // Claimed installed, but the seed is still there.
+    let f = seed_harness("seed-claimed", "", CALL_DOC);
+    let report = run_described(&f, &seeded(DESCRIBE));
+    assert!(
+        has(&report, "but it is its seed, and a seed is never published"),
+        "{:?}",
+        report.failures
+    );
+
+    // Displaced: the seed moved aside and not put back.
+    let call = CALL_DOC.replacen(r#""effect": "installed""#, r#""effect": "displaced""#, 1);
+    let f = seed_harness("seed-displaced", "rm \"$R/roles/out-a\"", &call);
+    let report = run_described(&f, &seeded(DESCRIBE));
+    assert!(report.passed, "{:?}", report.failures);
 }
 
 #[test]
@@ -885,6 +997,226 @@ fn nothing_is_replayed_past_a_layout_breach() {
         report.failures
     );
     assert!(cli_log(&f).is_empty());
+}
+
+const REFUSAL_CLI: &str = r#"{"argv": ["cat", {"input": "input"}, "-o", {"output": "out-a"}],
+  "expect": "refusal", "exit": 2}"#;
+
+/// `CALL_DOC` with call `a` returning an error and publishing nothing.
+fn errored() -> String {
+    unpublished().replacen(
+        r#""outcome": {"status": "ok"}"#,
+        r#""outcome": {"status": "error", "kind": "nofile", "message": "too many open files"}"#,
+        1,
+    )
+}
+
+/// A harness whose call refused: out-a left absent.
+fn refused_harness() -> String {
+    script(
+        &format!("rm \"$R/roles/out-a\"\n{}", documents(SCENARIO_DOC, &errored())),
+        0,
+    )
+}
+
+#[test]
+fn a_refusal_counterpart_passes_when_both_sides_refuse_and_publish_nothing() {
+    let f = fixture("refusal-pass", &refused_harness());
+    cat_extra(&f, "echo 'Error: too many open files' >&2\nexit 2\n");
+    let report = run_described(&f, &with_cli(REFUSAL_CLI));
+    assert!(report.passed, "{:?}", report.failures);
+    let detail = &cli_result(&report).detail;
+    assert!(
+        detail.contains("refused as declared, exit 2: Error: too many open files"),
+        "{detail}"
+    );
+    let log = cli_log(&f);
+    assert_eq!(log.len(), 1, "a refusal is never digested: {log:?}");
+}
+
+#[test]
+fn a_refusal_counterpart_fails_on_another_status_or_a_published_output() {
+    // The CLI does not refuse: it exits 0 and writes its output.
+    let f = fixture("refusal-cli-wrote", &refused_harness());
+    let report = run_described(&f, &with_cli(REFUSAL_CLI));
+    for needle in [
+        "the counterpart exited 0, not the declared refusal 2",
+        "the counterpart left out-a present, not absent as it started",
+    ] {
+        assert!(has(&report, needle), "{needle}: {:?}", report.failures);
+    }
+
+    // Another failure status is not the declared refusal.
+    let f = fixture("refusal-cli-other", &refused_harness());
+    cat_extra(&f, "exit 3\n");
+    let report = run_described(&f, &with_cli(REFUSAL_CLI));
+    assert!(
+        has(&report, "exited 3, not the declared refusal 2"),
+        "{:?}",
+        report.failures
+    );
+
+    // The call itself did not refuse: nothing is replayed.
+    let f = fixture("refusal-call-ok", &equal_harness());
+    let report = run_described(&f, &with_cli(REFUSAL_CLI));
+    for needle in [
+        "the call returned ok, but its counterpart expects a refusal",
+        "publication 1 installed out-a",
+        "the library left out-a present, not absent as it started",
+    ] {
+        assert!(has(&report, needle), "{needle}: {:?}", report.failures);
+    }
+    assert!(cli_log(&f).is_empty());
+
+    // A cancelled call never has a refusal counterpart.
+    let cancelled = errored().replacen(
+        r#"{"status": "error", "kind": "nofile", "message": "too many open files"}"#,
+        r#"{"status": "cancelled"}"#,
+        1,
+    );
+    let f = fixture(
+        "refusal-call-cancelled",
+        &script(
+            &format!("rm \"$R/roles/out-a\"\n{}", documents(SCENARIO_DOC, &cancelled)),
+            0,
+        ),
+    );
+    let report = run_described(&f, &with_cli(REFUSAL_CLI));
+    assert!(has(&report, "the call was cancelled"), "{:?}", report.failures);
+}
+
+#[test]
+fn a_refusal_is_whole_call_and_never_a_signal() {
+    // The call refused, but left another output role it owns written.
+    let described = with_cli(REFUSAL_CLI).replacen(
+        r#"{"id": "tmp-a", "kind": "directory", "source": "scratch", "owner": "a"}"#,
+        r#"{"id": "tmp-a", "kind": "directory", "source": "scratch", "owner": "a"},
+     {"id": "log-a", "kind": "file", "source": "output", "owner": "a"}"#,
+        1,
+    );
+    let f = fixture(
+        "refusal-other-output",
+        &script(
+            &format!(
+                "rm \"$R/roles/out-a\"\n: > \"$R/roles/log-a\"\n{}",
+                documents(SCENARIO_DOC, &errored())
+            ),
+            0,
+        ),
+    );
+    let report = run_described(&f, &described);
+    assert!(
+        has(&report, "the library left log-a present, not absent as it started"),
+        "{:?}",
+        report.failures
+    );
+    assert!(cli_log(&f).is_empty(), "nothing replayed");
+
+    // Killed by a signal: never a refusal.
+    let f = fixture("refusal-signal", &refused_harness());
+    cat_extra(&f, "kill -9 $$\n");
+    let report = run_described(&f, &with_cli(REFUSAL_CLI));
+    assert!(
+        has(&report, "killed by signal 9, which is never a refusal"),
+        "{:?}",
+        report.failures
+    );
+}
+
+#[test]
+fn a_refusal_replay_that_replaces_roles_is_a_breach_never_read_through() {
+    let f = fixture("refusal-roles-link", &refused_harness());
+    cat_extra(
+        &f,
+        "RD=$(dirname \"$(dirname \"$(dirname \"$out\")\")\")\nmv \"$RD/roles\" \"$RD/roles.real\"\nln -s \"$RD/roles.real\" \"$RD/roles\"\nexit 2\n",
+    );
+    let report = run_described(&f, &with_cli(REFUSAL_CLI));
+    assert!(
+        has(&report, "after a launch, ") && has(&report, "roles is no longer a directory"),
+        "{:?}",
+        report.failures
+    );
+    assert_eq!(cli_result(&report).status, super::Status::Fail);
+}
+
+#[test]
+fn a_seeded_refusal_leaves_both_destinations_byte_identical_without_overwrite() {
+    let cli = REFUSAL_CLI.replacen(r#""exit": 2"#, r#""exit": 2, "overwrite": false"#, 1);
+    let f = seed_harness("refusal-seeded", "", &errored());
+    // Refuses an existing output unless told to overwrite, as pbfhogg does.
+    cat_extra(
+        &f,
+        "case \"$*\" in *--overwrite*) ;; *) [ -e \"$out\" ] && { echo exists >&2; exit 2; } ;; esac\n",
+    );
+    let report = run_described(&f, &seeded(&with_cli(&cli)));
+    assert!(report.passed, "{:?}", report.failures);
+    assert!(!cli_log(&f)[0].contains("--overwrite"), "{:?}", cli_log(&f));
+
+    // Negotiated, the CLI is told to overwrite and replaces the seed.
+    let f = seed_harness("refusal-seeded-negotiated", "", &errored());
+    cat_extra(
+        &f,
+        "case \"$*\" in *--overwrite*) ;; *) [ -e \"$out\" ] && { echo exists >&2; exit 2; } ;; esac\n",
+    );
+    let report = run_described(&f, &seeded(&with_cli(REFUSAL_CLI)));
+    assert!(
+        has(&report, "exited 0, not the declared refusal 2"),
+        "{:?}",
+        report.failures
+    );
+    assert!(cli_log(&f)[0].contains("--overwrite"), "{:?}", cli_log(&f));
+}
+
+#[test]
+fn a_declared_overwrite_is_passed_and_required() {
+    let cli = CAT_CLI.replacen(r#""policy_differences""#, r#""overwrite": true, "policy_differences""#, 1);
+    let f = fixture("overwrite-true", &equal_harness());
+    let report = run_described(&f, &with_cli(&cli));
+    assert!(report.passed, "{:?}", report.failures);
+    assert!(cli_log(&f)[0].contains("--overwrite"));
+}
+
+#[test]
+fn a_later_iteration_reuses_a_refusal_and_launches_nothing() {
+    let f = fixture("measured-refusal", &refused_harness());
+    cat_extra(&f, "exit 2\n");
+    let mut reuse = Default::default();
+    let (first, _) = measured(&f, &with_cli(REFUSAL_CLI), 0, None, &mut reuse);
+    assert!(first.passed, "{:?}", first.failures);
+    let before = cli_log(&f).len();
+    let baseline = first.identity.expect("identified");
+    let (second, _) = measured(&f, &with_cli(REFUSAL_CLI), 1, Some(&baseline), &mut reuse);
+    assert!(second.passed, "{:?}", second.failures);
+    assert_eq!(cli_log(&f).len(), before, "nothing launched");
+    assert!(cli_result(&second).detail.contains("CLI refusal reused from iteration 0"));
+}
+
+#[test]
+fn diagnostics_show_post_seal_events_and_setup_s() {
+    let call = CALL_DOC.replacen(
+        r#"[{"at_us": 12, "kind": "note", "key": "sort.x", "message": "hello", "truncated": false}]"#,
+        r#"[{"at_us": 12, "kind": "note", "key": "sort.x", "message": "hello", "truncated": false},
+            {"at_us": 30, "kind": "warn", "key": "out.drop", "message": "at seal", "truncated": false},
+            {"at_us": 31, "kind": "warn", "key": "out.drop", "message": "late", "truncated": true}]"#,
+        1,
+    );
+    let scenario = SCENARIO_DOC.replacen(
+        r#""diagnostics": []"#,
+        r#""diagnostics": [{"at_us": 1, "kind": "note", "key": "setup.gen", "message": "made", "truncated": false}]"#,
+        1,
+    );
+    let f = fixture("diagnostics", &script(&documents(&scenario, &call), 0));
+    let report = run(&f);
+    assert!(report.passed, "{:?}", report.failures);
+    assert_eq!(
+        report.diagnostics,
+        [
+            "- note setup.gen: made",
+            "a note sort.x: hello",
+            "a warn out.drop: at seal",
+            "a warn out.drop: late (truncated) (after seal)"
+        ]
+    );
 }
 
 #[test]

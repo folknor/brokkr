@@ -4,7 +4,12 @@ use super::*;
 
 const DESCRIBE: &str = r#"{"protocol": 1, "scenarios": [
   {"id": "pair", "description": "two calls", "deadline_s": 60,
-   "roles": [],
+   "roles": [
+     {"id": "out-a", "kind": "pbf", "source": "output", "owner": "a"},
+     {"id": "side-a", "kind": "file", "source": "output", "owner": "a", "seeded": true},
+     {"id": "out-b", "kind": "pbf", "source": "output", "owner": "b"},
+     {"id": "tmp-a", "kind": "directory", "source": "scratch", "owner": "a"}
+   ],
    "calls": [{"id": "a", "label": "first"}, {"id": "b", "label": "second"}],
    "assertions": [{"id": "a.outcome", "call": "a"}, {"id": "b.outcome", "call": "b"},
                   {"id": "whole", "call": null}]}
@@ -20,18 +25,20 @@ fn scenario() -> Scenario {
 /// A valid call document for `a`, every top-level field named.
 const CALL: &str = r#"{"protocol": 1, "call": "a", "entry_us": 10, "return_us": 20, "seal_us": 30,
  "outcome": {"status": "ok"},
- "publications": [{"ordinal": 1, "decision": "authorized", "installed": true},
-                  {"ordinal": 2, "decision": "refused_cancelled", "installed": false}],
+ "publications": [{"ordinal": 1, "decision": "authorized",
+                   "members": [{"role": "out-a", "effect": "installed"}, {"role": "side-a", "effect": "restored"}]},
+                  {"ordinal": 2, "decision": "refused_cancelled",
+                   "members": [{"role": "out-a", "effect": "none"}]}],
  "cancel": {"result": "after_decision", "ordinal": 1},
- "seal": {"state": "sealed", "outstanding_blocks": 0},
+ "seal": {"state": "sealed"},
  "snapshot": {"writer_blocks": 3, "pipeline wait_ns": 18446744073709551615},
  "stream": {"state": "sealed", "drops": 0},
  "context": {"parallelism": 4, "executor": "ambient"},
- "diagnostics": [{"kind": "note", "key": "sort.distrust_metadata", "message": "m", "truncated": false}],
+ "diagnostics": [{"at_us": 25, "kind": "note", "key": "sort.distrust_metadata", "message": "m", "truncated": false}],
  "assertions": [{"id": "a.outcome", "status": "pass", "detail": "line one\nline two"}]}"#;
 
 fn call(text: &str) -> Result<CallDoc, String> {
-    parse_call(text.as_bytes(), "a", &["/run/dir"])
+    parse_call(text.as_bytes(), &scenario(), "a", &["/run/dir"])
 }
 
 fn edited(from: &str, to: &str) -> String {
@@ -46,7 +53,16 @@ fn a_valid_call_document_parses() {
     assert_eq!(doc.seal, Seal::Sealed);
     assert_eq!(doc.outcome, CallOutcome::Ok);
     assert_eq!(doc.diagnostics[0].key, "sort.distrust_metadata");
+    assert_eq!(doc.diagnostics[0].at_us, 25);
     assert_eq!(doc.results[0].detail, "line one\nline two");
+    assert_eq!(
+        doc.publications[0].members,
+        [
+            ("out-a".to_owned(), Effect::Installed),
+            ("side-a".to_owned(), Effect::Restored)
+        ]
+    );
+    assert_eq!(doc.publications[1].decision, Decision::RefusedCancelled);
 }
 
 #[test]
@@ -63,15 +79,15 @@ fn readings_must_be_ordered_and_in_range() {
 
 #[test]
 fn the_call_field_names_its_own_file() {
-    let e = parse_call(CALL.as_bytes(), "b", &[]).unwrap_err();
+    let e = parse_call(CALL.as_bytes(), &scenario(), "b", &[]).unwrap_err();
     assert!(e.contains(r#""a", not "b""#), "{e}");
 }
 
 #[test]
 fn a_seal_decides_its_snapshot() {
     let outstanding = edited(
-        r#""state": "sealed", "outstanding_blocks": 0"#,
-        r#""state": "outstanding", "outstanding_blocks": 2"#,
+        r#""seal": {"state": "sealed"}"#,
+        r#""seal": {"state": "outstanding", "held": {"session": 1, "writer": 2}}"#,
     );
     let e = call(&outstanding).unwrap_err();
     assert!(e.contains("must be null unless the call sealed"), "{e}");
@@ -88,7 +104,26 @@ fn a_seal_decides_its_snapshot() {
         1,
     );
     let doc = call(&ok).unwrap();
-    assert_eq!(doc.seal, Seal::Outstanding(2));
+    assert_eq!(
+        doc.seal,
+        Seal::Outstanding(BTreeMap::from([
+            ("session".to_owned(), 1),
+            ("writer".to_owned(), 2)
+        ]))
+    );
+    for (held, why) in [
+        ("{}", "holds at least one value"),
+        (r#"{"writer": 0}"#, "0 is outside 1 to"),
+        (r#"{"Writer": 1}"#, "not an identifier"),
+    ] {
+        let e = call(&ok.replacen(
+            r#"{"session": 1, "writer": 2}"#,
+            held,
+            1,
+        ))
+        .unwrap_err();
+        assert!(e.contains(why), "{held}: {e}");
+    }
     assert_eq!(doc.snapshot, None);
     assert_eq!(doc.stream.state, SinkState::Open);
     let e = call(&edited(
@@ -104,14 +139,14 @@ fn a_seal_decides_its_snapshot() {
         "the snapshot keeps its values"
     );
     let e = call(&edited(
-        r#""outstanding_blocks": 0"#,
-        r#""outstanding_blocks": 1"#,
+        r#""seal": {"state": "sealed"}"#,
+        r#""seal": {"state": "sealed", "held": {"writer": 1}}"#,
     ))
     .unwrap_err();
-    assert!(e.contains("outstanding_blocks"), "{e}");
+    assert!(e.contains("not allowed on a sealed seal"), "{e}");
     let refused = edited(
-        r#""state": "sealed", "outstanding_blocks": 0"#,
-        r#""state": "refused", "outstanding_blocks": 0"#,
+        r#""seal": {"state": "sealed"}"#,
+        r#""seal": {"state": "refused", "reason": "busy", "held": {"writer": 1}}"#,
     );
     assert!(
         call(&refused)
@@ -127,11 +162,11 @@ fn publications_and_cancel_must_agree() {
     let e = call(&edited(r#""ordinal": 2"#, r#""ordinal": 3"#)).unwrap_err();
     assert!(e.contains("without gaps"), "{e}");
     let e = call(&edited(
-        r#""decision": "refused_cancelled", "installed": false"#,
-        r#""decision": "refused_cancelled", "installed": true"#,
+        r#""members": [{"role": "out-a", "effect": "none"}]"#,
+        r#""members": [{"role": "out-a", "effect": "displaced"}]"#,
     ))
     .unwrap_err();
-    assert!(e.contains("cannot be installed"), "{e}");
+    assert!(e.contains("leaves every member none"), "{e}");
     let e = call(&edited(
         r#""result": "after_decision", "ordinal": 1"#,
         r#""result": "after_decision", "ordinal": 2"#,
@@ -139,8 +174,8 @@ fn publications_and_cancel_must_agree() {
     .unwrap_err();
     assert!(e.contains("not an authorized publication"), "{e}");
     let e = call(&edited(
-        r#""decision": "refused_cancelled", "installed": false"#,
-        r#""decision": "authorized", "installed": false"#,
+        r#""decision": "refused_cancelled""#,
+        r#""decision": "authorized""#,
     ))
     .unwrap_err();
     assert!(e.contains("authorized after the cancel"), "{e}");
@@ -155,6 +190,37 @@ fn publications_and_cancel_must_agree() {
     ))
     .unwrap_err();
     assert!(e.contains("unknown key \"ordinal\""), "{e}");
+}
+
+#[test]
+fn a_member_is_an_output_role_of_its_call_once_per_publication() {
+    let member = r#"[{"role": "out-a", "effect": "none"}]"#;
+    for (members, why) in [
+        ("[]", "at least one member"),
+        (
+            r#"[{"role": "out-b", "effect": "none"}]"#,
+            "\"out-b\" is not an output role of call \"a\"",
+        ),
+        (
+            r#"[{"role": "tmp-a", "effect": "none"}]"#,
+            "not an output role",
+        ),
+        (
+            r#"[{"role": "out-a", "effect": "none"}, {"role": "out-a", "effect": "none"}]"#,
+            "a member twice",
+        ),
+        (
+            r#"[{"role": "out-a", "effect": "gone"}]"#,
+            "unknown effect",
+        ),
+        (
+            r#"[{"role": "out-a", "effect": "none", "installed": true}]"#,
+            "unknown key \"installed\"",
+        ),
+    ] {
+        let e = call(&edited(member, members)).unwrap_err();
+        assert!(e.contains(why), "{members}: {e}");
+    }
 }
 
 #[test]
@@ -174,10 +240,13 @@ fn context_and_plan_stay_in_the_plain_value_domain() {
 
     let scenario = scenario();
     let doc = |plan: &str| {
-        format!(r#"{{"protocol": 1, "scenario": "pair", "plan": {plan}, "assertions": []}}"#)
+        format!(
+            r#"{{"protocol": 1, "scenario": "pair", "plan": {plan}, "assertions": [], "diagnostics": [{{"at_us": 0, "kind": "warn", "key": "setup", "message": "", "truncated": false}}]}}"#
+        )
     };
     let ok = doc(r#"{"calls": {"a": {"cmd": "cat"}, "b": {"cmd": "cat"}}, "order": [1, -2]}"#);
-    assert!(parse_scenario(ok.as_bytes(), &scenario, &[]).is_ok());
+    let parsed = parse_scenario(ok.as_bytes(), &scenario, &[]).unwrap();
+    assert_eq!(parsed.diagnostics[0].kind, "warn");
     for (plan, why) in [
         (
             r#"{"calls": {"a": {"cmd": "cat"}}}"#,
@@ -223,6 +292,13 @@ fn diagnostics_carry_kind_key_and_a_bounded_message() {
     assert!(e.contains("0 to 4000 bytes"), "{e}");
     let e = call(&edited(r#", "truncated": false"#, "")).unwrap_err();
     assert!(e.contains("missing key \"truncated\""), "{e}");
+    let e = call(&edited(r#""at_us": 25, "#, "")).unwrap_err();
+    assert!(e.contains("missing key \"at_us\""), "{e}");
+    // Setup's diagnostics are never a call's: one before entry_us fails.
+    let e = call(&edited(r#""at_us": 25"#, r#""at_us": 9"#)).unwrap_err();
+    assert!(e.contains("9 is before the call's entry_us 10"), "{e}");
+    // After the seal is the call's own still.
+    assert!(call(&edited(r#""at_us": 25"#, r#""at_us": 99"#)).is_ok());
 }
 
 #[test]

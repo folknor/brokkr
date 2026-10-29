@@ -9,23 +9,13 @@ weighed and rejected, so a later change does not reopen them unknowingly.
 Each holds until someone argues it down with evidence and changes this file
 and the code together.
 
-## Protocol stability
-
-Protocol 1 is final. While it was being built, a describe or artefact field
-landed only with the brokkr change that acted on it, and brokkr refused
-every field it did not implement, so no producer ever met an intermediate
-dialect. Now a change to the schema or to what brokkr makes of it comes with
-a new protocol number; the producer-defined domains library.md names stay
-open without one. The strict reader still refuses unknown keys, so that
-rule is what keeps a newer harness from being half-read by an older brokkr.
-
-`isolation` is part of version 1 although nothing times it yet: the library
-against CLI timing it is for needs nothing more from the harness (a call's
-`entry_us` and `return_us` exist already, and the boundary it lacks is the
-CLI's), so declaring it now lets that feature arrive without a protocol
-change. What brokkr does with it today is validate and list it.
-
 ## The strict JSON reader
+
+The strict reader is the protocol's one compatibility guarantee: every
+field lands with the brokkr change that acts on it, and anything a
+document holds that brokkr does not implement is refused, so a harness and
+a brokkr that disagree fail loudly instead of half reading each other. The
+schema itself still changes as the pbfhogg harness is written against it.
 
 `json.rs` reads every protocol document with its own visitor into a tree
 that keeps every object member in order, integers as integers. serde derive
@@ -123,6 +113,47 @@ when a counterpart exists) was rejected: two handle lifetimes over one run
 for a near no-op cargo run. There is no digest capability probe: a pbfhogg
 commit that has the harness member postdates `pbfhogg digest`.
 
+## Refusal counterparts
+
+A refusal's `exit` is required, and 2 to 127, though it cannot tell a
+refusal from a usage error: pbfhogg's failure status is 2, the same as
+clap's usage error, so a typo in the argv passes as a refusal. Requiring
+it still rejects any status the counterpart did not declare (an unexpected
+3, a platform feature missing, among them), and its range keeps out 1 (a
+completed negative answer, never a refusal) and 130 or 143 (a caught
+signal, which pbfhogg turns into a normal exit, so `Exited` alone would not
+keep a signal out). That the declared status is a refusal for the intended
+reason stays the producer's obligation.
+Comparing stderr text was rejected as brittle; a machine-readable refusal
+kind from the CLI would close the gap, and is pbfhogg's to add.
+
+A refusal is judged whole-call: every output role the call owns stays
+initial, not only those the placeholders name, since a call that refused
+while installing an output the counterpart does not name would otherwise
+pass.
+
+## Seeds and publications
+
+Seeds are brokkr's, written before the launch, rather than setup's copy of
+a generated role or a recipe only the plan states: by the time brokkr can
+look, the call may have replaced a setup-written seed, so brokkr would
+never know what the call met, and could not lay the same bytes in front of
+the CLI. pbfhogg never reads a destination it replaces, so the producer
+loses nothing by not choosing the content. The bytes are reserved content
+(a producer obligation, not a consequence of the read rules: the recipe is
+public), which is what lets a published generation byte-identical to the
+seed count as a false installation claim.
+
+The publication replay (`publication.rs`) tracks absent, seed or published
+per role, not generation identities: those would need the harness to hash
+every output, inside the measured scenario wall. So a published state is
+checked for presence, kind and not being the seed, and which generation a
+restore put back stays the harness's assertion. The replay needs
+publications sharing a role to run in ordinal order, rollback included:
+ordinals number decisions, and when publications run concurrently the
+order they were decided in need not be the order they touched the
+destination.
+
 ## Identity and recording
 
 brokkr-json-v1 is brokkr's own canonical form, not RFC 8785, whose numbers
@@ -159,6 +190,11 @@ over a whole call stream; both are adjudicated at their code sites in
 `src/sidecar_cmd.rs`.
 
 ## Not built
+
+`isolation` is validated and listed although nothing times it yet: the
+library against CLI timing it is for needs nothing more from the harness
+(a call's `entry_us` and `return_us` exist already, and the boundary it
+lacks is the CLI's).
 
 Library against CLI timing (timed counterpart runs, boundary matching,
 recording the declared policy differences, a comparison view, never folded

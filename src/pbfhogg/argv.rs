@@ -25,6 +25,13 @@ pub(crate) enum Overwrite {
     /// Writes a brokkr-owned output, and a flag the argv already carries
     /// (`build-geocode-index --force`) replaces it in every pbfhogg version.
     ImpliedByForce,
+    /// Writes an output whose replacement policy was declared: pass
+    /// `--overwrite`, and refuse an executable that does not accept it (a
+    /// library counterpart with `overwrite: true`).
+    Required,
+    /// Writes an output that must never be replaced: no `--overwrite` (a
+    /// library counterpart with `overwrite: false`).
+    Never,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +42,8 @@ pub(crate) struct PbfArgv {
     /// Where run scratch goes when the argv names no output.
     scratch_root: Option<PathBuf>,
     forced: bool,
+    /// A declared replacement policy, which overrides negotiation.
+    stance: Option<bool>,
 }
 
 impl PbfArgv {
@@ -45,6 +54,7 @@ impl PbfArgv {
             writes: Vec::new(),
             scratch_root: None,
             forced: false,
+            stance: None,
         }
     }
 
@@ -137,15 +147,24 @@ impl PbfArgv {
         self
     }
 
+    /// The replacement policy is declared, not negotiated: `true` passes
+    /// `--overwrite` or refuses the executable, `false` never passes it.
+    pub(crate) fn overwrite_stance(mut self, overwrite: bool) -> Self {
+        self.stance = Some(overwrite);
+        self
+    }
+
     pub(crate) fn args(&self) -> &[String] {
         &self.args
     }
 
     pub(crate) fn overwrite(&self) -> Overwrite {
-        match (self.writes.is_empty(), self.forced) {
-            (true, _) => Overwrite::NoOutput,
-            (false, true) => Overwrite::ImpliedByForce,
-            (false, false) => Overwrite::Negotiate,
+        match (self.writes.is_empty(), self.forced, self.stance) {
+            (true, _, _) => Overwrite::NoOutput,
+            (false, true, _) => Overwrite::ImpliedByForce,
+            (false, false, Some(true)) => Overwrite::Required,
+            (false, false, Some(false)) => Overwrite::Never,
+            (false, false, None) => Overwrite::Negotiate,
         }
     }
 
@@ -236,6 +255,31 @@ mod tests {
         );
         assert_eq!(argv.reads().len(), 2);
         assert_eq!(argv.writes().len(), 2);
+    }
+
+    #[test]
+    fn a_declared_stance_overrides_negotiation_but_not_a_read_or_a_force() {
+        let written = || PbfArgv::new("cat").written("out").unwrap();
+        assert_eq!(written().overwrite(), Overwrite::Negotiate);
+        assert_eq!(
+            written().overwrite_stance(true).overwrite(),
+            Overwrite::Required
+        );
+        assert_eq!(
+            written().overwrite_stance(false).overwrite(),
+            Overwrite::Never
+        );
+        assert!(!written().overwrite_stance(false).negotiates_overwrite());
+        assert_eq!(
+            PbfArgv::new("inspect")
+                .overwrite_stance(true)
+                .overwrite(),
+            Overwrite::NoOutput
+        );
+        assert_eq!(
+            written().forces_overwrite().overwrite_stance(false).overwrite(),
+            Overwrite::ImpliedByForce
+        );
     }
 
     #[test]

@@ -74,8 +74,10 @@ pub(crate) enum RoleSource {
     Dataset { variant: String },
     /// Written by the harness's setup before any call, read by calls.
     Generated,
-    /// Written by its one owner call.
-    Output { owner: String },
+    /// Written by its one owner call. A `seeded` one starts as its seed
+    /// ([`super::seed`]), written by brokkr before the launch, so a call
+    /// meets an existing destination.
+    Output { owner: String, seeded: bool },
     /// A directory its one owner call uses as run scratch.
     Scratch { owner: String },
 }
@@ -85,6 +87,17 @@ pub(crate) struct Role {
     pub(crate) id: String,
     pub(crate) kind: RoleKind,
     pub(crate) source: RoleSource,
+}
+
+impl Role {
+    /// An output role `call` owns.
+    pub(crate) fn is_output_of(&self, call: &str) -> bool {
+        matches!(&self.source, RoleSource::Output { owner, .. } if owner == call)
+    }
+
+    pub(crate) fn seeded(&self) -> bool {
+        matches!(self.source, RoleSource::Output { seeded: true, .. })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,10 +119,41 @@ pub(crate) struct Cli {
     pub(crate) argv: Vec<Token>,
     /// The counterpart writes run scratch (`--tmp-dir` is negotiated).
     pub(crate) scratch: bool,
+    /// What the replay must come to.
+    pub(crate) expect: Expect,
+    /// The declared replacement policy: `None` negotiates `--overwrite`,
+    /// `Some(true)` requires it, `Some(false)` never passes it.
+    pub(crate) overwrite: Option<bool>,
     /// How the CLI's process policy differs from the call's, as the
     /// harness states it; shown, never judged.
     pub(crate) policy_differences: Vec<String>,
 }
+
+/// What a counterpart's replay must come to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Expect {
+    /// Exit 0 with every output written, each equal to the library's.
+    Output,
+    /// The declared exit status, every output destination left as it
+    /// started, and a call that returned an error and published nothing.
+    Refusal { exit: u8 },
+}
+
+impl Expect {
+    /// The expectation as the listing and the reuse key show it.
+    pub(crate) fn show(self) -> String {
+        match self {
+            Self::Output => "output".to_owned(),
+            Self::Refusal { exit } => format!("refusal, exit {exit}"),
+        }
+    }
+}
+
+/// The exit statuses a refusal may declare: never 0 or 1, which pbfhogg
+/// reserves for a completed command's answer, and never 128 and up, the
+/// band a signal's status takes (pbfhogg's own cancellation exits 130 or
+/// 143).
+const REFUSAL_EXIT: std::ops::RangeInclusive<i128> = 2..=127;
 
 /// One argv token of a counterpart.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -357,6 +401,11 @@ fn cli(field: &Field<'_>) -> Result<Cli, String> {
         Some(f) => f.as_bool()?,
         None => false,
     };
+    let expect = expect(&obj)?;
+    let overwrite = match obj.optional("overwrite") {
+        Some(f) => Some(f.as_bool()?),
+        None => None,
+    };
     let mut policy_differences = Vec::new();
     if let Some(list) = obj.optional("policy_differences") {
         for item in list.as_array()? {
@@ -367,8 +416,35 @@ fn cli(field: &Field<'_>) -> Result<Cli, String> {
     Ok(Cli {
         argv,
         scratch,
+        expect,
+        overwrite,
         policy_differences,
     })
+}
+
+/// `expect` (default `output`) and the `exit` a refusal requires.
+fn expect(obj: &Obj<'_>) -> Result<Expect, String> {
+    let refusal = match obj.optional("expect") {
+        None => false,
+        Some(field) => match field.as_str()? {
+            "output" => false,
+            "refusal" => true,
+            other => {
+                return Err(format!(
+                    "{}: unknown expectation {other:?} (expected output or refusal)",
+                    field.path()
+                ));
+            }
+        },
+    };
+    if !refusal {
+        obj.forbid("exit", "unless the counterpart expects a refusal: output means exit 0")?;
+        return Ok(Expect::Output);
+    }
+    let field = obj.required("exit")?;
+    let code = field.as_int_in(*REFUSAL_EXIT.start(), *REFUSAL_EXIT.end())?;
+    let exit = u8::try_from(code).map_err(|_| format!("{}: out of range", field.path()))?;
+    Ok(Expect::Refusal { exit })
 }
 
 fn token(item: &Field<'_>) -> Result<Token, String> {
@@ -453,13 +529,7 @@ fn check_cli(call: &Call, cli: &Cli, roles: &[Role], path: &str) -> Result<(), S
                     return Err(format!("{at}: output {role:?} is named twice"));
                 }
                 outputs.push(role);
-                find(role).is_some_and(|r| {
-                    r.kind == RoleKind::Pbf
-                        && r.source
-                            == RoleSource::Output {
-                                owner: call.id.clone(),
-                            }
-                })
+                find(role).is_some_and(|r| r.kind == RoleKind::Pbf && r.is_output_of(&call.id))
             }
         };
         if !fits {
@@ -562,6 +632,9 @@ fn role(item: &Field<'_>, calls: &BTreeSet<&str>) -> Result<Role, String> {
         ));
     }
     let shape = format!("on a role of source {source_name}");
+    if source_name != "output" {
+        obj.forbid("seeded", &format!("{shape}: only an output role starts seeded"))?;
+    }
     let source = match source_name {
         "dataset" => {
             obj.forbid("owner", &format!("{shape}: a dataset role is read-only"))?;
@@ -578,7 +651,11 @@ fn role(item: &Field<'_>, calls: &BTreeSet<&str>) -> Result<Role, String> {
             obj.forbid("variant", &shape)?;
             let owner = owner(&obj.required("owner")?, calls)?;
             if source_name == "output" {
-                RoleSource::Output { owner }
+                let seeded = match obj.optional("seeded") {
+                    Some(f) => f.as_bool()?,
+                    None => false,
+                };
+                RoleSource::Output { owner, seeded }
             } else {
                 RoleSource::Scratch { owner }
             }

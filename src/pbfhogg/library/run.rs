@@ -248,6 +248,17 @@ fn judge_run(
             .iter()
             .filter_map(|(id, doc)| doc.snapshot.clone().map(|s| (id.clone(), s)))
             .collect();
+        // Each call's publications against its output roles, read only
+        // through a directory that passed its layout check.
+        if layout_ok {
+            let roles = run_dir.join(ROLES_DIR);
+            for (id, doc) in &judged.calls {
+                let failures = super::publication::failures(scenario, id, doc, &roles);
+                report
+                    .failures
+                    .extend(failures.iter().map(|why| printable(why)));
+            }
+        }
         // A measured process's identity, read before any replay (the reuse
         // key reads it), and its agreement with iteration 0's.
         let mut measured = measured;
@@ -294,12 +305,18 @@ fn judge_run(
                 profiled.is_some(),
             )
         };
+        let docs: BTreeMap<&str, &CallDoc> = judged
+            .calls
+            .iter()
+            .map(|(id, doc)| (id.as_str(), doc))
+            .collect();
         let cli_results = equality(
             Equal {
                 cli,
                 scenario,
                 run_dir: &run_dir,
                 paths,
+                docs: &docs,
                 layout_ok,
                 reusing,
             },
@@ -404,11 +421,18 @@ fn identify(
             .ok_or_else(|| format!("generated role {} was never bound", role.id))?;
         generated.insert(role.id.clone(), identity::generated(path, role.kind)?);
     }
+    let seeds = scenario
+        .roles
+        .iter()
+        .filter(|r| r.seeded())
+        .map(|r| (r.id.clone(), super::seed::recipe(r.kind)))
+        .collect();
     Ok(Identity {
         plan,
         contexts,
         datasets: m.datasets.clone(),
         generated,
+        seeds,
         features: m.features.to_owned(),
     })
 }
@@ -434,6 +458,7 @@ struct Equal<'a> {
     scenario: &'a Scenario,
     run_dir: &'a Path,
     paths: &'a BTreeMap<String, PathBuf>,
+    docs: &'a BTreeMap<&'a str, &'a CallDoc>,
     layout_ok: bool,
     reusing: Option<counterpart::Reusing<'a>>,
 }
@@ -454,10 +479,12 @@ fn equality(
         scenario,
         run_dir,
         paths,
+        docs,
         layout_ok,
         reusing,
     } = on;
-    let equality = match counterpart::judge(cli, scenario, run_dir, paths, layout_ok, reusing) {
+    let equality = match counterpart::judge(cli, scenario, run_dir, paths, docs, layout_ok, reusing)
+    {
         Ok(equality) => equality,
         Err(Stop::Interrupted) => return Err(DevError::Interrupted),
         Err(Stop::Unsafe(_)) if crate::shutdown::should_unwind() => {
@@ -491,8 +518,8 @@ struct Prepared {
 }
 
 /// Allocate the run directory and lay it out: `cwd/`, `artefacts/`,
-/// `roles/` with each role in its initial state, and the request binding
-/// every role.
+/// `roles/` with each role in its initial state (a seeded output role as
+/// its seed), and the request binding every role.
 fn prepare(
     scenario: &Scenario,
     datasets: &BTreeMap<String, PathBuf>,
@@ -542,6 +569,9 @@ fn prepare(
                     && !matches!(role.source, RoleSource::Output { .. });
                 if starts_empty_dir {
                     std::fs::create_dir(&path)?;
+                }
+                if role.seeded() {
+                    super::seed::write(&path, role.kind, &role.id)?;
                 }
                 writes.push(path.clone());
                 path
@@ -734,6 +764,8 @@ fn output_failures(run: &HarnessRun) -> Vec<String> {
 struct Judged {
     scenario_results: Vec<Outcome>,
     plan: super::json::Json,
+    /// Setup's and the harness's own diagnostics, from `scenario.json`.
+    scenario_diagnostics: Vec<artefact::Diagnostic>,
     calls: Vec<(String, CallDoc)>,
 }
 
@@ -826,7 +858,7 @@ fn judge_artefacts(
     };
     let mut calls: Vec<(String, CallDoc)> = Vec::new();
     for (id, bytes) in &tree.calls {
-        match artefact::parse_call(bytes, id, forbidden) {
+        match artefact::parse_call(bytes, scenario, id, forbidden) {
             Ok(doc) => calls.push((id.clone(), doc)),
             Err(e) => {
                 report.failures.push(invalid(e));
@@ -838,6 +870,7 @@ fn judge_artefacts(
     let artefact::ScenarioDoc {
         results: scenario_results,
         plan,
+        diagnostics: scenario_diagnostics,
     } = scenario_doc;
     let call_results: Vec<(String, Vec<Outcome>)> = calls
         .iter()
@@ -855,7 +888,10 @@ fn judge_artefacts(
         .unwrap_or(u64::MAX)
         .saturating_add(1_000_000);
     for (id, doc) in &calls {
-        for (what, end) in [("return_us", doc.return_us), ("seal_us", doc.seal_us)] {
+        let readings = [("return_us", doc.return_us), ("seal_us", doc.seal_us)]
+            .into_iter()
+            .chain(doc.diagnostics.iter().map(|d| ("a diagnostic's at_us", d.at_us)));
+        for (what, end) in readings {
             let span = end - doc.entry_us;
             if span > limit_us {
                 report.failures.push(format!(
@@ -886,6 +922,7 @@ fn judge_artefacts(
     Some(Judged {
         scenario_results,
         plan,
+        scenario_diagnostics,
         calls,
     })
 }
@@ -903,11 +940,17 @@ fn collect_results(
 ) {
     let Judged {
         scenario_results,
+        scenario_diagnostics,
         calls,
         ..
     } = judged;
     for result in scenario_results {
         report.results.push((None, result.clone()));
+    }
+    for d in scenario_diagnostics {
+        report
+            .diagnostics
+            .push(format!("- {}", diagnostic_line(d, None)));
     }
     for (id, doc) in calls {
         for result in &doc.results {
@@ -915,13 +958,16 @@ fn collect_results(
         }
         let (status, detail) = match &doc.seal {
             Seal::Sealed => (Status::Pass, String::new()),
-            Seal::Outstanding(n) => (
-                Status::Fail,
-                format!(
-                    "{} still outstanding",
-                    crate::output::count(usize::try_from(*n).unwrap_or(usize::MAX), "block")
-                ),
-            ),
+            Seal::Outstanding(held) => {
+                let census: Vec<String> = held
+                    .iter()
+                    .map(|(kind, n)| format!("{n} {}", printable(kind)))
+                    .collect();
+                (
+                    Status::Fail,
+                    format!("still held at the seal: {}", census.join(", ")),
+                )
+            }
             Seal::Refused(reason) => (Status::Fail, format!("refused: {reason}")),
         };
         report.results.push((
@@ -954,13 +1000,9 @@ fn collect_results(
             report.results.push((Some(id.clone()), result.clone()));
         }
         for d in &doc.diagnostics {
-            report.diagnostics.push(format!(
-                "{id} {} {}: {}{}",
-                printable(&d.kind),
-                printable(&d.key),
-                printable(&d.message),
-                if d.truncated { " (truncated)" } else { "" }
-            ));
+            report
+                .diagnostics
+                .push(format!("{id} {}", diagnostic_line(d, Some(doc.seal_us))));
         }
         if let artefact::CallOutcome::Error { kind, message } = &doc.outcome {
             report.diagnostics.push(format!(
@@ -984,6 +1026,24 @@ fn collect_results(
             report.failures.push(line);
         }
     }
+}
+
+/// One diagnostic as printed: its kind, key and message, marked when the
+/// harness cut it, and for a call's (`seal_us` its seal reading) when it was
+/// captured strictly after the seal; equal readings establish no order.
+fn diagnostic_line(d: &artefact::Diagnostic, seal_us: Option<u64>) -> String {
+    format!(
+        "{} {}: {}{}{}",
+        printable(&d.kind),
+        printable(&d.key),
+        printable(&d.message),
+        if d.truncated { " (truncated)" } else { "" },
+        if seal_us.is_some_and(|seal| d.at_us > seal) {
+            " (after seal)"
+        } else {
+            ""
+        }
+    )
 }
 
 /// Make evidence/ beside the run's documents and write what brokkr saw

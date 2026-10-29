@@ -38,7 +38,7 @@ A doc with 8+ `##` sections is **section-addressed**: `brokkr man conventions sc
 - `docs/commands/measure.md` - `--bench`/`--hotpath`/`--alloc`/`--stop`, the sidecar profiler, markers, `brokkr sidecar`.
 - `docs/commands/output-channels.md` - where a run's output goes (stdout/stderr/FIFO, results.db vs sidecar.db).
 - `docs/commands/library.md` - pbfhogg `brokkr library`, `[pbfhogg.library]`, the library harness protocol, `--bench`/`--hotpath`/`--alloc` measurement and `--all` certification.
-- `reference/library-internals.md` - how the library harness consumer is built and why: protocol stability, the strict reader, the run directory's reservation and serial launches, profiled runs, capture, identity and recording. Read before changing `src/pbfhogg/library/`.
+- `reference/library-internals.md` - how the library harness consumer is built and why: the strict reader, the run directory's reservation and serial launches, profiled runs, capture, refusal counterparts, seeds and publications, identity and recording. Read before changing `src/pbfhogg/library/`.
 - `docs/commands/visual.md` - litehtml-rs/sluggrs visual commands.
 - `docs/commands/hotpath.md` - sluggrs `brokkr hotpath`.
 - `docs/commands/sync.md` - ratatoskr `sync` / `mock-serve`.

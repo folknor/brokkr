@@ -17,6 +17,7 @@ fn identity(plan_text: &str, context: &str, generated: &str) -> Identity {
         )]),
         datasets: BTreeMap::from([("input".to_owned(), "xxh128:00".to_owned())]),
         generated: BTreeMap::from([("gen".to_owned(), generated.to_owned())]),
+        seeds: BTreeMap::new(),
         features: String::new(),
     }
 }
@@ -65,6 +66,29 @@ fn the_qualifier_is_canonical_and_a_disagreement_names_its_field() {
         "generated role gen differs (absent vs xxh128:11)"
     );
     assert_eq!(base.documents().len(), 2);
+}
+
+#[test]
+fn seeds_enter_the_qualifier_only_when_a_role_is_seeded() {
+    let base = identity(r#"{"calls":{"a":{"n":1}}}"#, r#"{"p":4}"#, "absent");
+    assert!(!base.qualifier().contains("seeds"));
+    let mut seeded = base.clone();
+    seeded
+        .seeds
+        .insert("out-a".to_owned(), "seed-v1:pbf".to_owned());
+    assert!(
+        seeded
+            .qualifier()
+            .contains(r#""seeds":{"out-a":"seed-v1:pbf"}"#),
+        "{}",
+        seeded.qualifier()
+    );
+    assert!(
+        seeded
+            .disagreement(&base)
+            .unwrap()
+            .contains("seeded role out-a differs")
+    );
 }
 
 #[test]

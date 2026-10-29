@@ -45,15 +45,19 @@ pub(crate) struct Identity {
     pub(crate) datasets: BTreeMap<String, String>,
     /// Each generated role after the harness exited (see [`generated`]).
     pub(crate) generated: BTreeMap<String, String>,
+    /// Each seeded output role's seed recipe (`seed-v1:<kind>`); empty when
+    /// the scenario seeds none.
+    pub(crate) seeds: BTreeMap<String, String>,
     /// The harness build's features, sorted, comma-joined; empty for none.
     pub(crate) features: String,
 }
 
 impl Identity {
     /// The identity as one canonical JSON text: the plan digest, each
-    /// call's context digest, the dataset and generated identities and the
-    /// features. A stored row carries it as its arm qualifier and as
-    /// `meta.library.identity`.
+    /// call's context digest, the dataset and generated identities, the
+    /// seeds when there are any (so an identity without seeds is spelled as
+    /// before seeds existed) and the features. A stored row carries it as
+    /// its arm qualifier and as `meta.library.identity`.
     pub(crate) fn qualifier(&self) -> String {
         let map = |m: &BTreeMap<String, String>| {
             Json::Object(
@@ -67,15 +71,18 @@ impl Identity {
             .iter()
             .map(|(call, doc)| (call.clone(), doc.digest.clone()))
             .collect();
-        let value = Json::Object(vec![
+        let mut members = vec![
             ("v".to_owned(), Json::Int(1)),
             ("plan".to_owned(), Json::Str(self.plan.digest.clone())),
             ("contexts".to_owned(), map(&contexts)),
             ("datasets".to_owned(), map(&self.datasets)),
             ("generated".to_owned(), map(&self.generated)),
             ("features".to_owned(), Json::Str(self.features.clone())),
-        ]);
-        json::canonical(&value).unwrap_or_default()
+        ];
+        if !self.seeds.is_empty() {
+            members.push(("seeds".to_owned(), map(&self.seeds)));
+        }
+        json::canonical(&Json::Object(members)).unwrap_or_default()
     }
 
     /// Every canonical document, by digest, each once.
@@ -122,6 +129,7 @@ impl Identity {
         for (what, a, b) in [
             ("generated", &baseline.generated, &self.generated),
             ("dataset", &baseline.datasets, &self.datasets),
+            ("seeded", &baseline.seeds, &self.seeds),
         ] {
             let roles: std::collections::BTreeSet<&String> = a.keys().chain(b.keys()).collect();
             for role in roles {

@@ -99,7 +99,7 @@ use crate::build::executable_guard::{self, HandleToken};
 use crate::error::DevError;
 use crate::measure::{Executable, Invocation, Supervised};
 use crate::output;
-use crate::pbfhogg::argv::PbfArgv;
+use crate::pbfhogg::argv::{Overwrite, PbfArgv};
 use crate::reservations::PRIVATE_DIR_PLACEHOLDER;
 
 /// pbfhogg's opt-in for replacing an existing output path.
@@ -353,8 +353,19 @@ impl PbfhoggBinary {
             ));
         };
         self.check_identity()?;
-        let negotiate =
-            argv.negotiates_overwrite() && self.supports(&subcommand, Flag::Overwrite)?;
+        let negotiate = match argv.overwrite() {
+            Overwrite::Negotiate => self.supports(&subcommand, Flag::Overwrite)?,
+            Overwrite::Required => {
+                if !self.supports(&subcommand, Flag::Overwrite)? {
+                    return Err(DevError::Verify(format!(
+                        "this pbfhogg build's `{subcommand}` does not accept {OVERWRITE_FLAG}, \
+                         which the argv requires"
+                    )));
+                }
+                true
+            }
+            Overwrite::NoOutput | Overwrite::ImpliedByForce | Overwrite::Never => false,
+        };
         let staging = argv.writes_output() && self.supports(&subcommand, Flag::StagingDir)?;
         let tmp = argv.writes_scratch() && self.supports(&subcommand, Flag::TmpDir)?;
         if (argv.writes_output() && !staging) || (argv.writes_scratch() && !tmp) {

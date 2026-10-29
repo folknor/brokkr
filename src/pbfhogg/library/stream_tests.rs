@@ -15,6 +15,7 @@ fn doc() -> CallDoc {
         return_us: 50,
         seal_us: 100,
         outcome: CallOutcome::Ok,
+        publications: Vec::new(),
         seal: Seal::Sealed,
         snapshot: Some(BTreeMap::from([("n".to_owned(), 3)])),
         stream: StreamAccount {
@@ -254,7 +255,7 @@ fn a_sink_that_dropped_or_failed_is_incomplete() {
 #[test]
 fn a_call_that_did_not_seal_is_unevaluated_unless_its_sink_closed() {
     let mut open = doc();
-    open.seal = Seal::Outstanding(1);
+    open.seal = Seal::Outstanding(BTreeMap::from([("writer".to_owned(), 1)]));
     open.snapshot = None;
     open.stream.state = SinkState::Open;
     let stream = judged(&open, &GOOD[..4], &CaptureLoss::default());

@@ -245,6 +245,16 @@ Each part below is tested, its whole path is not:
   reader, or of the startup shedding of inherited run variables through the
   production `main`.
 
+### A library refusal counterpart cannot tell a refusal from a usage error (2026-10-29)
+
+A refusal counterpart's declared `exit` proves the CLI's status, not its
+reason: pbfhogg's failure status is 2, the same as clap's usage error, so an
+argv typo passes as the CLI refusing the same input. Closing it needs a
+machine-readable refusal kind from the pbfhogg CLI (its error kind, which
+the call document's `outcome.kind` could then be compared with); brokkr's
+side would be an optional field on the counterpart. Comparing stderr text
+was rejected as brittle.
+
 ### Leftover sweeps for older brokkr binaries (2026-10-29)
 
 AGENTS.md now rules an older brokkr out as a design input. `brokkr clean`

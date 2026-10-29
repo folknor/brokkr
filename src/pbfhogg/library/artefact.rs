@@ -10,7 +10,7 @@
 //! obligation that nothing the harness started touches the run directory
 //! after it exits, not protection against a process still mutating it.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read as _;
 use std::path::Path;
 
@@ -83,17 +83,75 @@ pub(crate) enum CallOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Seal {
     Sealed,
-    Outstanding(u64),
+    /// The census at the seal attempt: every value the caller still held,
+    /// counted by producer-defined kind, each count at least 1.
+    Outstanding(BTreeMap<String, u64>),
     Refused(String),
+}
+
+impl Seal {
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Sealed => "sealed",
+            Self::Outstanding(_) => "outstanding",
+            Self::Refused(_) => "refused",
+        }
+    }
 }
 
 /// One captured `host::Diagnostics` event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Diagnostic {
+    /// `MarkerFifo::now_us()` when it was captured.
+    pub(crate) at_us: u64,
     pub(crate) kind: String,
     pub(crate) key: String,
     pub(crate) message: String,
     pub(crate) truncated: bool,
+}
+
+/// One decided publication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Publication {
+    pub(crate) decision: Decision,
+    /// Each destination it covers, by output role, with what the attempt
+    /// left there.
+    pub(crate) members: Vec<(String, Effect)>,
+}
+
+/// A publication's decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Decision {
+    Authorized,
+    RefusedCancelled,
+    RefusedError,
+}
+
+/// What one publication attempt left at a member's destination when it
+/// finished, relative to the destination just before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Effect {
+    /// The destination is as it was (a rollback to absence included).
+    None,
+    /// The new generation is at the destination (an incomplete rollback
+    /// included).
+    Installed,
+    /// The previous generation was moved aside and put back.
+    Restored,
+    /// The previous generation was moved aside and not put back: the
+    /// destination is absent.
+    Displaced,
+}
+
+impl Effect {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Installed => "installed",
+            Self::Restored => "restored",
+            Self::Displaced => "displaced",
+        }
+    }
 }
 
 /// How the call's sink ended, by its own account.
@@ -129,9 +187,11 @@ pub(crate) struct CallDoc {
     pub(crate) return_us: u64,
     pub(crate) seal_us: u64,
     pub(crate) outcome: CallOutcome,
+    /// Every publication the call decided, in ordinal order.
+    pub(crate) publications: Vec<Publication>,
     pub(crate) seal: Seal,
     /// The final counters; present exactly when the call sealed.
-    pub(crate) snapshot: Option<std::collections::BTreeMap<String, u64>>,
+    pub(crate) snapshot: Option<BTreeMap<String, u64>>,
     pub(crate) stream: StreamAccount,
     pub(crate) diagnostics: Vec<Diagnostic>,
     pub(crate) results: Vec<Outcome>,
@@ -139,11 +199,13 @@ pub(crate) struct CallDoc {
     pub(crate) context: json::Json,
 }
 
-/// A validated scenario document: its results and its `plan`.
+/// A validated scenario document: its results, its `plan`, and the
+/// diagnostics of setup and the harness's own work.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ScenarioDoc {
     pub(crate) results: Vec<Outcome>,
     pub(crate) plan: json::Json,
+    pub(crate) diagnostics: Vec<Diagnostic>,
 }
 
 /// The documents of a well-formed artefact tree, unparsed.
@@ -302,15 +364,22 @@ pub(crate) fn parse_scenario(
         return Err(format!("{}: call {missing:?} is missing", calls.path()));
     }
     let results = results(&top.required("assertions")?)?;
+    let diagnostics = diagnostics(&top.required("diagnostics")?)?;
     top.finish()?;
     Ok(ScenarioDoc {
         results,
         plan: plan.json().clone(),
+        diagnostics,
     })
 }
 
-/// One call document, `call` its declared id.
-pub(crate) fn parse_call(bytes: &[u8], call: &str, forbidden: &[&str]) -> Result<CallDoc, String> {
+/// One call document, `call` its declared id in `scenario`.
+pub(crate) fn parse_call(
+    bytes: &[u8],
+    scenario: &Scenario,
+    call: &str,
+    forbidden: &[&str],
+) -> Result<CallDoc, String> {
     let name = format!("{CALLS_DIR}/{call}.json");
     let doc = json::parse(&name, bytes)?;
     let root = Field::root(&doc, &name);
@@ -329,7 +398,7 @@ pub(crate) fn parse_call(bytes: &[u8], call: &str, forbidden: &[&str]) -> Result
         ));
     }
     let outcome = outcome(&top.required("outcome")?)?;
-    let publications = publications(&top.required("publications")?)?;
+    let publications = publications(&top.required("publications")?, scenario, call)?;
     cancel(&top.required("cancel")?, &publications)?;
     let seal = seal(&top.required("seal")?)?;
     let snapshot = snapshot(&top.required("snapshot")?, &seal)?;
@@ -342,11 +411,7 @@ pub(crate) fn parse_call(bytes: &[u8], call: &str, forbidden: &[&str]) -> Result
              seal is {}",
             stream_field.path(),
             stream.state.name(),
-            match seal {
-                Seal::Sealed => "sealed",
-                Seal::Outstanding(_) => "outstanding",
-                Seal::Refused(_) => "refused",
-            }
+            seal.name()
         ));
     }
     let context = top.required("context")?;
@@ -354,7 +419,21 @@ pub(crate) fn parse_call(bytes: &[u8], call: &str, forbidden: &[&str]) -> Result
     if context.as_members()?.is_empty() {
         return Err(format!("{}: an empty object", context.path()));
     }
-    let diagnostics = diagnostics(&top.required("diagnostics")?)?;
+    let diagnostics_field = top.required("diagnostics")?;
+    let diagnostics = diagnostics(&diagnostics_field)?;
+    // A call's diagnostics are captured from its entry on; setup's go in
+    // scenario.json.
+    if let Some((i, early)) = diagnostics
+        .iter()
+        .enumerate()
+        .find(|(_, d)| d.at_us < entry_us)
+    {
+        return Err(format!(
+            "{}[{i}].at_us: {} is before the call's entry_us {entry_us}",
+            diagnostics_field.path(),
+            early.at_us
+        ));
+    }
     let results = results(&top.required("assertions")?)?;
     top.finish()?;
     Ok(CallDoc {
@@ -362,6 +441,7 @@ pub(crate) fn parse_call(bytes: &[u8], call: &str, forbidden: &[&str]) -> Result
         return_us,
         seal_us,
         outcome,
+        publications,
         seal,
         snapshot,
         stream,
@@ -457,15 +537,14 @@ fn outcome(field: &Field<'_>) -> Result<CallOutcome, String> {
     Ok(outcome)
 }
 
-/// One decided publication: whether it was authorized.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Decision {
-    Authorized,
-    RefusedCancelled,
-    RefusedError,
-}
-
-fn publications(field: &Field<'_>) -> Result<Vec<Decision>, String> {
+/// The call's publications: ordinals 1, 2, ... without gaps, each with its
+/// decision and members, every member an output role `call` owns, at most
+/// once per publication, and every member of a refused one `none`.
+fn publications(
+    field: &Field<'_>,
+    scenario: &Scenario,
+    call: &str,
+) -> Result<Vec<Publication>, String> {
     let mut out = Vec::new();
     for (i, item) in field.as_array()?.iter().enumerate() {
         let obj = item.as_object()?;
@@ -490,20 +569,60 @@ fn publications(field: &Field<'_>) -> Result<Vec<Decision>, String> {
                 ));
             }
         };
-        let installed = obj.required("installed")?;
-        if installed.as_bool()? && decision != Decision::Authorized {
+        let members_field = obj.required("members")?;
+        let mut members: Vec<(String, Effect)> = Vec::new();
+        for entry in members_field.as_array()? {
+            let member = entry.as_object()?;
+            let role_field = member.required("role")?;
+            let role = describe::identifier(&role_field)?;
+            if !scenario.roles.iter().any(|r| r.id == role && r.is_output_of(call)) {
+                return Err(format!(
+                    "{}: {role:?} is not an output role of call {call:?}",
+                    role_field.path()
+                ));
+            }
+            if members.iter().any(|(r, _)| *r == role) {
+                return Err(format!(
+                    "{}: role {role:?} is a member twice",
+                    role_field.path()
+                ));
+            }
+            let effect_field = member.required("effect")?;
+            let effect = match effect_field.as_str()? {
+                "none" => Effect::None,
+                "installed" => Effect::Installed,
+                "restored" => Effect::Restored,
+                "displaced" => Effect::Displaced,
+                other => {
+                    return Err(format!(
+                        "{}: unknown effect {other:?} (expected none, installed, restored or \
+                         displaced)",
+                        effect_field.path()
+                    ));
+                }
+            };
+            if effect != Effect::None && decision != Decision::Authorized {
+                return Err(format!(
+                    "{}: a refused publication leaves every member none",
+                    effect_field.path()
+                ));
+            }
+            member.finish()?;
+            members.push((role, effect));
+        }
+        if members.is_empty() {
             return Err(format!(
-                "{}: a refused publication cannot be installed",
-                installed.path()
+                "{}: a publication has at least one member",
+                members_field.path()
             ));
         }
         obj.finish()?;
-        out.push(decision);
+        out.push(Publication { decision, members });
     }
     Ok(out)
 }
 
-fn cancel(field: &Field<'_>, publications: &[Decision]) -> Result<(), String> {
+fn cancel(field: &Field<'_>, publications: &[Publication]) -> Result<(), String> {
     if field.is_null() {
         return Ok(());
     }
@@ -529,7 +648,7 @@ fn cancel(field: &Field<'_>, publications: &[Decision]) -> Result<(), String> {
         usize::try_from(ordinal_field.as_int_in(1, i128::from(u64::MAX))?).unwrap_or(usize::MAX);
     obj.finish()?;
     match publications.get(ordinal - 1) {
-        Some(decision) if *decision == expected => {}
+        Some(publication) if publication.decision == expected => {}
         _ => {
             return Err(format!(
                 "{}: names publication {ordinal}, which is not {name} publication",
@@ -540,7 +659,7 @@ fn cancel(field: &Field<'_>, publications: &[Decision]) -> Result<(), String> {
     if let Some(later) = publications
         .iter()
         .skip(ordinal)
-        .position(|d| *d == Decision::Authorized)
+        .position(|p| p.decision == Decision::Authorized)
     {
         return Err(format!(
             "{}: publication {} was authorized after the cancel decided publication {ordinal}",
@@ -556,17 +675,33 @@ fn seal(field: &Field<'_>) -> Result<Seal, String> {
     let state = obj.required("state")?;
     let seal = match state.as_str()? {
         "sealed" => {
-            obj.required("outstanding_blocks")?.as_int_in(0, 0)?;
+            obj.forbid("held", "on a sealed seal: nothing was held")?;
             Seal::Sealed
         }
         "outstanding" => {
-            let n = obj
-                .required("outstanding_blocks")?
-                .as_int_in(1, i128::from(u64::MAX))?;
-            Seal::Outstanding(u64::try_from(n).unwrap_or(u64::MAX))
+            let held_field = obj.required("held")?;
+            let mut held = BTreeMap::new();
+            for (kind, count) in held_field.as_members()? {
+                if !describe::is_identifier(kind) {
+                    return Err(format!(
+                        "{}: {kind:?} is not an identifier ([a-z0-9][a-z0-9_.-], at most 64 \
+                         bytes)",
+                        count.path()
+                    ));
+                }
+                let n = count.as_int_in(1, i128::from(u64::MAX))?;
+                held.insert(kind.to_owned(), u64::try_from(n).unwrap_or(u64::MAX));
+            }
+            if held.is_empty() {
+                return Err(format!(
+                    "{}: an outstanding seal holds at least one value",
+                    held_field.path()
+                ));
+            }
+            Seal::Outstanding(held)
         }
         "refused" => {
-            obj.forbid("outstanding_blocks", "on a refused seal")?;
+            obj.forbid("held", "on a refused seal")?;
             Seal::Refused(describe::one_line_in(
                 &obj.required("reason")?,
                 1,
@@ -584,10 +719,7 @@ fn seal(field: &Field<'_>) -> Result<Seal, String> {
     Ok(seal)
 }
 
-fn snapshot(
-    field: &Field<'_>,
-    seal: &Seal,
-) -> Result<Option<std::collections::BTreeMap<String, u64>>, String> {
+fn snapshot(field: &Field<'_>, seal: &Seal) -> Result<Option<BTreeMap<String, u64>>, String> {
     if *seal != Seal::Sealed {
         return if field.is_null() {
             Ok(None)
@@ -598,7 +730,7 @@ fn snapshot(
             ))
         };
     }
-    let mut out = std::collections::BTreeMap::new();
+    let mut out = BTreeMap::new();
     for (name, value) in field.as_members()? {
         if name.is_empty()
             || name.len() > COUNTER_NAME_LIMIT
@@ -642,6 +774,8 @@ fn diagnostics(field: &Field<'_>) -> Result<Vec<Diagnostic>, String> {
     let mut out = Vec::new();
     for item in field.as_array()? {
         let obj = item.as_object()?;
+        let at = obj.required("at_us")?.as_int_in(0, i128::from(i64::MAX))?;
+        let at_us = u64::try_from(at).unwrap_or(u64::MAX);
         let kind = describe::identifier(&obj.required("kind")?)?;
         let bounded = |key: &str, min: usize, max: usize| -> Result<String, String> {
             let f = obj.required(key)?;
@@ -660,6 +794,7 @@ fn diagnostics(field: &Field<'_>) -> Result<Vec<Diagnostic>, String> {
         let truncated = obj.required("truncated")?.as_bool()?;
         obj.finish()?;
         out.push(Diagnostic {
+            at_us,
             kind,
             key,
             message,
