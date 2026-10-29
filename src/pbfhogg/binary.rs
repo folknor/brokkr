@@ -294,6 +294,11 @@ impl PbfhoggBinary {
         self.path.display().to_string()
     }
 
+    /// The XXH128 of the executable this handle runs, for records.
+    pub(crate) fn digest(&self) -> &str {
+        &self.digest
+    }
+
     /// Resolve an argv into the invocation that runs it: `--overwrite` where
     /// negotiated and accepted, the private directory's flags where needed
     /// and accepted, and the reservation each launch makes (module docs).
@@ -520,6 +525,8 @@ const DESCRIBE_STDERR_KEPT: usize = 64 * 1024;
 pub(crate) struct LibraryHarness {
     path: PathBuf,
     identity: FileIdentity,
+    /// The executable's XXH128, for records.
+    digest: String,
     project_root: PathBuf,
     /// The brokkr lock for the handle's life, on which a running harness
     /// child's pid is published (`None` only for test fixtures).
@@ -597,13 +604,28 @@ impl LibraryHarness {
                 path.display()
             ))
         })?;
+        let digest = match crate::preflight::digest::cached_path_digest(path, project_root)? {
+            crate::preflight::digest::PathDigest::File(digest) => digest.to_string(),
+            crate::preflight::digest::PathDigest::Tree(_) => {
+                return Err(DevError::Build(format!(
+                    "library harness {} is a directory",
+                    path.display()
+                )));
+            }
+        };
         Ok(Self {
             path: path.to_path_buf(),
             identity: FileIdentity::of(&meta),
+            digest,
             project_root: project_root.to_path_buf(),
             hold,
             _registered: registered,
         })
+    }
+
+    /// The XXH128 of the harness executable, for records.
+    pub(crate) fn digest(&self) -> &str {
+        &self.digest
     }
 
     /// Refuse an executable replaced since this handle was made.

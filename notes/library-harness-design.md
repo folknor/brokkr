@@ -121,6 +121,7 @@ Assertion ids starting `brokkr.` are reserved for results brokkr adds
 call, shown as `<call>/brokkr.stream`, and can never collide with a harness
 id. Capability ids (slice 5) use the id grammar and end in `.v<N>`
 (`cancel.pre-decision.v1`); a capability whose meaning changes gets a new id.
+Slice 5 landed `covers` and the gate (R15a).
 
 ### R7 The describe document, as slice 1 lands it
 
@@ -679,6 +680,62 @@ headline.
   run (slice 6 stores it on measured rows; an `--all` run stores a
   certification record, slice 5 decides where).
 
+### R15a Amendments made by slice 5 (link 5, sparred with codex over three rounds)
+
+Each sharpens R15; `docs/commands/library.md` "Certification" is the
+binding text.
+
+- **Admissible evidence**: a run's results count only from a fully read and
+  valid artefact tree. One invalid document leaves the scenario with no
+  results, so everything it declares is missing, hence failed; partial trees
+  are never mined. An inventory failure (tree valid, a result missing or
+  duplicated) still reports what was read. A duplicate counts as failed when
+  any copy is not a pass; a result reported under another call does not
+  cover.
+- **An unsafe counterpart keeps what was already read**: `verify` now
+  collects the harness results, `brokkr.seal` and `brokkr.stream` (memory
+  only) when a counterpart launch stops the run, without any `brokkr.cli`;
+  the run directory stays untouched, and the run still passes the final
+  stop check before it returns. Before, every result was dropped, so an
+  unrelated replay stop failed every capability of its scenario. A run that
+  did not come to a verdict records only its error (`kept` is null).
+- **A passed covering result counts as passed even when its scenario
+  failed for another reason** (R15 literal); certification fails on the
+  scenario anyway. A declared covering result of either kind (an assertion
+  or a stream) that is missing is failed, never unsupported.
+- **`require`**: validated at config load whatever the command (keys by
+  the protocol's capability grammar, `describe::is_capability`, exported;
+  meanings one line, 1 to 200 bytes); absent makes `--all` refuse before any
+  build; an explicitly empty table requires nothing. No config that loads
+  today can hold it, so the contract holds by construction.
+- **The sweep**: every scenario's datasets resolved before the first run
+  (a missing variant refuses the sweep); then every scenario, in describe
+  order, keep-going on failure, on a run that errored (its error is the
+  scenario's one failure) and on an unsafe launch (each run has its own
+  directory, and the reservation store checks every admission). A stop seen
+  before a run, during one (including one laundered into the harness run's
+  error) or before the record is written interrupts the sweep, and no record
+  is written; after that last check (the finalization boundary) the record
+  is written and reported whatever arrives.
+- **The digest** is `require-v1:` and XXH3-128 seed 0 over the required ids
+  in byte order, each followed by a newline: the requirement set's identity,
+  ids only (R6 makes the meaning description); the record keeps the
+  meanings, and a later comparison must report differing wording rather
+  than hide it behind equal digests. brokkr-json-v1 (R13) is not used.
+- **The record** is one JSON document per finished sweep,
+  `.brokkr/library-certifications/<uuid>.json`, written by
+  `atomic_write::replace` (atomic, not promised crash-durable: its directory
+  fsync is best effort), never cleaned. SQLite (no reader) and results.db
+  (measurements only, R16) were rejected. It carries the provenance a later
+  comparison needs to tell unsupported from a regression: full commit and
+  cleanliness, the `--commit` ref, the harness config, profile and both
+  executables' XXH128, brokkr's version, per scenario its failures (as
+  printed), kept directory, dataset bindings with the configured `xxhash`
+  or null (unknown, never a match), its declared coverage and its reported
+  results, and per capability its class and every covering result. A write
+  failure fails the command; the record may then exist or not.
+- Exit 1 for anything not certified, unsupported included.
+
 ### R16 Recording (slice 6; finding 15)
 
 - `--bench N` takes one SCENARIO; `--all` never measures. N whole
@@ -750,8 +807,10 @@ code. Sizes are rough source-plus-tests lines.
    parser, `brokkr.cli`, bounded probes, with the amendments of R12a.
    Deferred to slice 6: generated-role content digests and the reuse key
    (about 150). About 1300 source and test lines.
-5. **The gate.** Assertion `covers`, `[pbfhogg.library.require]`, `--all`,
-   classification, the certification record. About 700.
+5. **The gate** (link 5, landed). Assertion `covers`,
+   `[pbfhogg.library.require]`, `--all`, classification, the certification
+   record, with the amendments of R15a. Landed whole, nothing deferred out
+   of it; about 900 source and test lines.
 6. **Recording.** `--bench N`, `brokkr-json-v1` canonicalization and the
    plan and context digests (R13), iteration agreement, the results.db group
    write and migration, sidecar.db call boundaries and the closed final
@@ -828,6 +887,14 @@ only carry a harness written after that.
   replay and its digest there, never the library digest. `run_in` and
   `measure::Supervised` are the run-scoped launch; every new launch kind in a
   run goes through it. `library.md` has eleven `##` sections.
+- Slice 5 (link 5): as planned, with the amendments of R15a. Where a later
+  link starts: `certify.rs` holds `Requirements` (the applied list and its
+  digest), `classify`, `certified` and `record`; `mod.rs` has `Target`
+  (`One`/`All`), `certify_all` and `sweep`, and `show_report`, which prints a
+  run as `SCENARIO` does. Slice 6 stores the applied list and digest on
+  measured rows with `Requirements::digest` (`--bench` takes one SCENARIO,
+  never `--all`). `LibraryHarness::digest` and `PbfhoggBinary::digest` give
+  the executables' XXH128. `library.md` has twelve `##` sections.
 
 ## The pbfhogg list
 
@@ -841,6 +908,12 @@ Filed by the chain's last link with `bz new -p pbfhogg`, once settled.
   brokkr's lease descriptors).
 - `--describe-harness` and `--test-harness REQUEST --private-dir DIR` as
   specified.
+- The gate's inputs (slice 5): pbfhogg chooses the capability ids its 0.6.0
+  library-use gate needs and states each in `[pbfhogg.library.require]` of
+  its brokkr.toml, and the harness declares `covers` on the assertions (and
+  `stream` on the calls) that prove them, so `brokkr library --all`
+  certifies; nothing names them today (pbfhogg's notes/pre-release.md lists
+  the scenarios, not ids).
 - Invocation lifecycle Open, Draining, Sealed with `seal()` as the ledger
   states, documented as a binding pbfhogg library contract
   (docs/guide/advanced.md or an ADR) that the protocol can cite (finding 10).

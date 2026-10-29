@@ -2063,11 +2063,9 @@ impl HarnessConfig {
         crate::build::configured_profile(table, self.profile.as_ref(), self.debug)
     }
 
-    /// Resolved binary name (defaults to `package` when unset). Not
-    /// consumed by production code today - `cargo build` already takes
-    /// `--package` and `--bin` separately - but exercised by parse tests
-    /// to lock the defaulting rule into the schema.
-    #[cfg(test)]
+    /// Resolved binary name (defaults to `package` when unset), as records
+    /// name the bin that ran; `cargo build` itself takes `--package` and
+    /// `--bin` separately.
     pub fn binary_name(&self) -> &str {
         self.binary.as_deref().unwrap_or(&self.package)
     }

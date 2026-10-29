@@ -30,8 +30,9 @@ reads the ones that apply to it:
   behaviour is in `docs/commands/corpus.md`
 - `[dellingr]` and `[dellingr.workloads.*]` -> `docs/projects/dellingr.md`
 - `[mogwai]` and `[mogwai.targets.*]` -> `docs/projects/mogwai.md`
-- `[pbfhogg.library]` and `[pbfhogg.library.harness]` ->
-  `docs/commands/library.md` (`brokkr man library`)
+- `[pbfhogg.library]`, `[pbfhogg.library.harness]` and
+  `[pbfhogg.library.require]` -> `docs/commands/library.md` (`brokkr man
+  library`)
 
 For project-specific CLI flags that adjust dataset resolution or cargo
 features (`--snapshot`, `--as-snapshot`, `--direct-io`, `--io-uring`,

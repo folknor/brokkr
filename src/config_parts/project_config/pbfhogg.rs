@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use crate::config::HarnessConfig;
 use crate::error::DevError;
 use serde::Deserialize;
@@ -23,6 +25,41 @@ pub struct PbfhoggConfig {
 pub struct LibraryConfig {
     /// `[pbfhogg.library.harness]`: the harness member's build.
     pub harness: HarnessConfig,
+    /// `[pbfhogg.library.require]`: capability id to its one-line meaning,
+    /// what `brokkr library --all` certifies. Absent makes `--all` refuse;
+    /// empty requires no capability.
+    #[serde(default)]
+    pub require: Option<BTreeMap<String, String>>,
+}
+
+/// Longest meaning of a required capability, in bytes.
+const MEANING_LIMIT: usize = 200;
+
+/// Each required capability's id by the protocol's capability grammar, and
+/// its meaning one line of text.
+fn check_require(require: &BTreeMap<String, String>) -> Result<(), DevError> {
+    for (id, meaning) in require {
+        if !crate::pbfhogg::library::is_capability(id) {
+            return Err(DevError::Config(format!(
+                "[pbfhogg.library.require]: {id:?} is not a capability id (an identifier \
+                 ending .v<N>, such as cancel.pre-decision.v1; see `brokkr man library`)"
+            )));
+        }
+        if meaning.is_empty() || meaning.len() > MEANING_LIMIT {
+            return Err(DevError::Config(format!(
+                "[pbfhogg.library.require] {id}: its meaning must be 1 to {MEANING_LIMIT} bytes, \
+                 is {}",
+                meaning.len()
+            )));
+        }
+        if meaning.chars().any(char::is_control) {
+            return Err(DevError::Config(format!(
+                "[pbfhogg.library.require] {id}: its meaning is one line of text, without \
+                 control characters"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Whether the top-level `value` named `pbfhogg` is the pbfhogg project
@@ -64,8 +101,12 @@ pub(crate) fn parse(table: &toml::Table) -> Result<PbfhoggConfig, DevError> {
             )));
         }
     }
-    value
+    let config: PbfhoggConfig = value
         .clone()
         .try_into()
-        .map_err(|e: toml::de::Error| DevError::Config(format!("pbfhogg: {e}")))
+        .map_err(|e: toml::de::Error| DevError::Config(format!("pbfhogg: {e}")))?;
+    if let Some(require) = config.library.as_ref().and_then(|l| l.require.as_ref()) {
+        check_require(require)?;
+    }
+    Ok(config)
 }

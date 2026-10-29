@@ -22,7 +22,7 @@ const EXAMPLE: &str = r#"{
       "assertions": [
         {"id": "a.outcome", "call": "a"},
         {"id": "b.outcome", "call": "b"},
-        {"id": "outputs-equal", "call": null}
+        {"id": "outputs-equal", "call": null, "covers": ["repeat.equal-outputs.v1"]}
       ]
     }
   ]
@@ -61,8 +61,28 @@ fn the_documented_example_parses_into_its_scenario() {
         RoleSource::Output { owner: "b".into() }
     );
     assert_eq!(scenario.assertions[2].call, None);
+    assert_eq!(scenario.assertions[2].covers, ["repeat.equal-outputs.v1"]);
+    assert!(scenario.assertions[0].covers.is_empty());
     assert_eq!(scenario.calls[0].stream, ["counters.v1"]);
     assert!(scenario.calls[1].stream.is_empty());
+}
+
+#[test]
+fn an_assertion_covers_unique_capability_ids() {
+    let from = r#""covers": ["repeat.equal-outputs.v1"]"#;
+    for good in ["[]", r#"["a.v1", "b.v2"]"#] {
+        let doc = edited(from, &format!(r#""covers": {good}"#));
+        assert!(parse(doc.as_bytes()).is_ok(), "{good}");
+    }
+    for bad in [r#"["equal"]"#, r#"["equal.v0"]"#, r#""equal.v1""#] {
+        let e = refused(&edited(from, &format!(r#""covers": {bad}"#)));
+        assert!(
+            e.starts_with("describe.scenarios[0].assertions[2].covers"),
+            "{bad}: {e}"
+        );
+    }
+    let e = refused(&edited(from, r#""covers": ["a.v1", "a.v1"]"#));
+    assert!(e.contains("listed twice"), "{e}");
 }
 
 #[test]

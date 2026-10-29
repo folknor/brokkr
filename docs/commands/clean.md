@@ -49,6 +49,7 @@ The measurement stores are never removed, by any flag combination:
 | `$XDG_DATA_HOME/brokkr/history.db` | global command history |
 | `.brokkr/piners/corpus/runs.db` | the corpus run store, source of truth |
 | `.brokkr/ratatoskr/gate.db` | the gate baselines |
+| `.brokkr/library-certifications/` | `brokkr library --all` certification records |
 | `.brokkr/bench/` | criterion baselines + their environment stamps |
 | `$XDG_DATA_HOME/brokkr/sidecar-backups/` | durable profiler backups |
 

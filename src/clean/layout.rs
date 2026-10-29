@@ -99,6 +99,12 @@ impl ProjectState {
         self.root.join("pbfhogg-capabilities")
     }
 
+    /// `brokkr library --all`'s certification records, one JSON document
+    /// each, `<uuid>.json`. A result, never cleaned.
+    pub(crate) fn library_certifications(&self) -> PathBuf {
+        self.root.join("library-certifications")
+    }
+
     pub(crate) fn worktrees_file(&self) -> PathBuf {
         self.root.join("worktrees.toml")
     }

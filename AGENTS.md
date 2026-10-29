@@ -37,14 +37,13 @@ A doc with 8+ `##` sections is **section-addressed**: `brokkr man conventions sc
 - `docs/commands/results.md` - `brokkr results`.
 - `docs/commands/measure.md` - `--bench`/`--hotpath`/`--alloc`/`--stop`, the sidecar profiler, markers, `brokkr sidecar`.
 - `docs/commands/output-channels.md` - where a run's output goes (stdout/stderr/FIFO, results.db vs sidecar.db).
-- `docs/commands/library.md` - pbfhogg `brokkr library`, `[pbfhogg.library]` and the library harness protocol.
+- `docs/commands/library.md` - pbfhogg `brokkr library`, `[pbfhogg.library]`, the library harness protocol and `--all` certification.
 - `docs/commands/visual.md` - litehtml-rs/sluggrs visual commands.
 - `docs/commands/hotpath.md` - sluggrs `brokkr hotpath`.
 - `docs/commands/sync.md` - ratatoskr `sync` / `mock-serve`.
 - `docs/commands/ratatoskr-gate.md` - ratatoskr `--gate` and gate.db.
 - `docs/commands/service.md` - ratatoskr `service`.
 - `docs/commands/corpus.md` - piners `brokkr corpus`.
-- `docs/commands/library.md` - pbfhogg `brokkr library` and the library harness protocol.
 - `docs/projects/pbfhogg-vs-elivagar.md` - how the two dispatch layers differ.
 - `docs/projects/pbfhogg.md`, `elivagar.md`, `nidhogg.md`, `dellingr.md`, `mogwai.md`, `litehtml.md`, `sluggrs.md`, `ratatoskr.md`, `piners.md` - per-project commands and internals.
 

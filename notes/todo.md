@@ -249,6 +249,18 @@ passing path, all are pre-existing.
   `matched` or the dense-na table does not filter it. Whether the store should
   mark the row invalid, or queries should, is undecided.
 
+### `atomic_write`: the directory fsync is best effort (2026-10-29)
+
+Found while placing the library certification record (brokkr 46 slice 5).
+`Staged::commit` ignores a failure to open or fsync the target's directory
+(a comment says so), and nothing syncs the parent of a directory the
+caller just created, so `replace` returning `Ok` proves the rename, not that
+it survives a crash. The module doc says both paths "fsync the directory"
+without the qualifier. Either surface the failure (callers that only want
+atomicity would ignore it) or say best effort in the module doc. No caller
+promises crash durability today; the certification record's doc promises
+atomic publication only.
+
 ### Inter-suite gap on the unisolated serial path
 
 When harness isolation cannot be installed (a configured host runner or

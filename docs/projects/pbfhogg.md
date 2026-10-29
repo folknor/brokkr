@@ -16,7 +16,8 @@
 - `src/pbfhogg/library/` - `brokkr library`, pbfhogg used as a library
   through a harness a pbfhogg workspace member provides: listing its
   scenarios and verifying one, its calls' CLI counterparts replayed and
-  compared by `pbfhogg digest`; the command and its protocol are
+  compared by `pbfhogg digest`, and certifying every scenario against
+  `[pbfhogg.library.require]`; the command and its protocol are
   `brokkr man library`.
 - `src/pbfhogg/argv.rs` - `PbfArgv`, an argv with what it reads, writes and
   scratches.

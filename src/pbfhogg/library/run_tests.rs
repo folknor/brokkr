@@ -562,6 +562,53 @@ fn a_lease_held_past_the_harness_leaves_the_directory_untouched() {
     assert!(!report.run_dir.join("evidence").exists());
 }
 
+#[test]
+fn an_unsafe_replay_keeps_the_results_read_before_it() {
+    // The replay's descendant keeps the lease past its release: the run
+    // directory is left alone, but the harness's documents were read before
+    // the replay, so their results and the stream verdicts stand.
+    let f = fixture("replay-held", &equal_harness());
+    cat_extra(&f, "(sleep 4 </dev/null >/dev/null 2>&1 &)\n");
+    // Call `a` claims its stream as well as declaring a counterpart.
+    let described = DESCRIBE.replacen(
+        r#""label": "cat input -> out-a"}"#,
+        &format!(r#""label": "cat input -> out-a", "stream": ["counters.v1"], "cli": {CAT_CLI}}}"#),
+        1,
+    );
+    let report = run_described(&f, &described);
+    assert!(!report.passed);
+    assert!(
+        has(
+            &report,
+            "the replay launch of call a did not establish a safe state"
+        ),
+        "{:?}",
+        report.failures
+    );
+    let results: Vec<String> = report
+        .results
+        .iter()
+        .map(|(c, r)| {
+            format!(
+                "{}/{} {}",
+                c.as_deref().unwrap_or("-"),
+                r.id,
+                r.status.name()
+            )
+        })
+        .collect();
+    assert_eq!(
+        results,
+        [
+            "-/whole pass",
+            "a/a.outcome pass",
+            "a/brokkr.seal pass",
+            "a/brokkr.stream pass"
+        ]
+    );
+    assert!(!report.run_dir.join("evidence").exists());
+}
+
 /// The describe document with call `a` declaring `cli` as its counterpart.
 fn with_cli(cli: &str) -> String {
     DESCRIBE.replacen(

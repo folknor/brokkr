@@ -1771,24 +1771,31 @@ Examples:
     /// for its describe document (`--describe-harness`) and validates it.
     /// Bare, lists each scenario with its calls, roles and assertions; with
     /// SCENARIO, runs that scenario once as a verification, quiet on pass
-    /// and loud on fail, keeping a failed run's directory as evidence.
+    /// and loud on fail, keeping a failed run's directory as evidence; with
+    /// `--all`, runs every scenario and certifies the capabilities
+    /// `[pbfhogg.library.require]` names, writing a certification record.
     ///
     /// In depth: `brokkr man library`.
     #[command(display_order = 12)]
+    #[command(group(clap::ArgGroup::new("library_run").args(["scenario", "all"])))]
     Library {
         /// The scenario to run, by id; omit to list them.
         #[arg(value_name = "SCENARIO")]
         scenario: Option<String>,
 
+        /// Run every scenario, then certify the required capabilities.
+        #[arg(long)]
+        all: bool,
+
         /// Dataset name from brokkr.toml whose files bind the scenario's
         /// dataset roles, each in the variant the role declares. Defaults
         /// to the shared default dataset.
-        #[arg(long, value_name = "NAME", requires = "scenario")]
+        #[arg(long, value_name = "NAME", requires = "library_run")]
         dataset: Option<String>,
 
         /// Snapshot key of the dataset to bind: `base` (or omit) for its
         /// primary data, or a key under `[dataset.snapshot.<key>]`.
-        #[arg(long, value_name = "KEY", requires = "scenario")]
+        #[arg(long, value_name = "KEY", requires = "library_run")]
         snapshot: Option<crate::datasets::resolve::SnapshotRef>,
 
         /// Build the harness with the dev profile (`<target>/debug/`).

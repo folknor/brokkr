@@ -9,14 +9,18 @@
 //! - [`stream`]: each call's FIFO records judged against its document.
 //! - [`counterpart`]: each call's CLI counterpart replayed and compared.
 //! - [`digest`]: the `pbfhogg digest` report the comparison reads.
+//! - [`certify`]: `--all`'s capability classification and its record.
 
 mod artefact;
+mod certify;
 mod counterpart;
 mod describe;
 mod digest;
 mod json;
 mod run;
 mod stream;
+
+pub(crate) use describe::is_capability;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -39,23 +43,60 @@ pub(crate) struct LibraryArgs<'a> {
     /// worktree.
     pub(crate) build_root: &'a Path,
     pub(crate) harness: &'a HarnessConfig,
+    /// `[pbfhogg.library.require]`, which `--all` certifies against.
+    pub(crate) require: Option<&'a BTreeMap<String, String>>,
+    /// The files composed into the config, so a certification records
+    /// whether the tree built was clean under the measurement policy.
+    pub(crate) config_files: &'a [PathBuf],
+    /// `--commit REF`, when given.
+    pub(crate) commit: Option<&'a str>,
     /// `--profile`/`--debug`/`--release`, when given.
     pub(crate) profile: Option<RustProfile>,
-    /// A scenario to run; `None` lists them.
+    /// What to run; `None` lists the scenarios.
     pub(crate) run: Option<RunArgs<'a>>,
 }
 
-/// `brokkr library SCENARIO`: what to run, and where its inputs come from.
+/// Which scenarios a run covers.
+pub(crate) enum Target<'a> {
+    /// `SCENARIO`: one, as a verification.
+    One(&'a str),
+    /// `--all`: every one, then the certification.
+    All,
+}
+
+/// `brokkr library SCENARIO|--all`: what to run, and where its inputs come
+/// from.
 pub(crate) struct RunArgs<'a> {
-    pub(crate) scenario: &'a str,
+    pub(crate) target: Target<'a>,
     pub(crate) dataset: &'a str,
     pub(crate) snapshot: SnapshotRef,
     pub(crate) paths: &'a crate::config::ResolvedPaths,
 }
 
-/// `brokkr library [SCENARIO]`: build the harness, read its describe
-/// document, then list the scenarios or run one.
+/// `brokkr library [SCENARIO | --all]`: build the harness, read its describe
+/// document, then list the scenarios, run one, or certify them all.
 pub(crate) fn library(args: &LibraryArgs<'_>) -> Result<(), DevError> {
+    // The requirement list is taken once, before anything is built: what is
+    // printed, classified, hashed and stored is this one value.
+    let require = match &args.run {
+        Some(RunArgs {
+            target: Target::All,
+            ..
+        }) => Some(certify::Requirements::new(
+            args.require
+                .ok_or_else(|| {
+                    DevError::Config(
+                        "brokkr library --all certifies against [pbfhogg.library.require], \
+                         which brokkr.toml does not have: list each required capability id \
+                         with its meaning there, or leave the table empty to require none \
+                         (see `brokkr man library`, Certification)"
+                            .into(),
+                    )
+                })?
+                .clone(),
+        )),
+        _ => None,
+    };
     let _lock = crate::context::reenter_command_lock()?;
     // One window for the whole command: the build, describe and run guards
     // nest inside it, so a stop between them or during parsing is seen, not
@@ -70,7 +111,7 @@ pub(crate) fn library(args: &LibraryArgs<'_>) -> Result<(), DevError> {
     // before either handle exists; the listing does not.
     let (harness, cli) = LibraryHarness::build(
         args.harness,
-        profile,
+        profile.clone(),
         args.run.is_some(),
         args.build_root,
         args.project_root,
@@ -82,14 +123,28 @@ pub(crate) fn library(args: &LibraryArgs<'_>) -> Result<(), DevError> {
     if crate::shutdown::should_unwind() {
         return Err(DevError::Interrupted);
     }
-    match &args.run {
-        None => list(&doc),
-        Some(run) => {
-            let cli = cli.as_ref().ok_or_else(|| {
-                DevError::Internal("a library run was built without its CLI".into())
-            })?;
-            run_one(&harness, cli, &doc, run, args.project_root)
-        }
+    let Some(run) = &args.run else {
+        return list(&doc);
+    };
+    let cli = cli
+        .as_ref()
+        .ok_or_else(|| DevError::Internal("a library run was built without its CLI".into()))?;
+    match (&run.target, &require) {
+        (Target::One(id), _) => run_one(&harness, cli, &doc, run, id, args.project_root),
+        (Target::All, Some(require)) => certify_all(
+            &Handles {
+                harness: &harness,
+                cli,
+                profile: &profile,
+            },
+            &doc,
+            run,
+            require,
+            args,
+        ),
+        (Target::All, None) => Err(DevError::Internal(
+            "a library certification lost its requirement list".into(),
+        )),
     }
 }
 
@@ -111,27 +166,13 @@ fn run_one(
     harness: &LibraryHarness,
     cli: &PbfhoggBinary,
     doc: &describe::Describe,
-    args: &RunArgs<'_>,
+    run: &RunArgs<'_>,
+    id: &str,
     project_root: &Path,
 ) -> Result<(), DevError> {
-    let scenario = find_scenario(doc, args.scenario)?;
-    let datasets = bind_datasets(
-        scenario,
-        |variant| {
-            resolve::resolve_snapshot_pbf_path(
-                args.dataset,
-                &args.snapshot,
-                variant,
-                args.paths,
-                project_root,
-            )
-        },
-        args,
-    )?;
-    let library_root = crate::clean::layout::PbfhoggLayout::library_runs(&args.paths.scratch_dir);
-    std::fs::create_dir_all(&library_root)?;
-    let state = crate::clean::layout::ProjectState::new(project_root);
-    std::fs::create_dir_all(state.root())?;
+    let scenario = find_scenario(doc, id)?;
+    let (datasets, _) = bind_datasets(scenario, run, project_root)?;
+    let (library_root, state_root) = places(run, project_root)?;
     let report = run::verify(
         harness,
         cli,
@@ -139,12 +180,35 @@ fn run_one(
         &datasets,
         &run::Places {
             library_root: &library_root,
-            fifo_dir: state.root(),
+            fifo_dir: &state_root,
         },
     )?;
     // No stop check here: `verify` made the last one before a passing run's
     // removal, which commits the verdict, so a stop after it never turns a
     // removed run into an interrupted one.
+    if show_report(scenario, &report) {
+        return Ok(());
+    }
+    Err(DevError::Verify(format!(
+        "library scenario {} failed ({})",
+        scenario.id,
+        output::count(report.failures.len(), "failure")
+    )))
+}
+
+/// Make the library run root and the state root a run needs.
+fn places(run: &RunArgs<'_>, project_root: &Path) -> Result<(PathBuf, PathBuf), DevError> {
+    let library_root = crate::clean::layout::PbfhoggLayout::library_runs(&run.paths.scratch_dir);
+    std::fs::create_dir_all(&library_root)?;
+    let state = crate::clean::layout::ProjectState::new(project_root);
+    std::fs::create_dir_all(state.root())?;
+    Ok((library_root, state.root().to_path_buf()))
+}
+
+/// Print a run's report: on pass its stream, diagnostic and counterpart
+/// lines and one result line; on fail every failure, the kept directory and
+/// the clean hint. Whether it passed.
+fn show_report(scenario: &describe::Scenario, report: &run::Report) -> bool {
     for line in &report.streams {
         output::run_msg(&format!("stream {line}"));
     }
@@ -172,7 +236,7 @@ fn run_one(
             output::count(count, "result"),
             output::format_duration(report.wall)
         ));
-        return Ok(());
+        return true;
     }
     for line in &report.failures {
         output::error(line);
@@ -182,11 +246,207 @@ fn run_one(
         output::path(&report.run_dir)
     ));
     crate::artefacts::emit_clean_hint(output::run_msg);
-    Err(DevError::Verify(format!(
-        "library scenario {} failed ({})",
-        scenario.id,
-        output::count(report.failures.len(), "failure")
-    )))
+    false
+}
+
+/// The built executables a certification runs and records.
+struct Handles<'a> {
+    harness: &'a LibraryHarness,
+    cli: &'a PbfhoggBinary,
+    profile: &'a RustProfile,
+}
+
+/// `brokkr library --all`: print the requirement list, bind every scenario
+/// before the first runs, run each once in describe order whatever the
+/// others came to, classify every required capability, then write the
+/// certification record. A stop seen before the record is written
+/// interrupts, and no record is written; after that last check the
+/// certification finishes.
+fn certify_all(
+    handles: &Handles<'_>,
+    doc: &describe::Describe,
+    run: &RunArgs<'_>,
+    require: &certify::Requirements,
+    args: &LibraryArgs<'_>,
+) -> Result<(), DevError> {
+    let digest = require.digest();
+    output::run_msg(&format!(
+        "library --all: {} against {}, {digest}",
+        output::count(doc.scenarios.len(), "scenario"),
+        output::count(require.list().len(), "required capability"),
+    ));
+    for (id, meaning) in require.list() {
+        output::run_msg(&format!("  requires {id}: {meaning}"));
+    }
+
+    // Every binding first, so a dataset that lacks a variant refuses the
+    // sweep before anything runs.
+    let mut bound = Vec::new();
+    for scenario in &doc.scenarios {
+        bound.push((scenario, bind_datasets(scenario, run, args.project_root)?));
+    }
+    // So is what the record needs about the tree, the host and the builds.
+    let git = crate::git::collect_with_config_paths(args.build_root, args.config_files)?;
+    let commit = crate::git::resolve_commit(args.build_root, "HEAD")?;
+    let hostname = crate::config::hostname()?;
+    let uuid = crate::db::generate_uuid()?;
+    let unix_time_s = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let (library_root, state_root) = places(run, args.project_root)?;
+    let total = bound.len();
+    let attempts = sweep(
+        handles,
+        bound,
+        &run::Places {
+            library_root: &library_root,
+            fifo_dir: &state_root,
+        },
+    )?;
+
+    let verdicts = certify::classify(require, &attempts);
+    let certified = certify::certified(&attempts, &verdicts);
+    // The finalization boundary: past it the certification is written and
+    // reported whatever arrives.
+    if crate::shutdown::should_unwind() {
+        return Err(interrupted(total, total));
+    }
+    for verdict in &verdicts {
+        let line = certify::verdict_line(verdict);
+        if verdict.class == certify::Class::Passed {
+            output::run_msg(&line);
+        } else {
+            output::error(&line);
+        }
+    }
+    let not_required = certify::not_required(require, &attempts);
+    if !not_required.is_empty() {
+        output::run_msg(&format!(
+            "covered, not required: {}",
+            not_required.join(", ")
+        ));
+    }
+
+    let record = certify::record(
+        &certify::Provenance {
+            uuid: &uuid,
+            unix_time_s,
+            hostname: &hostname,
+            commit: commit.as_str(),
+            clean: git.is_clean,
+            commit_ref: args.commit,
+            harness: args.harness,
+            profile: handles.profile.label(),
+            harness_xxh128: handles.harness.digest(),
+            cli_xxh128: handles.cli.digest(),
+            dataset: run.dataset,
+            snapshot: run.snapshot.as_str(),
+        },
+        require,
+        &attempts,
+        &verdicts,
+    );
+    let path = write_record(args.project_root, &uuid, &record)?;
+
+    let passed_scenarios = attempts.iter().filter(|a| a.passed).count();
+    let tally = |class: certify::Class| verdicts.iter().filter(|v| v.class == class).count();
+    let summary = format!(
+        "{passed_scenarios}/{total} scenarios passed; capabilities: {} passed, {} failed, {} \
+         unsupported of {}; {digest}{}; record {}",
+        tally(certify::Class::Passed),
+        tally(certify::Class::Failed),
+        tally(certify::Class::Unsupported),
+        verdicts.len(),
+        if git.is_clean {
+            ""
+        } else {
+            "; the tree was dirty"
+        },
+        output::path(&path)
+    );
+    if certified {
+        output::result_msg(&format!("library --all: certified, {summary}"));
+        Ok(())
+    } else {
+        output::error(&format!("library --all: not certified, {summary}"));
+        Err(DevError::Verify("library --all: not certified".into()))
+    }
+}
+
+/// Publish the certification record as `<uuid>.json` (atomically: never a
+/// partial file). A failure fails the command: the record may or may not
+/// exist then.
+fn write_record(
+    project_root: &Path,
+    uuid: &str,
+    record: &serde_json::Value,
+) -> Result<PathBuf, DevError> {
+    let dir = crate::clean::layout::ProjectState::new(project_root).library_certifications();
+    let path = dir.join(format!("{uuid}.json"));
+    let written = (|| -> std::io::Result<()> {
+        let mut bytes = serde_json::to_vec_pretty(record).map_err(std::io::Error::other)?;
+        bytes.push(b'\n');
+        std::fs::create_dir_all(&dir)?;
+        crate::atomic_write::replace(&path, &bytes)
+    })();
+    written.map(|()| path.clone()).map_err(|e| {
+        DevError::Verify(format!(
+            "library --all: the certification record {} could not be written ({e}); it may or \
+             may not exist, so this certification is not recorded",
+            output::path(&path)
+        ))
+    })
+}
+
+/// A scenario with its bound dataset roles: role id to path, and the
+/// bindings the record keeps.
+type Bound<'a> = (
+    &'a describe::Scenario,
+    (BTreeMap<String, PathBuf>, Vec<certify::Binding>),
+);
+
+/// Run each bound scenario once, in order, whatever the others came to: a
+/// run that did not come to a verdict is that scenario's failure. A stop
+/// seen before a run, or during one, interrupts the sweep.
+fn sweep<'a>(
+    handles: &Handles<'_>,
+    bound: Vec<Bound<'a>>,
+    places: &run::Places<'_>,
+) -> Result<Vec<certify::Attempt<'a>>, DevError> {
+    let total = bound.len();
+    let mut attempts: Vec<certify::Attempt<'a>> = Vec::new();
+    for (i, (scenario, (datasets, bindings))) in bound.into_iter().enumerate() {
+        if crate::shutdown::should_unwind() {
+            return Err(interrupted(i, total));
+        }
+        output::run_msg(&format!("scenario {}/{total}: {}", i + 1, scenario.id));
+        let attempt = match run::verify(handles.harness, handles.cli, scenario, &datasets, places) {
+            Ok(report) => {
+                show_report(scenario, &report);
+                certify::Attempt::of_report(scenario, bindings, &report)
+            }
+            Err(DevError::Interrupted) => return Err(interrupted(i, total)),
+            // A stop can arrive as the harness launch's own error.
+            Err(_) if crate::shutdown::should_unwind() => return Err(interrupted(i, total)),
+            Err(e) => {
+                let why = format!("it did not come to a verdict: {e}");
+                output::error(&format!("library {}: {why}", scenario.id));
+                certify::Attempt::errored(scenario, bindings, why)
+            }
+        };
+        attempts.push(attempt);
+    }
+    Ok(attempts)
+}
+
+/// A stop seen with `done` of `total` scenarios finished: reported, no
+/// record written.
+fn interrupted(done: usize, total: usize) -> DevError {
+    output::run_msg(&format!(
+        "library --all: interrupted with {done} of {total} scenarios finished; no \
+         certification recorded"
+    ));
+    DevError::Interrupted
 }
 
 fn find_scenario<'a>(
@@ -202,27 +462,55 @@ fn find_scenario<'a>(
     })
 }
 
-/// Resolve every dataset role of `scenario` through `resolve` (its variant
-/// to the file of the chosen dataset and snapshot).
+/// Resolve every dataset role of `scenario` (its variant to the file of the
+/// chosen dataset and snapshot): role id to path, and each binding with the
+/// configured digest of the entry it came from.
 fn bind_datasets(
     scenario: &describe::Scenario,
-    resolve: impl Fn(&str) -> Result<PathBuf, ResolveError>,
-    args: &RunArgs<'_>,
-) -> Result<BTreeMap<String, PathBuf>, DevError> {
+    run: &RunArgs<'_>,
+    project_root: &Path,
+) -> Result<(BTreeMap<String, PathBuf>, Vec<certify::Binding>), DevError> {
+    bind_with(
+        scenario,
+        |variant| {
+            resolve::resolve_snapshot_pbf_entry(
+                run.dataset,
+                &run.snapshot,
+                variant,
+                run.paths,
+                project_root,
+            )
+            .map(|resolved| {
+                (
+                    resolved.path,
+                    resolved.entry.xxhash.as_ref().map(ToString::to_string),
+                )
+            })
+        },
+        run.dataset,
+        &run.snapshot,
+    )
+}
+
+fn bind_with(
+    scenario: &describe::Scenario,
+    resolve: impl Fn(&str) -> Result<(PathBuf, Option<String>), ResolveError>,
+    dataset: &str,
+    snapshot: &SnapshotRef,
+) -> Result<(BTreeMap<String, PathBuf>, Vec<certify::Binding>), DevError> {
     let mut out = BTreeMap::new();
+    let mut bindings = Vec::new();
     for role in &scenario.roles {
         let describe::RoleSource::Dataset { variant } = &role.source else {
             continue;
         };
-        let path = resolve(variant).map_err(|e| match e {
+        let (path, xxhash) = resolve(variant).map_err(|e| match e {
             ResolveError::SnapshotVariant { available, .. } => DevError::Config(format!(
-                "scenario {} role {} reads variant {variant}, which snapshot {} of dataset {} \
-                 does not have (it has {}); choose a snapshot that has it, or register the \
-                 variant",
+                "scenario {} role {} reads variant {variant}, which snapshot {snapshot} of \
+                 dataset {dataset} does not have (it has {}); choose a snapshot that has it, or \
+                 register the variant",
                 scenario.id,
                 role.id,
-                args.snapshot,
-                args.dataset,
                 if available.is_empty() {
                     "none".to_owned()
                 } else {
@@ -234,9 +522,15 @@ fn bind_datasets(
                 scenario.id, role.id
             )),
         })?;
-        out.insert(role.id.clone(), path);
+        out.insert(role.id.clone(), path.clone());
+        bindings.push(certify::Binding {
+            role: role.id.clone(),
+            variant: variant.clone(),
+            path,
+            xxhash,
+        });
     }
-    Ok(out)
+    Ok((out, bindings))
 }
 
 /// The listing, one string per line.
@@ -283,10 +577,13 @@ fn listing(doc: &describe::Describe) -> Vec<String> {
             ));
         }
         for assertion in &scenario.assertions {
-            let scope = assertion
+            let mut scope = assertion
                 .call
                 .as_ref()
                 .map_or_else(|| "scenario".to_owned(), |call| format!("call {call}"));
+            if !assertion.covers.is_empty() {
+                scope.push_str(&format!(" (covers: {})", assertion.covers.join(", ")));
+            }
             lines.push(format!("  assertion  {:<24} {scope}", assertion.id));
         }
     }

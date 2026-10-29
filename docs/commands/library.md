@@ -5,8 +5,9 @@ workspace member that links the library at the commit under test and runs
 scripted sequences of library calls in one process; pbfhogg writes it to the
 protocol below, and a pbfhogg commit without that member has nothing for this
 command to build. `brokkr library` builds the harness per commit (so
-`--commit` works), lists the scenarios it declares, and runs one as a
-verification.
+`--commit` works), lists the scenarios it declares, runs one as a
+verification, and runs them all to certify the capabilities brokkr.toml
+requires.
 
 pbfhogg owns what a call does: the scenarios, the library calls they make
 and the assertions about them that only the process itself can judge. brokkr
@@ -26,6 +27,7 @@ releases is not promised until it is.
 ```
 brokkr library [--commit REF] [--debug | --release | --profile NAME]
 brokkr library SCENARIO [--dataset NAME] [--snapshot KEY] [--commit REF] [...]
+brokkr library --all [--dataset NAME] [--snapshot KEY] [--commit REF] [...]
 ```
 
 Bare, builds the harness and lists the scenarios it declares: per scenario
@@ -42,10 +44,14 @@ pbfhogg CLI of the same tree, release with default features whatever
 profile the harness gets, the reference its counterparts replay against
 (see CLI equality); both builds finish before either is used.
 
+With `--all`, runs every scenario once, then classifies each capability
+`[pbfhogg.library.require]` names and writes a certification record (see
+Certification). It never measures. `--all` and `SCENARIO` exclude each other.
+
 - `--commit REF` builds the harness from a git worktree at REF. Config,
-  including `[pbfhogg.library]` and the host's datasets and scratch, still
-  comes from the current tree. A commit that predates the harness member
-  fails its build.
+  including `[pbfhogg.library]` (its `require` too) and the host's datasets
+  and scratch, still comes from the current tree. A commit that predates the
+  harness member fails its build.
 - `--debug`, `--release`, `--profile NAME` choose the cargo profile,
   overriding the config's `debug`/`profile`. The default is release: the
   library is measured in release, and one build serves every use.
@@ -54,7 +60,7 @@ profile the harness gets, the reference its counterparts replay against
   choose the files the scenario's dataset roles bind. There is no
   `--variant`: each dataset role names its own variant, resolved in the
   chosen dataset and snapshot as `brokkr man datasets` describes, its
-  `xxhash` checked when one is configured. Both need `SCENARIO`.
+  `xxhash` checked when one is configured. Both need `SCENARIO` or `--all`.
 
 ## `[pbfhogg.library]`
 
@@ -64,11 +70,26 @@ package = "pbfhogg-harness"   # the workspace member
 binary = "pbfhogg-harness"    # its bin, when it is not named like the package
 features = []                 # cargo features for the build
 profile = "release"           # or debug = true
+
+[pbfhogg.library.require]
+"cancel.pre-decision.v1" = "a cancel before the publication decision refuses it"
+"counters.v1" = "a sealed call's counters reach the FIFO whole"
 ```
 
 `[pbfhogg.library.harness]` is required inside `[pbfhogg.library]` and has
-the shape of `[piners.harness]` (`brokkr man piners-config`). Nothing else is
-accepted in either table.
+the shape of `[piners.harness]` (`brokkr man piners-config`).
+
+`[pbfhogg.library.require]` is optional: the capabilities `brokkr library
+--all` certifies, each a capability id (see Identifiers; quoted, since it
+holds dots) to its meaning, one line of 1 to 200 bytes. A key that is not a
+capability id, or a meaning that is not one line, fails the config load,
+whatever the command. Absent, `--all` refuses to run; empty, it requires no
+capability, and certification rests on every scenario passing. The listing
+and `SCENARIO` runs do not apply it. It is read from the current tree also
+under `--commit`, so a baseline commit is certified against today's
+requirements.
+
+Nothing else is accepted in `[pbfhogg.library]` or its harness table.
 
 `pbfhogg` is not a reserved top-level name: a `[pbfhogg]` table has always
 been read as a hostname section, and still is. brokkr reads it as the pbfhogg
@@ -158,7 +179,7 @@ character.
       "assertions": [
         {"id": "a.outcome", "call": "a"},
         {"id": "b.outcome", "call": "b"},
-        {"id": "outputs-equal", "call": null}
+        {"id": "outputs-equal", "call": null, "covers": ["repeat.equal-outputs.v1"]}
       ]
     }
   ]
@@ -171,15 +192,19 @@ character.
 - `calls`: at least one, ids unique within the scenario, none `setup`. Each
   has a one-line `label`, and may have `stream`: a list of capability ids,
   each at most once, that the call's stream verdict stands for. A nonempty
-  list makes brokkr add `<call>/brokkr.stream` (see The call stream); absent
-  and `[]` mean the same. brokkr gives the ids no other meaning. It may have
+  list makes brokkr add `<call>/brokkr.stream` (see The call stream), which
+  covers those capabilities in a certification; absent and `[]` mean the
+  same. It may have
   `cli`, its CLI counterpart, which makes brokkr add `<call>/brokkr.cli`
   (see CLI equality).
 - `roles`: every path the scenario uses, ids unique within the scenario;
   possibly none.
 - `assertions`: the scenario's assertion inventory, ids unique within the
   scenario; possibly none. `call` is required: a call id of this scenario,
-  or `null` for an assertion about the scenario as a whole.
+  or `null` for an assertion about the scenario as a whole. `covers` is
+  optional: the capability ids, each at most once, that the assertion's
+  result stands for in a certification (see Certification); absent and `[]`
+  mean the same.
 
 ### Roles
 
@@ -489,7 +514,9 @@ launch whose admission or release cannot be shown safe (a lease
 still held after the child exited, a private directory that could not be
 made, an overlapping reservation) stops the run as a held harness lease
 does: the failure is reported and nothing in the run directory is read or
-written again. A stop request interrupts the run, its directory kept, also
+written again. The results read before it (the harness's, `brokkr.seal`
+and `brokkr.stream`, judged from what brokkr already holds) are still
+reported; no counterpart's is. A stop request interrupts the run, its directory kept, also
 when it arrived while a release waited. The
 capability probes the negotiation makes are not run launches: they never
 touch the run directory, and are bounded as every probe is.
@@ -539,8 +566,9 @@ brokkr adds one result per call, `<call>/brokkr.seal`: `pass` only for a
 sealed call, since the snapshot exists only then; `<call>/brokkr.stream`
 for a call that claims its stream (see The call stream); and
 `<call>/brokkr.cli` for a call with a counterpart (see CLI equality). They
-are reported once the call documents were read, and a result brokkr adds
-never makes the harness's exit inconsistent.
+are reported once the call documents were read, except that no
+`brokkr.cli` is reported after a counterpart launch that was not safe, and
+a result brokkr adds never makes the harness's exit inconsistent.
 
 On pass, brokkr prints each call's stream line, each diagnostic, each
 counterpart's detail (its counts and declared policy differences) and one
@@ -549,10 +577,104 @@ refused removal is a warning,
 and the directory stays). On fail, it prints every failure, results as
 `<call>/<id>` or, for a scenario-level one, `<id>`, with any detail
 indented beneath; harness-supplied text is printed with control characters
-escaped. It writes `evidence/` into the run directory (`stdout`, `stderr`,
+escaped. Unless the run directory was left untouched (a held lease, an
+unsafe launch, or a run directory that is no longer one), it writes
+`evidence/` into the run directory (`stdout`, `stderr`,
 `stream.txt` with every FIFO record kept, in arrival order and in its wire
 spelling, after a comment line per cause of capture loss, `failures.txt`),
 and keeps the directory, naming it. Routine `brokkr clean` removes kept run
 directories through the gate (`brokkr man clean`); the cleanup after an
 interrupted command never does. An interrupted run, including one stopped
 after the harness exited, keeps its directory and exits as interrupted.
+
+## Certification
+
+`brokkr library --all` certifies the harness against
+`[pbfhogg.library.require]`, its applied requirement list.
+
+**Coverage** is declared in the describe document, and nowhere else: an
+assertion's `covers` lists the capabilities its result stands for, and a
+call's `stream` lists those its `<call>/brokkr.stream` result stands for.
+brokkr's other results (`brokkr.seal`, `brokkr.cli`) cover nothing. A
+covering result is the one reported under the declared call (or at scenario
+level for `call: null`) with the declared id; one reported elsewhere does
+not count. A run reports results only once its artefact tree was read and
+valid: a run that did not run, failed before its artefacts, or left any
+invalid document reports none.
+
+**The sweep.** brokkr prints the requirement list (each id with its meaning)
+and its digest, resolves every scenario's dataset roles before the first run
+(a variant a dataset lacks refuses the whole sweep, as for `SCENARIO`; this
+is resolution up front, not a snapshot of the files), then runs each
+scenario once, in describe order, as `SCENARIO` would, printing what
+`SCENARIO` prints. It always goes on to the next: a scenario that failed, or
+whose run did not come to a verdict (its error is that scenario's failure),
+does not stop the sweep, since each run has its own directory and every
+launch's reservation is checked against every other's.
+
+**Classification**, for each required capability, in this order:
+
+- **failed** when any covering result is `fail` or `unevaluated`, or a
+  declared covering result, of an assertion or a stream, has no result (its
+  scenario failed before reporting it);
+- else **passed** when at least one covering result passed;
+- else **unsupported**: nothing the harness declares covers it, as on a
+  `--commit` baseline that predates the capability. It is shown apart and
+  never called a regression, and it fails certification.
+
+A covering result that passed counts as passed even when its scenario
+failed for another reason; certification still fails on that scenario.
+Capabilities the harness covers that the list does not name are shown on
+one line, never judged.
+
+**Certified** exactly when every scenario passed and every required
+capability passed.
+
+**The digest** of the requirement list is `require-v1:` and the XXH3-128
+(seed 0, 32 lowercase hex digits) of the required ids in byte order, each
+followed by a newline. It covers the ids only: a capability whose meaning
+changes gets a new id, so two certifications with equal digests required
+the same capabilities, though the wording of a meaning may differ; the
+record keeps the wording.
+
+**The record.** Every sweep that finishes writes one JSON document,
+`<uuid>.json` under the `library-certifications/` directory of the current
+tree's `.brokkr/`, certified or not. `brokkr clean` never removes it
+(`brokkr man clean`). It is written atomically, never as a partial file; a
+failure to write it fails the command, and the record may then exist or
+not. It holds:
+
+- `record` (`brokkr-library-certification`) and `version` (1), `uuid`,
+  `unix_time_s`, `hostname`, `brokkr_version`;
+- `commit`: `hash` (the full commit of the tree built, the `--commit`
+  worktree's when given), `clean` (the tree was clean under the measurement
+  policy) and `ref` (the `--commit` argument or `null`);
+- `harness`: `package`, `binary` (the package's name when unset) and
+  `features` as configured, the `profile`
+  it was built under and its executable's `xxh128`; `cli`: the CLI
+  executable's `xxh128`; `dataset` and `snapshot`;
+- `require`: its `digest` and `capabilities`, id to meaning;
+- `certified`;
+- `scenarios`, in run order: `id`, `passed`, `failures` (every failure line
+  as printed), `kept` (the directory a run that came to a verdict kept, or
+  `null`; a run that did not come to a verdict has only its error, which
+  names a directory it kept when it knows one), `bindings` (each
+  dataset role's `role`, `variant`, `path` and the configured `xxhash` of
+  its entry, `null` when none is configured, an unknown identity that never
+  matches another), `coverage` (the assertions with their `call`, `id` and
+  `covers`, and the calls with their stream `capabilities`, as declared) and
+  `results` (each reported result's `call`, `id` and `status`; after an
+  unsafe launch, the results reported, which lack the counterparts');
+- `capabilities`, in id order: `id`, `meaning`, `class` (`passed`,
+  `failed` or `unsupported`) and `covering`, each declared covering result's
+  `scenario`, `call` (or `null`), `result` and `status` (`pass`, `fail`,
+  `unevaluated`, or `missing`);
+- `not_required`: the capabilities covered but not required.
+
+**Output and exit.** After the sweep, one line per required capability: its
+class, its meaning and, when it failed, each covering result that failed,
+was unevaluated or is missing; then the certification line with the tallies,
+the digest, whether the tree was dirty, and the record. Exit 0 when
+certified, 1 otherwise, unsupported included. A stop seen before the
+record is written interrupts the sweep, and no record is written; once that
+last check passed, the record is written and reported whatever arrives.

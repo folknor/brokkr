@@ -14,7 +14,8 @@ const DOC: &str = r#"{"protocol": 1, "scenarios": [
      {"id": "tmp-a", "kind": "directory", "source": "scratch", "owner": "a"}
    ],
    "calls": [{"id": "a", "label": "cat input -> out-a", "stream": ["counters.v1"]}],
-   "assertions": [{"id": "a.outcome", "call": "a"}, {"id": "whole", "call": null}]}
+   "assertions": [{"id": "a.outcome", "call": "a"},
+                  {"id": "whole", "call": null, "covers": ["repeat.v1"]}]}
 ]}"#;
 
 /// Install `body` as an executable shell script under a fresh scratch root.
@@ -79,7 +80,46 @@ fn a_harness_lists_the_scenarios_it_describes() {
     assert!(
         lines
             .iter()
-            .any(|l| l.contains("whole") && l.ends_with("scenario"))
+            .any(|l| l.contains("whole") && l.ends_with("scenario (covers: repeat.v1)"))
+    );
+}
+
+#[test]
+fn a_binding_keeps_the_configured_digest_or_none_and_names_a_missing_variant() {
+    use crate::datasets::error::ResolveError;
+    use crate::datasets::resolve::SnapshotRef;
+    let doc = describe::parse(DOC.as_bytes()).unwrap();
+    let scenario = &doc.scenarios[0];
+    let (paths, bindings) = super::bind_with(
+        scenario,
+        |variant| Ok((PathBuf::from(format!("/d/{variant}.pbf")), None)),
+        "denmark",
+        &SnapshotRef::Base,
+    )
+    .unwrap();
+    assert_eq!(paths["input"], PathBuf::from("/d/indexed.pbf"));
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].variant, "indexed");
+    assert_eq!(bindings[0].xxhash, None);
+
+    let e = super::bind_with(
+        scenario,
+        |variant| {
+            Err(ResolveError::SnapshotVariant {
+                dataset: "denmark".into(),
+                snapshot: "s".into(),
+                variant: variant.into(),
+                available: vec!["raw".into()],
+            })
+        },
+        "denmark",
+        &SnapshotRef::Base,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        e.contains("role input reads variant indexed") && e.contains("it has raw"),
+        "{e}"
     );
 }
 

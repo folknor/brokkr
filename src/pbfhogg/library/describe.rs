@@ -141,6 +141,8 @@ pub(crate) struct Assertion {
     pub(crate) id: String,
     /// The call it judges, or `None` for a scenario-level assertion.
     pub(crate) call: Option<String>,
+    /// The capability ids its result stands for in a certification.
+    pub(crate) covers: Vec<String>,
 }
 
 /// Parse and validate a describe document.
@@ -273,19 +275,7 @@ fn call(item: &Field<'_>) -> Result<Call, String> {
         ));
     }
     let label = one_line(&obj.required("label")?)?;
-    let mut stream: Vec<String> = Vec::new();
-    if let Some(list) = obj.optional("stream") {
-        for item in list.as_array()? {
-            let capability = capability(&item)?;
-            if stream.contains(&capability) {
-                return Err(format!(
-                    "{}: capability {capability:?} is listed twice",
-                    item.path()
-                ));
-            }
-            stream.push(capability);
-        }
-    }
+    let stream = capabilities(&obj, "stream")?;
     let cli = match obj.optional("cli") {
         Some(field) => Some(cli(&field)?),
         None => None,
@@ -453,7 +443,7 @@ fn check_cli(call: &Call, cli: &Cli, roles: &[Role], path: &str) -> Result<(), S
 /// A capability id: an identifier ending `.v<N>`, N a positive decimal
 /// without a leading zero, so a capability whose meaning changes gets a new
 /// id.
-fn is_capability(id: &str) -> bool {
+pub(crate) fn is_capability(id: &str) -> bool {
     is_identifier(id)
         && id.rsplit_once(".v").is_some_and(|(base, n)| {
             !base.is_empty()
@@ -474,6 +464,25 @@ fn capability(field: &Field<'_>) -> Result<String, String> {
             field.path()
         ))
     }
+}
+
+/// The optional list of capability ids under `key`, each at most once;
+/// absent is empty.
+fn capabilities(obj: &Obj<'_>, key: &str) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    if let Some(list) = obj.optional(key) {
+        for item in list.as_array()? {
+            let capability = capability(&item)?;
+            if out.contains(&capability) {
+                return Err(format!(
+                    "{}: capability {capability:?} is listed twice",
+                    item.path()
+                ));
+            }
+            out.push(capability);
+        }
+    }
+    Ok(out)
 }
 
 fn role(item: &Field<'_>, calls: &BTreeSet<&str>) -> Result<Role, String> {
@@ -568,8 +577,9 @@ fn assertion(item: &Field<'_>, calls: &BTreeSet<&str>) -> Result<Assertion, Stri
     } else {
         Some(owner(&call_field, calls)?)
     };
+    let covers = capabilities(&obj, "covers")?;
     obj.finish()?;
-    Ok(Assertion { id, call })
+    Ok(Assertion { id, call, covers })
 }
 
 /// `[a-z0-9][a-z0-9_.-]{0,63}`: valid as a FIFO call id, a file name and a

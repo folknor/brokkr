@@ -1074,6 +1074,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
         }
         Command::Library {
             scenario,
+            all,
             dataset,
             snapshot,
             debug,
@@ -1081,10 +1082,16 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             profile,
             commit,
         } => {
+            use crate::pbfhogg::library::Target;
             let library = project_config.pbfhogg_library()?;
             let profile = profile_choice(debug, release, profile.as_ref());
+            let target = match &scenario {
+                Some(id) => Some(Target::One(id)),
+                None if all => Some(Target::All),
+                None => None,
+            };
             // Host paths come from the live tree, also under `--commit`.
-            let paths = match &scenario {
+            let paths = match &target {
                 Some(_) => {
                     let pi = context::bootstrap(&detection.build_root)?;
                     Some(context::bootstrap_config(
@@ -1096,9 +1103,9 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                 None => None,
             };
             let dataset = dataset.as_deref().unwrap_or(crate::cli::DEFAULT_DATASET);
-            let run = match (&scenario, &paths) {
-                (Some(scenario), Some(paths)) => Some(crate::pbfhogg::library::RunArgs {
-                    scenario,
+            let run = match (target, &paths) {
+                (Some(target), Some(paths)) => Some(crate::pbfhogg::library::RunArgs {
+                    target,
                     dataset,
                     snapshot: crate::datasets::resolve::SnapshotRef::from_opt(snapshot.as_ref()),
                     paths,
@@ -1118,6 +1125,9 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                         project_root,
                         build_root: build_root.as_path(),
                         harness: &library.harness,
+                        require: library.require.as_ref(),
+                        config_files: &dev_config.included_config_files,
+                        commit: commit.as_deref(),
                         profile,
                         run,
                     })

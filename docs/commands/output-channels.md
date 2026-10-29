@@ -215,8 +215,9 @@ self-reported.
 (`brokkr library SCENARIO` is a correctness check too and records to neither
 DB: the harness gets the FIFO, its records are judged as each call's stream
 and kept only as a failed run's evidence, and its stdout and stderr must
-stay empty; see
-`brokkr man library`.)
+stay empty. `brokkr library --all` records neither either; it writes one
+certification record, a JSON document under `.brokkr/library-certifications/`.
+See `brokkr man library`.)
 
 (`verify` subcommands are correctness checks, not benchmarks - they don't
 record to either DB. Their listing-producing steps and every reference-tool

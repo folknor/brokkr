@@ -157,7 +157,7 @@ const TOPICS: &[Topic] = &[
     },
     Topic {
         name: "library",
-        summary: "brokkr library: the pbfhogg library harness, [pbfhogg.library], its protocol",
+        summary: "brokkr library: the pbfhogg library harness, [pbfhogg.library], its protocol, --all certification",
         content: include_str!("../docs/commands/library.md"),
         commands: &[CommandId::Library],
     },

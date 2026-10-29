@@ -34,7 +34,7 @@ const SEAL_RESULT: &str = "brokkr.seal";
 
 /// The id of the stream result brokkr adds to a call whose describe lists
 /// stream capabilities.
-const STREAM_RESULT: &str = "brokkr.stream";
+pub(super) const STREAM_RESULT: &str = "brokkr.stream";
 
 /// Where a run lives.
 pub(crate) struct Places<'a> {
@@ -153,11 +153,12 @@ pub(crate) fn verify(
     report.failures.extend(layout);
     report.failures.extend(output_failures(&run));
     report.failures.extend(undeclared);
+    let mut untouched = false;
     if let Some(judged) = judge_ending(&run, &artefacts, scenario, &forbidden, &mut report) {
         let relayout = |made: &[String]| {
             layout_failures(&run_dir, &request_bytes, cwd_identity, scenario, made)
         };
-        let Some(cli_results) = equality(
+        let cli_results = equality(
             cli,
             scenario,
             &run_dir,
@@ -165,17 +166,27 @@ pub(crate) fn verify(
             layout_ok,
             relayout,
             &mut report,
-        )?
-        else {
-            return Ok(report);
-        };
-        collect_results(&judged, &run, scenario, &cli_results, &mut report);
+        )?;
+        // An unsafe launch (`None`) leaves the run directory alone, but the
+        // documents were read before it and the stream records are in
+        // memory: those results stand, without any counterpart's.
+        untouched = cli_results.is_none();
+        collect_results(
+            &judged,
+            &run,
+            scenario,
+            &cli_results.unwrap_or_default(),
+            &mut report,
+        );
     }
     // A stop that landed after the child's ending was seen (while output
     // settled, the lease was released or the artefacts were read) still
     // interrupts the run, which keeps its directory.
     if crate::shutdown::should_unwind() {
         return Err(DevError::Interrupted);
+    }
+    if untouched {
+        return Ok(report);
     }
     report.passed = report.failures.is_empty();
     if !report.passed {

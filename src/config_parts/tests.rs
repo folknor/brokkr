@@ -3239,4 +3239,35 @@ profile = "corpus"
             );
         }
     }
+
+    #[test]
+    fn the_required_capabilities_are_capability_ids_with_one_line_meanings() {
+        let parse = |require: &str| {
+            let table = root_table(&format!(
+                "project = \"pbfhogg\"\n[pbfhogg.library.harness]\npackage = \"h\"\n\
+                 [pbfhogg.library.require]\n{require}"
+            ));
+            project_config::ProjectConfig::parse(&Project::Pbfhogg, &table)
+                .map(|p| p.pbfhogg_library().unwrap().require.clone())
+                .map_err(|e| e.to_string())
+        };
+        let good = parse("\"cancel.pre-decision.v1\" = \"a cancel before the decision refuses\"\n")
+            .unwrap()
+            .unwrap();
+        assert_eq!(good.len(), 1);
+        assert_eq!(parse("").unwrap().unwrap().len(), 0, "an empty table requires nothing");
+        for (bad, needle) in [
+            ("cancel = \"x\"\n", "not a capability id"),
+            ("\"cancel.v0\" = \"x\"\n", "not a capability id"),
+            ("\"cancel.v1\" = \"\"\n", "1 to 200 bytes"),
+            ("\"cancel.v1\" = \"a\\nb\"\n", "one line"),
+            ("\"cancel.v1\" = 1\n", "pbfhogg"),
+        ] {
+            let e = parse(bad).unwrap_err();
+            assert!(e.contains(needle), "{bad}: {e}");
+        }
+        let table = root_table("project = \"pbfhogg\"\n[pbfhogg.library.harness]\npackage = \"h\"\n");
+        let absent = project_config::ProjectConfig::parse(&Project::Pbfhogg, &table).unwrap();
+        assert!(absent.pbfhogg_library().unwrap().require.is_none());
+    }
 }
