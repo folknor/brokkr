@@ -228,27 +228,6 @@ would churn every litehtml/sluggrs invocation in CI and docs.
 
 ## Backlog
 
-### Corpus disposition lines: integrity gaps outside the unevaluated shape (2026-10-29)
-
-Found while closing the `unevaluated` line's shape (brokkr 57); none opens a
-passing path, all are pre-existing.
-
-- `kind` is read with `as_str`, so a disposition line with `"kind": null`, a
-  number or an object is routed as a disposition line, as if `kind` were
-  absent. An `unevaluated` line now refuses a non-`"disposition"` kind; parity
-  and `*_fail` lines still accept one.
-- The line is parsed into `serde_json::Value`, which keeps the last of a
-  repeated key, so `{"outcome":"parity",...,"outcome":"compile_fail"}` is read
-  as one record with no complaint. Rejecting duplicate keys needs a parse that
-  sees them (the pbfhogg library harness's strict reader in
-  `src/pbfhogg/library/json.rs` is one).
-- An invalid record that deserializes is still stored (`corpus.md`: never
-  scored, still stored): its raw line projects parity columns into
-  `disposition` and its typed `dense_na_sites` become `dense_na_site` rows.
-  Only `gate_ok` and the run's protocol violations mark it; a query over
-  `matched` or the dense-na table does not filter it. Whether the store should
-  mark the row invalid, or queries should, is undecided.
-
 ### `atomic_write`: the directory fsync is best effort (2026-10-29)
 
 Found while placing the library certification record (brokkr 46 slice 5).

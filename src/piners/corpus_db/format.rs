@@ -192,14 +192,19 @@ pub fn compare_report(c: &Comparison, full: bool) -> String {
     out
 }
 
-/// `outcome/disposition`, marked when the run emitted the line unasked.
+/// `outcome/disposition`, marked when the run emitted the line unasked, and
+/// when its record was unusable.
 fn side_label(s: &compare::Side) -> String {
     let selection = match s.selection {
         compare::Selection::Selected => "",
         compare::Selection::NotSelected => " (report-only)",
         compare::Selection::Unknown => " (selection unknown)",
     };
-    format!("{}/{}{selection}", s.outcome, s.disposition)
+    let standing = match s.standing {
+        compare::Standing::Invalid => " (invalid)",
+        compare::Standing::Counted | compare::Standing::Unscored => "",
+    };
+    format!("{}/{}{selection}{standing}", s.outcome, s.disposition)
 }
 
 fn compare_cells(d: &ProbeDelta) -> Vec<String> {
@@ -291,6 +296,20 @@ fn label_gate(stored: Option<&str>) -> String {
         .join(", ")
 }
 
+/// The `gate` cell: `INVALID` for a row its run did not score because a
+/// record was unusable, `report-only` for one it did not score because the
+/// probe was not selected, else the gate's own `ok`/`DEVIATES`. A row
+/// stored before v17 has no mark and reads as it always did.
+fn gate_cell(gate_ok: bool, scored: Option<bool>, defect: Option<&str>) -> String {
+    match (scored, defect) {
+        (Some(false), Some(_)) => "INVALID",
+        (Some(false), None) => "report-only",
+        _ if gate_ok => "ok",
+        _ => "DEVIATES",
+    }
+    .to_owned()
+}
+
 /// The per-probe disposition table (run detail / `--probe`).
 pub fn dispositions_table(rows: &[DispositionRow]) -> String {
     let cells: Vec<Vec<String>> = rows
@@ -306,11 +325,7 @@ pub fn dispositions_table(rows: &[DispositionRow]) -> String {
                 d.outcome.clone(),
                 d.disposition.clone(),
                 fs(&d.expected),
-                if d.gate_ok {
-                    "ok".to_owned()
-                } else {
-                    "DEVIATES".to_owned()
-                },
+                gate_cell(d.gate_ok, d.scored, d.defect.as_deref()),
                 label_gate(d.label_gate.as_deref()),
                 d.matched.to_string(),
                 d.ours_only.to_string(),
@@ -322,11 +337,19 @@ pub fn dispositions_table(rows: &[DispositionRow]) -> String {
                 ff(d.p90_exit),
                 ff(d.p90_pnl),
                 sig,
-                // An unevaluated row leads its detail with the reason.
-                match (&d.reason, &d.error) {
-                    (Some(reason), Some(error)) => format!("{reason}: {error}"),
-                    (Some(reason), None) => reason.clone(),
-                    (None, error) => error.clone().unwrap_or_default(),
+                // An unusable record leads its detail with why; an
+                // unevaluated row with its reason.
+                {
+                    let detail = match (&d.reason, &d.error) {
+                        (Some(reason), Some(error)) => format!("{reason}: {error}"),
+                        (Some(reason), None) => reason.clone(),
+                        (None, error) => error.clone().unwrap_or_default(),
+                    };
+                    match &d.defect {
+                        Some(defect) if detail.is_empty() => format!("invalid: {defect}"),
+                        Some(defect) => format!("invalid: {defect}; {detail}"),
+                        None => detail,
+                    }
                 },
             ]
         })
@@ -444,11 +467,7 @@ pub fn trend_table(rows: &[TrendRow]) -> String {
                 t.started_at.clone(),
                 t.disposition.clone(),
                 fs(&t.count_tier),
-                if t.gate_ok {
-                    "ok".to_owned()
-                } else {
-                    "DEVIATES".to_owned()
-                },
+                gate_cell(t.gate_ok, t.scored, t.defect.as_deref()),
                 t.matched.to_string(),
                 t.ours_only.to_string(),
                 t.tv_only.to_string(),

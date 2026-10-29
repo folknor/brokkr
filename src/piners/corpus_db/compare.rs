@@ -17,6 +17,9 @@
 //!   than as a fall to zero, which would read as a divergence improvement.
 //! - `count_tier` is compared NULL-safely: a tier appearing or vanishing is a
 //!   move.
+//! - A line its run did not count (`scored = 0`, v17) is marked `(invalid)`
+//!   when its record was unusable and gets no direction either way; a row
+//!   stored before the mark reads as counted, as it always did.
 //! - The direction column is a heuristic for comparable parity executions,
 //!   never a verdict: fewer matched trades can be a shorter window, and raw
 //!   unmatched counts include boundary artifacts the label discounts. So it
@@ -39,6 +42,8 @@ pub struct Side {
     /// Whether the run selected the probe. `NotSelected` is a report-only
     /// line (the harness emitted it unasked), which the gate never judged.
     pub selection: Selection,
+    /// Whether the run counted the line (`scored`, v17).
+    pub standing: Standing,
     pub outcome: String,
     pub disposition: String,
     pub count_tier: Option<String>,
@@ -49,6 +54,31 @@ pub struct Side {
     pub matched: i64,
     pub ours_only: i64,
     pub tv_only: i64,
+}
+
+/// Whether the run counted a stored line, from its `scored`/`defect` pair.
+/// A row stored before v17 carries no mark and is `Counted`, as every row
+/// was read before the mark existed, so a backfilled 1 and a NULL compare
+/// equal and no store upgrade manufactures a move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standing {
+    /// Scored, or not recorded.
+    Counted,
+    /// Unscored because a record was unusable: an invalid record, or a probe
+    /// an invalid occurrence tainted.
+    Invalid,
+    /// Unscored with a usable record: a report-only extra.
+    Unscored,
+}
+
+impl Standing {
+    fn from_stored(scored: Option<i64>, has_defect: bool) -> Self {
+        match (scored, has_defect) {
+            (Some(0), true) => Standing::Invalid,
+            (Some(0), false) => Standing::Unscored,
+            _ => Standing::Counted,
+        }
+    }
 }
 
 /// What the stored run can establish about a probe's selection.
@@ -168,7 +198,7 @@ impl CorpusDb {
         };
         let sql = format!(
             "SELECT probe, outcome, disposition, count_tier, matched, ours_only, tv_only, \
-                    ({} AND {} AND {}) AS has_counts \
+                    ({} AND {} AND {}) AS has_counts, scored, defect IS NOT NULL AS has_defect \
              FROM disposition WHERE run_id = ?1",
             numeric("$.matched"),
             numeric("$.ours_only"),
@@ -187,6 +217,10 @@ impl CorpusDb {
                     } else {
                         Selection::Unknown
                     },
+                    standing: Standing::from_stored(
+                        r.get("scored")?,
+                        r.get::<_, i64>("has_defect")? != 0,
+                    ),
                     outcome: r.get::<_, Option<String>>("outcome")?.unwrap_or_default(),
                     disposition: r.get("disposition")?,
                     count_tier: r.get("count_tier")?,
@@ -233,9 +267,15 @@ fn selected_ids(selector: &str) -> Option<Vec<String>> {
 }
 
 /// Which way a probe's counts moved, as a heuristic for comparable parity
-/// executions. `None` when either side has no counts or nothing moved.
+/// executions. `None` when either side has no counts, either side is a line
+/// its run did not count (an unusable record or a report-only extra), or
+/// nothing moved.
 pub fn direction(a: &Side, b: &Side) -> Option<&'static str> {
-    if !a.has_counts || !b.has_counts {
+    if !a.has_counts
+        || !b.has_counts
+        || a.standing != Standing::Counted
+        || b.standing != Standing::Counted
+    {
         return None;
     }
     // Each axis on its own: summing the two unmatched deltas would let one
@@ -271,6 +311,7 @@ mod tests {
     use super::*;
     use crate::piners::corpus_db::{RunContext, RunRecord, compare_report};
     use crate::piners::gate::{GateDiff, GateVerdict};
+    use crate::piners::integrity::Reconciliation;
     use crate::piners::report::parse;
 
     fn record(db: &CorpusDb, ids: &[&str], nd: &str, misses: &[&str]) -> i64 {
@@ -302,9 +343,13 @@ mod tests {
                 actual: None,
             })
             .collect();
+        let report = parse(nd.as_bytes());
+        let ids = selected_ids(selector).unwrap_or_default();
+        let rec = Reconciliation::reconcile(&ids, &report, Vec::new());
         db.record_run(
             &run,
-            &parse(nd.as_bytes()),
+            &report,
+            &rec,
             &BTreeMap::new(),
             &GateVerdict::from(diffs),
         )
@@ -335,9 +380,12 @@ mod tests {
             protocol_violations: Some(0),
             run_error: None,
         };
+        let report = parse(line("p", "exact", 1, 0, 0).as_bytes());
+        let rec = Reconciliation::reconcile(&["p".to_owned()], &report, Vec::new());
         db.record_run(
             &run,
-            &parse(line("p", "exact", 1, 0, 0).as_bytes()),
+            &report,
+            &rec,
             &BTreeMap::new(),
             &GateVerdict::default(),
         )
@@ -470,6 +518,7 @@ mod tests {
     fn opposing_unmatched_moves_are_mixed_not_cancelled() {
         let side = |o, t| Side {
             selection: Selection::Selected,
+            standing: Standing::Counted,
             outcome: "parity".into(),
             disposition: "accepted".into(),
             count_tier: None,
@@ -525,6 +574,55 @@ mod tests {
             &[],
         );
         assert!(db.compare_runs(a, b).unwrap().probes[0].moved());
+    }
+
+    #[test]
+    fn an_uncounted_line_is_marked_and_gets_no_direction() {
+        let db = CorpusDb::open_in_memory().unwrap();
+        let a = record(
+            &db,
+            &["p", "q"],
+            &(line("p", "near", 10, 0, 0) + &line("q", "near", 10, 0, 0)),
+            &[],
+        );
+        // p's line has no tier (invalid); q is valid but unselected.
+        let b = record(
+            &db,
+            &["p"],
+            &("{\"probe\":\"p\",\"outcome\":\"parity\",\"matched\":5,\"ours_only\":9,\"tv_only\":9}\n"
+                .to_owned()
+                + &line("q", "near", 20, 0, 0)),
+            &[],
+        );
+        let c = db.compare_runs(a, b).unwrap();
+        let by: BTreeMap<&str, &ProbeDelta> =
+            c.probes.iter().map(|d| (d.probe.as_str(), d)).collect();
+        for (probe, standing) in [("p", Standing::Invalid), ("q", Standing::Unscored)] {
+            let (Presence::Ran(sa), Presence::Ran(sb)) = (&by[probe].a, &by[probe].b) else {
+                panic!("{probe} ran on both sides");
+            };
+            assert_eq!(sb.standing, standing, "{probe}");
+            assert_eq!(direction(sa, sb), None, "{probe}");
+        }
+        let rendered = compare_report(&c, false);
+        assert!(rendered.contains("parity/parity (invalid)"), "{rendered}");
+
+        // A row stored before the mark (NULL) and a scored one are the same
+        // standing: an upgrade moves nothing.
+        let d = record(
+            &db,
+            &["p", "q"],
+            &(line("p", "near", 10, 0, 0) + &line("q", "near", 10, 0, 0)),
+            &[],
+        );
+        db.conn()
+            .execute(
+                "UPDATE disposition SET scored = NULL WHERE run_id = ?1",
+                [a],
+            )
+            .unwrap();
+        let unmoved = db.compare_runs(a, d).unwrap();
+        assert!(unmoved.probes.iter().all(|delta| !delta.moved()));
     }
 
     #[test]

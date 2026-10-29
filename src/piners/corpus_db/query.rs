@@ -66,6 +66,10 @@ pub struct DispositionRow {
     /// The label ratchet's deviations as stored JSON: `[]` when checked and
     /// clean, `None` when not label-checked (or a pre-v14 row).
     pub label_gate: Option<String>,
+    /// Whether the run scored the row (v17); `None` when not recorded.
+    pub scored: Option<bool>,
+    /// Why an unscored row's record was not usable (v17).
+    pub defect: Option<String>,
 }
 
 /// One per-trade drill-down row (the rendered subset). `our_qty`/`tv_entry_qty`
@@ -95,6 +99,9 @@ pub struct TrendRow {
     pub disposition: String,
     pub count_tier: Option<String>,
     pub gate_ok: bool,
+    /// As [`DispositionRow::scored`].
+    pub scored: Option<bool>,
+    pub defect: Option<String>,
     pub matched: i64,
     pub ours_only: i64,
     pub tv_only: i64,
@@ -208,6 +215,8 @@ fn disposition_row(row: &Row<'_>) -> rusqlite::Result<DispositionRow> {
         error: row.get("error")?,
         reason: row.get("reason")?,
         label_gate: row.get("label_gate")?,
+        scored: row.get::<_, Option<i64>>("scored")?.map(|v| v != 0),
+        defect: row.get("defect")?,
     })
 }
 
@@ -222,7 +231,7 @@ fn runtime_row(row: &Row<'_>) -> rusqlite::Result<RuntimeRow> {
 const DISPOSITION_COLS: &str = "\
 probe, outcome, disposition, expected, gate_ok, matched, ours_only, tv_only, \
 boundary_ours, boundary_tv, count_tier, p90_entry, p90_exit, p90_pnl, \
-sig_domain, sig_dimension, error, reason, label_gate";
+sig_domain, sig_dimension, error, reason, label_gate, scored, defect";
 
 /// Every queryable `trade_diff` column - the row key, the harness projections
 /// `schema.rs` generates from the stored record, `raw_source`, and the record
@@ -297,6 +306,8 @@ pub const DISPOSITION_COLUMNS: &[&str] = &[
     "gate_ok",
     "expected_labels",
     "label_gate",
+    "scored",
+    "defect",
     "raw_source",
     "outcome",
     "matched",
@@ -346,10 +357,13 @@ pub const DISPOSITION_COLUMNS: &[&str] = &[
 /// decorative, and each timestamp-shift share rides with its counts because
 /// 1/1 and 100/100 are both 100 percent. `raw_source` says whether a NULL means
 /// "the harness did not report it" or "this row predates storing it".
+/// `scored` rides with `gate_ok`: a row the run did not score (`0`) is no
+/// evidence, whatever its counts say.
 pub const DEFAULT_DISPOSITION_COLUMNS: &[&str] = &[
     "probe",
     "disposition",
     "gate_ok",
+    "scored",
     "boundary_ours",
     "boundary_tv",
     "boundary_anchor",
@@ -601,7 +615,8 @@ impl CorpusDb {
     pub fn trend_for_probe(&self, probe: &str, limit: usize) -> Result<Vec<TrendRow>, DevError> {
         let mut stmt = self.conn().prepare(
             "SELECT d.run_id AS run_id, r.started_at AS started_at, d.disposition AS disposition, \
-                    d.count_tier AS count_tier, d.gate_ok AS gate_ok, d.matched AS matched, \
+                    d.count_tier AS count_tier, d.gate_ok AS gate_ok, d.scored AS scored, \
+                    d.defect AS defect, d.matched AS matched, \
                     d.ours_only AS ours_only, d.tv_only AS tv_only, \
                     d.boundary_ours AS boundary_ours, d.boundary_tv AS boundary_tv, \
                     d.p90_exit AS p90_exit, d.raw_source AS raw_source, \
@@ -630,6 +645,8 @@ impl CorpusDb {
                 disposition: r.get("disposition")?,
                 count_tier: r.get("count_tier")?,
                 gate_ok: r.get::<_, i64>("gate_ok")? != 0,
+                scored: r.get::<_, Option<i64>>("scored")?.map(|v| v != 0),
+                defect: r.get("defect")?,
                 matched: r.get("matched")?,
                 ours_only: r.get("ours_only")?,
                 tv_only: r.get("tv_only")?,
@@ -681,7 +698,9 @@ impl CorpusDb {
     /// non-null `runtime_ms`), slowest first. A *diagnostic* view - "which probe
     /// is heavy": the harness overlaps probes, so the sum of these per-probe
     /// figures runs several times the real wall (the run row's `wall_ms`).
-    /// `over_ms`, when set, keeps only probes above it.
+    /// A row its run did not score (`scored = 0`) is no runtime evidence; it
+    /// is filtered before the newest is chosen, so an older scored runtime
+    /// shows through. `over_ms`, when set, keeps only probes above it.
     pub fn runtimes(&self, over_ms: Option<f64>) -> Result<Vec<RuntimeRow>, DevError> {
         // One pass with a window, not a correlated subquery per row:
         // `runtime_ms` is projected from the stored record, so every
@@ -690,7 +709,7 @@ impl CorpusDb {
             "SELECT probe, runtime_ms, run_id FROM ( \
                  SELECT probe, runtime_ms, run_id, ROW_NUMBER() OVER \
                      (PARTITION BY probe ORDER BY run_id DESC) AS newest \
-                 FROM disposition WHERE runtime_ms IS NOT NULL) \
+                 FROM disposition WHERE runtime_ms IS NOT NULL AND scored IS NOT 0) \
              WHERE newest = 1",
         );
         if over_ms.is_some() {
@@ -820,7 +839,7 @@ mod tests {
         nd: &[u8],
         protocol_violations: Option<i64>,
     ) {
-        let report = parse(nd);
+        let mut report = parse(nd);
         let run = crate::piners::corpus_db::RunRecord {
             run_id: None,
             started_at: None,
@@ -836,8 +855,35 @@ mod tests {
             protocol_violations,
             run_error: None,
         };
-        db.record_run(&run, &report, &BTreeMap::new(), &GateVerdict::default())
-            .unwrap();
+        let duplicates = report.take_duplicates();
+        let rec = reconciled(selector, &report, duplicates);
+        db.record_run(
+            &run,
+            &report,
+            &rec,
+            &BTreeMap::new(),
+            &GateVerdict::default(),
+        )
+        .unwrap();
+    }
+
+    /// The reconciliation a run makes: against the selector's `ids`, or,
+    /// when it names none, as if it selected every probe the report names.
+    fn reconciled(
+        selector: &str,
+        report: &crate::piners::report::HarnessReport,
+        duplicates: Vec<String>,
+    ) -> crate::piners::integrity::Reconciliation {
+        let named = serde_json::from_str::<serde_json::Value>(selector)
+            .ok()
+            .and_then(|v| v.get("ids").cloned())
+            .and_then(|ids| serde_json::from_value::<Vec<String>>(ids).ok());
+        let ids = named.unwrap_or_else(|| {
+            let mut ids: Vec<String> = report.probes.iter().map(|p| p.probe.clone()).collect();
+            ids.dedup();
+            ids
+        });
+        crate::piners::integrity::Reconciliation::reconcile(&ids, report, duplicates)
     }
 
     fn owned(cols: &[&str]) -> Vec<String> {
@@ -973,15 +1019,15 @@ mod tests {
         record(
             &db,
             &RunVerdict::Pass,
-            br#"{"probe":"slow","outcome":"parity","runtime_ms":300000}
-{"probe":"fast","outcome":"parity","runtime_ms":100}
+            br#"{"probe":"slow","outcome":"parity","acceptance":{"tier":"accepted"},"runtime_ms":300000}
+{"probe":"fast","outcome":"parity","acceptance":{"tier":"accepted"},"runtime_ms":100}
 "#,
         );
         // `slow` re-runs faster; the latest value must win (not the max).
         record(
             &db,
             &RunVerdict::Pass,
-            br#"{"probe":"slow","outcome":"parity","runtime_ms":5000}
+            br#"{"probe":"slow","outcome":"parity","acceptance":{"tier":"accepted"},"runtime_ms":5000}
 "#,
         );
 
@@ -999,8 +1045,55 @@ mod tests {
         assert_eq!(over[0].probe, "slow");
     }
 
+    #[test]
+    fn an_unscored_row_is_no_runtime_evidence_and_an_older_one_shows_through() {
+        let db = CorpusDb::open_in_memory().unwrap();
+        let dev = RunContext {
+            profile: crate::build::RustProfile::Dev,
+            harness_args: Vec::new(),
+        };
+        let ids = r#"{"ids":["p","q"]}"#;
+        record_in(
+            &db,
+            &dev,
+            ids,
+            br#"{"probe":"p","outcome":"parity","acceptance":{"tier":"accepted"},"runtime_ms":900}
+{"probe":"q","outcome":"parity","acceptance":{"tier":"accepted"},"runtime_ms":800}
+"#,
+        );
+        // Newer: p's line is invalid (no tier), q's is clean but tainted by
+        // an earlier contradictory occurrence.
+        record_in(
+            &db,
+            &dev,
+            ids,
+            br#"{"probe":"p","outcome":"parity","runtime_ms":5}
+{"probe":"q","outcome":"compile_fail","error":"x","disposition":"accepted","runtime_ms":6}
+{"probe":"q","outcome":"parity","acceptance":{"tier":"accepted"},"runtime_ms":7}
+"#,
+        );
+        let est = db.scheduling_runtimes(&dev).unwrap();
+        assert_eq!((est.get("p"), est.get("q")), (Some(&900.0), Some(&800.0)));
+        let rows = db.runtimes(None).unwrap();
+        let by: HashMap<&str, f64> = rows
+            .iter()
+            .map(|r| (r.probe.as_str(), r.runtime_ms))
+            .collect();
+        assert_eq!((by["p"], by["q"]), (900.0, 800.0));
+        // A row stored before the mark (NULL) is judged as it always was.
+        db.conn()
+            .execute("UPDATE disposition SET scored = NULL", [])
+            .unwrap();
+        let rows = db.runtimes(None).unwrap();
+        let by: HashMap<&str, f64> = rows
+            .iter()
+            .map(|r| (r.probe.as_str(), r.runtime_ms))
+            .collect();
+        assert_eq!(by["p"], 5.0);
+    }
+
     fn record_in(db: &CorpusDb, context: &RunContext, selector: &str, nd: &[u8]) {
-        let report = parse(nd);
+        let mut report = parse(nd);
         let run = crate::piners::corpus_db::RunRecord {
             run_id: None,
             started_at: None,
@@ -1016,8 +1109,16 @@ mod tests {
             protocol_violations: Some(0),
             run_error: None,
         };
-        db.record_run(&run, &report, &BTreeMap::new(), &GateVerdict::default())
-            .unwrap();
+        let duplicates = report.take_duplicates();
+        let rec = reconciled(selector, &report, duplicates);
+        db.record_run(
+            &run,
+            &report,
+            &rec,
+            &BTreeMap::new(),
+            &GateVerdict::default(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1036,9 +1137,9 @@ mod tests {
             &db,
             &dev,
             ids,
-            br#"{"probe":"kept","outcome":"parity","runtime_ms":900}
-{"probe":"aborts","outcome":"parity","runtime_ms":700}
-{"probe":"warned","outcome":"parity","runtime_ms":600}
+            br#"{"probe":"kept","outcome":"parity","acceptance":{"tier":"accepted"},"runtime_ms":900}
+{"probe":"aborts","outcome":"parity","acceptance":{"tier":"accepted"},"runtime_ms":700}
+{"probe":"warned","outcome":"parity","acceptance":{"tier":"accepted"},"runtime_ms":600}
 "#,
         );
         // Newer, but each row disqualified: an abort, a dropped disposition
@@ -1050,8 +1151,8 @@ mod tests {
             ids,
             br#"{"probe":"aborts","outcome":"harness_abort","runtime_ms":5}
 {"probe":"warned","outcome":7}
-{"probe":"warned","outcome":"parity","runtime_ms":1}
-{"probe":"extra","outcome":"parity","runtime_ms":50}
+{"probe":"warned","outcome":"parity","acceptance":{"tier":"accepted"},"runtime_ms":1}
+{"probe":"extra","outcome":"parity","acceptance":{"tier":"accepted"},"runtime_ms":50}
 "#,
         );
         // Another context, and a run whose selector is not JSON at all.
@@ -1059,14 +1160,14 @@ mod tests {
             &db,
             &traced,
             ids,
-            br#"{"probe":"kept","outcome":"parity","runtime_ms":3}
+            br#"{"probe":"kept","outcome":"parity","acceptance":{"tier":"accepted"},"runtime_ms":3}
 "#,
         );
         record_in(
             &db,
             &dev,
             "not json",
-            br#"{"probe":"other","outcome":"parity","runtime_ms":4}
+            br#"{"probe":"other","outcome":"parity","acceptance":{"tier":"accepted"},"runtime_ms":4}
 "#,
         );
 
@@ -1080,7 +1181,7 @@ mod tests {
                 &db,
                 &dev,
                 selector,
-                br#"{"probe":"other","outcome":"parity","runtime_ms":4}
+                br#"{"probe":"other","outcome":"parity","acceptance":{"tier":"accepted"},"runtime_ms":4}
 "#,
             );
         }
@@ -1103,7 +1204,7 @@ mod tests {
             &db,
             &dev,
             ids,
-            br#"{"probe":"kept","outcome":"parity","runtime_ms":2}
+            br#"{"probe":"kept","outcome":"parity","acceptance":{"tier":"accepted"},"runtime_ms":2}
 "#,
         );
         check(2.0);
@@ -1145,15 +1246,15 @@ mod tests {
             &db,
             &dev,
             ids,
-            br#"{"probe":"p","outcome":"parity","runtime_ms":11}
-{"probe":"q","outcome":"parity","runtime_ms":12}
+            br#"{"probe":"p","outcome":"parity","acceptance":{"tier":"accepted"},"runtime_ms":11}
+{"probe":"q","outcome":"parity","acceptance":{"tier":"accepted"},"runtime_ms":12}
 "#,
         );
         record_in(
             &db,
             &release,
             ids,
-            br#"{"probe":"p","outcome":"parity","runtime_ms":21}
+            br#"{"probe":"p","outcome":"parity","acceptance":{"tier":"accepted"},"runtime_ms":21}
 "#,
         );
         // Back to a populated v11 store: no estimates table.
@@ -1184,7 +1285,7 @@ mod tests {
             &db,
             &dev,
             r#"{"ids":["p"]}"#,
-            br#"{"probe":"p","outcome":"parity","runtime_ms":40}
+            br#"{"probe":"p","outcome":"parity","acceptance":{"tier":"accepted"},"runtime_ms":40}
 "#,
         );
         db.conn().execute("DELETE FROM disposition", []).unwrap();
@@ -1198,7 +1299,7 @@ mod tests {
             &db,
             &dev,
             r#"{"ids":["p"]}"#,
-            br#"{"probe":"p","outcome":"parity","runtime_ms":7}
+            br#"{"probe":"p","outcome":"parity","acceptance":{"tier":"accepted"},"runtime_ms":7}
 "#,
         );
         assert_eq!(db.scheduling_runtimes(&dev).unwrap().get("p"), Some(&40.0));

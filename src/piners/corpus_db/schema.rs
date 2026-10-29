@@ -25,6 +25,13 @@
 //! `label_gate` (the label deviations as a JSON list, `[]` when checked and
 //! clean; NULL when the probe was not label-checked - unselected, an invalid
 //! line, or a row from before v14, whose label verdict was never recorded),
+//! `scored` (v17: 1 when the run's reconciliation scored the row - a
+//! selected probe, a valid record, no invalid occurrence - and 0 for an
+//! invalid record, a tainted probe or a report-only extra; on a row stored
+//! before v17, 1 when its run recorded zero protocol violations - so every
+//! row of it was scored - and NULL, not recorded, otherwise),
+//! `defect` (v17: why an unscored row's record was not usable, the record's
+//! own defect or the occurrence that tainted its probe; NULL otherwise),
 //! and `raw_source`. `raw_source` is `harness` for a parsed harness line and
 //! `reconstructed` for a row migrated from the typed schema (v4 and older),
 //! whose record was rebuilt from exactly the columns it kept - so on such a
@@ -245,6 +252,8 @@ pub(super) fn disposition_ddl(name: &str) -> String {
     raw_json      TEXT NOT NULL,
     expected_labels TEXT,
     label_gate    TEXT,
+    scored        INTEGER,
+    defect        TEXT,
 {},
     PRIMARY KEY (run_id, probe)
 );

@@ -328,10 +328,14 @@ fn render_probe(db: &CorpusDb, run_id: i64, probe: &str) -> Result<(), DevError>
 /// from its pin, a crash, or an experiment not conducted. A `harness_abort`
 /// stays visible even when pinned, as in the live rendering, so a crash is
 /// never folded into "matching their pin"; an `unevaluated` row likewise,
-/// whatever its stored `gate_ok`.
+/// whatever its stored `gate_ok`; and a row the run did not score (an
+/// invalid record, a tainted probe, a report-only extra), which matched no
+/// pin whatever its `gate_ok` says - an unselected line is `gate_ok` because
+/// the gate never judged it.
 fn shown_by_default(d: &DispositionRow) -> bool {
     use crate::piners::registry::{PinnedDisposition, UNEVALUATED};
     !d.gate_ok
+        || d.scored == Some(false)
         || d.disposition == PinnedDisposition::HarnessAbort.as_str()
         || d.disposition == UNEVALUATED
 }
@@ -453,6 +457,8 @@ mod tests {
             error: None,
             reason: None,
             label_gate: None,
+            scored: None,
+            defect: None,
         }
     }
 
@@ -465,5 +471,34 @@ mod tests {
         assert!(shown_by_default(&row("unevaluated", true)));
         // A retired label in history displays like any other.
         assert!(!shown_by_default(&row("no_tv_data", true)));
+    }
+
+    #[test]
+    fn an_unscored_row_is_never_folded_as_matching_its_pin() {
+        // A report-only extra the gate never judged: gate_ok, unscored.
+        let extra = DispositionRow {
+            scored: Some(false),
+            ..row("accepted", true)
+        };
+        assert!(shown_by_default(&extra));
+        let invalid = DispositionRow {
+            scored: Some(false),
+            defect: Some("line 2: outcome 'parity' with tier '' is not a valid disposition".into()),
+            ..row("parity", false)
+        };
+        assert!(shown_by_default(&invalid));
+        let table = corpus_db::dispositions_table(&[extra, invalid]);
+        assert!(table.contains("report-only"), "{table}");
+        assert!(table.contains("INVALID"), "{table}");
+        assert!(
+            table.contains("invalid: line 2: outcome 'parity'"),
+            "{table}"
+        );
+        // A scored row, and one stored before the mark, fold as before.
+        let scored = DispositionRow {
+            scored: Some(true),
+            ..row("accepted", true)
+        };
+        assert!(!shown_by_default(&scored));
     }
 }

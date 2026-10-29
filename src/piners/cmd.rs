@@ -498,7 +498,7 @@ pub fn corpus(
     // refusing a changed pins.toml, a finalize error) is the command's error,
     // not a second row under this id. Recorded BEFORE any diagnosis, so an
     // interrupted diagnosis cannot lose the original record.
-    if let Err(e) = ingest_run(&corpus_db_path, &record, report, &expected, &gate) {
+    if let Err(e) = ingest_run(&corpus_db_path, &record, report, rec, &expected, &gate) {
         output::warn(&format!(
             "failed to persist run to {}: {e}",
             output::path(&corpus_db_path)
@@ -1044,6 +1044,8 @@ fn record_unfinished(
         db_path,
         &record,
         &report::HarnessReport::default(),
+        // Nothing ran, so nothing was reconciled.
+        &integrity::Reconciliation::default(),
         &BTreeMap::new(),
         &crate::piners::gate::GateVerdict::default(),
     ) {
@@ -1068,11 +1070,12 @@ fn ingest_run(
     db_path: &Path,
     record: &RunRecord<'_>,
     report: &report::HarnessReport,
+    rec: &integrity::Reconciliation,
     expected: &BTreeMap<String, Option<String>>,
     gate: &crate::piners::gate::GateVerdict,
 ) -> Result<(), DevError> {
     let db = CorpusDb::open(db_path)?;
-    db.record_run(record, report, expected, gate)?;
+    db.record_run(record, report, rec, expected, gate)?;
     Ok(())
 }
 
@@ -1114,6 +1117,7 @@ mod tests {
         db.record_run(
             &rec,
             &report::HarnessReport::default(),
+            &integrity::Reconciliation::default(),
             &BTreeMap::new(),
             &crate::piners::gate::GateVerdict::default(),
         )

@@ -147,7 +147,9 @@ Lines carry an optional `kind` field, so the harness can interleave new record
 kinds without a brokkr change:
 
 - no `kind`, or `kind == "disposition"` - the per-probe line above. The only
-  kind that feeds the summary, breakdowns, and the gate. (Both forms accepted.)
+  kind that feeds the summary, breakdowns, and the gate. (Both forms
+  accepted.) A `kind` that is present but not a string is no kind: the line
+  is judged as a disposition line and is invalid for it.
 - `kind == "trade_diff"` - a per-trade drill-down record, one per matched
   pair the signature counts a breach on, emitted inline in probe order. An
   unmatched-count divergence produces none, so a probe with no rows is not
@@ -159,6 +161,11 @@ kinds without a brokkr change:
   brokkr does not aggregate these but **persists** them (below).
 - the contract kinds, each carrying `"version": 1` (below).
 - any other `kind` - skipped (forward-compat).
+
+Every line is one JSON object with no key repeated within any of its
+objects; what a line with a repeated key becomes depends on its kind
+(report integrity in `docs/commands/corpus.md`, "Repeated keys"). piners
+serializes each record from a struct, so it writes none.
 
 ### Contract lines and ordering (crash containment)
 
@@ -197,8 +204,8 @@ brokkr parses tolerantly at the *field* level (a field it does not model is
 ignored for rendering, and stored with the rest of the line - see the run
 store below), but not at the *record* level: the stream must carry exactly
 one valid disposition for every manifest probe and nothing for any other id,
-and a stdout line that is not JSON or a disposition line that does not
-deserialize is an invalid record. Any shortfall or violation fails the run
+and a stdout line that is not JSON, a disposition line that does not
+deserialize and one that repeats a key are invalid records. Any shortfall or violation fails the run
 (report integrity, `docs/commands/corpus.md`), whatever the exit code. brokkr
 renders per-probe lines + a computed summary (led by the reconciliation, `N
 selected, M scored, K missing`) + divergence breakdown (probes carrying a
@@ -284,8 +291,8 @@ The store has per-db `PRAGMA user_version` migrations and WAL, mirroring
   it is a projection in `schema.rs`, which reaches fresh stores, plus a
   migration step - `ALTER TABLE ... ADD COLUMN ... GENERATED ALWAYS AS (...)
   VIRTUAL` - that reaches every row already stored. The record is the parsed
-  line re-serialized compactly (the harness's key order kept, its original
-  bytes not). Every projection is gated on the JSON type it expects, so a
+  line re-serialized compactly: its fields and values, not its original
+  bytes or key order (`serde_json` writes object keys sorted). Every projection is gated on the JSON type it expects, so a
   mistyped value reads `NULL` rather than as garbage. Physical columns are only what is
   not the harness's: `disposition` (brokkr's own gate label, derived, never
   trusted from the line), `expected` (from the pins at run time; `NULL` for a
@@ -298,7 +305,18 @@ The store has per-db `PRAGMA user_version` migrations and WAL, mirroring
   `NULL` when the probe was not label-checked - unselected or an invalid
   line - and on every older row, whose label verdict was never recorded,
   so there `expected_labels` `NULL` means *not recorded*; run detail renders
-  it as the `labels` column), and `raw_source` - `harness`,
+  it as the `labels` column), `scored` (v17: 1 when the run's reconciliation
+  scored the row - selected, a valid record, no invalid occurrence of its
+  probe - which is exactly the set the live summary and breakdowns
+  aggregate, and 0 for every other stored row: an invalid record, a probe an
+  invalid occurrence tainted, a report-only extra; on a row stored before
+  v17, 1 when its run counted zero protocol violations, so every row of it
+  was scored, else `NULL`, *not recorded* - its records are never re-judged
+  by today's validator, which would turn a retired label invalid), `defect`
+  (v17: on an unscored row, why its record was unusable, as `line N:
+  reason` - the row's own defect, else the first invalid occurrence naming
+  its probe; `NULL` on a scored row, a valid extra and every older row), and
+  `raw_source` - `harness`,
   or `reconstructed` for a row migrated from the v4 typed table, whose record
   was rebuilt from exactly the columns it kept (so its newer diagnostics read
   `NULL`, meaning *not retained*, not zero). The projections: `outcome`,
@@ -325,7 +343,9 @@ The store has per-db `PRAGMA user_version` migrations and WAL, mirroring
   migration refuses to swap in the rebuilt table unless every projection
   reproduces the column it replaced, row for row.
   Durability covers the disposition lines the parser accepts. One it cannot
-  parse is not stored as a row, but it is never silent: it is an invalid
+  parse - or one that repeats a key, whose record depends on which
+  occurrence a reader keeps - is not stored as a row, but it is never
+  silent: it is an invalid
   record, a protocol violation that fails the run under `--no-gate` too, and
   its probe counts as unscored (the report-integrity check in
   `docs/commands/corpus.md`). Its bytes survive in the stored
@@ -345,7 +365,9 @@ The store has per-db `PRAGMA user_version` migrations and WAL, mirroring
 - `gate_miss` (PK `run_id,probe`) - selected probes the harness emitted **no**
   disposition line for (the gate violations with no disposition row).
 - `dense_na_site` - one row per dense-`na` call site (`name`, `call_site`,
-  `na_count`).
+  `na_count`) of every stored disposition, scored or not. To keep to the
+  sites the run counted, join `disposition` on `(run_id, probe)` with
+  `d.scored IS NOT 0`.
 - `schedule_estimate` (PK `cargo_profile,harness_args,probe`) - each probe's
   latest qualifying `runtime_ms` per execution context, folded in by every
   ingest and read by probe scheduling (see `docs/commands/corpus.md`, "Probe
@@ -388,7 +410,10 @@ struct, no benchmark filters to reject. The corpus views:
   an error. Only the **deviations**
   (rows where the stored disposition misses its pin, `gate_ok = 0`) are shown,
   plus every `harness_abort` row even when pinned - a crash is never folded
-  away, as in the live rendering - and every `unevaluated` row;
+  away, as in the live rendering - every `unevaluated` row, and every row
+  the run did not score (`scored = 0`), whose `gate` cell reads `INVALID`
+  (with `invalid: <defect>` leading its detail) or `report-only` for a valid
+  line nobody selected, which the gate never judged;
   the other pin-matchers fold into a `N probes matching their pin (hidden)` line - a
   200-probe `--all` run otherwise buries the few that moved. `--full` shows the
   complete table. The disposition table carries `b_ours`/`b_tv` columns (the
@@ -421,18 +446,21 @@ struct, no benchmark filters to reject. The corpus views:
   is the window-edge diagnostics the run-detail view leaves out: the boundary
   discount, `boundary_anchor` beside `anchor_consumed` (an armed anchor that
   granted nothing is decorative), the clipped counts, each timestamp-shift
-  share beside its counts (1/1 and 100/100 are both 100 percent), and
-  `raw_source`. `--columns all` includes `raw_json`. `--columns`/`--where`
+  share beside its counts (1/1 and 100/100 are both 100 percent),
+  `raw_source`, and `scored` beside `gate_ok` (`--where "scored IS NOT 0"`
+  keeps to what the run counted). `--columns all` includes `raw_json`. `--columns`/`--where`
   without `--diffs` or `--dispositions` is an error rather than ignored, as
   is either table flag beside `--sql`, `--runtimes` or `--trend`.
 - `brokkr corpus-results --runtimes [--over <secs>]` - each probe's most-recent
-  runtime, slowest first, in milliseconds (the harness's unit). A **diagnostic**
+  runtime, slowest first, in milliseconds (the harness's unit) - the newest
+  row its run did not mark unscored, so an invalid or report-only line leaves
+  the previous runtime showing. A **diagnostic**
   for spotting heavy probes (trim `bar_budget`, or disable): probes overlap in
   the harness, so the `sum(shown)` footer is a per-probe sum, several times the
   real run wall (the run row's `wall_ms`). `--over <secs>` keeps only the
   probes above it.
 - `brokkr corpus-results --trend <probe>` - disposition/count_tier/p90 over recent
-  runs, plus the `anchor` (suffixed `+` when it granted a discount) and the
+  runs (the `gate` cell marks an unscored row as in run detail), plus the `anchor` (suffixed `+` when it granted a discount) and the
   entry/exit timestamp-shift census as `shifted/considered share%` - the
   census was added to be trended even when it does not breach. On a row
   migrated from the typed schema those cells read `n/r` (not retained).
@@ -444,7 +472,11 @@ struct, no benchmark filters to reject. The corpus views:
   is classified, not dropped: `not selected` there, or `selected, no line`
   (from the stored selection and `gate_miss`). A legacy or malformed selector
   is shown as `selection unknown`; a line the harness emitted for a probe the
-  run did not select is marked `(report-only)`. A line not
+  run did not select is marked `(report-only)`, and one whose record was
+  unusable (`scored = 0` with a `defect`) `(invalid)`; a row marked
+  `scored = 0` gets no `movement`. A row stored before the mark compares as
+  counted, as it always did (an older report-only line still gets a
+  movement), so an upgrade moves nothing. A line not
   carrying all three counts as numbers (a compile failure) reads `no counts`
   rather than a fall to zero, and a tier
   appearing or vanishing is a move. The `movement` column (`more divergent` /

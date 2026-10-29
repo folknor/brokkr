@@ -580,14 +580,19 @@ mod tests {
             [("a".to_owned(), Some("compile_fail".to_owned()))]
                 .into_iter()
                 .collect();
+        let rec = crate::piners::integrity::Reconciliation::reconcile(&ids, &rep, Vec::new());
         let run_id = db
-            .record_run(&run, &rep, &expected, &GateVerdict::from(diffs))
+            .record_run(&run, &rep, &rec, &expected, &GateVerdict::from(diffs))
             .unwrap();
+        let stored = db.disposition_for_probe(run_id, "a").unwrap().unwrap();
+        assert!(!stored.gate_ok);
+        // The clean last line is stored, unscored, with the occurrence that
+        // tainted it.
+        assert_eq!(stored.scored, Some(false));
         assert!(
-            !db.disposition_for_probe(run_id, "a")
-                .unwrap()
-                .unwrap()
-                .gate_ok
+            stored.defect.as_deref().unwrap().starts_with("line 1: "),
+            "{:?}",
+            stored.defect
         );
     }
 

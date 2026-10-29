@@ -11,6 +11,7 @@ pub mod gate;
 pub mod integrity;
 pub mod isolate;
 pub mod lfs;
+pub(crate) mod line_value;
 pub mod manifest;
 pub mod measured;
 pub mod pins_write;

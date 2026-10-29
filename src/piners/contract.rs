@@ -6,7 +6,8 @@
 //! recognised, in emission order, against the selection and the process exit.
 //! Recognition precedes version validation: a known kind with a missing,
 //! malformed or unsupported version is a violation even when no valid line
-//! appeared. Strictness starts once any contract line is observed; a stream
+//! appeared, and so is one whose line repeats a key, whose payload is then
+//! not read. Strictness starts once any contract line is observed; a stream
 //! with none is "no contract observed" and is judged by the rules that
 //! predate the contract (exit status and selection coverage).
 //!
@@ -294,6 +295,16 @@ pub fn assess_contract(
     let mut run_error_line: Option<usize> = None;
 
     for c in &report.contract {
+        // A repeated key, like a bad version, leaves the line present - it
+        // counted as a start above - but nothing in it is read: which
+        // occurrence a reader keeps would decide what it says.
+        if !c.repeated.is_empty() {
+            b.add(
+                "contract line with a repeated key",
+                format!("{} at line {} ({})", c.kind, c.line, c.repeated.join(", ")),
+            );
+            continue;
+        }
         if let Err(why) = check_version(c) {
             b.add(
                 "contract line with a bad version",
@@ -821,6 +832,45 @@ mod tests {
         assert!(a.observed);
         assert_eq!(a.violations.len(), 1, "{:?}", a.violations);
         assert!(a.violations[0].starts_with("contract line with a bad version"));
+    }
+
+    #[test]
+    fn a_repeated_key_leaves_the_line_present_and_unread() {
+        // A start that repeats a key is still a start: observed, counted,
+        // and a second start beside it is a duplicate.
+        let nd = format!(
+            "{{\"kind\":\"run_start\",\"version\":1,\"version\":1}}\n{}",
+            clean(&["a"], 0)
+        );
+        let a = assess(&nd, &["a"], HarnessEnd::Code(0));
+        let v = a.violations.join("\n");
+        assert!(
+            v.contains(r#"contract line with a repeated key: run_start at line 1 ("version")"#),
+            "{v}"
+        );
+        assert!(v.contains("duplicate run_start: 2 run_start lines"), "{v}");
+        let a = assess(
+            "{\"kind\":\"run_start\",\"version\":1,\"x\":1,\"x\":2}\n",
+            &["a"],
+            HarnessEnd::Signal(9),
+        );
+        assert!(a.observed);
+        assert_eq!(a.violations.len(), 1, "{:?}", a.violations);
+        // A run_error that repeats a key is never read, so never stored as
+        // the run's record.
+        let nd = format!(
+            "{}{{\"kind\":\"run_error\",\"version\":1,\"stage\":\"x\",\"error\":\"a\",\"error\":\"b\"}}\n",
+            start()
+        );
+        let a = assess(&nd, &["a"], HarnessEnd::Code(2));
+        assert!(a.run_error.is_none());
+        assert!(
+            a.violations
+                .iter()
+                .any(|l| l.starts_with("contract line with a repeated key: run_error")),
+            "{:?}",
+            a.violations
+        );
     }
 
     #[test]

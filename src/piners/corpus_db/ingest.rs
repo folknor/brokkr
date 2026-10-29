@@ -7,6 +7,10 @@
 //! registry's pinned expectations and the gate's own verdict
 //! (`gate::evaluate`), never a second computation of it; `gate_miss` rows
 //! come from the gate violations the harness emitted no disposition line for.
+//! `scored`/`defect` come from the run's reconciliation
+//! (`integrity::Reconciliation`) and the parser's per-record verdicts, so a
+//! stored row says whether the live run counted it, and if not for its
+//! record's sake, why.
 //! The caller collapses repeated harness records first
 //! (`HarnessReport::take_duplicates`); an insert failure still names the
 //! probe it was storing.
@@ -19,6 +23,7 @@ use super::CorpusDb;
 use crate::db::store::as_i64;
 use crate::error::DevError;
 use crate::piners::gate::{GateVerdict, LabelAssessment};
+use crate::piners::integrity::Reconciliation;
 use crate::piners::report::{HarnessReport, ProbeLine, TradeDiffLine};
 use crate::piners::run_model::RunVerdict;
 
@@ -84,16 +89,24 @@ pub struct RunRecord<'a> {
 
 impl CorpusDb {
     /// Persist one run and all its child rows in a single transaction.
-    /// Returns the new `run_id`.
+    /// `rec` is the run's own reconciliation of `report`, which says which
+    /// rows were scored. Returns the new `run_id`.
     pub fn record_run(
         &self,
         run: &RunRecord<'_>,
         report: &HarnessReport,
+        rec: &Reconciliation,
         expected: &BTreeMap<String, Option<String>>,
         gate: &GateVerdict,
     ) -> Result<i64, DevError> {
         self.conn().execute("BEGIN", [])?;
-        let result = record_inner(self.conn(), run, report, expected, gate).and_then(|run_id| {
+        let stored = Stored {
+            report,
+            rec,
+            expected,
+            gate,
+        };
+        let result = record_inner(self.conn(), run, &stored).and_then(|run_id| {
             prune_run_history(self.conn(), RUN_RETENTION_LIMIT)?;
             Ok(run_id)
         });
@@ -154,7 +167,10 @@ fn prune_run_history(conn: &rusqlite::Connection, keep: i64) -> Result<(), DevEr
 /// for both, reading the stored columns, so ingest and backfill cannot
 /// qualify an observation differently. An observation qualifies from a run
 /// with a known context, for a probe the run selected (a report-only extra
-/// is not one), whose stored disposition is not `harness_abort` (that times
+/// is not one), whose stored row is not marked unscored (`scored = 0`: an
+/// invalid record, a tainted probe or an extra; a row from before v17 with
+/// no mark is judged by the other rules alone), whose stored disposition is
+/// not `harness_abort` (that times
 /// the failure, not the workload), whose run dropped no disposition line
 /// naming it, and whose `runtime_ms` is a finite nonnegative number. A run
 /// whose selector has no `ids` array, or whose `report_warnings` is not a
@@ -182,6 +198,7 @@ pub(super) fn update_schedule_estimates(
              FROM disposition d JOIN run r ON r.run_id = d.run_id \
              WHERE {filter} \
                AND r.cargo_profile IS NOT NULL AND r.harness_args IS NOT NULL \
+               AND d.scored IS NOT 0 \
                AND d.disposition <> 'harness_abort' \
                AND d.runtime_ms >= 0 AND d.runtime_ms < 9e999 \
                AND EXISTS (SELECT 1 FROM json_each( \
@@ -218,13 +235,41 @@ pub(super) fn stored_context(context: &RunContext) -> Result<(String, String), D
     Ok((profile, args))
 }
 
+/// What one run's judgement says about its rows.
+struct Stored<'a> {
+    report: &'a HarnessReport,
+    rec: &'a Reconciliation,
+    expected: &'a BTreeMap<String, Option<String>>,
+    gate: &'a GateVerdict,
+}
+
+/// Why a stored row is not scored evidence for its record's sake: the
+/// record's own defect, else the first invalid occurrence naming its probe
+/// (which taints it however clean the stored line is), as `line N: reason`.
+/// `None` when no occurrence was invalid. A report-only extra that is valid
+/// has none: it is unscored for its selection, not its record.
+fn defect_of(p: &ProbeLine, report: &HarnessReport) -> Option<String> {
+    if let Some(own) = p.record_defect() {
+        return Some(format!("line {}: {own}", p.line));
+    }
+    report
+        .invalid
+        .iter()
+        .find(|r| r.probe.as_deref() == Some(p.probe.as_str()))
+        .map(|r| format!("line {}: {}", r.line, r.reason))
+}
+
 fn record_inner(
     conn: &rusqlite::Connection,
     run: &RunRecord<'_>,
-    report: &HarnessReport,
-    expected: &BTreeMap<String, Option<String>>,
-    gate: &GateVerdict,
+    stored: &Stored<'_>,
 ) -> Result<i64, DevError> {
+    let Stored {
+        report,
+        rec,
+        expected,
+        gate,
+    } = *stored;
     let (cargo_profile, harness_args) = match run.context {
         Some(context) => {
             let (profile, args) = stored_context(context)?;
@@ -270,10 +315,17 @@ fn record_inner(
     // the conjunction of both checks, the disposition and the label ratchet.
     let deviating = gate.deviating();
 
+    // Every row is stored, scored or not, and says which it is: `scored` is
+    // the reconciliation's own membership - the set the live summary and
+    // breakdowns aggregate - so a query can keep to it.
     for p in &report.probes {
-        let gate_ok = !deviating.contains(p.probe.as_str());
-        let assessment = gate.assessments.get(&p.probe);
-        insert_disposition(conn, run_id, p, expected, gate_ok, assessment).map_err(|e| {
+        let annotation = Annotation {
+            gate_ok: !deviating.contains(p.probe.as_str()),
+            labels: gate.assessments.get(&p.probe),
+            scored: rec.valid.contains(&p.probe),
+            defect: defect_of(p, report),
+        };
+        insert_disposition(conn, run_id, p, expected, &annotation).map_err(|e| {
             DevError::Database(format!(
                 "storing the disposition of probe '{}': {e}",
                 p.probe
@@ -324,6 +376,14 @@ fn record_inner(
     Ok(run_id)
 }
 
+/// brokkr's own verdicts on one stored row.
+struct Annotation<'a> {
+    gate_ok: bool,
+    labels: Option<&'a LabelAssessment>,
+    scored: bool,
+    defect: Option<String>,
+}
+
 /// Store one disposition line: the harness record whole, plus brokkr's own
 /// annotations. Every harness column is generated from `raw_json` (see
 /// `schema.rs`), so nothing here restates a harness field.
@@ -332,8 +392,7 @@ fn insert_disposition(
     run_id: i64,
     p: &ProbeLine,
     expected: &BTreeMap<String, Option<String>>,
-    gate_ok: bool,
-    labels: Option<&LabelAssessment>,
+    annotation: &Annotation<'_>,
 ) -> Result<(), DevError> {
     if p.raw.is_empty() {
         // Only `report::parse` builds lines for ingest, and it always sets the
@@ -346,17 +405,19 @@ fn insert_disposition(
     conn.execute(
         "INSERT INTO disposition \
          (run_id, probe, disposition, expected, gate_ok, raw_source, raw_json, \
-          expected_labels, label_gate) \
-         VALUES (?1, ?2, ?3, ?4, ?5, 'harness', ?6, ?7, ?8)",
+          expected_labels, label_gate, scored, defect) \
+         VALUES (?1, ?2, ?3, ?4, ?5, 'harness', ?6, ?7, ?8, ?9, ?10)",
         params![
             run_id,
             p.probe,
             p.disposition(),
             expected.get(&p.probe).cloned().flatten(),
-            i64::from(gate_ok),
+            i64::from(annotation.gate_ok),
             p.raw,
-            labels.and_then(LabelAssessment::pinned_json),
-            labels.and_then(LabelAssessment::deviations_json),
+            annotation.labels.and_then(LabelAssessment::pinned_json),
+            annotation.labels.and_then(LabelAssessment::deviations_json),
+            i64::from(annotation.scored),
+            annotation.defect,
         ],
     )?;
     Ok(())
@@ -381,6 +442,16 @@ mod tests {
     use super::*;
     use crate::piners::gate::{GateDiff, GateVerdict};
     use crate::piners::report::parse;
+
+    /// The reconciliation of `report` against the selection `expected`
+    /// keys, as a run makes it.
+    fn reconciled(
+        expected: &BTreeMap<String, Option<String>>,
+        report: &HarnessReport,
+    ) -> Reconciliation {
+        let ids: Vec<String> = expected.keys().cloned().collect();
+        Reconciliation::reconcile(&ids, report, Vec::new())
+    }
 
     fn expected_map(pairs: &[(&str, Option<&str>)]) -> BTreeMap<String, Option<String>> {
         pairs
@@ -421,7 +492,13 @@ mod tests {
             run_error: None,
         };
         let run_id = db
-            .record_run(&run, &report, &expected, &GateVerdict::from(gate_diffs))
+            .record_run(
+                &run,
+                &report,
+                &reconciled(&expected, &report),
+                &expected,
+                &GateVerdict::from(gate_diffs),
+            )
             .unwrap();
         assert_eq!(run_id, 1);
 
@@ -485,8 +562,14 @@ mod tests {
             protocol_violations: Some(0),
             run_error: None,
         };
-        db.record_run(&run, &parse(b""), &BTreeMap::new(), &GateVerdict::default())
-            .unwrap();
+        db.record_run(
+            &run,
+            &parse(b""),
+            &Reconciliation::default(),
+            &BTreeMap::new(),
+            &GateVerdict::default(),
+        )
+        .unwrap();
 
         assert_eq!(db.run(1).unwrap().unwrap().context, Some(context));
     }
@@ -515,10 +598,12 @@ mod tests {
             protocol_violations: Some(0),
             run_error: None,
         };
+        let expected = expected_map(&[("p1", Some("accepted"))]);
         db.record_run(
             &run,
             &report,
-            &expected_map(&[("p1", Some("accepted"))]),
+            &reconciled(&expected, &report),
+            &expected,
             &GateVerdict::default(),
         )
         .unwrap();
@@ -565,7 +650,13 @@ mod tests {
             run_error: None,
         };
         let run_id = db
-            .record_run(&run, &report, &expected, &GateVerdict::from(gate_diffs))
+            .record_run(
+                &run,
+                &report,
+                &reconciled(&expected, &report),
+                &expected,
+                &GateVerdict::from(gate_diffs),
+            )
             .unwrap();
         assert!(
             !db.disposition_for_probe(run_id, "p1")
@@ -576,6 +667,86 @@ mod tests {
         let stray = db.disposition_for_probe(run_id, "stray").unwrap().unwrap();
         assert!(stray.gate_ok);
         assert_eq!(stray.expected, None);
+        // Not scored, though: it was never selected. Its record is fine.
+        assert_eq!(stray.scored, Some(false));
+        assert_eq!(stray.defect, None);
+        let p1 = db.disposition_for_probe(run_id, "p1").unwrap().unwrap();
+        assert_eq!((p1.scored, p1.defect), (Some(true), None));
+    }
+
+    #[test]
+    fn every_unscored_row_is_marked_and_an_invalid_one_says_why() {
+        // `bad` has no tier; `extra` is an invalid line nobody selected;
+        // `tainted` is clean last but its first occurrence was not; `ok` is
+        // scored. Every one is stored, its dense-na sites too.
+        let mut report = parse(
+            br#"{"probe":"bad","outcome":"parity","matched":218,"dense_na_sites":[{"name":"ta.ema","call_site":"s:1","na_count":3}]}
+{"probe":"extra","outcome":"accepted","matched":4}
+{"probe":"tainted","outcome":"compile_fail","error":"x","disposition":"accepted"}
+{"probe":"tainted","outcome":"compile_fail","error":"x"}
+{"probe":"ok","outcome":"parity","acceptance":{"tier":"accepted"}}
+"#,
+        );
+        let duplicates = report.take_duplicates();
+        let expected = expected_map(&[
+            ("bad", Some("accepted")),
+            ("tainted", Some("compile_fail")),
+            ("ok", Some("accepted")),
+        ]);
+        let ids: Vec<String> = expected.keys().cloned().collect();
+        let rec = Reconciliation::reconcile(&ids, &report, duplicates);
+        let db = CorpusDb::open_in_memory().unwrap();
+        let run = RunRecord {
+            run_id: None,
+            started_at: None,
+            commit_sha: None,
+            dirty: None,
+            selector: "{}",
+            context: None,
+            gated: true,
+            verdict: &RunVerdict::Fail("integrity".to_owned()),
+            harness_exit_code: Some(0),
+            stderr: "",
+            wall_ms: None,
+            protocol_violations: Some(4),
+            run_error: None,
+        };
+        let run_id = db
+            .record_run(&run, &report, &rec, &expected, &GateVerdict::default())
+            .unwrap();
+        let row = |probe: &str| db.disposition_for_probe(run_id, probe).unwrap().unwrap();
+        assert_eq!(row("ok").scored, Some(true));
+        assert_eq!(row("ok").defect, None);
+        for probe in ["bad", "extra", "tainted"] {
+            assert_eq!(row(probe).scored, Some(false), "{probe}");
+        }
+        assert!(
+            row("bad")
+                .defect
+                .unwrap()
+                .starts_with("line 1: outcome 'parity'"),
+            "the row's own defect"
+        );
+        assert!(row("extra").defect.unwrap().starts_with("line 2: "));
+        // The stored line is the clean repeat; the defect is the occurrence
+        // that tainted it.
+        assert!(
+            row("tainted")
+                .defect
+                .unwrap()
+                .starts_with("line 3: its disposition field")
+        );
+        // The dense-na table keeps every stored row's sites; a join on the
+        // mark keeps to the scored set.
+        let all = db.raw_sql("SELECT COUNT(*) FROM dense_na_site").unwrap();
+        assert_eq!(all.rows[0][0], "1");
+        let scored = db
+            .raw_sql(
+                "SELECT COUNT(*) FROM dense_na_site s JOIN disposition d \
+                 USING (run_id, probe) WHERE d.scored IS NOT 0",
+            )
+            .unwrap();
+        assert_eq!(scored.rows[0][0], "0");
     }
 
     #[test]
@@ -599,8 +770,14 @@ mod tests {
             protocol_violations: Some(0),
             run_error: Some(json),
         };
-        db.record_run(&run, &parse(b""), &BTreeMap::new(), &GateVerdict::default())
-            .unwrap();
+        db.record_run(
+            &run,
+            &parse(b""),
+            &Reconciliation::default(),
+            &BTreeMap::new(),
+            &GateVerdict::default(),
+        )
+        .unwrap();
         let row = db.run(3).unwrap().unwrap();
         let rec =
             crate::piners::contract::RunErrorRecord::from_json(row.run_error.as_deref().unwrap())
@@ -630,8 +807,14 @@ mod tests {
             protocol_violations: Some(0),
             run_error: None,
         };
-        db.record_run(&run, &parse(b""), &BTreeMap::new(), &GateVerdict::default())
-            .unwrap();
+        db.record_run(
+            &run,
+            &parse(b""),
+            &Reconciliation::default(),
+            &BTreeMap::new(),
+            &GateVerdict::default(),
+        )
+        .unwrap();
         db.append_diagnosis(7, "first").unwrap();
         db.append_diagnosis(7, "second").unwrap();
         let row = db.run(7).unwrap().unwrap();
@@ -664,8 +847,14 @@ mod tests {
                 protocol_violations: Some(0),
                 run_error: None,
             };
-            db.record_run(&run, &parse(b""), &BTreeMap::new(), &GateVerdict::default())
-                .unwrap();
+            db.record_run(
+                &run,
+                &parse(b""),
+                &Reconciliation::default(),
+                &BTreeMap::new(),
+                &GateVerdict::default(),
+            )
+            .unwrap();
         }
 
         db.conn()

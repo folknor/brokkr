@@ -375,7 +375,8 @@ The harness fills its job slots from the front of the manifest, so brokkr
 orders the manifest slowest first by estimated scan duration. A probe's
 estimate is its `runtime_ms` from the latest run that qualifies: same build
 profile and forwarded harness flags as this run, the probe in that run's
-selection (not a report-only extra), not a `harness_abort` (which times the
+selection (not a report-only extra), not marked unscored (`scored = 0`: an
+invalid record or a tainted probe), not a `harness_abort` (which times the
 failure, not the workload), and no dropped disposition line naming it in
 that run's `report_warnings`. A historical run whose selector has no `ids`
 array, or whose `report_warnings` is not a JSON array, contributes no
@@ -552,8 +553,12 @@ separate categories:
   occurrence is checked before repeats collapse, so a later clean repeat
   cannot hide an earlier contradiction: the probe stays unscored, never
   satisfies its pin (the gate shows `invalid (an occurrence was invalid;
-  ...)`), explains no exit-1 break, and is stored with `gate_ok = 0`, so
-  `corpus-results` lists it as a deviation.
+  ...)`), explains no exit-1 break, and is stored with `scored = 0` and the
+  `defect` that unscored it, so `corpus-results` lists it as `INVALID`
+  whether or not it was selected. A disposition line's `kind`, when present,
+  must be the string `"disposition"`: any other present value (a null, a
+  number, an object) routes the line here as no other kind, and makes it
+  invalid, whatever its outcome.
   The record is still stored whole. The parser validates each line once,
   into a `report::ProbeOutcome` - an evaluated disposition a pin can hold,
   or a refusal no pin, gate comparison or bless stamp can - or the reason it
@@ -563,8 +568,8 @@ separate categories:
   nor explains exit 1), bless, the summary and the reconciliation;
 - **missing** - selected ids with no record at all;
 - **invalid** - a line for a selected id whose disposition is not a gate
-  label, a disposition line that does not deserialize, or a stdout line that
-  is not JSON;
+  label, a disposition line that does not deserialize, a stdout line that
+  is not JSON, or a line that repeats a key (below);
 - **duplicate** - repeated records (above);
 - **report-only extras** - disposition lines for ids that were not selected.
   Never scored, whatever they say. An invalid record naming an unselected id
@@ -578,7 +583,25 @@ missing list capped, with a count). An empty report therefore reads as
 `850 selected, 0 scored, 850 missing`, never as a bare `0 total`. The tallies
 after it, the divergence and dense-na breakdowns, and the `N probes matching
 their pin (hidden)` count all cover the **scored** set only: an extra or an
-invalid line is stored, but never counted as a match or aggregated.
+invalid line is stored, but never counted as a match or aggregated. Its
+stored row says so: `scored` is 1 exactly for the scored set and 0 for every
+other stored row, with `defect` naming the unusable record - the row's own,
+or the occurrence that tainted its probe - and `NULL` for a valid extra
+(`docs/projects/piners.md`, the run store). A query over the store keeps to
+what the run counted with `scored IS NOT 0` (a row stored before the mark
+existed reads `NULL` unless its run counted no protocol violation).
+
+**Repeated keys.** A line is one JSON object written once: a key repeated
+within any object of it, at any depth, makes it a record the harness did not
+write once, and nothing brokkr reads from it is trusted. A repeated
+top-level `kind` (nothing to route the line by) and a disposition line with
+any repeat are invalid records, named by their `probe` unless that key
+repeated, and never stored as a row (the repeat is kept in the run's
+`report_warnings`, kind `duplicate_key`, with the repeated paths); a contract
+line is still a contract line, but a violation whose fields are not read
+(below); a repeated top-level `summary` denies the legacy-summary skip; a
+`trade_diff` line is warned about and dropped, like one whose key does not
+parse; an unknown kind is skipped unread.
 
 Invalid records, duplicates and extras are **protocol violations** and fail
 the run. **Any selected probe without a valid disposition fails the run**,
@@ -623,10 +646,16 @@ iteration, and an isolation attempt.
   `run_end`, `run_error` is a contract line whatever else it says (a `summary: true`
   flag included). The legacy-summary skip applies only after this, and only
   to an actual legacy summary record: `summary: true`, no `probe` key, and no
-  `kind` or a kind other than `disposition`. A disposition record carrying a
-  `summary` flag is still a disposition record; a missing, malformed
-  or unsupported `version` (anything but integer 1) is a violation, even if
-  no valid contract line appeared. Unknown kinds are still skipped.
+  `kind` or a string kind other than `disposition`. A disposition record
+  carrying a `summary` flag is still a disposition record; a missing,
+  malformed or unsupported `version` (anything but integer 1) is a
+  violation, even if no valid contract line appeared, and so is a contract
+  line that repeats a key: it still counts as present (a `run_start` is
+  still a start, and a second beside it a duplicate), but none of its fields
+  is read, so a repeated-key `run_error` is never the run's record and a
+  repeated-key `probe_start` starts nothing. Unknown kinds are still skipped;
+  a non-string `kind` is no kind, so such a line is neither a contract line
+  nor skipped.
 - **No contract observed.** With no contract line at all the output says
   `no contract observed` and the run is judged by exit status and selection
   coverage alone, as before the contract existed. Once any contract line is

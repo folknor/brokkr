@@ -15,18 +15,29 @@
 //!
 //! Lines are discriminated by an optional `kind` field. A line with no `kind`
 //! (or `kind == "disposition"`) is a per-probe disposition line: the only kind
-//! that feeds aggregation and the gate. A `kind == "trade_diff"` line is a
+//! that feeds aggregation and the gate. A `kind` that is present but not a
+//! string routes there too, and makes the record invalid. A `kind ==
+//! "trade_diff"` line is a
 //! per-trade drill-down record; brokkr collects these into the report so the
 //! corpus DB can persist them, but they never touch the summary, breakdowns,
 //! or exit code. Any other `kind` is tolerated and skipped, so a new harness
 //! record kind needs no brokkr change beyond (optionally) modelling it for
 //! persistence.
+//!
+//! Every line is read by [`crate::piners::line_value`], which names each key
+//! repeated within an object. A record with a repeated key is one the harness
+//! did not write once, so nothing brokkr reads from it is trusted: a repeated
+//! top-level `kind` leaves the line unroutable (an invalid record), a
+//! disposition line with any repeat is an invalid record that is not stored,
+//! a contract line keeps its place in the contract with a violation instead of
+//! its payload, and a `trade_diff` line is warned about and dropped.
 
 use std::collections::{BTreeMap, HashSet};
 
 use serde::Deserialize;
 
 use crate::output;
+use crate::piners::line_value;
 use crate::piners::registry::{PinnedDisposition, UNEVALUATED};
 
 /// Acceptance detail, present only when `outcome == "parity"`. Models what
@@ -349,9 +360,24 @@ const UNEVALUATED_KEYS: [&str; 7] = [
     "error",
 ];
 
+/// A disposition record's `kind`, given its whole value: absent, or exactly
+/// the string `"disposition"`. `parse` routes a present non-string kind to
+/// the disposition path (it is no other kind), so it is refused here, on
+/// every outcome, and the record is still stored and taints its probe.
+fn disposition_kind(value: &serde_json::Value) -> Result<(), String> {
+    match value.get("kind") {
+        None => Ok(()),
+        Some(serde_json::Value::String(kind)) if kind == "disposition" => Ok(()),
+        Some(other) => Err(format!(
+            "its kind {other} is not \"disposition\" (a disposition line's kind, when present, is \
+             that string)"
+        )),
+    }
+}
+
 /// The closed shape of an `unevaluated` line, given its whole value: no key
-/// outside [`UNEVALUATED_KEYS`], and `kind`, when present, exactly
-/// `"disposition"` (`parse` routes a non-string kind here as if absent).
+/// outside [`UNEVALUATED_KEYS`]. Its `kind` is checked first, as on every
+/// disposition line, by [`disposition_kind`].
 fn unevaluated_shape(value: &serde_json::Value) -> Result<(), String> {
     let foreign: Vec<&str> = value
         .as_object()
@@ -366,13 +392,7 @@ fn unevaluated_shape(value: &serde_json::Value) -> Result<(), String> {
             foreign.join(", ")
         ));
     }
-    match value.get("kind") {
-        None => Ok(()),
-        Some(serde_json::Value::String(kind)) if kind == "disposition" => Ok(()),
-        Some(other) => Err(format!(
-            "an unevaluated line's kind {other} is not \"disposition\""
-        )),
-    }
+    Ok(())
 }
 
 /// An `unevaluated` line's refusal, given its whole value: a known `reason`
@@ -496,8 +516,10 @@ pub struct ProbeLine {
     /// outcome.
     #[serde(default)]
     pub error: Option<String>,
-    /// The whole line as parsed, re-serialized compactly (the harness's key
-    /// order is kept; its original bytes are not), every field kept,
+    /// The whole line as parsed, re-serialized compactly (in
+    /// `serde_json::Map`'s key order, which without its `preserve_order`
+    /// feature is sorted, not the harness's; its original bytes are not
+    /// kept either), every field kept,
     /// including the ones this struct does not model. The run store
     /// persists it as the authoritative record and projects its columns from
     /// it, so a diagnostic the harness adds is stored the day it ships rather
@@ -568,7 +590,8 @@ impl ProbeLine {
     }
 
     /// Validate this line, given the whole value it was read from and its
-    /// parsed `labels` census: on a line whose outcome is `unevaluated`, its
+    /// parsed `labels` census: its `kind` ([`disposition_kind`]); on a line
+    /// whose outcome is `unevaluated`, its
     /// closed shape first ([`unevaluated_shape`]), keyed on the outcome string
     /// so a stray tier or census on it is named rather than reported as some
     /// later defect; then the outcome, tier and declared label together
@@ -582,6 +605,7 @@ impl ProbeLine {
         value: &serde_json::Value,
         census: Result<Option<LabelCensus>, String>,
     ) -> Result<ProbeOutcome, String> {
+        disposition_kind(value)?;
         if self.outcome == UNEVALUATED {
             unevaluated_shape(value)?;
         }
@@ -689,6 +713,12 @@ pub struct ContractLine {
     pub physical: usize,
     pub kind: String,
     pub value: serde_json::Value,
+    /// The paths of keys the line repeated (`line_value::RepeatedKey`),
+    /// empty for a well-formed line. A repeat leaves the line present in the
+    /// contract - it is still this kind at this position - but its payload is
+    /// a record the harness did not write once, so `contract` judges it a
+    /// violation and reads nothing from it.
+    pub repeated: Vec<String>,
 }
 
 /// Everything parsed out of one harness run.
@@ -908,6 +938,35 @@ fn record_unparsable_disposition(
     });
 }
 
+/// A line with a repeated key that brokkr would read as a record: a
+/// warning, and an invalid record naming its probe when its top-level
+/// `probe` is an unrepeated string. Never stored as a row: what it says
+/// depends on which occurrence a reader keeps.
+fn record_repeated_keys(
+    report: &mut HarnessReport,
+    position: usize,
+    trimmed: &str,
+    probe: Option<String>,
+    paths: &str,
+) {
+    report.warnings.push(ParseWarning {
+        line: position,
+        kind: "duplicate_key".to_owned(),
+        probe: probe.clone(),
+        reason: format!("repeated key(s): {paths}"),
+        raw: clip(trimmed),
+    });
+    report.invalid.push(InvalidRecord {
+        probe,
+        reason: format!(
+            "a key repeats within the record ({paths}): {}",
+            clip(trimmed)
+        ),
+        line: position,
+        not_json: false,
+    });
+}
+
 /// Parse NDJSON harness stdout. Blank lines are skipped; a legacy `summary`
 /// line is skipped (the harness no longer emits one); a `trade_diff` line is
 /// collected, and one that fails to parse is warned about and dropped (it is
@@ -917,7 +976,12 @@ fn record_unparsable_disposition(
 /// protocol violation the integrity check fails the run on, and dropping it
 /// silently is how a probe used to vanish from a run that could still pass.
 /// Unknown *fields* stay tolerated (forward compat; see the module docs),
-/// except on an `unevaluated` line, whose shape is closed.
+/// except on an `unevaluated` line, whose shape is closed. A repeated key is
+/// routed by the line's kind, in this order: a repeated top-level `kind` (no
+/// kind to route by) or a disposition line is an invalid record, a contract
+/// line keeps its repeats for the contract to judge, a repeated top-level
+/// `summary` denies the legacy-summary skip, a `trade_diff` line is warned
+/// about and dropped, and an unknown kind is skipped unread.
 pub fn parse(stdout: &[u8]) -> HarnessReport {
     let text = String::from_utf8_lossy(stdout);
     let mut report = HarnessReport {
@@ -938,13 +1002,31 @@ pub fn parse(stdout: &[u8]) -> HarnessReport {
         report.last_line = Some(position);
         // Peek at the line as a generic value to discriminate record kinds
         // before committing to the ProbeLine shape.
-        let value = match serde_json::from_str::<serde_json::Value>(trimmed) {
+        let parsed = match line_value::parse(trimmed) {
             Ok(v) => v,
             Err(e) => {
                 record_not_json(&mut report, position, trimmed, &e);
                 continue;
             }
         };
+        let repeated = parsed.repeated_paths();
+        // The probe a repeated record names, unless `probe` itself repeated.
+        let repeat_probe = (!parsed.repeats_top("probe"))
+            .then(|| {
+                parsed
+                    .value
+                    .get("probe")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .flatten()
+            .map(str::to_owned);
+        // A repeated top-level kind leaves nothing to route the line by.
+        if parsed.repeats_top("kind") {
+            record_repeated_keys(&mut report, position, trimmed, repeat_probe, &repeated);
+            continue;
+        }
+        let summary_repeated = parsed.repeats_top("summary");
+        let value = parsed.value;
 
         // Contract kinds first: a contract line is judged whatever else it
         // carries, so no tolerance below (the legacy summary skip) can hide one.
@@ -957,16 +1039,18 @@ pub fn parse(stdout: &[u8]) -> HarnessReport {
                 physical,
                 kind,
                 value,
+                repeated: parsed.repeated.into_iter().map(|r| r.path).collect(),
             });
             continue;
         }
 
         // Tolerate (and ignore) a stray legacy summary record, and only that:
-        // `summary: true`, no `probe` key, and no `kind` or a kind other than
-        // `disposition`. A disposition record (no kind or `kind:
+        // `summary: true`, no `probe` key, and no `kind` or a string kind
+        // other than `disposition`. A disposition record (no kind or `kind:
         // "disposition"`, naming a probe) is recognised first whatever flags
-        // it carries, so a `summary` flag can never make one vanish.
-        if is_legacy_summary(&value) {
+        // it carries, so a `summary` flag can never make one vanish; nor can a
+        // `summary` key that repeats, which says nothing for certain.
+        if !summary_repeated && is_legacy_summary(&value) {
             continue;
         }
 
@@ -985,19 +1069,23 @@ pub fn parse(stdout: &[u8]) -> HarnessReport {
             .get("probe")
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
-        let dense_na_warnings = if matches!(
-            value.get("kind").and_then(serde_json::Value::as_str),
-            None | Some("disposition")
-        ) {
-            malformed_dense_na_sites(&value, probe_id.as_deref(), position)
-        } else {
-            Vec::new()
+        // A present kind that is not a string is no other kind: the line is
+        // judged as the disposition it would otherwise be, and its record
+        // check refuses the kind (`disposition_kind`).
+        let route = match value.get("kind") {
+            Some(serde_json::Value::String(kind)) => kind.as_str(),
+            None | Some(_) => "disposition",
         };
         let at = probe_id
             .as_deref()
             .map_or_else(String::new, |id| format!(" (probe {id})"));
-        match value.get("kind").and_then(serde_json::Value::as_str) {
-            None | Some("disposition") => {
+        match route {
+            "disposition" if !repeated.is_empty() => {
+                record_repeated_keys(&mut report, position, trimmed, repeat_probe, &repeated);
+            }
+            "disposition" => {
+                let dense_na_warnings =
+                    malformed_dense_na_sites(&value, probe_id.as_deref(), position);
                 match ProbeLine::deserialize(&value) {
                     Ok(p) => record_disposition(&mut report, p, &value, position),
                     Err(e) => {
@@ -1006,27 +1094,56 @@ pub fn parse(stdout: &[u8]) -> HarnessReport {
                 }
                 report.warnings.extend(dense_na_warnings);
             }
-            Some("trade_diff") => match TradeDiffLine::deserialize(&value) {
-                Ok(t) => report.trade_diffs.push(TradeDiffLine {
-                    raw: value.to_string(),
-                    ..t
-                }),
-                Err(e) => {
-                    output::warn(&format!("corpus: unparsable trade_diff line{at}: {e}"));
-                    report.warnings.push(ParseWarning {
-                        line: position,
-                        kind: "trade_diff_parse".to_owned(),
-                        probe: probe_id,
-                        reason: e.to_string(),
-                        raw: clip(trimmed),
-                    });
-                }
-            },
-            Some(_) => continue,
+            // A diagnostic: a repeat costs only the line, as a key that does
+            // not parse does.
+            "trade_diff" if !repeated.is_empty() => {
+                output::warn(&format!(
+                    "corpus: trade_diff line{at} repeats a key ({repeated}); dropped"
+                ));
+                report.warnings.push(ParseWarning {
+                    line: position,
+                    kind: "duplicate_key".to_owned(),
+                    probe: repeat_probe,
+                    reason: format!("repeated key(s): {repeated}"),
+                    raw: clip(trimmed),
+                });
+            }
+            "trade_diff" => record_trade_diff(&mut report, &value, position, trimmed, probe_id),
+            _ => continue,
         }
     }
 
     report
+}
+
+/// A `trade_diff` line: collected whole, or, when its key does not parse,
+/// warned about and dropped - a diagnostic, never scored.
+fn record_trade_diff(
+    report: &mut HarnessReport,
+    value: &serde_json::Value,
+    position: usize,
+    trimmed: &str,
+    probe_id: Option<String>,
+) {
+    match TradeDiffLine::deserialize(value) {
+        Ok(t) => report.trade_diffs.push(TradeDiffLine {
+            raw: value.to_string(),
+            ..t
+        }),
+        Err(e) => {
+            let at = probe_id
+                .as_deref()
+                .map_or_else(String::new, |id| format!(" (probe {id})"));
+            output::warn(&format!("corpus: unparsable trade_diff line{at}: {e}"));
+            report.warnings.push(ParseWarning {
+                line: position,
+                kind: "trade_diff_parse".to_owned(),
+                probe: probe_id,
+                reason: e.to_string(),
+                raw: clip(trimmed),
+            });
+        }
+    }
 }
 
 /// Collect malformed dense-na subrecords before `de_dense_na_sites` drops
@@ -1069,11 +1186,17 @@ fn malformed_dense_na_sites(
 }
 
 /// The legacy trailing summary record the harness once emitted: `summary:
-/// true`, no `probe` key, and no `kind` or one other than `disposition`.
+/// true`, no `probe` key, and no `kind` or a string one other than
+/// `disposition`. A non-string kind is no kind brokkr can skip: the line goes
+/// on to the disposition path and is refused there.
 fn is_legacy_summary(value: &serde_json::Value) -> bool {
     value.get("summary").and_then(serde_json::Value::as_bool) == Some(true)
         && value.get("probe").is_none()
-        && value.get("kind").and_then(serde_json::Value::as_str) != Some("disposition")
+        && match value.get("kind") {
+            None => true,
+            Some(serde_json::Value::String(kind)) => kind != "disposition",
+            Some(_) => false,
+        }
 }
 
 /// At most this many characters of a non-JSON line are quoted in its
@@ -1576,7 +1699,7 @@ mod tests {
             );
         }
         // An explicit kind must be the disposition kind itself; a non-string
-        // one, which dispatch reads as absent, is refused here.
+        // one, which dispatch routes here, is refused (as on every line).
         for kind in ["null", "3", "{}"] {
             let r = line(&format!(
                 r#","kind":{kind},"reason":"no_overlap","error":"x""#
@@ -2107,6 +2230,91 @@ mod tests {
             "{line}"
         );
         assert!(!line.contains("total"), "{line}");
+    }
+
+    #[test]
+    fn a_non_string_kind_is_invalid_on_every_disposition_line() {
+        for rest in [
+            r#""outcome":"parity","acceptance":{"tier":"accepted"}"#,
+            r#""outcome":"compile_fail","error":"x""#,
+            r#""outcome":"harness_abort","error":"x""#,
+        ] {
+            for kind in ["null", "3", "{}", "[\"disposition\"]", "true"] {
+                let r = parse(format!("{{\"kind\":{kind},\"probe\":\"p\",{rest}}}").as_bytes());
+                // Stored whole, never scored, and its probe tainted.
+                assert_eq!(r.probes.len(), 1, "{kind} {rest}");
+                assert_eq!(r.probes[0].outcome(), None, "{kind} {rest}");
+                assert_eq!(r.invalid.len(), 1, "{kind} {rest}");
+                assert_eq!(r.invalid[0].probe.as_deref(), Some("p"));
+                assert!(
+                    r.invalid[0].reason.contains("kind"),
+                    "{}",
+                    r.invalid[0].reason
+                );
+            }
+        }
+        // A would-be contract line or summary with a non-string kind is
+        // neither: it reaches the disposition path and is refused there.
+        let r = parse(b"{\"kind\":null,\"summary\":true}\n{\"kind\":7,\"version\":1}\n");
+        assert!(r.contract.is_empty());
+        assert_eq!(r.invalid.len(), 2, "{:?}", r.invalid);
+        // A string kind is still routed by its value.
+        let r = parse(b"{\"kind\":\"future\",\"probe\":\"p\"}\n{\"kind\":\"disposition\",\"probe\":\"p\",\"outcome\":\"compile_fail\",\"error\":\"x\"}\n");
+        assert!(r.invalid.is_empty(), "{:?}", r.invalid);
+        assert_eq!(r.probes.len(), 1);
+    }
+
+    #[test]
+    fn a_repeated_key_is_routed_by_the_lines_kind() {
+        let r = parse(
+            br#"{"probe":"a","outcome":"parity","acceptance":{"tier":"accepted"},"outcome":"compile_fail"}
+{"probe":"b","outcome":"compile_fail","error":"x","dense_na_sites":[{"name":"f","name":"g"}]}
+{"probe":"c","probe":"d","outcome":"compile_fail","error":"x"}
+{"kind":"trade_diff","kind":"disposition","probe":"e","outcome":"compile_fail"}
+{"kind":"trade_diff","probe":"f","our_index":1,"tv_index":1,"our_index":2}
+{"kind":"future","probe":"g","x":1,"x":2}
+{"summary":true,"summary":true}
+{"summary":true,"total":1,"total":2}
+{"kind":"run_start","version":1,"version":2}
+"#,
+        );
+        // A disposition line with any repeat - top level or nested - is an
+        // invalid record, never stored; its probe is named unless `probe`
+        // itself repeated. A repeated kind leaves nothing to route by.
+        assert!(r.probes.is_empty(), "{:?}", r.probes);
+        let named: Vec<Option<&str>> = r.invalid.iter().map(|i| i.probe.as_deref()).collect();
+        assert_eq!(
+            named,
+            vec![Some("a"), Some("b"), None, Some("e"), None],
+            "{:?}",
+            r.invalid
+        );
+        assert!(
+            r.invalid[0].reason.contains(r#"("outcome")"#),
+            "{}",
+            r.invalid[0].reason
+        );
+        assert!(
+            r.invalid[1]
+                .reason
+                .contains(r#""dense_na_sites"[0]."name""#),
+            "{}",
+            r.invalid[1].reason
+        );
+        // The trade_diff is dropped with a warning; the unknown kind is
+        // skipped unread; a repeated `summary` denies the legacy skip, any
+        // other repeat on a summary does not.
+        assert!(r.trade_diffs.is_empty());
+        let dup_warnings = r
+            .warnings
+            .iter()
+            .filter(|w| w.kind == "duplicate_key")
+            .count();
+        assert_eq!(dup_warnings, 6);
+        assert!(r.invalid[4].reason.contains(r#""summary""#));
+        // The contract line keeps its place, its repeats beside it.
+        assert_eq!(r.contract.len(), 1);
+        assert_eq!(r.contract[0].repeated, vec![r#""version""#.to_owned()]);
     }
 
     #[test]

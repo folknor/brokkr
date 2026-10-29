@@ -28,7 +28,11 @@
 //! and `disposition.label_gate`, the label ratchet's pin and verdict; version
 //! 15 drops the retired `dynamic_builtin_calls` projection; version 16 adds
 //! the `disposition.reason` projection, why an `unevaluated` probe could not
-//! be evaluated. On a fresh database,
+//! be evaluated; version 17 adds `disposition.scored` and `disposition.defect`,
+//! whether the run's reconciliation scored the row and why its record was
+//! not usable, backfilling `scored = 1` on every row of a run that recorded
+//! zero protocol violations and leaving every other older row NULL (not
+//! recorded). On a fresh database,
 //! the schema DDL in `schema.rs` creates the current tables (columns included)
 //! inside the shared migration transaction. Schema inspection uses the shared
 //! `db::store` helpers, which preserve errors and recognize generated columns.
@@ -44,7 +48,7 @@ use crate::db::store::{column_exists as has_column, table_exists as has_table};
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding a migration below.
-pub(super) const SCHEMA_VERSION: i64 = 16;
+pub(super) const SCHEMA_VERSION: i64 = 17;
 
 /// Run pending migrations through the shared store policy. The v5 rebuild
 /// preserves historical orphan dispositions, so foreign-key enforcement is
@@ -203,13 +207,7 @@ fn migrate_from(conn: &rusqlite::Connection, current: i64) -> Result<(), DevErro
         )?;
     }
 
-    // v11 -> v12: the materialized scheduling estimates, backfilled once from
-    // the history every context has, so the first run after the upgrade
-    // schedules as well as the old pass over history did.
-    if current < 12 {
-        conn.execute_batch(super::schema::SCHEDULE_ESTIMATE_DDL)?;
-        super::ingest::update_schedule_estimates(conn, None)?;
-    }
+    add_schedule_estimates(conn, current)?;
 
     // v12 -> v13: rebuild `trade_diff` around the stored record, as v5 did
     // `disposition`.
@@ -235,7 +233,63 @@ fn migrate_from(conn: &rusqlite::Connection, current: i64) -> Result<(), DevErro
     }
 
     drop_retired_projections(conn, current)?;
-    add_reason_projection(conn, current)
+    add_reason_projection(conn, current)?;
+    if current < 17 && has_table(conn, "disposition")? {
+        add_scored_columns(conn)?;
+        backfill_scored(conn)?;
+    }
+    Ok(())
+}
+
+/// v11 -> v12: the materialized scheduling estimates, backfilled once from
+/// the history every context has, so the first run after the upgrade
+/// schedules as well as the old pass over history did. The estimate query
+/// reads v17's `scored`, so that column arrives first, NULL on every row -
+/// which the query judges by the older rules alone, as this backfill always
+/// did.
+fn add_schedule_estimates(conn: &rusqlite::Connection, current: i64) -> Result<(), DevError> {
+    if current < 12 {
+        add_scored_columns(conn)?;
+        conn.execute_batch(super::schema::SCHEDULE_ESTIMATE_DDL)?;
+        super::ingest::update_schedule_estimates(conn, None)?;
+    }
+    Ok(())
+}
+
+/// The v17 columns: whether the run's reconciliation scored a row, and why
+/// its record was not usable. Nullable, no default: an older row's standing
+/// was never recorded. Guarded per column, so the v12 step may add them
+/// early.
+fn add_scored_columns(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    if !has_table(conn, "disposition")? {
+        return Ok(());
+    }
+    for (col, ty) in [("scored", "INTEGER"), ("defect", "TEXT")] {
+        if !has_column(conn, "disposition", col)? {
+            conn.execute(
+                &format!("ALTER TABLE disposition ADD COLUMN {col} {ty}"),
+                [],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// v16 -> v17: an older run that recorded zero protocol violations scored
+/// every row it stored. The count arrived with the reconciliation (v7), and
+/// every invalid record, repeat and extra adds to it, so zero means no row
+/// was invalid, tainted or unselected by the rules of the brokkr that stored
+/// it. Any other older row - a run that counted violations, or one from
+/// before the count - stays NULL: which of its rows were scored was never
+/// kept, and judging their records by today's validator would reclassify
+/// history (a retired label was valid when stored).
+fn backfill_scored(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    conn.execute(
+        "UPDATE disposition SET scored = 1 WHERE scored IS NULL AND run_id IN \
+         (SELECT run_id FROM run WHERE protocol_violations = 0)",
+        [],
+    )?;
+    Ok(())
 }
 
 /// v15 -> v16: the `reason` an `unevaluated` line carries, projected from
@@ -614,6 +668,8 @@ mod tests {
         assert!(has_column(&conn, "run", "cargo_profile").unwrap());
         assert!(has_column(&conn, "disposition", "expected_labels").unwrap());
         assert!(has_column(&conn, "disposition", "label_gate").unwrap());
+        assert!(has_column(&conn, "disposition", "scored").unwrap());
+        assert!(has_column(&conn, "disposition", "defect").unwrap());
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
@@ -690,6 +746,51 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(reasons, vec![Some("no_overlap".to_owned()), None]);
+    }
+
+    /// A v16 store gains `scored`/`defect`: every row of a run that counted
+    /// zero protocol violations was scored; any other older row's standing
+    /// was never kept and stays NULL, a retired label included.
+    #[test]
+    fn v17_marks_only_what_the_storing_run_established() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(super::super::schema::SCHEMA).unwrap();
+        conn.execute_batch(&disposition_ddl("disposition")).unwrap();
+        for col in ["scored", "defect"] {
+            conn.execute(&format!("ALTER TABLE disposition DROP COLUMN {col}"), [])
+                .unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO run (run_id, started_at, selector, gated, result, probe_count, \
+                 protocol_violations) \
+                 VALUES (1, 'then', '{}', 1, 'pass', 2, 0), (2, 'then', '{}', 1, 'fail', 1, 1), \
+                 (3, 'then', '{}', 1, 'pass', 1, NULL);
+             INSERT INTO disposition (run_id, probe, disposition, gate_ok, raw_source, raw_json) \
+                 VALUES (1, 'p', 'accepted', 1, 'harness', '{}'), \
+                 (1, 'q', 'no_tv_data', 1, 'harness', '{\"outcome\":\"no_tv_data\"}'), \
+                 (2, 'p', 'parity', 0, 'harness', '{\"outcome\":\"parity\"}'), \
+                 (3, 'p', 'accepted', 1, 'reconstructed', '{}');",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 16).unwrap();
+
+        run_migrations(&conn).unwrap();
+        let rows: Vec<(i64, String, Option<i64>, Option<String>)> = conn
+            .prepare("SELECT run_id, probe, scored, defect FROM disposition ORDER BY run_id, probe")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (1, "p".to_owned(), Some(1), None),
+                (1, "q".to_owned(), Some(1), None),
+                (2, "p".to_owned(), None, None),
+                (3, "p".to_owned(), None, None),
+            ]
+        );
     }
 
     #[test]
