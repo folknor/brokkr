@@ -753,11 +753,23 @@ pub(super) fn replay_listing(listing: &Path) -> Result<(), DevError> {
 /// as the status line on a terminal. Closed when the guard drops, which also
 /// adds its wall time to the check's [`StepTimes`].
 pub(super) fn step(label: &str) -> Step {
+    step_as(label, false)
+}
+
+/// A reference step served from the reference cache: shown as `<label>
+/// cached` among the step times, without a duration, since its tool did not
+/// run.
+pub(super) fn cached_step(label: &str) -> Step {
+    step_as(label, true)
+}
+
+fn step_as(label: &str, cached: bool) -> Step {
     let activity = crate::lockfile::activity::Activity::begin(label);
     crate::output::status(label);
     Step {
         _activity: activity,
         label: label.to_owned(),
+        cached,
         started: std::time::Instant::now(),
     }
 }
@@ -765,12 +777,13 @@ pub(super) fn step(label: &str) -> Step {
 pub(super) struct Step {
     _activity: crate::lockfile::activity::Activity,
     label: String,
+    cached: bool,
     started: std::time::Instant,
 }
 
 impl Drop for Step {
     fn drop(&mut self) {
-        StepTimes::add(std::mem::take(&mut self.label), self.started.elapsed());
+        StepTimes::add(std::mem::take(&mut self.label), self.cached, self.started.elapsed());
     }
 }
 
@@ -781,24 +794,30 @@ impl Drop for Step {
 /// because checks run one at a time.
 struct StepTimes;
 
-static STEP_TIMES: std::sync::Mutex<Vec<(String, std::time::Duration, usize)>> =
-    std::sync::Mutex::new(Vec::new());
+/// One step label's record: total wall time, runs, and whether it was served
+/// from the reference cache.
+type StepTime = (String, std::time::Duration, usize, bool);
+
+static STEP_TIMES: std::sync::Mutex<Vec<StepTime>> = std::sync::Mutex::new(Vec::new());
 
 impl StepTimes {
-    fn lock() -> std::sync::MutexGuard<'static, Vec<(String, std::time::Duration, usize)>> {
+    fn lock() -> std::sync::MutexGuard<'static, Vec<StepTime>> {
         STEP_TIMES
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn add(label: String, took: std::time::Duration) {
+    fn add(label: String, cached: bool, took: std::time::Duration) {
         let mut times = Self::lock();
-        match times.iter_mut().find(|(l, _, _)| *l == label) {
-            Some((_, total, runs)) => {
+        match times
+            .iter_mut()
+            .find(|(l, _, _, c)| *l == label && *c == cached)
+        {
+            Some((_, total, runs, _)) => {
                 *total += took;
                 *runs += 1;
             }
-            None => times.push((label, took, 1)),
+            None => times.push((label, took, 1, cached)),
         }
     }
 
@@ -815,17 +834,22 @@ impl StepTimes {
     }
 }
 
-fn render_step_times(times: &mut [(String, std::time::Duration, usize)]) -> String {
-    times.sort_by_key(|(_, total, _)| std::cmp::Reverse(*total));
+/// Slowest first; cached reference steps, which took no tool time, last.
+fn render_step_times(times: &mut [StepTime]) -> String {
+    times.sort_by_key(|(_, total, _, cached)| (*cached, std::cmp::Reverse(*total)));
     times
         .iter()
-        .map(|(label, total, runs)| {
+        .map(|(label, total, runs, cached)| {
             let runs = if *runs > 1 {
                 format!(" ({runs} runs)")
             } else {
                 String::new()
             };
-            format!("{label} {}{runs}", output::format_duration(*total))
+            if *cached {
+                format!("{label} cached{runs}")
+            } else {
+                format!("{label} {}{runs}", output::format_duration(*total))
+            }
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -910,19 +934,21 @@ mod tests {
     fn step_times_render_slowest_first_with_run_counts() {
         use std::time::Duration;
         let mut times = vec![
-            ("pbfhogg diff".to_owned(), Duration::from_secs(15), 2),
-            ("osmium sort".to_owned(), Duration::from_secs(120), 1),
-            ("pbfhogg sort".to_owned(), Duration::from_secs(41), 1),
+            ("pbfhogg diff".to_owned(), Duration::from_secs(15), 2, false),
+            ("osmium cat".to_owned(), Duration::from_millis(1), 3, true),
+            ("osmium sort".to_owned(), Duration::from_secs(120), 1, false),
+            ("pbfhogg sort".to_owned(), Duration::from_secs(41), 1, false),
         ];
         let text = render_step_times(&mut times);
         let labels: Vec<&str> = text.split(", ").collect();
-        assert_eq!(labels.len(), 3, "{text}");
+        assert_eq!(labels.len(), 4, "{text}");
         assert!(labels[0].starts_with("osmium sort "), "{text}");
         assert!(labels[1].starts_with("pbfhogg sort "), "{text}");
         assert!(
             labels[2].starts_with("pbfhogg diff ") && labels[2].ends_with(" (2 runs)"),
             "{text}"
         );
+        assert_eq!(labels[3], "osmium cat cached (3 runs)", "{text}");
         assert_eq!(render_step_times(&mut []), "");
     }
 

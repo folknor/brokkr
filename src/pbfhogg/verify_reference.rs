@@ -355,7 +355,7 @@ impl ReferenceCache {
         if !FRESH.load(Ordering::Relaxed)
             && let Some(manifest) = self.lookup(&entry, &key, run, &outputs)
         {
-            let _step = super::verify::step(&format!("{label} (cached)"));
+            let _step = super::verify::cached_step(&label);
             place(&entry.join(ARTIFACTS), &outputs, stdout, true)?;
             touch(&entry.join(MANIFEST));
             output::verify_msg(&format!(

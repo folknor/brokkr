@@ -45,6 +45,7 @@ pub fn run(
     let outdir = harness.subdir("extract")?;
 
     let mut findings = Findings::claiming(CLAIM);
+    let mut membership = Vec::new();
 
     for strategy in ExtractStrategy::all() {
         let strategy_name = strategy.name();
@@ -108,6 +109,7 @@ pub fn run(
             None
         };
         report.print(strategy_name, shared.as_ref());
+        membership.extend(report.membership_clause(strategy_name));
         if report.content_mismatch.total() > 0 {
             findings.fail(format!(
                 "{label} element content differs from osmium on {} shared IDs",
@@ -116,6 +118,9 @@ pub fn run(
         }
     }
 
+    if let Some(line) = membership_line(&membership, &outdir) {
+        verify_summary(&line);
+    }
     Ok(findings)
 }
 
@@ -140,6 +145,7 @@ impl ExtractDiffReport {
         }
     }
 
+    /// The strategy's full account, into the check's detail.
     fn print(&self, strategy: &str, shared: Option<&[u64; 3]>) {
         let coverage = match shared {
             Some([n, w, r]) => format!("shared {n} nodes, {w} ways, {r} relations"),
@@ -150,20 +156,50 @@ impl ExtractDiffReport {
                 .print("FAIL ", "content differs on a shared ID", verify_msg);
         }
         if self.pbfhogg_only.total() + self.osmium_only.total() == 0 {
-            verify_summary(&format!(
-                "extract --{strategy} vs osmium: {coverage}; same membership"
-            ));
+            verify_msg(&format!("  extract --{strategy} vs osmium: {coverage}; same membership"));
             return;
         }
-        verify_summary(&format!(
-            "extract --{strategy} vs osmium: {coverage}; membership differs (not adjudicated): \
-             pbfhogg-only {}; osmium-only {}",
-            self.pbfhogg_only.counts_line(),
-            self.osmium_only.counts_line()
+        verify_msg(&format!(
+            "  extract --{strategy} vs osmium: {coverage}; membership differs (not adjudicated)"
         ));
-        self.pbfhogg_only.print("", "pbfhogg-only", verify_summary);
-        self.osmium_only.print("", "osmium-only", verify_summary);
+        self.pbfhogg_only.print("", "pbfhogg-only", verify_msg);
+        self.osmium_only.print("", "osmium-only", verify_msg);
     }
+
+    /// The strategy's membership difference as one clause of the summary
+    /// line, `None` when both hold the same elements.
+    fn membership_clause(&self, strategy: &str) -> Option<String> {
+        let sides: Vec<String> = [("pbfhogg-only", &self.pbfhogg_only), ("osmium-only", &self.osmium_only)]
+            .into_iter()
+            .filter(|(_, class)| class.total() > 0)
+            .map(|(label, class)| format!("{label} {}", nonzero_counts(class)))
+            .collect();
+        (!sides.is_empty()).then(|| format!("{strategy} {}", sides.join(", ")))
+    }
+}
+
+/// `56307 nodes 394 ways`: the kinds a class holds, zeros left out.
+fn nonzero_counts(class: &PerType) -> String {
+    ["nodes", "ways", "relations"]
+        .iter()
+        .zip(&class.kinds)
+        .filter(|(_, sampled)| sampled.count > 0)
+        .map(|(kind, sampled)| format!("{} {kind}", sampled.count))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The one summary line for every strategy's membership difference, which
+/// prints on a pass too, so a change in it is visible run to run; `None`
+/// when no strategy differs. The element lists stay in each strategy's diff.
+fn membership_line(clauses: &[String], outdir: &Path) -> Option<String> {
+    (!clauses.is_empty()).then(|| {
+        format!(
+            "  extract vs osmium, membership not adjudicated: {}; element lists in {}",
+            clauses.join("; "),
+            crate::output::path(&outdir.join("pbfhogg-vs-osmium-<strategy>.osc"))
+        )
+    })
 }
 
 /// Elements per kind both outputs hold: pbfhogg's count less its only-side,

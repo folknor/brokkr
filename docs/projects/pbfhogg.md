@@ -293,7 +293,10 @@ replayed if the check fails; a passing check prints just a one-line
 per tool run label, slowest first, with a run count when a label ran more
 than once (`osmium sort 2m0s, pbfhogg sort 41.2s, pbfhogg diff 15.1s (2
 runs)`), so the summary says how a check's time splits between the pbfhogg
-command under test, the reference tool and the comparisons. INTERRUPTED and
+command under test, the reference tool and the comparisons; a reference step
+served from the reference cache is listed last as `osmium sort cached`, with
+no duration. A passing check adds at most one informational line of its own on
+the summary channel, naming the file that holds the detail. INTERRUPTED and
 FAIL lines carry the same breakdown. While a check runs on a terminal, a live
 status line names the step in flight (the same activity `brokkr lock` shows),
 so a long osmium step is not silent. `-v`/`--verbose` skips the buffer so
@@ -380,11 +383,13 @@ pbfhogg's extract contract states no per-strategy membership equivalence with
 osmium, and the two are known to differ in which relations, and under smart
 which nodes, they include. Both outputs go through the strict order check;
 an osmium output that fails it is an error, since a repeated ID could hide a
-content conflict from a by-ID comparison. The summary channel gets, per
-strategy, the shared coverage per kind (given only when pbfhogg's output is
-strictly ordered too, so every count is of distinct IDs, and an error when
-the arithmetic does not close) and the pbfhogg-only and osmium-only counts
-with their smallest IDs. A PASS
+content conflict from a by-ID comparison. The detail gets, per strategy, the
+shared coverage per kind (given only when pbfhogg's output is strictly ordered
+too, so every count is of distinct IDs, and an error when the arithmetic does
+not close) and the pbfhogg-only and osmium-only counts with their smallest
+IDs. The summary channel gets one line naming, per strategy that differs, the
+nonzero pbfhogg-only and osmium-only counts, and the strategies' diff OSCs
+(`pbfhogg-vs-osmium-<strategy>.osc`), which list every element. A PASS
 line says `output order, and element content where pbfhogg and osmium hold
 the same ID; which elements each includes is not adjudicated`, so a selection
 bug that drops or invents elements passes. `multi-extract` holds each strip
@@ -412,8 +417,8 @@ normalisation, `check --locations`, the element diffs) still runs, against the
 reused reference bytes, and no pbfhogg observation or verdict is cached. The
 contract is reuse of a completed execution of the same declared computation,
 with its artifacts and its exit code; it does not claim a rerun would write the
-same bytes. A hit prints `<tool> <command> (cached)` among the step times and,
-in the detail, the entry's key and stored exit.
+same bytes. A hit shows as `<tool> <command> cached` among the step times
+and, in the detail, the entry's key and stored exit.
 
 - **Key**: the run id, the tool's identity, the controlled environment, each
   input's content digest and file-name extension (taken from the resolved
@@ -507,10 +512,11 @@ treats inline way coordinates as derived data, not content, so the element
 diff cannot see a stale coordinate; instead pbfhogg's output must pass
 `pbfhogg check --locations` (each way's inline coordinates equal its nodes'
 records in the same file; exit 1 is a FAIL, any other non-zero exit an
-error). osmium's output gets the same check, reported on the summary channel
-only - a STALE result with the head of the check's report, so a change in
-what osmium gets wrong shows from run to run (`-v` streams the whole
-report): its location index is searched before it is sorted and resolves
+error). osmium's output gets the same check, reported only: one summary line,
+consistent or STALE with the report's mismatch count, so a change in what
+osmium gets wrong shows from run to run, naming `osmium-locations.txt` in the
+check's directory, which holds the whole report (the detail carries it too):
+its location index is searched before it is sorted and resolves
 duplicate keys to the smallest location, so multi-version diffs can make
 osmium itself write stale coordinates. osmosis and osmconvert, which write no
 inline locations, are not run. The base must be LocationsOnWays and keep its

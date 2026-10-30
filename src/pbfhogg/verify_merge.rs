@@ -102,20 +102,24 @@ pub fn run(
         let (pbfhogg_verdict, _) = harness.check_locations("pbfhogg", &pbfhogg_out)?;
         findings.record("pbfhogg apply-changes inline locations", pbfhogg_verdict);
         let (osmium, report) = harness.check_locations("osmium", &osmium_out)?;
+        // One line on the summary channel, which prints on a pass too, so a
+        // change in osmium's stale set stays visible run to run; the report
+        // itself goes beside the outputs and into the detail.
+        let report_file = outdir.join("osmium-locations.txt");
+        std::fs::write(&report_file, &report)?;
+        for line in report.lines().filter(|l| !l.trim().is_empty()) {
+            verify_msg(&format!("    {line}"));
+        }
         output::verify_summary(&format!(
             "  osmium apply-changes --locations-on-ways inline locations: {} \
-             (informational: osmium's location index is not an oracle)",
+             (informational: osmium's location index is not an oracle); report in {}",
             if osmium.is_pass() {
-                "consistent"
+                "consistent".to_owned()
             } else {
-                "STALE"
-            }
+                stale_summary(&report)
+            },
+            output::path(&report_file)
         ));
-        // The summary channel prints on a pass too, so the report's head is
-        // what makes a change in osmium's stale set visible run to run.
-        if !osmium.is_pass() {
-            print_report_head(&report);
-        }
     }
 
     // pbfhogg diff (the deep-compare below) is a merge-join and requires both
@@ -154,21 +158,18 @@ pub fn run(
     Ok(findings)
 }
 
-/// Cap on report lines echoed for an informational `check --locations`.
-const MAX_REPORT_LINES: usize = 12;
-
-/// Echo the first [`MAX_REPORT_LINES`] lines of a `check --locations` report
-/// on the summary channel, noting how many were left out.
-fn print_report_head(report: &str) {
-    let lines: Vec<&str> = report.lines().filter(|l| !l.trim().is_empty()).collect();
-    for line in lines.iter().take(MAX_REPORT_LINES) {
-        output::verify_summary(&format!("    {line}"));
-    }
-    if lines.len() > MAX_REPORT_LINES {
-        output::verify_summary(&format!(
-            "    (+{} more report lines; -v prints them all)",
-            lines.len() - MAX_REPORT_LINES
-        ));
+/// `STALE (563 mismatched (538 nodes))`: the verdict with the report's
+/// mismatch count, echoed from its "Refs with a node record" line when it has
+/// one, so a change in the stale set shows in the summary line itself.
+fn stale_summary(report: &str) -> String {
+    let count = report
+        .lines()
+        .find(|l| l.contains("Refs with a node record"))
+        .and_then(|l| l.split(", ").nth(1))
+        .map(str::trim);
+    match count {
+        Some(count) => format!("STALE ({count})"),
+        None => "STALE".to_owned(),
     }
 }
 
@@ -517,6 +518,14 @@ mod tests {
         assert_eq!(sampled.ids(), (0..10).collect::<Vec<i64>>());
         assert_eq!(element_diff::MAX_REPORTED_IDS, 10);
         assert_eq!(report.total_failures(), 100_000);
+    }
+
+    #[test]
+    fn a_stale_summary_carries_the_reports_mismatch_count() {
+        let report = "Elements: 52494246 nodes, 6616927 ways, 60836789 way node refs\n\
+                      Refs with a node record: 60836196 verified, 563 mismatched (538 nodes)\n";
+        assert_eq!(stale_summary(report), "STALE (563 mismatched (538 nodes))");
+        assert_eq!(stale_summary("something else\n"), "STALE");
     }
 
     #[test]
