@@ -267,6 +267,16 @@ before this contract exited 1 on every failure, and a `--commit` baseline of
 of the four answer commands from that era cannot tell a failure from a
 negative answer either way; its `meta.exit_code` of 1 is the only hint.
 
+## Digest
+
+`brokkr digest` measures `pbfhogg digest` on the dataset PBF like any other
+read-side command (`--bench`, `--hotpath`, `--alloc`, `--commit`). `--form
+full|content` is forwarded as pbfhogg's `--form`; without it no flag is
+passed and the build's own default form is measured, so a `--commit`
+baseline from before pbfhogg grew `--form` digests its only form, v1 content.
+The brokkr argv, `--form` included, is part of the row's identity: a
+defaulted run never pairs with an explicit `--form` one.
+
 ## Verify subcommands
 
 `brokkr verify` holds the brokkr command lock for the whole invocation,

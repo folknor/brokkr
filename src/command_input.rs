@@ -94,6 +94,24 @@ impl Command {
                     params,
                 }
             }
+            Self::Digest {
+                mode,
+                pbf,
+                form,
+                snapshot,
+            } => {
+                let params = CommandParams {
+                    snapshot,
+                    ..Default::default()
+                };
+                RoutedCommand::Pbf {
+                    mode,
+                    pbf,
+                    command: PbfhoggCommand::Digest { form },
+                    osc: None,
+                    params,
+                }
+            }
             Self::Sort {
                 mode,
                 pbf,

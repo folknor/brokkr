@@ -207,6 +207,24 @@ pub enum DiffFormat {
     Osc,
 }
 
+/// Canonical form for `digest --form` (`full` is v2, `content` is v1, diff's
+/// equality).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[value(rename_all = "lowercase")]
+pub enum DigestForm {
+    Full,
+    Content,
+}
+
+impl DigestForm {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Content => "content",
+        }
+    }
+}
+
 impl ExtractStrategy {
     pub fn all() -> &'static [ExtractStrategy] {
         &[Self::Simple, Self::Complete, Self::Smart]
@@ -340,6 +358,12 @@ pub enum PbfhoggCommand {
     CheckIds {
         full: bool,
     },
+    /// `digest`. `form` → `--form <full|content>`; `None` passes no flag, so
+    /// the build's own default is measured - a baseline from before `--form`
+    /// existed digests its only form.
+    Digest {
+        form: Option<DigestForm>,
+    },
     Sort,
     /// `cat`, in one of the shapes `CatMode` admits.
     Cat(CatMode),
@@ -434,6 +458,7 @@ impl PbfhoggCommand {
             Self::Inspect { .. } => ("inspect", None, PromotionVariant::Unsupported, false),
             Self::CheckRefs => ("check-refs", None, PromotionVariant::Unsupported, false),
             Self::CheckIds { .. } => ("check-ids", None, PromotionVariant::Unsupported, false),
+            Self::Digest { .. } => ("digest", None, PromotionVariant::Unsupported, false),
             Self::Sort => ("sort", ScratchPbf, PromotionVariant::Indexed, true),
             Self::Cat(cat) => (
                 "cat",
@@ -784,6 +809,13 @@ impl PbfhoggCommand {
                     .arg("--ids")
                     .input(ctx.pbf_str()?)?;
                 Ok(if *full { argv.arg("--full") } else { argv })
+            }
+            Self::Digest { form } => {
+                let argv = CommandArgv::new("digest").input(ctx.pbf_str()?)?;
+                Ok(match form {
+                    Some(form) => argv.arg("--form").arg(form.as_str()),
+                    None => argv,
+                })
             }
             Self::Sort => {
                 let output = scratch_output_path(ctx, self, mode)?;
@@ -1377,6 +1409,13 @@ mod tests {
             PbfhoggCommand::CheckRefs,
             PbfhoggCommand::CheckIds { full: false },
             PbfhoggCommand::CheckIds { full: true },
+            PbfhoggCommand::Digest { form: None },
+            PbfhoggCommand::Digest {
+                form: Some(DigestForm::Full),
+            },
+            PbfhoggCommand::Digest {
+                form: Some(DigestForm::Content),
+            },
             PbfhoggCommand::Sort,
             PbfhoggCommand::Cat(CatMode::Plain {
                 type_filter: Some(CatTypeFilter::Way),

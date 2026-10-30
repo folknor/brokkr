@@ -197,6 +197,7 @@ self-reported.
 | inspect | run_external_ok | yes | counters |
 | check-refs | run_external_ok | yes | counters |
 | check-ids | run_external_ok | yes | counters |
+| digest | run_external_ok | yes | counters |
 | sort | run_external_ok | yes | counters |
 | cat | run_external_ok | yes | counters |
 | tags-filter | run_external_ok | yes | counters |

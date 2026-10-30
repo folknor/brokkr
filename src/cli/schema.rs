@@ -628,6 +628,24 @@ In depth: `brokkr man clippy`."
         #[arg(long)]
         snapshot: Option<crate::datasets::resolve::SnapshotRef>,
     },
+    /// Digest a PBF's canonical form
+    #[command(name = "digest", display_order = 2)]
+    Digest {
+        #[command(flatten)]
+        mode: ModeArgs,
+        #[command(flatten)]
+        pbf: PbfArgs,
+        /// Canonical form: `full` (v2) or `content` (v1, diff's equality).
+        /// Omit to measure the build's own default, which is `full` since
+        /// pbfhogg grew `--form` and `content` before it.
+        #[arg(long, value_enum)]
+        form: Option<crate::pbfhogg::commands::DigestForm>,
+        /// Snapshot key to read input from. Use `base` (or omit) for the
+        /// dataset's primary data; pass a key registered under
+        /// `[dataset.snapshot.<key>]` for a historical snapshot.
+        #[arg(long)]
+        snapshot: Option<crate::datasets::resolve::SnapshotRef>,
+    },
     /// Sort PBF
     #[command(name = "sort", display_order = 2)]
     Sort {
