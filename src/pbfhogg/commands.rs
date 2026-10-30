@@ -621,9 +621,11 @@ impl PbfhoggCommand {
     /// ways-only file, `check-ids` on a duplicated one, `check-index` on a
     /// file whose blob metadata disagrees with its payload). Those runs are
     /// stored, with `meta.exit_code` saying which answer was measured. Only
-    /// the commands that give such an answer accept 1: pbfhogg commits from
-    /// before that contract exited 1 on every failure, and a `--commit`
-    /// baseline must not store those as runs. `inspect` would answer
+    /// the commands that give such an answer accept 1, and only on a build
+    /// that has the contract: pbfhogg commits from before it (854f9465)
+    /// exited 1 on every failure, so `plan::completed_exits` drops 1 for a
+    /// build its probe finds predates the split, and a `--commit` baseline
+    /// never stores a crash as an answer. `inspect` would answer
     /// negatively only under `--indexed` or `--show`, which brokkr never
     /// passes.
     pub fn ok_exit_codes(&self) -> &'static [i32] {

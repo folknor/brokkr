@@ -61,7 +61,9 @@ opens a marker FIFO brokkr inherited; a probe killed at its wall, or whose
 output stays open after it exited, is such an error too.
 Answers are kept in `.brokkr/pbfhogg-capabilities`, keyed by probe protocol,
 the executable's XXH128 and the subcommand, so a build is probed once and
-different bytes never reuse an answer. `build-geocode-index` keeps its own
+different bytes never reuse an answer. The same store and bounds serve one
+more question, whether the build's exit 1 is only an answer (Answer exit
+codes, below). `build-geocode-index` keeps its own
 `--force`, which pbfhogg defines as overwrite plus allow-unindexed.
 
 Every pbfhogg CLI spawn is an invocation produced by a `PbfhoggBinary` for one
@@ -269,9 +271,23 @@ accepts nothing but 0.
 
 The set is per command, not "1 is always an answer": pbfhogg commits from
 before this contract exited 1 on every failure, and a `--commit` baseline of
-`sort` or `cat` must not store a crash as a run. A `--commit` baseline of an
-answer command from that era cannot tell a failure from a
-negative answer either way; its `meta.exit_code` of 1 is the only hint.
+`sort` or `cat` must not store a crash as a run.
+
+It is also per build. pbfhogg 854f9465 moved failures from 1 to 2 and left
+the answer sites on 1; a build from before it cannot tell "no" from
+"crashed" by its exit. So before an answer command runs, brokkr asks the
+built executable which side of the split it is on, the way it asks about
+`--overwrite` (`src/pbfhogg/binary.rs`): `inspect` on an input that does not
+exist fails with 1 before the split and 2 after it, and the answer is cached
+under the executable's digest in `.brokkr/pbfhogg-capabilities`. On a build
+from before the split exit 1 is not accepted: a run that ends 1 fails, and a
+warning says the build predates the split. Its negative answers are lost
+with its crashes; no run is stored that might be either. Rows stored before
+this gate from such a build keep their `meta.exit_code` of 1, which there
+cannot say which it was.
+
+`diff --format osc` exited 0 on differences until pbfhogg 50a9fc06, so a
+build between the two never gives it exit 1; it needs no gate of its own.
 
 ## Diff text output
 

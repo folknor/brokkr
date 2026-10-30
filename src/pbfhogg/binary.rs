@@ -163,6 +163,10 @@ const PROBE_PROTOCOL: u32 = 2;
 /// one a build uses is read from its control probe.
 const USAGE_STATUSES: [i32; 2] = [2, 64];
 
+/// The store key of [`PbfhoggBinary::splits_answer_from_failure`]'s answer.
+/// Not a subcommand name, so it never collides with a flag answer.
+const EXIT_SPLIT_KEY: &str = "exit-1-is-an-answer";
+
 /// Most recent answers kept in the store; older ones are dropped on save.
 const STORE_CAP: usize = 512;
 
@@ -503,50 +507,113 @@ impl PbfhoggBinary {
             .any(|(probed, supported)| *probed == flag && *supported))
     }
 
-    fn probe(&self, subcommand: &str) -> Result<Vec<(Flag, bool)>, DevError> {
+    /// One probe run: `args` under the probe's bounds, its exit code (`None`
+    /// for a signal). `question` names what the probe is asking, for errors.
+    fn probe_run(
+        &self,
+        args: &[&str],
+        question: &str,
+        sigterm: &crate::shutdown::SigtermGuard,
+    ) -> Result<Option<i32>, DevError> {
         let program = self.label();
-        let flags = Flag::ALL.map(Flag::name).join(", ");
+        let failed = |why: String| {
+            DevError::Build(format!(
+                "cannot tell {question}: probe `{program} {}` {why}",
+                args.join(" ")
+            ))
+        };
         // Bounded like describe mode: a wall, the run variables removed (a
         // probe must never open a marker FIFO it inherited), its own process
         // group. Only exit codes are read, so help text cut at the cap does
         // not matter; an output left open past the exit does, since the
         // ending it came with cannot be trusted as the whole run.
+        match crate::output::child::run_captured_bounded_unsetting(
+            &program,
+            args,
+            &self.project_root,
+            &[],
+            &HARNESS_RUN_ENV,
+            PROBE_DEADLINE,
+            None,
+            crate::shutdown::ChildIsolation::ProcessGroup(sigterm),
+            crate::output::child::CaptureCap {
+                stdout: PROBE_OUTPUT_KEPT,
+                stderr: PROBE_OUTPUT_KEPT,
+            },
+        ) {
+            Ok(capture) if capture.captured.ending.is_deadline() => Err(failed(format!(
+                "was killed after {}",
+                output::format_duration(PROBE_DEADLINE)
+            ))),
+            Ok(capture) if capture.output_cut => {
+                Err(failed("left its output open after it exited".to_owned()))
+            }
+            Ok(capture) => Ok(capture.captured.code()),
+            Err(DevError::Interrupted) => Err(DevError::Interrupted),
+            Err(e) => Err(failed(format!("did not run: {e}"))),
+        }
+    }
+
+    /// Whether this build reserves exit 1 for a completed negative answer.
+    /// pbfhogg 854f9465 moved failures from 1 to 2 and left the answer sites
+    /// on 1; before it, the main error handler returned 1 for every failure,
+    /// so a build from then cannot tell "no" from "crashed" by its exit. Asked
+    /// of the executable like the flags: `inspect` on an input that does not
+    /// exist fails with 1 before the split and 2 after it. `inspect --help`
+    /// must exit 0 first, so an unknown subcommand's usage error is never
+    /// read as the split. Cached under the executable's digest.
+    pub(crate) fn splits_answer_from_failure(&self) -> Result<bool, DevError> {
+        if let Some(&known) = self.answers.borrow().get(EXIT_SPLIT_KEY) {
+            return Ok(known);
+        }
+        let question = format!(
+            "whether `{}` exits 1 only for a negative answer",
+            self.label()
+        );
+        let missing =
+            crate::clean::layout::ProjectState::new(&self.project_root).pbfhogg_exit_probe_input();
+        if missing.exists() {
+            return Err(DevError::Build(format!(
+                "cannot tell {question}: the probe's missing input {} exists",
+                missing.display()
+            )));
+        }
+        let missing = crate::utf8_path::path_string(&missing)?;
+        let sigterm = crate::shutdown::SigtermGuard::install();
+        let help = self.probe_run(&["inspect", "--help"], &question, &sigterm)?;
+        if help != Some(0) {
+            return Err(DevError::Build(format!(
+                "cannot tell {question}: `inspect --help` exited {} instead of 0",
+                show_code(help)
+            )));
+        }
+        let split = match self.probe_run(&["inspect", &missing], &question, &sigterm)? {
+            Some(1) => false,
+            Some(2) => true,
+            other => {
+                return Err(DevError::Build(format!(
+                    "cannot tell {question}: `inspect` on a missing input exited {}, \
+                     expected 1 (before the split) or 2 (after it)",
+                    show_code(other)
+                )));
+            }
+        };
+        CapabilityStore::open(&self.project_root).record(&self.digest, EXIT_SPLIT_KEY, split);
+        self.answers
+            .borrow_mut()
+            .insert(EXIT_SPLIT_KEY.to_owned(), split);
+        Ok(split)
+    }
+
+    fn probe(&self, subcommand: &str) -> Result<Vec<(Flag, bool)>, DevError> {
+        let program = self.label();
+        let flags = Flag::ALL.map(Flag::name).join(", ");
+        let question = format!("whether `{program} {subcommand}` accepts {flags}");
         let sigterm = crate::shutdown::SigtermGuard::install();
         let run = |extra: &[&str]| -> Result<Option<i32>, DevError> {
             let mut args = vec![subcommand];
             args.extend_from_slice(extra);
-            let failed = |why: String| {
-                DevError::Build(format!(
-                    "cannot tell whether `{program} {subcommand}` accepts {flags}: \
-                     probe `{}` {why}",
-                    args.join(" ")
-                ))
-            };
-            match crate::output::child::run_captured_bounded_unsetting(
-                &program,
-                &args,
-                &self.project_root,
-                &[],
-                &HARNESS_RUN_ENV,
-                PROBE_DEADLINE,
-                None,
-                crate::shutdown::ChildIsolation::ProcessGroup(&sigterm),
-                crate::output::child::CaptureCap {
-                    stdout: PROBE_OUTPUT_KEPT,
-                    stderr: PROBE_OUTPUT_KEPT,
-                },
-            ) {
-                Ok(capture) if capture.captured.ending.is_deadline() => Err(failed(format!(
-                    "was killed after {}",
-                    output::format_duration(PROBE_DEADLINE)
-                ))),
-                Ok(capture) if capture.output_cut => {
-                    Err(failed("left its output open after it exited".to_owned()))
-                }
-                Ok(capture) => Ok(capture.captured.code()),
-                Err(DevError::Interrupted) => Err(DevError::Interrupted),
-                Err(e) => Err(failed(format!("did not run: {e}"))),
-            }
+            self.probe_run(&args, &question, &sigterm)
         };
         let help = run(&["--help"])?;
         let control = run(&["--hel", "--help"])?;

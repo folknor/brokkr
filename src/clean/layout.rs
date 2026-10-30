@@ -98,6 +98,12 @@ impl ProjectState {
         self.root.join("pbfhogg-capabilities")
     }
 
+    /// The input the pbfhogg exit-code probe names. Never created: the probe
+    /// asks how a build fails on an input that does not exist.
+    pub(crate) fn pbfhogg_exit_probe_input(&self) -> PathBuf {
+        self.root.join("pbfhogg-exit-probe-missing.osm.pbf")
+    }
+
     /// `brokkr verify`'s reference cache: one directory per execution key,
     /// holding a manifest and the reference run's artifacts.
     pub(crate) fn verify_reference_dir(&self) -> PathBuf {

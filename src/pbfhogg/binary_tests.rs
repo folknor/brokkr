@@ -502,6 +502,80 @@ fn a_binary_replaced_under_a_live_handle_is_refused() {
     assert!(err.contains("replaced"), "got: {err}");
 }
 
+/// A fake pbfhogg whose `inspect --help` exits 0 and whose `inspect` on any
+/// input fails with `failure`: 1 before pbfhogg split answers from
+/// failures, 2 after. Each call is logged like [`FAKE_PBFHOGG`]'s.
+fn failing_inspect(failure: i32) -> String {
+    format!(
+        "#!/bin/sh\necho \"$*\" >> \"$0.log\"\n[ \"$1\" = inspect ] || exit 2\n\
+         [ \"$2\" = --help ] && exit 0\nexit {failure}\n"
+    )
+}
+
+#[test]
+fn a_build_whose_failures_exit_2_answers_with_exit_1() {
+    let (root, path) = install("exit-split", &failing_inspect(2));
+    let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
+    assert!(binary.splits_answer_from_failure().unwrap());
+    let codes = crate::pbfhogg::plan::completed_exits(
+        &crate::pbfhogg::commands::PbfhoggCommand::CheckRefs,
+        &binary,
+    )
+    .unwrap();
+    assert_eq!(codes, [1]);
+}
+
+#[test]
+fn a_build_from_before_the_split_never_stores_exit_1() {
+    let (root, path) = install("exit-unsplit", &failing_inspect(1));
+    let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
+    assert!(!binary.splits_answer_from_failure().unwrap());
+    let codes = crate::pbfhogg::plan::completed_exits(
+        &crate::pbfhogg::commands::PbfhoggCommand::CheckRefs,
+        &binary,
+    )
+    .unwrap();
+    assert!(codes.is_empty(), "got: {codes:?}");
+}
+
+#[test]
+fn a_command_that_never_answers_no_never_probes_the_exit_split() {
+    let (root, path) = install("exit-no-probe", &failing_inspect(1));
+    let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
+    let codes = crate::pbfhogg::plan::completed_exits(
+        &crate::pbfhogg::commands::PbfhoggCommand::Sort,
+        &binary,
+    )
+    .unwrap();
+    assert!(codes.is_empty());
+    assert_eq!(spawns(&path), 0);
+}
+
+#[test]
+fn the_exit_split_is_probed_once_per_build() {
+    let (root, path) = install("exit-once", &failing_inspect(2));
+    let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
+    assert!(binary.splits_answer_from_failure().unwrap());
+    assert!(binary.splits_answer_from_failure().unwrap());
+    assert_eq!(spawns(&path), 2, "help and the missing input, once");
+    let again = PbfhoggBinary::fixture(&path, &root).unwrap();
+    assert!(again.splits_answer_from_failure().unwrap());
+    assert_eq!(
+        spawns(&path),
+        2,
+        "the recorded answer serves the same bytes"
+    );
+}
+
+#[test]
+fn an_exit_split_probe_that_ends_otherwise_is_an_error_not_an_answer() {
+    let (root, path) = install("exit-odd", &failing_inspect(64));
+    let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
+    let err = binary.splits_answer_from_failure().unwrap_err().to_string();
+    assert!(err.contains("missing input exited 64"), "got: {err}");
+    assert!(CapabilityStore::open(&root).read().is_empty());
+}
+
 /// Spawn `invocation` the way every pbfhogg call site does.
 pub(crate) fn execute(invocation: &crate::measure::Invocation<'_>, cwd: &Path) -> Option<i32> {
     invocation.capture_in(cwd).unwrap().code()

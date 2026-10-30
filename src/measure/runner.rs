@@ -155,7 +155,9 @@ pub(crate) trait PlannedCommand {
     ) -> Result<(), DevError> {
         Ok(())
     }
-    fn ok_codes(&self) -> &[i32] {
+    /// Non-zero exits a run of this plan stores as completed. Takes the plan
+    /// so a project can answer for the executable it was built against.
+    fn ok_codes<'p>(&self, _plan: &'p CommandPlan<Self::State, Self::Argv>) -> &'p [i32] {
         &[]
     }
     fn env(&self) -> Vec<(&str, &str)> {
@@ -304,7 +306,7 @@ fn execute_invocation<C: PlannedCommand, P: Fn() -> Result<(), DevError>>(
                 }
             };
             finished?;
-            if let Some(code) = out.failed_code(command.ok_codes()) {
+            if let Some(code) = out.failed_code(command.ok_codes(plan)) {
                 return Err(DevError::ExitCode(code));
             }
             output::run_msg(&format!(
@@ -318,7 +320,7 @@ fn execute_invocation<C: PlannedCommand, P: Fn() -> Result<(), DevError>>(
                 &config,
                 invocation,
                 req.project_root.as_path(),
-                command.ok_codes(),
+                command.ok_codes(plan),
                 prepare,
             )?;
         }
@@ -339,7 +341,7 @@ fn execute_invocation<C: PlannedCommand, P: Fn() -> Result<(), DevError>>(
                     &launched.arg_refs(),
                     cwd,
                     &command.env(),
-                    command.ok_codes(),
+                    command.ok_codes(plan),
                     fifo,
                     i,
                     None,

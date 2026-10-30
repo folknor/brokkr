@@ -53,6 +53,31 @@ pub(crate) struct PbfhoggPlan<'a> {
 pub(crate) struct PbfhoggState {
     pub ctx: CommandContext,
     handle: Option<PbfhoggBinary>,
+    /// The non-zero exits a run stores as completed, for this executable
+    /// ([`completed_exits`]); the command's own set for a dry run.
+    ok_codes: Vec<i32>,
+}
+
+/// The non-zero exits a run of `command` on `binary` stores as completed:
+/// the command's answer exits, less exit 1 when the build predates pbfhogg's
+/// split of answers from failures, where 1 may be a crash and storing it
+/// would record a failed run as a negative answer. Such a run then fails,
+/// and a warning says why.
+pub(crate) fn completed_exits(
+    command: &PbfhoggCommand,
+    binary: &PbfhoggBinary,
+) -> Result<Vec<i32>, DevError> {
+    let codes = command.ok_exit_codes();
+    if !codes.contains(&1) || binary.splits_answer_from_failure()? {
+        return Ok(codes.to_vec());
+    }
+    output::warn(&format!(
+        "this pbfhogg build predates the exit-code split (pbfhogg 854f9465): its exit 1 is \
+         either a negative answer or a failure, so a `{}` run that exits 1 fails instead of \
+         being stored",
+        command.id()
+    ));
+    Ok(codes.iter().copied().filter(|&code| code != 1).collect())
 }
 
 impl PlannedCommand for PbfhoggPlan<'_> {
@@ -70,8 +95,8 @@ impl PlannedCommand for PbfhoggPlan<'_> {
     fn supports_profiling(&self) -> bool {
         true
     }
-    fn ok_codes(&self) -> &[i32] {
-        self.command.ok_exit_codes()
+    fn ok_codes<'p>(&self, plan: &'p CommandPlan<PbfhoggState, CommandArgv>) -> &'p [i32] {
+        &plan.state.ok_codes
     }
     fn build_config(
         &self,
@@ -126,6 +151,10 @@ impl PlannedCommand for PbfhoggPlan<'_> {
         let mode = arg_mode(req);
         let argv = self.command.build_args(&ctx, mode)?;
         let (basename, mb) = result_input_metadata(&ctx)?;
+        let ok_codes = match &binary {
+            Some(binary) => completed_exits(self.command, binary)?,
+            None => self.command.ok_exit_codes().to_vec(),
+        };
         Ok(CommandPlan {
             argv,
             scratch_dirs: vec![],
@@ -140,6 +169,7 @@ impl PlannedCommand for PbfhoggPlan<'_> {
             state: PbfhoggState {
                 ctx,
                 handle: binary,
+                ok_codes,
             },
         })
     }
@@ -316,6 +346,7 @@ pub(crate) fn run_wallclock_core(
     project_root: &Path,
     announce: bool,
 ) -> Result<(), DevError> {
+    let ok_codes = completed_exits(command, binary)?;
     let invocation = binary.invocation(command.build_args(cmd_ctx, ArgMode::Bench)?)?;
 
     let (basename, file_mb) = result_input_metadata(cmd_ctx)?;
@@ -339,16 +370,10 @@ pub(crate) fn run_wallclock_core(
         ));
     }
 
-    harness.run_external_prepared(
-        &config,
-        &invocation,
-        project_root,
-        command.ok_exit_codes(),
-        || {
-            cleanup_output(command, cmd_ctx, ArgMode::Bench)?;
-            command.prepare_scratch(cmd_ctx)
-        },
-    )?;
+    harness.run_external_prepared(&config, &invocation, project_root, &ok_codes, || {
+        cleanup_output(command, cmd_ctx, ArgMode::Bench)?;
+        command.prepare_scratch(cmd_ctx)
+    })?;
     Ok(())
 }
 
