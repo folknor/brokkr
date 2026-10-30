@@ -223,7 +223,7 @@ out=""
 force=""
 prev=""
 for a in "$@"; do
-  if [ "$prev" = "-o" ]; then out="$a"; fi
+  if [ "$prev" = "-o" ] || [ "$prev" = "--output" ]; then out="$a"; fi
   if [ "$a" = "--overwrite" ]; then force=1; fi
   prev="$a"
 done
@@ -280,7 +280,10 @@ fn fake_pbfhogg_ex_usage() -> String {
         .replacen("build-geocode-index) ok=2", "build-geocode-index) ok=64", 1)
         .replacen("*) exit 2 ;;", "*) exit 64 ;;", 1)
         .replacen("--hel) exit 2 ;;", "--hel) exit 64 ;;", 1);
-    assert!(!split.contains("exit 2") && !split.contains("=2 "), "{split}");
+    assert!(
+        !split.contains("exit 2") && !split.contains("=2 "),
+        "{split}"
+    );
     split
 }
 
@@ -312,10 +315,7 @@ fn a_declared_overwrite_is_required_and_a_declared_none_never_passed() {
     let Err(e) = binary.invocation(writing("cat", "out.pbf").overwrite_stance(true)) else {
         panic!("a required --overwrite the build lacks was not refused");
     };
-    assert!(
-        e.to_string().contains("does not accept --overwrite"),
-        "{e}"
-    );
+    assert!(e.to_string().contains("does not accept --overwrite"), "{e}");
 }
 
 #[test]

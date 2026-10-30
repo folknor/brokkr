@@ -276,11 +276,23 @@ mod tests {
     #[test]
     fn a_zero_reading_or_unequal_arms_leave_no_paired_ratio() {
         let zero = comparison(vec![100, 0], vec![100, 100]);
-        assert!(zero.paired_ratio().unwrap_err().contains("pair 1 has a zero reading"));
+        assert!(
+            zero.paired_ratio()
+                .unwrap_err()
+                .contains("pair 1 has a zero reading")
+        );
         let unequal = comparison(vec![100], vec![100, 100]);
-        assert!(unequal.paired_ratio().unwrap_err().contains("1 and 2 samples"));
+        assert!(
+            unequal
+                .paired_ratio()
+                .unwrap_err()
+                .contains("1 and 2 samples")
+        );
         let lines = zero.lines();
-        assert!(lines.iter().any(|l| l.contains("unavailable, pair 1")), "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("unavailable, pair 1")),
+            "{lines:?}"
+        );
     }
 
     fn stored(command: &str, iterations_us: &[i64], cli: bool) -> crate::db::StoredRow {
@@ -306,7 +318,10 @@ mod tests {
             stored("library:s/a/cli", &[30, 40], true),
         ];
         let c = from_rows(&rows).unwrap();
-        assert_eq!((c.call.as_str(), c.library_us.as_slice()), ("a", &[10, 20][..]));
+        assert_eq!(
+            (c.call.as_str(), c.library_us.as_slice()),
+            ("a", &[10, 20][..])
+        );
         assert_eq!(c.cli_us, [30, 40]);
         // An isolation call named `cli` is still told apart.
         let rows = [
@@ -356,11 +371,18 @@ mod tests {
     fn the_view_states_its_claim_both_builds_and_the_declarations() {
         let mut c = comparison(vec![100, 300, 200], vec![150, 450, 300]);
         let lines = c.lines();
-        assert!(lines[0].contains("this declared library invocation"), "{lines:?}");
+        assert!(
+            lines[0].contains("this declared library invocation"),
+            "{lines:?}"
+        );
         assert!(lines[1].contains("min 100us, median 200us"), "{lines:?}");
         assert!(lines[2].contains("min 150us, median 300us"), "{lines:?}");
         assert!(lines.iter().any(|l| l.contains("over 3 processes")));
-        assert!(lines.iter().any(|l| l.contains("declared policy differences: the CLI raises NOFILE")));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("declared policy differences: the CLI raises NOFILE"))
+        );
         assert!(!lines.iter().any(|l| l.contains("the builds differ")));
         c.library_build = "debug, features x".to_owned();
         assert!(c.lines().iter().any(|l| l.contains("the builds differ")));

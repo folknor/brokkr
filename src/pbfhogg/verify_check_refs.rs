@@ -233,7 +233,12 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
     )?;
     let osmium_text = capture_and_log(
         harness,
-        Side::Osmium(ToolRun::osmium("check-refs.1").arg("check-refs").input(pbf).accept(&[1])),
+        Side::Osmium(
+            ToolRun::osmium("check-refs.1")
+                .arg("check-refs")
+                .input(pbf)
+                .accept(&[1]),
+        ),
         &outdir.join("osmium-ways.txt"),
         "osmium (ways only)",
     )?;

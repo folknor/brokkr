@@ -767,7 +767,7 @@ impl PbfhoggCommand {
     #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
     fn build_body(&self, ctx: &CommandContext, mode: ArgMode) -> Result<CommandArgv, DevError> {
         let jobs = |argv: CommandArgv| match ctx.params.jobs {
-            Some(j) => argv.arg("-j").arg(j.to_string()),
+            Some(j) => argv.arg("--jobs").arg(j.to_string()),
             None => argv,
         };
         match self {
@@ -863,13 +863,13 @@ impl PbfhoggCommand {
                         remove_tags,
                     } => {
                         if *omit_referenced {
-                            argv = argv.arg("-R");
+                            argv = argv.arg("--omit-referenced");
                         }
                         if *invert {
-                            argv = argv.arg("-i");
+                            argv = argv.arg("--invert-match");
                         }
                         if *remove_tags {
-                            argv = argv.arg("-t");
+                            argv = argv.arg("--remove-tags");
                         }
                         ctx.pbf_str()?
                     }
@@ -971,7 +971,10 @@ impl PbfhoggCommand {
                 let to = ctx.pbf_b_str()?;
                 let argv = match format {
                     DiffFormat::Default => {
-                        let argv = CommandArgv::new("diff").input(from)?.input(to)?.arg("-c");
+                        let argv = CommandArgv::new("diff")
+                            .input(from)?
+                            .input(to)?
+                            .arg("--suppress-common");
                         if crate::pbfhogg::argv::text_diff_writes_scratch(ctx.params.jobs, false) {
                             argv.scratch(&ctx.scratch_dir)
                         } else {
@@ -1095,7 +1098,7 @@ impl PbfhoggCommand {
             argv = argv.arg("--locations-on-ways");
         }
         if let Some(jobs) = params.jobs {
-            argv = argv.arg("-j").arg(jobs.to_string());
+            argv = argv.arg("--jobs").arg(jobs.to_string());
         }
         argv.output(output)
     }
@@ -1696,7 +1699,7 @@ mod tests {
         assert_eq!(args[0], "apply-changes");
         assert_eq!(args[1], "/data/denmark.osm.pbf");
         assert_eq!(args[2], "/data/denmark-4705.osc.gz");
-        assert_eq!(args[3], "-o");
+        assert_eq!(args[3], "--output");
         assert!(!args.iter().any(|a| a == "--locations-on-ways"));
     }
 
@@ -1718,7 +1721,10 @@ mod tests {
         ctx.params.jobs = Some(8);
         let cmd = PbfhoggCommand::ApplyChanges;
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
-        let pos = args.iter().position(|a| a == "-j").expect("-j present");
+        let pos = args
+            .iter()
+            .position(|a| a == "--jobs")
+            .expect("--jobs present");
         assert_eq!(args[pos + 1], "8");
     }
 
@@ -1728,7 +1734,7 @@ mod tests {
         use_pbf_and_osc(&mut ctx);
         let cmd = PbfhoggCommand::ApplyChanges;
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
-        assert!(!args.iter().any(|a| a == "-j"));
+        assert!(!args.iter().any(|a| a == "--jobs"));
     }
 
     #[test]
@@ -1745,7 +1751,7 @@ mod tests {
                 "diff",
                 "/data/denmark.osm.pbf",
                 "/data/scratch/merged.osm.pbf",
-                "-c",
+                "--suppress-common",
             ]
         );
     }
@@ -1758,7 +1764,10 @@ mod tests {
             mode: InspectMode::Nodes,
         };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
-        let pos = args.iter().position(|a| a == "-j").expect("-j present");
+        let pos = args
+            .iter()
+            .position(|a| a == "--jobs")
+            .expect("--jobs present");
         assert_eq!(args[pos + 1], "4");
     }
 
@@ -1770,7 +1779,10 @@ mod tests {
             mode: InspectMode::Tags { type_filter: None },
         };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
-        let pos = args.iter().position(|a| a == "-j").expect("-j present");
+        let pos = args
+            .iter()
+            .position(|a| a == "--jobs")
+            .expect("--jobs present");
         assert_eq!(args[pos + 1], "0");
     }
 
@@ -1782,7 +1794,7 @@ mod tests {
             mode: InspectMode::Default { extended: false },
         };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
-        assert!(!args.iter().any(|a| a == "-j"));
+        assert!(!args.iter().any(|a| a == "--jobs"));
     }
 
     #[test]
@@ -1794,7 +1806,10 @@ mod tests {
             format: DiffFormat::Default,
         };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
-        let pos = args.iter().position(|a| a == "-j").expect("-j present");
+        let pos = args
+            .iter()
+            .position(|a| a == "--jobs")
+            .expect("--jobs present");
         assert_eq!(args[pos + 1], "0");
     }
 
@@ -1811,7 +1826,10 @@ mod tests {
             format: DiffFormat::Osc,
         };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
-        let pos = args.iter().position(|a| a == "-j").expect("-j present");
+        let pos = args
+            .iter()
+            .position(|a| a == "--jobs")
+            .expect("--jobs present");
         assert_eq!(args[pos + 1], "8");
     }
 
@@ -1954,9 +1972,9 @@ mod tests {
             },
         };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
-        assert!(args.iter().any(|a| a == "-i"));
-        assert!(args.iter().any(|a| a == "-t"));
-        assert!(!args.iter().any(|a| a == "-R"));
+        assert!(args.iter().any(|a| a == "--invert-match"));
+        assert!(args.iter().any(|a| a == "--remove-tags"));
+        assert!(!args.iter().any(|a| a == "--omit-referenced"));
     }
 
     #[test]
@@ -1968,9 +1986,9 @@ mod tests {
             input: TagsFilterInput::Osc,
         };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
-        assert!(!args.iter().any(|a| a == "-R"));
-        assert!(!args.iter().any(|a| a == "-i"));
-        assert!(!args.iter().any(|a| a == "-t"));
+        assert!(!args.iter().any(|a| a == "--omit-referenced"));
+        assert!(!args.iter().any(|a| a == "--invert-match"));
+        assert!(!args.iter().any(|a| a == "--remove-tags"));
     }
 
     #[test]
@@ -1986,7 +2004,10 @@ mod tests {
             },
         };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
-        let pos = args.iter().position(|a| a == "-j").expect("-j present");
+        let pos = args
+            .iter()
+            .position(|a| a == "--jobs")
+            .expect("--jobs present");
         assert_eq!(args[pos + 1], "4");
     }
 

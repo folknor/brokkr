@@ -13,7 +13,7 @@ use crate::output::verify_msg;
 /// its run scratch goes under the verify directory.
 fn text_diff(harness: &VerifyHarness, old: &Path, new: &Path) -> Result<PbfArgv, DevError> {
     Ok(PbfArgv::new("diff")
-        .arg("-c")
+        .arg("--suppress-common")
         .input(old)?
         .input(new)?
         .scratch(&harness.output_dir))

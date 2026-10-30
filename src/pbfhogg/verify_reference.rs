@@ -134,7 +134,8 @@ impl<'a> ToolRun<'a> {
     }
 
     pub(crate) fn args(mut self, args: &[&str]) -> Self {
-        self.args.extend(args.iter().map(|&a| RunArg::Lit(a.to_owned())));
+        self.args
+            .extend(args.iter().map(|&a| RunArg::Lit(a.to_owned())));
         self
     }
 
@@ -343,13 +344,18 @@ impl ReferenceCache {
         let staging = self.next_staging();
         let java_props = xargs_safe(&staging.display().to_string());
         let key = if matches!(run.program, Program::Osmosis(_)) && !java_props {
-            self.say_uncached(run.program.name(), "the cache path holds characters its launcher splits");
+            self.say_uncached(
+                run.program.name(),
+                "the cache path holds characters its launcher splits",
+            );
             None
         } else {
             self.key(run)?
         };
         let Some(key) = key else {
-            return self.miss(harness, run, &label, &outputs, stdout, &staging, None, java_props);
+            return self.miss(
+                harness, run, &label, &outputs, stdout, &staging, None, java_props,
+            );
         };
         let entry = self.dir.join(&key.hex);
         if !FRESH.load(Ordering::Relaxed)
@@ -371,7 +377,16 @@ impl ReferenceCache {
                 elapsed: std::time::Duration::ZERO,
             });
         }
-        self.miss(harness, run, &label, &outputs, stdout, &staging, Some(&key), java_props)
+        self.miss(
+            harness,
+            run,
+            &label,
+            &outputs,
+            stdout,
+            &staging,
+            Some(&key),
+            java_props,
+        )
     }
 
     /// Run the tool for real in `staging`, place its artifacts, and publish
@@ -407,10 +422,14 @@ impl ReferenceCache {
         let completed = captured
             .code()
             .is_some_and(|code| run.accepted.contains(&code))
-            && outputs.iter().all(|(name, _)| artifacts.join(name).is_file());
+            && outputs
+                .iter()
+                .all(|(name, _)| artifacts.join(name).is_file());
         let mut cacheable = key.is_some() && completed;
         if cacheable && let Err(e) = fs::write(artifacts.join(STDERR), &captured.stderr) {
-            output::warn(&format!("{label}: cannot keep its stderr, so it is not cached: {e}"));
+            output::warn(&format!(
+                "{label}: cannot keep its stderr, so it is not cached: {e}"
+            ));
             cacheable = false;
         }
         if let (true, Some(key)) = (cacheable, key) {
@@ -432,7 +451,13 @@ impl ReferenceCache {
         let mut source = artifacts.clone();
         if let (true, Some(key)) = (cacheable, key) {
             let entry = self.dir.join(&key.hex);
-            if let Err(e) = publish(staging, &entry, &key.text, captured.code().unwrap_or(0), outputs) {
+            if let Err(e) = publish(
+                staging,
+                &entry,
+                &key.text,
+                captured.code().unwrap_or(0),
+                outputs,
+            ) {
                 output::warn(&format!("{label}: cannot cache the reference run: {e}"));
             }
             // Wherever the artifacts survived: a failure after the rename
@@ -484,19 +509,27 @@ impl ReferenceCache {
                 Some(fs::canonicalize(&tools.java_home)?),
             ),
         };
-        let spec = crate::reservations::LaunchSpec::new(staging.to_path_buf(), reads, Vec::new(), None)
-            .with_coverage(vec![staging.to_path_buf()]);
+        let spec =
+            crate::reservations::LaunchSpec::new(staging.to_path_buf(), reads, Vec::new(), None)
+                .with_coverage(vec![staging.to_path_buf()]);
         let mut invocation = Invocation::reserved(&program, args, spec).isolated_env();
         for (k, v) in run_env(&run.program, &staging_str, java_home.as_deref(), java_props) {
             invocation = invocation.with_env(&k, &v);
         }
-        harness.run_reference_in(&invocation, label, &staging.join(ARTIFACTS).join(STDOUT), staging)
+        harness.run_reference_in(
+            &invocation,
+            label,
+            &staging.join(ARTIFACTS).join(STDOUT),
+            staging,
+        )
     }
 
     /// Say once per program that its runs are not cached, and why.
     fn say_uncached(&self, name: &str, why: &str) {
         if self.warned.borrow_mut().insert(name.to_owned()) {
-            output::warn(&format!("{name}: {why}, so its reference runs are not cached"));
+            output::warn(&format!(
+                "{name}: {why}, so its reference runs are not cached"
+            ));
         }
     }
 
@@ -522,7 +555,9 @@ impl ReferenceCache {
                         None
                     }
                 };
-                self.identities.borrow_mut().insert(name.clone(), identity.clone());
+                self.identities
+                    .borrow_mut()
+                    .insert(name.clone(), identity.clone());
                 identity
             }
         };
@@ -565,7 +600,10 @@ impl ReferenceCache {
                 return Err("manifest does not match the key".into());
             }
             if !run.accepted.contains(&manifest.exit_code) {
-                return Err(format!("stored exit {} is not accepted", manifest.exit_code));
+                return Err(format!(
+                    "stored exit {} is not accepted",
+                    manifest.exit_code
+                ));
             }
             let mut expected: Vec<&str> = outputs.iter().map(|(n, _)| n.as_str()).collect();
             expected.extend([STDOUT, STDERR]);
@@ -578,7 +616,8 @@ impl ReferenceCache {
             let mut restamped = false;
             for artifact in &mut manifest.artifacts {
                 let path = entry.join(ARTIFACTS).join(&artifact.name);
-                let meta = fs::symlink_metadata(&path).map_err(|e| format!("{}: {e}", artifact.name))?;
+                let meta =
+                    fs::symlink_metadata(&path).map_err(|e| format!("{}: {e}", artifact.name))?;
                 if !meta.is_file() {
                     return Err(format!("{} is not a regular file", artifact.name));
                 }
@@ -618,8 +657,16 @@ struct Key {
 /// The key text and its hash. Inputs are named by content and file-name
 /// extension (format detection keys on the suffix), outputs by artifact name.
 fn key_text(run: &ToolRun<'_>, identity: &str, project_root: &Path) -> Result<Key, DevError> {
-    let mut text = format!("brokkr-verify-reference {FORMAT}\nrun {}\n{identity}", run.id);
-    for (k, v) in run_env(&run.program, STAGING_PLACEHOLDER, Some(Path::new("<java_home>")), true) {
+    let mut text = format!(
+        "brokkr-verify-reference {FORMAT}\nrun {}\n{identity}",
+        run.id
+    );
+    for (k, v) in run_env(
+        &run.program,
+        STAGING_PLACEHOLDER,
+        Some(Path::new("<java_home>")),
+        true,
+    ) {
         text.push_str(&format!("env {k}={v}\n"));
     }
     // The resolved path, as the launch passes it: its suffix is what the
@@ -661,8 +708,12 @@ fn extension(path: &Path) -> String {
 }
 
 fn absolute(path: &Path) -> Result<PathBuf, DevError> {
-    fs::canonicalize(path)
-        .map_err(|e| DevError::Verify(format!("cannot resolve reference input {}: {e}", path.display())))
+    fs::canonicalize(path).map_err(|e| {
+        DevError::Verify(format!(
+            "cannot resolve reference input {}: {e}",
+            path.display()
+        ))
+    })
 }
 
 fn resolve_tool(tool: ExternalTool) -> Result<PathBuf, DevError> {
@@ -681,7 +732,12 @@ fn identity(program: &Program<'_>, project_root: &Path) -> Result<Option<String>
                 return Ok(None);
             };
             let path = fs::canonicalize(found)?;
-            text.push_str(&format!("tool {} {} {}\n", tool.name(), path.display(), digest(&path)?));
+            text.push_str(&format!(
+                "tool {} {} {}\n",
+                tool.name(),
+                path.display(),
+                digest(&path)?
+            ));
             if matches!(tool, ExternalTool::Osmium) {
                 let Some(version) = probe(&path, &["--version"], project_root)? else {
                     return Ok(None);
@@ -711,7 +767,10 @@ fn identity(program: &Program<'_>, project_root: &Path) -> Result<Option<String>
                 java_home.display(),
                 crate::preflight::digest::compute_tree_digest(&java_home, project_root)?
             ));
-            for binary in [java_home.join("bin/java"), java_home.join("lib/server/libjvm.so")] {
+            for binary in [
+                java_home.join("bin/java"),
+                java_home.join("lib/server/libjvm.so"),
+            ] {
                 if !binary.is_file() {
                     continue;
                 }
@@ -865,7 +924,11 @@ fn publish(
 fn write_manifest(path: &Path, manifest: &Manifest) -> Result<(), DevError> {
     let tmp = path.with_extension("json.tmp");
     let mut file = fs::File::create(&tmp)?;
-    file.write_all(serde_json::to_string_pretty(manifest).map_err(|e| DevError::Internal(e.to_string()))?.as_bytes())?;
+    file.write_all(
+        serde_json::to_string_pretty(manifest)
+            .map_err(|e| DevError::Internal(e.to_string()))?
+            .as_bytes(),
+    )?;
     file.sync_all()?;
     crate::reservations::rename(&tmp, path)?;
     Ok(())
@@ -893,7 +956,9 @@ fn place(
             let src = source.join(name);
             if !src.exists() {
                 if complete {
-                    return Err(DevError::Internal(format!("cached artifact {name} is missing")));
+                    return Err(DevError::Internal(format!(
+                        "cached artifact {name} is missing"
+                    )));
                 }
                 continue;
             }
@@ -1008,7 +1073,9 @@ mod tests {
 
     #[test]
     fn xargs_safety_refuses_splitting_characters() {
-        assert!(xargs_safe("/home/folk/p/state/verify-reference/.staging-1-0"));
+        assert!(xargs_safe(
+            "/home/folk/p/state/verify-reference/.staging-1-0"
+        ));
         assert!(!xargs_safe("/home/my project/x"));
         assert!(!xargs_safe("/a'b"));
         assert!(!xargs_safe("/a\\b"));
@@ -1036,11 +1103,26 @@ mod tests {
         assert_eq!(a.hex, key_text(&moved, "tool x\n", &root).unwrap().hex);
         // Another tool identity, another artifact name or other input bytes:
         // another key.
-        assert_ne!(a.hex, key_text(&run(&input, "osmium.osm.pbf"), "tool y\n", &root).unwrap().hex);
-        assert_ne!(a.hex, key_text(&run(&input, "other.osm.pbf"), "tool x\n", &root).unwrap().hex);
+        assert_ne!(
+            a.hex,
+            key_text(&run(&input, "osmium.osm.pbf"), "tool y\n", &root)
+                .unwrap()
+                .hex
+        );
+        assert_ne!(
+            a.hex,
+            key_text(&run(&input, "other.osm.pbf"), "tool x\n", &root)
+                .unwrap()
+                .hex
+        );
         let other = root.join("other.osm.pbf");
         fs::write(&other, b"two").unwrap();
-        assert_ne!(a.hex, key_text(&run(&other, "osmium.osm.pbf"), "tool x\n", &root).unwrap().hex);
+        assert_ne!(
+            a.hex,
+            key_text(&run(&other, "osmium.osm.pbf"), "tool x\n", &root)
+                .unwrap()
+                .hex
+        );
         assert!(a.text.contains("arg <out:osmium.osm.pbf>"), "{}", a.text);
         assert!(a.text.contains("arg <in0>"), "{}", a.text);
     }
@@ -1100,7 +1182,13 @@ mod tests {
         };
         assert!(cache.lookup(&entry, &key, &run, &outputs).is_some());
         // Linking moves ctime only; the entry stays valid.
-        place(&entry.join(ARTIFACTS), &outputs, &check.join("o.stdout"), true).unwrap();
+        place(
+            &entry.join(ARTIFACTS),
+            &outputs,
+            &check.join("o.stdout"),
+            true,
+        )
+        .unwrap();
         assert!(cache.lookup(&entry, &key, &run, &outputs).is_some());
         // Replacing an artifact's bytes moves its stamp; the rehash fails it.
         let artifact = entry.join(ARTIFACTS).join("osmium.osm.pbf");

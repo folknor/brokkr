@@ -146,10 +146,7 @@ mod tests {
         let v2 = parse(report(&format!("xxh128 v2 {H}")).as_bytes()).unwrap();
         let d = differences(&v1, &v2);
         assert_eq!(d.len(), 1, "{d:?}");
-        assert!(
-            d[0].contains("library xxh128 v1, CLI xxh128 v2"),
-            "{d:?}"
-        );
+        assert!(d[0].contains("library xxh128 v1, CLI xxh128 v2"), "{d:?}");
     }
 
     #[test]

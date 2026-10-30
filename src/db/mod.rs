@@ -11,6 +11,8 @@ pub(crate) mod store;
 mod types;
 mod write;
 
+#[cfg(test)]
+pub(crate) use format::fixture_row;
 pub(crate) use format::library as library_rows;
 pub use format::{
     DatasetMatcher, Sides, format_compare_with_limit, format_details, format_single_result,
@@ -18,8 +20,6 @@ pub use format::{
 };
 pub use hotpath::hotpath_data_from_json;
 pub(crate) use run_store::{Resolved, RunId, RunRef, RunSelector, RunStore};
-#[cfg(test)]
-pub(crate) use format::fixture_row;
 #[cfg(test)]
 pub(crate) use types::RunRowBuilder;
 pub use types::{

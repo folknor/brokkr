@@ -46,7 +46,10 @@ pub(crate) fn initial(role: &Role) -> State {
 }
 
 /// The output roles `call` owns, in describe order.
-pub(crate) fn outputs_of<'a>(scenario: &'a Scenario, call: &'a str) -> impl Iterator<Item = &'a Role> {
+pub(crate) fn outputs_of<'a>(
+    scenario: &'a Scenario,
+    call: &'a str,
+) -> impl Iterator<Item = &'a Role> {
     scenario.roles.iter().filter(move |r| r.is_output_of(call))
 }
 

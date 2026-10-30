@@ -46,7 +46,10 @@ fn roles(name: &str) -> std::path::PathBuf {
 #[test]
 fn untouched_roles_agree_with_no_publication() {
     let dir = roles("untouched");
-    assert_eq!(failures(&scenario(), "a", &doc("[]"), &dir), Vec::<String>::new());
+    assert_eq!(
+        failures(&scenario(), "a", &doc("[]"), &dir),
+        Vec::<String>::new()
+    );
 }
 
 #[test]
@@ -57,21 +60,20 @@ fn an_output_set_replays_member_by_member() {
     std::fs::remove_dir_all(dir.join("tree")).unwrap();
     std::fs::create_dir(dir.join("tree")).unwrap();
     std::fs::write(dir.join("tree/index"), b"x").unwrap();
-    let published = doc(
-        r#"[{"ordinal": 1, "decision": "authorized", "members": [
+    let published = doc(r#"[{"ordinal": 1, "decision": "authorized", "members": [
              {"role": "fresh", "effect": "installed"},
              {"role": "old", "effect": "restored"},
-             {"role": "tree", "effect": "installed"}]}]"#,
+             {"role": "tree", "effect": "installed"}]}]"#);
+    assert_eq!(
+        failures(&scenario(), "a", &published, &dir),
+        Vec::<String>::new()
     );
-    assert_eq!(failures(&scenario(), "a", &published, &dir), Vec::<String>::new());
 
     // The same disk read against a set that reports old displaced.
-    let displaced = doc(
-        r#"[{"ordinal": 1, "decision": "authorized", "members": [
+    let displaced = doc(r#"[{"ordinal": 1, "decision": "authorized", "members": [
              {"role": "fresh", "effect": "installed"},
              {"role": "old", "effect": "displaced"},
-             {"role": "tree", "effect": "installed"}]}]"#,
-    );
+             {"role": "tree", "effect": "installed"}]}]"#);
     let found = failures(&scenario(), "a", &displaced, &dir);
     assert_eq!(found.len(), 1, "{found:?}");
     assert!(
@@ -90,7 +92,10 @@ fn later_publications_continue_from_the_state_earlier_ones_left() {
             {"ordinal": 2, "decision": "authorized", "members": [{"role": "old", "effect": "displaced"}]},
             {"ordinal": 3, "decision": "refused_error", "members": [{"role": "old", "effect": "none"}]}]"#,
     );
-    assert_eq!(failures(&scenario(), "a", &sequence, &dir), Vec::<String>::new());
+    assert_eq!(
+        failures(&scenario(), "a", &sequence, &dir),
+        Vec::<String>::new()
+    );
 
     // A restore of a destination already displaced has nothing to restore.
     let restored = doc(
@@ -109,5 +114,8 @@ fn a_destination_of_the_wrong_kind_is_reported() {
     let dir = roles("wrong-kind");
     std::fs::create_dir(dir.join("fresh")).unwrap();
     let found = failures(&scenario(), "a", &doc("[]"), &dir);
-    assert!(found[0].contains("output fresh:") && found[0].contains("is not a pbf"), "{found:?}");
+    assert!(
+        found[0].contains("output fresh:") && found[0].contains("is not a pbf"),
+        "{found:?}"
+    );
 }

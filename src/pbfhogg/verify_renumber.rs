@@ -223,9 +223,13 @@ pub fn run(
     // A verbose text diff still makes run scratch with automatic jobs.
     let captured = harness.run_pbfhogg_to(
         PbfArgv::new("diff")
+            // The one short brokkr forwards: stable across the pbfhogg
+            // versions that have the option, whose long spelling changed
+            // from `--summary` to `--osmium-summary` while `-s` kept its
+            // meaning.
             .arg("-s")
-            .arg("-c")
-            .arg("-v")
+            .arg("--suppress-common")
+            .arg("--verbose")
             .input(&osmium_out)?
             .input(&pbfhogg_out)?
             .scratch(&harness.output_dir),

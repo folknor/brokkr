@@ -139,7 +139,12 @@ and one with automatic jobs make one at startup whether or not they write a
 shard, which pbfhogg's prose reference does not say. Such a text `diff` to
 stdout used to put that run directory in the project root, its working
 directory; it now goes to the scratch dir, which can shift measured `diff`
-timings when the two are on different filesystems. The argv carries
+timings when the two are on different filesystems. brokkr spells every
+pbfhogg flag it forwards long (`--output`, `--jobs`, `--invert-match`, ...),
+since pbfhogg has reassigned short letters between versions and a `--commit`
+baseline accepts the long forms; the one exception is `verify renumber`'s
+`diff -s`, whose long form was renamed while the short kept its meaning.
+Rows recorded earlier carry short spellings in `cli_args`. The argv carries
 `@brokkr-private-dir@` until the launch, and the recorded `cli_args` keep that
 placeholder (no shell metacharacter, so a pasted line runs), so a row does not
 change with the random name; the column differs from rows recorded before

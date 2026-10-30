@@ -116,12 +116,7 @@ fn a_seal_decides_its_snapshot() {
         (r#"{"writer": 0}"#, "0 is outside 1 to"),
         (r#"{"Writer": 1}"#, "not an identifier"),
     ] {
-        let e = call(&ok.replacen(
-            r#"{"session": 1, "writer": 2}"#,
-            held,
-            1,
-        ))
-        .unwrap_err();
+        let e = call(&ok.replacen(r#"{"session": 1, "writer": 2}"#, held, 1)).unwrap_err();
         assert!(e.contains(why), "{held}: {e}");
     }
     assert_eq!(doc.snapshot, None);
@@ -209,10 +204,7 @@ fn a_member_is_an_output_role_of_its_call_once_per_publication() {
             r#"[{"role": "out-a", "effect": "none"}, {"role": "out-a", "effect": "none"}]"#,
             "a member twice",
         ),
-        (
-            r#"[{"role": "out-a", "effect": "gone"}]"#,
-            "unknown effect",
-        ),
+        (r#"[{"role": "out-a", "effect": "gone"}]"#, "unknown effect"),
         (
             r#"[{"role": "out-a", "effect": "none", "installed": true}]"#,
             "unknown key \"installed\"",

@@ -611,12 +611,20 @@ pub fn warn_forced(msg: &str) {
 }
 
 /// `"1 rule"` / `"5 rules"` - a count with its noun, pluralized by the
-/// count instead of the `(s)` hedge. For the regular `+s` nouns brokkr's
-/// messages use; a noun with an irregular plural wants its own format
-/// string, not a smarter helper.
+/// count instead of the `(s)` hedge. Covers the regular plurals brokkr's
+/// messages use: `+s`, `+es` after `s`, and consonant + `y` to `ies`
+/// (`"capability"`, `"entry"`; `"key"` stays `"keys"`). A noun with an
+/// irregular plural wants its own format string, not a smarter helper.
 pub fn count(n: usize, noun: &str) -> String {
     if n == 1 {
         format!("1 {noun}")
+    } else if let Some(stem) = noun.strip_suffix('y')
+        && stem
+            .chars()
+            .last()
+            .is_some_and(|c| c.is_ascii_alphabetic() && !"aeiou".contains(c))
+    {
+        format!("{n} {stem}ies")
     } else if noun.ends_with('s') {
         format!("{n} {noun}es")
     } else {
@@ -678,6 +686,18 @@ mod count_tests {
         assert_eq!(super::count(1, "rule"), "1 rule");
         assert_eq!(super::count(0, "rule"), "0 rules");
         assert_eq!(super::count(5, "workspace package"), "5 workspace packages");
+    }
+
+    #[test]
+    fn regular_plural_endings() {
+        assert_eq!(super::count(1, "capability"), "1 capability");
+        assert_eq!(
+            super::count(16, "required capability"),
+            "16 required capabilities"
+        );
+        assert_eq!(super::count(0, "entry"), "0 entries");
+        assert_eq!(super::count(2, "key"), "2 keys");
+        assert_eq!(super::count(2, "process"), "2 processes");
     }
 
     /// The prefix field is 10 columns; a wider tag overflows by one space

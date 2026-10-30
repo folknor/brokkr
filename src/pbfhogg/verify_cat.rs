@@ -22,7 +22,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
         let captured = harness.run_pbfhogg(
             PbfArgv::new("cat")
                 .input(pbf)?
-                .arg("-t")
+                .arg("--type")
                 .arg(*elem_type)
                 .output(&pbfhogg_out)?
                 .arg_if(direct_io, "--direct-io"),

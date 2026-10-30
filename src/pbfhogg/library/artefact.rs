@@ -575,7 +575,11 @@ fn publications(
             let member = entry.as_object()?;
             let role_field = member.required("role")?;
             let role = describe::identifier(&role_field)?;
-            if !scenario.roles.iter().any(|r| r.id == role && r.is_output_of(call)) {
+            if !scenario
+                .roles
+                .iter()
+                .any(|r| r.id == role && r.is_output_of(call))
+            {
                 return Err(format!(
                     "{}: {role:?} is not an output role of call {call:?}",
                     role_field.path()

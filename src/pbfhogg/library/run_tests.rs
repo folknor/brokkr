@@ -1019,7 +1019,10 @@ fn errored() -> String {
 /// A harness whose call refused: out-a left absent.
 fn refused_harness() -> String {
     script(
-        &format!("rm \"$R/roles/out-a\"\n{}", documents(SCENARIO_DOC, &errored())),
+        &format!(
+            "rm \"$R/roles/out-a\"\n{}",
+            documents(SCENARIO_DOC, &errored())
+        ),
         0,
     )
 }
@@ -1082,12 +1085,19 @@ fn a_refusal_counterpart_fails_on_another_status_or_a_published_output() {
     let f = fixture(
         "refusal-call-cancelled",
         &script(
-            &format!("rm \"$R/roles/out-a\"\n{}", documents(SCENARIO_DOC, &cancelled)),
+            &format!(
+                "rm \"$R/roles/out-a\"\n{}",
+                documents(SCENARIO_DOC, &cancelled)
+            ),
             0,
         ),
     );
     let report = run_described(&f, &with_cli(REFUSAL_CLI));
-    assert!(has(&report, "the call was cancelled"), "{:?}", report.failures);
+    assert!(
+        has(&report, "the call was cancelled"),
+        "{:?}",
+        report.failures
+    );
 }
 
 #[test]
@@ -1111,7 +1121,10 @@ fn a_refusal_is_whole_call_and_never_a_signal() {
     );
     let report = run_described(&f, &described);
     assert!(
-        has(&report, "the library left log-a present, not absent as it started"),
+        has(
+            &report,
+            "the library left log-a present, not absent as it started"
+        ),
         "{:?}",
         report.failures
     );
@@ -1174,7 +1187,11 @@ fn a_seeded_refusal_leaves_both_destinations_byte_identical_without_overwrite() 
 
 #[test]
 fn a_declared_overwrite_is_passed_and_required() {
-    let cli = CAT_CLI.replacen(r#""policy_differences""#, r#""overwrite": true, "policy_differences""#, 1);
+    let cli = CAT_CLI.replacen(
+        r#""policy_differences""#,
+        r#""overwrite": true, "policy_differences""#,
+        1,
+    );
     let f = fixture("overwrite-true", &equal_harness());
     let report = run_described(&f, &with_cli(&cli));
     assert!(report.passed, "{:?}", report.failures);
@@ -1193,7 +1210,11 @@ fn a_later_iteration_reuses_a_refusal_and_launches_nothing() {
     let (second, _) = measured(&f, &with_cli(REFUSAL_CLI), 1, Some(&baseline), &mut reuse);
     assert!(second.passed, "{:?}", second.failures);
     assert_eq!(cli_log(&f).len(), before, "nothing launched");
-    assert!(cli_result(&second).detail.contains("CLI refusal reused from iteration 0"));
+    assert!(
+        cli_result(&second)
+            .detail
+            .contains("CLI refusal reused from iteration 0")
+    );
 }
 
 #[test]
@@ -1244,10 +1265,14 @@ fn an_isolation_verification_times_its_replay_and_shows_one_line() {
     assert!(report.passed, "{:?}", report.failures);
     assert_eq!(
         report.timing.as_deref(),
-        Some("a: library call 10us, CLI command interval 40us (one process each, not a measurement)")
+        Some(
+            "a: library call 10us, CLI command interval 40us (one process each, not a measurement)"
+        )
     );
     assert!(
-        cli_result(&report).detail.contains("CLI command interval 40us"),
+        cli_result(&report)
+            .detail
+            .contains("CLI command interval 40us"),
         "{}",
         cli_result(&report).detail
     );
@@ -1255,7 +1280,11 @@ fn an_isolation_verification_times_its_replay_and_shows_one_line() {
     let f = fixture("isolation-none", &equal_harness());
     cat_extra(&f, INTERVAL);
     let report = run_described(&f, &with_cli(CAT_CLI));
-    assert!(has(&report, "the counterpart exited 7"), "{:?}", report.failures);
+    assert!(
+        has(&report, "the counterpart exited 7"),
+        "{:?}",
+        report.failures
+    );
 }
 
 #[test]
@@ -1307,7 +1336,11 @@ fn a_measured_isolation_process_prepares_both_arms_and_replays_every_iteration()
     let (second, _) = measured(&f, &isolated(), 1, Some(&identity), &mut reuse);
     assert!(second.passed, "{:?}", second.failures);
     let added = &cli_log(&f)[before..];
-    assert_eq!(added.len(), 3, "a timed counterpart is never reused: {added:?}");
+    assert_eq!(
+        added.len(),
+        3,
+        "a timed counterpart is never reused: {added:?}"
+    );
     assert!(second.cli.is_some());
 }
 
@@ -1328,7 +1361,10 @@ fn a_timed_cli_process_s_trajectory_survives_an_invalid_interval_or_a_bad_ending
         let (report, _, cli) =
             measured_full(&f, &isolated(), 0, None, &mut Default::default(), None);
         assert!(has(&report, why), "{name}: {:?}", report.failures);
-        assert!(report.cli.is_none(), "{name}: no sample from a failed replay");
+        assert!(
+            report.cli.is_none(),
+            "{name}: no sample from a failed replay"
+        );
         let cli = cli.unwrap_or_else(|| panic!("{name}: the CLI capture was dropped"));
         assert!(cli.markers().count() <= 2, "{name}");
     }

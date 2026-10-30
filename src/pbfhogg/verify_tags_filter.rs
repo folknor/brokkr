@@ -27,7 +27,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
         let captured = harness.run_pbfhogg(
             PbfArgv::new("tags-filter")
                 .input(pbf)?
-                .arg("-R")
+                .arg("--omit-referenced")
                 .arg(*expr)
                 .output(&pbfhogg_out)?
                 .arg_if(direct_io, "--direct-io"),

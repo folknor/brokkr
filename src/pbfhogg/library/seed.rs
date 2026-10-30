@@ -84,7 +84,11 @@ pub(crate) fn state(path: &Path, kind: RoleKind, role: &str) -> Result<State, St
     let seed = bytes(role);
     match kind {
         RoleKind::Pbf | RoleKind::File if meta.file_type().is_file() => {
-            Ok(if holds(path, &seed)? { State::Seed } else { State::Other })
+            Ok(if holds(path, &seed)? {
+                State::Seed
+            } else {
+                State::Other
+            })
         }
         RoleKind::Directory if meta.file_type().is_dir() => {
             let mut entries = Vec::new();
@@ -171,7 +175,10 @@ mod tests {
         let tree = dir.join("d");
         write(&tree, RoleKind::Directory, "d").unwrap();
         std::fs::write(tree.join("more"), b"x").unwrap();
-        assert_eq!(state(&tree, RoleKind::Directory, "d").unwrap(), State::Other);
+        assert_eq!(
+            state(&tree, RoleKind::Directory, "d").unwrap(),
+            State::Other
+        );
     }
 
     #[test]

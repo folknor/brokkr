@@ -8,7 +8,7 @@
 //! through [`PbfArgv::arg`]. Scratch is declared from the actual argument
 //! combination: pbfhogg makes run scratch for `add-locations-to-ways`,
 //! `build-geocode-index`, `diff --format osc`, and every text `diff` but a
-//! quiet one or one with an explicit `-j 1`, which refuse `--tmp-dir`.
+//! quiet one or one with an explicit `--jobs 1`, which refuse `--tmp-dir`.
 
 use std::path::{Path, PathBuf};
 
@@ -92,10 +92,12 @@ impl PbfArgv {
         Ok(self)
     }
 
-    /// `-o PATH`, a file or directory output.
+    /// `--output PATH`, a file or directory output. brokkr spells every
+    /// pbfhogg flag it forwards long: pbfhogg has reassigned short letters
+    /// between versions, and a `--commit` baseline accepts the longs.
     pub(crate) fn output(mut self, path: impl AsRef<Path>) -> Result<Self, DevError> {
         let path = path.as_ref();
-        self.args.push("-o".into());
+        self.args.push("--output".into());
         self.args.push(crate::utf8_path::path_string(path)?);
         self.writes.push(path.to_path_buf());
         Ok(self)
@@ -227,11 +229,11 @@ mod tests {
             .unwrap()
             .output("/s/out.pbf")
             .unwrap()
-            .arg("-j")
+            .arg("--jobs")
             .arg("4");
         assert_eq!(
             argv.args(),
-            ["sort", "/d/in.pbf", "-o", "/s/out.pbf", "-j", "4"]
+            ["sort", "/d/in.pbf", "--output", "/s/out.pbf", "--jobs", "4"]
         );
         assert_eq!(argv.reads(), [PathBuf::from("/d/in.pbf")]);
         assert_eq!(argv.writes(), [PathBuf::from("/s/out.pbf")]);
@@ -271,13 +273,14 @@ mod tests {
         );
         assert!(!written().overwrite_stance(false).negotiates_overwrite());
         assert_eq!(
-            PbfArgv::new("inspect")
-                .overwrite_stance(true)
-                .overwrite(),
+            PbfArgv::new("inspect").overwrite_stance(true).overwrite(),
             Overwrite::NoOutput
         );
         assert_eq!(
-            written().forces_overwrite().overwrite_stance(false).overwrite(),
+            written()
+                .forces_overwrite()
+                .overwrite_stance(false)
+                .overwrite(),
             Overwrite::ImpliedByForce
         );
     }

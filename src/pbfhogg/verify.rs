@@ -783,7 +783,11 @@ pub(super) struct Step {
 
 impl Drop for Step {
     fn drop(&mut self) {
-        StepTimes::add(std::mem::take(&mut self.label), self.cached, self.started.elapsed());
+        StepTimes::add(
+            std::mem::take(&mut self.label),
+            self.cached,
+            self.started.elapsed(),
+        );
     }
 }
 

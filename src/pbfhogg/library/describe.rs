@@ -467,7 +467,10 @@ fn expect(obj: &Obj<'_>) -> Result<Expect, String> {
         },
     };
     if !refusal {
-        obj.forbid("exit", "unless the counterpart expects a refusal: output means exit 0")?;
+        obj.forbid(
+            "exit",
+            "unless the counterpart expects a refusal: output means exit 0",
+        )?;
         return Ok(Expect::Output);
     }
     let field = obj.required("exit")?;
@@ -669,7 +672,10 @@ fn role(item: &Field<'_>, calls: &BTreeSet<&str>) -> Result<Role, String> {
     }
     let shape = format!("on a role of source {source_name}");
     if source_name != "output" {
-        obj.forbid("seeded", &format!("{shape}: only an output role starts seeded"))?;
+        obj.forbid(
+            "seeded",
+            &format!("{shape}: only an output role starts seeded"),
+        )?;
     }
     let source = match source_name {
         "dataset" => {

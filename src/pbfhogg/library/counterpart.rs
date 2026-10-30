@@ -457,11 +457,15 @@ impl Replay<'_> {
         ) {
             Ok(fifo) => fifo,
             Err(e) => {
-                verdict.fail(format!("the counterpart's marker FIFO could not be made: {e}"));
+                verdict.fail(format!(
+                    "the counterpart's marker FIFO could not be made: {e}"
+                ));
                 return Ok(());
             }
         };
-        let run = self.cli.run_in_timed(argv, scope, &mut fifo, timing.iteration);
+        let run = self
+            .cli
+            .run_in_timed(argv, scope, &mut fifo, timing.iteration);
         drop(fifo);
         let run = match run {
             Timed::Unsafe(e) => return Err(self.unsafe_launch("replay", &e)),
@@ -648,9 +652,8 @@ impl Replay<'_> {
     fn library_refused(&self, verdict: &mut Verdict) {
         match &self.doc.outcome {
             CallOutcome::Error { .. } => {}
-            CallOutcome::Ok => verdict.fail(
-                "the call returned ok, but its counterpart expects a refusal".to_owned(),
-            ),
+            CallOutcome::Ok => verdict
+                .fail("the call returned ok, but its counterpart expects a refusal".to_owned()),
             CallOutcome::Cancelled => verdict.fail(
                 "the call was cancelled: a refusal counterpart needs a call that returned an \
                  error, since the CLI has no cancel"

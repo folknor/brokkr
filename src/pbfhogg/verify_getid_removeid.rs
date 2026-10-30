@@ -4,8 +4,8 @@ use std::path::Path;
 
 use super::pbf_frames::{self, IndexSummary};
 use super::verify::{Findings, PbfArgv, Verdict, VerifyHarness};
-use super::verify_reference::ToolRun;
 use super::verify_multi_extract::{Counts, inspect_counts};
+use super::verify_reference::ToolRun;
 use crate::error::DevError;
 use crate::output::verify_msg;
 

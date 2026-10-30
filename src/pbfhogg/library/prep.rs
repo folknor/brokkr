@@ -30,7 +30,9 @@ pub(crate) enum NotEstablished {
 impl std::fmt::Display for NotEstablished {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Residency(why) => write!(f, "dataset page-cache preparation not established: {why}"),
+            Self::Residency(why) => {
+                write!(f, "dataset page-cache preparation not established: {why}")
+            }
             Self::Interrupted => f.write_str("dataset page-cache preparation interrupted"),
         }
     }
@@ -59,7 +61,10 @@ pub(crate) fn prepare(datasets: &[PathBuf], retained: &[PathBuf]) -> Result<(), 
                 format!(
                     "{} still has {} in the page cache after eviction",
                     file.display(),
-                    crate::output::count(usize::try_from(resident).unwrap_or(usize::MAX), "resident page")
+                    crate::output::count(
+                        usize::try_from(resident).unwrap_or(usize::MAX),
+                        "resident page"
+                    )
                 )
             } else {
                 format!(
@@ -148,8 +153,12 @@ fn resident_pages(path: &Path) -> Result<u64, NotEstablished> {
             .map_err(|_| fail(format!("{}: a window does not fit memory", path.display())))?;
         let pages = usize::try_from(span.div_ceil(page))
             .map_err(|_| fail(format!("{}: a window does not fit memory", path.display())))?;
-        let map_offset = libc::off_t::try_from(offset)
-            .map_err(|_| fail(format!("{}: offset {offset} is out of range", path.display())))?;
+        let map_offset = libc::off_t::try_from(offset).map_err(|_| {
+            fail(format!(
+                "{}: offset {offset} is out of range",
+                path.display()
+            ))
+        })?;
         // SAFETY: a read-only shared mapping of a range inside the file,
         // never touched, unmapped below.
         let addr = unsafe {

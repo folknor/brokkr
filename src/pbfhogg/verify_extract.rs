@@ -23,8 +23,8 @@ use std::path::Path;
 use super::commands::{ExtractStrategy, PbfhoggCommand};
 use super::inspect_report::InspectCounts;
 use super::verify::{Findings, VerifyHarness};
-use super::verify_reference::ToolRun;
 use super::verify_element_diff::{self as element_diff, PerType};
+use super::verify_reference::ToolRun;
 use crate::datasets::Bbox;
 use crate::error::DevError;
 use crate::osc::OscAction;
@@ -156,7 +156,9 @@ impl ExtractDiffReport {
                 .print("FAIL ", "content differs on a shared ID", verify_msg);
         }
         if self.pbfhogg_only.total() + self.osmium_only.total() == 0 {
-            verify_msg(&format!("  extract --{strategy} vs osmium: {coverage}; same membership"));
+            verify_msg(&format!(
+                "  extract --{strategy} vs osmium: {coverage}; same membership"
+            ));
             return;
         }
         verify_msg(&format!(
@@ -169,11 +171,14 @@ impl ExtractDiffReport {
     /// The strategy's membership difference as one clause of the summary
     /// line, `None` when both hold the same elements.
     fn membership_clause(&self, strategy: &str) -> Option<String> {
-        let sides: Vec<String> = [("pbfhogg-only", &self.pbfhogg_only), ("osmium-only", &self.osmium_only)]
-            .into_iter()
-            .filter(|(_, class)| class.total() > 0)
-            .map(|(label, class)| format!("{label} {}", nonzero_counts(class)))
-            .collect();
+        let sides: Vec<String> = [
+            ("pbfhogg-only", &self.pbfhogg_only),
+            ("osmium-only", &self.osmium_only),
+        ]
+        .into_iter()
+        .filter(|(_, class)| class.total() > 0)
+        .map(|(label, class)| format!("{label} {}", nonzero_counts(class)))
+        .collect();
         (!sides.is_empty()).then(|| format!("{strategy} {}", sides.join(", ")))
     }
 }

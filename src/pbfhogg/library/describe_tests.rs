@@ -172,8 +172,8 @@ fn a_refusal_declares_its_exit_and_an_output_none() {
             r#"{{"argv": ["cat", "-o", {{"output": "out-b"}}]{extra}}}"#
         ))
     };
-    let doc = parse(cli(r#", "expect": "refusal", "exit": 2, "overwrite": false"#).as_bytes())
-        .unwrap();
+    let doc =
+        parse(cli(r#", "expect": "refusal", "exit": 2, "overwrite": false"#).as_bytes()).unwrap();
     let declared = doc.scenarios[0].calls[1].cli.as_ref().unwrap();
     assert_eq!(declared.expect, Expect::Refusal { exit: 2 });
     assert_eq!(declared.overwrite, Some(false));
@@ -183,11 +183,23 @@ fn a_refusal_declares_its_exit_and_an_output_none() {
     assert_eq!(declared.overwrite, Some(true));
     for (extra, needle) in [
         (r#", "expect": "refusal""#, "missing key \"exit\""),
-        (r#", "expect": "refusal", "exit": 1"#, "1 is outside 2 to 127"),
-        (r#", "expect": "refusal", "exit": 130"#, "130 is outside 2 to 127"),
+        (
+            r#", "expect": "refusal", "exit": 1"#,
+            "1 is outside 2 to 127",
+        ),
+        (
+            r#", "expect": "refusal", "exit": 130"#,
+            "130 is outside 2 to 127",
+        ),
         (r#", "expect": "refusal", "exit": 0"#, "outside 2 to 127"),
-        (r#", "expect": "refusal", "exit": 64"#, "64 is pbfhogg's usage error"),
-        (r#", "exit": 2"#, "not allowed unless the counterpart expects a refusal"),
+        (
+            r#", "expect": "refusal", "exit": 64"#,
+            "64 is pbfhogg's usage error",
+        ),
+        (
+            r#", "exit": 2"#,
+            "not allowed unless the counterpart expects a refusal",
+        ),
         (r#", "expect": "output", "exit": 2"#, "not allowed unless"),
         (r#", "expect": "error""#, "unknown expectation"),
         (r#", "overwrite": "yes""#, "overwrite"),

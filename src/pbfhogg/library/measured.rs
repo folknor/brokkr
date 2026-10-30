@@ -535,9 +535,8 @@ fn cli_row(
     let samples: Vec<CliSample> = processes
         .iter()
         .map(|p| {
-            p.cli.ok_or_else(|| {
-                DevError::Internal("a measured process has no CLI interval".into())
-            })
+            p.cli
+                .ok_or_else(|| DevError::Internal("a measured process has no CLI interval".into()))
         })
         .collect::<Result<_, _>>()?;
     let mut winner = 0;
@@ -559,7 +558,10 @@ fn cli_row(
             i64::try_from(winner).unwrap_or(i64::MAX),
         ),
         KvPair::text(meta("library.cli_sidecar"), &side.session.uuid),
-        KvPair::text(meta(super::vs_cli::INTERVAL_KEY), super::interval::DEFINITION),
+        KvPair::text(
+            meta(super::vs_cli::INTERVAL_KEY),
+            super::interval::DEFINITION,
+        ),
         KvPair::text(meta("library.prep"), super::prep::PROCEDURE),
         KvPair::text(meta("library.build"), &side.library_build),
         KvPair::text(meta("library.cli_build"), super::vs_cli::CLI_BUILD),

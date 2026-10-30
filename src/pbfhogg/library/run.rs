@@ -959,7 +959,11 @@ fn judge_artefacts(
     for (id, doc) in &calls {
         let readings = [("return_us", doc.return_us), ("seal_us", doc.seal_us)]
             .into_iter()
-            .chain(doc.diagnostics.iter().map(|d| ("a diagnostic's at_us", d.at_us)));
+            .chain(
+                doc.diagnostics
+                    .iter()
+                    .map(|d| ("a diagnostic's at_us", d.at_us)),
+            );
         for (what, end) in readings {
             let span = end - doc.entry_us;
             if span > limit_us {
