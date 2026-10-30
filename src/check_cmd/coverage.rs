@@ -289,23 +289,7 @@ pub(crate) fn report_policy(
         ));
     }
 
-    for d in dead {
-        output::error(&format!(
-            "dead filter: {} in {} - matches no test in any sweep it applies \
-             to ({})",
-            d.label, d.origin, d.sweeps
-        ));
-    }
-    if !dead.is_empty() {
-        output::error(&format!(
-            "{}: a filter that selects nothing is a \
-             name that drifted, not a no-op - a dead `skip` no longer excludes \
-             what it names, and a dead `only` leaves its lane evaluating \
-             nothing while still reading as a gate. Fix the substring or delete \
-             the filter.",
-            output::count(dead.len(), "dead `skip`/`only` filter")
-        ));
-    }
+    report_dead_filters(dead);
 
     if green {
         let curated_frag = if stats.curated > 0 {
@@ -350,6 +334,28 @@ pub(crate) fn report_policy(
         },
         failing || !plan.complete,
     )
+}
+
+/// Print each dead filter and the rollup that says why it fails the run.
+/// Shared by the certifying audit and a non-certifying run's judgement.
+pub(crate) fn report_dead_filters(dead: &[DeadFilterRecord]) {
+    for d in dead {
+        output::error(&format!(
+            "dead filter: {} in {} - matches no test in any sweep it applies \
+             to ({})",
+            d.label, d.origin, d.sweeps
+        ));
+    }
+    if !dead.is_empty() {
+        output::error(&format!(
+            "{}: a filter that selects nothing is a \
+             name that drifted, not a no-op - a dead `skip` no longer excludes \
+             what it names, and a dead `only` leaves its lane evaluating \
+             nothing while still reading as a gate. Fix the substring or delete \
+             the filter.",
+            output::count(dead.len(), "dead `skip`/`only` filter")
+        ));
+    }
 }
 
 /// Every filter on `sweep` that matched nothing it could have matched.
@@ -568,8 +574,8 @@ fn lane_candidates(
 /// A non-certifying run's filter liveness, from each lane's own unfiltered
 /// listings ([`PreparedBinary::existence`]) rather than a policy universe.
 ///
-/// Advisory: the result is warned about, never fatal - a profile that is not
-/// `certifies = "complete"` passed with a dead filter before this existed.
+/// The result fails a green test phase, as a certifying audit's dead filters
+/// do; it is not written to the plan, whose policy universe stays empty.
 /// The rules are the certifying ones (scope union, `skip` against existence,
 /// `only` against what would be evaluated, package-qualified skips scoped),
 /// and a lane that cannot give sound evidence makes its filters unknown, not

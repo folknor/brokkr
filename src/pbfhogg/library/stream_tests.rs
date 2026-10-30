@@ -127,6 +127,24 @@ fn a_complete_stream_passes_with_its_phases_and_tail() {
     assert_eq!(stream.phases[0].0, "READ");
 }
 
+/// brokkr#62: only a sealing emission may not repeat a name; a marker
+/// emitted again and a counter sampled many times are ordinary records.
+#[test]
+fn repeated_ordinary_names_are_legal() {
+    let lines = [
+        "M 10 WAIT",
+        "C 15 n 1",
+        "M 20 WAIT",
+        "C 25 n 2",
+        "M 30 WAIT",
+        "C 35 n 2",
+        "S 70 n 3",
+        "T 80 sealed 0",
+    ];
+    let stream = judged(&doc(), &lines, &CaptureLoss::default());
+    assert_eq!(stream.status, Status::Pass, "{}", stream.detail);
+}
+
 #[test]
 fn what_the_records_prove_fails_even_when_records_were_lost() {
     for (from, to, why) in [

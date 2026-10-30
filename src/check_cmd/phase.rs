@@ -1116,6 +1116,16 @@ fn finish_build_phases(
             // No claim to audit, but the inventory and the journal are as real:
             // what a stop left unresolved is read from them the same way.
             run_report.continuation = continuation_of(&prepared);
+            // A dead filter is a finding on every profile: a renamed test a
+            // `skip` no longer excludes resurfaces elsewhere looking like a
+            // hang or an unrelated failure. Reported on any outcome, failing
+            // only a green test phase, as the certifying audit does.
+            let dead = &prepared.prep.dead_filters;
+            report_dead_filters(dead);
+            if test_failure.is_none() && !dead.is_empty() {
+                start_phase(failing_phase, Phase::Coverage);
+                return Err(PhaseFailure::Findings(Phase::Coverage));
+            }
         }
     }
 
@@ -1932,7 +1942,7 @@ mod continuation_gate_tests {
         let plan = AccountingPlan { run_id: "1700000000000-1".into(), complete: true, lanes: vec![lane], ..AccountingPlan::default() };
         let sweeps = [PlannedSweep::from(crate::profile::SweepDecl::default())];
         Prepared {
-            prep: ProfilePrep { plan, lanes: Lanes::from_sweeps(&sweeps, |_, _| None), error: None },
+            prep: ProfilePrep { plan, lanes: Lanes::from_sweeps(&sweeps, |_, _| None), error: None, dead_filters: Vec::new() },
             paths: Some(AccountingPaths { plan: dir.join("plan.json"), journal }),
             test_phase_ran: ran,
         }

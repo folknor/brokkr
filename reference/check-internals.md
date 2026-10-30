@@ -1371,7 +1371,7 @@ must never share the machine with a compile:
    binary against its own names and `#[ignore]`d subset, and every filter of
    a listed lane is registered before any binary is, so a lane holding no
    binary still reports its filters.
-4. **Advisory liveness (every other run).** No universe exists, so pass one
+4. **Lane-evidence liveness (every other run).** No universe exists, so pass one
    took a second, unfiltered pair of listings per binary (`existence_listing`)
    on the libtest lanes whose sweep carries a filter and that forward no
    libtest args (`wants_existence`), auxiliary to the inventory: a failure
@@ -1379,8 +1379,9 @@ must never share the machine with a compile:
    ledger then judges the lanes that gave sound evidence and treats every
    other lane - unattempted, unavailable, nextest, doc-only, a serial lane
    carrying doctests, forwarded libtest args, a binary without evidence - as
-   unknown (`advisory_dead_filters`). Dead filters are warned about and
-   change no exit status; they are not written to the plan.
+   unknown (`advisory_dead_filters`). Dead filters ride on `ProfilePrep`,
+   not the plan, whose policy universe stays empty; once the test phase ends
+   they are reported and fail a green one as `coverage` findings.
 
 Listings must not modify the files they are listed from. Hashing either side of
 a listing catches a net change, not a file replaced and put back while it ran.

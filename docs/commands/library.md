@@ -516,7 +516,8 @@ call document:
   `entry_us..seal_us`; a sealing or terminal record stamped before
   `return_us`, or before the sealing record ahead of it; an ordinary record
   stamped later than any sealing or terminal record, or arriving after
-  sealing began; a name emitted twice; a second terminal record, or any
+  sealing began; a sealing emission naming a counter an earlier sealing
+  emission of the call already named; a second terminal record, or any
   record after it; a terminal record whose state or drops differ from the
   artefact's `stream`; no terminal record from a sink the artefact reports
   `sealed` or `failed`, although the reader lost nothing and the artefact
@@ -524,6 +525,10 @@ call document:
   snapshot lacks, or carrying another value; an ordinary counter of a
   snapshot name above its final value; any sealing or terminal record of a
   call that did not seal.
+
+  Ordinary records may repeat a name freely: a marker emitted again (a
+  `WAIT` pair per wait), a counter sampled many times or emitted once per
+  stage is legal, held only to the snapshot bound above.
 - **Otherwise incomplete is unevaluated**: a call that did not seal, a
   capture that may have lost a FIFO record (a rejected line, a read error,
   records left unread, the marker or counter limit), no terminal record, or

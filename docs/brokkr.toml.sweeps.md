@@ -732,8 +732,8 @@ include_ignored = true
   the one dead-filter shape the `coverage` phase cannot detect. Breaking
   change for configs that carried one; the fix is the substring that was
   meant, and there is no opt-in for a broad filter.
-- **A filter that matches no test is reported by `brokkr check`**, as a
-  failure under a complete profile and a warning elsewhere. Under a
+- **A filter that matches no test fails `brokkr check`**, under every
+  profile where it can be judged. Under a
   `certifies = "complete"` profile the `coverage` phase asserts every
   `skip` and every `only` - profile-level and entry-level alike, each
   individually - against the enumeration, and reports a dead one with the
@@ -744,9 +744,10 @@ include_ignored = true
   sweep of that profile runs it. Same rule as a stale `[[quarantine]]` entry, and
   for the same reason: a filter selecting nothing is a name that drifted,
   and a dead `only` leaves its lane evaluating nothing while still reading
-  as a gate. Under any other profile the same judgement is a warning, made
-  from each lane's own unfiltered listing where that evidence is sound, so a
-  `skip` left behind by a rename is named on the run where the rename lands.
+  as a gate. Under any other profile the same judgement is made from each
+  lane's own unfiltered listing where that evidence is sound and fails a
+  green test phase, so a `skip` left behind by a rename fails the run where
+  the rename lands.
   Complementary to the test phase's `zero tests ran` refusal, which catches
   a sweep whose filters together select no work at run time (a live sibling
   `only` hides a dead one from it). See

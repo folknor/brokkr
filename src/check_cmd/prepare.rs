@@ -1957,6 +1957,9 @@ pub(crate) struct ProfilePrep {
     pub(crate) lanes: Lanes<Option<PreparedLane>>,
     /// The first lane that failed to prepare, when one did.
     pub(crate) error: Option<DevError>,
+    /// A non-certifying run's dead filters ([`advisory_dead_filters`]); a
+    /// certifying run's are policy, on the plan.
+    pub(crate) dead_filters: Vec<DeadFilterRecord>,
 }
 
 /// Prepare every active sweep and assemble the plan.
@@ -1971,7 +1974,7 @@ pub(crate) struct ProfilePrep {
 /// `certifying` is whether the run is held to a `certifies = "complete"`
 /// claim: only then are policy universes enumerated and dead filters policy.
 /// Any other run judges its filters from the lanes' own unfiltered listings
-/// and only warns ([`advisory_dead_filters`]). Every run gets the execution
+/// ([`advisory_dead_filters`]) and keeps them on `dead_filters`. Every run gets the execution
 /// inventory. A lane that fails to
 /// prepare under a claim that does not need it is a lane with no inventory
 /// (its `unavailable` says why), not a refusal: it still runs.
@@ -2155,21 +2158,16 @@ pub(crate) fn prepare_profile(
     // Pass two is policy-only and runs only for a certifying profile. It reads
     // the inventories built above; it never changes a lane's selected pairs.
     // A non-certifying run has no policy universe, so its filters are judged
-    // from the lanes' own unfiltered listings instead, and only warned about:
-    // a dead filter outside a complete profile has always passed.
+    // from the lanes' own unfiltered listings instead; they fail a green test
+    // phase once it ends, so a rename is caught where it happens.
+    let mut dead_filters = Vec::new();
     if certifying {
         prepare_policy_universes(sweeps, selection, &mut plan, &lanes, preparer, &mut error);
     } else {
-        for d in &advisory_dead_filters(sweeps, selection, &lanes, doctests) {
-            output::warn(&format!(
-                "dead filter: {} in {} - matches no test in any sweep it applies to ({}). A dead \
-                 `skip` no longer excludes what it names; fix the substring or delete the filter.",
-                d.label, d.origin, d.sweeps
-            ));
-        }
+        dead_filters = advisory_dead_filters(sweeps, selection, &lanes, doctests);
     }
     plan.complete = plan.incomplete.is_empty() && plan.lanes.iter().all(|lane| lane.inventory.is_known());
-    ProfilePrep { plan, lanes, error }
+    ProfilePrep { plan, lanes, error, dead_filters }
 }
 
 #[cfg(test)]
@@ -2953,10 +2951,11 @@ mod prepare_tests {
     }
 
     /// brokkr#48 end to end: a non-certifying run whose lane carries an
-    /// unfiltered listing reports a skip naming a test that no longer exists,
-    /// as advisory and not as policy - the plan's dead filters stay empty.
+    /// unfiltered listing keeps a skip naming a test that no longer exists on
+    /// the prepared profile, where it fails a green test phase, and not as
+    /// policy - the plan's dead filters stay empty.
     #[test]
-    fn a_partial_run_reports_a_dead_skip_as_advisory() {
+    fn a_partial_run_keeps_a_dead_skip_outside_the_plan() {
         struct Listed(Fake);
         impl Preparer for Listed {
             fn support(&mut self, s: &PlannedSweep, a: &Attempt) -> Result<Vec<SupportArtifact>, DevError> {
@@ -2987,10 +2986,9 @@ mod prepare_tests {
         let sweeps = [serial];
         let prep = prepare_all(&sweeps, false, &mut Listed(Fake::new(None)));
         assert!(prep.error.is_none(), "{:?}", prep.error);
-        assert!(prep.plan.dead_filters.is_empty(), "advisory, not policy");
-        let advisory = advisory_dead_filters(&sweeps, &selected(&sweeps, &[]), &prep.lanes, false);
-        assert_eq!(advisory.len(), 1, "{advisory:?}");
-        assert!(advisory[0].label.to_string().contains("renamed_away"));
+        assert!(prep.plan.dead_filters.is_empty(), "not policy");
+        assert_eq!(prep.dead_filters.len(), 1, "{:?}", prep.dead_filters);
+        assert!(prep.dead_filters[0].label.to_string().contains("renamed_away"));
     }
 
     /// A lane that cannot be attributed to binaries: inventory unavailable.

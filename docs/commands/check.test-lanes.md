@@ -906,7 +906,8 @@ defect, not a no-op.** During the `prepare` phase every `skip` and every
 `only` declared on a `[test.profiles.*]` block or a `[[check]]` entry is
 asserted against the enumeration. Under a `certifies = "complete"` profile
 one that matched nothing fails the check in the `coverage` phase, named with
-the block it was written in (any other run warns instead - see below):
+the block it was written in (any other run judges it from narrower evidence
+and fails too - see below):
 
 ```
 [error]   dead filter: only "read_market_latency" in [test.profiles.timing] - matches no test in any sweep it applies to (timing)
@@ -968,17 +969,18 @@ parsing Rust source - has to be taught every declaration form
 (`#[tokio::test]`, `macro_rules!`-generated tests, and so on), and a parser
 that has gone blind agrees with every filter list there is.
 
-### Outside a complete profile: a warning
+### Outside a complete profile
 
-The failing alive-check runs only under `certifies = "complete"`, because
-that is the only place the `coverage` phase runs. Every other run judges the
-same filters in `prepare`, by the same four rules, and **warns** about a dead
-one rather than failing - a profile that is not `complete` has always passed
-with one:
+The policy audit runs only under `certifies = "complete"`. Every other run
+judges the same filters in `prepare`, by the same four rules, reports each
+dead one once the test phase ends, and fails a green test phase in the
+`coverage` phase, with the same message:
 
 ```
-[warn]    dead filter: skip "sort_overlapping_blobs_uring" in [test.profiles.full] - matches no test in any sweep it applies to (all). A dead `skip` no longer excludes what it names; fix the substring or delete the filter.
+[error]   dead filter: skip "sort_overlapping_blobs_uring" in [test.profiles.full] - matches no test in any sweep it applies to (all)
 ```
+
+A failed test phase stays the run's verdict; the dead filters print beside it.
 
 There is no policy universe there, so the evidence is each lane's own: a
 lane whose sweep carries a `skip` or `only` takes two additional listings
