@@ -123,10 +123,25 @@ fn format_brokkr_argv(brokkr_args: &str) -> String {
         Ok(argv) => argv
             .iter()
             .skip(2)
-            .map(|arg| format!("{arg:?}"))
+            .map(|arg| display_arg(arg))
             .collect::<Vec<_>>()
             .join(" "),
         Err(_) => brokkr_args.to_owned(),
+    }
+}
+
+/// An argument as the args column shows it: bare when it reads unambiguously
+/// as one shell word, quoted and escaped otherwise, so an empty argument or
+/// one holding spaces or shell metacharacters keeps its boundaries.
+fn display_arg(arg: &str) -> String {
+    let plain = !arg.is_empty()
+        && arg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./=:,+@%".contains(c));
+    if plain {
+        arg.to_owned()
+    } else {
+        format!("{arg:?}")
     }
 }
 
@@ -506,7 +521,17 @@ mod tests {
     fn brokkr_argv_display_preserves_argument_boundaries() {
         assert_eq!(
             format_brokkr_argv(r#"["brokkr","tilegen","--input","a b","--note","--commit"]"#),
-            r#""--input" "a b" "--note" "--commit""#
+            r#"--input "a b" --note --commit"#
+        );
+        assert_eq!(
+            format_brokkr_argv(
+                r#"["brokkr","tags-filter","--filter","w/highway=primary","--x",""]"#
+            ),
+            r#"--filter w/highway=primary --x """#
+        );
+        assert_eq!(
+            format_brokkr_argv(r#"["brokkr","run","--","a;b","it's"]"#),
+            r#"-- "a;b" "it's""#
         );
         assert_eq!(
             format_brokkr_argv("brokkr tilegen --bench 3"),
