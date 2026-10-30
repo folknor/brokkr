@@ -1043,9 +1043,37 @@ pub(crate) fn run_stdout_to_file(
     env: &[(&str, &str)],
     stdout: std::fs::File,
 ) -> Result<FileSinkRun, DevError> {
-    let start = Instant::now();
     let policy = crate::process::spawn::ChildPolicy::from_cargo_profile(SpawnProfile::Plain);
-    let mut cmd = policy.command(program, args, Some(cwd), env, ChildIsolation::Inherit)?;
+    let cmd = policy.command(program, args, Some(cwd), env, ChildIsolation::Inherit)?;
+    run_command_to_file(cmd, program, stdout)
+}
+
+/// [`run_stdout_to_file`] with no inherited user environment: the child sees
+/// `env` and the variables brokkr's own lifecycle policy stamps, nothing
+/// else. For a reference run whose identity must describe its launch.
+pub(crate) fn run_stdout_to_file_isolated(
+    program: &str,
+    args: &[&str],
+    cwd: &Path,
+    env: &[(&str, &str)],
+    stdout: std::fs::File,
+) -> Result<FileSinkRun, DevError> {
+    let policy = crate::process::spawn::ChildPolicy::from_cargo_profile(SpawnProfile::Plain);
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args).current_dir(cwd).env_clear();
+    for &(name, value) in env {
+        cmd.env(name, value);
+    }
+    policy.apply_runtime_policy(&mut cmd);
+    run_command_to_file(cmd, program, stdout)
+}
+
+fn run_command_to_file(
+    mut cmd: std::process::Command,
+    program: &str,
+    stdout: std::fs::File,
+) -> Result<FileSinkRun, DevError> {
+    let start = Instant::now();
     crate::process::spawn::capture_stdio(&mut cmd);
     cmd.stdout(std::process::Stdio::from(stdout));
     crate::shutdown::die_with_parent_strict(&mut cmd);

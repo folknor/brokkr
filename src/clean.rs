@@ -248,13 +248,7 @@ pub(crate) fn cmd_clean(
     if c.dir(&state.test_hung_dir())? {
         output::run_msg(&format!("{} test-hung snapshots", c.verb()));
     }
-
-    // Only by hand: a script may still be running a snapshot `brokkr build`
-    // handed it, and the cleanup after an interrupted command must not pull
-    // it out from under that script.
-    if !interrupted && c.dir(&state.artifacts_dir())? {
-        output::run_msg(&format!("{} build artifact snapshots", c.verb()));
-    }
+    clean_by_hand_only(project, &state, &c, interrupted)?;
 
     if let Some(status) = crate::user_dirs::sidecar_status()
         && c.file(&status)?
@@ -421,6 +415,29 @@ fn clean_scratch(
 /// creation is mid-way; after an interrupt, when the command lock is gone and
 /// another brokkr may be creating one, a held lock skips the sweep rather than
 /// wait.
+/// What only a `brokkr clean` by hand removes, never the cleanup after an
+/// interrupted command.
+fn clean_by_hand_only(
+    project: &Project,
+    state: &layout::ProjectState,
+    c: &Cleaner,
+    interrupted: bool,
+) -> Result<(), DevError> {
+    if interrupted {
+        return Ok(());
+    }
+    // A script may still be running a snapshot `brokkr build` handed it.
+    if c.dir(&state.artifacts_dir())? {
+        output::run_msg(&format!("{} build artifact snapshots", c.verb()));
+    }
+    // pbfhogg's verify reference cache spares the next verify its reference
+    // runs.
+    if *project == Project::Pbfhogg && c.guarded_dir(&state.verify_reference_dir())? {
+        output::run_msg(&format!("{} verify reference cache", c.verb()));
+    }
+    Ok(())
+}
+
 fn clean_sidecar_fifos(
     state: &layout::ProjectState,
     c: &Cleaner,

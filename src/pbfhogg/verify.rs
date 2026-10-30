@@ -60,6 +60,8 @@ pub struct VerifyHarness {
     pub output_dir: PathBuf,
     /// Project root (used as cwd for subprocess invocations).
     pub project_root: PathBuf,
+    /// Completed reference runs kept for reuse (`super::verify_reference`).
+    references: super::verify_reference::ReferenceCache,
 }
 
 impl VerifyHarness {
@@ -94,6 +96,7 @@ impl VerifyHarness {
             handle,
             output_dir,
             project_root: project_root.to_path_buf(),
+            references: super::verify_reference::ReferenceCache::new(project_root),
         })
     }
 
@@ -134,46 +137,43 @@ impl VerifyHarness {
         Ok(run.captured)
     }
 
-    /// Run a reference tool with the given arguments, its stdout written to
-    /// the file `stdout` (every reference run does this, so none holds its
-    /// stdout in memory and every one reaches the ending classification).
+    /// Run a declared reference run, its stdout at the file `stdout` and its
+    /// outputs at the paths it declares, reusing a cached execution of the
+    /// same run when one matches (`super::verify_reference`). The returned
+    /// outcome is the run's, fresh or replayed; the caller judges it.
     ///
     /// A reference tool killed by `SIGKILL` - which brokkr never sends one;
     /// its own stop is a SIGTERM that comes back as `Interrupted` - is a
     /// [`DevError::VerifyEnvironment`]: the comparison could not be made, and
     /// that says nothing about pbfhogg. The kill is classified before any
     /// capture failure, so a tool that flooded stderr and was then killed is
-    /// still reported as killed.
+    /// still reported as killed. Such a run is never cached.
     ///
     /// Does **not** check the exit status otherwise.
-    pub(crate) fn run_tool(
+    pub(crate) fn reference(
         &self,
-        tool: ExternalTool,
-        args: &[&str],
+        run: &super::verify_reference::ToolRun<'_>,
         stdout: &Path,
     ) -> Result<CapturedOutput, DevError> {
-        let label = format!("{} {}", tool.name(), args.first().copied().unwrap_or(""));
-        let invocation = Invocation::tool(tool, args.iter().map(|&a| a.to_owned()).collect());
-        self.run_reference(&invocation, &label, stdout)
+        self.references.run(self, run, stdout)
     }
 
-    /// [`run_tool`](Self::run_tool) for a reference program that is not a
-    /// `PATH` tool (osmosis, a resolved launcher with its own environment):
-    /// the same file sink, death signal, orphan token and ending
-    /// classification, under the step `label`.
+    /// One reference launch in `cwd`: the file sink, death signal, orphan
+    /// token and ending classification, under the step `label`.
     ///
     /// The death signal reaches the program brokkr spawned. A launcher that
     /// `exec`s its real program (osmosis's start script execs java) passes it
     /// on; helpers it forks first (its preamble's subshells) do not inherit
     /// it, and are left to the orphan reaper.
-    pub(crate) fn run_reference(
+    pub(crate) fn run_reference_in(
         &self,
         invocation: &Invocation<'_>,
         label: &str,
         stdout: &Path,
+        cwd: &Path,
     ) -> Result<CapturedOutput, DevError> {
         let _step = step(label);
-        let run = invocation.run_to_file(&self.project_root, stdout)?;
+        let run = invocation.run_to_file(cwd, stdout)?;
         if let Some(why) = reference_kill(run.captured.signal(), label) {
             return Err(DevError::VerifyEnvironment(why));
         }

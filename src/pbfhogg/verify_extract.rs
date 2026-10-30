@@ -22,7 +22,8 @@ use std::path::Path;
 
 use super::commands::{ExtractStrategy, PbfhoggCommand};
 use super::inspect_report::InspectCounts;
-use super::verify::{ExternalTool, Findings, VerifyHarness};
+use super::verify::{Findings, VerifyHarness};
+use super::verify_reference::ToolRun;
 use super::verify_element_diff::{self as element_diff, PerType};
 use crate::datasets::Bbox;
 use crate::error::DevError;
@@ -43,7 +44,6 @@ pub fn run(
 ) -> Result<Findings, DevError> {
     let outdir = harness.subdir("extract")?;
 
-    let pbf_str = pbf.display().to_string();
     let mut findings = Findings::claiming(CLAIM);
 
     for strategy in ExtractStrategy::all() {
@@ -63,20 +63,13 @@ pub fn run(
 
         // --- osmium extract ---
         let osmium_out = outdir.join(format!("osmium-{strategy_name}.osm.pbf"));
-        let osmium_out_str = osmium_out.display().to_string();
-        let captured = harness.run_tool(
-            ExternalTool::Osmium,
-            &[
-                "extract",
-                &pbf_str,
-                "-b",
-                bbox.as_str(),
-                "-s",
-                strategy.osmium_name(),
-                "-o",
-                &osmium_out_str,
-                "--overwrite",
-            ],
+        let captured = harness.reference(
+            &ToolRun::osmium("extract.1")
+                .arg("extract")
+                .input(pbf)
+                .args(&["-b", bbox.as_str(), "-s", strategy.osmium_name(), "-o"])
+                .output(&osmium_out)
+                .arg("--overwrite"),
             &outdir.join(format!("osmium-{strategy_name}.stdout")),
         )?;
         harness.check_exit(&captured, "osmium extract")?;

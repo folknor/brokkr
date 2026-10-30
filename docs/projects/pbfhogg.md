@@ -90,8 +90,8 @@ the lock and the build registration, re-stats its executable before each
 spawn and exposes no path. The executable the runner hands a plan is guarded by types:
 its path needs a key only the handle can make, and pairing it with argv
 directly is refused for a pbfhogg build. The handle and its invocations
-expose no path, and reference tools run by a closed name set or as
-executables a named resolver produced. The remaining seams that hand out a
+expose no path, and reference tools are a closed set (osmium, osmconvert,
+osmosis) launched by the absolute path their resolver produced. The remaining seams that hand out a
 built path (the build, harness-build and check modules, cargo spawned
 directly, a session's binary) are kept out by two rules in brokkr's own
 `brokkr.toml`, `pbfhogg-executables-through-the-handle` for code and
@@ -310,10 +310,8 @@ tool SIGKILL (its own stop is a SIGTERM that ends as INTERRUPTED), so the
 kill came from outside, commonly the kernel OOM killer on a host too small
 for the reference tool at that scale. osmosis's start script `exec`s java,
 so an OOM-killed JVM ends as that signal too, while a Java
-`OutOfMemoryError` is an ordinary non-zero exit. `run_tool`, and
-`run_reference` for a launcher that is not a `PATH` tool (osmosis with its
-`JAVA_HOME`), raise it as
-`DevError::VerifyEnvironment`, classified from the child's ending before any
+`OutOfMemoryError` is an ordinary non-zero exit. `VerifyHarness::reference`
+raises it as `DevError::VerifyEnvironment`, classified from the child's ending before any
 capture failure, and the check prints `<name>: ENVIRONMENT (<ms>; <steps>):
 <reason>` with its detail replayed. A comparison failure recorded earlier in
 the same check still wins: `Findings::fail` also writes a check-scoped
@@ -399,11 +397,72 @@ verdict: its non-zero exit is taken as an allocation failure on hosts without
 `vm.overcommit_memory=1` and skipped.
 
 **Fresh outputs.** `VerifyHarness::subdir` empties `target/verify/<check>/`
-before handing it back, so every file a check finds there was written by this
-run. Checks rely on that: `verify_merge` treats the diff OSC's existence as
-proof the diff ran. The optional osmosis/osmconvert outputs are printed only
-for a tool whose run succeeded (tracked from the run, not from the file
-existing), and a failed optional tool's partial output is removed.
+before handing it back, so every file a check finds there was written or
+placed by this run. Checks rely on that: `verify_merge` treats the diff OSC's
+existence as proof the diff ran. The optional osmosis/osmconvert outputs are
+printed only for a tool whose run succeeded (tracked from the run, not from
+the file existing), and a failed optional tool's partial output is removed.
+
+**Reference cache.** Every reference run (osmium, osmosis, osmconvert) is a
+declared `ToolRun` - literal arguments, inputs and outputs kept apart - run
+through `VerifyHarness::reference` (`src/pbfhogg/verify_reference.rs`), which
+reuses a completed execution of the same run from `.brokkr/verify-reference/`.
+Only the tool's execution is skipped: every pbfhogg step (inspect, diff, sort
+normalisation, `check --locations`, the element diffs) still runs, against the
+reused reference bytes, and no pbfhogg observation or verdict is cached. The
+contract is reuse of a completed execution of the same declared computation,
+with its artifacts and its exit code; it does not claim a rerun would write the
+same bytes. A hit prints `<tool> <command> (cached)` among the step times and,
+in the detail, the entry's key and stored exit.
+
+- **Key**: the run id, the tool's identity, the controlled environment, each
+  input's content digest and file-name extension (taken from the resolved
+  path, which is what the launch passes), and the argv with inputs and outputs
+  as placeholders. Identity is osmium's or osmconvert's resolved executable,
+  osmium's `--version` and every shared library `ldd` resolves for it; for
+  osmosis, its install tree, its Java runtime tree and the libraries `ldd`
+  resolves for `java` and `libjvm.so`. The probes run in the same controlled
+  environment as the tool. A program whose identity cannot be established runs
+  the same way but is never cached, said once per program.
+- **Launch**: every reference run, cached or not, runs in a fresh staging
+  directory with no inherited user environment - `PATH=/usr/bin:/bin`,
+  `C.UTF-8`, `TZ=UTC`, `HOME` and `TMPDIR` inside staging, and for osmosis
+  `JAVA_HOME` plus `JAVA_OPTS` setting `user.home` and `java.io.tmpdir` inside
+  staging, since osmosis looks for plugins under `user.home` - beside brokkr's
+  own lifecycle variables. Its inputs are reserved for reading and staging for
+  writing. Where the staging path holds characters the osmosis launcher splits
+  (whitespace, quotes, backslashes), osmosis runs without those two properties
+  and is never cached.
+- **Publication**: only a run that exited with an accepted code (0, or 1 for
+  `osmium diff` and `check-refs`), wrote every declared output, and whose key
+  is unchanged when recomputed after the run is published: artifacts made
+  read-only, hashed and stamped, a manifest written, everything synced, and the
+  staging directory renamed into place, an older entry renamed aside first. A
+  signalled, interrupted or failed run is never stored. A storage failure is a
+  warning; the run's result is still used.
+- **Placement**: a check never receives a cache path. Each artifact is
+  hard-linked into the check's own directory under a name that must not exist
+  (copied through a temporary name across filesystems), so the check owns its
+  names as it owns a fresh output, inspect reports land beside them, and
+  removing or replacing an entry never takes a file from a live check. Nothing
+  writes a reference artifact in place.
+- **Integrity**: a lookup rechecks the stored exit against today's accepted
+  codes and the artifact set against the run's, and compares each artifact's
+  stamp (device, inode, size, mtime); a moved stamp is rehashed against the
+  digest recorded at publication. ctime is not in the stamp, since placing a
+  link moves it. This catches a replaced or rewritten artifact whose stamp
+  moved, not an mtime-preserving rewrite or silent media corruption. An
+  invalid entry is removed and the run is a miss.
+- **Outside the identity**, so able to change a run without a miss: system
+  utilities a launcher script runs from the fixed `PATH`, libraries loaded at
+  run time outside the `ldd` closure, symlink referents inside a hashed tree,
+  and an input or tool changed while a run is in flight by something other than
+  a cooperating brokkr process.
+- `brokkr verify --fresh-reference` runs every reference tool for real and
+  replaces its entry. `brokkr clean` removes the whole cache by hand only,
+  never in the cleanup after an interrupted command. Nothing evicts entries
+  otherwise; a hit refreshes its manifest's mtime, the recency a future
+  retention policy will read.
 
 **`verify all` inputs.** The OSC- and bbox-consuming checks skip only when
 the input is not configured at all (no `--osc-seq` and no OSC registered for

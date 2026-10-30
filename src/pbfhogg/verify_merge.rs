@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use super::verify::{self, ExternalTool, Findings, PbfArgv, VerifyHarness};
 use super::verify_element_diff::{self as element_diff, PerType};
+use super::verify_reference::{Program, ToolRun};
 use crate::error::DevError;
-use crate::measure::Invocation;
 use crate::osc::{self, OscAction, OscKind};
 use crate::output;
 use crate::output::verify_msg;
@@ -41,9 +41,6 @@ pub fn run(
         verify_msg("  mode: --locations-on-ways");
     }
 
-    let pbf_str = pbf.display().to_string();
-    let osc_str = osc.display().to_string();
-
     // --- pbfhogg apply-changes ---
     let pbfhogg_out = outdir.join("pbfhogg.osm.pbf");
 
@@ -59,32 +56,26 @@ pub fn run(
 
     // --- osmium apply-changes ---
     let osmium_out = outdir.join("osmium.osm.pbf");
-    let osmium_out_str = osmium_out.display().to_string();
 
     verify_msg("--- osmium apply-changes ---");
-    let mut osmium_args = vec![
-        "apply-changes",
-        &pbf_str,
-        &osc_str,
-        "-o",
-        &osmium_out_str,
-        "--overwrite",
-    ];
+    let mut osmium_run = ToolRun::osmium("apply-changes.1")
+        .arg("apply-changes")
+        .input(pbf)
+        .input(osc)
+        .arg("-o")
+        .output(&osmium_out)
+        .arg("--overwrite");
     if locations_on_ways {
-        osmium_args.push("--locations-on-ways");
+        osmium_run = osmium_run.arg("--locations-on-ways");
     }
-    let captured = harness.run_tool(
-        ExternalTool::Osmium,
-        &osmium_args,
-        &outdir.join("osmium.stdout"),
-    )?;
+    let captured = harness.reference(&osmium_run, &outdir.join("osmium.stdout"))?;
     harness.check_exit(&captured, "osmium apply-changes")?;
 
     // --- osmosis / osmconvert (optional context) ---
     let context_outputs = if locations_on_ways {
         Vec::new()
     } else {
-        run_context_tools(harness, osmosis, &pbf_str, &osc_str, &outdir)?
+        run_context_tools(harness, osmosis, pbf, osc, &outdir)?
     };
 
     // --- Element counts ---
@@ -193,29 +184,22 @@ fn print_report_head(report: &str) {
 fn run_context_tools(
     harness: &VerifyHarness,
     osmosis: Option<&OsmosisTools>,
-    pbf_str: &str,
-    osc_str: &str,
+    pbf: &Path,
+    osc: &Path,
     outdir: &Path,
 ) -> Result<Vec<(&'static str, PathBuf)>, DevError> {
     let mut produced = Vec::new();
     let osmosis_out = outdir.join("osmosis.osm.pbf");
     if let Some(tools) = osmosis {
         verify_msg("--- osmosis --apply-change ---");
-        let osmosis_out_str = osmosis_out.display().to_string();
-        match run_osmosis(
-            harness,
-            tools,
-            &[
-                "--read-xml-change",
-                &format!("file={osc_str}"),
-                "--read-pbf",
-                &format!("file={pbf_str}"),
-                "--apply-change",
-                "--write-pbf",
-                &format!("file={osmosis_out_str}"),
-            ],
-            &outdir.join("osmosis.stdout"),
-        ) {
+        let run = ToolRun::new("apply-changes-osmosis.1", Program::Osmosis(tools))
+            .arg("--read-xml-change")
+            .input_as("file=", osc)
+            .arg("--read-pbf")
+            .input_as("file=", pbf)
+            .args(&["--apply-change", "--write-pbf"])
+            .output_as("file=", &osmosis_out);
+        match harness.reference(&run, &outdir.join("osmosis.stdout")) {
             Ok(captured) => match harness.check_exit(&captured, "osmosis") {
                 Ok(()) => produced.push(("osmosis", osmosis_out)),
                 Err(e) => {
@@ -242,13 +226,14 @@ fn run_context_tools(
     let osmconvert_out = outdir.join("osmconvert.osm.pbf");
     if verify::which_exists("osmconvert") {
         verify_msg("--- osmconvert ---");
-        let osmconvert_out_str = osmconvert_out.display().to_string();
-        let out_arg = format!("-o={osmconvert_out_str}");
-        match harness.run_tool(
-            ExternalTool::Osmconvert,
-            &[pbf_str, osc_str, &out_arg],
-            &outdir.join("osmconvert.stdout"),
-        ) {
+        let run = ToolRun::new(
+            "apply-changes-osmconvert.1",
+            Program::Tool(ExternalTool::Osmconvert),
+        )
+        .input(pbf)
+        .input(osc)
+        .output_as("-o=", &osmconvert_out);
+        match harness.reference(&run, &outdir.join("osmconvert.stdout")) {
             Ok(captured) => match harness.check_exit(&captured, "osmconvert") {
                 Ok(()) => produced.push(("osmconvert", osmconvert_out)),
                 Err(e) => {
@@ -432,21 +417,6 @@ impl MergeDiffReport {
         fail("pbfhogg-only (osmium dropped)", &self.pbfhogg_only);
         fail("content differs", &self.content_mismatch);
     }
-}
-
-/// Run osmosis with `JAVA_HOME` set through the reference-run path, its stdout
-/// written to `stdout` (see [`VerifyHarness::run_reference`]).
-fn run_osmosis(
-    harness: &VerifyHarness,
-    tools: &OsmosisTools,
-    args: &[&str],
-    stdout: &Path,
-) -> Result<output::CapturedOutput, DevError> {
-    let osmosis = tools.osmosis_executable();
-    let java_home = tools.java_home.display().to_string();
-    let invocation = Invocation::resolved(&osmosis, args.iter().map(|&a| a.to_owned()).collect())
-        .with_env("JAVA_HOME", &java_home);
-    harness.run_reference(&invocation, "osmosis", stdout)
 }
 
 #[cfg(test)]

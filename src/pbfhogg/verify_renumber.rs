@@ -16,7 +16,8 @@
 use std::fs;
 use std::path::Path;
 
-use super::verify::{ExternalTool, Findings, PbfArgv, VerifyHarness};
+use super::verify::{Findings, PbfArgv, VerifyHarness};
+use super::verify_reference::ToolRun;
 use crate::error::DevError;
 use crate::output::verify_msg;
 
@@ -174,26 +175,22 @@ pub fn run(
         verify_msg(&format!("  start-id: {sid}"));
     }
 
-    let pbf_str = pbf.display().to_string();
-
     // --- Output paths ---------------------------------------------------
     let osmium_out = outdir.join(format!("osmium-renumber-{dataset}.osm.pbf"));
     let pbfhogg_out = outdir.join(format!("pbfhogg-renumber-{dataset}.osm.pbf"));
     let diff_log = outdir.join(format!("verify-renumber-{dataset}-diff.txt"));
-    let osmium_out_str = osmium_out.display().to_string();
 
     // --- osmium renumber ------------------------------------------------
-    let mut osmium_args: Vec<&str> =
-        vec!["renumber", &pbf_str, "-o", &osmium_out_str, "--overwrite"];
+    let mut osmium_run = ToolRun::osmium("renumber.1")
+        .arg("renumber")
+        .input(pbf)
+        .arg("-o")
+        .output(&osmium_out)
+        .arg("--overwrite");
     if let Some(sid) = start_id {
-        osmium_args.push("--start-id");
-        osmium_args.push(sid);
+        osmium_run = osmium_run.args(&["--start-id", sid]);
     }
-    let captured = harness.run_tool(
-        ExternalTool::Osmium,
-        &osmium_args,
-        &outdir.join("osmium-renumber.stdout"),
-    )?;
+    let captured = harness.reference(&osmium_run, &outdir.join("osmium-renumber.stdout"))?;
     harness.check_exit(&captured, "osmium renumber")?;
     let osmium_elapsed = captured.elapsed;
     let osmium_size = fs::metadata(&osmium_out).map(|m| m.len()).unwrap_or(0);

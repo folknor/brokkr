@@ -2,7 +2,8 @@
 
 use std::path::Path;
 
-use super::verify::{ExternalTool, Findings, PbfArgv, VerifyHarness};
+use super::verify::{Findings, PbfArgv, VerifyHarness};
+use super::verify_reference::ToolRun;
 use crate::error::DevError;
 use crate::output::verify_msg;
 
@@ -10,7 +11,6 @@ use crate::output::verify_msg;
 pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findings, DevError> {
     let outdir = harness.subdir("cat")?;
 
-    let pbf_str = pbf.display().to_string();
     let mut findings = Findings::new();
 
     for elem_type in &["node", "way", "relation"] {
@@ -31,19 +31,14 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
 
         // --- osmium cat ---
         let osmium_out = outdir.join(format!("osmium-{elem_type}.osm.pbf"));
-        let osmium_out_str = osmium_out.display().to_string();
 
-        let captured = harness.run_tool(
-            ExternalTool::Osmium,
-            &[
-                "cat",
-                &pbf_str,
-                "-t",
-                elem_type,
-                "-o",
-                &osmium_out_str,
-                "--overwrite",
-            ],
+        let captured = harness.reference(
+            &ToolRun::osmium("cat.1")
+                .arg("cat")
+                .input(pbf)
+                .args(&["-t", elem_type, "-o"])
+                .output(&osmium_out)
+                .arg("--overwrite"),
             &outdir.join(format!("osmium-{elem_type}.stdout")),
         )?;
         harness.check_exit(&captured, "osmium cat")?;

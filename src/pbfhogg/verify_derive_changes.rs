@@ -2,7 +2,8 @@
 
 use std::path::Path;
 
-use super::verify::{ExternalTool, Findings, PbfArgv, Verdict, VerifyHarness};
+use super::verify::{Findings, PbfArgv, Verdict, VerifyHarness};
+use super::verify_reference::ToolRun;
 use crate::error::DevError;
 use crate::osc;
 use crate::output::verify_msg;
@@ -41,11 +42,8 @@ pub fn run(
         crate::output::path(osc)
     ));
 
-    let pbf_str = pbf.display().to_string();
-
     // Step 1: Create "new" PBF by applying the OSC.
     let new_pbf = outdir.join("new.osm.pbf");
-    let new_pbf_str = new_pbf.display().to_string();
 
     verify_msg("--- creating 'new' PBF via apply-changes ---");
     let captured = harness.run_pbfhogg(
@@ -67,19 +65,16 @@ pub fn run(
     captured.check_success_or("pbfhogg diff --format osc", &[1])?;
 
     let osmium_osc = outdir.join("osmium.osc.gz");
-    let osmium_osc_str = osmium_osc.display().to_string();
 
     verify_msg("--- osmium derive-changes ---");
-    let captured = harness.run_tool(
-        ExternalTool::Osmium,
-        &[
-            "derive-changes",
-            &pbf_str,
-            &new_pbf_str,
-            "-o",
-            &osmium_osc_str,
-            "--overwrite",
-        ],
+    let captured = harness.reference(
+        &ToolRun::osmium("derive-changes.1")
+            .arg("derive-changes")
+            .input(pbf)
+            .input(&new_pbf)
+            .arg("-o")
+            .output(&osmium_osc)
+            .arg("--overwrite"),
         &outdir.join("osmium-derive-changes.stdout"),
     )?;
     harness.check_exit(&captured, "osmium derive-changes")?;
@@ -107,19 +102,16 @@ pub fn run(
     harness.check_exit(&captured, "pbfhogg apply-changes (roundtrip)")?;
 
     let rt_osmium = outdir.join("roundtrip-osmium.osm.pbf");
-    let rt_osmium_str = rt_osmium.display().to_string();
 
     verify_msg("--- roundtrip: apply osmium OSC ---");
-    let captured = harness.run_tool(
-        ExternalTool::Osmium,
-        &[
-            "apply-changes",
-            &pbf_str,
-            &osmium_osc_str,
-            "-o",
-            &rt_osmium_str,
-            "--overwrite",
-        ],
+    let captured = harness.reference(
+        &ToolRun::osmium("derive-changes-roundtrip.1")
+            .arg("apply-changes")
+            .input(pbf)
+            .input(&osmium_osc)
+            .arg("-o")
+            .output(&rt_osmium)
+            .arg("--overwrite"),
         &outdir.join("osmium-roundtrip.stdout"),
     )?;
     harness.check_exit(&captured, "osmium apply-changes (roundtrip)")?;

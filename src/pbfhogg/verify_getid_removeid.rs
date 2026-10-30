@@ -3,7 +3,8 @@
 use std::path::Path;
 
 use super::pbf_frames::{self, IndexSummary};
-use super::verify::{ExternalTool, Findings, PbfArgv, Verdict, VerifyHarness};
+use super::verify::{Findings, PbfArgv, Verdict, VerifyHarness};
+use super::verify_reference::ToolRun;
 use super::verify_multi_extract::{Counts, inspect_counts};
 use crate::error::DevError;
 use crate::output::verify_msg;
@@ -58,7 +59,6 @@ fn selection_verdicts(ids: &[Vec<i64>; 3], selected: Counts) -> [(&'static str, 
 #[allow(clippy::too_many_lines)]
 pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findings, DevError> {
     let outdir = harness.subdir("getid-removeid")?;
-    let pbf_str = pbf.display().to_string();
 
     verify_msg("--- getid: choosing IDs from the input's indexdata ---");
     let summary = {
@@ -114,15 +114,15 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
 
     // osmium getid <pbf> <ids...> -o <out> --overwrite
     let osmium_getid = outdir.join("osmium-getid.osm.pbf");
-    let osmium_getid_str = osmium_getid.display().to_string();
-    let mut osmium_args: Vec<&str> = vec!["getid", &pbf_str];
-    osmium_args.extend(requested.iter().map(String::as_str));
-    osmium_args.extend_from_slice(&["-o", &osmium_getid_str, "--overwrite"]);
-    let captured = harness.run_tool(
-        ExternalTool::Osmium,
-        &osmium_args,
-        &outdir.join("osmium-getid.stdout"),
-    )?;
+    let mut osmium_run = ToolRun::osmium("getid.1").arg("getid").input(pbf);
+    for id in &requested {
+        osmium_run = osmium_run.arg(id.as_str());
+    }
+    let osmium_run = osmium_run
+        .arg("-o")
+        .output(&osmium_getid)
+        .arg("--overwrite");
+    let captured = harness.reference(&osmium_run, &outdir.join("osmium-getid.stdout"))?;
     harness.check_exit(&captured, "osmium getid")?;
 
     // Print inspect output for both getid outputs.

@@ -3,7 +3,8 @@
 use std::fs;
 use std::path::Path;
 
-use super::verify::{ExternalTool, Findings, PbfArgv, Verdict, VerifyHarness};
+use super::verify::{Findings, PbfArgv, Verdict, VerifyHarness};
+use super::verify_reference::ToolRun;
 use super::verify_stream;
 use crate::error::DevError;
 use crate::output::verify_msg;
@@ -33,11 +34,8 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<Findings, 
         crate::output::path(osc)
     ));
 
-    let pbf_str = pbf.display().to_string();
-
     // Create "new" PBF by applying the OSC.
     let new_pbf = outdir.join("new.osm.pbf");
-    let new_pbf_str = new_pbf.display().to_string();
 
     verify_msg("--- creating 'new' PBF via apply-changes ---");
     let captured = harness.run_pbfhogg(
@@ -68,15 +66,13 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<Findings, 
     // denmark against pbfhogg's changes-only output). `--summary` prints its
     // stats on stderr, which we capture separately below.
     let osmium_listing = outdir.join("osmium-diff.txt");
-    let captured = harness.run_tool(
-        ExternalTool::Osmium,
-        &[
-            "diff",
-            "--suppress-common",
-            &pbf_str,
-            &new_pbf_str,
-            "--summary",
-        ],
+    let captured = harness.reference(
+        &ToolRun::osmium("diff.1")
+            .args(&["diff", "--suppress-common"])
+            .input(pbf)
+            .input(&new_pbf)
+            .arg("--summary")
+            .accept(&[1]),
         &osmium_listing,
     )?;
     // osmium diff exits 1 when the inputs differ; anything else means its

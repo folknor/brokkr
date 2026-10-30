@@ -119,7 +119,10 @@ Bare `brokkr clean`, in order:
   `.brokkr/dellingr/`, `.brokkr/mogwai/`, `.brokkr/test-hung/`, and, for
   litehtml, `.brokkr/prepare-cache/`. `.brokkr/artifacts/` (the `brokkr build`
   snapshots) goes only in a clean run by hand, never in the cleanup after an
-  interrupted command, since a script may still be running one. A per-user
+  interrupted command, since a script may still be running one. So does
+  pbfhogg's `.brokkr/verify-reference/` (the verify reference cache, see
+  "Reference cache" in `docs/projects/pbfhogg.md`), through the reservation
+  gate, since it is what spares the next verify its reference runs. A per-user
   `~/.brokkr/sidecar-status` file an older brokkr left (the last marker now
   lives in the holder's memory) is removed with the project scratch.
   Other directories under `.brokkr/ratatoskr/` are preserved. Hung-test snapshots

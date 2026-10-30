@@ -14,7 +14,8 @@
 use std::fs;
 use std::path::Path;
 
-use super::verify::{ExternalTool, Findings, PbfArgv, Verdict, VerifyHarness};
+use super::verify::{Findings, PbfArgv, Verdict, VerifyHarness};
+use super::verify_reference::ToolRun;
 use crate::error::DevError;
 use crate::output::verify_msg;
 
@@ -168,7 +169,7 @@ fn parse_osmium(text: &str) -> CheckRefCounts {
 /// One side of the comparison and what it runs.
 enum Side<'a> {
     Pbfhogg(PbfArgv),
-    Osmium(&'a [&'a str]),
+    Osmium(ToolRun<'a>),
 }
 
 /// Largest osmium check-refs report accepted: it prints a handful of count
@@ -191,9 +192,9 @@ fn capture_and_log(
         }
         // A reference run writes its stdout to a file; check-refs without
         // --show-ids prints counts only, so its report is read whole.
-        Side::Osmium(args) => {
+        Side::Osmium(run) => {
             let sink = out_file.with_extension("stdout");
-            let captured = harness.run_tool(ExternalTool::Osmium, args, &sink)?;
+            let captured = harness.reference(&run, &sink)?;
             let stdout = super::verify_stream::read_bounded(&sink, REPORT_CAP)?;
             (captured, stdout)
         }
@@ -218,8 +219,6 @@ fn capture_and_log(
 pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findings, DevError> {
     let mut findings = Findings::new();
     let outdir = harness.subdir("check-refs")?;
-    let pbf_str = pbf.display().to_string();
-
     // --- Ways only ---
     verify_msg("--- check --refs (ways only) ---");
     let pbf_ways_args = PbfArgv::new("check")
@@ -234,7 +233,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
     )?;
     let osmium_text = capture_and_log(
         harness,
-        Side::Osmium(&["check-refs", &pbf_str]),
+        Side::Osmium(ToolRun::osmium("check-refs.1").arg("check-refs").input(pbf).accept(&[1])),
         &outdir.join("osmium-ways.txt"),
         "osmium (ways only)",
     )?;
@@ -266,7 +265,12 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
     )?;
     let osmium_text = capture_and_log(
         harness,
-        Side::Osmium(&["check-refs", "-r", &pbf_str]),
+        Side::Osmium(
+            ToolRun::osmium("check-refs.1")
+                .args(&["check-refs", "-r"])
+                .input(pbf)
+                .accept(&[1]),
+        ),
         &outdir.join("osmium-all.txt"),
         "osmium (with relations)",
     )?;

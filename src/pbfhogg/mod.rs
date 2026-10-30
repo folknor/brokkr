@@ -28,6 +28,7 @@ pub mod verify_extract;
 pub mod verify_getid_removeid;
 pub mod verify_merge;
 pub mod verify_multi_extract;
+pub(crate) mod verify_reference;
 pub mod verify_renumber;
 pub mod verify_sort;
 pub(crate) mod verify_stream;

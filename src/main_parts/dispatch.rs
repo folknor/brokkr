@@ -1019,10 +1019,12 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
         Command::Verify {
             verbose,
             commit,
+            fresh_reference,
             verify,
         } => {
             let features = resolve_features(dev_config, &[]);
             output::set_quiet(!verbose);
+            crate::pbfhogg::verify_reference::set_fresh(fresh_reference);
             // `verify pmtiles` only reads an archive, with the current binary,
             // so it belongs to the resolver family (pmtiles-inspect/diag/svg/
             // regress) rather than to the pbfhogg cross-validators: no

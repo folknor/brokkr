@@ -102,6 +102,9 @@ pub(crate) struct Invocation<'a> {
     /// What each launch reserves (`crate::reservations`); `None` runs the
     /// argv as given.
     spec: Option<crate::reservations::LaunchSpec>,
+    /// The child inherits no user environment, only `env` and brokkr's own
+    /// lifecycle variables ([`isolated_env`](Self::isolated_env)).
+    isolated: bool,
 }
 
 impl<'a> Invocation<'a> {
@@ -111,7 +114,16 @@ impl<'a> Invocation<'a> {
             args,
             env: Vec::new(),
             spec: None,
+            isolated: false,
         }
+    }
+
+    /// Drop the inherited environment: the child sees only the variables
+    /// added with [`with_env`](Self::with_env) and brokkr's own lifecycle
+    /// variables. Honoured by [`run_to_file`](Self::run_to_file).
+    pub(crate) fn isolated_env(mut self) -> Self {
+        self.isolated = true;
+        self
     }
 
     /// An invocation each of whose launches reserves `spec`. Its argv may
@@ -239,7 +251,11 @@ impl<'a> Invocation<'a> {
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
-        let run = output::run_stdout_to_file(&program, &args, cwd, &env, sink);
+        let run = if self.isolated {
+            output::child::run_stdout_to_file_isolated(&program, &args, cwd, &env, sink)
+        } else {
+            output::run_stdout_to_file(&program, &args, cwd, &env, sink)
+        };
         let finished = launched.finish();
         let run = match run {
             Ok(run) => run,

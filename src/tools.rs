@@ -89,14 +89,6 @@ impl PlanetilerTools {
     }
 }
 
-impl OsmosisTools {
-    /// The resolved Osmosis launcher, for code that may only spawn resolved
-    /// executables. Run it with `JAVA_HOME` set to [`Self::java_home`].
-    pub(crate) fn osmosis_executable(&self) -> crate::measure::ResolvedExecutable {
-        crate::measure::ResolvedExecutable::new(self.osmosis.clone())
-    }
-}
-
 pub struct TilemakerTools {
     pub tilemaker: PathBuf,
     pub config: PathBuf,

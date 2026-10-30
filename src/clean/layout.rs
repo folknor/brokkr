@@ -98,6 +98,12 @@ impl ProjectState {
         self.root.join("pbfhogg-capabilities")
     }
 
+    /// `brokkr verify`'s reference cache: one directory per execution key,
+    /// holding a manifest and the reference run's artifacts.
+    pub(crate) fn verify_reference_dir(&self) -> PathBuf {
+        self.root.join("verify-reference")
+    }
+
     /// `brokkr library --all`'s certification records, one JSON document
     /// each, `<uuid>.json`. A result, never cleaned.
     pub(crate) fn library_certifications(&self) -> PathBuf {

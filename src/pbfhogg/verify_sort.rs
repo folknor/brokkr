@@ -2,7 +2,8 @@
 
 use std::path::Path;
 
-use super::verify::{ExternalTool, Findings, PbfArgv, VerifyHarness};
+use super::verify::{Findings, PbfArgv, VerifyHarness};
+use super::verify_reference::ToolRun;
 use crate::error::DevError;
 use crate::output::verify_msg;
 
@@ -13,7 +14,6 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
     verify_msg("=== verify sort ===");
 
     // --- pbfhogg sort ---
-    let pbf_str = pbf.display().to_string();
     let pbfhogg_out = outdir.join("pbfhogg.osm.pbf");
 
     let captured = harness.run_pbfhogg(
@@ -26,11 +26,14 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
 
     // --- osmium sort ---
     let osmium_out = outdir.join("osmium.osm.pbf");
-    let osmium_out_str = osmium_out.display().to_string();
 
-    let captured = harness.run_tool(
-        ExternalTool::Osmium,
-        &["sort", &pbf_str, "-o", &osmium_out_str, "--overwrite"],
+    let captured = harness.reference(
+        &ToolRun::osmium("sort.1")
+            .arg("sort")
+            .input(pbf)
+            .arg("-o")
+            .output(&osmium_out)
+            .arg("--overwrite"),
         &outdir.join("osmium.stdout"),
     )?;
     harness.check_exit(&captured, "osmium sort")?;

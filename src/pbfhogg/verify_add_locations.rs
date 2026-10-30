@@ -2,7 +2,8 @@
 
 use std::path::Path;
 
-use super::verify::{ExternalTool, Findings, Verdict, VerifyHarness};
+use super::verify::{Findings, Verdict, VerifyHarness};
+use super::verify_reference::ToolRun;
 use crate::cli::AltwMode;
 use crate::error::DevError;
 use crate::output::{CapturedOutput, verify_msg};
@@ -31,17 +32,13 @@ pub fn run(
     // untagged relation-member nodes (a documented deviation in pbfhogg's
     // DEVIATIONS.md); osmium does so only with --keep-member-nodes.
     let osmium_out = outdir.join("osmium.osm.pbf");
-    let osmium_out_str = osmium_out.display().to_string();
-    let captured = harness.run_tool(
-        ExternalTool::Osmium,
-        &[
-            "add-locations-to-ways",
-            "--keep-member-nodes",
-            &pbf_str,
-            "-o",
-            &osmium_out_str,
-            "--overwrite",
-        ],
+    let captured = harness.reference(
+        &ToolRun::osmium("add-locations-to-ways.1")
+            .args(&["add-locations-to-ways", "--keep-member-nodes"])
+            .input(pbf)
+            .arg("-o")
+            .output(&osmium_out)
+            .arg("--overwrite"),
         &outdir.join("osmium.stdout"),
     )?;
     harness.check_exit(&captured, "osmium add-locations-to-ways")?;

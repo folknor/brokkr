@@ -1780,6 +1780,11 @@ Examples:
         #[arg(long)]
         commit: Option<String>,
 
+        /// Run every reference tool for real instead of reusing a cached
+        /// execution, and replace the cache entry with the new run.
+        #[arg(long)]
+        fresh_reference: bool,
+
         #[command(subcommand)]
         verify: VerifyCommand,
     },
