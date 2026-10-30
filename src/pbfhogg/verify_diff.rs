@@ -54,7 +54,8 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<Findings, 
     let pbfhogg_listing = outdir.join("pbfhogg-diff.txt");
     let captured_indexed =
         harness.run_pbfhogg_to(text_diff(harness, pbf, &new_pbf)?, &pbfhogg_listing)?;
-    captured_indexed.check_success_or("pbfhogg diff", &[1])?;
+    captured_indexed
+        .check_success_or("pbfhogg diff", crate::output::child::Exits::answer(&[0, 1]))?;
 
     fs::write(outdir.join("pbfhogg-summary.txt"), &captured_indexed.stderr)?;
     let pbfhogg_summary = String::from_utf8_lossy(&captured_indexed.stderr);
@@ -77,7 +78,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<Findings, 
     )?;
     // osmium diff exits 1 when the inputs differ; anything else means its
     // summary cannot be trusted, however complete it looks.
-    captured.check_success_or("osmium diff", &[1])?;
+    captured.check_success_or("osmium diff", crate::output::child::Exits::answer(&[0, 1]))?;
 
     fs::write(outdir.join("osmium-summary.txt"), &captured.stderr)?;
     let osmium_summary = String::from_utf8_lossy(&captured.stderr);
@@ -152,7 +153,10 @@ fn unindexed_diff_matches(
     verify_msg("--- pbfhogg diff (unindexed inputs) ---");
     let raw_listing = outdir.join("pbfhogg-unindexed-diff.txt");
     let captured = harness.run_pbfhogg_to(text_diff(harness, &old_raw, &new_raw)?, &raw_listing)?;
-    captured.check_success_or("pbfhogg diff (unindexed inputs)", &[1])?;
+    captured.check_success_or(
+        "pbfhogg diff (unindexed inputs)",
+        crate::output::child::Exits::answer(&[0, 1]),
+    )?;
     fs::write(
         outdir.join("pbfhogg-unindexed-summary.txt"),
         &captured.stderr,

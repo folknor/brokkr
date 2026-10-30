@@ -62,7 +62,10 @@ pub fn run(
     let captured = harness.run_pbfhogg(osc_diff(&outdir, pbf, &new_pbf, &pbfhogg_osc)?)?;
     // Like a text diff, it exits 1 when the inputs differ - the normal case
     // here - and still writes its OSC; 2 and above are real failures.
-    captured.check_success_or("pbfhogg diff --format osc", &[1])?;
+    captured.check_success_or(
+        "pbfhogg diff --format osc",
+        crate::output::child::Exits::answer(&[0, 1]),
+    )?;
 
     let osmium_osc = outdir.join("osmium.osc.gz");
 
@@ -209,7 +212,10 @@ fn unindexed_osc_matches(
     let raw_osc = outdir.join("pbfhogg-unindexed.osc.gz");
     verify_msg("--- pbfhogg diff --format osc (unindexed inputs) ---");
     let captured = harness.run_pbfhogg(osc_diff(outdir, &old_raw, &new_raw, &raw_osc)?)?;
-    captured.check_success_or("pbfhogg diff --format osc (unindexed inputs)", &[1])?;
+    captured.check_success_or(
+        "pbfhogg diff --format osc (unindexed inputs)",
+        crate::output::child::Exits::answer(&[0, 1]),
+    )?;
 
     verify_msg("=== diff: unindexed OSC vs indexed OSC ===");
     match osc::first_content_difference(&raw_osc, indexed_osc)? {

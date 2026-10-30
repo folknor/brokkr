@@ -248,6 +248,32 @@ impl DatasetToml {
         )
     }
 
+    /// `[..expect.diff-snapshots]` entry for `pair`, replacing any spelling
+    /// of the same pair already there, so the table never names it twice.
+    pub(super) fn set_pair_expect(
+        &mut self,
+        pair: crate::config::DigestPair,
+        verdict: crate::config::DiffVerdict,
+    ) -> Result<(), DevError> {
+        let label = self.label(&["expect", "diff-snapshots"]);
+        let table = self.table_mut(&["expect", "diff-snapshots"])?;
+        table.set_implicit(false);
+        let stale: Vec<String> = table
+            .iter()
+            .filter(|(key, _)| key.parse::<crate::config::DigestPair>().ok() == Some(pair))
+            .map(|(key, _)| key.to_owned())
+            .collect();
+        for key in stale {
+            table.remove(&key);
+        }
+        table.insert(&pair.to_string(), toml_edit::value(verdict.as_str()));
+        self.changes.push(format!(
+            "recorded {label} \"{pair}\" = \"{}\"",
+            verdict.as_str()
+        ));
+        Ok(())
+    }
+
     /// Drop `[..snapshot.<key>]` and every sub-table under it.
     pub(super) fn remove_snapshot(&mut self, snap_key: &str) -> Result<(), DevError> {
         let label = self.label(&["snapshot", snap_key]);

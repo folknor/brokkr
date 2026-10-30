@@ -189,7 +189,7 @@ fn run_one(
                     &args,
                     req.project_root.as_path(),
                     &[],
-                    &[],
+                    crate::output::child::Exits::SUCCESS,
                     fifo,
                     i,
                     None,

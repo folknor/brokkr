@@ -563,7 +563,12 @@ impl BenchHarness {
         invocation: &Invocation<'_>,
         cwd: &Path,
     ) -> Result<BenchResult, DevError> {
-        self.run_external_ok(config, invocation, cwd, &[])
+        self.run_external_ok(
+            config,
+            invocation,
+            cwd,
+            crate::output::child::Exits::SUCCESS,
+        )
     }
 
     pub(crate) fn run_external_ok(
@@ -571,9 +576,9 @@ impl BenchHarness {
         config: &BenchConfig,
         invocation: &Invocation<'_>,
         cwd: &Path,
-        ok_codes: &[i32],
+        exits: crate::output::child::Exits,
     ) -> Result<BenchResult, DevError> {
-        self.run_external_prepared(config, invocation, cwd, ok_codes, || Ok(()))
+        self.run_external_prepared(config, invocation, cwd, exits, || Ok(()))
     }
 
     pub(crate) fn run_external_prepared<F>(
@@ -581,7 +586,7 @@ impl BenchHarness {
         config: &BenchConfig,
         invocation: &Invocation<'_>,
         cwd: &Path,
-        ok_codes: &[i32],
+        exits: crate::output::child::Exits,
         prepare: F,
     ) -> Result<BenchResult, DevError>
     where
@@ -593,7 +598,7 @@ impl BenchHarness {
             &config,
             invocation,
             cwd,
-            ok_codes,
+            exits,
             WallSource::External,
             prepare,
         )?;
@@ -607,7 +612,7 @@ impl BenchHarness {
         config: &BenchConfig,
         invocation: &Invocation<'_>,
         cwd: &Path,
-        ok_codes: &[i32],
+        exits: crate::output::child::Exits,
         source: WallSource,
         prepare: F,
     ) -> Result<Measurement, DevError>
@@ -623,7 +628,7 @@ impl BenchHarness {
                 &launched.arg_refs(),
                 cwd,
                 &[],
-                ok_codes,
+                exits,
                 fifo.expect("external loop owns a FIFO"),
                 i,
                 None,
@@ -676,7 +681,7 @@ impl BenchHarness {
             &config,
             invocation,
             cwd,
-            &[],
+            crate::output::child::Exits::SUCCESS,
             WallSource::SelfReported,
             || Ok(()),
         )?;
@@ -691,7 +696,7 @@ impl BenchHarness {
         program: &Path,
         args: &[&str],
         cwd: &Path,
-        ok_codes: &[i32],
+        exits: crate::output::child::Exits,
         source: WallSource,
         prepare: F,
     ) -> Result<Measurement, DevError>
@@ -705,7 +710,7 @@ impl BenchHarness {
                 args,
                 cwd,
                 &[],
-                ok_codes,
+                exits,
                 fifo.expect("external loop owns a FIFO"),
                 i,
                 None,

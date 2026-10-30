@@ -83,6 +83,48 @@ impl Ending {
     }
 }
 
+/// The exits a run counts as completed, and whether its exit status is its
+/// answer. An ordinary command completes on 0 alone; an answer command
+/// (pbfhogg's `diff` finding differences, `check` finding violations)
+/// completes on the answers it may give, which can exclude 0 when the input
+/// is expected to answer no, and records which one it gave.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Exits {
+    codes: &'static [i32],
+    answer: bool,
+}
+
+impl Exits {
+    /// Exit 0 only, and the exit is not an answer.
+    pub const SUCCESS: Self = Self {
+        codes: &[0],
+        answer: false,
+    };
+
+    /// An answer command completing on exactly `codes`. Empty means no
+    /// exit completes it.
+    pub const fn answer(codes: &'static [i32]) -> Self {
+        Self {
+            codes,
+            answer: true,
+        }
+    }
+
+    pub fn accepts(self, code: i32) -> bool {
+        self.codes.contains(&code)
+    }
+
+    /// Whether the exit status is the command's answer, recorded on its row.
+    pub fn is_answer(self) -> bool {
+        self.answer
+    }
+
+    #[cfg(test)]
+    pub fn codes(self) -> &'static [i32] {
+        self.codes
+    }
+}
+
 /// The common classification used by measurement loops and captured commands.
 pub enum IterationVerdict {
     Counted,
@@ -92,12 +134,7 @@ pub enum IterationVerdict {
 
 /// Classify an ended child once, retaining its typed ending and captured
 /// stderr in a subprocess failure.
-pub fn verdict(
-    ending: &Ending,
-    program: &str,
-    stderr: &[u8],
-    ok_codes: &[i32],
-) -> IterationVerdict {
+pub fn verdict(ending: &Ending, program: &str, stderr: &[u8], exits: Exits) -> IterationVerdict {
     match ending {
         Ending::Interrupted => IterationVerdict::Interrupted,
         Ending::WaitFailed(message) => IterationVerdict::Failed(DevError::Spawn {
@@ -109,7 +146,7 @@ pub fn verdict(
             failure: crate::error::ChildFailureKind::Deadline(*limit),
         }),
         Ending::StopMarker(_) => IterationVerdict::Counted,
-        Ending::Exited(code) if *code == 0 || ok_codes.contains(code) => IterationVerdict::Counted,
+        Ending::Exited(code) if exits.accepts(*code) => IterationVerdict::Counted,
         Ending::Exited(code) => IterationVerdict::Failed(DevError::Subprocess {
             program: program.to_owned(),
             ending: crate::error::ProcessEnding::Code(*code),
@@ -140,12 +177,13 @@ pub struct PassthroughOutput {
 }
 
 impl PassthroughOutput {
-    /// The exit code to propagate when the child exited non-zero with a code
-    /// not in `ok_codes`. Every other ending a passthrough run returns `Ok`
-    /// for counts as success (signal deaths and interrupts are errors already).
-    pub fn failed_code(&self, ok_codes: &[i32]) -> Option<i32> {
+    /// The exit code of a child that exited with a code `exits` does not
+    /// accept - 0 included, for an answer command expected to answer no.
+    /// Every other ending a passthrough run returns `Ok` for counts as
+    /// success (signal deaths and interrupts are errors already).
+    pub fn failed_code(&self, exits: Exits) -> Option<i32> {
         match self.ending {
-            Ending::Exited(code) if code != 0 && !ok_codes.contains(&code) => Some(code),
+            Ending::Exited(code) if !exits.accepts(code) => Some(code),
             _ => None,
         }
     }
@@ -171,13 +209,13 @@ impl CapturedOutput {
     /// `DevError::Subprocess` for an unsuccessful exit, or `ChildFailure` for
     /// a supervised deadline.
     pub fn check_success(&self, program: &str) -> Result<(), DevError> {
-        self.check_success_or(program, &[])
+        self.check_success_or(program, Exits::SUCCESS)
     }
 
-    /// Like `check_success`, but also treats the given exit codes as success.
+    /// Like `check_success`, but completes on the exits `exits` accepts.
     /// For example, `diff` uses exit 1 to mean "differences found" (not an error).
-    pub fn check_success_or(&self, program: &str, ok_codes: &[i32]) -> Result<(), DevError> {
-        match verdict(&self.ending, program, &self.stderr, ok_codes) {
+    pub fn check_success_or(&self, program: &str, exits: Exits) -> Result<(), DevError> {
+        match verdict(&self.ending, program, &self.stderr, exits) {
             IterationVerdict::Counted => Ok(()),
             IterationVerdict::Failed(error) => Err(error),
             IterationVerdict::Interrupted => Err(DevError::Interrupted),
@@ -1003,7 +1041,7 @@ fn run_captured_limited_unsetting(
     crate::process::spawn::capture_stdio(&mut cmd);
     let child = crate::process::spawn::spawn(cmd, on_spawn)?;
     let run = supervise_child_capped(child, program, start, limit, isolation, options, |_| None);
-    let classification = verdict(&run.ending, program, &run.stderr, &[]);
+    let classification = verdict(&run.ending, program, &run.stderr, Exits::SUCCESS);
     match (&run.ending, classification) {
         (_, IterationVerdict::Interrupted) => return Err(DevError::Interrupted),
         (Ending::WaitFailed(_), IterationVerdict::Failed(error)) => return Err(error),
@@ -1142,7 +1180,10 @@ fn run_command_to_file(
         options,
         |_| None,
     );
-    match (&run.ending, verdict(&run.ending, program, &run.stderr, &[])) {
+    match (
+        &run.ending,
+        verdict(&run.ending, program, &run.stderr, Exits::SUCCESS),
+    ) {
         (_, IterationVerdict::Interrupted) => return Err(DevError::Interrupted),
         (Ending::WaitFailed(_), IterationVerdict::Failed(error)) => return Err(error),
         _ => {}
@@ -1344,7 +1385,7 @@ pub fn run_passthrough_in(
             elapsed: run.elapsed,
         }),
         Ending::Interrupted => Err(DevError::Interrupted),
-        ending => match verdict(&ending, program, &run.stderr, &[]) {
+        ending => match verdict(&ending, program, &run.stderr, Exits::SUCCESS) {
             IterationVerdict::Failed(error) => Err(error),
             IterationVerdict::Interrupted => Err(DevError::Interrupted),
             IterationVerdict::Counted => Ok(PassthroughOutput {

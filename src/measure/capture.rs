@@ -23,7 +23,7 @@ impl BenchHarness {
         args: &[&str],
         cwd: &Path,
         extra_env: &[(&str, &str)],
-        ok_codes: &[i32],
+        exits: child::Exits,
         fifo: &mut crate::sidecar::SidecarFifo,
         index: usize,
         ceiling: Option<Duration>,
@@ -86,7 +86,7 @@ impl BenchHarness {
                 failure,
             })
         } else {
-            match child::verdict(&ending, &program_str, &capture.stderr, ok_codes) {
+            match child::verdict(&ending, &program_str, &capture.stderr, exits) {
                 child::IterationVerdict::Counted => None,
                 child::IterationVerdict::Failed(error) => Some(error),
                 child::IterationVerdict::Interrupted => Some(DevError::Interrupted),
@@ -99,9 +99,9 @@ impl BenchHarness {
         };
         // A command whose exit status is its answer (`diff` found differences,
         // `check` found violations) stores both answers as completed runs, so
-        // the row says which one it measured. Commands without accepted
-        // non-zero codes keep their rows as they were.
-        if !ok_codes.is_empty()
+        // the row says which one it measured. Other commands keep their rows
+        // as they were.
+        if exits.is_answer()
             && error.is_none()
             && let Some(code) = ending.exit_code()
         {
@@ -157,7 +157,7 @@ impl BenchHarness {
         args: &[&str],
         cwd: &Path,
         extra_env: &[(&str, &str)],
-        ok_codes: &[i32],
+        exits: child::Exits,
         fifo: &mut crate::sidecar::SidecarFifo,
         index: usize,
         ceiling: Option<Duration>,
@@ -173,7 +173,7 @@ impl BenchHarness {
             Err(error) => return Err(DevError::Io(error)),
         }
         let iteration = self.capture_hotpath_into(
-            program, args, cwd, extra_env, ok_codes, fifo, index, ceiling, &report,
+            program, args, cwd, extra_env, exits, fifo, index, ceiling, &report,
         );
         std::fs::remove_file(&report).ok(); // gate: brokkr's own state file
         iteration
@@ -188,7 +188,7 @@ impl BenchHarness {
         args: &[&str],
         cwd: &Path,
         extra_env: &[(&str, &str)],
-        ok_codes: &[i32],
+        exits: child::Exits,
         fifo: &mut crate::sidecar::SidecarFifo,
         index: usize,
         ceiling: Option<Duration>,
@@ -201,8 +201,7 @@ impl BenchHarness {
             ("HOTPATH_OUTPUT_FORMAT", "json"),
             ("HOTPATH_OUTPUT_PATH", &report_str),
         ]);
-        let mut iteration =
-            self.capture(program, args, cwd, &env, ok_codes, fifo, index, ceiling)?;
+        let mut iteration = self.capture(program, args, cwd, &env, exits, fifo, index, ceiling)?;
         if iteration.error.is_none() {
             let profile = (|| {
                 let text = std::fs::read_to_string(report).map_err(|error| {

@@ -14,6 +14,8 @@ use super::{
     TMP_DIR_FLAG, decide, parse_store_line,
 };
 use crate::pbfhogg::argv::PbfArgv;
+use crate::pbfhogg::commands::PbfhoggCommand;
+use crate::pbfhogg::expect::{Expectation, completed_exits};
 use crate::reservations::PRIVATE_DIR_PLACEHOLDER;
 
 // ---------------------------------------------------------------------------
@@ -517,12 +519,9 @@ fn a_build_whose_failures_exit_2_answers_with_exit_1() {
     let (root, path) = install("exit-split", &failing_inspect(2));
     let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
     assert!(binary.splits_answer_from_failure().unwrap());
-    let codes = crate::pbfhogg::plan::completed_exits(
-        &crate::pbfhogg::commands::PbfhoggCommand::CheckRefs,
-        &binary,
-    )
-    .unwrap();
-    assert_eq!(codes, [1]);
+    let exits = completed_exits(&PbfhoggCommand::CheckRefs, &binary, None).unwrap();
+    assert_eq!(exits.codes(), [0, 1]);
+    assert!(exits.is_answer());
 }
 
 #[test]
@@ -530,25 +529,54 @@ fn a_build_from_before_the_split_never_stores_exit_1() {
     let (root, path) = install("exit-unsplit", &failing_inspect(1));
     let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
     assert!(!binary.splits_answer_from_failure().unwrap());
-    let codes = crate::pbfhogg::plan::completed_exits(
-        &crate::pbfhogg::commands::PbfhoggCommand::CheckRefs,
-        &binary,
-    )
-    .unwrap();
-    assert!(codes.is_empty(), "got: {codes:?}");
+    let exits = completed_exits(&PbfhoggCommand::CheckRefs, &binary, None).unwrap();
+    assert_eq!(exits.codes(), [0]);
 }
 
 #[test]
 fn a_command_that_never_answers_no_never_probes_the_exit_split() {
     let (root, path) = install("exit-no-probe", &failing_inspect(1));
     let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
-    let codes = crate::pbfhogg::plan::completed_exits(
-        &crate::pbfhogg::commands::PbfhoggCommand::Sort,
+    let exits = completed_exits(&PbfhoggCommand::Sort, &binary, None).unwrap();
+    assert_eq!(exits, crate::output::child::Exits::SUCCESS);
+    assert_eq!(spawns(&path), 0);
+}
+
+fn expecting(exit: i32) -> Expectation {
+    Expectation {
+        exit,
+        verdict: if exit == 0 { "clean" } else { "violations" },
+        source: "[test]".into(),
+    }
+}
+
+#[test]
+fn a_declared_answer_narrows_the_accepted_exits_to_it() {
+    let (root, path) = install("exit-expect", &failing_inspect(2));
+    let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
+    let clean = completed_exits(
+        &PbfhoggCommand::CheckIds { full: false },
         &binary,
+        Some(&expecting(0)),
     )
     .unwrap();
-    assert!(codes.is_empty());
-    assert_eq!(spawns(&path), 0);
+    assert_eq!(clean.codes(), [0]);
+    let violations =
+        completed_exits(&PbfhoggCommand::CheckIndex, &binary, Some(&expecting(1))).unwrap();
+    assert_eq!(violations.codes(), [1]);
+    assert!(violations.is_answer());
+}
+
+#[test]
+fn expected_violations_on_a_build_from_before_the_split_refuse_the_run() {
+    let (root, path) = install("exit-expect-unsplit", &failing_inspect(1));
+    let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
+    let err = completed_exits(&PbfhoggCommand::CheckRefs, &binary, Some(&expecting(1)))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("not started"), "got: {err}");
+    let clean = completed_exits(&PbfhoggCommand::CheckRefs, &binary, Some(&expecting(0))).unwrap();
+    assert_eq!(clean.codes(), [0]);
 }
 
 #[test]

@@ -38,7 +38,7 @@ pub(crate) fn cmd_hotpath_generic(req: &measure::MeasureRequest) -> Result<(), D
             &[],
             req.project_root.as_path(),
             &[],
-            &[],
+            crate::output::child::Exits::SUCCESS,
             fifo,
             i,
             None,

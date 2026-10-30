@@ -1217,6 +1217,7 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
             osc: HashMap::new(),
             pmtiles: HashMap::new(),
             snapshot: HashMap::new(),
+            expect: DatasetExpect::default(),
             path: None,
             xxh128: None,
         }
@@ -1524,6 +1525,7 @@ xxhash = "000000000000000000000000feedface"
             osc: HashMap::new(),
             pmtiles: HashMap::new(),
             snapshot: HashMap::new(),
+            expect: DatasetExpect::default(),
             path: None,
             xxh128: None,
         };
@@ -1569,6 +1571,7 @@ xxhash = "000000000000000000000000feedface"
             osc: HashMap::new(),
             pmtiles: HashMap::new(),
             snapshot: HashMap::new(),
+            expect: DatasetExpect::default(),
             path: None,
             xxh128: None,
         };

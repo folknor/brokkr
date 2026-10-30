@@ -36,6 +36,7 @@ pub fn run(
     file_mb: f64,
     runs: usize,
     dataset: &str,
+    variant: &str,
 ) -> Result<(), DevError> {
     let project_root = build_root.as_path();
     // No build may start while a pbfhogg handle is alive, and the osmpbf
@@ -54,6 +55,7 @@ pub fn run(
             harness,
             paths,
             dataset,
+            variant,
             &binary,
             pbf_path,
             file_mb,
@@ -71,6 +73,7 @@ fn run_suite_binary(
     harness: &BenchHarness,
     paths: &ResolvedPaths,
     dataset: &str,
+    variant: &str,
     binary: &PbfhoggBinary,
     pbf_path: &Path,
     file_mb: f64,
@@ -103,6 +106,20 @@ fn run_suite_binary(
         bench_commands::ALL_COMMANDS,
         &crate::pbfhogg::context::BenchSelection::for_dataset(paths.datasets.get(dataset)),
         project_root,
+        // The answers the primary entry the suite measures declares.
+        paths
+            .datasets
+            .get(dataset)
+            .and_then(|ds| ds.pbf.get(variant))
+            .map(|entry| bench_commands::SuiteExpect {
+                expect: &entry.expect,
+                table: crate::pbfhogg::expect::entry_table(
+                    dataset,
+                    &crate::datasets::resolve::SnapshotRef::Base,
+                    variant,
+                ),
+            })
+            .as_ref(),
     )?;
 
     // 2. bench read -- all 5 modes

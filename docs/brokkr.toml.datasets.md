@@ -31,6 +31,22 @@ paths still resolve against each including project's root.
   They live here rather than in a `[<host>.tilegen.<name>]` block because they
   describe the input, not the pipeline - a block would otherwise have to know
   which variant it was about to be run against.
+- `pbf.<variant>.expect` (pbfhogg, optional) - the answers pbfhogg's
+  answer commands should give on this file, so a contradicting answer fails
+  the run instead of being stored (`docs/projects/pbfhogg.md`, Declared
+  answers). `check-refs`, `check-ids` and `check-index` take `"clean"` or
+  `"violations"`; `diff` is a table keyed by an OSC sequence of the same
+  snapshot, `"same"` or `"differs"`, for this file against itself with that
+  OSC applied. Unknown keys and values are load errors. Absent, either
+  answer is stored. It belongs to the entry as composed, so an `include`
+  override of `file` alone keeps the declarations of the file it replaced.
+  A `--refresh` rotation moves it with its `pbf` table.
+- `expect.diff-snapshots` (pbfhogg, optional) - on the dataset:
+  `"<xxhash>+<xxhash>" = "same" | "differs"`, the `diff-snapshots` answer
+  between the two PBF files whose registered digests the key names, in
+  either order and either hex case; one pair spelled twice is a load error.
+  Addressed by content, it never follows a snapshot key to another file. A
+  `repack --as-snapshot` writes its `same` entry here.
 - `osc.<seq>` - OSC diff file entries keyed by sequence number. Each has
   `file`, optional `xxhash` (XXH128).
 - `pmtiles.<variant>` - PMTiles archive entries keyed by variant name (e.g.
@@ -75,6 +91,11 @@ getid_ids = ["n115722", "w2080", "r174"]    # pbfhogg only
 file = "denmark-with-indexdata.osm.pbf"
 xxhash = "3f1977fd..."
 seq = 4704
+
+[plantasjen.datasets.denmark.pbf.indexed.expect]   # pbfhogg only
+check-refs = "clean"
+check-ids = "clean"
+diff = { "4705" = "differs" }
 
 [plantasjen.datasets.denmark.osc.4705]
 file = "denmark-4705.osc.gz"

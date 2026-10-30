@@ -358,7 +358,7 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
                 &[HARNESS_MODE_FLAG, &script_str],
                 req.project_root.as_path(),
                 &env_pairs,
-                &[],
+                crate::output::child::Exits::SUCCESS,
                 fifo,
                 i,
                 // The frontmatter ceiling bounds each measured iteration.

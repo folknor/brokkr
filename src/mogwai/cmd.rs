@@ -88,7 +88,7 @@ pub(crate) fn run(
                     &argv,
                     req.project_root.as_path(),
                     &[],
-                    &[],
+                    crate::output::child::Exits::SUCCESS,
                     fifo,
                     i,
                     None,

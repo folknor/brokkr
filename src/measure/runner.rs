@@ -8,6 +8,7 @@ use crate::error::DevError;
 use crate::harness::{self, BenchConfig};
 use crate::measure::{Executable, Invocation, MeasureMode, MeasureRequest};
 use crate::output;
+use crate::output::child::Exits;
 use crate::project::{self, Project};
 use std::path::{Path, PathBuf};
 
@@ -155,10 +156,16 @@ pub(crate) trait PlannedCommand {
     ) -> Result<(), DevError> {
         Ok(())
     }
-    /// Non-zero exits a run of this plan stores as completed. Takes the plan
-    /// so a project can answer for the executable it was built against.
-    fn ok_codes<'p>(&self, _plan: &'p CommandPlan<Self::State, Self::Argv>) -> &'p [i32] {
-        &[]
+    /// The exits a run of this plan stores as completed. Takes the plan so a
+    /// project can answer for the executable it was built against and the
+    /// input it resolved.
+    fn exits(&self, _plan: &CommandPlan<Self::State, Self::Argv>) -> Exits {
+        Exits::SUCCESS
+    }
+    /// Restate a failed run's error in the plan's terms, such as the answer
+    /// its input declared. The error as it is by default.
+    fn explain(&self, _plan: &CommandPlan<Self::State, Self::Argv>, error: DevError) -> DevError {
+        error
     }
     fn env(&self) -> Vec<(&str, &str)> {
         vec![]
@@ -235,7 +242,8 @@ pub(crate) fn run(req: &MeasureRequest<'_>, command: &impl PlannedCommand) -> Re
     };
     if let Some(binary) = binary {
         let invocation = command.materialize(&plan, binary)?;
-        execute_invocation(req, &ctx, command, &plan, &invocation, &prepare)?;
+        execute_invocation(req, &ctx, command, &plan, &invocation, &prepare)
+            .map_err(|error| command.explain(&plan, error))?;
     } else {
         prepare()?;
         command.execute(req, &ctx, &plan)?;
@@ -306,7 +314,16 @@ fn execute_invocation<C: PlannedCommand, P: Fn() -> Result<(), DevError>>(
                 }
             };
             finished?;
-            if let Some(code) = out.failed_code(command.ok_codes(plan)) {
+            if let Some(code) = out.failed_code(command.exits(plan)) {
+                // An answer command expected to answer no fails on exit 0,
+                // which must not reach the process exit as success.
+                if code == 0 {
+                    return Err(DevError::Subprocess {
+                        program: program.clone(),
+                        ending: crate::error::ProcessEnding::Code(0),
+                        stderr: String::new(),
+                    });
+                }
                 return Err(DevError::ExitCode(code));
             }
             output::run_msg(&format!(
@@ -320,7 +337,7 @@ fn execute_invocation<C: PlannedCommand, P: Fn() -> Result<(), DevError>>(
                 &config,
                 invocation,
                 req.project_root.as_path(),
-                command.ok_codes(plan),
+                command.exits(plan),
                 prepare,
             )?;
         }
@@ -341,7 +358,7 @@ fn execute_invocation<C: PlannedCommand, P: Fn() -> Result<(), DevError>>(
                     &launched.arg_refs(),
                     cwd,
                     &command.env(),
-                    command.ok_codes(plan),
+                    command.exits(plan),
                     fifo,
                     i,
                     None,
@@ -427,7 +444,7 @@ pub(crate) fn execute_external(
             let program = invocation.program.display().to_string();
             output::run_msg(&format!("{program} {}", args.join(" ")));
             let out = output::run_passthrough_timed(&program, &args, Some(ctx.harness.lock()))?;
-            if let Some(code) = out.failed_code(&[]) {
+            if let Some(code) = out.failed_code(Exits::SUCCESS) {
                 return Err(DevError::ExitCode(code));
             }
             output::run_msg(&format!(
@@ -440,7 +457,7 @@ pub(crate) fn execute_external(
                 &invocation.config,
                 &run,
                 req.project_root.as_path(),
-                &[],
+                Exits::SUCCESS,
                 prepare,
             )?;
         }
@@ -469,7 +486,7 @@ pub(crate) fn execute_example(
         MeasureMode::Run => {
             output::run_msg(&format!("{program} {}", args.join(" ")));
             let out = output::run_passthrough_timed(&program, args, Some(ctx.harness.lock()))?;
-            if let Some(code) = out.failed_code(&[]) {
+            if let Some(code) = out.failed_code(Exits::SUCCESS) {
                 return Err(DevError::ExitCode(code));
             }
             output::run_msg(&format!(
@@ -503,7 +520,7 @@ pub(crate) fn execute_example(
                     args,
                     req.project_root.as_path(),
                     &[],
-                    &[],
+                    Exits::SUCCESS,
                     fifo,
                     i,
                     None,

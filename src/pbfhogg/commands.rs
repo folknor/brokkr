@@ -623,9 +623,10 @@ impl PbfhoggCommand {
     /// stored, with `meta.exit_code` saying which answer was measured. Only
     /// the commands that give such an answer accept 1, and only on a build
     /// that has the contract: pbfhogg commits from before it (854f9465)
-    /// exited 1 on every failure, so `plan::completed_exits` drops 1 for a
+    /// exited 1 on every failure, so `expect::completed_exits` drops 1 for a
     /// build its probe finds predates the split, and a `--commit` baseline
-    /// never stores a crash as an answer. `inspect` would answer
+    /// never stores a crash as an answer; an input that declares its answer
+    /// narrows the set to that answer. `inspect` would answer
     /// negatively only under `--indexed` or `--show`, which brokkr never
     /// passes.
     pub fn ok_exit_codes(&self) -> &'static [i32] {

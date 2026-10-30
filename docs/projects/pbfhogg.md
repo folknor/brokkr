@@ -289,6 +289,52 @@ cannot say which it was.
 `diff --format osc` exited 0 on differences until pbfhogg 50a9fc06, so a
 build between the two never gives it exit 1; it needs no gate of its own.
 
+A row from a build that predates the split records `meta.exit_code` 0, as
+any answer command's completed run does; rows stored before this recorded
+no key there.
+
+### Declared answers
+
+Accepting both answers is wrong when no is the bug: `check-refs` on an
+honest file that starts reporting false violations exits 1 and would be
+stored as a completed run. An input whose answer is known can say so in
+brokkr.toml (`docs/brokkr.toml.datasets.md`), and then only that answer completes the
+run: `clean` or `same` accepts exit 0 alone, `violations` or `differs` exit
+1 alone, and the other answer fails the run like a crash. An input that
+declares nothing keeps both answers; nothing is inferred, not "the primary
+is clean" and not "two snapshot keys differ", which a repack of `base`
+disproves.
+
+- `check-refs`, `check-ids` (with or without `--full`) and `check-index`
+  read `[..pbf.<variant>.expect]` on the entry the command resolved, primary
+  or `--snapshot`, so each variant file declares for itself.
+- `diff` reads `diff."<seq>"` on the same table: this file against itself
+  with that OSC applied. A declared `diff` rebuilds the merged B side with
+  the build under test even under `brokkr run` or `--keep-cache`, since a
+  cached merge is keyed by name, not by the OSC's content or the build that
+  made it. The suite always rebuilds it.
+- `diff-snapshots` reads `[..datasets.<name>.expect.diff-snapshots]`, keyed
+  by the registered digests of both files, so a rotation by `download
+  --refresh` or a `--replace-snapshot` can never point a declaration at
+  another file. A side without an `xxhash` cannot be addressed and stays
+  undeclared.
+
+The accepted exits are the answers the build can be trusted to give
+intersected with the declared one. A build from before the split, asked to
+answer `violations` or `differs`, leaves nothing to accept: the run is
+refused before it starts. A declared run says what it expects before it
+runs, and a dry run lists it. The suite reads the declarations of the
+primary entry it measures.
+
+`repack --as-snapshot` records one declaration itself: pbfhogg's repack
+round-trips every element, so the new file and the entry it read are
+recorded as `same` under `diff-snapshots` when the source has a registered
+digest. `cat` and `degrade` record nothing: `--type` drops kinds, `--clean`
+drops versions, `--strip-locations` drops way coordinates, and whether
+`--unsort` leaves an ID-order violation depends on the input's size. No
+check verdict is ever derived: a repack can repair the metadata its input
+lied about.
+
 ## Diff text output
 
 The text arm of `brokkr diff` and `brokkr diff-snapshots` (no `--format osc`)
@@ -681,7 +727,9 @@ schema-universal flags (`--variant`, `--osc-seq`, `--tiles`) see
   graph as a new snapshot. `cat --type way --as-snapshot ways-only` is how a
   single-kind input (every way ref dangling) is made addressable as
   `--snapshot ways-only`. `--replace-snapshot` allows overwriting an existing key;
-  without it, an existing key errors out. Both flags are validated up-front
+  without it, an existing key errors out. A `repack` promotion also records
+  the new file as `same` as its source for `diff-snapshots` (Declared
+  answers, above). Both flags are validated up-front
   via `download::preflight_snapshot_collision` (called from the top of
   `run_command_with_params`), so a forgotten `--replace-snapshot` errors
   before the cargo build kicks off, not after the run.

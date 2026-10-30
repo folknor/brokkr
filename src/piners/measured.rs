@@ -166,7 +166,9 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
             &subprocess_args,
             &project_root,
             &env,
-            &[0],
+            // Recorded as an answer, so each row carries meta.exit_code 0,
+            // as it has since exit codes were recorded.
+            crate::output::child::Exits::answer(&[0]),
             fifo,
             i,
             Some(crate::piners::cmd::HARNESS_HANG_BACKSTOP),

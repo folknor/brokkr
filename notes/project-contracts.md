@@ -255,6 +255,16 @@ exit matches and fail it when it does not, an exit 0 where violations were
 expected included. Some of that is not recorded yet, such as which
 `degrade` flags produced a snapshot. Its own ticket.
 
+Landed for bz 71 as declarations, not inference: an input declares its
+answer in brokkr.toml and only that answer completes a run (pbfhogg.md,
+Declared answers). Three of the proposed defaults did not survive checking:
+a primary is not known clean without a key saying so (assuming it would
+change what existing configs mean), two snapshot keys do not imply differ
+(a repack of `base` is the same), and brokkr's `degrade` has no
+`--corrupt-*` flag, while `--unsort` violates ID order only on inputs large
+enough. Only `repack --as-snapshot` derives a declaration, `same` against
+its source.
+
 ## Exit 3
 
 Agreed with the pbfhogg dev on bz 65: exit 3 (the host refused

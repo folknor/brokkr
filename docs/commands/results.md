@@ -261,7 +261,9 @@ both sides of a pair recorded one and they differ, the pair gets an
 `answer: exit A -> B` line: one side found violations or differences and the
 other did not, so the walls time different work. A row from before exit codes
 were recorded has no key and is never flagged. `--meta exit_code=1` selects the
-negative answers.
+negative answers. An input that declares its answer in brokkr.toml stores
+only that answer; the other fails the run (`docs/projects/pbfhogg.md`,
+Declared answers).
 
 ### Build provenance
 

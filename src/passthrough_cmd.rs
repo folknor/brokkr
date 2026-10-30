@@ -167,7 +167,7 @@ pub(crate) fn cmd_run(
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         output::run_msg(&format!("{binary_str} {}", args.join(" ")));
         let out = output::run_passthrough_timed(&binary_str, &arg_refs, lock)?;
-        if let Some(code) = out.failed_code(&[]) {
+        if let Some(code) = out.failed_code(crate::output::child::Exits::SUCCESS) {
             return Err(DevError::ExitCode(code));
         }
         let run_elapsed = out.elapsed;

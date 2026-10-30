@@ -581,7 +581,7 @@ fn cargo_bench(
         output::SpawnProfile::Cargo { phase: None },
         Some(lock),
     )?;
-    let Some(code) = out.failed_code(&[]) else {
+    let Some(code) = out.failed_code(crate::output::child::Exits::SUCCESS) else {
         return Ok(());
     };
     // Cargo and criterion printed their own diagnostics; echoing the exit code

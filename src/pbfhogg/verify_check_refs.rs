@@ -202,7 +202,7 @@ fn capture_and_log(
     // Both tools exit 1 when they find missing refs; any other non-zero exit
     // or a signal means the report cannot be trusted, however complete it
     // looks.
-    captured.check_success_or(label, &[1])?;
+    captured.check_success_or(label, crate::output::child::Exits::answer(&[0, 1]))?;
     let text = format!("{stdout}{}", String::from_utf8_lossy(&captured.stderr));
     fs::write(out_file, &text)?;
     verify_msg(&format!("  {label}:"));

@@ -57,6 +57,7 @@ mod tests {
             osc: HashMap::new(),
             pmtiles: HashMap::new(),
             snapshot: HashMap::new(),
+            expect: crate::config::DatasetExpect::default(),
             path: None,
             xxh128: None,
         }

@@ -26,7 +26,8 @@ fn materialize_runs_the_handles_resolved_argv_not_the_runners_binary() {
         state: PbfhoggState {
             ctx,
             handle: Some(PbfhoggBinary::fixture(&path, &root).unwrap()),
-            ok_codes: vec![],
+            exits: Exits::SUCCESS,
+            expectation: None,
         },
     };
     let params = CommandParams::default();

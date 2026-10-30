@@ -31,7 +31,7 @@ pub fn run(
         &invocation.config,
         &invocation.invocation(),
         project_root,
-        &[],
+        crate::output::child::Exits::SUCCESS,
         || invocation.prepare_sample(false),
     )?;
     invocation.cleanup(false);

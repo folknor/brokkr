@@ -154,6 +154,44 @@ fn suite_needs_osc(commands: &[&str]) -> Result<bool, DevError> {
         .try_fold(false, |acc, cmd| Ok(acc || cmd?.needs_osc_for_setup()))
 }
 
+/// The answers the suite's input entry declares, and the label of the table
+/// that declares them.
+pub struct SuiteExpect<'a> {
+    pub expect: &'a crate::config::PbfExpect,
+    pub table: String,
+}
+
+/// Every preset's declared answer and accepted exits, before anything runs:
+/// a preset that could not pass refuses the suite before the merged PBF is
+/// built. The suite always rebuilds the merge with this build, so a declared
+/// diff answer is checked against this build's merge.
+fn plan_answers<'n>(
+    binary: &crate::pbfhogg::binary::PbfhoggBinary,
+    commands: &[&'n str],
+    osc_seq: Option<&str>,
+    expect: Option<&SuiteExpect<'_>>,
+) -> Result<
+    std::collections::HashMap<
+        &'n str,
+        (
+            crate::output::child::Exits,
+            Option<crate::pbfhogg::expect::Expectation>,
+        ),
+    >,
+    DevError,
+> {
+    let mut answers = std::collections::HashMap::new();
+    for name in commands {
+        let cmd = preset_to_command(name)?;
+        let expectation = expect.and_then(|suite| {
+            crate::pbfhogg::expect::for_entry(&cmd, suite.expect, osc_seq, &suite.table)
+        });
+        let exits = crate::pbfhogg::expect::completed_exits(&cmd, binary, expectation.as_ref())?;
+        answers.insert(*name, (exits, expectation));
+    }
+    Ok(answers)
+}
+
 /// Run the suite presets.
 ///
 /// `osc_seq` is the replication seq `osc_path` was registered under; together
@@ -174,7 +212,10 @@ pub fn run(
     commands: &[&str],
     selection: &BenchSelection,
     project_root: &Path,
+    expect: Option<&SuiteExpect<'_>>,
 ) -> Result<(), DevError> {
+    let answers = plan_answers(binary, commands, osc_seq, expect)?;
+
     // Resolve OSC path once if any preset needs it.
     let osc_pathbuf = if suite_needs_osc(commands)? {
         Some(
@@ -265,6 +306,9 @@ pub fn run(
             },
         };
 
+        let (exits, expectation) = answers
+            .get(name)
+            .ok_or_else(|| DevError::Internal(format!("suite preset {name} was not planned")))?;
         crate::pbfhogg::plan::run_wallclock_core(
             harness,
             binary,
@@ -273,6 +317,8 @@ pub fn run(
             runs,
             project_root,
             false,
+            *exits,
+            expectation.as_ref(),
         )?;
         crate::pbfhogg::plan::cleanup_output(&cmd, &ctx, crate::pbfhogg::commands::ArgMode::Bench)?;
         Ok(())

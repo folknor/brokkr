@@ -235,7 +235,7 @@ pub fn run(
             .scratch(&harness.output_dir),
         &diff_log,
     )?;
-    captured.check_success_or("pbfhogg diff", &[1])?;
+    captured.check_success_or("pbfhogg diff", crate::output::child::Exits::answer(&[0, 1]))?;
     let stderr = String::from_utf8_lossy(&captured.stderr).into_owned();
     // pbfhogg's -s summary is written to stderr.
     let summary = parse_summary(&stderr).ok_or_else(|| {

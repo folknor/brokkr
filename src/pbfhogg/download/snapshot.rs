@@ -71,6 +71,7 @@ pub(crate) fn promote_snapshot(
     target_variant: &str,
     dataset: Option<&Dataset>,
     data_dir: &Path,
+    same_as: Option<crate::preflight::FileDigest>,
 ) -> Result<(), DevError> {
     crate::config::validate_snapshot_key(snap_key).map_err(DevError::Config)?;
 
@@ -124,7 +125,8 @@ pub(crate) fn promote_snapshot(
         move_file_into_place(scratch_pbf, &target_path)?;
 
         output::download_msg(&format!("  hashing {target_filename}..."));
-        let hash = preflight::cached_path_digest(&target_path, project_root)?.to_string();
+        let digest = preflight::cached_path_digest(&target_path, project_root)?;
+        let hash = digest.to_string();
 
         let date = today();
         let snapshot_download_date =
@@ -135,6 +137,13 @@ pub(crate) fn promote_snapshot(
         }
         toml.set_snapshot_header(snap_key, &snapshot_download_date)?;
         toml.set_snapshot_pbf(snap_key, target_variant, &target_filename, &hash)?;
+        if let Some(source) = same_as {
+            let new: crate::preflight::FileDigest = hash.parse().map_err(DevError::Config)?;
+            toml.set_pair_expect(
+                crate::config::DigestPair::new(source, new),
+                crate::config::DiffVerdict::Same,
+            )?;
+        }
         toml.commit()
     })();
     if let Some(parked) = &parked {

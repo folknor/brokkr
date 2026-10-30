@@ -1767,6 +1767,133 @@ pub struct PbfEntry {
     /// Force the compact node store without the PBF sort header.
     #[serde(default)]
     pub force_sorted: bool,
+    /// The answers pbfhogg's answer commands should give on this file,
+    /// declared by hand (pbfhogg). Absent: unknown, either answer is stored.
+    #[serde(default)]
+    pub expect: PbfExpect,
+}
+
+/// A `check` verdict a file is expected to give.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CheckVerdict {
+    /// The check passes: exit 0.
+    Clean,
+    /// The check reports violations: exit 1.
+    Violations,
+}
+
+/// A `diff` verdict a pair of inputs is expected to give.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiffVerdict {
+    /// No differences: exit 0.
+    Same,
+    /// Differences found: exit 1.
+    Differs,
+}
+
+impl CheckVerdict {
+    pub fn exit_code(self) -> i32 {
+        match self {
+            Self::Clean => 0,
+            Self::Violations => 1,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::Violations => "violations",
+        }
+    }
+}
+
+impl DiffVerdict {
+    pub fn exit_code(self) -> i32 {
+        match self {
+            Self::Same => 0,
+            Self::Differs => 1,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Same => "same",
+            Self::Differs => "differs",
+        }
+    }
+}
+
+/// `[..pbf.<variant>.expect]`: expected answers on one PBF file. Handwritten;
+/// it follows the effective composed entry, so an `include` override of
+/// `file` alone keeps the expectations declared for the file it replaced.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct PbfExpect {
+    pub check_refs: Option<CheckVerdict>,
+    /// Covers `check-ids` with and without `--full`.
+    pub check_ids: Option<CheckVerdict>,
+    pub check_index: Option<CheckVerdict>,
+    /// `diff` of this file against itself with the OSC of that sequence
+    /// applied, keyed by the OSC sequence in the same snapshot's `osc` table.
+    #[serde(default)]
+    pub diff: BTreeMap<String, DiffVerdict>,
+}
+
+/// An unordered pair of PBF file digests, stored smaller first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DigestPair(FileDigest, FileDigest);
+
+impl DigestPair {
+    pub fn new(a: FileDigest, b: FileDigest) -> Self {
+        if a <= b { Self(a, b) } else { Self(b, a) }
+    }
+}
+
+impl std::fmt::Display for DigestPair {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}+{}", self.0, self.1)
+    }
+}
+
+impl FromStr for DigestPair {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (a, b) = s.split_once('+').ok_or_else(|| {
+            format!("'{s}' is not a digest pair: write two XXH128 digests joined by '+'")
+        })?;
+        let a: FileDigest = a.parse().map_err(|e| format!("'{s}': {e}"))?;
+        let b: FileDigest = b.parse().map_err(|e| format!("'{s}': {e}"))?;
+        Ok(Self::new(a, b))
+    }
+}
+
+/// `[..datasets.<name>.expect]`: expected answers about pairs of this
+/// dataset's PBF files, addressed by content so a rotation or a replaced
+/// snapshot can never retarget one.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct DatasetExpect {
+    /// `diff-snapshots` between the two files whose registered digests the
+    /// key names, `"<xxhash>+<xxhash>"` in either order.
+    #[serde(default, deserialize_with = "deserialize_pair_map")]
+    pub diff_snapshots: BTreeMap<DigestPair, DiffVerdict>,
+}
+
+fn deserialize_pair_map<'de, D>(deserializer: D) -> Result<BTreeMap<DigestPair, DiffVerdict>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = BTreeMap::<String, DiffVerdict>::deserialize(deserializer)?;
+    let mut out = BTreeMap::new();
+    for (key, verdict) in raw {
+        let pair: DigestPair = key.parse().map_err(de::Error::custom)?;
+        if out.insert(pair, verdict).is_some() {
+            return Err(de::Error::custom(format!(
+                "expect.diff-snapshots names the pair {pair} twice"
+            )));
+        }
+    }
+    Ok(out)
 }
 
 /// A single OSC diff file entry, keyed by sequence number.
@@ -1847,6 +1974,9 @@ pub struct Dataset {
     /// because it's the CLI sentinel for the legacy top-level data.
     #[serde(default)]
     pub snapshot: HashMap<String, Snapshot>,
+    /// Expected answers about pairs of this dataset's PBF files (pbfhogg).
+    #[serde(default)]
+    pub expect: DatasetExpect,
     /// A plain out-of-git input: one path, one digest, no variant structure.
     ///
     /// The map-data fields above describe a dataset that HAS variants - a PBF

@@ -9,12 +9,14 @@ use crate::harness::{self, BenchConfig};
 use crate::measure::runner::{CommandPlan, PlanTarget, PlannedCommand, RowSubject};
 use crate::measure::{Executable, Invocation, MeasureMode, MeasureRequest};
 use crate::output;
+use crate::output::child::Exits;
 use crate::pbfhogg::binary::{OVERWRITE_FLAG, PbfhoggBinary, STAGING_DIR_FLAG, TMP_DIR_FLAG};
 use crate::pbfhogg::commands::{ArgMode, CommandArgv, OutputKind, PbfhoggCommand, TagsFilterInput};
 use crate::pbfhogg::context::{
     BenchSelection, CommandContext, CommandObservations, CommandParams, MergedCacheState,
     ResolvedInputs, SnapshotSide, TwoPbfOrigin,
 };
+use crate::pbfhogg::expect::{self, Expectation};
 use crate::project::Project;
 
 /// Resolve cargo features for the selected I/O mode and run its preflight
@@ -53,31 +55,11 @@ pub(crate) struct PbfhoggPlan<'a> {
 pub(crate) struct PbfhoggState {
     pub ctx: CommandContext,
     handle: Option<PbfhoggBinary>,
-    /// The non-zero exits a run stores as completed, for this executable
-    /// ([`completed_exits`]); the command's own set for a dry run.
-    ok_codes: Vec<i32>,
-}
-
-/// The non-zero exits a run of `command` on `binary` stores as completed:
-/// the command's answer exits, less exit 1 when the build predates pbfhogg's
-/// split of answers from failures, where 1 may be a crash and storing it
-/// would record a failed run as a negative answer. Such a run then fails,
-/// and a warning says why.
-pub(crate) fn completed_exits(
-    command: &PbfhoggCommand,
-    binary: &PbfhoggBinary,
-) -> Result<Vec<i32>, DevError> {
-    let codes = command.ok_exit_codes();
-    if !codes.contains(&1) || binary.splits_answer_from_failure()? {
-        return Ok(codes.to_vec());
-    }
-    output::warn(&format!(
-        "this pbfhogg build predates the exit-code split (pbfhogg 854f9465): its exit 1 is \
-         either a negative answer or a failure, so a `{}` run that exits 1 fails instead of \
-         being stored",
-        command.id()
-    ));
-    Ok(codes.iter().copied().filter(|&code| code != 1).collect())
+    /// The exits a run stores as completed, for this executable and input
+    /// ([`expect::completed_exits`]); the command's own set for a dry run.
+    exits: Exits,
+    /// The answer brokkr.toml declares for this input, if any.
+    expectation: Option<Expectation>,
 }
 
 impl PlannedCommand for PbfhoggPlan<'_> {
@@ -95,8 +77,11 @@ impl PlannedCommand for PbfhoggPlan<'_> {
     fn supports_profiling(&self) -> bool {
         true
     }
-    fn ok_codes<'p>(&self, plan: &'p CommandPlan<PbfhoggState, CommandArgv>) -> &'p [i32] {
-        &plan.state.ok_codes
+    fn exits(&self, plan: &CommandPlan<PbfhoggState, CommandArgv>) -> Exits {
+        plan.state.exits
+    }
+    fn explain(&self, plan: &CommandPlan<PbfhoggState, CommandArgv>, error: DevError) -> DevError {
+        expect::explain(self.command, plan.state.expectation.as_ref(), error)
     }
     fn build_config(
         &self,
@@ -140,6 +125,21 @@ impl PlannedCommand for PbfhoggPlan<'_> {
                 ));
             }
         };
+        let expectation = expect::resolve(
+            self.command,
+            req.dataset,
+            req.variant,
+            self.osc_seq,
+            self.params,
+            paths,
+            req.project_root.as_path(),
+        )?;
+        // Before the context: a run that could not pass is refused before
+        // a diff's merged input is built for it.
+        let exits = match &binary {
+            Some(binary) => expect::completed_exits(self.command, binary, expectation.as_ref())?,
+            None => expect::dry_run_exits(self.command),
+        };
         let ctx = build_pbfhogg_context(
             req,
             self.command,
@@ -147,14 +147,11 @@ impl PlannedCommand for PbfhoggPlan<'_> {
             binary.as_ref(),
             paths,
             self.params,
+            expectation.is_some(),
         )?;
         let mode = arg_mode(req);
         let argv = self.command.build_args(&ctx, mode)?;
         let (basename, mb) = result_input_metadata(&ctx)?;
-        let ok_codes = match &binary {
-            Some(binary) => completed_exits(self.command, binary)?,
-            None => self.command.ok_exit_codes().to_vec(),
-        };
         Ok(CommandPlan {
             argv,
             scratch_dirs: vec![],
@@ -169,7 +166,8 @@ impl PlannedCommand for PbfhoggPlan<'_> {
             state: PbfhoggState {
                 ctx,
                 handle: binary,
-                ok_codes,
+                exits,
+                expectation,
             },
         })
     }
@@ -241,6 +239,12 @@ impl PlannedCommand for PbfhoggPlan<'_> {
         if let Some(bbox) = state.inputs.bbox() {
             lines.push(format!("bbox: {bbox}"));
         }
+        if let Some(expectation) = &plan.state.expectation {
+            lines.push(format!(
+                "expects: {} ({}); the other answer fails the run",
+                expectation.verdict, expectation.source
+            ));
+        }
         Ok(lines)
     }
     fn announce(
@@ -277,6 +281,7 @@ impl PlannedCommand for PbfhoggPlan<'_> {
             arg_mode(req),
             &ctx.paths,
             req.project_root.as_path(),
+            req.variant,
         )?;
         cleanup_output(self.command, &plan.state.ctx, arg_mode(req))
     }
@@ -345,8 +350,9 @@ pub(crate) fn run_wallclock_core(
     runs: usize,
     project_root: &Path,
     announce: bool,
+    exits: Exits,
+    expectation: Option<&Expectation>,
 ) -> Result<(), DevError> {
-    let ok_codes = completed_exits(command, binary)?;
     let invocation = binary.invocation(command.build_args(cmd_ctx, ArgMode::Bench)?)?;
 
     let (basename, file_mb) = result_input_metadata(cmd_ctx)?;
@@ -370,10 +376,12 @@ pub(crate) fn run_wallclock_core(
         ));
     }
 
-    harness.run_external_prepared(&config, &invocation, project_root, &ok_codes, || {
-        cleanup_output(command, cmd_ctx, ArgMode::Bench)?;
-        command.prepare_scratch(cmd_ctx)
-    })?;
+    harness
+        .run_external_prepared(&config, &invocation, project_root, exits, || {
+            cleanup_output(command, cmd_ctx, ArgMode::Bench)?;
+            command.prepare_scratch(cmd_ctx)
+        })
+        .map_err(|error| expect::explain(command, expectation, error))?;
     Ok(())
 }
 
@@ -406,6 +414,8 @@ fn result_input_metadata(cmd_ctx: &CommandContext) -> Result<(String, f64), DevE
 
 /// Build the `CommandContext` for a pbfhogg command, resolving all input paths.
 /// `binary` is `None` for a dry run, which builds nothing it could run.
+/// `expected` says the input declares its answer, so a `diff`'s merged input
+/// is rebuilt by this build rather than taken from the cache.
 fn build_pbfhogg_context(
     req: &MeasureRequest,
     command: &PbfhoggCommand,
@@ -413,6 +423,7 @@ fn build_pbfhogg_context(
     binary: Option<&PbfhoggBinary>,
     paths: &config::ResolvedPaths,
     extra_params: &CommandParams,
+    expected: bool,
 ) -> Result<CommandContext, DevError> {
     if matches!(command, PbfhoggCommand::DiffSnapshots { .. }) {
         return build_diff_snapshots_context(req, paths, extra_params);
@@ -479,6 +490,7 @@ fn build_pbfhogg_context(
         &snapshot_ref,
         paths,
         extra_params,
+        expected,
     )?;
 
     let inputs = match command {
@@ -550,6 +562,7 @@ fn resolve_merged_pbf(
     snapshot_ref: &resolve::SnapshotRef,
     paths: &config::ResolvedPaths,
     extra_params: &CommandParams,
+    expected: bool,
 ) -> Result<(Option<std::path::PathBuf>, Option<MergedCacheState>), DevError> {
     if !command.needs_merged_pbf() {
         return Ok((None, None));
@@ -576,7 +589,16 @@ fn resolve_merged_pbf(
         ));
     };
 
-    let force_rebuild = !matches!(req.mode, MeasureMode::Run) && !extra_params.keep_cache;
+    let reuse = matches!(req.mode, MeasureMode::Run) || extra_params.keep_cache;
+    // A declared answer is checked against the merge this build makes: a
+    // cached merge is keyed by name, not by the OSC's content or the build
+    // that made it, so it could answer for another input.
+    if expected && reuse {
+        output::bench_msg(
+            "rebuilding the merged PBF: this diff's answer is declared, so a cached merge is not used",
+        );
+    }
+    let force_rebuild = expected || !reuse;
     let (merged, state) = ensure_merged_pbf(
         binary,
         pbf_path,
@@ -654,6 +676,7 @@ fn promote_artifact(
     mode: ArgMode,
     paths: &config::ResolvedPaths,
     project_root: &Path,
+    variant: &str,
 ) -> Result<(), DevError> {
     let Some(snap_key) = ctx.params.as_snapshot.as_deref() else {
         return Ok(());
@@ -672,6 +695,24 @@ fn promote_artifact(
         }
     };
     let dataset = paths.datasets.get(&ctx.dataset);
+    // repack round-trips every element (pbfhogg's repack contract), so its
+    // output holds the same elements as the entry it read: recorded as a
+    // `diff-snapshots` answer of same between the two files, when the
+    // source has a registered digest to address it by. Nothing else is
+    // derived; cat and degrade change what they copy.
+    let same_as = if matches!(command, PbfhoggCommand::Repack { .. }) {
+        let source = resolve::SnapshotRef::from_opt(ctx.params.snapshot.as_ref());
+        dataset
+            .and_then(|ds| match &source {
+                resolve::SnapshotRef::Base => ds.pbf.get(variant),
+                resolve::SnapshotRef::Named(key) => {
+                    ds.snapshot.get(key).and_then(|snap| snap.pbf.get(variant))
+                }
+            })
+            .and_then(|entry| entry.xxhash)
+    } else {
+        None
+    };
 
     crate::pbfhogg::download::promote_snapshot(
         project_root,
@@ -683,6 +724,7 @@ fn promote_artifact(
         target_variant,
         dataset,
         &paths.data_dir,
+        same_as,
     )
 }
 

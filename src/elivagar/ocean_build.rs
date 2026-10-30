@@ -114,7 +114,7 @@ pub fn run(
 
     output::run_msg(&format!("{binary_str} {}", arg_refs.join(" ")));
     let out = output::run_passthrough_timed(&binary_str, &arg_refs, lock)?;
-    if let Some(code) = out.failed_code(&[]) {
+    if let Some(code) = out.failed_code(crate::output::child::Exits::SUCCESS) {
         return Err(DevError::ExitCode(code));
     }
     Ok(())

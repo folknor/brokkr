@@ -162,7 +162,7 @@ fn run_tilegen(
         binary,
         &refs,
         project_root,
-        &[],
+        crate::output::child::Exits::SUCCESS,
         WallSource::External,
         || Ok(()),
     );

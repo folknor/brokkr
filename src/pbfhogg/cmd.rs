@@ -365,6 +365,7 @@ pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
         file_mb,
         req.runs(),
         req.dataset,
+        req.variant,
     )
 }
 

@@ -203,7 +203,7 @@ impl Plan<'_> {
             DevError::Interrupted => e,
             other => DevError::Refused(format!("install step '{step}' failed: {other}")),
         })?;
-        match out.failed_code(&[]) {
+        match out.failed_code(crate::output::child::Exits::SUCCESS) {
             // The command printed its own output; this names the step.
             Some(code) => Err(DevError::Reported(format!(
                 "install step '{step}' failed (exit code {code})"

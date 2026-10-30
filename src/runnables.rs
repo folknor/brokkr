@@ -355,7 +355,7 @@ pub fn cmd_run_commit(
         Some(lock),
     )?;
     // Same contract as `cmd_run`: the program's code, silently.
-    match out.failed_code(&[]) {
+    match out.failed_code(crate::output::child::Exits::SUCCESS) {
         None => Ok(()),
         Some(code) => Err(DevError::ExitCode(code)),
     }
@@ -630,7 +630,9 @@ fn run_cargo_with_env(
         output::SpawnProfile::Cargo { phase: None },
         lock,
     )?;
-    Ok(out.failed_code(&[]).unwrap_or(0))
+    Ok(out
+        .failed_code(crate::output::child::Exits::SUCCESS)
+        .unwrap_or(0))
 }
 
 #[cfg(test)]
