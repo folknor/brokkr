@@ -358,6 +358,10 @@ pub enum PbfhoggCommand {
     CheckIds {
         full: bool,
     },
+    /// `check --index`: re-derives every OSMData blob's indexdata and
+    /// tagdata from its decompressed payload. Passing `--index` alone
+    /// suppresses pbfhogg's default `--ids --refs` pair.
+    CheckIndex,
     /// `digest`. `form` → `--form <full|content>`; `None` passes no flag, so
     /// the build's own default is measured - a baseline from before `--form`
     /// existed digests its only form.
@@ -458,6 +462,7 @@ impl PbfhoggCommand {
             Self::Inspect { .. } => ("inspect", None, PromotionVariant::Unsupported, false),
             Self::CheckRefs => ("check-refs", None, PromotionVariant::Unsupported, false),
             Self::CheckIds { .. } => ("check-ids", None, PromotionVariant::Unsupported, false),
+            Self::CheckIndex => ("check-index", None, PromotionVariant::Unsupported, false),
             Self::Digest { .. } => ("digest", None, PromotionVariant::Unsupported, false),
             Self::Sort => ("sort", ScratchPbf, PromotionVariant::Indexed, true),
             Self::Cat(cat) => (
@@ -605,7 +610,8 @@ impl PbfhoggCommand {
     ///
     /// pbfhogg exits 1 for a completed negative answer and 2 for a failure:
     /// `diff` found differences, `check` found violations (`check-refs` on a
-    /// ways-only file, `check-ids` on a duplicated one). Those runs are
+    /// ways-only file, `check-ids` on a duplicated one, `check-index` on a
+    /// file whose blob metadata disagrees with its payload). Those runs are
     /// stored, with `meta.exit_code` saying which answer was measured. Only
     /// the commands that give such an answer accept 1: pbfhogg commits from
     /// before that contract exited 1 on every failure, and a `--commit`
@@ -617,8 +623,27 @@ impl PbfhoggCommand {
             Self::Diff { .. }
             | Self::DiffSnapshots { .. }
             | Self::CheckRefs
-            | Self::CheckIds { .. } => &[1],
-            _ => &[],
+            | Self::CheckIds { .. }
+            | Self::CheckIndex => &[1],
+            // Exhaustive on purpose: a new command must decide whether it
+            // answers negatively, or a violating run is dropped as a failure.
+            Self::Inspect { .. }
+            | Self::Digest { .. }
+            | Self::Sort
+            | Self::Cat(_)
+            | Self::TagsFilter { .. }
+            | Self::Getid { .. }
+            | Self::Getparents
+            | Self::Renumber
+            | Self::MergeChanges { .. }
+            | Self::ApplyChanges
+            | Self::AddLocationsToWays
+            | Self::TimeFilter
+            | Self::Repack { .. }
+            | Self::Degrade { .. }
+            | Self::BuildGeocodeIndex
+            | Self::Extract { .. }
+            | Self::MultiExtract { .. } => &[],
         }
     }
 
@@ -810,6 +835,9 @@ impl PbfhoggCommand {
                     .input(ctx.pbf_str()?)?;
                 Ok(if *full { argv.arg("--full") } else { argv })
             }
+            Self::CheckIndex => CommandArgv::new("check")
+                .arg("--index")
+                .input(ctx.pbf_str()?),
             Self::Digest { form } => {
                 let argv = CommandArgv::new("digest").input(ctx.pbf_str()?)?;
                 Ok(match form {
@@ -1412,6 +1440,7 @@ mod tests {
             PbfhoggCommand::CheckRefs,
             PbfhoggCommand::CheckIds { full: false },
             PbfhoggCommand::CheckIds { full: true },
+            PbfhoggCommand::CheckIndex,
             PbfhoggCommand::Digest { form: None },
             PbfhoggCommand::Digest {
                 form: Some(DigestForm::Full),
@@ -1578,6 +1607,24 @@ mod tests {
             )
         );
         assert!(!args.iter().any(|a| a == "--dedupe"));
+        assert!(!cmd.supports_io_uring());
+    }
+
+    #[test]
+    fn check_index_passes_only_the_index_selector_and_accepts_a_negative_answer() {
+        let cmd = PbfhoggCommand::CheckIndex;
+        let args = cmd
+            .build_args(&ctx_for(&cmd), ArgMode::Bench)
+            .unwrap()
+            .into_args();
+        assert_eq!(
+            args.get(..3),
+            Some(&["check", "--index", "/data/denmark.osm.pbf"].map(String::from)[..])
+        );
+        // Any other selector would change what pbfhogg checks: `--index`
+        // alone suppresses the default `--ids --refs` pair.
+        assert!(!args.iter().any(|a| a == "--ids" || a == "--refs"));
+        assert_eq!(cmd.ok_exit_codes(), &[1]);
         assert!(!cmd.supports_io_uring());
     }
 

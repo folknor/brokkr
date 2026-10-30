@@ -255,7 +255,7 @@ describes the preceding run so it differs on nearly every pair.
 
 One `meta.` pair is the exception. A command whose exit status is its answer
 (a project-defined set; for pbfhogg `diff`, `diff-snapshots`, `check-refs`,
-`check-ids`) stores a run that exits with an accepted non-zero code as a
+`check-ids`, `check-index`) stores a run that exits with an accepted non-zero code as a
 completed run, and every such row records `meta.exit_code`, 0 included. When
 both sides of a pair recorded one and they differ, the pair gets an
 `answer: exit A -> B` line: one side found violations or differences and the

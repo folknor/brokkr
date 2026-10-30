@@ -94,6 +94,23 @@ impl Command {
                     params,
                 }
             }
+            Self::CheckIndex {
+                mode,
+                pbf,
+                snapshot,
+            } => {
+                let params = CommandParams {
+                    snapshot,
+                    ..Default::default()
+                };
+                RoutedCommand::Pbf {
+                    mode,
+                    pbf,
+                    command: PbfhoggCommand::CheckIndex,
+                    osc: None,
+                    params,
+                }
+            }
             Self::Digest {
                 mode,
                 pbf,

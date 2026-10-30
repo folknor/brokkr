@@ -382,6 +382,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
         | Command::Inspect { .. }
         | Command::CheckRefs { .. }
         | Command::CheckIds { .. }
+        | Command::CheckIndex { .. }
         | Command::Digest { .. }
         | Command::Sort { .. }
         | Command::Cat { .. }

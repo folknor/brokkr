@@ -628,6 +628,19 @@ In depth: `brokkr man clippy`."
         #[arg(long)]
         snapshot: Option<crate::datasets::resolve::SnapshotRef>,
     },
+    /// Verify every blob's indexdata and tagdata against its payload
+    #[command(name = "check-index", display_order = 2)]
+    CheckIndex {
+        #[command(flatten)]
+        mode: ModeArgs,
+        #[command(flatten)]
+        pbf: PbfArgs,
+        /// Snapshot key to read input from. Use `base` (or omit) for the
+        /// dataset's primary data; pass a key registered under
+        /// `[dataset.snapshot.<key>]` for a historical snapshot.
+        #[arg(long)]
+        snapshot: Option<crate::datasets::resolve::SnapshotRef>,
+    },
     /// Digest a PBF's canonical form
     #[command(name = "digest", display_order = 2)]
     Digest {

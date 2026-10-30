@@ -259,7 +259,7 @@ pbfhogg exits 0 or 1 for a completed command's answer and 2 or above for a
 failure: 1 is `diff` finding differences, `check` finding violations,
 `inspect --indexed` finding no index, `inspect --show` finding no element.
 The measured commands that give such an answer - `diff`, `diff-snapshots`,
-`check-refs`, `check-ids` - accept exit 1 as a completed run, so a
+`check-refs`, `check-ids`, `check-index` - accept exit 1 as a completed run, so a
 `--bench` cell on a file that rightly fails its check (a ways-only snapshot
 under `check-refs`) reaches results.db, with `meta.exit_code` recording which
 answer was measured (see `docs/commands/results.md`). Exit 2 and signals stay
@@ -268,8 +268,8 @@ accepts nothing but 0.
 
 The set is per command, not "1 is always an answer": pbfhogg commits from
 before this contract exited 1 on every failure, and a `--commit` baseline of
-`sort` or `cat` must not store a crash as a run. A `--commit` baseline of one
-of the four answer commands from that era cannot tell a failure from a
+`sort` or `cat` must not store a crash as a run. A `--commit` baseline of an
+answer command from that era cannot tell a failure from a
 negative answer either way; its `meta.exit_code` of 1 is the only hint.
 
 ## Digest
@@ -281,6 +281,21 @@ passed and the build's own default form is measured, so a `--commit`
 baseline from before pbfhogg grew `--form` digests its only form, v1 content.
 The brokkr argv, `--form` included, is part of the row's identity: a
 defaulted run never pairs with an explicit `--form` one.
+
+## Check index
+
+`brokkr check-index` measures `pbfhogg check --index` on the dataset PBF
+like the other read-side commands (`--bench`, `--hotpath`, `--alloc`,
+`--commit`, `--snapshot`), and is a `brokkr suite pbfhogg` preset. brokkr
+passes `--index` alone, which suppresses pbfhogg's default `--ids --refs`
+pair, so the row times index verification only. It decompresses every blob,
+so it costs about a full `cat --clean` pass. It verifies the metadata a blob
+claims, not that it claims any: absent indexdata or tagdata passes. A file
+whose blob metadata disagrees with its payload exits 1 and is stored as a completed run (see
+Answer exit codes). `--direct-io` is forwarded and changes every read the
+command makes; a host that refuses O_DIRECT exits 3, a failure. The suite
+preset runs without it. `--io-uring` is refused, as pbfhogg's check has no
+io_uring path.
 
 ## Verify subcommands
 

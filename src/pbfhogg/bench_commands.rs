@@ -25,6 +25,7 @@ pub const ALL_COMMANDS: &[&str] = &[
     "inspect-tags-way",
     "check-refs",
     "check-ids",
+    "check-index",
     "sort",
     "cat",
     "cat-way",
@@ -70,6 +71,7 @@ pub(crate) fn preset_to_command(name: &str) -> Result<PbfhoggCommand, DevError> 
         },
         "check-refs" => PbfhoggCommand::CheckRefs,
         "check-ids" => PbfhoggCommand::CheckIds { full: false },
+        "check-index" => PbfhoggCommand::CheckIndex,
         "sort" => PbfhoggCommand::Sort,
         "cat" => PbfhoggCommand::Cat(CatMode::Plain {
             type_filter: None,
@@ -330,6 +332,7 @@ mod tests {
             "inspect-tags-way",
             "check-refs",
             "check-ids",
+            "check-index",
             "diff",
         ] {
             let cmd = preset_to_command(name).unwrap();

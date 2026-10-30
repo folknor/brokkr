@@ -90,6 +90,7 @@ Env => ("env", Visibility::Any, Required, None, false, crate::measure::MeasureMo
 Inspect => ("inspect", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
 CheckRefs => ("check-refs", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
 CheckIds => ("check-ids", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
+CheckIndex => ("check-index", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
 Digest => ("digest", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
 Sort => ("sort", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
 Cat => ("cat", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
@@ -204,6 +205,7 @@ impl CommandSpec {
                     super::Command::Inspect { mode, .. }
                     | super::Command::CheckRefs { mode, .. }
                     | super::Command::CheckIds { mode, .. }
+                    | super::Command::CheckIndex { mode, .. }
                     | super::Command::Digest { mode, .. }
                     | super::Command::Sort { mode, .. }
                     | super::Command::Cat { mode, .. }
