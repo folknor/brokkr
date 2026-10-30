@@ -282,7 +282,7 @@ gets the variable: brokkr drops `BROKKR_MARKER_FIFO` and
 unchanged to the program cargo meant to run), so a
 brokkr started under another brokkr's sidecar passes that FIFO to none of its
 children, measured or not (configured environment can still set the name
-explicitly). The shared supervisor in `src/output/child.rs` polls the child, handles
+explicitly). The shared supervisor in `src/output/child.rs` waits on the child (a pidfd between ticks), handles
 stop markers, deadlines and interrupts, and drains stdout/stderr with a bounded
 settle period. It records one typed ending (`Exited`, `Signalled`, `StopMarker`,
 `Deadline`, `Interrupted`, or `WaitFailed`) before waiting for the drains. `src/sidecar.rs`
@@ -502,6 +502,15 @@ switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`.
   against monotonic time so the ~30us of /proc read overhead does not accumulate
   drift. Each tick reads
   `/proc/<pid>/{stat,io,status}`.
+- **The wall is the exit, not a tick.** Between ticks the supervisor waits on
+  the child's pidfd, so a natural exit wakes it at once and the wall is taken
+  there; a short run's wall is not rounded up to the next multiple of the
+  sample interval. The exit wake still drains the FIFO, so a stop marker
+  written before the exit wins as before, but takes no `/proc` sample, so no
+  sample postdates the wall. Where a pidfd cannot be opened the exit is found
+  on the next tick. Rows recorded before this change carry the tick-quantized
+  wall: up to one sample interval (100 ms by default) late, always upward, most
+  visible at `--bench 1` on short runs.
 - **`--stop <marker>`** SIGKILLs the whole child **process group**
   (`process::signal_process_group`, so descendants are reaped too) the moment the marker
   lands. That SIGKILL is *not* treated as a failure - `stopped_by_marker`

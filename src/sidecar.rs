@@ -36,8 +36,14 @@
 //! # Timing
 //!
 //! `Instant::now()` provides sample timestamps and drift-free tick scheduling
-//! through the shared child supervisor. The child's wall-clock time is
-//! captured when the supervisor observes the ending, before pipe drains settle.
+//! through the shared child supervisor. The supervisor waits on the child's
+//! pidfd between ticks, so a natural exit is stamped when the pidfd reports
+//! it, not on the next tick, and the wall is not quantized to the sample
+//! interval; the exit wake drains the FIFO for a stop marker but takes no
+//! sample, so every sample precedes the wall. Without a pidfd the exit is
+//! found on a tick, as are the stop-marker, deadline and interrupt endings,
+//! whose wall is taken after the kill and wait. Pipe drains settle after the
+//! wall is taken.
 
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
@@ -1664,10 +1670,17 @@ pub(crate) fn run_sidecar_with_deadline(
         limit,
         crate::shutdown::ChildIsolation::ProcessGroup(&shutdown_guard),
         options,
-        || {
-            let elapsed_us =
-                i64::try_from(sampler.elapsed_since(start).as_micros()).unwrap_or(i64::MAX);
-            if let Some(sample) = sampler.sample(pid, sample_idx, elapsed_us) {
+        |wake| {
+            // A sample on the exit wake would read a zombie off cadence and
+            // postdate the wall; that wake only looks for a stop marker.
+            let sample = (wake == child::Wake::Tick)
+                .then(|| {
+                    let elapsed_us =
+                        i64::try_from(sampler.elapsed_since(start).as_micros()).unwrap_or(i64::MAX);
+                    sampler.sample(pid, sample_idx, elapsed_us)
+                })
+                .flatten();
+            if let Some(sample) = sample {
                 sample_idx = sample_idx.saturating_add(1);
                 last_hwm = last_hwm.max(sample.vm_hwm_kb);
                 if fifo.keep_sample() {

@@ -824,14 +824,7 @@ fn proc_parent(pid: u32) -> io::Result<u32> {
 /// An unverified pidfd for a process the caller itself owns: its own child,
 /// not yet reaped, so the pid cannot have been recycled.
 pub(super) fn open_pidfd(pid: u32) -> io::Result<OwnedFd> {
-    // SAFETY: a plain syscall with no pointer arguments.
-    let ret = unsafe { libc::syscall(libc::SYS_pidfd_open, pid.cast_signed(), 0_u32) };
-    if ret < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let fd = RawFd::try_from(ret).map_err(|_| io::Error::other("pidfd out of range"))?;
-    // SAFETY: a successful pidfd_open returns a fresh fd we uniquely own.
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    crate::process::pidfd::open_own(pid)
 }
 
 fn pidfd_exited(fd: &OwnedFd) -> bool {
@@ -841,13 +834,10 @@ fn pidfd_exited(fd: &OwnedFd) -> bool {
 /// Wait up to `wait` for the process behind `fd` to exit; true once it has.
 /// A pidfd turns readable at exit, so the waiter wakes then, not a poll later.
 pub(super) fn pidfd_wait(fd: &OwnedFd, wait: Duration) -> bool {
-    let mut pfd = libc::pollfd {
-        fd: fd.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    let ms = libc::c_int::try_from(wait.as_millis()).unwrap_or(libc::c_int::MAX);
-    unsafe { libc::poll(&mut pfd, 1, ms) > 0 }
+    matches!(
+        crate::process::pidfd::wait(fd, wait),
+        crate::process::pidfd::PidfdWait::Exited
+    )
 }
 
 fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {

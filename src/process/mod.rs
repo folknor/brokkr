@@ -3,6 +3,7 @@
 mod helpers;
 mod identity;
 pub(crate) mod inflight;
+pub(crate) mod pidfd;
 mod reap;
 pub(crate) mod spawn;
 mod table;

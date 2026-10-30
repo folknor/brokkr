@@ -641,7 +641,7 @@ pub(crate) fn supervise_child(
     limit: ChildLimit,
     isolation: ChildIsolation<'_>,
     options: ChildOptions,
-    observe: impl FnMut() -> Option<String>,
+    observe: impl FnMut(Wake) -> Option<String>,
 ) -> SupervisedChild {
     supervise_child_capped(child, label, start, limit, isolation, options, observe)
 }
@@ -765,6 +765,42 @@ fn start_drains(
     (stdout_thread, stderr_thread)
 }
 
+/// Why the supervisor is observing: its scheduled tick, or the child's exit
+/// reported between ticks. An observer that samples on cadence (the sidecar)
+/// skips its sample on `Exit` and only checks for a stop marker.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Wake {
+    Tick,
+    Exit,
+}
+
+/// Wait until `next_tick`, waking early if the pidfd reports the exit, and
+/// return the exit time measured from `start` when it does. A wait already
+/// past its tick still checks the pidfd once. A pidfd that fails is dropped,
+/// and the rest of the wait, and every later one, is a plain sleep.
+fn wait_for_tick(
+    pidfd: &mut Option<std::os::fd::OwnedFd>,
+    next_tick: Instant,
+    start: Instant,
+) -> Option<Duration> {
+    use crate::process::pidfd::{PidfdWait, wait};
+    while let Some(fd) = pidfd.as_ref() {
+        match wait(fd, next_tick.saturating_duration_since(Instant::now())) {
+            PidfdWait::Exited => return Some(start.elapsed()),
+            PidfdWait::TimedOut => return None,
+            PidfdWait::Interrupted => {}
+            PidfdWait::Failed(error) => {
+                super::console::warn(&format!(
+                    "pidfd wait failed ({error}); this child's exit is found on the next tick"
+                ));
+                *pidfd = None;
+            }
+        }
+    }
+    std::thread::sleep(next_tick.saturating_duration_since(Instant::now()));
+    None
+}
+
 #[allow(clippy::too_many_arguments)] // the supervisor's whole contract, one call
 fn supervise_child_capped(
     mut child: std::process::Child,
@@ -773,7 +809,7 @@ fn supervise_child_capped(
     limit: ChildLimit,
     isolation: ChildIsolation<'_>,
     options: ChildOptions,
-    mut observe: impl FnMut() -> Option<String>,
+    mut observe: impl FnMut(Wake) -> Option<String>,
 ) -> SupervisedChild {
     use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
@@ -790,11 +826,23 @@ fn supervise_child_capped(
         }
     };
 
+    // Our own unreaped child, so its pid cannot be recycled under the open.
+    // Without a pidfd, exit is found on the tick, as before.
+    let mut pidfd = crate::process::pidfd::open_own(child.id()).ok();
+    // When the pidfd reported the exit: the wall, rather than the tick that
+    // reaps it.
+    let mut exit_at = None;
+
     #[allow(unused_assignments)] // every ending path stamps its observation time
     let mut child_elapsed = None;
     let mut next_tick = Instant::now();
     let ending = loop {
-        if let Some(marker) = observe() {
+        let wake = if exit_at.is_some() {
+            Wake::Exit
+        } else {
+            Wake::Tick
+        };
+        if let Some(marker) = observe(wake) {
             let ending = terminate_and_wait(
                 &mut child,
                 isolation,
@@ -819,7 +867,7 @@ fn supervise_child_capped(
         // later reading can rule out. Its own ending stands.
         match child.try_wait() {
             Ok(Some(status)) => {
-                child_elapsed = Some(start.elapsed());
+                child_elapsed = Some(exit_at.unwrap_or_else(|| start.elapsed()));
                 break Ending::from_status(&status).unwrap_or_else(|| {
                     Ending::WaitFailed("wait returned no exit code or signal".to_owned())
                 });
@@ -851,8 +899,13 @@ fn supervise_child_capped(
             }
         }
 
+        if exit_at.is_some() {
+            // Exited yet not reaped is not expected; fall back to the ticks
+            // rather than spin on a readable pidfd.
+            pidfd = None;
+        }
         next_tick += options.poll_interval;
-        std::thread::sleep(next_tick.saturating_duration_since(Instant::now()));
+        exit_at = wait_for_tick(&mut pidfd, next_tick, start);
     };
 
     let drains = vec![stdout_thread, stderr_thread];
@@ -949,7 +1002,7 @@ fn run_captured_limited_unsetting(
     }
     crate::process::spawn::capture_stdio(&mut cmd);
     let child = crate::process::spawn::spawn(cmd, on_spawn)?;
-    let run = supervise_child_capped(child, program, start, limit, isolation, options, || None);
+    let run = supervise_child_capped(child, program, start, limit, isolation, options, |_| None);
     let classification = verdict(&run.ending, program, &run.stderr, &[]);
     match (&run.ending, classification) {
         (_, IterationVerdict::Interrupted) => return Err(DevError::Interrupted),
@@ -1087,7 +1140,7 @@ fn run_command_to_file(
         ChildLimit::None,
         ChildIsolation::Inherit,
         options,
-        || None,
+        |_| None,
     );
     match (&run.ending, verdict(&run.ending, program, &run.stderr, &[])) {
         (_, IterationVerdict::Interrupted) => return Err(DevError::Interrupted),
@@ -1280,7 +1333,7 @@ pub fn run_passthrough_in(
         ChildLimit::None,
         ChildIsolation::Inherit,
         ChildOptions::DEFAULT,
-        || None,
+        |_| None,
     );
     if let Some(lock) = lock {
         lock.clear_child_pid();
@@ -1350,7 +1403,7 @@ fn run_prepared_plain(
         ChildLimit::None,
         ChildIsolation::Inherit,
         options,
-        || None,
+        |_| None,
     );
     if run.output_cut || run.stdout_truncated || run.stderr_truncated {
         return Err(std::io::Error::other(format!(
@@ -1481,6 +1534,42 @@ mod tests {
         .unwrap();
         assert!(!result.captured.ending.is_deadline());
         assert_eq!(result.captured.ending, Ending::Exited(0));
+    }
+
+    #[test]
+    fn the_wall_is_the_exit_not_the_tick_that_reaps_it() {
+        // A 60 s tick: on the old grid the wall would be 60 s; the pidfd
+        // wakes the supervisor at the exit. The exit wake observes once,
+        // marked as such, and nothing is observed after it.
+        let mut command = crate::process::spawn::ChildPolicy::plain_command("/bin/sleep");
+        command.arg("0.05");
+        let child = crate::process::spawn::spawn(command, None).expect("spawn sleep");
+        let start = Instant::now();
+        let mut wakes = Vec::new();
+        let run = supervise_child(
+            child,
+            "sleep",
+            start,
+            ChildLimit::None,
+            ChildIsolation::Inherit,
+            ChildOptions {
+                poll_interval: Duration::from_secs(60),
+                ..ChildOptions::DEFAULT
+            },
+            |wake| {
+                wakes.push(wake);
+                None
+            },
+        );
+        assert_eq!(run.ending, Ending::Exited(0));
+        assert!(
+            run.elapsed >= Duration::from_millis(50),
+            "{:?}",
+            run.elapsed
+        );
+        assert!(run.elapsed < Duration::from_secs(10), "{:?}", run.elapsed);
+        assert_eq!(wakes.last(), Some(&Wake::Exit));
+        assert_eq!(wakes.iter().filter(|w| **w == Wake::Exit).count(), 1);
     }
 
     #[test]
