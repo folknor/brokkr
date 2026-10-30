@@ -374,6 +374,7 @@ impl<'a> NidhoggLayout<'a> {
 pub(crate) enum PbfhoggFileKind {
     Pbf,
     Osc,
+    Text,
 }
 
 /// Pbfhogg's known scratch outputs. These names come from the command layer;
@@ -408,6 +409,7 @@ impl<'a> PbfhoggLayout<'a> {
         let extension = match kind {
             PbfhoggFileKind::Pbf => "osm.pbf",
             PbfhoggFileKind::Osc => "osc.gz",
+            PbfhoggFileKind::Text => "txt",
         };
         scratch_dir.join(format!("{prefix}-{command}-output.{extension}"))
     }
@@ -493,6 +495,7 @@ impl<'a> PbfhoggLayout<'a> {
             "extract",
         ];
         const OSC_COMMANDS: &[&str] = &["tags-filter", "merge-changes", "diff", "diff-snapshots"];
+        const TEXT_COMMANDS: &[&str] = &["diff", "diff-snapshots"];
 
         let scratch_dir = self.scratch();
         let mut files = BTreeSet::new();
@@ -521,6 +524,14 @@ impl<'a> PbfhoggLayout<'a> {
                     prefix,
                     command,
                     PbfhoggFileKind::Osc,
+                ));
+            }
+            for command in TEXT_COMMANDS {
+                files.insert(Self::command_output_file(
+                    scratch_dir,
+                    prefix,
+                    command,
+                    PbfhoggFileKind::Text,
                 ));
             }
         }

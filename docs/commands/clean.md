@@ -84,7 +84,7 @@ Bare `brokkr clean`, in order:
   store) is wiped and recreated, and `<data>/tilegen_tmp` (the `--tmp-dir`
   brokkr hands elivagar) is removed. Nidhogg's constructed
   `bench-ingest-output/` directory is removed. Pbfhogg removes its known
-  bench/hotpath PBF and OSC outputs, `multi-extract/`, the `geocode-<dataset>/`
+  bench/hotpath PBF, OSC and diff text outputs, `multi-extract/`, the `geocode-<dataset>/`
   dirs for configured datasets, merged-PBF cache names constructed from
   configured PBF/OSC entries. First it reclaims every free pbfhogg launch
   lease with its private directory, wherever that sits, and names each lease

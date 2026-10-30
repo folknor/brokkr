@@ -333,7 +333,6 @@ mod tests {
             "check-refs",
             "check-ids",
             "check-index",
-            "diff",
         ] {
             let cmd = preset_to_command(name).unwrap();
             assert!(matches!(cmd.output_kind(), OutputKind::None), "{name}");
@@ -346,5 +345,8 @@ mod tests {
                 "{name}"
             );
         }
+        // The text diff writes its text to a scratch file, never stdout.
+        let cmd = preset_to_command("diff").unwrap();
+        assert!(matches!(cmd.output_kind(), OutputKind::ScratchText));
     }
 }

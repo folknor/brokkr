@@ -121,8 +121,8 @@ directory, passed as `--staging-dir` when the argv writes an output and as
 is in there. It goes in the directory holding the first output (for a
 `build-geocode-index --output-dir`, the index directory's parent, never inside
 the directory publication replaces), or for scratch with no output (a parallel
-text `diff` to stdout) in the root the argv names: the scratch dir for
-measured commands, the verify directory for checks. Before anything is
+text `diff` to stdout, which only verify runs) in the root the argv names, the
+verify directory. Before anything is
 created, every output's directory must be on the same mount as that location,
 or the launch is refused, since pbfhogg publishes by rename. A launch in a
 `brokkr library` run directory (a CLI counterpart's replay and the digests
@@ -136,10 +136,11 @@ declared by what pbfhogg's implementation actually does:
 path, and every text `diff` except a quiet one and one with an explicit
 `-j 1`, which make no run directory and refuse `--tmp-dir`. A verbose text diff
 and one with automatic jobs make one at startup whether or not they write a
-shard, which pbfhogg's prose reference does not say. Such a text `diff` to
-stdout used to put that run directory in the project root, its working
-directory; it now goes to the scratch dir, which can shift measured `diff`
-timings when the two are on different filesystems. brokkr spells every
+shard, which pbfhogg's prose reference does not say. A measured text `diff`
+used to put that run directory in the project root, its working directory; it
+now goes beside its text output in the scratch dir (see Diff text output),
+which can shift measured `diff` timings when the two are on different
+filesystems. brokkr spells every
 pbfhogg flag it forwards long (`--output`, `--jobs`, `--invert-match`, ...),
 since pbfhogg has reassigned short letters between versions and a `--commit`
 baseline accepts the long forms; the one exception is `verify renumber`'s
@@ -271,6 +272,25 @@ before this contract exited 1 on every failure, and a `--commit` baseline of
 `sort` or `cat` must not store a crash as a run. A `--commit` baseline of an
 answer command from that era cannot tell a failure from a
 negative answer either way; its `meta.exit_code` of 1 is the only hint.
+
+## Diff text output
+
+The text arm of `brokkr diff` and `brokkr diff-snapshots` (no `--format osc`)
+runs `pbfhogg diff A B --suppress-common --output FILE`, writing the text to
+`<scratch>/bench-<id>-output.txt` (`hotpath-` under `--hotpath` and
+`--alloc`), removed before and after the run and by `brokkr clean`, like the
+OSC arm's `.osc.gz`. The text never passes through stdout, whose capture is
+bounded (`brokkr man measure`, trajectory capture limits): a planet diff
+between snapshots weeks apart writes far more text than the bound, and was
+cut off and stored nothing. Writing the text stays part of the measured cost,
+so `-q`, which only counts and skips byte-equal blobs, is never passed.
+pbfhogg publishes the file on both answers, exit 0 and exit 1.
+
+Rows recorded before this streamed the text to stdout. Their brokkr argv is
+the same, so they pair with newer rows in `brokkr results` comparisons, but
+they did not pay for staging, sync and publication of the file; only
+`cli_args`, which gains `--output`, tells the two apart. The planet rows of the
+stdout era never completed.
 
 ## Digest
 

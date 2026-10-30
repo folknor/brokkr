@@ -667,7 +667,7 @@ pub(crate) fn cleanup_output(
     mode: ArgMode,
 ) -> Result<(), DevError> {
     match command.output_kind() {
-        OutputKind::ScratchPbf | OutputKind::ScratchOsc => {
+        OutputKind::ScratchPbf | OutputKind::ScratchOsc | OutputKind::ScratchText => {
             crate::reservations::remove_file(&crate::pbfhogg::commands::scratch_output_path(
                 ctx, command, mode,
             )?)

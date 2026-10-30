@@ -1025,8 +1025,8 @@ In depth: `brokkr man clippy`."
         mode: ModeArgs,
         #[command(flatten)]
         pbf: PbfArgs,
-        /// Output format: `default` (summary diff) or `osc` (OSC-format
-        /// diff written to scratch).
+        /// Output format: `default` (text diff) or `osc` (OSC-format diff),
+        /// either written to a scratch file.
         #[arg(long, default_value_t, value_enum)]
         format: crate::pbfhogg::commands::DiffFormat,
         /// OSC sequence number from brokkr.toml
@@ -1042,8 +1042,8 @@ In depth: `brokkr man clippy`."
         /// from a historical snapshot.
         #[arg(long)]
         snapshot: Option<crate::datasets::resolve::SnapshotRef>,
-        /// Parallel worker threads for pbfhogg diff. `0` = auto
-        /// (`available_parallelism()`); omit to use pbfhogg's default (1).
+        /// Parallel worker threads and shards for pbfhogg diff, forwarded as
+        /// `--jobs`; omit to use pbfhogg's default (`0`, one shard per core).
         #[arg(short = 'j', long)]
         jobs: Option<usize>,
     },
@@ -1084,16 +1084,15 @@ Examples:
         /// Errors if the requested variant doesn't exist on either snapshot.
         #[arg(long, default_value = DEFAULT_INDEXED_VARIANT)]
         variant: String,
-        /// Output format: `default` (summary diff) or `osc` (OSC-format diff
-        /// written to scratch).
+        /// Output format: `default` (text diff) or `osc` (OSC-format diff),
+        /// either written to a scratch file.
         #[arg(long, default_value_t, value_enum)]
         format: crate::pbfhogg::commands::DiffFormat,
-        /// Parallel worker threads for pbfhogg diff. `0` = auto
-        /// (`available_parallelism()`); omit to use pbfhogg's default (1).
+        /// Parallel worker threads and shards for pbfhogg diff, forwarded as
+        /// `--jobs`; omit to use pbfhogg's default (`0`, one shard per core).
         #[arg(short = 'j', long)]
         jobs: Option<usize>,
     },
-    /// Diff two PBFs (OSC output)
     /// Build geocode index
     #[command(name = "build-geocode-index", display_order = 2)]
     BuildGeocodeIndex {

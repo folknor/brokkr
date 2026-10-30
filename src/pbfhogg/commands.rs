@@ -76,6 +76,9 @@ pub enum OutputKind {
     ScratchPbf,
     /// Writes a scratch `.osc.gz` file.
     ScratchOsc,
+    /// Writes a scratch `.txt` file: a text `diff`, whose text would
+    /// overflow the measurement's stdout capture at planet scale.
+    ScratchText,
     /// Writes to a scratch directory. `dataset_suffix` distinguishes output
     /// directories such as `geocode-<dataset>` from fixed paths such as
     /// multi-extract's `multi-extract`.
@@ -200,10 +203,10 @@ impl CatTypeFilter {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Default)]
 #[value(rename_all = "lowercase")]
 pub enum DiffFormat {
-    /// Default summary diff (`pbfhogg diff <a> <b> -c`).
+    /// Text diff (`pbfhogg diff <a> <b> --suppress-common --output <out>`).
     #[default]
     Default,
-    /// OSC-format diff (`pbfhogg diff --format osc <a> <b> -o <out>`).
+    /// OSC-format diff (`pbfhogg diff --format osc <a> <b> --output <out>`).
     Osc,
 }
 
@@ -457,7 +460,7 @@ pub enum PbfhoggCommand {
 impl PbfhoggCommand {
     /// Describe command identity, output routing and I/O support in one match.
     pub fn descriptor(&self) -> CommandDescriptor {
-        use OutputKind::{None, ScratchDir, ScratchOsc, ScratchPbf};
+        use OutputKind::{None, ScratchDir, ScratchOsc, ScratchPbf, ScratchText};
         let (id, output, promotion_variant, supports_io_uring) = match self {
             Self::Inspect { .. } => ("inspect", None, PromotionVariant::Unsupported, false),
             Self::CheckRefs => ("check-refs", None, PromotionVariant::Unsupported, false),
@@ -500,13 +503,18 @@ impl PbfhoggCommand {
             Self::TimeFilter => ("time-filter", ScratchPbf, PromotionVariant::Indexed, false),
             Self::Diff {
                 format: DiffFormat::Default,
-            } => ("diff", None, PromotionVariant::Unsupported, false),
+            } => ("diff", ScratchText, PromotionVariant::Unsupported, false),
             Self::Diff {
                 format: DiffFormat::Osc,
             } => ("diff", ScratchOsc, PromotionVariant::Unsupported, true),
             Self::DiffSnapshots {
                 format: DiffFormat::Default,
-            } => ("diff-snapshots", None, PromotionVariant::Unsupported, false),
+            } => (
+                "diff-snapshots",
+                ScratchText,
+                PromotionVariant::Unsupported,
+                false,
+            ),
             Self::DiffSnapshots {
                 format: DiffFormat::Osc,
             } => (
@@ -999,10 +1007,14 @@ impl PbfhoggCommand {
                 let to = ctx.pbf_b_str()?;
                 let argv = match format {
                     DiffFormat::Default => {
+                        // The text goes to a file, never stdout: at planet it
+                        // overflows the measurement's stdout capture.
+                        let output = scratch_output_path(ctx, self, mode)?;
                         let argv = CommandArgv::new("diff")
                             .input(from)?
                             .input(to)?
-                            .arg("--suppress-common");
+                            .arg("--suppress-common")
+                            .output(&output)?;
                         if crate::pbfhogg::argv::text_diff_writes_scratch(ctx.params.jobs, false) {
                             argv.scratch(&ctx.scratch_dir)
                         } else {
@@ -1256,6 +1268,12 @@ pub(crate) fn scratch_output_path(
         OutputKind::ScratchOsc => {
             PbfhoggLayout::command_output_file(&ctx.scratch_dir, prefix, name, PbfhoggFileKind::Osc)
         }
+        OutputKind::ScratchText => PbfhoggLayout::command_output_file(
+            &ctx.scratch_dir,
+            prefix,
+            name,
+            PbfhoggFileKind::Text,
+        ),
         OutputKind::ScratchDir {
             name,
             dataset_suffix: true,
@@ -1799,8 +1817,46 @@ mod tests {
                 "/data/denmark.osm.pbf",
                 "/data/scratch/merged.osm.pbf",
                 "--suppress-common",
+                "--output",
+                "/data/scratch/bench-diff-output.txt",
             ]
         );
+    }
+
+    #[test]
+    fn a_text_diff_writes_its_text_to_a_scratch_file_per_command_and_mode() {
+        let mut ctx = test_ctx();
+        use_two_pbfs(&mut ctx);
+        for (cmd, mode, want) in [
+            (
+                PbfhoggCommand::Diff {
+                    format: DiffFormat::Default,
+                },
+                ArgMode::Hotpath,
+                "/data/scratch/hotpath-diff-output.txt",
+            ),
+            (
+                PbfhoggCommand::DiffSnapshots {
+                    format: DiffFormat::Default,
+                },
+                ArgMode::Bench,
+                "/data/scratch/bench-diff-snapshots-output.txt",
+            ),
+            (
+                PbfhoggCommand::Diff {
+                    format: DiffFormat::Osc,
+                },
+                ArgMode::Bench,
+                "/data/scratch/bench-diff-output.osc.gz",
+            ),
+        ] {
+            let args = cmd.build_args(&ctx, mode).unwrap().into_args();
+            let pos = args
+                .iter()
+                .position(|a| a == "--output")
+                .expect("--output present");
+            assert_eq!(args[pos + 1], want, "{cmd:?}");
+        }
     }
 
     #[test]
