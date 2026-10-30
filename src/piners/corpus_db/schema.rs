@@ -150,7 +150,7 @@ impl Projection {
 /// NULL, `acc_failing` is `'[]'` when absent, and `sig_breaches` is present
 /// exactly when a signature object is. Declared types give the projections
 /// their affinity, so an integral p90 reads back REAL as it was stored.
-const PROJECTIONS: [(&str, Projection); 39] = [
+const PROJECTIONS: [(&str, Projection); 45] = [
     ("outcome", Projection::Text("$.outcome")),
     ("matched", Projection::CountOr0("$.matched")),
     ("ours_only", Projection::CountOr0("$.ours_only")),
@@ -227,6 +227,41 @@ const PROJECTIONS: [(&str, Projection); 39] = [
     ("window_sensitive", Projection::Array("$.window_sensitive")),
     // Why an `unevaluated` probe could not be evaluated (v16).
     ("reason", Projection::Text("$.reason")),
+    // The performance census, per leg (v18); NULL where a leg is absent.
+    (
+        "perf_equity_compared",
+        Projection::Count("$.performance.equity.compared"),
+    ),
+    (
+        "perf_equity_mismatched",
+        Projection::Count("$.performance.equity.mismatched"),
+    ),
+    (
+        "perf_equity_tolerance",
+        Projection::Text("$.performance.equity.tolerance"),
+    ),
+    (
+        "perf_scalars_compared",
+        Projection::Count("$.performance.scalars.compared"),
+    ),
+    (
+        "perf_scalars_mismatched",
+        Projection::Count("$.performance.scalars.mismatched"),
+    ),
+    (
+        "perf_scalars_tolerance",
+        Projection::Text("$.performance.scalars.tolerance"),
+    ),
+];
+
+/// The v18 performance projections, in [`PROJECTIONS`] order.
+pub(super) const PERFORMANCE_PROJECTIONS: [&str; 6] = [
+    "perf_equity_compared",
+    "perf_equity_mismatched",
+    "perf_equity_tolerance",
+    "perf_scalars_compared",
+    "perf_scalars_mismatched",
+    "perf_scalars_tolerance",
 ];
 
 /// The `ADD COLUMN` definition of the [`PROJECTIONS`] entry `name`, for a
@@ -254,6 +289,8 @@ pub(super) fn disposition_ddl(name: &str) -> String {
     label_gate    TEXT,
     scored        INTEGER,
     defect        TEXT,
+    expected_performance TEXT,
+    performance_gate TEXT,
 {},
     PRIMARY KEY (run_id, probe)
 );

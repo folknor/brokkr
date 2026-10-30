@@ -14,6 +14,7 @@ pub mod lfs;
 pub(crate) mod line_value;
 pub mod manifest;
 pub mod measured;
+pub mod performance;
 pub mod pins_write;
 pub(crate) mod prepare;
 pub mod registry;

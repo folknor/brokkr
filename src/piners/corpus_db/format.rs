@@ -264,10 +264,11 @@ fn compare_cells(d: &ProbeDelta) -> Vec<String> {
     }
 }
 
-/// The stored label verdict, compactly: `-` when the probe was not
-/// label-checked (or the row predates the ratchet), `ok` when clean, else
-/// each deviation as `entry 0->3` or `missing census`.
-fn label_gate(stored: Option<&str>) -> String {
+/// A stored ratchet verdict (labels or performance), compactly: `-` when the
+/// probe was not checked (or the row predates the ratchet), `ok` when clean,
+/// else each deviation as `entry 0->3`, `equity missing` for a performance
+/// leg, or `missing census` for the label census.
+fn ratchet_cell(stored: Option<&str>) -> String {
     let Some(text) = stored else {
         return "-".to_owned();
     };
@@ -282,7 +283,10 @@ fn label_gate(stored: Option<&str>) -> String {
         .iter()
         .map(|d| {
             if d.get("missing").is_some() {
-                "missing census".to_owned()
+                match d["leg"].as_str() {
+                    Some(leg) => format!("{leg} missing"),
+                    None => "missing census".to_owned(),
+                }
             } else {
                 format!(
                     "{} {}->{}",
@@ -326,7 +330,8 @@ pub fn dispositions_table(rows: &[DispositionRow]) -> String {
                 d.disposition.clone(),
                 fs(&d.expected),
                 gate_cell(d.gate_ok, d.scored, d.defect.as_deref()),
-                label_gate(d.label_gate.as_deref()),
+                ratchet_cell(d.label_gate.as_deref()),
+                ratchet_cell(d.performance_gate.as_deref()),
                 d.matched.to_string(),
                 d.ours_only.to_string(),
                 d.tv_only.to_string(),
@@ -362,6 +367,7 @@ pub fn dispositions_table(rows: &[DispositionRow]) -> String {
             "expected",
             "gate",
             "labels",
+            "perf",
             "matched",
             "ours",
             "tv",

@@ -33,7 +33,15 @@ use crate::piners::toml_writer::{self, set_block_prefix, set_value, sort_fields,
 
 /// Field order inside a `[probes.<id>]` entry: the blessed contract first,
 /// then the volatile hashes.
-const PROBE_FIELDS: [&str; 6] = ["expected", "labels", "pine", "inputs", "csv", "record"];
+const PROBE_FIELDS: [&str; 7] = [
+    "expected",
+    "labels",
+    "performance",
+    "pine",
+    "inputs",
+    "csv",
+    "record",
+];
 
 /// Field order inside a `[feeds.<name>]` group. `base` is the single-base
 /// form; `primary`/`warmup`/`lower` the role form. The two forms never
@@ -215,6 +223,22 @@ fn fill_probe(table: &mut Table, pin: &Pin) -> Result<(), DevError> {
             .map(|l| {
                 toml_writer::parse_value(
                     &format!("{{ entry = {}, exit = {} }}", l.entry, l.exit),
+                    "piners: pins.toml",
+                )
+            })
+            .transpose()?,
+    );
+    sync_opt(
+        table,
+        "performance",
+        pin.performance
+            .map(|p| {
+                let legs: Vec<String> = [("equity", p.equity), ("scalars", p.scalars)]
+                    .into_iter()
+                    .filter_map(|(leg, n)| n.map(|n| format!("{leg} = {n}")))
+                    .collect();
+                toml_writer::parse_value(
+                    &format!("{{ {} }}", legs.join(", ")),
                     "piners: pins.toml",
                 )
             })

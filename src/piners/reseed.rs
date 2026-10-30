@@ -513,13 +513,14 @@ fn stamp_file(
 }
 
 /// Copy each surviving probe's blessed contract - `expected` and its label
-/// counts - from the old pin set into the freshly stamped one. A probe new to
+/// and performance counts - from the old pin set into the freshly stamped one. A probe new to
 /// the corpus stays `expected: None` (unblessed), which the gate treats as a
 /// hard "must bless".
 fn carry_expected(new: &mut BTreeMap<String, Pin>, old: &BTreeMap<String, Pin>) {
     registry_io::carry_by_id(new, old, |pin, previous| {
         pin.expected = previous.expected;
         pin.labels = previous.labels;
+        pin.performance = previous.performance;
     });
 }
 
@@ -659,7 +660,7 @@ impl Diff {
         for (id, pin) in new {
             if let Some(prev) = old.get(id)
                 && prev != pin
-                && (pin.expected.is_some() || pin.labels.is_some())
+                && (pin.expected.is_some() || pin.labels.is_some() || pin.performance.is_some())
                 && prev.record.is_some() != pin.record.is_some()
             {
                 oracle_switched.push(id.clone());

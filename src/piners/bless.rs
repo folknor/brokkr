@@ -4,6 +4,9 @@
 //! `gate.rs`): a parity line's census is stamped, a non-parity line clears
 //! the counts, and a parity line without a census leaves an unpinned probe
 //! unpinned but refuses the bless where it would drop counts already pinned.
+//! The performance counts (`performance.rs`) follow the same rules per leg:
+//! every leg the parity line carries is stamped, and a pinned leg it does
+//! not carry refuses the bless.
 //!
 //! Bless is the sibling of `--reseed`: reseed adopts new corpus *content*
 //! (re-hashing the pinned probe files), bless adopts new *dispositions*. Both are
@@ -25,10 +28,18 @@ use std::path::Path;
 
 use crate::error::DevError;
 use crate::output;
+use crate::piners::performance;
 use crate::piners::pins_write;
-use crate::piners::registry::{LabelPin, PinnedDisposition, Registry};
+use crate::piners::registry::{LabelPin, PerformancePin, PinnedDisposition, Registry};
 use crate::piners::registry_io;
-use crate::piners::report::{HarnessReport, LabelCensus, ProbeOutcome};
+use crate::piners::report::{HarnessReport, LabelCensus, ProbeLine, ProbeOutcome};
+
+/// What a bless stamps into one probe's pin.
+struct Stamp {
+    disposition: PinnedDisposition,
+    labels: Option<LabelPin>,
+    performance: Option<PerformancePin>,
+}
 
 /// The label counts a bless stamps for one probe with a valid line, or
 /// `None` when it must refuse. A non-parity line has no labels to pin; a
@@ -60,6 +71,7 @@ fn refusal(
     unevaluated: &[String],
     unpinned: &[&str],
     lost_labels: &[&str],
+    lost_performance: &[String],
 ) -> Option<String> {
     let mut why = Vec::new();
     if !missing.is_empty() {
@@ -86,7 +98,90 @@ fn refusal(
             lost_labels.join(", ")
         ));
     }
+    if !lost_performance.is_empty() {
+        why.push(format!(
+            "a pinned performance leg the parity line does not carry for {}",
+            lost_performance.join(", ")
+        ));
+    }
     (!why.is_empty()).then(|| why.join("; "))
+}
+
+/// Every selected probe's stamp, validated before anything is mutated, or
+/// the refusal naming every probe that has none.
+fn plan_stamps<'a>(
+    registry: &Registry,
+    report: &'a HarnessReport,
+    scope_ids: &'a [String],
+) -> Result<BTreeMap<&'a str, Stamp>, DevError> {
+    // Each line, with its derived label (for naming a refusal), its
+    // validated outcome (the parse-time verdict integrity and the gate
+    // share), and its censuses, already held valid by the record check.
+    let lines: BTreeMap<&str, &ProbeLine> = report
+        .probes
+        .iter()
+        .map(|p| (p.probe.as_str(), p))
+        .collect();
+    let mut missing: Vec<&str> = Vec::new();
+    let mut rejected: Vec<String> = Vec::new();
+    let mut unevaluated: Vec<String> = Vec::new();
+    let mut unpinned: Vec<&str> = Vec::new();
+    let mut lost_labels: Vec<&str> = Vec::new();
+    let mut lost_performance: Vec<String> = Vec::new();
+    let mut stamps: BTreeMap<&str, Stamp> = BTreeMap::new();
+    for id in scope_ids {
+        let Some(line) = lines.get(id.as_str()) else {
+            missing.push(id);
+            continue;
+        };
+        match line.outcome() {
+            None => rejected.push(format!("{id} ({})", line.disposition())),
+            Some(ProbeOutcome::Unevaluated(r)) => {
+                unevaluated.push(format!("{id} ({})", r.reason.label()));
+            }
+            Some(_) if !registry.pins.contains_key(id) => unpinned.push(id),
+            Some(ProbeOutcome::Evaluated(disp)) => {
+                let pin = registry.pins.get(id);
+                let labels = label_stamp(disp.is_parity(), line.census, pin.and_then(|p| p.labels));
+                if labels.is_none() {
+                    lost_labels.push(id);
+                }
+                let performance = performance::stamp(
+                    disp.is_parity(),
+                    line.performance.as_ref(),
+                    pin.and_then(|p| p.performance),
+                );
+                if let Err(legs) = &performance {
+                    let legs: Vec<&str> = legs.iter().map(|l| l.as_str()).collect();
+                    lost_performance.push(format!("{id} ({})", legs.join(", ")));
+                }
+                if let (Some(labels), Ok(performance)) = (labels, performance) {
+                    stamps.insert(
+                        id,
+                        Stamp {
+                            disposition: *disp,
+                            labels,
+                            performance,
+                        },
+                    );
+                }
+            }
+        }
+    }
+    match refusal(
+        &missing,
+        &rejected,
+        &unevaluated,
+        &unpinned,
+        &lost_labels,
+        &lost_performance,
+    ) {
+        Some(why) => Err(DevError::Config(format!(
+            "corpus --bless: nothing blessed, pins.toml untouched - every selected probe needs \
+             a stampable disposition ({why})"
+        ))),
+        None => Ok(stamps),
+    }
 }
 
 /// Stamp dispositions for `scope_ids` into the registry's pins, then
@@ -130,68 +225,24 @@ pub fn apply(
         )));
     }
 
-    // Each line's derived label (for naming a refusal) and its validated
-    // outcome (the parse-time verdict integrity and the gate share).
-    let actual: BTreeMap<&str, (String, Option<&ProbeOutcome>)> = report
-        .probes
-        .iter()
-        .map(|p| (p.probe.as_str(), (p.disposition(), p.outcome())))
-        .collect();
-
-    // Each line's label census, already held valid by the record check.
-    let census: BTreeMap<&str, Option<LabelCensus>> = report
-        .probes
-        .iter()
-        .map(|p| (p.probe.as_str(), p.census))
-        .collect();
-
-    // Validate every stamp before mutating anything.
-    let mut missing: Vec<&str> = Vec::new();
-    let mut rejected: Vec<String> = Vec::new();
-    let mut unevaluated: Vec<String> = Vec::new();
-    let mut unpinned: Vec<&str> = Vec::new();
-    let mut lost_labels: Vec<&str> = Vec::new();
-    let mut stamps: BTreeMap<&str, (PinnedDisposition, Option<LabelPin>)> = BTreeMap::new();
-    for id in scope_ids {
-        match actual.get(id.as_str()) {
-            None => missing.push(id),
-            Some((derived, None)) => rejected.push(format!("{id} ({derived})")),
-            Some((_, Some(ProbeOutcome::Unevaluated(r)))) => {
-                unevaluated.push(format!("{id} ({})", r.reason.label()));
-            }
-            Some(_) if !registry.pins.contains_key(id) => unpinned.push(id),
-            Some((_, Some(ProbeOutcome::Evaluated(disp)))) => {
-                let pinned = registry.pins.get(id).and_then(|p| p.labels);
-                let line = census.get(id.as_str()).copied().flatten();
-                match label_stamp(disp.is_parity(), line, pinned) {
-                    Some(stamp) => {
-                        stamps.insert(id, (*disp, stamp));
-                    }
-                    None => lost_labels.push(id),
-                }
-            }
-        }
-    }
-    if let Some(why) = refusal(&missing, &rejected, &unevaluated, &unpinned, &lost_labels) {
-        return Err(DevError::Config(format!(
-            "corpus --bless: nothing blessed, pins.toml untouched - every selected probe needs \
-             a stampable disposition ({why})"
-        )));
-    }
+    let stamps = plan_stamps(registry, report, scope_ids)?;
 
     let mut blessed = 0usize;
     let mut changed = 0usize;
     for id in scope_ids {
-        let (Some(pin), Some(&(disp, labels))) =
-            (registry.pins.get_mut(id), stamps.get(id.as_str()))
+        let (Some(pin), Some(stamp)) = (registry.pins.get_mut(id), stamps.get(id.as_str()))
         else {
             continue; // unreachable: validated above
         };
         blessed += 1;
-        if pin.expected != Some(disp) || pin.labels != labels {
+        if pin.expected != Some(stamp.disposition)
+            || pin.labels != stamp.labels
+            || pin.performance != stamp.performance
+        {
             changed += 1;
-            pin.expected = Some(disp);
-            pin.labels = labels;
+            pin.expected = Some(stamp.disposition);
+            pin.labels = stamp.labels;
+            pin.performance = stamp.performance;
         }
     }
 
@@ -344,6 +395,46 @@ mod tests {
         assert!(err.to_string().contains("no label census"));
         assert_eq!(std::fs::read_to_string(&pins_path).unwrap(), LOADED);
         assert_eq!(reg.pins["a"].labels, Some(LabelPin { entry: 0, exit: 2 }));
+    }
+
+    #[test]
+    fn stamps_performance_legs_and_refuses_to_drop_a_pinned_one() {
+        let dir = crate::test_scratch::scratch("piners_bless", "stamps_performance");
+        let pins_path = dir.join("pins.toml");
+        let line = |perf: &str| {
+            report(&format!(
+                "{{\"probe\":\"a\",\"outcome\":\"parity\",\"acceptance\":{{\"tier\":\"accepted\"}},\
+                 \"performance\":{{{perf}}}}}"
+            ))
+        };
+        let mut pins = BTreeMap::new();
+        pins.insert("a".to_owned(), pin(Some("accepted")));
+        let mut reg = registry_of(pins);
+        let both = line(
+            "\"equity\":{\"compared\":9,\"mismatched\":1,\"tolerance\":\"exact\"},\
+             \"scalars\":{\"compared\":4,\"mismatched\":0,\"tolerance\":\"exact\"}",
+        );
+        apply(&pins_path, &mut reg, &both, &["a".to_owned()]).unwrap();
+        let written = std::fs::read_to_string(&pins_path).unwrap();
+        assert!(written.contains("performance = { equity = 1, scalars = 0 }"), "{written}");
+        let on_disk = registry::parse_pins(&written, &pins_path).unwrap();
+        assert_eq!(
+            on_disk.probes["a"].performance,
+            Some(PerformancePin {
+                equity: Some(1),
+                scalars: Some(0)
+            })
+        );
+        // The equity leg went missing: refused, nothing written.
+        let scalars_only =
+            line("\"scalars\":{\"compared\":4,\"mismatched\":0,\"tolerance\":\"exact\"}");
+        let err = apply(&pins_path, &mut reg, &scalars_only, &["a".to_owned()]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("pinned performance leg the parity line does not carry for a (equity)"),
+            "{err}"
+        );
+        assert_eq!(std::fs::read_to_string(&pins_path).unwrap(), written);
     }
 
     #[test]

@@ -22,6 +22,9 @@
 //! adopting the ratchet changes no existing verdict. `ambiguous` moves with
 //! the pairing and is reported, never gated.
 //!
+//! The performance ratchet (`performance.rs`) runs beside it on the same
+//! lines, per pinned leg, and leaves the tier alone.
+//!
 //! The gate's verdict is also what reconciles it with the harness exit code:
 //! [`breaks_all_pinned`] decides whether an exit of 1 is fully explained by
 //! breaks the pins expect, which is what lets a pinned `compile_fail` pass.
@@ -29,6 +32,9 @@
 use std::collections::{BTreeMap, HashSet};
 
 use crate::output;
+use crate::piners::performance::{
+    self, PerformanceAssessment, PerformanceCoverage, PerformanceDeviation,
+};
 use crate::piners::registry::{LabelPin, PinnedDisposition, Registry};
 use crate::piners::report::{HarnessReport, LabelCensus, ProbeLine, ProbeOutcome};
 
@@ -204,13 +210,16 @@ pub struct LabelCoverage {
 
 /// The whole gate verdict: disposition deviations (the only kind that can
 /// mean "no disposition emitted", so the only source of `gate_miss`), label
-/// deviations, and every selected probe's label assessment.
+/// and performance deviations, and every selected probe's assessments.
 #[derive(Debug, Default)]
 pub struct GateVerdict {
     pub dispositions: Vec<GateDiff>,
     pub labels: Vec<(String, LabelDeviation)>,
     pub assessments: BTreeMap<String, LabelAssessment>,
     pub coverage: LabelCoverage,
+    pub performance: Vec<(String, PerformanceDeviation)>,
+    pub performance_assessments: BTreeMap<String, PerformanceAssessment>,
+    pub performance_coverage: PerformanceCoverage,
 }
 
 impl From<Vec<GateDiff>> for GateVerdict {
@@ -223,7 +232,7 @@ impl From<Vec<GateDiff>> for GateVerdict {
 }
 
 impl GateVerdict {
-    /// The full gate: dispositions, then the label ratchet.
+    /// The full gate: dispositions, then the label and performance ratchets.
     pub fn evaluate(ids: &[String], registry: &Registry, report: &HarnessReport) -> Self {
         let dispositions = evaluate(ids, registry, report);
         let deviating: HashSet<&str> = dispositions.iter().map(|d| d.probe.as_str()).collect();
@@ -236,6 +245,9 @@ impl GateVerdict {
         let mut labels = Vec::new();
         let mut assessments = BTreeMap::new();
         let mut coverage = LabelCoverage::default();
+        let mut performance = Vec::new();
+        let mut performance_assessments = BTreeMap::new();
+        let mut performance_coverage = PerformanceCoverage::default();
         for id in ids {
             let pinned = registry.pins.get(id).and_then(|p| p.labels);
             let line = lines
@@ -268,17 +280,35 @@ impl GateVerdict {
                 labels.extend(ds.iter().map(|d| (id.clone(), d.clone())));
             }
             assessments.insert(id.clone(), LabelAssessment { pinned, deviations });
+
+            let pinned = registry.pins.get(id).and_then(|p| p.performance);
+            let deviations = line.map(|p| {
+                performance_coverage.record(pinned, p.performance.as_ref());
+                performance::check(
+                    pinned,
+                    p.performance.as_ref(),
+                    deviating.contains(id.as_str()),
+                )
+            });
+            if let Some(ds) = &deviations {
+                performance.extend(ds.iter().map(|d| (id.clone(), d.clone())));
+            }
+            performance_assessments
+                .insert(id.clone(), PerformanceAssessment { pinned, deviations });
         }
         Self {
             dispositions,
             labels,
             assessments,
             coverage,
+            performance,
+            performance_assessments,
+            performance_coverage,
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.dispositions.is_empty() && self.labels.is_empty()
+        self.dispositions.is_empty() && self.labels.is_empty() && self.performance.is_empty()
     }
 
     /// Every deviating probe, either kind.
@@ -287,6 +317,7 @@ impl GateVerdict {
             .iter()
             .map(|d| d.probe.as_str())
             .chain(self.labels.iter().map(|(p, _)| p.as_str()))
+            .chain(self.performance.iter().map(|(p, _)| p.as_str()))
             .collect()
     }
 
@@ -295,17 +326,28 @@ impl GateVerdict {
         self.deviating().len()
     }
 
-    /// Render every deviation, then the label coverage, to the `[corpus]`
-    /// log.
+    /// Render every deviation to the `[corpus]` log.
     pub fn render(&self) {
         render_diffs(&self.dispositions);
         for (probe, d) in &self.labels {
             output::corpus_msg(&format!("gate: {probe}: {}", d.render()));
         }
+        for (probe, d) in &self.performance {
+            output::corpus_msg(&format!("gate: {probe}: {}", d.render()));
+        }
     }
 
-    /// The coverage line, when any parity probe was label-checked.
-    pub fn coverage_line(&self) -> Option<String> {
+    /// The coverage lines: labels, then performance, each when it has
+    /// anything to count.
+    pub fn coverage_lines(&self) -> Vec<String> {
+        self.label_coverage_line()
+            .into_iter()
+            .chain(self.performance_coverage.line())
+            .collect()
+    }
+
+    /// The label coverage line, when any parity probe was label-checked.
+    fn label_coverage_line(&self) -> Option<String> {
         let c = &self.coverage;
         (c.ratcheted + c.unpinned > 0).then(|| {
             let mut line = format!("labels: {} ratcheted", output::count(c.ratcheted, "probe"));
@@ -702,7 +744,7 @@ mod tests {
         assert!(v.is_empty());
         // The break has no labels to pin; only the parity probe awaits one.
         assert_eq!(v.coverage.unpinned, 1);
-        assert!(v.coverage_line().unwrap().contains("1 unpinned"));
+        assert!(v.coverage_lines()[0].contains("1 unpinned"));
     }
 
     #[test]
@@ -740,6 +782,42 @@ mod tests {
         assert_eq!(v.dispositions.len(), 2);
         assert_eq!(v.assessments["a"].deviations, None);
         assert_eq!(v.assessments["b"].deviations, None);
+    }
+
+    #[test]
+    fn a_moved_performance_leg_fails_the_gate_and_leaves_the_tier_alone() {
+        let ids = ["a".to_owned()];
+        let mut reg = registry(&[("a", Some("byte_exact"))]);
+        reg.pins.get_mut("a").unwrap().performance =
+            Some(crate::piners::registry::PerformancePin {
+                equity: Some(0),
+                scalars: None,
+            });
+        let line = |equity: u64| {
+            report(&format!(
+                "{{\"probe\":\"a\",\"outcome\":\"parity\",\"acceptance\":{{\"tier\":\"byte_exact\"}},\
+                 \"performance\":{{\"equity\":{{\"compared\":9,\"mismatched\":{equity},\
+                 \"tolerance\":\"exact\"}},\"scalars\":{{\"compared\":4,\"mismatched\":2,\
+                 \"tolerance\":\"exact\"}}}}}}"
+            ))
+        };
+        let v = GateVerdict::evaluate(&ids, &reg, &line(0));
+        assert!(v.is_empty(), "an unpinned scalars leg is not gated");
+        assert_eq!(v.performance_coverage.unpinned, 1);
+        let v = GateVerdict::evaluate(&ids, &reg, &line(3));
+        assert!(v.dispositions.is_empty());
+        assert_eq!(v.performance.len(), 1);
+        assert_eq!(v.deviating_count(), 1);
+        assert_eq!(
+            v.performance_assessments["a"].deviations_json().unwrap(),
+            r#"[{"actual":3,"compared":9,"leg":"equity","pinned":0,"tolerance":"exact"}]"#
+        );
+        // A census that cannot describe one population invalidates the line.
+        let bad = report(
+            "{\"probe\":\"a\",\"outcome\":\"parity\",\"acceptance\":{\"tier\":\"byte_exact\"},\
+             \"performance\":{}}",
+        );
+        assert!(bad.probes[0].record_defect().is_some());
     }
 
     #[test]

@@ -537,6 +537,11 @@ pub struct Pin {
     /// Stamped and carried exactly like `expected`.
     #[serde(default)]
     pub labels: Option<LabelPin>,
+    /// The blessed per-leg equity and report-scalar mismatch counts, the
+    /// performance ratchet (`performance.rs`). `None` means never stamped;
+    /// a leg left out is ungated. Stamped and carried exactly like `labels`.
+    #[serde(default)]
+    pub performance: Option<PerformancePin>,
     pub pine: FilePin,
     /// The probe's `inputs.json`, when the probe dir carries one.
     #[serde(default)]
@@ -560,6 +565,17 @@ pub struct LabelPin {
     pub exit: u64,
 }
 
+/// A probe's blessed performance mismatch counts. Each leg is optional, a
+/// leg left out being ungated; a table pinning neither is refused at load.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PerformancePin {
+    #[serde(default)]
+    pub equity: Option<u64>,
+    #[serde(default)]
+    pub scalars: Option<u64>,
+}
+
 /// A probe's pinned files, as reseed stamps them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeFiles {
@@ -577,6 +593,7 @@ impl Pin {
         Self {
             expected: None,
             labels: None,
+            performance: None,
             pine: files.pine,
             inputs: files.inputs,
             csv: files.csv,
@@ -713,6 +730,15 @@ fn check_pins(probes: &BTreeMap<String, Pin>) -> Vec<String> {
             problems.push(format!(
                 "{id}: pins no oracle - needs `csv` ({CSV_FILE}), `record` ({RECORD_FILE}), \
                  or both"
+            ));
+        }
+        if pin
+            .performance
+            .is_some_and(|p| p.equity.is_none() && p.scalars.is_none())
+        {
+            problems.push(format!(
+                "{id}: `performance` pins no leg - pin `equity`, `scalars`, or both, or drop the \
+                 key"
             ));
         }
         let dir = pin.probe_dir();

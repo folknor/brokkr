@@ -299,13 +299,17 @@ The store has per-db `PRAGMA user_version` migrations and WAL, mirroring
   probe outside the selection), `gate_ok` (the gate's own verdict - a probe is
   ok unless the gate flagged it, so a never-blessed selected probe is not ok
   and a stray line for an unselected probe is; since v14 the conjunction of
-  the disposition check and the label ratchet), `expected_labels` (v14: the
+  the disposition check and the label ratchet, since v18 the performance
+  ratchet too), `expected_labels` (v14: the
   pin's label counts at run time as JSON, `NULL` when unpinned), `label_gate`
   (v14: the label deviations as a JSON list, `[]` when checked and clean;
   `NULL` when the probe was not label-checked - unselected or an invalid
   line - and on every older row, whose label verdict was never recorded,
   so there `expected_labels` `NULL` means *not recorded*; run detail renders
-  it as the `labels` column), `scored` (v17: 1 when the run's reconciliation
+  it as the `labels` column), `expected_performance` and `performance_gate`
+  (v18: the same pair for the performance ratchet, the pin holding only its
+  pinned legs; run detail renders the verdict as the `perf` column),
+  `scored` (v17: 1 when the run's reconciliation
   scored the row - selected, a valid record, no invalid occurrence of its
   probe - which is exactly the set the live summary and breakdowns
   aggregate, and 0 for every other stored row: an invalid record, a probe an
@@ -335,7 +339,11 @@ The store has per-db `PRAGMA user_version` migrations and WAL, mirroring
   string - on an `unevaluated` row, why the probe could not be evaluated;
   `NULL` wherever the line carried no string `reason`, which piners sends on
   no other outcome, though a stray one on another line is tolerated and
-  projected as sent; run detail shows it ahead of the `error` detail). v15 dropped the `dynamic_builtin_calls`
+  projected as sent; run detail shows it ahead of the `error` detail), and
+  the performance census `perf_{equity,scalars}_{compared,mismatched,tolerance}`
+  (v18; `NULL` where the line carried no such leg, which is every older row).
+  The tier is `acc_tier` - there is no `acceptance` column - and a `--where`
+  naming a column that does not exist lists the ones that do. v15 dropped the `dynamic_builtin_calls`
   projection once piners stopped reporting the counter, since it read `NULL` on
   every new row and a filter on `= 0` silently stopped matching them; older
   rows keep the value in `raw_json` (`json_extract(raw_json,

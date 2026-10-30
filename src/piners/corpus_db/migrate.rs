@@ -32,7 +32,9 @@
 //! whether the run's reconciliation scored the row and why its record was
 //! not usable, backfilling `scored = 1` on every row of a run that recorded
 //! zero protocol violations and leaving every other older row NULL (not
-//! recorded). On a fresh database,
+//! recorded); version 18 adds `disposition.expected_performance` and
+//! `disposition.performance_gate`, the performance ratchet's pin and verdict,
+//! and the `perf_*` census projections. On a fresh database,
 //! the schema DDL in `schema.rs` creates the current tables (columns included)
 //! inside the shared migration transaction. Schema inspection uses the shared
 //! `db::store` helpers, which preserve errors and recognize generated columns.
@@ -41,14 +43,15 @@ use rusqlite::params;
 use serde_json::{Map, Value};
 
 use super::schema::{
-    Projection, TRADE_DIFF_PROJECTIONS, TRADE_DIFF_TYPED_FIELDS, disposition_ddl,
+    PERFORMANCE_PROJECTIONS, Projection, TRADE_DIFF_PROJECTIONS, TRADE_DIFF_TYPED_FIELDS,
+    disposition_ddl,
     disposition_projection_column, trade_diff_ddl,
 };
 use crate::db::store::{column_exists as has_column, table_exists as has_table};
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding a migration below.
-pub(super) const SCHEMA_VERSION: i64 = 17;
+pub(super) const SCHEMA_VERSION: i64 = 18;
 
 /// Run pending migrations through the shared store policy. The v5 rebuild
 /// preserves historical orphan dispositions, so foreign-key enforcement is
@@ -237,6 +240,36 @@ fn migrate_from(conn: &rusqlite::Connection, current: i64) -> Result<(), DevErro
     if current < 17 && has_table(conn, "disposition")? {
         add_scored_columns(conn)?;
         backfill_scored(conn)?;
+    }
+    add_performance_columns(conn, current)?;
+    Ok(())
+}
+
+/// v17 -> v18: the performance ratchet's pin and verdict, nullable with no
+/// default like the label ones (an older row was never checked), and the
+/// census projections, which read NULL on every older row since no harness
+/// sent the field before.
+fn add_performance_columns(conn: &rusqlite::Connection, current: i64) -> Result<(), DevError> {
+    if current >= 18 || !has_table(conn, "disposition")? {
+        return Ok(());
+    }
+    for col in ["expected_performance", "performance_gate"] {
+        if !has_column(conn, "disposition", col)? {
+            conn.execute(
+                &format!("ALTER TABLE disposition ADD COLUMN {col} TEXT"),
+                [],
+            )?;
+        }
+    }
+    for name in PERFORMANCE_PROJECTIONS {
+        if !has_column(conn, "disposition", name)? {
+            let column = disposition_projection_column(name).ok_or_else(|| {
+                DevError::Database(format!(
+                    "corpus runs.db v18 migration: no `{name}` projection"
+                ))
+            })?;
+            conn.execute(&format!("ALTER TABLE disposition ADD COLUMN {column}"), [])?;
+        }
     }
     Ok(())
 }
@@ -746,6 +779,41 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(reasons, vec![Some("no_overlap".to_owned()), None]);
+    }
+
+    /// A v17 store gains the performance pin, verdict and projections, NULL
+    /// on every row stored before.
+    #[test]
+    fn v18_adds_the_performance_columns_over_stored_rows() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(super::super::schema::SCHEMA).unwrap();
+        conn.execute_batch(&disposition_ddl("disposition")).unwrap();
+        for col in PERFORMANCE_PROJECTIONS
+            .iter()
+            .chain(&["expected_performance", "performance_gate"])
+        {
+            conn.execute(&format!("ALTER TABLE disposition DROP COLUMN {col}"), [])
+                .unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO run (run_id, started_at, selector, gated, result, probe_count) \
+                 VALUES (1, 'then', '{}', 1, 'pass', 1);
+             INSERT INTO disposition (run_id, probe, disposition, gate_ok, raw_source, raw_json) \
+                 VALUES (1, 'p', 'accepted', 1, 'harness', '{\"outcome\":\"parity\"}');",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 17).unwrap();
+
+        run_migrations(&conn).unwrap();
+        let row: (Option<i64>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT perf_equity_mismatched, perf_scalars_tolerance, performance_gate \
+                 FROM disposition",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (None, None, None));
     }
 
     /// A v16 store gains `scored`/`defect`: every row of a run that counted

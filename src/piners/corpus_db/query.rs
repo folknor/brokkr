@@ -66,6 +66,9 @@ pub struct DispositionRow {
     /// The label ratchet's deviations as stored JSON: `[]` when checked and
     /// clean, `None` when not label-checked (or a pre-v14 row).
     pub label_gate: Option<String>,
+    /// The performance ratchet's deviations as stored JSON, as `label_gate`
+    /// (`None` on a pre-v18 row).
+    pub performance_gate: Option<String>,
     /// Whether the run scored the row (v17); `None` when not recorded.
     pub scored: Option<bool>,
     /// Why an unscored row's record was not usable (v17).
@@ -215,6 +218,7 @@ fn disposition_row(row: &Row<'_>) -> rusqlite::Result<DispositionRow> {
         error: row.get("error")?,
         reason: row.get("reason")?,
         label_gate: row.get("label_gate")?,
+        performance_gate: row.get("performance_gate")?,
         scored: row.get::<_, Option<i64>>("scored")?.map(|v| v != 0),
         defect: row.get("defect")?,
     })
@@ -231,7 +235,7 @@ fn runtime_row(row: &Row<'_>) -> rusqlite::Result<RuntimeRow> {
 const DISPOSITION_COLS: &str = "\
 probe, outcome, disposition, expected, gate_ok, matched, ours_only, tv_only, \
 boundary_ours, boundary_tv, count_tier, p90_entry, p90_exit, p90_pnl, \
-sig_domain, sig_dimension, error, reason, label_gate, scored, defect";
+sig_domain, sig_dimension, error, reason, label_gate, performance_gate, scored, defect";
 
 /// Every queryable `trade_diff` column - the row key, the harness projections
 /// `schema.rs` generates from the stored record, `raw_source`, and the record
@@ -306,6 +310,8 @@ pub const DISPOSITION_COLUMNS: &[&str] = &[
     "gate_ok",
     "expected_labels",
     "label_gate",
+    "expected_performance",
+    "performance_gate",
     "scored",
     "defect",
     "raw_source",
@@ -348,6 +354,12 @@ pub const DISPOSITION_COLUMNS: &[&str] = &[
     "ts_exit_share_pct",
     "window_sensitive",
     "reason",
+    "perf_equity_compared",
+    "perf_equity_mismatched",
+    "perf_equity_tolerance",
+    "perf_scalars_compared",
+    "perf_scalars_mismatched",
+    "perf_scalars_tolerance",
     "raw_json",
 ];
 
@@ -685,7 +697,20 @@ impl CorpusDb {
             sql.push_str(&format!(" AND ({expr})"));
         }
         sql.push_str(&format!(" ORDER BY {}", table.order()));
-        let mut stmt = self.conn().prepare(&sql)?;
+        let mut stmt = self.conn().prepare(&sql).map_err(|e| {
+            // A misnamed column in `--where` reaches SQLite as written; name
+            // the columns there are instead.
+            let msg = e.to_string();
+            if where_expr.is_some() && msg.contains("no such column") {
+                DevError::Config(format!(
+                    "corpus-results --where: {msg}; the {} columns are: {}",
+                    table.table(),
+                    table.columns().join(", ")
+                ))
+            } else {
+                DevError::from(e)
+            }
+        })?;
         let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(1 + probes.len());
         params.push(&run_id);
         for p in probes {

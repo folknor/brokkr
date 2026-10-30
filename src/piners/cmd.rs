@@ -439,7 +439,7 @@ pub fn corpus(
     // Aggregates and the hidden-match count cover the scored set only.
     let scored: HashSet<&str> = rec.valid.iter().map(String::as_str).collect();
     report::render(report, &scored, &deviating, &rec.summary());
-    if let Some(line) = gate.coverage_line() {
+    for line in gate.coverage_lines() {
         output::corpus_msg(&line);
     }
     for line in assessment.detail_lines() {

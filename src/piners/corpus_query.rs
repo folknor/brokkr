@@ -457,6 +457,7 @@ mod tests {
             error: None,
             reason: None,
             label_gate: None,
+            performance_gate: None,
             scored: None,
             defect: None,
         }

@@ -23,6 +23,7 @@ use super::CorpusDb;
 use crate::db::store::as_i64;
 use crate::error::DevError;
 use crate::piners::gate::{GateVerdict, LabelAssessment};
+use crate::piners::performance::PerformanceAssessment;
 use crate::piners::integrity::Reconciliation;
 use crate::piners::report::{HarnessReport, ProbeLine, TradeDiffLine};
 use crate::piners::run_model::RunVerdict;
@@ -312,7 +313,8 @@ fn record_inner(
     // a line for a probe outside the selection, which the gate ignores but a
     // recomputation against the (selection-only) expected map stored as
     // DEVIATES - so a passing run read as failing in `corpus-results`. It is
-    // the conjunction of both checks, the disposition and the label ratchet.
+    // the conjunction of every check: the disposition, the label ratchet and
+    // the performance ratchet.
     let deviating = gate.deviating();
 
     // Every row is stored, scored or not, and says which it is: `scored` is
@@ -322,6 +324,7 @@ fn record_inner(
         let annotation = Annotation {
             gate_ok: !deviating.contains(p.probe.as_str()),
             labels: gate.assessments.get(&p.probe),
+            performance: gate.performance_assessments.get(&p.probe),
             scored: rec.valid.contains(&p.probe),
             defect: defect_of(p, report),
         };
@@ -380,6 +383,7 @@ fn record_inner(
 struct Annotation<'a> {
     gate_ok: bool,
     labels: Option<&'a LabelAssessment>,
+    performance: Option<&'a PerformanceAssessment>,
     scored: bool,
     defect: Option<String>,
 }
@@ -405,8 +409,9 @@ fn insert_disposition(
     conn.execute(
         "INSERT INTO disposition \
          (run_id, probe, disposition, expected, gate_ok, raw_source, raw_json, \
-          expected_labels, label_gate, scored, defect) \
-         VALUES (?1, ?2, ?3, ?4, ?5, 'harness', ?6, ?7, ?8, ?9, ?10)",
+          expected_labels, label_gate, scored, defect, expected_performance, \
+          performance_gate) \
+         VALUES (?1, ?2, ?3, ?4, ?5, 'harness', ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             run_id,
             p.probe,
@@ -418,6 +423,12 @@ fn insert_disposition(
             annotation.labels.and_then(LabelAssessment::deviations_json),
             i64::from(annotation.scored),
             annotation.defect,
+            annotation
+                .performance
+                .and_then(PerformanceAssessment::pinned_json),
+            annotation
+                .performance
+                .and_then(PerformanceAssessment::deviations_json),
         ],
     )?;
     Ok(())

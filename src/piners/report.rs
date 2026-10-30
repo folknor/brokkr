@@ -542,6 +542,11 @@ pub struct ProbeLine {
     /// whole record invalid, so a valid line's census is whatever it sent.
     #[serde(skip)]
     pub census: Option<LabelCensus>,
+    /// The `performance` census (`performance.rs`), parsed once by
+    /// [`parse`] under the same rule as `census`: `None` when the key is
+    /// missing or invalid, an invalid one making the whole record invalid.
+    #[serde(skip)]
+    pub performance: Option<crate::piners::performance::PerformanceCensus>,
     /// The record's validated outcome, or why it has none: computed once, by
     /// [`parse`], from the whole line, and read by every consumer - the
     /// reconciliation, the gate and its label ratchet, bless, the summary and
@@ -590,12 +595,13 @@ impl ProbeLine {
     }
 
     /// Validate this line, given the whole value it was read from and its
-    /// parsed `labels` census: its `kind` ([`disposition_kind`]); on a line
+    /// parsed `labels` and `performance` censuses: its `kind`
+    /// ([`disposition_kind`]); on a line
     /// whose outcome is `unevaluated`, its
     /// closed shape first ([`unevaluated_shape`]), keyed on the outcome string
     /// so a stray tier or census on it is named rather than reported as some
     /// later defect; then the outcome, tier and declared label together
-    /// ([`record_label`]); a present census whole and consistent; and on an
+    /// ([`record_label`]); each present census whole and consistent; and on an
     /// `unevaluated` line, its reason and error ([`refusal_of`]). A line
     /// whose values fail typed deserialization, a foreign key's or an
     /// allowed one's, never gets here: it is invalid with the serde message
@@ -604,6 +610,7 @@ impl ProbeLine {
         &self,
         value: &serde_json::Value,
         census: Result<Option<LabelCensus>, String>,
+        performance: Result<(), String>,
     ) -> Result<ProbeOutcome, String> {
         disposition_kind(value)?;
         if self.outcome == UNEVALUATED {
@@ -618,6 +625,7 @@ impl ProbeLine {
         // record invalid, so it taints the probe like any other defect and a
         // clean repeat cannot launder it.
         census?;
+        performance?;
         match label {
             LineLabel::Evaluated(d) => Ok(ProbeOutcome::Evaluated(d)),
             LineLabel::Unevaluated => refusal_of(value).map(ProbeOutcome::Unevaluated),
@@ -897,7 +905,12 @@ fn record_disposition(
     p.declared = value.get("disposition").cloned();
     let census = value.get("labels").map(parse_label_census).transpose();
     p.census = census.clone().ok().flatten();
-    p.verdict = p.validate(value, census);
+    let performance = value
+        .get("performance")
+        .map(crate::piners::performance::parse_census)
+        .transpose();
+    p.performance = performance.clone().ok().flatten();
+    p.verdict = p.validate(value, census, performance.map(|_| ()));
     // Every valid refusal is evidence, kept here before repeats collapse or
     // a taint unscores its probe.
     if let Some(refusal) = p.refusal() {

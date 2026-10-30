@@ -149,6 +149,7 @@ Probes are pinned in the registry (`registry_dir`), two file kinds:
   [probes.some-tvr-capture]
   expected = "byte_exact"
   labels = { entry = 0, exit = 2 }  # blessed label mismatch counts (the label ratchet)
+  performance = { equity = 0, scalars = 0 }  # blessed performance mismatch counts
   pine   = { path = "piners/some-tvr-capture/strategy.pine", xxh128 = "<hex>" }
   record = { path = "piners/some-tvr-capture/tv_record.json", xxh128 = "<hex>" }
   ```
@@ -504,6 +505,32 @@ count. `ambiguous` moves with the pairing and is shown, never gated.
   non-negative integer counts, `mismatched + ambiguous <= compared`); anything
   else, `"labels": null` included, makes the line an invalid record.
 - Only a valid, untainted line is label-checked.
+
+**The performance ratchet.** A line the harness checked `strategy.equity`
+per bar or the report scalars for (max drawdown and max run-up, in cash and
+in percent) carries `performance`, with an `equity` leg, a `scalars` leg, or
+both: `{ "compared": N, "mismatched": M, "tolerance": "<label>" }`. It is
+ratcheted like `labels` and apart from the tier, which keeps meaning "the
+trades match": equity can drift while every trade matches, and a legitimate
+drift pins its count. The pin is `performance = { equity = N, scalars = M }`,
+each leg optional; a gated move reads `id: equity mismatches rose 0 -> 3 of
+2637 compared (tolerance exact)`. `tolerance` is piners' own label, stored and
+shown, never interpreted - the float comparison is the harness's.
+
+- Only a pinned leg is gated. A leg the line carries but the pin lacks is
+  ungated, and its probe is counted in the `performance: N ratcheted, M with
+  an unpinned leg` line; a probe whose line carries no `performance` is in
+  neither count.
+- A pinned leg the line does not carry fails as missing evidence, unless the
+  disposition already deviates.
+- Bless stamps every leg a parity line carries, clears the pin on a
+  non-parity line, and refuses to drop a pinned leg the parity line does not
+  carry.
+- A present `performance` must be an object with at least one leg; each
+  present leg an object with non-negative integer `compared` and
+  `mismatched`, `mismatched <= compared`, and a nonempty single-line
+  `tolerance`. Anything else, a `null` leg included, makes the line an
+  invalid record.
 
 **Pinned breaks.** The harness exits 1 whenever any probe breaks
 (`compile_fail`, `runtime_fail`, `harness_abort` or `unevaluated`), including a probe pinned
