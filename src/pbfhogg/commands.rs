@@ -1012,17 +1012,13 @@ impl PbfhoggCommand {
                     DiffFormat::Default => {
                         // The text goes to a file, never stdout: at planet it
                         // overflows the measurement's stdout capture.
+                        // No scratch: pbfhogg refuses --tmp-dir on a text diff.
                         let output = scratch_output_path(ctx, self, mode)?;
-                        let argv = CommandArgv::new("diff")
+                        CommandArgv::new("diff")
                             .input(from)?
                             .input(to)?
                             .arg("--suppress-common")
-                            .output(&output)?;
-                        if crate::pbfhogg::argv::text_diff_writes_scratch(ctx.params.jobs, false) {
-                            argv.scratch(&ctx.scratch_dir)
-                        } else {
-                            argv
-                        }
+                            .output(&output)?
                     }
                     DiffFormat::Osc => {
                         let output = scratch_output_path(ctx, self, mode)?;
@@ -1583,7 +1579,7 @@ mod tests {
 
     /// Run scratch is declared by exactly the commands pbfhogg makes it
     /// for: add-locations-to-ways, build-geocode-index, an OSC diff on every
-    /// path, and a text diff unless it runs with `-j 1`.
+    /// path, and never a text diff, which refuses `--tmp-dir`.
     #[test]
     fn scratch_is_declared_by_the_commands_that_write_it() {
         for cmd in every_command_state() {
@@ -1594,7 +1590,7 @@ mod tests {
                 let expected = match &cmd {
                     PbfhoggCommand::AddLocationsToWays | PbfhoggCommand::BuildGeocodeIndex => true,
                     PbfhoggCommand::Diff { format } | PbfhoggCommand::DiffSnapshots { format } => {
-                        *format == DiffFormat::Osc || jobs != Some(1)
+                        *format == DiffFormat::Osc
                     }
                     _ => false,
                 };

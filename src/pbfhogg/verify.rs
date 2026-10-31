@@ -216,12 +216,11 @@ impl VerifyHarness {
     /// as many elements as differ. A FAIL replays only a bounded head of it
     /// and names the file.
     pub fn diff_pbfs(&self, a: &Path, b: &Path, listing: &Path) -> Result<Verdict, DevError> {
-        // A text diff with automatic jobs: it makes run scratch.
+        // A text diff writes no scratch and refuses `--tmp-dir`.
         let argv = PbfArgv::new("diff")
             .arg("--suppress-common")
             .input(a)?
-            .input(b)?
-            .scratch(&self.output_dir);
+            .input(b)?;
         let captured = self.run_pbfhogg_to(argv, listing)?;
         let listed = super::verify_stream::has_content(listing)?;
         let verdict =

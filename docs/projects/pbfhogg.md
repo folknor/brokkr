@@ -134,15 +134,11 @@ reserves the whole run directory as coverage; its private directory follows
 the same rule, so it goes beside the replay's first output, inside the run
 directory, and a digest, which writes nothing, gets none. Scratch is
 declared by what pbfhogg's implementation actually does:
-`add-locations-to-ways`, `build-geocode-index`, `diff --format osc` on every
-path, and every text `diff` except a quiet one and one with an explicit
-`-j 1`, which make no run directory and refuse `--tmp-dir`. A verbose text diff
-and one with automatic jobs make one at startup whether or not they write a
-shard, which pbfhogg's prose reference does not say. A measured text `diff`
-used to put that run directory in the project root, its working directory; it
-now goes beside its text output in the scratch dir (see Diff text output),
-which can shift measured `diff` timings when the two are on different
-filesystems. brokkr spells every
+`add-locations-to-ways`, `build-geocode-index` and `diff --format osc` on
+every path. A text `diff` writes no scratch since pbfhogg 587bfc12 and
+refuses `--tmp-dir` as a usage error, so brokkr never declares scratch for
+one; a `--commit` baseline from before that commit puts its text-diff scratch
+wherever pbfhogg defaults it. brokkr spells every
 pbfhogg flag it forwards long (`--output`, `--jobs`, `--invert-match`, ...),
 since pbfhogg has reassigned short letters between versions and a `--commit`
 baseline accepts the long forms; the one exception is `verify renumber`'s

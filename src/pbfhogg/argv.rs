@@ -7,8 +7,8 @@
 //! never disagree with the argv that runs. Arguments that name no path go in
 //! through [`PbfArgv::arg`]. Scratch is declared from the actual argument
 //! combination: pbfhogg makes run scratch for `add-locations-to-ways`,
-//! `build-geocode-index`, `diff --format osc`, and every text `diff` but a
-//! quiet one or one with an explicit `--jobs 1`, which refuse `--tmp-dir`.
+//! `build-geocode-index` and `diff --format osc`; a text `diff` writes none
+//! and refuses `--tmp-dir`.
 
 use std::path::{Path, PathBuf};
 
@@ -207,16 +207,6 @@ impl AsRef<[String]> for PbfArgv {
     }
 }
 
-/// Whether a text `diff` with these settings makes a run scratch directory.
-/// pbfhogg makes one at startup for every text diff except a quiet one and
-/// one with an explicit `-j 1` - the two that also refuse `--tmp-dir` -
-/// whatever the automatic job count resolves to and whether or not it is
-/// verbose (`command_paths.rs` in pbfhogg's CLI; its prose reference also
-/// excuses `-v`, which the implementation does not).
-pub(crate) fn text_diff_writes_scratch(jobs: Option<usize>, quiet: bool) -> bool {
-    !quiet && jobs != Some(1)
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -297,17 +287,5 @@ mod tests {
             .arg("--force")
             .forces_overwrite();
         assert_eq!(geocode.overwrite(), Overwrite::ImpliedByForce);
-    }
-
-    #[test]
-    fn a_text_diff_writes_scratch_unless_quiet_or_one_job() {
-        assert!(!text_diff_writes_scratch(Some(1), false));
-        assert!(!text_diff_writes_scratch(None, true));
-        assert!(
-            text_diff_writes_scratch(None, false),
-            "automatic jobs, whatever they resolve to"
-        );
-        assert!(text_diff_writes_scratch(Some(0), false));
-        assert!(text_diff_writes_scratch(Some(8), false));
     }
 }

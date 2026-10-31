@@ -9,14 +9,13 @@ use super::verify_stream;
 use crate::error::DevError;
 use crate::output::verify_msg;
 
-/// `pbfhogg diff -c OLD NEW`, a text diff to stdout with automatic jobs:
-/// its run scratch goes under the verify directory.
-fn text_diff(harness: &VerifyHarness, old: &Path, new: &Path) -> Result<PbfArgv, DevError> {
-    Ok(PbfArgv::new("diff")
+/// `pbfhogg diff -c OLD NEW`, a text diff to stdout. It writes no scratch,
+/// and pbfhogg refuses `--tmp-dir` on it.
+fn text_diff(old: &Path, new: &Path) -> Result<PbfArgv, DevError> {
+    PbfArgv::new("diff")
         .arg("--suppress-common")
         .input(old)?
-        .input(new)?
-        .scratch(&harness.output_dir))
+        .input(new)
 }
 
 /// Cross-validate `pbfhogg diff` against `osmium diff --summary`.
@@ -53,7 +52,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<Findings, 
     verify_msg("--- pbfhogg diff ---");
     let pbfhogg_listing = outdir.join("pbfhogg-diff.txt");
     let captured_indexed =
-        harness.run_pbfhogg_to(text_diff(harness, pbf, &new_pbf)?, &pbfhogg_listing)?;
+        harness.run_pbfhogg_to(text_diff(pbf, &new_pbf)?, &pbfhogg_listing)?;
     captured_indexed
         .check_success_or("pbfhogg diff", crate::output::child::Exits::answer(&[0, 1]))?;
 
@@ -152,7 +151,7 @@ fn unindexed_diff_matches(
 
     verify_msg("--- pbfhogg diff (unindexed inputs) ---");
     let raw_listing = outdir.join("pbfhogg-unindexed-diff.txt");
-    let captured = harness.run_pbfhogg_to(text_diff(harness, &old_raw, &new_raw)?, &raw_listing)?;
+    let captured = harness.run_pbfhogg_to(text_diff(&old_raw, &new_raw)?, &raw_listing)?;
     captured.check_success_or(
         "pbfhogg diff (unindexed inputs)",
         crate::output::child::Exits::answer(&[0, 1]),

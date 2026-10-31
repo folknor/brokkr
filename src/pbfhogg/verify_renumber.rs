@@ -220,7 +220,7 @@ pub fn run(
     // element's members, which outgrew any in-memory capture at germany
     // scale. Exit 1 means "differences", 0 "identical"; anything else (a
     // signal, a refusal) means the listing and summary cannot be trusted.
-    // A verbose text diff still makes run scratch with automatic jobs.
+    // A text diff writes no scratch and refuses `--tmp-dir`.
     let captured = harness.run_pbfhogg_to(
         PbfArgv::new("diff")
             // The one short brokkr forwards: stable across the pbfhogg
@@ -231,8 +231,7 @@ pub fn run(
             .arg("--suppress-common")
             .arg("--verbose")
             .input(&osmium_out)?
-            .input(&pbfhogg_out)?
-            .scratch(&harness.output_dir),
+            .input(&pbfhogg_out)?,
         &diff_log,
     )?;
     captured.check_success_or("pbfhogg diff", crate::output::child::Exits::answer(&[0, 1]))?;
