@@ -49,7 +49,7 @@ impl SnapshotDb {
         status: Status,
     ) -> Result<(), DevError> {
         self.inner
-            .insert_result(run_id, snapshot_id, pixel_diff_pct, None, status)
+            .insert_result(run_id, snapshot_id, pixel_diff_pct, None, status, None)
     }
 
     pub fn get_approval(&self, snapshot_id: &str) -> Result<Option<Approval>, DevError> {
@@ -63,7 +63,7 @@ impl SnapshotDb {
         pixel_diff_pct: f64,
     ) -> Result<(), DevError> {
         self.inner
-            .set_approval(snapshot_id, commit, pixel_diff_pct, None)
+            .set_approval(snapshot_id, commit, pixel_diff_pct, None, None)
     }
 
     pub fn run_results(&self, run_id: &str) -> Result<Vec<ResultRow>, DevError> {
@@ -122,11 +122,12 @@ mod tests {
                 Some(2.0),
                 Some(98.0),
                 Status::Pass,
+                None,
             )
             .unwrap();
         mechanical.mark_run_complete("litehtml-run").unwrap();
         mechanical
-            .set_approval("fixture", "commit", 2.0, Some(98.0))
+            .set_approval("fixture", "commit", 2.0, Some(98.0), 800)
             .unwrap();
         drop(mechanical);
 

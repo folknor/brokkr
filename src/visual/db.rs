@@ -25,6 +25,9 @@ struct Layout {
     adapter: bool,
     /// Whether the runs table records completion (`completed` column).
     completion: bool,
+    /// Whether results record the comparison they scored (`viewport_width`
+    /// and `reference_id`) and approvals the width they were measured at.
+    reference: bool,
 }
 
 impl Layout {
@@ -40,6 +43,7 @@ impl Layout {
                 element: true,
                 adapter: false,
                 completion: true,
+                reference: true,
             },
             DbSubject::Sluggrs => Self {
                 store_name: "sluggrs visual store",
@@ -51,6 +55,7 @@ impl Layout {
                 element: false,
                 adapter: true,
                 completion: false,
+                reference: false,
             },
         }
     }
@@ -76,12 +81,41 @@ impl Layout {
     fn adapter_column(&self) -> &'static str {
         if self.adapter { "adapter_name" } else { "NULL" }
     }
+
+    /// The reference columns read through an optional table alias, or `NULL`
+    /// stand-ins for a store without them.
+    fn reference_columns(&self, alias: &str) -> String {
+        if self.reference {
+            format!("{alias}viewport_width, {alias}reference_id")
+        } else {
+            "NULL, NULL".to_owned()
+        }
+    }
+
+    fn approval_width_column(&self) -> &'static str {
+        if self.reference {
+            "viewport_width"
+        } else {
+            "NULL"
+        }
+    }
 }
 
 pub(crate) struct Approval {
     pub(crate) subject_id: String,
     pub(crate) pixel_diff_pct: f64,
     pub(crate) element_match_pct: Option<f64>,
+    /// The width the approved result was measured at; `None` on a row
+    /// written before the store recorded it, and on every sluggrs row.
+    pub(crate) viewport_width: Option<u32>,
+}
+
+/// What a scored litehtml result was compared against: the width both sides
+/// rendered at and the identity of the published Chrome reference.
+#[derive(Clone, Copy)]
+pub(crate) struct ReferenceStamp<'a> {
+    pub(crate) viewport_width: u32,
+    pub(crate) reference_id: &'a str,
 }
 
 pub(crate) struct RunSummary {
@@ -109,6 +143,10 @@ pub(crate) struct ResultRow {
     pub(crate) pixel_diff_pct: Option<f64>,
     pub(crate) element_match_pct: Option<f64>,
     pub(crate) status: Status,
+    /// [`ReferenceStamp`] of a scored litehtml result; `None` on an `ERROR`
+    /// row, a row written before the store recorded it, and every sluggrs row.
+    pub(crate) viewport_width: Option<u32>,
+    pub(crate) reference_id: Option<String>,
 }
 
 pub(crate) struct VisualDb {
@@ -252,8 +290,28 @@ impl VisualDb {
         pixel_diff_pct: Option<f64>,
         element_match_pct: Option<f64>,
         status: Status,
+        stamp: Option<ReferenceStamp<'_>>,
     ) -> Result<(), DevError> {
-        if self.layout.element {
+        if self.layout.reference {
+            self.conn.execute(
+                &format!(
+                    "INSERT INTO {} \
+                     (run_id, {}, pixel_diff_pct, element_match_pct, status, \
+                      viewport_width, reference_id) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    self.layout.results, self.layout.id,
+                ),
+                rusqlite::params![
+                    run_id,
+                    subject_id,
+                    pixel_diff_pct,
+                    element_match_pct,
+                    status.as_str(),
+                    stamp.map(|s| s.viewport_width),
+                    stamp.map(|s| s.reference_id),
+                ],
+            )?;
+        } else if self.layout.element {
             self.conn.execute(
                 &format!(
                     "INSERT INTO {} \
@@ -284,10 +342,11 @@ impl VisualDb {
 
     pub(crate) fn get_approval(&self, subject_id: &str) -> Result<Option<Approval>, DevError> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {}, pixel_diff_pct, {} \
+            "SELECT {}, pixel_diff_pct, {}, {} \
              FROM {} WHERE {} = ?1",
             self.layout.id,
             self.layout.element_column(),
+            self.layout.approval_width_column(),
             self.layout.approvals,
             self.layout.id,
         ))?;
@@ -305,8 +364,25 @@ impl VisualDb {
         commit: &str,
         pixel_diff_pct: f64,
         element_match_pct: Option<f64>,
+        viewport_width: Option<u32>,
     ) -> Result<(), DevError> {
-        if self.layout.element {
+        if self.layout.reference {
+            self.conn.execute(
+                &format!(
+                    "INSERT OR REPLACE INTO {} \
+                     ({}, [commit], pixel_diff_pct, element_match_pct, viewport_width) \
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    self.layout.approvals, self.layout.id,
+                ),
+                rusqlite::params![
+                    subject_id,
+                    commit,
+                    pixel_diff_pct,
+                    element_match_pct,
+                    viewport_width
+                ],
+            )?;
+        } else if self.layout.element {
             self.conn.execute(
                 &format!(
                     "INSERT OR REPLACE INTO {} \
@@ -345,10 +421,11 @@ impl VisualDb {
 
     pub(crate) fn run_results(&self, run_id: &str) -> Result<Vec<ResultRow>, DevError> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT run_id, {}, pixel_diff_pct, {}, status \
+            "SELECT run_id, {}, pixel_diff_pct, {}, status, {} \
              FROM {} WHERE run_id = ?1",
             self.layout.id,
             self.layout.element_column(),
+            self.layout.reference_columns(""),
             self.layout.results,
         ))?;
         let rows = stmt.query_map(rusqlite::params![run_id], map_result_row)?;
@@ -357,10 +434,11 @@ impl VisualDb {
 
     pub(crate) fn all_approvals(&self) -> Result<Vec<Approval>, DevError> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {}, pixel_diff_pct, {} \
+            "SELECT {}, pixel_diff_pct, {}, {} \
              FROM {} ORDER BY {}",
             self.layout.id,
             self.layout.element_column(),
+            self.layout.approval_width_column(),
             self.layout.approvals,
             self.layout.id,
         ))?;
@@ -390,12 +468,13 @@ impl VisualDb {
         subject_id: &str,
     ) -> Result<Option<ResultRow>, DevError> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT r.run_id, r.{}, r.pixel_diff_pct, {}, r.status \
+            "SELECT r.run_id, r.{}, r.pixel_diff_pct, {}, r.status, {} \
              FROM {} r JOIN {} runs ON runs.run_id = r.run_id \
              WHERE r.{} = ?1{} \
              ORDER BY runs.timestamp DESC, runs.rowid DESC LIMIT 1",
             self.layout.id,
             self.layout.qualified_element_column("r"),
+            self.layout.reference_columns("r."),
             self.layout.results,
             self.layout.runs,
             self.layout.id,
@@ -418,7 +497,11 @@ impl VisualDb {
 }
 
 /// 2 added `completed` to litehtml's runs table; older rows keep NULL.
-const SCHEMA_VERSION: i64 = 2;
+/// 3 added `viewport_width` and `reference_id` to litehtml's results and
+/// `viewport_width` to its approvals; older rows keep NULL, which the litehtml
+/// adapter reads as the pipeline's default width (see `recorded_width` in
+/// `src/litehtml/db.rs`). The sluggrs store takes the stamp with no new column.
+const SCHEMA_VERSION: i64 = 3;
 const LEGACY_IMPORT: &str = "results-db-visual-v1";
 
 struct LegacyRun {
@@ -495,6 +578,16 @@ fn initialize(conn: &Connection, layout: &Layout) -> Result<(), DevError> {
     } else {
         ""
     };
+    let result_reference = if layout.reference {
+        ", viewport_width INTEGER, reference_id TEXT"
+    } else {
+        ""
+    };
+    let approval_reference = if layout.reference {
+        ", viewport_width INTEGER"
+    } else {
+        ""
+    };
     conn.execute_batch(&format!(
         "CREATE TABLE IF NOT EXISTS {} (\
             run_id TEXT PRIMARY KEY, \
@@ -506,14 +599,14 @@ fn initialize(conn: &Connection, layout: &Layout) -> Result<(), DevError> {
             run_id TEXT NOT NULL REFERENCES {}(run_id), \
             {} TEXT NOT NULL, \
             pixel_diff_pct REAL{result_element}, \
-            status TEXT NOT NULL, \
+            status TEXT NOT NULL{result_reference}, \
             PRIMARY KEY (run_id, {})\
         );\
         CREATE TABLE IF NOT EXISTS {} (\
             {} TEXT PRIMARY KEY, \
             approved_at TEXT NOT NULL DEFAULT (datetime('now')), \
             [commit] TEXT NOT NULL, \
-            pixel_diff_pct REAL NOT NULL{approval_element}\
+            pixel_diff_pct REAL NOT NULL{approval_element}{approval_reference}\
         );\
         CREATE TABLE IF NOT EXISTS brokkr_imports (migration TEXT PRIMARY KEY);",
         layout.runs, layout.results, layout.runs, layout.id, layout.id, layout.approvals, layout.id,
@@ -546,6 +639,17 @@ fn initialize(conn: &Connection, layout: &Layout) -> Result<(), DevError> {
             "ALTER TABLE {} ADD COLUMN element_match_pct REAL",
             layout.approvals
         ))?;
+    }
+    if layout.reference {
+        for (table, column, kind) in [
+            (layout.results, "viewport_width", "INTEGER"),
+            (layout.results, "reference_id", "TEXT"),
+            (layout.approvals, "viewport_width", "INTEGER"),
+        ] {
+            if !crate::db::store::column_exists(conn, table, column)? {
+                conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"))?;
+            }
+        }
     }
     Ok(())
 }
@@ -836,6 +940,7 @@ fn map_approval(row: &Row<'_>) -> rusqlite::Result<Approval> {
         subject_id: row.get(0)?,
         pixel_diff_pct: row.get(1)?,
         element_match_pct: row.get(2)?,
+        viewport_width: row.get(3)?,
     })
 }
 
@@ -855,5 +960,7 @@ fn map_result_row(row: &Row<'_>) -> rusqlite::Result<ResultRow> {
         pixel_diff_pct: row.get(2)?,
         element_match_pct: row.get(3)?,
         status: row.get(4)?,
+        viewport_width: row.get(5)?,
+        reference_id: row.get(6)?,
     })
 }

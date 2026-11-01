@@ -692,6 +692,8 @@ mod tests {
             pixel_diff_pct: Some(1.0),
             element_match_pct: None,
             status,
+            viewport_width: None,
+            reference_id: None,
         }
     }
 

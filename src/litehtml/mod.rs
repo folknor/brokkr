@@ -3,3 +3,4 @@
 pub(crate) mod cmd;
 pub(crate) mod compare;
 pub(crate) mod db;
+pub(crate) mod reference;

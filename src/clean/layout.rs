@@ -271,17 +271,25 @@ impl MogwaiLayout {
 #[derive(Debug, Clone)]
 pub(crate) struct LitehtmlLayout {
     prepare_cache: PathBuf,
+    capture_staging: PathBuf,
 }
 
 impl LitehtmlLayout {
     fn new(state_root: &Path) -> Self {
         Self {
             prepare_cache: state_root.join("prepare-cache"),
+            capture_staging: state_root.join("litehtml-capture"),
         }
     }
 
     pub(crate) fn prepare_cache(&self) -> &Path {
         &self.prepare_cache
+    }
+
+    /// Where a Chrome capture is written before it is published into the
+    /// fixture's directory; one subdirectory per fixture, empty between runs.
+    pub(crate) fn capture_staging(&self) -> &Path {
+        &self.capture_staging
     }
 }
 

@@ -51,7 +51,11 @@ impl Status {
             {
                 " (improved)"
             }
-            Status::Pass if show_unapproved_pass => " (unapproved)",
+            // Only a pass with no approval to compare against is unapproved;
+            // an approved pass that did not improve carries no annotation.
+            Status::Pass if show_unapproved_pass && approved_pixel_diff.is_none() => {
+                " (unapproved)"
+            }
             Status::NoBaseline => " (run `brokkr approve`)",
             _ => "",
         }

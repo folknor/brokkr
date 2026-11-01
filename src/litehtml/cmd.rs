@@ -14,7 +14,8 @@ use crate::user_dirs;
 use crate::visual::engine::{self, Subject, SubjectItem, SummaryOptions};
 
 use super::compare;
-use super::db::{MechanicalDb, RunCompletion};
+use super::db::{MechanicalDb, ReferenceStamp, RunCompletion, recorded_width};
+use super::reference::{self, Inspection, ReferenceFiles};
 
 fn open_db(project_root: &Path) -> Result<MechanicalDb, DevError> {
     engine::open_results_db(project_root, MechanicalDb::open)
@@ -129,6 +130,25 @@ impl SubjectItem for LitehtmlFixture {
 // Pipeline execution
 // ---------------------------------------------------------------------------
 
+/// The pipeline's argv for one fixture. The width is always passed, even when
+/// it is the pipeline's own default of 800: the Chrome reference is captured
+/// at the same resolved width, and a comparison of two different widths
+/// scores silently (the pixel diff pads the smaller image) rather than
+/// failing. `--width` also drives the pipeline's media-query evaluation.
+fn pipeline_args(html: &str, output_dir: &str, width: u32, mode: PipelineMode) -> Vec<String> {
+    let mut args = vec![
+        html.to_owned(),
+        "--output-dir".to_owned(),
+        output_dir.to_owned(),
+        "--width".to_owned(),
+        width.to_string(),
+    ];
+    if mode == PipelineMode::Ahem {
+        args.push("--fixture".to_owned());
+    }
+    args
+}
+
 fn run_pipeline(
     binary: &Path,
     fixture: &LitehtmlFixture,
@@ -145,17 +165,16 @@ fn run_pipeline(
     }
 
     let binary_str = binary.display().to_string();
-    let html_str = fixture_html.display().to_string();
-    let output_dir_str = artifact_dir.display().to_string();
+    let width = fixture.resolved_viewport_width(config);
+    let args = pipeline_args(
+        &fixture_html.display().to_string(),
+        &artifact_dir.display().to_string(),
+        width,
+        fixture.resolved_mode(config),
+    );
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
 
-    let mode = fixture.resolved_mode(config);
-
-    let mut args = vec![&html_str as &str, "--output-dir", &output_dir_str];
-    if mode == PipelineMode::Ahem {
-        args.push("--fixture");
-    }
-
-    output::litehtml_msg(&format!("  rendering {}", fixture.id));
+    output::litehtml_msg(&format!("  rendering {} ({width}px)", fixture.id));
 
     let captured = output::run_captured(&binary_str, &args, project_root)?;
 
@@ -187,8 +206,14 @@ fn record_error(
     reason: &str,
 ) -> Result<FixtureOutcome, DevError> {
     output::litehtml_msg(&format!("  ERROR {}: {reason}", fixture.id));
-    ctx.db
-        .insert_result(ctx.run_id, &fixture.id, None, None, compare::Status::Error)?;
+    ctx.db.insert_result(
+        ctx.run_id,
+        &fixture.id,
+        None,
+        None,
+        compare::Status::Error,
+        None,
+    )?;
     Ok(FixtureOutcome::error())
 }
 
@@ -219,42 +244,16 @@ fn remove_if_present(path: &Path) -> Result<(), DevError> {
 
 fn run_fixture(ctx: &TestContext, fixture: &LitehtmlFixture) -> Result<FixtureOutcome, DevError> {
     let fixture_dir = ctx.project_root.join("fixtures").join(&fixture.id);
-    std::fs::create_dir_all(&fixture_dir)?;
-
-    let ref_png = fixture_dir.join("chrome.png");
-    let ref_json = fixture_dir.join("chrome.json");
-
-    // Chrome reference: `--recapture` always captures. Otherwise a missing
-    // reference is captured only for a fixture nobody has approved yet - its
-    // first run. Once an approval exists, its numbers were measured against
-    // THAT reference, so silently recapturing a deleted one would swap the
-    // baseline's ground truth mid-run; that takes an explicit `--recapture`.
-    if let Some(script) = ctx.capture_script {
-        if let Err(e) = capture_fixture(fixture, ctx.config, ctx.project_root, script) {
-            return record_step_error(ctx, fixture, &e);
-        }
-    } else if !ref_png.exists() || !ref_json.exists() {
-        if ctx.db.get_approval(&fixture.id)?.is_some() {
-            return record_error(
-                ctx,
-                fixture,
-                "Chrome reference (chrome.png/chrome.json) is missing but the fixture has an \
-                 approved baseline measured against it - restore it, or rerun with --recapture",
-            );
-        }
-        let script = CaptureScript::write(ctx.project_root)?;
-        if let Err(e) = capture_fixture(fixture, ctx.config, ctx.project_root, &script.path) {
-            return record_step_error(ctx, fixture, &e);
-        }
+    if let Err(e) = std::fs::create_dir_all(&fixture_dir) {
+        return record_step_error(ctx, fixture, &e.into());
     }
 
-    if !ref_png.exists() || !ref_json.exists() {
-        return record_error(
-            ctx,
-            fixture,
-            "capture did not produce both chrome.png and chrome.json",
-        );
-    }
+    let width = fixture.resolved_viewport_width(ctx.config);
+    let reference_id = match ensure_reference(ctx, fixture, &fixture_dir, width) {
+        Ok(Ok(id)) => id,
+        Ok(Err(reason)) => return record_error(ctx, fixture, &reason),
+        Err(e) => return record_step_error(ctx, fixture, &e),
+    };
 
     // Clear the previous run's outputs first: existence is the only signal
     // that the pipeline wrote them, so a leftover would be scored as fresh.
@@ -281,7 +280,48 @@ fn run_fixture(ctx: &TestContext, fixture: &LitehtmlFixture) -> Result<FixtureOu
         );
     }
 
-    score_fixture(ctx, fixture, &fixture_dir, &ref_png, &ref_json)
+    let stamp = ReferenceStamp {
+        viewport_width: width,
+        reference_id: &reference_id,
+    };
+    score_fixture(ctx, fixture, &fixture_dir, stamp)
+}
+
+/// Make sure `fixture_dir` holds a usable Chrome reference at `width` and
+/// return its id, or the reason this fixture is an `ERROR` instead.
+///
+/// `--recapture` always captures. Otherwise an unusable reference (missing,
+/// half-published, or captured at another width) is captured only for a
+/// fixture with no approval at all - its first run. Once any approval exists,
+/// its numbers were measured against the reference that is there, so silently
+/// replacing it would swap the baseline's ground truth; that takes an explicit
+/// `--recapture`. That holds for an approval measured at another width too:
+/// the approval no longer ratchets this comparison, but it is the only record
+/// of the reference it was measured against.
+fn ensure_reference(
+    ctx: &TestContext,
+    fixture: &LitehtmlFixture,
+    fixture_dir: &Path,
+    width: u32,
+) -> Result<Result<String, String>, DevError> {
+    if let Some(script) = ctx.capture_script {
+        return capture_fixture(fixture, width, ctx.project_root, script).map(Ok);
+    }
+    match reference::inspect(fixture_dir, width)? {
+        Inspection::Usable { reference_id } => Ok(Ok(reference_id)),
+        Inspection::Unidentified => reference::adopt(fixture_dir, width).map(Ok),
+        Inspection::Unusable(reason) => {
+            if ctx.db.get_approval(&fixture.id)?.is_some() {
+                return Ok(Err(format!(
+                    "Chrome reference is not usable ({reason}) but the fixture has an approved \
+                     baseline measured against the reference that is there - restore it, or \
+                     rerun with --recapture"
+                )));
+            }
+            let script = CaptureScript::write(ctx.project_root)?;
+            capture_fixture(fixture, width, ctx.project_root, &script.path).map(Ok)
+        }
+    }
 }
 
 /// Compare pipeline output against the Chrome reference, persist the
@@ -291,9 +331,10 @@ fn score_fixture(
     ctx: &TestContext,
     fixture: &LitehtmlFixture,
     fixture_dir: &Path,
-    ref_png: &Path,
-    ref_json: &Path,
+    stamp: ReferenceStamp<'_>,
 ) -> Result<FixtureOutcome, DevError> {
+    let reference = ReferenceFiles::in_dir(fixture_dir);
+    let (ref_png, ref_json) = (reference.png.as_path(), reference.json.as_path());
     let pipeline_png = fixture_dir.join("pipeline.png");
     let pipeline_json = fixture_dir.join("pipeline.json");
     let diff_png = fixture_dir.join("diff.png");
@@ -305,7 +346,20 @@ fn score_fixture(
         Some(fixture.resolved_element_threshold(ctx.config))
     };
     let expected_fail = fixture.expected == ExpectedOutcome::Fail;
-    let approval = ctx.db.get_approval(&fixture.id)?;
+    // An approval ratchets only the comparison it measured: one taken at
+    // another width scores this run as unapproved, and says so.
+    let approval = ctx.db.get_approval(&fixture.id)?.filter(|approval| {
+        let approved_width = recorded_width(approval.viewport_width);
+        let applies = approved_width == stamp.viewport_width;
+        if !applies {
+            output::litehtml_msg(&format!(
+                "  note: {} was approved at {approved_width}px; at {}px that approval does not \
+                 apply - approve a run at this width",
+                fixture.id, stamp.viewport_width,
+            ));
+        }
+        applies
+    });
     let approved_pixel = approval.as_ref().map(|a| a.pixel_diff_pct);
     let approved_element = approval.as_ref().and_then(|a| a.element_match_pct);
 
@@ -347,6 +401,7 @@ fn score_fixture(
         pixel_diff_pct,
         element_match_pct,
         status,
+        Some(stamp),
     )?;
 
     let unexpected_pass = expected_fail && matches!(status, compare::Status::Pass);
@@ -459,6 +514,46 @@ fn approval_scores(
             "latest result for fixture '{fixture_id}' is {} without both a pixel and an element score \
              - nothing to approve; fix it and rerun `brokkr visual {fixture_id}`",
             result.status,
+        ))),
+    }
+}
+
+/// An approval pins the comparison its result measured, so that result must
+/// be the comparison a run would make now: scored at the width the fixture
+/// resolves to, against the reference that is published now. A result from
+/// before results recorded their reference, or one scored before a later
+/// `--recapture` replaced it (an interrupted run's rows are not the latest
+/// result, so the replaced reference's scores still are), is refused.
+fn approval_comparison(
+    fixture_id: &str,
+    result: &super::db::ResultRow,
+    width: u32,
+    current: &Inspection,
+) -> Result<(), DevError> {
+    let rerun = format!("rerun `brokkr visual {fixture_id}` and approve that");
+    let measured = recorded_width(result.viewport_width);
+    if measured != width {
+        return Err(DevError::Verify(format!(
+            "latest result for fixture '{fixture_id}' was measured at {measured}px but the \
+             fixture now renders at {width}px - {rerun}"
+        )));
+    }
+    let Some(scored) = result.reference_id.as_deref() else {
+        return Err(DevError::Verify(format!(
+            "latest result for fixture '{fixture_id}' does not record which Chrome reference it \
+             was scored against - {rerun}"
+        )));
+    };
+    match current {
+        Inspection::Usable { reference_id } if reference_id == scored => Ok(()),
+        Inspection::Usable { .. } | Inspection::Unidentified => Err(DevError::Verify(format!(
+            "the Chrome reference for fixture '{fixture_id}' was replaced after its latest \
+             result was scored - {rerun}"
+        ))),
+        Inspection::Unusable(reason) => Err(DevError::Verify(format!(
+            "the Chrome reference for fixture '{fixture_id}' is not usable ({reason}) - restore \
+             it and approve again, or run `brokkr visual {fixture_id} --recapture` and approve \
+             that"
         ))),
     }
 }
@@ -623,17 +718,20 @@ fn write_capture_script() -> Result<PathBuf, DevError> {
     Ok(script_path)
 }
 
+/// Capture the Chrome reference at `width` and publish it into the fixture's
+/// directory, returning its new id. The capture lands in a staging directory
+/// under `.brokkr/` first, so a failed or interrupted capture never touches
+/// the published reference; see `reference.rs` for the publication order.
 fn capture_fixture(
     fixture: &LitehtmlFixture,
-    config: &LitehtmlConfig,
+    width: u32,
     project_root: &Path,
     capture_script: &Path,
-) -> Result<(), DevError> {
+) -> Result<String, DevError> {
     let fixture_dir = project_root.join("fixtures").join(&fixture.id);
     std::fs::create_dir_all(&fixture_dir)?;
 
-    let viewport = fixture.viewport_width.unwrap_or(config.viewport_width);
-    output::litehtml_msg(&format!("  capturing {} ({viewport}px)", fixture.id));
+    output::litehtml_msg(&format!("  capturing {} ({width}px)", fixture.id));
 
     let fixture_html = project_root.join(&fixture.path);
     if !fixture_html.exists() {
@@ -643,14 +741,24 @@ fn capture_fixture(
         )));
     }
 
-    let chrome_png = fixture_dir.join("chrome.png");
-    let chrome_json = fixture_dir.join("chrome.json");
+    let staging = crate::clean::layout::ProjectState::new(project_root)
+        .litehtml()
+        .capture_staging()
+        .join(&fixture.id);
+    match std::fs::remove_dir_all(&staging) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    std::fs::create_dir_all(&staging)?;
+    let staged = ReferenceFiles::in_dir(&staging);
 
     let script_str = capture_script.display().to_string();
     let html_str = fixture_html.display().to_string();
-    let png_str = chrome_png.display().to_string();
-    let json_str = chrome_json.display().to_string();
-    let vp_str = viewport.to_string();
+    // capture.js writes chrome.meta.json beside the JSON path it is given.
+    let png_str = staged.png.display().to_string();
+    let json_str = staged.json.display().to_string();
+    let vp_str = width.to_string();
     let Some(cache_dir) = capture_script.parent() else {
         return Err(DevError::Internal(
             "capture script has no parent directory".into(),
@@ -686,8 +794,15 @@ fn capture_fixture(
         )));
     }
 
+    let reference_id = reference::publish(&staging, &fixture_dir, width)
+        .map_err(|e| DevError::Verify(format!("Chrome capture for {}: {e}", fixture.id)))?;
+    // The staging directory is empty once published; a leftover is cleared
+    // by the next capture of this fixture, so failing to remove it is not
+    // this capture's failure.
+    drop(std::fs::remove_dir(&staging));
+
     output::litehtml_msg(&format!("    \u{2192} {}", output::path(&fixture_dir)));
-    Ok(())
+    Ok(reference_id)
 }
 
 // ---------------------------------------------------------------------------
@@ -726,16 +841,27 @@ pub(crate) fn approve(
         run.as_ref(),
         git_info.commit.as_str(),
     )?;
+    let width = fixture.resolved_viewport_width(litehtml_config);
+    let fixture_dir = project_root.join("fixtures").join(&fixture.id);
+    let current = reference::inspect(&fixture_dir, width).map_err(|e| {
+        DevError::Verify(format!(
+            "cannot read the Chrome reference for fixture '{id}': {e} - restore it and approve \
+             again, or run `brokkr visual {id} --recapture` and approve that",
+            id = fixture.id
+        ))
+    })?;
+    approval_comparison(&fixture.id, &result, width, &current)?;
 
     db.set_approval(
         &fixture.id,
         git_info.commit.as_str(),
         pixel_pct,
         Some(element_pct),
+        width,
     )?;
 
     output::litehtml_msg(&format!(
-        "approved '{}' at pixel={pixel_pct:.1}%, elements={element_pct:.0}% (commit {})",
+        "approved '{}' at pixel={pixel_pct:.1}%, elements={element_pct:.0}%, {width}px (commit {})",
         fixture.id, git_info.commit,
     ));
 
@@ -799,30 +925,56 @@ pub(crate) fn status(
     output::litehtml_msg(&format!("  {}", "\u{2500}".repeat(70)));
 
     for fixture in &litehtml_config.fixtures {
-        print_fixture_status(fixture, &approvals, &db)?;
+        let width = fixture.resolved_viewport_width(litehtml_config);
+        print_fixture_status(fixture, width, &approvals, &db)?;
     }
 
     Ok(())
 }
 
+/// A delta needs the approval, the latest result and the configuration to
+/// agree on the width; anything measured at another width is shown with its
+/// width and never compared, since a config edit alone does not make an old
+/// result describe the current comparison.
 fn print_fixture_status(
     fixture: &LitehtmlFixture,
+    width: u32,
     approvals: &[super::db::Approval],
     db: &MechanicalDb,
 ) -> Result<(), DevError> {
     let approval = approvals.iter().find(|a| a.subject_id == fixture.id);
     let latest = db.latest_result_for_fixture(&fixture.id)?;
+    let approved_width = approval.map(|a| recorded_width(a.viewport_width));
+    // An ERROR row scored nothing and records no width, so it is never stale:
+    // it is the current state at whatever width the run attempted.
+    let latest_width = latest
+        .as_ref()
+        .filter(|row| row.status != compare::Status::Error)
+        .map(|row| recorded_width(row.viewport_width));
 
-    let approved_str = approval
-        .map(|a| format!("{:.1}%", a.pixel_diff_pct))
-        .unwrap_or_else(|| "\u{2014}".into());
+    let approved_str = match (approval, approved_width) {
+        (Some(a), Some(w)) if w != width => format!("{:.1}% {w}px", a.pixel_diff_pct),
+        (Some(a), _) => format!("{:.1}%", a.pixel_diff_pct),
+        _ => "\u{2014}".into(),
+    };
+    let applicable_approval = approval.filter(|_| approved_width == Some(width));
 
-    let columns = compare::status_columns(
-        latest.as_ref().map(|row| row.status),
-        latest.as_ref().and_then(|row| row.pixel_diff_pct),
-        approval.map(|entry| entry.pixel_diff_pct),
-        true,
-    );
+    let columns = match latest_width {
+        Some(measured) if measured != width => crate::visual::status::StatusColumns {
+            pixel: "\u{2014}".into(),
+            delta: "\u{2014}".into(),
+            status: "STALE".into(),
+            annotation: format!(
+                " (last run at {measured}px, fixture renders at {width}px - rerun)"
+            ),
+        },
+        _ => compare::status_columns(
+            latest.as_ref().map(|row| row.status),
+            latest.as_ref().and_then(|row| row.pixel_diff_pct),
+            applicable_approval.map(|entry| entry.pixel_diff_pct),
+            true,
+        ),
+    };
     output::litehtml_msg(&engine::format_status_row(
         &fixture.id,
         &approved_str,
@@ -1271,6 +1423,8 @@ mod tests {
             pixel_diff_pct: pixel,
             element_match_pct: element,
             status,
+            viewport_width: Some(800),
+            reference_id: Some("reference".into()),
         }
     }
 
@@ -1295,6 +1449,68 @@ mod tests {
 
         let missing_element = result(compare::Status::Pass, Some(1.5), None);
         assert!(approval_scores("fixture", &missing_element).is_err());
+    }
+
+    /// The pipeline is always told the width, so it renders the comparison
+    /// the Chrome reference was captured for.
+    #[test]
+    fn pipeline_argv_carries_the_resolved_width() {
+        let mut narrow = fixture("narrow");
+        narrow.viewport_width = Some(720);
+        let cfg = config(vec![narrow.clone(), fixture("plain")]);
+
+        let args = pipeline_args(
+            "a.html",
+            "out",
+            narrow.resolved_viewport_width(&cfg),
+            PipelineMode::Ahem,
+        );
+        assert_eq!(
+            args,
+            [
+                "a.html",
+                "--output-dir",
+                "out",
+                "--width",
+                "720",
+                "--fixture"
+            ]
+        );
+        let args = pipeline_args(
+            "b.html",
+            "out",
+            cfg.fixtures[1].resolved_viewport_width(&cfg),
+            PipelineMode::Default,
+        );
+        assert_eq!(args, ["b.html", "--output-dir", "out", "--width", "800"]);
+    }
+
+    #[test]
+    fn approval_needs_the_current_width_and_the_published_reference() {
+        let scored = result(compare::Status::Pass, Some(1.5), Some(98.0));
+        let current = Inspection::Usable {
+            reference_id: "reference".into(),
+        };
+        assert!(approval_comparison("f", &scored, 800, &current).is_ok());
+
+        let error = approval_comparison("f", &scored, 720, &current).unwrap_err();
+        assert!(error.to_string().contains("measured at 800px"), "{error}");
+
+        let replaced = Inspection::Usable {
+            reference_id: "other".into(),
+        };
+        let error = approval_comparison("f", &scored, 800, &replaced).unwrap_err();
+        assert!(error.to_string().contains("was replaced"), "{error}");
+        assert!(approval_comparison("f", &scored, 800, &Inspection::Unidentified).is_err());
+        assert!(
+            approval_comparison("f", &scored, 800, &Inspection::Unusable("gone".into())).is_err()
+        );
+
+        let mut legacy = result(compare::Status::Pass, Some(1.5), Some(98.0));
+        legacy.viewport_width = None;
+        legacy.reference_id = None;
+        let error = approval_comparison("f", &legacy, 800, &current).unwrap_err();
+        assert!(error.to_string().contains("does not record"), "{error}");
     }
 
     #[test]

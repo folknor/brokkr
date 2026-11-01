@@ -496,6 +496,13 @@ mod tests {
         let small_delta = status_columns(Some(Status::Pass), Some(1.0), Some(1.04), false);
         assert_eq!(small_delta.delta, "\u{2014}");
         assert_eq!(small_delta.annotation, "");
+
+        // An approved pass that did not improve is not "unapproved"; only a
+        // pass with no approval behind it is.
+        let approved = status_columns(Some(Status::Pass), Some(1.0), Some(1.04), true);
+        assert_eq!(approved.annotation, "");
+        let unapproved = status_columns(Some(Status::Pass), Some(1.0), None, true);
+        assert_eq!(unapproved.annotation, " (unapproved)");
     }
 
     #[test]

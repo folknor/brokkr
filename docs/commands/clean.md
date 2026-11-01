@@ -117,7 +117,9 @@ Bare `brokkr clean`, in order:
   trees and child directories under `.brokkr/piners/corpus/` (the `gate.db`
   and `runs.db` paths are protected),
   `.brokkr/dellingr/`, `.brokkr/mogwai/`, `.brokkr/test-hung/`, and, for
-  litehtml, `.brokkr/prepare-cache/`. `.brokkr/artifacts/` (the `brokkr build`
+  litehtml, `.brokkr/prepare-cache/` and `.brokkr/litehtml-capture/` (the
+  staging a Chrome capture is written to before it is published into
+  `fixtures/<id>/`; the published references are never cleaned). `.brokkr/artifacts/` (the `brokkr build`
   snapshots) goes only in a clean run by hand, never in the cleanup after an
   interrupted command, since a script may still be running one. So does
   pbfhogg's `.brokkr/verify-reference/` (the verify reference cache, see

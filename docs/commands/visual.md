@@ -37,20 +37,25 @@ its project-specific config block.
   `.brokkr/litehtml-visual.db` and `.brokkr/sluggrs-visual.db`. The first open
   imports that subject's existing tables from `.brokkr/results.db`.
 
-  A fixture whose Chrome reference (`chrome.png` + `chrome.json`) is missing
-  is captured automatically only while it has no approval - its first run.
-  Once approved, a missing reference is an `ERROR` naming the fix (restore
-  it, or `--recapture`): the approved numbers were measured against that
-  reference, and recapturing it silently would swap the baseline's ground
-  truth. Each run deletes the previous `pipeline.png`/`pipeline.json`
-  (sluggrs: `output.png`) before rendering, so a pipeline that stops writing
-  one is an `ERROR`, not a comparison against last run's file.
+  A litehtml fixture whose Chrome reference is not usable at the width it
+  renders at (see "Chrome reference" below) is captured automatically only
+  while it has no approval - its first run. Once it has any approval, even
+  one measured at another width, an unusable reference is an `ERROR` naming
+  the fix (restore it, or `--recapture`): the approved numbers were measured
+  against the reference that is there, and recapturing it silently would
+  swap the baseline's ground truth. Each run deletes the previous
+  `pipeline.png`/`pipeline.json` (sluggrs: `output.png`) before rendering, so
+  a pipeline that stops writing one is an `ERROR`, not a comparison against
+  last run's file.
 
   A capture, pipeline, or comparison failure is one `ERROR` row with the
-  reason printed, and the run continues with the next fixture.
+  reason printed, and the run continues with the next fixture. That includes
+  a failure to install the capture's script dependencies or Chrome for a
+  fixture's first capture; `--recapture` installs them once before the run
+  starts, and a failure there ends the command before any fixture runs.
 
   Litehtml records whether a run finished (`completed` on `mechanical_runs`,
-  store schema version 2). A run is stamped complete once its fixture loop has
+  added in store schema version 2). A run is stamped complete once its fixture loop has
   run to the end, however the fixtures scored. A run that was interrupted
   (`brokkr kill`, Ctrl-C), aborted by an error, or killed outright never gets
   the stamp. `report` on such a run prints an `INCOMPLETE RUN` line above the
@@ -65,7 +70,9 @@ its project-specific config block.
   and measuring before Ahem is active captures fallback-font geometry. Each
   capture writes a `chrome.meta.json` sidecar (browser + puppeteer version,
   viewport, timestamp) so a silent Chrome update is attributable rather than
-  looking like drift across all fixtures at once. The screenshot is
+  looking like drift across all fixtures at once; brokkr adds the reference
+  id to it and uses it as the reference's commit marker (see "Chrome
+  reference" below). The screenshot is
   `fullPage` at the measurement viewport - the viewport is never resized
   between the JSON dump and the PNG. The pinned Puppeteer package and its
   matching Chrome build are installed in the per-user script cache. If Chrome
@@ -98,10 +105,70 @@ its project-specific config block.
   The latest scored result must also point to a run recorded as clean at the
   same commit as the current checkout. If the checkout moved or the image came
   from a dirty run, rerun the visual command from the current clean tree before
-  approving.
+  approving. Litehtml also requires that result to be the comparison a run
+  would make now: measured at the width the fixture renders at, and scored
+  against the Chrome reference that is published now (see "Approvals and
+  width" below).
 - `report <run_id>` - show results table for a past test run.
 - `visual-status` - dashboard: all fixtures with approved baseline vs last
-  run, delta, improvements.
+  run, delta, improvements. Litehtml shows a delta only when the approval,
+  the last run and the fixture's current width agree; an approval measured at
+  another width shows that width, and a scored last run at another width
+  shows as `STALE` with its width. An `ERROR` last run records no width and
+  is shown as it is.
+
+## Chrome reference (litehtml only)
+
+A fixture's reference is three files in `fixtures/<id>/`: `chrome.png`,
+`chrome.json` and the `chrome.meta.json` sidecar. It is usable for a run when
+all three are there, the sidecar parses, and the viewport width it records is
+the width the fixture renders at (`viewport_width`, see
+`docs/projects/litehtml.md`). The pipeline is rendered at that same width, so
+a reference captured at another width is never scored against it: the pixel
+diff pads the smaller image rather than failing, so a cross-width comparison
+would be a plausible, silent score.
+
+A capture is written to `.brokkr/litehtml-capture/<id>/` first. Only once it
+is complete and at the requested width does brokkr give it a fresh reference
+id and publish it: the old `chrome.meta.json` is removed first (a failure to
+remove it stops before anything else is replaced), then the PNG and JSON are
+moved in, and the new sidecar last. The sidecar is the commit marker: one that
+is present describes the PNG and JSON beside it, and a capture interrupted at
+any point leaves either the old reference untouched or no sidecar at all,
+which is unusable. That holds with brokkr as the only writer under the command
+lock; hand-edited reference files are not detected.
+
+A sidecar from before reference ids existed is given one on the fixture's
+next run, by rewriting the sidecar in place. A sidecar whose id is present but
+not a non-empty string makes the reference unusable.
+
+## Approvals and width (litehtml only)
+
+Each scored result records the width it was measured at and the id of the
+reference it was scored against; each approval records the width its result
+was measured at. Rows from before these were recorded read as 800, which is
+what every one of them measured (see `docs/projects/litehtml.md`).
+
+An approval ratchets only the comparison it measured. At another width it
+does not apply: the fixture scores as unapproved (`NO_BASELINE`,
+`FAIL_THRESHOLD` or `EXPECTED_FAIL`) and the run prints a note naming the
+approved width. It is not an `ERROR`, because `approve` refuses an `ERROR`
+result and the fixture could then never be approved at its new width. So a
+fixture moved from 800 to 720 runs `ERROR` (its reference is at 800 and it has
+an approval) until `--recapture`, then scores unapproved at 720 until a 720
+result is approved. A fixture keeps one approval, so approving at 720
+replaces the 800 one; moved back before that, the 800 approval applies again
+once an 800 reference is captured.
+
+`approve` refuses a latest result measured at another width than the fixture
+renders at, one that does not record its reference, and one whose reference
+is no longer the published one - for example after a `--recapture` run was
+interrupted, which leaves the earlier run's result as the latest while the
+reference it was scored against has been replaced.
+
+An explicit `--recapture` at the same width keeps the approval: it is the
+documented, deliberate swap of the ground truth, and the approval then
+ratchets scores against the new reference.
 
 ## Element comparison (litehtml only)
 

@@ -17,7 +17,15 @@ visual-test surface, different pipeline binary).
   version, owned by `ResultsDb`. `mechanical_runs.completed` is NULL for rows
   from before completion tracking (unknown), 0 from `insert_run` until the
   fixture loop ends, 1 once `finish` stamps it; readers treat only 0 as
-  unfinished, so a SIGKILL needs no cleanup.
+  unfinished, so a SIGKILL needs no cleanup. Store version 3 records on each
+  scored result the width it was measured at and the id of the Chrome
+  reference it was scored against, and on each approval its width. Rows from
+  before version 3 have neither; they read as 800, which is what every one of
+  them measured: the pipeline was never passed a width before then and so
+  rendered at its default of 800, and every litehtml configuration until then
+  set 800 with no fixture override.
+- `src/litehtml/reference.rs` - the published Chrome reference: staged
+  publication, the `chrome.meta.json` commit marker, width and identity checks.
 - `src/litehtml/compare.rs` - element geometry comparison.
 - `src/visual/` - shared pixel comparison, typed visual statuses, run engine,
   database operations, and common command formatting. Run IDs use the shared
@@ -61,9 +69,15 @@ notes = "narrow mobile layout"       # optional metadata
 ```
 
 `[litehtml]` requires `viewport_width`, `mode`, `pixel_diff_threshold`, and
-`element_match_threshold`. `viewport_width` sets the Chrome capture viewport
-and must be greater than zero; both thresholds are percentages in percentage
-points. `mode` is `ahem` (pass
+`element_match_threshold`. `viewport_width` is the width both sides of the
+comparison render at: the Chrome capture viewport and the pipeline's
+`--width`, which also drives its media-query evaluation. It must be greater
+than zero. The pipeline is passed `--width` even at its own default of 800, so
+a pipeline that does not accept the flag fails every fixture rather than
+rendering at a width nobody configured. Changing a fixture's width makes its
+stored reference and approval describe another comparison; see "Chrome
+reference" and "Approvals and width" in `docs/commands/visual.md`. Both
+thresholds are percentages in percentage points. `mode` is `ahem` (pass
 `--fixture` to the pipeline) or `default` (run the pipeline without that flag).
 The optional `fallback_aspect_ratio` is used only by `prepare` and must be
 finite and greater than zero. When omitted, brokkr supplies its default value.
@@ -89,9 +103,10 @@ package, lockfile, and script contents. pnpm installs dependencies there with
 directory (the cache is per user, so runs in two trees can race) and a
 10-minute wall bound; a failed or timed-out install removes the partial
 `node_modules` and reports pnpm's stderr. `brokkr clean` in a litehtml tree
-removes the directories of every other key. The Chrome capture still resolves
-Puppeteer from the global npm module path; the checked-in litehtml package does
-not yet pin Puppeteer.
+removes the directories of every other key. The Chrome capture script is
+materialized in the same versioned directory, so it resolves the Puppeteer the
+package pins from that directory's `node_modules`, and Puppeteer's matching
+Chrome build is installed under it.
 
 ## Test runner
 

@@ -69,6 +69,13 @@ impl LitehtmlFixture {
             .unwrap_or(config.pixel_diff_threshold)
     }
 
+    /// The width both sides of the comparison render at: the Chrome capture
+    /// viewport and the pipeline's `--width`. One resolver for both, so the
+    /// two can never be handed different widths.
+    pub fn resolved_viewport_width(&self, config: &LitehtmlConfig) -> u32 {
+        self.viewport_width.unwrap_or(config.viewport_width)
+    }
+
     pub fn resolved_mode(&self, config: &LitehtmlConfig) -> PipelineMode {
         self.mode.unwrap_or(config.mode)
     }
@@ -183,5 +190,18 @@ mod tests {
                     [[litehtml.fixture]]\nid = \"small\"\npath = \"small.html\"\n\
                     expected = \"pass\"\nviewport_width = 0\n";
         assert!(parse_str(body).is_err());
+    }
+
+    #[test]
+    fn viewport_width_resolves_fixture_override_over_global() {
+        let body = "[litehtml]\nviewport_width = 800\nmode = \"default\"\n\
+                    pixel_diff_threshold = 1.0\nelement_match_threshold = 90.0\n\
+                    [[litehtml.fixture]]\nid = \"narrow\"\npath = \"narrow.html\"\n\
+                    expected = \"pass\"\nviewport_width = 720\n\
+                    [[litehtml.fixture]]\nid = \"wide\"\npath = \"wide.html\"\n\
+                    expected = \"pass\"\n";
+        let cfg = parse_str(body).unwrap();
+        assert_eq!(cfg.fixtures[0].resolved_viewport_width(&cfg), 720);
+        assert_eq!(cfg.fixtures[1].resolved_viewport_width(&cfg), 800);
     }
 }

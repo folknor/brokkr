@@ -174,6 +174,33 @@ fn clean_io_error(action: &str, path: &Path, source: &std::io::Error) -> DevErro
     ))
 }
 
+/// Litehtml: the prepare cache, any capture staging left by an interrupted
+/// capture (the published references in `fixtures/` are never touched), and
+/// the per-user Node script cache, which keeps one directory per bundled
+/// script version, including the hashed capture script, each with its own
+/// node_modules. There is no project-local `.brokkr/capture.js`; every stale
+/// version goes and the current one stays so the next run does not reinstall.
+fn clean_litehtml(state: &layout::ProjectState, c: &Cleaner) -> Result<(), DevError> {
+    if c.dir(state.litehtml().prepare_cache())? {
+        output::run_msg(&format!("{} litehtml prepare cache", c.verb()));
+    }
+    if c.dir(state.litehtml().capture_staging())? {
+        output::run_msg(&format!("{} litehtml capture staging", c.verb()));
+    }
+    let stale = litehtml::cmd::stale_script_cache_dirs();
+    for dir in &stale {
+        c.dir(dir)?;
+    }
+    if !stale.is_empty() {
+        output::run_msg(&format!(
+            "{} {}",
+            c.verb(),
+            output::count(stale.len(), "stale litehtml script cache")
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn cmd_clean(
     dev_config: &config::DevConfig,
     project: &Project,
@@ -256,25 +283,8 @@ pub(crate) fn cmd_clean(
         output::run_msg(&format!("{} sidecar status", c.verb()));
     }
 
-    // Litehtml: the per-user Node script cache keeps one directory per bundled
-    // script version, including the hashed capture script, each with its own
-    // node_modules. There is no project-local `.brokkr/capture.js`; every stale
-    // version goes and the current one stays so the next run does not reinstall.
     if *project == Project::Litehtml {
-        if c.dir(state.litehtml().prepare_cache())? {
-            output::run_msg(&format!("{} litehtml prepare cache", c.verb()));
-        }
-        let stale = litehtml::cmd::stale_script_cache_dirs();
-        for dir in &stale {
-            c.dir(dir)?;
-        }
-        if !stale.is_empty() {
-            output::run_msg(&format!(
-                "{} {}",
-                c.verb(),
-                output::count(stale.len(), "stale litehtml script cache")
-            ));
-        }
+        clean_litehtml(&state, &c)?;
     }
 
     // An empty routine sweep says so once, instead of printing nothing (which
