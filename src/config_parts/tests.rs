@@ -1296,6 +1296,7 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
                 datasets: host_ds,
                 tilegen: HashMap::new(),
                 worktree_keep: None,
+                verify_reference_budget: None,
             },
         );
         let config = make_config(hosts);
@@ -1364,6 +1365,7 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
                 datasets: host_ds,
                 tilegen: HashMap::new(),
                 worktree_keep: None,
+                verify_reference_budget: None,
             },
         );
         let config = make_config(hosts);
@@ -1413,6 +1415,7 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
                 datasets: host_ds,
                 tilegen: HashMap::new(),
                 worktree_keep: None,
+                verify_reference_budget: None,
             },
         );
         let config = make_config(hosts);
@@ -1548,6 +1551,7 @@ xxhash = "000000000000000000000000feedface"
             datasets: HashMap::new(),
             tilegen: HashMap::new(),
                 worktree_keep: None,
+                verify_reference_budget: None,
         };
         let mut ds = Dataset {
             origin: None,
@@ -1594,6 +1598,7 @@ xxhash = "000000000000000000000000feedface"
             datasets: HashMap::new(),
             tilegen: HashMap::new(),
                 worktree_keep: None,
+                verify_reference_budget: None,
         };
         let mut ds = Dataset {
             origin: None,
@@ -2899,6 +2904,7 @@ profile = "corpus"
                 datasets: HashMap::new(),
                 tilegen,
                 worktree_keep: None,
+                verify_reference_budget: None,
             },
         );
         hosts

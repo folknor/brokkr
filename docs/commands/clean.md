@@ -2,7 +2,13 @@
 
 ```
 brokkr clean [--worktrees] [--cargo [PKG]] [--archives [--keep N]] [--all] [--dry-run]
+brokkr clean --verify-reference [--dry-run]
 ```
+
+`--verify-reference` removes pbfhogg's verify reference cache and nothing
+else. The verify outputs placed from it are hard links that stay, so it frees
+less than the cache's logical size while they exist. To keep the cache
+bounded instead, set `verify_reference_budget` (`brokkr man config`).
 
 Remove the scratch and temporary files a brokkr project accumulates. Runs in
 any project; what it finds is project-shaped, but the rule it follows is not.
@@ -76,7 +82,10 @@ No flag removes these either. What keeps each in check, where anything does:
 | state | what limits it |
 | --- | --- |
 | `.brokkr/check-logs/` | each new log prunes its kind to the newest 10, best effort; a single log's size is not capped |
-| `.brokkr/accounting/` | each new check run prunes to the newest 10 plus itself, best effort; a plan or journal's size is not capped |
+| `.brokkr/accounting/` | each new check run prunes to the newest 10, itself among them, best effort; a plan or journal's size is not capped |
+| `.brokkr/verify-reference/` | `verify_reference_budget` per host (`brokkr man config`), applied when each verify ends; absent, nothing; `--verify-reference` removes it whole |
+| `$XDG_DATA_HOME/brokkr/history.db` | nothing: every invocation, never pruned |
+| `$XDG_DATA_HOME/brokkr/sidecar-backups/` | three whole copies of each project's sidecar.db, named by project kind |
 | `.brokkr/hash_cache`, `hash_cache.lock` | a save drops entries for files that no longer exist; a run that only hits the cache does not save |
 | `.brokkr/pbfhogg-capabilities` | capped at 512 lines |
 | `.brokkr/worktrees.toml` | cutting a new `--commit` worktree drops the vanished records of that checkout only; nothing else does |
@@ -85,18 +94,34 @@ No flag removes these either. What keeps each in check, where anything does:
 | `.brokkr/.sidecar.lock`, `.gitignore` | one small file each; the lock persists, and an existing `.gitignore` is never rewritten |
 
 Some files exist only while their writer runs, and a writer killed with
-SIGKILL leaves them behind. Nothing sweeps them, and they can accumulate:
+SIGKILL leaves them behind. These, made only by commands that hold the brokkr
+lock, are removed by store maintenance (`src/maintenance.rs`) the next time
+dispatch takes a fresh hold for a command whose spec locks (`check`, `test`,
+`build`, `run`, `clean`, `verify` and the measured commands; not `bench`,
+`fmt` or `env`, which lock inside their own handler), before that command
+does anything, with one line saying how many went and the allocated bytes
+observed. `clean --dry-run` only lists them, and `clean --verify-reference`
+leaves them alone:
 
+- `~/.brokkr/harness/<pid>-<nanos>-<n>/`, a `check` or `test` harness session.
 - `.brokkr/nextest-synth.<pid>-<n>.toml` and
   `.brokkr/nextest-sweep-env.<pid>-<n>.toml`, one private config file per
-  nextest-lane read, removed when the read ends.
+  nextest-lane read.
+- `.brokkr/corpus-sort/brokkr-corpus-sort-<pid>-<id>/`, the spill directory of
+  one elivagar corpus sort, which can be large.
+- `.brokkr/artifacts/.staging-<pid>-<name>`, a `brokkr build` snapshot's
+  partial copy.
+
+Nothing sweeps these, and they can accumulate:
+
 - `.<name>.tmp-<pid>-<n>` beside a file brokkr replaces atomically (the hash
   cache, the capabilities store, `worktrees.toml` and others), removed once
-  the replacement is published.
-- `.brokkr/corpus-sort/<dir>`, the spill directory of one elivagar corpus
-  sort, removed when the sort ends.
+  the replacement is published. Their writers do not all share one
+  exclusion, and a lockless `brokkr env` writes the hash cache, so no sweep
+  can prove one dead.
 - `.brokkr/hotpath-report.json`, at most one: each hotpath capture removes it
-  before and after the run.
+  before and after the run. `.brokkr/hotpath-report-<token>.json`, a reserved
+  launch's report, goes with that launch's lease instead.
 
 ## Routine clean
 
@@ -154,8 +179,12 @@ Bare `brokkr clean`, in order:
   interrupted command, since a script may still be running one. So does
   pbfhogg's `.brokkr/verify-reference/` (the verify reference cache, see
   "Reference cache" in `docs/projects/pbfhogg.md`), through the reservation
-  gate, since it is what spares the next verify its reference runs.
-  Other directories under `.brokkr/ratatoskr/` are preserved. Hung-test snapshots
+  gate, since it is what spares the next verify its reference runs. So do the
+  isolated feature-unification and fixture-lint targets,
+  `<target>/unify-*` and `<target>/fixture-*` under cargo's resolved target
+  root, which nothing else removes: the cleanup after an interrupted command
+  runs after the lock is released, when another check may be building into
+  them. Other directories under `.brokkr/ratatoskr/` are preserved. Hung-test snapshots
   also prune their oldest directories as new diagnostics arrive, keeping a
   bounded recent history even between cleans.
 - **Litehtml also**: under `$XDG_CACHE_HOME/brokkr/litehtml-prepare/`, every

@@ -75,13 +75,18 @@ fn probe_storage(label: &str, path: &Path, mounts: &[MountEntry]) -> Option<Stor
     })
 }
 
+/// The nearest ancestor of `path` that exists, `path` itself included. Only a
+/// missing component is climbed past: one that cannot be read (a permission,
+/// a symlink loop) is `None`, unavailable, rather than a parent on what may
+/// be another filesystem.
 fn existing_ancestor(path: &Path) -> Option<PathBuf> {
     let mut cur: &Path = path;
     loop {
-        if cur.exists() {
-            return Some(cur.to_path_buf());
+        match std::fs::metadata(cur) {
+            Ok(_) => return Some(cur.to_path_buf()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => cur = cur.parent()?,
+            Err(_) => return None,
         }
-        cur = cur.parent()?;
     }
 }
 

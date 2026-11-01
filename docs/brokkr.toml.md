@@ -182,6 +182,7 @@ scratch = "data/scratch"
 output = "data/tilegen"   # durable tilegen output store (map-data projects)
 target = "target"
 worktree_keep = 6         # persistent --commit worktrees kept before LRU eviction
+verify_reference_budget = "50G"  # pbfhogg verify reference cache, kept most recent first
 port = 3033
 drives.source = "nvme"
 drives.data = "ssd"
@@ -341,6 +342,35 @@ worktree container (`~/.brokkr/worktrees`) is writable to sandboxed agents, so
 one can be edited between runs, and reusing it would measure the edit under
 the commit's name. Such a run fails with the worktree's path; `brokkr clean
 --worktrees` clears it.
+
+## `verify_reference_budget`
+
+```toml
+[plantasjen]
+verify_reference_budget = "50G"
+```
+
+The retained size of pbfhogg's verify reference cache
+(`.brokkr/verify-reference/`), as bytes or with an `M` or `G` suffix. Absent,
+no entry is ever evicted, as before the key existed. Per host because the
+disk is a host property.
+
+It is applied once each `brokkr verify` ends, on every exit including a
+failed or interrupted check, while that verify still holds the lock: the most
+recently used entries that fit stay, recency being the time an entry was last
+published or hit, and the rest go, including an entry larger than the budget
+on its own; `"0"` keeps none. Nothing is evicted during the run, so the entry
+a check is about to place from never goes. A lowered budget therefore takes
+effect at the next verify, whether its references hit or miss.
+
+The budget counts the logical bytes the entries' manifests record. It is a
+budget on retained cache artifacts, not a disk bound: a check's outputs are
+hard links to an entry's artifacts, so evicting an entry frees little while
+those outputs exist, and a placement across filesystems is a copy that the
+budget never sees. An eviction renames the entry aside before removing it, so
+one cut short by a second interrupt is cleared at the next verify; a failed
+eviction is a warning, never the verify's result. `brokkr clean
+--verify-reference` removes the whole cache instead.
 
 ## `disable_toolchain`
 

@@ -1635,6 +1635,12 @@ In depth: `brokkr man measure`.",
         #[arg(long)]
         all: bool,
 
+        /// Remove only pbfhogg's verify reference cache, nothing else. Its
+        /// placed verify outputs stay, so this frees less than the cache's
+        /// logical size while they exist.
+        #[arg(long, conflicts_with_all = ["worktrees", "cargo", "archives", "all"])]
+        verify_reference: bool,
+
         /// List what would be removed without deleting anything.
         #[arg(long)]
         dry_run: bool,

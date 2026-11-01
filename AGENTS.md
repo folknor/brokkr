@@ -18,7 +18,7 @@ A doc with 8+ `##` sections is **section-addressed**: `brokkr man conventions sc
 
 - `reference/architecture.md` - the full module map: what each source file owns and why. Read before changing a module you have not touched this session.
 - `reference/output.md` - operator output channel conventions.
-- `docs/brokkr.toml.md` - config core: where it lives, the user-wide layer, `include` composition, top-level shape and host sections, `worktree_keep`, `disable_toolchain`, `strip_rustflags`, `[cargo_env]`, `[deps]`, `[bin]`, `[[install]]`, `[member_check]`, `[lints]`.
+- `docs/brokkr.toml.md` - config core: where it lives, the user-wide layer, `include` composition, top-level shape and host sections, `worktree_keep`, `verify_reference_budget`, `disable_toolchain`, `strip_rustflags`, `[cargo_env]`, `[deps]`, `[bin]`, `[[install]]`, `[member_check]`, `[lints]`.
 - `docs/brokkr.toml.conventions.md` - convention gates: `[gremlins]`, shared path selectors, `[header]`, `[[textlint]]`, `[textlint_preset]`, `[[script_check]]`, `[manifest]`, `[rustdoc]`, `[[fixture_lint]]`, `[[dependency_rule]]`.
 - `docs/brokkr.toml.sweeps.md` - `[[check]]` sweeps, `[[lint_sweep]]` (linted, never tested), the `parallel` lane, `[test]` and its profiles, `[[quarantine]]`.
 - `docs/brokkr.toml.elivagar.md` - `[<host>.tilegen.*]` blocks (elivagar).
@@ -69,7 +69,7 @@ Single crate, single binary (plus the `brokkr-rustc-guard` bin). No workspace. T
 - `check` / `test` - the validation pipeline (see `docs/commands/check.md`). A markdown-only dirty tree runs the prose phases only.
 - `clippy`, `deps`, `bench`, `run` / `build` / `install`, `clean`, `results` - see their docs above.
 - `man [TOPIC] [SECTION...]` - read the bundled docs.
-- `env` - host facts, tool versions, dataset status and digests.
+- `env` - host facts, tool versions, dataset status and digests, and the sizes and free space of brokkr's own stores.
 - `wc [threshold]` - tracked `.rs` files over `threshold` lines (default 800).
 - `history` - global command history.
 - `lock`, `strays [--kill]`, `guard [--install|--remove]`, `kill [--hard]` - lock status and process hygiene (see `docs/commands/check.hygiene.md`).

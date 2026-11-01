@@ -100,6 +100,12 @@ impl VerifyHarness {
         })
     }
 
+    /// Apply the reference cache's retention budget once the run's reference
+    /// requests are done, under this harness's lock (`ReferenceCache::retain`).
+    pub(crate) fn retain_references(&self, budget: Option<u64>) {
+        self.references.retain(budget);
+    }
+
     // -- Subprocess runners ------------------------------------------------
 
     /// Run the pbfhogg CLI with `argv`, whose outputs under the verify

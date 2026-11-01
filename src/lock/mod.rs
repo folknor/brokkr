@@ -166,6 +166,11 @@ struct LockInner {
     /// The per-acquisition accounting cgroup, where delegation allows one.
     /// Restored on release, before the flock goes.
     cgroup: Option<cgroup::HoldCgroup>,
+    /// Set only on dispatch's fresh acquisition ([`acquire_for_command`]) and
+    /// cleared by the one [`LockGuard::take_maintenance`] that claims it,
+    /// which dispatch makes before the command runs; every other hold starts
+    /// without one, so no re-entered guard can ever claim it.
+    maintenance_pending: std::sync::atomic::AtomicBool,
 }
 
 impl LockInner {
@@ -246,7 +251,28 @@ fn held_registry() -> std::sync::MutexGuard<'static, Vec<Weak<LockInner>>> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// The one window in which store maintenance may remove what earlier, dead
+/// brokkr commands left: after a fresh exclusive acquisition, before the
+/// acquiring command does any work. It borrows the guard and is neither
+/// `Clone` nor `Copy`; `crate::maintenance::run` consumes it, so no later
+/// code holds the authority and nothing the command itself creates can be
+/// swept.
+pub(crate) struct MaintenancePhase<'g> {
+    _guard: std::marker::PhantomData<&'g LockGuard>,
+}
+
 impl LockGuard {
+    /// The maintenance phase of a hold [`acquire_for_command`] made, once:
+    /// `None` for any other hold, and on every call after the first.
+    pub(crate) fn take_maintenance(&self) -> Option<MaintenancePhase<'_>> {
+        self.inner
+            .maintenance_pending
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+            .then_some(MaintenancePhase {
+                _guard: std::marker::PhantomData,
+            })
+    }
+
     /// Register an additional edited tree directory for the lifetime of this
     /// worktree guard, so the watchdog can restore it if the main thread
     /// cannot unwind. Registered before the edits are applied, so no applied
@@ -490,16 +516,27 @@ pub(crate) fn acquire_without_tree(ctx: &LockContext<'_>) -> Result<LockGuard, D
     acquire_at(&path, ctx, &HOST_EFFECTS_WITHOUT_TREE)
 }
 
-/// As [`acquire_without_tree`], but a lock held by another process is
-/// refused at once with the typed busy refusal instead of waited for. Re-entry
-/// into this process's own hold still succeeds.
-pub(crate) fn try_acquire_without_tree(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
+/// Dispatch's acquisition for a locked command, without the tree policy: a
+/// fresh hold carries the maintenance phase
+/// ([`LockGuard::take_maintenance`]) dispatch consumes before the command
+/// runs. `nonblocking` refuses a lock another process holds at once, with the
+/// typed busy refusal, instead of waiting; re-entry into this process's own
+/// hold still succeeds. The phase belongs to the hold, not to a guard, and
+/// dispatch claims it before any command code can re-enter.
+pub(crate) fn acquire_for_command(
+    ctx: &LockContext<'_>,
+    nonblocking: bool,
+) -> Result<LockGuard, DevError> {
     let path = lock_path()?;
     hold_protocol::acquire_at_with(
         &path,
         ctx,
-        &HOST_EFFECTS_WITHOUT_TREE,
-        hold_protocol::FlockWait::NonBlocking,
+        &hold_protocol::HOST_EFFECTS_FOR_COMMAND,
+        if nonblocking {
+            hold_protocol::FlockWait::NonBlocking
+        } else {
+            hold_protocol::FlockWait::Block
+        },
     )
 }
 
@@ -757,6 +794,7 @@ mod tests {
         capability: no_capability,
         after_fresh_hold: nothing_after,
         cgroup: no_cgroup,
+        maintenance: false,
     };
 
     fn no_cgroup(_: &AcqId) -> Option<(cgroup::HoldCgroup, cgroup::CgroupView)> {
@@ -904,6 +942,27 @@ mod tests {
             2,
             "a new fresh hold runs it again"
         );
+    }
+
+    /// The maintenance phase exists only on a hold acquired with it, is taken
+    /// once, and a re-entered guard never gets one; a hold acquired without
+    /// it has none at all.
+    #[test]
+    fn the_maintenance_phase_is_taken_once_and_only_where_acquired() {
+        let with = HoldEffects {
+            maintenance: true,
+            ..INERT
+        };
+        let path = tmp_lock("maintenance.lock");
+        let outer = acquire_at(&path, &ctx(), &with).unwrap();
+        assert!(outer.take_maintenance().is_some());
+        let nested = acquire_at(&path, &ctx(), &with).unwrap();
+        assert!(nested.take_maintenance().is_none());
+        assert!(outer.take_maintenance().is_none());
+        drop((nested, outer));
+
+        let plain = acquire_at(&path, &ctx(), &INERT).unwrap();
+        assert!(plain.take_maintenance().is_none());
     }
 
     /// An inert test hold has no capability of its own and cannot replace the

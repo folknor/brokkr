@@ -103,6 +103,19 @@ pub(crate) fn own_exe() -> PathBuf {
     PathBuf::from(format!("/proc/{}/exe", std::process::id()))
 }
 
+/// Whether `name` is a session directory [`Session::new`] makes under
+/// `~/.brokkr/harness`, `PID-NANOS-N`. Only `check` and `test` make one, both
+/// under the brokkr lock, and `Drop` removes it; one a killed brokkr left is
+/// removed by store maintenance (`crate::maintenance`).
+pub(crate) fn is_session_dir_name(name: &str) -> bool {
+    name.split_once('-')
+        .is_some_and(|(pid, rest)| {
+            !pid.is_empty()
+                && pid.bytes().all(|b| b.is_ascii_digit())
+                && crate::maintenance::is_number_pair(rest)
+        })
+}
+
 /// Whether `pid` runs the same executable inode as this process. Compared by
 /// device and inode rather than by link text, which reads `<path> (deleted)`
 /// once the binary is replaced and so says nothing reliable about identity.
@@ -174,7 +187,7 @@ impl Session {
     ) -> Result<Self, DevError> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         // Beside the other per-run state in ~/.brokkr, and short enough for a
-        // unix socket path.
+        // unix socket path. [`is_session_dir_name`] recognises this name.
         let base = crate::user_dirs::harness_dir().ok_or_else(|| {
             DevError::Config("$HOME is not set or is empty; no place for the harness socket".into())
         })?;

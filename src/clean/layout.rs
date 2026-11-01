@@ -601,13 +601,24 @@ impl<'a> PbfhoggLayout<'a> {
 /// A name-prefix namespace under Cargo's target directory. Old hashes cannot
 /// be reconstructed after a sweep changes, so the reserved namespace is the
 /// identity of these isolated targets.
-pub(crate) struct RustflagsTargets<'a> {
+pub(crate) struct PrefixedTargets<'a> {
     target_root: &'a Path,
+    prefix: &'a str,
 }
 
-impl<'a> RustflagsTargets<'a> {
-    pub(crate) fn new(target_root: &'a Path) -> Self {
-        Self { target_root }
+impl<'a> PrefixedTargets<'a> {
+    /// The directories under `target_root` in the reserved `prefix`
+    /// namespace (`crate::target_namespace`).
+    pub(crate) fn new(target_root: &'a Path, prefix: &'a str) -> Self {
+        Self {
+            target_root,
+            prefix,
+        }
+    }
+
+    /// The isolated per-RUSTFLAGS sweep targets.
+    pub(crate) fn rustflags(target_root: &'a Path) -> Self {
+        Self::new(target_root, RUSTFLAGS_TARGET_PREFIX)
     }
 
     pub(crate) fn existing_dirs(&self) -> Vec<PathBuf> {
@@ -620,7 +631,8 @@ impl<'a> RustflagsTargets<'a> {
                 let is_reserved = entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with(RUSTFLAGS_TARGET_PREFIX);
+                    .strip_prefix(self.prefix)
+                    .is_some_and(|rest| !rest.is_empty());
                 (is_reserved && entry.file_type().ok()?.is_dir()).then(|| entry.path())
             })
             .collect()

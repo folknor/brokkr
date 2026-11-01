@@ -152,6 +152,14 @@ struct TempDir {
     path: PathBuf,
 }
 
+/// Whether `name` is a spill directory [`TempDir::create`] makes,
+/// `brokkr-corpus-sort-PID-ID`: what a killed sort leaves, which store
+/// maintenance removes (`crate::maintenance`).
+pub(crate) fn is_spill_dir_name(name: &str) -> bool {
+    name.strip_prefix("brokkr-corpus-sort-")
+        .is_some_and(crate::maintenance::is_number_pair)
+}
+
 impl TempDir {
     fn create(base: &Path) -> io::Result<Self> {
         fs::create_dir_all(base)?;

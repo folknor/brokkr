@@ -24,6 +24,9 @@ pub(crate) struct CleanOpts {
     pub(crate) worktrees: bool,
     pub(crate) archives: bool,
     pub(crate) keep: usize,
+    /// `--verify-reference`: pbfhogg's verify reference cache and nothing
+    /// else.
+    pub(crate) verify_reference_only: bool,
     pub(crate) dry_run: bool,
     /// The sweep runs on the interrupt/kill path: it says nothing beyond what
     /// it removes (no hints, no "nothing to clean").
@@ -39,6 +42,7 @@ impl CleanOpts {
             worktrees: false,
             archives: false,
             keep: 2,
+            verify_reference_only: false,
             dry_run: false,
             interrupted: true,
         }
@@ -213,10 +217,20 @@ pub(crate) fn cmd_clean(
         worktrees,
         archives,
         keep,
+        verify_reference_only,
         dry_run,
         interrupted,
     } = opts;
     let c = Cleaner::new(dry_run);
+    if verify_reference_only {
+        let state = layout::ProjectState::new(project_root.as_path());
+        if c.guarded_dir(&state.verify_reference_dir())? {
+            output::run_msg(&format!("{} verify reference cache", c.verb()));
+        } else {
+            output::run_msg("nothing to clean");
+        }
+        return Ok(());
+    }
     // Worktrees are keyed by the *build* root, because that is the git repo
     // `Worktree::create` cuts them from and the checkout whose path names their
     // directory in the container (and, for legacy siblings, their parent and
@@ -275,7 +289,7 @@ pub(crate) fn cmd_clean(
     if c.dir(&state.test_hung_dir())? {
         output::run_msg(&format!("{} test-hung snapshots", c.verb()));
     }
-    clean_by_hand_only(project, &state, &c, interrupted)?;
+    clean_by_hand_only(project, &state, &pi.target_dir, &c, interrupted)?;
 
     if *project == Project::Litehtml {
         clean_litehtml(&state, &c)?;
@@ -424,11 +438,34 @@ fn clean_scratch(
 fn clean_by_hand_only(
     project: &Project,
     state: &layout::ProjectState,
+    target_dir: &Path,
     c: &Cleaner,
     interrupted: bool,
 ) -> Result<(), DevError> {
     if interrupted {
         return Ok(());
+    }
+    // The isolated unification and fixture-lint targets under cargo's real
+    // target root, names reserved in `crate::target_namespace`. By hand only:
+    // the after-interrupt sweep runs after the lock is released, when another
+    // check may already be building into them.
+    let mut isolated = 0usize;
+    for prefix in [
+        crate::target_namespace::UNIFY_PREFIX,
+        crate::target_namespace::FIXTURE_PREFIX,
+    ] {
+        for path in layout::PrefixedTargets::new(target_dir, prefix).existing_dirs() {
+            if c.dir(&path)? {
+                isolated += 1;
+            }
+        }
+    }
+    if isolated > 0 {
+        output::run_msg(&format!(
+            "{} {}",
+            c.verb(),
+            output::count(isolated, "isolated unification or fixture target dir")
+        ));
     }
     // A script may still be running a snapshot `brokkr build` handed it.
     if c.dir(&state.artifacts_dir())? {
@@ -661,7 +698,7 @@ fn clean_archives(paths: &config::ResolvedPaths, keep: usize, c: &Cleaner) -> Re
 /// old hash's tree permanently. A routine `brokkr clean` sweeps them.
 fn clean_rustflags_target_dirs(target_dir: &Path, c: &Cleaner) -> Result<(), DevError> {
     let mut removed = 0usize;
-    for path in layout::RustflagsTargets::new(target_dir).existing_dirs() {
+    for path in layout::PrefixedTargets::rustflags(target_dir).existing_dirs() {
         if c.dir(&path)? {
             removed += 1;
         }

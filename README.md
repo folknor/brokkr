@@ -62,7 +62,7 @@ pbfhogg commands additionally accept `--direct-io` and `--io-uring` to enable O_
 |---------|-------------|
 | `check` | Run configured conventions, rustdoc and clippy checks, and test sweeps (extra cargo arguments are forwarded) |
 | `test [-p <PKG>] <NAME>` | Run matching cargo tests with ignored tests included; profile comes from CLI flags, the selected sweep, and `[test] debug`. Package selection uses `-p`, `[test] default_package`, then the project's built-in default. `-N` repeats; `-j` sets cargo's compile parallelism. |
-| `env` | Show hostname, kernel, governor, memory, drives, tool versions, dataset status |
+| `env` | Show hostname, kernel, governor, memory, drives, tool versions, dataset status, and brokkr's own state: each store's allocated size, the free space of each filesystem holding one, and any filesystem under 10% free |
 | `results` | Query the results database (`.brokkr/results.db`) |
 | `invalidate` | Hard-delete results + sidecar rows by UUID or commit prefix (dry-run unless `-f`) |
 | `clean [--worktrees]` | Remove scratch/temp files; `--worktrees` also purges persistent benchmark worktrees |

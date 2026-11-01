@@ -1174,6 +1174,7 @@ fn parse_host_config(section: &str, value: &toml::Value) -> Result<HostConfig, D
         && hc.output.is_none()
         && hc.target.is_none()
         && hc.worktree_keep.is_none()
+        && hc.verify_reference_budget.is_none()
         && hc.port.is_none()
         && !drive_settings_present
         && hc.features.is_empty()

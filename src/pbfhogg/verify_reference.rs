@@ -330,6 +330,100 @@ impl ReferenceCache {
         }
     }
 
+    /// Keep the cache within `budget` logical bytes (the artifact sizes its
+    /// manifests record): the most recently used entries that fit stay,
+    /// recency being the manifest's mtime, which every hit refreshes; an
+    /// entry larger than the budget goes too, and zero keeps none. `None`
+    /// keeps everything. Called once a verify's reference requests are done,
+    /// under its lock, so no entry is still to be placed or read; the run's
+    /// outputs are their own links and stay. An entry whose manifest cannot
+    /// be read is invalid, which lookup would remove, and goes. Each eviction
+    /// renames the entry to its trash name first, so one cut short is swept
+    /// with the other leftovers by the next verify; a failure is a warning,
+    /// never the verify's result.
+    pub(crate) fn retain(&self, budget: Option<u64>) {
+        let Some(budget) = budget else {
+            return;
+        };
+        let read = match fs::read_dir(&self.dir) {
+            Ok(read) => read,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => {
+                output::warn(&format!(
+                    "reference cache {} not read, budget not applied: {e}",
+                    self.dir.display()
+                ));
+                return;
+            }
+        };
+        let mut unreadable = 0usize;
+        let mut entries: Vec<(std::time::SystemTime, Option<u64>, PathBuf)> = read
+            .filter_map(|entry| {
+                entry.map_err(|_| unreadable += 1).ok()
+            })
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.len() == 32 && name.bytes().all(|b| b.is_ascii_hexdigit())
+            })
+            .map(|entry| {
+                let manifest = entry.path().join(MANIFEST);
+                let used = fs::metadata(&manifest)
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                let bytes = fs::read_to_string(&manifest)
+                    .ok()
+                    .and_then(|text| serde_json::from_str::<Manifest>(&text).ok())
+                    .map(|m| m.artifacts.iter().map(|a| a.stamp.size).sum::<u64>());
+                (used, bytes, entry.path())
+            })
+            .collect();
+        if unreadable > 0 {
+            output::warn(&format!(
+                "reference cache {}: {} could not be read and stay",
+                self.dir.display(),
+                output::count(unreadable, "entry")
+            ));
+        }
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.0));
+        let mut kept = 0u64;
+        let (mut evicted, mut freed) = (0usize, 0u64);
+        for (_, bytes, path) in entries {
+            // A zero budget keeps none, an entry of no logical bytes included.
+            if budget > 0
+                && let Some(bytes) = bytes
+                && kept.saturating_add(bytes) <= budget
+            {
+                kept += bytes;
+                continue;
+            }
+            let trash = path.with_file_name(format!(
+                "{TRASH_PREFIX}{}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ));
+            match crate::reservations::rename(&path, &trash) {
+                Ok(()) => {
+                    remove_tree(&trash);
+                    evicted += 1;
+                    freed += bytes.unwrap_or(0);
+                }
+                Err(e) => output::warn(&format!(
+                    "reference cache entry {} not evicted: {e}",
+                    path.display()
+                )),
+            }
+        }
+        if evicted > 0 {
+            output::verify_msg(&format!(
+                "reference cache: evicted {} ({} logical), {} kept of a {} budget",
+                output::count(evicted, "entry"),
+                output::format_bytes(freed),
+                output::format_bytes(kept),
+                output::format_bytes(budget),
+            ));
+        }
+    }
+
     /// Run `run` for `harness`, its stdout at `stdout`, reusing a cached
     /// execution when one matches. Returns the run's outcome as a fresh run
     /// would; the caller judges it as before.
@@ -1048,6 +1142,71 @@ fn sweep_leftovers(dir: &Path) {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
+
+    /// An entry `hex` of `size` logical bytes, last used `age` seconds ago.
+    fn entry(dir: &Path, hex: char, size: u64, age: u64) -> PathBuf {
+        let path = dir.join(hex.to_string().repeat(32));
+        fs::create_dir_all(&path).unwrap();
+        let manifest = Manifest {
+            format: FORMAT,
+            key: String::new(),
+            exit_code: 0,
+            artifacts: vec![Artifact {
+                name: "out".into(),
+                xxh128: String::new(),
+                stamp: Stamp {
+                    dev: 0,
+                    ino: 0,
+                    size,
+                    mtime_ns: 0,
+                },
+            }],
+        };
+        let file = path.join(MANIFEST);
+        fs::write(&file, serde_json::to_string(&manifest).unwrap()).unwrap();
+        let used = std::time::SystemTime::now() - std::time::Duration::from_secs(age);
+        fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(used)
+            .unwrap();
+        path
+    }
+
+    /// The most recently used entries that fit stay; an older one past the
+    /// budget, one larger than the budget and one whose manifest cannot be
+    /// read go; no budget keeps everything.
+    #[test]
+    fn retention_keeps_the_most_recent_entries_that_fit() {
+        let root = crate::test_scratch::scratch("verify_reference", "retention");
+        let cache = ReferenceCache {
+            dir: root.join("verify-reference"),
+            project_root: root.clone(),
+            identities: RefCell::new(BTreeMap::new()),
+            warned: RefCell::new(std::collections::BTreeSet::new()),
+            seq: Cell::new(0),
+        };
+        let newest = entry(&cache.dir, 'a', 40, 10);
+        let huge = entry(&cache.dir, 'b', 500, 20);
+        let older = entry(&cache.dir, 'c', 50, 30);
+        let oldest = entry(&cache.dir, 'd', 70, 40);
+        let broken = cache.dir.join("e".repeat(32));
+        fs::create_dir_all(&broken).unwrap();
+
+        cache.retain(None);
+        assert!(broken.exists() && oldest.exists());
+
+        cache.retain(Some(100));
+        assert!(newest.exists() && older.exists());
+        assert!(!huge.exists() && !oldest.exists() && !broken.exists());
+
+        let empty = entry(&cache.dir, 'f', 0, 5);
+        cache.retain(Some(0));
+        assert!(!newest.exists() && !older.exists() && !empty.exists());
+        // Nothing is left half-evicted.
+        assert_eq!(fs::read_dir(&cache.dir).unwrap().count(), 0);
+    }
 
     #[test]
     fn ldd_output_parses_resolved_libraries_and_refuses_a_missing_one() {

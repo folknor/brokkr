@@ -215,6 +215,9 @@ pub(crate) fn cmd_check(
     if timings {
         emit_timings(&collected_timings, sweeps.tested().len() > 1);
     }
+    // Free space under brokkr's own state, a warning that never fails the
+    // run: statvfs per store root, no walk.
+    crate::health::warn_pressure(state_root);
 
     let outcome = outcome.map_err(PhaseFailure::into_dev_error);
 

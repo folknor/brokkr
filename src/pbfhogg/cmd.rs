@@ -399,6 +399,11 @@ pub(crate) fn verify(
     let harness =
         super::verify::VerifyHarness::new(project_root, &pi.target_dir, build_root, features)?;
 
+    // Every exit of the run below, an error or an interruption included,
+    // reaches the reference cache's retention while `harness` and its lock
+    // guard are still alive; a retention failure is a warning, and the run's
+    // own result is what returns.
+    let result = (|| -> Result<(), DevError> {
     // `all` runs the whole suite and prints its own per-check results + banner,
     // so it manages the quiet/verbose behaviour itself rather than being
     // wrapped in a single `run_check`.
@@ -708,6 +713,9 @@ pub(crate) fn verify(
         | VerifyCommand::NidGeocode { .. }
         | VerifyCommand::Readonly { .. } => Err(not_a_pbfhogg_verify()),
     })
+    })();
+    harness.retain_references(dev_config.verify_reference_budget(&paths.hostname));
+    result
 }
 
 /// The refusal for an elivagar/nidhogg `verify` subcommand reaching the

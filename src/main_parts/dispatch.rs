@@ -82,13 +82,30 @@ pub(super) fn run(
                 // worktree commands and tracked on the hold.
                 tree: None,
             };
-            Some(if spec.lock == cli::LockPolicy::NonBlocking {
-                lockfile::try_acquire_without_tree(&ctx)?
-            } else {
-                lockfile::acquire_without_tree(&ctx)?
-            })
+            Some(lockfile::acquire_for_command(
+                &ctx,
+                spec.lock == cli::LockPolicy::NonBlocking,
+            )?)
         }
     };
+    // A fresh hold's maintenance phase, before the command does anything:
+    // what killed brokkr commands left goes now, and nothing this one makes
+    // can be swept. `clean --dry-run` removes nothing, so maintenance only
+    // reports, and `clean --verify-reference` touches only that cache, so it
+    // leaves the phase unused.
+    if let Some(phase) = _lock.as_ref().and_then(lockfile::LockGuard::take_maintenance) {
+        let mode = match &cli.command {
+            Command::Clean {
+                verify_reference: true,
+                ..
+            } => None,
+            Command::Clean { dry_run: true, .. } => Some(crate::maintenance::Mode::Report),
+            _ => Some(crate::maintenance::Mode::Apply),
+        };
+        if let Some(mode) = mode {
+            crate::maintenance::run(phase, mode, state_root.map(project::ProjectRoot::as_path));
+        }
+    }
     // Every detected tree is carried, active policy or not: activation also
     // recovers a cargo config a crashed run left filtered, which must happen
     // even after the policy that filtered it is gone.
@@ -997,6 +1014,7 @@ fn run_project(
             archives,
             keep,
             all,
+            verify_reference,
             dry_run,
         } => {
             let _lock = context::reenter_command_lock()?;
@@ -1025,6 +1043,7 @@ fn run_project(
                     worktrees: worktrees || all,
                     archives: archives || all,
                     keep,
+                    verify_reference_only: verify_reference,
                     dry_run,
                     interrupted: false,
                 },

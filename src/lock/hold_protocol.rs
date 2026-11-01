@@ -42,6 +42,10 @@ pub(super) struct HoldEffects {
     /// Enter the per-acquisition accounting cgroup where delegation allows
     /// (`super::cgroup`), before the hold goes live and spawns anything.
     pub(super) cgroup: CgroupEntry,
+    /// The hold carries a maintenance phase for its acquirer to take: only
+    /// dispatch's acquisition, which takes it before the command runs. Every
+    /// other fresh hold has none, so no later guard can claim one.
+    pub(super) maintenance: bool,
 }
 
 /// The accounting-cgroup effect: the hold's ownership and a read-only view.
@@ -57,6 +61,7 @@ pub(super) const HOST_EFFECTS: HoldEffects = HoldEffects {
     capability: Some,
     after_fresh_hold: host_after_fresh_hold,
     cgroup: super::cgroup::enter,
+    maintenance: false,
 };
 
 fn activate_tree(ctx: &LockContext<'_>) -> Result<Option<crate::tree_policy::HeldTree>, DevError> {
@@ -75,6 +80,14 @@ pub(super) const HOST_EFFECTS_WITHOUT_TREE: HoldEffects = HoldEffects {
     capability: Some,
     after_fresh_hold: host_after_fresh_hold,
     cgroup: super::cgroup::enter,
+    maintenance: false,
+};
+
+/// Dispatch's acquisition for a locked command: [`HOST_EFFECTS_WITHOUT_TREE`]
+/// with the maintenance phase dispatch takes before the command runs.
+pub(super) const HOST_EFFECTS_FOR_COMMAND: HoldEffects = HoldEffects {
+    maintenance: true,
+    ..HOST_EFFECTS_WITHOUT_TREE
 };
 
 fn host_service(
@@ -212,7 +225,12 @@ pub(super) fn acquire_at_with(
     let gated = flocked.gate(ctx, effects.disk_gate)?;
     let drained = gated.drain(ctx, effects.drain)?;
     let authorized = drained.authorize(effects.tree, ctx)?;
-    Ok(authorized.into_live(effects.capability, effects.after_fresh_hold, effects.cgroup))
+    Ok(authorized.into_live(
+        effects.capability,
+        effects.after_fresh_hold,
+        effects.cgroup,
+        effects.maintenance,
+    ))
 }
 
 /// A fresh exclusive flock, before the free-space gate has admitted work.
@@ -345,6 +363,7 @@ impl Authorized {
         attach_capability: fn(Nonce) -> Option<Nonce>,
         after_fresh_hold: fn(),
         enter_cgroup: CgroupEntry,
+        maintenance: bool,
     ) -> LockGuard {
         let acq = self.flocked.service.as_ref().map(|(id, _)| id.clone());
         let service = self.flocked.service.map(|(_, service)| service);
@@ -374,6 +393,7 @@ impl Authorized {
             service,
             observed,
             cgroup,
+            maintenance_pending: std::sync::atomic::AtomicBool::new(maintenance),
         });
         held_registry().push(Arc::downgrade(&inner));
         let guard = LockGuard { inner };

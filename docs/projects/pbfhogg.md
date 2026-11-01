@@ -628,9 +628,12 @@ and, in the detail, the entry's key and stored exit.
   a cooperating brokkr process.
 - `brokkr verify --fresh-reference` runs every reference tool for real and
   replaces its entry. `brokkr clean` removes the whole cache by hand only,
-  never in the cleanup after an interrupted command. Nothing evicts entries
-  otherwise; a hit refreshes its manifest's mtime, the recency a future
-  retention policy will read.
+  never in the cleanup after an interrupted command, and `brokkr clean
+  --verify-reference` removes it and nothing else. A host's
+  `verify_reference_budget` (`brokkr man config verify_reference_budget`)
+  bounds it: when each verify ends, the most recently used entries that fit
+  stay, a hit refreshing an entry's recency through its manifest's mtime.
+  Without the key nothing evicts entries.
 
 **`verify all` inputs.** The OSC- and bbox-consuming checks skip only when
 the input is not configured at all (no `--osc-seq` and no OSC registered for

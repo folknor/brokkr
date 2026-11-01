@@ -31,6 +31,7 @@ pub(crate) use events::{
     AttributionRefusal, ExecutionFailure, KillCause, ObsEvent, Observation, ObservationSink,
     StreamEnd, StreamSource, StreamTap, TestResult, next_stream_id,
 };
+pub(crate) use harness_shim::is_session_dir_name;
 pub(crate) use hung::{format_hung_test, is_bare_status_line};
 pub(crate) use invocation::LibtestArgs;
 use libtest_json::JsonReconstructor;

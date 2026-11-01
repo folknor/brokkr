@@ -89,6 +89,7 @@ pub(crate) fn cmd_env(
 
     let info = collect(&paths, project, project_root.as_path(), sources);
     print(&info);
+    crate::health::print_env(project_root.as_path(), &paths);
     if let Some(note) = crate::config::unmatched_host_note(dev_config, &paths.hostname) {
         output::warn(&format!(
             "{note}. Host-specific settings are ignored and defaults apply."

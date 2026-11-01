@@ -971,6 +971,15 @@ same way under `complete`: a libtest `--skip` or a cargo `--lib` narrows
 the real run but not the plan, which is built from the sweeps' own filters.
 2 = clap usage errors, 124 = a time ceiling fired, 130 = interrupt.
 
+Before the verdict, check warns when a filesystem holding brokkr's own state
+(the project's `.brokkr` stores, `~/.brokkr`, and the XDG data and cache
+directories) has under 10% free, naming each store on it and what shrinks
+it, or that nothing does. That warning never changes the exit code. It costs
+one `statvfs` per store root, probed at the nearest existing ancestor of a
+root not yet made, and never walks a store; `brokkr env` lists the sizes. The
+cargo target disk is already guarded by the free-space gate every locked
+command passes, at 5% (`brokkr man clean`).
+
 ## Per-sweep log lines (run log and failures only)
 
 Each sweep describes itself as `<phase> <name>: <shape>` rather than its full

@@ -430,6 +430,17 @@ fn snapshot_executable(exe: &Path, store: &Path) -> Result<PathBuf, DevError> {
     Ok(dest)
 }
 
+/// Whether `name` is a staging copy [`snapshot_executable`] makes,
+/// `.staging-PID-NAME`: what a killed snapshot leaves in the artifact store,
+/// which store maintenance removes (`crate::maintenance`).
+pub(crate) fn is_staging_copy_name(name: &str) -> bool {
+    name.strip_prefix(".staging-")
+        .and_then(|rest| rest.split_once('-'))
+        .is_some_and(|(pid, file)| {
+            !file.is_empty() && !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit())
+        })
+}
+
 /// The staging copy, removed however the snapshot ends - published (renamed
 /// away, so nothing is left to remove), reused, or failed partway. A failed
 /// copy is the case that matters: an out-of-space write leaves a partial
