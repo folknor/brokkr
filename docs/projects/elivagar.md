@@ -96,6 +96,10 @@ properties of the PBF, so they come from the already-resolved `pbf.<variant>`
 entry (`PipelineOpts::from_pbf_entry`) rather than a second config lookup.
 `PipelineOpts::push_args()` expands the block plus those assertions into argv;
 the maps are `BTreeMap`, so identical config yields byte-identical `cli_args`.
+`PipelineOpts::arm_qualifier()` renders the same flags from the same emitter,
+ocean entries under their brokkr.toml names, as the row's pairing qualifier,
+because `brokkr tilegen`'s argv names only the input and rows built under an
+edited block used to pair (`docs/commands/results.md`, `--compare A B`).
 
 This replaced `detect_ocean()`/`push_ocean_args()`, which stat'd `data/` for
 the two shapefiles and passed whichever existed (and never passed the
@@ -164,8 +168,15 @@ durable path is
 `data/tilegen`, NOT scratch), constructed by `ArchiveStore::path_for()` and
 admitted after tilegen by `ArchiveStore::admit()` in
 `src/elivagar/artifacts.rs`. Admission also applies the per-group retention
-window. The archive content is a function of
-`(dataset, variant, commit)`, and the name carries all three - the variant is
+window. The name holds the latest successfully admitted archive of
+`(dataset, variant, commit)`: a rerun at the same commit replaces it, whatever
+tilegen block built either, and says so when it does. The tilegen block is not
+in the name - every reader resolves by revision - so to keep two blocks'
+archives of one commit, copy one elsewhere and address it with `--file`. What
+built an archive is in its own metadata (elivagar's embedded contract, read
+by `pmtiles-inspect`); the corpus gate checks that contract, which leaves out
+the performance settings (budgets, threads, `dedup_cap`), and `regress` does
+not check it at all. The variant is
 load-bearing, because without it `--against-commit H` (or a plain re-open)
 resolves to whichever variant happened to be built last at `H`, the
 meaning-lives-in-the-filesystem trap the contract-free `regress` cannot catch.

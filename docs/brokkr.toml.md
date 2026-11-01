@@ -216,7 +216,9 @@ resembles a misspelled section. Datasets are host-scoped (no global
 `[datasets]` section). Path resolution: host config -> defaults (`data/`,
 `data/scratch/`, `data/tilegen/`, cargo target dir). `output` is the durable
 tilegen output store (map-data projects): `ArchiveStore` admits each successful
-tilegen archive as `<output>/<dataset>-<variant>-<commit>.pmtiles`, and
+tilegen archive as `<output>/<dataset>-<variant>-<commit>.pmtiles` (the
+latest one: a rerun at the same commit replaces it, whatever tilegen block
+built either; `docs/projects/elivagar.md`), and
 `pmtiles-inspect`/`diag`/`svg`/`regress`/`pmtiles-corpus` resolve it by
 `--variant` + `--commit`. It is kept SEPARATE from `scratch`
 on purpose - elivagar wipes its `--tmp-dir` (`<data>/tilegen_tmp`) every run,

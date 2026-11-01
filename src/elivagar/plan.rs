@@ -76,6 +76,7 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
         let mut state = (std::path::PathBuf::new(), 0.0);
         let mut input_file = None;
         let mut input_mb = None;
+        let mut arm_qualifier = None;
         let args = if self.0.needs_pbf() {
             let pbf = crate::datasets::resolve::resolve_pbf_entry(
                 req.dataset,
@@ -93,11 +94,11 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
                 .map(|n| n.to_string_lossy().into_owned());
             input_mb = Some(state.1);
             match self.0 {
-                ElivagarCommand::Built(command) => command.build_args(
-                    &pbf.path.display().to_string(),
-                    &layout,
-                    Some(&super::PipelineOpts::from_pbf_entry(pbf.entry)),
-                )?,
+                ElivagarCommand::Built(command) => {
+                    let opts = super::PipelineOpts::from_pbf_entry(pbf.entry);
+                    arm_qualifier = command.arm_qualifier(Some(&opts))?;
+                    command.build_args(&pbf.path.display().to_string(), &layout, Some(&opts))?
+                }
                 ElivagarCommand::External(tool) => external(tool, req, &layout, &state, true)?.args,
             }
         } else {
@@ -128,7 +129,7 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
                 input_mb,
                 cli_args: None,
                 metadata: vec![],
-                arm_qualifier: None,
+                arm_qualifier,
             },
         })
     }

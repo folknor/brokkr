@@ -361,12 +361,39 @@ stdout era never completed.
 ## Digest
 
 `brokkr digest` measures `pbfhogg digest` on the dataset PBF like any other
-read-side command (`--bench`, `--hotpath`, `--alloc`, `--commit`). `--form
-full|content` is forwarded as pbfhogg's `--form`; without it no flag is
-passed and the build's own default form is measured, so a `--commit`
-baseline from before pbfhogg grew `--form` digests its only form, v1 content.
-The brokkr argv, `--form` included, is part of the row's identity: a
-defaulted run never pairs with an explicit `--form` one.
+read-side command (`--bench`, `--hotpath`, `--alloc`, `--commit`).
+
+The form is a workload axis brokkr holds constant across revisions, not a
+default it leaves to the build. pbfhogg 16154b0d added `--form` and, in the
+same commit, moved its default from v1 content to v2 full; every `digest`
+before it has one form, v1 content. Leaving the choice to the build would
+time a different function on either side of that commit under one identity.
+So before the run brokkr asks the built executable whether its `digest`
+takes `--form` (`digest --form=full --help` against the usual controls,
+cached under the executable's digest like the other capability answers in
+`.brokkr/pbfhogg-capabilities`), and then:
+
+- without `--form`, a build that takes it gets `--form full`, spelled so a
+  later default change cannot move it, and one that does not gets no flag
+  and digests content;
+- `--form content` is forwarded where the build takes it and dropped where it
+  does not, since content is that build's only form, so a content baseline
+  from before 16154b0d pairs with a content run after it;
+- `--form full` is always forwarded, and a build without the flag refuses it.
+
+That a build without `--form` digests content is pbfhogg's history, not
+something the probe proves. A dry run builds nothing to ask, so it prints the
+argv for the form asked, and, without `--form` or with `--form content`, a
+line saying what the build decides.
+
+The brokkr argv, `--form` included, is part of the row's identity, so an
+explicit `--form` run never pairs with a defaulted one. A defaulted row
+carries the form it measured as its qualifier (`form=full` or
+`form=content`), and every digest row whose form was resolved records it as
+`meta.digest_form`, so `--meta digest_form=content` selects across both
+spellings. A defaulted row from before this carries neither and pairs only
+with other such rows; that set mixes the two forms and nothing recorded
+tells them apart (its `commit` against 16154b0d does).
 
 ## Check index
 

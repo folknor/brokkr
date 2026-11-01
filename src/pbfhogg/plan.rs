@@ -209,6 +209,23 @@ impl PlannedCommand for PbfhoggPlan<'_> {
                  time where the built binary accepts them"
             ));
         }
+        if let PbfhoggCommand::Digest { form } = self.command
+            && plan.state.ctx.observations.digest_takes_form.is_none()
+        {
+            match form {
+                None => lines.push(
+                    "--form full: added at run time if the built binary's digest accepts \
+                     --form; a build without it digests its only form, content, with no flag"
+                        .into(),
+                ),
+                Some(crate::pbfhogg::commands::DigestForm::Content) => lines.push(
+                    "--form content: dropped at run time if the built binary's digest lacks \
+                     --form, whose only form is content"
+                        .into(),
+                ),
+                Some(crate::pbfhogg::commands::DigestForm::Full) => {}
+            }
+        }
         let state = &plan.state.ctx;
         if let Some(path) = state.inputs.primary_pbf() {
             lines.push(format!("pbf: {}", path.display()));
@@ -528,6 +545,7 @@ fn build_pbfhogg_context(
     let observations = CommandObservations {
         merged_cache,
         snapshot_to: None,
+        digest_takes_form: digest_takes_form(command, binary)?,
     };
 
     let mut params = extra_params.clone();
@@ -540,6 +558,18 @@ fn build_pbfhogg_context(
         params,
         observations,
     })
+}
+
+/// Whether the build's `digest` takes `--form`, asked only for a digest with
+/// a build to ask (`None` otherwise, a dry run included).
+fn digest_takes_form(
+    command: &PbfhoggCommand,
+    binary: Option<&PbfhoggBinary>,
+) -> Result<Option<bool>, DevError> {
+    match (command, binary) {
+        (PbfhoggCommand::Digest { .. }, Some(binary)) => binary.digest_takes_form().map(Some),
+        _ => Ok(None),
+    }
 }
 
 /// Resolve the B-side (merged) PBF path for diff commands.
@@ -654,6 +684,7 @@ fn build_diff_snapshots_context(
         observations: CommandObservations {
             merged_cache: None,
             snapshot_to: Some(snapshot_to),
+            digest_takes_form: None,
         },
     })
 }

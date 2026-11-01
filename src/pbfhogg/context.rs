@@ -177,6 +177,11 @@ pub struct SnapshotSide {
 pub struct CommandObservations {
     pub merged_cache: Option<MergedCacheState>,
     pub snapshot_to: Option<SnapshotSide>,
+    /// Whether the built pbfhogg's `digest` accepts `--form`, asked of the
+    /// executable at planning (`None` for a dry run and every other
+    /// command). It decides what a digest passes and measures
+    /// (`PbfhoggCommand::digest_form`).
+    pub digest_takes_form: Option<bool>,
 }
 
 /// Command execution context after all input paths have been resolved.

@@ -256,7 +256,7 @@ pub enum DiffFormat {
 }
 
 /// Canonical form for `digest --form` (`full` is v2, `content` is v1, diff's
-/// equality).
+/// equality). Which one a run passes and measures is [`digest_form`]'s.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 #[value(rename_all = "lowercase")]
 pub enum DigestForm {
@@ -270,6 +270,36 @@ impl DigestForm {
             Self::Full => "full",
             Self::Content => "content",
         }
+    }
+}
+
+/// What a digest run passes as `--form` and which form it measures, from the
+/// form brokkr was asked for and whether the build's `digest` takes `--form`
+/// (`None` when no build was asked, a dry run).
+///
+/// The form is a workload axis brokkr holds constant across revisions, not a
+/// default left to the build: pbfhogg 16154b0d added `--form` and in the same
+/// commit moved its default from v1 content to v2 full, so "the build's
+/// default" measured a different function on either side of it. Every pbfhogg
+/// `digest` before that commit has one form, v1 content - history, not
+/// something the probe proves.
+///
+/// - Asked for nothing: `full` where the build takes `--form`, spelled
+///   explicitly so a later default change cannot move it, and content, with
+///   no flag, where it does not.
+/// - Asked for `content`: forwarded where taken, and omitted where not, since
+///   there content is the only form.
+/// - Asked for `full`: always forwarded; a build without `--form` refuses it.
+///
+/// Returns `(flag, measured)`.
+pub(crate) fn digest_form(
+    asked: Option<DigestForm>,
+    takes_form: Option<bool>,
+) -> (Option<DigestForm>, Option<DigestForm>) {
+    match (asked, takes_form) {
+        (None, Some(true)) => (Some(DigestForm::Full), Some(DigestForm::Full)),
+        (None | Some(DigestForm::Content), Some(false)) => (None, Some(DigestForm::Content)),
+        (asked, _) => (asked, asked),
     }
 }
 
@@ -410,9 +440,8 @@ pub enum PbfhoggCommand {
     /// tagdata from its decompressed payload. Passing `--index` alone
     /// suppresses pbfhogg's default `--ids --refs` pair.
     CheckIndex,
-    /// `digest`. `form` → `--form <full|content>`; `None` passes no flag, so
-    /// the build's own default is measured - a baseline from before `--form`
-    /// existed digests its only form.
+    /// `digest`. `form` is the form asked for; what is passed and measured
+    /// also depends on the build ([`digest_form`]).
     Digest {
         form: Option<DigestForm>,
     },
@@ -823,9 +852,17 @@ impl PbfhoggCommand {
     /// does not show: the bbox when it came from the dataset rather than
     /// `--bbox`, and the strategy when one argv fans out over every strategy
     /// (`CommandParams::strategy_fanout`). An explicit `--bbox` with a single
-    /// `--strategy` stays unqualified. `None` for every other command.
+    /// `--strategy` stays unqualified.
+    ///
+    /// A `digest` asked for no form qualifies by the form it measures
+    /// (`form=full` or `form=content`, [`digest_form`]), which the brokkr argv
+    /// does not show; one with `--form` is unqualified, its argv names it.
+    /// `None` for every other command.
     pub fn arm_qualifier(&self, ctx: &CommandContext) -> Option<String> {
         match self {
+            Self::Digest { form: None } => digest_form(None, ctx.observations.digest_takes_form)
+                .1
+                .map(|measured| format!("form={}", measured.as_str())),
             Self::Extract { strategy } | Self::MultiExtract { strategy, .. } => {
                 let mut parts = Vec::new();
                 if ctx.params.bbox.is_none()
@@ -902,6 +939,13 @@ impl PbfhoggCommand {
                 }
                 meta
             }
+            // The form resolved for this build ([`digest_form`]), explicit or
+            // not, so `--meta digest_form=content` selects across both
+            // spellings. A resolution, not something read from the output.
+            Self::Digest { form } => digest_form(*form, observations.digest_takes_form)
+                .1
+                .map(|measured| vec![KvPair::text("meta.digest_form", measured.as_str())])
+                .unwrap_or_default(),
             _ => vec![],
         }
     }
@@ -1003,7 +1047,8 @@ impl PbfhoggCommand {
                 .input(ctx.pbf_str()?),
             Self::Digest { form } => {
                 let argv = CommandArgv::new("digest").input(ctx.pbf_str()?)?;
-                Ok(match form {
+                let (flag, _) = digest_form(*form, ctx.observations.digest_takes_form);
+                Ok(match flag {
                     Some(form) => argv.arg("--form").arg(form.as_str()),
                     None => argv,
                 })
@@ -1512,6 +1557,42 @@ mod tests {
         // getid_ids does not move getparents, and no other command qualifies.
         assert_eq!(PbfhoggCommand::Getparents.arm_qualifier(&ctx), None);
         assert_eq!(PbfhoggCommand::Sort.arm_qualifier(&ctx), None);
+    }
+
+    /// Every asked form against a build that takes `--form`, one that does
+    /// not, and no build (dry run): the argv's flag, the stored qualifier and
+    /// `meta.digest_form`.
+    #[test]
+    fn digest_spells_and_records_the_form_it_measures() {
+        use DigestForm::{Content, Full};
+        let case = |asked: Option<DigestForm>, takes: Option<bool>| {
+            let mut ctx = test_ctx();
+            ctx.observations.digest_takes_form = takes;
+            let cmd = PbfhoggCommand::Digest { form: asked };
+            let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
+            let flag = args
+                .iter()
+                .position(|a| a == "--form")
+                .map(|i| args[i + 1].clone());
+            (
+                flag,
+                cmd.arm_qualifier(&ctx),
+                cmd.metadata(&ctx.observations).len(),
+            )
+        };
+        let s = |v: &str| Some(v.to_owned());
+        // A build with --form: the default is spelled and qualified.
+        assert_eq!(case(None, Some(true)), (s("full"), s("form=full"), 1));
+        assert_eq!(case(Some(Content), Some(true)), (s("content"), None, 1));
+        assert_eq!(case(Some(Full), Some(true)), (s("full"), None, 1));
+        // A build before --form: content by omission; full forwarded, refused
+        // by the build.
+        assert_eq!(case(None, Some(false)), (None, s("form=content"), 1));
+        assert_eq!(case(Some(Content), Some(false)), (None, None, 1));
+        assert_eq!(case(Some(Full), Some(false)), (s("full"), None, 1));
+        // Dry run: nothing resolved for the default.
+        assert_eq!(case(None, None), (None, None, 0));
+        assert_eq!(case(Some(Content), None), (s("content"), None, 1));
     }
 
     #[test]

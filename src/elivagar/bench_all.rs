@@ -150,7 +150,8 @@ fn run_tilegen(
             &refs,
         )),
         metadata: vec![],
-        arm_qualifier: None,
+        // The same block identity a `brokkr tilegen` row carries.
+        arm_qualifier: command.arm_qualifier(Some(opts))?,
     };
     // `bench all`'s self arm only measures output; clear any artifact left by
     // an earlier interrupted run before starting this sample.

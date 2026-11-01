@@ -45,6 +45,11 @@ impl ArchiveKey {
         })
     }
 
+    /// The revision token the archive is named by.
+    pub fn commit(&self) -> &str {
+        &self.commit
+    }
+
     fn group(&self) -> ArchiveGroup {
         ArchiveGroup::new(self.dataset.clone(), self.variant.clone())
     }
@@ -80,6 +85,14 @@ pub enum ArchiveOrigin {
 pub struct ArchiveResolution {
     pub path: PathBuf,
     pub origin: ArchiveOrigin,
+}
+
+/// An archive [`ArchiveStore::admit`] placed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Admitted {
+    pub path: PathBuf,
+    /// Whether an archive already at the key was replaced.
+    pub replaced: bool,
 }
 
 /// Owner of the durable PMTiles archive directory and its naming/retention
@@ -171,12 +184,18 @@ impl ArchiveStore {
     /// Move one successful tilegen output into the store and apply the
     /// store-owned per-group retention window. The protected directories are
     /// the caller's scratch and tool-temporary directories.
+    ///
+    /// The key holds the latest admitted archive of its revision: an archive
+    /// already at the key is replaced, whatever tilegen block built either,
+    /// and the result says so. The key carries no block identity on purpose -
+    /// every reader resolves by revision - and each archive records the
+    /// contract elivagar built it under in its own metadata.
     pub fn admit(
         &self,
         scratch_file: &Path,
         key: &ArchiveKey,
         protected_dirs: &[&Path],
-    ) -> Result<PathBuf, DevError> {
+    ) -> Result<Admitted, DevError> {
         let scratch_dir = scratch_file.parent().unwrap_or_else(|| Path::new(""));
         if self.dir.as_path() == scratch_dir || protected_dirs.contains(&self.dir.as_path()) {
             return Err(DevError::Config(format!(
@@ -204,6 +223,9 @@ impl ArchiveStore {
         })?;
 
         let destination = self.path_for(key);
+        // Asked before the rename, which replaces silently. Nothing else
+        // writes the store while tilegen holds the brokkr lock.
+        let replaced = destination.exists();
         std::fs::rename(scratch_file, &destination).map_err(|error| {
             DevError::Io(io::Error::new(
                 error.kind(),
@@ -223,7 +245,10 @@ impl ArchiveStore {
                 std::fs::remove_file(path).is_ok()
             }),
         );
-        Ok(destination)
+        Ok(Admitted {
+            path: destination,
+            replaced,
+        })
     }
 
     /// Return and remove archives beyond the newest `keep` in each configured

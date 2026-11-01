@@ -101,10 +101,6 @@ impl BuiltCommand<'_> {
                     args.push("--skip-to".into());
                     args.push((*phase).into());
                 }
-                if let Some(level) = tilegen.compression_level {
-                    args.push("--compression-level".into());
-                    args.push(level.to_string());
-                }
                 opts.push_args(tilegen, &mut args, layout.data_dir())?;
 
                 Ok(args)
@@ -113,6 +109,21 @@ impl BuiltCommand<'_> {
                 "an example's argv depends on its internal run count; use ExampleCommand::args"
                     .into(),
             )),
+        }
+    }
+
+    /// The pairing qualifier of this command's results rows: the tilegen
+    /// block's flags ([`PipelineOpts::arm_qualifier`]) for the main binary,
+    /// `None` for an example, whose argv is all in the brokkr argv.
+    pub fn arm_qualifier(&self, opts: Option<&PipelineOpts>) -> Result<Option<String>, DevError> {
+        match self {
+            Self::MainBinary { tilegen, .. } => {
+                let opts = opts.ok_or_else(|| {
+                    DevError::Config("tilegen arguments require resolved PBF assertions".into())
+                })?;
+                opts.arm_qualifier(tilegen).map(Some)
+            }
+            Self::Example(_) => Ok(None),
         }
     }
 

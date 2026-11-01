@@ -300,6 +300,7 @@ pub fn run(
             observations: CommandObservations {
                 merged_cache,
                 snapshot_to: None,
+                digest_takes_form: None,
             },
         };
 

@@ -648,8 +648,9 @@ In depth: `brokkr man clippy`."
         #[command(flatten)]
         pbf: PbfArgs,
         /// Canonical form: `full` (v2) or `content` (v1, diff's equality).
-        /// Omit to measure the build's own default, which is `full` since
-        /// pbfhogg grew `--form` and `content` before it.
+        /// Omitted, brokkr passes `--form full` to a build that takes the
+        /// flag and nothing to one from before it, whose only form is
+        /// `content`; the row records which.
         #[arg(long, value_enum)]
         form: Option<crate::pbfhogg::commands::DigestForm>,
         /// Snapshot key to read input from. Use `base` (or omit) for the

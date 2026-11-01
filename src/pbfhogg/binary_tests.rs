@@ -604,6 +604,42 @@ fn an_exit_split_probe_that_ends_otherwise_is_an_error_not_an_answer() {
     assert!(CapabilityStore::open(&root).read().is_empty());
 }
 
+/// A fake pbfhogg whose `digest` takes `--form` (`form` 0) or rejects it
+/// with the usage error `form` (2 or 64), or whose `--form` probe ends some
+/// other way. Each call is logged like [`FAKE_PBFHOGG`]'s.
+fn digest_with_form(form: i32) -> String {
+    format!(
+        "#!/bin/sh\necho \"$*\" >> \"$0.log\"\n[ \"$1\" = digest ] || exit 2\n\
+         case \"$2\" in\n  --help) exit 0 ;;\n  --hel) exit 2 ;;\n  --form=full) exit {form} ;;\nesac\nexit 0\n"
+    )
+}
+
+#[test]
+fn whether_digest_takes_form_is_asked_once_per_build_either_way() {
+    for (name, code, takes) in [("form-yes", 0, true), ("form-no", 2, false)] {
+        let (root, path) = install(name, &digest_with_form(code));
+        let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
+        assert_eq!(binary.digest_takes_form().unwrap(), takes);
+        assert_eq!(binary.digest_takes_form().unwrap(), takes);
+        assert_eq!(spawns(&path), 3, "help, control and probe, once");
+        let log = std::fs::read_to_string(path.with_extension("log")).unwrap();
+        assert!(log.contains("digest --form=full --help"), "{log}");
+        // A recorded answer, false included, serves the same bytes.
+        let again = PbfhoggBinary::fixture(&path, &root).unwrap();
+        assert_eq!(again.digest_takes_form().unwrap(), takes);
+        assert_eq!(spawns(&path), 3);
+    }
+}
+
+#[test]
+fn an_inconclusive_form_probe_is_an_error_not_a_cached_answer() {
+    let (root, path) = install("form-odd", &digest_with_form(3));
+    let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
+    let err = binary.digest_takes_form().unwrap_err().to_string();
+    assert!(err.contains("accepts --form"), "got: {err}");
+    assert!(CapabilityStore::open(&root).read().is_empty());
+}
+
 /// Spawn `invocation` the way every pbfhogg call site does.
 pub(crate) fn execute(invocation: &crate::measure::Invocation<'_>, cwd: &Path) -> Option<i32> {
     invocation.capture_in(cwd).unwrap().code()

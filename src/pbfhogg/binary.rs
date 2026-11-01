@@ -63,7 +63,8 @@
 //! Answers are persisted in `.brokkr/pbfhogg-capabilities`, keyed by probe
 //! protocol, the executable's XXH128 and the subcommand (`sort` for
 //! `--overwrite`, as before the other flags existed, and `sort --staging-dir`
-//! for the others). Different bytes
+//! for the others; `digest --form` for whether `digest` takes a form, which
+//! [`PbfhoggBinary::digest_takes_form`] asks on its own). Different bytes
 //! never reuse an answer; identical bytes rebuilt for a later baseline skip
 //! the probe. Only conclusive answers are recorded.
 //!
@@ -166,6 +167,11 @@ const USAGE_STATUSES: [i32; 2] = [2, 64];
 /// The store key of [`PbfhoggBinary::splits_answer_from_failure`]'s answer.
 /// Not a subcommand name, so it never collides with a flag answer.
 const EXIT_SPLIT_KEY: &str = "exit-1-is-an-answer";
+
+/// The store key of [`PbfhoggBinary::digest_takes_form`]'s answer. It has the
+/// `SUB FLAG` shape of the directory flags' keys, a pair no negotiated flag
+/// uses.
+const DIGEST_FORM_KEY: &str = "digest --form";
 
 /// Most recent answers kept in the store; older ones are dropped on save.
 const STORE_CAP: usize = 512;
@@ -619,6 +625,31 @@ impl PbfhoggBinary {
             .borrow_mut()
             .insert(EXIT_SPLIT_KEY.to_owned(), split);
         Ok(split)
+    }
+
+    /// Whether this build's `digest` accepts `--form`, asked like the
+    /// negotiated flags (module docs, The probe) but on its own, so it never
+    /// couples to the output-directory flags: `digest --form=full --help`,
+    /// with a value every build that has the flag accepts, against the same
+    /// two controls. Cached under the executable's digest as `digest --form`;
+    /// an absent answer probes, never reads as unsupported.
+    pub(crate) fn digest_takes_form(&self) -> Result<bool, DevError> {
+        if let Some(&known) = self.answers.borrow().get(DIGEST_FORM_KEY) {
+            return Ok(known);
+        }
+        let program = self.label();
+        let question = format!("whether `{program} digest` accepts --form");
+        let sigterm = crate::shutdown::SigtermGuard::install();
+        let help = self.probe_run(&["digest", "--help"], &question, &sigterm)?;
+        let control = self.probe_run(&["digest", "--hel", "--help"], &question, &sigterm)?;
+        let probed = self.probe_run(&["digest", "--form=full", "--help"], &question, &sigterm)?;
+        let supported = decide(help, control, probed, "--form=full")
+            .map_err(|why| DevError::Build(format!("cannot tell {question}: {why}")))?;
+        CapabilityStore::open(&self.project_root).record(&self.digest, DIGEST_FORM_KEY, supported);
+        self.answers
+            .borrow_mut()
+            .insert(DIGEST_FORM_KEY.to_owned(), supported);
+        Ok(supported)
     }
 
     fn probe(&self, subcommand: &str) -> Result<Vec<(Flag, bool)>, DevError> {

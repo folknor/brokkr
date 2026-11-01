@@ -48,7 +48,8 @@ impl PipelineOpts {
         }
     }
 
-    /// Append elivagar CLI flags to an args vec.
+    /// Append the elivagar CLI flags the block and the input assertions
+    /// configure to an args vec.
     ///
     /// Ocean paths are stored bare in brokkr.toml and resolved against
     /// `data_dir` here, like every other path in the file.
@@ -64,6 +65,55 @@ impl PipelineOpts {
         args: &mut Vec<String>,
         data_dir: &Path,
     ) -> Result<(), DevError> {
+        self.push_configured(tg, args, |spec| {
+            let path = data_dir.join(spec.file());
+            if !path.exists() {
+                return Err(DevError::Config(format!(
+                    "tilegen ocean input not found: {} (named by brokkr.toml as '{}'); \
+                     omitting it would silently change the ocean geometry this run \
+                     produces",
+                    path.display(),
+                    spec.file()
+                )));
+            }
+            Ok(spec.render(&path.display().to_string()))
+        })
+    }
+
+    /// The pairing qualifier of a tilegen results row: the flags
+    /// [`push_args`](Self::push_args) passes, ocean entries spelled by their
+    /// brokkr.toml name rather than the host's resolved path, as a JSON array
+    /// behind `tilegen=`. `brokkr tilegen`'s own argv names only the input, so
+    /// without it rows built under an edited block share one arm key. Always
+    /// present, an empty block on an input with neither assertion included
+    /// (`tilegen=[]`), so no new row pairs
+    /// with one from before the qualifier, whose block nothing records.
+    ///
+    /// It names what brokkr passes, not what elivagar does with it: a setting
+    /// the block omits is the build revision's default, part of the code a
+    /// comparison compares; the content behind an ocean name and the worker
+    /// count an omitted `threads` resolves to are not in it either.
+    pub fn arm_qualifier(
+        &self,
+        tg: &config::project_config::elivagar::TilegenConfig,
+    ) -> Result<String, DevError> {
+        let mut tokens = Vec::new();
+        self.push_configured(tg, &mut tokens, |spec| Ok(spec.render(spec.file())))?;
+        Ok(format!("tilegen={}", serde_json::json!(tokens)))
+    }
+
+    /// The one emitter behind both the argv and the qualifier, so the two
+    /// cannot drift apart. `ocean` spells each ocean entry.
+    fn push_configured(
+        &self,
+        tg: &config::project_config::elivagar::TilegenConfig,
+        args: &mut Vec<String>,
+        ocean: impl Fn(&config::OceanSpec) -> Result<String, DevError>,
+    ) -> Result<(), DevError> {
+        if let Some(level) = tg.compression_level {
+            args.push("--compression-level".into());
+            args.push(level.to_string());
+        }
         if self.force_sorted {
             args.push("--force-sorted".into());
         }
@@ -137,21 +187,12 @@ impl PipelineOpts {
             args.push(f.to_string());
         }
 
-        // Ocean syntax is validated while loading the config. Resolve each
-        // parsed spec's bare path against the data dir here.
+        // Ocean syntax is validated while loading the config; the caller
+        // spells each parsed spec.
         for spec in tg.ocean_specs() {
-            let path = data_dir.join(spec.file());
-            if !path.exists() {
-                return Err(DevError::Config(format!(
-                    "tilegen ocean input not found: {} (named by brokkr.toml as '{}'); \
-                     omitting it would silently change the ocean geometry this run \
-                     produces",
-                    path.display(),
-                    spec.file()
-                )));
-            }
+            let rendered = ocean(spec)?;
             args.push("--ocean".into());
-            args.push(spec.render(&path.display().to_string()));
+            args.push(rendered);
         }
 
         Ok(())
@@ -210,3 +251,7 @@ pub fn resolve_tilegen<'a>(
     })?;
     Ok(config)
 }
+
+#[cfg(test)]
+#[path = "pipeline_tests.rs"]
+mod pipeline_tests;

@@ -79,8 +79,9 @@ Caps the PMTiles payload dedup map. Like the budgets and `threads`, it sits
 outside elivagar's provenance comparability contract: it can only change how
 many duplicate payload copies the archive stores and the map's RAM (~56
 bytes/entry), never what a consumer decodes from a tile. brokkr applies no
-default of its own - the key is either set or the flag is absent - so
-`brokkr results --grep dedup-cap` separates the arms after the fact.
+default of its own - the key is either set or the flag is absent - so its
+rows never pair with rows built without it, and `brokkr results --grep
+dedup-cap` selects them.
 
 ### `seam_reconcile_layers`
 
@@ -104,3 +105,12 @@ Only `default` is currently selectable. A sibling block does not create a
 runnable A/B arm until a block selector is added; the CLI cannot select one.
 Key order in the expanded argv is stable (the maps are `BTreeMap`), so
 identical selected config produces byte-identical `cli_args`.
+
+Editing the block between runs is how an A/B arm is made today, and every
+results row records the block it ran under: its arm key is qualified by the
+flags the block and the input assertions passed, ocean entries under their
+names here rather than the host's resolved paths (`docs/commands/results.md`,
+`--compare A B`). So `brokkr results --compare` pairs only rows built under
+the same flags. A key the block omits is the elivagar revision's own default
+and pairs across revisions as part of the code under comparison, and the
+content behind an ocean name is not in the key.

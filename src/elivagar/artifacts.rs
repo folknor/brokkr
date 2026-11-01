@@ -57,8 +57,15 @@ pub(crate) fn rename_elivagar_output(
     let key = super::archive_store::ArchiveKey::new(dataset, variant, commit)?;
     let tmp_dir = layout.tilegen_tmp();
     for path in &output_files {
-        let dest = store.admit(path, &key, &[layout.scratch(), &tmp_dir])?;
-        output::run_msg(&format!("output: {}", output::path(&dest)));
+        let admitted = store.admit(path, &key, &[layout.scratch(), &tmp_dir])?;
+        output::run_msg(&format!("output: {}", output::path(&admitted.path)));
+        if admitted.replaced {
+            output::run_msg(&format!(
+                "replaced the earlier {variant} archive of {}; the store keeps one per revision, \
+                 so copy an archive elsewhere and address it with --file to keep both",
+                key.commit()
+            ));
+        }
     }
     Ok(())
 }

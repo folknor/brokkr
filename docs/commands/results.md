@@ -203,7 +203,17 @@ from the dataset rather than `--bbox` (`bbox=...`, the parsed coordinates, so
 (`--strategy all`, which is `extract`'s default, or the suite;
 `strategy=...`), joined by `;`. An extract
 row from before the bbox and strategy qualifiers existed carries neither, so
-it does not pair with a newer row that does. A `brokkr library` row's
+it does not pair with a newer row that does. A pbfhogg `digest` without
+`--form` carries the form it measured (`form=full` or `form=content`;
+`docs/projects/pbfhogg.md`, Digest). An elivagar `tilegen` row, the `bench
+all` self arm's included, carries every flag its tilegen block and input
+assertions passed (`tilegen=` and a JSON array of them, ocean entries under
+their brokkr.toml names rather than the host's resolved paths; an empty block
+on an input with neither assertion is `tilegen=[]`), since `brokkr tilegen`'s
+own argv names only the input. A defaulted digest row or a tilegen row from
+before these carries none and pairs only with other such rows, which mix the
+forms or blocks of their day; an explicit `--form` digest row was never
+qualified and pairs as before. A `brokkr library` row's
 qualifier is its library identity (the plan and context digests, the
 dataset and generated identities, the harness features, and any seeds or
 preparation; `brokkr man library`, Measuring a scenario), also stored as
@@ -218,6 +228,18 @@ claims that difference is the only one. A qualified row
 stores `["qualified-v1", <argv key>, <qualifier>]` (JSON) as its `arm_key`
 and pairs only with rows carrying the same qualifier; an unqualified row's
 key is the argv key alone, exactly as before qualifiers existed.
+
+The rule behind the key: rows pair when brokkr asked for the same thing,
+config-derived arguments included. What the measured program does with a
+setting nobody passed is that revision's default, and a default that changes
+between two commits is part of the code a comparison compares, even where it
+changes output - except where brokkr holds a choice constant as a workload
+axis, as it does pbfhogg's digest form, which is resolved before the run and
+named in the row. Not in the key: the content behind an input's name (a
+dataset PBF or an ocean file replaced under the same name), and a resource
+the program sizes at run time (the worker count an omitted tilegen `threads`
+resolves to), which the host-condition annotations below do not capture
+either.
 
 Pairing is by parsed command identity: two different brokkr commands that
 happen to run the same subprocess stay separate rows.
