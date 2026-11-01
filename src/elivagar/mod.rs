@@ -108,6 +108,8 @@ impl PipelineOpts {
             args.push("--dedup-cap".into());
             args.push(n.to_string());
         }
+        // Accepted only by elivagar before 099611b, which removed the flag;
+        // emitted as configured all the same (see the TilegenConfig field).
         if !tg.seam_reconcile_layers.is_empty() {
             let spec: Vec<String> = tg
                 .seam_reconcile_layers

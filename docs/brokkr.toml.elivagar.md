@@ -32,7 +32,6 @@ dedup_cap = 60000000           # payload dedup map entry cap; plain integer,
                                # no size suffix. Absent = elivagar's 1M default
 fanout_cap_default = 0         # 0/absent = uncapped
 polygon_simplify_factor = 1.0
-seam_reconcile_layers = { boundaries = 8 }   # layer -> maxzoom
 fanout_caps = { water = 10 }                 # layer -> cap; beats the default
 allow_unsafe_flat_index = false              # expert debugging only
 ```
@@ -82,6 +81,16 @@ many duplicate payload copies the archive stores and the map's RAM (~56
 bytes/entry), never what a consumer decodes from a tile. brokkr applies no
 default of its own - the key is either set or the flag is absent - so
 `brokkr results --grep dedup-cap` separates the arms after the fact.
+
+### `seam_reconcile_layers`
+
+Still accepted, and left out of the sample above because current elivagar
+has no use for it. A nonempty map (`{ boundaries = 8 }`, layer -> maxzoom)
+emits `--seam-reconcile-layers` with comma-separated `layer:maxzoom` entries;
+an omitted or empty map emits no flag. Set it only for an elivagar revision
+that supports the flag: elivagar commit `099611b` removed it, and a revision
+without it rejects the emitted argv. Before that commit an absent flag meant
+elivagar's own default, `boundaries:8`, not no reconciliation.
 
 ### What lives elsewhere
 

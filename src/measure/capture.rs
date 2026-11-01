@@ -174,7 +174,6 @@ impl BenchHarness {
             program,
             args,
             cwd,
-            &[],
             child::Exits::SUCCESS,
             fifo,
             index,
@@ -186,25 +185,31 @@ impl BenchHarness {
 
     /// [`capture_hotpath`](Self::capture_hotpath) writing the report to
     /// `report`, a fresh path the caller removes afterwards.
+    ///
+    /// There is no per-command environment here, by design: a project
+    /// variable set beside the planned invocation is invisible to dry run and
+    /// to the row, while that invocation's own environment is refused by the
+    /// measure runner. elivagar's `ELIVAGAR_NODE_STATS=1` was the last one,
+    /// set on every tilegen hotpath and alloc run long after elivagar
+    /// deleted its reader (elivagar ab935ff); a variable a command needs
+    /// belongs in its invocation.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn capture_hotpath_into(
         &self,
         program: &Path,
         args: &[&str],
         cwd: &Path,
-        extra_env: &[(&str, &str)],
         exits: child::Exits,
         fifo: &mut crate::sidecar::SidecarFifo,
         index: usize,
         report: &Path,
     ) -> Result<Iteration, DevError> {
         let report_str = report.display().to_string();
-        let mut env = extra_env.to_vec();
-        env.extend_from_slice(&[
+        let env = [
             ("HOTPATH_METRICS_SERVER_OFF", "true"),
             ("HOTPATH_OUTPUT_FORMAT", "json"),
-            ("HOTPATH_OUTPUT_PATH", &report_str),
-        ]);
+            ("HOTPATH_OUTPUT_PATH", report_str.as_str()),
+        ];
         let mut iteration = self.capture(program, args, cwd, &env, exits, fifo, index, None)?;
         if iteration.error.is_none() {
             let profile = (|| {

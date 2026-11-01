@@ -58,7 +58,11 @@ pub struct TilegenConfig {
     /// contract: it changes how many duplicate payload copies the archive
     /// stores, never what a consumer decodes from a tile.
     pub dedup_cap: Option<u64>,
-    /// Polygon layers getting shared-edge seam reconciliation, layer -> maxzoom.
+    /// Polygon layers getting shared-edge seam reconciliation, layer -> maxzoom,
+    /// emitted as `--seam-reconcile-layers`. elivagar removed that flag at
+    /// 099611b, so only a revision before it accepts the argv; later ones
+    /// reject it. Kept because a loading config must keep loading and
+    /// meaning the same; retiring or refusing it is the user's call.
     #[serde(default)]
     pub seam_reconcile_layers: BTreeMap<String, u32>,
     /// Default fanout cap for all polygon layers. 0 or absent = uncapped.

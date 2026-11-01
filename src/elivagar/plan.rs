@@ -158,9 +158,6 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
         }
         Ok(())
     }
-    fn env(&self) -> Vec<(&str, &str)> {
-        vec![("ELIVAGAR_NODE_STATS", "1")]
-    }
     fn observe(&self, result: &mut crate::harness::BenchResult, stderr: &[u8]) {
         result.kv.push(crate::db::KvPair::text(
             "meta.locations_on_ways_detected",

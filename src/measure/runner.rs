@@ -167,9 +167,6 @@ pub(crate) trait PlannedCommand {
     fn explain(&self, _plan: &CommandPlan<Self::State, Self::Argv>, error: DevError) -> DevError {
         error
     }
-    fn env(&self) -> Vec<(&str, &str)> {
-        vec![]
-    }
     fn observe(&self, _result: &mut harness::BenchResult, _stderr: &[u8]) {}
     fn execute(
         &self,
@@ -357,7 +354,6 @@ fn execute_invocation<C: PlannedCommand, P: Fn() -> Result<(), DevError>>(
                     binary,
                     &launched.arg_refs(),
                     cwd,
-                    &command.env(),
                     command.exits(plan),
                     fifo,
                     i,
