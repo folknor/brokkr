@@ -220,8 +220,7 @@ only with each other.
 Dellingr has no project-specific scratch tree. Hotpath capture temporarily uses
 `.brokkr/hotpath-report.json`, and sidecar measurement temporarily uses
 `.brokkr/.sidecar-<token>.fifo`; both are removed after capture, and `brokkr
-clean` removes a FIFO a killed brokkr left (`brokkr man clean`). `brokkr clean`
-removes a legacy `.brokkr/dellingr/` directory if one remains. `results.db` and
+clean` removes a FIFO a killed brokkr left (`brokkr man clean`). `results.db` and
 `sidecar.db` stay in `.brokkr/` and are out of scope for `clean`.
 
 ## Out of scope

@@ -1,7 +1,6 @@
 //! Database adapter for sluggrs' visual snapshot tables.
 
-use std::path::Path;
-
+use crate::clean::layout::ProjectState;
 use crate::error::DevError;
 use crate::visual::db::{self, DbSubject, VisualDb};
 use crate::visual::status::Status;
@@ -16,18 +15,18 @@ pub(crate) struct SnapshotDb {
 
 impl SnapshotDb {
     /// Opens sluggrs' versioned visual store, importing legacy snapshot tables
-    /// from the supplied `results.db` path on first open.
-    pub fn open(path: &Path) -> Result<Self, DevError> {
+    /// from the state's `results.db` on first open.
+    pub fn open(state: &ProjectState) -> Result<Self, DevError> {
         Ok(Self {
-            inner: VisualDb::open(path, DbSubject::Sluggrs)?,
+            inner: VisualDb::open(state, DbSubject::Sluggrs)?,
         })
     }
 
     /// Open sluggrs' visual store for queries (`list`, `visual-status`,
     /// `report`). Never writes except to perform the one-time import.
-    pub fn open_read_only(path: &Path) -> Result<Self, DevError> {
+    pub fn open_read_only(state: &ProjectState) -> Result<Self, DevError> {
         Ok(Self {
-            inner: VisualDb::open_read_only(path, DbSubject::Sluggrs)?,
+            inner: VisualDb::open_read_only(state, DbSubject::Sluggrs)?,
         })
     }
 
@@ -99,9 +98,9 @@ mod tests {
     #[test]
     fn visual_stores_coexist_with_the_main_results_database() {
         let dir = crate::test_scratch::scratch("sluggrs_db", "separate_visual_stores");
-        let path = dir.join("results.db");
+        let state = ProjectState::new(&dir);
 
-        let snapshots = SnapshotDb::open(&path).unwrap();
+        let snapshots = SnapshotDb::open(&state).unwrap();
         snapshots
             .insert_run("sluggrs-run", "commit", false, Some("adapter"))
             .unwrap();
@@ -111,7 +110,7 @@ mod tests {
         snapshots.set_approval("snapshot", "commit", 0.0).unwrap();
         drop(snapshots);
 
-        let mechanical = crate::litehtml::db::MechanicalDb::open(&path).unwrap();
+        let mechanical = crate::litehtml::db::MechanicalDb::open(&state).unwrap();
         mechanical
             .insert_run("litehtml-run", "commit", false)
             .unwrap();
@@ -131,9 +130,17 @@ mod tests {
             .unwrap();
         drop(mechanical);
 
-        drop(crate::db::ResultsDb::open(&path).unwrap());
+        drop(crate::db::ResultsDb::open(&state.results_db()).unwrap());
+        // Three stores side by side in one state directory.
+        for store in [
+            state.results_db(),
+            state.litehtml_visual_db(),
+            state.sluggrs_visual_db(),
+        ] {
+            assert!(store.is_file(), "{}", store.display());
+        }
 
-        let snapshots = SnapshotDb::open(&path).unwrap();
+        let snapshots = SnapshotDb::open(&state).unwrap();
         assert_eq!(
             snapshots
                 .latest_result_for_snapshot("snapshot")
@@ -152,7 +159,7 @@ mod tests {
         );
         drop(snapshots);
 
-        let mechanical = crate::litehtml::db::MechanicalDb::open(&path).unwrap();
+        let mechanical = crate::litehtml::db::MechanicalDb::open(&state).unwrap();
         assert_eq!(
             mechanical
                 .latest_result_for_fixture("fixture")

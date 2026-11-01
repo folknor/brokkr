@@ -14,11 +14,11 @@ use crate::visual::{compare, status};
 use super::db::SnapshotDb;
 
 fn open_db(project_root: &Path) -> Result<SnapshotDb, DevError> {
-    engine::open_results_db(project_root, SnapshotDb::open)
+    engine::open_visual_db(project_root, SnapshotDb::open)
 }
 
 fn open_db_read_only(project_root: &Path) -> Result<SnapshotDb, DevError> {
-    engine::open_results_db(project_root, SnapshotDb::open_read_only)
+    engine::open_visual_db(project_root, SnapshotDb::open_read_only)
 }
 
 struct SnapshotOutcome {

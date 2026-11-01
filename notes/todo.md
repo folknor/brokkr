@@ -258,13 +258,6 @@ machine-readable error kind from the pbfhogg CLI would close that
 a scenario turns out to need the distinction. Comparing stderr text was
 rejected as brittle.
 
-### Leftover sweeps for older brokkr binaries (2026-10-29)
-
-AGENTS.md now rules an older brokkr out as a design input. `brokkr clean`
-still removes two things only an older brokkr left: the fixed-name
-`.brokkr-pbfhogg/` directories in scratch and the data dir, and
-`~/.brokkr/sidecar-status`. Both, with their clean.md lines, can go.
-
 ### Install: a destination parent outside the home has no durable anchor (2026-10-29)
 
 `atomic_write` now has an atomic and a durable tier, and the install

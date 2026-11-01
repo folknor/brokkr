@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, Row};
 
+use crate::clean::layout::ProjectState;
 use crate::error::DevError;
 
 use super::status::Status;
@@ -16,7 +17,6 @@ pub(crate) enum DbSubject {
 
 struct Layout {
     store_name: &'static str,
-    file_name: &'static str,
     runs: &'static str,
     results: &'static str,
     approvals: &'static str,
@@ -35,7 +35,6 @@ impl Layout {
         match subject {
             DbSubject::Litehtml => Self {
                 store_name: "litehtml visual store",
-                file_name: "litehtml-visual.db",
                 runs: "mechanical_runs",
                 results: "mechanical_results",
                 approvals: "mechanical_approvals",
@@ -47,7 +46,6 @@ impl Layout {
             },
             DbSubject::Sluggrs => Self {
                 store_name: "sluggrs visual store",
-                file_name: "sluggrs-visual.db",
                 runs: "snapshot_runs",
                 results: "snapshot_results",
                 approvals: "snapshot_approvals",
@@ -155,14 +153,15 @@ pub(crate) struct VisualDb {
 }
 
 impl VisualDb {
-    /// Open the subject's versioned visual store. `legacy_results_path` is
-    /// retained as the source for a one-time import of the former shared
-    /// `results.db` tables.
-    pub(crate) fn open(legacy_results_path: &Path, subject: DbSubject) -> Result<Self, DevError> {
+    /// Open the subject's versioned visual store in `state`. The state's
+    /// `results.db` is retained as the source for a one-time import of the
+    /// former shared tables.
+    pub(crate) fn open(state: &ProjectState, subject: DbSubject) -> Result<Self, DevError> {
         let layout = Layout::for_subject(subject);
-        let path = store_path(legacy_results_path, &layout);
+        let path = store_path(state, subject);
+        let legacy_results_path = state.results_db();
         let conn = open_writable(&path, &layout)?;
-        import_legacy(&conn, legacy_results_path, &layout)?;
+        import_legacy(&conn, &legacy_results_path, &layout)?;
         Ok(Self { conn, layout })
     }
 
@@ -170,11 +169,13 @@ impl VisualDb {
     /// When neither a visual file nor legacy tables exist, query an empty
     /// in-memory schema without creating a project file.
     pub(crate) fn open_read_only(
-        legacy_results_path: &Path,
+        state: &ProjectState,
         subject: DbSubject,
     ) -> Result<Self, DevError> {
         let layout = Layout::for_subject(subject);
-        let path = store_path(legacy_results_path, &layout);
+        let path = store_path(state, subject);
+        let legacy_results_path = state.results_db();
+        let legacy_results_path = legacy_results_path.as_path();
         let conn = if path.exists() {
             crate::db::store::open_read_only_migrating(
                 &path,
@@ -536,8 +537,11 @@ struct LegacyData {
     approvals: Vec<LegacyApproval>,
 }
 
-fn store_path(legacy_results_path: &Path, layout: &Layout) -> PathBuf {
-    legacy_results_path.with_file_name(layout.file_name)
+fn store_path(state: &ProjectState, subject: DbSubject) -> PathBuf {
+    match subject {
+        DbSubject::Litehtml => state.litehtml_visual_db(),
+        DbSubject::Sluggrs => state.sluggrs_visual_db(),
+    }
 }
 
 fn open_writable(path: &Path, layout: &Layout) -> Result<Connection, DevError> {

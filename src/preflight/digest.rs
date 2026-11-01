@@ -2,7 +2,7 @@
 
 use std::fmt;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::str::FromStr;
 
 use serde::de::{self, Visitor};
@@ -799,7 +799,7 @@ fn read_cache_file(path: &Path) -> std::collections::BTreeMap<String, (FileStamp
 /// The hash cache for one top-level digest request: loaded once, consulted
 /// and added to in memory, merged back to disk once by [`HashCache::save`].
 struct HashCache {
-    dir: PathBuf,
+    state: crate::clean::layout::ProjectState,
     entries: std::collections::BTreeMap<String, (FileStamp, Xxh128)>,
     updates: Vec<(String, FileStamp, Xxh128)>,
 }
@@ -807,10 +807,9 @@ struct HashCache {
 impl HashCache {
     fn load(project_root: &Path) -> Self {
         let state = crate::clean::layout::ProjectState::new(project_root);
-        let dir = state.root().to_path_buf();
         let entries = read_cache_file(&state.hash_cache_file());
         Self {
-            dir,
+            state,
             entries,
             updates: Vec::new(),
         }
@@ -844,19 +843,19 @@ impl HashCache {
         if let Err(error) = self.try_save() {
             crate::output::warn(&format!(
                 "hash cache not saved under {}: {error}",
-                self.dir.display()
+                self.state.root().display()
             ));
         }
     }
 
     fn try_save(&self) -> std::io::Result<()> {
         use std::os::fd::AsRawFd;
-        std::fs::create_dir_all(&self.dir)?;
+        std::fs::create_dir_all(self.state.root())?;
         let lock = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
-            .open(self.dir.join("hash_cache.lock"))?;
+            .open(self.state.hash_cache_lock_file())?;
         // SAFETY: `lock` is an open file descriptor owned for the duration of
         // the call; the lock is released when `lock` is dropped (closed).
         if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
@@ -864,7 +863,7 @@ impl HashCache {
         }
 
         // Re-read under the lock: another process may have saved since `load`.
-        let cache_path = self.dir.join("hash_cache");
+        let cache_path = self.state.hash_cache_file();
         let mut merged = read_cache_file(&cache_path);
         for (key, stamp, digest) in &self.updates {
             merged.insert(key.clone(), (*stamp, *digest));

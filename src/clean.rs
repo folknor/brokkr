@@ -277,12 +277,6 @@ pub(crate) fn cmd_clean(
     }
     clean_by_hand_only(project, &state, &c, interrupted)?;
 
-    if let Some(status) = crate::user_dirs::sidecar_status()
-        && c.file(&status)?
-    {
-        output::run_msg(&format!("{} sidecar status", c.verb()));
-    }
-
     if *project == Project::Litehtml {
         clean_litehtml(&state, &c)?;
     }
@@ -579,14 +573,6 @@ fn clean_artefact_trees(
                 output::count(removed, "directory")
             ));
         }
-    }
-
-    if *project == Project::Dellingr && c.dir(state.dellingr().scratch())? {
-        output::run_msg(&format!("{} dellingr scratch dir", c.verb()));
-    }
-
-    if *project == Project::Mogwai && c.dir(state.mogwai().scratch())? {
-        output::run_msg(&format!("{} mogwai scratch dir", c.verb()));
     }
 
     if *project == Project::Piners {

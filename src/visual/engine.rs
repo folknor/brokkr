@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use crate::db::paths;
+use crate::clean::layout::ProjectState;
 use crate::error::DevError;
 use crate::git::{self, GitInfo};
 
@@ -157,14 +157,14 @@ pub(crate) fn validate_approval_origin(
     Ok(())
 }
 
-/// Open a subject's visual store. The opener is handed the legacy
-/// `results.db` path: the store lives beside it under its own file name, and
-/// the legacy tables in it are the source of the one-time import.
-pub(crate) fn open_results_db<T>(
+/// Open a subject's visual store. The opener is handed the project state,
+/// which names both the store and the legacy `results.db` whose tables are
+/// the source of the one-time import.
+pub(crate) fn open_visual_db<T>(
     project_root: &Path,
-    open: impl FnOnce(&Path) -> Result<T, DevError>,
+    open: impl FnOnce(&ProjectState) -> Result<T, DevError>,
 ) -> Result<T, DevError> {
-    open(&paths::results_db_path(project_root))
+    open(&ProjectState::new(project_root))
 }
 
 pub(crate) struct SummaryOptions<'a> {

@@ -36,13 +36,6 @@ pub(crate) fn harness_dir() -> Option<PathBuf> {
     brokkr_state_dir().map(|dir| dir.join("harness"))
 }
 
-/// The sidecar's former last-marker status file, beside the global lock. No
-/// longer written - the marker lives on the holder's observation table - and
-/// only `brokkr clean` still names it, to remove one an older brokkr left.
-pub(crate) fn sidecar_status() -> Option<PathBuf> {
-    brokkr_state_dir().map(|dir| dir.join("sidecar-status"))
-}
-
 /// The `[[install]]` ownership registry: one record per copy destination.
 pub(crate) fn install_registry() -> Option<PathBuf> {
     brokkr_state_dir().map(|dir| dir.join("install"))

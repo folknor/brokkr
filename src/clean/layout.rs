@@ -93,6 +93,22 @@ impl ProjectState {
         self.root.join("hash_cache")
     }
 
+    /// The flock writers of [`hash_cache_file`](Self::hash_cache_file)
+    /// serialise on. Empty; never removed, since a waiter may hold it open.
+    pub(crate) fn hash_cache_lock_file(&self) -> PathBuf {
+        self.root.join("hash_cache.lock")
+    }
+
+    /// litehtml's visual store: mechanical runs, results and approvals.
+    pub(crate) fn litehtml_visual_db(&self) -> PathBuf {
+        self.root.join("litehtml-visual.db")
+    }
+
+    /// sluggrs' visual store: snapshot runs, results and approvals.
+    pub(crate) fn sluggrs_visual_db(&self) -> PathBuf {
+        self.root.join("sluggrs-visual.db")
+    }
+
     /// Which pbfhogg builds accept which flags, keyed by executable digest.
     pub(crate) fn pbfhogg_capabilities_file(&self) -> PathBuf {
         self.root.join("pbfhogg-capabilities")
@@ -144,14 +160,6 @@ impl ProjectState {
 
     pub(crate) fn piners(&self) -> PinersLayout {
         PinersLayout::new(&self.root)
-    }
-
-    pub(crate) fn dellingr(&self) -> DellingrLayout {
-        DellingrLayout::new(&self.root)
-    }
-
-    pub(crate) fn mogwai(&self) -> MogwaiLayout {
-        MogwaiLayout::new(&self.root)
     }
 
     pub(crate) fn litehtml(&self) -> LitehtmlLayout {
@@ -227,44 +235,6 @@ impl PinersLayout {
 
     pub(crate) fn corpus_runs_db(&self) -> PathBuf {
         self.corpus_root().join("runs.db")
-    }
-}
-
-/// Dellingr harness output, separate from configurable data scratch so a
-/// project without a data directory does not gain one just for brokkr files.
-#[derive(Debug, Clone)]
-pub(crate) struct DellingrLayout {
-    scratch: PathBuf,
-}
-
-impl DellingrLayout {
-    fn new(state_root: &Path) -> Self {
-        Self {
-            scratch: state_root.join("dellingr"),
-        }
-    }
-
-    pub(crate) fn scratch(&self) -> &Path {
-        &self.scratch
-    }
-}
-
-/// Mogwai harness output, separate from configurable data scratch so a
-/// project without a data directory does not gain one just for brokkr files.
-#[derive(Debug, Clone)]
-pub(crate) struct MogwaiLayout {
-    scratch: PathBuf,
-}
-
-impl MogwaiLayout {
-    fn new(state_root: &Path) -> Self {
-        Self {
-            scratch: state_root.join("mogwai"),
-        }
-    }
-
-    pub(crate) fn scratch(&self) -> &Path {
-        &self.scratch
     }
 }
 
@@ -557,11 +527,8 @@ impl<'a> PbfhoggLayout<'a> {
     pub(crate) fn scratch_dirs(&self) -> Vec<PathBuf> {
         let scratch_dir = self.scratch();
         let mut dirs = BTreeSet::new();
-        // The fixed-name private directory one earlier brokkr gave pbfhogg
-        // children beside their outputs; today's per-launch ones go with
-        // their leases (`crate::reservations`).
-        dirs.insert(scratch_dir.join(".brokkr-pbfhogg"));
-        dirs.insert(self.paths.data_dir.join(".brokkr-pbfhogg"));
+        // The per-launch private directories pbfhogg children get go with
+        // their leases (`crate::reservations`), not from here.
         dirs.insert(Self::multi_extract_dir(scratch_dir));
         for dataset in self.paths.datasets.keys() {
             dirs.insert(Self::geocode_dir(scratch_dir, dataset));

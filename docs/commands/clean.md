@@ -69,6 +69,21 @@ Its path is a named permanent store in the ratatoskr layout. Cleanup preserves
 that path and any directory containing it, even if the store moves below the
 current `.brokkr/ratatoskr/` level.
 
+## Left alone, bounded by their writers
+
+No flag removes these either. They are small, or their writers bound them:
+
+| state | bound |
+| --- | --- |
+| `.brokkr/check-logs/` | the newest 10 logs per kind; a single log's size is not capped |
+| `.brokkr/accounting/` | the newest 10 check runs |
+| `.brokkr/hash_cache`, `hash_cache.lock` | entries for files that no longer exist are dropped on every save |
+| `.brokkr/pbfhogg-capabilities` | capped at 512 lines |
+| `.brokkr/worktrees.toml` | last-used records for persistent worktrees; a vanished worktree's record is dropped |
+| `.brokkr/corpus-sort/` | each elivagar corpus sort removes its own spill directory when it ends; one killed mid-sort stays, and nothing sweeps it |
+| `.brokkr/nidhogg.pid` | the identity of a running nidhogg server, removed when brokkr stops it |
+| `.brokkr/parallel-timings.toml`, `nextest-synth.toml`, `nextest-sweep-env.toml`, `.sidecar.lock`, `.gitignore` | single small files, rewritten in place |
+
 ## Routine clean
 
 Bare `brokkr clean`, in order:
@@ -92,9 +107,7 @@ Bare `brokkr clean`, in order:
   Its removals of pbfhogg's verify output and scratch go through the
   reservation gate, so a path a running pbfhogg launch still uses is named,
   kept and skipped while the rest of the clean goes on, and a tree holding a
-  `.pbfhogg-backup-*` is never removed; it also removes the fixed-name
-  `.brokkr-pbfhogg/` directories one earlier brokkr left in scratch and the
-  data dir. The run directories a failed `brokkr library` run kept
+  `.pbfhogg-backup-*` is never removed. The run directories a failed `brokkr library` run kept
   (`<scratch>/library/<scenario>/run-N/`) go each through the gate, so one
   an orphaned harness still holds stays alone, and a scenario directory left
   empty goes with them; only in a clean run by hand, never in the cleanup
@@ -116,7 +129,7 @@ Bare `brokkr clean`, in order:
 - **Run-artefact trees**: the named `.brokkr/ratatoskr/{service,service-mock,sync,mock}/`
   trees and child directories under `.brokkr/piners/corpus/` (the `gate.db`
   and `runs.db` paths are protected),
-  `.brokkr/dellingr/`, `.brokkr/mogwai/`, `.brokkr/test-hung/`, and, for
+  `.brokkr/test-hung/`, and, for
   litehtml, `.brokkr/prepare-cache/` and `.brokkr/litehtml-capture/` (the
   staging a Chrome capture is written to before it is published into
   `fixtures/<id>/`; the published references are never cleaned). `.brokkr/artifacts/` (the `brokkr build`
@@ -124,9 +137,7 @@ Bare `brokkr clean`, in order:
   interrupted command, since a script may still be running one. So does
   pbfhogg's `.brokkr/verify-reference/` (the verify reference cache, see
   "Reference cache" in `docs/projects/pbfhogg.md`), through the reservation
-  gate, since it is what spares the next verify its reference runs. A per-user
-  `~/.brokkr/sidecar-status` file an older brokkr left (the last marker now
-  lives in the holder's memory) is removed with the project scratch.
+  gate, since it is what spares the next verify its reference runs.
   Other directories under `.brokkr/ratatoskr/` are preserved. Hung-test snapshots
   also prune their oldest directories as new diagnostics arrive, keeping a
   bounded recent history even between cleans.

@@ -18,11 +18,11 @@ use super::db::{MechanicalDb, ReferenceStamp, RunCompletion, recorded_width};
 use super::reference::{self, Inspection, ReferenceFiles};
 
 fn open_db(project_root: &Path) -> Result<MechanicalDb, DevError> {
-    engine::open_results_db(project_root, MechanicalDb::open)
+    engine::open_visual_db(project_root, MechanicalDb::open)
 }
 
 fn open_db_read_only(project_root: &Path) -> Result<MechanicalDb, DevError> {
-    engine::open_results_db(project_root, MechanicalDb::open_read_only)
+    engine::open_visual_db(project_root, MechanicalDb::open_read_only)
 }
 
 struct FixtureOutcome {

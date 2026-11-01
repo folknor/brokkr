@@ -1,7 +1,6 @@
 //! Database adapter for litehtml's visual result tables.
 
-use std::path::Path;
-
+use crate::clean::layout::ProjectState;
 use crate::error::DevError;
 use crate::visual::db::{self, DbSubject, VisualDb};
 use crate::visual::status::Status;
@@ -41,18 +40,18 @@ pub(crate) struct MechanicalDb {
 
 impl MechanicalDb {
     /// Open litehtml's visual store for writing (`visual`, `approve`),
-    /// importing legacy tables from the given `results.db` path on first open.
-    pub fn open(path: &Path) -> Result<Self, DevError> {
+    /// importing legacy tables from the state's `results.db` on first open.
+    pub fn open(state: &ProjectState) -> Result<Self, DevError> {
         Ok(Self {
-            inner: VisualDb::open(path, DbSubject::Litehtml)?,
+            inner: VisualDb::open(state, DbSubject::Litehtml)?,
         })
     }
 
     /// Open litehtml's visual store for queries (`list`, `report`,
     /// `visual-status`). Never writes except to perform the one-time import.
-    pub fn open_read_only(path: &Path) -> Result<Self, DevError> {
+    pub fn open_read_only(state: &ProjectState) -> Result<Self, DevError> {
         Ok(Self {
-            inner: VisualDb::open_read_only(path, DbSubject::Litehtml)?,
+            inner: VisualDb::open_read_only(state, DbSubject::Litehtml)?,
         })
     }
 
@@ -145,17 +144,25 @@ mod tests {
             .is_ok()
     }
 
+    /// Project state under a fresh scratch root, its directory made so a
+    /// test can write a store there by hand.
+    fn state(name: &str) -> ProjectState {
+        let state = ProjectState::new(&crate::test_scratch::scratch("litehtml_db", name));
+        std::fs::create_dir_all(state.root()).unwrap();
+        state
+    }
+
     /// Opening the litehtml visual store must leave `user_version` untouched
     /// in the legacy `results.db`; the main results store owns that stamp.
     #[test]
     fn open_leaves_user_version_alone() {
-        let dir = crate::test_scratch::scratch("litehtml_db", "user_version");
-        let path = dir.join("results.db");
+        let state = state("user_version");
+        let path = state.results_db();
         {
             let conn = Connection::open(&path).unwrap();
             conn.pragma_update(None, "user_version", 0).unwrap();
         }
-        drop(MechanicalDb::open(&path).unwrap());
+        drop(MechanicalDb::open(&state).unwrap());
         let conn = Connection::open(&path).unwrap();
         let v: i32 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -164,7 +171,7 @@ mod tests {
 
         conn.pragma_update(None, "user_version", 18).unwrap();
         drop(conn);
-        drop(MechanicalDb::open(&path).unwrap());
+        drop(MechanicalDb::open(&state).unwrap());
         let conn = Connection::open(&path).unwrap();
         let v: i32 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -192,8 +199,7 @@ mod tests {
     /// is invisible to the latest-result lookups; finishing it flips both.
     #[test]
     fn unfinished_run_is_incomplete_and_not_the_latest_result() {
-        let dir = crate::test_scratch::scratch("litehtml_db", "incomplete");
-        let db = MechanicalDb::open(&dir.join("results.db")).unwrap();
+        let db = MechanicalDb::open(&state("incomplete")).unwrap();
 
         db.insert_run("done", "abc", false).unwrap();
         score(&db, "done", "a");
@@ -223,10 +229,9 @@ mod tests {
     /// completion and still count as the latest result, as they did before.
     #[test]
     fn version_one_store_upgrades_with_unknown_completion() {
-        let dir = crate::test_scratch::scratch("litehtml_db", "v1_upgrade");
-        let path = dir.join("results.db");
+        let state = state("v1_upgrade");
         {
-            let conn = Connection::open(dir.join("litehtml-visual.db")).unwrap();
+            let conn = Connection::open(state.litehtml_visual_db()).unwrap();
             conn.execute_batch(
                 "CREATE TABLE mechanical_runs (
                     run_id TEXT PRIMARY KEY,
@@ -250,7 +255,7 @@ mod tests {
             )
             .unwrap();
         }
-        let db = MechanicalDb::open_read_only(&path).unwrap();
+        let db = MechanicalDb::open_read_only(&state).unwrap();
         assert_eq!(db.run_completion("old").unwrap(), RunCompletion::Unknown);
         assert_eq!(
             db.latest_result_for_fixture("a").unwrap().unwrap().run_id,
@@ -262,8 +267,7 @@ mod tests {
     /// width it was measured at.
     #[test]
     fn results_and_approvals_record_their_comparison() {
-        let dir = crate::test_scratch::scratch("litehtml_db", "reference_stamp");
-        let db = MechanicalDb::open(&dir.join("results.db")).unwrap();
+        let db = MechanicalDb::open(&state("reference_stamp")).unwrap();
         db.insert_run("run", "abc", false).unwrap();
         score(&db, "run", "a");
         db.insert_result("run", "b", None, None, Status::Error, None)
@@ -289,10 +293,9 @@ mod tests {
     /// which reads as the width every such row was measured at.
     #[test]
     fn version_two_store_upgrades_with_legacy_width() {
-        let dir = crate::test_scratch::scratch("litehtml_db", "v2_upgrade");
-        let path = dir.join("results.db");
+        let state = state("v2_upgrade");
         {
-            let conn = Connection::open(dir.join("litehtml-visual.db")).unwrap();
+            let conn = Connection::open(state.litehtml_visual_db()).unwrap();
             conn.execute_batch(
                 "CREATE TABLE mechanical_runs (
                     run_id TEXT PRIMARY KEY,
@@ -318,7 +321,7 @@ mod tests {
             )
             .unwrap();
         }
-        let db = MechanicalDb::open_read_only(&path).unwrap();
+        let db = MechanicalDb::open_read_only(&state).unwrap();
         let latest = db.latest_result_for_fixture("a").unwrap().unwrap();
         assert_eq!(latest.viewport_width, None);
         assert_eq!(latest.reference_id, None);
@@ -331,8 +334,8 @@ mod tests {
     /// the new litehtml store and leaves the original shared file as it was.
     #[test]
     fn import_omits_retired_artifact_dir_column() {
-        let dir = crate::test_scratch::scratch("litehtml_db", "legacy_column");
-        let path = dir.join("results.db");
+        let state = state("legacy_column");
+        let path = state.results_db();
         {
             let conn = Connection::open(&path).unwrap();
             conn.execute(SCHEMA_RUNS, []).unwrap();
@@ -347,11 +350,10 @@ mod tests {
             .unwrap();
             conn.pragma_update(None, "user_version", 18).unwrap();
         }
-        drop(MechanicalDb::open(&path).unwrap());
+        drop(MechanicalDb::open(&state).unwrap());
         let legacy = Connection::open(&path).unwrap();
         assert!(has_column(&legacy, "mechanical_results", "artifact_dir"));
-        let visual_path = dir.join("litehtml-visual.db");
-        let visual = Connection::open(&visual_path).unwrap();
+        let visual = Connection::open(state.litehtml_visual_db()).unwrap();
         assert!(!has_column(&visual, "mechanical_results", "artifact_dir"));
         assert!(has_column(&visual, "mechanical_results", "status"));
     }
