@@ -1830,7 +1830,11 @@ impl DiffVerdict {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct PbfExpect {
+    /// Covers `check-refs` without `--check-relations` only: a relation
+    /// check can find violations on a file whose way refs are clean.
     pub check_refs: Option<CheckVerdict>,
+    /// Covers `check-refs --check-relations`.
+    pub check_refs_relations: Option<CheckVerdict>,
     /// Covers `check-ids` with and without `--full`.
     pub check_ids: Option<CheckVerdict>,
     pub check_index: Option<CheckVerdict>,

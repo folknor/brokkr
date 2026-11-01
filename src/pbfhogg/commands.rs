@@ -429,7 +429,12 @@ pub enum PbfhoggCommand {
     Inspect {
         mode: InspectMode,
     },
-    CheckRefs,
+    /// `check --refs`. `relations` adds `--check-relations`: a third phase
+    /// over every relation blob and the deferred relation-member resolve,
+    /// accepted by every pbfhogg revision that has `check --refs`.
+    CheckRefs {
+        relations: bool,
+    },
     /// `check --ids`. `full` adds `--full` - per-type duplicate-ID detection
     /// via RoaringTreemap sets, in addition to the streaming monotonicity /
     /// type-order checks.
@@ -538,7 +543,7 @@ impl PbfhoggCommand {
         use PromotionVariant::{Indexed, Raw, Unsupported};
         let (id, output, promotion_variant) = match self {
             Self::Inspect { .. } => ("inspect", None, Unsupported),
-            Self::CheckRefs => ("check-refs", None, Unsupported),
+            Self::CheckRefs { .. } => ("check-refs", None, Unsupported),
             Self::CheckIds { .. } => ("check-ids", None, Unsupported),
             Self::CheckIndex => ("check-index", None, Unsupported),
             Self::Digest { .. } => ("digest", None, Unsupported),
@@ -657,7 +662,7 @@ impl PbfhoggCommand {
             ),
             Axis::Compression => match self {
                 Self::Inspect { .. }
-                | Self::CheckRefs
+                | Self::CheckRefs { .. }
                 | Self::CheckIds { .. }
                 | Self::CheckIndex
                 | Self::Digest { .. }
@@ -815,7 +820,7 @@ impl PbfhoggCommand {
         match self {
             Self::Diff { .. }
             | Self::DiffSnapshots { .. }
-            | Self::CheckRefs
+            | Self::CheckRefs { .. }
             | Self::CheckIds { .. }
             | Self::CheckIndex => &[1],
             // Exhaustive on purpose: a new command must decide whether it
@@ -1033,9 +1038,16 @@ impl PbfhoggCommand {
                 }
                 Ok(argv)
             }
-            Self::CheckRefs => CommandArgv::new("check")
-                .arg("--refs")
-                .input(ctx.pbf_str()?),
+            Self::CheckRefs { relations } => {
+                let argv = CommandArgv::new("check")
+                    .arg("--refs")
+                    .input(ctx.pbf_str()?)?;
+                Ok(if *relations {
+                    argv.arg("--check-relations")
+                } else {
+                    argv
+                })
+            }
             Self::CheckIds { full } => {
                 let argv = CommandArgv::new("check")
                     .arg("--ids")
@@ -1692,7 +1704,8 @@ mod tests {
                     type_filter: Some(InspectTypeFilter::Way),
                 },
             },
-            PbfhoggCommand::CheckRefs,
+            PbfhoggCommand::CheckRefs { relations: false },
+            PbfhoggCommand::CheckRefs { relations: true },
             PbfhoggCommand::CheckIds { full: false },
             PbfhoggCommand::CheckIds { full: true },
             PbfhoggCommand::CheckIndex,
@@ -1877,6 +1890,20 @@ mod tests {
         }
         // Both simplify states, one and several inputs, at every jobs value.
         assert_eq!(merge_shapes.len(), 2 * 2 * 4, "{merge_shapes:?}");
+    }
+
+    #[test]
+    fn check_refs_passes_check_relations_only_when_asked() {
+        for (relations, tail) in [(false, None), (true, Some("--check-relations"))] {
+            let cmd = PbfhoggCommand::CheckRefs { relations };
+            let args = cmd
+                .build_args(&ctx_for(&cmd), ArgMode::Bench)
+                .unwrap()
+                .into_args();
+            assert_eq!(&args[..2], ["check", "--refs"], "{args:?}");
+            assert_eq!(args.len(), if relations { 4 } else { 3 }, "{args:?}");
+            assert_eq!(args.get(3).map(String::as_str), tail, "{args:?}");
+        }
     }
 
     #[test]
@@ -2450,7 +2477,10 @@ mod tests {
                 }),
                 Axis::IoUring,
             ),
-            (PbfhoggCommand::CheckRefs, Axis::Compression),
+            (
+                PbfhoggCommand::CheckRefs { relations: true },
+                Axis::Compression,
+            ),
             (PbfhoggCommand::Digest { form: None }, Axis::Compression),
             (PbfhoggCommand::BuildGeocodeIndex, Axis::Compression),
             (

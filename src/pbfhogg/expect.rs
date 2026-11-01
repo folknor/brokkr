@@ -71,7 +71,14 @@ pub(crate) fn for_entry(
     table: &str,
 ) -> Option<Expectation> {
     match command {
-        PbfhoggCommand::CheckRefs => check(expect.check_refs, table, "check-refs"),
+        PbfhoggCommand::CheckRefs { relations: false } => {
+            check(expect.check_refs, table, "check-refs")
+        }
+        PbfhoggCommand::CheckRefs { relations: true } => check(
+            expect.check_refs_relations,
+            table,
+            "check-refs-relations",
+        ),
         PbfhoggCommand::CheckIds { .. } => check(expect.check_ids, table, "check-ids"),
         PbfhoggCommand::CheckIndex => check(expect.check_index, table, "check-index"),
         PbfhoggCommand::Diff { .. } => {
@@ -124,7 +131,7 @@ pub(crate) fn resolve(
                     source: format!("[<host>.datasets.{dataset}.expect.diff-snapshots] \"{pair}\""),
                 }))
         }
-        PbfhoggCommand::CheckRefs
+        PbfhoggCommand::CheckRefs { .. }
         | PbfhoggCommand::CheckIds { .. }
         | PbfhoggCommand::CheckIndex
         | PbfhoggCommand::Diff { .. } => {

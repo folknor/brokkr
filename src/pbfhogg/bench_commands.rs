@@ -69,7 +69,7 @@ pub(crate) fn preset_to_command(name: &str) -> Result<PbfhoggCommand, DevError> 
                 type_filter: Some(super::commands::InspectTypeFilter::Way),
             },
         },
-        "check-refs" => PbfhoggCommand::CheckRefs,
+        "check-refs" => PbfhoggCommand::CheckRefs { relations: false },
         "check-ids" => PbfhoggCommand::CheckIds { full: false },
         "check-index" => PbfhoggCommand::CheckIndex,
         "sort" => PbfhoggCommand::Sort,

@@ -603,6 +603,10 @@ In depth: `brokkr man clippy`."
         mode: ModeArgs,
         #[command(flatten)]
         pbf: PbfArgs,
+        /// Also check relation member references: pbfhogg's
+        /// `--check-relations`, a third phase over every relation blob.
+        #[arg(long)]
+        check_relations: bool,
         /// Snapshot key to read input from. Use `base` (or omit) for the
         /// dataset's primary data; pass a key registered under
         /// `[dataset.snapshot.<key>]` for a historical snapshot.

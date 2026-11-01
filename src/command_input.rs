@@ -63,6 +63,7 @@ impl Command {
             Self::CheckRefs {
                 mode,
                 pbf,
+                check_relations,
                 snapshot,
             } => {
                 let params = CommandParams {
@@ -72,7 +73,9 @@ impl Command {
                 RoutedCommand::Pbf {
                     mode,
                     pbf,
-                    command: PbfhoggCommand::CheckRefs,
+                    command: PbfhoggCommand::CheckRefs {
+                        relations: check_relations,
+                    },
                     osc: None,
                     params,
                 }

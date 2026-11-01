@@ -315,6 +315,8 @@ disproves.
 - `check-refs`, `check-ids` (with or without `--full`) and `check-index`
   read `[..pbf.<variant>.expect]` on the entry the command resolved, primary
   or `--snapshot`, so each variant file declares for itself.
+  `check-refs --check-relations` reads `check-refs-relations` there, never
+  `check-refs`: clean way refs say nothing about relation members.
 - `diff` reads `diff."<seq>"` on the same table: this file against itself
   with that OSC applied. A declared `diff` rebuilds the merged B side with
   the build under test even under `brokkr run` or `--keep-cache`, since a

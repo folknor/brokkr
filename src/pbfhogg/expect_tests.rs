@@ -47,7 +47,12 @@ expect = { check-ids = "violations" }
 "#,
     );
     let params = CommandParams::default();
-    let refs = resolved(&PbfhoggCommand::CheckRefs, &params, &paths).unwrap();
+    let refs = resolved(
+        &PbfhoggCommand::CheckRefs { relations: false },
+        &params,
+        &paths,
+    )
+    .unwrap();
     assert_eq!((refs.exit, refs.verdict), (0, "clean"));
     assert!(
         refs.source.contains("pbf.indexed.expect"),
@@ -67,7 +72,8 @@ fn a_dataset_without_declarations_expects_nothing() {
     let paths = paths("[pbf.indexed]\nfile = \"d.osm.pbf\"\n");
     let params = CommandParams::default();
     for command in [
-        PbfhoggCommand::CheckRefs,
+        PbfhoggCommand::CheckRefs { relations: false },
+        PbfhoggCommand::CheckRefs { relations: true },
         PbfhoggCommand::CheckIds { full: false },
         PbfhoggCommand::CheckIndex,
         PbfhoggCommand::Diff {
@@ -76,6 +82,28 @@ fn a_dataset_without_declarations_expects_nothing() {
     ] {
         assert!(resolved(&command, &params, &paths).is_none(), "{command:?}");
     }
+}
+
+/// A clean way check says nothing about relation members, which an extract
+/// cuts at its boundary: each check-refs shape reads its own key only.
+#[test]
+fn check_refs_with_relations_reads_its_own_declaration() {
+    let both: PbfExpect =
+        toml::from_str("check-refs = \"clean\"\ncheck-refs-relations = \"violations\"").unwrap();
+    let plain = PbfhoggCommand::CheckRefs { relations: false };
+    let relations = PbfhoggCommand::CheckRefs { relations: true };
+    let hit = for_entry(&plain, &both, None, "[t]").unwrap();
+    assert_eq!((hit.exit, hit.source.as_str()), (0, "[t] check-refs"));
+    let hit = for_entry(&relations, &both, None, "[t]").unwrap();
+    assert_eq!(
+        (hit.exit, hit.source.as_str()),
+        (1, "[t] check-refs-relations")
+    );
+    let ways_only: PbfExpect = toml::from_str("check-refs = \"clean\"").unwrap();
+    assert!(for_entry(&relations, &ways_only, None, "[t]").is_none());
+    let relations_only: PbfExpect =
+        toml::from_str("check-refs-relations = \"clean\"").unwrap();
+    assert!(for_entry(&plain, &relations_only, None, "[t]").is_none());
 }
 
 #[test]
@@ -154,15 +182,16 @@ fn the_other_answer_is_restated_as_a_contradiction_of_the_declaration() {
         ending: crate::error::ProcessEnding::Code(code),
         stderr: String::new(),
     };
-    let said = explain(&PbfhoggCommand::CheckRefs, Some(&declared), failed(1)).to_string();
+    let refs = PbfhoggCommand::CheckRefs { relations: false };
+    let said = explain(&refs, Some(&declared), failed(1)).to_string();
     assert!(
         said.contains("[here] check-refs") && said.contains("clean"),
         "{said}"
     );
     // A crash is not an answer, and an undeclared run is not restated.
-    let crash = explain(&PbfhoggCommand::CheckRefs, Some(&declared), failed(2)).to_string();
+    let crash = explain(&refs, Some(&declared), failed(2)).to_string();
     assert!(!crash.contains("declares"), "{crash}");
-    let plain = explain(&PbfhoggCommand::CheckRefs, None, failed(1)).to_string();
+    let plain = explain(&refs, None, failed(1)).to_string();
     assert!(!plain.contains("declares"), "{plain}");
 }
 

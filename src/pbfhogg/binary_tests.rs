@@ -519,7 +519,8 @@ fn a_build_whose_failures_exit_2_answers_with_exit_1() {
     let (root, path) = install("exit-split", &failing_inspect(2));
     let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
     assert!(binary.splits_answer_from_failure().unwrap());
-    let exits = completed_exits(&PbfhoggCommand::CheckRefs, &binary, None).unwrap();
+    let exits =
+        completed_exits(&PbfhoggCommand::CheckRefs { relations: false }, &binary, None).unwrap();
     assert_eq!(exits.codes(), [0, 1]);
     assert!(exits.is_answer());
 }
@@ -529,7 +530,8 @@ fn a_build_from_before_the_split_never_stores_exit_1() {
     let (root, path) = install("exit-unsplit", &failing_inspect(1));
     let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
     assert!(!binary.splits_answer_from_failure().unwrap());
-    let exits = completed_exits(&PbfhoggCommand::CheckRefs, &binary, None).unwrap();
+    let exits =
+        completed_exits(&PbfhoggCommand::CheckRefs { relations: false }, &binary, None).unwrap();
     assert_eq!(exits.codes(), [0]);
 }
 
@@ -571,11 +573,12 @@ fn a_declared_answer_narrows_the_accepted_exits_to_it() {
 fn expected_violations_on_a_build_from_before_the_split_refuse_the_run() {
     let (root, path) = install("exit-expect-unsplit", &failing_inspect(1));
     let binary = PbfhoggBinary::fixture(&path, &root).unwrap();
-    let err = completed_exits(&PbfhoggCommand::CheckRefs, &binary, Some(&expecting(1)))
+    let refs = PbfhoggCommand::CheckRefs { relations: true };
+    let err = completed_exits(&refs, &binary, Some(&expecting(1)))
         .unwrap_err()
         .to_string();
     assert!(err.contains("not started"), "got: {err}");
-    let clean = completed_exits(&PbfhoggCommand::CheckRefs, &binary, Some(&expecting(0))).unwrap();
+    let clean = completed_exits(&refs, &binary, Some(&expecting(0))).unwrap();
     assert_eq!(clean.codes(), [0]);
 }
 
@@ -722,7 +725,7 @@ fn typed_commands_resolve_through_the_negotiation_their_arm_chose() {
     // A read-only command: no probe, no flag.
     let check = binary
         .invocation(
-            PbfhoggCommand::CheckRefs
+            PbfhoggCommand::CheckRefs { relations: false }
                 .build_args(&ctx, ArgMode::Bench)
                 .unwrap(),
         )
