@@ -1838,6 +1838,11 @@ pub struct PbfExpect {
     /// Covers `check-ids` with and without `--full`.
     pub check_ids: Option<CheckVerdict>,
     pub check_index: Option<CheckVerdict>,
+    /// Covers `check-locations` without `--agreement` only.
+    pub check_locations: Option<CheckVerdict>,
+    /// Covers `check-locations --agreement`: a file clean under the plain
+    /// check can still fail agreement.
+    pub check_locations_agreement: Option<CheckVerdict>,
     /// `diff` of this file against itself with the OSC of that sequence
     /// applied, keyed by the OSC sequence in the same snapshot's `osc` table.
     #[serde(default)]

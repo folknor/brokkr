@@ -34,11 +34,13 @@ paths still resolve against each including project's root.
 - `pbf.<variant>.expect` (pbfhogg, optional) - the answers pbfhogg's
   answer commands should give on this file, so a contradicting answer fails
   the run instead of being stored (`docs/projects/pbfhogg.md`, Declared
-  answers). `check-refs`, `check-refs-relations`, `check-ids` and
-  `check-index` take `"clean"` or `"violations"`; `check-refs` covers the
-  plain run and `check-refs-relations` the `--check-relations` one, since a
-  file with clean way refs can still have missing relation members (an
-  extract cuts them at its boundary). `diff` is a table keyed by an OSC sequence of the same
+  answers). `check-refs`, `check-refs-relations`, `check-ids`,
+  `check-index`, `check-locations` and `check-locations-agreement` take
+  `"clean"` or `"violations"`; `check-refs` covers the plain run and
+  `check-refs-relations` the `--check-relations` one, since a file with clean
+  way refs can still have missing relation members (an extract cuts them at
+  its boundary), and `check-locations` and `check-locations-agreement` split
+  the same way over `--agreement`. `diff` is a table keyed by an OSC sequence of the same
   snapshot, `"same"` or `"differs"`, for this file against itself with that
   OSC applied. Unknown keys and values are load errors. Absent, either
   answer is stored. It belongs to the entry as composed, so an `include`
@@ -111,7 +113,8 @@ xxhash = "fa581f7b..."
 Every measurable command on a project that uses datasets accepts:
 
 - `--variant <name>` - selects from `pbf.<name>`. Default: `indexed`
-  (pbfhogg), `raw` (elivagar/nidhogg).
+  (pbfhogg, except `check-locations`, which defaults to `locations`), `raw`
+  (elivagar/nidhogg).
 - `--osc-seq <seq>` - selects from `osc.<seq>`. Auto-selects if exactly one
   OSC is configured.
 - `--tiles <variant>` - selects from `pmtiles.<variant>`. Auto-selects if

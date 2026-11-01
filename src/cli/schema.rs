@@ -9,6 +9,8 @@ use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 pub(crate) const DEFAULT_DATASET: &str = "denmark";
 pub(crate) const DEFAULT_RAW_VARIANT: &str = "raw";
 pub(crate) const DEFAULT_INDEXED_VARIANT: &str = "indexed";
+/// The `add-locations-to-ways` output variant, `check-locations`'s default.
+pub(crate) const LOCATIONS_VARIANT: &str = "locations";
 
 /// Node-index engine selection for `verify add-locations-to-ways`: one of
 /// pbfhogg's `--index-type` engines, or both.
@@ -638,6 +640,30 @@ In depth: `brokkr man clippy`."
         mode: ModeArgs,
         #[command(flatten)]
         pbf: PbfArgs,
+        /// Snapshot key to read input from. Use `base` (or omit) for the
+        /// dataset's primary data; pass a key registered under
+        /// `[dataset.snapshot.<key>]` for a historical snapshot.
+        #[arg(long)]
+        snapshot: Option<crate::datasets::resolve::SnapshotRef>,
+    },
+    /// Verify a LocationsOnWays file's inline way-node coordinates against
+    /// its node records. Defaults to the `locations` variant, since pbfhogg
+    /// refuses an input that is not LocationsOnWays
+    #[command(
+        name = "check-locations",
+        display_order = 2,
+        mut_arg("variant", |arg| arg.default_value(LOCATIONS_VARIANT))
+    )]
+    CheckLocations {
+        #[command(flatten)]
+        mode: ModeArgs,
+        #[command(flatten)]
+        pbf: PbfArgs,
+        /// Also require every inline coordinate of a node the file does not
+        /// contain to agree across the ways referencing it: pbfhogg's
+        /// `--agreement`, which needs a slot per referenced node
+        #[arg(long)]
+        agreement: bool,
         /// Snapshot key to read input from. Use `base` (or omit) for the
         /// dataset's primary data; pass a key registered under
         /// `[dataset.snapshot.<key>]` for a historical snapshot.

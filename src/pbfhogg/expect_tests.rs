@@ -76,6 +76,8 @@ fn a_dataset_without_declarations_expects_nothing() {
         PbfhoggCommand::CheckRefs { relations: true },
         PbfhoggCommand::CheckIds { full: false },
         PbfhoggCommand::CheckIndex,
+        PbfhoggCommand::CheckLocations { agreement: false },
+        PbfhoggCommand::CheckLocations { agreement: true },
         PbfhoggCommand::Diff {
             format: DiffFormat::Default,
         },
@@ -104,6 +106,30 @@ fn check_refs_with_relations_reads_its_own_declaration() {
     let relations_only: PbfExpect =
         toml::from_str("check-refs-relations = \"clean\"").unwrap();
     assert!(for_entry(&plain, &relations_only, None, "[t]").is_none());
+}
+
+/// Agreement is a different proposition: each locations shape reads its own
+/// key only, with no fallback either way.
+#[test]
+fn check_locations_with_agreement_reads_its_own_declaration() {
+    let both: PbfExpect = toml::from_str(
+        "check-locations = \"clean\"\ncheck-locations-agreement = \"violations\"",
+    )
+    .unwrap();
+    let plain = PbfhoggCommand::CheckLocations { agreement: false };
+    let agreement = PbfhoggCommand::CheckLocations { agreement: true };
+    let hit = for_entry(&plain, &both, None, "[t]").unwrap();
+    assert_eq!((hit.exit, hit.source.as_str()), (0, "[t] check-locations"));
+    let hit = for_entry(&agreement, &both, None, "[t]").unwrap();
+    assert_eq!(
+        (hit.exit, hit.source.as_str()),
+        (1, "[t] check-locations-agreement")
+    );
+    let plain_only: PbfExpect = toml::from_str("check-locations = \"clean\"").unwrap();
+    assert!(for_entry(&agreement, &plain_only, None, "[t]").is_none());
+    let agreement_only: PbfExpect =
+        toml::from_str("check-locations-agreement = \"clean\"").unwrap();
+    assert!(for_entry(&plain, &agreement_only, None, "[t]").is_none());
 }
 
 #[test]

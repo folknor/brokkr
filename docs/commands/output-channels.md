@@ -199,6 +199,7 @@ self-reported.
 | check-refs | run_external_ok | yes | counters |
 | check-ids | run_external_ok | yes | counters |
 | check-index | run_external_ok | yes | counters |
+| check-locations | run_external_ok | yes | counters |
 | digest | run_external_ok | yes | counters |
 | sort | run_external_ok | yes | counters |
 | cat | run_external_ok | yes | counters |

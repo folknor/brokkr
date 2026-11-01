@@ -269,7 +269,7 @@ pbfhogg exits 0 or 1 for a completed command's answer and 2 or above for a
 failure: 1 is `diff` finding differences, `check` finding violations,
 `inspect --indexed` finding no index, `inspect --show` finding no element.
 The measured commands that give such an answer - `diff`, `diff-snapshots`,
-`check-refs`, `check-ids`, `check-index` - accept exit 1 as a completed run, so a
+`check-refs`, `check-ids`, `check-index`, `check-locations` - accept exit 1 as a completed run, so a
 `--bench` cell on a file that rightly fails its check (a ways-only snapshot
 under `check-refs`) reaches results.db, with `meta.exit_code` recording which
 answer was measured (see `docs/commands/results.md`). Exit 2 and signals stay
@@ -317,6 +317,8 @@ disproves.
   or `--snapshot`, so each variant file declares for itself.
   `check-refs --check-relations` reads `check-refs-relations` there, never
   `check-refs`: clean way refs say nothing about relation members.
+  `check-locations` reads `check-locations` and `check-locations --agreement`
+  reads `check-locations-agreement`, the same split.
 - `diff` reads `diff."<seq>"` on the same table: this file against itself
   with that OSC applied. A declared `diff` rebuilds the merged B side with
   the build under test even under `brokkr run` or `--keep-cache`, since a
@@ -414,6 +416,33 @@ Answer exit codes). `--direct-io` is forwarded and changes every read the
 command makes; a host that refuses O_DIRECT exits 3, a failure. The suite
 preset runs without it. `--io-uring` is refused, as pbfhogg's check has no
 io_uring path.
+
+## Check locations
+
+`brokkr check-locations` measures `pbfhogg check --locations`, which
+verifies a LocationsOnWays file's inline way-node coordinates against its own
+node records, with the same modes as its siblings (`--bench`, `--hotpath`,
+`--alloc`, `--commit`, `--snapshot`). brokkr passes `--locations` alone, so
+the row times that check only, and never drops it: without the selector
+pbfhogg would run its default `--ids --refs` pair under this row's name, so a
+`--commit` build from before pbfhogg 669a31e6, which lacks the flag, fails
+instead. `--agreement` adds pbfhogg's `--agreement`, which also requires
+every inline copy of an absent node's coordinate to agree; it needs a slot
+per referenced node, so it is a different workload as well as a different
+answer, and is declared separately (Declared answers).
+
+pbfhogg refuses an input that does not declare LocationsOnWays, or declares
+HistoricalInformation, before reading any data blob, exit 2. So
+`check-locations` alone defaults `--variant` to `locations`, the
+`add-locations-to-ways` output; an explicit `--variant` wins, and a dataset
+or snapshot without that variant fails resolution with no substitute.
+Whether a file is checkable is left to the binary, which alone knows what its
+revision accepts, so an inapplicable input fails after the build. It is not a
+`brokkr suite pbfhogg` preset: the suite runs every preset on one selected
+input, by default `indexed`, which is generally not LocationsOnWays.
+`--direct-io`, `--io-uring`, `--compression` and `--jobs` are refused, since
+no pbfhogg revision gives any of them effect there; pbfhogg itself notes that
+direct I/O has no effect on its unaligned parallel reads.
 
 ## Verify subcommands
 

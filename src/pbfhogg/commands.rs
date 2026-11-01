@@ -445,6 +445,16 @@ pub enum PbfhoggCommand {
     /// tagdata from its decompressed payload. Passing `--index` alone
     /// suppresses pbfhogg's default `--ids --refs` pair.
     CheckIndex,
+    /// `check --locations`: verifies a LocationsOnWays file's inline way-node
+    /// coordinates against its node records, since pbfhogg 669a31e6. Passed
+    /// alone, like `--index`, so the row times that check only. `agreement`
+    /// adds `--agreement`, which also requires every inline copy of an absent
+    /// node's coordinate to agree: a different proposition and workload.
+    /// pbfhogg refuses an input that is not LocationsOnWays; brokkr leaves
+    /// that to the binary, which alone knows what its revision accepts.
+    CheckLocations {
+        agreement: bool,
+    },
     /// `digest`. `form` is the form asked for; what is passed and measured
     /// also depends on the build ([`digest_form`]).
     Digest {
@@ -546,6 +556,7 @@ impl PbfhoggCommand {
             Self::CheckRefs { .. } => ("check-refs", None, Unsupported),
             Self::CheckIds { .. } => ("check-ids", None, Unsupported),
             Self::CheckIndex => ("check-index", None, Unsupported),
+            Self::CheckLocations { .. } => ("check-locations", None, Unsupported),
             Self::Digest { .. } => ("digest", None, Unsupported),
             Self::Sort => ("sort", ScratchPbf, Indexed),
             Self::Cat(_) => ("cat", ScratchPbf, Indexed),
@@ -634,8 +645,8 @@ impl PbfhoggCommand {
     ///   `check`, `digest`, `diff` (its output is OSC or text),
     ///   `merge-changes` (OSC) or `build-geocode-index` (an index), nor an
     ///   OSC tags-filter.
-    /// - `--direct-io`: everything but `merge-changes` and an OSC
-    ///   tags-filter.
+    /// - `--direct-io`: everything but `merge-changes`, `check --locations`
+    ///   and an OSC tags-filter.
     /// - `--jobs`: the commands with a worker pool it sizes: `inspect --nodes`
     ///   and `inspect tags`, a PBF tags-filter that keeps referenced objects
     ///   (`--omit-referenced` has no classify pool, and the OSC filter takes
@@ -665,6 +676,7 @@ impl PbfhoggCommand {
                 | Self::CheckRefs { .. }
                 | Self::CheckIds { .. }
                 | Self::CheckIndex
+                | Self::CheckLocations { .. }
                 | Self::Digest { .. }
                 | Self::Diff { .. }
                 | Self::DiffSnapshots { .. }
@@ -685,7 +697,9 @@ impl PbfhoggCommand {
                 | Self::MultiExtract { .. } => true,
             },
             Axis::DirectIo => match self {
-                Self::MergeChanges { .. } => false,
+                // Every pbfhogg with `check --locations` prints that
+                // `--direct-io` has no effect there (unaligned parallel preads).
+                Self::MergeChanges { .. } | Self::CheckLocations { .. } => false,
                 Self::TagsFilter { .. } => pbf_tags_filter(self),
                 _ => true,
             },
@@ -822,7 +836,8 @@ impl PbfhoggCommand {
             | Self::DiffSnapshots { .. }
             | Self::CheckRefs { .. }
             | Self::CheckIds { .. }
-            | Self::CheckIndex => &[1],
+            | Self::CheckIndex
+            | Self::CheckLocations { .. } => &[1],
             // Exhaustive on purpose: a new command must decide whether it
             // answers negatively, or a violating run is dropped as a failure.
             Self::Inspect { .. }
@@ -1057,6 +1072,19 @@ impl PbfhoggCommand {
             Self::CheckIndex => CommandArgv::new("check")
                 .arg("--index")
                 .input(ctx.pbf_str()?),
+            // Never dropped for an older build: without the selector pbfhogg
+            // runs the default `--ids --refs` pair, which this row would
+            // then mislabel. A build before 669a31e6 fails on the flag.
+            Self::CheckLocations { agreement } => {
+                let argv = CommandArgv::new("check")
+                    .arg("--locations")
+                    .input(ctx.pbf_str()?)?;
+                Ok(if *agreement {
+                    argv.arg("--agreement")
+                } else {
+                    argv
+                })
+            }
             Self::Digest { form } => {
                 let argv = CommandArgv::new("digest").input(ctx.pbf_str()?)?;
                 let (flag, _) = digest_form(*form, ctx.observations.digest_takes_form);
@@ -1709,6 +1737,8 @@ mod tests {
             PbfhoggCommand::CheckIds { full: false },
             PbfhoggCommand::CheckIds { full: true },
             PbfhoggCommand::CheckIndex,
+            PbfhoggCommand::CheckLocations { agreement: false },
+            PbfhoggCommand::CheckLocations { agreement: true },
             PbfhoggCommand::Digest { form: None },
             PbfhoggCommand::Digest {
                 form: Some(DigestForm::Full),
@@ -1950,6 +1980,34 @@ mod tests {
         assert!(!args.iter().any(|a| a == "--ids" || a == "--refs"));
         assert_eq!(cmd.ok_exit_codes(), &[1]);
         assert!(!cmd.axis_has_effect(Axis::IoUring));
+    }
+
+    /// `--locations` alone, `--agreement` only when asked, a negative answer
+    /// accepted, and no axis flag: none has ever had effect on the check.
+    #[test]
+    fn check_locations_passes_only_its_selector_and_refuses_every_axis() {
+        for agreement in [false, true] {
+            let cmd = PbfhoggCommand::CheckLocations { agreement };
+            let args = cmd
+                .build_args(&ctx_for(&cmd), ArgMode::Bench)
+                .unwrap()
+                .into_args();
+            assert_eq!(
+                args.get(..3),
+                Some(&["check", "--locations", "/data/denmark.osm.pbf"].map(String::from)[..])
+            );
+            assert_eq!(args.len(), if agreement { 4 } else { 3 }, "{args:?}");
+            assert_eq!(args.iter().any(|a| a == "--agreement"), agreement);
+            assert!(
+                !args
+                    .iter()
+                    .any(|a| a == "--ids" || a == "--refs" || a == "--index")
+            );
+            assert_eq!(cmd.ok_exit_codes(), &[1]);
+            for axis in [Axis::IoUring, Axis::Compression, Axis::DirectIo, Axis::Jobs] {
+                assert!(!cmd.axis_has_effect(axis), "{axis:?}");
+            }
+        }
     }
 
     #[test]

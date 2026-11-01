@@ -98,6 +98,24 @@ impl Command {
                     params,
                 }
             }
+            Self::CheckLocations {
+                mode,
+                pbf,
+                agreement,
+                snapshot,
+            } => {
+                let params = CommandParams {
+                    snapshot,
+                    ..Default::default()
+                };
+                RoutedCommand::Pbf {
+                    mode,
+                    pbf,
+                    command: PbfhoggCommand::CheckLocations { agreement },
+                    osc: None,
+                    params,
+                }
+            }
             Self::CheckIndex {
                 mode,
                 pbf,

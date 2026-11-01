@@ -161,6 +161,22 @@ mod tests {
             .expect("parser thread")
     }
 
+    /// check-locations alone defaults to the locations variant; an explicit
+    /// `--variant` still wins, and a sibling check keeps `indexed`.
+    #[test]
+    fn check_locations_defaults_to_the_locations_variant() {
+        let variant = |cli: Cli| match cli.command {
+            Command::CheckLocations { pbf, .. } | Command::CheckIndex { pbf, .. } => pbf.variant,
+            _ => panic!("unexpected command"),
+        };
+        let omitted = parse(["brokkr", "check-locations"]).unwrap();
+        assert_eq!(variant(omitted), "locations");
+        let explicit = parse(["brokkr", "check-locations", "--variant", "raw"]).unwrap();
+        assert_eq!(variant(explicit), "raw");
+        let sibling = parse(["brokkr", "check-index"]).unwrap();
+        assert_eq!(variant(sibling), "indexed");
+    }
+
     /// The positional tail the arm key keeps verbatim, from a real parse.
     fn tail(argv: &'static [&'static str]) -> usize {
         std::thread::Builder::new()

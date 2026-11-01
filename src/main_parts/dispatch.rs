@@ -388,6 +388,7 @@ fn run_project(
         | Command::CheckRefs { .. }
         | Command::CheckIds { .. }
         | Command::CheckIndex { .. }
+        | Command::CheckLocations { .. }
         | Command::Digest { .. }
         | Command::Sort { .. }
         | Command::Cat { .. }

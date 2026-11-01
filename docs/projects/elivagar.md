@@ -64,7 +64,8 @@ knobs. CLI defaults are still spelled in the command schema.
 
 ## Variant defaults
 
-- `--variant <name>` defaults to `raw` (vs pbfhogg's `indexed`), except on
+- `--variant <name>` defaults to `raw` (vs pbfhogg's `indexed`, or
+  `locations` for its `check-locations`), except on
   `pmtiles-corpus`, where it is required (see the corpus section).
 - The shared `--tiles <variant>` flag (the `pmtiles.<variant>` config entry)
   has **no elivagar consumer**. Elivagar produces archives rather than reading

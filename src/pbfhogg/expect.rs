@@ -2,7 +2,7 @@
 //! input, where brokkr.toml declares it.
 //!
 //! An answer command (`diff`, `diff-snapshots`, `check-refs`, `check-ids`,
-//! `check-index`) completes on exit 0 or 1. When no is the bug - a check
+//! `check-index`, `check-locations`) completes on exit 0 or 1. When no is the bug - a check
 //! reporting false violations on an honest file - exit 1 would be stored as
 //! a completed run. An input that declares its answer narrows the accepted
 //! exits to that one answer, so the contradiction fails the run. Nothing is
@@ -81,6 +81,14 @@ pub(crate) fn for_entry(
         ),
         PbfhoggCommand::CheckIds { .. } => check(expect.check_ids, table, "check-ids"),
         PbfhoggCommand::CheckIndex => check(expect.check_index, table, "check-index"),
+        PbfhoggCommand::CheckLocations { agreement: false } => {
+            check(expect.check_locations, table, "check-locations")
+        }
+        PbfhoggCommand::CheckLocations { agreement: true } => check(
+            expect.check_locations_agreement,
+            table,
+            "check-locations-agreement",
+        ),
         PbfhoggCommand::Diff { .. } => {
             let seq = osc_seq?;
             expect.diff.get(seq).map(|v| Expectation {
@@ -134,6 +142,7 @@ pub(crate) fn resolve(
         PbfhoggCommand::CheckRefs { .. }
         | PbfhoggCommand::CheckIds { .. }
         | PbfhoggCommand::CheckIndex
+        | PbfhoggCommand::CheckLocations { .. }
         | PbfhoggCommand::Diff { .. } => {
             let snapshot = SnapshotRef::from_opt(params.snapshot.as_ref());
             let Some(e) = entry(paths, dataset, &snapshot, variant) else {
