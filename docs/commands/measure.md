@@ -30,15 +30,9 @@ the command name.
 ## Measurable commands per project
 
 The measurable commands are pbfhogg's data ops, elivagar's tilegen/etc., and
-nidhogg's query/ingest. Piners' `corpus` is also measurable, but **only
-`--hotpath`/`--alloc`** (see `docs/commands/corpus.md`): a bare `corpus` is the
-parity run (gate + `runs.db`), while `corpus --hotpath`/`--alloc` builds the
-`[piners.harness]` crate with the hotpath feature and records to `results.db`
-via the same `MeasurementSession` path as everyone else. `corpus --bench` is refused
-- the parity harness emits NDJSON dispositions, not the `key=value` stderr
-timing contract `--bench` needs. The build-config seam both paths share is
-`MeasurementSession::with_build_config` + `BuildConfig::for_harness_with_profile`.
-Pbfhogg's `library SCENARIO` takes `--bench`, and `--hotpath`/`--alloc` for a
+nidhogg's query/ingest. Piners' `corpus` is **not** measurable: it takes no
+measurement flag, and its timing is the parity run row's `wall_ms` (why:
+`docs/commands/corpus.md`). Pbfhogg's `library SCENARIO` takes `--bench`, and `--hotpath`/`--alloc` for a
 scenario its harness declares hotpath, building the
 `[pbfhogg.library.harness]` member with the instrumentation feature added;
 every process is a full verification (`brokkr man library`).
@@ -525,8 +519,8 @@ switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`.
 - **Deadlines**: a caller may bound each child's wall time
   (`run_sidecar_with_deadline`, which the capture helpers pass through). Past it the child's process
   group is SIGKILLed, `stopped_by_deadline` is set, and the run fails. The
-  ratatoskr sync bench uses the script's `ceiling:`; measured `corpus` uses the
-  parity path's hang backstop. Paths with no deadline run until the child
+  ratatoskr sync bench uses the script's `ceiling:`. Paths with no deadline
+  run until the child
   exits or `brokkr kill`.
 - **`brokkr kill` asks the holder over its control socket.** Every fresh
   hold binds `~/.brokkr/lock/<acquisition id>.sock` (`src/lock_service.rs`),

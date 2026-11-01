@@ -2,9 +2,9 @@
 //!
 //! Queries the corpus run store resolved by `corpus_runs_db_path` and written
 //! by `brokkr corpus`. This is its own command rather than a mode of `brokkr
-//! results`: piners now records hotpath/alloc benchmarks into the shared
-//! `results.db` like every other project, so `results` keeps its benchmark
-//! meaning and the corpus store gets a dedicated surface (no overloaded
+//! results`: `results` keeps its benchmark meaning over the shared
+//! `results.db` (which still holds rows from the retired measured corpus
+//! path), and the corpus store gets a dedicated surface (no overloaded
 //! struct, no benchmark filters to reject).
 //!
 //! Flag -> view:

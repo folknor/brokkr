@@ -34,7 +34,8 @@ pub struct HarnessBuild {
     /// `<target>/<profile dir>/`.
     pub binary: PathBuf,
     /// Directory containing every binary the package produced. Exported to
-    /// the harness as `BROKKR_TEST_BIN_DIR` so spawned-binary tests can find
+    /// a ratatoskr harness as `BROKKR_TEST_BIN_DIR` (the piners corpus
+    /// harness gets no brokkr variables) so spawned-binary tests can find
     /// sibling helpers without re-deriving the cargo target dir. The parent
     /// of the executable cargo reported, so a custom profile's directory
     /// needs no mapping of its own.

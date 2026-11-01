@@ -72,9 +72,7 @@ const ARTEFACT_TEST_ID: &str = "corpus";
 /// kill`. Set far above any real run (a full pass included), so only a hang
 /// reaches it; the run is then recorded as failed.
 /// This fixed guard does not estimate from run history or use a dirty-tree
-/// bypass; those checks belong to measured commands, not parity runs.
-/// Shared with the measured path (`measured.rs`), which applies it per
-/// iteration as the sidecar's deadline.
+/// bypass; those checks belong to measured commands, and corpus has none.
 pub(crate) const HARNESS_HANG_BACKSTOP: Duration = Duration::from_secs(60 * 60);
 
 /// Flags lifted off the `Corpus` CLI command.
@@ -99,8 +97,7 @@ pub struct CorpusArgs {
     /// Integrity reporting and the stderr print still apply.
     pub no_isolate: bool,
     /// The CLI profile choice (`--debug`/`--release`/`--profile`); `None`
-    /// takes the config default, else dev for a parity run and release for
-    /// a measured one.
+    /// takes the config default, else dev.
     pub profile_override: Option<crate::build::RustProfile>,
     pub keep_artefacts: bool,
     /// Extra flags forwarded verbatim to the harness binary after
@@ -111,7 +108,7 @@ pub struct CorpusArgs {
     pub harness_args: Vec<String>,
 }
 
-pub(crate) fn missing_harness_config_error() -> DevError {
+fn missing_harness_config_error() -> DevError {
     DevError::Config(
         "corpus: no [piners.harness] section in brokkr.toml. \
          Declare `[piners.harness]` with `package = \"<crate>\"` \
@@ -316,8 +313,6 @@ pub fn corpus(
     // so `brokkr kill` reaches the harness.
     let binary_str = built.binary.display().to_string();
     let manifest_str = manifest_path.display().to_string();
-    let harness_env = crate::ratatoskr::harness_env(artefacts.path(), &built.bin_dir);
-    let env_pairs = harness_env.as_pairs();
 
     let mut harness_argv: Vec<&str> = vec!["--manifest", &manifest_str];
     harness_argv.extend(context.harness_args.iter().map(String::as_str));
@@ -338,7 +333,6 @@ pub fn corpus(
         &binary_str,
         &harness_argv,
         project_root,
-        &env_pairs,
         HARNESS_HANG_BACKSTOP,
         Some(&|pid| lock.set_child_pid(pid)),
         crate::shutdown::ChildIsolation::ProcessGroup(&sigterm),
@@ -545,7 +539,6 @@ pub fn corpus(
                 registry: &registry,
                 binary: &binary_str,
                 harness_args: &context.harness_args,
-                bin_dir: &built.bin_dir,
                 project_root,
                 lock: &lock,
                 launched,
@@ -687,8 +680,8 @@ fn end_line(end: HarnessEnd, rec: &Reconciliation) -> String {
 }
 
 /// Everything a diagnostic attempt reuses from the original run: the same
-/// built binary, verified probes, env, cwd and forwarded harness args, under
-/// the same lock and the same deadline.
+/// built binary, verified probes, cwd and forwarded harness args, under the
+/// same lock and the same deadline.
 struct AttemptEnv<'a> {
     run_dir: &'a Path,
     corpus_root: &'a Path,
@@ -696,7 +689,6 @@ struct AttemptEnv<'a> {
     registry: &'a Registry,
     binary: &'a str,
     harness_args: &'a [String],
-    bin_dir: &'a Path,
     project_root: &'a Path,
     lock: &'a LockGuard,
     /// When the original harness launched; the backstop counts from here.
@@ -705,8 +697,8 @@ struct AttemptEnv<'a> {
 
 impl AttemptEnv<'_> {
     /// Run one diagnostic attempt over `subset` in `<run dir>/attempt-<n>/`:
-    /// its own manifest (built from the same verified probes), stdout,
-    /// stderr and `BROKKR_HARNESS_ARTEFACT_DIR`. Judged by the same run
+    /// its own manifest (built from the same verified probes), stdout and
+    /// stderr. Judged by the same run
     /// assessment as the original run; see [`isolate::classify_attempt`].
     /// Carries every refusal the captured stream holds; an attempt that
     /// produced no capture (not started, interrupted, capture failed) has
@@ -740,22 +732,18 @@ impl AttemptEnv<'_> {
                 .into();
         }
         let manifest_str = manifest_path.display().to_string();
-        let harness_env = crate::ratatoskr::harness_env(&dir, self.bin_dir);
-        let env = harness_env.as_pairs();
         let mut argv: Vec<&str> = vec!["--manifest", &manifest_str];
         argv.extend(self.harness_args.iter().map(String::as_str));
         let lock = self.lock;
         // Guards nest; this one is the borrow the process-group isolation needs.
         let signal_guard = crate::shutdown::SigtermGuard::install();
-        let capture = output::run_captured_with_env_and_deadline_allow_output_cut(
+        let capture = capture_harness(
             self.binary,
             &argv,
             self.project_root,
-            &env,
             remaining,
             Some(&|pid| lock.set_child_pid(pid)),
             crate::shutdown::ChildIsolation::ProcessGroup(&signal_guard),
-            output::child::ChildOptions::LARGE,
         );
         drop(signal_guard);
         lock.clear_child_pid();
@@ -974,12 +962,20 @@ impl<'a> Envelope<'a> {
 /// Run one harness attempt under its caller's wall-clock deadline.
 ///
 /// Kept as the corpus command's boundary so its timeout policy can be tested
-/// with a short deadline without changing the production backstop.
+/// with a short deadline without changing the production backstop. The
+/// original run and every diagnostic attempt launch through here.
+///
+/// brokkr adds no corpus-specific variables to the harness environment (the
+/// shared spawn policy still applies). It once set
+/// `BROKKR_HARNESS_ARTEFACT_DIR` and `BROKKR_TEST_BIN_DIR`, borrowed from
+/// ratatoskr's harness, but no piners harness at any commit has read
+/// either: the hand-off is `--manifest PATH` with the project root as cwd,
+/// and the harness reports on stdout, which brokkr stores as
+/// `harness.stdout` itself.
 fn capture_harness(
     program: &str,
     argv: &[&str],
     cwd: &Path,
-    env: &[(&str, &str)],
     deadline: Duration,
     on_spawn: Option<&dyn Fn(u32)>,
     isolation: crate::shutdown::ChildIsolation<'_>,
@@ -988,7 +984,7 @@ fn capture_harness(
         program,
         argv,
         cwd,
-        env,
+        &[],
         deadline,
         on_spawn,
         isolation,
@@ -1203,7 +1199,6 @@ mod tests {
             "/bin/sleep",
             &["30"],
             Path::new("."),
-            &[],
             Duration::from_millis(250),
             None,
             crate::shutdown::ChildIsolation::Inherit,

@@ -122,9 +122,6 @@ pub enum StopReason {
     /// An attempt's harness reported a `run_error` (rendered): a failure of
     /// its own setup, not of the subset, so there is nothing to bisect.
     HarnessFailure(String),
-    /// An attempt ended at a `--stop` marker, which no diagnostic attempt
-    /// sets: an intentional stop is never an abort to attribute.
-    StopMarker,
 }
 
 /// The policy result for one diagnostic harness invocation.
@@ -161,7 +158,6 @@ impl StopReason {
                 format!("an attempt's evidence could not be stored: {e}")
             }
             StopReason::HarnessFailure(e) => format!("an attempt's harness failed: {e}"),
-            StopReason::StopMarker => "an attempt was ended at a --stop marker".to_owned(),
         }
     }
 
@@ -176,7 +172,6 @@ impl StopReason {
             StopReason::Setup(_) => "stopped on a setup failure",
             StopReason::EvidenceStorage(_) => "stopped on an evidence-storage failure",
             StopReason::HarnessFailure(_) => "stopped on a harness run_error",
-            StopReason::StopMarker => "stopped on a stop marker",
         }
     }
 }

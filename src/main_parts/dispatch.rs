@@ -1,13 +1,13 @@
 //! Top-level and project command dispatch.
 
 use super::bootstrap::{
-    refuse_unmeasured_force, require_detection, run_build, run_check, run_clippy, run_deps,
-    run_fmt, run_install, run_man, run_measured, run_program, run_sync, run_wc,
+    require_detection, run_build, run_check, run_clippy, run_deps, run_fmt, run_install, run_man,
+    run_measured, run_program, run_sync, run_wc,
 };
 use crate::clean::CleanOpts;
 use crate::clean::{cargo_clean_package, cmd_clean};
 use crate::cli::{Cli, Command, VerifyCommand};
-use crate::command_args::{profile_choice, resolve_features, resolve_mode};
+use crate::command_args::{profile_choice, resolve_features};
 use crate::config::project_config::ProjectConfig;
 use crate::context::with_worktree;
 use crate::env::cmd_env;
@@ -1621,9 +1621,8 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             profile,
             keep_artefacts,
             harness_args,
-            mode,
+            commit,
         } => {
-            refuse_unmeasured_force(&mode)?;
             let args = piners::cmd::CorpusArgs {
                 keywords: keyword,
                 probe,
@@ -1637,33 +1636,25 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                 keep_artefacts,
                 harness_args,
             };
-            if resolve_mode(&mode) != measure::MeasureMode::Run {
-                // --hotpath/--alloc: build the harness with the hotpath feature
-                // and record to results.db, skipping the gate and runs.db.
-                run_measured(&mode, detection, "", "", &invocation, |req| {
-                    piners::measured::run(req, &args)
-                })
-            } else {
-                // Bare corpus: the parity run (gate + runs.db). Under
-                // `--commit` only the harness build and the recorded commit
-                // move to the worktree; selection, pins, corpus bytes, the
-                // harness cwd, runs.db and artefacts stay on the main tree.
-                // `--verify-only` and `--reseed` build nothing, so clap
-                // refuses `--commit` beside them.
-                let piners_cfg = project_config.piners()?;
-                with_worktree(
-                    Some(project),
-                    &detection.project_root,
-                    &detection.build_root,
-                    mode.commit.as_deref(),
-                    false,
-                    &crate::tree_policy::TreePolicy::of(dev_config),
-                    context::worktree_keep(dev_config)?,
-                    |build_root| {
-                        piners::cmd::corpus(project_root, build_root.as_path(), piners_cfg, &args)
-                    },
-                )
-            }
+            // The parity run (gate + runs.db); corpus has no measured mode
+            // (see the `piners` module docs). Under `--commit` only the
+            // harness build and the recorded commit move to the worktree;
+            // selection, pins, corpus bytes, the harness cwd, runs.db and
+            // artefacts stay on the main tree. `--verify-only` and `--reseed`
+            // build nothing, so clap refuses `--commit` beside them.
+            let piners_cfg = project_config.piners()?;
+            with_worktree(
+                Some(project),
+                &detection.project_root,
+                &detection.build_root,
+                commit.as_deref(),
+                false,
+                &crate::tree_policy::TreePolicy::of(dev_config),
+                context::worktree_keep(dev_config)?,
+                |build_root| {
+                    piners::cmd::corpus(project_root, build_root.as_path(), piners_cfg, &args)
+                },
+            )
         }
     }
 }

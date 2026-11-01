@@ -605,20 +605,6 @@ pub(super) fn run_sync(
     )
 }
 
-/// `--force` is a measured-run flag (run on a dirty tree, handled by
-/// run_measured/MeasurementSession). A corpus parity run has nothing for it to
-/// override, and a flag accepted and ignored would read as if it did something.
-pub(super) fn refuse_unmeasured_force(mode: &cli::ModeArgs) -> Result<(), DevError> {
-    if mode.force && resolve_mode(mode) == measure::MeasureMode::Run {
-        return Err(DevError::Usage(
-            "corpus: `--force` applies to a measured run (`--hotpath`/`--alloc`) only; \
-             a parity run has no runtime limit to bypass"
-                .into(),
-        ));
-    }
-    Ok(())
-}
-
 /// `check` builds, scans, and diffs the code tree, so it anchors on the build
 /// root (cwd). The config values it uses (`[[check]]` sweeps, dependency rules,
 /// gremlin excludes) come from wherever brokkr.toml was found, in cwd or one

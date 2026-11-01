@@ -204,6 +204,33 @@ mod tests {
         );
     }
 
+    /// Corpus is not measurable: piners' corpus binary carries no profiler
+    /// and no timing contract, so the measurement and measured-run flags
+    /// are refused at parse instead of building something that cannot
+    /// report, and the shared flags a parity run never read are gone too.
+    #[test]
+    fn corpus_takes_no_measurement_flags() {
+        for flag in [
+            "--bench",
+            "--hotpath",
+            "--alloc",
+            "--force",
+            "--dry-run",
+            "--verbose",
+        ] {
+            assert!(
+                parse(["brokkr", "corpus", "--all", flag]).is_err(),
+                "{flag}"
+            );
+        }
+        for (flag, value) in [("--stop", "m"), ("--features", "x")] {
+            assert!(
+                parse(["brokkr", "corpus", "--all", flag, value]).is_err(),
+                "{flag}"
+            );
+        }
+    }
+
     #[test]
     fn check_accepts_profile_flag() {
         let parsed = parse(["brokkr", "check", "--profile", "tier1"]).expect("parse");

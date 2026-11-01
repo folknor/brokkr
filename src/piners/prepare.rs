@@ -9,7 +9,7 @@ use crate::output;
 use crate::piners::registry::{self, Registry, VerifiedProbe};
 use crate::piners::select::{self, SelectArgs};
 
-/// A locked, verified corpus selection shared by parity and measured runs.
+/// A locked, verified corpus selection.
 pub(crate) struct PreparedSelection {
     pub registry: Registry,
     pub registry_dir: PathBuf,

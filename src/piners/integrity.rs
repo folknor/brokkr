@@ -17,16 +17,14 @@
 //! [`RunAssessment`] is the one shared judgement of a harness invocation:
 //! process termination, stream integrity, the contract
 //! (`crate::piners::contract`) and the exact selection reconciliation,
-//! built by [`assess`]. Ordinary runs, bless, measured iterations and isolation
-//! attempts each read it through a verdict method with the matching return
-//! type: [`RunAssessment::parity_verdict`],
-//! [`RunAssessment::measured_verdict`] or
-//! [`RunAssessment::isolation_verdict`].
+//! built by [`assess`]. Ordinary runs, bless and isolation attempts each read
+//! it through a verdict method with the matching return type:
+//! [`RunAssessment::parity_verdict`] or [`RunAssessment::isolation_verdict`].
 
 use std::collections::{BTreeSet, HashSet};
 
 use crate::output;
-use crate::piners::contract::{self, ContractAssessment, HarnessExitCode};
+use crate::piners::contract::{self, ContractAssessment};
 use crate::piners::registry::PinnedDisposition;
 use crate::piners::report::{self, HarnessReport, ProbeOutcome, RefusalReason};
 
@@ -64,8 +62,8 @@ pub struct RunAssessment {
     /// gathered before repeats collapse, whether or not the probe was
     /// selected, scored or tainted by another occurrence, and whatever the
     /// ending, so neither scoring nor a classification of how the invocation
-    /// ended can hide one. Each fails a parity run, disqualifies a measured
-    /// iteration and is kept by diagnostic isolation.
+    /// ended can hide one. Each fails a parity run and is kept by diagnostic
+    /// isolation.
     pub refusals: Vec<RefusedProbe>,
 }
 
@@ -124,7 +122,7 @@ impl RunAssessment {
     /// Every selected probe validly reported, nothing broke protocol, the
     /// stream is whole, no `run_error`, the process exited 0 or 1, and - once
     /// the contract is observed - the stream carries its `run_end`. The
-    /// completion standard isolation attempts and measured iterations hold.
+    /// completion standard isolation attempts hold.
     pub fn completed(&self) -> bool {
         self.end.completed_status()
             && self.rec.complete()
@@ -146,21 +144,6 @@ impl RunAssessment {
             .filter(|p| {
                 p.outcome() == Some(&ProbeOutcome::Evaluated(PinnedDisposition::HarnessAbort))
                     && self.rec.valid.contains(&p.probe)
-            })
-            .map(|p| p.probe.as_str())
-            .collect();
-        ids.sort_unstable();
-        ids
-    }
-
-    /// Scored probes reported with any break, refusals included, sorted.
-    fn breaks(&self) -> Vec<&str> {
-        let mut ids: Vec<&str> = self
-            .report
-            .probes
-            .iter()
-            .filter(|p| {
-                self.rec.valid.contains(&p.probe) && p.outcome().is_some_and(ProbeOutcome::is_break)
             })
             .map(|p| p.probe.as_str())
             .collect();
@@ -190,11 +173,6 @@ impl RunAssessment {
         }
     }
 
-    /// Whether an iteration is a valid timing sample and, if not, why.
-    pub fn measured_verdict(&self) -> Result<(), String> {
-        self.measured_failure()
-    }
-
     /// Classify one diagnostic isolation attempt under its acceptance rule.
     /// Its refusals are not part of the verdict: they ride beside it
     /// ([`Self::refusals`]), whatever the attempt's status.
@@ -203,9 +181,6 @@ impl RunAssessment {
 
         if let Some(error) = &self.contract.run_error {
             AttemptVerdict::Stop(StopReason::HarnessFailure(error.render()))
-        } else if self.end == HarnessEnd::Stopped {
-            // An intentional stop is never an abort to attribute.
-            AttemptVerdict::Stop(StopReason::StopMarker)
         } else if self.completed() {
             AttemptVerdict::Completed
         } else if self.violations() > 0 || self.output_cut {
@@ -251,9 +226,6 @@ impl RunAssessment {
                 "harness killed at the {}s hang backstop",
                 crate::piners::cmd::HARNESS_HANG_BACKSTOP.as_secs()
             )),
-            // A parity run never sets a stop marker; one that ends this way
-            // is not a completed run.
-            HarnessEnd::Stopped => reasons.push("harness stopped at its --stop marker".to_owned()),
             other => reasons.push(abnormal_reason(other, rec)),
         }
         if self.output_cut {
@@ -264,8 +236,7 @@ impl RunAssessment {
         // An abnormal end or a run_error already counted what went unreported.
         if !rec.complete()
             && self.contract.run_error.is_none()
-            && (self.end.completed_status()
-                || matches!(self.end, HarnessEnd::Backstop | HarnessEnd::Stopped))
+            && (self.end.completed_status() || self.end == HarnessEnd::Backstop)
         {
             reasons.push(format!(
                 "{} of {} selected probes without a valid disposition",
@@ -304,81 +275,6 @@ impl RunAssessment {
             ));
         }
         reasons
-    }
-
-    /// Produce the measured-run failure reason, if the assessment is not a
-    /// sample. A sample is an exit-0 workload, so observed failure evidence
-    /// disqualifies an iteration however it ended. An iteration ended at its
-    /// `--stop` marker is excused only what the stop interrupted - full
-    /// coverage and a terminal record - never what its stream already shows.
-    fn measured_failure(&self) -> Result<(), String> {
-        let aborts = self.harness_aborts();
-        if let Some(error) = &self.contract.run_error {
-            return Err(error.render());
-        }
-        if !aborts.is_empty() {
-            return Err(format!(
-                "harness_abort in the run ({}); a crashed probe is no timing sample",
-                aborts.join(", ")
-            ));
-        }
-        if !self.refusals.is_empty() {
-            return Err(format!(
-                "unevaluated in the run ({}); an experiment that was not conducted is no \
-                 timing sample",
-                self.refusal_names().join(", ")
-            ));
-        }
-        if self.end == HarnessEnd::Stopped {
-            return self.stopped_failure();
-        }
-        if self.end == HarnessEnd::Code(0) && self.completed() {
-            return Ok(());
-        }
-        Err(if self.end == HarnessEnd::Code(0) {
-            format!(
-                "harness exited 0 without reporting exactly its selection ({})",
-                self.rec.summary()
-            )
-        } else {
-            format!("harness {} ({})", self.end.describe(), self.rec.summary())
-        })
-    }
-
-    /// The measured policy for a stream ended at its `--stop` marker: what
-    /// was observed must be clean - no break line, no `run_end` saying 1, no
-    /// protocol or contract violation, an intact stream.
-    fn stopped_failure(&self) -> Result<(), String> {
-        let breaks = self.breaks();
-        if !breaks.is_empty() {
-            return Err(format!(
-                "breaks reported before the --stop marker fired ({}); a failing workload is \
-                 no timing sample",
-                breaks.join(", ")
-            ));
-        }
-        if self.contract.run_end == Some(HarnessExitCode::Breaks) {
-            return Err(
-                "run_end exit 1 reported before the --stop marker fired; a failing workload is \
-                 no timing sample"
-                    .to_owned(),
-            );
-        }
-        if self.violations() > 0 || self.output_cut {
-            let mut what = Vec::new();
-            if self.rec.protocol_violations() > 0 {
-                what.push(self.rec.summary());
-            }
-            what.extend(self.contract.violations.iter().cloned());
-            if self.output_cut {
-                what.push("stdout cut short".to_owned());
-            }
-            return Err(format!(
-                "the stream before the --stop marker broke the report protocol ({})",
-                what.join("; ")
-            ));
-        }
-        Ok(())
     }
 
     /// The `[corpus]` lines naming what the assessment found beyond the
@@ -436,9 +332,7 @@ impl RunAssessment {
 /// `harness exited 2 before reporting K of N` / `harness killed by signal 11
 /// after reporting all N` - the short form stored as the fail reason.
 pub fn abnormal_reason(end: HarnessEnd, rec: &Reconciliation) -> String {
-    if end == HarnessEnd::Stopped {
-        abnormal_end_line(end, rec)
-    } else if rec.complete() {
+    if rec.complete() {
         format!(
             "harness {} after reporting all {}",
             end.describe(),
@@ -639,14 +533,12 @@ pub enum HarnessEnd {
     Signal(i32),
     /// Killed by brokkr at the hang backstop.
     Backstop,
-    /// Stopped by an interrupt or a requested shutdown.
+    /// Stopped by an interrupt or a requested shutdown. A `--stop` marker
+    /// ending classifies here too, as a stop brokkr was asked for, though no
+    /// corpus spawn sets a marker (corpus has no measured mode).
     Interrupted,
     /// Never started.
     SpawnFailed,
-    /// Ended by brokkr when the measured iteration's `--stop` marker fired:
-    /// on purpose, so never an abort, and with no natural exit code. Only a
-    /// measured run sets a stop marker; it is not a completed status.
-    Stopped,
 }
 
 impl HarnessEnd {
@@ -658,8 +550,7 @@ impl HarnessEnd {
             Ending::Exited(c) => Self::Code(*c),
             Ending::Signalled(s) => Self::Signal(*s),
             Ending::Deadline(_) => Self::Backstop,
-            Ending::Interrupted => Self::Interrupted,
-            Ending::StopMarker(_) => Self::Stopped,
+            Ending::Interrupted | Ending::StopMarker(_) => Self::Interrupted,
             // The child could not be waited on: the generic failure.
             Ending::WaitFailed(_) => Self::Code(-1),
         }
@@ -679,7 +570,6 @@ impl HarnessEnd {
             Self::Backstop => "was killed at the hang backstop".to_owned(),
             Self::Interrupted => "was interrupted".to_owned(),
             Self::SpawnFailed => "failed to spawn".to_owned(),
-            Self::Stopped => "was stopped at its --stop marker".to_owned(),
         }
     }
 
@@ -691,7 +581,6 @@ impl HarnessEnd {
             Self::Backstop => "hang backstop".to_owned(),
             Self::Interrupted => "interrupted".to_owned(),
             Self::SpawnFailed => "spawn failure".to_owned(),
-            Self::Stopped => "stop marker".to_owned(),
         }
     }
 }
@@ -699,16 +588,9 @@ impl HarnessEnd {
 /// The line printed when the harness ended abnormally: how it ended, against
 /// how much of the selection it had reported. Distinguishes an abort after
 /// complete reporting (a teardown crash, say), where every probe is scored
-/// and only the exit is wrong. An intentional stop is never called a crash.
+/// and only the exit is wrong.
 pub fn abnormal_end_line(end: HarnessEnd, rec: &Reconciliation) -> String {
-    if end == HarnessEnd::Stopped {
-        format!(
-            "harness {} with {} of {} selected probes reported",
-            end.describe(),
-            rec.valid.len(),
-            rec.selected
-        )
-    } else if rec.complete() {
+    if rec.complete() {
         format!(
             "harness {} after reporting all {} selected probes (an abort after complete \
              reporting, e.g. a teardown crash; nothing to isolate)",
@@ -745,9 +627,6 @@ pub enum Trigger {
     /// The harness reported a `run_error`: a shared-setup or harness failure
     /// it already named. Nothing to bisect.
     RunError,
-    /// brokkr ended the harness at a `--stop` marker: an intentional stop,
-    /// never a crash to bisect.
-    Stopped,
     /// `--no-isolate`.
     Disabled,
 }
@@ -765,7 +644,6 @@ pub fn isolation_trigger(
         HarnessEnd::Interrupted => Trigger::Interrupted,
         HarnessEnd::SpawnFailed => Trigger::SpawnFailed,
         HarnessEnd::Backstop => Trigger::Backstop,
-        HarnessEnd::Stopped => Trigger::Stopped,
         _ if run_error => Trigger::RunError,
         e if e.completed_status() => Trigger::CompletedStatus,
         _ if rec.complete() => Trigger::ReportComplete,
@@ -1007,6 +885,11 @@ not json at all
             HarnessEnd::from_ending(&Ending::Interrupted),
             HarnessEnd::Interrupted
         );
+        // No corpus spawn sets a stop marker; one would be a requested stop.
+        assert_eq!(
+            HarnessEnd::from_ending(&Ending::StopMarker("m".to_owned())),
+            HarnessEnd::Interrupted
+        );
     }
 
     const V1: &str = "\"version\":1";
@@ -1079,114 +962,6 @@ not json at all
                 .iter()
                 .any(|l| l.starts_with("unevaluated (") && l.ends_with("a (witness_contract)"))
         );
-        // Never a timing sample, on exit 0 as on exit 1.
-        let solo = clean_stream(&["a"], "unevaluated", 0).replace(
-            r#""outcome":"unevaluated""#,
-            r#""outcome":"unevaluated","reason":"no_overlap","error":"disjoint""#,
-        );
-        let a = assess(&ids(&["a"]), solo.as_bytes(), HarnessEnd::Code(0), false);
-        assert!(a.completed());
-        assert!(
-            a.measured_verdict()
-                .unwrap_err()
-                .starts_with("unevaluated in the run (a (no_overlap))")
-        );
-    }
-
-    /// A prefix of a contract stream, cut where a `--stop` marker fired:
-    /// start, setup, then each of `probes` started with `line` as its
-    /// disposition, no end and no terminal record.
-    fn stopped_prefix(probes: &[(&str, &str)]) -> String {
-        let mut s =
-            format!("{{\"kind\":\"run_start\",{V1}}}\n{{\"kind\":\"setup_complete\",{V1}}}\n");
-        for (p, line) in probes {
-            s.push_str(&format!(
-                "{{\"kind\":\"probe_start\",{V1},\"probe\":\"{p}\"}}\n{line}\n"
-            ));
-        }
-        s
-    }
-
-    #[test]
-    fn a_stop_excuses_only_what_it_interrupted() {
-        let ok = r#"{"probe":"a","outcome":"parity","acceptance":{"tier":"accepted"}}"#;
-        let sel = ids(&["a", "b"]);
-        // Clean prefix: coverage and the terminal record are excused.
-        let clean = stopped_prefix(&[("a", ok)]);
-        let a = assess(&sel, clean.as_bytes(), HarnessEnd::Stopped, false);
-        assert!(
-            a.contract.violations.is_empty(),
-            "{:?}",
-            a.contract.violations
-        );
-        assert!(a.measured_verdict().is_ok(), "{:?}", a.measured_verdict());
-        // A fragment the stop cut off is context, not an invalid record.
-        let cut = format!("{clean}{{\"probe\":\"b\",\"outc");
-        let a = assess(&sel, cut.as_bytes(), HarnessEnd::Stopped, false);
-        assert!(a.measured_verdict().is_ok(), "{:?}", a.measured_verdict());
-        assert!(a.truncated_tail.is_some());
-        // Observed failure evidence is never excused.
-        let broke = stopped_prefix(&[
-            ("a", ok),
-            ("b", r#"{"probe":"b","outcome":"compile_fail"}"#),
-        ]);
-        let err = assess(&sel, broke.as_bytes(), HarnessEnd::Stopped, false)
-            .measured_verdict()
-            .unwrap_err();
-        assert!(
-            err.starts_with("breaks reported before the --stop marker fired (b)"),
-            "{err}"
-        );
-        let refused = stopped_prefix(&[(
-            "a",
-            r#"{"probe":"a","outcome":"unevaluated","reason":"no_overlap","error":"d"}"#,
-        )]);
-        let err = assess(&sel, refused.as_bytes(), HarnessEnd::Stopped, false)
-            .measured_verdict()
-            .unwrap_err();
-        assert!(
-            err.starts_with("unevaluated in the run (a (no_overlap))"),
-            "{err}"
-        );
-        let ended_one = format!(
-            "{}{{\"kind\":\"probe_end\",{V1},\"probe\":\"a\"}}\n{{\"kind\":\"run_end\",{V1},\"exit\":1}}\n",
-            stopped_prefix(&[("a", ok)])
-        );
-        let err = assess(
-            &ids(&["a"]),
-            ended_one.as_bytes(),
-            HarnessEnd::Stopped,
-            false,
-        )
-        .measured_verdict()
-        .unwrap_err();
-        assert!(err.starts_with("run_end exit 1 reported"), "{err}");
-        // A defect the prefix already establishes fails too: a duplicate start.
-        let dup = format!("{clean}{{\"kind\":\"probe_start\",{V1},\"probe\":\"a\"}}\n");
-        let err = assess(&sel, dup.as_bytes(), HarnessEnd::Stopped, false)
-            .measured_verdict()
-            .unwrap_err();
-        assert!(err.contains("duplicate probe_start"), "{err}");
-        // So does a malformed run_error, which a blanket waiver would pass.
-        let bad_error = format!("{clean}{{\"kind\":\"run_error\",{V1}}}\n");
-        assert!(
-            assess(&sel, bad_error.as_bytes(), HarnessEnd::Stopped, false)
-                .measured_verdict()
-                .is_err()
-        );
-        // A whole clean stream with run_end 0 the stop then cut off is
-        // accepted: with no process exit, run_end is compared with nothing.
-        let whole = clean_stream(&["a"], "compile_fail", 0).replace(
-            r#""outcome":"compile_fail""#,
-            r#""outcome":"parity","acceptance":{"tier":"accepted"}"#,
-        );
-        let a = assess(&ids(&["a"]), whole.as_bytes(), HarnessEnd::Stopped, false);
-        assert!(
-            a.contract.violations.is_empty(),
-            "{:?}",
-            a.contract.violations
-        );
-        assert!(a.measured_verdict().is_ok(), "{:?}", a.measured_verdict());
     }
 
     #[test]
@@ -1222,29 +997,6 @@ not json at all
                     .starts_with("1 unevaluated probe (a (invalid_evidence), a (feed_coverage))")),
             "{:?}",
             parity_reasons(&a, true)
-        );
-    }
-
-    #[test]
-    fn a_stop_is_never_isolated_or_called_a_crash() {
-        let inc = incomplete();
-        assert_eq!(
-            isolation_trigger(HarnessEnd::Stopped, &inc, false, false),
-            Trigger::Stopped
-        );
-        let a = assess(&ids(&["a", "b"]), b"", HarnessEnd::Stopped, false);
-        assert_eq!(
-            a.isolation_verdict(),
-            crate::piners::isolate::AttemptVerdict::Stop(
-                crate::piners::isolate::StopReason::StopMarker
-            )
-        );
-        let line = abnormal_end_line(HarnessEnd::Stopped, &complete());
-        assert!(!line.contains("teardown"), "{line}");
-        assert!(
-            parity_reasons(&a, true)
-                .iter()
-                .any(|r| r == "harness stopped at its --stop marker")
         );
     }
 

@@ -2814,7 +2814,7 @@ In depth: `brokkr man nidhogg`."
         /// exit, without building or running the harness. Use after a
         /// submodule re-pin to catch drift. Builds nothing, so it takes no
         /// `--commit`.
-        #[arg(long, conflicts_with_all = ["bench", "hotpath", "alloc", "commit"])]
+        #[arg(long, conflicts_with = "commit")]
         verify_only: bool,
 
         /// Stamp `pins.toml` from the corpus filesystem (no build, no
@@ -2832,7 +2832,7 @@ In depth: `brokkr man nidhogg`."
         /// Prints added/changed/removed probes and changed feed hashes;
         /// review the result with `git diff pins.toml`. Not usable with
         /// `--keyword`, `--verify-only` or `--commit` (it builds nothing).
-        #[arg(long, conflicts_with_all = ["verify_only", "keyword", "bench", "hotpath", "alloc", "commit"])]
+        #[arg(long, conflicts_with_all = ["verify_only", "keyword", "commit"])]
         reseed: bool,
 
         /// Run the selection, then stamp each selected probe's current
@@ -2844,7 +2844,7 @@ In depth: `brokkr man nidhogg`."
         /// Prints `blessed N (changed M)`; review with `git diff pins.toml`.
         /// Combine with `--all`/`--keyword`/`--probe` to scope what is
         /// blessed. Not usable with `--verify-only` or `--reseed`.
-        #[arg(long, conflicts_with_all = ["verify_only", "reseed", "bench", "hotpath", "alloc"])]
+        #[arg(long, conflicts_with_all = ["verify_only", "reseed"])]
         bless: bool,
 
         /// Run, aggregate, and report the per-probe expected-disposition gate
@@ -2853,7 +2853,7 @@ In depth: `brokkr man nidhogg`."
         /// disposition, or a protocol violation, fails the run regardless.
         /// Use during the bless-everything rollout (before expectations
         /// exist) or for ad-hoc "just show me the breakdown" runs.
-        #[arg(long, conflicts_with_all = ["bench", "hotpath", "alloc"])]
+        #[arg(long)]
         no_gate: bool,
 
         /// Skip the diagnostic isolation pass. By default, when the harness
@@ -2862,7 +2862,7 @@ In depth: `brokkr man nidhogg`."
         /// separate harness invocations to find which abort when run alone.
         /// Evidence only - nothing it finds is scored. The integrity report
         /// and the harness stderr are printed either way.
-        #[arg(long, conflicts_with_all = ["verify_only", "reseed", "bench", "hotpath", "alloc"])]
+        #[arg(long, conflicts_with_all = ["verify_only", "reseed"])]
         no_isolate: bool,
 
         /// Build the harness with the dev profile (`<target>/debug/`).
@@ -2879,24 +2879,21 @@ In depth: `brokkr man nidhogg`."
 
         /// Build the harness under this cargo profile: `dev`, `release` or
         /// a custom `[profile.<name>]` (`<target>/<name>/`). Overrides
-        /// `[piners.harness] profile`/`debug` for parity runs; measured
-        /// runs honour only this flag, never the config keys.
+        /// `[piners.harness] profile`/`debug`.
         #[arg(long, value_name = "NAME", value_parser = crate::build::RustProfile::parse,
               conflicts_with_all = ["debug", "release"])]
         profile: Option<crate::build::RustProfile>,
 
         /// Preserve the run dir (manifest + harness output) even on
-        /// success. Failures are always preserved. (Parity runs only;
-        /// measured runs use the bench scratch dir.)
-        #[arg(long, conflicts_with_all = ["bench", "hotpath", "alloc"])]
+        /// success. Failures are always preserved.
+        #[arg(long)]
         keep_artefacts: bool,
 
         /// Extra flags forwarded verbatim to the harness binary, appended
         /// after `--manifest <path>`: everything after a literal `--`, e.g.
         /// `brokkr corpus --probe x --no-gate -- --signal-extra`. The
         /// allowlist-friendly replacement for env-var-prefixed invocations.
-        /// Works for parity and measured runs; recorded in the run row's
-        /// selector (runs.db) / cli_args (results.db). Conflicts with
+        /// Recorded in the run row's selector (runs.db). Conflicts with
         /// `--verify-only`/`--reseed` (no harness runs) and `--bless` (pins
         /// must record default-behavior dispositions only). The gate stays
         /// active - pair with `--no-gate` when the flags change dispositions.
@@ -2904,14 +2901,13 @@ In depth: `brokkr man nidhogg`."
               conflicts_with_all = ["verify_only", "reseed", "bless"])]
         harness_args: Vec<String>,
 
-        /// Measurement mode (`--hotpath`/`--alloc`) and shared build flags.
-        /// With no measurement flag this is a bare parity run (gate +
-        /// runs.db); `--hotpath`/`--alloc` build the harness with the hotpath
-        /// feature and record to results.db via `brokkr results`. `--force`
-        /// (run on a dirty tree) applies to a measured run only; a parity run
-        /// refuses it. `--bench` is not yet supported for corpus.
-        #[command(flatten)]
-        mode: ModeArgs,
+        /// Build the harness from a worktree at this commit and judge it
+        /// against today's pins and corpus: only the harness build and the
+        /// commit the run row records move. Corpus is not a measurable
+        /// command, so it takes no `--bench`/`--hotpath`/`--alloc` (see
+        /// `brokkr man corpus`).
+        #[arg(long, value_name = "REF")]
+        commit: Option<String>,
     },
 
     /// Query the corpus run store (.brokkr/piners/corpus/runs.db)
@@ -2921,7 +2917,7 @@ In depth: `brokkr man nidhogg`."
         long_about = "\
 Query the corpus run store written by `brokkr corpus`
 (.brokkr/piners/corpus/runs.db). This is piners' parity-corpus query
-surface; `brokkr results` stays the benchmark store (hotpath/alloc).
+surface; `brokkr results` stays the benchmark store (results.db).
 
 Examples:
   brokkr corpus-results                                    # table of recent corpus runs

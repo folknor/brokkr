@@ -283,10 +283,7 @@ impl MeasurementSession {
     /// As [`MeasurementSession::build`], but the caller supplies the `BuildConfig`
     /// directly instead of having it derived as a release build of the
     /// project's own crate. Same lock -> `cargo_build` -> `BenchHarness`
-    /// lifecycle; the only difference is *what* gets built. This is the seam
-    /// the measured corpus path uses to build the `[piners.harness]` crate
-    /// (with the hotpath feature appended) while still recording to
-    /// `results.db` via the standard bench harness.
+    /// lifecycle; the only difference is *what* gets built.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn with_build_config(
         dev_config: &config::DevConfig,

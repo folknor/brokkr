@@ -33,16 +33,8 @@ pub(crate) fn cmd_hotpath_generic(req: &measure::MeasureRequest) -> Result<(), D
     };
 
     ctx.harness.run_hotpath(&config, ctx.binary()?, |i, fifo| {
-        ctx.harness.capture_hotpath(
-            ctx.binary()?,
-            &[],
-            req.project_root.as_path(),
-            &[],
-            crate::output::child::Exits::SUCCESS,
-            fifo,
-            i,
-            None,
-        )
+        ctx.harness
+            .capture_hotpath(ctx.binary()?, &[], req.project_root.as_path(), fifo, i)
     })?;
 
     Ok(())

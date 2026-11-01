@@ -13,16 +13,14 @@ registry_dir = "corpus/registry" # pins.toml + <keyword>.toml files (default: co
 # Corpus harness binary, reusing the shared [*.harness] shape. Required to
 # run probes; --verify-only and --reseed work without it.
 [piners.harness]
-package = "piners-runner"  # cargo package
-binary  = "corpus"         # bin (built as `cargo build -p piners-runner --bin corpus`)
+package = "piners-harness" # cargo package
+binary  = "corpus"         # bin (built as `cargo build -p piners-harness --bin corpus`)
 # features = ["..."]       # optional
-# debug = true             # parity-run default (dev if unset); --debug/--release
-                           # override. Measured runs (--hotpath/--alloc) ignore it
-                           # and default to release.
-# profile = "corpus"       # parity-run default by cargo profile name, e.g. a
+# debug = true             # default build (dev if unset); --debug/--release
+                           # override.
+# profile = "corpus"       # default by cargo profile name, e.g. a
                            # [profile.corpus] with inherits = "dev", opt-level = 2.
-                           # Wins over debug; --debug/--release/--profile override;
-                           # measured runs ignore it too.
+                           # Wins over debug; --debug/--release/--profile override.
 ```
 
 - `corpus_root` - root of the piners-owned corpus tree (default `corpus`):

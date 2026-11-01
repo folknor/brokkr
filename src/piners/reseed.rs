@@ -67,8 +67,6 @@ use crate::preflight;
 
 /// Entry point for `brokkr corpus --reseed`.
 pub fn run(project_root: &Path, cfg: &PinersConfig, args: &CorpusArgs) -> Result<(), DevError> {
-    // `--force` is checked in command dispatch: without a measured mode it is
-    // rejected, and measured modes conflict with reseed before dispatch.
     if args.no_gate {
         return Err(DevError::Config(
             "corpus --reseed: --no-gate only applies to a harness run.".into(),

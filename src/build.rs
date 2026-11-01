@@ -302,10 +302,9 @@ impl BuildConfig {
 
     /// Build config for an external harness crate described by a `[*.harness]`
     /// block (`package` + optional `binary`/`features`), under an
-    /// already-resolved profile. Shared by the ratatoskr and piners harness
-    /// builds and the measured corpus path (which appends the hotpath feature
-    /// to the returned config before building) - they build the same kind of
-    /// engine, so the config mapping lives once here.
+    /// already-resolved profile. Shared by every harness build
+    /// (`harness_build`): they build the same kind of engine, so the config
+    /// mapping lives once here.
     pub fn for_harness_with_profile(
         harness_cfg: &crate::config::HarnessConfig,
         profile: RustProfile,

@@ -6,9 +6,9 @@ query sibling). Driving the parity runner - config, selection, verification, the
 expected-disposition gate, reseed/bless - is documented in
 `docs/commands/corpus.md`. This doc covers the **data contracts** the harness
 emits and the **run store** brokkr persists them to. Helpers: `src/piners/`.
-(`corpus --hotpath`/`--alloc` is a separate, *measured* path that records to
-`.brokkr/results.db` via `brokkr results`, not the `runs.db` store here - see
-the measured-runs section of `docs/commands/corpus.md`.)
+`corpus` is not a measurable command (no `--bench`/`--hotpath`/`--alloc`;
+why is in `docs/commands/corpus.md`), so `runs.db` is the only store a corpus
+run writes.
 
 ## The manifest hand-off
 
@@ -77,8 +77,12 @@ pointer (see the Git-LFS guard in `docs/commands/corpus.md`; `src/piners/lfs.rs`
 
 Built once (`cargo build -p <pkg> --bin <bin>`, debug by default - parity is
 opt-level-independent), then spawned as `<bin> --manifest
-<run-dir>/manifest.json` with `BROKKR_HARNESS_ARTEFACT_DIR` (run dir) and
-`BROKKR_TEST_BIN_DIR` (`target/debug/`) set, mirroring ratatoskr.
+<run-dir>/manifest.json` (plus any forwarded flags) with the project root as
+its working directory. brokkr sets no corpus-specific environment
+variables (only what every brokkr spawn carries): unlike ratatoskr's
+harness, the piners harness reads neither `BROKKR_HARNESS_ARTEFACT_DIR` nor
+`BROKKR_TEST_BIN_DIR`, so neither is set, and brokkr stores the harness's
+stdout and stderr in the run dir itself.
 
 Emits **one NDJSON object per probe, no summary line** (brokkr aggregates):
 
@@ -400,12 +404,9 @@ dir and propagates. `brokkr clean` removes the `run-<id>/` dirs but spares
 ## Querying via `brokkr corpus-results`
 
 The corpus run store has its own command, `brokkr corpus-results`, separate
-from `brokkr results`. They used to be one: piners recorded no benchmarks, so
-`results` was rerouted to `runs.db` and rejected the benchmark filters. That
-broke once piners gained hotpath/alloc support - those runs land in the shared
-`results.db` like every other project, so `brokkr results` keeps its benchmark
-meaning and the corpus store moved to a dedicated command. No overloaded query
-struct, no benchmark filters to reject. The corpus views:
+from `brokkr results`, which keeps its benchmark meaning over the shared
+`results.db` (where rows from the retired measured corpus path remain). No
+overloaded query struct, no benchmark filters to reject. The corpus views:
 
 - `brokkr corpus-results` - table of recent runs, each with its `commit`
   (short hash, `*` when the tree was dirty, `?` when its dirtiness is

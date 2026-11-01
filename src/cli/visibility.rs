@@ -167,7 +167,7 @@ Mogwai => ("mogwai", Visibility::Only(&[Project::Mogwai]), Required, None, true,
 Service => ("service", Visibility::Only(&[Project::Ratatoskr]), Required, None, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
 Sync => ("sync", Visibility::Only(&[Project::Ratatoskr]), Required, None, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Direct),
 MockServe => ("mock-serve", Visibility::Only(&[Project::Ratatoskr]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
-Corpus => ("corpus", Visibility::Only(&[Project::Piners]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Mode),
+Corpus => ("corpus", Visibility::Only(&[Project::Piners]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Direct),
 CorpusResults => ("corpus-results", Visibility::Only(&[Project::Piners]), Required, None, true, crate::measure::MeasureMode::Run, None, &[]),}
 
 static INVOCATION: std::sync::OnceLock<CommandId> = std::sync::OnceLock::new();
@@ -239,8 +239,7 @@ impl CommandSpec {
                     | super::Command::Suite { mode, .. }
                     | super::Command::Hotpath { mode, .. }
                     | super::Command::Dellingr { mode, .. }
-                    | super::Command::Mogwai { mode, .. }
-                    | super::Command::Corpus { mode, .. } => Some(mode),
+                    | super::Command::Mogwai { mode, .. } => Some(mode),
                     _ => None,
                 };
                 mode.map(|mode| mode.commit.is_some()).ok_or_else(|| {
@@ -255,7 +254,8 @@ impl CommandSpec {
                 | super::Command::Bench { commit, .. }
                 | super::Command::Verify { commit, .. }
                 | super::Command::Library { commit, .. }
-                | super::Command::Sync { commit, .. } => Ok(commit.is_some()),
+                | super::Command::Sync { commit, .. }
+                | super::Command::Corpus { commit, .. } => Ok(commit.is_some()),
                 _ => Err(crate::error::DevError::Internal(
                     "command has direct worktree policy but carries no direct commit field".into(),
                 )),

@@ -97,16 +97,8 @@ pub(crate) fn run(
             // The profiling runner writes and reads the hotpath report as
             // well as timing the child.
             ctx.harness.run_hotpath(&config, ctx.binary()?, |i, fifo| {
-                ctx.harness.capture_hotpath(
-                    ctx.binary()?,
-                    &argv,
-                    child_cwd,
-                    &[],
-                    crate::output::child::Exits::SUCCESS,
-                    fifo,
-                    i,
-                    None,
-                )
+                ctx.harness
+                    .capture_hotpath(ctx.binary()?, &argv, child_cwd, fifo, i)
             })
         },
         || {

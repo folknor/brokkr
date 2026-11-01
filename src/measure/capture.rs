@@ -149,18 +149,16 @@ impl BenchHarness {
     /// An unreserved launch: the report has one fixed name, cleared before and
     /// after, so a killed run leaves at most that one file; a reserved launch
     /// uses [`capture_hotpath_into`](Self::capture_hotpath_into) with a fresh
-    /// name it declares.
-    #[allow(clippy::too_many_arguments)]
+    /// name it declares. Beyond the shared spawn policy, the child gets only
+    /// the profiler's variables and the marker FIFO; it completes on exit 0
+    /// or a fired `--stop` marker, and runs without a deadline.
     pub fn capture_hotpath(
         &self,
         program: &Path,
         args: &[&str],
         cwd: &Path,
-        extra_env: &[(&str, &str)],
-        exits: child::Exits,
         fifo: &mut crate::sidecar::SidecarFifo,
         index: usize,
-        ceiling: Option<Duration>,
     ) -> Result<Iteration, DevError> {
         let report = self
             .state
@@ -173,7 +171,14 @@ impl BenchHarness {
             Err(error) => return Err(DevError::Io(error)),
         }
         let iteration = self.capture_hotpath_into(
-            program, args, cwd, extra_env, exits, fifo, index, ceiling, &report,
+            program,
+            args,
+            cwd,
+            &[],
+            child::Exits::SUCCESS,
+            fifo,
+            index,
+            &report,
         );
         std::fs::remove_file(&report).ok(); // gate: brokkr's own state file
         iteration
@@ -191,7 +196,6 @@ impl BenchHarness {
         exits: child::Exits,
         fifo: &mut crate::sidecar::SidecarFifo,
         index: usize,
-        ceiling: Option<Duration>,
         report: &Path,
     ) -> Result<Iteration, DevError> {
         let report_str = report.display().to_string();
@@ -201,7 +205,7 @@ impl BenchHarness {
             ("HOTPATH_OUTPUT_FORMAT", "json"),
             ("HOTPATH_OUTPUT_PATH", &report_str),
         ]);
-        let mut iteration = self.capture(program, args, cwd, &env, exits, fifo, index, ceiling)?;
+        let mut iteration = self.capture(program, args, cwd, &env, exits, fifo, index, None)?;
         if iteration.error.is_none() {
             let profile = (|| {
                 let text = std::fs::read_to_string(report).map_err(|error| {

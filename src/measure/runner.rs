@@ -361,7 +361,6 @@ fn execute_invocation<C: PlannedCommand, P: Fn() -> Result<(), DevError>>(
                     command.exits(plan),
                     fifo,
                     i,
-                    None,
                     &report,
                 );
                 let finished = launched.finish();
@@ -515,16 +514,8 @@ pub(crate) fn execute_example(
                 profiling.print_note();
             }
             ctx.harness.run_hotpath(config, binary, |i, fifo| {
-                ctx.harness.capture_hotpath(
-                    binary,
-                    args,
-                    req.project_root.as_path(),
-                    &[],
-                    Exits::SUCCESS,
-                    fifo,
-                    i,
-                    None,
-                )
+                ctx.harness
+                    .capture_hotpath(binary, args, req.project_root.as_path(), fifo, i)
             })?;
         }
     }

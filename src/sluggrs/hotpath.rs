@@ -172,16 +172,8 @@ fn run(
         command_label,
         || {
             ctx.harness.run_hotpath(&config, ctx.binary()?, |i, fifo| {
-                ctx.harness.capture_hotpath(
-                    ctx.binary()?,
-                    &[],
-                    build_root,
-                    &[],
-                    crate::output::child::Exits::SUCCESS,
-                    fifo,
-                    i,
-                    None,
-                )
+                ctx.harness
+                    .capture_hotpath(ctx.binary()?, &[], build_root, fifo, i)
             })
         },
         || {

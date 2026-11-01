@@ -6,58 +6,28 @@ loop (edit Rust, run the relevant probes, read the verdict) stays inside the
 prompt-cache-warm window. `--all` is the full characterization pass.
 Helpers live in `src/piners/`.
 
-## Measured runs (`--hotpath` / `--alloc`)
+## Not a measurable command
 
-`corpus` is a measurable command (`docs/commands/measure.md`): the measurement
-mode is a flag. A **bare** `corpus` is the parity run described in this doc
-(verify -> gate -> `runs.db`). `corpus --hotpath [N]` / `--alloc [N]` instead
-builds the `[piners.harness]` crate **with the hotpath feature added**, runs the
-selection through the sidecar + hotpath-capture path, and records to
-`.brokkr/results.db` - queryable with `brokkr results` like every other
-project, *not* `corpus-results` (that stays the parity run store). The gate
-and the `runs.db` ingest are parity-only and skipped.
+`corpus` takes no `--bench`, `--hotpath` or `--alloc`, and none of the
+shared measurement flags (`--force`, `--features`, `--dry-run`, `--stop`,
+`--verbose`); clap refuses them. Its own flags are the ones below, plus
+`--commit REF`. The timing of a corpus run is the run row's `wall_ms` in
+`runs.db` (`brokkr corpus-results`).
 
-- Selection is the same surface (`--keyword`/`--probe`/`--all`); it builds the
-  manifest workload, but no disposition is gated.
-- The parity-only flags (`--verify-only`/`--reseed`/`--bless`/`--no-gate`/
-  `--keep-artefacts`) conflict with the measurement flags.
-- Profile defaults to **release** for measured runs (meaningful timing);
-  `--debug` profiles the dev build and `--profile <name>` any other.
-  `[piners.harness] debug` and `profile` are the parity default and are not
-  consulted here. The row's `cargo_profile` records what was built (`dev`,
-  `release`, or `cargo:<name>` for a custom profile, shown as the bare
-  name), and `brokkr results --compare` pairs rows only on equal profiles.
-- Each iteration is bounded by the parity path's one-hour hang backstop
-  (below); a harness still running then is killed and the run fails.
-- Each iteration's output is read first, on every process status, and judged
-  by the same run assessment as a parity run (report integrity and the
-  harness contract, below). The iteration counts only if the harness exited
-  0 and the run completed: every selected probe validly reported, no
-  invalid, repeated or report-only extra record, no contract violation, no
-  `run_error`, and the `run_end` once the contract is observed. Anything else
-  fails the measurement (its timing is of a different workload), naming the
-  rendered `run_error` when there is one, and printing the reconciliation,
-  the in-flight context and the whole harness stderr. Exit 1 fails too, so a
-  run with a `harness_abort` is never a timing sample. There is no isolation
-  pass on this path. Any `harness_abort` or `unevaluated` disqualifies the
-  iteration explicitly, even on exit 0 (a disposition-only stream, or a
-  `run_end` saying 0).
-- An iteration whose `--stop` marker actually fired ends early by design, so
-  it is excused only what the stop interrupted: full coverage and a terminal
-  record. Everything its stream already shows is held to the same rules: it
-  fails on a `run_error`, any `harness_abort`, any `unevaluated`, any other
-  break line from a selected probe, a `run_end` saying 1, an invalid,
-  repeated or extra record, a contract violation the prefix establishes (a
-  duplicate start, a malformed `run_error`, a record after a terminal one) or
-  a stream cut short. A fragment the stop cut off mid-write is context, not an
-  invalid record, and the stop leaves no process exit for `run_end` or
-  `run_error` to be compared against. A configured marker that never fired is
-  held to the selection like any other run.
-- `--force` carries its usual measured-run meaning (run on a dirty tree). A
-  parity run refuses it: there is nothing there for it to override.
-- `--bench` is **not** supported - the harness emits NDJSON dispositions,
-  not the `key=value` stderr timing contract `--bench` consumes. Code:
-  `src/piners/measured.rs`.
+A measured path once existed (`--hotpath`/`--alloc` building the harness
+with the hotpath feature and recording to `results.db`). It was retired
+because piners retired its side: piners removed the corpus binary's hotpath
+guard and counting allocator (hotpath's 64-frame ceiling aborts on deep Pine
+recursion) and keeps hotpath out of the corpus build. `piners-harness`
+defines no `hotpath-alloc` feature, so `--alloc` failed at cargo; `--hotpath`
+ran the whole selection and then failed reading a report nothing wrote. The
+corpus binary also forks a process per probe, which one report per
+iteration cannot profile, and it emits no sidecar markers, so `--stop` could
+never fire. `--bench` was never supported: the harness emits NDJSON
+dispositions, not the `key=value` timing contract it consumes. Profiling the
+corpus again needs a producer and capture contract agreed with piners first.
+Rows earlier measured runs stored stay in `results.db`, readable with
+`brokkr results`.
 
 ## Config
 
@@ -67,7 +37,7 @@ in `docs/brokkr.toml.piners.md`. Kept out of the `[[check]]` sweep, like
 
 ## Build profile
 
-A parity run builds the harness under `--debug`/`--release`/`--profile
+A run builds the harness under `--debug`/`--release`/`--profile
 <name>` (mutually exclusive) if given, else `[piners.harness] profile`, else
 `[piners.harness] debug`, else **dev**. Parity is opt-level-independent, so
 the choice is a trade between build time and run time. A dev build keeps
@@ -84,7 +54,7 @@ opt-level = 2
 
 with `profile = "corpus"` under `[piners.harness]`. It builds into
 `<target>/corpus/`, so it and `brokkr check`'s dev builds never invalidate
-each other's artifacts, and `BROKKR_TEST_BIN_DIR` points there. The run row
+each other's artifacts. The run row
 records the profile the build used in `cargo_profile`. A run's wall is
 comparable only against runs built the same way, and
 `corpus-results --compare` notes a profile difference as a context mismatch.
@@ -93,12 +63,11 @@ the same profile differently.
 
 ## `--commit REF`
 
-Builds the harness from a persistent worktree at `REF`, for a parity run and
-a measured one alike, so an older engine is judged against today's corpus.
-Only the harness build and the commit the row records move: the registry,
-the pins and their expectations, the corpus bytes, the manifest, the
-harness's working directory, `runs.db`, `results.db` and the artefact dir
-all stay on the main tree. A parity row's `commit_sha` and `dirty` describe
+Builds the harness from a persistent worktree at `REF`, so an older engine
+is judged against today's corpus. Only the harness build and the commit the
+row records move: the registry, the pins and their expectations, the corpus
+bytes, the manifest, the harness's working directory, `runs.db` and the
+artefact dir all stay on the main tree. A parity row's `commit_sha` and `dirty` describe
 the worktree the harness was built from, never the main tree, whose pins
 and corpus the run used however they stood.
 `--verify-only` and `--reseed` build nothing and refuse `--commit`. `--bless
@@ -107,15 +76,13 @@ to restore expectations from a known-good engine.
 
 The build spec is the main tree's too: the package, binary, features and
 profile name are chosen exactly as without `--commit` (from `[piners.harness]`
-and the flags; a measured run's own profile default and added feature
-included, see Measured runs), and the worktree and its effective cargo
+and the flags), and the worktree and its effective cargo
 configuration decide what they mean - a custom profile of the same name can
 be defined differently at `REF`, and an empty feature list still means that
 package's defaults there. A `REF` that lacks a name the build uses fails its
 build: before the harness package existed, or before the custom profile was
 defined (`--profile`, `--debug` or `--release` replaces the profile for the
-run). Rows record the profile (a measured row its
-requested features too), never the package or binary.
+run). Rows record the profile, never the package or binary.
 
 ## The corpus and the registry
 
@@ -368,11 +335,10 @@ invocation, after `--manifest <path>`:
 
 The allowlist-friendly replacement for env-var-prefixed invocations
 (`PINERS_CORPUS_*=1 brokkr corpus ...`), whose shifting prefixes defeat
-command approval. Works for parity and measured runs. Forwarded flags
+command approval. Forwarded flags
 are part of the run's identity: recorded in the run row's selector and its
 typed `cargo_profile`/`harness_args` context columns (runs.db;
-`corpus-results` renders them as `probe=x -- --flag`) and in
-`cli_args` (results.db). Conflicts with `--verify-only`/`--reseed` (no
+`corpus-results` renders them as `probe=x -- --flag`). Conflicts with `--verify-only`/`--reseed` (no
 harness runs) and `--bless` (pins must record default-behavior
 dispositions only). The gate stays active - pair with `--no-gate` when
 the flags change dispositions.
@@ -691,8 +657,8 @@ The harness's versioned contract lines (shape in `docs/projects/piners.md`)
 are checked in the same one run assessment as the reconciliation
 (`src/piners/integrity.rs` builds it, `src/piners/contract.rs` validates the
 contract). Every consumer reads that one assessment under its own acceptance
-policy: an ordinary run and bless (the failure reasons above), a measured
-iteration, and an isolation attempt.
+policy: an ordinary run and bless (the failure reasons above), and an
+isolation attempt.
 
 - **Recognition before version.** A line whose `kind` is one of
   `run_start`, `setup_stage`, `setup_complete`, `probe_start`, `probe_end`,
@@ -734,8 +700,8 @@ iteration, and an isolation attempt.
   probes without a disposition after a `run_error` are reported as unfinished
   work (`K of N selected probes unfinished`), not as protocol violations.
   It must mean process exit 2 (unless brokkr itself killed the harness, by
-  the hang backstop or an interrupt - a measured iteration's backstop kill
-  is classified as such, never as a spontaneous SIGKILL); it must be the last
+  the hang backstop or an interrupt - a backstop kill is classified as such,
+  never as a spontaneous SIGKILL); it must be the last
   line, so any record after it, an unknown kind included, is a violation;
   and a second `run_error` is a violation.
 - **`run_end`** carries `exit` integer 0 or 1, appears at most once, is the
@@ -795,7 +761,7 @@ run alone (`src/piners/isolate.rs`). Evidence only, never scoring.
   (said in the output). Same built binary, same lock, same env, flags, cwd and
   forwarded harness args. Each attempt gets its own `attempt-<n>/` under the
   run dir, with its own manifest (built from the same verified probes),
-  `harness.stdout`, `harness.stderr` and `BROKKR_HARNESS_ARTEFACT_DIR`. Each
+  `harness.stdout` and `harness.stderr`. Each
   attempt gets the same run assessment as the original. A subset *completes*
   only if it exits 0 or 1, validly reports every probe in it (a
   `harness_abort` counts: the harness already attributed that crash), breaks
