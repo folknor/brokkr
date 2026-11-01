@@ -58,6 +58,20 @@ pub(crate) fn run(
 
     let binary_str = ctx.binary()?.display().to_string();
 
+    // The child's working directory is the live checkout (the project root),
+    // under `--commit` too: only the binary comes from the worktree. Mogwai's
+    // surfaces default their inputs to repo-relative paths, and the market-data
+    // corpus under `research/` and the cache under `analysis/out/` are
+    // gitignored, so they are not populated by a worktree checkout and stay
+    // reachable only here. It is the `brokkr run --commit` split: both arms of
+    // an A/B resolve run-time relative paths against the same directory, not
+    // necessarily to the same paths or contents, since a default can change
+    // between builds. The build root would make the `--commit` arm read a
+    // different tree from the arm it is compared with. The consequences
+    // (outputs landing in the live checkout, git asked about the live HEAD) are
+    // in `docs/projects/mogwai.md`.
+    let child_cwd = req.project_root.as_path();
+
     // Rows file under the target name (or the bin name for a CLI invocation)
     // and carry the exact invocation. Comparison uses its parsed arm_key,
     // which excludes commit provenance, verbosity, and iteration count while
@@ -86,7 +100,7 @@ pub(crate) fn run(
                 ctx.harness.capture_hotpath(
                     ctx.binary()?,
                     &argv,
-                    req.project_root.as_path(),
+                    child_cwd,
                     &[],
                     crate::output::child::Exits::SUCCESS,
                     fifo,
@@ -104,8 +118,7 @@ pub(crate) fn run(
                 ctx.binary()?,
                 argv.iter().map(|&a| a.to_owned()).collect(),
             );
-            ctx.harness
-                .run_external(&config, &invocation, req.project_root.as_path())
+            ctx.harness.run_external(&config, &invocation, child_cwd)
         },
     )?;
 

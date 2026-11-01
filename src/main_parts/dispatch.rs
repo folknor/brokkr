@@ -721,9 +721,9 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
         }
 
         // ----- mogwai commands -----
-        // Dataset/variant stay empty: an input a mogwai surface reads is named
-        // in its argv, which the row captures verbatim, so filling these would
-        // duplicate it under a second name that pairing also keys on.
+        // Dataset/variant stay empty: brokkr does not know what a mogwai
+        // surface reads. An input the argv names is captured verbatim with it;
+        // one the surface defaults internally is named nowhere in the row.
         Command::Mogwai { mode, target, args } => {
             run_measured(&mode, detection, "", "", &invocation, |req| {
                 mogwai::cmd::run(req, target.as_deref(), &args)

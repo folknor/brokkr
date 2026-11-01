@@ -99,9 +99,12 @@ The design is in `src/worktree.rs`.
 That split is the point. The build happens in the worktree, so the commit's
 own manifests, lockfile and `.cargo` config decide what is compiled. The
 program runs in the live tree, so relative paths in its arguments, and any
-cache or data it reads relative to its working directory, resolve exactly as
-they do for the plain `run` it is being compared against. The pair varies the
-code and nothing else.
+cache or data it reads relative to its working directory, resolve against the
+same directory as for the plain `run` it is being compared against. That does
+not guarantee identical inputs: a default can change between the two builds,
+and a path the build embeds (one rooted on `CARGO_MANIFEST_DIR`) points into
+the worktree. A program that asks git about its working directory sees the
+live checkout, not `REF`.
 
 Without it the A/B gets hand-rolled - a second `CARGO_TARGET_DIR`, a tarball of
 the old source - and those leftovers pile up in the tree, unknown to `clean`.

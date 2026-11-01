@@ -116,9 +116,52 @@ Selecting an arm is therefore a query. `brokkr results --grep` and `--grep-v`
 run over the whole invocation, which is the only way to select an arm defined by
 an *absent* flag. See `brokkr man results`.
 
-`input_file` stays empty: an input a surface reads is named in its argv, which
-the row already carries, and duplicating it into that column would key pairing
-on the same fact twice.
+`input_file` stays empty, as do `dataset` and `variant`: brokkr does not know
+what a surface reads. An input the argv names is in the row already, as part of
+the captured invocation. An input the surface defaults internally (`measure`
+reads its corpus, jobs manifest and preflight from repo-relative defaults) is
+named nowhere in the row, and no row identifies the contents of what was read.
+A `[<host>.datasets.*]` entry in mogwai's `brokkr.toml` is checked by
+`brokkr env`; `brokkr mogwai` never reads one.
+
+## `--commit`: which tree the child runs in
+
+`--commit REF` builds the surface in a worktree of `REF`, as every measured
+command does, and runs it with the **live checkout** (the project root) as its
+working directory - the split `brokkr man run` describes for `run --commit`.
+Both arms of an A/B resolve run-time relative paths against the same
+directory. That does not make their inputs identical: a default can change
+between the two builds, and so can what it points at.
+
+The worktree would be the wrong directory. Mogwai's market-data corpus under
+`research/` and its cache under `analysis/out/` are gitignored, so a `REF`
+checkout does not populate them, and the `--commit` arm would read a different
+tree from the arm it is compared against.
+
+What follows from it:
+
+- **Relative inputs are the live checkout's copies**, defaults inside mogwai
+  included. A tracked input may be dirty or newer than `REF`, so old code reads
+  today's format, and fails or misreads where the format moved.
+- **Paths rooted on `CARGO_MANIFEST_DIR` point into the worktree**, since the
+  build bakes them in. `tape_lateness`'s default config is one: under `--commit`
+  it is `REF`'s copy whatever the working directory.
+- **Relative outputs land in the live checkout.** A successful `measure` with
+  its default `--out` rewrites the tracked `analysis/mnq-measure-12a.json`, and
+  if the content changed the tree is now dirty for the next iteration and the
+  other arm - mogwai's own clean-tree gate can then refuse them.
+- **A surface that asks git about its working directory sees the live
+  checkout.** Mogwai's tree-attested artifact writers, `measure` and `fit`
+  among them, currently bind
+  `git rev-parse HEAD` of their working directory as the commit that produced
+  the artifact, so under `--commit` they record the live HEAD rather than
+  `REF`. That is a mogwai defect, not this split's contract: a stale binary run
+  in a checkout that has moved on misbinds the same way without brokkr.
+- **The row files under `REF` even when the live checkout is dirty**, since the
+  dirty-tree refusal checks the build root (`brokkr man measure`). Nothing in
+  the row says which state of the live checkout the inputs came from; that is
+  part of the wider gap of `--commit` rows not identifying what besides the
+  code shaped the run.
 
 ## Counters
 
