@@ -3,7 +3,6 @@
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use crate::civil_date::CivilDate;
 use crate::error::DevError;
@@ -14,11 +13,15 @@ use crate::preflight::{Sha256, Xxh128};
 // Public types
 // ---------------------------------------------------------------------------
 
-pub struct PlanetilerTools {
+/// The pinned JDK and Planetiler jar. Elivagar runs planetiler itself;
+/// pbfhogg's read baseline also needs [`planetiler_bench_classes`].
+pub struct PlanetilerRuntime {
     pub java: PathBuf,
     pub planetiler_jar: PathBuf,
-    pub bench_class_dir: PathBuf,
 }
+
+/// pbfhogg's planetiler read baseline, the Java source under the build root.
+pub(crate) const PLANETILER_BENCH_SOURCE: &str = "bench/planetiler-baseline/BenchPbfRead.java";
 
 pub struct OsmosisTools {
     pub osmosis: PathBuf,
@@ -81,7 +84,7 @@ pub(crate) fn osmpbf_baseline(
     ))
 }
 
-impl PlanetilerTools {
+impl PlanetilerRuntime {
     /// The resolved Java runtime, for code that may only spawn resolved
     /// executables.
     pub(crate) fn java_executable(&self) -> crate::measure::ResolvedExecutable {
@@ -139,22 +142,16 @@ const SHORTBREAD_COMMIT: &str = "9ec009826b49b71bb1481a1c28c3681766c600e3";
 // Top-level entry point
 // ---------------------------------------------------------------------------
 
-/// Ensure JDK + Planetiler JAR + compiled benchmark class are ready.
-pub fn ensure_planetiler(
-    data_dir: &Path,
-    workspace_root: &Path,
-) -> Result<PlanetilerTools, DevError> {
+/// Ensure the pinned JDK and Planetiler jar are ready.
+pub fn ensure_planetiler_runtime(data_dir: &Path) -> Result<PlanetilerRuntime, DevError> {
     check_curl()?;
 
     let java = ensure_jdk(data_dir)?;
-    let javac = data_dir.join("jdk/bin/javac");
     let planetiler_jar = ensure_planetiler_jar(data_dir)?;
-    let bench_class_dir = compile_bench(data_dir, workspace_root, &javac, &planetiler_jar)?;
 
-    Ok(PlanetilerTools {
+    Ok(PlanetilerRuntime {
         java,
         planetiler_jar,
-        bench_class_dir,
     })
 }
 
@@ -383,7 +380,7 @@ fn replace_directory(staged: &Path, destination: &Path, backup: &Path) -> Result
 fn ensure_planetiler_jar(data_dir: &Path) -> Result<PathBuf, DevError> {
     let jar_path = data_dir.join("planetiler.jar");
     let version_file = data_dir.join(".planetiler-version");
-    let marker = format!("{PLANETILER_RELEASE}\n{PLANETILER_SHA256}\n");
+    let marker = planetiler_marker();
 
     // Cache only the release this build records. A different marker gets
     // replaced by the pinned asset below.
@@ -410,65 +407,147 @@ fn ensure_planetiler_jar(data_dir: &Path) -> Result<PathBuf, DevError> {
     Ok(jar_path)
 }
 
+/// `.planetiler-version`: the exact release and its asset digest.
+fn planetiler_marker() -> String {
+    format!("{PLANETILER_RELEASE}\n{PLANETILER_SHA256}\n")
+}
+
 // ---------------------------------------------------------------------------
 // Compile benchmark class
 // ---------------------------------------------------------------------------
 
-fn compile_bench(
+/// Compile pbfhogg's planetiler read baseline from the tree at `tree` (the
+/// build root, a `--commit` worktree included) and hand back its class
+/// directory.
+///
+/// The compiled classes live under the host's data dir, shared by every
+/// tree, so the cache is keyed by content, never by mtime: the key is a
+/// digest of the source bytes and the JDK and Planetiler markers (release and
+/// archive digest each). An mtime test let a `--commit` run's class, compiled
+/// from a freshly checked-out and so newer-looking source, be reused by the
+/// next run on another tree whose source looked older.
+///
+/// The source is copied into a staging dir first, and that copy is both what
+/// is hashed and what javac compiles, so an edit between the two cannot
+/// publish one source's classes under another's key. The classes are
+/// published by renaming the staging output into place only after javac
+/// succeeded and the class exists; other keys are pruned after that, so one
+/// key is kept per data dir and alternating trees recompile.
+pub(crate) fn planetiler_bench_classes(
     data_dir: &Path,
-    workspace_root: &Path,
-    javac: &Path,
-    planetiler_jar: &Path,
+    tree: &Path,
+    runtime: &PlanetilerRuntime,
 ) -> Result<PathBuf, DevError> {
-    let bench_src = workspace_root.join("bench/planetiler-baseline/BenchPbfRead.java");
-    let class_dir = data_dir.join("planetiler-bench-classes");
-    let class_file = class_dir.join("BenchPbfRead.class");
-
-    // Check if recompilation is needed.
-    if class_file.exists()
-        && let Some(false) = needs_recompile(&class_file, &bench_src, planetiler_jar)
-    {
-        return Ok(class_dir);
+    let source = tree.join(PLANETILER_BENCH_SOURCE);
+    let root = data_dir.join("planetiler-bench-classes");
+    let staging = root.join(".staging");
+    if staging.exists() {
+        fs::remove_dir_all(&staging)?;
     }
+    fs::create_dir_all(staging.join("src"))?;
+    let staged_source = staging.join("src/BenchPbfRead.java");
+    fs::copy(&source, &staged_source).map_err(|error| {
+        DevError::Config(format!(
+            "cannot read the planetiler baseline source {}: {error}",
+            source.display()
+        ))
+    })?;
+    let bytes = fs::read(&staged_source)?;
+    let jdk = jdk_marker(jdk_checksum(detect_arch()?, detect_os()?)?);
+    let key = bench_class_key(&bytes, &jdk, &planetiler_marker());
+    let class_dir = root.join(&key);
 
-    fs::create_dir_all(&class_dir)?;
-
-    let javac_str = javac.display().to_string();
-    let jar_str = planetiler_jar.display().to_string();
-    let class_dir_str = class_dir.display().to_string();
-    let bench_src_str = bench_src.display().to_string();
-
-    let captured = output::run_captured(
-        &javac_str,
-        &[
-            "-proc:none",
-            "-cp",
-            &jar_str,
-            "-d",
-            &class_dir_str,
-            &bench_src_str,
-        ],
-        workspace_root,
-    )?;
-
-    captured.check_success("javac")?;
-
-    output::bench_msg("compiled planetiler benchmark");
+    if !class_dir.join("BenchPbfRead.class").is_file() {
+        let staged_classes = staging.join("classes");
+        fs::create_dir_all(&staged_classes)?;
+        let javac = data_dir.join("jdk/bin/javac");
+        let captured = output::run_captured(
+            &javac.display().to_string(),
+            &[
+                "-proc:none",
+                "-cp",
+                &runtime.planetiler_jar.display().to_string(),
+                "-d",
+                &staged_classes.display().to_string(),
+                &staged_source.display().to_string(),
+            ],
+            tree,
+        )?;
+        captured.check_success("javac")?;
+        if !staged_classes.join("BenchPbfRead.class").is_file() {
+            return Err(DevError::Build(format!(
+                "javac succeeded but wrote no BenchPbfRead.class for {}",
+                source.display()
+            )));
+        }
+        // A directory under this key without the class is a leftover, never
+        // a publication: publication is the rename below.
+        if class_dir.exists() {
+            fs::remove_dir_all(&class_dir)?;
+        }
+        fs::rename(&staged_classes, &class_dir)?;
+        output::bench_msg("compiled planetiler benchmark");
+    }
+    if let Err(error) = fs::remove_dir_all(&staging) {
+        output::warn(&format!(
+            "planetiler bench staging {} not removed: {error}",
+            staging.display()
+        ));
+    }
+    prune_bench_classes(&root, &key);
     Ok(class_dir)
 }
 
-/// Returns `Some(true)` if the class file is older than any source, `Some(false)`
-/// if it is up to date, or `None` if timestamps could not be compared.
-fn needs_recompile(class_file: &Path, bench_src: &Path, planetiler_jar: &Path) -> Option<bool> {
-    let class_mtime = file_mtime(class_file)?;
-    let src_mtime = file_mtime(bench_src)?;
-    let jar_mtime = file_mtime(planetiler_jar)?;
-
-    Some(src_mtime > class_mtime || jar_mtime > class_mtime)
+/// The class cache key: a digest over length-framed fields, so no two
+/// distinct inputs can concatenate to the same bytes.
+fn bench_class_key(source: &[u8], jdk_marker: &str, planetiler_marker: &str) -> String {
+    let mut hasher = xxhash_rust::xxh3::Xxh3::new();
+    for field in [source, jdk_marker.as_bytes(), planetiler_marker.as_bytes()] {
+        hasher.update(&u64::try_from(field.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(field);
+    }
+    format!("{:032x}", hasher.digest128())
 }
 
-fn file_mtime(path: &Path) -> Option<SystemTime> {
-    fs::metadata(path).ok()?.modified().ok()
+/// Remove every entry of the class cache but `keep` (including the
+/// pre-keying layout's loose class files). Bookkeeping: a failure warns.
+fn prune_bench_classes(root: &Path, keep: &str) {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) => {
+            output::warn(&format!(
+                "planetiler bench class cache {} not pruned: {error}",
+                root.display()
+            ));
+            return;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                output::warn(&format!(
+                    "planetiler bench class cache {} not fully pruned: {error}",
+                    root.display()
+                ));
+                continue;
+            }
+        };
+        if entry.file_name() == keep {
+            continue;
+        }
+        let path = entry.path();
+        let removed = match entry.file_type() {
+            Ok(kind) if kind.is_dir() => fs::remove_dir_all(&path),
+            _ => fs::remove_file(&path),
+        };
+        if let Err(error) = removed {
+            output::warn(&format!(
+                "stale planetiler bench classes {} not removed: {error}",
+                path.display()
+            ));
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1022,6 +1101,21 @@ mod tests {
         assert!(!jdk_marker_matches("jdk-25.0.1+8\ndigest-a\n", "digest-a"));
         assert!(!jdk_marker_matches("jdk-25.0.4+7\ndigest-a\n", "digest-a"));
         assert!(!jdk_marker_matches("", "digest-a"));
+    }
+
+    #[test]
+    fn bench_class_key_follows_every_input_and_frames_them() {
+        let base = bench_class_key(b"class A {}", "jdk\n", "pt\n");
+        assert_eq!(base, bench_class_key(b"class A {}", "jdk\n", "pt\n"));
+        assert_ne!(base, bench_class_key(b"class B {}", "jdk\n", "pt\n"));
+        assert_ne!(base, bench_class_key(b"class A {}", "jdk2\n", "pt\n"));
+        assert_ne!(base, bench_class_key(b"class A {}", "jdk\n", "pt2\n"));
+        // Moving bytes across a field boundary is a different input.
+        assert_ne!(
+            bench_class_key(b"ab", "c", "d"),
+            bench_class_key(b"a", "bc", "d")
+        );
+        assert_eq!(base.len(), 32);
     }
 
     #[test]

@@ -51,12 +51,17 @@ records. Pbfhogg adds `--overwrite` there when the executable accepts it (see
 Dry-run validates inputs and argv without acquiring a measurement session,
 building, downloading tools, starting servers, or creating run artifacts.
 With nothing built, it prints the argv as planned, before any flag resolved
-against the executable.
+against the executable. The planned argv is the one that runs: a lifecycle
+plan spawns its child with it (nidhogg's tiles server, elivagar's examples
+with the internal run count the mode gives them), and a plan with no single
+argv says what it will do instead (nidhogg's API bench prints its endpoint and
+selected queries; see `docs/projects/nidhogg.md`).
 It still follows the command's lock policy, so a measured command can wait for
 the brokkr lock before it reports the plan.
 Input hash verification may refresh `.brokkr/hash_cache`; this validation cache
 is the sole permitted planning write. Elivagar's argv construction creates no
-directories. API dry-run derives queries without contacting the running server.
+directories. API dry-run derives queries without contacting the running
+server, and refuses a `--query` that selects none.
 
 Run executes once without persisting result or sidecar records. Stored modes
 use the request's measurement mode and brokkr invocation; per-row fallback

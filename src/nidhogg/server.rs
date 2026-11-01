@@ -27,6 +27,20 @@ pub const DEFAULT_PORT: u16 = 3033;
 // Public API
 // ---------------------------------------------------------------------------
 
+/// The argv of `nidhogg serve`, for the persistent server and the measured
+/// tiles lifecycle alike. The port is not an argument: nidhogg reads `PORT`
+/// from its environment, which both spawns set.
+pub(crate) fn serve_argv(data_dir: Option<&str>, tiles: Option<&str>) -> Vec<String> {
+    let mut args = vec!["serve".to_owned()];
+    if let Some(d) = data_dir {
+        args.extend(["--data-dir".to_owned(), d.to_owned()]);
+    }
+    if let Some(t) = tiles {
+        args.extend(["--tiles".to_owned(), t.to_owned()]);
+    }
+    args
+}
+
 /// Start the nidhogg server as a background process.
 ///
 /// Stops the server brokkr previously recorded, refuses if something else
@@ -70,16 +84,7 @@ pub fn serve(
     let log_file = std::fs::File::create(&log_path)?;
     let log_file_err = log_file.try_clone()?;
 
-    // Build argument list.
-    let mut args = vec!["serve"];
-    if let Some(d) = data_dir {
-        args.push("--data-dir");
-        args.push(d);
-    }
-    if let Some(t) = tiles {
-        args.push("--tiles");
-        args.push(t);
-    }
+    let args = serve_argv(data_dir, tiles);
 
     let port_str = port.to_string();
 

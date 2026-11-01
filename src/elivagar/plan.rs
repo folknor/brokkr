@@ -102,6 +102,14 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
             }
         } else {
             match self.0 {
+                // Planned with the count the process gets, so dry run shows
+                // the argv that runs.
+                ElivagarCommand::Built(BuiltCommand::Example(example)) => {
+                    example.args(ExampleCommand::internal_runs(
+                        matches!(req.mode, MeasureMode::Bench { .. }),
+                        req.runs(),
+                    ))
+                }
                 ElivagarCommand::Built(command) => command.build_args("", &layout, None)?,
                 ElivagarCommand::External(_) => {
                     return Err(DevError::Internal(
@@ -245,15 +253,9 @@ fn run_example(
     plan: &CommandPlan<(std::path::PathBuf, f64)>,
 ) -> Result<(), DevError> {
     let binary = ctx.binary()?;
-    let mut args = plan.argv.clone();
-    let bench = matches!(req.mode, MeasureMode::Bench { .. });
-    if bench {
-        let runs = args
-            .last_mut()
-            .ok_or_else(|| DevError::Config("example has no --runs argument".into()))?;
-        *runs = req.runs().to_string();
-    }
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let internal_runs =
+        ExampleCommand::internal_runs(matches!(req.mode, MeasureMode::Bench { .. }), req.runs());
+    let refs: Vec<&str> = plan.argv.iter().map(String::as_str).collect();
     // Examples historically have no cli_args; retain that row shape.
     let config = crate::harness::BenchConfig {
         command: example.id().into(),
@@ -267,17 +269,6 @@ fn run_example(
         arm_qualifier: None,
     };
     runner::execute_example(req, ctx, binary, &refs, &config, || {
-        use crate::db::KvPair;
-        let (key, value) = match example {
-            ExampleCommand::PmtilesWriter { tiles } => ("tiles", *tiles),
-            ExampleCommand::NodeStore { nodes } => ("nodes_millions", *nodes),
-        };
-        vec![
-            KvPair::int(key, i64::try_from(value).unwrap_or(i64::MAX)),
-            KvPair::int(
-                "internal_runs",
-                i64::try_from(req.runs()).unwrap_or(i64::MAX),
-            ),
-        ]
+        example.observations(internal_runs)
     })
 }

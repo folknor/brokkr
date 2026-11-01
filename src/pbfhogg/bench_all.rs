@@ -1,6 +1,5 @@
 //! Combined benchmark suite: runs all pbfhogg benchmarks plus external baselines.
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use crate::build;
@@ -359,58 +358,53 @@ fn run_osmpbf_baseline(
     let captured = invocation.capture_in(project_root)?;
     invocation.check(&captured)?;
 
-    // Parse stderr for --- delimited blocks.
+    // Every block is parsed and validated before the first row is recorded.
     let stderr = String::from_utf8_lossy(&captured.stderr);
-    let blocks = parse_stderr_blocks(&stderr);
+    let variant_data: Vec<(String, i64, Vec<KvPair>)> =
+        super::baseline_blocks::parse("osmpbf baseline", &stderr)?
+            .into_iter()
+            .map(|block| {
+                let kv = kv_from_fields(&block.fields);
+                (format!("osmpbf/{}", block.mode), block.elapsed_ms, kv)
+            })
+            .collect();
 
     let basename = crate::utf8_path::file_name(pbf_path);
 
-    // Build variant list from parsed blocks.
-    let variant_data: Vec<(String, i64, Vec<KvPair>)> = blocks
-        .iter()
-        .filter_map(|block| {
-            let mode = block.get("mode")?.clone();
-            let elapsed_ms: i64 = block.get("elapsed_ms")?.parse().ok()?;
-            let kv = build_kv_from_block(block);
-            Some((format!("osmpbf/{mode}"), elapsed_ms, kv))
-        })
-        .collect();
-    let variant_names: Vec<&str> = variant_data.iter().map(|(v, ..)| v.as_str()).collect();
+    crate::bench_variants::run_variants_of(
+        "baseline",
+        &variant_data,
+        |(variant, ..)| variant.as_str(),
+        |(variant, elapsed_ms, kv)| {
+            let config = BenchConfig {
+                // `baseline-<tool>/<op>` - each external baseline is its own
+                // row, distinguished by command. No natural cli/brokkr args
+                // discriminator since baselines run different tools entirely.
+                command: format!("baseline-{variant}"),
+                input_file: Some(basename.clone()),
+                input_mb: Some(file_mb),
+                cargo_features: None,
+                external_build: None,
+                runs: 1,
+                cli_args: None,
+                metadata: vec![],
+                arm_qualifier: None,
+            };
 
-    crate::bench_variants::run_variants("baseline", &variant_names, |variant| {
-        let (_, elapsed_ms, kv) = variant_data
-            .iter()
-            .find(|(v, ..)| v == variant)
-            .expect("variant exists in variant_data");
-
-        let config = BenchConfig {
-            // `baseline-<tool>/<op>` - each external baseline is its own
-            // row, distinguished by command. No natural cli/brokkr args
-            // discriminator since baselines run different tools entirely.
-            command: format!("baseline-{variant}"),
-            input_file: Some(basename.clone()),
-            input_mb: Some(file_mb),
-            cargo_features: None,
-            external_build: None,
-            runs: 1,
-            cli_args: None,
-            metadata: vec![],
-            arm_qualifier: None,
-        };
-
-        harness
-            .run_internal(&config, |_i| {
-                Ok(BenchResult {
-                    elapsed_ms: *elapsed_ms,
-                    elapsed_us: None,
-                    kv: kv.clone(),
-                    iterations: Vec::new(),
-                    distribution: None,
-                    hotpath: None,
+            harness
+                .run_internal(&config, |_i| {
+                    Ok(BenchResult {
+                        elapsed_ms: *elapsed_ms,
+                        elapsed_us: None,
+                        kv: kv.clone(),
+                        iterations: Vec::new(),
+                        distribution: None,
+                        hotpath: None,
+                    })
                 })
-            })
-            .map(|_| ())
-    })
+                .map(|_| ())
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -502,53 +496,12 @@ fn strings(args: &[&str]) -> Vec<String> {
     args.iter().map(|&a| a.to_owned()).collect()
 }
 
-/// Parse `---` delimited blocks from stderr output.
-///
-/// The osmpbf baseline emits results as blocks separated by `---` lines, with
-/// `key=value` pairs on each line. Planetiler has its own typed parser.
-fn parse_stderr_blocks(stderr: &str) -> Vec<HashMap<String, String>> {
-    let mut blocks = Vec::new();
-    let mut current: Option<HashMap<String, String>> = None;
-
-    for line in stderr.lines() {
-        let trimmed = line.trim();
-        if trimmed == "---" {
-            // Start a new block, pushing the previous one if it exists.
-            if let Some(block) = current.take()
-                && !block.is_empty()
-            {
-                blocks.push(block);
-            }
-            current = Some(HashMap::new());
-            continue;
-        }
-
-        if let Some(ref mut block) = current
-            && let Some((key, value)) = trimmed.split_once('=')
-        {
-            block.insert(key.to_owned(), value.to_owned());
-        }
-    }
-
-    // Push the final block.
-    if let Some(block) = current
-        && !block.is_empty()
-    {
-        blocks.push(block);
-    }
-
-    blocks
-}
-
-/// Build a KvPair vec from a parsed block, including relevant fields.
-fn build_kv_from_block(block: &HashMap<String, String>) -> Vec<KvPair> {
+/// The KV pairs of an osmpbf result block's fields (its mode and elapsed time
+/// are the row's own columns, not fields).
+fn kv_from_fields(fields: &[(String, String)]) -> Vec<KvPair> {
     let mut kv = Vec::new();
 
-    for (key, value) in block {
-        // Skip keys already used as primary fields.
-        if key == "mode" || key == "elapsed_ms" {
-            continue;
-        }
+    for (key, value) in fields {
         // Try to parse as number, fall back to string.
         if let Ok(n) = value.parse::<i64>() {
             kv.push(KvPair::int(key, n));

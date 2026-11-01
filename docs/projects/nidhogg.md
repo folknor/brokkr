@@ -102,7 +102,15 @@ names (`run-ingest-output`, `bench-ingest-output`, `hotpath-ingest-output`).
 `--dry-run` is supported for ingest: resolve the input and construct argv,
 without building, executing, or creating scratch directories. API and tiles
 also support dry-run through HTTP/server lifecycle plans: resolution does not
-contact or start a server. They still reject hotpath/alloc. Run executes one
+contact or start a server. Tiles prints the argv its server is spawned with
+(`tiles args: serve --data-dir D --tiles T`, the same value the lifecycle
+spawns, built by the same function as `brokkr serve`'s) and the port it hands
+over in the environment (`tiles env: PORT=N`). The API bench has no single
+argv, since it sends its own curl requests per query (a warmup, the timed
+samples, a statistics request), so it prints its endpoint and
+the selected queries (`api endpoint: URL`, `api queries: a,b`); a `--query`
+that names no query is refused at planning, in dry-run as in a real run. They
+still reject hotpath/alloc. Run executes one
 sample per selected query or lifecycle without recording. Stored command names
 remain `api-<query>` and `tiles`, with absent `cli_args`.
 

@@ -69,7 +69,6 @@ pub fn run(
     run_example(
         harness,
         project_root,
-        &layout,
         features,
         ExampleCommand::NodeStore {
             nodes: super::constants::DEFAULT_NODE_STORE_MILLIONS,
@@ -82,7 +81,6 @@ pub fn run(
     run_example(
         harness,
         project_root,
-        &layout,
         features,
         ExampleCommand::PmtilesWriter {
             tiles: super::constants::DEFAULT_PMTILES_BENCH_TILES,
@@ -210,22 +208,18 @@ fn cleanup_outputs(
 fn run_example(
     harness: &BenchHarness,
     project_root: &Path,
-    layout: &ElivagarLayout<'_>,
     features: &[String],
     example: ExampleCommand,
     runs: usize,
 ) -> Result<(), DevError> {
-    let command = BuiltCommand::Example(example);
     let mut build = super::build_config(features);
     build.example = Some(example.cargo_example().into());
     let built = build::cargo_build(&build, project_root)?;
     harness.note_build(crate::harness::BuildIdentity::of(&built));
     let binary = built.path;
-    let mut args = command.build_args("", layout, None)?;
-    let run_arg = args
-        .last_mut()
-        .ok_or_else(|| DevError::Internal("example command has no --runs argument".into()))?;
-    *run_arg = runs.to_string();
+    // The suite always benches: the process repeats its loops `runs` times.
+    let internal_runs = ExampleCommand::internal_runs(true, runs);
+    let args = example.args(internal_runs);
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let program = binary.display().to_string();
     let config = BenchConfig {
@@ -250,17 +244,10 @@ fn run_example(
         }
         captured.check_success(&program)?;
 
-        let (key, value) = match example {
-            ExampleCommand::PmtilesWriter { tiles } => ("tiles", tiles),
-            ExampleCommand::NodeStore { nodes } => ("nodes_millions", nodes),
-        };
         Ok(BenchResult {
             elapsed_ms: crate::harness::elapsed_to_ms(&captured.elapsed),
             elapsed_us: None,
-            kv: vec![
-                KvPair::int(key, i64::try_from(value).unwrap_or(i64::MAX)),
-                KvPair::int("internal_runs", i64::try_from(runs).unwrap_or(i64::MAX)),
-            ],
+            kv: example.observations(internal_runs),
             iterations: Vec::new(),
             distribution: None,
             hotpath: None,

@@ -15,12 +15,15 @@ pub(crate) enum NidhoggState {
     Api {
         port: u16,
         bbox: crate::datasets::Bbox,
+        /// The selected query names, for dry run.
+        queries: Vec<String>,
         input_file: Option<String>,
         input_mb: Option<f64>,
     },
     Tiles {
         port: u16,
-        data: String,
+        /// The resolved archive, read for tile coordinates before the
+        /// server starts; the server gets it through the planned argv.
         tiles: String,
         file: String,
         mb: f64,
@@ -85,6 +88,28 @@ impl PlannedCommand for NidhoggPlan<'_> {
             PlanKind::External | PlanKind::Lifecycle => Err(not_a_binary_plan(self.id())),
         }
     }
+    /// Ingest prints its argv. A lifecycle plan prints what it will do: the
+    /// tiles server's argv and the `PORT` it gets in its environment, the
+    /// API bench's endpoint and selected queries (it spawns curl per query,
+    /// so there is no one argv to show).
+    fn describe(
+        &self,
+        _req: &MeasureRequest<'_>,
+        plan: &CommandPlan<NidhoggState>,
+    ) -> Result<Vec<String>, DevError> {
+        let id = self.id();
+        Ok(match &plan.state {
+            NidhoggState::Ingest => vec![format!("{id} args: {}", plan.argv.join(" "))],
+            NidhoggState::Tiles { port, .. } => vec![
+                format!("{id} args: {}", plan.argv.join(" ")),
+                format!("{id} env: PORT={port}"),
+            ],
+            NidhoggState::Api { port, queries, .. } => vec![
+                format!("{id} endpoint: {}", super::client::query_url(*port)),
+                format!("{id} queries: {}", queries.join(",")),
+            ],
+        })
+    }
     fn execute(
         &self,
         req: &MeasureRequest<'_>,
@@ -97,6 +122,7 @@ impl PlannedCommand for NidhoggPlan<'_> {
                 bbox,
                 input_file,
                 input_mb,
+                ..
             } => {
                 let query = match self.0 {
                     NidhoggCommand::Api { query } => query.as_deref(),
@@ -114,7 +140,6 @@ impl PlannedCommand for NidhoggPlan<'_> {
             }
             NidhoggState::Tiles {
                 port,
-                data,
                 tiles,
                 file,
                 mb,
@@ -122,7 +147,7 @@ impl PlannedCommand for NidhoggPlan<'_> {
             } => super::bench_tiles::run(
                 &ctx.harness,
                 ctx.binary()?,
-                data,
+                &plan.argv,
                 tiles,
                 *port,
                 file,
@@ -192,6 +217,11 @@ fn api_plan(
         .filter(|(n, _)| query.is_none_or(|q| q == n))
         .map(|(n, _)| n)
         .collect();
+    // Refused here, not only when the bench starts, so dry run validates
+    // the selection too.
+    if names.is_empty() {
+        return Err(crate::bench_variants::no_variants_selected("query"));
+    }
     let has_configured_pbf = paths
         .datasets
         .get(req.dataset)
@@ -214,11 +244,14 @@ fn api_plan(
         .as_ref()
         .map(|p| crate::datasets::resolve::file_size_mb(p))
         .transpose()?;
+    // No argv: the bench is curl requests against a running server, which
+    // `describe` states as the endpoint and the selected queries.
     Ok((
-        vec![super::client::query_url(port), names.join(",")],
+        Vec::new(),
         NidhoggState::Api {
             port,
             bbox,
+            queries: names,
             input_file,
             input_mb,
         },
@@ -272,16 +305,12 @@ fn tiles_plan(
         .map(ToString::to_string);
     let file = crate::utf8_path::file_name(&tiles);
     let tiles = crate::utf8_path::path_str(&tiles)?.to_owned();
+    // The argv the server is spawned with, as dry run prints it; the port
+    // travels in the environment (`describe` shows it).
     Ok((
-        vec![
-            "serve".into(),
-            data.clone(),
-            tiles.clone(),
-            format!("PORT={port}"),
-        ],
+        super::server::serve_argv(Some(&data), Some(&tiles)),
         NidhoggState::Tiles {
             port,
-            data,
             tiles,
             file,
             mb,

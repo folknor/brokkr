@@ -1,7 +1,7 @@
 //! Benchmark: Planetiler Shortbread tilegen for comparison.
 //!
 //! Replaces `bench-planetiler.sh`. Auto-downloads JDK + Planetiler JAR via
-//! `tools::ensure_planetiler`, primes source data on first run, then runs N
+//! `tools::ensure_planetiler_runtime`, primes source data on first run, then runs N
 //! times with external wall-clock timing (best of N).
 
 use std::path::Path;
@@ -79,14 +79,16 @@ pub(crate) fn prepare(
 ) -> Result<crate::measure::runner::ExternalInvocation, DevError> {
     let data_dir = layout.data_dir();
     let scratch_dir = layout.scratch();
+    // The runtime only: pbfhogg's read-baseline class is pbfhogg's alone.
+    // Resolving it here used to compile `bench/planetiler-baseline` from the
+    // elivagar tree, which has never had one, so javac failed every run.
     let pt = if dry_run {
-        tools::PlanetilerTools {
+        tools::PlanetilerRuntime {
             java: data_dir.join("jdk/bin/java"),
             planetiler_jar: data_dir.join("planetiler.jar"),
-            bench_class_dir: data_dir.join("planetiler-bench-classes"),
         }
     } else {
-        tools::ensure_planetiler(data_dir, project_root)?
+        tools::ensure_planetiler_runtime(data_dir)?
     };
 
     let basename = pbf_path

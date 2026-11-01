@@ -1,4 +1,5 @@
 pub(crate) mod argv;
+pub(crate) mod baseline_blocks;
 pub mod bench_all;
 pub mod bench_blob_filter;
 pub mod bench_commands;

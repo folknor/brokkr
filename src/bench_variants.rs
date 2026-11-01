@@ -26,17 +26,37 @@ pub fn run_variants<F>(label: &str, variants: &[&str], mut run_one: F) -> Result
 where
     F: FnMut(&str) -> Result<(), DevError>,
 {
-    if variants.is_empty() {
-        return Err(DevError::Refused(format!(
-            "no {label} variants selected - nothing to benchmark (check the {label} name)"
-        )));
+    run_variants_of(
+        label,
+        variants,
+        |variant: &&str| *variant,
+        |variant: &&str| run_one(variant),
+    )
+}
+
+/// [`run_variants`] over items that carry their own name, so the closure is
+/// handed the item itself and never looks it up again by name (a lookup that
+/// can only fail by a bug, and resolves a repeated name to its first item).
+pub fn run_variants_of<'t, T, N, F>(
+    label: &str,
+    items: &'t [T],
+    name: N,
+    mut run_one: F,
+) -> Result<(), DevError>
+where
+    N: Fn(&'t T) -> &'t str,
+    F: FnMut(&'t T) -> Result<(), DevError>,
+{
+    if items.is_empty() {
+        return Err(no_variants_selected(label));
     }
 
     let mut failures: Vec<&str> = Vec::new();
 
-    for &variant in variants {
+    for item in items {
+        let variant = name(item);
         console::bench_msg(&format!("{label}: {variant}"));
-        match run_one(variant) {
+        match run_one(item) {
             Ok(()) => {}
             // A cooperative shutdown ends the whole run, not one variant.
             Err(e @ DevError::Interrupted) => return Err(e),
@@ -50,8 +70,15 @@ where
     if failures.is_empty() {
         Ok(())
     } else {
-        Err(variants_failed(&failures, variants.len()))
+        Err(variants_failed(&failures, items.len()))
     }
+}
+
+/// The refusal for a selector that matched nothing.
+pub(crate) fn no_variants_selected(label: &str) -> DevError {
+    DevError::Refused(format!(
+        "no {label} variants selected - nothing to benchmark (check the {label} name)"
+    ))
 }
 
 /// The summary error [`run_variants`] ends with. Each failure's cause was

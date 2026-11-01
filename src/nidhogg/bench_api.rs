@@ -37,40 +37,39 @@ pub fn run(
         .iter()
         .filter(|(name, _)| only.is_none_or(|f| name == f))
         .collect();
-    let variant_names: Vec<&str> = filtered.iter().map(|(name, _)| name.as_str()).collect();
+    crate::bench_variants::run_variants_of(
+        "query",
+        &filtered,
+        |query| query.0.as_str(),
+        |query| {
+            let (name, body) = *query;
+            // Warmup: one request, discard result.
+            run_curl_timed(&url, body)?;
 
-    crate::bench_variants::run_variants("query", &variant_names, |name| {
-        let (_, body) = filtered
-            .iter()
-            .find(|(n, _)| n == name)
-            .expect("variant exists in filtered list");
+            let config = BenchConfig {
+                // Each query variant shares the same brokkr/cli invocation
+                // (curl-style HTTP). Different query rows are distinguished
+                // by the command column: `api-<query>`.
+                command: format!("api-{name}"),
+                input_file: input_file.map(str::to_owned),
+                input_mb,
+                cargo_features: None,
+                external_build: None,
+                runs,
+                cli_args: None,
+                metadata: vec![KvPair::int("meta.port", port as i64)],
+                arm_qualifier: None,
+            };
 
-        // Warmup: one request, discard result.
-        run_curl_timed(&url, body)?;
+            let url_clone = url.clone();
+            let body_owned = body.clone();
 
-        let config = BenchConfig {
-            // Each query variant shares the same brokkr/cli invocation
-            // (curl-style HTTP). Different query rows are distinguished
-            // by the command column: `api-<query>`.
-            command: format!("api-{name}"),
-            input_file: input_file.map(str::to_owned),
-            input_mb,
-            cargo_features: None,
-            external_build: None,
-            runs,
-            cli_args: None,
-            metadata: vec![KvPair::int("meta.port", port as i64)],
-            arm_qualifier: None,
-        };
+            harness.run_distribution(&config, |_i| run_curl_timed(&url_clone, &body_owned))?;
 
-        let url_clone = url.clone();
-        let body_owned = body.clone();
-
-        harness.run_distribution(&config, |_i| run_curl_timed(&url_clone, &body_owned))?;
-
-        report_response_stats(&url, body, name)?;
-        Ok(())
-    })
+            report_response_stats(&url, body, name)?;
+            Ok(())
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------

@@ -45,6 +45,13 @@ Elivagar's enum selects its build shape:
 All builds pass through the same session. Tool setup and Planetiler's initial
 source priming run outside timed samples.
 
+Both projects share the pinned JDK and Planetiler jar under the host's data
+dir. Only pbfhogg's suite compiles a Java bench: its planetiler read baseline,
+from the build root (the `--commit` worktree under `--commit`, as for the
+osmpbf baseline). The compiled classes are cached in the data dir, shared by
+every tree, keyed by the source's content and the tool pins, so a run never
+reuses classes compiled from another tree's source.
+
 ## 3. Bench harness path and timing
 
 Pbfhogg and tilegen use `run_external_prepared`: best-of-N external wall-clock
@@ -53,8 +60,17 @@ before every execution. Stderr counters describe the winning sample but do
 not replace its measured wall time.
 
 Elivagar examples self-iterate with `--runs N`; brokkr executes one aggregate
-sample through `run_internal`. Their existing `tiles`/`nodes_millions` and
-`internal_runs` observations remain. Examples retain absent `cli_args`.
+sample through `run_internal`, timed as the whole process. That wall is not a
+per-pass time: an example sets up once and repeats only its loops, so
+`pmtiles-writer` covers generating the tiles and then N passes of each writer
+(elivagar's and pmtiles-rs's), and `node-store` covers generating the nodes and
+building the store once and then N way-like and N random lookup passes. The
+best-of figures each example prints are human-readable stderr, not recorded.
+N is the requested runs under `--bench` and 1 in run and profiled modes, where
+each process is one pass; the argv is planned with it, so dry run prints the
+`--runs` that runs, and a bench row's `internal_runs` records it beside the
+existing `tiles`/`nodes_millions` observation. Examples retain absent
+`cli_args`.
 Planetiler and Tilemaker use the external wall-clock path with their existing
 argv and Java/CMake profile labels.
 

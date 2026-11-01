@@ -84,6 +84,26 @@ build: before the harness package existed, or before the custom profile was
 defined (`--profile`, `--debug` or `--release` replaces the profile for the
 run). Rows record the profile, never the package or binary.
 
+The commit's output is read by this brokkr's reader, which knows the
+harness contract and the disposition vocabulary as they stand now (below, and
+`docs/projects/piners.md`); brokkr keeps no reader for an earlier form. Two
+earlier forms are still within `--commit`'s reach, both under contract
+version 1, so the version field cannot tell them apart:
+
+- a contract-bearing stream without `run_start`, which piners' harness wrote
+  from 914b0d132 to c13d8db41 (`run_start` arrived in ac3d8f701), fails as a
+  contract violation;
+- a disposition carrying the retired outcome `no_tv_data` or `no_overlap`,
+  which harnesses before piners 6804cfa53 could report, is an invalid record
+  and fails the run, gated, `--no-gate` and `--bless --commit` alike. A run
+  whose selected probes report neither is unaffected.
+
+A stream with no contract lines at all, from a harness older than the
+contract, is still judged as "no contract observed". A compatibility reader
+picked by the commit's ancestry could restore the two cases above; brokkr
+declines it, judging a harness only under the contract it holds today rather
+than carrying another repository's protocol history.
+
 ## The corpus and the registry
 
 The corpus tree under `corpus_root` is piners-owned: vendor git submodules

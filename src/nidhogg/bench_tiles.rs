@@ -87,7 +87,7 @@ fn is_ready_line(line: &str) -> bool {
 pub fn run(
     harness: &BenchHarness,
     binary: &Path,
-    data_dir: &str,
+    server_argv: &[String],
     tiles: &str,
     port: u16,
     tiles_file: &str,
@@ -135,15 +135,12 @@ pub fn run(
     };
 
     let binary = binary.to_owned();
-    let data_dir = data_dir.to_owned();
-    let tiles = tiles.to_owned();
     let project_root = project_root.to_owned();
 
     harness.run_internal(&config, |_i| {
         run_lifecycle(
             &binary,
-            &data_dir,
-            &tiles,
+            server_argv,
             port,
             &project_root,
             &tile_coords,
@@ -162,8 +159,7 @@ pub fn run(
 #[allow(clippy::too_many_lines)]
 fn run_lifecycle(
     binary: &Path,
-    data_dir: &str,
-    tiles: &str,
+    server_argv: &[String],
     port: u16,
     project_root: &Path,
     tile_coords: &[(u32, u32, u32)],
@@ -174,10 +170,7 @@ fn run_lifecycle(
     // 1. Spawn server with piped stderr. ChildGuard ensures cleanup on
     //    error - tracks the PG-leader PID via add_mock_pid /
     //    remove_mock_pid so `brokkr kill --hard` can reach the server.
-    let mut guard = ChildGuard::new(
-        spawn_server(binary, data_dir, tiles, port, project_root)?,
-        lock,
-    );
+    let mut guard = ChildGuard::new(spawn_server(binary, server_argv, port, project_root)?, lock);
     let child = guard
         .child
         .as_mut()
@@ -326,11 +319,11 @@ fn run_lifecycle(
     })
 }
 
-/// Spawn nidhogg as a foreground child process with piped stderr.
+/// Spawn nidhogg as a foreground child process with piped stderr, with the
+/// argv the plan resolved (the one dry run prints) and the port in `PORT`.
 fn spawn_server(
     binary: &Path,
-    data_dir: &str,
-    tiles: &str,
+    server_argv: &[String],
     port: u16,
     project_root: &Path,
 ) -> Result<std::process::Child, DevError> {
@@ -344,7 +337,7 @@ fn spawn_server(
     // those are part of the same PG-as-brokkr and will be reaped on
     // brokkr exit).
     let mut cmd = crate::process::spawn::ChildPolicy::plain_command(binary);
-    cmd.args(["serve", "--data-dir", data_dir, "--tiles", tiles])
+    cmd.args(server_argv)
         .env("PORT", &port_str)
         .current_dir(project_root)
         .stdout(Stdio::null())

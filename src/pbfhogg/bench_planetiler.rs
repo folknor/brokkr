@@ -14,74 +14,25 @@ struct ParsedResult {
     kv: Vec<KvPair>,
 }
 
+/// The bench's result blocks (grammar in `super::baseline_blocks`), each
+/// required to carry its element counts.
 fn parse_planetiler_output(stderr: &str) -> Result<Vec<ParsedResult>, DevError> {
-    let mut results = Vec::new();
-
-    for block in stderr.split("---") {
-        let block = block.trim();
-        if block.is_empty() {
-            continue;
-        }
-
-        let mut mode: Option<String> = None;
-        let mut elapsed_ms: Option<i64> = None;
-        let mut nodes: Option<i64> = None;
-        let mut ways: Option<i64> = None;
-        let mut relations: Option<i64> = None;
-
-        for line in block.lines() {
-            let line = line.trim();
-            let Some((key, value)) = line.split_once('=') else {
-                continue;
-            };
-
-            match key {
-                "mode" => mode = Some(value.to_owned()),
-                "elapsed_ms" => elapsed_ms = Some(parse_metric(key, value)?),
-                "nodes" => nodes = Some(parse_metric(key, value)?),
-                "ways" => ways = Some(parse_metric(key, value)?),
-                "relations" => relations = Some(parse_metric(key, value)?),
-                _ => {}
-            }
-        }
-
-        let Some(mode) = mode else { continue };
-        let elapsed_ms = required_metric("elapsed_ms", elapsed_ms)?;
-        let nodes = required_metric("nodes", nodes)?;
-        let ways = required_metric("ways", ways)?;
-        let relations = required_metric("relations", relations)?;
-        let kv = vec![
-            KvPair::int("nodes", nodes),
-            KvPair::int("ways", ways),
-            KvPair::int("relations", relations),
-        ];
-
-        results.push(ParsedResult {
-            mode,
-            elapsed_ms,
-            kv,
-        });
-    }
-
-    Ok(results)
-}
-
-fn parse_metric(key: &str, value: &str) -> Result<i64, DevError> {
-    let parsed = value.parse::<i64>().map_err(|_| {
-        DevError::Build(format!(
-            "planetiler benchmark emitted invalid {key}: {value}"
-        ))
-    })?;
-    if parsed < 0 {
-        return Err(DevError::Build(format!(
-            "planetiler benchmark emitted negative {key}: {parsed}"
-        )));
-    }
-    Ok(parsed)
-}
-
-fn required_metric(key: &str, value: Option<i64>) -> Result<i64, DevError> {
-    value.ok_or_else(|| DevError::Build(format!("planetiler benchmark result is missing {key}")))
+    const TOOL: &str = "planetiler";
+    super::baseline_blocks::parse(TOOL, stderr)?
+        .into_iter()
+        .map(|block| {
+            let kv = vec![
+                KvPair::int("nodes", block.required_count(TOOL, "nodes")?),
+                KvPair::int("ways", block.required_count(TOOL, "ways")?),
+                KvPair::int("relations", block.required_count(TOOL, "relations")?),
+            ];
+            Ok(ParsedResult {
+                mode: block.mode,
+                elapsed_ms: block.elapsed_ms,
+                kv,
+            })
+        })
+        .collect()
 }
 
 fn run_planetiler_subprocess(
@@ -120,14 +71,17 @@ pub fn run(
     data_dir: &Path,
     project_root: &Path,
 ) -> Result<(), DevError> {
-    let pt = tools::ensure_planetiler(data_dir, project_root)?;
+    let pt = tools::ensure_planetiler_runtime(data_dir)?;
+    // `project_root` is the suite's build root, so a `--commit` run compiles
+    // the commit's baseline source.
+    let bench_class_dir = tools::planetiler_bench_classes(data_dir, project_root, &pt)?;
 
     #[allow(clippy::cast_possible_truncation)]
     let heap_mb = std::cmp::max((file_mb as i64) * 2, 2048);
     let classpath = format!(
         "{}:{}",
         pt.planetiler_jar.display(),
-        pt.bench_class_dir.display()
+        bench_class_dir.display()
     );
 
     let (basename, _) = crate::utf8_path::path_strings(pbf_path)?;
@@ -147,42 +101,41 @@ pub fn run(
         ));
     }
 
-    let variant_names: Vec<&str> = results.iter().map(|r| r.mode.as_str()).collect();
+    crate::bench_variants::run_variants_of(
+        "mode",
+        &results,
+        |result| result.mode.as_str(),
+        |result| {
+            let mode = &result.mode;
+            let config = BenchConfig {
+                // Planetiler emits several mode results per Java subprocess
+                // run (sequential and parallel read). Neither cli_args nor
+                // brokkr_args distinguishes them, so the mode goes in the
+                // command column as `planetiler-<mode>`. Query with
+                // `--command planetiler` (substring) for the whole suite.
+                command: format!("planetiler-{mode}"),
+                input_file: Some(basename.clone()),
+                input_mb: Some(file_mb),
+                cargo_features: None,
+                external_build: Some(crate::build::BuildKind::Java),
+                runs: 1,
+                cli_args: None,
+                metadata: vec![KvPair::int("meta.heap_mb", heap_mb)],
+                arm_qualifier: None,
+            };
 
-    crate::bench_variants::run_variants("mode", &variant_names, |mode| {
-        let result = results
-            .iter()
-            .find(|r| r.mode == mode)
-            .expect("mode exists in results");
-
-        let config = BenchConfig {
-            // Planetiler emits multiple mode results per Java subprocess
-            // run (elements/blobs/features/…). Neither cli_args nor
-            // brokkr_args distinguishes them, so the mode goes in the
-            // command column as `planetiler-<mode>`. Query with
-            // `--command planetiler` (substring) for the whole suite.
-            command: format!("planetiler-{mode}"),
-            input_file: Some(basename.clone()),
-            input_mb: Some(file_mb),
-            cargo_features: None,
-            external_build: Some(crate::build::BuildKind::Java),
-            runs: 1,
-            cli_args: None,
-            metadata: vec![KvPair::int("meta.heap_mb", heap_mb)],
-            arm_qualifier: None,
-        };
-
-        harness
-            .run_internal(&config, |_| {
-                Ok(BenchResult {
-                    elapsed_ms: result.elapsed_ms,
-                    elapsed_us: None,
-                    kv: result.kv.clone(),
-                    iterations: Vec::new(),
-                    distribution: None,
-                    hotpath: None,
+            harness
+                .run_internal(&config, |_| {
+                    Ok(BenchResult {
+                        elapsed_ms: result.elapsed_ms,
+                        elapsed_us: None,
+                        kv: result.kv.clone(),
+                        iterations: Vec::new(),
+                        distribution: None,
+                        hotpath: None,
+                    })
                 })
-            })
-            .map(|_| ())
-    })
+                .map(|_| ())
+        },
+    )
 }
