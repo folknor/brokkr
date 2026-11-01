@@ -308,12 +308,28 @@ impl VerifyHarness {
     /// is printed), anything else - a signal, a usage error, an older pbfhogg
     /// without the flag - is an error, never a verdict.
     ///
+    /// With `agreement`, `--agreement` also requires every inline coordinate
+    /// of a node the file does not contain to agree across the ways
+    /// referencing it - the only evidence on a default add-locations-to-ways
+    /// output, which drops most untagged nodes, for the references whose node
+    /// is gone.
+    ///
     /// Returns the verdict and the check's report (its stdout), which on a
     /// FAIL is also written to the detail channel. A caller reporting an
     /// informational result reads the report itself: detail is replayed only
     /// when the check fails.
-    pub fn check_locations(&self, label: &str, pbf: &Path) -> Result<(Verdict, String), DevError> {
-        let captured = self.run_pbfhogg(PbfArgv::new("check").arg("--locations").input(pbf)?)?;
+    pub fn check_locations(
+        &self,
+        label: &str,
+        pbf: &Path,
+        agreement: bool,
+    ) -> Result<(Verdict, String), DevError> {
+        let captured = self.run_pbfhogg(
+            PbfArgv::new("check")
+                .arg("--locations")
+                .arg_if(agreement, "--agreement")
+                .input(pbf)?,
+        )?;
         let report = String::from_utf8_lossy(&captured.stdout).into_owned();
         match captured.code() {
             Some(0) => {

@@ -10,12 +10,11 @@ pub(crate) const DEFAULT_DATASET: &str = "denmark";
 pub(crate) const DEFAULT_RAW_VARIANT: &str = "raw";
 pub(crate) const DEFAULT_INDEXED_VARIANT: &str = "indexed";
 
-/// Index mode selection for `verify add-locations-to-ways`.
+/// Node-index engine selection for `verify add-locations-to-ways`: one of
+/// pbfhogg's `--index-type` engines, or both.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub(crate) enum AltwMode {
-    Hash,
     Sparse,
-    Dense,
     External,
     All,
 }
@@ -875,7 +874,8 @@ In depth: `brokkr man clippy`."
         mode: ModeArgs,
         #[command(flatten)]
         pbf: PbfArgs,
-        /// Index type (dense, sparse, external; default: hash)
+        /// Node index type, forwarded verbatim to pbfhogg's `--index-type`;
+        /// omit for pbfhogg's default
         #[arg(long)]
         index_type: Option<String>,
         /// Emit the injected-prepass wire extensions (BlobHeader field 5
@@ -3193,7 +3193,8 @@ pub(crate) enum VerifyCommand {
     AddLocationsToWays {
         #[command(flatten)]
         pbf: VerifyPbfArgs,
-        /// Which index modes to verify. `all` runs hash, sparse, dense, external.
+        /// Which node-index engines to verify. `all` runs sparse and external
+        /// and also requires them to agree on full element records.
         #[arg(long, value_enum, default_value = "all")]
         mode: AltwMode,
         /// Accepted only so the refusal is explicit: enriched (injected-prepass)

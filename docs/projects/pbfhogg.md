@@ -495,10 +495,6 @@ of a simple `--config` run to strict order and diffs it (not its counts)
 against a sequential pbfhogg extract of the strip; it never consults osmium
 and does not prove the single-pass path ran.
 
-The `dense` index variant of `add-locations-to-ways` is deliberately not a
-verdict: its non-zero exit is taken as an allocation failure on hosts without
-`vm.overcommit_memory=1` and skipped.
-
 **Fresh outputs.** `VerifyHarness::subdir` empties `target/verify/<check>/`
 before handing it back, so every file a check finds there was written or
 placed by this run. Checks rely on that: `verify_merge` treats the diff OSC's
@@ -678,6 +674,36 @@ same walk. The input must not change on disk while the check runs.
 keeps untagged relation-member nodes unconditionally (a documented pbfhogg
 deviation), osmium only with that flag.
 
+It verifies pbfhogg's node-index engines by name, each run with an explicit
+`--index-type`: `--mode sparse`, `--mode external`, or `--mode all` (the
+default, and what `verify all` runs) for both. `auto` is not verified on its
+own, since it routes to one of the two and its output is that engine's. Every
+engine runs before any check reads an output. An engine that exits non-zero
+is a recorded failure with its stderr in the detail, never a skip, and brokkr
+does not re-derive why: the domain is the input both engines and the checks
+accept - sorted, indexed, no negative node IDs or references, no
+`HistoricalInformation` header - and an input outside it fails the check
+without that alleging an engine defect (verify an input external refuses with
+`--mode sparse`). Each output that was produced gets:
+
+- the element diff against osmium's output and the sort-declaration
+  comparison;
+- `pbfhogg check --locations --agreement`. `pbfhogg diff` treats inline
+  coordinates as derived data, not content, so the diff never sees one; this
+  holds each coordinate to the node record the output keeps and, for a node
+  it dropped (most untagged nodes), to the other references to that node.
+
+Under `all`, the two outputs' node, way and relation lines of `pbfhogg digest
+--form full`, which cover metadata and exact way coordinates, must be
+identical; the overall line is ignored, since it also covers the header. A
+digest that fails or prints a malformed report, or two reports of different
+form versions, is an error. The PASS line carries the claim: inline locations
+are never compared with osmium's, so a wrong coordinate for a dropped node
+that every reference to it shares, written by both engines alike, passes.
+Under `--commit` nothing is negotiated: a build lacking what the selected
+mode runs - its engine, `check --agreement`, and under `all` both engines
+and `digest --form` - fails the check.
+
 ## OSC parser (`src/osc.rs`)
 
 Minimal `.osc` / `.osc.gz` reader. `scan_osc_file` calls back once per
@@ -779,8 +805,10 @@ compare pairs automatically, no suffix required.
   its indexdata requirement so raw / non-indexed input reaches the decode-all
   fallback path. Named to disambiguate from brokkr's own per-subcommand
   `--force` dirty-tree override, mirroring `--force-repack`. Composes with
-  `--inject-prepass`, `--index-type`, `--compression`, and the measurement
-  modes. brokkr does no validation of its own - pbfhogg owns the semantics. The
+  `--index-type sparse` or `auto`, `--compression`, and the measurement
+  modes; pbfhogg refuses `--force` with `--inject-prepass` and with
+  `--index-type external`, which need indexdata whatever `--force` says.
+  brokkr does no validation of its own - pbfhogg owns the semantics. The
   intended cell: `brokkr add-locations-to-ways --dataset europe --variant raw
   --index-type sparse --compression zstd:1 --force-altw --bench 3`.
 - `--locations-on-ways` - (`apply-changes` only) passes through to the child

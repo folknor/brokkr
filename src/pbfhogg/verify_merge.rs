@@ -99,9 +99,9 @@ pub fn run(
     // would otherwise keep this verdict from being recorded.
     if locations_on_ways {
         verify_msg("=== inline locations (pbfhogg check --locations) ===");
-        let (pbfhogg_verdict, _) = harness.check_locations("pbfhogg", &pbfhogg_out)?;
+        let (pbfhogg_verdict, _) = harness.check_locations("pbfhogg", &pbfhogg_out, false)?;
         findings.record("pbfhogg apply-changes inline locations", pbfhogg_verdict);
-        let (osmium, report) = harness.check_locations("osmium", &osmium_out)?;
+        let (osmium, report) = harness.check_locations("osmium", &osmium_out, false)?;
         // One line on the summary channel, which prints on a pass too, so a
         // change in osmium's stale set stays visible run to run; the report
         // itself goes beside the outputs and into the detail.

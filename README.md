@@ -113,7 +113,7 @@ Several commands are flag-driven umbrellas that previously had separate subcomma
 - `brokkr extract` - `--strategy simple|complete|smart` picks the extract algorithm
 - `brokkr diff` - `--format default|osc` picks the output shape
 
-`add-locations-to-ways` accepts `--index-type` (dense, sparse, external; default: hash). Lands in `cli_args` verbatim.
+`add-locations-to-ways` accepts `--index-type`, forwarded verbatim to pbfhogg (omit it for pbfhogg's default). Lands in `cli_args` verbatim.
 
 `repack` re-encodes a PBF with a configurable elements-per-blob cap (`--elements-per-blob N`, default 8000). `degrade` produces an adversarial PBF: `--unsort` (clear `Sort.Type_then_ID` and force one adjacent same-kind blob pair to overlap per kind), `--strip-locations` (drop `LocationsOnWays`), `--strip-indexdata` (clear per-blob indexdata). Flags compose; pbfhogg requires at least one transformation flag on `degrade`. Both write to scratch by default and overwrite each `--bench` iteration. Both, and `cat`, also accept `--as-snapshot KEY` to promote the final iteration's artifact into the dataset graph - `repack` and `cat` always write under `pbf.indexed`; `degrade` writes under `pbf.raw` when `--strip-indexdata` is set, otherwise `pbf.indexed`. `KEY=base` is reserved (CLI sentinel for the dataset's primary data); existing keys are rejected unless `--replace-snapshot` is passed. Subsequent runs address the promoted artifact via `--snapshot KEY` on every measurable pbfhogg command. Closing measurement loops blocked on adversarial inputs:
 
