@@ -238,6 +238,17 @@ definition rather than replaying an old test too. Sluggrs' `hotpath` has
 no such rule because there the example and the renderer are both code;
 here the `.lua` script is the test, not the subject.
 
+The build spec stays too: `[ratatoskr.harness]`'s `package`, `binary` and
+`features`, and the profile name, are passed to cargo as written, and the
+worktree and its effective cargo configuration decide what they mean - a
+custom profile of the same
+name can be defined differently at `REF`, and an empty feature list means
+that package's defaults there. A `REF` that lacks a name the spec uses fails
+its build: one from before the harness package existed under that name, or
+before the custom profile was defined (`--profile`, `--debug` or `--release`
+replaces the profile for the run). The row records the profile and
+features, not the package or binary.
+
 Git state is read from the worktree, so the recorded commit describes what
 was built. That also makes a `--commit` run inherently clean - a detached
 worktree has nothing uncommitted in it - so `--force` is not needed and the

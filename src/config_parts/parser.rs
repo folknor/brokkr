@@ -150,17 +150,21 @@ fn parse_dev_config(table: &toml::Table) -> Result<DevConfig, DevError> {
     })
 }
 
-/// Parse the optional `[cargo_env]` table: variable name -> shell command.
+/// Parse the optional `[cargo_env]` table: variable name -> a shell command
+/// string, or an inline table `{ command = "...", if_exists = "path" }`.
 ///
 /// Refused: a name that is not an environment variable name; one in a
 /// namespace brokkr, cargo, rustc, rustup or the loader owns (the run's own
 /// plumbing would be displaced); a blank command; and a name a `capture_env`
 /// pattern matches - capture reads brokkr's inherited environment, which never
-/// carries the per-invocation value, so it would record a stale one.
+/// carries the per-invocation value, so it would record a stale one. In the
+/// table form: a missing or blank `command`, a blank or absolute `if_exists`
+/// (it names a path in the tree cargo runs in, so it must be relative to that
+/// tree), and any other key.
 fn parse_cargo_env(
     table: &toml::map::Map<String, toml::Value>,
     capture_env: &[String],
-) -> Result<std::collections::BTreeMap<String, String>, DevError> {
+) -> Result<std::collections::BTreeMap<String, crate::cargo_env::Entry>, DevError> {
     let mut out = std::collections::BTreeMap::new();
     let Some(value) = table.get("cargo_env") else {
         return Ok(out);
@@ -168,7 +172,7 @@ fn parse_cargo_env(
     let entries = value
         .as_table()
         .ok_or_else(|| DevError::Config("[cargo_env] must be a table of NAME = \"command\"".into()))?;
-    for (name, command) in entries {
+    for (name, value) in entries {
         let valid = name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
             && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
         if !valid {
@@ -181,18 +185,64 @@ fn parse_cargo_env(
                 "[cargo_env] {name}: the name belongs to brokkr, cargo, rustc or the loader - pick a project-owned name"
             )));
         }
-        let Some(command) = command.as_str().filter(|c| !c.trim().is_empty()) else {
-            return Err(DevError::Config(format!("[cargo_env] {name}: the value must be a non-blank command string")));
-        };
+        let entry = parse_cargo_env_entry(name, value)?;
         if let Some(pattern) = capture_env.iter().find(|p| matches_capture(name, std::slice::from_ref(*p))) {
             return Err(DevError::Config(format!(
                 "[cargo_env] {name} is matched by capture_env {pattern:?}: capture reads brokkr's own environment, \
                  which never carries the value brokkr computes per cargo invocation"
             )));
         }
-        out.insert(name.clone(), command.to_owned());
+        out.insert(name.clone(), entry);
     }
     Ok(out)
+}
+
+/// One `[cargo_env]` value: a command string, or the inline table form.
+fn parse_cargo_env_entry(name: &str, value: &toml::Value) -> Result<crate::cargo_env::Entry, DevError> {
+    let blank_command =
+        || DevError::Config(format!("[cargo_env] {name}: the command must be a non-blank string"));
+    match value {
+        toml::Value::String(command) if !command.trim().is_empty() => Ok(crate::cargo_env::Entry {
+            command: command.clone(),
+            if_exists: None,
+        }),
+        toml::Value::String(_) => Err(blank_command()),
+        toml::Value::Table(t) => {
+            if let Some(key) = t.keys().find(|k| !matches!(k.as_str(), "command" | "if_exists")) {
+                return Err(DevError::Config(format!(
+                    "[cargo_env] {name}: unknown key `{key}` (an entry takes `command` and `if_exists`)"
+                )));
+            }
+            let command = t
+                .get("command")
+                .and_then(toml::Value::as_str)
+                .filter(|c| !c.trim().is_empty())
+                .ok_or_else(blank_command)?;
+            let if_exists = match t.get("if_exists") {
+                None => None,
+                Some(v) => {
+                    let path = v.as_str().filter(|p| !p.trim().is_empty()).ok_or_else(|| {
+                        DevError::Config(format!("[cargo_env] {name}: `if_exists` must be a non-blank path string"))
+                    })?;
+                    let path = std::path::PathBuf::from(path);
+                    if path.is_absolute() {
+                        return Err(DevError::Config(format!(
+                            "[cargo_env] {name}: `if_exists` must be relative - it names a path in the tree \
+                             cargo runs in, which a --commit build moves to a worktree"
+                        )));
+                    }
+                    Some(path)
+                }
+            };
+            Ok(crate::cargo_env::Entry {
+                command: command.to_owned(),
+                if_exists,
+            })
+        }
+        _ => Err(DevError::Config(format!(
+            "[cargo_env] {name}: the value must be a command string or a table {{ command = \"...\", if_exists = \"path\" }}"
+        ))),
+    }
 }
 
 /// Parse the optional `[bin]` section. Absent -> `None`.

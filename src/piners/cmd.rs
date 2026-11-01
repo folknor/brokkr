@@ -121,9 +121,16 @@ pub(crate) fn missing_harness_config_error() -> DevError {
 }
 
 /// Entry point for `brokkr corpus`.
+///
+/// `build_root` is the tree the harness is built from and whose commit the
+/// run row records: the code tree, or the worktree of `--commit`. Everything
+/// else - the registry, the corpus, the manifest, the harness's working
+/// directory, `runs.db` and the artefact dir - is anchored on `project_root`,
+/// so a `--commit` run judges an older engine against today's pins.
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)] // linear orchestration: load, select, verify, build, run, report, diagnose
 pub fn corpus(
     project_root: &Path,
+    build_root: &Path,
     piners: &PinersConfig,
     args: &CorpusArgs,
 ) -> Result<(), DevError> {
@@ -210,12 +217,13 @@ pub fn corpus(
         drop(CorpusDb::open(&corpus_db_path)?);
     }
 
-    // The run's provenance, taken before the build: what HEAD was, whether
-    // the tree carried uncommitted work, and when the run began.
-    let start = RunStart::capture(project_root);
+    // The run's provenance, taken before the build: what HEAD of the built
+    // tree was, whether that tree carried uncommitted work, and when the run
+    // began. A `--commit` worktree names the commit built and is clean.
+    let start = RunStart::capture(build_root);
 
     let built = harness_build::build_for_harness(
-        project_root,
+        build_root,
         harness_cfg,
         profile,
         Some(&|pid| lock.set_child_pid(pid)),
@@ -890,7 +898,7 @@ fn selector_json(
 }
 
 /// What a run knows about itself before it executes: when it started, and
-/// the checkout it was taken from.
+/// the checkout its harness was built from.
 pub(crate) struct RunStart {
     /// `YYYY-MM-DD HH:MM:SS`, UTC - the store's `started_at` convention.
     pub started_at: String,
@@ -901,13 +909,15 @@ pub(crate) struct RunStart {
 }
 
 impl RunStart {
-    pub(crate) fn capture(project_root: &Path) -> Self {
+    /// `build_root` is the tree the harness is built from: the code tree, or
+    /// a `--commit` worktree.
+    pub(crate) fn capture(build_root: &Path) -> Self {
         Self {
             started_at: crate::piners::time::now_sqlite_utc(),
-            commit_sha: crate::git::resolve_commit(project_root, "HEAD")
+            commit_sha: crate::git::resolve_commit(build_root, "HEAD")
                 .ok()
                 .map(|c| c.as_str().to_owned()),
-            dirty: crate::git::has_uncommitted(project_root),
+            dirty: crate::git::has_uncommitted(build_root),
         }
     }
 }

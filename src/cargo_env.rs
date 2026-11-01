@@ -4,6 +4,7 @@
 //! ```toml
 //! [cargo_env]
 //! BA_SOURCE_IDENTITY = "python3 scripts/source_identity.py"
+//! FX_SOURCE_IDENTITY = { command = "python3 scripts/source_identity.py", if_exists = "scripts/source_identity.py" }
 //! ```
 //!
 //! Before each cargo invocation brokkr launches directly - every spawn whose
@@ -30,9 +31,21 @@
 //!   `--version`/`--help`.
 //! - **Where it runs.** cwd is cargo's launch directory - the worktree for a
 //!   `--commit` build, so a relative command runs that tree's own script
-//!   against that tree. The environment is the one that cargo gets (inherited
+//!   against that tree. The entries themselves are the live tree's, so a
+//!   commit older than the script has no script to run, and a plain entry
+//!   that runs it fails there. The environment is the one that cargo gets (inherited
 //!   plus the caller's pairs, the hold capability included), less every
 //!   configured name, so no entry reads a stale value of itself or another.
+//! - **Applicability.** `NAME = { command = "...", if_exists = "path" }`
+//!   applies only to a tree in which `path`, relative to cargo's launch
+//!   directory, exists; checked per invocation. Where it does not, the
+//!   command is not run and the name is removed from that cargo's
+//!   environment, so the build sees the variable absent - the state a plain
+//!   `cargo` gives it, which its build scripts must already handle. A path
+//!   whose existence cannot be determined fails like an evaluation. The
+//!   cargo-config conflict check below covers skipped names too, since cargo
+//!   would otherwise supply a value for one. Existence is applicability only:
+//!   a command that exists and fails still fails.
 //! - **Failure is fatal.** A non-zero exit, a kill on the deadline, output that
 //!   is empty, too long, not UTF-8, multi-line or carries a control character,
 //!   or output that did not close cleanly, fails that cargo spawn - and every
@@ -74,9 +87,23 @@ pub enum SpawnProfile {
     Cargo { phase: Option<Phase> },
 }
 
+/// One `[cargo_env]` entry: `NAME = "command"`, or
+/// `NAME = { command = "...", if_exists = "path" }`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    /// Run with `sh -c` in cargo's launch directory; its one line of stdout
+    /// is the value.
+    pub command: String,
+    /// A path relative to cargo's launch directory. When nothing exists
+    /// there, the entry does not apply to that tree: the variable is removed
+    /// from that cargo's environment and the command is not run. `None`
+    /// applies the entry to every tree.
+    pub if_exists: Option<PathBuf>,
+}
+
 /// The configured entries, by name (sorted - entries are independent, so the
 /// order is only what makes evaluation deterministic).
-static REGISTRY: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+static REGISTRY: Mutex<Vec<(String, Entry)>> = Mutex::new(Vec::new());
 
 /// The active check phase and its start time. Process launch code also needs
 /// this context to tag Cargo environment failures, so the shared clock lives
@@ -97,7 +124,7 @@ struct FailureRecord {
 
 /// Install the project's `[cargo_env]` entries. Called by project detection;
 /// detection of one checkout installs the same entries however often it runs.
-pub fn install(entries: &BTreeMap<String, String>) {
+pub fn install(entries: &BTreeMap<String, Entry>) {
     let mut reg = REGISTRY
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -107,7 +134,7 @@ pub fn install(entries: &BTreeMap<String, String>) {
         .collect();
 }
 
-fn snapshot() -> Vec<(String, String)> {
+fn snapshot() -> Vec<(String, Entry)> {
     REGISTRY
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -199,13 +226,39 @@ pub fn apply(
         Some(d) => d.to_path_buf(),
         None => std::env::current_dir()?,
     };
+    // Every configured name, applicable to this tree or not: a cargo config
+    // `[env]` entry would hand cargo a value for a skipped name too, and the
+    // evaluator must not read a stale value of any of them.
     let names: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
     if let Some(conflict) = config_conflict(&names, &dir, args, env)? {
         return Err(record(conflict, phase));
     }
-    for (name, command) in &entries {
+    for (name, entry) in &entries {
         if crate::shutdown::is_shutdown_requested() {
             return Err(DevError::Interrupted);
+        }
+        let command = &entry.command;
+        match applies(entry, &dir) {
+            Ok(true) => {}
+            Ok(false) => {
+                // Removed, not merely left unset: an inherited or caller
+                // value must not stand in for one this tree does not have.
+                cmd.env_remove(name);
+                let guard = entry.if_exists.as_deref().unwrap_or(Path::new(""));
+                output::detail_or_console(&format!(
+                    "cargo_env {name} unset: {} does not exist in {} (for cargo {})",
+                    guard.display(),
+                    output::path(&dir),
+                    subcommand(args).unwrap_or("?")
+                ));
+                continue;
+            }
+            Err(why) => {
+                return Err(record(
+                    format!("{name}: if_exists {why} (in {})", output::path(&dir)),
+                    phase,
+                ));
+            }
         }
         let started = Instant::now();
         match evaluate(command, &dir, env, &names) {
@@ -231,6 +284,20 @@ pub fn apply(
         return Err(DevError::Interrupted);
     }
     Ok(())
+}
+
+/// Whether `entry` applies to the tree cargo launches in at `dir`: always
+/// without `if_exists`, else exactly when something exists at that path (a
+/// directory counts; a dangling symlink does not). A path whose existence
+/// cannot be determined fails rather than reading as absent - a permissions
+/// fault must not silently unset the variable.
+fn applies(entry: &Entry, dir: &Path) -> Result<bool, String> {
+    let Some(guard) = &entry.if_exists else {
+        return Ok(true);
+    };
+    dir.join(guard)
+        .try_exists()
+        .map_err(|e| format!("{} could not be checked: {e}", guard.display()))
 }
 
 /// The label every `[cargo_env]` error carries: the detail is printed once,
@@ -553,6 +620,28 @@ mod tests {
         assert!(fails("printf 'a\\nb'").contains("one line"));
         assert!(fails("echo oops >&2; exit 3").contains("oops"));
         assert!(fails("head -c 5000 /dev/zero | tr '\\0' a").contains("more than"));
+    }
+
+    #[test]
+    fn an_if_exists_entry_applies_only_where_its_path_exists() {
+        let dir = crate::test_scratch::scratch("cargo_env", "if_exists");
+        let guarded = |path: &str| Entry {
+            command: "true".into(),
+            if_exists: Some(PathBuf::from(path)),
+        };
+        let plain = Entry {
+            command: "true".into(),
+            if_exists: None,
+        };
+        assert_eq!(applies(&plain, &dir), Ok(true));
+        assert_eq!(applies(&guarded("scripts/id.py"), &dir), Ok(false));
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(dir.join("scripts/id.py"), "").unwrap();
+        assert_eq!(applies(&guarded("scripts/id.py"), &dir), Ok(true));
+        // A directory exists; a dangling symlink does not.
+        assert_eq!(applies(&guarded("scripts"), &dir), Ok(true));
+        std::os::unix::fs::symlink(dir.join("nowhere"), dir.join("dangling")).unwrap();
+        assert_eq!(applies(&guarded("dangling"), &dir), Ok(false));
     }
 
     #[test]

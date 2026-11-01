@@ -7,6 +7,16 @@
 //! build does not participate in `brokkr check`'s sweep matrix, so everyday
 //! checks don't compile orchestration-only feature graphs.
 //!
+//! The spec is always the current tree's config, also when `project_root` is
+//! a `--commit` worktree: package, binary, features and profile name go to
+//! cargo as written, and the built tree and its effective cargo
+//! configuration give them meaning. A
+//! commit that lacks one of those names fails its build with cargo's error;
+//! the `--commit` sections of `docs/commands/sync.md` and
+//! `docs/commands/corpus.md` state this. Reading the spec at the commit would
+//! need the project's definitions versioned with its code, which today's
+//! design does not do.
+//!
 //! The caller resolves the profile once, before building; what it records
 //! (run rows, `run.toml`) is the profile this build returns, the one cargo
 //! actually built under.

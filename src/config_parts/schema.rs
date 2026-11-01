@@ -202,9 +202,10 @@ pub struct DevConfig {
     /// config for the locked window. Empty when the key is absent, and then
     /// nothing is edited. See [`crate::cargo_config_strip`].
     pub strip_rustflags: Vec<crate::cargo_config_strip::StripSpec>,
-    /// `[cargo_env]`: variable name -> shell command whose output brokkr sets
-    /// on every cargo it launches. See [`crate::cargo_env`].
-    pub cargo_env: std::collections::BTreeMap<String, String>,
+    /// `[cargo_env]`: variable name -> the entry (a shell command, and the
+    /// path that must exist for it to apply) whose output brokkr sets on
+    /// every cargo it launches. See [`crate::cargo_env`].
+    pub cargo_env: std::collections::BTreeMap<String, crate::cargo_env::Entry>,
     /// Absolute paths of the files this config's `include` graph pulled in
     /// (composition provenance, not a TOML key). Measurement provenance
     /// exempts them from the dirty-tree policy exactly as `brokkr.toml`

@@ -44,8 +44,7 @@ use serde_json::{Map, Value};
 
 use super::schema::{
     PERFORMANCE_PROJECTIONS, Projection, TRADE_DIFF_PROJECTIONS, TRADE_DIFF_TYPED_FIELDS,
-    disposition_ddl,
-    disposition_projection_column, trade_diff_ddl,
+    disposition_ddl, disposition_projection_column, trade_diff_ddl,
 };
 use crate::db::store::{column_exists as has_column, table_exists as has_table};
 use crate::error::DevError;

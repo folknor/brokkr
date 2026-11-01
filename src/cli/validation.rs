@@ -179,6 +179,31 @@ mod tests {
         assert_eq!(repeat.get(), 3);
     }
 
+    /// A parity run builds the harness, so it takes `--commit`; the corpus
+    /// operations that build nothing refuse it.
+    #[test]
+    fn corpus_commit_needs_a_build() {
+        assert!(parse(["brokkr", "corpus", "--all", "--commit", "abc123"]).is_ok());
+        assert!(parse(["brokkr", "corpus", "--all", "--bless", "--commit", "abc123"]).is_ok());
+        assert!(
+            parse([
+                "brokkr",
+                "corpus",
+                "--all",
+                "--verify-only",
+                "--commit",
+                "abc123"
+            ])
+            .is_err()
+        );
+        assert!(
+            parse([
+                "brokkr", "corpus", "--all", "--reseed", "--commit", "abc123"
+            ])
+            .is_err()
+        );
+    }
+
     #[test]
     fn check_accepts_profile_flag() {
         let parsed = parse(["brokkr", "check", "--profile", "tier1"]).expect("parse");

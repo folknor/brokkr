@@ -366,10 +366,9 @@ mod tests {
 
     #[test]
     fn a_census_is_read_strictly_and_each_leg_is_optional() {
-        let c = census(
-            r#"{"equity":{"compared":2637,"mismatched":0,"tolerance":"exact"},"extra":1}"#,
-        )
-        .unwrap();
+        let c =
+            census(r#"{"equity":{"compared":2637,"mismatched":0,"tolerance":"exact"},"extra":1}"#)
+                .unwrap();
         assert_eq!(c.equity.unwrap().compared, 2637);
         assert_eq!(c.scalars, None);
         for bad in [

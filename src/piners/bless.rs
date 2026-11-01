@@ -230,8 +230,7 @@ pub fn apply(
     let mut blessed = 0usize;
     let mut changed = 0usize;
     for id in scope_ids {
-        let (Some(pin), Some(stamp)) = (registry.pins.get_mut(id), stamps.get(id.as_str()))
-        else {
+        let (Some(pin), Some(stamp)) = (registry.pins.get_mut(id), stamps.get(id.as_str())) else {
             continue; // unreachable: validated above
         };
         blessed += 1;
@@ -416,7 +415,10 @@ mod tests {
         );
         apply(&pins_path, &mut reg, &both, &["a".to_owned()]).unwrap();
         let written = std::fs::read_to_string(&pins_path).unwrap();
-        assert!(written.contains("performance = { equity = 1, scalars = 0 }"), "{written}");
+        assert!(
+            written.contains("performance = { equity = 1, scalars = 0 }"),
+            "{written}"
+        );
         let on_disk = registry::parse_pins(&written, &pins_path).unwrap();
         assert_eq!(
             on_disk.probes["a"].performance,

@@ -245,10 +245,14 @@ The store has per-db `PRAGMA user_version` migrations and WAL, mirroring
 - `run` - `run_id` (the number the run's artefact dir carries - see
   `docs/commands/corpus.md`), `started_at` (UTC, `YYYY-MM-DD HH:MM:SS`,
   taken before the build; rows older than v6 carry their ingest time
-  instead), `commit_sha` + `dirty` (v6: the project checkout's full `HEAD`
-  hash at run start, and whether it had any uncommitted change outside
-  `.brokkr/` - markdown and `brokkr.toml` included, so clean means `HEAD`
-  describes the whole invocation; a toolchain file the lock moved aside is
+  instead), `commit_sha` + `dirty` (v6: the full `HEAD` hash of the checkout
+  the harness was built from at run start - the code checkout, or the
+  worktree of `--commit` - and whether that checkout had any uncommitted
+  change outside `.brokkr/`, markdown and `brokkr.toml` included. Both
+  describe the build checkout only: the pins, corpus and config the run used
+  are the project tree's, which a `--commit` worktree, or a code checkout
+  below a `brokkr.toml` one level up, does not cover; a toolchain file the
+  lock moved aside is
   judged by its moved bytes against `HEAD`'s; each `NULL` when unknown,
   never a guessed clean), `selector` (JSON: resolved ids in selection order + raw
   flags, forwarded harness flags, the build profile by name - older rows carry

@@ -160,6 +160,41 @@ skip_test = false
         assert!(unknown.is_err());
     }
 
+    fn cargo_env_of(src: &str) -> Result<std::collections::BTreeMap<String, crate::cargo_env::Entry>, DevError> {
+        let table: toml::map::Map<String, toml::Value> = toml::from_str(src).unwrap();
+        parse_cargo_env(&table, &[])
+    }
+
+    #[test]
+    fn cargo_env_takes_a_string_or_a_guarded_table() {
+        let env = cargo_env_of(
+            "[cargo_env]\nA = \"python3 s.py\"\nB = { command = \"python3 t.py\", if_exists = \"scripts/t.py\" }\n\
+             C = { command = \"c\" }\n",
+        )
+        .unwrap();
+        assert_eq!(env["A"], crate::cargo_env::Entry { command: "python3 s.py".into(), if_exists: None });
+        assert_eq!(
+            env["B"],
+            crate::cargo_env::Entry {
+                command: "python3 t.py".into(),
+                if_exists: Some(std::path::PathBuf::from("scripts/t.py")),
+            }
+        );
+        assert_eq!(env["C"].if_exists, None);
+        for bad in [
+            "[cargo_env]\nA = \"  \"\n",
+            "[cargo_env]\nA = 3\n",
+            "[cargo_env]\nA = { if_exists = \"x\" }\n",
+            "[cargo_env]\nA = { command = \" \" }\n",
+            "[cargo_env]\nA = { command = \"c\", if_exists = \"\" }\n",
+            "[cargo_env]\nA = { command = \"c\", if_exists = \"/abs/x\" }\n",
+            "[cargo_env]\nA = { command = \"c\", if_exists = 1 }\n",
+            "[cargo_env]\nA = { command = \"c\", when = \"x\" }\n",
+        ] {
+            assert!(cargo_env_of(bad).is_err(), "{bad} should be refused");
+        }
+    }
+
     fn script_checks_of(src: &str) -> Result<Vec<ScriptCheck>, DevError> {
         let table: toml::map::Map<String, toml::Value> = toml::from_str(src).unwrap();
         parse_script_checks(&table)

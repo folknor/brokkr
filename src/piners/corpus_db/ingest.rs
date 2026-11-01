@@ -23,8 +23,8 @@ use super::CorpusDb;
 use crate::db::store::as_i64;
 use crate::error::DevError;
 use crate::piners::gate::{GateVerdict, LabelAssessment};
-use crate::piners::performance::PerformanceAssessment;
 use crate::piners::integrity::Reconciliation;
+use crate::piners::performance::PerformanceAssessment;
 use crate::piners::report::{HarnessReport, ProbeLine, TradeDiffLine};
 use crate::piners::run_model::RunVerdict;
 

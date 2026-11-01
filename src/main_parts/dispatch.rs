@@ -1644,8 +1644,25 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                     piners::measured::run(req, &args)
                 })
             } else {
-                // Bare corpus: the parity run (gate + runs.db), unchanged.
-                piners::cmd::corpus(project_root, project_config.piners()?, &args)
+                // Bare corpus: the parity run (gate + runs.db). Under
+                // `--commit` only the harness build and the recorded commit
+                // move to the worktree; selection, pins, corpus bytes, the
+                // harness cwd, runs.db and artefacts stay on the main tree.
+                // `--verify-only` and `--reseed` build nothing, so clap
+                // refuses `--commit` beside them.
+                let piners_cfg = project_config.piners()?;
+                with_worktree(
+                    Some(project),
+                    &detection.project_root,
+                    &detection.build_root,
+                    mode.commit.as_deref(),
+                    false,
+                    &crate::tree_policy::TreePolicy::of(dev_config),
+                    context::worktree_keep(dev_config)?,
+                    |build_root| {
+                        piners::cmd::corpus(project_root, build_root.as_path(), piners_cfg, &args)
+                    },
+                )
             }
         }
     }

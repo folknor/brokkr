@@ -10,7 +10,9 @@
 // is the whole algorithm.
 //
 // The merge rules, applied key by key:
-// - table + table: merged recursively (a host section split across files).
+// - table + table: merged recursively (a host section split across files),
+//   except a `[cargo_env]` entry's inline table, which the higher layer
+//   replaces whole.
 // - array of tables + array of tables (`[[check]]`, `[[textlint]]`, ...):
 //   joined, lower-precedence entries first, and an entry whose `name` the
 //   higher-precedence side reuses is dropped - a higher layer can redefine
@@ -377,7 +379,7 @@ fn merge_into(
     for (key, value) in overlay {
         path.push(key.clone());
         match (base.get_mut(&key), value) {
-            (Some(toml::Value::Table(b)), toml::Value::Table(o)) => {
+            (Some(toml::Value::Table(b)), toml::Value::Table(o)) if !is_atomic(path) => {
                 merge_into(b, o, idx, path, sources);
             }
             (Some(toml::Value::Array(b)), toml::Value::Array(o))
@@ -401,6 +403,14 @@ fn merge_into(
         }
         path.pop();
     }
+}
+
+/// A table at `path` that a higher layer replaces whole rather than merging
+/// into: a `[cargo_env]` entry. Its table form pairs a command with the path
+/// that decides where it applies, and a layer redefining the command must not
+/// inherit a guard written for another one.
+fn is_atomic(path: &[String]) -> bool {
+    matches!(path, [table, _] if table == "cargo_env")
 }
 
 /// An array whose every element is a table - a TOML `[[array]]`. An empty
@@ -460,6 +470,25 @@ mod compose_tests {
         assert_eq!(t["h"]["data"].as_str(), Some("d"));
         assert_eq!(t["h"]["datasets"]["x"]["origin"].as_str(), Some("o"));
         assert!(t.get("include").is_none());
+    }
+
+    #[test]
+    fn a_cargo_env_entry_is_replaced_whole_not_merged() {
+        let dir = tree("cargo_env_atomic", &[
+            (
+                "brokkr.toml",
+                "project = \"p\"\ninclude = [\"a.toml\"]\n[cargo_env]\nID = { command = \"new\" }\n",
+            ),
+            (
+                "a.toml",
+                "[cargo_env]\nID = { command = \"old\", if_exists = \"old.py\" }\nOTHER = \"o\"\n",
+            ),
+        ]);
+        let (t, _) = compose(&dir.join("brokkr.toml")).unwrap();
+        assert_eq!(t["cargo_env"]["ID"]["command"].as_str(), Some("new"));
+        assert!(t["cargo_env"]["ID"].get("if_exists").is_none());
+        // The table itself still merges: an entry only one layer names stays.
+        assert_eq!(t["cargo_env"]["OTHER"].as_str(), Some("o"));
     }
 
     #[test]

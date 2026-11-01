@@ -494,10 +494,33 @@ so such a build script should keep rerunning when it is absent.
   evaluates nothing: those binaries carry the value they were built with.
 - **Where it runs.** `sh -c` in the directory cargo is about to run in - the
   worktree for a `--commit` build, so a relative command runs that tree's own
-  script against that tree. The environment is the one that cargo gets
-  (brokkr's, the sweep's, the hold capability) with every configured name
-  removed, so no command reads a stale value of itself or another entry.
-  Entries are evaluated in name order, independently.
+  script against that tree. The entries are the current tree's, though, so a
+  commit older than the script has no script to run: a plain entry that
+  runs it fails there, and with it every `--commit` build of that commit. The environment is
+  the one that cargo gets (brokkr's, the sweep's, the hold capability) with
+  every configured name removed, so no command reads a stale value of itself
+  or another entry. Entries are evaluated in name order, independently.
+- **Where it applies.** The table form names a path that must exist for the
+  entry to apply:
+
+  ```toml
+  [cargo_env]
+  BA_SOURCE_IDENTITY = { command = "python3 scripts/source_identity.py", if_exists = "scripts/source_identity.py" }
+  ```
+
+  `if_exists` is relative to the directory the command would run in, checked
+  per cargo invocation; a directory counts, a dangling symlink does not. Where
+  nothing exists there - a commit from before the script arrived - the
+  command is not run and the name is removed from that cargo's environment,
+  inherited value included, so the build sees the variable absent: the state
+  a plain `cargo` leaves it in, which its build scripts must handle anyway. The
+  run log says so (`cargo_env NAME unset: <path> does not exist in <dir>`,
+  on the console when no run log is open). A path whose existence cannot be
+  determined fails like an evaluation. Existence decides only whether the
+  entry applies: a script that is there and fails still fails. A plain string
+  entry applies to every tree. Under `include`, a layer that names an entry
+  replaces it whole, so a redefined command never inherits another layer's
+  `if_exists`.
 - **Failure is fatal.** A non-zero exit, 30 seconds without finishing, more than
   4 KiB of output, output that is empty, not UTF-8, more than one line or
   carries a control character, or output that did not close - any of these
@@ -510,13 +533,16 @@ so such a build script should keep rerunning when it is absent.
   it at runtime.
 - **Refused at load:** a name that is not an environment variable name; one in
   a namespace brokkr, cargo, rustc or the loader owns (`BROKKR_*`, `CARGO*`,
-  `RUST*`, `LD_*`, `PATH`, `HOME`); a blank command; and a name a
+  `RUST*`, `LD_*`, `PATH`, `HOME`); a blank command; a name a
   [`capture_env`](#top-level-shape) pattern matches - capture reads brokkr's own
-  environment, which never carries the per-invocation value.
+  environment, which never carries the per-invocation value; and in the table
+  form a missing `command`, a blank or absolute `if_exists`, or any other key.
 - **Refused per invocation:** a cargo config `[env]` entry for the name, in the
   chain that cargo reads or a `--config` it is given. `force = true` there
   would replace what brokkr hands cargo, and a plain entry would be a second
-  source for one input.
+  source for one input. This holds for an entry `if_exists` skipped too,
+  since cargo would hand the build that entry's value where brokkr promised
+  it absent.
 
 The values go to the run log, one line per variable per cargo invocation
 (`cargo_env NAME=value (12ms in <dir>, for cargo test)`). The user-wide config

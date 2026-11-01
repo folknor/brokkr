@@ -51,8 +51,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<Findings, 
     // change set, which at planet scale is not bounded by any capture.
     verify_msg("--- pbfhogg diff ---");
     let pbfhogg_listing = outdir.join("pbfhogg-diff.txt");
-    let captured_indexed =
-        harness.run_pbfhogg_to(text_diff(pbf, &new_pbf)?, &pbfhogg_listing)?;
+    let captured_indexed = harness.run_pbfhogg_to(text_diff(pbf, &new_pbf)?, &pbfhogg_listing)?;
     captured_indexed
         .check_success_or("pbfhogg diff", crate::output::child::Exits::answer(&[0, 1]))?;
 

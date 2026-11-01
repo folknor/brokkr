@@ -2812,8 +2812,9 @@ In depth: `brokkr man nidhogg`."
 
         /// Verify every pinned probe's files against the submodule and
         /// exit, without building or running the harness. Use after a
-        /// submodule re-pin to catch drift.
-        #[arg(long, conflicts_with_all = ["bench", "hotpath", "alloc"])]
+        /// submodule re-pin to catch drift. Builds nothing, so it takes no
+        /// `--commit`.
+        #[arg(long, conflicts_with_all = ["bench", "hotpath", "alloc", "commit"])]
         verify_only: bool,
 
         /// Stamp `pins.toml` from the corpus filesystem (no build, no
@@ -2830,8 +2831,8 @@ In depth: `brokkr man nidhogg`."
         /// `[probe_config]` (where feed, budget and start are declared).
         /// Prints added/changed/removed probes and changed feed hashes;
         /// review the result with `git diff pins.toml`. Not usable with
-        /// `--keyword` or `--verify-only`.
-        #[arg(long, conflicts_with_all = ["verify_only", "keyword", "bench", "hotpath", "alloc"])]
+        /// `--keyword`, `--verify-only` or `--commit` (it builds nothing).
+        #[arg(long, conflicts_with_all = ["verify_only", "keyword", "bench", "hotpath", "alloc", "commit"])]
         reseed: bool,
 
         /// Run the selection, then stamp each selected probe's current

@@ -91,6 +91,32 @@ comparable only against runs built the same way, and
 Equal names are necessary but not sufficient, since two commits can define
 the same profile differently.
 
+## `--commit REF`
+
+Builds the harness from a persistent worktree at `REF`, for a parity run and
+a measured one alike, so an older engine is judged against today's corpus.
+Only the harness build and the commit the row records move: the registry,
+the pins and their expectations, the corpus bytes, the manifest, the
+harness's working directory, `runs.db`, `results.db` and the artefact dir
+all stay on the main tree. A parity row's `commit_sha` and `dirty` describe
+the worktree the harness was built from, never the main tree, whose pins
+and corpus the run used however they stood.
+`--verify-only` and `--reseed` build nothing and refuse `--commit`. `--bless
+--commit REF` writes `REF`'s dispositions into today's `pins.toml`, the way
+to restore expectations from a known-good engine.
+
+The build spec is the main tree's too: the package, binary, features and
+profile name are chosen exactly as without `--commit` (from `[piners.harness]`
+and the flags; a measured run's own profile default and added feature
+included, see Measured runs), and the worktree and its effective cargo
+configuration decide what they mean - a custom profile of the same name can
+be defined differently at `REF`, and an empty feature list still means that
+package's defaults there. A `REF` that lacks a name the build uses fails its
+build: before the harness package existed, or before the custom profile was
+defined (`--profile`, `--debug` or `--release` replaces the profile for the
+run). Rows record the profile (a measured row its
+requested features too), never the package or binary.
+
 ## The corpus and the registry
 
 The corpus tree under `corpus_root` is piners-owned: vendor git submodules

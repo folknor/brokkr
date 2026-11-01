@@ -237,10 +237,7 @@ fn fill_probe(table: &mut Table, pin: &Pin) -> Result<(), DevError> {
                     .into_iter()
                     .filter_map(|(leg, n)| n.map(|n| format!("{leg} = {n}")))
                     .collect();
-                toml_writer::parse_value(
-                    &format!("{{ {} }}", legs.join(", ")),
-                    "piners: pins.toml",
-                )
+                toml_writer::parse_value(&format!("{{ {} }}", legs.join(", ")), "piners: pins.toml")
             })
             .transpose()?,
     );
