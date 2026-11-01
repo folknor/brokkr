@@ -871,7 +871,14 @@ revision built answers. The table lives in `PbfhoggCommand::axis_has_effect`
 - The synthetic `read`, `write` and `merge` benches run pbfhogg's
   `bench-read`, `bench-write` and `bench-merge`, which take none of the
   three, and refuse them rather than ignore them: pick codecs with
-  `--compressions`, and io_uring on `merge` with `--uring`.
+  `--compressions`, and io_uring on `merge` with `--uring`. Each runs one
+  cell per variant (`src/pbfhogg/bench_cells.rs`) on one build, which carries
+  the measured mode's instrumentation feature, and with `--uring`
+  `linux-io-uring` for every merge cell, buffered ones too, so the I/O mode
+  is all a pair of cells varies. `--hotpath` and `--alloc` profile each cell
+  like any other command; every mode records the wall the child reports, and
+  each row carries its cell as a qualifier (`brokkr man results`).
+  `--dry-run` prints every cell's argv.
 - `--inject-prepass` - (`add-locations-to-ways` only) emit the injected-prepass
   wire extensions (BlobHeader field 5 way-member bitmaps, Way field 20
   shared-node pins; declared via the `pbfhogg.WayMembers-v1` /

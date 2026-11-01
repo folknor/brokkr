@@ -1,6 +1,6 @@
 //! Iteration scheduling and execution evidence.
 
-use super::kv::parse_kv_stderr;
+use super::kv::reported_timing;
 use super::wall::{
     WallSource, elapsed_to_ms, elapsed_to_us, marker_span_us, us_to_ms, winning_index,
 };
@@ -47,6 +47,10 @@ pub struct Iteration {
     pub stderr: Vec<u8>,
     pub pid: Option<u32>,
     pub error: Option<DevError>,
+    /// The `elapsed_ms`/`total_ms` the child printed, in microseconds, from
+    /// capture's one parse of its stderr. Read only by
+    /// [`WallSource::SelfReported`].
+    pub reported_us: Option<i64>,
 }
 
 impl Iteration {
@@ -60,6 +64,7 @@ impl Iteration {
             stderr: Vec::new(),
             pid: None,
             error: None,
+            reported_us: None,
         }
     }
 
@@ -194,9 +199,16 @@ fn apply_wall_source(source: WallSource, iteration: &mut Iteration) -> Result<()
                 "external timing requires a captured wall".into(),
             )),
         },
-        WallSource::SelfReported => parse_kv_stderr(&iteration.stderr).map(|result| {
-            iteration.result = Some(result);
-        }),
+        // The elapsed fields only: the counters capture parsed, an answer's
+        // exit code, an observer's additions and a hotpath profile all stay.
+        WallSource::SelfReported => {
+            let us = reported_timing(iteration.reported_us, &iteration.stderr)?;
+            if let Some(result) = &mut iteration.result {
+                result.elapsed_us = Some(us);
+                result.elapsed_ms = us_to_ms(us);
+            }
+            Ok(())
+        }
         WallSource::MarkerSpan { start, end } => {
             let span = iteration
                 .sidecar
@@ -252,5 +264,50 @@ impl BenchHarness {
             fifo,
         }
         .run(program, f))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn captured(reported_us: Option<i64>) -> Iteration {
+        let mut iteration = Iteration::from_result(BenchResult {
+            elapsed_ms: 9_000,
+            elapsed_us: Some(9_000_000),
+            kv: vec![KvPair::int("blocks", 42), KvPair::int("meta.exit_code", 0)],
+            iterations: Vec::new(),
+            distribution: None,
+            hotpath: Some(crate::db::HotpathData {
+                functions: Vec::new(),
+                threads: Vec::new(),
+                thread_summary: vec![KvPair::int("threads", 4)],
+            }),
+        });
+        iteration.stderr = b"elapsed_ms=1.5\nblocks=42\n".to_vec();
+        iteration.reported_us = reported_us;
+        iteration
+    }
+
+    /// A self-reported wall sets the elapsed fields and nothing else, so a
+    /// profiled cell keeps its profile, counters and exit code.
+    #[test]
+    fn a_self_reported_wall_replaces_only_the_elapsed_fields() {
+        let mut iteration = captured(Some(1_500));
+        apply_wall_source(WallSource::SelfReported, &mut iteration).unwrap();
+        let result = iteration.result.unwrap();
+        assert_eq!((result.elapsed_ms, result.elapsed_us), (2, Some(1_500)));
+        assert_eq!(result.kv.len(), 2);
+        assert!(result.hotpath.is_some());
+    }
+
+    /// A child that printed no timing fails the sample rather than fall back
+    /// to another wall.
+    #[test]
+    fn a_missing_self_reported_wall_fails_the_sample() {
+        let mut iteration = captured(None);
+        let error = apply_wall_source(WallSource::SelfReported, &mut iteration).unwrap_err();
+        assert!(error.to_string().contains("missing elapsed_ms"), "{error}");
     }
 }

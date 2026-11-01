@@ -46,15 +46,8 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
         ) {
             super::resolve_tilegen(req.dev_config, super::DEFAULT_TILEGEN)?;
         }
-        let features = if matches!(
-            req.mode,
-            MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. }
-        ) {
-            req.build_features()
-        } else {
-            req.feat_refs()
-        };
-        let mut config = crate::build::BuildConfig::release_with_features(None, &features);
+        let mut config =
+            crate::build::BuildConfig::release_with_features(None, &req.build_features());
         if let ElivagarCommand::Built(BuiltCommand::Example(example)) = self.0 {
             config.example = Some(example.cargo_example().into());
         }

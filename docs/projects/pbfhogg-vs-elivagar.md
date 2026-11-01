@@ -79,7 +79,9 @@ argv and Java/CMake profile labels.
 External wall-clock and profiling runs capture the sidecar's `/proc` trajectory
 and FIFO markers/counters into `sidecar.db`. External timing also accepts stderr
 counters into the winning result's KV pairs. A self-reported `elapsed_ms` never
-replaces external timing.
+replaces external timing; a command times one or the other in every mode. The
+exception on the pbfhogg side is the `read`, `write` and `merge` cells, which
+record the self-reported wall in every mode, profiled ones included.
 
 Elivagar examples' ordinary captured execution has no FIFO sidecar. Profiling
 uses the shared hotpath capture path. Run mode persists neither result nor

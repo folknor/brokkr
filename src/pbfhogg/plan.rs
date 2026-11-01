@@ -85,14 +85,7 @@ impl PlannedCommand for PbfhoggPlan<'_> {
     ) -> Result<Option<crate::build::BuildConfig>, DevError> {
         preflight_as_snapshot(self.command, req, self.params)?;
         let io = resolve_io_features(self.command, self.params)?;
-        let mut features = if matches!(
-            req.mode,
-            MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. }
-        ) {
-            req.build_features()
-        } else {
-            req.feat_refs()
-        };
+        let mut features = req.build_features();
         features.extend(io);
         Ok(Some(crate::build::BuildConfig::release_with_features(
             self.package(),

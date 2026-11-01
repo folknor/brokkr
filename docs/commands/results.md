@@ -230,7 +230,20 @@ on an input with neither assertion is `tilegen=[]`), since `brokkr tilegen`'s
 own argv names only the input. A defaulted digest row or a tilegen row from
 before these carries none and pairs only with other such rows, which mix the
 forms or blocks of their day; an explicit `--form` digest row was never
-qualified and pairs as before. A `brokkr library` row's
+qualified and pairs as before. A pbfhogg `read`, `write` or `merge` row, the
+suite's included, carries the cell it measured, since one invocation runs
+several: `mode=...` for a read mode, `writer=...;compression=...` for a write
+cell, `io=...;compression=...` for a merge cell. Before that every cell of an
+invocation shared one key, so `--compare` paired whichever it met first. The
+v27 results.db migration qualifies the older rows whose recorded `cli_args`
+proves the cell, folding the qualifier onto the key they already compared
+under (their `arm_key`, or `brokkr_args` where that is NULL), so those cells
+stop colliding; an old row pairs with a new one only where their unqualified
+keys already matched, which a row whose key still holds `--commit X` never
+does. A row whose `cli_args` is missing, quoted or of an unrecognised shape
+stays unqualified. A read, write or merge row stored under `--hotpath` or
+`--alloc` before those modes profiled these cells carries no profile, and
+qualifying it does not give it one. A `brokkr library` row's
 qualifier is its library identity (the plan and context digests, the
 dataset and generated identities, the harness features, and any seeds or
 preparation; `brokkr man library`, Measuring a scenario), also stored as

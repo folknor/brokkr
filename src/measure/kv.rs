@@ -1,5 +1,6 @@
 //! The stderr key=value timing and counter protocol.
 
+#[cfg(test)]
 use super::BenchResult;
 use super::wall::us_to_ms;
 use crate::db::KvPair;
@@ -61,10 +62,11 @@ pub(crate) fn parse_kv_lines_us(stderr: &[u8]) -> (Option<i64>, Vec<KvPair>) {
     (elapsed_us, kv)
 }
 
-pub(super) fn parse_kv_stderr(stderr: &[u8]) -> Result<BenchResult, DevError> {
-    let (elapsed_us, kv) = parse_kv_lines_us(stderr);
-
-    let elapsed_us = elapsed_us.ok_or_else(|| {
+/// The timing a self-reporting child printed (the `elapsed_us` capture
+/// already parsed from `stderr`), or the error naming its absence with a
+/// preview of what it printed instead.
+pub(super) fn reported_timing(reported_us: Option<i64>, stderr: &[u8]) -> Result<i64, DevError> {
+    reported_us.ok_or_else(|| {
         let text = String::from_utf8_lossy(stderr);
         let preview: String = text
             .chars()
@@ -73,7 +75,16 @@ pub(super) fn parse_kv_stderr(stderr: &[u8]) -> Result<BenchResult, DevError> {
         DevError::Config(format!(
             "subprocess stderr missing elapsed_ms=NNN. stderr was:\n{preview}"
         ))
-    })?;
+    })
+}
+
+/// One parse of a self-reporting child's stderr into a result, for the
+/// protocol tests; the measurement path parses once in capture and applies
+/// [`reported_timing`].
+#[cfg(test)]
+pub(super) fn parse_kv_stderr(stderr: &[u8]) -> Result<BenchResult, DevError> {
+    let (elapsed_us, kv) = parse_kv_lines_us(stderr);
+    let elapsed_us = reported_timing(elapsed_us, stderr)?;
 
     Ok(BenchResult {
         elapsed_ms: us_to_ms(elapsed_us),

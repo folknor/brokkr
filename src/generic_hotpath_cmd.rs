@@ -32,7 +32,8 @@ pub(crate) fn cmd_hotpath_generic(req: &measure::MeasureRequest) -> Result<(), D
         arm_qualifier: None,
     };
 
-    ctx.harness.run_hotpath(&config, ctx.binary()?, |i, fifo| {
+    let wall = crate::harness::WallSource::External;
+    ctx.harness.run_hotpath(&config, ctx.binary()?, wall, |i, fifo| {
         ctx.harness
             .capture_hotpath(ctx.binary()?, &[], req.project_root.as_path(), fifo, i)
     })?;

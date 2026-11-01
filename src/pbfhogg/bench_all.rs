@@ -10,10 +10,11 @@ use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness, BenchResult};
 use crate::measure::{ExternalTool, Invocation};
 use crate::output;
+use crate::measure::MeasureMode;
+use crate::pbfhogg::bench_cells::{self, Batch, BatchInputs};
 use crate::pbfhogg::binary::PbfhoggBinary;
 use crate::pbfhogg::{
-    bench_blob_filter, bench_commands, bench_extract, bench_merge, bench_planetiler, bench_read,
-    bench_write,
+    bench_blob_filter, bench_commands, bench_extract, bench_planetiler,
 };
 use crate::project::BuildRoot;
 use crate::tools;
@@ -28,6 +29,7 @@ use crate::tools;
 /// skip the baseline without failing the whole run.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
+    mode: &MeasureMode,
     harness: &BenchHarness,
     paths: &ResolvedPaths,
     build_root: &BuildRoot,
@@ -51,6 +53,7 @@ pub fn run(
         )?;
         harness.note_build(identity);
         run_suite_binary(
+            mode,
             harness,
             paths,
             dataset,
@@ -69,6 +72,7 @@ pub fn run(
 /// Every suite benchmark that runs the one suite build.
 #[allow(clippy::too_many_arguments)]
 fn run_suite_binary(
+    mode: &MeasureMode,
     harness: &BenchHarness,
     paths: &ResolvedPaths,
     dataset: &str,
@@ -121,33 +125,39 @@ fn run_suite_binary(
             .as_ref(),
     )?;
 
-    // 2. bench read -- all 5 modes
-    output::bench_msg("=== bench read ===");
-    bench_read::run(
+    // The read, write and merge cells run under this suite's one handle,
+    // through the same constructors and executor as `brokkr read`, `write`
+    // and `merge`.
+    let batch = |label| Batch {
+        mode,
         harness,
-        binary,
-        pbf_path,
+        handle: binary,
+        label,
         file_mb,
         runs,
-        bench_read::ALL_MODES,
-        project_root,
+        cwd: project_root,
+    };
+
+    // 2. bench read -- every read mode
+    output::bench_msg("=== bench read ===");
+    bench_cells::run_batch(
+        &batch("mode"),
+        &bench_cells::read_cells(bench_cells::ALL_READ_MODES),
+        &BatchInputs::new(pbf_path, None, &paths.scratch_dir),
     )?;
 
     // 3. bench write -- sync + pipelined x default compressions
     output::bench_msg("=== bench write ===");
     let write_compressions =
         super::parse_compressions(super::DEFAULT_BENCH_WRITE_COMPRESSIONS, false)?;
-    bench_write::run(
-        harness,
-        binary,
-        pbf_path,
-        file_mb,
-        runs,
-        &write_compressions,
-        project_root,
+    bench_cells::run_batch(
+        &batch("variant"),
+        &bench_cells::write_cells(&write_compressions),
+        &BatchInputs::new(pbf_path, None, &paths.scratch_dir),
     )?;
 
     run_dataset_dependent(
+        mode,
         harness,
         paths,
         dataset,
@@ -165,6 +175,7 @@ fn run_suite_binary(
 /// Run benchmarks that depend on optional dataset config fields (osc, bbox, pbf_raw).
 #[allow(clippy::too_many_arguments)]
 fn run_dataset_dependent(
+    mode: &MeasureMode,
     harness: &BenchHarness,
     paths: &ResolvedPaths,
     dataset: &str,
@@ -184,17 +195,18 @@ fn run_dataset_dependent(
         output::bench_msg("=== bench merge ===");
         let merge_compressions =
             super::parse_compressions(super::DEFAULT_BENCH_MERGE_COMPRESSIONS, false)?;
-        bench_merge::run(
-            harness,
-            binary,
-            pbf_path,
-            osc_path,
-            file_mb,
-            runs,
-            &merge_compressions,
-            false,
-            &paths.scratch_dir,
-            project_root,
+        bench_cells::run_batch(
+            &Batch {
+                mode,
+                harness,
+                handle: binary,
+                label: "variant",
+                file_mb,
+                runs,
+                cwd: project_root,
+            },
+            &bench_cells::merge_cells(&merge_compressions, false),
+            &BatchInputs::new(pbf_path, Some(osc_path), &paths.scratch_dir),
         )?;
     } else {
         output::bench_msg("=== bench merge === (skipped, no osc file)");

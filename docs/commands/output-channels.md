@@ -137,9 +137,10 @@ from brokkr rather than stderr.
 
 | Harness fn | stdout | stderr kv -> results.db | FIFO -> sidecar.db | Used by |
 |---|---|---|---|---|
-| `run_passthrough_timed` | inherited (shown) | no | **no** (no FIFO) | all `--` run mode (no `--bench`) |
+| `run_passthrough_timed` | inherited (shown) | no | **no** (no FIFO) | run mode (no `--bench`), except the pbfhogg read/write/merge cells, which run their one launch through `run_invocation_timed` with nothing stored |
 | `run_external_ok` | captured, dropped | **yes** (counters only) | yes | every pbfhogg bench command + elivagar `tilegen` + `brokkr mogwai` |
-| `measure_external` | captured, dropped | **yes** | yes | elivagar `self` micro-bench; pbfhogg read/write/merge micro-benches (via `run_external_with_kv`) |
+| `measure_external` | captured, dropped | **yes** | yes | elivagar `self` micro-bench; sluggrs `hotpath --bench` (via `run_external_with_kv`) |
+| `run_invocation_timed` (self-reported) | captured, dropped | **yes** | yes | pbfhogg read/write/merge cells in run mode (stored nowhere) and under `--bench`; under `--hotpath`/`--alloc` they keep the self-reported wall through `run_hotpath` |
 | `run_internal` (+ `run_captured`) | captured, dropped | no | **no** (no FIFO) | elivagar example benches |
 | `capture_hotpath` (stored via `run_hotpath`) | captured | stderr counters + JSON profile | yes | `--hotpath` / `--alloc`, all projects but `brokkr library`, whose measured runs are verifications (see below) |
 
@@ -279,9 +280,10 @@ timing names and are not stored as counters. This path uses no sidecar FIFO.
   elivagar `tilegen`, `brokkr mogwai`) it is scraped into `kv` as a counter
   and feeds `--compare`'s `counters:` line; `elapsed_ms` and `total_ms` are
   reserved and ignored there, and the wall stays brokkr's own. On the
-  read/write/merge/`self` micro-benches (`measure_external`) a
-  mandatory `elapsed_ms=`/`total_ms=` line additionally supplies the recorded
-  timing.
+  self-reported paths (the pbfhogg read/write/merge cells in every mode,
+  through `run_invocation_timed` and `run_hotpath`; elivagar's `self`
+  micro-bench through `measure_external`) a mandatory
+  `elapsed_ms=`/`total_ms=` line additionally supplies the recorded timing.
 - Want a metric in `brokkr sidecar`? Emit an `@name=value` counter to
   `BROKKR_MARKER_FIFO`. Works for every pbfhogg command and elivagar
   `tilegen` (any path that spawns the sidecar), in bench/hotpath/alloc modes.

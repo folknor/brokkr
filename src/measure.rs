@@ -96,7 +96,9 @@ impl ProfiledMode {
 impl MeasureRequest<'_> {
     /// The cargo features a build for this request carries: the profiled
     /// mode's instrumentation feature first (when there is one), then the
-    /// user/host features.
+    /// user/host features. The only way a measured build gets its features,
+    /// so no command can build a `--hotpath` or `--alloc` run without the
+    /// instrumentation the mode needs.
     pub fn build_features(&self) -> Vec<&str> {
         let mut all: Vec<&str> = self
             .mode
@@ -192,11 +194,6 @@ impl MeasureRequest<'_> {
     pub fn runs(&self) -> usize {
         self.mode.runs().get()
     }
-
-    /// Feature refs as `&str` slices (for passing to build functions).
-    pub fn feat_refs(&self) -> Vec<&str> {
-        self.features.iter().map(String::as_str).collect()
-    }
 }
 
 /// Shared execution of standalone command plans.
@@ -207,6 +204,7 @@ pub(crate) mod runner;
 // ---------------------------------------------------------------------------
 
 /// Configuration for a benchmark run.
+#[derive(Clone)]
 pub struct BenchConfig {
     pub command: String,
     pub input_file: Option<String>,
@@ -537,22 +535,21 @@ impl BenchHarness {
     }
 
     /// Collect captured profiling iterations, including their failure evidence.
+    /// `source` names the wall a row records and the best-of-N ranks on; the
+    /// profile stays attached to the iteration it ranks.
     pub fn run_hotpath<F>(
         &self,
         config: &BenchConfig,
         program: &Path,
+        source: WallSource,
         f: F,
     ) -> Result<BenchResult, DevError>
     where
         F: Fn(usize, &mut crate::sidecar::SidecarFifo) -> Result<Iteration, DevError>,
     {
-        let mut measurement = self.measure(
-            config,
-            Some(program),
-            WallSource::External,
-            true,
-            |i, fifo| f(i, fifo.expect("profiled loop owns a FIFO")),
-        )?;
+        let mut measurement = self.measure(config, Some(program), source, true, |i, fifo| {
+            f(i, fifo.expect("profiled loop owns a FIFO"))
+        })?;
         self.record(config, &mut measurement, |_, _| Ok(()))
     }
 
@@ -593,16 +590,33 @@ impl BenchHarness {
     where
         F: Fn() -> Result<(), DevError>,
     {
-        invocation.require_no_env("the external wall-clock runner")?;
-        let config = config_for(config, invocation);
-        let mut measurement = self.measure_invocation(
-            &config,
+        self.run_invocation_timed(
+            config,
             invocation,
             cwd,
             exits,
             WallSource::External,
             prepare,
-        )?;
+        )
+    }
+
+    /// Each iteration one launch of `invocation`, timed by `source`.
+    pub(crate) fn run_invocation_timed<F>(
+        &self,
+        config: &BenchConfig,
+        invocation: &Invocation<'_>,
+        cwd: &Path,
+        exits: crate::output::child::Exits,
+        source: WallSource,
+        prepare: F,
+    ) -> Result<BenchResult, DevError>
+    where
+        F: Fn() -> Result<(), DevError>,
+    {
+        invocation.require_no_env("the external runner")?;
+        let config = config_for(config, invocation);
+        let mut measurement =
+            self.measure_invocation(&config, invocation, cwd, exits, source, prepare)?;
         self.record(&config, &mut measurement, |_, _| Ok(()))
     }
 
@@ -676,17 +690,14 @@ impl BenchHarness {
         invocation: &Invocation<'_>,
         cwd: &Path,
     ) -> Result<BenchResult, DevError> {
-        invocation.require_no_env("the self-reported external runner")?;
-        let config = config_for(config, invocation);
-        let mut measurement = self.measure_invocation(
-            &config,
+        self.run_invocation_timed(
+            config,
             invocation,
             cwd,
             crate::output::child::Exits::SUCCESS,
             WallSource::SelfReported,
             || Ok(()),
-        )?;
-        self.record(&config, &mut measurement, |_, _| Ok(()))
+        )
     }
 
     /// Collect subprocess iterations without recording; postprocessing belongs in `record`.

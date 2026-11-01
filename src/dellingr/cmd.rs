@@ -183,7 +183,8 @@ fn run_one(
         "dellingr",
         &resolved.name,
         || {
-            ctx.harness.run_hotpath(&config, ctx.binary()?, |i, fifo| {
+            let wall = crate::harness::WallSource::External;
+            ctx.harness.run_hotpath(&config, ctx.binary()?, wall, |i, fifo| {
                 ctx.harness.capture_hotpath(
                     ctx.binary()?,
                     &args,

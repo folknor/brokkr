@@ -7,6 +7,7 @@ use crate::datasets::resolve::{self, resolve_bbox, resolve_pbf_with_size};
 use crate::error::DevError;
 use crate::measure::MeasureRequest;
 use crate::output;
+use crate::pbfhogg::bench_cells;
 use crate::pbfhogg::binary::PbfhoggBinary;
 use crate::preflight;
 use crate::project::Project;
@@ -220,124 +221,104 @@ pub(crate) fn bench_read(
     modes_str: &str,
     snapshot: Option<&resolve::SnapshotRef>,
 ) -> Result<(), DevError> {
-    if req.dry_run {
-        let paths = dry_run_paths(req)?;
-        let _ = resolve_read_pbf_with_size(req, snapshot, &paths)?;
-        let _ = super::bench_read::parse_modes(modes_str)?;
-        output::dry_run_msg("ok (bench read)");
-        return Ok(());
-    }
-
-    let feat_refs = req.feat_refs();
-    let ctx = MeasurementSession::build_for_request(
-        req,
-        Project::Pbfhogg.cli_package(),
-        &feat_refs,
-        true,
-    )?;
-    let (pbf_path, file_mb) = resolve_read_pbf_with_size(req, snapshot, &ctx.paths)?;
-    let modes = super::bench_read::parse_modes(modes_str)?;
-    super::bench_read::run(
-        &ctx.harness,
-        &PbfhoggBinary::from_session(&ctx, req.project_root.as_path())?,
-        &pbf_path,
-        file_mb,
-        req.runs(),
-        &modes,
-        req.project_root.as_path(),
-    )
+    let cells = bench_cells::read_cells(&bench_cells::parse_read_modes(modes_str)?);
+    run_bench_cells(req, "mode", &cells, &[], |paths| {
+        let (pbf, mb) = resolve_read_pbf_with_size(req, snapshot, paths)?;
+        Ok((pbf, mb, None))
+    })
 }
 
 pub(crate) fn bench_write(
     req: &MeasureRequest,
     compressions: &super::CompressionList,
 ) -> Result<(), DevError> {
-    if req.dry_run {
-        let paths = dry_run_paths(req)?;
-        let _ =
-            resolve_pbf_with_size(req.dataset, req.variant, &paths, req.project_root.as_path())?;
-        output::dry_run_msg("ok (bench write)");
-        return Ok(());
-    }
-
-    let feat_refs = req.feat_refs();
-    let ctx = MeasurementSession::build_for_request(
-        req,
-        Project::Pbfhogg.cli_package(),
-        &feat_refs,
-        true,
-    )?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(
-        req.dataset,
-        req.variant,
-        &ctx.paths,
-        req.project_root.as_path(),
-    )?;
     let compressions = super::compression_args(compressions.as_slice(), true);
-    super::bench_write::run(
-        &ctx.harness,
-        &PbfhoggBinary::from_session(&ctx, req.project_root.as_path())?,
-        &pbf_path,
-        file_mb,
-        req.runs(),
-        &compressions,
-        req.project_root.as_path(),
-    )
+    let cells = bench_cells::write_cells(&compressions);
+    run_bench_cells(req, "variant", &cells, &[], |paths| {
+        let (pbf, mb) =
+            resolve_pbf_with_size(req.dataset, req.variant, paths, req.project_root.as_path())?;
+        Ok((pbf, mb, None))
+    })
 }
 
+/// With `uring` every merge cell, buffered ones included, runs on the one
+/// build with `linux-io-uring`, so the I/O mode is the only thing a pair of
+/// cells varies.
 pub(crate) fn bench_merge(
     req: &MeasureRequest,
     osc_seq: Option<&str>,
     uring: bool,
     compressions: &super::CompressionList,
 ) -> Result<(), DevError> {
-    if req.dry_run {
-        if uring {
-            preflight::run_preflight(&preflight::uring_checks())?;
-        }
-        let paths = dry_run_paths(req)?;
-        let (pbf_path, _file_mb) =
-            resolve_pbf_with_size(req.dataset, req.variant, &paths, req.project_root.as_path())?;
-        let osc_path = resolve_bench_osc(req.dataset, osc_seq, &paths, req.project_root.as_path())?;
-        output::dry_run_msg(&format!("pbf: {}", output::path(&pbf_path)));
-        output::dry_run_msg(&format!("osc: {}", output::path(&osc_path)));
-        output::dry_run_msg("ok (bench merge)");
-        return Ok(());
-    }
-
     if uring {
         preflight::run_preflight(&preflight::uring_checks())?;
     }
+    let compressions = super::compression_args(compressions.as_slice(), false);
+    let cells = bench_cells::merge_cells(&compressions, uring);
+    let features: &[&str] = if uring { &["linux-io-uring"] } else { &[] };
+    run_bench_cells(req, "variant", &cells, features, |paths| {
+        let root = req.project_root.as_path();
+        let (pbf, mb) = resolve_pbf_with_size(req.dataset, req.variant, paths, root)?;
+        let osc = resolve_bench_osc(req.dataset, osc_seq, paths, root)?;
+        Ok((pbf, mb, Some(osc)))
+    })
+}
 
-    let mut all_features = req.feat_refs();
-    if uring {
-        all_features.push("linux-io-uring");
+/// The input a bench batch measures: its PBF, that PBF's size in MB, and the
+/// OSC a merge batch applies.
+type BatchInput = (PathBuf, f64, Option<PathBuf>);
+
+/// Resolve, build and measure one `read`, `write` or `merge` batch. Dry run
+/// resolves the same input and prints every cell's argv. A real run builds
+/// once with the request's features (the profiled mode's instrumentation
+/// included) plus `extra_features`, resolves the input after the session is
+/// admitted, and measures each cell through the shared executor.
+fn run_bench_cells(
+    req: &MeasureRequest,
+    label: &str,
+    cells: &[bench_cells::BenchCell],
+    extra_features: &[&str],
+    resolve: impl Fn(&config::ResolvedPaths) -> Result<BatchInput, DevError>,
+) -> Result<(), DevError> {
+    if req.dry_run {
+        let paths = dry_run_paths(req)?;
+        let (pbf, _mb, osc) = resolve(&paths)?;
+        let inputs = bench_cells::BatchInputs::new(&pbf, osc.as_deref(), &paths.scratch_dir);
+        for cell in cells {
+            output::dry_run_msg(&format!(
+                "{} {}: {}",
+                cell.command(),
+                cell.name(),
+                cell.argv(&inputs)?.args().join(" ")
+            ));
+        }
+        output::dry_run_msg("ok");
+        return Ok(());
     }
+
+    let mut features = req.build_features();
+    features.extend_from_slice(extra_features);
     let ctx = MeasurementSession::build_for_request(
         req,
         Project::Pbfhogg.cli_package(),
-        &all_features,
+        &features,
         true,
     )?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(
-        req.dataset,
-        req.variant,
-        &ctx.paths,
-        req.project_root.as_path(),
-    )?;
-    let osc_path = resolve_bench_osc(req.dataset, osc_seq, &ctx.paths, req.project_root.as_path())?;
-    let compressions = super::compression_args(compressions.as_slice(), false);
-    super::bench_merge::run(
-        &ctx.harness,
-        &PbfhoggBinary::from_session(&ctx, req.project_root.as_path())?,
-        &pbf_path,
-        &osc_path,
-        file_mb,
-        req.runs(),
-        &compressions,
-        uring,
-        &ctx.paths.scratch_dir,
-        req.project_root.as_path(),
+    let (pbf, file_mb, osc) = resolve(&ctx.paths)?;
+    let inputs = bench_cells::BatchInputs::new(&pbf, osc.as_deref(), &ctx.paths.scratch_dir);
+    let binary = PbfhoggBinary::from_session(&ctx, req.project_root.as_path())?;
+    bench_cells::run_batch(
+        &bench_cells::Batch {
+            mode: &req.mode,
+            harness: &ctx.harness,
+            handle: &binary,
+            label,
+            file_mb,
+            runs: req.runs(),
+            cwd: req.project_root.as_path(),
+        },
+        cells,
+        &inputs,
     )
 }
 
@@ -358,6 +339,7 @@ pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
         req.project_root.as_path(),
     )?;
     super::bench_all::run(
+        &req.mode,
         &ctx.harness,
         &ctx.paths,
         req.build_root,

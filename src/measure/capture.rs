@@ -92,7 +92,7 @@ impl BenchHarness {
                 child::IterationVerdict::Interrupted => Some(DevError::Interrupted),
             }
         };
-        let (_, mut kv) = if incomplete_output {
+        let (reported_us, mut kv) = if incomplete_output {
             (None, Vec::new())
         } else {
             parse_kv_lines_us(&capture.stderr)
@@ -126,6 +126,7 @@ impl BenchHarness {
             stderr: capture.stderr,
             pid: Some(pid),
             error,
+            reported_us,
         })
     }
 

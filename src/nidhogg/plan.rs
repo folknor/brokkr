@@ -61,14 +61,7 @@ impl PlannedCommand for NidhoggPlan<'_> {
         if matches!(self.0, NidhoggCommand::Api { .. }) {
             return Ok(None);
         }
-        let mut features = if matches!(
-            req.mode,
-            MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. }
-        ) {
-            req.build_features()
-        } else {
-            req.feat_refs()
-        };
+        let mut features = req.build_features();
         if matches!(self.0, NidhoggCommand::Tiles { uring: true, .. }) {
             crate::preflight::run_preflight(&crate::preflight::uring_checks())?;
             features.push("linux-io-uring");

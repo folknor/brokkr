@@ -4,7 +4,7 @@ use super::store::{column_exists, table_exists};
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding new migrations.
-pub(super) const SCHEMA_VERSION: i64 = 26;
+pub(super) const SCHEMA_VERSION: i64 = 27;
 
 /// Apply all migrations newer than `current`. Version checks and stamping are
 /// centralized in `db::store`.
@@ -101,6 +101,73 @@ fn run_migrations_from_v23(conn: &rusqlite::Connection, current: i64) -> Result<
     if current < 26 {
         // v25 -> v26: the canonical documents library rows name by digest.
         conn.execute_batch(super::schema::LIBRARY_DOCUMENTS_DDL)?;
+    }
+    if current < 27 {
+        migrate_v26_to_v27(conn)?;
+    }
+    Ok(())
+}
+
+/// v26 -> v27: qualify the pbfhogg `read`, `write` and `merge` rows stored
+/// before each cell carried its discriminators. One brokkr invocation runs
+/// several cells, and their rows shared one pairing key, so `results
+/// --compare` paired whichever cell it met first. A row is qualified only
+/// where its recorded `cli_args` proves which cell it was
+/// (`bench_cells::historical_qualifier`, which accepts only the exact shapes
+/// those benchmarks emitted, retired values included), and the qualifier is
+/// folded onto the key the row already compared under: its stored `arm_key`,
+/// or the `brokkr_args` compare falls back to when that is NULL. No base is
+/// reconstructed, so the recovered cells stop colliding and pair with new
+/// rows exactly where their bases already matched; the recorded argv
+/// columns and every other row stay as they were. A row stored under
+/// `--hotpath` or `--alloc` from before these cells were profiled carries no
+/// profile, and qualifying it does not give it one.
+fn migrate_v26_to_v27(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    for column in ["id", "command", "arm_key", "cli_args", "brokkr_args", "project"] {
+        if !column_exists(conn, "runs", column)? {
+            return Ok(());
+        }
+    }
+    let rows = {
+        let mut statement = conn.prepare(
+            "SELECT id, command, cli_args, arm_key, brokkr_args, project FROM runs \
+             WHERE command IN ('read', 'write', 'merge') AND cli_args IS NOT NULL",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for (id, command, cli_args, arm_key, brokkr_args, project) in rows {
+        // A row without attribution is pbfhogg's, as the query path reads it.
+        if project.as_deref().is_some_and(|p| p != "pbfhogg") {
+            continue;
+        }
+        if arm_key
+            .as_deref()
+            .is_some_and(|key| key.starts_with("[\"qualified-v1\""))
+        {
+            continue;
+        }
+        let Some(qualifier) =
+            crate::pbfhogg::bench_cells::historical_qualifier(&command, &cli_args)
+        else {
+            continue;
+        };
+        let base = arm_key.or(brokkr_args).unwrap_or_default();
+        let qualified = crate::run_invocation::qualified_arm_key(&base, Some(&qualifier));
+        conn.execute(
+            "UPDATE runs SET arm_key = ?1 WHERE id = ?2",
+            rusqlite::params![qualified, id],
+        )?;
     }
     Ok(())
 }
@@ -2336,6 +2403,77 @@ mod tests {
                 ("plain001".into(), None, None),
             ]
         );
+    }
+
+    /// Recoverable cells are qualified onto the key they compared under; a
+    /// row the stored argv does not prove, another project's, and one already
+    /// qualified stay exactly as they were, argv columns included.
+    #[test]
+    fn migrate_v26_to_v27_qualifies_only_the_cells_their_argv_proves() {
+        let dir = crate::test_scratch::scratch("db-migrate", "v26_to_v27");
+        let db = ResultsDb::open(&dir.join("results.db")).unwrap();
+        let insert = |uuid: &str,
+                      command: &str,
+                      cli_args: Option<&str>,
+                      arm_key: Option<&str>,
+                      brokkr_args: Option<&str>,
+                      project: Option<&str>| {
+            db.conn
+                .execute(
+                    "INSERT INTO runs (timestamp, hostname, [commit], subject, command, mode, \
+                     elapsed_ms, uuid, project, cli_args, arm_key, brokkr_args) VALUES \
+                     ('2026-10-01 00:00:00', 'h', 'aabb', 's', ?1, 'bench', 0, ?2, ?3, ?4, \
+                     ?5, ?6)",
+                    rusqlite::params![command, uuid, project, cli_args, arm_key, brokkr_args],
+                )
+                .unwrap();
+        };
+        let read = "/p/pbfhogg bench-read /d/planet.osm.pbf --mode parallel";
+        let pbfhogg = Some("pbfhogg");
+        insert("null-key", "read", Some(read), None, Some("brokkr read --bench 1"), pbfhogg);
+        insert("no-args", "read", Some(read), None, None, pbfhogg);
+        insert(
+            "stored",
+            "write",
+            Some("/p/pbfhogg bench-write /d/dk.osm.pbf --compression zstd:3 --writer sync"),
+            Some("brokkr write --bench 1"),
+            Some("[\"brokkr\",\"write\",\"--bench\",\"1\"]"),
+            Some("pbfhogg"),
+        );
+        let qualified = crate::run_invocation::qualified_arm_key("k", Some("mode=parallel"));
+        insert("already", "read", Some(read), Some(&qualified), None, pbfhogg);
+        let quoted = "/p/pbfhogg bench-read \"/d/a b.pbf\" --mode parallel";
+        insert("quoted", "read", Some(quoted), None, Some("brokkr read"), pbfhogg);
+        insert("no-cli", "read", None, None, Some("brokkr read"), pbfhogg);
+        insert("elsewhere", "read", Some(read), None, Some("x"), Some("nidhogg"));
+
+        migrate_v26_to_v27(&db.conn).unwrap();
+
+        let key = |uuid: &str| -> (Option<String>, Option<String>, Option<String>) {
+            db.conn
+                .query_row(
+                    "SELECT arm_key, brokkr_args, cli_args FROM runs WHERE uuid = ?1",
+                    [uuid],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap()
+        };
+        let q = |base: &str, qualifier: &str| {
+            Some(crate::run_invocation::qualified_arm_key(base, Some(qualifier)))
+        };
+        assert_eq!(key("null-key").0, q("brokkr read --bench 1", "mode=parallel"));
+        assert_eq!(key("no-args").0, q("", "mode=parallel"));
+        assert_eq!(
+            key("stored").0,
+            q("brokkr write --bench 1", "writer=sync;compression=zstd:3")
+        );
+        assert_eq!(key("already").0, Some(qualified));
+        assert_eq!(key("quoted").0, None);
+        assert_eq!(key("no-cli").0, None);
+        assert_eq!(key("elsewhere").0, None);
+        // The recorded argv columns never change.
+        assert_eq!(key("null-key").1.as_deref(), Some("brokkr read --bench 1"));
+        assert_eq!(key("null-key").2.as_deref(), Some(read));
     }
 
     // -----------------------------------------------------------------------

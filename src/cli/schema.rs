@@ -3128,7 +3128,7 @@ pub(crate) struct PbfArgs {
     pub(crate) variant: String,
     /// Use O_DIRECT for file I/O (builds pbfhogg with linux-direct-io).
     /// Refused where pbfhogg has no such path (merge-changes, an OSC
-    /// tags-filter, the read, write and merge benches)
+    /// tags-filter, check-locations, the read, write and merge benches)
     #[arg(long)]
     pub(crate) direct_io: bool,
     /// Use io_uring for output I/O (builds pbfhogg with linux-io-uring).

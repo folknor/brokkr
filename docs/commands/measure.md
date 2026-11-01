@@ -98,10 +98,26 @@ from sample scratch. Tilegen's checkpoint directory remains available for
   failures preserve captured evidence under `dirty`; storage failures are
   reported. There is no separate sidecar commit for callers to arrange.
 - `run_internal(config, closure)` uses closure timing and best-of-N, without
-  a sidecar. `run_hotpath(config, program, closure)` uses the same loop with a
-  FIFO; `capture_hotpath` receives that FIFO and uses the session's held lock
-  and stop marker. Missing or invalid profile JSON fails the iteration while
-  retaining its captured evidence.
+  a sidecar. `run_hotpath(config, program, source, closure)` uses the same
+  loop with a FIFO and the caller's wall source, so the profile is the one
+  attached to the iteration that wall ranks best; `capture_hotpath` receives
+  that FIFO and uses the session's held lock and stop marker. Missing or
+  invalid profile JSON fails the iteration while retaining its captured
+  evidence.
+- A self-reported wall replaces only the iteration's elapsed fields with the
+  `elapsed_ms=` capture parsed from stderr; its counters, an answer's
+  `meta.exit_code`, an observer's additions and a hotpath profile stay. A
+  child that printed no timing fails the sample.
+- `runner::execute_cell(mode, harness, cwd, cell, hooks)`
+  (`src/measure/runner.rs`) is the one place a measured invocation's mode is
+  decided: run with output passed through, benchmark, or profile. A cell is
+  the invocation, its row subject, its accepted exits and its wall source;
+  the planned runner's plans are cells with the external wall, and pbfhogg's
+  `read`, `write` and `merge` cells (`src/pbfhogg/bench_cells.rs`) are cells
+  with the self-reported wall in every mode. No command accepts `--hotpath`
+  or `--alloc` and runs a plain child, and every measured build takes its
+  features from `MeasureRequest::build_features`, which adds the mode's
+  instrumentation feature.
 - `run_external(config, binary, args)` - subprocess timing
 - `run_distribution(config, closure)` - distribution timing
   (min/p50/p95/max). The closure returns each sample as a `Duration`; the

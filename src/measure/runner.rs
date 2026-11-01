@@ -92,14 +92,9 @@ pub(crate) trait PlannedCommand {
         &self,
         req: &MeasureRequest<'_>,
     ) -> Result<Option<crate::build::BuildConfig>, DevError> {
-        let features = if profiling(req) {
-            req.build_features()
-        } else {
-            req.feat_refs()
-        };
         Ok(Some(crate::build::BuildConfig::release_with_features(
             self.package(),
-            &features,
+            &req.build_features(),
         )))
     }
     fn plan(
@@ -276,9 +271,10 @@ fn remove_one_file(gated: bool, file: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Run a binary plan's materialised invocation in the request's mode. Only
-/// the invocation is spawned, never the bare binary: its program and argv are
-/// what the row records and what runs.
+/// Run a binary plan's materialised invocation in the request's mode, as one
+/// [`Cell`] timed by the external wall. Only the invocation is spawned, never
+/// the bare binary: its program and argv are what the row records and what
+/// runs.
 fn execute_invocation<C: PlannedCommand, P: Fn() -> Result<(), DevError>>(
     req: &MeasureRequest<'_>,
     ctx: &MeasurementSession,
@@ -287,19 +283,90 @@ fn execute_invocation<C: PlannedCommand, P: Fn() -> Result<(), DevError>>(
     invocation: &Invocation<'_>,
     prepare: &P,
 ) -> Result<(), DevError> {
+    let cell = Cell {
+        config: plan.subject.config(req.runs()),
+        invocation,
+        exits: command.exits(plan),
+        wall: crate::harness::WallSource::External,
+    };
+    execute_cell(
+        &req.mode,
+        &ctx.harness,
+        req.project_root.as_path(),
+        &cell,
+        &CellHooks {
+            prepare,
+            announce: &|| command.announce(req, plan),
+            observe: &|result, stderr| command.observe(result, stderr),
+        },
+    )
+}
+
+/// One measured invocation and how its row is formed: what the row says,
+/// which exits complete it, and which wall it records and ranks on.
+pub(crate) struct Cell<'i> {
+    /// The row's subject. Its `cli_args` is replaced by the invocation's own
+    /// rendering, so the recorded command is the one that ran.
+    pub config: BenchConfig,
+    pub invocation: &'i Invocation<'i>,
+    pub exits: Exits,
+    /// [`WallSource::External`](crate::harness::WallSource::External) for a
+    /// plan; a child that times its own measured region reports it, and
+    /// keeps reporting it under `--hotpath` and `--alloc`.
+    pub wall: crate::harness::WallSource,
+}
+
+/// What a cell's caller runs around its launches: `prepare` before every
+/// launch in every mode, `announce` once before a benchmark, `observe` on
+/// each successful profiled iteration's result.
+pub(crate) struct CellHooks<'h> {
+    pub prepare: &'h dyn Fn() -> Result<(), DevError>,
+    pub announce: &'h dyn Fn() -> Result<(), DevError>,
+    pub observe: &'h dyn Fn(&mut harness::BenchResult, &[u8]),
+}
+
+impl CellHooks<'static> {
+    /// No preparation, announcement or observation.
+    pub(crate) const NONE: Self = Self {
+        prepare: &|| Ok(()),
+        announce: &|| Ok(()),
+        observe: &|_, _| {},
+    };
+}
+
+/// The one place a measured invocation's mode is decided: run once (output
+/// passed through for an externally timed cell; one unstored measured launch
+/// for a self-timed one), benchmark, or profile under `--hotpath` and
+/// `--alloc`. Every measured command reaches its child through here, the
+/// planned runner's plans and pbfhogg's read, write and merge cells alike, so
+/// no command can accept a profiled mode and run it as a plain one.
+pub(crate) fn execute_cell(
+    mode: &MeasureMode,
+    harness: &harness::BenchHarness,
+    cwd: &Path,
+    cell: &Cell<'_>,
+    hooks: &CellHooks<'_>,
+) -> Result<(), DevError> {
+    let invocation = cell.invocation;
     invocation.require_no_env("the measure runner")?;
     let binary = invocation.program();
     let program = invocation.program_string();
-    let cwd = req.project_root.as_path();
-    let mut config = plan.subject.config(req.runs());
+    let mut config = cell.config.clone();
     config.cli_args = Some(invocation.cli_args());
-    match req.mode {
+    let prepare = hooks.prepare;
+    match mode {
+        // A child that times itself reports that wall in run mode too: one
+        // measured launch, its result line printed and nothing stored (a run
+        // mode harness stores no row), the FIFO and `--stop` attached.
+        MeasureMode::Run if !matches!(cell.wall, crate::harness::WallSource::External) => {
+            harness.run_invocation_timed(&config, invocation, cwd, cell.exits, cell.wall, prepare)?;
+        }
         MeasureMode::Run => {
             prepare()?;
             let launched = invocation.launch(cwd)?;
             let args = launched.arg_refs();
             output::run_msg(&format!("{program} {}", args.join(" ")));
-            let out = output::run_passthrough_timed(&program, &args, Some(ctx.harness.lock()));
+            let out = output::run_passthrough_timed(&program, &args, Some(harness.lock()));
             let finished = launched.finish();
             let out = match out {
                 Ok(out) => out,
@@ -311,7 +378,7 @@ fn execute_invocation<C: PlannedCommand, P: Fn() -> Result<(), DevError>>(
                 }
             };
             finished?;
-            if let Some(code) = out.failed_code(command.exits(plan)) {
+            if let Some(code) = out.failed_code(cell.exits) {
                 // An answer command expected to answer no fails on exit 0,
                 // which must not reach the process exit as success.
                 if code == 0 {
@@ -329,32 +396,26 @@ fn execute_invocation<C: PlannedCommand, P: Fn() -> Result<(), DevError>>(
             ));
         }
         MeasureMode::Bench { .. } => {
-            command.announce(req, plan)?;
-            ctx.harness.run_external_prepared(
-                &config,
-                invocation,
-                req.project_root.as_path(),
-                command.exits(plan),
-                prepare,
-            )?;
+            (hooks.announce)()?;
+            harness.run_invocation_timed(&config, invocation, cwd, cell.exits, cell.wall, prepare)?;
         }
         MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. } => {
-            if let Some(profiling) = req.mode.profiled() {
+            if let Some(profiling) = mode.profiled() {
                 profiling.print_note();
             }
-            ctx.harness.run_hotpath(&config, binary, |i, fifo| {
+            harness.run_hotpath(&config, binary, cell.wall, |i, fifo| {
                 prepare()?;
                 // The report is this launch's disposable output: reserved
                 // with it and removed with its lease, here or, if the child
                 // outlives this run, by a later scan. A launch with no
                 // reservation (an unreserved invocation) is removed here.
-                let report = ctx.harness.new_hotpath_report_path()?;
+                let report = harness.new_hotpath_report_path()?;
                 let launched = invocation.launch_with(cwd, std::slice::from_ref(&report))?;
-                let iteration = ctx.harness.capture_hotpath_into(
+                let iteration = harness.capture_hotpath_into(
                     binary,
                     &launched.arg_refs(),
                     cwd,
-                    command.exits(plan),
+                    cell.exits,
                     fifo,
                     i,
                     &report,
@@ -370,7 +431,7 @@ fn execute_invocation<C: PlannedCommand, P: Fn() -> Result<(), DevError>>(
                 if iteration.error.is_none()
                     && let Some(result) = &mut iteration.result
                 {
-                    command.observe(result, &iteration.stderr);
+                    (hooks.observe)(result, &iteration.stderr);
                 }
                 Ok(iteration)
             })?;
@@ -509,7 +570,8 @@ pub(crate) fn execute_example(
             if let Some(profiling) = req.mode.profiled() {
                 profiling.print_note();
             }
-            ctx.harness.run_hotpath(config, binary, |i, fifo| {
+            let wall = crate::harness::WallSource::External;
+            ctx.harness.run_hotpath(config, binary, wall, |i, fifo| {
                 ctx.harness
                     .capture_hotpath(binary, args, req.project_root.as_path(), fifo, i)
             })?;
