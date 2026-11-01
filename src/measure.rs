@@ -435,6 +435,7 @@ impl BenchHarness {
             stop_marker,
             invocation: crate::db::RunInvocation {
                 argv: Vec::new(),
+                positional_tail: 0,
                 arm_key: String::new(),
                 arm_qualifier: None,
             },

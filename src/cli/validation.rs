@@ -161,6 +161,49 @@ mod tests {
             .expect("parser thread")
     }
 
+    /// The positional tail the arm key keeps verbatim, from a real parse.
+    fn tail(argv: &'static [&'static str]) -> usize {
+        std::thread::Builder::new()
+            .stack_size(8 << 20)
+            .spawn(move || {
+                let mut cmd = <Cli as clap::CommandFactory>::command();
+                let matches = cmd.try_get_matches_from_mut(argv).expect("parse");
+                let argv: Vec<String> = argv.iter().map(|&a| a.to_owned()).collect();
+                crate::run_invocation::positional_tail(&cmd, &matches, &argv).expect("tail")
+            })
+            .expect("spawn parser thread")
+            .join()
+            .expect("parser thread")
+    }
+
+    /// Every trailing positional's values are the argv's suffix, `--`
+    /// tokens inside them included, so the arm key's boundary is one count.
+    #[test]
+    fn trailing_positionals_are_the_argv_suffix() {
+        assert_eq!(tail(&["brokkr", "mogwai", "stage", "quick", "-v"]), 2);
+        assert_eq!(tail(&["brokkr", "mogwai", "stage", "quick", "--", "x"]), 3);
+        assert_eq!(
+            tail(&["brokkr", "mogwai", "stage", "--", "quick", "--", "x"]),
+            3
+        );
+        assert_eq!(
+            tail(&[
+                "brokkr", "mogwai", "stage", "--bench", "5", "--", "--bench", "3", "-v"
+            ]),
+            3
+        );
+        assert_eq!(
+            tail(&["brokkr", "mogwai", "-v", "--bench", "5", "stage"]),
+            0
+        );
+        assert_eq!(tail(&["brokkr", "mogwai", "--bench"]), 0);
+        assert_eq!(tail(&["brokkr", "run", "name", "a", "-v"]), 2);
+        assert_eq!(tail(&["brokkr", "bench", "--", "--sample-size", "10"]), 2);
+        assert_eq!(tail(&["brokkr", "fmt", "--", "--check"]), 1);
+        assert_eq!(tail(&["brokkr", "update", "a", "--b"]), 2);
+        assert_eq!(tail(&["brokkr", "read", "--bench", "3"]), 0);
+    }
+
     #[test]
     fn results_compare_requires_two_commits() {
         let parsed = parse(["brokkr", "results", "--compare", "abc123"]);

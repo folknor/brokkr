@@ -117,16 +117,16 @@ Two consequences worth knowing:
 The usual baseline shape:
 
 ```
-brokkr hotpath --bench 5 --commit v0.3.0
+brokkr hotpath --bench 5 --commit <REF>
 brokkr hotpath --bench 5
-brokkr results --command render --compare <old-uuid> <new-uuid>
+brokkr results --command render --compare <COMMIT_A> <COMMIT_B>
 ```
 
 Use `--bench`, not `--hotpath`, for that comparison - see the modes table above.
 
 `--compare` pairs the two rows into a single delta row. Pairing keys on the
 tuple `brokkr man results` (`--compare`) gives, among it the arm key: the
-recorded argv with `--commit`, `--verbose` and iteration counts removed
+recorded argv with brokkr's `--commit`, `--verbose` and iteration counts removed
 (rows from before the key existed pair by their stored argv) - otherwise the retro row
 could never pair with the current-tree row, since `--commit` is precisely what
 distinguishes them. Any *other* flag difference between the two invocations

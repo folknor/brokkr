@@ -27,7 +27,11 @@ use crate::{
 };
 
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
-pub(super) fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError> {
+pub(super) fn run(
+    cli: Cli,
+    detection: Option<&project::Detection>,
+    invocation: &crate::db::RunInvocation,
+) -> Result<(), DevError> {
     let spec = cli::invocation().spec();
     if spec.config == cli::ConfigNeed::Required {
         spec.require(&require_detection(detection)?.project)?;
@@ -280,7 +284,7 @@ pub(super) fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<()
             lib,
             detection,
         ),
-        _ => run_project(cli.command, require_detection(detection)?),
+        _ => run_project(cli.command, require_detection(detection)?, invocation),
     }
 }
 
@@ -315,7 +319,11 @@ fn reject_unused_pbf_flags(
 
 // The project command table: one arm per subcommand, so its size tracks the CLI's.
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
-fn run_project(command: Command, detection: &project::Detection) -> Result<(), DevError> {
+fn run_project(
+    command: Command,
+    detection: &project::Detection,
+    invocation: &crate::db::RunInvocation,
+) -> Result<(), DevError> {
     let project = &detection.project;
     let dev_config = &detection.config;
     // The section parsed for `project`. Load already refused a missing
@@ -329,7 +337,6 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
     // `project_root` in the common case (config in cwd) and differs only under
     // the one-level-up layout used to drive a foreign checkout.
     let build_root = detection.build_root.as_path();
-    let invocation = crate::run_invocation::capture();
 
     let command = match command.into_route() {
         command_input::RoutedCommand::Pbf {
@@ -346,7 +353,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                 detection,
                 &pbf.dataset,
                 &pbf.variant,
-                &invocation,
+                invocation,
                 |req| {
                     measure::runner::run(
                         req,
@@ -420,7 +427,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                 jobs,
                 ..Default::default()
             };
-            run_measured(&mode, detection, &dataset, &variant, &invocation, |req| {
+            run_measured(&mode, detection, &dataset, &variant, invocation, |req| {
                 let cmd = pbfhogg::commands::PbfhoggCommand::DiffSnapshots { format };
                 measure::runner::run(
                     req,
@@ -452,7 +459,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                 detection,
                 &pbf.dataset,
                 &pbf.variant,
-                &invocation,
+                invocation,
                 |req| {
                     if strategy == "all" {
                         for strat in pbfhogg::commands::ExtractStrategy::all() {
@@ -504,7 +511,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                 detection,
                 &pbf.dataset,
                 &pbf.variant,
-                &invocation,
+                invocation,
                 |req| {
                     if strategy == "all" {
                         for strat in pbfhogg::commands::ExtractStrategy::all() {
@@ -552,7 +559,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                 detection,
                 &pbf.dataset,
                 &pbf.variant,
-                &invocation,
+                invocation,
                 |req| pbfhogg::cmd::bench_read(req, &modes, snapshot.as_ref()),
             )
         }
@@ -567,7 +574,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                 detection,
                 &pbf.dataset,
                 &pbf.variant,
-                &invocation,
+                invocation,
                 |req| pbfhogg::cmd::bench_write(req, &compressions),
             )
         }
@@ -584,7 +591,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                 detection,
                 &pbf.dataset,
                 &pbf.variant,
-                &invocation,
+                invocation,
                 |req| pbfhogg::cmd::bench_merge(req, osc_seq.as_deref(), uring, &compressions),
             )
         }
@@ -605,7 +612,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                     skip_to: skip_to.as_deref(),
                 },
             );
-            run_measured(&mode, detection, &dataset, &variant, &invocation, |req| {
+            run_measured(&mode, detection, &dataset, &variant, invocation, |req| {
                 measure::runner::run(req, &elivagar::plan::ElivagarPlan(&cmd))
             })
         }
@@ -620,7 +627,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                 detection,
                 cli::DEFAULT_DATASET,
                 cli::DEFAULT_RAW_VARIANT,
-                &invocation,
+                invocation,
                 |req| measure::runner::run(req, &elivagar::plan::ElivagarPlan(&cmd)),
             )
         }
@@ -635,7 +642,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                 detection,
                 cli::DEFAULT_DATASET,
                 cli::DEFAULT_RAW_VARIANT,
-                &invocation,
+                invocation,
                 |req| measure::runner::run(req, &elivagar::plan::ElivagarPlan(&cmd)),
             )
         }
@@ -647,7 +654,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             let cmd = elivagar::commands::ElivagarCommand::External(
                 elivagar::commands::ExternalTool::Planetiler,
             );
-            run_measured(&mode, detection, &dataset, &variant, &invocation, |req| {
+            run_measured(&mode, detection, &dataset, &variant, invocation, |req| {
                 measure::runner::run(req, &elivagar::plan::ElivagarPlan(&cmd))
             })
         }
@@ -659,7 +666,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             let cmd = elivagar::commands::ElivagarCommand::External(
                 elivagar::commands::ExternalTool::Tilemaker,
             );
-            run_measured(&mode, detection, &dataset, &variant, &invocation, |req| {
+            run_measured(&mode, detection, &dataset, &variant, invocation, |req| {
                 measure::runner::run(req, &elivagar::plan::ElivagarPlan(&cmd))
             })
         }
@@ -676,7 +683,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                 detection,
                 &dataset,
                 cli::DEFAULT_RAW_VARIANT,
-                &invocation,
+                invocation,
                 |req| measure::runner::run(req, &nidhogg::plan::NidhoggPlan(&cmd)),
             )
         }
@@ -686,7 +693,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             variant,
         } => {
             let cmd = nidhogg::commands::NidhoggCommand::Ingest;
-            run_measured(&mode, detection, &dataset, &variant, &invocation, |req| {
+            run_measured(&mode, detection, &dataset, &variant, invocation, |req| {
                 measure::runner::run(req, &nidhogg::plan::NidhoggPlan(&cmd))
             })
         }
@@ -705,7 +712,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                 detection,
                 &dataset,
                 cli::DEFAULT_RAW_VARIANT,
-                &invocation,
+                invocation,
                 |req| measure::runner::run(req, &nidhogg::plan::NidhoggPlan(&cmd)),
             )
         }
@@ -720,7 +727,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             } else {
                 dellingr::cmd::Selection::Named(lua)
             };
-            run_measured(&mode, detection, "", "", &invocation, |req| {
+            run_measured(&mode, detection, "", "", invocation, |req| {
                 dellingr::cmd::run(req, &selection)
             })
         }
@@ -730,7 +737,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
         // surface reads. An input the argv names is captured verbatim with it;
         // one the surface defaults internally is named nowhere in the row.
         Command::Mogwai { mode, target, args } => {
-            run_measured(&mode, detection, "", "", &invocation, |req| {
+            run_measured(&mode, detection, "", "", invocation, |req| {
                 mogwai::cmd::run(req, target.as_deref(), &args)
             })
         }
@@ -741,7 +748,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             mode,
             dataset,
             variant,
-        } => run_measured(&mode, detection, &dataset, &variant, &invocation, |req| {
+        } => run_measured(&mode, detection, &dataset, &variant, invocation, |req| {
             if req.dry_run {
                 return Err(DevError::Usage(
                     "--dry-run is not yet supported for generic-hotpath".into(),
@@ -761,7 +768,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             name,
             dataset,
             variant,
-        } => run_measured(&mode, detection, &dataset, &variant, &invocation, |req| {
+        } => run_measured(&mode, detection, &dataset, &variant, invocation, |req| {
             if req.dry_run {
                 return Err(DevError::Usage(
                     "--dry-run is not yet supported for suites".into(),
@@ -1155,7 +1162,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                             dev_config,
                             project_root: &detection.project_root,
                             build_root,
-                            invocation: &invocation,
+                            invocation,
                         }),
                     })
                 },
@@ -1524,7 +1531,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
         } => litehtml::cmd::outline(project_root, &input, depth, full, selectors),
         // ----- sluggrs-only commands -----
         Command::Hotpath { mode, target } => {
-            run_measured(&mode, detection, "", "", &invocation, |req| {
+            run_measured(&mode, detection, "", "", invocation, |req| {
                 sluggrs::hotpath::cmd(req, &target)
             })
         }
@@ -1601,7 +1608,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             &as_baseline,
             &commit,
             detection,
-            &invocation,
+            invocation,
         ),
         Command::MockServe { fixture } => {
             let cfg = project_config.ratatoskr()?;

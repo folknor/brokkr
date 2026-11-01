@@ -14,12 +14,15 @@ use std::collections::BTreeMap;
 /// enumerated, and everything it could not hold got pushed into a second
 /// "layer" that was an escape hatch with a name rather than an architecture.
 ///
-/// pbfhogg is the precedent: ~25 commands over several flag axes and ten
-/// datasets, and it registers ZERO workloads. It registers inputs. Invocations
-/// are composed at the call site and captured verbatim, and pairing rows is a
-/// query rather than a name lookup. What a registry must hold is only what
-/// cannot be recovered from the invocation: which cargo target a name means,
-/// and which features it needs to be built with.
+/// pbfhogg is the precedent, with a difference: its brokkr.toml registers ZERO
+/// workloads, only inputs, but its command shapes are a registry in brokkr's
+/// typed layer (`PbfhoggCommand`, one argv shape per measurable command).
+/// What neither enumerates is the product: commands, flag axes and datasets
+/// combine at the call site, the invocation is captured verbatim, and pairing
+/// rows is a query rather than a name lookup. Mogwai drops the typed layer too.
+/// What a registry must hold is only what cannot be recovered from the
+/// invocation: which cargo target a name means, and which features it needs
+/// to be built with.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MogwaiConfig {

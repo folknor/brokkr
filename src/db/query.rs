@@ -1007,6 +1007,7 @@ mod tests {
     fn test_invocation(raw: &str) -> RunInvocation {
         RunInvocation {
             argv: raw.split_whitespace().map(str::to_owned).collect(),
+            positional_tail: 0,
             arm_key: raw.to_owned(),
             arm_qualifier: None,
         }

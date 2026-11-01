@@ -710,6 +710,11 @@ pub struct RunRow {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunInvocation {
     pub argv: Vec<String>,
+    /// How many trailing `argv` tokens clap assigned to the command's trailing
+    /// positional (`crate::run_invocation::positional_tail`); the arm key
+    /// keeps them verbatim. Redaction keeps the token count, so the writer
+    /// applies it to the stored argv as captured.
+    pub positional_tail: usize,
     pub arm_key: String,
     /// Row-level identity beyond the argv (see
     /// `crate::harness::BenchConfig::arm_qualifier`); the writer folds it
@@ -893,6 +898,7 @@ impl RunRowBuilder {
                 cli_args: None,
                 invocation: RunInvocation {
                     argv: Vec::new(),
+                    positional_tail: 0,
                     arm_key: String::new(),
                     arm_qualifier: None,
                 },

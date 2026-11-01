@@ -187,11 +187,28 @@ The command, mode, dataset, metadata, env, and invocation filters above apply
 to both commit result sets before pairing.
 
 The caller supplies `arm_key` with the typed `RunInvocation`, while parsed CLI
-arguments are available. It excludes commit provenance, verbosity, and sample
-count, while retaining measurement-affecting options. The comparison layer
-treats it as an opaque identity and does not implement a second CLI grammar.
+arguments are available. It excludes brokkr's own commit provenance
+(`--commit`), verbosity (`-v`, `--verbose`), and sample count (the `N` of
+`--bench`, `--hotpath`, `--alloc`), while retaining measurement-affecting
+options. Tokens the parse assigned to a command's trailing positional, the
+argv `brokkr mogwai TARGET ARGS...` forwards to its child, are kept verbatim
+whatever they spell, with or without a `--` before them: a child's `-v` or
+`--bench 3` is part of what was asked. The key joins its tokens with single
+spaces, unless one is empty or holds whitespace (or the first starts with
+`[`), when it is the JSON array `["argv-v1", <tokens>...]` instead, so `"a b"`
+and `a b` stay apart. The comparison layer treats the key as an opaque
+identity and does not implement a second CLI grammar.
 Historical rows have no `arm_key`; those rows use their exact stored
 invocation string and can only pair when that spelling matches.
+
+Rows stored before the positional boundary and the JSON form keep the key
+they were given, stripped across the whole argv and space-joined. Where an
+old row's child argv held one of the stripped spellings or a token with
+whitespace, two things follow: it no longer pairs with a new row of the same
+invocation, and it can still pair with a new row of a different one (an old
+`stage -- quick -v` keyed as `stage -- quick` pairs a new `stage -- quick`).
+Reading a row's `arm_key` beside its `brokkr_args` shows which case it is;
+the argv alone does not, since the positional boundary is not stored.
 
 A measurement-defining choice that reaches the subprocess argv from config
 rather than from the brokkr argv cannot show in the argv key, so the row

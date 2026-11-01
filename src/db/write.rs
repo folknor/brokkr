@@ -137,9 +137,18 @@ fn insert_inner(conn: &rusqlite::Connection, row: &RunRow, uuid: &str) -> Result
             "a results row carries an arm qualifier but no arm key to qualify".into(),
         ));
     }
+    // The positional boundary is the captured count, never re-inferred from
+    // redacted spellings; redaction rewrites tokens one for one.
+    if stored_argv.len() != row.invocation.argv.len()
+        || row.invocation.positional_tail >= stored_argv.len().max(1)
+    {
+        return Err(DevError::Internal(
+            "a results row's positional tail does not fit its stored argv".into(),
+        ));
+    }
     let stored_arm_key = (!row.invocation.arm_key.is_empty()).then(|| {
         crate::run_invocation::qualified_arm_key(
-            &crate::run_invocation::arm_key(&stored_argv),
+            &crate::run_invocation::arm_key(&stored_argv, row.invocation.positional_tail),
             row.invocation.arm_qualifier.as_deref(),
         )
     });
@@ -492,7 +501,9 @@ mod tests {
                         String::from("brokkr"),
                         String::from("test"),
                         String::from("--fast"),
+                        String::from("-v"),
                     ],
+                    positional_tail: 1,
                     arm_key: String::from("test/fast"),
                     arm_qualifier: None,
                 };
@@ -520,15 +531,11 @@ mod tests {
         assert_eq!(rows[0].input_file, "denmark.osm.pbf");
         assert_eq!(rows[0].elapsed, Wall::LegacyMillis(1234));
         assert_eq!(rows[0].cli_args, "--fast");
-        assert_eq!(rows[0].brokkr_args, r#"["brokkr","test","--fast"]"#);
+        assert_eq!(rows[0].brokkr_args, r#"["brokkr","test","--fast","-v"]"#);
         // The writer derives the stored arm key from the stored (redacted)
-        // argv, so the caller's opaque key is only a presence flag.
-        let expected_arm = crate::run_invocation::arm_key(&[
-            String::from("brokkr"),
-            String::from("test"),
-            String::from("--fast"),
-        ]);
-        assert_eq!(rows[0].arm_key.as_deref(), Some(expected_arm.as_str()));
+        // argv, so the caller's opaque key is only a presence flag; the
+        // captured positional tail carries over, so the positional `-v` stays.
+        assert_eq!(rows[0].arm_key.as_deref(), Some("brokkr test --fast -v"));
 
         // Clean up.
         drop(std::fs::remove_file(&db_path));
@@ -547,6 +554,7 @@ mod tests {
                 .update(|run| {
                     run.invocation = RunInvocation {
                         argv: argv.clone(),
+                        positional_tail: 0,
                         arm_key: String::from("x"),
                         arm_qualifier: qualifier.map(str::to_owned),
                     };
@@ -787,6 +795,7 @@ mod tests {
                     run.command = command.to_owned();
                     run.invocation = RunInvocation {
                         argv: vec![String::from("brokkr"), String::from("library")],
+                        positional_tail: 0,
                         arm_key: String::from("library"),
                         arm_qualifier: Some(String::from("{\"v\":1}")),
                     };

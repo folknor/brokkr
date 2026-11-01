@@ -166,9 +166,12 @@ fn migrate_v24_to_v25(conn: &rusqlite::Connection) -> Result<(), DevError> {
                 DevError::Database(format!("could not encode redacted brokkr argv: {error}"))
             })?;
             if has_arm_key {
+                // These rows were keyed by the algorithm of their day
+                // (provenance stripped across the whole argv, a plain join),
+                // so recompute with it: the redaction is the only change.
                 let safe_arm = arm_key
                     .filter(|key| !key.is_empty())
-                    .map(|_| crate::run_invocation::arm_key(&redacted));
+                    .map(|_| crate::run_invocation::historical_arm_key(&redacted));
                 conn.execute(
                     "UPDATE runs SET brokkr_args = ?1, arm_key = ?2 WHERE id = ?3",
                     rusqlite::params![encoded, safe_arm, id],

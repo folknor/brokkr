@@ -100,8 +100,14 @@ where
 /// an unreadable cwd - leaves the full command list visible rather than
 /// hiding commands on the strength of a guess. A `brokkr.toml` so broken that
 /// the project is unknown must not also cost the user their `--help`.
-fn parse_cli(project: Option<&Project>) -> (Cli, cli::CommandId) {
-    let argv = crate::runnables::bare_run_sentinel(std::env::args().collect());
+///
+/// Also captures the invocation a results row records, here because only the
+/// parse knows which trailing tokens are positional values rather than
+/// brokkr's options (`run_invocation::positional_tail`). The recorded argv is
+/// the one brokkr was given, not the copy `bare_run_sentinel` rewrites.
+fn parse_cli(project: Option<&Project>) -> (Cli, cli::CommandId, crate::db::RunInvocation) {
+    let raw_argv: Vec<String> = std::env::args().collect();
+    let argv = crate::runnables::bare_run_sentinel(raw_argv.clone());
 
     let mut cmd = <Cli as clap::CommandFactory>::command();
     let names: Vec<String> = cmd
@@ -128,7 +134,15 @@ fn parse_cli(project: Option<&Project>) -> (Cli, cli::CommandId) {
         });
     }
 
-    let matches = cmd.get_matches_from(argv);
+    let matches = match cmd.try_get_matches_from_mut(argv) {
+        Ok(matches) => matches,
+        Err(e) => e.exit(),
+    };
+    let positional_tail = match crate::run_invocation::positional_tail(&cmd, &matches, &raw_argv) {
+        Ok(tail) => tail,
+        Err(message) => clap::Error::raw(clap::error::ErrorKind::ArgumentConflict, message).exit(),
+    };
+    let invocation = crate::run_invocation::capture(raw_argv, positional_tail);
     let Some(command_id) = matches
         .subcommand_name()
         .and_then(cli::CommandId::from_name)
@@ -161,7 +175,7 @@ fn parse_cli(project: Option<&Project>) -> (Cli, cli::CommandId) {
         )
         .exit();
     }
-    (cli, command_id)
+    (cli, command_id, invocation)
 }
 
 /// Drop the variables brokkr hands the children it attaches a marker FIFO or
@@ -203,7 +217,7 @@ pub(crate) fn main() {
             .map_or(cwd.as_path(), |d| d.project_root.as_path());
         output::set_path_anchor(&cwd, root);
     }
-    let (cli, command_id) = parse_cli(detection.as_ref().map(|d| &d.project));
+    let (cli, command_id, invocation) = parse_cli(detection.as_ref().map(|d| &d.project));
     cli::set_invocation(command_id);
     // `build`'s stdout is its value - the snapshot path - so everything else
     // the run says, from the lock wait on, goes to stderr.
@@ -226,7 +240,7 @@ pub(crate) fn main() {
     // A `[cargo_env]` failure some path tolerated still fails the command.
     let result = crate::cargo_env::seal(match detection_error {
         Some(error) if !detection_error_is_ignored(command_id) => Err(error),
-        _ => run(cli, detection.as_ref()),
+        _ => run(cli, detection.as_ref(), &invocation),
     });
     let elapsed_ms = duration_ms(start.elapsed());
 

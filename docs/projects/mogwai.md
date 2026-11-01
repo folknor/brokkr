@@ -80,10 +80,14 @@ command at all. That product cannot be enumerated, and a registry that must be
 edited before a new question can be asked will not survive a decade of asking
 them.
 
-pbfhogg is the precedent: roughly 25 commands across several flag axes and ten
-datasets, and its `brokkr.toml` registers **zero** workloads. It registers
-inputs. Invocations are composed at the call site and captured verbatim, and
-pairing rows is a query rather than a name lookup.
+pbfhogg is the precedent, with a difference. Its `brokkr.toml` registers
+**zero** workloads; it registers inputs. Its command shapes do live in a
+registry, though: brokkr's typed pbfhogg layer (`PbfhoggCommand`) defines each
+measurable command's argv once, and brokkr is edited when pbfhogg gains one.
+What that layer does not enumerate is the product: commands, flag axes and
+datasets combine at the call site, the invocation is captured verbatim, and
+pairing rows is a query rather than a name lookup. Mogwai drops the typed layer
+as well and captures the argv itself.
 
 What went with it, and why:
 
@@ -108,8 +112,10 @@ row rather than prevented, and reading rules turn that into a verdict.
 Rows file under the target name, or the bin name for a CLI invocation. The
 subprocess and brokkr invocations are recorded in `cli_args` and `brokkr_args`.
 New rows pair on the tuple `brokkr man results` gives under `--compare`;
-its `arm_key` keeps measurement-affecting options while excluding commit, verbosity,
-and iteration-count provenance. See `brokkr man results` for historical-row
+its `arm_key` keeps measurement-affecting options while excluding brokkr's own
+commit, verbosity, and iteration-count provenance. The forwarded argv is kept
+verbatim: a surface's own `-v`, `--commit` or `--bench N` is part of the arm,
+whether or not a `--` precedes it. See `brokkr man results` for historical-row
 pairing behavior.
 
 Selecting an arm is therefore a query. `brokkr results --grep` and `--grep-v`
