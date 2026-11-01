@@ -470,7 +470,10 @@ impl PbfhoggBinary {
     /// declares, so whatever a killed child leaves of it stays where pbfhogg
     /// puts it by default. It names the flags rather than claiming leftovers:
     /// a build older than a command's scratch (merge-changes before pbfhogg
-    /// c97b9985) lacks `--tmp-dir` because it writes none.
+    /// c97b9985) lacks `--tmp-dir` because it writes none. The opposite gap,
+    /// a build that writes scratch the argv does not declare (merge-changes
+    /// from c97b9985 up to 2b1c6ba1 on a shape that cannot spill), is
+    /// invisible to the probe and not reported.
     fn say_unguarded(&self, subcommand: &str, missing: &[&str]) {
         let missing = missing.join(" and ");
         if self

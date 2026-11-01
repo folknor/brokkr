@@ -1149,16 +1149,27 @@ impl PbfhoggCommand {
             Self::MergeChanges { simplify } => {
                 let output = scratch_output_path(ctx, self, mode)?;
                 let mut argv = CommandArgv::new("merge-changes");
-                for o in ctx.osc_strs()? {
+                let oscs = ctx.osc_strs()?;
+                let several = oscs.len() > 1;
+                for o in oscs {
                     argv = argv.input(o)?;
                 }
-                // Scratch on every path: since pbfhogg c97b9985, which gave
-                // merge-changes `--tmp-dir`, its CLI makes a run directory
-                // (with its lock and ready files) for every invocation, though
-                // only several inputs without `--simplify` spill into it. A
-                // build from before c97b9985 lacks the flag, the probe says
-                // so, and it makes no run directory to redirect.
-                let argv = argv.output(&output)?.scratch(&ctx.scratch_dir);
+                let argv = argv.output(&output)?;
+                // Scratch only where the run can spill: several inputs, no
+                // `--simplify`, and a `--jobs` other than 1 (0 or none is
+                // auto and counts, whatever it resolves to). Since pbfhogg
+                // 2b1c6ba1 only those make a run directory, and every other
+                // shape refuses `--tmp-dir` as a usage error. Builds from
+                // c97b9985 up to it made one on every shape, so on the others
+                // their run directory lands beside the output, removed on
+                // completion and left by a killed child; the flag probe
+                // cannot tell the two apart, and that loss is accepted.
+                // Builds before c97b9985 lack the flag and make none.
+                let argv = if several && !*simplify && ctx.params.jobs != Some(1) {
+                    argv.scratch(&ctx.scratch_dir)
+                } else {
+                    argv
+                };
                 Ok(if *simplify {
                     argv.arg("--simplify")
                 } else {
@@ -1811,11 +1822,13 @@ mod tests {
     }
 
     /// Run scratch is declared by exactly the commands pbfhogg makes it
-    /// for: add-locations-to-ways, build-geocode-index, merge-changes and an
-    /// OSC diff on every path, and never a text diff, which refuses
-    /// `--tmp-dir`.
+    /// for: add-locations-to-ways, build-geocode-index and an OSC diff on
+    /// every path, merge-changes only with several inputs, no `--simplify`
+    /// and a `--jobs` other than 1, and never a text diff. pbfhogg refuses
+    /// `--tmp-dir` everywhere else.
     #[test]
     fn scratch_is_declared_by_the_commands_that_write_it() {
+        let mut merge_shapes = std::collections::BTreeSet::new();
         for cmd in every_command_state() {
             let mut ctx = ctx_for(&cmd);
             let several = vec![
@@ -1831,7 +1844,7 @@ mod tests {
                 vec![ctx.inputs.clone()]
             };
             let jobs = if cmd.axis_has_effect(Axis::Jobs) {
-                vec![None, Some(0), Some(4)]
+                vec![None, Some(0), Some(1), Some(4)]
             } else {
                 vec![None]
             };
@@ -1843,17 +1856,27 @@ mod tests {
                 ctx.params.jobs = jobs;
                 let argv = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
                 let expected = match &cmd {
-                    PbfhoggCommand::AddLocationsToWays
-                    | PbfhoggCommand::BuildGeocodeIndex
-                    | PbfhoggCommand::MergeChanges { .. } => true,
+                    PbfhoggCommand::AddLocationsToWays | PbfhoggCommand::BuildGeocodeIndex => true,
+                    PbfhoggCommand::MergeChanges { simplify } => {
+                        let several = input.osc_paths().len() > 1;
+                        merge_shapes.insert((*simplify, several, jobs));
+                        several && !*simplify && jobs != Some(1)
+                    }
                     PbfhoggCommand::Diff { format } | PbfhoggCommand::DiffSnapshots { format } => {
                         *format == DiffFormat::Osc
                     }
                     _ => false,
                 };
-                assert_eq!(argv.writes_scratch(), expected, "{cmd:?} with -j {jobs:?}");
+                assert_eq!(
+                    argv.writes_scratch(),
+                    expected,
+                    "{cmd:?} with {} inputs and -j {jobs:?}",
+                    input.osc_paths().len()
+                );
             }
         }
+        // Both simplify states, one and several inputs, at every jobs value.
+        assert_eq!(merge_shapes.len(), 2 * 2 * 4, "{merge_shapes:?}");
     }
 
     #[test]

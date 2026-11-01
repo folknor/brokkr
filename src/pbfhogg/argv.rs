@@ -7,8 +7,10 @@
 //! never disagree with the argv that runs. Arguments that name no path go in
 //! through [`PbfArgv::arg`]. Scratch is declared from the actual argument
 //! combination: pbfhogg makes a run scratch directory for
-//! `add-locations-to-ways`, `build-geocode-index`, `diff --format osc` and
-//! `merge-changes`; a text `diff` writes none and refuses `--tmp-dir`.
+//! `add-locations-to-ways`, `build-geocode-index` and `diff --format osc`,
+//! and for `merge-changes` only with several inputs, no `--simplify` and a
+//! `--jobs` other than 1; a text `diff` and every other `merge-changes`
+//! write none and refuse `--tmp-dir`.
 
 use std::path::{Path, PathBuf};
 

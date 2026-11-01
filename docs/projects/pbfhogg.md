@@ -134,14 +134,17 @@ reserves the whole run directory as coverage; its private directory follows
 the same rule, so it goes beside the replay's first output, inside the run
 directory, and a digest, which writes nothing, gets none. Scratch is
 declared by what pbfhogg's implementation actually does:
-`add-locations-to-ways`, `build-geocode-index`, `diff --format osc` and
-`merge-changes` on every path. merge-changes has made a run directory (with
-its lock and ready files) on every invocation since pbfhogg c97b9985 gave it
-`--tmp-dir`, though only several inputs without `--simplify` spill into it;
-an older build lacks the flag and makes no run directory. pbfhogg's own docs
-say a single-input or `--simplify` run writes no scratch, which its CLI does
-not yet follow: if pbfhogg starts refusing `--tmp-dir` there, those runs fail
-with a usage error and the declaration narrows then. A text `diff` writes no
+`add-locations-to-ways`, `build-geocode-index` and `diff --format osc` on
+every path, and `merge-changes` only where it can spill: several inputs, no
+`--simplify`, and a `--jobs` other than 1 (an omitted or 0 `--jobs` is auto
+and counts, whatever it resolves to on the host). Since pbfhogg 2b1c6ba1 only
+those make a run directory, and every other merge-changes refuses `--tmp-dir`
+as a usage error. Builds from c97b9985, which gave merge-changes `--tmp-dir`,
+up to 2b1c6ba1 made a run directory on every merge-changes; the flag probe
+cannot tell them from later builds, so on the other shapes such a `--commit`
+baseline puts its run directory beside the output, removed on completion and
+left behind by a killed child. A build before c97b9985 lacks the flag and
+makes no run directory. A text `diff` writes no
 scratch since pbfhogg 587bfc12 and
 refuses `--tmp-dir` as a usage error, so brokkr never declares scratch for
 one; a `--commit` baseline from before that commit puts its text-diff scratch
