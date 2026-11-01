@@ -19,20 +19,16 @@ use crate::pbfhogg::context::{
 use crate::pbfhogg::expect::{self, Expectation};
 use crate::project::Project;
 
-/// Resolve cargo features for the selected I/O mode and run its preflight
-/// checks. The command arg builder reads the same parameters to construct argv.
+/// Refuse a command shape that cannot run, then resolve cargo features for
+/// the selected I/O mode and run its preflight checks. The shape check comes
+/// first, so a refused flag is named before a host check or a build; the
+/// command arg builder reads the same parameters to construct argv.
 fn resolve_io_features(
     command: &PbfhoggCommand,
     extra_params: &CommandParams,
 ) -> Result<Vec<&'static str>, DevError> {
+    command.validate_shape(extra_params)?;
     let io = extra_params.io;
-
-    if io.io_uring && !command.supports_io_uring() {
-        return Err(DevError::Config(format!(
-            "--io-uring is not supported by '{}'",
-            command.id(),
-        )));
-    }
 
     if io.io_uring {
         crate::preflight::run_preflight(&crate::preflight::uring_checks())?;
@@ -848,7 +844,7 @@ pub(crate) fn ensure_merged_pbf(
         pbf_path,
         osc_path,
         staged.tmp_path(),
-        &CommandParams::default(),
+        false,
     )?)?;
     let captured = invocation.capture_in(project_root)?;
     invocation.check(&captured)?;

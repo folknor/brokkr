@@ -9,7 +9,7 @@ use std::path::Path;
 use crate::error::DevError;
 use crate::harness::BenchHarness;
 use crate::pbfhogg::commands::{
-    CatMode, CatTypeFilter, DiffFormat, InspectMode, PbfhoggCommand, TagsFilterInput,
+    CatMode, CatTypeFilter, DiffFormat, InspectMode, PbfhoggCommand, Referenced, TagsFilterInput,
 };
 use crate::pbfhogg::context::{
     BenchSelection, CommandContext, CommandObservations, CommandParams, ResolvedInputs,
@@ -89,25 +89,22 @@ pub(crate) fn preset_to_command(name: &str) -> Result<PbfhoggCommand, DevError> 
         "tags-filter-way" => PbfhoggCommand::TagsFilter {
             filter: "w/highway=primary".into(),
             input: TagsFilterInput::Pbf {
-                omit_referenced: true,
+                referenced: Referenced::Omitted,
                 invert: false,
-                remove_tags: false,
             },
         },
         "tags-filter-amenity" => PbfhoggCommand::TagsFilter {
             filter: "amenity=restaurant".into(),
             input: TagsFilterInput::Pbf {
-                omit_referenced: true,
+                referenced: Referenced::Omitted,
                 invert: false,
-                remove_tags: false,
             },
         },
         "tags-filter-twopass" => PbfhoggCommand::TagsFilter {
             filter: "highway=primary".into(),
             input: TagsFilterInput::Pbf {
-                omit_referenced: false,
+                referenced: Referenced::Kept { remove_tags: false },
                 invert: false,
-                remove_tags: false,
             },
         },
         "tags-filter-osc" => PbfhoggCommand::TagsFilter {

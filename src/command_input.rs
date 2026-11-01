@@ -1,7 +1,8 @@
 //! Route the parsed command into a concrete execution input.
 use crate::cli::{Command, ModeArgs, PbfArgs};
 use crate::pbfhogg::commands::{
-    CatMode, CatTypeFilter, InspectMode, InspectTypeFilter, PbfhoggCommand, TagsFilterInput,
+    CatMode, CatTypeFilter, InspectMode, InspectTypeFilter, PbfhoggCommand, Referenced,
+    TagsFilterInput,
 };
 use crate::pbfhogg::context::CommandParams;
 
@@ -193,11 +194,30 @@ impl Command {
                 jobs,
             } => {
                 let input = match input_kind.as_deref() {
+                    Some("osc") if omit_referenced || invert_match || remove_tags => {
+                        TagsFilterInput::Invalid(
+                            "--omit-referenced, --invert-match and --remove-tags only apply to \
+                             PBF input; pbfhogg's OSC filter keeps direct matches only and \
+                             refuses them"
+                                .into(),
+                        )
+                    }
                     Some("osc") => TagsFilterInput::Osc,
-                    None | Some("pbf") => TagsFilterInput::Pbf {
-                        omit_referenced,
-                        invert: invert_match,
-                        remove_tags,
+                    None | Some("pbf") => match (omit_referenced, remove_tags) {
+                        (true, true) => TagsFilterInput::Invalid(
+                            "--remove-tags strips tags from referenced objects, which \
+                             --omit-referenced drops: no effect on pbfhogg at any revision, \
+                             which refuses or ignores it"
+                                .into(),
+                        ),
+                        (true, false) => TagsFilterInput::Pbf {
+                            referenced: Referenced::Omitted,
+                            invert: invert_match,
+                        },
+                        (false, remove_tags) => TagsFilterInput::Pbf {
+                            referenced: Referenced::Kept { remove_tags },
+                            invert: invert_match,
+                        },
                     },
                     Some(other) => TagsFilterInput::Invalid(format!(
                         "unknown tags-filter --input-kind '{other}' (expected: pbf, osc)"

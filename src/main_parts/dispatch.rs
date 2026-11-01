@@ -284,10 +284,11 @@ pub(super) fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<()
     }
 }
 
-/// `write` and `merge` share `PbfArgs` with the single-command benches but run
-/// their own variant matrix, so `--compression`, `--direct-io` and
-/// `--io-uring` would be silently ignored. Refuse them instead, naming the
-/// flag the matrix does honour.
+/// `write`, `merge` and `read` share `PbfArgs` with the single-command benches
+/// but run pbfhogg's `bench-write`, `bench-merge` and `bench-read`, which take
+/// none of `--compression`, `--direct-io` and `--io-uring` (write and merge
+/// run their own codec matrix), so the flags would be silently ignored.
+/// Refuse them instead, naming the flag the matrix does honour.
 fn reject_unused_pbf_flags(
     command: &str,
     pbf: &crate::cli::PbfArgs,
@@ -338,10 +339,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             osc,
             mut params,
         } => {
-            params.io = crate::pbfhogg::context::IoMode {
-                direct_io: pbf.direct_io,
-                io_uring: pbf.io_uring,
-            };
+            params.io = pbf.io_mode();
             params.compression = pbf.compression.clone();
             return run_measured(
                 &mode,
@@ -442,6 +440,8 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             snapshot,
         } => {
             let params = crate::pbfhogg::context::CommandParams {
+                io: pbf.io_mode(),
+                compression: pbf.compression.clone(),
                 bbox: bbox.clone(),
                 snapshot: snapshot.clone(),
                 strategy_fanout: strategy == "all",
@@ -492,6 +492,8 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             snapshot,
         } => {
             let params = crate::pbfhogg::context::CommandParams {
+                io: pbf.io_mode(),
+                compression: pbf.compression.clone(),
                 bbox: bbox.clone(),
                 snapshot: snapshot.clone(),
                 strategy_fanout: strategy == "all",
@@ -543,14 +545,17 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             pbf,
             modes,
             snapshot,
-        } => run_measured(
-            &mode,
-            detection,
-            &pbf.dataset,
-            &pbf.variant,
-            &invocation,
-            |req| pbfhogg::cmd::bench_read(req, &modes, snapshot.as_ref()),
-        ),
+        } => {
+            reject_unused_pbf_flags("read", &pbf, None)?;
+            run_measured(
+                &mode,
+                detection,
+                &pbf.dataset,
+                &pbf.variant,
+                &invocation,
+                |req| pbfhogg::cmd::bench_read(req, &modes, snapshot.as_ref()),
+            )
+        }
         Command::Write {
             mode,
             pbf,

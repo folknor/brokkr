@@ -48,9 +48,12 @@ pub const DEFAULT_BENCH_WRITE_COMPRESSIONS: &str = "none,zlib:6,zstd:3";
 pub const DEFAULT_BENCH_MERGE_COMPRESSIONS: &str = "zlib,none";
 
 const DEFAULT_ZLIB_LEVEL: u8 = 6;
-const DEFAULT_ZSTD_LEVEL: u32 = 3;
+const DEFAULT_ZSTD_LEVEL: i32 = 3;
 
-/// One validated compression choice accepted by pbfhogg.
+/// One compression choice to pass pbfhogg. zlib levels are checked against
+/// 0-9, which every pbfhogg with `--compression` accepts; a zstd level is
+/// any i32 and the built revision checks it, since pbfhogg bounded it to
+/// -7..=22 only at c8ee4531 and an older `--commit` baseline takes others.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Compression {
     codec: CompressionCodec,
@@ -83,7 +86,7 @@ impl FromStr for CompressionList {
 enum CompressionCodec {
     None,
     Zlib(Option<u8>),
-    Zstd(Option<u32>),
+    Zstd(Option<i32>),
 }
 
 impl Compression {
@@ -146,8 +149,8 @@ impl FromStr for Compression {
                 let level = level_text
                     .parse::<u8>()
                     .map_err(|_| format!("invalid compression level: {value}"))?;
-                if !(1..=9).contains(&level) {
-                    return Err(format!("zlib level {level} out of range, expected 1-9"));
+                if level > 9 {
+                    return Err(format!("zlib level {level} out of range, expected 0-9"));
                 }
                 Ok(Self {
                     codec: CompressionCodec::Zlib(Some(level)),
@@ -157,7 +160,7 @@ impl FromStr for Compression {
             value if value.starts_with("zstd:") => {
                 let level_text = &value["zstd:".len()..];
                 let level = level_text
-                    .parse::<u32>()
+                    .parse::<i32>()
                     .map_err(|_| format!("invalid compression level: {value}"))?;
                 Ok(Self {
                     codec: CompressionCodec::Zstd(Some(level)),
@@ -275,11 +278,21 @@ mod tests {
     }
 
     #[test]
-    fn compression_levels_follow_cli_ranges() {
-        assert!(parse_compressions("zlib:0", true).is_err());
+    fn compression_levels_follow_pbfhogg_across_revisions() {
+        // zlib 0-9 is every revision's range; the zstd range is the built
+        // revision's to check.
+        assert_eq!(parse_compressions("zlib:0", true).unwrap(), vec!["zlib:0"]);
         assert!(parse_compressions("zlib:10", true).is_err());
-        assert!(parse_compressions("zstd:-1", true).is_err());
+        assert_eq!(
+            parse_compressions("zstd:-7", true).unwrap(),
+            vec!["zstd:-7"]
+        );
+        assert_eq!(
+            parse_compressions("zstd:-8", true).unwrap(),
+            vec!["zstd:-8"]
+        );
         assert_eq!(parse_compressions("zstd:0", true).unwrap(), vec!["zstd:0"]);
+        assert!(parse_compressions("zstd:x", true).is_err());
     }
 
     #[test]

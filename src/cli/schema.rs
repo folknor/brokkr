@@ -584,10 +584,10 @@ In depth: `brokkr man clippy`."
         /// clap rejects the combination with `--nodes` / `--tags`.
         #[arg(long, conflicts_with_all = ["nodes", "tags"])]
         extended: bool,
-        /// Parallel worker threads for pbfhogg inspect. Only applies to
-        /// `--nodes` / `--tags` modes (pbfhogg's default inspect doesn't
-        /// accept `-j`). `0` = auto (`available_parallelism()`); omit to
-        /// use pbfhogg's default (1).
+        /// Parallel worker threads for pbfhogg inspect, with `--nodes` or
+        /// `--tags` only: the default inspect has no worker pool and
+        /// refuses `-j`, and so does brokkr. `0` = auto; omit to use
+        /// pbfhogg's default.
         #[arg(short = 'j', long)]
         jobs: Option<usize>,
         /// Snapshot key to read input from. Use `base` (or omit) for the
@@ -726,7 +726,7 @@ In depth: `brokkr man clippy`."
     ///   `-i` / `--invert-match` - flip match sense: keep non-matching,
     ///     drop matching.
     ///   `-t` / `--remove-tags` - strip tags from referenced-but-unmatched
-    ///     objects (meaningful only in the two-pass path, i.e. without `-R`).
+    ///     objects (two-pass path only; refused with `-R`).
     ///   `--input-kind osc` - read an OSC diff instead of a PBF.
     #[command(name = "tags-filter", display_order = 2)]
     TagsFilter {
@@ -738,17 +738,17 @@ In depth: `brokkr man clippy`."
         #[arg(long, default_value = "w/highway=primary")]
         filter: String,
         /// Single-pass filter: match objects only, drop referenced ones.
-        /// Not valid with `--input-kind osc` (pbfhogg rejects it at runtime).
-        #[arg(short = 'R', long = "omit-referenced", conflicts_with = "input_kind")]
+        /// Refused with `--input-kind osc`.
+        #[arg(short = 'R', long = "omit-referenced")]
         omit_referenced: bool,
         /// Invert match sense: drop matching objects, keep non-matching.
-        /// Not valid with `--input-kind osc`.
-        #[arg(short = 'i', long = "invert-match", conflicts_with = "input_kind")]
+        /// Refused with `--input-kind osc`.
+        #[arg(short = 'i', long = "invert-match")]
         invert_match: bool,
         /// Remove tags from referenced-but-unmatched objects in the
-        /// two-pass path. No-op under `-R` (referenced objects are
-        /// dropped entirely). Not valid with `--input-kind osc`.
-        #[arg(short = 't', long = "remove-tags", conflicts_with = "input_kind")]
+        /// two-pass path. Refused with `-R`, which drops referenced objects
+        /// whole, and with `--input-kind osc`.
+        #[arg(short = 't', long = "remove-tags")]
         remove_tags: bool,
         /// Read an OSC diff as input instead of a PBF.
         #[arg(long = "input-kind", value_parser = ["pbf", "osc"])]
@@ -763,10 +763,11 @@ In depth: `brokkr man clippy`."
         /// `[dataset.snapshot.<key>]` for a historical snapshot.
         #[arg(long)]
         snapshot: Option<crate::datasets::resolve::SnapshotRef>,
-        /// Parallel worker threads for pbfhogg tags-filter. `0` = auto
-        /// (`available_parallelism()`); omit to use pbfhogg's default.
-        /// Requires a pbfhogg build that exposes `-j` on tags-filter;
-        /// older builds will reject it.
+        /// Parallel worker threads for pbfhogg tags-filter's two-pass
+        /// path. `0` = auto; omit to use pbfhogg's default. Refused with
+        /// `-R` and with `--input-kind osc`, which have no worker pool it
+        /// sizes. Requires a pbfhogg build that exposes `-j` on
+        /// tags-filter; older builds will reject it.
         #[arg(short = 'j', long)]
         jobs: Option<usize>,
     },
@@ -818,9 +819,9 @@ In depth: `brokkr man clippy`."
         #[arg(long)]
         snapshot: Option<crate::datasets::resolve::SnapshotRef>,
     },
-    /// Merge OSC changes. `--simplify` picks the BTreeMap dedupe
-    /// path (keep only the last change per object) instead of the default
-    /// streaming concat path - a different code path worth measuring.
+    /// Merge OSC changes. `--simplify` keeps only the last change per
+    /// object instead of every change in input order - a different code
+    /// path worth measuring.
     #[command(name = "merge-changes", display_order = 2)]
     MergeChanges {
         #[command(flatten)]
@@ -838,7 +839,7 @@ In depth: `brokkr man clippy`."
         /// from a historical snapshot's OSC table.
         #[arg(long)]
         snapshot: Option<crate::datasets::resolve::SnapshotRef>,
-        /// Keep only the last change per (type, id) - BTreeMap dedupe path.
+        /// Keep only the last change per (type, id).
         #[arg(long)]
         simplify: bool,
     },
@@ -3094,15 +3095,29 @@ pub(crate) struct PbfArgs {
     /// PBF variant to use (raw, indexed, locations)
     #[arg(long, default_value = DEFAULT_INDEXED_VARIANT)]
     pub(crate) variant: String,
-    /// Use O_DIRECT for file I/O (requires linux-direct-io feature in pbfhogg)
+    /// Use O_DIRECT for file I/O (builds pbfhogg with linux-direct-io).
+    /// Refused where pbfhogg has no such path (merge-changes, an OSC
+    /// tags-filter, the read, write and merge benches)
     #[arg(long)]
     pub(crate) direct_io: bool,
-    /// Use io_uring for I/O (requires linux-io-uring feature in pbfhogg)
+    /// Use io_uring for output I/O (builds pbfhogg with linux-io-uring).
+    /// Refused by commands without an io_uring writer
     #[arg(long)]
     pub(crate) io_uring: bool,
-    /// Output compression: zlib[:N] (N=1-9), zstd[:N], or none
+    /// Output PBF compression: none, zlib[:N] (N=0-9), zstd[:N]; the built
+    /// pbfhogg checks the zstd level. Refused by commands that write no PBF
     #[arg(long)]
     pub(crate) compression: Option<crate::pbfhogg::Compression>,
+}
+
+impl PbfArgs {
+    /// The I/O switches these flags select.
+    pub(crate) fn io_mode(&self) -> crate::pbfhogg::context::IoMode {
+        crate::pbfhogg::context::IoMode {
+            direct_io: self.direct_io,
+            io_uring: self.io_uring,
+        }
+    }
 }
 
 /// Shared dataset/variant/direct_io args for pbfhogg verify subcommands.

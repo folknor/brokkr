@@ -134,8 +134,15 @@ reserves the whole run directory as coverage; its private directory follows
 the same rule, so it goes beside the replay's first output, inside the run
 directory, and a digest, which writes nothing, gets none. Scratch is
 declared by what pbfhogg's implementation actually does:
-`add-locations-to-ways`, `build-geocode-index` and `diff --format osc` on
-every path. A text `diff` writes no scratch since pbfhogg 587bfc12 and
+`add-locations-to-ways`, `build-geocode-index`, `diff --format osc` and
+`merge-changes` on every path. merge-changes has made a run directory (with
+its lock and ready files) on every invocation since pbfhogg c97b9985 gave it
+`--tmp-dir`, though only several inputs without `--simplify` spill into it;
+an older build lacks the flag and makes no run directory. pbfhogg's own docs
+say a single-input or `--simplify` run writes no scratch, which its CLI does
+not yet follow: if pbfhogg starts refusing `--tmp-dir` there, those runs fail
+with a usage error and the declaration narrows then. A text `diff` writes no
+scratch since pbfhogg 587bfc12 and
 refuses `--tmp-dir` as a usage error, so brokkr never declares scratch for
 one; a `--commit` baseline from before that commit puts its text-diff scratch
 wherever pbfhogg defaults it. brokkr spells every
@@ -155,8 +162,9 @@ controls serves all three flags), and kept in the same store under
 `SUB --staging-dir` and `SUB --tmp-dir` keys while `--overwrite` keeps the bare
 subcommand key it always had. A build that lacks a needed flag (an old
 `--commit` baseline) still runs, reserved, without the redirection: its
-leftovers land where pbfhogg puts them by default, and the handle says so once
-per subcommand.
+leftovers land where pbfhogg puts them by default, and the handle names the
+missing flags once per subcommand. It does not claim leftovers exist: a build
+older than a command's scratch lacks `--tmp-dir` because it writes none.
 
 **The lease.** Before the spawn, brokkr creates `<id>.lock` in
 `~/.brokkr/launch-leases/`, flocks it, and writes a durable record of every
@@ -761,25 +769,47 @@ schema-universal flags (`--variant`, `--osc-seq`, `--tiles`) see
 pbfhogg-specific flags that adjust cargo features and binary args. Note on
 result rows: post-v13 the `mode` column (formerly `variant`) carries only the
 measurement mode (`bench`/`hotpath`/`alloc`). These axis flags are **not**
-folded into a variant suffix anymore - they live in the `cli_args` /
-`brokkr_args` columns and are what the `brokkr results` table's `args` column
-renders and what `brokkr results --compare` keys its pairs on. So a flag-on run
-and its flag-off baseline at the same commit are distinct rows / distinct
-compare pairs automatically, no suffix required.
+folded into a variant suffix anymore - they are in the brokkr argv, so in
+`brokkr_args` and the `arm_key` `brokkr results --compare` pairs on, and in the
+child's `cli_args`; the `brokkr results` table's `args` column renders them.
+So a flag-on run and its flag-off baseline at the same commit are distinct
+rows / distinct compare pairs automatically, no suffix required.
+
+**Which commands take them.** brokkr appends `--direct-io`, `--io-uring`,
+`--compression` and `--jobs` after the rest of the argv, and refuses one, as
+a usage error before anything is built or preflighted (dry run included),
+only on a command shape where no pbfhogg revision gives it effect: the flag
+was never accepted there, or it was a no-op until pbfhogg began refusing it
+(6e87c0ef). Where some revision honours it, brokkr forwards it and the
+revision built answers. The table lives in `PbfhoggCommand::axis_has_effect`
+(`src/pbfhogg/commands.rs`):
 
 - `--direct-io` - enable O_DIRECT I/O. Adds `linux-direct-io` cargo feature,
-  `--direct-io` binary flag.
+  `--direct-io` binary flag. Every command but `merge-changes` and
+  `tags-filter --input-kind osc`.
 - `--io-uring` - enable io_uring I/O. Adds `linux-io-uring` cargo feature,
   `--io-uring` binary flag. Runs io_uring preflight checks before building.
-  Only supported by `apply-changes`, `sort`, `cat-dedupe`, `diff-osc`,
-  `repack`, and `degrade`; brokkr rejects it for other commands before
-  building.
-- `--compression <spec>` - output compression passed through to the binary.
-  Values: `zlib` or `zlib:N` (1-9), `zstd` or `zstd:N`, `none`. Bare
-  `zlib` and `zstd` use the binary's default levels. No cargo features
-  required.
-- The synthetic `write` and `merge` benches run their own codec matrix and
-  refuse all three flags rather than ignore them: pick codecs with
+  Only `apply-changes`, `sort`, `cat --dedupe`, `repack` and `degrade`, the
+  commands with an io_uring writer; `diff` never had the flag.
+- `--compression <spec>` - output PBF compression passed through to the
+  binary, so only commands that write a PBF: not `inspect`, the `check`
+  commands, `digest`, `diff`, `merge-changes`, `build-geocode-index` or an
+  OSC `tags-filter`. Values: `none`, `zlib` or `zlib:N` (0-9, every
+  revision's range), `zstd` or `zstd:N` (any integer; the built revision
+  checks the level, -7..22 since pbfhogg c8ee4531). Bare `zlib` and `zstd`
+  use the binary's default levels. No cargo features required.
+- `-j/--jobs` (on the subcommands that expose it) - `inspect --nodes` and
+  `--tags` (the default inspect has no worker pool), a PBF `tags-filter`
+  without `-R` (neither `-R` nor OSC input has a pool it sizes), `diff`,
+  `diff-snapshots` and `apply-changes`. `-j 0` counts as given.
+- `tags-filter -R` with `--remove-tags` is refused too, since `-R` drops the
+  referenced objects `--remove-tags` would strip; so are `-R`,
+  `--invert-match` and `--remove-tags` with `--input-kind osc`.
+- `extract` and `multi-extract` forward `--direct-io` and `--compression`
+  (they used to drop both silently).
+- The synthetic `read`, `write` and `merge` benches run pbfhogg's
+  `bench-read`, `bench-write` and `bench-merge`, which take none of the
+  three, and refuse them rather than ignore them: pick codecs with
   `--compressions`, and io_uring on `merge` with `--uring`.
 - `--inject-prepass` - (`add-locations-to-ways` only) emit the injected-prepass
   wire extensions (BlobHeader field 5 way-member bitmaps, Way field 20

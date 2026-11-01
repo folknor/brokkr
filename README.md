@@ -54,7 +54,7 @@ All measured modes automatically attach a sidecar that samples `/proc` metrics a
 
 Commands accept the options relevant to their workflow, including dataset selection, feature selection, worktree commits, force, and verbose output.
 
-pbfhogg commands additionally accept `--direct-io` and `--io-uring` to enable O_DIRECT and io_uring I/O paths. These add the required cargo features to the build, pass the flags to the binary, and show up in the `cli_args`/`brokkr_args` columns of the results DB (query via `brokkr results --grep direct-io`). `--direct-io` works with all commands. `--io-uring` is only supported by `apply-changes`, `sort`, `cat --dedupe`, `diff --format osc`, `repack`, and `degrade` - brokkr rejects it for other commands before building. io_uring preflight checks run automatically.
+pbfhogg commands additionally accept `--direct-io` and `--io-uring` to enable O_DIRECT and io_uring I/O paths. These add the required cargo features to the build, pass the flags to the binary, and show up in the `cli_args`/`brokkr_args` columns of the results DB (query via `brokkr results --grep direct-io`). `--direct-io` works with every command but `merge-changes` and an OSC `tags-filter`. `--io-uring` is only supported by `apply-changes`, `sort`, `cat --dedupe`, `repack`, and `degrade`. brokkr refuses either flag, and `--compression` and `-j`, before building on a command where no pbfhogg revision gives it effect (`docs/projects/pbfhogg.md`, I/O and compression flags). io_uring preflight checks run automatically.
 
 ### Shared (all projects)
 
@@ -108,7 +108,7 @@ Several commands are flag-driven umbrellas that previously had separate subcomma
 
 - `brokkr inspect` - no flag: metadata; `--nodes`: node stats; `--tags`: tag frequencies (narrow with `--type node|way|relation`)
 - `brokkr cat` - bare: adds missing indexdata, normally keeping compressed payloads (an unindexed mixed-kind block is rebuilt); `--type way|relation`: keep one object kind, selecting blobs on their indexdata kind; `--clean`: decode and re-encode each kept data blob (every one without `--type`), stripping the version attribute; `--dedupe`: two-input dedupe path (supports `--io-uring`), refused with `--type` or `--clean`, as pbfhogg refuses it. Bare `cat` defaults to `--variant raw` since that's the natural bootstrap input.
-- `brokkr tags-filter` - `--filter EXPR` (default `w/highway=primary`), `-R` for single-pass (drop referenced), `--input-kind osc` to read an OSC diff instead of a PBF
+- `brokkr tags-filter` - `--filter EXPR` (default `w/highway=primary`), `-R` for single-pass (drop referenced; refused with `--remove-tags` and `-j`), `--input-kind osc` to read an OSC diff instead of a PBF
 - `brokkr getid` - hardcoded ID set; `--add-referenced` for two-pass, `--invert` to negate
 - `brokkr extract` - `--strategy simple|complete|smart` picks the extract algorithm
 - `brokkr diff` - `--format default|osc` picks the output shape

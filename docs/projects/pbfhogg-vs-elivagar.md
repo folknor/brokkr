@@ -87,9 +87,10 @@ sidecar records.
 
 ## 5. I/O mode flags
 
-Pbfhogg supports `--direct-io`, `--io-uring` and `--compression`. I/O support is
-checked per command, and io_uring has its preflight. The `write` and `merge`
-benches refuse all three in favour of their own matrix flags. The flags retain their
+Pbfhogg supports `--direct-io`, `--io-uring` and `--compression`. Each is
+checked per command shape against one table before anything is built, and
+io_uring has its preflight. The `read`, `write` and `merge` benches refuse all
+three, `write` and `merge` in favour of their own matrix flags. The flags retain their
 literal spelling in recorded subprocess `cli_args`.
 
 Elivagar has no corresponding I/O selection flags.

@@ -201,7 +201,8 @@ pub(crate) struct PbfhoggBinary {
     digest: String,
     project_root: PathBuf,
     answers: RefCell<BTreeMap<String, bool>>,
-    /// Subcommands already told they run without the private directory.
+    /// Subcommands, with the flags they lacked, already told they run
+    /// without the private directory.
     unguarded: RefCell<std::collections::BTreeSet<String>>,
     /// Keeps the brokkr lock held for the handle's life (`None` only for
     /// test fixtures, which run without the lock).
@@ -420,8 +421,15 @@ impl PbfhoggBinary {
         };
         let staging = argv.writes_output() && self.supports(&subcommand, Flag::StagingDir)?;
         let tmp = argv.writes_scratch() && self.supports(&subcommand, Flag::TmpDir)?;
-        if (argv.writes_output() && !staging) || (argv.writes_scratch() && !tmp) {
-            self.say_unguarded(&subcommand);
+        let missing: Vec<&str> = [
+            (argv.writes_output() && !staging, STAGING_DIR_FLAG),
+            (argv.writes_scratch() && !tmp, TMP_DIR_FLAG),
+        ]
+        .into_iter()
+        .filter_map(|(lacks, flag)| lacks.then_some(flag))
+        .collect();
+        if !missing.is_empty() {
+            self.say_unguarded(&subcommand, &missing);
         }
         let private_in = if staging || tmp {
             match (argv.writes().first(), argv.scratch_root()) {
@@ -451,15 +459,23 @@ impl PbfhoggBinary {
         Ok(Invocation::reserved(&self.path, args, spec))
     }
 
-    /// Once per subcommand per handle: this executable cannot take the
-    /// private directory, so a killed child's leftovers stay where pbfhogg
-    /// puts them by default.
-    fn say_unguarded(&self, subcommand: &str) {
-        if self.unguarded.borrow_mut().insert(subcommand.to_owned()) {
+    /// Once per subcommand and set of missing flags per handle: this
+    /// executable cannot take the private directory for what the argv
+    /// declares, so whatever a killed child leaves of it stays where pbfhogg
+    /// puts it by default. It names the flags rather than claiming leftovers:
+    /// a build older than a command's scratch (merge-changes before pbfhogg
+    /// c97b9985) lacks `--tmp-dir` because it writes none.
+    fn say_unguarded(&self, subcommand: &str, missing: &[&str]) {
+        let missing = missing.join(" and ");
+        if self
+            .unguarded
+            .borrow_mut()
+            .insert(format!("{subcommand} {missing}"))
+        {
             output::warn(&format!(
-                "this pbfhogg build's `{subcommand}` predates {STAGING_DIR_FLAG}/{TMP_DIR_FLAG}: \
-                 a child killed mid-write leaves its staging or scratch beside its output, and \
-                 brokkr does not remove it"
+                "this pbfhogg build's `{subcommand}` takes no {missing}: any staging or \
+                 scratch a child killed mid-write leaves stays where pbfhogg puts it by default, \
+                 and brokkr does not remove it"
             ));
         }
     }

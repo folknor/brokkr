@@ -61,12 +61,58 @@ impl InspectTypeFilter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TagsFilterInput {
     Pbf {
-        omit_referenced: bool,
+        referenced: Referenced,
         invert: bool,
-        remove_tags: bool,
     },
     Osc,
     Invalid(String),
+}
+
+/// What a PBF tags-filter does with objects the matches reference.
+/// `--remove-tags` strips tags from referenced objects, which
+/// `--omit-referenced` drops whole, so the pair has no shape here: it was a
+/// no-op before pbfhogg 6e87c0ef and is a usage error since.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Referenced {
+    /// `--omit-referenced`: one pass, direct matches only.
+    Omitted,
+    /// The two-pass default; `remove_tags` adds `--remove-tags`.
+    Kept { remove_tags: bool },
+}
+
+/// A pbfhogg flag brokkr forwards from its own command line to any command
+/// shape that takes it, appended by [`PbfhoggCommand::build_args`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Axis {
+    DirectIo,
+    IoUring,
+    Compression,
+    Jobs,
+}
+
+impl Axis {
+    pub const ALL: [Self; 4] = [Self::DirectIo, Self::IoUring, Self::Compression, Self::Jobs];
+
+    /// The flag as brokkr and pbfhogg both spell it.
+    pub fn flag(self) -> &'static str {
+        match self {
+            Self::DirectIo => "--direct-io",
+            Self::IoUring => "--io-uring",
+            Self::Compression => "--compression",
+            Self::Jobs => "--jobs",
+        }
+    }
+
+    /// Whether `params` sets this axis. An explicit `--jobs 0` is set: it
+    /// asks for pbfhogg's auto resolution and still needs a worker pool.
+    fn is_set(self, params: &CommandParams) -> bool {
+        match self {
+            Self::DirectIo => params.io.direct_io,
+            Self::IoUring => params.io.io_uring,
+            Self::Compression => params.compression.is_some(),
+            Self::Jobs => params.jobs.is_some(),
+        }
+    }
 }
 
 /// What output a command produces.
@@ -104,7 +150,6 @@ pub struct CommandDescriptor {
     pub id: &'static str,
     pub output: OutputKind,
     pub promotion_variant: PromotionVariant,
-    pub supports_io_uring: bool,
 }
 
 /// Which build-args flavor to produce. The command arguments are shared;
@@ -458,22 +503,18 @@ pub enum PbfhoggCommand {
 }
 
 impl PbfhoggCommand {
-    /// Describe command identity, output routing and I/O support in one match.
+    /// Describe command identity and output routing in one match.
     pub fn descriptor(&self) -> CommandDescriptor {
         use OutputKind::{None, ScratchDir, ScratchOsc, ScratchPbf, ScratchText};
-        let (id, output, promotion_variant, supports_io_uring) = match self {
-            Self::Inspect { .. } => ("inspect", None, PromotionVariant::Unsupported, false),
-            Self::CheckRefs => ("check-refs", None, PromotionVariant::Unsupported, false),
-            Self::CheckIds { .. } => ("check-ids", None, PromotionVariant::Unsupported, false),
-            Self::CheckIndex => ("check-index", None, PromotionVariant::Unsupported, false),
-            Self::Digest { .. } => ("digest", None, PromotionVariant::Unsupported, false),
-            Self::Sort => ("sort", ScratchPbf, PromotionVariant::Indexed, true),
-            Self::Cat(cat) => (
-                "cat",
-                ScratchPbf,
-                PromotionVariant::Indexed,
-                matches!(cat, CatMode::Dedupe),
-            ),
+        use PromotionVariant::{Indexed, Raw, Unsupported};
+        let (id, output, promotion_variant) = match self {
+            Self::Inspect { .. } => ("inspect", None, Unsupported),
+            Self::CheckRefs => ("check-refs", None, Unsupported),
+            Self::CheckIds { .. } => ("check-ids", None, Unsupported),
+            Self::CheckIndex => ("check-index", None, Unsupported),
+            Self::Digest { .. } => ("digest", None, Unsupported),
+            Self::Sort => ("sort", ScratchPbf, Indexed),
+            Self::Cat(_) => ("cat", ScratchPbf, Indexed),
             Self::TagsFilter { input, .. } => (
                 "tags-filter",
                 if matches!(input, TagsFilterInput::Osc) {
@@ -481,79 +522,55 @@ impl PbfhoggCommand {
                 } else {
                     ScratchPbf
                 },
-                PromotionVariant::Unsupported,
-                false,
+                Unsupported,
             ),
-            Self::Getid { .. } => ("getid", ScratchPbf, PromotionVariant::Indexed, false),
-            Self::Getparents => ("getparents", ScratchPbf, PromotionVariant::Indexed, false),
-            Self::Renumber => ("renumber", ScratchPbf, PromotionVariant::Indexed, false),
-            Self::MergeChanges { .. } => (
-                "merge-changes",
-                ScratchOsc,
-                PromotionVariant::Unsupported,
-                false,
-            ),
-            Self::ApplyChanges => ("apply-changes", ScratchPbf, PromotionVariant::Indexed, true),
-            Self::AddLocationsToWays => (
-                "add-locations-to-ways",
-                ScratchPbf,
-                PromotionVariant::Indexed,
-                false,
-            ),
-            Self::TimeFilter => ("time-filter", ScratchPbf, PromotionVariant::Indexed, false),
+            Self::Getid { .. } => ("getid", ScratchPbf, Indexed),
+            Self::Getparents => ("getparents", ScratchPbf, Indexed),
+            Self::Renumber => ("renumber", ScratchPbf, Indexed),
+            Self::MergeChanges { .. } => ("merge-changes", ScratchOsc, Unsupported),
+            Self::ApplyChanges => ("apply-changes", ScratchPbf, Indexed),
+            Self::AddLocationsToWays => ("add-locations-to-ways", ScratchPbf, Indexed),
+            Self::TimeFilter => ("time-filter", ScratchPbf, Indexed),
             Self::Diff {
                 format: DiffFormat::Default,
-            } => ("diff", ScratchText, PromotionVariant::Unsupported, false),
+            } => ("diff", ScratchText, Unsupported),
             Self::Diff {
                 format: DiffFormat::Osc,
-            } => ("diff", ScratchOsc, PromotionVariant::Unsupported, true),
+            } => ("diff", ScratchOsc, Unsupported),
             Self::DiffSnapshots {
                 format: DiffFormat::Default,
-            } => (
-                "diff-snapshots",
-                ScratchText,
-                PromotionVariant::Unsupported,
-                false,
-            ),
+            } => ("diff-snapshots", ScratchText, Unsupported),
             Self::DiffSnapshots {
                 format: DiffFormat::Osc,
-            } => (
-                "diff-snapshots",
-                ScratchOsc,
-                PromotionVariant::Unsupported,
-                false,
-            ),
-            Self::Repack { .. } => ("repack", ScratchPbf, PromotionVariant::Indexed, true),
+            } => ("diff-snapshots", ScratchOsc, Unsupported),
+            Self::Repack { .. } => ("repack", ScratchPbf, Indexed),
             Self::Degrade {
                 strip_indexdata: true,
                 ..
-            } => ("degrade", ScratchPbf, PromotionVariant::Raw, true),
-            Self::Degrade { .. } => ("degrade", ScratchPbf, PromotionVariant::Indexed, true),
+            } => ("degrade", ScratchPbf, Raw),
+            Self::Degrade { .. } => ("degrade", ScratchPbf, Indexed),
             Self::BuildGeocodeIndex => (
                 "build-geocode-index",
                 ScratchDir {
                     name: "geocode",
                     dataset_suffix: true,
                 },
-                PromotionVariant::Unsupported,
-                false,
+                Unsupported,
             ),
-            Self::Extract { .. } => ("extract", ScratchPbf, PromotionVariant::Indexed, false),
+            Self::Extract { .. } => ("extract", ScratchPbf, Indexed),
             Self::MultiExtract { .. } => (
                 "multi-extract",
                 ScratchDir {
                     name: "multi-extract",
                     dataset_suffix: false,
                 },
-                PromotionVariant::Unsupported,
-                false,
+                Unsupported,
             ),
         };
         CommandDescriptor {
             id,
             output,
             promotion_variant,
-            supports_io_uring,
         }
     }
 
@@ -567,16 +584,152 @@ impl PbfhoggCommand {
         self.descriptor().output
     }
 
-    /// Whether this command accepts `--io-uring`.
+    /// Whether some pbfhogg revision brokkr can build gives `axis` effect on
+    /// this command shape. brokkr refuses an axis only where none does: the
+    /// flag was never accepted there, or it was a no-op until pbfhogg began
+    /// refusing it (6e87c0ef for tags-filter `--omit-referenced` with
+    /// `--jobs`, and OSC-mode `--compression` and `--direct-io`). Where any
+    /// revision honours it, brokkr forwards it and the built revision
+    /// answers. pbfhogg is an external binary, so this is not generated from
+    /// its clap schema; it was read from its CLI at HEAD and at the commits
+    /// named here.
     ///
-    /// Only commands whose pbfhogg binary clap definition includes `--io-uring`
-    /// are listed here.  Passing the flag to other commands causes clap exit
-    /// code 2.
-    /// pbfhogg is an external binary here, so this local compatibility set is
-    /// not generated from its clap schema; callers should not repeat it in
-    /// error text.
-    pub fn supports_io_uring(&self) -> bool {
-        self.descriptor().supports_io_uring
+    /// - `--io-uring`: only `sort`, `repack`, `degrade`, `apply-changes` and
+    ///   `cat --dedupe` have an io_uring writer; `diff` never had the flag.
+    /// - `--compression`: every command that writes a PBF, so not `inspect`,
+    ///   `check`, `digest`, `diff` (its output is OSC or text),
+    ///   `merge-changes` (OSC) or `build-geocode-index` (an index), nor an
+    ///   OSC tags-filter.
+    /// - `--direct-io`: everything but `merge-changes` and an OSC
+    ///   tags-filter.
+    /// - `--jobs`: the commands with a worker pool it sizes: `inspect --nodes`
+    ///   and `inspect tags`, a PBF tags-filter that keeps referenced objects
+    ///   (`--omit-referenced` has no classify pool, and the OSC filter takes
+    ///   no worker count: it was single-threaded until pbfhogg 3f8d9f35 and
+    ///   still refuses the flag), `diff`, `apply-changes` and `merge-changes`.
+    pub fn axis_has_effect(&self, axis: Axis) -> bool {
+        let pbf_tags_filter = |cmd: &Self| {
+            matches!(
+                cmd,
+                Self::TagsFilter {
+                    input: TagsFilterInput::Pbf { .. },
+                    ..
+                }
+            )
+        };
+        match axis {
+            Axis::IoUring => matches!(
+                self,
+                Self::Sort
+                    | Self::Repack { .. }
+                    | Self::Degrade { .. }
+                    | Self::ApplyChanges
+                    | Self::Cat(CatMode::Dedupe)
+            ),
+            Axis::Compression => match self {
+                Self::Inspect { .. }
+                | Self::CheckRefs
+                | Self::CheckIds { .. }
+                | Self::CheckIndex
+                | Self::Digest { .. }
+                | Self::Diff { .. }
+                | Self::DiffSnapshots { .. }
+                | Self::MergeChanges { .. }
+                | Self::BuildGeocodeIndex => false,
+                Self::TagsFilter { .. } => pbf_tags_filter(self),
+                Self::Sort
+                | Self::Cat(_)
+                | Self::Getid { .. }
+                | Self::Getparents
+                | Self::Renumber
+                | Self::ApplyChanges
+                | Self::AddLocationsToWays
+                | Self::TimeFilter
+                | Self::Repack { .. }
+                | Self::Degrade { .. }
+                | Self::Extract { .. }
+                | Self::MultiExtract { .. } => true,
+            },
+            Axis::DirectIo => match self {
+                Self::MergeChanges { .. } => false,
+                Self::TagsFilter { .. } => pbf_tags_filter(self),
+                _ => true,
+            },
+            Axis::Jobs => match self {
+                Self::Inspect { mode } => {
+                    matches!(mode, InspectMode::Nodes | InspectMode::Tags { .. })
+                }
+                Self::TagsFilter { input, .. } => matches!(
+                    input,
+                    TagsFilterInput::Pbf {
+                        referenced: Referenced::Kept { .. },
+                        ..
+                    }
+                ),
+                Self::Diff { .. }
+                | Self::DiffSnapshots { .. }
+                | Self::ApplyChanges
+                | Self::MergeChanges { .. } => true,
+                _ => false,
+            },
+        }
+    }
+
+    /// The command shape a refused axis is named against.
+    fn shape_label(&self) -> String {
+        match self {
+            Self::Inspect {
+                mode: InspectMode::Default { .. },
+            } => "inspect without --nodes or --tags".into(),
+            Self::Cat(CatMode::Plain { .. }) => "cat without --dedupe".into(),
+            Self::TagsFilter {
+                input: TagsFilterInput::Osc,
+                ..
+            } => "tags-filter --input-kind osc".into(),
+            Self::TagsFilter {
+                input:
+                    TagsFilterInput::Pbf {
+                        referenced: Referenced::Omitted,
+                        ..
+                    },
+                ..
+            } => "tags-filter --omit-referenced".into(),
+            Self::Diff { format } | Self::DiffSnapshots { format } => match format {
+                DiffFormat::Default => self.id().into(),
+                DiffFormat::Osc => format!("{} --format osc", self.id()),
+            },
+            _ => self.id().into(),
+        }
+    }
+
+    /// Refuse what this command shape cannot run, before anything is built:
+    /// a state the CLI could not express validly, and any axis `params` sets
+    /// that no pbfhogg revision gives effect here
+    /// ([`axis_has_effect`](Self::axis_has_effect)). Planning calls it ahead
+    /// of the cargo build and the io_uring preflight, and
+    /// [`build_args`](Self::build_args) calls it again, so no route emits a
+    /// refused flag.
+    pub fn validate_shape(&self, params: &CommandParams) -> Result<(), DevError> {
+        if let Self::TagsFilter {
+            input: TagsFilterInput::Invalid(message),
+            ..
+        } = self
+        {
+            return Err(DevError::Usage(message.clone()));
+        }
+        let refused: Vec<&str> = Axis::ALL
+            .into_iter()
+            .filter(|&axis| axis.is_set(params) && !self.axis_has_effect(axis))
+            .map(Axis::flag)
+            .collect();
+        if refused.is_empty() {
+            return Ok(());
+        }
+        Err(DevError::Usage(format!(
+            "{}: no effect on pbfhogg {} at any revision, which refuses or ignores it",
+            refused.join(" and "),
+            self.shape_label(),
+        )))
     }
 
     /// Whether this command consumes an OSC file as an argv input.
@@ -759,19 +912,27 @@ impl PbfhoggCommand {
     /// the binary separately when spawning. The mode only selects the scratch
     /// filename namespace, so benchmark and profiling runs execute the same
     /// command arguments.
-    /// I/O and explicit compression options are appended here so every caller,
-    /// including dry-run, sees the same command shape. The one flag not here
+    /// The [`Axis`] flags (I/O, explicit compression, `--jobs`) are appended
+    /// here, after [`validate_shape`](Self::validate_shape) refused any this
+    /// shape cannot take, so every caller, including dry-run, sees the same
+    /// command shape. The one flag not here
     /// is `--overwrite`: whether it is passed depends on the executable, so
     /// [`PbfhoggBinary`](crate::pbfhogg::binary::PbfhoggBinary) adds it when
     /// resolving the returned [`CommandArgv`].
     #[allow(clippy::too_many_lines)]
     pub fn build_args(&self, ctx: &CommandContext, mode: ArgMode) -> Result<CommandArgv, DevError> {
+        self.validate_shape(&ctx.params)?;
         let mut argv = self.build_body(ctx, mode)?;
         for arg in ctx.params.io.args() {
             argv = argv.arg(arg);
         }
         if let Some(compression) = &ctx.params.compression {
-            argv = argv.arg("--compression").arg(compression.to_string());
+            argv = argv
+                .arg(Axis::Compression.flag())
+                .arg(compression.to_string());
+        }
+        if let Some(jobs) = ctx.params.jobs {
+            argv = argv.arg(Axis::Jobs.flag()).arg(jobs.to_string());
         }
         Ok(argv)
     }
@@ -802,10 +963,6 @@ impl PbfhoggCommand {
     /// reads, writes and scratches, all from the same calls.
     #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
     fn build_body(&self, ctx: &CommandContext, mode: ArgMode) -> Result<CommandArgv, DevError> {
-        let jobs = |argv: CommandArgv| match ctx.params.jobs {
-            Some(j) => argv.arg("--jobs").arg(j.to_string()),
-            None => argv,
-        };
         match self {
             // -----------------------------------------------------------------
             // Tool CLI commands (26 from bench_commands.rs)
@@ -829,11 +986,6 @@ impl PbfhoggCommand {
                             argv = argv.arg("--extended");
                         }
                     }
-                }
-                // pbfhogg's default inspect (metadata) doesn't accept -j;
-                // drop the flag silently rather than let pbfhogg reject.
-                if matches!(inspect_mode, InspectMode::Nodes | InspectMode::Tags { .. }) {
-                    argv = jobs(argv);
                 }
                 Ok(argv)
             }
@@ -896,31 +1048,21 @@ impl PbfhoggCommand {
                         argv = argv.arg("--input-kind").arg("osc");
                         ctx.osc_str()?
                     }
-                    TagsFilterInput::Pbf {
-                        omit_referenced,
-                        invert,
-                        remove_tags,
-                    } => {
-                        if *omit_referenced {
-                            argv = argv.arg("--omit-referenced");
-                        }
-                        if *invert {
-                            argv = argv.arg("--invert-match");
-                        }
-                        if *remove_tags {
-                            argv = argv.arg("--remove-tags");
-                        }
+                    TagsFilterInput::Pbf { referenced, invert } => {
+                        argv = argv
+                            .arg_if(*referenced == Referenced::Omitted, "--omit-referenced")
+                            .arg_if(*invert, "--invert-match")
+                            .arg_if(
+                                *referenced == (Referenced::Kept { remove_tags: true }),
+                                "--remove-tags",
+                            );
                         ctx.pbf_str()?
                     }
                     TagsFilterInput::Invalid(message) => {
-                        return Err(DevError::Config(message.clone()));
+                        return Err(DevError::Usage(message.clone()));
                     }
                 };
-                let argv = argv
-                    .input(input_path)?
-                    .arg(filter.clone())
-                    .output(&output)?;
-                Ok(jobs(argv))
+                argv.input(input_path)?.arg(filter.clone()).output(&output)
             }
             Self::Getid {
                 add_referenced,
@@ -965,7 +1107,13 @@ impl PbfhoggCommand {
                 for o in ctx.osc_strs()? {
                     argv = argv.input(o)?;
                 }
-                let argv = argv.output(&output)?;
+                // Scratch on every path: since pbfhogg c97b9985, which gave
+                // merge-changes `--tmp-dir`, its CLI makes a run directory
+                // (with its lock and ready files) for every invocation, though
+                // only several inputs without `--simplify` spill into it. A
+                // build from before c97b9985 lacks the flag, the probe says
+                // so, and it makes no run directory to redirect.
+                let argv = argv.output(&output)?.scratch(&ctx.scratch_dir);
                 Ok(if *simplify {
                     argv.arg("--simplify")
                 } else {
@@ -978,7 +1126,7 @@ impl PbfhoggCommand {
                     Path::new(ctx.pbf_str()?),
                     Path::new(ctx.osc_str()?),
                     &output,
-                    &ctx.params,
+                    ctx.params.locations_on_ways,
                 )
             }
             Self::AddLocationsToWays => {
@@ -1031,7 +1179,7 @@ impl PbfhoggCommand {
                             .scratch(&ctx.scratch_dir)
                     }
                 };
-                Ok(jobs(argv))
+                Ok(argv)
             }
 
             Self::Repack {
@@ -1124,22 +1272,20 @@ impl PbfhoggCommand {
     }
 
     /// Construct the shared apply-changes core argv. `ensure_merged_pbf`
-    /// uses default settings to build a cache input; measured apply-changes
-    /// commands pass their resolved parameters here.
+    /// builds its cache input with pbfhogg's defaults (no transform, no
+    /// axis flag); measured apply-changes passes its `--locations-on-ways`
+    /// here and gets its axis flags from [`build_args`](Self::build_args).
     pub(crate) fn apply_changes_args(
         pbf: &Path,
         osc: &Path,
         output: &Path,
-        params: &CommandParams,
+        locations_on_ways: bool,
     ) -> Result<CommandArgv, DevError> {
-        let mut argv = CommandArgv::new("apply-changes").input(pbf)?.input(osc)?;
-        if params.locations_on_ways {
-            argv = argv.arg("--locations-on-ways");
-        }
-        if let Some(jobs) = params.jobs {
-            argv = argv.arg("--jobs").arg(jobs.to_string());
-        }
-        argv.output(output)
+        CommandArgv::new("apply-changes")
+            .input(pbf)?
+            .input(osc)?
+            .arg_if(locations_on_ways, "--locations-on-ways")
+            .output(output)
     }
 
     /// Materialise the on-disk inputs `build_args` only names.
@@ -1478,9 +1624,15 @@ mod tests {
             PbfhoggCommand::TagsFilter {
                 filter: "w/highway=primary".into(),
                 input: TagsFilterInput::Pbf {
-                    omit_referenced: true,
+                    referenced: Referenced::Kept { remove_tags: true },
                     invert: true,
-                    remove_tags: true,
+                },
+            },
+            PbfhoggCommand::TagsFilter {
+                filter: "w/highway=primary".into(),
+                input: TagsFilterInput::Pbf {
+                    referenced: Referenced::Omitted,
+                    invert: true,
                 },
             },
             PbfhoggCommand::TagsFilter {
@@ -1578,17 +1730,41 @@ mod tests {
     }
 
     /// Run scratch is declared by exactly the commands pbfhogg makes it
-    /// for: add-locations-to-ways, build-geocode-index, an OSC diff on every
-    /// path, and never a text diff, which refuses `--tmp-dir`.
+    /// for: add-locations-to-ways, build-geocode-index, merge-changes and an
+    /// OSC diff on every path, and never a text diff, which refuses
+    /// `--tmp-dir`.
     #[test]
     fn scratch_is_declared_by_the_commands_that_write_it() {
         for cmd in every_command_state() {
             let mut ctx = ctx_for(&cmd);
-            for jobs in [None, Some(1), Some(4)] {
+            let several = vec![
+                PathBuf::from("/data/denmark-4705.osc.gz"),
+                PathBuf::from("/data/denmark-4706.osc.gz"),
+            ];
+            let inputs = if matches!(cmd, PbfhoggCommand::MergeChanges { .. }) {
+                vec![
+                    ctx.inputs.clone(),
+                    ResolvedInputs::OscOnly { oscs: several },
+                ]
+            } else {
+                vec![ctx.inputs.clone()]
+            };
+            let jobs = if cmd.axis_has_effect(Axis::Jobs) {
+                vec![None, Some(0), Some(4)]
+            } else {
+                vec![None]
+            };
+            for (input, jobs) in inputs
+                .iter()
+                .flat_map(|input| jobs.iter().map(move |jobs| (input, *jobs)))
+            {
+                ctx.inputs = input.clone();
                 ctx.params.jobs = jobs;
                 let argv = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
                 let expected = match &cmd {
-                    PbfhoggCommand::AddLocationsToWays | PbfhoggCommand::BuildGeocodeIndex => true,
+                    PbfhoggCommand::AddLocationsToWays
+                    | PbfhoggCommand::BuildGeocodeIndex
+                    | PbfhoggCommand::MergeChanges { .. } => true,
                     PbfhoggCommand::Diff { format } | PbfhoggCommand::DiffSnapshots { format } => {
                         *format == DiffFormat::Osc
                     }
@@ -1624,7 +1800,7 @@ mod tests {
             )
         );
         assert!(!args.iter().any(|a| a == "--dedupe"));
-        assert!(!cmd.supports_io_uring());
+        assert!(!cmd.axis_has_effect(Axis::IoUring));
     }
 
     #[test]
@@ -1642,7 +1818,7 @@ mod tests {
         // alone suppresses the default `--ids --refs` pair.
         assert!(!args.iter().any(|a| a == "--ids" || a == "--refs"));
         assert_eq!(cmd.ok_exit_codes(), &[1]);
-        assert!(!cmd.supports_io_uring());
+        assert!(!cmd.axis_has_effect(Axis::IoUring));
     }
 
     #[test]
@@ -1665,7 +1841,7 @@ mod tests {
             )
         );
         assert!(!args.iter().any(|a| a == "--clean" || a == "--type"));
-        assert!(cmd.supports_io_uring());
+        assert!(cmd.axis_has_effect(Axis::IoUring));
     }
 
     #[test]
@@ -1889,14 +2065,18 @@ mod tests {
     }
 
     #[test]
-    fn inspect_default_drops_jobs_flag() {
+    fn inspect_default_refuses_jobs_rather_than_dropping_it() {
         let mut ctx = test_ctx();
-        ctx.params.jobs = Some(4);
         let cmd = PbfhoggCommand::Inspect {
             mode: InspectMode::Default { extended: false },
         };
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
-        assert!(!args.iter().any(|a| a == "--jobs"));
+        for jobs in [0, 4] {
+            ctx.params.jobs = Some(jobs);
+            let err = cmd.build_args(&ctx, ArgMode::Bench).unwrap_err();
+            assert!(matches!(err, DevError::Usage(_)), "{err}");
+            assert!(err.to_string().contains("--jobs"), "{err}");
+            assert!(cmd.validate_shape(&ctx.params).is_err());
+        }
     }
 
     #[test]
@@ -2052,9 +2232,8 @@ mod tests {
         let cmd = PbfhoggCommand::TagsFilter {
             filter: "w/highway=primary".into(),
             input: TagsFilterInput::Pbf {
-                omit_referenced: true,
+                referenced: Referenced::Omitted,
                 invert: false,
-                remove_tags: false,
             },
         };
         assert!(!cmd.needs_osc_input());
@@ -2068,9 +2247,8 @@ mod tests {
         let cmd = PbfhoggCommand::TagsFilter {
             filter: "highway=primary".into(),
             input: TagsFilterInput::Pbf {
-                omit_referenced: false,
+                referenced: Referenced::Kept { remove_tags: true },
                 invert: true,
-                remove_tags: true,
             },
         };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
@@ -2100,9 +2278,8 @@ mod tests {
         let cmd = PbfhoggCommand::TagsFilter {
             filter: "w/highway=primary".into(),
             input: TagsFilterInput::Pbf {
-                omit_referenced: true,
+                referenced: Referenced::Kept { remove_tags: false },
                 invert: false,
-                remove_tags: false,
             },
         };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
@@ -2111,6 +2288,115 @@ mod tests {
             .position(|a| a == "--jobs")
             .expect("--jobs present");
         assert_eq!(args[pos + 1], "4");
+    }
+
+    /// Every axis a state takes is appended once, after the body; every
+    /// one it does not take is refused before any argv exists.
+    #[test]
+    fn axis_flags_are_appended_where_they_have_effect_and_refused_elsewhere() {
+        for cmd in every_command_state() {
+            for axis in Axis::ALL {
+                let mut ctx = ctx_for(&cmd);
+                match axis {
+                    Axis::DirectIo => ctx.params.io.direct_io = true,
+                    Axis::IoUring => ctx.params.io.io_uring = true,
+                    Axis::Compression => ctx.params.compression = Some("zstd:-1".parse().unwrap()),
+                    Axis::Jobs => ctx.params.jobs = Some(0),
+                }
+                let built = cmd.build_args(&ctx, ArgMode::Bench);
+                if cmd.axis_has_effect(axis) {
+                    let args = built.unwrap().into_args();
+                    let count = args.iter().filter(|a| a.as_str() == axis.flag()).count();
+                    assert_eq!(count, 1, "{cmd:?} {axis:?}: {args:?}");
+                } else {
+                    let err = built.unwrap_err();
+                    assert!(matches!(err, DevError::Usage(_)), "{cmd:?} {axis:?}: {err}");
+                    assert!(err.to_string().contains(axis.flag()), "{err}");
+                    assert!(cmd.validate_shape(&ctx.params).is_err());
+                }
+            }
+        }
+    }
+
+    /// The cells the survey found offered and refused by pbfhogg.
+    #[test]
+    fn axis_table_matches_pbfhogg_for_the_refused_cells() {
+        let osc_filter = PbfhoggCommand::TagsFilter {
+            filter: "highway=primary".into(),
+            input: TagsFilterInput::Osc,
+        };
+        let omit = PbfhoggCommand::TagsFilter {
+            filter: "highway=primary".into(),
+            input: TagsFilterInput::Pbf {
+                referenced: Referenced::Omitted,
+                invert: false,
+            },
+        };
+        let refused = [
+            (
+                PbfhoggCommand::Diff {
+                    format: DiffFormat::Osc,
+                },
+                Axis::IoUring,
+            ),
+            (
+                PbfhoggCommand::Cat(CatMode::Plain {
+                    type_filter: None,
+                    clean: false,
+                }),
+                Axis::IoUring,
+            ),
+            (PbfhoggCommand::CheckRefs, Axis::Compression),
+            (PbfhoggCommand::Digest { form: None }, Axis::Compression),
+            (PbfhoggCommand::BuildGeocodeIndex, Axis::Compression),
+            (
+                PbfhoggCommand::MergeChanges { simplify: false },
+                Axis::Compression,
+            ),
+            (
+                PbfhoggCommand::MergeChanges { simplify: true },
+                Axis::DirectIo,
+            ),
+            (osc_filter.clone(), Axis::Compression),
+            (osc_filter.clone(), Axis::DirectIo),
+            (osc_filter, Axis::Jobs),
+            (omit.clone(), Axis::Jobs),
+        ];
+        for (cmd, axis) in refused {
+            assert!(!cmd.axis_has_effect(axis), "{cmd:?} {axis:?}");
+        }
+        for (cmd, axis) in [
+            (omit, Axis::Compression),
+            (PbfhoggCommand::MergeChanges { simplify: true }, Axis::Jobs),
+            (
+                PbfhoggCommand::Extract {
+                    strategy: ExtractStrategy::Smart,
+                },
+                Axis::DirectIo,
+            ),
+            (
+                PbfhoggCommand::MultiExtract {
+                    regions: 2,
+                    strategy: ExtractStrategy::Simple,
+                },
+                Axis::Compression,
+            ),
+        ] {
+            assert!(cmd.axis_has_effect(axis), "{cmd:?} {axis:?}");
+        }
+    }
+
+    #[test]
+    fn an_invalid_tags_filter_is_refused_by_shape_validation() {
+        let cmd = PbfhoggCommand::TagsFilter {
+            filter: "highway=primary".into(),
+            input: TagsFilterInput::Invalid("nope".into()),
+        };
+        let err = cmd.validate_shape(&CommandParams::default()).unwrap_err();
+        assert!(
+            matches!(err, DevError::Usage(ref m) if m == "nope"),
+            "{err}"
+        );
     }
 
     #[test]
