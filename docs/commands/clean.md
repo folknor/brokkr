@@ -69,20 +69,34 @@ Its path is a named permanent store in the ratatoskr layout. Cleanup preserves
 that path and any directory containing it, even if the store moves below the
 current `.brokkr/ratatoskr/` level.
 
-## Left alone, bounded by their writers
+## Left alone
 
-No flag removes these either. They are small, or their writers bound them:
+No flag removes these either. What keeps each in check, where anything does:
 
-| state | bound |
+| state | what limits it |
 | --- | --- |
-| `.brokkr/check-logs/` | the newest 10 logs per kind; a single log's size is not capped |
-| `.brokkr/accounting/` | the newest 10 check runs |
-| `.brokkr/hash_cache`, `hash_cache.lock` | entries for files that no longer exist are dropped on every save |
+| `.brokkr/check-logs/` | each new log prunes its kind to the newest 10, best effort; a single log's size is not capped |
+| `.brokkr/accounting/` | each new check run prunes to the newest 10 plus itself, best effort; a plan or journal's size is not capped |
+| `.brokkr/hash_cache`, `hash_cache.lock` | a save drops entries for files that no longer exist; a run that only hits the cache does not save |
 | `.brokkr/pbfhogg-capabilities` | capped at 512 lines |
-| `.brokkr/worktrees.toml` | last-used records for persistent worktrees; a vanished worktree's record is dropped |
-| `.brokkr/corpus-sort/` | each elivagar corpus sort removes its own spill directory when it ends; one killed mid-sort stays, and nothing sweeps it |
-| `.brokkr/nidhogg.pid` | the identity of a running nidhogg server, removed when brokkr stops it |
-| `.brokkr/parallel-timings.toml`, `nextest-synth.toml`, `nextest-sweep-env.toml`, `.sidecar.lock`, `.gitignore` | single small files, rewritten in place |
+| `.brokkr/worktrees.toml` | cutting a new `--commit` worktree drops the vanished records of that checkout only; nothing else does |
+| `.brokkr/parallel-timings.toml` | nothing: measured costs merge in per sweep and binary, and a sweep or binary that stops existing keeps its entries; advisory, and safe to delete |
+| `.brokkr/nidhogg.pid` | removed when brokkr stops the server; a server that exits on its own leaves it |
+| `.brokkr/.sidecar.lock`, `.gitignore` | one small file each; the lock persists, and an existing `.gitignore` is never rewritten |
+
+Some files exist only while their writer runs, and a writer killed with
+SIGKILL leaves them behind. Nothing sweeps them, and they can accumulate:
+
+- `.brokkr/nextest-synth.<pid>-<n>.toml` and
+  `.brokkr/nextest-sweep-env.<pid>-<n>.toml`, one private config file per
+  nextest-lane read, removed when the read ends.
+- `.<name>.tmp-<pid>-<n>` beside a file brokkr replaces atomically (the hash
+  cache, the capabilities store, `worktrees.toml` and others), removed once
+  the replacement is published.
+- `.brokkr/corpus-sort/<dir>`, the spill directory of one elivagar corpus
+  sort, removed when the sort ends.
+- `.brokkr/hotpath-report.json`, at most one: each hotpath capture removes it
+  before and after the run.
 
 ## Routine clean
 
