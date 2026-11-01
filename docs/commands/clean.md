@@ -121,7 +121,10 @@ Bare `brokkr clean`, in order:
   Its removals of pbfhogg's verify output and scratch go through the
   reservation gate, so a path a running pbfhogg launch still uses is named,
   kept and skipped while the rest of the clean goes on, and a tree holding a
-  `.pbfhogg-backup-*` is never removed. The run directories a failed `brokkr library` run kept
+  `.pbfhogg-backup-*` is never removed; it also removes the fixed-name
+  `.brokkr-pbfhogg/` directories an older brokkr left in scratch and the
+  data dir, where a killed child's staging can be a whole PBF. The run
+  directories a failed `brokkr library` run kept
   (`<scratch>/library/<scenario>/run-N/`) go each through the gate, so one
   an orphaned harness still holds stays alone, and a scenario directory left
   empty goes with them; only in a clean run by hand, never in the cleanup

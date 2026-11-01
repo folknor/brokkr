@@ -527,8 +527,12 @@ impl<'a> PbfhoggLayout<'a> {
     pub(crate) fn scratch_dirs(&self) -> Vec<PathBuf> {
         let scratch_dir = self.scratch();
         let mut dirs = BTreeSet::new();
-        // The per-launch private directories pbfhogg children get go with
-        // their leases (`crate::reservations`), not from here.
+        // The fixed-name private directory an older brokkr gave pbfhogg
+        // children, beside their outputs: on a host that ran one, a killed
+        // child's staging there can be a whole PBF. Today's per-launch ones
+        // go with their leases (`crate::reservations`), not from here.
+        dirs.insert(scratch_dir.join(".brokkr-pbfhogg"));
+        dirs.insert(self.paths.data_dir.join(".brokkr-pbfhogg"));
         dirs.insert(Self::multi_extract_dir(scratch_dir));
         for dataset in self.paths.datasets.keys() {
             dirs.insert(Self::geocode_dir(scratch_dir, dataset));

@@ -104,7 +104,7 @@ New keys and tables are fine as long as every existing config behaves identicall
 
 ### Older brokkr binaries
 
-An older brokkr binary is never a design input. Do not add a sweep for what one left behind, a guard against one running beside this one, or a doc caveat about a gap only one could open. Stored data is a different matter: `brokkr.toml` (the config contract above) and the history in results.db, sidecar.db and runs.db keep reading as they do.
+Never guard against one running, or caveat a gap only one could open. What one left on disk is ordinary state: sweep it if it's big and nameable by construction. Stored data is a different matter too: `brokkr.toml` (the config contract above) and the history in results.db, sidecar.db and runs.db keep reading as they do.
 
 ### Bash rules
 
