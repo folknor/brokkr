@@ -137,6 +137,15 @@ impl RunStore {
             .query_capture_truncated_for(id, run_idx)
     }
 
+    pub(crate) fn query_sidecar_clock_outliers(
+        &self,
+        id: &RunId,
+        run_idx: Option<usize>,
+    ) -> Result<Vec<(usize, crate::sidecar::ClockOutliers)>, DevError> {
+        self.sidecar_required()?
+            .query_clock_outliers_for(id, run_idx)
+    }
+
     pub(crate) fn query_sidecar_samples(
         &self,
         id: &RunId,

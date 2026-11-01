@@ -94,8 +94,9 @@ not inserted into `results.db`.
 The Lua VM, `ServiceClient` userdata bindings, wait combinators, and
 runtime-owned artefact writers (`frames.jsonl`, `events.jsonl`, `steps.jsonl`,
 `service.stderr`, `runtime-outcome.json`,
-`proc-{status,wchan,syscall,stack}.txt`, `data-dir/`) live in ratatoskr's
-`app` crate behind `app --test-harness`, gated by the `test-helpers` feature.
+`proc-{status,wchan,syscall,stack}.txt`, `data-dir/`) live in ratatoskr,
+reached through the `[ratatoskr.harness]` binary's `--test-harness` mode
+(`brokkr man ratatoskr`, Lua test runtime).
 
 Flags:
 - `-N <COUNT>` - on a single script, repeats with per-iter status, per-iter

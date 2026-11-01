@@ -126,9 +126,11 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         Some(&|| harness.lock().clear_child_pid()),
         crate::shutdown::ChildIsolation::ProcessGroup(phase_guard.signal_guard()),
     )?;
-    // What was actually built: ratatoskr's config sets `debug = true`, so the
-    // row's profile follows the build, not a release default. The row, the
-    // gate identity and `run.toml` all take the profile the build returned.
+    // What was actually built: the harness profile comes from the CLI, then
+    // `[ratatoskr.harness]` `profile` or `debug`, then release, and a
+    // project's config routinely picks a non-release one, so the row's
+    // profile follows the build, not a release default. The row, the gate
+    // identity and `run.toml` all take the profile the build returned.
     let profile = built.profile.clone();
     let harness = harness.with_build_identity(crate::harness::BuildIdentity {
         profile: BuildKind::Cargo(profile.clone()),

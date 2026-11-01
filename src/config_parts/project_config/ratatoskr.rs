@@ -8,7 +8,7 @@ use std::path::PathBuf;
 ///
 /// `[ratatoskr.harness]` (the nested table) is the harness build both
 /// `service` and `sync` run. The flat fields say where sæhrimnir's binary and
-/// fixtures live, which env-var names ratatoskr's `test-helpers` feature reads
+/// fixtures live, which env-var names ratatoskr's harness runtime reads
 /// to pick up the mock endpoints (exported by `service` and `sync` alike), and
 /// where sync-test scripts live. All flat fields are optional; a command that
 /// needs one refuses when it is missing.
@@ -31,7 +31,7 @@ pub struct RatatoskrConfig {
     /// `crate::ratatoskr::saehrimnir::resolve_fixture`.
     pub fixtures_dir: Option<PathBuf>,
 
-    /// Env-var names ratatoskr's `test-helpers` reads to pick up the
+    /// Env-var names ratatoskr's harness runtime reads to pick up the
     /// per-protocol mock endpoints. Consumed by `service` and `sync` when
     /// exporting endpoints to the harness binary - `mock-serve` doesn't
     /// need them. Brokkr does not hardcode the

@@ -327,7 +327,7 @@ tokens accepted by `--fields`, `--where`, and `--stat`.
 | Field | Source | Meaning |
 |---|---|---|
 | `i` | - | sample index |
-| `t` | - | seconds since process start (always present in `--samples` JSON) |
+| `t` | - | seconds since brokkr spawned the process, from an `Instant` taken just before the spawn (always present in `--samples` JSON; Marker & counter rules, The clock) |
 | `rss` | status `VmRSS` | resident set (kB) |
 | `anon` | status `RssAnon` | anonymous RSS (kB) - the usual "real memory" signal |
 | `file` | status `RssFile` | file-backed RSS (kB) |
@@ -379,7 +379,7 @@ The FIFO carries these line types (parsed in `SidecarFifo::drain`,
   JSONL view encodes it with serde_json, so control characters are escaped.
 - **Counter** - `<ts_us> @<name>=<value>`. The value **must parse as `i64`**
   or the line is rejected. `<ts_us>` that doesn't parse is rejected for
-  either type. Timestamps are microseconds since process start.
+  either type. What a timestamp means is under "The clock" below.
 - **Call stream** - `<ts_us> %<call_id> <name>` and
   `<ts_us> %<call_id> @<name>=<value>` are the same records in one call's
   stream, for a library harness that runs several calls in one process.
@@ -409,6 +409,45 @@ The FIFO carries these line types (parsed in `SidecarFifo::drain`,
   since its v10, a terminal's drops as exact decimal text) and the default
   summary reads them; a run stored before v10 had no place for them and
   was stored as incomplete, which it stays.
+
+**The clock.** Every `<ts_us>` on the FIFO is a non-negative integer count
+of microseconds on one monotonic elapsed-time clock whose zero is the start
+of the process brokkr spawned. Every thread, call stream, counter and sink
+end shares that origin, and so do a library harness's call boundaries
+(`brokkr man library`). Nothing resets it: not opening the FIFO, not
+initialising instrumentation, not beginning a call, not the first record.
+UNIX-epoch stamps do not conform. The origin matters because brokkr stamps
+each `/proc` sample (the `t` field) from an `Instant` it takes just before
+spawning that process, and every view that lines markers up against samples
+(the per-phase summary, `--phase` with `--samples`/`--stat`/`--counters`)
+compares the two clocks directly. The alignment is approximate: it includes
+the launch overhead between brokkr's `Instant` and the process start, and
+however the writer estimates its own start (pbfhogg reads its process age
+from procfs; an `Instant` taken as early as possible in `main` is the
+portable approximation). A writer that takes its origin later, at its first
+FIFO open or first record, conforms only as far as that delay is negligible:
+every stamp is early against the samples by it. What only subtracts two
+stamps of one stream (`--durations`, a marker-span wall) does not depend on
+the origin, and `--stop` and `brokkr lock`'s last marker read names and
+brokkr's own observation time, not stamps.
+
+brokkr checks what it can. At the end of a capture, any retained record stamped
+negative or later than the run's wall plus one second is counted as outside
+the run interval, warned about once, and stored on the run's sidecar.db
+summary (`clock_outliers` and the smallest such stamp, since v11); every
+`brokkr sidecar` query of that run repeats the warning, one line per run.
+The records themselves are stored and shown as written; nothing is rebased.
+Such a record is off the contract clock, or was written after the process
+exited by a descendant still holding the FIFO. Passing proves nothing: a
+late origin stamps early, never late, so it passes. A run stored before v11
+was never checked, and the run's wall is no longer in sidecar.db; the
+upgrade marks one only for a stamp negative or at or past 10^15 us and
+leaves the rest unchecked. That threshold is 31.7 years, an operational
+assumption that no measured process in the stored history ran that long,
+not a protocol rule; every UNIX-epoch stamp after 2001-09-09 exceeds it. No
+reader interprets or rebases a stamp by its magnitude. A ratatoskr harness revision that stamps
+UNIX-epoch microseconds produces exactly such runs, at capture and in the
+stored history alike.
 
 The capture keeps every record in the one order it arrived in, markers,
 counters and sink ends alike, and sidecar.db stores each record's position

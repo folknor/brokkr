@@ -100,9 +100,10 @@ A running binary can hand data to brokkr three ways:
    (the `run_external_ok` path uses external best-of-N wall-clock instead).
 3. **FIFO markers + counters** - via `BROKKR_MARKER_FIFO`. The target writes
    `<us> name` (marker) or `<us> @name=value` (counter, value must parse as
-   `i64`), optionally tagged with a call stream (`<us> %<call_id> ...`,
-   which also carries a library call sink's sealing and terminal records; see
-   "Marker & counter rules" in `docs/commands/measure.md`). Drained by
+   `i64`), `<us>` being microseconds since the process started, optionally
+   tagged with a call stream (`<us> %<call_id> ...`, which also carries a
+   library call sink's sealing and terminal records; see "Marker & counter
+   rules" in `docs/commands/measure.md`, The clock included). Drained by
    `SidecarFifo::drain` (`src/sidecar.rs`) into one arrival-ordered capture,
    then into sidecar.db. Any project
    binary can emit them by writing that line format to the FIFO. In pbfhogg

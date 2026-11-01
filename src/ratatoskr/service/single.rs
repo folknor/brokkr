@@ -36,7 +36,7 @@ use super::suite::{FixtureSession, directory_filter, service_suite, write_artefa
 ///
 /// The harness binary itself - the Lua VM, `ServiceClient` userdata,
 /// wait combinator, frame-log tap, and `/proc` snapshot writer - lives in
-/// ratatoskr's `app` crate behind the `test-helpers` feature. This module
+/// ratatoskr, in the binary `[ratatoskr.harness]` builds. This module
 /// owns the subprocess lifecycle and captured artefacts around it.
 #[allow(clippy::too_many_lines)] // linear orchestration: parse, build, mock-up, run, mock-down
 pub(crate) fn service_test(req: &crate::request::ServiceTestRequest<'_>) -> Result<(), DevError> {

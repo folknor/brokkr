@@ -5,8 +5,9 @@
 //! brokkr's orchestration responsibilities: project gating, direct harness
 //! builds from `[ratatoskr.harness]`, lockfile, artefact-dir
 //! lifecycle, and measurement-history recording for sync benches. The Lua VM
-//! and the `ServiceClient` Lua bindings live in ratatoskr (in the `app`
-//! crate, behind the `test-helpers` feature). Cross-cutting design lives at
+//! and the `ServiceClient` Lua bindings live in ratatoskr, reached only
+//! through the configured harness binary's [`HARNESS_MODE_FLAG`] mode; which
+//! crate holds them is ratatoskr's concern. Cross-cutting design lives at
 //! `<ratatoskr>/docs/harness/{problem-statement,architecture,roadmap}.md`.
 
 use crate::config::HarnessConfig;

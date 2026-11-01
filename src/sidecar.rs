@@ -787,6 +787,65 @@ pub struct SidecarSummary {
     pub wall_time_ms: i64,
     /// What the capture omitted, by cause.
     pub(crate) loss: CaptureLoss,
+    /// Records stamped outside the run interval, by [`clock_outliers`].
+    pub(crate) clock: ClockOutliers,
+}
+
+/// Slack past a run's wall before a record's stamp counts as outside the run.
+/// A writer on the contract clock stamps a record before it exits, and brokkr
+/// stamps the wall at or after the exit from an `Instant` taken before the
+/// spawn, so a conforming stamp exceeds the wall by at most the writer's own
+/// origin estimate error (a procfs clock tick for pbfhogg). A second is far
+/// past that and far below any wrong origin worth catching.
+const CLOCK_TOLERANCE: Duration = Duration::from_secs(1);
+
+/// Retained FIFO records stamped outside the run interval plus tolerance: a
+/// negative stamp, or one later than the run's wall plus [`CLOCK_TOLERANCE`].
+/// Such a record is off the contract clock (microseconds since the measured
+/// process started), or was written after that process exited by a
+/// descendant still holding the FIFO. The count is a lower bound: a record
+/// the capture budget dropped is never seen, and a stamp inside the interval
+/// passes whatever its clock, so a writer whose origin is late (the first
+/// FIFO open rather than process start) is never caught here. `min_us` is the smallest stamp among those identified.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ClockOutliers {
+    pub count: usize,
+    pub min_us: Option<i64>,
+}
+
+impl ClockOutliers {
+    fn note(&mut self, timestamp_us: i64) {
+        self.count = self.count.saturating_add(1);
+        self.min_us = Some(self.min_us.map_or(timestamp_us, |m| m.min(timestamp_us)));
+    }
+
+    /// The operator line for `label` (which run of which result), or `None`
+    /// when nothing was identified. One wording serves the capture, whose
+    /// count is exact, and a stored run, whose count may come from the
+    /// history scan and is only a lower bound.
+    pub(crate) fn message(&self, label: &str) -> Option<String> {
+        let min_us = self.min_us?;
+        Some(format!(
+            "{label}: at least {} stamped outside the run interval (smallest identified stamp \
+             {min_us} us); phase views and sample windows may misalign (`brokkr man measure`, \
+             Marker & counter rules)",
+            crate::output::count(self.count, "FIFO record")
+        ))
+    }
+}
+
+/// Check every retained record, markers, counters and sink ends alike,
+/// against the run interval `[0, elapsed + CLOCK_TOLERANCE]`.
+pub(crate) fn clock_outliers(records: &[Record], elapsed: Duration) -> ClockOutliers {
+    let bound =
+        i64::try_from(elapsed.saturating_add(CLOCK_TOLERANCE).as_micros()).unwrap_or(i64::MAX);
+    let mut found = ClockOutliers::default();
+    for ts in records.iter().map(Record::timestamp_us) {
+        if ts < 0 || ts > bound {
+            found.note(ts);
+        }
+    }
+    found
 }
 
 /// Complete sidecar data for one run of a benchmark.
@@ -826,6 +885,7 @@ impl SidecarData {
                 marker_count: 0,
                 wall_time_ms: 0,
                 loss: CaptureLoss::default(),
+                clock: ClockOutliers::default(),
             },
         }
     }
@@ -1708,6 +1768,10 @@ pub(crate) fn run_sidecar_with_deadline(
     capture.loss.output_truncated = stdout_truncated || stderr_truncated || run.output_cut;
     warn_if_truncated(&capture.loss);
     let (marker_total, counter_total) = capture.kept_counts();
+    let clock = clock_outliers(&capture.records, run.elapsed);
+    if let Some(message) = clock.message(&format!("sidecar run {}", run_idx + 1)) {
+        console::warn(&message);
+    }
     announce_ending(&run.ending);
 
     // The shared nearest-millisecond rule, so the sidecar summary agrees with
@@ -1740,6 +1804,7 @@ pub(crate) fn run_sidecar_with_deadline(
                 marker_count,
                 wall_time_ms,
                 loss: capture.loss,
+                clock,
             },
         },
     }
@@ -2218,6 +2283,38 @@ mod tests {
         assert_eq!(segments[2].end_us, None, "no call boundary is known");
         assert_eq!(open.resolve_phase_range("C"), Some((30, None)));
         assert_eq!(open.resolve_phase_range("B"), Some((10, Some(20))));
+    }
+
+    // The clock check counts every record kind stamped before the spawn or
+    // past the wall plus a second, and passes a stamp just inside that
+    // bound; a UNIX-epoch stamp is always outside.
+    #[test]
+    fn the_clock_check_counts_records_outside_the_run_interval() {
+        let wall = Duration::from_millis(500);
+        let inside = Record::Marker(marker(0, 1_500_000, "AT_BOUND"));
+        let epoch = Record::Marker(marker(1, 1_784_405_827_990_876, "SYNC_START"));
+        let negative = Record::Counter(Counter {
+            timestamp_us: -1,
+            name: "c".to_owned(),
+            value: 1,
+            run_idx: 0,
+            call: None,
+        });
+        let late = Record::Terminal(Terminal {
+            timestamp_us: 1_500_001,
+            call: "a".to_owned(),
+            end: SinkEnd::Sealed,
+            drops: 0,
+        });
+        let found = clock_outliers(&[inside.clone(), epoch, negative, late], wall);
+        assert_eq!(found.count, 3);
+        assert_eq!(found.min_us, Some(-1));
+        let message = found.message("sidecar run 1").unwrap();
+        assert!(message.contains("at least 3 FIFO records"), "{message}");
+
+        let clean = clock_outliers(&[inside], wall);
+        assert_eq!(clean, ClockOutliers::default());
+        assert_eq!(clean.message("sidecar run 1"), None);
     }
 
     #[test]

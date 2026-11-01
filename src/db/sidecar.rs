@@ -35,6 +35,11 @@ CREATE TABLE IF NOT EXISTS sidecar_summary (
     result_uuid  TEXT NOT NULL,
     run_idx      INTEGER NOT NULL DEFAULT 0,
     capture_truncated INTEGER NOT NULL DEFAULT 0,
+    -- FIFO records known to be stamped outside the run interval, a lower
+    -- bound, and the smallest stamp among them (since v11). NULL count is
+    -- unchecked; 0 is checked at capture, none found.
+    clock_outliers INTEGER,
+    clock_outlier_min_us INTEGER,
     PRIMARY KEY (result_uuid, run_idx)
 );
 
@@ -128,7 +133,7 @@ fn sidecar_schema() -> String {
 /// Current sidecar schema version. This database is independently readable
 /// and can exist without results.db, so its steps are local; `db::store` still
 /// owns the version stamp, transaction, and upgrade policy.
-const SIDECAR_VERSION: i64 = 10;
+const SIDECAR_VERSION: i64 = 11;
 
 /// Apply migrations newer than `current`; version checks and stamping are
 /// centralized in `db::store`.
@@ -210,7 +215,60 @@ fn run_sidecar_migrations(conn: &rusqlite::Connection, current: i64) -> Result<(
             }
         }
     }
+    // v10 -> v11: the summary carries the capture's clock check. An older
+    // run is scanned for the one finding stored data settles without the
+    // run's wall, which sidecar.db no longer holds.
+    if current < 11 {
+        for column in ["clock_outliers", "clock_outlier_min_us"] {
+            if !super::store::column_exists(conn, "sidecar_summary", column)? {
+                conn.execute_batch(&format!(
+                    "ALTER TABLE sidecar_summary ADD COLUMN {column} INTEGER"
+                ))?;
+            }
+        }
+        mark_historical_clock_outliers(conn)?;
+    }
 
+    Ok(())
+}
+
+/// The stamp at or past which a stored record is treated as off the contract
+/// clock without knowing its run's wall: 10^15 us is 31.7 years. No measured
+/// process brokkr has run lived that long, and every UNIX-epoch microsecond
+/// stamp after 2001-09-09 exceeds it, which is the clock one writer used
+/// (ratatoskr's harness, from its first marker). An operational assumption
+/// about the stored history, not a protocol rule: no reader interprets or
+/// rebases a stamp by magnitude.
+const HISTORICAL_OFF_CLOCK_US: i64 = 1_000_000_000_000_000;
+
+/// Mark each pre-v11 run that holds a record stamped negative or at or past
+/// [`HISTORICAL_OFF_CLOCK_US`]: every such record lies outside any run
+/// interval the capture check would have used, so the count is the same
+/// claim as the capture's, only possibly short. Every other older run stays
+/// NULL, unchecked. The last sample is deliberately not used as a bound: a
+/// conforming record can follow it by more than a tick (brokkr descheduled,
+/// no sample on the exit wake, samples capped), so it would accuse runs
+/// that did nothing wrong.
+fn mark_historical_clock_outliers(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    conn.execute(
+        "WITH outliers(result_uuid, run_idx, ts) AS (
+             SELECT result_uuid, run_idx, timestamp_us FROM sidecar_markers
+             UNION ALL SELECT result_uuid, run_idx, timestamp_us FROM sidecar_counters
+             UNION ALL SELECT result_uuid, run_idx, timestamp_us FROM sidecar_sink_records
+         ),
+         found(result_uuid, run_idx, n, min_ts) AS (
+             SELECT result_uuid, run_idx, COUNT(*), MIN(ts) FROM outliers
+             WHERE ts < 0 OR ts >= ?1
+             GROUP BY result_uuid, run_idx
+         )
+         UPDATE sidecar_summary
+         SET clock_outliers = found.n, clock_outlier_min_us = found.min_ts
+         FROM found
+         WHERE sidecar_summary.result_uuid = found.result_uuid
+           AND sidecar_summary.run_idx = found.run_idx
+           AND sidecar_summary.clock_outliers IS NULL",
+        rusqlite::params![HISTORICAL_OFF_CLOCK_US],
+    )?;
     Ok(())
 }
 
@@ -583,8 +641,9 @@ fn insert_run(
     }
 
     tx.execute(
-        "INSERT INTO sidecar_summary (result_uuid, run_idx, capture_truncated)
-             VALUES (?1, ?2, ?3)",
+        "INSERT INTO sidecar_summary (result_uuid, run_idx, capture_truncated,
+                 clock_outliers, clock_outlier_min_us)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
         rusqlite::params![
             result_uuid,
             run_idx as i64,
@@ -592,7 +651,9 @@ fn insert_run(
                 1_i64
             } else {
                 0_i64
-            }
+            },
+            i64::try_from(data.summary.clock.count).unwrap_or(i64::MAX),
+            data.summary.clock.min_us,
         ],
     )?;
     Ok(())
@@ -646,6 +707,35 @@ impl SidecarDb {
             )?,
         };
         Ok(truncated)
+    }
+
+    /// Each selected run with a clock finding, as `(run_idx, outliers)`, in
+    /// run order. `None` selects every run in the session; a run unchecked
+    /// or checked clean is absent.
+    pub(crate) fn query_clock_outliers_for(
+        &self,
+        id: &RunId,
+        run_idx: Option<usize>,
+    ) -> Result<Vec<(usize, crate::sidecar::ClockOutliers)>, DevError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT run_idx, clock_outliers, clock_outlier_min_us FROM sidecar_summary
+             WHERE result_uuid = ?1 AND (?2 IS NULL OR run_idx = ?2)
+               AND clock_outliers > 0
+             ORDER BY run_idx",
+        )?;
+        let selected = run_idx.map(|idx| i64::try_from(idx).unwrap_or(i64::MAX));
+        let rows = stmt.query_map(rusqlite::params![id.as_str(), selected], |row| {
+            let run: i64 = row.get(0)?;
+            let count: i64 = row.get(1)?;
+            Ok((
+                stored_run_idx(run),
+                crate::sidecar::ClockOutliers {
+                    count: usize::try_from(count).unwrap_or(usize::MAX),
+                    min_us: row.get(2)?,
+                },
+            ))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// Query provenance for one identity already resolved by `RunStore`.
@@ -1153,6 +1243,103 @@ mod tests {
         );
     }
 
+    // The v11 scan marks an older run only where stored data alone settles
+    // it, an epoch-magnitude or negative stamp, and leaves every other older
+    // run unchecked (NULL), never clean. A capture stores its own check, 0
+    // included.
+    #[test]
+    fn the_v11_scan_marks_only_settled_clock_outliers_and_captures_store_their_check() {
+        let path = crate::test_scratch::scratch("db-sidecar", "clock_v11").join("s.db");
+        let db = SidecarDb::open(&path).unwrap();
+        insert_session(&db, "epoch1", "SYNC_START");
+        db.conn
+            .execute(
+                "INSERT INTO sidecar_markers (result_uuid, run_idx, marker_idx, \
+                 timestamp_us, name) VALUES ('epoch1', 0, 1, 1784405827990876, 'SYNC_END'), \
+                 ('epoch1', 0, 2, 1784405827990000, 'SYNC_START')",
+                [],
+            )
+            .unwrap();
+        insert_session(&db, "clean1", "M");
+        drop(db);
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        raw.execute_batch(
+            "ALTER TABLE sidecar_summary DROP COLUMN clock_outliers;
+             ALTER TABLE sidecar_summary DROP COLUMN clock_outlier_min_us;",
+        )
+        .unwrap();
+        raw.pragma_update(None, "user_version", 10).unwrap();
+        drop(raw);
+
+        let ro = SidecarDb::open_read_only(&path).unwrap();
+        let epoch = super::super::RunId::new("epoch1".to_owned());
+        let found = ro.query_clock_outliers_for(&epoch, None).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, 0);
+        assert_eq!(
+            found[0].1,
+            crate::sidecar::ClockOutliers {
+                count: 2,
+                min_us: Some(1_784_405_827_990_000)
+            },
+            "the 1000 us marker of the same run is not counted"
+        );
+        let clean = super::super::RunId::new("clean1".to_owned());
+        assert!(
+            ro.query_clock_outliers_for(&clean, None)
+                .unwrap()
+                .is_empty()
+        );
+        let unchecked: Option<i64> = ro
+            .conn()
+            .query_row(
+                "SELECT clock_outliers FROM sidecar_summary WHERE result_uuid = 'clean1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            unchecked, None,
+            "an older clean-looking run stays unchecked"
+        );
+        drop(ro);
+
+        let db = SidecarDb::open(&path).unwrap();
+        let mut data = library_capture();
+        let meta = SessionMeta {
+            best_run_idx: 0,
+            total_runs: 2,
+            run_info: None,
+            sidecar_only: true,
+        };
+        db.store_session_run("cap111", 0, &data, &meta).unwrap();
+        data.summary.clock = crate::sidecar::ClockOutliers {
+            count: 4,
+            min_us: Some(-3),
+        };
+        db.store_session_run("cap111", 1, &data, &meta).unwrap();
+        let cap = super::super::RunId::new("cap111".to_owned());
+        let found = db.query_clock_outliers_for(&cap, None).unwrap();
+        assert_eq!(found.len(), 1, "a clean capture is not a finding");
+        assert_eq!(found[0].0, 1);
+        assert_eq!(found[0].1.count, 4);
+        assert!(
+            db.query_clock_outliers_for(&cap, Some(0))
+                .unwrap()
+                .is_empty()
+        );
+        let checked: Option<i64> = db
+            .conn
+            .query_row(
+                "SELECT clock_outliers FROM sidecar_summary \
+                 WHERE result_uuid = 'cap111' AND run_idx = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(checked, Some(0), "a capture records that it checked");
+    }
+
     /// A library run's trajectory: a call's counters out of time order, its
     /// sealing emission and terminal record, and its boundaries.
     fn library_capture() -> crate::sidecar::SidecarData {
@@ -1202,6 +1389,7 @@ mod tests {
                 marker_count: 0,
                 wall_time_ms: 0,
                 loss: crate::sidecar::CaptureLoss::default(),
+                clock: crate::sidecar::ClockOutliers::default(),
             },
         }
     }

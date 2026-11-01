@@ -74,7 +74,7 @@ fn resolve_run_filter(
         })?),
         None => Some(best_idx),
     };
-    warn_if_capture_truncated(store, id, run_filter)?;
+    warn_about_stored_capture(store, id, run_filter)?;
     if total > 1 {
         let showing = match run_filter {
             Some(idx) => format!("run {idx}/{total}"),
@@ -85,7 +85,7 @@ fn resolve_run_filter(
     Ok(run_filter)
 }
 
-fn warn_if_capture_truncated(
+fn warn_about_stored_capture(
     store: &db::RunStore,
     id: &db::RunId,
     run_idx: Option<usize>,
@@ -96,6 +96,14 @@ fn warn_if_capture_truncated(
              lines were rejected or left unread, child output was cut, or (for a run stored \
              before sidecar.db v10) sink-end records had no place to be stored",
         );
+    }
+    // A separate fact from truncation: every record may have arrived intact
+    // and still sit off the sample clock. One line per run, so `--run all`
+    // and `--compare` never fold several runs' counts into one.
+    for (run, outliers) in store.query_sidecar_clock_outliers(id, run_idx)? {
+        if let Some(message) = outliers.message(&format!("sidecar {} --run {run}", id.as_str())) {
+            output::warn(&message);
+        }
     }
     Ok(())
 }
@@ -514,8 +522,8 @@ fn run_compare(
     };
     let (best_a, _) = store.query_sidecar_meta(&id_a)?;
     let (best_b, _) = store.query_sidecar_meta(&id_b)?;
-    warn_if_capture_truncated(store, &id_a, Some(best_a))?;
-    warn_if_capture_truncated(store, &id_b, Some(best_b))?;
+    warn_about_stored_capture(store, &id_a, Some(best_a))?;
+    warn_about_stored_capture(store, &id_b, Some(best_b))?;
     let samples_a = store.query_sidecar_samples(&id_a, Some(best_a))?;
     let samples_b = store.query_sidecar_samples(&id_b, Some(best_b))?;
     if samples_a.is_empty() || samples_b.is_empty() {

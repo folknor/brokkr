@@ -103,13 +103,16 @@ disambiguate. Bare stems with both files present errors out.
 The Lua VM, `ServiceClient` userdata bindings, wait combinators, and
 runtime-owned artefact writers (`frames.jsonl`, `events.jsonl`,
 `steps.jsonl`, `service.stderr`, `runtime-outcome.json`,
-`proc-{status,wchan,syscall,stack}.txt`, `data-dir/`) live in ratatoskr's
-`app` crate behind `app --test-harness`, gated by the `test-helpers` feature.
+`proc-{status,wchan,syscall,stack}.txt`, `data-dir/`) live in ratatoskr, not
+in brokkr. brokkr reaches them only through the binary `[ratatoskr.harness]`
+builds (`package` and `binary` name it), run in its `--test-harness <script>`
+mode; which ratatoskr crate holds the code, and whether a cargo feature gates
+it, is ratatoskr's business and not something brokkr builds against.
 
-`parent_death_helper` is a bin target inside the `app` package
-(`crates/app/src/bin/parent_death_helper.rs`), not a separate cargo package -
-`cargo build -p app` builds it as a side effect, and `BROKKR_TEST_BIN_DIR`
-points at the directory containing both binaries.
+Anything else the runtime spawns is ratatoskr's to find. brokkr's part is
+`BROKKR_TEST_BIN_DIR`, the directory holding the binary it built, so the
+runtime can start that same binary in another mode (its parent-death helper
+is one) rather than look for a separately built one.
 
 ## Artefact layout
 
