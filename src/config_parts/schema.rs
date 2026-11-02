@@ -1746,7 +1746,7 @@ pub struct ProfileDef {
     pub env: Option<BTreeMap<String, String>>,
 }
 
-/// A single PBF file entry (one variant like raw, indexed, locations).
+/// A single PBF file entry (one variant like raw, indexed, altw).
 ///
 /// `locations_on_ways` and `force_sorted` are assertions about *this file*,
 /// not about a pipeline config: one says the PBF carries node coordinates
@@ -1969,7 +1969,7 @@ pub struct Dataset {
     #[serde(default)]
     pub getparents_ids: Option<ElementIdList>,
     pub data_dir: Option<String>,
-    /// PBF variants keyed by name (e.g. "raw", "indexed", "locations").
+    /// PBF variants keyed by name (e.g. "raw", "indexed", "altw").
     /// These are the variants of the dataset's primary (legacy / `base`) snapshot.
     #[serde(default)]
     pub pbf: HashMap<String, PbfEntry>,

@@ -649,9 +649,9 @@ impl PbfhoggCommand {
     ///   and an OSC tags-filter.
     /// - `--jobs`: the commands with a worker pool it sizes: `inspect --nodes`
     ///   and `inspect tags`, a PBF tags-filter that keeps referenced objects
-    ///   (`--omit-referenced` has no classify pool, and the OSC filter takes
-    ///   no worker count: it was single-threaded until pbfhogg 3f8d9f35 and
-    ///   still refuses the flag), `diff`, `apply-changes` and `merge-changes`.
+    ///   (`--omit-referenced` has no classify pool), an OSC tags-filter (it
+    ///   refused the flag until pbfhogg 07c67afc sized its batch workers with
+    ///   it), `diff`, `apply-changes` and `merge-changes`.
     pub fn axis_has_effect(&self, axis: Axis) -> bool {
         let pbf_tags_filter = |cmd: &Self| {
             matches!(
@@ -709,10 +709,11 @@ impl PbfhoggCommand {
                 }
                 Self::TagsFilter { input, .. } => matches!(
                     input,
-                    TagsFilterInput::Pbf {
-                        referenced: Referenced::Kept { .. },
-                        ..
-                    }
+                    TagsFilterInput::Osc
+                        | TagsFilterInput::Pbf {
+                            referenced: Referenced::Kept { .. },
+                            ..
+                        }
                 ),
                 Self::Diff { .. }
                 | Self::DiffSnapshots { .. }
@@ -2551,13 +2552,13 @@ mod tests {
             ),
             (osc_filter.clone(), Axis::Compression),
             (osc_filter.clone(), Axis::DirectIo),
-            (osc_filter, Axis::Jobs),
             (omit.clone(), Axis::Jobs),
         ];
         for (cmd, axis) in refused {
             assert!(!cmd.axis_has_effect(axis), "{cmd:?} {axis:?}");
         }
         for (cmd, axis) in [
+            (osc_filter, Axis::Jobs),
             (omit, Axis::Compression),
             (PbfhoggCommand::MergeChanges { simplify: true }, Axis::Jobs),
             (

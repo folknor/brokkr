@@ -433,9 +433,13 @@ answer, and is declared separately (Declared answers).
 
 pbfhogg refuses an input that does not declare LocationsOnWays, or declares
 HistoricalInformation, before reading any data blob, exit 2. So
-`check-locations` alone defaults `--variant` to `locations`, the
-`add-locations-to-ways` output; an explicit `--variant` wins, and a dataset
-or snapshot without that variant fails resolution with no substitute.
+`check-locations` alone defaults `--variant` to an `add-locations-to-ways`
+output: `altw-keep-untagged`, the name `verify all` also looks for, which
+keeps every referenced node so a reference to an absent node is a failure;
+with `--agreement`, `altw`, which drops most untagged nodes, the ones
+`--agreement` holds to their other references. An explicit `--variant` wins,
+and a dataset or snapshot without the default fails resolution with no
+substitute.
 Whether a file is checkable is left to the binary, which alone knows what its
 revision accepts, so an inapplicable input fails after the build. It is not a
 `brokkr suite pbfhogg` preset: the suite runs every preset on one selected
@@ -849,8 +853,8 @@ revision built answers. The table lives in `PbfhoggCommand::axis_has_effect`
 (`src/pbfhogg/commands.rs`):
 
 - `--direct-io` - enable O_DIRECT I/O. Adds `linux-direct-io` cargo feature,
-  `--direct-io` binary flag. Every command but `merge-changes` and
-  `tags-filter --input-kind osc`.
+  `--direct-io` binary flag. Every command but `merge-changes`,
+  `check-locations` and `tags-filter --input-kind osc`.
 - `--io-uring` - enable io_uring I/O. Adds `linux-io-uring` cargo feature,
   `--io-uring` binary flag. Runs io_uring preflight checks before building.
   Only `apply-changes`, `sort`, `cat --dedupe`, `repack` and `degrade`, the
@@ -863,9 +867,10 @@ revision built answers. The table lives in `PbfhoggCommand::axis_has_effect`
   checks the level, -7..22 since pbfhogg c8ee4531). Bare `zlib` and `zstd`
   use the binary's default levels. No cargo features required.
 - `-j/--jobs` (on the subcommands that expose it) - `inspect --nodes` and
-  `--tags` (the default inspect has no worker pool), a PBF `tags-filter`
-  without `-R` (neither `-R` nor OSC input has a pool it sizes), `diff`,
-  `diff-snapshots` and `apply-changes`. `-j 0` counts as given.
+  `--tags` (the default inspect has no worker pool), a `tags-filter`
+  without `-R` (`-R` has no pool it sizes; the OSC filter refused `-j`
+  until pbfhogg 07c67afc), `diff`, `diff-snapshots`, `apply-changes` and
+  `merge-changes`. `-j 0` counts as given.
 - `tags-filter -R` with `--remove-tags` is refused too, since `-R` drops the
   referenced objects `--remove-tags` would strip; so are `-R`,
   `--invert-match` and `--remove-tags` with `--input-kind osc`.

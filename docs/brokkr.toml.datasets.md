@@ -113,8 +113,8 @@ xxhash = "fa581f7b..."
 Every measurable command on a project that uses datasets accepts:
 
 - `--variant <name>` - selects from `pbf.<name>`. Default: `indexed`
-  (pbfhogg, except `check-locations`, which defaults to `locations`), `raw`
-  (elivagar/nidhogg).
+  (pbfhogg, except `check-locations`, which defaults to `altw-keep-untagged`,
+  or `altw` with `--agreement`), `raw` (elivagar/nidhogg).
 - `--osc-seq <seq>` - selects from `osc.<seq>`. Auto-selects if exactly one
   OSC is configured.
 - `--tiles <variant>` - selects from `pmtiles.<variant>`. Auto-selects if

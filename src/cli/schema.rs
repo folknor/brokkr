@@ -9,8 +9,14 @@ use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 pub(crate) const DEFAULT_DATASET: &str = "denmark";
 pub(crate) const DEFAULT_RAW_VARIANT: &str = "raw";
 pub(crate) const DEFAULT_INDEXED_VARIANT: &str = "indexed";
-/// The `add-locations-to-ways` output variant, `check-locations`'s default.
-pub(crate) const LOCATIONS_VARIANT: &str = "locations";
+/// `check-locations`'s default variant, the name `verify all` also looks for:
+/// a LocationsOnWays file that keeps its untagged nodes, so a reference to an
+/// absent node is a failure rather than a node to agree on.
+pub(crate) const CHECK_LOCATIONS_VARIANT: &str = crate::pbfhogg::verify_all::KEEP_UNTAGGED_VARIANT;
+/// `check-locations --agreement`'s default variant: the plain
+/// `add-locations-to-ways` output, which drops most untagged nodes, the nodes
+/// `--agreement` holds to their other references.
+pub(crate) const CHECK_LOCATIONS_AGREEMENT_VARIANT: &str = "altw";
 
 /// Node-index engine selection for `verify add-locations-to-ways`: one of
 /// pbfhogg's `--index-type` engines, or both.
@@ -647,12 +653,16 @@ In depth: `brokkr man clippy`."
         snapshot: Option<crate::datasets::resolve::SnapshotRef>,
     },
     /// Verify a LocationsOnWays file's inline way-node coordinates against
-    /// its node records. Defaults to the `locations` variant, since pbfhogg
-    /// refuses an input that is not LocationsOnWays
+    /// its node records. Defaults to the `altw-keep-untagged` variant, or
+    /// `altw` with `--agreement`, since pbfhogg refuses an input that is not
+    /// LocationsOnWays
     #[command(
         name = "check-locations",
         display_order = 2,
-        mut_arg("variant", |arg| arg.default_value(LOCATIONS_VARIANT))
+        mut_arg("variant", |arg| arg
+            .default_value(CHECK_LOCATIONS_VARIANT)
+            // A SetTrue flag always holds a value, so match `true`, not presence.
+            .default_value_if("agreement", "true", CHECK_LOCATIONS_AGREEMENT_VARIANT))
     )]
     CheckLocations {
         #[command(flatten)]
@@ -794,11 +804,11 @@ In depth: `brokkr man clippy`."
         /// `[dataset.snapshot.<key>]` for a historical snapshot.
         #[arg(long)]
         snapshot: Option<crate::datasets::resolve::SnapshotRef>,
-        /// Parallel worker threads for pbfhogg tags-filter's two-pass
-        /// path. `0` = auto; omit to use pbfhogg's default. Refused with
-        /// `-R` and with `--input-kind osc`, which have no worker pool it
-        /// sizes. Requires a pbfhogg build that exposes `-j` on
-        /// tags-filter; older builds will reject it.
+        /// Parallel worker threads for pbfhogg tags-filter: the two-pass
+        /// path's classify pool, or the OSC filter's batch workers. `0` =
+        /// auto; omit to use pbfhogg's default. Refused with `-R`, which
+        /// has no worker pool it sizes. Requires a pbfhogg build that
+        /// exposes `-j` on that shape; older builds will reject it.
         #[arg(short = 'j', long)]
         jobs: Option<usize>,
     },
@@ -1112,7 +1122,7 @@ Examples:
         /// "To" snapshot reference (same naming as `--from`).
         #[arg(long)]
         to: crate::datasets::resolve::SnapshotRef,
-        /// PBF variant to use on both sides (raw, indexed, locations).
+        /// PBF variant to use on both sides (e.g. raw, indexed, altw).
         /// Errors if the requested variant doesn't exist on either snapshot.
         #[arg(long, default_value = DEFAULT_INDEXED_VARIANT)]
         variant: String,
@@ -2034,7 +2044,7 @@ In depth: `brokkr man elivagar` (config: `brokkr man elivagar-config`)."
         /// Dataset name from brokkr.toml
         #[arg(long, default_value = DEFAULT_DATASET)]
         dataset: String,
-        /// PBF variant selecting which output to open (raw, indexed, locations)
+        /// PBF variant selecting which output to open (e.g. raw, indexed, altw)
         #[arg(long, default_value = DEFAULT_RAW_VARIANT)]
         variant: String,
         /// Commit short hash selecting which tilegen output to open (default: current HEAD)
@@ -2050,7 +2060,7 @@ In depth: `brokkr man elivagar` (config: `brokkr man elivagar-config`)."
         /// Dataset name from brokkr.toml
         #[arg(long, default_value = DEFAULT_DATASET)]
         dataset: String,
-        /// PBF variant selecting which output to open (raw, indexed, locations)
+        /// PBF variant selecting which output to open (e.g. raw, indexed, altw)
         #[arg(long, default_value = DEFAULT_RAW_VARIANT)]
         variant: String,
         /// Commit short hash selecting which tilegen output to open (default: current HEAD)
@@ -2072,7 +2082,7 @@ In depth: `brokkr man elivagar` (config: `brokkr man elivagar-config`)."
         /// Dataset name from brokkr.toml
         #[arg(long, default_value = DEFAULT_DATASET)]
         dataset: String,
-        /// PBF variant selecting which output to open (raw, indexed, locations)
+        /// PBF variant selecting which output to open (e.g. raw, indexed, altw)
         #[arg(long, default_value = DEFAULT_RAW_VARIANT)]
         variant: String,
         /// Commit short hash selecting which tilegen output to open (default: current HEAD)
@@ -2126,7 +2136,7 @@ In depth: `brokkr man elivagar`.",
         /// Dataset name from brokkr.toml
         #[arg(long, default_value = DEFAULT_DATASET)]
         dataset: String,
-        /// PBF variant of the CURRENT output (raw, indexed, locations)
+        /// PBF variant of the CURRENT output (e.g. raw, indexed, altw)
         #[arg(long, default_value = DEFAULT_RAW_VARIANT)]
         variant: String,
         /// Commit short hash selecting the CURRENT output (default: current HEAD)
@@ -2249,7 +2259,7 @@ In depth: `brokkr man nidhogg`."
     /// Ingest a PBF into disk format
     #[command(display_order = 43)]
     Ingest {
-        /// PBF variant to use (raw, indexed, locations)
+        /// PBF variant to use (e.g. raw, indexed, altw)
         #[arg(long, default_value = DEFAULT_RAW_VARIANT)]
         variant: String,
 
@@ -3129,7 +3139,7 @@ pub(crate) struct PbfArgs {
     /// Dataset name from brokkr.toml
     #[arg(long, default_value = DEFAULT_DATASET)]
     pub(crate) dataset: String,
-    /// PBF variant to use (raw, indexed, locations)
+    /// PBF variant to use (e.g. raw, indexed, altw)
     #[arg(long, default_value = DEFAULT_INDEXED_VARIANT)]
     pub(crate) variant: String,
     /// Use O_DIRECT for file I/O (builds pbfhogg with linux-direct-io).
@@ -3173,7 +3183,7 @@ pub(crate) struct VerifyPbfArgs {
     /// Dataset name from brokkr.toml
     #[arg(long, default_value = DEFAULT_DATASET, conflicts_with = "input")]
     pub(crate) dataset: String,
-    /// PBF variant to use (raw, indexed, locations)
+    /// PBF variant to use (e.g. raw, indexed, altw)
     #[arg(long, default_value = DEFAULT_INDEXED_VARIANT, conflicts_with = "input")]
     pub(crate) variant: String,
     /// Path to a handcrafted input PBF (skips dataset resolution).
@@ -3359,7 +3369,7 @@ pub(crate) enum VerifyCommand {
         /// Dataset name from brokkr.toml
         #[arg(long, default_value = DEFAULT_DATASET)]
         dataset: String,
-        /// PBF variant, selecting which archive to open (raw, indexed, locations)
+        /// PBF variant, selecting which archive to open (e.g. raw, indexed, altw)
         #[arg(long, default_value = DEFAULT_RAW_VARIANT)]
         variant: String,
         /// Commit short hash selecting which archive to open (default: current HEAD)
@@ -3431,7 +3441,7 @@ pub(crate) struct CorpusArchiveArgs {
     /// Dataset name from brokkr.toml
     #[arg(long, default_value = DEFAULT_DATASET)]
     pub(crate) dataset: String,
-    /// PBF variant, selecting which archive to open (raw, indexed, locations).
+    /// PBF variant, selecting which archive to open (e.g. raw, indexed, altw).
     /// Required unless --file is given: the corpus contract pins one variant
     /// (bless accepts only a locations-generated archive), so a default of
     /// `raw` could never bless and failed every check against a locations
