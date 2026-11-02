@@ -145,9 +145,41 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
         if let ElivagarCommand::Built(command @ BuiltCommand::MainBinary { .. }) = self.0 {
             let layout = ElivagarLayout::new(&ctx.paths);
             std::fs::create_dir_all(layout.scratch())?;
-            std::fs::create_dir_all(layout.tilegen_tmp())?;
+            // Emptied here, as elivagar empties its `--tmp-dir` at start
+            // anyway, so what sits in it once this returns is this attempt's
+            // and [`discard`](Self::discard) may take it.
+            let tmp_dir = layout.tilegen_tmp();
+            if tmp_dir.as_path() != layout.scratch() {
+                match std::fs::remove_dir_all(&tmp_dir) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            std::fs::create_dir_all(&tmp_dir)?;
             for file in command.output_files(&layout) {
                 remove_if_present(&file)?;
+            }
+        }
+        Ok(())
+    }
+    /// A stopped tilegen's partial archive and its `--tmp-dir`, which
+    /// [`prepare`](Self::prepare) recreates. A failed run keeps both, so its
+    /// output can be moved by hand.
+    fn discard(
+        &self,
+        _req: &MeasureRequest<'_>,
+        ctx: &MeasurementSession,
+        _plan: &CommandPlan<Self::State>,
+    ) -> Result<(), DevError> {
+        if let ElivagarCommand::Built(command @ BuiltCommand::MainBinary { .. }) = self.0 {
+            let layout = ElivagarLayout::new(&ctx.paths);
+            for file in command.output_files(&layout) {
+                runner::discard_path(false, &file, false);
+            }
+            let tmp_dir = layout.tilegen_tmp();
+            if tmp_dir.as_path() != layout.scratch() {
+                runner::discard_path(false, &tmp_dir, true);
             }
         }
         Ok(())

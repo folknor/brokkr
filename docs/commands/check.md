@@ -187,8 +187,8 @@ Output:
   verdict, so a red run always names its cause. In code, the first kind is a
   `DevError::Reported`; everything else is printed by the summary.
 - **A graceful `brokkr kill` (or Ctrl-C) ends a run as `check interrupted in
-  ...`** and exits 130 with main's scratch cleanup, like every other locked
-  command - not exit 1. `check` holds a `SigtermGuard` for its whole run: the
+  ...`** and exits 130, like every other locked command - not exit 1. No
+  clean follows, so a hung-test snapshot the run captured stays. `check` holds a `SigtermGuard` for its whole run: the
   handler kills the registered test groups at once, every runner that polls
   the flag returns, and no new test group is spawned. A second signal while
   the first is still being honoured takes the default action, so a wait that

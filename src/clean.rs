@@ -28,25 +28,6 @@ pub(crate) struct CleanOpts {
     /// else.
     pub(crate) verify_reference_only: bool,
     pub(crate) dry_run: bool,
-    /// The sweep runs on the interrupt/kill path: it says nothing beyond what
-    /// it removes (no hints, no "nothing to clean").
-    pub(crate) interrupted: bool,
-}
-
-impl CleanOpts {
-    /// Scratch/tmp cleanup after an interrupt or cooperative kill, without
-    /// the hints and empty-sweep notice of an interactive clean.
-    pub(crate) fn after_interrupt() -> Self {
-        Self {
-            cargo_swept: false,
-            worktrees: false,
-            archives: false,
-            keep: 2,
-            verify_reference_only: false,
-            dry_run: false,
-            interrupted: true,
-        }
-    }
 }
 
 /// Removal helper that honours `--dry-run`: in dry-run it reports the path and
@@ -219,7 +200,6 @@ pub(crate) fn cmd_clean(
         keep,
         verify_reference_only,
         dry_run,
-        interrupted,
     } = opts;
     let c = Cleaner::new(dry_run);
     if verify_reference_only {
@@ -268,8 +248,8 @@ pub(crate) fn cmd_clean(
     // repoint). Routine scratch: reproducible, and nothing else reaches them.
     clean_rustflags_target_dirs(&pi.target_dir, &c)?;
 
-    clean_scratch(project, &paths, &c, interrupted)?;
-    clean_sidecar_fifos(&state, &c, interrupted)?;
+    clean_scratch(project, &paths, &c)?;
+    clean_sidecar_fifos(&state, &c)?;
 
     // Elivagar's default `-o` target for `pmtiles-corpus mutate` is a
     // brokkr-designated scratch location. `ocean-build_tmp` is not passed by
@@ -289,7 +269,7 @@ pub(crate) fn cmd_clean(
     if c.dir(&state.test_hung_dir())? {
         output::run_msg(&format!("{} test-hung snapshots", c.verb()));
     }
-    clean_by_hand_only(project, &state, &pi.target_dir, &c, interrupted)?;
+    clean_isolated_targets_and_snapshots(project, &state, &pi.target_dir, &c)?;
 
     if *project == Project::Litehtml {
         clean_litehtml(&state, &c)?;
@@ -297,7 +277,7 @@ pub(crate) fn cmd_clean(
 
     // An empty routine sweep says so once, instead of printing nothing (which
     // reads as "did it run?"). Cargo and the deep flags report their own work.
-    if !cargo_swept && !worktrees && !archives && !interrupted && !dry_run && c.hits.get() == 0 {
+    if !cargo_swept && !worktrees && !archives && !dry_run && c.hits.get() == 0 {
         output::run_msg("nothing to clean");
     }
 
@@ -336,9 +316,7 @@ pub(crate) fn cmd_clean(
                 ));
             }
         }
-    } else if !interrupted && !dry_run {
-        // A hint for someone running `brokkr clean` by hand; the interrupt
-        // path's cleanup is not a place to advertise a deep clean.
+    } else if !dry_run {
         let existing =
             worktree::list(worktree_root)?.len() + worktree::list_legacy(worktree_root)?.len();
         if existing > 0 {
@@ -375,7 +353,6 @@ fn clean_scratch(
     project: &Project,
     paths: &config::ResolvedPaths,
     c: &Cleaner,
-    interrupted: bool,
 ) -> Result<(), DevError> {
     if *project == Project::Elivagar {
         let elivagar = layout::ElivagarLayout::new(paths);
@@ -417,38 +394,23 @@ fn clean_scratch(
                 output::count(removed, "pbfhogg scratch output")
             ));
         }
-        // Only by hand: between two launches of a library run no lease
-        // covers its directory, and the cleanup after an interrupt runs after
-        // the command dropped the lock that does, so it could remove a live
-        // run of another brokkr.
-        if !interrupted {
-            clean_library_runs(paths, c)?;
-        }
+        // Between two launches of a library run no lease covers its
+        // directory; the brokkr lock this clean holds is what does.
+        clean_library_runs(paths, c)?;
     }
     Ok(())
 }
 
-/// Remove the marker FIFOs no process reads (`crate::sidecar::namespace`)
-/// from the state root, where they are made. Under the namespace lock, so no
-/// creation is mid-way; after an interrupt, when the command lock is gone and
-/// another brokkr may be creating one, a held lock skips the sweep rather than
-/// wait.
-/// What only a `brokkr clean` by hand removes, never the cleanup after an
-/// interrupted command.
-fn clean_by_hand_only(
+/// The isolated unification and fixture-lint targets, the build snapshots and
+/// pbfhogg's verify reference cache.
+fn clean_isolated_targets_and_snapshots(
     project: &Project,
     state: &layout::ProjectState,
     target_dir: &Path,
     c: &Cleaner,
-    interrupted: bool,
 ) -> Result<(), DevError> {
-    if interrupted {
-        return Ok(());
-    }
     // The isolated unification and fixture-lint targets under cargo's real
-    // target root, names reserved in `crate::target_namespace`. By hand only:
-    // the after-interrupt sweep runs after the lock is released, when another
-    // check may already be building into them.
+    // target root, names reserved in `crate::target_namespace`.
     let mut isolated = 0usize;
     for prefix in [
         crate::target_namespace::UNIFY_PREFIX,
@@ -479,11 +441,10 @@ fn clean_by_hand_only(
     Ok(())
 }
 
-fn clean_sidecar_fifos(
-    state: &layout::ProjectState,
-    c: &Cleaner,
-    interrupted: bool,
-) -> Result<(), DevError> {
+/// Remove the marker FIFOs no process reads (`crate::sidecar::namespace`)
+/// from the state root, where they are made. Under the namespace lock, waited
+/// for, so no creation is mid-way.
+fn clean_sidecar_fifos(state: &layout::ProjectState, c: &Cleaner) -> Result<(), DevError> {
     use crate::sidecar::namespace;
     // The state root is scanned only under its lock: one absent now may be
     // made, with a FIFO in it, before the scan.
@@ -491,10 +452,11 @@ fn clean_sidecar_fifos(
         return Ok(());
     }
     let Some(_lock) =
-        namespace::NamespaceLock::acquire(state.root(), namespace::Access::Sweep, !interrupted)?
+        namespace::NamespaceLock::acquire(state.root(), namespace::Access::Sweep, true)?
     else {
-        output::warn("sidecar FIFO sweep skipped: another brokkr is creating a FIFO");
-        return Ok(());
+        return Err(DevError::Internal(
+            "a waiting namespace lock returned none".into(),
+        ));
     };
     let mut removed = 0usize;
     for fifo in namespace::abandoned(state.root()) {

@@ -142,7 +142,9 @@ time it measured against its limit (one number when the kill was on time, both
 when they differ), the killed process group and test children, whichever of
 `/proc/<pid>/wchan` and `/proc/<pid>/stack` could be read (the stack is
 normally unreadable without root, so its line is simply absent), and the
-snapshot directory. The three clocks mean:
+snapshot directory, under `.brokkr/test-hung/`. A snapshot outlives the run,
+a later interrupt included; only `brokkr clean` and the retention bound (the
+newest 16) remove it. The three clocks mean:
 
 - **Per-test timeout** - a test exceeded its cap (normally 20s), or a suite
   made no progress for that long after a start record was lost. Cargo build

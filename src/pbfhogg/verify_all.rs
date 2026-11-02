@@ -27,7 +27,7 @@ struct Counts {
 /// final banner reads them directly.
 ///
 /// An interrupted check is not counted: it is returned, so the suite stops
-/// there and `main` runs the interrupt cleanup. Every later check would only
+/// there and `main` exits 130. Every later check would only
 /// have been interrupted at its first child.
 fn tally(counts: &mut Counts, result: Result<CheckStatus, DevError>) -> Result<(), DevError> {
     match result? {

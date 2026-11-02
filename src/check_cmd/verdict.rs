@@ -756,7 +756,7 @@ mod failure_exit_tests {
     }
 
     /// A graceful `brokkr kill` must reach main as `Interrupted`, which is
-    /// what buys exit 130 and the scratch cleanup - not a plain exit 1.
+    /// what buys exit 130 - not a plain exit 1.
     #[test]
     fn an_interrupted_run_keeps_its_exit_path() {
         assert!(matches!(

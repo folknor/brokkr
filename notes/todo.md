@@ -243,9 +243,8 @@ Each part below is tested, its whole path is not:
   `BROKKR_HARNESS_ARTEFACT_DIR`; it rests on the shared constant and runner.
 - The `[pbfhogg.library]` claim and its tables are tested on parsed tables,
   never through `include` composition.
-- The sidecar FIFO namespace has no test of the interrupt cleanup skipping a
-  held lock, of a sweep interleaved with a creator between `mkfifo` and its
-  reader, or of the startup shedding of inherited run variables through the
+- The sidecar FIFO namespace has no test of a sweep interleaved with a
+  creator between `mkfifo` and its reader, or of the startup shedding of inherited run variables through the
   production `main`.
 
 ### A library refusal counterpart proves a status, not a reason (2026-10-29)
@@ -271,6 +270,25 @@ destination by hand. `run.md` states it. A fix needs an anchor outside the
 home that brokkr can justify - perhaps the nearest ancestor that existed
 before any install (recorded in the journal), or syncing up to the mount
 point of the destination's filesystem.
+
+### Nidhogg run and hotpath ingest outputs are outside `brokkr clean` (2026-11-02)
+
+The nidhogg ingest plan (`src/nidhogg/plan.rs`) writes to one of three
+scratch dirs by mode: `run-ingest-output`, `bench-ingest-output` or
+`hotpath-ingest-output`. A successful run removes its dir and an interrupted
+one discards it, but a failed run keeps it, and `clean_scratch` in
+`src/clean.rs` removes only `bench-ingest-output/`. The other two stay until
+the next run of that mode. Adding them to the nidhogg layout's clean list
+closes it; clean.md names only the bench dir today.
+
+### Captured-child termination may leave group members alive (2026-11-02, unverified)
+
+Raised in the spar on brokkr bz 101, not traced here: the captured runner's
+terminate path (`terminate_and_wait` in `src/output/child.rs`) may return
+once the group leader exits during the SIGTERM grace period without killing
+surviving group members. If so, a helper of a stopped tool can still be
+writing scratch when the measured runner discards the attempt's paths, or
+after a by-hand clean removes them. Verify before acting.
 
 ### Inter-suite gap on the unisolated serial path
 

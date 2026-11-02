@@ -454,7 +454,7 @@ direct I/O has no effect on its unaligned parallel reads.
 including `verify all` and its per-check runs, and a `SigtermGuard` alongside
 it, so `brokkr kill` or Ctrl-C ends the running pbfhogg/osmium child, prints
 `<name>: INTERRUPTED`, stops `verify all` at that check (no further checks, no
-tally banner) and exits 130 through the interrupt cleanup.
+tally banner) and exits 130.
 
 **Output model.** Every verify check runs "quiet on pass, loud on fail" via
 `verify::run_check`: by default a check's detail (`verify_msg` output - section
@@ -631,9 +631,8 @@ and, in the detail, the entry's key and stored exit.
   and an input or tool changed while a run is in flight by something other than
   a cooperating brokkr process.
 - `brokkr verify --fresh-reference` runs every reference tool for real and
-  replaces its entry. `brokkr clean` removes the whole cache by hand only,
-  never in the cleanup after an interrupted command, and `brokkr clean
-  --verify-reference` removes it and nothing else. A host's
+  replaces its entry. `brokkr clean` removes the whole cache, and `brokkr
+  clean --verify-reference` removes it and nothing else. A host's
   `verify_reference_budget` (`brokkr man config verify_reference_budget`)
   bounds it: when each verify ends, the most recently used entries that fit
   stay, a hit refreshing an entry's recency through its manifest's mtime.

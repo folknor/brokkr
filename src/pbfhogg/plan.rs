@@ -275,6 +275,32 @@ impl PlannedCommand for PbfhoggPlan<'_> {
         cleanup_output(self.command, &plan.state.ctx, arg_mode(req))?;
         self.command.prepare_scratch(&plan.state.ctx)
     }
+    /// A stopped command's scratch output, through the reservation gate, so a
+    /// path a surviving launch still holds is named and kept.
+    fn discard(
+        &self,
+        req: &MeasureRequest<'_>,
+        _ctx: &MeasurementSession,
+        plan: &CommandPlan<PbfhoggState, CommandArgv>,
+    ) -> Result<(), DevError> {
+        let ctx = &plan.state.ctx;
+        let dir = match self.command.output_kind() {
+            OutputKind::ScratchPbf | OutputKind::ScratchOsc | OutputKind::ScratchText => false,
+            OutputKind::ScratchDir { .. } => true,
+            OutputKind::None => return Ok(()),
+        };
+        let output =
+            crate::pbfhogg::commands::scratch_output_path(ctx, self.command, arg_mode(req))?;
+        crate::measure::runner::discard_path(true, &output, dir);
+        if matches!(self.command, PbfhoggCommand::MultiExtract { .. }) {
+            crate::measure::runner::discard_path(
+                true,
+                &crate::pbfhogg::commands::multi_extract_config_path(&ctx.scratch_dir),
+                false,
+            );
+        }
+        Ok(())
+    }
     fn finish(
         &self,
         req: &MeasureRequest<'_>,

@@ -56,10 +56,9 @@ admission or release that did not establish a safe state apart from a run
 that failed; any admission error counts as unsafe, a conflict refusal
 included, since the lease may exist and its release be in doubt.
 
-The interrupt cleanup runs after the command's guards dropped
-(`src/main_parts/bootstrap.rs`), so the lock no longer protects the
-directory then; that cleanup never removes a kept run directory, and only
-routine `brokkr clean` does, through the gate.
+No cleanup runs after an interrupted command (`src/main_parts/bootstrap.rs`),
+whose guards, the lock included, have dropped by then; only routine `brokkr
+clean`, under the lock, removes a kept run directory, through the gate.
 
 The marker FIFO lives in the project's `.brokkr/`, never in the run
 directory, so the layout stays fixed.

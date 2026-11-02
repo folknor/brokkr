@@ -646,7 +646,8 @@ switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`, `--comp
   default, except that registered test process groups are SIGKILLed first.
   On catch in the sidecar window, the child is killed, the **partial** sidecar
   data is flushed under a fresh UUID + the `dirty` alias, and the run returns
-  `Interrupted`; `main` runs the scratch cleanup and exits 130.
+  `Interrupted`; the runner discards the attempt's own scratch output and
+  brokkr exits 130 (`brokkr man clean after-an-interrupt`).
 - **`brokkr kill --hard`** runs no handler: it SIGKILLs the recorded child,
   mock servers and every identity-checked descendant of brokkr, then brokkr.
   Nothing is flushed; follow up with `brokkr clean`. It signals by PID, so it

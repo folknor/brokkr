@@ -71,7 +71,7 @@ pub(crate) fn cmd_check(
     let started = std::time::Instant::now();
     let _scope = RunScope::begin()?;
     // A graceful `brokkr kill` / Ctrl-C ends the run as `Interrupted` (exit 130,
-    // main's scratch cleanup) rather than killing brokkr on the default action
+    // through the normal unwind) rather than killing brokkr on the default action
     // mid-phase. Every runner the phases use either polls the flag or is
     // released by the handler killing its registered test group; a wait that
     // does neither still yields to a second signal. See `crate::shutdown`.

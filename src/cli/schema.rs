@@ -1706,7 +1706,7 @@ Enrollment invalidates cargo's compile fingerprint once per target dir."
         #[arg(long)]
         remove: bool,
     },
-    /// Gracefully stop the active bench (SIGTERM → clean shutdown + scratch cleanup)
+    /// Gracefully stop the active command (SIGTERM, then a clean unwind)
     #[command(
         display_order = 6,
         long_about = "\
@@ -1714,8 +1714,9 @@ Ask the brokkr process holding the lock to wrap up cleanly.
 
 Default: sends SIGTERM to the brokkr process. Brokkr catches it,
 SIGKILLs the tool being measured, flushes partial sidecar data
-(reachable via `brokkr sidecar dirty`), releases the lock, and
-runs `brokkr clean` for the project.
+(reachable via `brokkr sidecar dirty`), discards the stopped
+attempt's own scratch output, and releases the lock. No project
+clean follows; diagnostics and kept run directories stay.
 
 --hard: sends SIGKILL to both the brokkr PID and the recorded
 child PID without any cleanup. Use when the default path is

@@ -760,9 +760,10 @@ unsafe launch, or a run directory that is no longer one), it writes
 `stream.txt` with every FIFO record kept, in arrival order and in its wire
 spelling, after a comment line per cause of capture loss, `failures.txt`),
 and keeps the directory, naming it. Routine `brokkr clean` removes kept run
-directories through the gate (`brokkr man clean`); the cleanup after an
-interrupted command never does. An interrupted run, including one stopped
-after the harness exited, keeps its directory and exits as interrupted.
+directories through the gate (`brokkr man clean`), and nothing else does:
+no clean follows an interrupted command. An interrupted run, including one
+stopped after the harness exited, keeps its directory and exits as
+interrupted.
 
 ## Measuring a scenario
 

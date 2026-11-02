@@ -1048,7 +1048,6 @@ fn run_project(
                     keep,
                     verify_reference_only: verify_reference,
                     dry_run,
-                    interrupted: false,
                 },
             )
         }

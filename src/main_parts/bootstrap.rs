@@ -1,8 +1,6 @@
 //! Startup, parsing and command-context helpers.
 
 use super::dispatch::run;
-use crate::clean::CleanOpts;
-use crate::clean::cmd_clean;
 use crate::cli::{Cli, Command};
 use crate::command_args::{parse_env_overrides, resolve_features, resolve_mode};
 use crate::context::with_worktree;
@@ -60,8 +58,8 @@ where
             // prepare steps and every child between measured samples. The
             // per-sample sidecar and passthrough guards nest inside; without
             // this one, a stop landing between them (or during the build or a
-            // tool download) took the default action and killed brokkr with
-            // no scratch cleanup.
+            // tool download) took the default action and killed brokkr before
+            // it could unwind and discard the attempt's scratch output.
             let _interrupts = shutdown::SigtermGuard::install();
             let req = measure::MeasureRequest {
                 dev_config,
@@ -205,7 +203,7 @@ pub(crate) fn main() {
     let start = Instant::now();
 
     // Resolve the project once for help filtering, the toolchain setting, command
-    // dispatch and interrupt cleanup. Help still fails open on a bad config;
+    // dispatch and history. Help still fails open on a bad config;
     // the command decides below whether that detection error is fatal.
     let (detection, detection_error) = match project::detect_optional() {
         Ok(detection) => (detection, None),
@@ -253,25 +251,14 @@ pub(crate) fn main() {
     match result {
         Ok(()) => {}
         Err(DevError::ExitCode(code)) => std::process::exit(code),
-        Err(DevError::Interrupted) => {
-            output::run_msg("interrupted - running scratch cleanup");
-            crate::shutdown::admit_exit_cleanup();
-            // Best-effort cleanup from the same config that governed this
-            // invocation; the user already has `brokkr clean` as a follow-up
-            // when startup could not detect a project.
-            if let Some(d) = detection.as_ref()
-                && let Err(e) = cmd_clean(
-                    &d.config,
-                    &d.project,
-                    &d.project_root,
-                    &d.build_root,
-                    CleanOpts::after_interrupt(),
-                )
-            {
-                output::error(&format!("cleanup failed: {e}"));
-            }
-            std::process::exit(130);
-        }
+        // No project-wide sweep follows an interrupt. It would run after every
+        // guard, the lock included, has dropped, and the routine set holds what
+        // runs keep on purpose: hung-test snapshots, failure artefacts, caches.
+        // A measured attempt discards its own scratch output while it unwinds,
+        // under its hold (`measure::runner`); other disposable working state
+        // an interrupted run leaves sits under a fixed name its next run
+        // clears, or goes with a `brokkr clean`.
+        Err(DevError::Interrupted) => std::process::exit(130),
         Err(e) => {
             output::error(&e.to_string());
             std::process::exit(1);
@@ -622,8 +609,8 @@ pub(super) fn run_sync(
 /// `check` builds, scans, and diffs the code tree, so it anchors on the build
 /// root (cwd). The config values it uses (`[[check]]` sweeps, dependency rules,
 /// gremlin excludes) come from wherever brokkr.toml was found, in cwd or one
-/// level up. The loaded Detection stays available to main's interrupt cleanup;
-/// the no-config path still composes the user-wide rules on their own.
+/// level up; the no-config path still composes the user-wide rules on their
+/// own.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub(super) fn run_check(
     features: &[String],

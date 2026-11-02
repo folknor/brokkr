@@ -151,6 +151,21 @@ pub(crate) trait PlannedCommand {
     ) -> Result<(), DevError> {
         Ok(())
     }
+    /// Remove, by exact path, what an interrupted attempt of this plan wrote
+    /// beyond `plan.scratch_dirs`, which the runner removes itself. Called
+    /// only when a stop ended the attempt after a preparation had cleared and
+    /// taken those paths and before execution completed, so nothing an
+    /// earlier run left there is touched; a failure that is not a stop, and
+    /// anything [`finish`](Self::finish) returns, keep the output for
+    /// diagnosis.
+    fn discard(
+        &self,
+        _req: &MeasureRequest<'_>,
+        _ctx: &MeasurementSession,
+        _plan: &CommandPlan<Self::State, Self::Argv>,
+    ) -> Result<(), DevError> {
+        Ok(())
+    }
     /// The exits a run of this plan stores as completed. Takes the plan so a
     /// project can answer for the executable it was built against and the
     /// input it resolved.
@@ -223,6 +238,9 @@ pub(crate) fn run(req: &MeasureRequest<'_>, command: &impl PlannedCommand) -> Re
         binary.map_or(PlanTarget::Unbound, PlanTarget::Built),
     )?;
     let gated = gated_for(req);
+    // Set once a preparation has cleared the plan's paths: from then on what
+    // sits at them is this attempt's own output.
+    let owned = std::cell::Cell::new(false);
     let prepare = || -> Result<(), DevError> {
         for dir in &plan.scratch_dirs {
             if dir.exists() {
@@ -230,17 +248,30 @@ pub(crate) fn run(req: &MeasureRequest<'_>, command: &impl PlannedCommand) -> Re
             }
             std::fs::create_dir_all(dir)?;
         }
-        command.prepare(req, &ctx, &plan)
+        command.prepare(req, &ctx, &plan)?;
+        owned.set(true);
+        Ok(())
     };
     if let Some(binary) = binary {
         let invocation = command.materialize(&plan, binary)?;
-        execute_invocation(req, &ctx, command, &plan, &invocation, &prepare)
-            .map_err(|error| command.explain(&plan, error))?;
+        let executed = execute_invocation(req, &ctx, command, &plan, &invocation, &prepare);
+        if matches!(executed, Err(DevError::Interrupted)) && owned.get() {
+            discard_interrupted(gated, &plan.scratch_dirs, || {
+                command.discard(req, &ctx, &plan)
+            });
+        }
+        executed.map_err(|error| command.explain(&plan, error))?;
     } else {
-        prepare()?;
-        command.execute(req, &ctx, &plan)?;
+        let executed = prepare().and_then(|()| command.execute(req, &ctx, &plan));
+        if matches!(executed, Err(DevError::Interrupted)) && owned.get() {
+            discard_interrupted(gated, &plan.scratch_dirs, || {
+                command.discard(req, &ctx, &plan)
+            });
+        }
+        executed?;
     }
-    // Promotion is part of success. If it fails, preserve the current output.
+    // Promotion is part of success. If it fails, preserve the current output,
+    // a stop during it included: execution completed, so the output is whole.
     command.finish(req, &ctx, &plan)?;
     for dir in &plan.scratch_dirs {
         remove_tree(gated, dir).ok();
@@ -260,6 +291,40 @@ fn remove_tree(gated: bool, dir: &Path) -> std::io::Result<()> {
         crate::reservations::remove_dir_all(dir)
     } else {
         std::fs::remove_dir_all(dir) // gate: another project's own scratch
+    }
+}
+
+/// Discard what an interrupted attempt wrote: its scratch dirs, then the
+/// plan's own paths through `discard`. Best effort, under the command's hold,
+/// with no subprocess: a removal that fails is named and the stop still ends
+/// the command. This is the whole of brokkr's cleanup after an interrupt; no
+/// project-wide sweep follows, so a stop never removes what other runs keep.
+fn discard_interrupted(
+    gated: bool,
+    scratch_dirs: &[PathBuf],
+    discard: impl FnOnce() -> Result<(), DevError>,
+) {
+    output::run_msg("interrupted - discarding this run's scratch output");
+    for dir in scratch_dirs {
+        discard_path(gated, dir, true);
+    }
+    if let Err(error) = discard() {
+        output::warn(&format!("interrupted run's scratch output kept: {error}"));
+    }
+}
+
+/// Remove one path of an interrupted attempt, naming it when it stays. Gone
+/// already is fine; a reservation refusal or any other error keeps it.
+pub(crate) fn discard_path(gated: bool, path: &Path, dir: bool) {
+    let result = if dir {
+        remove_tree(gated, path)
+    } else {
+        remove_one_file(gated, path)
+    };
+    match result {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => output::warn(&format!("kept {}: {error}", output::path(path))),
     }
 }
 
@@ -492,10 +557,38 @@ pub(crate) fn execute_external(
     ctx: &MeasurementSession,
     invocation: &ExternalInvocation,
 ) -> Result<(), DevError> {
+    let gated = gated_for(req);
+    // As in [`run`], which this executes under and which reports the
+    // discard: an interrupted attempt removes its outputs only once a
+    // preparation has cleared the ones it declares.
+    let owned = std::cell::Cell::new(false);
+    let prepare = || -> Result<(), DevError> {
+        invocation.prepare_sample(gated)?;
+        owned.set(true);
+        Ok(())
+    };
+    let executed = run_external_mode(req, ctx, invocation, prepare);
+    if matches!(executed, Err(DevError::Interrupted)) && owned.get() {
+        for file in &invocation.output_files {
+            discard_path(gated, file, false);
+        }
+        for dir in &invocation.scratch_dirs {
+            discard_path(gated, dir, true);
+        }
+    }
+    executed?;
+    invocation.cleanup(gated);
+    Ok(())
+}
+
+fn run_external_mode(
+    req: &MeasureRequest<'_>,
+    ctx: &MeasurementSession,
+    invocation: &ExternalInvocation,
+    prepare: impl Fn() -> Result<(), DevError>,
+) -> Result<(), DevError> {
     let args: Vec<&str> = invocation.args.iter().map(String::as_str).collect();
     let run = invocation.invocation();
-    let gated = gated_for(req);
-    let prepare = || invocation.prepare_sample(gated);
     match req.mode {
         MeasureMode::Run => {
             prepare()?;
@@ -525,7 +618,6 @@ pub(crate) fn execute_external(
             ));
         }
     }
-    invocation.cleanup(gated);
     Ok(())
 }
 

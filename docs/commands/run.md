@@ -214,9 +214,9 @@ not a bundle. A program that finds siblings or resources beside its own path
 the snapshot directory instead of `target/<profile>/`. Like running the
 uplifted file directly, it gets none of cargo's launch environment.
 
-Snapshots accumulate, one per distinct build. A `brokkr clean` run by hand
-removes the store; the cleanup that follows an interrupted command does not,
-since a script may still be running one. `clean` needs a `brokkr.toml`, so in
+Snapshots accumulate, one per distinct build. `brokkr clean` removes the
+store, and nothing else does: an interrupted command runs no clean. `clean`
+needs a `brokkr.toml`, so in
 a tree with none the store is yours to delete: `.brokkr/artifacts/` holds
 nothing else.
 

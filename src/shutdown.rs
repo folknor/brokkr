@@ -28,8 +28,10 @@
 //!    `SIGKILL`s the child and breaks out of the loop with
 //!    `stopped_by_signal = true`.
 //! 4. `run_external` propagates that up as [`crate::error::DevError::Interrupted`]
-//!    after saving the partial sidecar data under the `dirty` alias. `main`
-//!    catches that error, runs the scratch-cleanup path, and exits 130.
+//!    after saving the partial sidecar data under the `dirty` alias. The
+//!    measured runner (`crate::measure::runner`) discards the interrupted
+//!    attempt's own scratch output as it unwinds, still under the command's
+//!    hold, and `main` exits 130.
 //!
 //! `brokkr kill --hard` bypasses this entirely: it SIGSTOPs the brokkr PID,
 //! SIGKILLs the recorded child PID and every identity-checked descendant of
@@ -47,8 +49,6 @@ use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 
 /// The shutdown protocol's complete state. The guard-scoped request is reset
 /// when the outermost guard leaves; a committed stop survives that transition.
-/// Exit cleanup is a terminal admission state: it permits the cleanup lock but
-/// still remembers any guard-scoped request until that guard leaves.
 #[repr(u8)]
 #[derive(Clone, Copy)]
 enum ShutdownState {
@@ -60,10 +60,6 @@ enum ShutdownState {
     CommittedGuarded = 5,
     CommittedRequested = 6,
     CommittedRequestPending = 7,
-    ExitCleanup = 8,
-    ExitCleanupGuarded = 9,
-    ExitCleanupRequested = 10,
-    ExitCleanupRequestPending = 11,
 }
 
 impl ShutdownState {
@@ -76,10 +72,6 @@ impl ShutdownState {
             5 => Self::CommittedGuarded,
             6 => Self::CommittedRequested,
             7 => Self::CommittedRequestPending,
-            8 => Self::ExitCleanup,
-            9 => Self::ExitCleanupGuarded,
-            10 => Self::ExitCleanupRequested,
-            11 => Self::ExitCleanupRequestPending,
             _ => Self::Running,
         }
     }
@@ -91,20 +83,13 @@ impl ShutdownState {
                 | Self::RequestPending
                 | Self::CommittedRequested
                 | Self::CommittedRequestPending
-                | Self::ExitCleanupRequested
-                | Self::ExitCleanupRequestPending
         )
     }
 
     fn guard_active(self) -> bool {
         matches!(
             self,
-            Self::Guarded
-                | Self::Requested
-                | Self::CommittedGuarded
-                | Self::CommittedRequested
-                | Self::ExitCleanupGuarded
-                | Self::ExitCleanupRequested
+            Self::Guarded | Self::Requested | Self::CommittedGuarded | Self::CommittedRequested
         )
     }
 
@@ -132,9 +117,7 @@ impl ShutdownState {
     fn enter_guard(self) -> Self {
         match self {
             Self::Committed | Self::CommittedRequestPending => Self::CommittedGuarded,
-            Self::ExitCleanup | Self::ExitCleanupRequestPending => Self::ExitCleanupGuarded,
             Self::CommittedGuarded | Self::CommittedRequested => Self::CommittedGuarded,
-            Self::ExitCleanupGuarded | Self::ExitCleanupRequested => Self::ExitCleanupGuarded,
             _ => Self::Guarded,
         }
     }
@@ -143,10 +126,8 @@ impl ShutdownState {
         match self {
             Self::Guarded | Self::Requested => Self::Running,
             Self::CommittedGuarded | Self::CommittedRequested => Self::Committed,
-            Self::ExitCleanupGuarded | Self::ExitCleanupRequested => Self::ExitCleanup,
             Self::Running | Self::RequestPending => self,
             Self::Committed | Self::CommittedRequestPending => self,
-            Self::ExitCleanup | Self::ExitCleanupRequestPending => self,
         }
     }
 
@@ -156,8 +137,6 @@ impl ShutdownState {
             Self::Guarded | Self::Requested => Self::Requested,
             Self::Committed | Self::CommittedRequestPending => Self::CommittedRequestPending,
             Self::CommittedGuarded | Self::CommittedRequested => Self::CommittedRequested,
-            Self::ExitCleanup | Self::ExitCleanupRequestPending => Self::ExitCleanupRequestPending,
-            Self::ExitCleanupGuarded | Self::ExitCleanupRequested => Self::ExitCleanupRequested,
         }
     }
 
@@ -168,19 +147,6 @@ impl ShutdownState {
             Self::Requested => Self::CommittedRequested,
             Self::RequestPending => Self::CommittedRequestPending,
             _ => self,
-        }
-    }
-
-    fn admit_exit_cleanup(self) -> Self {
-        match self {
-            Self::Running | Self::Committed => Self::ExitCleanup,
-            Self::Guarded | Self::CommittedGuarded => Self::ExitCleanupGuarded,
-            Self::Requested | Self::CommittedRequested => Self::ExitCleanupRequested,
-            Self::RequestPending | Self::CommittedRequestPending => Self::ExitCleanupRequestPending,
-            Self::ExitCleanup
-            | Self::ExitCleanupGuarded
-            | Self::ExitCleanupRequested
-            | Self::ExitCleanupRequestPending => self,
         }
     }
 }
@@ -293,22 +259,13 @@ pub fn commit_stop() {
 }
 
 /// Whether work may still be admitted under the current process state.
-/// [`admit_exit_cleanup`] lifts a committed stop's bar for the scratch cleanup
-/// on the way out.
 pub fn admits_new_work() -> bool {
     current_state().admits_new_work()
 }
 
-/// Called by `main`'s interrupt path immediately before the scratch cleanup,
-/// which takes the lock like any `brokkr clean`. Nothing but that cleanup and
-/// the process exit follow it.
-pub fn admit_exit_cleanup() {
-    transition(ShutdownState::admit_exit_cleanup);
-}
-
 /// Whether the active operation should unwind for a signal request or a
 /// committed stop. A signal request remains guard-scoped; a committed stop
-/// remains effective until exit cleanup begins.
+/// remains effective until the process exits.
 pub fn should_unwind() -> bool {
     current_state().should_unwind()
 }

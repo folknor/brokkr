@@ -152,41 +152,34 @@ Bare `brokkr clean`, in order:
   directories a failed `brokkr library` run kept
   (`<scratch>/library/<scenario>/run-N/`) go each through the gate, so one
   an orphaned harness still holds stays alone, and a scenario directory left
-  empty goes with them; only in a clean run by hand, never in the cleanup
-  after an interrupted command, which runs after the command released the
-  lock that protects a live run between its launches. Other pbfhogg scratch
-  files survive.
+  empty goes with them; the brokkr lock clean holds is what protects a live
+  run between its launches. Other pbfhogg scratch files survive.
 - **Sidecar marker FIFOs**, every project: in `.brokkr/`, where measured and
   `brokkr library` runs make them. A FIFO is removed only when its name has the
   reserved `.sidecar-<token>.fifo` shape, it is a FIFO, and no process holds
   its read end (a non-blocking write open is refused with `ENXIO`); clean
   never parses the token. A live brokkr always holds its FIFO's read end, and
   the window before it opens one is covered by `.brokkr/.sidecar.lock`, which
-  each creator holds shared across it and the sweep exclusive; the lock file
-  stays. A clean run by hand waits for the lock; the cleanup after an
-  interrupted command skips the sweep, with a warning, when it is held.
+  each creator holds shared across it and the sweep exclusive (clean waits
+  for it); the lock file stays.
 - **Elivagar also**: `corpus-calibrands/` (the default `-o` for
   `pmtiles-corpus mutate`). The `ocean-build_tmp`, `.ingest_tmp`, and
   `.tilegen_tmp` names are not brokkr-designated paths and are left alone.
 - **Run-artefact trees**: the named `.brokkr/ratatoskr/{service,service-mock,sync,mock}/`
   trees and child directories under `.brokkr/piners/corpus/` (the `gate.db`
-  and `runs.db` paths are protected),
-  `.brokkr/test-hung/`, and, for
-  litehtml, `.brokkr/prepare-cache/` and `.brokkr/litehtml-capture/` (the
-  staging a Chrome capture is written to before it is published into
-  `fixtures/<id>/`; the published references are never cleaned). `.brokkr/artifacts/` (the `brokkr build`
-  snapshots) goes only in a clean run by hand, never in the cleanup after an
-  interrupted command, since a script may still be running one. So does
+  and `runs.db` paths are protected), `.brokkr/test-hung/`, the isolated
+  feature-unification and fixture-lint targets, `<target>/unify-*` and
+  `<target>/fixture-*` under cargo's resolved target root, which nothing
+  else removes, `.brokkr/artifacts/` (the `brokkr build` snapshots), and
   pbfhogg's `.brokkr/verify-reference/` (the verify reference cache, see
   "Reference cache" in `docs/projects/pbfhogg.md`), through the reservation
-  gate, since it is what spares the next verify its reference runs. So do the
-  isolated feature-unification and fixture-lint targets,
-  `<target>/unify-*` and `<target>/fixture-*` under cargo's resolved target
-  root, which nothing else removes: the cleanup after an interrupted command
-  runs after the lock is released, when another check may be building into
-  them. Other directories under `.brokkr/ratatoskr/` are preserved. Hung-test snapshots
-  also prune their oldest directories as new diagnostics arrive, keeping a
-  bounded recent history even between cleans.
+  gate; then, for litehtml, `.brokkr/prepare-cache/` and
+  `.brokkr/litehtml-capture/` (the staging a Chrome capture is written to
+  before it is published into `fixtures/<id>/`; the published references are
+  never cleaned). Other directories under `.brokkr/ratatoskr/` are
+  preserved. Hung-test snapshots also prune their oldest directories as
+  new diagnostics arrive, keeping a bounded recent history even between
+  cleans.
 - **Litehtml also**: under `$XDG_CACHE_HOME/brokkr/litehtml-prepare/`, every
   version directory (a constructed 32-hex-digit name) other than the one this
   brokkr's bundled Node scripts hash to. The current one stays, so the next
@@ -196,11 +189,30 @@ Bare `brokkr clean`, in order:
 A routine clean **spares the durable tilegen output archives**
 (`<output>/<dataset>-<variant>-<commit>.pmtiles`). They are reproducible but
 expensive, retention already bounds their growth, and they are what `regress`
-diffs. If persistent worktrees exist, a routine clean run by hand names them
-and points at `--worktrees` rather than removing them; the interrupt/kill
-cleanup does not print that hint. A routine clean that finds nothing prints
-`nothing to clean` unless a cargo sweep already reported its work; a
-`--dry-run` reports only what it would remove.
+diffs. If persistent worktrees exist, a routine clean names them and points
+at `--worktrees` rather than removing them. A routine clean that finds
+nothing prints `nothing to clean` unless a cargo sweep already reported its
+work; a `--dry-run` reports only what it would remove.
+
+## After an interrupt
+
+No clean runs after an interrupted command (Ctrl-C, `brokkr kill`). A sweep
+there would run after the command released the brokkr lock, while another
+brokkr may already be using the same paths, and the routine set holds what
+runs keep on purpose for later: hung-test snapshots, the run directories of
+failed corpus, ratatoskr and library runs, an elivagar archive whose
+promotion failed, caches. Instead a measured attempt that a stop ends
+discards its own scratch output as it unwinds, still under its hold
+(`src/measure/runner.rs`): the plan's scratch directories, pbfhogg's command
+output, elivagar's partial archive and `tilegen_tmp`, and an external tool's
+declared outputs. It does so only once a preparation has cleared those
+paths, and never for a stop during promotion, after execution completed; a
+path it cannot remove is named and kept. Other disposable working state an
+interrupted command leaves on disk (an unmeasured command's output, a
+verify's output) sits under a fixed name its next run clears, or goes with
+the next `brokkr clean`. What a stop records on purpose stays: the partial
+sidecar data under `dirty`, the history entry, and every retained
+diagnostic above.
 
 ## `--cargo [PKG]`
 

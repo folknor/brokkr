@@ -173,9 +173,9 @@ Accordingly it has no retention or pruning policy (the store is
 insert-and-select only), and `brokkr clean` does not touch it: a clean
 removes the artefact and `mock/` **directories** under
 `.brokkr/ratatoskr` and spares every file at that level. This is the
-same carve-out piners' `runs.db` gets. Note that `brokkr kill`'s
-graceful path runs `brokkr clean`, so this exemption is what keeps a
-SIGTERM'd bench from destroying the baselines.
+same carve-out piners' `runs.db` gets. `brokkr kill`'s graceful path runs
+no clean, so a SIGTERM'd bench keeps its artefact directories as well as
+the baselines.
 
 The sidecar backups under `$XDG_DATA_HOME/brokkr/sidecar-backups/` are
 sidecar profile data only - unrelated to gate baselines and no recovery

@@ -564,7 +564,7 @@ impl CheckOutcome for Findings {
 ///
 /// A check cut short by a shutdown request (`brokkr kill`, Ctrl-C) is neither
 /// a PASS nor a FAIL: it prints `INTERRUPTED` and returns
-/// `DevError::Interrupted` unchanged, so `main` runs the scratch cleanup and
+/// `DevError::Interrupted` unchanged, so `main` exits 130 and
 /// `verify all` stops instead of starting checks that would be interrupted
 /// at once.
 ///
@@ -1132,8 +1132,8 @@ mod tests {
     fn run_check_passes_an_interrupt_through_rather_than_failing() {
         let _serial = ledger_lock();
         // The bug: an interrupted check folded into a FAIL like any error,
-        // so `main` never ran the interrupt cleanup and `verify all` went on
-        // to start the next check.
+        // so brokkr never exited 130 and `verify all` went on to start the
+        // next check.
         let interrupted = super::run_check("x", true, || -> Result<(), crate::error::DevError> {
             Err(crate::error::DevError::Interrupted)
         });

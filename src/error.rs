@@ -374,7 +374,7 @@ pub enum DevError {
     CargoEnv(String),
     /// `brokkr kill` requested a cooperative shutdown (SIGTERM). The bench
     /// aborted mid-run, partial sidecar data was stored under the `dirty`
-    /// alias, and `main` should run scratch cleanup and exit 130.
+    /// alias, and `main` exits 130.
     Interrupted,
 }
 
