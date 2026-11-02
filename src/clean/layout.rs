@@ -20,18 +20,26 @@ const SELF_IGNORE: &[u8] = b"# Written by brokkr: per-host state.\n*\n";
 /// The project-local `.brokkr` root and its named stores.
 #[derive(Debug, Clone)]
 pub(crate) struct ProjectState {
+    project_root: PathBuf,
     root: PathBuf,
 }
 
 impl ProjectState {
     pub(crate) fn new(project_root: &Path) -> Self {
         Self {
+            project_root: project_root.to_path_buf(),
             root: project_root.join(PROJECT_STATE_DIR),
         }
     }
 
     pub(crate) fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The project root this state lives under: the identity per-user
+    /// stores of this project's state, the sidecar backups, are keyed by.
+    pub(crate) fn project_root(&self) -> &Path {
+        &self.project_root
     }
 
     /// Create the state directory with a `.gitignore` of `*` inside it, as

@@ -85,7 +85,7 @@ No flag removes these either. What keeps each in check, where anything does:
 | `.brokkr/accounting/` | each new check run prunes to the newest 10, itself among them, best effort; a plan or journal's size is not capped |
 | `.brokkr/verify-reference/` | `verify_reference_budget` per host (`brokkr man config`), applied when each verify ends; absent, nothing; `--verify-reference` removes it whole |
 | `$XDG_DATA_HOME/brokkr/history.db` | nothing: every invocation, never pruned |
-| `$XDG_DATA_HOME/brokkr/sidecar-backups/` | three whole copies of each project's sidecar.db, named by project kind |
+| `$XDG_DATA_HOME/brokkr/sidecar-backups/` | nothing: three whole copies of each project root's sidecar.db, in a directory per root whose `origin` file names it, never pruned; a moved checkout starts a new one. The kind-keyed `<kind>-sidecar.db`, `.1`, `.2` an earlier brokkr wrote at the top level stay too, never written again; delete either by hand |
 | `.brokkr/hash_cache`, `hash_cache.lock` | a save drops entries for files that no longer exist; a run that only hits the cache does not save |
 | `.brokkr/pbfhogg-capabilities` | capped at 512 lines |
 | `.brokkr/worktrees.toml` | cutting a new `--commit` worktree drops the vanished records of that checkout only; nothing else does |

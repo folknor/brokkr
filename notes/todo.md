@@ -290,6 +290,18 @@ surviving group members. If so, a helper of a stopped tool can still be
 writing scratch when the measured runner discards the attempt's paths, or
 after a by-hand clean removes them. Verify before acting.
 
+### A worktree checkout key names the path as spelled (2026-11-02)
+
+Found while keying sidecar backups per project root (brokkr bz 102).
+`checkout_key` in `src/worktree.rs` hashes the canonical git root but takes
+the readable name from the root as supplied, so a checkout reached through a
+symlink (`/alias/main` leading to `/real/pbfhogg`) gets `main-<hash>` one way
+and `pbfhogg-<hash>` the other: two worktree directories, two record
+prefixes, and a `clean --worktrees` from one spelling that does not see the
+other's slots. Taking the name from the canonical path fixes it, at the cost
+of re-keying any existing slot whose two spellings differ. The sidecar backup
+key deliberately does not share this function.
+
 ### Inter-suite gap on the unisolated serial path
 
 When harness isolation cannot be installed (a configured host runner or

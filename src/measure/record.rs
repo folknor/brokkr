@@ -347,7 +347,7 @@ impl BenchHarness {
     /// Back the sidecar store up, as every stored measurement does; a
     /// failure is a warning.
     pub(crate) fn backup_sidecar(&self) {
-        if let Err(e) = backup_sidecar(&self.state.sidecar_db(), &self.project) {
+        if let Err(e) = backup_sidecar(&self.state, &self.project) {
             console::warn(&format!("sidecar backup failed (non-fatal): {e}"));
         }
     }
@@ -561,7 +561,7 @@ impl BenchHarness {
         drop(sidecar_db);
 
         // Back up sidecar DB while the lock is still held.
-        if let Err(e) = backup_sidecar(&sidecar_db_path, &self.project) {
+        if let Err(e) = backup_sidecar(&self.state, &self.project) {
             // A warning, not narration: the quiet-gated sidecar line hid a
             // real loss of the backup.
             console::warn(&format!("sidecar backup failed (non-fatal): {e}"));

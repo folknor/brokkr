@@ -737,11 +737,29 @@ when a child stream exceeds its limit.
 ## Sidecar backup & rotation
 
 After each stored run (while the bench lock is still held), `backup_sidecar`
-snapshots sidecar.db to `$XDG_DATA_HOME/brokkr/sidecar-backups/` (falling back
-to `~/.local/share/...`), named `<project>-sidecar.db` with rotation - this is
-the one place the project name enters the sidecar path. The default
-`MeasurementTunables.sidecar_backup_copies` value is 3, so it keeps `.db`
-(newest), `.db.1`, and `.db.2`.
+snapshots sidecar.db to `$XDG_DATA_HOME/brokkr/sidecar-backups/<root key>/`
+(falling back to `~/.local/share/...`), with rotation. The default
+`MeasurementTunables.sidecar_backup_copies` value is 3, so it keeps
+`sidecar.db` (newest), `sidecar.db.1`, and `sidecar.db.2`.
+
+The rotation is per project root, the directory whose `.brokkr/sidecar.db` is
+copied, so two checkouts of one project (`~/Programs/pbfhogg` and a copy under
+`PRs/`) never evict each other's copies. The root key is the canonical root's
+directory name, cut to 64 bytes, then `-` and a 16-hex-digit hash of the
+canonical path. Beside the copies, `origin` holds that canonical path and
+asserts ownership: a backup whose root does not match it is refused, as is one
+into a directory holding copies but no `origin` (restore the file or move the
+directory aside), and a slot or `origin` that is not a regular file (a
+symlink, say) refuses too. A refusal is a backup failure: warned, the copies
+untouched. A moved or renamed checkout starts a new rotation and the old one
+stays, named by its `origin`. Nothing prunes these; `brokkr env` reports their
+size.
+
+An earlier brokkr keyed one rotation per project kind
+(`<kind>-sidecar.db`, `.1`, `.2` directly under `sidecar-backups/`), shared by
+every checkout of the kind. Those copies are left alone, since one may be the
+only copy of a checkout that is gone; only their unfinished staging file,
+`.<kind>-sidecar.db.partial`, is removed by each backup of that kind.
 
 The sequence is crash-safe, in that no crash leaves a partial primary:
 SQLite's **online backup API** writes a self-contained DELETE-journal copy to

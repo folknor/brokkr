@@ -709,25 +709,57 @@ mod persistence {
             .unwrap();
     }
 
+    /// A project root under `dir` holding a sidecar DB, and that root's
+    /// rotation directory under `backups`.
+    fn backed_up_root(dir: &Path, name: &str) -> (PathBuf, PathBuf) {
+        let root = dir.join(name);
+        std::fs::create_dir_all(&root).unwrap();
+        create_sidecar(&root.join("sidecar.db"));
+        (root, dir.join("backups"))
+    }
+
+    fn backup(root: &Path, backups: &Path) -> Result<(), crate::error::DevError> {
+        backup_sidecar_to(
+            &root.join("sidecar.db"),
+            root,
+            &crate::project::Project::Pbfhogg,
+            Some(backups),
+        )
+    }
+
+    /// The one rotation directory `backups` holds.
+    fn only_rotation(backups: &Path) -> PathBuf {
+        let dirs: Vec<PathBuf> = std::fs::read_dir(backups)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.is_dir())
+            .collect();
+        assert_eq!(dirs.len(), 1, "{dirs:?}");
+        dirs.into_iter().next().unwrap()
+    }
+
     #[test]
     fn backup_sidecar_creates_and_rotates() {
         let dir = temp_dir("rotate");
-        let sidecar_path = dir.join("sidecar.db");
-        create_sidecar(&sidecar_path);
-
-        let backup_dir = dir.join("backups");
+        let (root, backup_dir) = backed_up_root(&dir, "pbfhogg");
 
         // Run backup 4 times to exercise rotation.
         for _ in 0..4 {
-            backup_sidecar_to(
-                &sidecar_path,
-                &crate::project::Project::Pbfhogg,
-                Some(&backup_dir),
-            )
-            .unwrap();
+            backup(&root, &backup_dir).unwrap();
         }
 
-        let base = backup_dir.join("pbfhogg-sidecar.db");
+        let rotation = only_rotation(&backup_dir);
+        let name = rotation.file_name().unwrap().to_str().unwrap().to_owned();
+        assert!(name.starts_with("pbfhogg-"), "{name}");
+        assert_eq!(name.len(), "pbfhogg-".len() + 16, "{name}");
+        let mut origin = std::fs::canonicalize(&root)
+            .unwrap()
+            .into_os_string()
+            .into_encoded_bytes();
+        origin.push(b'\n');
+        assert_eq!(std::fs::read(rotation.join("origin")).unwrap(), origin);
+
+        let base = rotation.join("sidecar.db");
         assert!(base.exists(), "newest backup should exist");
         assert!(
             base.with_extension("db.1").exists(),
@@ -760,20 +792,12 @@ mod persistence {
     #[test]
     fn backup_failure_does_not_displace_good_backup() {
         let dir = temp_dir("nodisplace");
-        let sidecar_path = dir.join("sidecar.db");
-        create_sidecar(&sidecar_path);
-
-        let backup_dir = dir.join("backups");
+        let (root, backup_dir) = backed_up_root(&dir, "pbfhogg");
 
         // Create a good initial backup.
-        backup_sidecar_to(
-            &sidecar_path,
-            &crate::project::Project::Pbfhogg,
-            Some(&backup_dir),
-        )
-        .unwrap();
+        backup(&root, &backup_dir).unwrap();
 
-        let base = backup_dir.join("pbfhogg-sidecar.db");
+        let base = only_rotation(&backup_dir).join("sidecar.db");
         assert!(base.exists());
         let good_size = std::fs::metadata(&base).unwrap().len();
 
@@ -783,6 +807,7 @@ mod persistence {
 
         let result = backup_sidecar_to(
             &bad_source,
+            &root,
             &crate::project::Project::Pbfhogg,
             Some(&backup_dir),
         );
@@ -801,9 +826,160 @@ mod persistence {
         let dir = temp_dir("noop");
         let sidecar_path = dir.join("does-not-exist.db");
 
-        let result =
-            backup_sidecar_to(&sidecar_path, &crate::project::Project::Pbfhogg, Some(&dir));
+        let result = backup_sidecar_to(
+            &sidecar_path,
+            &dir,
+            &crate::project::Project::Pbfhogg,
+            Some(&dir),
+        );
         assert!(result.is_ok());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Two checkouts of one project kind, same directory name included,
+    /// keep separate rotations: neither run evicts the other's copies.
+    #[test]
+    fn two_checkouts_of_one_project_keep_separate_rotations() {
+        let dir = temp_dir("two-checkouts");
+        let backups = dir.join("backups");
+        let main = dir.join("main").join("pbfhogg");
+        let copy = dir.join("PRs").join("pbfhogg");
+        for root in [&main, &copy] {
+            std::fs::create_dir_all(root).unwrap();
+            create_sidecar(&root.join("sidecar.db"));
+        }
+        for _ in 0..3 {
+            backup(&main, &backups).unwrap();
+        }
+        for _ in 0..3 {
+            backup(&copy, &backups).unwrap();
+        }
+
+        let mut rotations: Vec<PathBuf> = std::fs::read_dir(&backups)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        rotations.sort();
+        assert_eq!(rotations.len(), 2, "{rotations:?}");
+        let mut origins = Vec::new();
+        for rotation in &rotations {
+            for slot in ["sidecar.db", "sidecar.db.1", "sidecar.db.2"] {
+                assert!(rotation.join(slot).is_file(), "{}", rotation.display());
+            }
+            origins.push(std::fs::read(rotation.join("origin")).unwrap());
+        }
+        assert_ne!(origins[0], origins[1]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A rotation whose origin names another root is never rotated into,
+    /// and its copies stay as they were.
+    #[test]
+    fn a_rotation_owned_by_another_root_is_refused() {
+        let dir = temp_dir("foreign-origin");
+        let (root, backups) = backed_up_root(&dir, "pbfhogg");
+        backup(&root, &backups).unwrap();
+        let rotation = only_rotation(&backups);
+        std::fs::write(rotation.join("origin"), b"/somewhere/else\n").unwrap();
+        let before = std::fs::read(rotation.join("sidecar.db")).unwrap();
+
+        let err = backup(&root, &backups).unwrap_err().to_string();
+        assert!(err.contains("belongs to /somewhere/else"), "{err}");
+        assert!(!rotation.join("sidecar.db.1").exists());
+        assert_eq!(std::fs::read(rotation.join("sidecar.db")).unwrap(), before);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Copies with no origin are nobody's provably: refused, never claimed.
+    #[test]
+    fn copies_without_an_origin_are_refused() {
+        let dir = temp_dir("no-origin");
+        let (root, backups) = backed_up_root(&dir, "pbfhogg");
+        backup(&root, &backups).unwrap();
+        let rotation = only_rotation(&backups);
+        std::fs::remove_file(rotation.join("origin")).unwrap();
+
+        let err = backup(&root, &backups).unwrap_err().to_string();
+        assert!(err.contains("no origin file"), "{err}");
+        assert!(!rotation.join("origin").exists());
+        assert!(!rotation.join("sidecar.db.1").exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A slot that is a symlink, dangling or not, is refused rather than
+    /// rotated through.
+    #[test]
+    fn a_symlinked_slot_is_refused() {
+        let dir = temp_dir("symlink-slot");
+        let (root, backups) = backed_up_root(&dir, "pbfhogg");
+        backup(&root, &backups).unwrap();
+        let rotation = only_rotation(&backups);
+        std::os::unix::fs::symlink(dir.join("nowhere"), rotation.join("sidecar.db.2")).unwrap();
+
+        let err = backup(&root, &backups).unwrap_err().to_string();
+        assert!(err.contains("is not a regular file"), "{err}");
+        assert!(!rotation.join("sidecar.db.1").exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The kind-keyed rotation an earlier brokkr wrote stays; only its
+    /// unfinished staging file goes, even when there is nothing to back up.
+    #[test]
+    fn legacy_rotation_stays_and_its_partial_goes() {
+        let dir = temp_dir("legacy");
+        let backups = dir.join("backups");
+        std::fs::create_dir_all(&backups).unwrap();
+        for name in [
+            "pbfhogg-sidecar.db",
+            "pbfhogg-sidecar.db.1",
+            "pbfhogg-sidecar.db.2",
+            ".pbfhogg-sidecar.db.partial",
+            ".elivagar-sidecar.db.partial",
+        ] {
+            std::fs::write(backups.join(name), b"x").unwrap();
+        }
+
+        backup_sidecar_to(
+            &dir.join("absent.db"),
+            &dir,
+            &crate::project::Project::Pbfhogg,
+            Some(&backups),
+        )
+        .unwrap();
+
+        assert!(!backups.join(".pbfhogg-sidecar.db.partial").exists());
+        assert!(backups.join(".elivagar-sidecar.db.partial").exists());
+        for name in [
+            "pbfhogg-sidecar.db",
+            "pbfhogg-sidecar.db.1",
+            "pbfhogg-sidecar.db.2",
+        ] {
+            assert!(backups.join(name).exists(), "{name}");
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A long directory name is cut to a bounded label; the hash still
+    /// tells roots apart.
+    #[test]
+    fn a_long_root_name_gives_a_bounded_key() {
+        let dir = temp_dir("long-name");
+        let name = "\u{e9}".repeat(100);
+        let (root, backups) = backed_up_root(&dir, &name);
+        backup(&root, &backups).unwrap();
+        let key = only_rotation(&backups)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(key.len(), 64 + 1 + 16, "{key}");
 
         std::fs::remove_dir_all(&dir).ok();
     }

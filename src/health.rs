@@ -189,7 +189,8 @@ fn user_stores() -> Vec<Store> {
         (
             "sidecar-backups",
             crate::user_dirs::sidecar_backups_dir(),
-            "no pruning: three whole copies per project name, delete by hand",
+            "no pruning: three whole copies per project root, each dir named by its origin \
+             file, plus any kind-keyed rotation an earlier brokkr left; delete by hand",
         ),
         (
             "history.db",
