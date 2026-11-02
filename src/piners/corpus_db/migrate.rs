@@ -34,7 +34,11 @@
 //! zero protocol violations and leaving every other older row NULL (not
 //! recorded); version 18 adds `disposition.expected_performance` and
 //! `disposition.performance_gate`, the performance ratchet's pin and verdict,
-//! and the `perf_*` census projections. On a fresh database,
+//! and the `perf_*` census projections; version 19 adds
+//! `disposition.expected_excursions` and `disposition.excursion_gate`, the
+//! excursion ratchet's pin and verdict, the `label_*` and `exc_*` census
+//! projections, the `trade_diff` excursion and held-quantity projections,
+//! and the `scalar_pair` view. On a fresh database,
 //! the schema DDL in `schema.rs` creates the current tables (columns included)
 //! inside the shared migration transaction. Schema inspection uses the shared
 //! `db::store` helpers, which preserve errors and recognize generated columns.
@@ -43,14 +47,16 @@ use rusqlite::params;
 use serde_json::{Map, Value};
 
 use super::schema::{
-    PERFORMANCE_PROJECTIONS, Projection, TRADE_DIFF_PROJECTIONS, TRADE_DIFF_TYPED_FIELDS,
-    disposition_ddl, disposition_projection_column, trade_diff_ddl,
+    Projection, SCALAR_PAIR_VIEW, TRADE_DIFF_PROJECTIONS, TRADE_DIFF_TYPED_FIELDS, disposition_ddl,
+    disposition_projection_column, ratchet_projection_names, trade_diff_ddl,
+    trade_diff_projection_column,
 };
 use crate::db::store::{column_exists as has_column, table_exists as has_table};
 use crate::error::DevError;
+use crate::piners::ratchet::RatchetKind;
 
 /// Current schema version. Increment when adding a migration below.
-pub(super) const SCHEMA_VERSION: i64 = 18;
+pub(super) const SCHEMA_VERSION: i64 = 19;
 
 /// Run pending migrations through the shared store policy. The v5 rebuild
 /// preserves historical orphan dispositions, so foreign-key enforcement is
@@ -74,6 +80,9 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError
             conn.execute_batch(super::schema::SCHEDULE_ESTIMATE_DDL)?;
             conn.execute_batch(&disposition_ddl("disposition"))?;
             conn.execute_batch(&trade_diff_ddl("trade_diff"))?;
+            // Last, over the final tables: no rebuild above ever runs with
+            // a view depending on the table it drops.
+            conn.execute_batch(SCALAR_PAIR_VIEW)?;
             Ok(())
         },
     );
@@ -241,6 +250,7 @@ fn migrate_from(conn: &rusqlite::Connection, current: i64) -> Result<(), DevErro
         backfill_scored(conn)?;
     }
     add_performance_columns(conn, current)?;
+    add_v19_columns(conn, current)?;
     Ok(())
 }
 
@@ -260,14 +270,68 @@ fn add_performance_columns(conn: &rusqlite::Connection, current: i64) -> Result<
             )?;
         }
     }
-    for name in PERFORMANCE_PROJECTIONS {
+    add_projections(
+        conn,
+        18,
+        &ratchet_projection_names(RatchetKind::Performance),
+    )
+}
+
+/// Add each named `disposition` projection a store lacks.
+fn add_projections(
+    conn: &rusqlite::Connection,
+    version: i64,
+    names: &[&str],
+) -> Result<(), DevError> {
+    for name in names {
         if !has_column(conn, "disposition", name)? {
             let column = disposition_projection_column(name).ok_or_else(|| {
                 DevError::Database(format!(
-                    "corpus runs.db v18 migration: no `{name}` projection"
+                    "corpus runs.db v{version} migration: no `{name}` projection"
                 ))
             })?;
             conn.execute(&format!("ALTER TABLE disposition ADD COLUMN {column}"), [])?;
+        }
+    }
+    Ok(())
+}
+
+/// v18 -> v19: the excursion ratchet's pin and verdict, nullable with no
+/// default like the other ratchets' (an older row was never checked); the
+/// label and excursion census projections, which read every stored row
+/// that carried the census (labels since piners first sent them, excursions
+/// since piners 4cd63b1bc); and the `trade_diff` excursion and
+/// held-quantity projections, appended after the typed prefix. The
+/// `scalar_pair` view arrives in [`run_migrations`], after every table is
+/// final.
+fn add_v19_columns(conn: &rusqlite::Connection, current: i64) -> Result<(), DevError> {
+    if current >= 19 {
+        return Ok(());
+    }
+    if has_table(conn, "disposition")? {
+        let (pin, verdict) = RatchetKind::Excursions.columns();
+        for col in [pin, verdict] {
+            if !has_column(conn, "disposition", col)? {
+                conn.execute(
+                    &format!("ALTER TABLE disposition ADD COLUMN {col} TEXT"),
+                    [],
+                )?;
+            }
+        }
+        for kind in [RatchetKind::Labels, RatchetKind::Excursions] {
+            add_projections(conn, 19, &ratchet_projection_names(kind))?;
+        }
+    }
+    if has_table(conn, "trade_diff")? {
+        for (name, _) in &TRADE_DIFF_PROJECTIONS[TRADE_DIFF_TYPED_FIELDS..] {
+            if !has_column(conn, "trade_diff", name)? {
+                let column = trade_diff_projection_column(name).ok_or_else(|| {
+                    DevError::Database(format!(
+                        "corpus runs.db v19 migration: no `{name}` projection"
+                    ))
+                })?;
+                conn.execute(&format!("ALTER TABLE trade_diff ADD COLUMN {column}"), [])?;
+            }
         }
     }
     Ok(())
@@ -702,6 +766,14 @@ mod tests {
         assert!(has_column(&conn, "disposition", "label_gate").unwrap());
         assert!(has_column(&conn, "disposition", "scored").unwrap());
         assert!(has_column(&conn, "disposition", "defect").unwrap());
+        for col in [
+            "perf_scalars_mismatched",
+            "excursion_gate",
+            "exc_drawdown_ambiguous",
+        ] {
+            assert!(has_column(&conn, "disposition", col).unwrap(), "{col}");
+        }
+        assert!(has_column(&conn, "trade_diff", "tv_drawdown").unwrap());
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
@@ -787,7 +859,7 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(super::super::schema::SCHEMA).unwrap();
         conn.execute_batch(&disposition_ddl("disposition")).unwrap();
-        for col in PERFORMANCE_PROJECTIONS
+        for col in ratchet_projection_names(RatchetKind::Performance)
             .iter()
             .chain(&["expected_performance", "performance_gate"])
         {
@@ -813,6 +885,78 @@ mod tests {
             )
             .unwrap();
         assert_eq!(row, (None, None, None));
+    }
+
+    /// A v18 store gains the excursion pin and verdict, the label and
+    /// excursion projections - reading the censuses its stored rows already
+    /// carry - the appended `trade_diff` projections and the `scalar_pair`
+    /// view.
+    #[test]
+    fn v19_adds_the_excursion_ratchet_and_reads_the_stored_censuses() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(super::super::schema::SCHEMA).unwrap();
+        conn.execute_batch(&disposition_ddl("disposition")).unwrap();
+        conn.execute_batch(&trade_diff_ddl("trade_diff")).unwrap();
+        let mut dropped: Vec<&str> = ratchet_projection_names(RatchetKind::Labels);
+        dropped.extend(ratchet_projection_names(RatchetKind::Excursions));
+        dropped.extend(["expected_excursions", "excursion_gate"]);
+        for col in &dropped {
+            conn.execute(&format!("ALTER TABLE disposition DROP COLUMN {col}"), [])
+                .unwrap();
+        }
+        for (col, _) in &TRADE_DIFF_PROJECTIONS[27..] {
+            conn.execute(&format!("ALTER TABLE trade_diff DROP COLUMN {col}"), [])
+                .unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO run (run_id, started_at, selector, gated, result, probe_count) \
+                 VALUES (1, 'then', '{}', 1, 'pass', 1);
+             INSERT INTO disposition (run_id, probe, disposition, gate_ok, raw_source, raw_json) \
+                 VALUES (1, 'p', 'accepted', 1, 'harness', \
+                 '{\"excursions\":{\"run_up\":{\"compared\":5,\"mismatched\":2,\"ambiguous\":0,\
+                 \"unavailable\":1,\"tolerance\":\"t\"}},\"labels\":{\"entry\":{\"compared\":5,\
+                 \"mismatched\":1,\"ambiguous\":0,\"unavailable\":0},\"exit\":{\"compared\":5,\
+                 \"mismatched\":0,\"ambiguous\":0,\"unavailable\":0}},\"performance\":{\"scalars\":\
+                 {\"compared\":1,\"mismatched\":0,\"tolerance\":\"t\",\"pairs\":[{\"figure\":\"x\",\
+                 \"ours\":1,\"theirs\":1,\"match\":true}]}}}');
+             INSERT INTO trade_diff (run_id, probe, our_index, tv_index, raw_source, raw_json) \
+                 VALUES (1, 'p', 0, 0, 'harness', '{\"our_run_up\":3.5,\"tv_run_up\":\"inf\"}');",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 18).unwrap();
+
+        run_migrations(&conn).unwrap();
+        let counts: (Option<i64>, Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT exc_run_up_mismatched, exc_drawdown_compared, label_entry_mismatched \
+                 FROM disposition",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (Some(2), None, Some(1)));
+        let text: (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT exc_run_up_tolerance, excursion_gate FROM disposition",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(text, (Some("t".to_owned()), None));
+        let diff: (Option<f64>, Option<f64>) = conn
+            .query_row("SELECT our_run_up, tv_run_up FROM trade_diff", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(diff, (Some(3.5), None));
+        let figures: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM scalar_pair WHERE matched = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(figures, 1);
     }
 
     /// A v16 store gains `scored`/`defect`: every row of a run that counted

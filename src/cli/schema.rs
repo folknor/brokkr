@@ -2878,7 +2878,7 @@ In depth: `brokkr man nidhogg`."
         /// vanished drop out); `--reseed --probe <id>` (repeatable)
         /// upserts each. Re-stamps the `[feeds]` hashes of the feed groups
         /// the selection uses (every group under `--all`), carries each
-        /// probe's blessed `expected` forward, and never touches
+        /// probe's blessed `expected` and ratchet counts forward, and never touches
         /// `[probe_config]` (where feed, budget and start are declared).
         /// Prints added/changed/removed probes and changed feed hashes;
         /// review the result with `git diff pins.toml`. Not usable with
@@ -2888,7 +2888,9 @@ In depth: `brokkr man nidhogg`."
 
         /// Run the selection, then stamp each selected probe's current
         /// disposition into its `expected` field in `pins.toml` (the gate's
-        /// pinned contract). Sibling to `--reseed`: reseed adopts new corpus
+        /// pinned contract), and each census mismatch count its parity line
+        /// carries into `labels`, `performance` and `excursions` (the
+        /// ratchets). Sibling to `--reseed`: reseed adopts new corpus
         /// content, bless adopts new dispositions. Records reality, including
         /// `compile_fail`/`runtime_fail`/`harness_abort` outcomes, and refuses
         /// the whole write when any selected probe is `unevaluated`.
@@ -2980,6 +2982,9 @@ Examples:
   brokkr corpus-results --diffs --where 'exit_price_delta > 0.05'  # filtered trade rows (latest run)
   brokkr corpus-results --dispositions --columns probe,boundary_anchor,anchor_consumed  # projected
   brokkr corpus-results --dispositions --where 'ts_entry_share_pct >= 50'   # filtered probes
+  brokkr corpus-results --dispositions --where 'exc_run_up_mismatched > 0'  # excursion census
+  brokkr corpus-results --scalars                                  # missed report figures (latest run)
+  brokkr corpus-results --scalars --probe a --full                 # every figure of one probe
   brokkr corpus-results --trend magnifier-tick-dist-endpoints-01   # tier/p90 over recent runs
   brokkr corpus-results --sql 'SELECT probe, p90_exit FROM disposition'  # read-only escape hatch
 
@@ -3000,10 +3005,11 @@ In depth: `brokkr man piners`."
         #[arg(long, short = 'n', default_value = "20")]
         limit: usize,
 
-        /// Probe selector. A single `--probe` (without `--diffs`) shows that
-        /// probe's combo view - its disposition plus `trade_diff` rows.
-        /// Repeatable or comma-separated under `--diffs` to narrow the diff
-        /// table to several probes at once.
+        /// Probe selector. A single `--probe` without `--diffs`,
+        /// `--dispositions` or `--scalars` shows that probe's combo view - its
+        /// disposition plus `trade_diff` rows. Under any of those three it is
+        /// a filter, repeatable or comma-separated, narrowing the table to
+        /// several probes at once.
         #[arg(long, value_name = "ID", value_delimiter = ',')]
         probe: Vec<String>,
 
@@ -3020,7 +3026,15 @@ In depth: `brokkr man piners`."
         #[arg(long)]
         dispositions: bool,
 
-        /// Project the `--diffs` or `--dispositions` table onto these columns
+        /// List the performance scalars leg's figures across the run (latest
+        /// run by default), one row per pair: `figure`, `ours` and `theirs`
+        /// as piners sent them, `matched`, and `diff`/`rel_diff` when both
+        /// are numbers. Only the missed pairs, unless `--full`. Shape it with
+        /// `--probe`, `--columns`, and/or `--where`.
+        #[arg(long, conflicts_with_all = ["diffs", "dispositions"])]
+        scalars: bool,
+
+        /// Project the `--diffs`, `--dispositions` or `--scalars` table onto these columns
         /// (comma-separated or repeated). Each has a curated default; `all`
         /// selects every column and renders vertically. An unknown name lists
         /// the valid columns.
@@ -3044,7 +3058,7 @@ In depth: `brokkr man piners`."
         #[arg(long, value_name = "ID")]
         trend: Option<String>,
 
-        /// Raw SQL boolean filter for `--diffs` or `--dispositions` (trusted
+        /// Raw SQL boolean filter for `--diffs`, `--dispositions` or `--scalars` (trusted
         /// local input; the DB is opened read-only). E.g. `--diffs --where
         /// "exit_price_delta > 0.05"`.
         #[arg(long = "where", value_name = "EXPR")]
@@ -3057,7 +3071,8 @@ In depth: `brokkr man piners`."
 
         /// In the run-detail view (`--run`/bare id), show every probe instead
         /// of only the ones that deviate from their pin. With `--compare`, list
-        /// the probes that did not move too.
+        /// the probes that did not move too. With `--scalars`, every pair,
+        /// not only the missed ones.
         #[arg(long)]
         full: bool,
 
@@ -3068,7 +3083,7 @@ In depth: `brokkr man piners`."
         /// ran. Informational; exits 0.
         #[arg(long, num_args = 2, value_names = ["RUN_A", "RUN_B"],
               conflicts_with_all = ["run_id", "run", "probe", "diffs", "dispositions",
-                                    "columns", "runtimes", "over", "trend", "where_expr", "sql"])]
+                                    "scalars", "columns", "runtimes", "over", "trend", "where_expr", "sql"])]
         compare: Option<Vec<i64>>,
     },
 }

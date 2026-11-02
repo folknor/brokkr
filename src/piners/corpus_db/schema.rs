@@ -25,6 +25,8 @@
 //! `label_gate` (the label deviations as a JSON list, `[]` when checked and
 //! clean; NULL when the probe was not label-checked - unselected, an invalid
 //! line, or a row from before v14, whose label verdict was never recorded),
+//! the same pair for the performance ratchet (v18) and the excursion
+//! ratchet (v19), named by `RatchetKind::columns`,
 //! `scored` (v17: 1 when the run's reconciliation scored the row - a
 //! selected probe, a valid record, no invalid occurrence - and 0 for an
 //! invalid record, a tainted probe or a report-only extra; on a row stored
@@ -43,10 +45,12 @@
 //! dropping every field the harness added after it).
 
 use std::path::Path;
+use std::sync::LazyLock;
 
 use super::CorpusDb;
 use super::migrate;
 use crate::error::DevError;
+use crate::piners::ratchet::RatchetKind;
 
 /// How one harness field is projected out of `raw_json`.
 ///
@@ -150,7 +154,7 @@ impl Projection {
 /// NULL, `acc_failing` is `'[]'` when absent, and `sig_breaches` is present
 /// exactly when a signature object is. Declared types give the projections
 /// their affinity, so an integral p90 reads back REAL as it was stored.
-const PROJECTIONS: [(&str, Projection); 45] = [
+const PROJECTIONS: [(&str, Projection); 39] = [
     ("outcome", Projection::Text("$.outcome")),
     ("matched", Projection::CountOr0("$.matched")),
     ("ours_only", Projection::CountOr0("$.ours_only")),
@@ -227,50 +231,89 @@ const PROJECTIONS: [(&str, Projection); 45] = [
     ("window_sensitive", Projection::Array("$.window_sensitive")),
     // Why an `unevaluated` probe could not be evaluated (v16).
     ("reason", Projection::Text("$.reason")),
-    // The performance census, per leg (v18); NULL where a leg is absent.
-    (
-        "perf_equity_compared",
-        Projection::Count("$.performance.equity.compared"),
-    ),
-    (
-        "perf_equity_mismatched",
-        Projection::Count("$.performance.equity.mismatched"),
-    ),
-    (
-        "perf_equity_tolerance",
-        Projection::Text("$.performance.equity.tolerance"),
-    ),
-    (
-        "perf_scalars_compared",
-        Projection::Count("$.performance.scalars.compared"),
-    ),
-    (
-        "perf_scalars_mismatched",
-        Projection::Count("$.performance.scalars.mismatched"),
-    ),
-    (
-        "perf_scalars_tolerance",
-        Projection::Text("$.performance.scalars.tolerance"),
-    ),
 ];
 
-/// The v18 performance projections, in [`PROJECTIONS`] order.
-pub(super) const PERFORMANCE_PROJECTIONS: [&str; 6] = [
-    "perf_equity_compared",
-    "perf_equity_mismatched",
-    "perf_equity_tolerance",
-    "perf_scalars_compared",
-    "perf_scalars_mismatched",
-    "perf_scalars_tolerance",
-];
+/// One ratchet census projection: its kind, column name, JSON path, and
+/// whether it is the text `tolerance` rather than a count.
+type RatchetProjection = (RatchetKind, String, String, bool);
 
-/// The `ADD COLUMN` definition of the [`PROJECTIONS`] entry `name`, for a
-/// migration step that brings a projection to a store created before it.
-pub(super) fn disposition_projection_column(name: &str) -> Option<String> {
+/// The ratchet census projections (`ratchet.rs`), one rule for every kind:
+/// `<prefix>_<leg>_<count>` for each count a leg carries, then
+/// `<prefix>_<leg>_tolerance` where it carries one, each over
+/// `$.<key>.<leg>.<field>` and NULL where the line carried no such leg.
+/// Performance's six came at v18 (`perf_*`); the label (`label_*`) and
+/// excursion (`exc_*`) ones at v19, reading every row already stored.
+static RATCHET_PROJECTIONS: LazyLock<Vec<RatchetProjection>> = LazyLock::new(|| {
+    let mut out = Vec::new();
+    for kind in RatchetKind::ALL {
+        for leg in kind.legs() {
+            let fields = kind
+                .counts()
+                .iter()
+                .map(|c| (*c, false))
+                .chain(kind.has_tolerance().then_some(("tolerance", true)));
+            for (field, text) in fields {
+                out.push((
+                    kind,
+                    format!("{}_{leg}_{field}", kind.projection_prefix()),
+                    format!("$.{}.{leg}.{field}", kind.key()),
+                    text,
+                ));
+            }
+        }
+    }
+    out
+});
+
+/// The ratchet projections as `(name, projection)`, in kind then leg order.
+fn ratchet_projections() -> impl Iterator<Item = (&'static str, Projection)> {
+    LazyLock::force(&RATCHET_PROJECTIONS)
+        .iter()
+        .map(|(_, name, path, text)| {
+            let p = if *text {
+                Projection::Text(path.as_str())
+            } else {
+                Projection::Count(path.as_str())
+            };
+            (name.as_str(), p)
+        })
+}
+
+/// The ratchet projection names of one kind, for the migration step that
+/// brings them to a store created before them.
+pub(super) fn ratchet_projection_names(kind: RatchetKind) -> Vec<&'static str> {
+    LazyLock::force(&RATCHET_PROJECTIONS)
+        .iter()
+        .filter(|(k, ..)| *k == kind)
+        .map(|(_, name, ..)| name.as_str())
+        .collect()
+}
+
+/// Every `disposition` projection, the harness fields then the ratchet
+/// censuses, in column order.
+fn disposition_projections() -> Vec<(&'static str, Projection)> {
     PROJECTIONS
         .iter()
+        .copied()
+        .chain(ratchet_projections())
+        .collect()
+}
+
+/// Every projected `disposition` column name, in column order.
+pub(super) fn disposition_projection_names() -> Vec<&'static str> {
+    disposition_projections()
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect()
+}
+
+/// The `ADD COLUMN` definition of the projection `name`, for a migration
+/// step that brings a projection to a store created before it.
+pub(super) fn disposition_projection_column(name: &str) -> Option<String> {
+    disposition_projections()
+        .into_iter()
         .find(|(col, _)| *col == name)
-        .map(|(col, p)| column_def(col, *p))
+        .map(|(col, p)| column_def(col, p))
 }
 
 /// The `disposition` DDL under `name` - `disposition` itself, or the v5
@@ -291,11 +334,13 @@ pub(super) fn disposition_ddl(name: &str) -> String {
     defect        TEXT,
     expected_performance TEXT,
     performance_gate TEXT,
+    expected_excursions TEXT,
+    excursion_gate TEXT,
 {},
     PRIMARY KEY (run_id, probe)
 );
 CREATE INDEX IF NOT EXISTS idx_{name}_probe ON {name}(probe, run_id);",
-        generated(&PROJECTIONS)
+        generated(&disposition_projections())
     )
 }
 
@@ -303,9 +348,13 @@ CREATE INDEX IF NOT EXISTS idx_{name}_probe ON {name}(probe, run_id);",
 /// `disposition` ones are. Timestamps, deltas and bar indices are exact
 /// signed integers; ids, signals, labels, sides and `breaches` keep an empty
 /// string as stored. The v13 migration verifies the first 23 against the
-/// typed columns they replace; the last four arrived after the typed table
+/// typed columns they replace; the rest arrived after the typed table
 /// dropped them, so a reconstructed row reads NULL there - not retained.
-pub(super) const TRADE_DIFF_PROJECTIONS: [(&str, Projection); 27] = [
+/// v19 appended the excursions both sides carry and the held-quantity
+/// witness, after the typed prefix the v13 rebuild reads; an excursion is a
+/// metric, so one piners spells `inf` or `nan` reads NULL here (the record
+/// keeps it).
+pub(super) const TRADE_DIFF_PROJECTIONS: [(&str, Projection); 34] = [
     ("our_entry_ts", Projection::Int("$.our_entry_ts")),
     ("our_exit_ts", Projection::Int("$.our_exit_ts")),
     ("our_entry_price", Projection::Real("$.our_entry_price")),
@@ -333,7 +382,72 @@ pub(super) const TRADE_DIFF_PROJECTIONS: [(&str, Projection); 27] = [
     ("our_entry_label", Projection::Text("$.our_entry_label")),
     ("our_exit_label", Projection::Text("$.our_exit_label")),
     ("breaches", Projection::Text("$.breaches")),
+    ("our_run_up", Projection::Real("$.our_run_up")),
+    ("our_drawdown", Projection::Real("$.our_drawdown")),
+    ("tv_run_up", Projection::Real("$.tv_run_up")),
+    ("tv_drawdown", Projection::Real("$.tv_drawdown")),
+    ("tv_entry_value", Projection::Real("$.tv_entry_value")),
+    ("tv_held_qty_lo", Projection::Real("$.tv_held_qty_lo")),
+    ("tv_held_qty_hi", Projection::Real("$.tv_held_qty_hi")),
 ];
+
+/// The `ADD COLUMN` definition of the `trade_diff` projection `name`.
+pub(super) fn trade_diff_projection_column(name: &str) -> Option<String> {
+    TRADE_DIFF_PROJECTIONS
+        .iter()
+        .find(|(col, _)| *col == name)
+        .map(|(col, p)| column_def(col, *p))
+}
+
+/// The scalars leg's figures, one row per pair (v19), for `corpus-results
+/// --scalars` and `--sql`. A view, not a table: it reads the stored record,
+/// so it covers every retained row, and retention needs nothing for it.
+/// Every step is type-guarded, because the parser held `pairs` to nothing
+/// before v19 and the store keeps any record it accepted: only an array is
+/// expanded, a field is read only from an object element and only with the
+/// JSON type it should have, `figure` as text, `matched` from a boolean
+/// (1/0). `ours` and `theirs` are as sent: a JSON number as a REAL (an
+/// integer cast, so a numeric filter needs `typeof(ours) = 'real'`), a
+/// metric spelling (`inf`, `-inf`, `nan`) as TEXT. `diff` (ours - theirs)
+/// and `rel_diff` (|ours - theirs| over the larger magnitude, 0 when both
+/// are 0, the measure piners' scalars tolerance is stated in) are NULL
+/// unless both are numbers, and an overflowing difference reads as SQLite
+/// computes it. `matched` is piners' verdict; nothing here recomputes it.
+/// It reads only `run_id`, `probe` and `raw_json`, so a migration dropping
+/// another column never meets it.
+pub(super) const SCALAR_PAIR_VIEW: &str = "\
+CREATE VIEW IF NOT EXISTS scalar_pair AS
+SELECT run_id, probe, ordinal, figure, ours, theirs, matched,
+    CASE WHEN typeof(ours) = 'real' AND typeof(theirs) = 'real'
+        THEN ours - theirs END AS diff,
+    CASE WHEN typeof(ours) = 'real' AND typeof(theirs) = 'real' THEN
+        CASE WHEN ours = 0 AND theirs = 0 THEN 0.0
+            ELSE abs(ours - theirs) / max(abs(ours), abs(theirs)) END
+        END AS rel_diff
+FROM (
+    SELECT d.run_id AS run_id, d.probe AS probe, p.key AS ordinal,
+        CASE WHEN p.type = 'object' AND json_type(p.value, '$.figure') = 'text'
+            THEN json_extract(p.value, '$.figure') END AS figure,
+        CASE WHEN p.type = 'object' THEN
+            CASE json_type(p.value, '$.ours')
+                WHEN 'integer' THEN CAST(json_extract(p.value, '$.ours') AS REAL)
+                WHEN 'real' THEN json_extract(p.value, '$.ours')
+                WHEN 'text' THEN json_extract(p.value, '$.ours') END
+            END AS ours,
+        CASE WHEN p.type = 'object' THEN
+            CASE json_type(p.value, '$.theirs')
+                WHEN 'integer' THEN CAST(json_extract(p.value, '$.theirs') AS REAL)
+                WHEN 'real' THEN json_extract(p.value, '$.theirs')
+                WHEN 'text' THEN json_extract(p.value, '$.theirs') END
+            END AS theirs,
+        CASE WHEN p.type = 'object' THEN
+            CASE json_type(p.value, '$.match') WHEN 'true' THEN 1 WHEN 'false' THEN 0 END
+            END AS matched
+    FROM disposition AS d,
+        json_each(CASE WHEN json_type(d.raw_json, '$.performance.scalars.pairs') = 'array'
+            THEN json_extract(d.raw_json, '$.performance.scalars.pairs') END) AS p
+);
+";
 
 /// How many leading [`TRADE_DIFF_PROJECTIONS`] the typed (v12 and older)
 /// table kept, which the v13 rebuild reconstructs and verifies.
@@ -488,6 +602,7 @@ impl CorpusDb {
         conn.execute_batch(SCHEDULE_ESTIMATE_DDL)?;
         conn.execute_batch(&disposition_ddl("disposition"))?;
         conn.execute_batch(&trade_diff_ddl("trade_diff"))?;
+        conn.execute_batch(SCALAR_PAIR_VIEW)?;
         Ok(Self { conn })
     }
 }
@@ -496,6 +611,125 @@ impl CorpusDb {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    /// The generated ratchet columns keep the exact definitions stores
+    /// already hold: a v18 store's `perf_*` columns were written from this
+    /// text, and `CREATE TABLE IF NOT EXISTS` never reconciles a store with a
+    /// changed rule, so the rule may not drift from them.
+    #[test]
+    fn the_v18_performance_projections_keep_their_definitions() {
+        let expected = [
+            (
+                "perf_equity_compared",
+                "$.performance.equity.compared",
+                false,
+            ),
+            (
+                "perf_equity_mismatched",
+                "$.performance.equity.mismatched",
+                false,
+            ),
+            (
+                "perf_equity_tolerance",
+                "$.performance.equity.tolerance",
+                true,
+            ),
+            (
+                "perf_scalars_compared",
+                "$.performance.scalars.compared",
+                false,
+            ),
+            (
+                "perf_scalars_mismatched",
+                "$.performance.scalars.mismatched",
+                false,
+            ),
+            (
+                "perf_scalars_tolerance",
+                "$.performance.scalars.tolerance",
+                true,
+            ),
+        ];
+        assert_eq!(
+            ratchet_projection_names(RatchetKind::Performance),
+            expected.map(|(n, ..)| n)
+        );
+        for (name, path, text) in expected {
+            let p = if text {
+                Projection::Text(path)
+            } else {
+                Projection::Count(path)
+            };
+            assert_eq!(
+                disposition_projection_column(name),
+                Some(column_def(name, p)),
+                "{name}"
+            );
+        }
+        assert!(disposition_projection_column("exc_run_up_ambiguous").is_some());
+        assert!(disposition_projection_column("label_exit_unavailable").is_some());
+        assert!(disposition_projection_column("exc_run_up_frob").is_none());
+    }
+
+    /// The view reads what the record states and nothing it cannot type.
+    #[test]
+    fn scalar_pair_reads_each_figure_and_guards_what_it_cannot_type() {
+        let db = CorpusDb::open_in_memory().unwrap();
+        let line = |probe: &str, pairs: &str| {
+            format!(
+                r#"{{"probe":"{probe}","performance":{{"scalars":{{"compared":2,"mismatched":1,"tolerance":"t","pairs":{pairs}}}}}}}"#
+            )
+        };
+        db.conn()
+            .execute_batch(
+                "INSERT INTO run (run_id, started_at, selector, gated, result, probe_count) \
+                 VALUES (1, 'then', '{}', 1, 'pass', 3)",
+            )
+            .unwrap();
+        for (probe, raw) in [
+            (
+                "a",
+                line(
+                    "a",
+                    r#"[{"figure":"max_runup","ours":100,"theirs":101.0,"match":false},{"figure":"max_drawdown","ours":0,"theirs":0,"match":true},{"figure":"f","ours":"nan","theirs":1,"match":0}]"#,
+                ),
+            ),
+            ("b", line("b", r#"["bad", 3]"#)),
+            ("c", line("c", r#"{"not":"an array"}"#)),
+        ] {
+            db.conn()
+                .execute(
+                    "INSERT INTO disposition (run_id, probe, disposition, gate_ok, raw_source, \
+                     raw_json) VALUES (1, ?1, 'accepted', 1, 'harness', ?2)",
+                    rusqlite::params![probe, raw],
+                )
+                .unwrap();
+        }
+        let t = db
+            .raw_sql(
+                "SELECT probe, ordinal, figure, ours, theirs, matched, diff, rel_diff, \
+                 typeof(ours) FROM scalar_pair ORDER BY probe, ordinal",
+            )
+            .unwrap();
+        let rows: Vec<Vec<&str>> = t
+            .rows
+            .iter()
+            .map(|r| r.iter().map(String::as_str).collect())
+            .collect();
+        assert_eq!(rows.len(), 5, "{rows:?}");
+        assert_eq!(rows[0][..6], ["a", "0", "max_runup", "100", "101", "0"]);
+        assert_eq!(rows[0][8], "real");
+        assert!(rows[0][7].starts_with("0.0099"), "{rows:?}");
+        assert_eq!(rows[1][7], "0", "two zeros are no difference");
+        // A metric spelling is shown as sent, with no arithmetic, and a
+        // non-boolean match reads NULL.
+        assert_eq!(rows[2][3], "nan");
+        assert_eq!(rows[2][8], "text");
+        assert_eq!(rows[2][6], rows[2][7]);
+        // Elements that are no object expand to rows holding nothing; a
+        // non-array never expands.
+        assert!(rows[3..].iter().all(|r| r[0] == "b" && r[2] == rows[2][6]));
+    }
 
     #[test]
     fn readonly_open_migrates_an_older_store_first() {

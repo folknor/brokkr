@@ -16,6 +16,8 @@
 //!    [--where E]`             (`all` => every column, vertical), and/or filtered
 //! - `--dispositions …`    -> the same shaping over `disposition`, including
 //!   the harness diagnostics the run-detail view omits
+//! - `--scalars ...`       -> the same shaping over the `scalar_pair` view:
+//!   the performance scalars leg's missed figures (`--full`: every figure)
 //! - `--runtimes [--over S]` -> per-probe most-recent runtime, slowest first
 //! - `--trend X`           -> X's disposition/count_tier/p90, anchor and shift
 //!   census over recent runs
@@ -90,6 +92,8 @@ pub fn cmd(project_root: &Path, q: &CorpusQuery) -> Result<(), DevError> {
         Some(Shaped::Diffs)
     } else if q.dispositions {
         Some(Shaped::Dispositions)
+    } else if q.scalars {
+        Some(Shaped::Scalars)
     } else {
         None
     };
@@ -115,7 +119,7 @@ pub fn cmd(project_root: &Path, q: &CorpusQuery) -> Result<(), DevError> {
             }
             None => None,
         };
-        let table = db.shaped(shape, run_id, &q.probe, &columns, where_expr)?;
+        let table = db.shaped(shape, run_id, &q.probe, &columns, where_expr, q.full)?;
         if defaulted {
             println!("run {run_id} (latest; --run N for another)");
         } else {
@@ -134,8 +138,8 @@ pub fn cmd(project_root: &Path, q: &CorpusQuery) -> Result<(), DevError> {
     if !q.probe.is_empty() {
         if q.probe.len() > 1 {
             return Err(DevError::Config(
-                "corpus-results: multiple --probe needs --diffs or --dispositions (the \
-                 multi-probe tables); a bare --probe shows one probe's full combo view"
+                "corpus-results: multiple --probe needs --diffs, --dispositions or --scalars \
+                 (the multi-probe tables); a bare --probe shows one probe's full combo view"
                     .to_owned(),
             ));
         }
@@ -168,7 +172,7 @@ fn explicit_run_id(q: &CorpusQuery) -> Option<i64> {
 /// Reject options that would otherwise be accepted and silently ignored by a
 /// higher-priority corpus-results view.
 fn validate_query(q: &CorpusQuery) -> Result<(), DevError> {
-    let shaped = q.diffs || q.dispositions;
+    let shaped = q.diffs || q.dispositions || q.scalars;
 
     if q.over.is_some() && !q.runtimes {
         return Err(DevError::Config(
@@ -179,7 +183,7 @@ fn validate_query(q: &CorpusQuery) -> Result<(), DevError> {
     // `--columns` with --dispositions is supported even without --diffs.
     if !shaped && (!q.columns.is_empty() || q.where_expr.is_some()) {
         return Err(DevError::Config(
-            "corpus-results --columns/--where shape the --diffs or --dispositions table - \
+            "corpus-results --columns/--where shape the --diffs, --dispositions or --scalars table - \
              add one (e.g. `--diffs --probe <id> --columns our_qty,tv_entry_qty`)"
                 .to_owned(),
         ));
@@ -188,8 +192,7 @@ fn validate_query(q: &CorpusQuery) -> Result<(), DevError> {
     let sql_conflict = q.run_id.is_some()
         || q.run.is_some()
         || !q.probe.is_empty()
-        || q.diffs
-        || q.dispositions
+        || shaped
         || !q.columns.is_empty()
         || q.runtimes
         || q.over.is_some()
@@ -207,8 +210,7 @@ fn validate_query(q: &CorpusQuery) -> Result<(), DevError> {
     let trend_conflict = q.run_id.is_some()
         || q.run.is_some()
         || !q.probe.is_empty()
-        || q.diffs
-        || q.dispositions
+        || shaped
         || !q.columns.is_empty()
         || q.runtimes
         || q.over.is_some()
@@ -225,8 +227,7 @@ fn validate_query(q: &CorpusQuery) -> Result<(), DevError> {
     let runtimes_conflict = q.run_id.is_some()
         || q.run.is_some()
         || !q.probe.is_empty()
-        || q.diffs
-        || q.dispositions
+        || shaped
         || !q.columns.is_empty()
         || q.where_expr.is_some()
         || q.full
@@ -238,9 +239,10 @@ fn validate_query(q: &CorpusQuery) -> Result<(), DevError> {
         ));
     }
 
-    if shaped && (q.full || q.compare.is_some()) {
+    if shaped && (q.compare.is_some() || (q.full && !q.scalars)) {
         return Err(DevError::Config(
-            "corpus-results --full/--compare cannot be combined with --diffs or --dispositions."
+            "corpus-results --full/--compare cannot be combined with --diffs or --dispositions, \
+             and --compare not with --scalars (whose --full shows every pair)."
                 .to_owned(),
         ));
     }
@@ -250,9 +252,9 @@ fn validate_query(q: &CorpusQuery) -> Result<(), DevError> {
                 .to_owned(),
         ));
     }
-    if q.full && q.run_id.is_none() && q.run.is_none() && q.compare.is_none() {
+    if q.full && !q.scalars && q.run_id.is_none() && q.run.is_none() && q.compare.is_none() {
         return Err(DevError::Config(
-            "corpus-results --full requires a run id (or --compare).".to_owned(),
+            "corpus-results --full requires a run id (or --compare, or --scalars).".to_owned(),
         ));
     }
 
@@ -456,8 +458,7 @@ mod tests {
             sig_dimension: None,
             error: None,
             reason: None,
-            label_gate: None,
-            performance_gate: None,
+            ratchet_gates: [None, None, None],
             scored: None,
             defect: None,
         }

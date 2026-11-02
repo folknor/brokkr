@@ -30,11 +30,14 @@ pub(crate) struct CorpusQuery {
     /// Row cap for the recent-runs table and `--trend` history.
     pub(crate) limit: usize,
     /// Probe selector. One id (no table flag) is the combo view; repeated
-    /// under `--diffs`/`--dispositions` is an IN-list filter on that table.
+    /// under `--diffs`/`--dispositions`/`--scalars` is an IN-list filter on that table.
     pub(crate) probe: Vec<String>,
     pub(crate) diffs: bool,
     pub(crate) dispositions: bool,
-    /// `--columns` projection for the `--diffs`/`--dispositions` table. Empty
+    /// `--scalars`: the performance scalars leg's figures, one row per pair
+    /// (the missed ones unless `--full`).
+    pub(crate) scalars: bool,
+    /// `--columns` projection for the `--diffs`/`--dispositions`/`--scalars` table. Empty
     /// = that table's curated default; `["all"]` = every column, rendered
     /// vertically; else a validated subset.
     pub(crate) columns: Vec<String>,

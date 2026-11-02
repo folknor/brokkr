@@ -1,12 +1,10 @@
 //! `brokkr corpus --bless`: stamp each selected probe's *current*
-//! disposition into its `expected` field in `pins.toml`, and its per-leg
-//! displayed-label mismatch counts into `labels` (the label ratchet,
-//! `gate.rs`): a parity line's census is stamped, a non-parity line clears
-//! the counts, and a parity line without a census leaves an unpinned probe
-//! unpinned but refuses the bless where it would drop counts already pinned.
-//! The performance counts (`performance.rs`) follow the same rules per leg:
-//! every leg the parity line carries is stamped, and a pinned leg it does
-//! not carry refuses the bless.
+//! disposition into its `expected` field in `pins.toml`, and each ratchet
+//! census's per-leg mismatch counts into `labels`, `performance` and
+//! `excursions` (`ratchet.rs`): every leg a parity line carries is stamped,
+//! a non-parity line clears the counts, and a parity line without a leg
+//! leaves an unpinned leg unpinned but refuses the bless where it would drop
+//! a count already pinned.
 //!
 //! Bless is the sibling of `--reseed`: reseed adopts new corpus *content*
 //! (re-hashing the pinned probe files), bless adopts new *dispositions*. Both are
@@ -28,50 +26,28 @@ use std::path::Path;
 
 use crate::error::DevError;
 use crate::output;
-use crate::piners::performance;
 use crate::piners::pins_write;
-use crate::piners::registry::{LabelPin, PerformancePin, PinnedDisposition, Registry};
+use crate::piners::ratchet::{self, LegPin, RatchetKind};
+use crate::piners::registry::{PinnedDisposition, Registry};
 use crate::piners::registry_io;
-use crate::piners::report::{HarnessReport, LabelCensus, ProbeLine, ProbeOutcome};
+use crate::piners::report::{HarnessReport, ProbeLine, ProbeOutcome};
 
-/// What a bless stamps into one probe's pin.
+/// What a bless stamps into one probe's pin: its disposition and each
+/// ratchet kind's counts.
 struct Stamp {
     disposition: PinnedDisposition,
-    labels: Option<LabelPin>,
-    performance: Option<PerformancePin>,
-}
-
-/// The label counts a bless stamps for one probe with a valid line, or
-/// `None` when it must refuse. A non-parity line has no labels to pin; a
-/// parity line pins its census. A parity line without one keeps an unpinned
-/// probe unpinned (a harness predating the census still blesses), but cannot
-/// replace counts the pin already holds: that would turn a harness that lost
-/// the census into an authorized-looking removal of the ratchet.
-fn label_stamp(
-    parity: bool,
-    census: Option<LabelCensus>,
-    pinned: Option<LabelPin>,
-) -> Option<Option<LabelPin>> {
-    match (parity, census, pinned) {
-        (false, _, _) => Some(None),
-        (true, Some(c), _) => Some(Some(LabelPin {
-            entry: c.entry.mismatched,
-            exit: c.exit.mismatched,
-        })),
-        (true, None, None) => Some(None),
-        (true, None, Some(_)) => None,
-    }
+    ratchets: BTreeMap<RatchetKind, Option<LegPin>>,
 }
 
 /// Why a bless is refused, naming every probe per reason; `None` when it
-/// may proceed.
+/// may proceed. `lost` holds, per ratchet kind, each probe whose parity line
+/// does not carry a leg its pin holds, with those legs.
 fn refusal(
     missing: &[&str],
     rejected: &[String],
     unevaluated: &[String],
     unpinned: &[&str],
-    lost_labels: &[&str],
-    lost_performance: &[String],
+    lost: &BTreeMap<RatchetKind, Vec<String>>,
 ) -> Option<String> {
     let mut why = Vec::new();
     if !missing.is_empty() {
@@ -92,17 +68,14 @@ fn refusal(
     if !unpinned.is_empty() {
         why.push(format!("internal: not pinned: {}", unpinned.join(", ")));
     }
-    if !lost_labels.is_empty() {
-        why.push(format!(
-            "pinned label counts but no label census on the parity line for {}",
-            lost_labels.join(", ")
-        ));
-    }
-    if !lost_performance.is_empty() {
-        why.push(format!(
-            "a pinned performance leg the parity line does not carry for {}",
-            lost_performance.join(", ")
-        ));
+    for (kind, probes) in lost {
+        if !probes.is_empty() {
+            why.push(format!(
+                "a pinned {} leg the parity line does not carry for {}",
+                kind.key(),
+                probes.join(", ")
+            ));
+        }
     }
     (!why.is_empty()).then(|| why.join("; "))
 }
@@ -126,8 +99,7 @@ fn plan_stamps<'a>(
     let mut rejected: Vec<String> = Vec::new();
     let mut unevaluated: Vec<String> = Vec::new();
     let mut unpinned: Vec<&str> = Vec::new();
-    let mut lost_labels: Vec<&str> = Vec::new();
-    let mut lost_performance: Vec<String> = Vec::new();
+    let mut lost: BTreeMap<RatchetKind, Vec<String>> = BTreeMap::new();
     let mut stamps: BTreeMap<&str, Stamp> = BTreeMap::new();
     for id in scope_ids {
         let Some(line) = lines.get(id.as_str()) else {
@@ -142,40 +114,39 @@ fn plan_stamps<'a>(
             Some(_) if !registry.pins.contains_key(id) => unpinned.push(id),
             Some(ProbeOutcome::Evaluated(disp)) => {
                 let pin = registry.pins.get(id);
-                let labels = label_stamp(disp.is_parity(), line.census, pin.and_then(|p| p.labels));
-                if labels.is_none() {
-                    lost_labels.push(id);
+                let mut ratchets = BTreeMap::new();
+                let mut stampable = true;
+                for kind in RatchetKind::ALL {
+                    match ratchet::stamp(
+                        kind,
+                        disp.is_parity(),
+                        line.census(kind),
+                        pin.and_then(|p| p.ratchet(kind)),
+                    ) {
+                        Ok(counts) => {
+                            ratchets.insert(kind, counts);
+                        }
+                        Err(legs) => {
+                            stampable = false;
+                            lost.entry(kind)
+                                .or_default()
+                                .push(format!("{id} ({})", legs.join(", ")));
+                        }
+                    }
                 }
-                let performance = performance::stamp(
-                    disp.is_parity(),
-                    line.performance.as_ref(),
-                    pin.and_then(|p| p.performance),
-                );
-                if let Err(legs) = &performance {
-                    let legs: Vec<&str> = legs.iter().map(|l| l.as_str()).collect();
-                    lost_performance.push(format!("{id} ({})", legs.join(", ")));
-                }
-                if let (Some(labels), Ok(performance)) = (labels, performance) {
+                if stampable {
                     stamps.insert(
                         id,
                         Stamp {
                             disposition: *disp,
-                            labels,
-                            performance,
+                            ratchets,
                         },
                     );
                 }
             }
         }
     }
-    match refusal(
-        &missing,
-        &rejected,
-        &unevaluated,
-        &unpinned,
-        &lost_labels,
-        &lost_performance,
-    ) {
+    match refusal(&missing, &rejected, &unevaluated, &unpinned, &lost) {
         Some(why) => Err(DevError::Config(format!(
             "corpus --bless: nothing blessed, pins.toml untouched - every selected probe needs \
              a stampable disposition ({why})"
@@ -234,14 +205,17 @@ pub fn apply(
             continue; // unreachable: validated above
         };
         blessed += 1;
-        if pin.expected != Some(stamp.disposition)
-            || pin.labels != stamp.labels
-            || pin.performance != stamp.performance
-        {
+        let moved = pin.expected != Some(stamp.disposition)
+            || stamp
+                .ratchets
+                .iter()
+                .any(|(kind, counts)| pin.ratchet(*kind) != counts.as_ref());
+        if moved {
             changed += 1;
             pin.expected = Some(stamp.disposition);
-            pin.labels = stamp.labels;
-            pin.performance = stamp.performance;
+            for (kind, counts) in &stamp.ratchets {
+                *pin.ratchet_mut(*kind) = counts.clone();
+            }
         }
     }
 
@@ -356,7 +330,7 @@ mod tests {
         let mut pins = BTreeMap::new();
         pins.insert("a".to_owned(), pin(Some("accepted"))); // gains labels
         let mut broke = pin(Some("accepted"));
-        broke.labels = Some(LabelPin { entry: 0, exit: 0 });
+        broke.labels = Some(LegPin::from([("entry", 0), ("exit", 0)]));
         pins.insert("b".to_owned(), broke); // now compile_fail: labels clear
         pins.insert("c".to_owned(), pin(None)); // old harness: stays unpinned
         let rep = report(&format!(
@@ -372,7 +346,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             on_disk.probes["a"].labels,
-            Some(LabelPin { entry: 1, exit: 3 })
+            Some(LegPin::from([("entry", 1), ("exit", 3)]))
         );
         assert_eq!(on_disk.probes["b"].labels, None);
         assert_eq!(on_disk.probes["c"].labels, None);
@@ -384,16 +358,23 @@ mod tests {
         let pins_path = dir.join("pins.toml");
         std::fs::write(&pins_path, LOADED).unwrap();
         let mut pinned = pin(Some("accepted"));
-        pinned.labels = Some(LabelPin { entry: 0, exit: 2 });
+        pinned.labels = Some(LegPin::from([("entry", 0), ("exit", 2)]));
         let mut pins = BTreeMap::new();
         pins.insert("a".to_owned(), pinned);
         let mut reg = registry_of(pins);
         reg.pins_text = LOADED.to_owned();
         let rep = report(r#"{"probe":"a","outcome":"parity","acceptance":{"tier":"byte_exact"}}"#);
         let err = apply(&pins_path, &mut reg, &rep, &["a".to_owned()]).unwrap_err();
-        assert!(err.to_string().contains("no label census"));
+        assert!(
+            err.to_string()
+                .contains("a pinned labels leg the parity line does not carry for a (entry, exit)"),
+            "{err}"
+        );
         assert_eq!(std::fs::read_to_string(&pins_path).unwrap(), LOADED);
-        assert_eq!(reg.pins["a"].labels, Some(LabelPin { entry: 0, exit: 2 }));
+        assert_eq!(
+            reg.pins["a"].labels,
+            Some(LegPin::from([("entry", 0), ("exit", 2)]))
+        );
     }
 
     #[test]
@@ -422,10 +403,7 @@ mod tests {
         let on_disk = registry::parse_pins(&written, &pins_path).unwrap();
         assert_eq!(
             on_disk.probes["a"].performance,
-            Some(PerformancePin {
-                equity: Some(1),
-                scalars: Some(0)
-            })
+            Some(LegPin::from([("equity", 1), ("scalars", 0)]))
         );
         // The equity leg went missing: refused, nothing written.
         let scalars_only =
@@ -437,6 +415,37 @@ mod tests {
             "{err}"
         );
         assert_eq!(std::fs::read_to_string(&pins_path).unwrap(), written);
+    }
+
+    #[test]
+    fn stamps_excursion_legs_in_leg_order_and_clears_them_on_a_break() {
+        let dir = crate::test_scratch::scratch("piners_bless", "stamps_excursions");
+        let pins_path = dir.join("pins.toml");
+        let mut pins = BTreeMap::new();
+        pins.insert("a".to_owned(), pin(Some("accepted")));
+        let mut reg = registry_of(pins);
+        let leg = |n: u64| {
+            format!(
+                "{{\"compared\":9,\"mismatched\":{n},\"ambiguous\":0,\"unavailable\":1,\
+                 \"tolerance\":\"t\"}}"
+            )
+        };
+        let rep = report(&format!(
+            "{{\"probe\":\"a\",\"outcome\":\"parity\",\"acceptance\":{{\"tier\":\"accepted\"}},\
+             \"excursions\":{{\"drawdown\":{},\"run_up\":{}}}}}",
+            leg(1),
+            leg(4)
+        ));
+        apply(&pins_path, &mut reg, &rep, &["a".to_owned()]).unwrap();
+        let written = std::fs::read_to_string(&pins_path).unwrap();
+        assert!(
+            written.contains("excursions = { run_up = 4, drawdown = 1 }"),
+            "{written}"
+        );
+        let broke = report(r#"{"probe":"a","outcome":"runtime_fail","error":"x"}"#);
+        apply(&pins_path, &mut reg, &broke, &["a".to_owned()]).unwrap();
+        let written = std::fs::read_to_string(&pins_path).unwrap();
+        assert!(!written.contains("excursions"), "{written}");
     }
 
     #[test]

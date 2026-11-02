@@ -22,9 +22,9 @@ use rusqlite::params;
 use super::CorpusDb;
 use crate::db::store::as_i64;
 use crate::error::DevError;
-use crate::piners::gate::{GateVerdict, LabelAssessment};
+use crate::piners::gate::GateVerdict;
 use crate::piners::integrity::Reconciliation;
-use crate::piners::performance::PerformanceAssessment;
+use crate::piners::ratchet::{Assessment, RatchetKind};
 use crate::piners::report::{HarnessReport, ProbeLine, TradeDiffLine};
 use crate::piners::run_model::RunVerdict;
 
@@ -313,8 +313,7 @@ fn record_inner(
     // a line for a probe outside the selection, which the gate ignores but a
     // recomputation against the (selection-only) expected map stored as
     // DEVIATES - so a passing run read as failing in `corpus-results`. It is
-    // the conjunction of every check: the disposition, the label ratchet and
-    // the performance ratchet.
+    // the conjunction of every check: the disposition and every ratchet.
     let deviating = gate.deviating();
 
     // Every row is stored, scored or not, and says which it is: `scored` is
@@ -323,8 +322,8 @@ fn record_inner(
     for p in &report.probes {
         let annotation = Annotation {
             gate_ok: !deviating.contains(p.probe.as_str()),
-            labels: gate.assessments.get(&p.probe),
-            performance: gate.performance_assessments.get(&p.probe),
+            ratchets: RatchetKind::ALL
+                .map(|kind| gate.ratchet(kind).and_then(|v| v.assessments.get(&p.probe))),
             scored: rec.valid.contains(&p.probe),
             defect: defect_of(p, report),
         };
@@ -382,8 +381,8 @@ fn record_inner(
 /// brokkr's own verdicts on one stored row.
 struct Annotation<'a> {
     gate_ok: bool,
-    labels: Option<&'a LabelAssessment>,
-    performance: Option<&'a PerformanceAssessment>,
+    /// Each ratchet kind's assessment, in [`RatchetKind::ALL`] order.
+    ratchets: [Option<&'a Assessment>; 3],
     scored: bool,
     defect: Option<String>,
 }
@@ -406,30 +405,43 @@ fn insert_disposition(
             p.probe
         )));
     }
+    let mut columns = vec![
+        "run_id",
+        "probe",
+        "disposition",
+        "expected",
+        "gate_ok",
+        "raw_source",
+        "raw_json",
+        "scored",
+        "defect",
+    ];
+    let mut values: Vec<rusqlite::types::Value> = vec![
+        run_id.into(),
+        p.probe.clone().into(),
+        p.disposition().into(),
+        expected.get(&p.probe).cloned().flatten().into(),
+        i64::from(annotation.gate_ok).into(),
+        "harness".to_owned().into(),
+        p.raw.clone().into(),
+        i64::from(annotation.scored).into(),
+        annotation.defect.clone().into(),
+    ];
+    // Each ratchet's pin and verdict, in its own column pair.
+    for (kind, assessment) in RatchetKind::ALL.into_iter().zip(annotation.ratchets) {
+        let (pin, verdict) = kind.columns();
+        columns.extend([pin, verdict]);
+        values.push(assessment.and_then(Assessment::pinned_json).into());
+        values.push(assessment.and_then(Assessment::deviations_json).into());
+    }
+    let placeholders: Vec<String> = (1..=values.len()).map(|i| format!("?{i}")).collect();
     conn.execute(
-        "INSERT INTO disposition \
-         (run_id, probe, disposition, expected, gate_ok, raw_source, raw_json, \
-          expected_labels, label_gate, scored, defect, expected_performance, \
-          performance_gate) \
-         VALUES (?1, ?2, ?3, ?4, ?5, 'harness', ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-        params![
-            run_id,
-            p.probe,
-            p.disposition(),
-            expected.get(&p.probe).cloned().flatten(),
-            i64::from(annotation.gate_ok),
-            p.raw,
-            annotation.labels.and_then(LabelAssessment::pinned_json),
-            annotation.labels.and_then(LabelAssessment::deviations_json),
-            i64::from(annotation.scored),
-            annotation.defect,
-            annotation
-                .performance
-                .and_then(PerformanceAssessment::pinned_json),
-            annotation
-                .performance
-                .and_then(PerformanceAssessment::deviations_json),
-        ],
+        &format!(
+            "INSERT INTO disposition ({}) VALUES ({})",
+            columns.join(", "),
+            placeholders.join(", ")
+        ),
+        rusqlite::params_from_iter(values),
     )?;
     Ok(())
 }

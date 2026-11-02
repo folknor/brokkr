@@ -43,6 +43,7 @@ use serde::Deserialize;
 
 use crate::error::DevError;
 use crate::lockfile::LockGuard;
+use crate::piners::ratchet::{self, LegPin, RatchetKind};
 use crate::piners::registry_io;
 use crate::preflight;
 
@@ -531,17 +532,19 @@ pub struct Pin {
     /// and the retired labels fail to deserialize, naming why.
     #[serde(default)]
     pub expected: Option<PinnedDisposition>,
-    /// The blessed per-leg displayed-label mismatch counts, the label
-    /// ratchet (`gate.rs`). `None` means never stamped: labels are ungated
-    /// for the probe until a bless of a parity line carrying the census.
-    /// Stamped and carried exactly like `expected`.
+    /// The blessed per-leg mismatch counts of the three ratchets
+    /// (`ratchet.rs`): the displayed-label census (`entry`, `exit`, both
+    /// required), the performance census (`equity`, `scalars`) and the
+    /// excursion census (`run_up`, `drawdown`). `None` means never stamped:
+    /// the kind is ungated for the probe until a bless of a parity line
+    /// carrying its census; a leg left out is ungated. Stamped and carried
+    /// exactly like `expected`. Read through [`Pin::ratchet`].
     #[serde(default)]
-    pub labels: Option<LabelPin>,
-    /// The blessed per-leg equity and report-scalar mismatch counts, the
-    /// performance ratchet (`performance.rs`). `None` means never stamped;
-    /// a leg left out is ungated. Stamped and carried exactly like `labels`.
+    pub labels: Option<LegPin>,
     #[serde(default)]
-    pub performance: Option<PerformancePin>,
+    pub performance: Option<LegPin>,
+    #[serde(default)]
+    pub excursions: Option<LegPin>,
     pub pine: FilePin,
     /// The probe's `inputs.json`, when the probe dir carries one.
     #[serde(default)]
@@ -553,27 +556,6 @@ pub struct Pin {
     /// one. Outranks `csv` harness-side.
     #[serde(default)]
     pub record: Option<FilePin>,
-}
-
-/// A probe's blessed label mismatch counts, one per leg. Only `mismatched`
-/// is pinned: `ambiguous` moves with the pairing, so it is reported, never
-/// gated. Both legs are required; only the table as a whole is optional.
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct LabelPin {
-    pub entry: u64,
-    pub exit: u64,
-}
-
-/// A probe's blessed performance mismatch counts. Each leg is optional, a
-/// leg left out being ungated; a table pinning neither is refused at load.
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct PerformancePin {
-    #[serde(default)]
-    pub equity: Option<u64>,
-    #[serde(default)]
-    pub scalars: Option<u64>,
 }
 
 /// A probe's pinned files, as reseed stamps them.
@@ -594,6 +576,7 @@ impl Pin {
             expected: None,
             labels: None,
             performance: None,
+            excursions: None,
             pine: files.pine,
             inputs: files.inputs,
             csv: files.csv,
@@ -610,6 +593,31 @@ impl Pin {
             csv: Some(csv),
             record: None,
         })
+    }
+
+    /// The pinned counts of one ratchet kind.
+    pub const fn ratchet(&self, kind: RatchetKind) -> Option<&LegPin> {
+        match kind {
+            RatchetKind::Labels => self.labels.as_ref(),
+            RatchetKind::Performance => self.performance.as_ref(),
+            RatchetKind::Excursions => self.excursions.as_ref(),
+        }
+    }
+
+    /// The pinned counts of one ratchet kind, for a writer.
+    pub const fn ratchet_mut(&mut self, kind: RatchetKind) -> &mut Option<LegPin> {
+        match kind {
+            RatchetKind::Labels => &mut self.labels,
+            RatchetKind::Performance => &mut self.performance,
+            RatchetKind::Excursions => &mut self.excursions,
+        }
+    }
+
+    /// Whether any ratchet kind is pinned.
+    pub fn any_ratchet(&self) -> bool {
+        RatchetKind::ALL
+            .into_iter()
+            .any(|k| self.ratchet(k).is_some())
     }
 
     /// The probe dir, relative to `corpus_root`: where the harness reads
@@ -732,14 +740,10 @@ fn check_pins(probes: &BTreeMap<String, Pin>) -> Vec<String> {
                  or both"
             ));
         }
-        if pin
-            .performance
-            .is_some_and(|p| p.equity.is_none() && p.scalars.is_none())
-        {
-            problems.push(format!(
-                "{id}: `performance` pins no leg - pin `equity`, `scalars`, or both, or drop the \
-                 key"
-            ));
+        for kind in RatchetKind::ALL {
+            if let Some(why) = pin.ratchet(kind).and_then(|p| ratchet::check_pin(kind, p)) {
+                problems.push(format!("{id}: {why}"));
+            }
         }
         let dir = pin.probe_dir();
         // `components()` quietly drops an internal `.`, so the rebuilt spelling

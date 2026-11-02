@@ -9,6 +9,7 @@ use super::compare::{self, Comparison, Presence, ProbeDelta};
 use super::query::{
     DispositionRow, GateMissRow, RawTable, RunRow, RuntimeRow, ShiftCensus, TradeDiffRow, TrendRow,
 };
+use crate::piners::ratchet::RatchetKind;
 use crate::piners::table::grid;
 
 /// Compact float formatting: trims trailing zeros, `-` for `None`. Exact
@@ -264,10 +265,11 @@ fn compare_cells(d: &ProbeDelta) -> Vec<String> {
     }
 }
 
-/// A stored ratchet verdict (labels or performance), compactly: `-` when the
-/// probe was not checked (or the row predates the ratchet), `ok` when clean,
-/// else each deviation as `entry 0->3`, `equity missing` for a performance
-/// leg, or `missing census` for the label census.
+/// A stored ratchet verdict, compactly: `-` when the probe was not checked
+/// (or the row predates the ratchet), `ok` when clean, else each deviation
+/// as `entry 0->3`, `equity missing` for a missing leg, or `missing census`
+/// for the whole-census shape label rows stored before the ratchets shared
+/// one implementation.
 fn ratchet_cell(stored: Option<&str>) -> String {
     let Some(text) = stored else {
         return "-".to_owned();
@@ -324,14 +326,15 @@ pub fn dispositions_table(rows: &[DispositionRow]) -> String {
                 (Some(dom), None) => dom.clone(),
                 _ => "-".to_owned(),
             };
-            vec![
+            let mut row = vec![
                 d.probe.clone(),
                 d.outcome.clone(),
                 d.disposition.clone(),
                 fs(&d.expected),
                 gate_cell(d.gate_ok, d.scored, d.defect.as_deref()),
-                ratchet_cell(d.label_gate.as_deref()),
-                ratchet_cell(d.performance_gate.as_deref()),
+            ];
+            row.extend(d.ratchet_gates.iter().map(|g| ratchet_cell(g.as_deref())));
+            row.extend([
                 d.matched.to_string(),
                 d.ours_only.to_string(),
                 d.tv_only.to_string(),
@@ -356,32 +359,26 @@ pub fn dispositions_table(rows: &[DispositionRow]) -> String {
                         None => detail,
                     }
                 },
-            ]
+            ]);
+            row
         })
         .collect();
-    grid(
-        &[
-            "probe",
-            "outcome",
-            "disposition",
-            "expected",
-            "gate",
-            "labels",
-            "perf",
-            "matched",
-            "ours",
-            "tv",
-            "b_ours",
-            "b_tv",
-            "count_tier",
-            "p90_en",
-            "p90_ex",
-            "p90_pnl",
-            "signature",
-            "error",
-        ],
-        &cells,
-    )
+    let mut headers = vec!["probe", "outcome", "disposition", "expected", "gate"];
+    headers.extend(RatchetKind::ALL.map(RatchetKind::header));
+    headers.extend([
+        "matched",
+        "ours",
+        "tv",
+        "b_ours",
+        "b_tv",
+        "count_tier",
+        "p90_en",
+        "p90_ex",
+        "p90_pnl",
+        "signature",
+        "error",
+    ]);
+    grid(&headers, &cells)
 }
 
 /// The gate-miss block (selected probes that emitted no line).

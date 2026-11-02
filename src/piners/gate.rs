@@ -12,18 +12,14 @@
 //! `expected` yet (freshly reseeded, never blessed - "must bless") and a
 //! selected probe the harness emitted no disposition for.
 //!
-//! Beside the disposition, each pin may carry its per-leg displayed-label
-//! mismatch counts (`labels`), and [`GateVerdict`] ratchets them: a count
-//! that moves either way fails, as a tier move does, until a bless adopts
-//! it. The census needs no per-probe judgement of whether a probe's labels
-//! should agree - a probe whose labels legitimately differ (counter-built
-//! ids, value-bearing comments) just pins its count. A pin without `labels`
-//! is ungated for labels (counted as unpinned) until a bless stamps it, so
-//! adopting the ratchet changes no existing verdict. `ambiguous` moves with
-//! the pairing and is reported, never gated.
-//!
-//! The performance ratchet (`performance.rs`) runs beside it on the same
-//! lines, per pinned leg, and leaves the tier alone.
+//! Beside the disposition, each pin may carry per-leg mismatch counts for
+//! the label, performance and excursion censuses, and [`GateVerdict`]
+//! ratchets them (`ratchet.rs`): a count that moves either way fails, as a
+//! tier move does, until a bless adopts it. A census needs no per-probe
+//! judgement of whether a probe's labels or excursions should agree - a
+//! probe whose values legitimately differ just pins its count. An unpinned
+//! leg is ungated until a bless stamps it, so adopting a ratchet changes no
+//! existing verdict. None of them moves the tier.
 //!
 //! The gate's verdict is also what reconciles it with the harness exit code:
 //! [`breaks_all_pinned`] decides whether an exit of 1 is fully explained by
@@ -32,11 +28,9 @@
 use std::collections::{BTreeMap, HashSet};
 
 use crate::output;
-use crate::piners::performance::{
-    self, PerformanceAssessment, PerformanceCoverage, PerformanceDeviation,
-};
-use crate::piners::registry::{LabelPin, PinnedDisposition, Registry};
-use crate::piners::report::{HarnessReport, LabelCensus, ProbeLine, ProbeOutcome};
+use crate::piners::ratchet::{self, Assessment, Coverage, Deviation, RatchetKind};
+use crate::piners::registry::{PinnedDisposition, Registry};
+use crate::piners::report::{HarnessReport, ProbeLine, ProbeOutcome};
 
 /// One probe whose actual disposition does not satisfy its pinned `expected`.
 #[derive(Debug)]
@@ -96,130 +90,24 @@ pub fn evaluate(ids: &[String], registry: &Registry, report: &HarnessReport) -> 
     diffs
 }
 
-/// A displayed-label leg.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Leg {
-    Entry,
-    Exit,
-}
-
-impl Leg {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Leg::Entry => "entry",
-            Leg::Exit => "exit",
-        }
-    }
-}
-
-/// One way a probe's labels fail their ratchet.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LabelDeviation {
-    /// The leg's mismatch count differs from its pin. A rise is a
-    /// regression; a fall is an improvement to adopt by re-blessing, failed
-    /// like a tier improvement so the ratchet tightens instead of leaving the
-    /// old allowance for a later regression to hide in. `ambiguous` rides
-    /// along for the reader, never compared.
-    Moved {
-        leg: Leg,
-        pinned: u64,
-        actual: u64,
-        ambiguous: u64,
-    },
-    /// The pin has label counts, the disposition matches, and the line
-    /// carries no census: a ratchet cannot pass on missing evidence.
-    Missing { pinned: LabelPin },
-}
-
-impl LabelDeviation {
-    fn to_json(&self) -> serde_json::Value {
-        match self {
-            LabelDeviation::Moved {
-                leg,
-                pinned,
-                actual,
-                ambiguous,
-            } => serde_json::json!({
-                "leg": leg.as_str(), "pinned": pinned, "actual": actual, "ambiguous": ambiguous
-            }),
-            LabelDeviation::Missing { pinned } => serde_json::json!({
-                "missing": true, "pinned": { "entry": pinned.entry, "exit": pinned.exit }
-            }),
-        }
-    }
-
-    fn render(&self) -> String {
-        match self {
-            LabelDeviation::Moved {
-                leg,
-                pinned,
-                actual,
-                ambiguous,
-            } => {
-                let way = if actual > pinned {
-                    "rose"
-                } else {
-                    "fell (improvement - re-bless to adopt)"
-                };
-                format!(
-                    "{} label mismatches {way} {pinned} -> {actual} ({ambiguous} ambiguous, not gated)",
-                    leg.as_str()
-                )
-            }
-            LabelDeviation::Missing { pinned } => format!(
-                "labels pinned entry={} exit={}, but the line carries no label census",
-                pinned.entry, pinned.exit
-            ),
-        }
-    }
-}
-
-/// The label ratchet's view of one selected probe, stored with its run.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct LabelAssessment {
-    /// The pin's label counts at run time; `None` = not yet stamped.
-    pub pinned: Option<LabelPin>,
-    /// The deviations found, `None` when the probe was not label-checked (no
-    /// valid untainted line).
-    pub deviations: Option<Vec<LabelDeviation>>,
-}
-
-impl LabelAssessment {
-    /// The pinned counts as stored JSON.
-    pub fn pinned_json(&self) -> Option<String> {
-        self.pinned
-            .map(|p| serde_json::json!({ "entry": p.entry, "exit": p.exit }).to_string())
-    }
-
-    /// The deviations as stored JSON: `[]` when checked and clean.
-    pub fn deviations_json(&self) -> Option<String> {
-        self.deviations.as_ref().map(|ds| {
-            serde_json::Value::Array(ds.iter().map(LabelDeviation::to_json).collect()).to_string()
-        })
-    }
-}
-
-/// How many label-checked probes are ratcheted, how many await their first
-/// stamp, and the ambiguous legs across them (reported, never gated).
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct LabelCoverage {
-    pub ratcheted: usize,
-    pub unpinned: usize,
-    pub ambiguous: u64,
+/// One ratchet kind's verdict over the selection.
+#[derive(Debug, Default)]
+pub struct RatchetVerdict {
+    /// Every deviation, with its probe, in selection then leg order.
+    pub deviations: Vec<(String, Deviation)>,
+    /// Every selected probe's assessment, stored with the run.
+    pub assessments: BTreeMap<String, Assessment>,
+    pub coverage: Coverage,
 }
 
 /// The whole gate verdict: disposition deviations (the only kind that can
-/// mean "no disposition emitted", so the only source of `gate_miss`), label
-/// and performance deviations, and every selected probe's assessments.
+/// mean "no disposition emitted", so the only source of `gate_miss`), and
+/// one verdict per ratchet kind (`ratchet.rs`), every kind present once
+/// [`GateVerdict::evaluate`] ran.
 #[derive(Debug, Default)]
 pub struct GateVerdict {
     pub dispositions: Vec<GateDiff>,
-    pub labels: Vec<(String, LabelDeviation)>,
-    pub assessments: BTreeMap<String, LabelAssessment>,
-    pub coverage: LabelCoverage,
-    pub performance: Vec<(String, PerformanceDeviation)>,
-    pub performance_assessments: BTreeMap<String, PerformanceAssessment>,
-    pub performance_coverage: PerformanceCoverage,
+    pub ratchets: BTreeMap<RatchetKind, RatchetVerdict>,
 }
 
 impl From<Vec<GateDiff>> for GateVerdict {
@@ -232,7 +120,9 @@ impl From<Vec<GateDiff>> for GateVerdict {
 }
 
 impl GateVerdict {
-    /// The full gate: dispositions, then the label and performance ratchets.
+    /// The full gate: dispositions, then every ratchet. Each ratchet is told
+    /// whether the disposition check alone deviated - never whether another
+    /// ratchet did - and that excuses only a missing leg, never a moved one.
     pub fn evaluate(ids: &[String], registry: &Registry, report: &HarnessReport) -> Self {
         let dispositions = evaluate(ids, registry, report);
         let deviating: HashSet<&str> = dispositions.iter().map(|d| d.probe.as_str()).collect();
@@ -242,82 +132,66 @@ impl GateVerdict {
             .iter()
             .map(|p| (p.probe.as_str(), p))
             .collect();
-        let mut labels = Vec::new();
-        let mut assessments = BTreeMap::new();
-        let mut coverage = LabelCoverage::default();
-        let mut performance = Vec::new();
-        let mut performance_assessments = BTreeMap::new();
-        let mut performance_coverage = PerformanceCoverage::default();
+        let mut ratchets: BTreeMap<RatchetKind, RatchetVerdict> = RatchetKind::ALL
+            .into_iter()
+            .map(|k| (k, RatchetVerdict::default()))
+            .collect();
         for id in ids {
-            let pinned = registry.pins.get(id).and_then(|p| p.labels);
+            // Only a valid, untainted line is checked.
             let line = lines
                 .get(id.as_str())
                 .filter(|p| p.outcome().is_some() && !tainted.contains(id.as_str()));
-            let deviations = line.map(|p| {
-                let census = p.census;
-                let parity = p
-                    .outcome()
-                    .and_then(ProbeOutcome::evaluated)
-                    .is_some_and(PinnedDisposition::is_parity);
-                // Unpinned counts every parity probe awaiting its first stamp,
-                // census or not, so a harness predating the census still
-                // shows up as ungated; a pinned probe missing its census is
-                // missing evidence, in neither bucket.
-                match (pinned.is_some(), census.is_some()) {
-                    (true, true) => coverage.ratcheted += 1,
-                    (false, _) if parity => coverage.unpinned += 1,
-                    _ => {}
+            let parity = line
+                .and_then(|p| p.outcome())
+                .and_then(ProbeOutcome::evaluated)
+                .is_some_and(PinnedDisposition::is_parity);
+            let pin = registry.pins.get(id);
+            for (kind, verdict) in &mut ratchets {
+                let pinned = pin.and_then(|p| p.ratchet(*kind));
+                let deviations = line.map(|p| {
+                    let census = p.census(*kind);
+                    verdict.coverage.record(*kind, parity, pinned, census);
+                    ratchet::check(*kind, pinned, census, deviating.contains(id.as_str()))
+                });
+                if let Some(ds) = &deviations {
+                    verdict
+                        .deviations
+                        .extend(ds.iter().map(|d| (id.clone(), d.clone())));
                 }
-                if let Some(c) = census {
-                    coverage.ambiguous = coverage
-                        .ambiguous
-                        .saturating_add(c.entry.ambiguous)
-                        .saturating_add(c.exit.ambiguous);
-                }
-                check_labels(pinned, census, deviating.contains(id.as_str()))
-            });
-            if let Some(ds) = &deviations {
-                labels.extend(ds.iter().map(|d| (id.clone(), d.clone())));
+                verdict.assessments.insert(
+                    id.clone(),
+                    Assessment {
+                        pinned: pinned.cloned(),
+                        deviations,
+                    },
+                );
             }
-            assessments.insert(id.clone(), LabelAssessment { pinned, deviations });
-
-            let pinned = registry.pins.get(id).and_then(|p| p.performance);
-            let deviations = line.map(|p| {
-                performance_coverage.record(pinned, p.performance.as_ref());
-                performance::check(
-                    pinned,
-                    p.performance.as_ref(),
-                    deviating.contains(id.as_str()),
-                )
-            });
-            if let Some(ds) = &deviations {
-                performance.extend(ds.iter().map(|d| (id.clone(), d.clone())));
-            }
-            performance_assessments
-                .insert(id.clone(), PerformanceAssessment { pinned, deviations });
         }
         Self {
             dispositions,
-            labels,
-            assessments,
-            coverage,
-            performance,
-            performance_assessments,
-            performance_coverage,
+            ratchets,
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.dispositions.is_empty() && self.labels.is_empty() && self.performance.is_empty()
+    /// One kind's verdict, empty when the gate never ran it.
+    pub fn ratchet(&self, kind: RatchetKind) -> Option<&RatchetVerdict> {
+        self.ratchets.get(&kind)
     }
 
-    /// Every deviating probe, either kind.
+    fn ratchet_deviations(&self) -> impl Iterator<Item = &(String, Deviation)> {
+        self.ratchets.values().flat_map(|v| v.deviations.iter())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.dispositions.is_empty() && self.ratchet_deviations().next().is_none()
+    }
+
+    /// Every deviating probe, any kind.
     pub fn deviating(&self) -> HashSet<&str> {
         self.dispositions
             .iter()
             .map(|d| d.probe.as_str())
-            .chain(self.labels.iter().map(|(p, _)| p.as_str()))
-            .chain(self.performance.iter().map(|(p, _)| p.as_str()))
+            .chain(self.ratchet_deviations().map(|(p, _)| p.as_str()))
             .collect()
     }
 
@@ -329,71 +203,18 @@ impl GateVerdict {
     /// Render every deviation to the `[corpus]` log.
     pub fn render(&self) {
         render_diffs(&self.dispositions);
-        for (probe, d) in &self.labels {
-            output::corpus_msg(&format!("gate: {probe}: {}", d.render()));
-        }
-        for (probe, d) in &self.performance {
+        for (probe, d) in self.ratchet_deviations() {
             output::corpus_msg(&format!("gate: {probe}: {}", d.render()));
         }
     }
 
-    /// The coverage lines: labels, then performance, each when it has
-    /// anything to count.
+    /// The coverage lines, one per kind with anything to count.
     pub fn coverage_lines(&self) -> Vec<String> {
-        self.label_coverage_line()
-            .into_iter()
-            .chain(self.performance_coverage.line())
+        self.ratchets
+            .iter()
+            .filter_map(|(kind, v)| v.coverage.line(*kind))
             .collect()
     }
-
-    /// The label coverage line, when any parity probe was label-checked.
-    fn label_coverage_line(&self) -> Option<String> {
-        let c = &self.coverage;
-        (c.ratcheted + c.unpinned > 0).then(|| {
-            let mut line = format!("labels: {} ratcheted", output::count(c.ratcheted, "probe"));
-            if c.unpinned > 0 {
-                line.push_str(&format!(
-                    ", {} unpinned (labels ungated until blessed)",
-                    c.unpinned
-                ));
-            }
-            line.push_str(&format!(", {} ambiguous legs (not gated)", c.ambiguous));
-            line
-        })
-    }
-}
-
-/// The label check for one probe with a valid untainted line.
-fn check_labels(
-    pinned: Option<LabelPin>,
-    census: Option<LabelCensus>,
-    disposition_deviates: bool,
-) -> Vec<LabelDeviation> {
-    let Some(pin) = pinned else {
-        return Vec::new(); // never stamped: ungated, counted as unpinned
-    };
-    let Some(c) = census else {
-        // A disposition that already deviates says enough; otherwise the
-        // missing evidence is itself the failure.
-        return if disposition_deviates {
-            Vec::new()
-        } else {
-            vec![LabelDeviation::Missing { pinned: pin }]
-        };
-    };
-    [
-        (Leg::Entry, pin.entry, c.entry),
-        (Leg::Exit, pin.exit, c.exit),
-    ]
-    .into_iter()
-    .filter(|(_, pinned, leg)| leg.mismatched != *pinned)
-    .map(|(leg, pinned, census)| LabelDeviation::Moved {
-        leg,
-        pinned,
-        actual: census.mismatched,
-        ambiguous: census.ambiguous,
-    })
-    .collect()
 }
 
 /// Whether the report carries at least one break line (any probe).
@@ -464,6 +285,7 @@ pub fn render_diffs(diffs: &[GateDiff]) {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use crate::piners::ratchet::LegPin;
     use crate::piners::registry::{FilePin, Pin};
     use std::path::PathBuf;
 
@@ -673,7 +495,7 @@ mod tests {
     fn labelled(id: &str, expected: &str, labels: Option<(u64, u64)>) -> Registry {
         let mut reg = registry(&[(id, Some(expected))]);
         if let Some(p) = reg.pins.get_mut(id) {
-            p.labels = labels.map(|(entry, exit)| LabelPin { entry, exit });
+            p.labels = labels.map(|(entry, exit)| LegPin::from([("entry", entry), ("exit", exit)]));
         }
         reg
     }
@@ -687,6 +509,10 @@ mod tests {
         )
     }
 
+    fn labels(v: &GateVerdict) -> &RatchetVerdict {
+        v.ratchet(RatchetKind::Labels).unwrap()
+    }
+
     #[test]
     fn a_label_count_that_rises_or_falls_fails_and_equal_passes() {
         let ids = ["a".to_owned()];
@@ -694,19 +520,23 @@ mod tests {
         let same = report(&census_line("a", "byte_exact", 0, 2, 5));
         let v = GateVerdict::evaluate(&ids, &reg, &same);
         assert!(v.is_empty(), "ambiguous moves are never gated");
-        assert_eq!(v.coverage.ratcheted, 1);
+        assert_eq!(labels(&v).coverage.ratcheted, 1);
         // Entry rose, exit fell: both legs reported, each its own way.
         let moved = report(&census_line("a", "byte_exact", 3, 0, 0));
         let v = GateVerdict::evaluate(&ids, &reg, &moved);
         assert!(v.dispositions.is_empty());
-        assert_eq!(v.labels.len(), 2);
+        assert_eq!(labels(&v).deviations.len(), 2);
         assert_eq!(v.deviating_count(), 1);
-        let rendered: Vec<String> = v.labels.iter().map(|(_, d)| d.render()).collect();
-        assert!(rendered[0].contains("rose 0 -> 3"));
+        let rendered: Vec<String> = labels(&v)
+            .deviations
+            .iter()
+            .map(|(_, d)| d.render())
+            .collect();
+        assert!(rendered[0].contains("labels entry mismatches rose 0 -> 3"));
         assert!(rendered[1].contains("fell"));
         assert_eq!(
-            v.assessments["a"].deviations_json().unwrap(),
-            r#"[{"actual":3,"ambiguous":0,"leg":"entry","pinned":0},{"actual":0,"ambiguous":0,"leg":"exit","pinned":2}]"#
+            labels(&v).assessments["a"].deviations_json().unwrap(),
+            r#"[{"actual":3,"ambiguous":0,"compared":10,"leg":"entry","pinned":0},{"actual":0,"ambiguous":0,"compared":10,"leg":"exit","pinned":2}]"#
         );
     }
 
@@ -717,15 +547,18 @@ mod tests {
         let v = GateVerdict::evaluate(&ids, &reg, &report(&census_line("a", "accepted", 4, 4, 1)));
         assert!(v.is_empty());
         assert_eq!(
-            v.coverage,
-            LabelCoverage {
+            labels(&v).coverage,
+            Coverage {
                 ratcheted: 0,
                 unpinned: 1,
                 ambiguous: 1
             }
         );
-        assert_eq!(v.assessments["a"].deviations_json().as_deref(), Some("[]"));
-        assert_eq!(v.assessments["a"].pinned_json(), None);
+        assert_eq!(
+            labels(&v).assessments["a"].deviations_json().as_deref(),
+            Some("[]")
+        );
+        assert_eq!(labels(&v).assessments["a"].pinned_json(), None);
     }
 
     #[test]
@@ -743,27 +576,54 @@ mod tests {
         let v = GateVerdict::evaluate(&ids, &reg, &rep);
         assert!(v.is_empty());
         // The break has no labels to pin; only the parity probe awaits one.
-        assert_eq!(v.coverage.unpinned, 1);
-        assert!(v.coverage_lines()[0].contains("1 unpinned"));
+        assert_eq!(labels(&v).coverage.unpinned, 1);
+        assert!(v.coverage_lines()[0].contains("1 with an unpinned leg"));
     }
 
     #[test]
     fn a_pinned_probe_without_a_census_fails_unless_its_disposition_already_does() {
         let ids = ["a".to_owned()];
-        // A parity line that lost its census.
+        // A parity line that lost its census: each pinned leg is missing.
         let reg = labelled("a", "accepted", Some((0, 0)));
         let rep = report(r#"{"probe":"a","outcome":"parity","acceptance":{"tier":"accepted"}}"#);
         let v = GateVerdict::evaluate(&ids, &reg, &rep);
-        assert!(matches!(v.labels[0].1, LabelDeviation::Missing { .. }));
-        assert_eq!(v.coverage, LabelCoverage::default()); // missing, not unpinned
+        assert_eq!(labels(&v).deviations.len(), 2);
+        assert!(matches!(
+            labels(&v).deviations[0].1,
+            Deviation::Missing { leg: "entry", .. }
+        ));
+        assert_eq!(v.deviating_count(), 1);
+        assert_eq!(labels(&v).coverage, Coverage::default()); // missing, not unpinned
         // A non-parity line under a labels pin whose disposition matches.
         let reg = labelled("a", "compile_fail", Some((0, 0)));
         let rep = report(r#"{"probe":"a","outcome":"compile_fail","error":"x"}"#);
-        assert_eq!(GateVerdict::evaluate(&ids, &reg, &rep).labels.len(), 1);
+        assert_eq!(
+            labels(&GateVerdict::evaluate(&ids, &reg, &rep))
+                .deviations
+                .len(),
+            2
+        );
         // A disposition deviation already says enough.
         let reg = labelled("a", "accepted", Some((0, 0)));
         let v = GateVerdict::evaluate(&ids, &reg, &rep);
-        assert_eq!((v.dispositions.len(), v.labels.len()), (1, 0));
+        assert_eq!((v.dispositions.len(), labels(&v).deviations.len()), (1, 0));
+    }
+
+    #[test]
+    fn one_ratchets_deviation_never_excuses_another_ratchets_missing_leg() {
+        // Labels moved and the performance pin's leg is missing, on a line
+        // whose disposition matches: both fail, whatever order they run in.
+        let ids = ["a".to_owned()];
+        let mut reg = labelled("a", "accepted", Some((0, 0)));
+        reg.pins.get_mut("a").unwrap().performance = Some(LegPin::from([("equity", 0)]));
+        let v = GateVerdict::evaluate(&ids, &reg, &report(&census_line("a", "accepted", 1, 0, 0)));
+        assert_eq!(labels(&v).deviations.len(), 1);
+        let perf = v.ratchet(RatchetKind::Performance).unwrap();
+        assert!(matches!(
+            perf.deviations[0].1,
+            Deviation::Missing { leg: "equity", .. }
+        ));
+        assert_eq!(v.deviating_count(), 1);
     }
 
     #[test]
@@ -778,21 +638,17 @@ mod tests {
         // `b` emitted nothing.
         let rep = report(&census_line("a", "accepted", 11, 0, 0));
         let v = GateVerdict::evaluate(&ids, &reg, &rep);
-        assert!(v.labels.is_empty());
+        assert!(labels(&v).deviations.is_empty());
         assert_eq!(v.dispositions.len(), 2);
-        assert_eq!(v.assessments["a"].deviations, None);
-        assert_eq!(v.assessments["b"].deviations, None);
+        assert_eq!(labels(&v).assessments["a"].deviations, None);
+        assert_eq!(labels(&v).assessments["b"].deviations, None);
     }
 
     #[test]
     fn a_moved_performance_leg_fails_the_gate_and_leaves_the_tier_alone() {
         let ids = ["a".to_owned()];
         let mut reg = registry(&[("a", Some("byte_exact"))]);
-        reg.pins.get_mut("a").unwrap().performance =
-            Some(crate::piners::registry::PerformancePin {
-                equity: Some(0),
-                scalars: None,
-            });
+        reg.pins.get_mut("a").unwrap().performance = Some(LegPin::from([("equity", 0)]));
         let line = |equity: u64| {
             report(&format!(
                 "{{\"probe\":\"a\",\"outcome\":\"parity\",\"acceptance\":{{\"tier\":\"byte_exact\"}},\
@@ -801,15 +657,18 @@ mod tests {
                  \"tolerance\":\"exact\"}}}}}}"
             ))
         };
+        fn perf(v: &GateVerdict) -> &RatchetVerdict {
+            v.ratchet(RatchetKind::Performance).unwrap()
+        }
         let v = GateVerdict::evaluate(&ids, &reg, &line(0));
         assert!(v.is_empty(), "an unpinned scalars leg is not gated");
-        assert_eq!(v.performance_coverage.unpinned, 1);
+        assert_eq!(perf(&v).coverage.unpinned, 1);
         let v = GateVerdict::evaluate(&ids, &reg, &line(3));
         assert!(v.dispositions.is_empty());
-        assert_eq!(v.performance.len(), 1);
+        assert_eq!(perf(&v).deviations.len(), 1);
         assert_eq!(v.deviating_count(), 1);
         assert_eq!(
-            v.performance_assessments["a"].deviations_json().unwrap(),
+            perf(&v).assessments["a"].deviations_json().unwrap(),
             r#"[{"actual":3,"compared":9,"leg":"equity","pinned":0,"tolerance":"exact"}]"#
         );
         // A census that cannot describe one population invalidates the line.
@@ -818,6 +677,39 @@ mod tests {
              \"performance\":{}}",
         );
         assert!(bad.probes[0].record_defect().is_some());
+    }
+
+    #[test]
+    fn a_moved_excursion_leg_fails_the_gate_and_an_unpinned_one_awaits_a_stamp() {
+        let ids = ["a".to_owned()];
+        let mut reg = registry(&[("a", Some("accepted"))]);
+        let line = |run_up: u64| {
+            report(&format!(
+                "{{\"probe\":\"a\",\"outcome\":\"parity\",\"acceptance\":{{\"tier\":\"accepted\"}},\
+                 \"excursions\":{{\"run_up\":{{\"compared\":9,\"mismatched\":{run_up},\
+                 \"ambiguous\":1,\"unavailable\":0,\"tolerance\":\"float32\"}},\
+                 \"drawdown\":{{\"compared\":9,\"mismatched\":0,\"ambiguous\":0,\
+                 \"unavailable\":0,\"tolerance\":\"float32\"}}}}}}"
+            ))
+        };
+        let v = GateVerdict::evaluate(&ids, &reg, &line(2));
+        assert!(v.is_empty(), "an unpinned census is not gated");
+        let lines = v.coverage_lines();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("excursions: 0 probes ratcheted, 1 with an unpinned leg")),
+            "{lines:?}"
+        );
+        reg.pins.get_mut("a").unwrap().excursions = Some(LegPin::from([("run_up", 2)]));
+        assert!(GateVerdict::evaluate(&ids, &reg, &line(2)).is_empty());
+        let v = GateVerdict::evaluate(&ids, &reg, &line(1));
+        let exc = v.ratchet(RatchetKind::Excursions).unwrap();
+        assert_eq!(exc.deviations.len(), 1);
+        assert!(exc.deviations[0].1.render().contains(
+            "excursions run_up mismatches fell (improvement - re-bless to adopt) 2 -> 1"
+        ));
+        assert!(v.dispositions.is_empty());
     }
 
     #[test]

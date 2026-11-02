@@ -9,12 +9,14 @@
 //! guard before reaching here.
 
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use rusqlite::{Row, params};
 
 use super::CorpusDb;
 use super::ingest::RunContext;
 use crate::error::DevError;
+use crate::piners::ratchet::RatchetKind;
 
 /// One row of the recent-runs table.
 pub struct RunRow {
@@ -63,12 +65,11 @@ pub struct DispositionRow {
     /// Why an `unevaluated` probe could not be evaluated; `None` on any
     /// other line.
     pub reason: Option<String>,
-    /// The label ratchet's deviations as stored JSON: `[]` when checked and
-    /// clean, `None` when not label-checked (or a pre-v14 row).
-    pub label_gate: Option<String>,
-    /// The performance ratchet's deviations as stored JSON, as `label_gate`
-    /// (`None` on a pre-v18 row).
-    pub performance_gate: Option<String>,
+    /// Each ratchet's deviations as stored JSON, in `RatchetKind::ALL`
+    /// order: `[]` when checked and clean, `None` when not checked, or on a
+    /// row older than the ratchet (labels v14, performance v18, excursions
+    /// v19).
+    pub ratchet_gates: [Option<String>; 3],
     /// Whether the run scored the row (v17); `None` when not recorded.
     pub scored: Option<bool>,
     /// Why an unscored row's record was not usable (v17).
@@ -217,8 +218,11 @@ fn disposition_row(row: &Row<'_>) -> rusqlite::Result<DispositionRow> {
         sig_dimension: row.get("sig_dimension")?,
         error: row.get("error")?,
         reason: row.get("reason")?,
-        label_gate: row.get("label_gate")?,
-        performance_gate: row.get("performance_gate")?,
+        ratchet_gates: [
+            row.get(RatchetKind::Labels.columns().1)?,
+            row.get(RatchetKind::Performance.columns().1)?,
+            row.get(RatchetKind::Excursions.columns().1)?,
+        ],
         scored: row.get::<_, Option<i64>>("scored")?.map(|v| v != 0),
         defect: row.get("defect")?,
     })
@@ -235,7 +239,8 @@ fn runtime_row(row: &Row<'_>) -> rusqlite::Result<RuntimeRow> {
 const DISPOSITION_COLS: &str = "\
 probe, outcome, disposition, expected, gate_ok, matched, ours_only, tv_only, \
 boundary_ours, boundary_tv, count_tier, p90_entry, p90_exit, p90_pnl, \
-sig_domain, sig_dimension, error, reason, label_gate, performance_gate, scored, defect";
+sig_domain, sig_dimension, error, reason, label_gate, performance_gate, excursion_gate, scored, \
+defect";
 
 /// Every queryable `trade_diff` column - the row key, the harness projections
 /// `schema.rs` generates from the stored record, `raw_source`, and the record
@@ -274,6 +279,13 @@ pub const TRADE_DIFF_COLUMNS: &[&str] = &[
     "our_entry_label",
     "our_exit_label",
     "breaches",
+    "our_run_up",
+    "our_drawdown",
+    "tv_run_up",
+    "tv_drawdown",
+    "tv_entry_value",
+    "tv_held_qty_lo",
+    "tv_held_qty_hi",
     "raw_source",
     "raw_json",
 ];
@@ -300,67 +312,26 @@ pub const DEFAULT_DIFF_COLUMNS: &[&str] = &[
 ];
 
 /// Every queryable `disposition` column (`run_id` excluded, as for
-/// [`TRADE_DIFF_COLUMNS`]): brokkr's annotations, the harness projections
-/// `schema.rs` generates from the stored record, and the record itself. The
-/// `--dispositions` allow-list; a test holds it to the table's real columns.
-pub const DISPOSITION_COLUMNS: &[&str] = &[
-    "probe",
-    "disposition",
-    "expected",
-    "gate_ok",
-    "expected_labels",
-    "label_gate",
-    "expected_performance",
-    "performance_gate",
-    "scored",
-    "defect",
-    "raw_source",
-    "outcome",
-    "matched",
-    "ours_only",
-    "tv_only",
-    "boundary_ours",
-    "boundary_tv",
-    "count_tier",
-    "acc_tier",
-    "acc_profile",
-    "acc_failing",
-    "p90_entry",
-    "p90_exit",
-    "p90_pnl",
-    "sig_domain",
-    "sig_leg",
-    "sig_dimension",
-    "sig_detail",
-    "sig_breaches",
-    "error",
-    "runtime_ms",
-    "boundary_anchor",
-    "anchor_consumed",
-    "rule_start_ours",
-    "rule_tail_ours",
-    "rule_start_tv",
-    "rule_end_tv",
-    "clipped_ours",
-    "clipped_tv",
-    "history_prefix_bars",
-    "oracle_trimmed",
-    "oracle_realtime",
-    "ts_entry_considered",
-    "ts_entry_shifted",
-    "ts_entry_share_pct",
-    "ts_exit_considered",
-    "ts_exit_shifted",
-    "ts_exit_share_pct",
-    "window_sensitive",
-    "reason",
-    "perf_equity_compared",
-    "perf_equity_mismatched",
-    "perf_equity_tolerance",
-    "perf_scalars_compared",
-    "perf_scalars_mismatched",
-    "perf_scalars_tolerance",
-    "raw_json",
+/// [`TRADE_DIFF_COLUMNS`]): brokkr's annotations - each ratchet's pin and
+/// verdict pair among them - the harness projections `schema.rs` generates
+/// from the stored record, and the record itself. The `--dispositions`
+/// allow-list; a test holds it to the table's real columns.
+pub static DISPOSITION_COLUMNS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    let mut cols = vec!["probe", "disposition", "expected", "gate_ok"];
+    for kind in RatchetKind::ALL {
+        let (pin, verdict) = kind.columns();
+        cols.extend([pin, verdict]);
+    }
+    cols.extend(["scored", "defect", "raw_source"]);
+    cols.extend(super::schema::disposition_projection_names());
+    cols.push("raw_json");
+    cols
+});
+
+/// Every queryable `scalar_pair` column (`run_id` excluded): the
+/// `--scalars` allow-list.
+pub const SCALAR_PAIR_COLUMNS: &[&str] = &[
+    "probe", "ordinal", "figure", "ours", "theirs", "matched", "diff", "rel_diff",
 ];
 
 /// The curated default projection for `--dispositions`: the window-edge
@@ -398,6 +369,10 @@ pub enum Shaped {
     Diffs,
     /// `--dispositions`: `disposition`, ordered by probe.
     Dispositions,
+    /// `--scalars`: the `scalar_pair` view, ordered by probe then the
+    /// harness's own pair order. Its rows are the missed pairs unless every
+    /// pair is asked for ([`Shaped::default_filter`]).
+    Scalars,
 }
 
 impl Shaped {
@@ -405,13 +380,15 @@ impl Shaped {
         match self {
             Shaped::Diffs => "trade_diff",
             Shaped::Dispositions => "disposition",
+            Shaped::Scalars => "scalar_pair",
         }
     }
 
     fn columns(self) -> &'static [&'static str] {
         match self {
             Shaped::Diffs => TRADE_DIFF_COLUMNS,
-            Shaped::Dispositions => DISPOSITION_COLUMNS,
+            Shaped::Dispositions => LazyLock::force(&DISPOSITION_COLUMNS).as_slice(),
+            Shaped::Scalars => SCALAR_PAIR_COLUMNS,
         }
     }
 
@@ -419,6 +396,7 @@ impl Shaped {
         match self {
             Shaped::Diffs => DEFAULT_DIFF_COLUMNS,
             Shaped::Dispositions => DEFAULT_DISPOSITION_COLUMNS,
+            Shaped::Scalars => SCALAR_PAIR_COLUMNS,
         }
     }
 
@@ -426,6 +404,18 @@ impl Shaped {
         match self {
             Shaped::Diffs => "probe, our_index",
             Shaped::Dispositions => "probe",
+            Shaped::Scalars => "probe, ordinal",
+        }
+    }
+
+    /// The rows the view shows unless every row is asked for, ANDed with
+    /// any `--where`: the missed pairs for `--scalars` (a pair whose
+    /// `matched` the record could not type is not one), nothing for the
+    /// tables.
+    pub const fn default_filter(self) -> Option<&'static str> {
+        match self {
+            Shaped::Scalars => Some("matched = 0"),
+            Shaped::Diffs | Shaped::Dispositions => None,
         }
     }
 }
@@ -684,9 +674,13 @@ impl CorpusDb {
         probes: &[String],
         columns: &[String],
         where_expr: Option<&str>,
+        every_row: bool,
     ) -> Result<RawTable, DevError> {
         let select = columns.join(", ");
         let mut sql = format!("SELECT {select} FROM {} WHERE run_id = ?1", table.table());
+        if let Some(filter) = table.default_filter().filter(|_| !every_row) {
+            sql.push_str(&format!(" AND {filter}"));
+        }
         if !probes.is_empty() {
             // probe IN (?2, ?3, ...) - the ids are bound, never interpolated.
             let placeholders: Vec<String> =
@@ -953,7 +947,7 @@ mod tests {
         // them. A projection added to the schema without an allow-list entry
         // (or the reverse) fails here, not at a user's --columns.
         let db = CorpusDb::open_in_memory().unwrap();
-        for shape in [Shaped::Dispositions, Shaped::Diffs] {
+        for shape in [Shaped::Dispositions, Shaped::Diffs, Shaped::Scalars] {
             let t = db
                 .raw_sql(&format!(
                     "SELECT name FROM pragma_table_xinfo('{}') WHERE name <> 'run_id'",
@@ -969,6 +963,45 @@ mod tests {
                 assert!(shape.columns().contains(c), "{c}");
             }
         }
+    }
+
+    #[test]
+    fn scalars_lists_the_missed_pairs_unless_every_pair_is_asked_for() {
+        let db = CorpusDb::open_in_memory().unwrap();
+        record(
+            &db,
+            &RunVerdict::Pass,
+            br#"{"probe":"a","outcome":"parity","acceptance":{"tier":"accepted"},"performance":{"scalars":{"compared":2,"mismatched":1,"tolerance":"t","pairs":[{"figure":"max_drawdown","ours":10,"theirs":10,"match":true},{"figure":"max_runup","ours":"inf","theirs":5.5,"match":false}]}}}
+{"probe":"b","outcome":"parity","acceptance":{"tier":"accepted"},"performance":{"scalars":{"compared":1,"mismatched":1,"tolerance":"t","pairs":[{"figure":"max_runup","ours":2,"theirs":4,"match":false}]}}}
+"#,
+        );
+        let cols = resolve_columns(Shaped::Scalars, &[]).unwrap();
+        let t = db
+            .shaped(Shaped::Scalars, 1, &[], &cols, None, false)
+            .unwrap();
+        let figures: Vec<(&str, &str)> = t
+            .rows
+            .iter()
+            .map(|r| (r[0].as_str(), r[2].as_str()))
+            .collect();
+        assert_eq!(figures, [("a", "max_runup"), ("b", "max_runup")]);
+        assert_eq!(t.rows[0][3], "inf");
+        assert_eq!(t.rows[1][7], "0.5");
+        let t = db
+            .shaped(Shaped::Scalars, 1, &owned(&["a"]), &cols, None, true)
+            .unwrap();
+        assert_eq!(t.rows.len(), 2, "every pair of the probe");
+        let t = db
+            .shaped(
+                Shaped::Scalars,
+                1,
+                &[],
+                &cols,
+                Some("rel_diff > 0.1"),
+                false,
+            )
+            .unwrap();
+        assert_eq!(t.rows.len(), 1);
     }
 
     #[test]
@@ -990,6 +1023,7 @@ mod tests {
                 &[],
                 &cols,
                 Some("ts_entry_share_pct >= 50"),
+                false,
             )
             .unwrap();
         assert_eq!(t.rows, vec![vec!["a".to_owned(), "carry_tv".to_owned()]]);

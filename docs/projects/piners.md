@@ -308,7 +308,7 @@ The store has per-db `PRAGMA user_version` migrations and WAL, mirroring
   ok unless the gate flagged it, so a never-blessed selected probe is not ok
   and a stray line for an unselected probe is; since v14 the conjunction of
   the disposition check and the label ratchet, since v18 the performance
-  ratchet too), `expected_labels` (v14: the
+  ratchet too, since v19 the excursion ratchet), `expected_labels` (v14: the
   pin's label counts at run time as JSON, `NULL` when unpinned), `label_gate`
   (v14: the label deviations as a JSON list, `[]` when checked and clean;
   `NULL` when the probe was not label-checked - unselected or an invalid
@@ -317,6 +317,12 @@ The store has per-db `PRAGMA user_version` migrations and WAL, mirroring
   it as the `labels` column), `expected_performance` and `performance_gate`
   (v18: the same pair for the performance ratchet, the pin holding only its
   pinned legs; run detail renders the verdict as the `perf` column),
+  `expected_excursions` and `excursion_gate` (v19: the same pair for the
+  excursion ratchet; run detail's `exc` column). A deviation is stored as
+  `{leg, pinned, actual, compared}` plus `ambiguous` and `tolerance` where
+  the census carries them, or `{leg, missing, pinned}`; a label row stored
+  before v19 holds the older whole-census `{missing, pinned: {entry, exit}}`,
+  which run detail still renders as `missing census`,
   `scored` (v17: 1 when the run's reconciliation
   scored the row - selected, a valid record, no invalid occurrence of its
   probe - which is exactly the set the live summary and breakdowns
@@ -348,8 +354,14 @@ The store has per-db `PRAGMA user_version` migrations and WAL, mirroring
   `NULL` wherever the line carried no string `reason`, which piners sends on
   no other outcome, though a stray one on another line is tolerated and
   projected as sent; run detail shows it ahead of the `error` detail), and
-  the performance census `perf_{equity,scalars}_{compared,mismatched,tolerance}`
-  (v18; `NULL` where the line carried no such leg, which is every older row).
+  the ratchet censuses, one rule for every kind -
+  `<prefix>_<leg>_<field>` over `$.<key>.<leg>.<field>`, `NULL` where the
+  line carried no such leg: `perf_{equity,scalars}_{compared,mismatched,tolerance}`
+  (v18), `label_{entry,exit}_{compared,mismatched,ambiguous,unavailable}` and
+  `exc_{run_up,drawdown}_{compared,mismatched,ambiguous,unavailable,tolerance}`
+  (v19). A projection added by a migration reads every row already stored,
+  so the v19 ones show the label and excursion censuses of the retained runs
+  that carried them.
   The tier is `acc_tier` - there is no `acceptance` column - and a `--where`
   naming a column that does not exist lists the ones that do. v15 dropped the `dynamic_builtin_calls`
   projection once piners stopped reporting the counter, since it read `NULL` on
@@ -371,7 +383,11 @@ The store has per-db `PRAGMA user_version` migrations and WAL, mirroring
   `disposition`: the line stored whole as `raw_json`, the key and
   `raw_source` physical, every harness field a type-gated generated column
   (timestamps, deltas and bars exact signed integers; prices, quantities and
-  PnL reals; ids, signals, labels, `tv_side` and `breaches` text). v13
+  PnL reals; ids, signals, labels, `tv_side` and `breaches` text; since v19
+  also both sides' excursions `our_run_up`/`our_drawdown`/`tv_run_up`/
+  `tv_drawdown` and the held-quantity witness `tv_entry_value`/
+  `tv_held_qty_lo`/`tv_held_qty_hi`, reals, an excursion piners spells `inf`
+  or `nan` reading `NULL`). v13
   rebuilt the typed table it replaced, verifying every row; a rebuilt row is
   `reconstructed`, and its `breaches`, `tv_side` and labels read `NULL` - the
   typed table had dropped them, so *not retained*. The volume driver; the PK covers probe-within-run lookups. A harness that
@@ -389,6 +405,18 @@ The store has per-db `PRAGMA user_version` migrations and WAL, mirroring
   ingest and read by probe scheduling (see `docs/commands/corpus.md`, "Probe
   scheduling"). Not a child of `run`: it outlives retention, and its `run_id`
   is provenance whose run may be gone.
+- `scalar_pair` (v19, a view) - the performance `scalars` leg's figures, one
+  row per pair of every stored disposition carrying `pairs`: `run_id`,
+  `probe`, `ordinal` (the harness's pair order), `figure`, `ours`, `theirs`,
+  `matched` (1/0, piners' verdict, never recomputed), `diff` (ours - theirs)
+  and `rel_diff` (|ours - theirs| over the larger magnitude, 0 when both are
+  0 - the measure piners' scalars tolerance is stated in). `ours` and
+  `theirs` are as sent: a number as a real, a metric spelling (`inf`, `-inf`,
+  `nan`) as text, so a numeric filter is `typeof(ours) = 'real' AND ours >
+  100`; `diff` and `rel_diff` are `NULL` unless both are numbers. A view, so
+  it reads the stored records and needs nothing from retention, and every
+  step is type-guarded: a record stored before brokkr checked `pairs` reads
+  `NULL` where it holds something untyped, never an error.
 
 Because the DB is the source of truth, the run dir is dropped (pass or fail)
 once ingest commits, unless `--keep-artefacts` or diagnostic isolation ran
@@ -461,9 +489,16 @@ overloaded query struct, no benchmark filters to reject. The corpus views:
   granted nothing is decorative), the clipped counts, each timestamp-shift
   share beside its counts (1/1 and 100/100 are both 100 percent),
   `raw_source`, and `scored` beside `gate_ok` (`--where "scored IS NOT 0"`
-  keeps to what the run counted). `--columns all` includes `raw_json`. `--columns`/`--where`
-  without `--diffs` or `--dispositions` is an error rather than ignored, as
-  is either table flag beside `--sql`, `--runtimes` or `--trend`.
+  keeps to what the run counted). `--columns all` includes `raw_json` and the
+  ratchet census columns (`--where "exc_run_up_mismatched > 0"`).
+- `brokkr corpus-results --scalars [--probe <id>...] [--columns ...] [--where "<expr>"] [--full]` -
+  the same shaping over the `scalar_pair` view: which report figure missed
+  and by how much, probe by probe, ordered by probe then pair. Only the
+  missed pairs (`matched = 0`) unless `--full`, which lists every pair;
+  `--where` narrows either (`--where "rel_diff > 1e-4"`).
+  `--columns`/`--where` without `--diffs`, `--dispositions` or `--scalars`
+  is an error rather than ignored, as is any table flag beside `--sql`,
+  `--runtimes` or `--trend`.
 - `brokkr corpus-results --runtimes [--over <secs>]` - each probe's most-recent
   runtime, slowest first, in milliseconds (the harness's unit) - the newest
   row its run did not mark unscored, so an invalid or report-only line leaves

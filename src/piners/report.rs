@@ -38,6 +38,7 @@ use serde::Deserialize;
 
 use crate::output;
 use crate::piners::line_value;
+use crate::piners::ratchet::{self, Census, RatchetKind};
 use crate::piners::registry::{PinnedDisposition, UNEVALUATED};
 
 /// Acceptance detail, present only when `outcome == "parity"`. Models what
@@ -422,63 +423,6 @@ fn refusal_of(value: &serde_json::Value) -> Result<Refusal, String> {
     }
 }
 
-/// One leg of the displayed-label census a parity line carries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LegCensus {
-    pub compared: u64,
-    pub mismatched: u64,
-    pub ambiguous: u64,
-    pub unavailable: u64,
-}
-
-/// The displayed-label census over a probe's matched pairs, per leg. The
-/// gate ratchets `mismatched` against the pin (`gate.rs`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LabelCensus {
-    pub entry: LegCensus,
-    pub exit: LegCensus,
-}
-
-/// Read a `labels` value strictly. The census is gate evidence, so nothing
-/// in it defaults: both legs, each with all four counts as non-negative
-/// integers, and counts that can describe one population - `mismatched` and
-/// `ambiguous` are disjoint subsets of `compared`. Unknown keys are
-/// tolerated. (`compared + unavailable` is not held to `matched`: the
-/// harness leaves discounted start-transient pairs out of the census.)
-pub fn parse_label_census(value: &serde_json::Value) -> Result<LabelCensus, String> {
-    let leg = |name: &str| -> Result<LegCensus, String> {
-        let obj = value
-            .get(name)
-            .and_then(serde_json::Value::as_object)
-            .ok_or_else(|| format!("labels.{name} is not an object"))?;
-        let count = |key: &str| {
-            obj.get(key)
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| format!("labels.{name}.{key} is not a non-negative integer"))
-        };
-        let c = LegCensus {
-            compared: count("compared")?,
-            mismatched: count("mismatched")?,
-            ambiguous: count("ambiguous")?,
-            unavailable: count("unavailable")?,
-        };
-        if c.mismatched > c.compared || c.ambiguous > c.compared - c.mismatched {
-            return Err(format!(
-                "labels.{name} counts {} mismatched and {} ambiguous of {} compared",
-                c.mismatched, c.ambiguous, c.compared
-            ));
-        }
-        Ok(c)
-    };
-    if !value.is_object() {
-        return Err("labels is not an object".to_owned());
-    }
-    Ok(LabelCensus {
-        entry: leg("entry")?,
-        exit: leg("exit")?,
-    })
-}
-
 /// A per-probe disposition line.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProbeLine {
@@ -536,20 +480,17 @@ pub struct ProbeLine {
     /// for a present null. Set by [`parse`]; checked by [`record_label`].
     #[serde(skip)]
     pub declared: Option<serde_json::Value>,
-    /// The `labels` census, parsed once by [`parse`]: `None` when the key is
-    /// missing (a harness predating it, or a non-parity line) or present but
-    /// not a valid census - an explicit null included - which also makes the
-    /// whole record invalid, so a valid line's census is whatever it sent.
+    /// The ratchet censuses the line carries (`labels`, `performance`,
+    /// `excursions`; `ratchet.rs`), each parsed once by [`parse`]. A kind is
+    /// absent when its key is missing (a harness predating it, or a line
+    /// the harness did not evaluate it for) or present but not a valid
+    /// census - an explicit null included - which also makes the whole
+    /// record invalid, so a valid line's censuses are whatever it sent.
     #[serde(skip)]
-    pub census: Option<LabelCensus>,
-    /// The `performance` census (`performance.rs`), parsed once by
-    /// [`parse`] under the same rule as `census`: `None` when the key is
-    /// missing or invalid, an invalid one making the whole record invalid.
-    #[serde(skip)]
-    pub performance: Option<crate::piners::performance::PerformanceCensus>,
+    pub censuses: BTreeMap<RatchetKind, Census>,
     /// The record's validated outcome, or why it has none: computed once, by
     /// [`parse`], from the whole line, and read by every consumer - the
-    /// reconciliation, the gate and its label ratchet, bless, the summary and
+    /// reconciliation, the gate and its ratchets, bless, the summary and
     /// the render filter. No consumer revalidates the raw fields.
     #[serde(skip, default = "unvalidated")]
     pub verdict: Result<ProbeOutcome, String>,
@@ -579,6 +520,11 @@ impl ProbeLine {
         }
     }
 
+    /// The `kind` census the line carries, if any.
+    pub fn census(&self, kind: RatchetKind) -> Option<&Census> {
+        self.censuses.get(&kind)
+    }
+
     /// The validated outcome, `None` for an invalid record.
     pub fn outcome(&self) -> Option<&ProbeOutcome> {
         self.verdict.as_ref().ok()
@@ -594,8 +540,8 @@ impl ProbeLine {
         self.outcome().and_then(ProbeOutcome::refusal)
     }
 
-    /// Validate this line, given the whole value it was read from and its
-    /// parsed `labels` and `performance` censuses: its `kind`
+    /// Validate this line, given the whole value it was read from and the
+    /// first defect among its ratchet censuses, if any: its `kind`
     /// ([`disposition_kind`]); on a line
     /// whose outcome is `unevaluated`, its
     /// closed shape first ([`unevaluated_shape`]), keyed on the outcome string
@@ -609,8 +555,7 @@ impl ProbeLine {
     fn validate(
         &self,
         value: &serde_json::Value,
-        census: Result<Option<LabelCensus>, String>,
-        performance: Result<(), String>,
+        censuses: Result<(), String>,
     ) -> Result<ProbeOutcome, String> {
         disposition_kind(value)?;
         if self.outcome == UNEVALUATED {
@@ -624,8 +569,7 @@ impl ProbeLine {
         // A present census is gate evidence: a malformed one makes the whole
         // record invalid, so it taints the probe like any other defect and a
         // clean repeat cannot launder it.
-        census?;
-        performance?;
+        censuses?;
         match label {
             LineLabel::Evaluated(d) => Ok(ProbeOutcome::Evaluated(d)),
             LineLabel::Unevaluated => refusal_of(value).map(ProbeOutcome::Unevaluated),
@@ -903,14 +847,20 @@ fn record_disposition(
     p.line = position;
     // Missing key and present null are different facts.
     p.declared = value.get("disposition").cloned();
-    let census = value.get("labels").map(parse_label_census).transpose();
-    p.census = census.clone().ok().flatten();
-    let performance = value
-        .get("performance")
-        .map(crate::piners::performance::parse_census)
-        .transpose();
-    p.performance = performance.clone().ok().flatten();
-    p.verdict = p.validate(value, census, performance.map(|_| ()));
+    let mut census_defect = Ok(());
+    for kind in RatchetKind::ALL {
+        let Some(v) = value.get(kind.key()) else {
+            continue;
+        };
+        match ratchet::parse(kind, v) {
+            Ok(c) => {
+                p.censuses.insert(kind, c);
+            }
+            Err(e) if census_defect.is_ok() => census_defect = Err(e),
+            Err(_) => {}
+        }
+    }
+    p.verdict = p.validate(value, census_defect);
     // Every valid refusal is evidence, kept here before repeats collapse or
     // a taint unscores its probe.
     if let Some(refusal) = p.refusal() {
@@ -1940,11 +1890,28 @@ mod tests {
         // Absent: valid, no census.
         let r = parse(line("").as_bytes());
         assert!(r.invalid.is_empty());
-        assert_eq!(r.probes[0].census, None);
+        assert_eq!(r.probes[0].census(RatchetKind::Labels), None);
         // Whole and consistent: valid.
         let r = parse(line(&format!(",\"labels\":{{\"entry\":{leg},\"exit\":{leg}}}")).as_bytes());
         assert!(r.invalid.is_empty());
-        assert_eq!(r.probes[0].census.unwrap().exit.ambiguous, 2);
+        assert_eq!(
+            r.probes[0]
+                .census(RatchetKind::Labels)
+                .unwrap()
+                .leg(1)
+                .unwrap()
+                .ambiguous,
+            Some(2)
+        );
+        // An excursion census is read and held to its shape the same way.
+        let exc = r#"{"compared":3,"mismatched":1,"ambiguous":0,"unavailable":1,"tolerance":"t"}"#;
+        let r = parse(line(&format!(",\"excursions\":{{\"run_up\":{exc}}}")).as_bytes());
+        assert!(r.invalid.is_empty());
+        assert!(r.probes[0].census(RatchetKind::Excursions).is_some());
+        for bad in [",\"excursions\":{}", ",\"excursions\":{\"drawdown\":null}"] {
+            let r = parse(line(bad).as_bytes());
+            assert_eq!(r.invalid.len(), 1, "{bad}");
+        }
         // Each defect makes the whole record invalid.
         for bad in [
             ",\"labels\":null".to_owned(),

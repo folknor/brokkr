@@ -28,15 +28,17 @@ use std::path::{Path, PathBuf};
 use toml_edit::{DocumentMut, Item, Table, Value};
 
 use crate::error::DevError;
+use crate::piners::ratchet::RatchetKind;
 use crate::piners::registry::{self, FeedGroup, FilePin, HarnessFile, Pin};
 use crate::piners::toml_writer::{self, set_block_prefix, set_value, sort_fields, sync_opt};
 
 /// Field order inside a `[probes.<id>]` entry: the blessed contract first,
 /// then the volatile hashes.
-const PROBE_FIELDS: [&str; 7] = [
+const PROBE_FIELDS: [&str; 8] = [
     "expected",
     "labels",
     "performance",
+    "excursions",
     "pine",
     "inputs",
     "csv",
@@ -216,31 +218,15 @@ fn fill_probe(table: &mut Table, pin: &Pin) -> Result<(), DevError> {
         pin.expected
             .map(|disposition| Value::from(disposition.as_str())),
     );
-    sync_opt(
-        table,
-        "labels",
-        pin.labels
-            .map(|l| {
-                toml_writer::parse_value(
-                    &format!("{{ entry = {}, exit = {} }}", l.entry, l.exit),
-                    "piners: pins.toml",
-                )
-            })
-            .transpose()?,
-    );
-    sync_opt(
-        table,
-        "performance",
-        pin.performance
-            .map(|p| {
-                let legs: Vec<String> = [("equity", p.equity), ("scalars", p.scalars)]
-                    .into_iter()
-                    .filter_map(|(leg, n)| n.map(|n| format!("{leg} = {n}")))
-                    .collect();
-                toml_writer::parse_value(&format!("{{ {} }}", legs.join(", ")), "piners: pins.toml")
-            })
-            .transpose()?,
-    );
+    for kind in RatchetKind::ALL {
+        sync_opt(
+            table,
+            kind.key(),
+            pin.ratchet(kind)
+                .map(|p| toml_writer::parse_value(&p.toml(kind), "piners: pins.toml"))
+                .transpose()?,
+        );
+    }
     set_value(table, "pine", pin_value(&pin.pine)?);
     sync_opt(
         table,
@@ -336,6 +322,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::piners::ratchet::LegPin;
     use crate::piners::registry::PinsData;
 
     fn file_pin(path: &str, hash: &str) -> FilePin {
@@ -585,7 +572,7 @@ csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
         let mut probes = BTreeMap::new();
         let mut alpha = pin("alpha-01", "a-old");
         alpha.expected = Some(registry::PinnedDisposition::Accepted);
-        alpha.labels = Some(registry::LabelPin { entry: 0, exit: 4 });
+        alpha.labels = Some(LegPin::from([("entry", 0), ("exit", 4)]));
         probes.insert("alpha-01".to_owned(), alpha);
         probes.insert("zulu-09".to_owned(), pin("zulu-09", "zz"));
 
@@ -596,13 +583,53 @@ csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
         assert!(labels_at < block.find("pine").unwrap());
         assert_eq!(
             reparse(&text).probes["alpha-01"].labels,
-            Some(registry::LabelPin { entry: 0, exit: 4 })
+            Some(LegPin::from([("entry", 0), ("exit", 4)]))
         );
 
         // A later write without labels removes the key.
         probes.get_mut("alpha-01").unwrap().labels = None;
         let text = render(Some(&text), &feeds, &BTreeMap::new(), &probes).unwrap();
         assert!(!text.contains("labels ="));
+    }
+
+    #[test]
+    fn ratchet_pins_render_in_kind_order_and_a_foreign_leg_is_refused() {
+        let feeds = commented_feeds();
+        let mut probes = BTreeMap::new();
+        let mut alpha = pin("alpha-01", "a-old");
+        alpha.expected = Some(registry::PinnedDisposition::Accepted);
+        alpha.excursions = Some(LegPin::from([("drawdown", 1), ("run_up", 0)]));
+        alpha.performance = Some(LegPin::from([("scalars", 2)]));
+        probes.insert("alpha-01".to_owned(), alpha);
+        probes.insert("zulu-09".to_owned(), pin("zulu-09", "zz"));
+
+        let text = render(Some(COMMENTED), &feeds, &BTreeMap::new(), &probes).unwrap();
+        let block = &text[text.find("[probes.alpha-01]").unwrap()..];
+        let perf_at = block.find("performance = { scalars = 2 }").unwrap();
+        let exc_at = block
+            .find("excursions = { run_up = 0, drawdown = 1 }")
+            .unwrap();
+        assert!(perf_at < exc_at && exc_at < block.find("pine").unwrap());
+        assert_eq!(
+            reparse(&text).probes["alpha-01"].excursions,
+            Some(LegPin::from([("run_up", 0), ("drawdown", 1)]))
+        );
+        // A misspelled leg beside a good one survives a rewrite, so the
+        // check on the render refuses it rather than the writer dropping it.
+        let mut typo = probes.clone();
+        typo.get_mut("alpha-01").unwrap().performance =
+            Some(LegPin::from([("equity", 0), ("scalras", 2)]));
+        let err = render(Some(&text), &feeds, &BTreeMap::new(), &typo).unwrap_err();
+        assert!(err.to_string().contains("unknown leg `scalras`"), "{err}");
+        // A leg the kind does not have, or no leg at all, does not load.
+        for bad in ["{ equity = 0 }", "{}"] {
+            let edited = text.replace("{ run_up = 0, drawdown = 1 }", bad);
+            let err = registry::parse_pins(&edited, Path::new("pins.toml")).unwrap_err();
+            assert!(
+                err.to_string().contains("`excursions` pins"),
+                "{bad}: {err}"
+            );
+        }
     }
 
     #[test]

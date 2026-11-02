@@ -161,8 +161,9 @@ Probes are pinned in the registry (`registry_dir`), two file kinds:
 
   [probes.some-tvr-capture]
   expected = "byte_exact"
-  labels = { entry = 0, exit = 2 }  # blessed label mismatch counts (the label ratchet)
-  performance = { equity = 0, scalars = 0 }  # blessed performance mismatch counts
+  labels = { entry = 0, exit = 2 }  # blessed mismatch counts (the ratchets)
+  performance = { equity = 0, scalars = 0 }
+  excursions = { run_up = 3, drawdown = 0 }
   pine   = { path = "piners/some-tvr-capture/strategy.pine", xxh128 = "<hex>" }
   record = { path = "piners/some-tvr-capture/tv_record.json", xxh128 = "<hex>" }
   ```
@@ -202,13 +203,16 @@ Probes are pinned in the registry (`registry_dir`), two file kinds:
   All `path`s (probe, feed and harness file) are relative to `corpus_root`. `xxh128` is
   brokkr's standard file hash (`preflight::compute_file_digest`, 32 lowercase hex,
   case-insensitive). `expected` is one disposition label (see the gate,
-  below); absent until the probe is blessed. `labels` is the per-leg
-  displayed-label mismatch count pair, both legs required (the label
-  ratchet, below); absent until a bless of a parity line carrying the
-  census. A probe entry holds nothing else: it is machine-stamped (reseed
-  writes its hashes, bless its `expected` and `labels`), and reseed drops it
-  when the probe's directory vanishes. A brokkr older than the ratchet
-  refuses a `pins.toml` holding `labels`.
+  below); absent until the probe is blessed. `labels`, `performance` and
+  `excursions` are the per-leg mismatch counts of the three ratchets
+  (below): `labels` pins both `entry` and `exit`, `performance` either or
+  both of `equity` and `scalars`, `excursions` either or both of `run_up` and
+  `drawdown`; each is absent until a bless of a parity line carrying its
+  census, and loading refuses a leg its kind does not have, an empty table,
+  and a `labels` missing a leg. A probe entry holds nothing else: it is
+  machine-stamped (reseed writes its hashes, bless its `expected` and its
+  ratchet counts), and reseed drops it when the probe's directory vanishes.
+  A brokkr older than a ratchet refuses a `pins.toml` holding its key.
 
   **`[probe_config."<prefix>"]` - how each probe runs.** Four optional
   fields, each flowing into the probe's manifest entry: `feed` (the `[feeds]`
@@ -493,56 +497,82 @@ gate to informational (still runs/aggregates/prints) - for rollout or ad-hoc
 breakdown runs. It downgrades the gate only: the harness exit and report
 integrity (below) still fail the run.
 
-**The label ratchet.** Every parity line carries `labels`, piners' census of
-displayed-label agreement over the matched pairs, per leg (`entry`,
-`exit`): `compared`, `mismatched`, `ambiguous`, `unavailable`. Labels stay
-out of the tiers (piners `reference/corpus.md`, Label comparison), so a
-label regression on a `byte_exact` probe would pass the disposition check.
-Bless therefore pins each leg's `mismatched` count beside `expected`, and the
-gate fails a selected probe whose count **moved** either way, as `id: entry
-label mismatches rose 0 -> 3` or `... fell 5 -> 2 (improvement - re-bless to
-adopt)`: a fall fails like a tier improvement, so the pin tightens rather
-than leaving the old allowance for a later regression. The ratchet needs no
-judgement of which probes' labels should agree - a probe whose labels
-legitimately differ (counter-built ids, value-bearing comments) pins its
-count. `ambiguous` moves with the pairing and is shown, never gated.
+**The ratchets.** Beside its tier, a parity line carries per-pair agreement
+censuses that never move the tier, and each is ratcheted against counts
+blessed beside `expected`:
 
-- A pin without `labels` is ungated for labels until a bless stamps it, so
-  adopting the ratchet changes no verdict; such probes are counted in the
-  `labels: N ratcheted, M unpinned, K ambiguous legs` line.
-- A pin with `labels` whose line carries no census fails as missing
-  evidence - a parity line that lost its census, or a non-parity line - unless
-  its disposition already deviates.
-- A present census must be whole and consistent (both legs, four
-  non-negative integer counts, `mismatched + ambiguous <= compared`); anything
-  else, `"labels": null` included, makes the line an invalid record.
-- Only a valid, untainted line is label-checked.
+- `labels` (every parity line): displayed-label agreement over the matched
+  pairs, legs `entry` and `exit`, each `{compared, mismatched, ambiguous,
+  unavailable}` (piners `reference/corpus.md`, Label comparison). A label
+  regression on a `byte_exact` probe would otherwise pass the disposition
+  check, and the ratchet needs no judgement of which probes' labels should
+  agree - a probe whose labels legitimately differ (counter-built ids,
+  value-bearing comments) pins its count.
+- `performance` (a record probe the harness checked `strategy.equity` per
+  bar or the report scalars for: max drawdown and max run-up, in cash and in
+  percent): legs `equity` and `scalars`, each `{compared, mismatched,
+  tolerance}`, either or both present. Equity can drift while every trade
+  matches, and a legitimate drift pins its count.
+- `excursions` (a parity line whose oracle states a comparable per-trade
+  run-up or drawdown): legs `run_up` and `drawdown`, each `{compared,
+  mismatched, ambiguous, unavailable, tolerance}`, a leg present exactly when
+  eligible, zero compared included (piners `reference/corpus.md`, Excursion
+  comparison). An excursion is the trade's accounting over its path, not what
+  the trade was, so an excursion regression on a probe whose tier holds
+  would otherwise pass.
 
-**The performance ratchet.** A line the harness checked `strategy.equity`
-per bar or the report scalars for (max drawdown and max run-up, in cash and
-in percent) carries `performance`, with an `equity` leg, a `scalars` leg, or
-both: `{ "compared": N, "mismatched": M, "tolerance": "<label>" }`. It is
-ratcheted like `labels` and apart from the tier, which keeps meaning "the
-trades match": equity can drift while every trade matches, and a legitimate
-drift pins its count. The pin is `performance = { equity = N, scalars = M }`,
-each leg optional; a gated move reads `id: equity mismatches rose 0 -> 3 of
-2637 compared (tolerance exact)`. `tolerance` is piners' own label, stored and
-shown, never interpreted - the float comparison is the harness's.
+The tier keeps meaning "the trades match". One rule holds for every kind,
+leg by leg. Bless pins each carried leg's `mismatched` count (`labels =
+{ entry = 0, exit = 2 }`, `performance = { equity = 0, scalars = 1 }`,
+`excursions = { run_up = 3, drawdown = 0 }`), and the gate fails a selected
+probe whose pinned count **moved** either way, as `id: excursions run_up
+mismatches rose 3 -> 5 of 412 compared, 0 ambiguous (not gated) (tolerance
+float32 within 1e-9 dust)` or `... fell 5 -> 2 (improvement - re-bless to
+adopt) ...`: a fall fails like a tier improvement, so the pin tightens rather
+than leaving the old allowance for a later regression. `ambiguous`, where a
+census counts it, moves with the pairing and is shown, never gated;
+`tolerance`, where a leg carries one, is piners' own label for what counts as
+a mismatch, stored and shown, never interpreted - the comparison is the
+harness's.
 
-- Only a pinned leg is gated. A leg the line carries but the pin lacks is
-  ungated, and its probe is counted in the `performance: N ratcheted, M with
-  an unpinned leg` line; a probe whose line carries no `performance` is in
-  neither count.
-- A pinned leg the line does not carry fails as missing evidence, unless the
-  disposition already deviates.
-- Bless stamps every leg a parity line carries, clears the pin on a
+- Only a pinned leg is gated. A pin without the key, or a leg the line
+  carries that the pin lacks, is ungated until a bless stamps it, so adopting
+  a ratchet changes no verdict. Each kind prints a coverage line, `labels: N
+  probes ratcheted, M with an unpinned leg (ungated until blessed), K
+  ambiguous (not gated)` (the ambiguous count only for the kinds that tally
+  it, summed over every checked census, pinned or not): a probe is ratcheted
+  when it has a pinned leg its line carries, and awaits a stamp when its line
+  carries a leg its pin lacks - for `labels`, which every parity line
+  carries, also when an unpinned parity line carries no census (a harness
+  predating it). A probe whose line carries no such census and whose pin
+  holds none is in neither count.
+- A pinned leg the line does not carry fails as missing evidence (`id:
+  labels entry pinned at 0 mismatches, but the line carries no labels entry
+  census`) - a parity line that lost a leg, or a non-parity line - unless the
+  disposition check already deviates. Only the disposition check excuses it:
+  one ratchet's deviation never excuses another's missing leg, and nothing
+  excuses a moved count.
+- Bless stamps every leg a parity line carries, clears the kind on a
   non-parity line, and refuses to drop a pinned leg the parity line does not
-  carry.
-- A present `performance` must be an object with at least one leg; each
-  present leg an object with non-negative integer `compared` and
-  `mismatched`, `mismatched <= compared`, and a nonempty single-line
-  `tolerance`. Anything else, a `null` leg included, makes the line an
-  invalid record.
+  carry (`a pinned excursions leg the parity line does not carry for id
+  (run_up)`).
+- A present census is gate evidence and is read strictly; anything else
+  makes the line an invalid record. It must be an object; each present leg an
+  object (a `null` leg is invalid) with every count its kind carries a
+  non-negative integer, `mismatched <= compared`, and where `ambiguous` is
+  counted `mismatched + ambiguous <= compared`; `tolerance`, where the kind
+  carries one, a nonempty single-line string. `labels` needs both legs, the
+  others at least one. Unknown keys are tolerated.
+- The `performance` `scalars` leg also carries `pairs`, its figures as
+  `{figure, ours, theirs, match}` (`brokkr corpus-results --scalars` lists
+  them). When present they must agree with the leg: an array of objects, each
+  a nonempty `figure` no other pair names, `ours` and `theirs` a number or one
+  of the metric spellings `inf`, `-inf`, `nan`, a boolean `match`; one pair
+  per comparison (`compared`), and `mismatched` exactly the pairs whose
+  `match` is false. This checks structure and the count only - which figures
+  piners compares, and whether a pair should match, are its policy. A line
+  without `pairs` (a harness predating them) is valid.
+- Only a valid, untainted line is checked.
 
 **Pinned breaks.** The harness exits 1 whenever any probe breaks
 (`compile_fail`, `runtime_fail`, `harness_abort` or `unevaluated`), including a probe pinned
@@ -886,11 +916,11 @@ refreshes every group), and every
 `[harness_files]` entry (`--probe` included - an edited facts file is
 re-stamped by any reseed), preserves
 `[probe_config]` verbatim, and carries each surviving probe's `expected`
-and `labels` forward. It decides nothing about how a probe runs, so a newly discovered or
+and ratchet counts (`labels`, `performance`, `excursions`) forward. It decides nothing about how a probe runs, so a newly discovered or
 re-added probe runs under whatever `[probe_config]` declares for its
 directory and stays unblessed. A blessed probe that gained or lost a
 `record` - so is now judged against a different oracle - keeps its
-`expected` and `labels` but is named in a re-bless warning, since a disposition that
+`expected` and ratchet counts but is named in a re-bless warning, since a disposition or count that
 happens to match across the switch would otherwise pass the gate unnoticed.
 A content change that breaks a `[probe_config]` rule - the probe gained a
 `record` under a declared CSV timezone, or the last probe under an exact-dir
@@ -898,11 +928,12 @@ declaration vanished - refuses the reseed, naming the declaration to edit.
 
 `--bless [--all|--keyword <k>|--probe <id>]` runs the selection (verify +
 build + harness), then stamps each probe's current disposition into
-`expected`, and its label census's per-leg `mismatched` counts into
-`labels`: a non-parity line clears `labels`, and a parity line without a
-census leaves an unpinned probe unpinned (a harness predating the census
-still blesses) but refuses the bless where the pin already holds counts it
-would drop. `changed` counts a probe whose `expected` or `labels` moved.
+`expected`, and each census's per-leg `mismatched` counts into `labels`,
+`performance` and `excursions` (the ratchets, above): a non-parity line
+clears them, and a parity line without a leg leaves an unpinned leg unpinned
+(a harness predating a census still blesses) but refuses the bless where the
+pin already holds a count it would drop. `changed` counts a probe whose
+`expected` or any ratchet count moved.
 Records reality including fails (a probe exercising an
 unimplemented feature legitimately pins `expected = "compile_fail"`; the
 gate then catches it starting to compile). Never gates. Prints `blessed N
