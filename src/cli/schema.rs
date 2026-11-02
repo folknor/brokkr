@@ -1482,10 +1482,12 @@ Query sidecar data captured in .brokkr/sidecar.db during `--bench`,
 `brokkr results` to find one. `--run N|all` picks a specific run
 within the result (default: best run).
 
-The `dirty` pseudo-UUID resolves to the most recent forced or failed
-run - runs produced via `--force` (dirty tree) or that exited non-zero
-have no results.db row, but their sidecar data is still stored and
-reachable this way.
+A run on a dirty tree (allowed by `--force`) or one that failed has no
+results.db row, but its sidecar data is still stored, under an id of its
+own that the run's `[sidecar]` line names even under quiet. The `dirty`
+pseudo-UUID resolves to the most recent such run; earlier ones stay
+readable by their ids. To A/B a variant and keep every cell, commit it
+locally so each cell stores a row (`brokkr man measure`).
 
 Examples:
   brokkr sidecar <uuid>                               # per-phase summary (default view)

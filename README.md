@@ -247,7 +247,7 @@ Sidecar data is stored even when the child is OOM-killed - the `/proc` trajector
 
 ### Querying sidecar data
 
-A UUID prefix is required (except for `--compare`) - use `brokkr results` to find one. The `dirty` pseudo-UUID resolves to the most recent failed/dirty-tree run.
+A UUID prefix is required (except for `--compare`) - use `brokkr results` to find one. The `dirty` pseudo-UUID resolves to the most recent failed/dirty-tree run; each earlier one keeps its own id, which its run's `[sidecar]` line names.
 
 ```
 brokkr sidecar <uuid>                              # per-phase summary (default view)

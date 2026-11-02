@@ -57,7 +57,8 @@ Quiet mode hides progress on the console but retains it in the run log.
 Warnings, errors, requested test verdicts and lock/guard/stray actions remain
 visible. The output channel owns all `[result]` framing; an unretrievable result
 (a dirty run or a failed database insert) uses the same printer without quiet
-suppression. Non-fatal bookkeeping failures are warnings.
+suppression, and so does the `[sidecar]` line naming a session no results row
+names. Non-fatal bookkeeping failures are warnings.
 
 JSON, query tables, outline and other data output retain their exact bytes and
 streams. Direct print macros are denied by this crate's Clippy configuration;

@@ -415,52 +415,76 @@ pub(crate) fn measure(
             &chosen.identity.documents(),
         )
     })();
+    // A completed measurement's comparison, printed whether or not its rows
+    // were published: with no row stored nothing retrieves it later, as for
+    // the result lines record_group forced, so it is then not quiet-gated.
+    let comparison = cli_side.as_ref().map(|side| super::vs_cli::Comparison {
+        call: side.call.id.clone(),
+        library_us: processes
+            .iter()
+            .map(|p| p.call_walls.get(&side.call.id).copied().unwrap_or(0))
+            .collect(),
+        cli_us: processes
+            .iter()
+            .map(|p| p.cli.map_or(0, |c| c.interval_us))
+            .collect(),
+        library_build: side.library_build.clone(),
+        policy_differences: policy_differences(side.call),
+    });
+    let print_comparison = |stored_rows: bool| {
+        for line in comparison.iter().flat_map(super::vs_cli::Comparison::lines) {
+            if stored_rows {
+                output::result_msg(&line);
+            } else {
+                output::result_forced(&line);
+            }
+        }
+    };
     let stored_rows = match published {
         Ok(stored_rows) => stored_rows,
-        Err(e) => return Err(file_failed(session, &sidecar, &uuid, stored, cli, e)),
+        Err(e) => {
+            print_comparison(false);
+            return Err(file_failed(session, &sidecar, &uuid, stored, cli, e));
+        }
     };
     if let Some(side) = &cli_side {
-        let comparison = super::vs_cli::Comparison {
-            call: side.call.id.clone(),
-            library_us: processes
-                .iter()
-                .map(|p| p.call_walls.get(&side.call.id).copied().unwrap_or(0))
-                .collect(),
-            cli_us: processes
-                .iter()
-                .map(|p| p.cli.map_or(0, |c| c.interval_us))
-                .collect(),
-            library_build: side.library_build.clone(),
-            policy_differences: policy_differences(side.call),
-        };
-        for line in comparison.lines() {
-            output::result_msg(&line);
-        }
-        output::sidecar_msg(&format!(
+        print_comparison(stored_rows);
+        // A stored `/cli` row names this session (`meta.library.cli_sidecar`);
+        // without one this line is its only handle.
+        let cli_line = format!(
             "CLI trajectories: {} in sidecar.db {} (`brokkr sidecar {}`)",
             output::count(side.session.stored, "process"),
             crate::db::short_uuid(&side.session.uuid),
             crate::db::short_uuid(&side.session.uuid)
-        ));
-    }
-    if !stored_rows {
-        // A dirty tree: the trajectories are kept, filed as dirty.
-        if let Err(e) = sidecar.set_latest("dirty", &uuid) {
-            output::warn(&format!(
-                "could not alias the sidecar session as dirty: {e}"
-            ));
+        );
+        if stored_rows {
+            output::sidecar_msg(&cli_line);
+        } else {
+            output::sidecar_forced(&cli_line);
         }
     }
-    output::sidecar_msg(&format!(
-        "{} stored, best run {}/{} (sidecar.db{})",
+    // A dirty tree: the trajectories are kept under their own id, which the
+    // summary names whether or not the alias could be moved to it.
+    let filing = if stored_rows {
+        crate::measure::Filing::Row
+    } else {
+        let aliased = match sidecar.set_latest("dirty", &uuid) {
+            Ok(()) => true,
+            Err(e) => {
+                output::warn(&format!(
+                    "could not alias the sidecar session as dirty: {e}"
+                ));
+                false
+            }
+        };
+        crate::measure::Filing::Unstored { aliased }
+    };
+    filing.emit(&format!(
+        "{} stored, best run {}/{} {}",
         output::count(stored, "process"),
         winner + 1,
         stored,
-        if stored_rows {
-            String::new()
-        } else {
-            format!(" {short}, filed as dirty")
-        }
+        filing.tail(&short)
     ));
     drop(sidecar);
     session.backup_sidecar();

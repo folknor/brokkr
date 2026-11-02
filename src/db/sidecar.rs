@@ -403,17 +403,22 @@ impl SidecarDb {
     // Write
     // -------------------------------------------------------------------
 
-    /// Bulk-insert sidecar profile data for one benchmark run.
-    /// Sidecar rows share the durable lifetime of results; only an explicit
-    /// `invalidate` removes them, so the store has no age-based pruning.
-    pub fn store_run(
+    /// A whole session, every run and its metadata, in one transaction: a
+    /// failure stores none of it, so no committed run is left under an id
+    /// nothing announced. Sidecar rows share the durable lifetime of
+    /// results; only an explicit `invalidate` removes them, so the store has
+    /// no age-based pruning.
+    pub(crate) fn store_session(
         &self,
         result_uuid: &str,
-        run_idx: usize,
-        data: &crate::sidecar::SidecarData,
+        runs: &[&crate::sidecar::SidecarData],
+        meta: &SessionMeta<'_>,
     ) -> Result<(), DevError> {
         let tx = self.conn.unchecked_transaction()?;
-        insert_run(&tx, result_uuid, run_idx, data)?;
+        for (run_idx, data) in runs.iter().enumerate() {
+            insert_run(&tx, result_uuid, run_idx, data)?;
+        }
+        write_meta(&tx, result_uuid, meta)?;
         tx.commit()?;
         Ok(())
     }
@@ -776,7 +781,9 @@ impl SidecarDb {
     /// Record a UUID as the latest for a given key (e.g. "dirty").
     ///
     /// Used so `brokkr results dirty` resolves to the most recent
-    /// dirty/failed run, even though each run gets a unique UUID.
+    /// dirty/failed run, even though each run gets a unique UUID. It moves
+    /// only the pointer: every earlier session keeps its rows and its own
+    /// id, so nothing is lost when the alias moves on.
     pub fn set_latest(&self, key: &str, uuid: &str) -> Result<(), DevError> {
         self.conn.execute(
             "INSERT OR REPLACE INTO sidecar_latest (key, uuid) VALUES (?1, ?2)",
@@ -1443,6 +1450,49 @@ mod tests {
         assert_eq!(db.delete_by_run_id(&id).unwrap(), 2);
         assert!(db.query_calls_for(&id, None).unwrap().is_empty());
         assert!(db.query_sink_ends_for(&id, None).unwrap().is_empty());
+    }
+
+    // Every unstored session keeps its rows under its own id: moving the
+    // `dirty` alias to a later one deletes nothing. A session whose second
+    // run cannot be written stores none of it, so no committed run is left
+    // under an id nothing announced.
+    #[test]
+    fn unstored_sessions_outlive_the_alias_and_store_whole_or_not_at_all() {
+        let path = crate::test_scratch::scratch("db-sidecar", "unstored").join("s.db");
+        let db = SidecarDb::open(&path).unwrap();
+        let data = library_capture();
+        let meta = |total_runs| SessionMeta {
+            best_run_idx: 0,
+            total_runs,
+            run_info: None,
+            sidecar_only: true,
+        };
+        for uuid in ["cell1111", "cell2222"] {
+            db.store_session(uuid, &[&data, &data], &meta(2)).unwrap();
+            db.set_latest("dirty", uuid).unwrap();
+        }
+        assert_eq!(db.resolve_latest("dirty").unwrap(), "cell2222");
+        let first = super::super::RunId::new("cell1111".to_owned());
+        assert!(db.has_data_for(&first).unwrap());
+        assert_eq!(db.query_meta_for(&first).unwrap(), (0, 2));
+        assert_eq!(db.query_calls_for(&first, None).unwrap().len(), 2);
+
+        let mut broken = library_capture();
+        let marker = || {
+            crate::sidecar::Record::Marker(crate::sidecar::Marker {
+                marker_idx: 0,
+                timestamp_us: 5,
+                name: "SAME".to_owned(),
+                run_idx: 0,
+                call: None,
+            })
+        };
+        broken.records = vec![marker(), marker()];
+        assert!(
+            db.store_session("cell3333", &[&data, &broken], &meta(2))
+                .is_err()
+        );
+        assert!(db.uuids_matching_prefix("cell3333").unwrap().is_empty());
     }
 
     // A store stamped newer than this brokkr knows is refused, and the stamp is

@@ -133,14 +133,44 @@ pub(super) fn append_kv_fields(parts: &mut Vec<String>, kv: &[KvPair]) {
     }
 }
 
+/// How a stored sidecar session can be found again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Filing {
+    /// Under its results row's id, which the `results.db` line named.
+    Row,
+    /// No results row: the id is named only on the summary line. `aliased`
+    /// says whether the `dirty` alias now points at it.
+    Unstored { aliased: bool },
+}
+
+impl Filing {
+    /// The `(sidecar.db ...)` tail of a summary line: the id only when no
+    /// results row names it, and `filed as dirty` only once the alias was
+    /// actually written.
+    pub(crate) fn tail(self, short: &str) -> String {
+        match self {
+            Self::Row => "(sidecar.db)".to_owned(),
+            Self::Unstored { aliased: true } => format!("(sidecar.db {short}, filed as dirty)"),
+            Self::Unstored { aliased: false } => format!("(sidecar.db {short}, no results row)"),
+        }
+    }
+
+    /// Print a summary line: quiet-gated when a results row names the
+    /// session, forced otherwise, since this line is then its only handle.
+    pub(crate) fn emit(self, line: &str) {
+        match self {
+            Self::Row => console::sidecar_msg(line),
+            Self::Unstored { .. } => console::sidecar_forced(line),
+        }
+    }
+}
+
 /// The single `[sidecar]` line a stored profile prints: the best run's
 /// sample, marker and counter counts (with the run number when there were
-/// several). `dirty` marks a trajectory filed under the `dirty` alias because
-/// no results row exists for it; only then is the id named here, since
-/// otherwise it is the results row's id, already printed.
+/// several), then how it is filed ([`Filing::tail`]).
 pub(super) fn sidecar_summary_line(
     short: &str,
-    dirty: bool,
+    filing: Filing,
     runs: &[&crate::sidecar::SidecarData],
     best_run_idx: usize,
 ) -> String {
@@ -163,12 +193,8 @@ pub(super) fn sidecar_summary_line(
         )
     });
     // A profile with a results row shares its id, which the `results.db` line
-    // already printed; only a `dirty`-filed one needs its own.
-    if dirty {
-        format!("{counts}(sidecar.db {short}, filed as dirty)")
-    } else {
-        format!("{counts}(sidecar.db)")
-    }
+    // already printed; only an unstored one needs its own.
+    format!("{counts}{}", filing.tail(short))
 }
 
 /// Build a storage notes string from the drive configuration.
@@ -465,7 +491,11 @@ impl BenchHarness {
     ///
     /// When `uuid` is `None` (dirty tree or failed run), generates a fresh
     /// UUID and updates the `dirty` latest pointer so `brokkr results dirty`
-    /// always finds the most recent unstored run.
+    /// always finds the most recent unstored run. The pointer is a
+    /// convenience: earlier unstored sessions keep their rows under their
+    /// own ids, which the forced summary line names. The session is written
+    /// in one transaction, so a failure leaves no unannounced id behind, and
+    /// an alias failure is a warning that cannot suppress the line.
     pub(super) fn store_sidecar(
         &self,
         uuid: Option<&str>,
@@ -488,30 +518,40 @@ impl BenchHarness {
             }
         };
 
-        for (i, data) in sidecar_runs.iter().enumerate() {
-            sidecar_db.store_run(&store_uuid, i, data)?;
-        }
-
-        sidecar_db.store_meta(
+        sidecar_db.store_session(
             &store_uuid,
-            best_run_idx,
-            sidecar_runs.len(),
-            run_info,
-            is_dirty,
+            sidecar_runs,
+            &crate::db::sidecar::SessionMeta {
+                best_run_idx,
+                total_runs: sidecar_runs.len(),
+                run_info,
+                sidecar_only: is_dirty,
+            },
         )?;
 
-        if is_dirty {
-            sidecar_db.set_latest("dirty", &store_uuid)?;
-        }
+        let filing = if is_dirty {
+            let aliased = match sidecar_db.set_latest("dirty", &store_uuid) {
+                Ok(()) => true,
+                Err(e) => {
+                    console::warn(&format!(
+                        "could not alias the sidecar session as dirty: {e}"
+                    ));
+                    false
+                }
+            };
+            Filing::Unstored { aliased }
+        } else {
+            Filing::Row
+        };
 
         // The one sidecar summary line: what was stored (and the id, only for
-        // a `dirty`-filed profile - otherwise the results.db line named it).
+        // an unstored profile - otherwise the results.db line named it).
         // Per-run attach and sample counts are run-log detail (the sidecar run);
         // the wall time is on the `[result]` line.
         let short = &store_uuid[..8.min(store_uuid.len())];
-        console::sidecar_msg(&sidecar_summary_line(
+        filing.emit(&sidecar_summary_line(
             short,
-            is_dirty,
+            filing,
             sidecar_runs,
             best_run_idx,
         ));

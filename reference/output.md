@@ -5,7 +5,9 @@ messages use the console printers. The channel owns prefix framing, run-log
 teeing, clearing and redrawing the terminal status line, and quiet filtering.
 `output::result_msg` and `output::result_forced` share one result renderer.
 Quiet progress still reaches an open run log; forced results remain visible
-when the result cannot be retrieved from storage.
+when the result cannot be retrieved from storage. `output::sidecar_forced` is
+the same rule for a sidecar session with no results row: the line naming its
+id is its only handle, so it is never quiet-suppressed.
 
 Operator messages default to stdout. Sidecar query provenance, including its
 errors and warnings, uses stderr so query data on stdout stays parseable. A

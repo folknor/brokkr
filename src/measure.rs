@@ -756,7 +756,7 @@ pub(crate) mod capture;
 pub(crate) mod execution;
 pub(crate) mod kv;
 mod record;
-pub(crate) use record::GroupRow;
+pub(crate) use record::{Filing, GroupRow};
 pub(crate) mod wall;
 
 #[cfg(test)]

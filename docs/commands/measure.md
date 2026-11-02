@@ -152,6 +152,16 @@ tree it warns that it has no effect (every measured command, ratatoskr's
 `sync --bench` included), so an A/B whose baseline is `--commit` and
 whose other arm is a dirty working tree shows which arm filed a row.
 
+To A/B an uncommitted variant and keep every cell, commit it locally first
+and drop the commit afterwards: with the baseline as `--commit <parent>` and
+the variant as the now clean tree (or both arms as `--commit`), every cell
+stores a row carrying its argv, captured env and provenance, with its sidecar
+profile under the row's id, `brokkr results` lists them, and `brokkr results
+--compare` pairs the arms. The rows keep the hash after the commit is gone. A
+dirty-tree cell that `--force` permits keeps its sidecar profile but has no
+results row: its id is named only on that run's `[sidecar]` line (below), and
+the `dirty` alias reaches only the latest such session.
+
 If the `results.db` insert fails, the `[result]` line still prints
 (unconditionally, since the row cannot be looked up later) and the sidecar
 trajectory is stored under `dirty` before the error is returned - a DB failure
@@ -176,12 +186,24 @@ One fact, one place. A run with a clean tree prints, in order:
 - `[run] results.db a1b2c3d4`, the stored row's short id - the one line
   naming it, and not hidden by quiet mode, since it is how the run is found
   again (`brokkr results a1b2c3d4`, `brokkr sidecar a1b2c3d4`).
-- one `[sidecar]` summary line on stderr (quiet-gated) once the profile is
-  stored: the best run's sample, marker and counter counts, with
-  `best run k/n:` when there were several (`(sidecar.db)`). The profile shares
-  the results row's id, so the line does not repeat it. A trajectory with no
+- one `[sidecar]` summary line on stderr once the profile is stored: the best
+  run's sample, marker and counter counts, with `best run k/n:` when there
+  were several (`(sidecar.db)`). The profile shares the results row's id, so
+  the line does not repeat it, and it is quiet-gated. A trajectory with no
   results row is filed under the `dirty` alias, and only then does the line
-  name its own id (`sidecar.db a1b2c3d4, filed as dirty`).
+  name its own id (`sidecar.db a1b2c3d4, filed as dirty`); that line is then
+  the one place the id appears, so like the `results.db` line it is not hidden
+  by quiet mode (measured runs are quiet unless `--verbose`). Moving the alias
+  removes nothing: every earlier such session keeps its rows under its own id
+  until `brokkr invalidate`. If the alias cannot be written, a warning says so,
+  the line reads `sidecar.db a1b2c3d4, no results row`, and the run's outcome
+  is what it would have been: the alias is bookkeeping, not part of the
+  measurement. A harness measurement writes its session in one transaction
+  after the last iteration, so a storage failure leaves no session behind
+  under an id no line named. A library measurement is the exception: it
+  stores each process as soon as it is judged, keeping the earlier ones if a
+  later write fails, and names its session on that error (`brokkr man
+  library`, Measuring a scenario).
 
 Sent to the run-log channel (`detail`) instead of the console: the per-run
 sidecar attach (`sidecar attached to pid P, run k`, one-indexed like `run i/n`)
@@ -324,7 +346,7 @@ Filter flags `--phase`, `--range`, `--where` compose with `--samples` and
 `--stat`; `--fields`/`--every`/`--head`/`--tail` only with `--samples`. A UUID
 is required except for `--compare`; the `dirty` pseudo-UUID resolves to the
 most recent failed/dirty-tree run (see "Run lifecycle" below for how it is
-set). `--bench N` stores **all N runs** in sidecar.db but marks
+set), and each earlier one by the id its `[sidecar]` line named. `--bench N` stores **all N runs** in sidecar.db but marks
 `best_run_idx` (the run whose wall-clock matched the reported `elapsed_ms`);
 the default view and `--stat`/`--phase` read that best run unless another
 `run_idx` is selected.
@@ -667,7 +689,9 @@ switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`, `--comp
   iteration's data even when the child succeeded and only the step after it
   (log write, `summary.json`) failed. Failed/dirty runs get a random UUID and update the
   `dirty` latest pointer, so `brokkr sidecar dirty` / `brokkr results dirty`
-  always resolve the most recent unstored run. The child is also marked as the
+  resolve the most recent unstored run (unless that pointer write failed,
+  which is warned about); the pointer is all that moves, and an earlier one
+  stays readable by its own id. The child is also marked as the
   kernel OOM killer's preferred target (`src/oom.rs`) so a memory blow-up
   takes the benchmarked process, not the host.
 

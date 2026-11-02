@@ -40,11 +40,15 @@ mod persistence {
     }
 
     #[test]
-    fn sidecar_summary_line_names_only_a_dirty_id() {
-        let line = sidecar_summary_line("a1b2c3d4", false, &[], 0);
+    fn sidecar_summary_line_names_only_an_unstored_id() {
+        let line = sidecar_summary_line("a1b2c3d4", Filing::Row, &[], 0);
         assert_eq!(line, "(sidecar.db)");
-        let dirty = sidecar_summary_line("a1b2c3d4", true, &[], 0);
+        let dirty = sidecar_summary_line("a1b2c3d4", Filing::Unstored { aliased: true }, &[], 0);
         assert_eq!(dirty, "(sidecar.db a1b2c3d4, filed as dirty)");
+        // An alias that could not be written is not claimed; the id still is.
+        let unaliased =
+            sidecar_summary_line("a1b2c3d4", Filing::Unstored { aliased: false }, &[], 0);
+        assert_eq!(unaliased, "(sidecar.db a1b2c3d4, no results row)");
     }
 
     // -----------------------------------------------------------------------

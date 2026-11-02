@@ -494,6 +494,13 @@ pub fn sidecar_msg(msg: &str) {
     }
 }
 
+/// The line that alone names a sidecar session with no results row, visible
+/// in quiet mode: like an unretrievable [`result_forced`] result, nothing
+/// else will show its id again. Measured runs are quiet by default.
+pub fn sidecar_forced(msg: &str) {
+    emit_text(Stream::Err, &prefixed(&tag_prefix("[sidecar]"), msg));
+}
+
 /// Requested sidecar provenance remains visible in quiet mode.
 pub fn sidecar_info(msg: &str) {
     emit_text(Stream::Err, &prefixed(&tag_prefix("[sidecar]"), msg));
@@ -761,6 +768,7 @@ mod channel_tests {
             result_msg("hidden result");
             sidecar_msg("hidden sidecar");
             result_forced("unretrievable result");
+            sidecar_forced("unstored session");
             warn("visible warning");
             set_quiet(false);
             for printer in [
@@ -825,6 +833,8 @@ mod channel_tests {
         assert_eq!(log.matches("logged action").count(), 15);
         assert!(!log.contains('\x1b'));
         assert!(stderr.contains("[sidecar] query provenance\n"));
+        assert!(stderr.contains("[sidecar] unstored session\n"));
+        assert!(log.contains("[sidecar] unstored session\n"));
         assert!(stderr.contains("[warn]    late bookkeeping\n"));
         assert!(log.contains("[warn]    late bookkeeping\n"));
         assert!(log.contains("[warn]    renderer busy during shutdown\n"));

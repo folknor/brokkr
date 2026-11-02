@@ -885,7 +885,9 @@ boundaries and sink account from its document, so a call's last phase ends
 at its return (`brokkr man measure`, Marker and counter rules). The rows
 come after the last trajectory and the final metadata, and they publish the
 measurement. When it fails, or the tree is dirty, the session is filed under
-the `dirty` alias and its id printed.
+the `dirty` alias and its id printed, on a line quiet mode does not hide
+since nothing else names it (`brokkr man measure`, What a measured run
+prints).
 
 ## Profiling a scenario
 
@@ -1031,7 +1033,8 @@ of its iteration in a sidecar session of its own, the one
 whatever it came to (an invalid interval, a bad ending, an unsafe release
 or an interrupt included), as the library's is; a measurement that stores
 no row names that session beside the library one (the `dirty` alias holds
-only the library session). A group is shown with a comparison only when
+only the library session), as it does its comparison, on lines quiet mode
+does not hide. A group is shown with a comparison only when
 it holds exactly one `/cli` row, told by its interval definition and not
 by its name alone, and exactly one call row it extends.
 

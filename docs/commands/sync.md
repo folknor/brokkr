@@ -209,10 +209,10 @@ only on equal profiles), configured
 features, the `capture_env` snapshot, sidecar RunInfo for the winning
 iteration's process, and a measurement-start stamp so `prev.gap_seconds`
 excludes the run's own duration. A failed, hung, or interrupted run has no
-`results.db` row; collected sidecar data can still be reached with
-`brokkr sidecar dirty`. `--force` permits measuring a dirty git tree, but
-does not insert that run into `results.db`; its sidecar data is available
-through the same alias. A completed gated bench separately writes a row
+`results.db` row; collected sidecar data can still be reached by the id its
+`[sidecar]` line names, or with `brokkr sidecar dirty` while it is the latest
+such run. `--force` permits measuring a dirty git tree, but does not insert
+that run into `results.db`; its sidecar data is reached the same way. A completed gated bench separately writes a row
 to `gate.db` (including a `dirty` flag when applicable), even if a metric
 rule then fails. A harness failure before the gate hook writes no gate row;
 see `docs/commands/ratatoskr-gate.md`.
