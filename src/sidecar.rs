@@ -478,10 +478,23 @@ pub(crate) struct Timeline<'a> {
 impl<'a> Timeline<'a> {
     /// The process stream of a stored run, using its sampled end as the final
     /// boundary and retaining the whole-run fallback for markerless runs.
+    ///
+    /// A marker stamped after the last sample (the process emits it in the
+    /// last tick before it exits) would put the sampled end before the final
+    /// segment's start. The boundary is then that marker, so the final segment
+    /// is zero-length, by convention rather than measurement: the run's wall
+    /// is not stored with its samples, so nothing observed bounds it. Every
+    /// view over this stream (summary, `--compare`, `--phase`) then shares one
+    /// valid interval instead of a reversed one.
     pub(crate) fn new(markers: &'a [Marker], samples: &[Sample]) -> Self {
+        let markers = chronological(markers);
+        let sampled_end = samples.last().map_or(0, |s| s.timestamp_us + 1);
+        let final_us = markers
+            .last()
+            .map_or(sampled_end, |last| sampled_end.max(last.timestamp_us));
         Self {
-            markers: chronological(markers),
-            final_us: Some(samples.last().map_or(0, |s| s.timestamp_us + 1)),
+            markers,
+            final_us: Some(final_us),
             first_sample_us: samples.first().map(|s| s.timestamp_us),
         }
     }

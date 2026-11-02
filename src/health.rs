@@ -63,7 +63,9 @@ pub(crate) fn usage(path: &Path) -> Measured {
         if meta.dev() != device || !seen.insert((meta.dev(), meta.ino())) {
             continue;
         }
-        usage.bytes = usage.bytes.saturating_add(meta.blocks().saturating_mul(512));
+        usage.bytes = usage
+            .bytes
+            .saturating_add(meta.blocks().saturating_mul(512));
         if !meta.is_dir() {
             continue;
         }
@@ -318,7 +320,10 @@ pub(crate) fn describe(pressure: &Pressure<'_>) -> Vec<String> {
 pub(crate) fn print_env(state_root: &Path, paths: &crate::config::ResolvedPaths) {
     let stores = all_stores(state_root, paths);
     let width = stores.iter().map(|s| s.name.len()).max().unwrap_or(0) + 1;
-    println!("{:<12} allocated; stores can share files, so the rows do not sum", "state:");
+    println!(
+        "{:<12} allocated; stores can share files, so the rows do not sum",
+        "state:"
+    );
     let mut absent = Vec::new();
     for store in &stores {
         let size = match usage(&store.path) {
@@ -397,7 +402,10 @@ mod tests {
         assert!(single.bytes >= 64 * 1024, "{single:?}");
         assert!(!single.incomplete);
         // The link adds a directory entry, not a second copy of the blocks.
-        assert!(linked.bytes < single.bytes + 64 * 1024, "{linked:?} {single:?}");
+        assert!(
+            linked.bytes < single.bytes + 64 * 1024,
+            "{linked:?} {single:?}"
+        );
         assert_eq!(usage(&root.join("absent")), Measured::Absent);
     }
 

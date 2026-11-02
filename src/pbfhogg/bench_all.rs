@@ -8,14 +8,12 @@ use crate::config::ResolvedPaths;
 use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness, BenchResult};
+use crate::measure::MeasureMode;
 use crate::measure::{ExternalTool, Invocation};
 use crate::output;
-use crate::measure::MeasureMode;
 use crate::pbfhogg::bench_cells::{self, Batch, BatchInputs};
 use crate::pbfhogg::binary::PbfhoggBinary;
-use crate::pbfhogg::{
-    bench_blob_filter, bench_commands, bench_extract, bench_planetiler,
-};
+use crate::pbfhogg::{bench_blob_filter, bench_commands, bench_extract, bench_planetiler};
 use crate::project::BuildRoot;
 use crate::tools;
 

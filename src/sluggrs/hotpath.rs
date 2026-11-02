@@ -172,10 +172,11 @@ fn run(
         command_label,
         || {
             let wall = crate::harness::WallSource::External;
-            ctx.harness.run_hotpath(&config, ctx.binary()?, wall, |i, fifo| {
-                ctx.harness
-                    .capture_hotpath(ctx.binary()?, &[], build_root, fifo, i)
-            })
+            ctx.harness
+                .run_hotpath(&config, ctx.binary()?, wall, |i, fifo| {
+                    ctx.harness
+                        .capture_hotpath(ctx.binary()?, &[], build_root, fifo, i)
+                })
         },
         || {
             output::bench_msg(&format!("sluggrs {command_label}: {runs} run(s)"));

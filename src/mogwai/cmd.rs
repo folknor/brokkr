@@ -97,10 +97,11 @@ pub(crate) fn run(
             // The profiling runner writes and reads the hotpath report as
             // well as timing the child.
             let wall = crate::harness::WallSource::External;
-            ctx.harness.run_hotpath(&config, ctx.binary()?, wall, |i, fifo| {
-                ctx.harness
-                    .capture_hotpath(ctx.binary()?, &argv, child_cwd, fifo, i)
-            })
+            ctx.harness
+                .run_hotpath(&config, ctx.binary()?, wall, |i, fifo| {
+                    ctx.harness
+                        .capture_hotpath(ctx.binary()?, &argv, child_cwd, fifo, i)
+                })
         },
         || {
             // External wall-clock, with the stderr counters that ride along

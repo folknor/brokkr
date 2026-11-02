@@ -108,12 +108,11 @@ pub(crate) fn own_exe() -> PathBuf {
 /// under the brokkr lock, and `Drop` removes it; one a killed brokkr left is
 /// removed by store maintenance (`crate::maintenance`).
 pub(crate) fn is_session_dir_name(name: &str) -> bool {
-    name.split_once('-')
-        .is_some_and(|(pid, rest)| {
-            !pid.is_empty()
-                && pid.bytes().all(|b| b.is_ascii_digit())
-                && crate::maintenance::is_number_pair(rest)
-        })
+    name.split_once('-').is_some_and(|(pid, rest)| {
+        !pid.is_empty()
+            && pid.bytes().all(|b| b.is_ascii_digit())
+            && crate::maintenance::is_number_pair(rest)
+    })
 }
 
 /// Whether `pid` runs the same executable inode as this process. Compared by

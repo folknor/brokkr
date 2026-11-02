@@ -103,8 +103,7 @@ fn check_refs_with_relations_reads_its_own_declaration() {
     );
     let ways_only: PbfExpect = toml::from_str("check-refs = \"clean\"").unwrap();
     assert!(for_entry(&relations, &ways_only, None, "[t]").is_none());
-    let relations_only: PbfExpect =
-        toml::from_str("check-refs-relations = \"clean\"").unwrap();
+    let relations_only: PbfExpect = toml::from_str("check-refs-relations = \"clean\"").unwrap();
     assert!(for_entry(&plain, &relations_only, None, "[t]").is_none());
 }
 
@@ -112,10 +111,9 @@ fn check_refs_with_relations_reads_its_own_declaration() {
 /// key only, with no fallback either way.
 #[test]
 fn check_locations_with_agreement_reads_its_own_declaration() {
-    let both: PbfExpect = toml::from_str(
-        "check-locations = \"clean\"\ncheck-locations-agreement = \"violations\"",
-    )
-    .unwrap();
+    let both: PbfExpect =
+        toml::from_str("check-locations = \"clean\"\ncheck-locations-agreement = \"violations\"")
+            .unwrap();
     let plain = PbfhoggCommand::CheckLocations { agreement: false };
     let agreement = PbfhoggCommand::CheckLocations { agreement: true };
     let hit = for_entry(&plain, &both, None, "[t]").unwrap();

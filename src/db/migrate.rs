@@ -123,7 +123,14 @@ fn run_migrations_from_v23(conn: &rusqlite::Connection, current: i64) -> Result<
 /// `--hotpath` or `--alloc` from before these cells were profiled carries no
 /// profile, and qualifying it does not give it one.
 fn migrate_v26_to_v27(conn: &rusqlite::Connection) -> Result<(), DevError> {
-    for column in ["id", "command", "arm_key", "cli_args", "brokkr_args", "project"] {
+    for column in [
+        "id",
+        "command",
+        "arm_key",
+        "cli_args",
+        "brokkr_args",
+        "project",
+    ] {
         if !column_exists(conn, "runs", column)? {
             return Ok(());
         }
@@ -2430,7 +2437,14 @@ mod tests {
         };
         let read = "/p/pbfhogg bench-read /d/planet.osm.pbf --mode parallel";
         let pbfhogg = Some("pbfhogg");
-        insert("null-key", "read", Some(read), None, Some("brokkr read --bench 1"), pbfhogg);
+        insert(
+            "null-key",
+            "read",
+            Some(read),
+            None,
+            Some("brokkr read --bench 1"),
+            pbfhogg,
+        );
         insert("no-args", "read", Some(read), None, None, pbfhogg);
         insert(
             "stored",
@@ -2441,11 +2455,32 @@ mod tests {
             Some("pbfhogg"),
         );
         let qualified = crate::run_invocation::qualified_arm_key("k", Some("mode=parallel"));
-        insert("already", "read", Some(read), Some(&qualified), None, pbfhogg);
+        insert(
+            "already",
+            "read",
+            Some(read),
+            Some(&qualified),
+            None,
+            pbfhogg,
+        );
         let quoted = "/p/pbfhogg bench-read \"/d/a b.pbf\" --mode parallel";
-        insert("quoted", "read", Some(quoted), None, Some("brokkr read"), pbfhogg);
+        insert(
+            "quoted",
+            "read",
+            Some(quoted),
+            None,
+            Some("brokkr read"),
+            pbfhogg,
+        );
         insert("no-cli", "read", None, None, Some("brokkr read"), pbfhogg);
-        insert("elsewhere", "read", Some(read), None, Some("x"), Some("nidhogg"));
+        insert(
+            "elsewhere",
+            "read",
+            Some(read),
+            None,
+            Some("x"),
+            Some("nidhogg"),
+        );
 
         migrate_v26_to_v27(&db.conn).unwrap();
 
@@ -2459,9 +2494,15 @@ mod tests {
                 .unwrap()
         };
         let q = |base: &str, qualifier: &str| {
-            Some(crate::run_invocation::qualified_arm_key(base, Some(qualifier)))
+            Some(crate::run_invocation::qualified_arm_key(
+                base,
+                Some(qualifier),
+            ))
         };
-        assert_eq!(key("null-key").0, q("brokkr read --bench 1", "mode=parallel"));
+        assert_eq!(
+            key("null-key").0,
+            q("brokkr read --bench 1", "mode=parallel")
+        );
         assert_eq!(key("no-args").0, q("", "mode=parallel"));
         assert_eq!(
             key("stored").0,

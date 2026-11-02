@@ -358,9 +358,7 @@ impl ReferenceCache {
         };
         let mut unreadable = 0usize;
         let mut entries: Vec<(std::time::SystemTime, Option<u64>, PathBuf)> = read
-            .filter_map(|entry| {
-                entry.map_err(|_| unreadable += 1).ok()
-            })
+            .filter_map(|entry| entry.map_err(|_| unreadable += 1).ok())
             .filter(|entry| {
                 let name = entry.file_name();
                 let name = name.to_string_lossy();

@@ -404,208 +404,29 @@ pub(crate) fn verify(
     // guard are still alive; a retention failure is a warning, and the run's
     // own result is what returns.
     let result = (|| -> Result<(), DevError> {
-    // `all` runs the whole suite and prints its own per-check results + banner,
-    // so it manages the quiet/verbose behaviour itself rather than being
-    // wrapped in a single `run_check`.
-    if let VerifyCommand::All { pbf, osc_seq, bbox } = &verify {
-        let pbf_path = resolve_verify_input(
-            pbf.input.as_deref(),
-            &pbf.dataset,
-            &pbf.variant,
-            pbf.snapshot.as_ref(),
-            &paths,
-            project_root,
-        )?;
-        // An input that is simply not configured skips the checks needing it;
-        // an input that IS configured but fails to resolve - hash mismatch,
-        // missing file, ambiguous OSC, malformed bbox - fails the command.
-        // Resolving with `.ok()` used to fold both into "SKIPPED", so a
-        // corrupted OSC turned five checks into skips and the suite exited 0.
-        let osc_path = if osc_configured(
-            &pbf.dataset,
-            pbf.snapshot.as_ref(),
-            osc_seq.as_deref(),
-            &paths,
-        ) {
-            let (path, scope) = resolve_verify_osc(
+        // `all` runs the whole suite and prints its own per-check results + banner,
+        // so it manages the quiet/verbose behaviour itself rather than being
+        // wrapped in a single `run_check`.
+        if let VerifyCommand::All { pbf, osc_seq, bbox } = &verify {
+            let pbf_path = resolve_verify_input(
+                pbf.input.as_deref(),
+                &pbf.dataset,
+                &pbf.variant,
+                pbf.snapshot.as_ref(),
+                &paths,
+                project_root,
+            )?;
+            // An input that is simply not configured skips the checks needing it;
+            // an input that IS configured but fails to resolve - hash mismatch,
+            // missing file, ambiguous OSC, malformed bbox - fails the command.
+            // Resolving with `.ok()` used to fold both into "SKIPPED", so a
+            // corrupted OSC turned five checks into skips and the suite exited 0.
+            let osc_path = if osc_configured(
                 &pbf.dataset,
                 pbf.snapshot.as_ref(),
                 osc_seq.as_deref(),
                 &paths,
-                project_root,
-            )?;
-            narrate_osc_scope(pbf.snapshot.as_ref(), scope);
-            Some(path)
-        } else {
-            None
-        };
-        let resolved_bbox = if bbox_configured(bbox.as_ref(), &pbf.dataset, &paths) {
-            Some(resolve_bbox(bbox.as_ref(), &pbf.dataset, &paths)?)
-        } else {
-            None
-        };
-        let locations_base = resolve_locations_base(
-            pbf.input.as_deref(),
-            &pbf.dataset,
-            pbf.snapshot.as_ref(),
-            &paths,
-            project_root,
-        )?;
-        return super::verify_all::run(
-            &harness,
-            &pbf_path,
-            osc_path.as_deref(),
-            resolved_bbox.as_ref(),
-            &locations_base,
-            &paths.data_dir,
-            pbf.direct_io,
-            &pbf.dataset,
-            verbose,
-        );
-    }
-
-    // Enriched (injected-prepass) output is osmium-incompatible by design:
-    // BlobHeader field-5 headers run ~1-8 KB and libosmium 2.23 rejects any
-    // BlobHeader over 127 bytes (their issue 405). There is no reference tool
-    // to cross-validate against, so we refuse the flag up-front rather than let
-    // the check report a false failure. Enriched-output correctness is covered
-    // inside pbfhogg's own suite (oracle roundtrip + backend parity).
-    if let VerifyCommand::AddLocationsToWays {
-        inject_prepass: true,
-        ..
-    } = &verify
-    {
-        output::verify_msg(
-            "add-locations-to-ways --inject-prepass emits osmium-incompatible wire \
-             extensions (BlobHeader field 5 > 127 bytes; libosmium 2.23 issue 405); \
-             enriched output cannot be osmium-verified.",
-        );
-        output::verify_msg(
-            "flag-off `brokkr verify add-locations-to-ways` covers the element \
-             semantics; enriched correctness is covered by pbfhogg's own oracle \
-             roundtrip + backend-parity suite.",
-        );
-        return Err(DevError::Config(
-            "verify add-locations-to-ways --inject-prepass: enriched output cannot be \
-             osmium-verified"
-                .into(),
-        ));
-    }
-
-    // Every individual check runs under the pass-quiet / fail-loud wrapper.
-    let name = verify_name(&verify);
-    super::verify::run_check(name, verbose, || match verify {
-        VerifyCommand::Sort { pbf } => {
-            let pbf_path = resolve_verify_input(
-                pbf.input.as_deref(),
-                &pbf.dataset,
-                &pbf.variant,
-                pbf.snapshot.as_ref(),
-                &paths,
-                project_root,
-            )?;
-            super::verify_sort::run(&harness, &pbf_path, pbf.direct_io)
-        }
-        VerifyCommand::Cat { pbf } => {
-            let pbf_path = resolve_verify_input(
-                pbf.input.as_deref(),
-                &pbf.dataset,
-                &pbf.variant,
-                pbf.snapshot.as_ref(),
-                &paths,
-                project_root,
-            )?;
-            super::verify_cat::run(&harness, &pbf_path, pbf.direct_io)
-        }
-        VerifyCommand::Extract { pbf, bbox } => {
-            let pbf_path = resolve_verify_input(
-                pbf.input.as_deref(),
-                &pbf.dataset,
-                &pbf.variant,
-                pbf.snapshot.as_ref(),
-                &paths,
-                project_root,
-            )?;
-            let bbox = resolve_bbox(bbox.as_ref(), &pbf.dataset, &paths)?;
-            super::verify_extract::run(&harness, &pbf_path, &bbox, pbf.direct_io)
-        }
-        VerifyCommand::MultiExtract { pbf, bbox, regions } => {
-            let pbf_path = resolve_verify_input(
-                pbf.input.as_deref(),
-                &pbf.dataset,
-                &pbf.variant,
-                pbf.snapshot.as_ref(),
-                &paths,
-                project_root,
-            )?;
-            let bbox = resolve_bbox(bbox.as_ref(), &pbf.dataset, &paths)?;
-            super::verify_multi_extract::run(&harness, &pbf_path, &bbox, regions, pbf.direct_io)
-        }
-        VerifyCommand::TagsFilter { pbf } => {
-            let pbf_path = resolve_verify_input(
-                pbf.input.as_deref(),
-                &pbf.dataset,
-                &pbf.variant,
-                pbf.snapshot.as_ref(),
-                &paths,
-                project_root,
-            )?;
-            super::verify_tags_filter::run(&harness, &pbf_path, pbf.direct_io)
-        }
-        VerifyCommand::GetidRemoveid { pbf } => {
-            let pbf_path = resolve_verify_input(
-                pbf.input.as_deref(),
-                &pbf.dataset,
-                &pbf.variant,
-                pbf.snapshot.as_ref(),
-                &paths,
-                project_root,
-            )?;
-            super::verify_getid_removeid::run(&harness, &pbf_path, pbf.direct_io)
-        }
-        VerifyCommand::AddLocationsToWays {
-            pbf,
-            mode,
-            inject_prepass: _,
-        } => {
-            let pbf_path = resolve_verify_input(
-                pbf.input.as_deref(),
-                &pbf.dataset,
-                &pbf.variant,
-                pbf.snapshot.as_ref(),
-                &paths,
-                project_root,
-            )?;
-            super::verify_add_locations::run(&harness, &pbf_path, mode, pbf.direct_io)
-        }
-        VerifyCommand::CheckRefs { pbf } => {
-            let pbf_path = resolve_verify_input(
-                pbf.input.as_deref(),
-                &pbf.dataset,
-                &pbf.variant,
-                pbf.snapshot.as_ref(),
-                &paths,
-                project_root,
-            )?;
-            super::verify_check_refs::run(&harness, &pbf_path, pbf.direct_io)
-        }
-        VerifyCommand::Merge {
-            pbf,
-            osc_seq,
-            osc,
-            locations_on_ways,
-        } => {
-            let pbf_path = resolve_verify_input(
-                pbf.input.as_deref(),
-                &pbf.dataset,
-                &pbf.variant,
-                pbf.snapshot.as_ref(),
-                &paths,
-                project_root,
-            )?;
-            let osc_path = if let Some(p) = osc.as_deref() {
-                canonical_fixture(p, project_root, "--osc")?
-            } else {
+            ) {
                 let (path, scope) = resolve_verify_osc(
                     &pbf.dataset,
                     pbf.snapshot.as_ref(),
@@ -614,105 +435,290 @@ pub(crate) fn verify(
                     project_root,
                 )?;
                 narrate_osc_scope(pbf.snapshot.as_ref(), scope);
-                path
-            };
-            // osmosis and osmconvert write no inline locations, so an -l run
-            // has nothing to ask them.
-            let osmosis = if locations_on_ways {
-                None
+                Some(path)
             } else {
-                match tools::ensure_osmosis(&paths.data_dir) {
-                    Ok(tools) => Some(tools),
-                    Err(DevError::Interrupted) => return Err(DevError::Interrupted),
-                    Err(e) => {
-                        output::verify_msg(&format!("osmosis not available (non-fatal): {e}"));
-                        None
-                    }
-                }
+                None
             };
-            super::verify_merge::run(
-                &harness,
-                &pbf_path,
-                &osc_path,
-                osmosis.as_ref(),
-                pbf.direct_io,
-                locations_on_ways,
-            )
-        }
-        VerifyCommand::DeriveChanges { pbf, osc_seq } => {
-            let pbf_path = resolve_verify_input(
+            let resolved_bbox = if bbox_configured(bbox.as_ref(), &pbf.dataset, &paths) {
+                Some(resolve_bbox(bbox.as_ref(), &pbf.dataset, &paths)?)
+            } else {
+                None
+            };
+            let locations_base = resolve_locations_base(
                 pbf.input.as_deref(),
                 &pbf.dataset,
-                &pbf.variant,
                 pbf.snapshot.as_ref(),
                 &paths,
                 project_root,
             )?;
-            let (osc_path, scope) = resolve_verify_osc(
+            return super::verify_all::run(
+                &harness,
+                &pbf_path,
+                osc_path.as_deref(),
+                resolved_bbox.as_ref(),
+                &locations_base,
+                &paths.data_dir,
+                pbf.direct_io,
                 &pbf.dataset,
-                pbf.snapshot.as_ref(),
-                osc_seq.as_deref(),
-                &paths,
-                project_root,
-            )?;
-            narrate_osc_scope(pbf.snapshot.as_ref(), scope);
-            super::verify_derive_changes::run(&harness, &pbf_path, &osc_path, pbf.direct_io)
+                verbose,
+            );
         }
-        VerifyCommand::Renumber {
-            dataset,
-            variant,
-            input,
-            snapshot,
-            start_id,
-            verbose,
-        } => {
-            let pbf_path = resolve_verify_input(
-                input.as_deref(),
-                &dataset,
-                &variant,
-                snapshot.as_ref(),
-                &paths,
-                project_root,
-            )?;
-            super::verify_renumber::run(&harness, &pbf_path, &dataset, start_id.as_deref(), verbose)
+
+        // Enriched (injected-prepass) output is osmium-incompatible by design:
+        // BlobHeader field-5 headers run ~1-8 KB and libosmium 2.23 rejects any
+        // BlobHeader over 127 bytes (their issue 405). There is no reference tool
+        // to cross-validate against, so we refuse the flag up-front rather than let
+        // the check report a false failure. Enriched-output correctness is covered
+        // inside pbfhogg's own suite (oracle roundtrip + backend parity).
+        if let VerifyCommand::AddLocationsToWays {
+            inject_prepass: true,
+            ..
+        } = &verify
+        {
+            output::verify_msg(
+                "add-locations-to-ways --inject-prepass emits osmium-incompatible wire \
+             extensions (BlobHeader field 5 > 127 bytes; libosmium 2.23 issue 405); \
+             enriched output cannot be osmium-verified.",
+            );
+            output::verify_msg(
+                "flag-off `brokkr verify add-locations-to-ways` covers the element \
+             semantics; enriched correctness is covered by pbfhogg's own oracle \
+             roundtrip + backend-parity suite.",
+            );
+            return Err(DevError::Config(
+                "verify add-locations-to-ways --inject-prepass: enriched output cannot be \
+             osmium-verified"
+                    .into(),
+            ));
         }
-        VerifyCommand::Diff {
-            dataset,
-            variant,
-            input,
-            snapshot,
-            osc_seq,
-        } => {
-            let pbf_path = resolve_verify_input(
-                input.as_deref(),
-                &dataset,
-                &variant,
-                snapshot.as_ref(),
-                &paths,
-                project_root,
-            )?;
-            let (osc_path, scope) = resolve_verify_osc(
-                &dataset,
-                snapshot.as_ref(),
-                osc_seq.as_deref(),
-                &paths,
-                project_root,
-            )?;
-            narrate_osc_scope(snapshot.as_ref(), scope);
-            super::verify_diff::run(&harness, &pbf_path, &osc_path)
-        }
-        // Both returned before this match: `all` (it manages its own output)
-        // and the other projects' variants (refused at the top). Errors, not
-        // `unreachable!()`: those guards are ordering this match cannot see,
-        // and a reordering should fail the command, not panic the process.
-        VerifyCommand::All { .. } => Err(DevError::Internal(
-            "verify all reached the single-check path".into(),
-        )),
-        VerifyCommand::ElivVerify { .. }
-        | VerifyCommand::Batch { .. }
-        | VerifyCommand::NidGeocode { .. }
-        | VerifyCommand::Readonly { .. } => Err(not_a_pbfhogg_verify()),
-    })
+
+        // Every individual check runs under the pass-quiet / fail-loud wrapper.
+        let name = verify_name(&verify);
+        super::verify::run_check(name, verbose, || match verify {
+            VerifyCommand::Sort { pbf } => {
+                let pbf_path = resolve_verify_input(
+                    pbf.input.as_deref(),
+                    &pbf.dataset,
+                    &pbf.variant,
+                    pbf.snapshot.as_ref(),
+                    &paths,
+                    project_root,
+                )?;
+                super::verify_sort::run(&harness, &pbf_path, pbf.direct_io)
+            }
+            VerifyCommand::Cat { pbf } => {
+                let pbf_path = resolve_verify_input(
+                    pbf.input.as_deref(),
+                    &pbf.dataset,
+                    &pbf.variant,
+                    pbf.snapshot.as_ref(),
+                    &paths,
+                    project_root,
+                )?;
+                super::verify_cat::run(&harness, &pbf_path, pbf.direct_io)
+            }
+            VerifyCommand::Extract { pbf, bbox } => {
+                let pbf_path = resolve_verify_input(
+                    pbf.input.as_deref(),
+                    &pbf.dataset,
+                    &pbf.variant,
+                    pbf.snapshot.as_ref(),
+                    &paths,
+                    project_root,
+                )?;
+                let bbox = resolve_bbox(bbox.as_ref(), &pbf.dataset, &paths)?;
+                super::verify_extract::run(&harness, &pbf_path, &bbox, pbf.direct_io)
+            }
+            VerifyCommand::MultiExtract { pbf, bbox, regions } => {
+                let pbf_path = resolve_verify_input(
+                    pbf.input.as_deref(),
+                    &pbf.dataset,
+                    &pbf.variant,
+                    pbf.snapshot.as_ref(),
+                    &paths,
+                    project_root,
+                )?;
+                let bbox = resolve_bbox(bbox.as_ref(), &pbf.dataset, &paths)?;
+                super::verify_multi_extract::run(&harness, &pbf_path, &bbox, regions, pbf.direct_io)
+            }
+            VerifyCommand::TagsFilter { pbf } => {
+                let pbf_path = resolve_verify_input(
+                    pbf.input.as_deref(),
+                    &pbf.dataset,
+                    &pbf.variant,
+                    pbf.snapshot.as_ref(),
+                    &paths,
+                    project_root,
+                )?;
+                super::verify_tags_filter::run(&harness, &pbf_path, pbf.direct_io)
+            }
+            VerifyCommand::GetidRemoveid { pbf } => {
+                let pbf_path = resolve_verify_input(
+                    pbf.input.as_deref(),
+                    &pbf.dataset,
+                    &pbf.variant,
+                    pbf.snapshot.as_ref(),
+                    &paths,
+                    project_root,
+                )?;
+                super::verify_getid_removeid::run(&harness, &pbf_path, pbf.direct_io)
+            }
+            VerifyCommand::AddLocationsToWays {
+                pbf,
+                mode,
+                inject_prepass: _,
+            } => {
+                let pbf_path = resolve_verify_input(
+                    pbf.input.as_deref(),
+                    &pbf.dataset,
+                    &pbf.variant,
+                    pbf.snapshot.as_ref(),
+                    &paths,
+                    project_root,
+                )?;
+                super::verify_add_locations::run(&harness, &pbf_path, mode, pbf.direct_io)
+            }
+            VerifyCommand::CheckRefs { pbf } => {
+                let pbf_path = resolve_verify_input(
+                    pbf.input.as_deref(),
+                    &pbf.dataset,
+                    &pbf.variant,
+                    pbf.snapshot.as_ref(),
+                    &paths,
+                    project_root,
+                )?;
+                super::verify_check_refs::run(&harness, &pbf_path, pbf.direct_io)
+            }
+            VerifyCommand::Merge {
+                pbf,
+                osc_seq,
+                osc,
+                locations_on_ways,
+            } => {
+                let pbf_path = resolve_verify_input(
+                    pbf.input.as_deref(),
+                    &pbf.dataset,
+                    &pbf.variant,
+                    pbf.snapshot.as_ref(),
+                    &paths,
+                    project_root,
+                )?;
+                let osc_path = if let Some(p) = osc.as_deref() {
+                    canonical_fixture(p, project_root, "--osc")?
+                } else {
+                    let (path, scope) = resolve_verify_osc(
+                        &pbf.dataset,
+                        pbf.snapshot.as_ref(),
+                        osc_seq.as_deref(),
+                        &paths,
+                        project_root,
+                    )?;
+                    narrate_osc_scope(pbf.snapshot.as_ref(), scope);
+                    path
+                };
+                // osmosis and osmconvert write no inline locations, so an -l run
+                // has nothing to ask them.
+                let osmosis = if locations_on_ways {
+                    None
+                } else {
+                    match tools::ensure_osmosis(&paths.data_dir) {
+                        Ok(tools) => Some(tools),
+                        Err(DevError::Interrupted) => return Err(DevError::Interrupted),
+                        Err(e) => {
+                            output::verify_msg(&format!("osmosis not available (non-fatal): {e}"));
+                            None
+                        }
+                    }
+                };
+                super::verify_merge::run(
+                    &harness,
+                    &pbf_path,
+                    &osc_path,
+                    osmosis.as_ref(),
+                    pbf.direct_io,
+                    locations_on_ways,
+                )
+            }
+            VerifyCommand::DeriveChanges { pbf, osc_seq } => {
+                let pbf_path = resolve_verify_input(
+                    pbf.input.as_deref(),
+                    &pbf.dataset,
+                    &pbf.variant,
+                    pbf.snapshot.as_ref(),
+                    &paths,
+                    project_root,
+                )?;
+                let (osc_path, scope) = resolve_verify_osc(
+                    &pbf.dataset,
+                    pbf.snapshot.as_ref(),
+                    osc_seq.as_deref(),
+                    &paths,
+                    project_root,
+                )?;
+                narrate_osc_scope(pbf.snapshot.as_ref(), scope);
+                super::verify_derive_changes::run(&harness, &pbf_path, &osc_path, pbf.direct_io)
+            }
+            VerifyCommand::Renumber {
+                dataset,
+                variant,
+                input,
+                snapshot,
+                start_id,
+                verbose,
+            } => {
+                let pbf_path = resolve_verify_input(
+                    input.as_deref(),
+                    &dataset,
+                    &variant,
+                    snapshot.as_ref(),
+                    &paths,
+                    project_root,
+                )?;
+                super::verify_renumber::run(
+                    &harness,
+                    &pbf_path,
+                    &dataset,
+                    start_id.as_deref(),
+                    verbose,
+                )
+            }
+            VerifyCommand::Diff {
+                dataset,
+                variant,
+                input,
+                snapshot,
+                osc_seq,
+            } => {
+                let pbf_path = resolve_verify_input(
+                    input.as_deref(),
+                    &dataset,
+                    &variant,
+                    snapshot.as_ref(),
+                    &paths,
+                    project_root,
+                )?;
+                let (osc_path, scope) = resolve_verify_osc(
+                    &dataset,
+                    snapshot.as_ref(),
+                    osc_seq.as_deref(),
+                    &paths,
+                    project_root,
+                )?;
+                narrate_osc_scope(snapshot.as_ref(), scope);
+                super::verify_diff::run(&harness, &pbf_path, &osc_path)
+            }
+            // Both returned before this match: `all` (it manages its own output)
+            // and the other projects' variants (refused at the top). Errors, not
+            // `unreachable!()`: those guards are ordering this match cannot see,
+            // and a reordering should fail the command, not panic the process.
+            VerifyCommand::All { .. } => Err(DevError::Internal(
+                "verify all reached the single-check path".into(),
+            )),
+            VerifyCommand::ElivVerify { .. }
+            | VerifyCommand::Batch { .. }
+            | VerifyCommand::NidGeocode { .. }
+            | VerifyCommand::Readonly { .. } => Err(not_a_pbfhogg_verify()),
+        })
     })();
     harness.retain_references(dev_config.verify_reference_budget(&paths.hostname));
     result

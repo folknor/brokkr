@@ -5,6 +5,10 @@ use crate::error::DevError;
 use crate::request::SidecarQuery;
 use crate::sidecar;
 
+mod compare;
+
+pub(crate) use compare::print_compare_timeline;
+
 /// Format a Unix epoch as a local ISO-8601 timestamp.
 /// The provenance line for an abnormal ending, `None` for a clean exit or an
 /// intentional stop-marker end.
@@ -1163,176 +1167,6 @@ fn print_marker_durations_human(
     }
 }
 
-/// Print phase-aligned comparison of two sidecar timelines. Default is
-/// JSONL (`{"type":"compare","name":...,"a":{...},"b":{...},"delta_pct":...}`);
-/// `human = true` gives the fixed-width table.
-pub(crate) fn print_compare_timeline(
-    uuid_a: &db::RunId,
-    samples_a: &[sidecar::Sample],
-    markers_a: &[sidecar::Marker],
-    uuid_b: &db::RunId,
-    samples_b: &[sidecar::Sample],
-    markers_b: &[sidecar::Marker],
-    human: bool,
-) {
-    // Build phases from run A's markers (or all markers if A has none).
-    let phases_a = build_phases(markers_a, samples_a);
-    let phases_b = build_phases(markers_b, samples_b);
-    let clk_tck = clk_tck_per_second();
-
-    if human {
-        print_compare_timeline_human(
-            uuid_a, samples_a, &phases_a, samples_b, &phases_b, uuid_b, clk_tck,
-        );
-    } else {
-        print_compare_timeline_jsonl(
-            uuid_a, samples_a, &phases_a, samples_b, &phases_b, uuid_b, clk_tck,
-        );
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
-fn print_compare_timeline_human(
-    uuid_a: &db::RunId,
-    samples_a: &[sidecar::Sample],
-    phases_a: &[(String, i64, i64)],
-    samples_b: &[sidecar::Sample],
-    phases_b: &[(String, i64, i64)],
-    uuid_b: &db::RunId,
-    clk_tck: i64,
-) {
-    let short_a = uuid_a.short();
-    let short_b = uuid_b.short();
-
-    println!(
-        "{:<20} {:>30} {:>30} {:>8}",
-        "Phase",
-        format!("Run A ({short_a})"),
-        format!("Run B ({short_b})"),
-        "Delta",
-    );
-
-    for (name, start_a, end_a) in phases_a {
-        let stats_a = phase_stats(samples_a, *start_a, *end_a);
-        let avg_cores_a = avg_cores_str(stats_a.cpu_delta_jiffies, stats_a.sample_span_us, clk_tck);
-
-        let match_b = phases_b
-            .iter()
-            .find(|(n, _, _)| n == name)
-            .map(|(_, start, end)| (phase_stats(samples_b, *start, *end), *start, *end));
-
-        let dur_a = (end_a - start_a) / 1_000;
-
-        match match_b {
-            Some((sb, sb_start, sb_end)) => {
-                let dur_b = (sb_end - sb_start) / 1_000;
-                let avg_cores_b = avg_cores_str(sb.cpu_delta_jiffies, sb.sample_span_us, clk_tck);
-
-                #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-                let delta_pct = if dur_a > 0 {
-                    ((dur_b - dur_a) as f64 / dur_a as f64 * 100.0) as i64
-                } else {
-                    0
-                };
-
-                println!(
-                    "{:<20} {:>5}ms {:>6}kB {:>5}MB {:>5}c  {:>5}ms {:>6}kB {:>5}MB {:>5}c  {:>+5}%",
-                    name,
-                    dur_a,
-                    stats_a.peak_anon,
-                    stats_a.disk_read_kb / 1024,
-                    avg_cores_a,
-                    dur_b,
-                    sb.peak_anon,
-                    sb.disk_read_kb / 1024,
-                    avg_cores_b,
-                    delta_pct,
-                );
-            }
-            None => {
-                println!(
-                    "{:<20} {:>5}ms {:>6}kB {:>5}MB {:>5}c  {:>30} {:>8}",
-                    name,
-                    dur_a,
-                    stats_a.peak_anon,
-                    stats_a.disk_read_kb / 1024,
-                    avg_cores_a,
-                    "(no match)",
-                    "-",
-                );
-            }
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
-fn print_compare_timeline_jsonl(
-    uuid_a: &db::RunId,
-    samples_a: &[sidecar::Sample],
-    phases_a: &[(String, i64, i64)],
-    samples_b: &[sidecar::Sample],
-    phases_b: &[(String, i64, i64)],
-    uuid_b: &db::RunId,
-    clk_tck: i64,
-) {
-    let header = serde_json::json!({
-        "type": "compare_summary",
-        "a_uuid": uuid_a.as_str(),
-        "b_uuid": uuid_b.as_str(),
-        "phases": phases_a.len(),
-    });
-    println!("{header}");
-
-    for (name, start_a, end_a) in phases_a {
-        let stats_a = phase_stats(samples_a, *start_a, *end_a);
-        let match_b = phases_b
-            .iter()
-            .find(|(n, _, _)| n == name)
-            .map(|(_, start, end)| (phase_stats(samples_b, *start, *end), *start, *end));
-
-        let dur_a_ms = (end_a - start_a) / 1_000;
-        let a_obj = compare_side_json(&stats_a, dur_a_ms, clk_tck);
-
-        let (b_obj, delta_pct) = match match_b {
-            Some((sb, sb_start, sb_end)) => {
-                let dur_b_ms = (sb_end - sb_start) / 1_000;
-                #[allow(clippy::cast_precision_loss)]
-                let pct = if dur_a_ms > 0 {
-                    let raw = (dur_b_ms - dur_a_ms) as f64 / dur_a_ms as f64 * 100.0;
-                    // Round to 2 decimals - same rationale as avg_cores.
-                    Some((raw * 100.0).round() / 100.0)
-                } else {
-                    None
-                };
-                (compare_side_json(&sb, dur_b_ms, clk_tck), pct)
-            }
-            None => (serde_json::Value::Null, None),
-        };
-
-        let obj = serde_json::json!({
-            "type": "compare_phase",
-            "name": name,
-            "a": a_obj,
-            "b": b_obj,
-            "delta_pct": delta_pct,
-        });
-        println!("{obj}");
-    }
-}
-
-fn compare_side_json(stats: &PhaseStats, duration_ms: i64, clk_tck: i64) -> serde_json::Value {
-    serde_json::json!({
-        "duration_ms": duration_ms,
-        "peak_anon_kb": stats.peak_anon,
-        "disk_read_kb": stats.disk_read_kb,
-        "cpu_delta_jiffies": stats.cpu_delta_jiffies,
-        "sample_span_us": stats.sample_span_us,
-        "avg_cores": avg_cores_f64(stats.cpu_delta_jiffies, stats.sample_span_us, clk_tck),
-    })
-}
-
 struct PhaseStats {
     peak_anon: i64,
     disk_read_kb: i64,
@@ -1654,7 +1488,7 @@ mod timeline_arg_tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
-    fn zero_sample() -> sidecar::Sample {
+    pub(super) fn zero_sample() -> sidecar::Sample {
         sidecar::Sample {
             sample_idx: 0,
             timestamp_us: 0,

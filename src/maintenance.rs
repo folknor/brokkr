@@ -52,10 +52,7 @@ pub(crate) fn run(_phase: MaintenancePhase<'_>, mode: Mode, state_root: Option<&
 fn leftovers(state_root: Option<&Path>) -> Vec<PathBuf> {
     let mut found = Vec::new();
     if let Some(harness) = crate::user_dirs::harness_dir() {
-        found.extend(children(
-            &harness,
-            crate::test_runner::is_session_dir_name,
-        ));
+        found.extend(children(&harness, crate::test_runner::is_session_dir_name));
     }
     if let Some(root) = state_root {
         let state = ProjectState::new(root);
@@ -130,7 +127,8 @@ fn apply(found: &[PathBuf]) {
 /// timestamp tail the stores put in their leftover names.
 pub(crate) fn is_number_pair(text: &str) -> bool {
     let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
-    text.split_once('-').is_some_and(|(a, b)| digits(a) && digits(b))
+    text.split_once('-')
+        .is_some_and(|(a, b)| digits(a) && digits(b))
 }
 
 #[cfg(test)]

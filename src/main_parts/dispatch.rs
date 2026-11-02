@@ -93,7 +93,10 @@ pub(super) fn run(
     // can be swept. `clean --dry-run` removes nothing, so maintenance only
     // reports, and `clean --verify-reference` touches only that cache, so it
     // leaves the phase unused.
-    if let Some(phase) = _lock.as_ref().and_then(lockfile::LockGuard::take_maintenance) {
+    if let Some(phase) = _lock
+        .as_ref()
+        .and_then(lockfile::LockGuard::take_maintenance)
+    {
         let mode = match &cli.command {
             Command::Clean {
                 verify_reference: true,

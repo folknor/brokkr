@@ -317,7 +317,8 @@ stored even when the child fails (OOM, signal, deadline, or non-zero exit).
 - `--call <CALL_ID>` - not a view: restricts any view but `--compare` to one
   call stream
 - `--stat <field>` - min/max/avg/p50/p95
-- `--compare <a> <b>` - phase-aligned
+- `--compare <a> <b>` - two runs' phases side by side, a repeated name paired
+  by ordinal (see "How `brokkr sidecar` renders")
 
 Filter flags `--phase`, `--range`, `--where` compose with `--samples` and
 `--stat`; `--fields`/`--every`/`--head`/`--tail` only with `--samples`. A UUID
@@ -501,7 +502,7 @@ prints the raw events:
 
 | View | Marker interpretation |
 |---|---|
-| default summary / `--compare` | the process stream only: each marker opens a segment running to the **next** marker (no `_START`/`_END` meaning); with no markers, the sampled run is one `(all)` segment. The default summary (never `--compare`) then lists each call stream (any call with boundaries, markers or sink ends) with no resource columns, since samples are process-wide: for a call with boundaries first a `type: call` record (entry, return and seal readings, its wall, its sink's account by its own document, the terminal record that arrived or `null`, and the count of sealing emissions), then its phases (`type: call_phase`), the last ending at the return, and its tail (`type: call_tail`); without boundaries a call's last interval has no known end (`end_us: null`). With `--call` only that call prints. A run with no samples still lists its calls |
+| default summary / `--compare` | the process stream only: each marker opens a segment running to the **next** marker (no `_START`/`_END` meaning), the last to just past the last sample, or zero-length when its marker is stamped after the last sample (a convention: the run's wall is not stored with its samples, so nothing observed bounds it; `--phase` on that marker gets the same interval); with no markers, the sampled run is one `(all)` segment. The default summary (never `--compare`) then lists each call stream (any call with boundaries, markers or sink ends) with no resource columns, since samples are process-wide: for a call with boundaries first a `type: call` record (entry, return and seal readings, its wall, its sink's account by its own document, the terminal record that arrived or `null`, and the count of sealing emissions), then its phases (`type: call_phase`), the last ending at the return, and its tail (`type: call_tail`); without boundaries a call's last interval has no known end (`end_us: null`). With `--call` only that call prints. A run with no samples still lists its calls |
 | `--markers` | raw marker events in arrival order, each with its `run` and, when tagged, `call`; no pairing or segment projection |
 | `--phase FOO` | resolved in one stream of one run - the process stream, or the `--call` stream - first match in time order: exact marker name first (that marker to the next), then a completed `FOO_START`..`FOO_END` span, then the first marker name containing `FOO` (that marker to the next). For a call with boundaries only its phases match, the last ending at the return, and a name only its tail has is an error; without boundaries a match on a call's last marker has no known end and is an error. With `--samples`/`--stat`, `--call` needs `--phase` and the samples stay process-wide |
 | `--durations` | per `(run, call)` stream, each `FOO_START` pairs with the next later `FOO_END`; unmatched starts and markers not used by a span render as standalone points. Overlapping same-name spans in one stream pair by that rule, which is deterministic but does not identify which operation ended. `--human` collapses names seen more than once in a stream into a single aggregate row (`WAIT_P2_SEND x287  total 4200.0ms  min/avg/max`), sorted by total desc, under a "Repeated spans" heading - the split is on observed cardinality, not on the name, so nothing here knows what `WAIT_` means. Totals accumulate in microseconds so a crowd of sub-millisecond spans still sums correctly. Several streams print under a heading each. JSONL keeps one record per span and standalone point, with `run` and `call`. |
@@ -528,7 +529,8 @@ See the README "Sidecar conventions" section for the emitter-side contract.
 ## How `brokkr sidecar` renders
 
 **JSONL is the default** for every view (machine/LLM consumption); `--human`
-switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`.
+switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`, `--compare`'s in
+`src/sidecar_fmt/compare.rs`.
 
 - **Provenance header** (`print_run_info`) is written to **stderr** so it never
   contaminates the stdout JSONL: run timestamp/PID/command/mode/dataset, git
@@ -545,8 +547,26 @@ switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`.
   sample span; too-short spans render `-` (table) / `null` (JSON).
 - **Deltas are clamped to >= 0** (`Running::delta`, `phase_stats`) because
   cumulative `/proc` counters could regress if the process exits mid-read.
-- `--compare` aligns run B's phases to run A by name and appends a `delta_pct`
-  on duration. `--counters` prints `t=<sec> name=value` (human) or one JSON
+- `--compare` pairs the two runs' phases (the default summary's segments, best
+  run each) by **ordinal within a name**: the k-th segment named N on A against
+  the k-th named N on B, counted in time order over every segment, zero-length
+  and sampleless ones included, so per-partition or per-pass repeats compare in
+  order. It is a correspondence convention, not identity recovery: a missing
+  emission shifts the later ordinals of its name, and same-name operations
+  that reorder pair different work. Every segment of either run lands in
+  exactly one row; a segment the other side lacks (a surplus repeat, a name it
+  never emitted) gets a one-sided row, `(no match)` in the table, `null` in
+  JSONL. Rows follow A's order; a B-only segment sits after the row holding
+  B's latest paired segment before it (first if there is none), in B order
+  within that slot, so when pairs cross the B-only rows need not read in B's
+  order. `delta_pct` is B's duration against A's from microseconds, `null`
+  (table `-`) unless both are positive. The table adds a `#` column (the
+  ordinal, blank for a name that occurs once on each side that has it) when any name
+  repeats. JSONL: a `compare_summary` record (`a_uuid`, `b_uuid`, `a_phases`,
+  `b_phases`), then one `compare_phase` record per row (`name`, `occurrence`,
+  `a`, `b`, `delta_pct`); each non-null side carries `index`, its zero-based
+  position among that run's `type: phase` records in the default JSONL view,
+  and `start_us`. `--counters` prints `t=<sec> name=value` (human) or one JSON
   object per counter.
 
 ## Run lifecycle: sampling, stop, kill, OOM

@@ -359,7 +359,8 @@ pub(crate) fn execute_cell(
         // measured launch, its result line printed and nothing stored (a run
         // mode harness stores no row), the FIFO and `--stop` attached.
         MeasureMode::Run if !matches!(cell.wall, crate::harness::WallSource::External) => {
-            harness.run_invocation_timed(&config, invocation, cwd, cell.exits, cell.wall, prepare)?;
+            harness
+                .run_invocation_timed(&config, invocation, cwd, cell.exits, cell.wall, prepare)?;
         }
         MeasureMode::Run => {
             prepare()?;
@@ -397,7 +398,8 @@ pub(crate) fn execute_cell(
         }
         MeasureMode::Bench { .. } => {
             (hooks.announce)()?;
-            harness.run_invocation_timed(&config, invocation, cwd, cell.exits, cell.wall, prepare)?;
+            harness
+                .run_invocation_timed(&config, invocation, cwd, cell.exits, cell.wall, prepare)?;
         }
         MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. } => {
             if let Some(profiling) = mode.profiled() {

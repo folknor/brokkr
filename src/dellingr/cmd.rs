@@ -184,15 +184,16 @@ fn run_one(
         &resolved.name,
         || {
             let wall = crate::harness::WallSource::External;
-            ctx.harness.run_hotpath(&config, ctx.binary()?, wall, |i, fifo| {
-                ctx.harness.capture_hotpath(
-                    ctx.binary()?,
-                    &args,
-                    req.project_root.as_path(),
-                    fifo,
-                    i,
-                )
-            })
+            ctx.harness
+                .run_hotpath(&config, ctx.binary()?, wall, |i, fifo| {
+                    ctx.harness.capture_hotpath(
+                        ctx.binary()?,
+                        &args,
+                        req.project_root.as_path(),
+                        fifo,
+                        i,
+                    )
+                })
         },
         || {
             output::bench_msg(&format!(

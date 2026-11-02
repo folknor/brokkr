@@ -82,9 +82,17 @@ pub fn parse_read_modes(input: &str) -> Result<Vec<ReadMode>, DevError> {
 /// What one cell runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CellKind {
-    Read { mode: ReadMode },
-    Write { writer: &'static str, compression: String },
-    Merge { io: &'static str, compression: String },
+    Read {
+        mode: ReadMode,
+    },
+    Write {
+        writer: &'static str,
+        compression: String,
+    },
+    Merge {
+        io: &'static str,
+        compression: String,
+    },
 }
 
 /// One measured variant of a batch.
@@ -272,32 +280,33 @@ pub(crate) fn run_batch(
         std::fs::create_dir_all(parent)?;
     }
     let basename = crate::utf8_path::file_name(inputs.pbf);
-    let result = crate::bench_variants::run_variants_of(batch.label, cells, BenchCell::name, |cell| {
-        let invocation = batch.handle.invocation(cell.argv(inputs)?)?;
-        let measured = Cell {
-            config: BenchConfig {
-                command: cell.command().into(),
-                input_file: Some(basename.clone()),
-                input_mb: Some(batch.file_mb),
-                cargo_features: None,
-                external_build: None,
-                runs: batch.runs,
-                cli_args: None,
-                metadata: vec![],
-                arm_qualifier: Some(cell.qualifier()),
-            },
-            invocation: &invocation,
-            exits: Exits::SUCCESS,
-            wall: WallSource::SelfReported,
-        };
-        execute_cell(
-            batch.mode,
-            batch.harness,
-            batch.cwd,
-            &measured,
-            &CellHooks::NONE,
-        )
-    });
+    let result =
+        crate::bench_variants::run_variants_of(batch.label, cells, BenchCell::name, |cell| {
+            let invocation = batch.handle.invocation(cell.argv(inputs)?)?;
+            let measured = Cell {
+                config: BenchConfig {
+                    command: cell.command().into(),
+                    input_file: Some(basename.clone()),
+                    input_mb: Some(batch.file_mb),
+                    cargo_features: None,
+                    external_build: None,
+                    runs: batch.runs,
+                    cli_args: None,
+                    metadata: vec![],
+                    arm_qualifier: Some(cell.qualifier()),
+                },
+                invocation: &invocation,
+                exits: Exits::SUCCESS,
+                wall: WallSource::SelfReported,
+            };
+            execute_cell(
+                batch.mode,
+                batch.harness,
+                batch.cwd,
+                &measured,
+                &CellHooks::NONE,
+            )
+        });
     if merges {
         match crate::reservations::remove_file(&inputs.merge_output) {
             Ok(()) => {}
@@ -455,8 +464,11 @@ mod tests {
     #[test]
     fn the_shapes_actually_stored_are_recognised() {
         assert_eq!(
-            historical_qualifier("read", "/p/pbfhogg bench-read /d/planet.osm.pbf --mode mmap")
-                .as_deref(),
+            historical_qualifier(
+                "read",
+                "/p/pbfhogg bench-read /d/planet.osm.pbf --mode mmap"
+            )
+            .as_deref(),
             Some("mode=mmap")
         );
         assert_eq!(
@@ -505,7 +517,11 @@ mod tests {
             " --direct-io",
             " extra",
         ] {
-            assert_eq!(historical_qualifier("merge", &format!("{base}{tail}")), None, "{tail}");
+            assert_eq!(
+                historical_qualifier("merge", &format!("{base}{tail}")),
+                None,
+                "{tail}"
+            );
         }
     }
 
@@ -513,17 +529,26 @@ mod tests {
     fn anything_unproven_is_left_alone() {
         for (command, cli_args) in [
             // A quoted argument: its boundaries are not recoverable.
-            ("read", "/p/pbfhogg bench-read \"/d/my file.pbf\" --mode parallel"),
+            (
+                "read",
+                "/p/pbfhogg bench-read \"/d/my file.pbf\" --mode parallel",
+            ),
             // The wrong command for the subcommand, or a different subcommand.
             ("write", "/p/pbfhogg bench-read /d/x.pbf --mode parallel"),
             ("read", "/p/pbfhogg check --refs /d/x.pbf"),
             // A flag searched for anywhere would match these.
-            ("read", "/p/pbfhogg bench-read /d/x.pbf --mode parallel --direct-io"),
+            (
+                "read",
+                "/p/pbfhogg bench-read /d/x.pbf --mode parallel --direct-io",
+            ),
             ("read", "/p/pbfhogg bench-read --mode parallel /d/x.pbf"),
             // A value that could hold a delimiter, or is a flag.
             ("read", "/p/pbfhogg bench-read /d/x.pbf --mode a;b"),
             ("read", "/p/pbfhogg bench-read /d/x.pbf --mode --writer"),
-            ("write", "/p/pbfhogg bench-write /d/x.pbf --writer sync --compression none"),
+            (
+                "write",
+                "/p/pbfhogg bench-write /d/x.pbf --writer sync --compression none",
+            ),
             ("read", ""),
         ] {
             assert_eq!(historical_qualifier(command, cli_args), None, "{cli_args}");
