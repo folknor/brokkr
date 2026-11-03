@@ -85,20 +85,38 @@ A running binary can hand data to brokkr three ways:
    the terminal) or captured (drained into a buffer and dropped). Never
    parsed, never stored.
 2. **stderr `key=value` lines** - structured metrics, parsed by
-   `parse_kv_lines` (`src/measure/kv.rs`) on both external
-   paths. The timing contract below applies to the kv harness path only; the
-   `run_external_ok` path keeps every pair, `elapsed_ms` included, as an
-   ordinary counter beside its own wall-clock. On the kv path a `elapsed_ms=` (or its alias `total_ms=`) line is **mandatory** on that
-   path - its absence errors the whole run; if both appear, the last valid timing line wins. The value may be **fractional** (`elapsed_ms=6.847`): it is kept as
+   `parse_kv_lines` (`src/measure/kv.rs`) on every path that scrapes
+   stderr. A line counts only if the text before its first `=`, trimmed,
+   is a **field name**: an ASCII letter or `_`, then ASCII letters, digits,
+   `_`, `.` or `-` (`rows`, `cold_prepare_us`, `cache.hit-rate`). Any other
+   line is prose and is skipped silently, so `Note: auto-selected index
+   (sorted=true)` or `time-filter: N versions scanned, M <= cutoff` store
+   nothing. The value is the trimmed rest of the line, `=` included
+   (`label=a=b` stores `a=b`). The grammar rejects nonconforming names; it
+   does not detect prose, so a sentence that opens with a field name and
+   `=` (`wheel = zoom, drag = pan`) still reads as a field. pbfhogg's
+   baseline result blocks (`src/pbfhogg/baseline_blocks.rs`) recognise
+   their fields by the same field-name rule, and only that: their block
+   framing and integer `elapsed_ms` are their own, and the timing rules
+   below do not apply to them. On every scraping path, `elapsed_ms` and
+   `total_ms` are reserved timing names and never stored as counters. On the
+   self-reported paths an `elapsed_ms=` (or its alias `total_ms=`) line is
+   **mandatory** - its absence errors the whole run; if both appear, the
+   last valid timing line wins. This is the subprocess's **self-reported**
+   timing, not brokkr's wall-clock (the `run_external_ok` path uses
+   external best-of-N wall-clock instead and ignores the reserved names).
+   The value may be **fractional** (`elapsed_ms=6.847`): it is kept as
    exact microseconds in the `elapsed_us` column, with `elapsed_ms` holding
    it rounded to nearest for every existing query and view. Best-of-N and
    `--compare`'s delta use the microsecond reading when both sides have one -
    without it a single-digit-millisecond workload's 100-200us deltas round
-   away to nothing. Every other line's value is type-inferred in order: `i64` -> finite
-   `f64` -> text (a non-finite float like `NaN`/`inf` falls back to text).
-   Those pairs land in the results.db `kv` column and the `[result]` line.
-   This is the subprocess's **self-reported** timing, not brokkr's wall-clock
-   (the `run_external_ok` path uses external best-of-N wall-clock instead).
+   away to nothing. Every other field's value is type-inferred in order:
+   `i64` -> finite `f64` -> text (a non-finite float like `NaN`/`inf` falls
+   back to text). Those pairs land in the results.db `kv` column and the
+   `[result]` line. Rows stored before the field-name rule keep whatever
+   keys the older scrape gave them, prose-shaped ones included; a
+   `--compare` against such a row lists those as counters present on one
+   side only.
 3. **FIFO markers + counters** - via `BROKKR_MARKER_FIFO`. The target writes
    `<us> name` (marker) or `<us> @name=value` (counter, value must parse as
    `i64`), `<us>` being microseconds since the process started, optionally
@@ -276,7 +294,9 @@ timing names and are not stored as counters. This path uses no sidecar FIFO.
 
 ## Quick decision guide
 
-- Want a metric in `brokkr results`? Print a non-timing `key=value` line to stderr. On
+- Want a metric in `brokkr results`? Print a non-timing `key=value` line to
+  stderr, its key a field name (letter or `_`, then letters, digits, `_`,
+  `.`, `-`) with nothing before it. On
   the external wall-clock path (`run_external_ok`: every pbfhogg command,
   elivagar `tilegen`, `brokkr mogwai`) it is scraped into `kv` as a counter
   and feeds `--compare`'s `counters:` line; `elapsed_ms` and `total_ms` are

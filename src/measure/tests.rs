@@ -492,6 +492,43 @@ mod persistence {
         );
     }
 
+    #[test]
+    fn parse_kv_lines_skips_prose_whose_key_is_not_a_field_name() {
+        // The two pbfhogg lines brokkr#110 named, a bracketed diagnostic, a
+        // leading digit, a banner with an empty key, and three that conform:
+        // a dotted and dashed name, a value holding `=`, and an empty value.
+        let stderr = b"time-filter: 11627453260 versions scanned, 9306266603 <= cutoff, 0 kept\n\
+            Note: auto-selected index type sparse (sorted=true, indexed=true)\n\
+            [altw external] num_workers=8 (from cores)\n\
+            1099041376 referenced nodes, compact index=yes\n\
+            1rows=5\n\
+            === bench ===\n\
+            cache.hit-rate=0.5\n\
+            label=a=b\n\
+            _tag=\n";
+        let (us, kv) = parse_kv_lines_us(stderr);
+        assert_eq!(us, None);
+        let pairs: Vec<(&str, String)> = kv
+            .iter()
+            .map(|p| {
+                let value = match &p.value {
+                    KvValue::Text(s) => s.clone(),
+                    KvValue::Real(f) => f.to_string(),
+                    KvValue::Int(n) => n.to_string(),
+                };
+                (p.key.as_str(), value)
+            })
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("cache.hit-rate", "0.5".to_owned()),
+                ("label", "a=b".to_owned()),
+                ("_tag", String::new()),
+            ]
+        );
+    }
+
     // -----------------------------------------------------------------------
     // format_cli_args / maybe_quote
     // -----------------------------------------------------------------------

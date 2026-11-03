@@ -66,7 +66,8 @@ Two consequences:
   available, which is what makes 100-200us A/B differences visible at all -
   rounded to whole milliseconds they vanish.
 
-Any other stderr `key=value` line lands in the results.db `kv` column and
+Any other stderr `key=value` line whose key is a field name (the grammar is
+in `brokkr man output-channels`) lands in the results.db `kv` column and
 shows up in `brokkr results`, so metrics like `cold_prepare_us=214` travel
 with the row.
 

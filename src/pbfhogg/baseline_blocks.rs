@@ -13,11 +13,13 @@
 //!
 //! A block opens at a line that is exactly `---` (surrounding whitespace
 //! aside); text before the first one is the program's header prose and is
-//! not read. Inside a block a line with `=` is a `key=value` field and any
-//! other line is ignored. The stream is unframed stderr, so that tolerance is
-//! partial: a diagnostic without `=` passes, but one with `=` is read as a
-//! field (osmpbf stores its fields as KV) and two with the same left-hand
-//! side are a repeated key. What would make a row wrong is refused: a block with no fields, a
+//! not read. Inside a block a line the shared stderr field lexer
+//! (`crate::measure::kv::kv_line`: a field-name key, key and value trimmed)
+//! accepts is a `key=value` field and any other line is ignored. The stream
+//! is unframed stderr, so that tolerance is partial: a diagnostic whose text
+//! before its first `=` is not a field name passes, but one that opens with a
+//! field name and `=` is read as a field (osmpbf stores its fields as KV) and
+//! two with the same key are a repeated key. What would make a row wrong is refused: a block with no fields, a
 //! missing or empty `mode`, a missing, non-integer or negative `elapsed_ms`,
 //! a key repeated within a block (which value is the result?) and a mode
 //! repeated across blocks (two rows under one command name). The whole
@@ -63,7 +65,7 @@ pub(crate) fn parse(tool: &str, stderr: &str) -> Result<Vec<ResultBlock>, DevErr
         let Some(block) = raw.last_mut() else {
             continue;
         };
-        let Some((key, value)) = line.split_once('=') else {
+        let Some((key, value)) = crate::measure::kv::kv_line(line) else {
             continue;
         };
         if block.iter().any(|(k, _)| k == key) {
@@ -159,6 +161,19 @@ mod tests {
         let blocks = parse("t", "---\nmode=a---b\nelapsed_ms=1\n").unwrap();
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].mode, "a---b");
+    }
+
+    #[test]
+    fn fields_are_trimmed_and_prose_with_an_equals_sign_is_skipped() {
+        let out = "---\nmode= a \nelapsed_ms = 3\nwarning: retry budget=2\nnodes=4\n";
+        let blocks = parse("t", out).unwrap();
+        assert_eq!(blocks[0].mode, "a");
+        assert_eq!(blocks[0].elapsed_ms, 3);
+        assert_eq!(blocks[0].fields, vec![("nodes".into(), "4".into())]);
+        // A trimmed key is the same key, so this is a repeat.
+        assert!(err("---\nmode=a\nelapsed_ms=1\nnodes=1\nnodes =2\n").contains("twice in one"));
+        // A whitespace-only mode trims to empty.
+        assert!(err("---\nmode=   \nelapsed_ms=1\n").contains("no mode"));
     }
 
     #[test]

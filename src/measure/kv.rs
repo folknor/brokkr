@@ -6,7 +6,30 @@ use super::wall::us_to_ms;
 use crate::db::KvPair;
 use crate::error::DevError;
 
+/// One stderr line read as a `key=value` field, or `None` when it is not one.
+///
+/// The line splits at its first `=`; key and value are trimmed. The key must
+/// be a field name: an ASCII letter or `_`, then ASCII letters, digits, `_`,
+/// `.` or `-`. Anything else - a key with spaces, a colon, a bracket, a
+/// leading digit, or nothing at all - makes the line prose, skipped silently.
+/// The value is unrestricted (`label=a=b` is `label` -> `a=b`).
+///
+/// This rejects nonconforming names; it is not a prose detector. A sentence
+/// that happens to open with a field name and `=` (`wheel = zoom, drag =
+/// pan`) still reads as a field. Every reader of a child's stderr
+/// `key=value` lines goes through here, so they share one grammar.
+pub(crate) fn kv_line(line: &str) -> Option<(&str, &str)> {
+    let (key, value) = line.split_once('=')?;
+    let key = key.trim();
+    let mut chars = key.chars();
+    let first = chars.next()?;
+    let named = (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
+    named.then_some((key, value.trim()))
+}
+
 /// Parse stderr `key=value` lines, returning the timing and non-timing pairs.
+/// Only lines [`kv_line`] accepts count; other lines are prose.
 /// `elapsed_ms`/`total_ms` are reserved timing names and are not added to the
 /// returned kv pairs; the last valid timing line wins.
 ///
@@ -28,9 +51,7 @@ pub(crate) fn parse_kv_lines_us(stderr: &[u8]) -> (Option<i64>, Vec<KvPair>) {
     let mut kv = Vec::new();
 
     for line in text.lines() {
-        if let Some((key, value)) = line.split_once('=') {
-            let key = key.trim();
-            let value = value.trim();
+        if let Some((key, value)) = kv_line(line) {
             if key == "elapsed_ms" || key == "total_ms" {
                 // Integer first so whole-millisecond values stay exact rather
                 // than making a round trip through f64.
