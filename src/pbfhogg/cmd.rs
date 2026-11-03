@@ -630,26 +630,27 @@ pub(crate) fn verify(
                 start_id,
                 verbose,
             } => {
-                let pbf_path = resolve_verify_input(&pbf, &paths, project_root)?;
+                let pbf_path = resolve_verify_input(&pbf.source, &paths, project_root)?;
                 super::verify_renumber::run(
                     &harness,
                     &pbf_path,
-                    &pbf.dataset,
+                    &pbf.source.dataset,
                     start_id.as_deref(),
                     verbose,
+                    pbf.direct_io,
                 )
             }
             VerifyCommand::Diff { pbf, osc_seq } => {
-                let pbf_path = resolve_verify_input(&pbf, &paths, project_root)?;
+                let pbf_path = resolve_verify_input(&pbf.source, &paths, project_root)?;
                 let (osc_path, scope) = resolve_verify_osc(
-                    &pbf.dataset,
-                    pbf.snapshot.as_ref(),
+                    &pbf.source.dataset,
+                    pbf.source.snapshot.as_ref(),
                     osc_seq.as_deref(),
                     &paths,
                     project_root,
                 )?;
-                narrate_osc_scope(pbf.snapshot.as_ref(), scope);
-                super::verify_diff::run(&harness, &pbf_path, &osc_path)
+                narrate_osc_scope(pbf.source.snapshot.as_ref(), scope);
+                super::verify_diff::run(&harness, &pbf_path, &osc_path, pbf.direct_io)
             }
             // Both returned before this match: `all` (it manages its own output)
             // and the other projects' variants (refused at the top). Errors, not

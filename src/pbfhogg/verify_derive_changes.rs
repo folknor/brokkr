@@ -9,15 +9,23 @@ use crate::osc;
 use crate::output::verify_msg;
 
 /// `pbfhogg diff --format osc OLD NEW -o OUT`, which writes run scratch on
-/// every path, kept in the check's own directory.
-fn osc_diff(outdir: &Path, old: &Path, new: &Path, out: &Path) -> Result<PbfArgv, DevError> {
+/// every path, kept in the check's own directory. pbfhogg takes
+/// `--direct-io` on indexed and unindexed inputs alike.
+fn osc_diff(
+    outdir: &Path,
+    old: &Path,
+    new: &Path,
+    out: &Path,
+    direct_io: bool,
+) -> Result<PbfArgv, DevError> {
     Ok(PbfArgv::new("diff")
         .arg("--format")
         .arg("osc")
         .input(old)?
         .input(new)?
         .output(out)?
-        .scratch(outdir))
+        .scratch(outdir)
+        .arg_if(direct_io, "--direct-io"))
 }
 
 /// Cross-validate `pbfhogg diff --format osc` against `osmium derive-changes`.
@@ -26,6 +34,13 @@ fn osc_diff(outdir: &Path, old: &Path, new: &Path, out: &Path) -> Result<PbfArgv
 /// both tools, then roundtrips each derived OSC back through apply-changes and compares.
 /// Finally derives again from the pair stripped of indexdata and requires the
 /// indexed OSC's content.
+///
+/// `direct_io` reaches both derives, the command under test. The
+/// apply-changes runs build the fixture and the roundtrip oracle, so they run
+/// buffered: "new" is judged only through roundtrips downstream of itself,
+/// so an O_DIRECT fault in building it would pass, and one in the roundtrip
+/// would fail the derive for a fault that is not its own. `verify merge`
+/// holds apply-changes under `--direct-io` to osmium instead.
 #[allow(clippy::too_many_lines)]
 pub fn run(
     harness: &VerifyHarness,
@@ -50,8 +65,7 @@ pub fn run(
         PbfArgv::new("apply-changes")
             .input(pbf)?
             .input(osc)?
-            .output(&new_pbf)?
-            .arg_if(direct_io, "--direct-io"),
+            .output(&new_pbf)?,
     )?;
     harness.check_exit(&captured, "pbfhogg apply-changes")?;
 
@@ -59,7 +73,8 @@ pub fn run(
     let pbfhogg_osc = outdir.join("pbfhogg.osc.gz");
 
     verify_msg("--- pbfhogg diff --format osc ---");
-    let captured = harness.run_pbfhogg(osc_diff(&outdir, pbf, &new_pbf, &pbfhogg_osc)?)?;
+    let captured =
+        harness.run_pbfhogg(osc_diff(&outdir, pbf, &new_pbf, &pbfhogg_osc, direct_io)?)?;
     // Like a text diff, it exits 1 when the inputs differ - the normal case
     // here - and still writes its OSC; 2 and above are real failures.
     captured.check_success_or(
@@ -99,8 +114,7 @@ pub fn run(
         PbfArgv::new("apply-changes")
             .input(pbf)?
             .input(&pbfhogg_osc)?
-            .output(&rt_pbfhogg)?
-            .arg_if(direct_io, "--direct-io"),
+            .output(&rt_pbfhogg)?,
     )?;
     harness.check_exit(&captured, "pbfhogg apply-changes (roundtrip)")?;
 
@@ -174,7 +188,7 @@ pub fn run(
 
     findings.record(
         "unindexed OSC vs indexed OSC",
-        unindexed_osc_matches(harness, &outdir, pbf, &new_pbf, &pbfhogg_osc)?,
+        unindexed_osc_matches(harness, &outdir, pbf, &new_pbf, &pbfhogg_osc, direct_io)?,
     );
 
     // Sort checks.
@@ -202,6 +216,7 @@ fn unindexed_osc_matches(
     old: &Path,
     new: &Path,
     indexed_osc: &Path,
+    direct_io: bool,
 ) -> Result<Verdict, DevError> {
     let old_raw = outdir.join("old-unindexed.osm.pbf");
     let new_raw = outdir.join("new-unindexed.osm.pbf");
@@ -211,7 +226,8 @@ fn unindexed_osc_matches(
 
     let raw_osc = outdir.join("pbfhogg-unindexed.osc.gz");
     verify_msg("--- pbfhogg diff --format osc (unindexed inputs) ---");
-    let captured = harness.run_pbfhogg(osc_diff(outdir, &old_raw, &new_raw, &raw_osc)?)?;
+    let captured =
+        harness.run_pbfhogg(osc_diff(outdir, &old_raw, &new_raw, &raw_osc, direct_io)?)?;
     captured.check_success_or(
         "pbfhogg diff --format osc (unindexed inputs)",
         crate::output::child::Exits::answer(&[0, 1]),

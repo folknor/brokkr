@@ -3248,18 +3248,19 @@ pub(crate) struct VerifyInputArgs {
     pub(crate) snapshot: Option<crate::datasets::resolve::SnapshotRef>,
 }
 
-/// The input plus `--direct-io`, for the verify subcommands whose pbfhogg
-/// steps take it. (Verify doesn't take `--io-uring` or `--compression` -
-/// different surface than `PbfArgs`, hence a separate struct.) `check-refs`,
-/// `renumber` and `diff` take [`VerifyInputArgs`] alone.
+/// The input plus `--direct-io`, for the verify subcommands whose command
+/// under test takes it. (Verify doesn't take `--io-uring` or `--compression` -
+/// different surface than `PbfArgs`, hence a separate struct.) `check-refs`
+/// takes [`VerifyInputArgs`] alone.
 #[derive(Args, Clone)]
 pub(crate) struct VerifyPbfArgs {
     #[command(flatten)]
     pub(crate) source: VerifyInputArgs,
-    /// Pass --direct-io to the pbfhogg steps that take it (`brokkr man
-    /// pbfhogg verify-subcommands` lists them per check; under `all`,
-    /// check-refs, renumber and diff run without it). Verify builds pbfhogg with the host's configured
-    /// features and does not enable linux-direct-io itself
+    /// Pass --direct-io to every run of the pbfhogg command under test;
+    /// fixture builders, references and comparisons run buffered (`brokkr
+    /// man pbfhogg verify-subcommands`; under `all`, check-refs runs without
+    /// it). Verify builds pbfhogg with the host's configured features and
+    /// does not enable linux-direct-io itself
     #[arg(long)]
     pub(crate) direct_io: bool,
 }
@@ -3381,7 +3382,7 @@ pub(crate) enum VerifyCommand {
     #[command(display_order = 9)]
     Renumber {
         #[command(flatten)]
-        pbf: VerifyInputArgs,
+        pbf: VerifyPbfArgs,
         /// Comma-separated starting IDs (forwarded to both pbfhogg and osmium)
         #[arg(long = "start-id", value_name = "IDS")]
         start_id: Option<String>,
@@ -3397,7 +3398,7 @@ pub(crate) enum VerifyCommand {
     #[command(display_order = 10)]
     Diff {
         #[command(flatten)]
-        pbf: VerifyInputArgs,
+        pbf: VerifyPbfArgs,
         #[arg(long)]
         osc_seq: Option<String>,
     },

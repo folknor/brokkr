@@ -3,6 +3,16 @@
 Standing list of gaps in what `brokkr verify` proves or how it scales. Current
 gaps only; remove an entry when it is resolved.
 
+## diff's listing content is never compared with osmium
+
+`verify diff` holds pbfhogg's text diff to osmium through the summary's
+class counts only (`compare_diff_classes` in `src/pbfhogg/verify_diff.rs`,
+with a tolerated version-comparison deviation); the line counts are
+informational. The listing itself is compared only with pbfhogg's own
+unindexed rerun, so a fault both of its diff paths share (a wrong element
+reported as modified, wrong detail in a block) passes as long as the class
+counts reconcile. This holds buffered and under `--direct-io` alike.
+
 ## multi-extract never constructs identical or deliberately empty regions
 
 `Bbox::strips` makes adjacent strips, and the mixed config appends the

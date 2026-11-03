@@ -10,12 +10,14 @@ use crate::error::DevError;
 use crate::output::verify_msg;
 
 /// `pbfhogg diff -c OLD NEW`, a text diff to stdout. It writes no scratch,
-/// and pbfhogg refuses `--tmp-dir` on it.
-fn text_diff(old: &Path, new: &Path) -> Result<PbfArgv, DevError> {
-    PbfArgv::new("diff")
+/// and pbfhogg refuses `--tmp-dir` on it. pbfhogg takes `--direct-io` on
+/// indexed and unindexed inputs alike.
+fn text_diff(old: &Path, new: &Path, direct_io: bool) -> Result<PbfArgv, DevError> {
+    Ok(PbfArgv::new("diff")
         .arg("--suppress-common")
         .input(old)?
-        .input(new)
+        .input(new)?
+        .arg_if(direct_io, "--direct-io"))
 }
 
 /// Cross-validate `pbfhogg diff` against `osmium diff --summary`.
@@ -23,7 +25,18 @@ fn text_diff(old: &Path, new: &Path) -> Result<PbfArgv, DevError> {
 /// Creates a "new" PBF by merging, then diffs old vs new with both tools
 /// and compares their summary output and line counts, then reruns pbfhogg's
 /// diff on the pair stripped of indexdata against its indexed answer.
-pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<Findings, DevError> {
+///
+/// `direct_io` reaches both pbfhogg diffs, the command under test. The
+/// apply-changes that builds "new" runs buffered: nothing compares "new"
+/// with osmium's apply-changes, so an O_DIRECT fault there would hand both
+/// tools the same wrong pair and pass; `verify merge` holds apply-changes
+/// under `--direct-io` to osmium instead.
+pub fn run(
+    harness: &VerifyHarness,
+    pbf: &Path,
+    osc: &Path,
+    direct_io: bool,
+) -> Result<Findings, DevError> {
     let outdir = harness.subdir("diff")?;
 
     verify_msg("=== verify diff ===");
@@ -51,7 +64,8 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<Findings, 
     // change set, which at planet scale is not bounded by any capture.
     verify_msg("--- pbfhogg diff ---");
     let pbfhogg_listing = outdir.join("pbfhogg-diff.txt");
-    let captured_indexed = harness.run_pbfhogg_to(text_diff(pbf, &new_pbf)?, &pbfhogg_listing)?;
+    let captured_indexed =
+        harness.run_pbfhogg_to(text_diff(pbf, &new_pbf, direct_io)?, &pbfhogg_listing)?;
     captured_indexed
         .check_success_or("pbfhogg diff", crate::output::child::Exits::answer(&[0, 1]))?;
 
@@ -119,6 +133,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<Findings, 
             &new_pbf,
             &pbfhogg_listing,
             &pbfhogg_summary,
+            direct_io,
         )?,
     );
     Ok(findings)
@@ -141,6 +156,7 @@ fn unindexed_diff_matches(
     new: &Path,
     indexed_listing: &Path,
     indexed_summary: &str,
+    direct_io: bool,
 ) -> Result<Verdict, DevError> {
     let old_raw = outdir.join("old-unindexed.osm.pbf");
     let new_raw = outdir.join("new-unindexed.osm.pbf");
@@ -150,7 +166,8 @@ fn unindexed_diff_matches(
 
     verify_msg("--- pbfhogg diff (unindexed inputs) ---");
     let raw_listing = outdir.join("pbfhogg-unindexed-diff.txt");
-    let captured = harness.run_pbfhogg_to(text_diff(&old_raw, &new_raw)?, &raw_listing)?;
+    let captured =
+        harness.run_pbfhogg_to(text_diff(&old_raw, &new_raw, direct_io)?, &raw_listing)?;
     captured.check_success_or(
         "pbfhogg diff (unindexed inputs)",
         crate::output::child::Exits::answer(&[0, 1]),

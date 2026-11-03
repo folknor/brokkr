@@ -822,19 +822,28 @@ and `--snapshot` are mutually exclusive. PBF resolution is centralised in
 
 **`--direct-io`.** Verify defines one operation set and `--commit` only picks
 the binary that runs it, so a verify subcommand offers `--direct-io` only
-where the current pbfhogg takes it on the step it is forwarded to. It reaches
-the command each check verifies on `sort`, `cat`, `extract`,
-`multi-extract` (its sequential reference extracts too), `tags-filter`, `getid-removeid` (every pbfhogg getid run),
-`add-locations-to-ways` (each engine) and `merge` (`apply-changes`); under
-`derive-changes` it reaches the two `apply-changes` runs, not the `diff
---format osc` under test. Inspections, normalising sorts, element diffs and
-`check --locations` steps run buffered. `check-refs`, `renumber` and `diff`
-do not take the flag, so passing it there is a parse error, and `verify all
---direct-io` runs those three buffered: pbfhogg refuses `--direct-io` under
-`check --refs` alone (exit 64, since 930ddfc9), where its ref check reads
-through buffered parallel unaligned preads. Revisions from fb8dd3c0 until
-053def6a did read it there; O_DIRECT oracle coverage of their ref check is
-given up rather than reached by probing the binary or retrying a refusal.
+where the current pbfhogg takes it on the step it is forwarded to. It
+reaches every run of the command a check verifies, and nothing else: `sort`,
+`cat`, `extract`, `multi-extract` (the single-pass runs), `tags-filter`,
+`getid-removeid` (every pbfhogg getid run), `add-locations-to-ways` (each
+engine), `merge` (`apply-changes`), `derive-changes` (`diff --format osc`,
+on the indexed pair and on the pair stripped of indexdata), `renumber`
+(`renumber`) and `diff` (the text diff, indexed and stripped). The steps a
+verdict is judged against run buffered, so an O_DIRECT fault cannot sit on
+both sides of a comparison or hand both tools the same wrong input: fixture
+builders (the `apply-changes` that makes `derive-changes`' and `diff`'s new
+PBF, `degrade --strip-indexdata`), references (`multi-extract`'s sequential
+single-region extracts, `derive-changes`' roundtrip `apply-changes`) and
+comparators (inspections, normalising sorts, element diffs, `renumber`'s
+comparison `diff`, `check --locations`). `verify merge` and `verify extract`
+hold `apply-changes` and the single-region extract to osmium under the flag.
+`check-refs` does not take the flag, so passing it there is a parse error,
+and `verify all --direct-io` runs it buffered: pbfhogg refuses
+`--direct-io` under `check --refs` alone (exit 64, since 930ddfc9), where
+its ref check reads through buffered parallel unaligned preads. Revisions
+from fb8dd3c0 until 053def6a did read it there; O_DIRECT oracle coverage of
+their ref check is given up rather than reached by probing the binary or
+retrying a refusal.
 Verify builds pbfhogg with the host's configured features and does not enable
 `linux-direct-io` itself.
 

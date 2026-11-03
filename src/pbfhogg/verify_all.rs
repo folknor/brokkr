@@ -251,7 +251,7 @@ pub fn run(
     tally(
         &mut counts,
         run_check_status(labels::RENUMBER, verbose, || {
-            verify_renumber::run(harness, pbf, dataset, None, false)
+            verify_renumber::run(harness, pbf, dataset, None, false, direct_io)
         }),
     )?;
 
@@ -260,7 +260,7 @@ pub fn run(
         tally(
             &mut counts,
             run_check_status(labels::DIFF, verbose, || {
-                verify_diff::run(harness, pbf, osc_path)
+                verify_diff::run(harness, pbf, osc_path, direct_io)
             }),
         )?;
     } else {

@@ -405,7 +405,7 @@ mod tests {
         let VerifyCommand::Renumber { pbf, .. } = verify else {
             panic!("expected Verify::Renumber");
         };
-        assert!(pbf.input.is_some());
+        assert!(pbf.source.input.is_some());
     }
 
     /// `--input` conflicts with an explicit `--snapshot` through the nested
@@ -471,12 +471,12 @@ mod tests {
         }
     }
 
-    /// `--direct-io` is on the verify subcommands whose pbfhogg steps take
-    /// it, `all` included, and absent from check-refs (pbfhogg refuses it
-    /// under check --refs alone), renumber and diff.
+    /// `--direct-io` is on the verify subcommands whose command under test
+    /// takes it, `all` included, and absent from check-refs alone (pbfhogg
+    /// refuses it under check --refs alone).
     #[test]
     fn verify_direct_io_is_offered_only_where_forwarded() {
-        for sub in ["sort", "all", "derive-changes"] {
+        for sub in ["sort", "all", "derive-changes", "renumber", "diff"] {
             let parsed = parse(["brokkr", "verify", sub, "--direct-io"]).expect(sub);
             let Command::Verify { verify, .. } = parsed.command else {
                 panic!("expected Verify");
@@ -484,17 +484,17 @@ mod tests {
             let pbf = match verify {
                 VerifyCommand::Sort { pbf }
                 | VerifyCommand::All { pbf, .. }
-                | VerifyCommand::DeriveChanges { pbf, .. } => pbf,
+                | VerifyCommand::DeriveChanges { pbf, .. }
+                | VerifyCommand::Renumber { pbf, .. }
+                | VerifyCommand::Diff { pbf, .. } => pbf,
                 _ => panic!("unexpected verify subcommand for {sub}"),
             };
             assert!(pbf.direct_io, "{sub}");
         }
-        for sub in ["check-refs", "renumber", "diff"] {
-            let Err(err) = parse(["brokkr", "verify", sub, "--direct-io"]) else {
-                panic!("verify {sub} --direct-io should be refused");
-            };
-            assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument, "{sub}");
-        }
+        let Err(err) = parse(["brokkr", "verify", "check-refs", "--direct-io"]) else {
+            panic!("verify check-refs --direct-io should be refused");
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]

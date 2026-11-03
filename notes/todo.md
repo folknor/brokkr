@@ -302,21 +302,6 @@ other's slots. Taking the name from the canonical path fixes it, at the cost
 of re-keying any existing slot whose two spellings differ. The sidecar backup
 key deliberately does not share this function.
 
-### Verify `--direct-io` misses diff and renumber steps pbfhogg may take it on (2026-11-03)
-
-Found while dropping `--direct-io` from `verify check-refs` (brokkr bz 112).
-`verify derive-changes --direct-io` forwards the flag only to its two
-`apply-changes` runs; `osc_diff` in `src/pbfhogg/verify_derive_changes.rs`
-builds the `diff --format osc` under test without it, both on the indexed
-pair and on the `degrade --strip-indexdata` rerun. `verify renumber` and
-`verify diff` never took the flag at all, though pbfhogg's I/O capability
-matrix lists renumber as R+W and diff as partly (indexed inputs only).
-Before offering it there, establish from pbfhogg whether `diff
---direct-io` on unindexed inputs is taken, noted or refused (exit 64): if
-refused, the stripped rerun must run buffered while the indexed diff takes
-it. Then update the Verify subcommands `--direct-io` paragraph in
-docs/projects/pbfhogg.md and the parse test in src/cli/validation.rs.
-
 ### A child's stderr can write harness namespaces other than provenance (2026-11-03)
 
 Found while giving the stderr kv scrape a field-name grammar (brokkr bz

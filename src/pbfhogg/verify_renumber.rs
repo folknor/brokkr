@@ -158,6 +158,9 @@ fn fmt_size(bytes: u64) -> String {
 }
 
 /// Cross-validate `pbfhogg renumber` against `osmium renumber`.
+///
+/// `direct_io` reaches the renumber run only; the `pbfhogg diff` that
+/// compares its output with osmium's is a comparator and reads buffered.
 #[allow(clippy::too_many_lines)]
 pub fn run(
     harness: &VerifyHarness,
@@ -165,6 +168,7 @@ pub fn run(
     dataset: &str,
     start_id: Option<&str>,
     verbose: bool,
+    direct_io: bool,
 ) -> Result<Findings, DevError> {
     let outdir = harness.subdir("renumber")?;
 
@@ -201,7 +205,10 @@ pub fn run(
     ));
 
     // --- pbfhogg renumber -----------------------------------------------
-    let mut pbfhogg_args = PbfArgv::new("renumber").input(pbf)?.output(&pbfhogg_out)?;
+    let mut pbfhogg_args = PbfArgv::new("renumber")
+        .input(pbf)?
+        .output(&pbfhogg_out)?
+        .arg_if(direct_io, "--direct-io");
     if let Some(sid) = start_id {
         pbfhogg_args = pbfhogg_args.arg("--start-id").arg(sid);
     }

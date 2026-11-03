@@ -129,6 +129,11 @@ pub fn run(
     let mut findings = Findings::claiming(claim(input_sorted, polygons));
 
     // --- Sequential single-region extracts, one per region ---
+    // These are the reference each region is diffed against, so they run
+    // buffered: under `direct_io` an O_DIRECT fault shared by both extract
+    // paths would otherwise sit on both sides of the diff and pass. The
+    // single-region extract's own O_DIRECT path is held to osmium by
+    // `verify extract`.
     let seq_dir = outdir.join("sequential");
     std::fs::create_dir_all(&seq_dir)?;
     verify_msg("  running sequential extracts...");
@@ -138,9 +143,7 @@ pub fn run(
         let command = PbfhoggCommand::Extract {
             strategy: ExtractStrategy::Simple,
         };
-        let seq_args = command
-            .extract_args_for(pbf, &named.region, &seq_out)?
-            .arg_if(direct_io, "--direct-io");
+        let seq_args = command.extract_args_for(pbf, &named.region, &seq_out)?;
         let captured = harness.run_pbfhogg(seq_args)?;
         harness.check_exit(&captured, &format!("pbfhogg extract {}", named.stem))?;
         let compared = if input_sorted {
