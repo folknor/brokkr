@@ -300,9 +300,22 @@ enum ScanState {
     #[default]
     Text,
     Probe(Vec<u8>),
-    Tag(Vec<u8>),
+    /// A tag's text so far, and the quote of the attribute value it is
+    /// inside, if any: XML allows a raw `>` in an attribute value, so only a
+    /// `>` outside quotes ends the tag.
+    Tag(Vec<u8>, Option<u8>),
     Comment(u8),
     Declaration,
+}
+
+/// The quote state after `byte` inside a tag: a quote opens a value, the
+/// same quote closes it, and anything else leaves the state as it was.
+fn next_quote(quote: Option<u8>, byte: u8) -> Option<u8> {
+    match (quote, byte) {
+        (None, b'"' | b'\'') => Some(byte),
+        (Some(open), _) if open == byte => None,
+        (state, _) => state,
+    }
 }
 
 impl<F: FnMut(OscAction, OscKind, i64)> OscParser<F> {
@@ -335,16 +348,17 @@ impl<F: FnMut(OscAction, OscKind, i64)> OscParser<F> {
                         self.process_tag(&prefix[..prefix.len() - 1])?;
                         ScanState::Text
                     } else {
-                        ScanState::Tag(prefix)
+                        let quote = next_quote(None, byte);
+                        ScanState::Tag(prefix, quote)
                     }
                 }
-                ScanState::Tag(tag) if byte == b'>' => {
+                ScanState::Tag(tag, None) if byte == b'>' => {
                     self.process_tag(&tag)?;
                     ScanState::Text
                 }
-                ScanState::Tag(mut tag) => {
+                ScanState::Tag(mut tag, quote) => {
                     tag.push(byte);
-                    ScanState::Tag(tag)
+                    ScanState::Tag(tag, next_quote(quote, byte))
                 }
                 ScanState::Comment(mut trailing_dashes) => {
                     if byte == b'>' && trailing_dashes == 2 {
@@ -486,7 +500,7 @@ impl<F: FnMut(OscAction, OscKind, i64)> OscParser<F> {
             ScanState::Text => {}
             ScanState::Comment(_) => return Err("unterminated XML comment".to_owned()),
             ScanState::Declaration => return Err("unterminated XML declaration".to_owned()),
-            ScanState::Probe(_) | ScanState::Tag(_) => {
+            ScanState::Probe(_) | ScanState::Tag(..) => {
                 return Err("incomplete XML tag".to_owned());
             }
         }
@@ -902,6 +916,26 @@ mod tests {
             diff.deleted_nodes.iter().copied().collect::<Vec<_>>(),
             vec![2]
         );
+    }
+
+    #[test]
+    fn a_raw_gt_inside_an_attribute_value_does_not_end_the_tag() {
+        // XML allows `>` unescaped in an attribute value; ending the tag
+        // there would read `<node user="` with no id and lose the entry.
+        let xml = r#"<osmChange><modify><node user=">" id="1" version="7"/><way user='a>b' id="2"><tag k="x" v="1>0"/></way></modify></osmChange>"#;
+        for ids in [Ids::Lenient, Ids::Strict] {
+            let mut seen = Vec::new();
+            scan_osc_text_as(xml, ids, |a, k, id| seen.push((a, k, id))).unwrap();
+            assert_eq!(
+                seen,
+                vec![
+                    (OscAction::Modify, OscKind::Node, 1),
+                    (OscAction::Modify, OscKind::Way, 2)
+                ],
+                "{ids:?}"
+            );
+        }
+        assert!(parse_osc_text(r#"<osmChange><create><node id="1" user="a>"#).is_err());
     }
 
     #[test]

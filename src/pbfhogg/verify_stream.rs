@@ -108,13 +108,6 @@ pub(super) fn has_content(path: &Path) -> Result<bool, DevError> {
     }
 }
 
-/// Newline-terminated lines plus a final unterminated one.
-pub(super) fn count_lines(path: &Path) -> Result<u64, DevError> {
-    let mut count = 0u64;
-    for_each_line_head(path, 0, |_| count += 1)?;
-    Ok(count)
-}
-
 /// The byte offset at which two files first differ (a length difference
 /// counts at the shorter one's end), or `None` when they are identical.
 pub(super) fn first_difference(a: &Path, b: &Path) -> Result<Option<u64>, DevError> {
@@ -192,7 +185,6 @@ mod tests {
         std::fs::write(&a, "one\ntwo\nthree\n").unwrap();
         std::fs::write(&b, "one\ntwX\nthree\n").unwrap();
         std::fs::write(&blank, " \n\n").unwrap();
-        assert_eq!(super::count_lines(&a).unwrap(), 3);
         assert_eq!(super::first_difference(&a, &b).unwrap(), Some(6));
         assert_eq!(super::first_difference(&a, &a).unwrap(), None);
         assert!(super::has_content(&a).unwrap());

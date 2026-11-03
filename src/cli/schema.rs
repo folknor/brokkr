@@ -3390,7 +3390,7 @@ pub(crate) enum VerifyCommand {
         #[arg(long)]
         verbose: bool,
     },
-    /// Cross-validate diff summary against osmium diff
+    /// Cross-validate diff's listing, detail and summary against osmium's content
     ///
     /// The OSC comes from the snapshot's own OSC table when `--snapshot`
     /// names one that has it, and from the dataset's primary chain otherwise

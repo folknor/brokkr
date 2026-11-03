@@ -418,14 +418,15 @@ impl Nesting {
 /// osmium getid's verbose output ended a run that completed with objects
 /// missing: a `Did not find N object(s).` line with N above zero, and after
 /// it the final line `Done.`, both from its verbose stream. An exception
-/// prints neither.
-fn osmium_completed(stderr: &[u8]) -> bool {
+/// prints neither. `verify diff`'s candidate fetch admits its exit 1 by the
+/// same rule.
+pub(super) fn osmium_completed(stderr: &[u8]) -> bool {
     osmium_missing(stderr).is_some()
 }
 
 /// The N of a completed run's `Did not find N object(s).` (see
 /// [`osmium_completed`]).
-fn osmium_missing(stderr: &[u8]) -> Option<u64> {
+pub(super) fn osmium_missing(stderr: &[u8]) -> Option<u64> {
     let text = std::str::from_utf8(stderr).ok()?;
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     let (last, before) = lines.split_last()?;

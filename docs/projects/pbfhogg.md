@@ -580,9 +580,9 @@ writer no reason to stop. The signal reaches the process brokkr spawned; a
 launcher that `exec`s its program passes it on, while helpers a launcher
 forks first (osmosis's start-script preamble) are left to the orphan
 reaper. Consumers read the files through fixed buffers
-(`verify_stream`): per-line heads for renumber's block count, byte-wise
-comparison and line counts for `verify diff`, emptiness for `diff_pbfs`'s
-verdict. A FAIL replays a bounded head of a listing (lines and bytes per
+(`verify_stream`): per-line heads for renumber's block count, emptiness for
+`diff_pbfs`'s verdict; `verify diff` reads its listings and osmium's OPL record
+by record, holding one identity's objects and detail at a time. A FAIL replays a bounded head of a listing (lines and bytes per
 line) and always names the file holding all of it. Every `inspect` verify
 reads - element counts, the header's sort flag, the computed order
 (`check_sorted`) and the summary `print_inspect` shows - is `inspect --json`
@@ -605,7 +605,9 @@ and the IDs of the relations each diff lists, all sorted vectors; the OPL
 relation records stream past twice. `verify getid-removeid`'s
 `--add-referenced` arm holds, from the input's relation records (streamed
 twice), only the relations that hold relations with their relation members,
-and the objects of osmium's `getid -r` output, one closure.
+and the objects of osmium's `getid -r` output, one closure. `verify diff` holds the identities to fetch:
+those its input OSC touches and those pbfhogg reports modified, as a sorted
+vector, O(change set), and the identities of osmium's listing, O(differences).
 
 **Verdicts.** A check fails by returning `Err` (a tool crashed, output could
 not be parsed) or by returning `Findings` that carry a failed comparison;
@@ -828,7 +830,8 @@ reaches every run of the command a check verifies, and nothing else: `sort`,
 `getid-removeid` (every pbfhogg getid run), `add-locations-to-ways` (each
 engine), `merge` (`apply-changes`), `derive-changes` (`diff --format osc`,
 on the indexed pair and on the pair stripped of indexdata), `renumber`
-(`renumber`) and `diff` (the text diff, indexed and stripped). The steps a
+(`renumber`) and `diff` (the text diff, indexed and stripped, plain and
+`--verbose`). The steps a
 verdict is judged against run buffered, so an O_DIRECT fault cannot sit on
 both sides of a comparison or hand both tools the same wrong input: fixture
 builders (the `apply-changes` that makes `derive-changes`' and `diff`'s new
@@ -906,11 +909,56 @@ unindexed base, so `--variant raw` cannot reach it; instead `verify_diff` and
 `verify_derive_changes` strip both sides of their verified pair with `pbfhogg
 degrade --strip-indexdata` and rerun the diff. `verify_derive_changes`
 requires the indexed OSC's decompressed content (gzip framing is not
-compared), and `verify_diff` requires the indexed listing byte for byte and
-the same summary classes. The indexed answer is the one held to osmium, so
-the match holds the unindexed path to osmium too. Both treat exit 1 from
-`pbfhogg diff`, text or OSC, as "the inputs differ", and 2 and above as a
-failed run.
+compared), and `verify_diff` requires the indexed verbose listing byte for
+byte (see below). The indexed answer is the one held to osmium, so the match
+holds the unindexed path to osmium too. Both treat exit 1 from `pbfhogg
+diff`, text or OSC, as "the inputs differ", and 2 and above as a failed run.
+
+`verify diff` holds pbfhogg's text diff, every line of it, to osmium's
+reading of the pair (the input and pbfhogg `apply-changes` of it with the
+OSC). pbfhogg `diff --suppress-common` runs on the indexed pair and on the
+stripped pair, each with and without `--verbose`. The expected listing comes
+from osmium's content, never from pbfhogg: `osmium diff --suppress-common
+--output-format opl` gives, with full content, every one-sided object and
+every pair whose version, timestamp or osmium checksum differs. osmium's
+checksum feeds tags without lengths, so a pair whose content differs can be
+"same" to it (`a=bc` against `ab=c`, or a replayed equal-version change that
+reorders tags), and it withholds that pair; every identity the input OSC
+touches (read with the strict OSC scanner), and every one pbfhogg reports
+modified, that the listing lacks is fetched from both inputs with `osmium
+getid --output-format opl` (exit 1 accepted only on its completed verbose
+output, the not-found count reconciled with what came back), and an
+identity found on one side only is an error. Content is pbfhogg's definition
+(node location and tags, way tags and refs, relation tags and members, in
+order; metadata never), so a version or metadata change alone is no
+difference. The indexed verbose listing must then hold exactly one record
+per identity whose content differs, in object order, rendered as pbfhogg's
+CLI reference documents: the header's class, type, ID and versions, and for a
+modification each detail component (a node's coordinates, a way's ref and a
+relation's member edit script, the tags keyed or, with a duplicate key, as
+a script) accounting for its whole change and printing nothing when
+unchanged, its literals and coordinates compared as the documented spelling
+of osmium's decoded values. An edit script must be faithful and shortest
+(the edit distance is recomputed) within 1000 edits, and a replacement must
+name exactly the ranges left after trimming the common prefix and suffix.
+The stripped verbose listing must equal it byte for byte, each plain
+listing must equal its header lines, and every run must exit 1 exactly when
+osmium's content shows a difference and summarise the created, modified and
+deleted counts it gives and a common count of osmium's `same`, less the
+fetched pairs whose content differs, plus the listed pairs whose content is
+equal. osmium's own summary must match its listing's line counts.
+
+What it does not prove: that `apply-changes` left the diff content of every
+identity the OSC does not touch alone (an untouched object it changed while
+keeping osmium's checksum, which pbfhogg's diff then wrongly called common,
+would pass; `verify merge` holds `apply-changes` to osmium); which of
+several shortest scripts pbfhogg prints; and whether a replacement within the
+1000-edit cap was due to pbfhogg's search budget. A version 0 in osmium's OPL
+cannot say whether a version is present, so either spelling is accepted;
+the PASS line says so when one was seen, and names the renderings no record
+exercised and any replacement accepted on the budget. A changed identity
+with a negative ID that must be fetched, and a member pbfhogg prints with an
+unknown type, cannot be compared and are errors.
 
 `verify renumber` requires the comparison diff to exit 0 or 1 and its `-s`
 summary (on stderr) to carry all four of `left`, `right`, `same` and
@@ -1015,12 +1063,14 @@ Minimal `.osc` / `.osc.gz` reader. `scan_osc_file` calls back once per
 element entry with its (`<create>` / `<modify>` / `<delete>`) action, kind
 and ID, in file order, and keeps nothing between entries; what is retained
 is the caller's choice. Used by `verify_merge` for the delete-set carve-out
-and the streamed classification of the element diff.
+and the streamed classification of the element diff, and by `verify_diff`,
+strictly, for the identities its input OSC touches.
 
 Streaming hand-rolled tag scanner; gzip and plain XML are consumed in bounded
 chunks, and the scanner retains only its current tag rather than the entire
 decompressed file. It is tolerant of XML comments, processing
-instructions, self-closing elements, and single-quoted attributes. Element
+instructions, self-closing elements, and single-quoted attributes, and a `>`
+inside a quoted attribute value does not end the tag (XML allows it raw). Element
 bodies (tags / refs / members / coords / metadata) are deliberately skipped -
 only IDs are needed. The document itself is checked: the first element must
 be the `<osmChange>` root and the root must be closed, with nothing after it.
