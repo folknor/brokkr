@@ -3,25 +3,16 @@
 Standing list of gaps in what `brokkr verify` proves or how it scales. Current
 gaps only; remove an entry when it is resolved.
 
-## extract membership is not adjudicated
+## multi-extract fails on an unsorted input for a reason outside pbfhogg
 
-`verify extract` gates order and content on shared IDs only. Which elements
-each strategy includes is reported, not judged, because pbfhogg contracts no
-per-strategy membership against osmium (pbfhogg ticket filed with the germany
-Berlin-bbox counts: simple 628 pbfhogg-only relations; complete 873
-osmium-only relations; smart 222,799 pbfhogg-only nodes plus the same 873
-relations; zero content mismatches in all three). Once pbfhogg states its
-inclusion rules, either gate the explained classes the way `verify merge`
-exempts its delete set, or add small fixtures with literal expected
-memberships.
-
-## extract source preservation is unchecked
-
-Nothing proves every element pbfhogg's extract emits exists unchanged in the
-input, so a corrupted or invented element only pbfhogg emits passes. Diffing
-output against input in text or OSC writes every input-only element, the whole
-dataset at planet scale; a bounded check needs a pbfhogg primitive that
-reports only one side (old-only and modified) of a diff.
+`verify multi-extract --snapshot unsorted` (denmark, 2026-11-03) fails before
+comparing anything: an extract of an input without `Sort.Type_then_ID` does
+not claim it either, and `pbfhogg diff` refuses such a strip with exit 2. The
+strip order verdict is also the sorted-input one. `verify extract` meets the
+same input by judging the header claim and comparing through osmium-sorted
+copies; multi-extract could do the same per strip. On such an input the
+single-pass path declines and both sides run the per-region fallback, so the
+check would compare that fallback with itself.
 
 ## multi-extract regions are adjacent strips only
 

@@ -85,6 +85,16 @@ impl InspectSummary {
             .any(|f| f == SORT_TYPE_THEN_ID)
     }
 
+    /// Whether the header's optional features hold `Sort.Type_then_ID`: the
+    /// one place pbfhogg's commands read the claim from when they choose a
+    /// sorted or an unsorted path (`HeaderBlock::is_sorted`).
+    pub(super) fn optional_sorted(&self) -> bool {
+        self.header
+            .optional_features
+            .iter()
+            .any(|f| f == SORT_TYPE_THEN_ID)
+    }
+
     /// The computed element order (standard ordering and per-kind ID
     /// monotonicity), `None` unless the report is extended.
     pub(super) fn objects_ordered(&self) -> Option<bool> {
@@ -158,7 +168,17 @@ pub(super) fn inspect(
     pbf: &Path,
     extended: bool,
 ) -> Result<InspectSummary, DevError> {
-    let report = report_path(pbf, extended);
+    inspect_into(harness, pbf, &report_path(pbf, extended), extended)
+}
+
+/// [`inspect`] with the report written to `report` instead of beside `pbf`:
+/// for a file outside the check's directory, such as the dataset input.
+pub(super) fn inspect_into(
+    harness: &VerifyHarness,
+    pbf: &Path,
+    report: &Path,
+    extended: bool,
+) -> Result<InspectSummary, DevError> {
     let argv = PbfArgv::new("inspect")
         .arg("--json")
         .arg_if(extended, "--extended")
@@ -168,9 +188,9 @@ pub(super) fn inspect(
     } else {
         "pbfhogg inspect --json"
     };
-    let captured = harness.run_pbfhogg_to(argv, &report)?;
+    let captured = harness.run_pbfhogg_to(argv, report)?;
     harness.check_exit(&captured, program)?;
-    read_report(&report, extended)
+    read_report(report, extended)
 }
 
 fn read_report(report: &Path, extended: bool) -> Result<InspectSummary, DevError> {
@@ -257,11 +277,12 @@ mod tests {
                 r#""optional_features":[]"#,
             )
             .replace(r#""DenseNodes"]"#, r#""DenseNodes","Sort.Type_then_ID"]"#);
-        assert!(
-            parse_summary(required.as_bytes())
-                .unwrap()
-                .declares_sorted()
-        );
+        let required = parse_summary(required.as_bytes()).unwrap();
+        assert!(required.declares_sorted());
+        // pbfhogg's commands read the claim from the optional features only,
+        // so a required-only claim selects their unsorted path.
+        assert!(!required.optional_sorted());
+        assert!(parse_summary(PLAIN.as_bytes()).unwrap().optional_sorted());
     }
 
     #[test]

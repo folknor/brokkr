@@ -564,7 +564,10 @@ one JSON value in memory before writing it.)
 counts and the ten smallest IDs; the one structure it holds is the input
 OSC's delete set, O(delete entries in the change file), which the osmium
 apply-changes step before it dominates by holding every change as a full
-object.
+object. `verify extract`'s simple relation judgement holds the node and way
+IDs osmium's complete_ways relations reference, the subset of them present,
+and the IDs of the relations each diff lists, all sorted vectors; the OPL
+relation records stream past twice.
 
 **Verdicts.** A check fails by returning `Err` (a tool crashed, output could
 not be parsed) or by returning `Findings` that carry a failed comparison;
@@ -583,23 +586,68 @@ claim is printed in its PASS line, under `verify all` too.
 `extract` and `verify merge` classify a `pbfhogg diff --format osc` between
 pbfhogg's and osmium's outputs as it streams (`verify_element_diff`); the
 diff's exit status must agree with the OSC (0 with no entries, 1 with some),
-or it is an error. `extract` fails on a `<modify>`: an ID both tools emit
-with unequal content, which no strategy explains, since neither tool rewrites
-an element it extracts. Which elements each includes is not adjudicated:
-pbfhogg's extract contract states no per-strategy membership equivalence with
-osmium, and the two are known to differ in which relations, and under smart
-which nodes, they include. Both outputs go through the strict order check;
-an osmium output that fails it is an error, since a repeated ID could hide a
-content conflict from a by-ID comparison. The detail gets, per strategy, the
-shared coverage per kind (given only when pbfhogg's output is strictly ordered
-too, so every count is of distinct IDs, and an error when the arithmetic does
-not close) and the pbfhogg-only and osmium-only counts with their smallest
-IDs. The summary channel gets one line naming, per strategy that differs, the
-nonzero pbfhogg-only and osmium-only counts, and the strategies' diff OSCs
-(`pbfhogg-vs-osmium-<strategy>.osc`), which list every element. A PASS
-line says `output order, and element content where pbfhogg and osmium hold
-the same ID; which elements each includes is not adjudicated`, so a selection
-bug that drops or invents elements passes. `multi-extract` holds each strip
+or it is an error; the generated OSC is read strictly, so an entry without a
+parsable ID, an entry outside an action block or inside another entry, a
+nested action block and an end tag closing nothing open are errors rather than
+skipped. `extract` fails on a `<modify>`:
+an ID both tools emit with unequal content, which no strategy explains, since
+neither tool rewrites an element it extracts.
+
+`extract` also gates membership, per pbfhogg's stated per-strategy contract
+against osmium (its DEVIATIONS.md, "extract: per-strategy membership against
+osmium"). complete_ways must hold osmium's element set, and smart the set of
+`osmium extract -s smart -S types=multipolygon,boundary` (the `-S` is in the
+reference argv, so in the cache key): any element only one tool holds is a
+FAIL. simple must hold osmium's nodes and ways and every relation osmium's
+simple holds; its relations differ by design, since osmium's simple decides a
+relation on its first node or way member and pbfhogg's on any direct one. They
+are judged against osmium's complete_ways output, which holds every relation
+simple's node and way sets match plus their parents
+(`verify_extract_simple`): its relations go to OPL (`osmium cat -t relation
+-f opl`), read by a strict reader (`verify_opl`) whose record count must equal
+inspect's; `osmium removeid` of every node and way they reference, diffed
+against osmium's simple output, names the members simple's sets hold; and a
+second element diff from pbfhogg's simple output to osmium's complete_ways
+output must list nothing only simple holds and no content difference, which
+checks the content of the relations osmium's simple omits too. Then every
+complete_ways relation must be in pbfhogg's simple output exactly when one of
+its direct node or way members is in those sets, and every relation only
+pbfhogg's simple holds must have its first node or way member outside them.
+That judgement runs only when simple's node and way membership agrees with
+osmium's, which a disagreement already fails. A negative node or way member
+reference is an error, not a verdict: `osmium removeid` cannot look one up.
+
+Both outputs go through the strict order check; an osmium output that fails
+it is an error, since a repeated ID could hide a content conflict from a by-ID
+comparison. The detail gets, per strategy, the shared coverage per kind (given
+only when pbfhogg's output is strictly ordered too, so every count is of
+distinct IDs, and an error when the arithmetic does not close) and the
+pbfhogg-only and osmium-only counts with their smallest IDs. The summary
+channel gets one line naming, per strategy that differs, the nonzero
+pbfhogg-only and osmium-only counts, and the strategies' diff OSCs
+(`pbfhogg-vs-osmium-<strategy>.osc`), which list every element; on a pass its
+only clause is simple's pbfhogg-only relations. A PASS line says `output
+order, element content and membership against osmium: complete_ways and smart
+(-S types=multipolygon,boundary) as osmium's, simple as osmium's but for the
+relations osmium's first-member rule omits`.
+
+`extract` branches on `Sort.Type_then_ID` among the input header's optional
+features, where pbfhogg's extract reads it. On an input without it (a
+`degrade --unsort` snapshot), osmium,
+which refuses out-of-order input, extracts from an osmium-sorted copy (the
+run and artifact name `verify sort` uses, so one cached sort serves both),
+and pbfhogg extracts the input as it is, through its unsorted fallbacks. Its
+order verdict becomes its header contract: an output that claims
+`Sort.Type_then_ID` (in either feature list) fails. Each pbfhogg output is
+then compared through an osmium-sorted copy, whose strict order proves it
+repeats no ID; osmium's outputs, read from a sorted copy, are compared as
+they are. The input
+header's report goes to the check's directory, never beside the input. Which
+order pbfhogg keeps an unsorted input's elements in is not promised and not
+checked. The PASS line then opens `on unsorted input, against osmium on an
+osmium-sorted copy: no sorted claim and no repeated ID in pbfhogg's output`.
+
+`multi-extract` holds each strip
 of a simple `--config` run to strict order and diffs it (not its counts)
 against a sequential pbfhogg extract of the strip; it never consults osmium
 and does not prove the single-pass path ran.

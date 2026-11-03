@@ -67,8 +67,39 @@ pub fn scan_osc_file(
     path: &Path,
     each: impl FnMut(OscAction, OscKind, i64),
 ) -> Result<(), DevError> {
+    scan_osc_file_as(path, Ids::Lenient, each)
+}
+
+/// [`scan_osc_file`] for an OSC a tool generated as a comparison: a node,
+/// way or relation inside an action container without a parsable `id` is an
+/// error rather than skipped, and so is one outside an action container, an
+/// action nested in another or inside an entry, an entry inside an entry, and
+/// an end tag that closes something not open. Every entry of the document is
+/// then accounted for, and a malformed one cannot drop out of a verdict
+/// unseen.
+pub fn scan_osc_file_strict(
+    path: &Path,
+    each: impl FnMut(OscAction, OscKind, i64),
+) -> Result<(), DevError> {
+    scan_osc_file_as(path, Ids::Strict, each)
+}
+
+/// Whether an action entry without a parsable `id` is skipped or refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ids {
+    /// Skipped: an input change file is read for the IDs it does carry.
+    Lenient,
+    /// Refused: a generated comparison must account for every entry.
+    Strict,
+}
+
+fn scan_osc_file_as(
+    path: &Path,
+    ids: Ids,
+    each: impl FnMut(OscAction, OscKind, i64),
+) -> Result<(), DevError> {
     let (input, compressed) = open_osc(path)?;
-    scan_osc_reader(input, each).map_err(|error| match error {
+    scan_osc_reader(input, ids, each).map_err(|error| match error {
         OscReadError::Read(error) if compressed => {
             DevError::Verify(format!("cannot decompress OSC {}: {error}", path.display()))
         }
@@ -211,9 +242,10 @@ impl Utf8Validator {
 
 fn scan_osc_reader<R: Read>(
     mut reader: R,
+    ids: Ids,
     each: impl FnMut(OscAction, OscKind, i64),
 ) -> Result<(), OscReadError> {
-    let mut parser = OscParser::new(each);
+    let mut parser = OscParser::new(ids, each);
     let mut validator = Utf8Validator::default();
     let mut chunk = [0; 16 * 1024];
     loop {
@@ -239,14 +271,26 @@ fn scan_osc_reader<R: Read>(
 /// "element-identical PASS".
 #[cfg(test)]
 pub fn scan_osc_text(text: &str, each: impl FnMut(OscAction, OscKind, i64)) -> Result<(), String> {
-    let mut parser = OscParser::new(each);
+    scan_osc_text_as(text, Ids::Lenient, each)
+}
+
+#[cfg(test)]
+fn scan_osc_text_as(
+    text: &str,
+    ids: Ids,
+    each: impl FnMut(OscAction, OscKind, i64),
+) -> Result<(), String> {
+    let mut parser = OscParser::new(ids, each);
     parser.feed(text.as_bytes())?;
     parser.finish()
 }
 
 struct OscParser<F> {
     each: F,
+    ids: Ids,
     section: Section,
+    /// The entry element open in strict mode (`node`, `way`, `relation`).
+    open: Option<&'static str>,
     root: Root,
     scan: ScanState,
 }
@@ -262,10 +306,12 @@ enum ScanState {
 }
 
 impl<F: FnMut(OscAction, OscKind, i64)> OscParser<F> {
-    fn new(each: F) -> Self {
+    fn new(ids: Ids, each: F) -> Self {
         Self {
             each,
+            ids,
             section: Section::None,
+            open: None,
             root: Root::Before,
             scan: ScanState::Text,
         }
@@ -321,6 +367,9 @@ impl<F: FnMut(OscAction, OscKind, i64)> OscParser<F> {
 
     fn process_tag(&mut self, tag: &[u8]) -> Result<(), String> {
         let tag = std::str::from_utf8(tag).map_err(|error| error.to_string())?;
+        if self.ids == Ids::Strict {
+            self.check_structure(tag)?;
+        }
         if let Some(name) = tag.strip_prefix('/') {
             let name = name.trim();
             match name {
@@ -348,14 +397,83 @@ impl<F: FnMut(OscAction, OscKind, i64)> OscParser<F> {
             Root::Open => {}
         }
         match name {
+            // A self-closing action block is empty: it opens nothing.
+            "create" | "modify" | "delete" if self_closing => {}
             "create" => self.section = Section::Create,
             "modify" => self.section = Section::Modify,
             "delete" => self.section = Section::Delete,
             "node" | "way" | "relation" => {
-                if let (Some(id), Some(action), Some(kind)) =
-                    (extract_id(attrs), self.section.action(), kind_of(name))
-                {
-                    (self.each)(action, kind, id);
+                match (extract_id(attrs), self.section.action(), kind_of(name)) {
+                    (Some(id), Some(action), Some(kind)) => (self.each)(action, kind, id),
+                    (None, Some(_), _) if self.ids == Ids::Strict => {
+                        return Err(format!("<{name}> in an action block without a parsable id"));
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Strict mode's structure: an action block holds element entries and is
+    /// not nested; an entry sits in an action block, holds no entry, and is
+    /// closed by its own end tag; the root closes with nothing left open.
+    /// Anything else could carry an entry the scan never delivers, so it is
+    /// an error. Runs before the tag is otherwise processed; the root
+    /// checks are [`process_tag`](Self::process_tag)'s own.
+    fn check_structure(&mut self, tag: &str) -> Result<(), String> {
+        if let Some(name) = tag.strip_prefix('/') {
+            let name = name.trim();
+            match name {
+                "create" | "modify" | "delete" => {
+                    let open = match self.section {
+                        Section::Create => Some("create"),
+                        Section::Modify => Some("modify"),
+                        Section::Delete => Some("delete"),
+                        Section::None => None,
+                    };
+                    if open != Some(name) {
+                        return Err(format!("</{name}> closes no open <{name}> action block"));
+                    }
+                    if let Some(open) = self.open {
+                        return Err(format!("</{name}> closes an action with <{open}> open"));
+                    }
+                }
+                "node" | "way" | "relation" => {
+                    if self.open != Some(name) {
+                        return Err(format!("</{name}> closes no open <{name}>"));
+                    }
+                    self.open = None;
+                }
+                "osmChange" if self.section.action().is_some() || self.open.is_some() => {
+                    return Err("</osmChange> with an action block or entry still open".into());
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+        let self_closing = tag.ends_with('/');
+        let (name, _) = split_tag_name(tag.trim_end_matches('/').trim());
+        match name {
+            "create" | "modify" | "delete" => {
+                if self.section.action().is_some() || self.open.is_some() {
+                    return Err(format!("<{name}> inside another action block or entry"));
+                }
+            }
+            "node" | "way" | "relation" => {
+                if self.section.action().is_none() {
+                    return Err(format!("<{name}> outside an action block"));
+                }
+                if let Some(open) = self.open {
+                    return Err(format!("<{name}> inside an open <{open}>"));
+                }
+                if !self_closing {
+                    self.open = match name {
+                        "node" => Some("node"),
+                        "way" => Some("way"),
+                        _ => Some("relation"),
+                    };
                 }
             }
             _ => {}
@@ -529,7 +647,7 @@ mod tests {
 
     fn parse_osc_reader(input: impl Read) -> Result<Seen, OscReadError> {
         let mut seen = Seen::default();
-        scan_osc_reader(input, |a, k, id| seen.record(a, k, id))?;
+        scan_osc_reader(input, Ids::Lenient, |a, k, id| seen.record(a, k, id))?;
         Ok(seen)
     }
 
@@ -792,6 +910,80 @@ mod tests {
         let xml = r#"<osmChange><delete><node version="1"/></delete></osmChange>"#;
         let diff = parse_osc_text(xml).unwrap();
         assert!(diff.is_empty());
+    }
+
+    #[test]
+    fn strict_ids_refuse_an_action_entry_without_a_parsable_id() {
+        // A generated comparison that loses an entry to a bad id could pass
+        // with the rest of its entries still agreeing with its exit status.
+        for xml in [
+            r#"<osmChange><modify><relation id="x"><member type="node" ref="1" role=""/></relation></modify><create><node id="2"/></create></osmChange>"#,
+            r#"<osmChange><delete><way version="1"/></delete></osmChange>"#,
+        ] {
+            let err = scan_osc_text_as(xml, Ids::Strict, |_, _, _| {}).unwrap_err();
+            assert!(err.contains("without a parsable id"), "{err}");
+        }
+    }
+
+    #[test]
+    fn strict_structure_refuses_an_entry_the_scan_could_not_deliver() {
+        // Each of these hides an entry from a scan that only reads entries
+        // inside one open action block.
+        for (xml, why) in [
+            (
+                r#"<osmChange><create><node id="2"/></create><relation id="7"/></osmChange>"#,
+                "outside an action block",
+            ),
+            (
+                r#"<osmChange><create><modify><node id="2"/></modify></create></osmChange>"#,
+                "inside another action block",
+            ),
+            (
+                r#"<osmChange><create><relation id="1"><node id="2"/></relation></create></osmChange>"#,
+                "inside an open <relation>",
+            ),
+            (
+                r#"<osmChange><create><way id="1"></relation></create></osmChange>"#,
+                "closes no open <relation>",
+            ),
+            (
+                r#"<osmChange><create><way id="1"></create></osmChange>"#,
+                "with <way> open",
+            ),
+            (
+                r#"<osmChange></create></osmChange>"#,
+                "closes no open <create>",
+            ),
+            (
+                r#"<osmChange><create><node id="2"/></delete></osmChange>"#,
+                "closes no open <delete>",
+            ),
+            (
+                r#"<osmChange><create><node id="1"/></osmChange>"#,
+                "still open",
+            ),
+        ] {
+            let err = scan_osc_text_as(xml, Ids::Strict, |_, _, _| {}).unwrap_err();
+            assert!(err.contains(why), "{xml}: {err}");
+            // The lenient reader keeps reading what it can.
+            assert!(scan_osc_text(xml, |_, _, _| {}).is_ok(), "{xml}");
+        }
+        // A well-formed document, with bodies and an empty action block.
+        let mut seen = Vec::new();
+        scan_osc_text_as(
+            r#"<osmChange><modify/><create><relation id="1"><member type="node" ref="2" role=""/><tag k="a" v="b"/></relation><node id="3"/></create><delete><way id="4"/></delete></osmChange>"#,
+            Ids::Strict,
+            |a, k, id| seen.push((a, k, id)),
+        )
+        .unwrap();
+        assert_eq!(
+            seen,
+            vec![
+                (OscAction::Create, OscKind::Relation, 1),
+                (OscAction::Create, OscKind::Node, 3),
+                (OscAction::Delete, OscKind::Way, 4),
+            ]
+        );
     }
 
     #[test]

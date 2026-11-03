@@ -8,7 +8,7 @@
 //! (coordinates, tags, refs, members; pbfhogg's content equality, which
 //! leaves metadata out). What each class means is the caller's policy:
 //! `verify_merge` exempts osmium-only IDs its input deleted, `verify_extract`
-//! gates on content and reports membership.
+//! gates content and per-strategy membership.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -106,7 +106,9 @@ fn print_id_sample(kind: &str, sampled: &Sampled, emit: fn(&str)) {
 /// on what it accumulated only after `Ok`. The exit status must agree with
 /// what the document holds: 0 with no entries (identical) or 1 with at least
 /// one (different). Any other status, a missing OSC, or a disagreement (0
-/// with entries, 1 with none) is an error, never a verdict. `osc` must lie in
+/// with entries, 1 with none) is an error, never a verdict, and so is an
+/// entry without a parsable ID or outside the document's action structure
+/// ([`osc::scan_osc_file_strict`]). `osc` must lie in
 /// a directory [`VerifyHarness::subdir`] emptied, so its existence proves
 /// this run wrote it.
 pub(super) fn scan_osc_diff(
@@ -151,7 +153,9 @@ pub(super) fn scan_osc_diff(
         )));
     }
     let mut entries: u64 = 0;
-    osc::scan_osc_file(osc_path, |action, kind, id| {
+    // Strict: an entry without a parsable id is an error, so the entries
+    // counted against the exit status are every entry the diff wrote.
+    osc::scan_osc_file_strict(osc_path, |action, kind, id| {
         entries += 1;
         each(action, kind, id);
     })?;

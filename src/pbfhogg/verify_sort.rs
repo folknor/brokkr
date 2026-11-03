@@ -7,6 +7,31 @@ use super::verify_reference::ToolRun;
 use crate::error::DevError;
 use crate::output::verify_msg;
 
+/// The file name of this check's osmium sort output. The artifact name is
+/// part of the reference key, so another check sorting the same input under
+/// this name (in its own directory) reuses this check's cached run.
+pub(super) const OSMIUM_SORTED: &str = "osmium.osm.pbf";
+
+/// `osmium sort <input> -o <output> --overwrite` as a reference run, its
+/// exit status required to be 0.
+pub(super) fn osmium_sort(
+    harness: &VerifyHarness,
+    input: &Path,
+    output: &Path,
+    stdout: &Path,
+) -> Result<(), DevError> {
+    let captured = harness.reference(
+        &ToolRun::osmium("sort.1")
+            .arg("sort")
+            .input(input)
+            .arg("-o")
+            .output(output)
+            .arg("--overwrite"),
+        stdout,
+    )?;
+    harness.check_exit(&captured, "osmium sort")
+}
+
 /// Cross-validate `pbfhogg sort` against `osmium sort`.
 pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findings, DevError> {
     let outdir = harness.subdir("sort")?;
@@ -25,18 +50,8 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
     harness.check_exit(&captured, "pbfhogg sort")?;
 
     // --- osmium sort ---
-    let osmium_out = outdir.join("osmium.osm.pbf");
-
-    let captured = harness.reference(
-        &ToolRun::osmium("sort.1")
-            .arg("sort")
-            .input(pbf)
-            .arg("-o")
-            .output(&osmium_out)
-            .arg("--overwrite"),
-        &outdir.join("osmium.stdout"),
-    )?;
-    harness.check_exit(&captured, "osmium sort")?;
+    let osmium_out = outdir.join(OSMIUM_SORTED);
+    osmium_sort(harness, pbf, &osmium_out, &outdir.join("osmium.stdout"))?;
 
     // --- Element counts (pbfhogg's output is summarised by its sort check) ---
     harness.print_inspect("osmium", &osmium_out)?;

@@ -431,7 +431,7 @@ impl VerifyHarness {
     /// Whether `pbf`'s header declares [`SORT_TYPE_THEN_ID`], from a plain
     /// `inspect --json` (report to a file). A failed `inspect` is an error,
     /// not "unsorted".
-    fn has_sort_flag(&self, pbf: &Path) -> Result<bool, DevError> {
+    pub(super) fn has_sort_flag(&self, pbf: &Path) -> Result<bool, DevError> {
         Ok(super::inspect_report::inspect(self, pbf, false)?.declares_sorted())
     }
 }
