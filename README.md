@@ -109,7 +109,7 @@ Several commands are flag-driven umbrellas that previously had separate subcomma
 - `brokkr inspect` - no flag: metadata; `--nodes`: node stats; `--tags`: tag counting (narrow with `--type node|way|relation`; repeatable `--expr EXPR` forwards pbfhogg's tag expressions, `--expr '*=*'` counting every key=value pair where a bare run counts keys since pbfhogg 9c4d6c81; see `brokkr man pbfhogg`)
 - `brokkr cat` - bare: adds missing indexdata, normally keeping compressed payloads (an unindexed mixed-kind block is rebuilt); `--type way|relation`: keep one object kind, selecting blobs on their indexdata kind; `--clean`: decode and re-encode each kept data blob (every one without `--type`), stripping the version attribute; `--dedupe`: two-input dedupe path (supports `--io-uring`), refused with `--type` or `--clean`, as pbfhogg refuses it. Bare `cat` defaults to `--variant raw` since that's the natural bootstrap input.
 - `brokkr tags-filter` - `--filter EXPR` (default `w/highway=primary`), `-R` for single-pass (drop referenced; refused with `--remove-tags` and `-j`), `--input-kind osc` to read an OSC diff instead of a PBF
-- `brokkr getid` - hardcoded ID set; `--add-referenced` for two-pass, `--invert` to negate
+- `brokkr getid` - the dataset's `getid_ids`, else a built-in ID set; `--add-referenced` to pull in what they reference, `--invert` to negate
 - `brokkr extract` - `--strategy simple|complete|smart` picks the extract algorithm
 - `brokkr diff` - `--format default|osc` picks the output shape
 

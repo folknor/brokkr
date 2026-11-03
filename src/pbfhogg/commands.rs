@@ -484,12 +484,12 @@ pub enum PbfhoggCommand {
         input: TagsFilterInput,
     },
     /// Unified `getid`. Flags:
-    ///   - `add_referenced` → `--add-referenced` (two-pass with
-    ///     referenced-element collection).
+    ///   - `add_referenced` → `--add-referenced` (also the objects the IDs
+    ///     reference; from pbfhogg d4c97d42 that follows relation members
+    ///     recursively, before it only a requested way's nodes).
     ///   - `invert` → `--invert` (select everything NOT matching).
     ///
-    /// The ID list is hardcoded (same fixed set used by all three
-    /// previous presets) to keep the bench shape reproducible.
+    /// The ID list is the dataset's `getid_ids`, else `GETID_BENCH_IDS`.
     Getid {
         add_referenced: bool,
         invert: bool,

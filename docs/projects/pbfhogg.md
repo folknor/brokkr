@@ -437,6 +437,16 @@ The suite's `inspect-tags-pairs` preset runs `--expr '*=*'`, so the suite
 keeps covering the pair table. Suite presets that share a command id carry
 their preset name in the row (`brokkr man results`, `--compare A B`).
 
+## Getid add-referenced
+
+`brokkr getid --add-referenced` measures `pbfhogg getid --add-referenced`
+on the dataset's `getid_ids`, else the built-in list, which holds three
+relations. What it follows is the build's: from pbfhogg d4c97d42 it follows
+relation members recursively as osmium `getid -r` does, before it only a
+requested way's nodes. The argv is the same on both sides, so a `--compare`
+across d4c97d42 compares two workloads, and stored rows are not marked: a
+row's `commit` against d4c97d42 tells them apart. No suite preset runs it.
+
 ## Check index
 
 `brokkr check-index` measures `pbfhogg check --index` on the dataset PBF
@@ -567,7 +577,10 @@ apply-changes step before it dominates by holding every change as a full
 object. `verify extract`'s simple relation judgement holds the node and way
 IDs osmium's complete_ways relations reference, the subset of them present,
 and the IDs of the relations each diff lists, all sorted vectors; the OPL
-relation records stream past twice.
+relation records stream past twice. `verify getid-removeid`'s
+`--add-referenced` arm holds, from the input's relation records (streamed
+twice), only the relations that hold relations with their relation members,
+and the objects of osmium's `getid -r` output, one closure.
 
 **Verdicts.** A check fails by returning `Err` (a tool crashed, output could
 not be parsed) or by returning `Findings` that carry a failed comparison;
@@ -580,8 +593,10 @@ warning instead of a silent PASS - the only way to consume one is
 names in the check's directory and reads `pbfhogg diff`'s exit status: 0 with
 no listing is identical, 1 is different, anything else (a signal, another
 code) is an error - never "identical". A check whose PASS establishes less
-than its name suggests builds its findings with `Findings::claiming`, and the
-claim is printed in its PASS line, under `verify all` too.
+than its name suggests builds its findings with `Findings::claiming` (or
+states it once known with `Findings::with_claim`, where what it established
+depends on the input), and the claim is printed in its PASS line, under
+`verify all` too.
 
 `extract` and `verify merge` classify a `pbfhogg diff --format osc` between
 pbfhogg's and osmium's outputs as it streams (`verify_element_diff`); the
@@ -690,7 +705,9 @@ and, in the detail, the entry's key and stored exit.
   (whitespace, quotes, backslashes), osmosis runs without those two properties
   and is never cached.
 - **Publication**: only a run that exited with an accepted code (0, or 1 for
-  `osmium diff` and `check-refs`), wrote every declared output, and whose key
+  `osmium diff` and `check-refs`; 1 for `osmium getid -r` only when its
+  stderr shows the run completed, `ToolRun::accept_if`), wrote every declared
+  output, and whose key
   is unchanged when recomputed after the run is published: artifacts made
   read-only, hashed and stamped, a manifest written, everything synced, and the
   staging directory renamed into place, an older entry renamed aside first. A
@@ -705,8 +722,9 @@ and, in the detail, the entry's key and stored exit.
 - **Integrity**: a lookup rechecks the stored exit against today's accepted
   codes and the artifact set against the run's, and compares each artifact's
   stamp (device, inode, size, mtime); a moved stamp is rehashed against the
-  digest recorded at publication. ctime is not in the stamp, since placing a
-  link moves it. This catches a replaced or rewritten artifact whose stamp
+  digest recorded at publication; a stored exit accepted only on a stderr
+  condition is held to it again on the stored stderr. ctime is not in the
+  stamp, since placing a link moves it. This catches a replaced or rewritten artifact whose stamp
   moved, not an mtime-preserving rewrite or silent media corruption. An
   invalid entry is removed and the run is a miss.
 - **Outside the identity**, so able to change a run without a miss: system
@@ -742,7 +760,7 @@ and `--snapshot` are mutually exclusive. PBF resolution is centralised in
 the binary that runs it, so a verify subcommand offers `--direct-io` only
 where the current pbfhogg takes it on the step it is forwarded to. It reaches
 the command each check verifies on `sort`, `cat`, `extract`,
-`multi-extract` (its sequential reference extracts too), `tags-filter`, `getid-removeid` (both getid runs),
+`multi-extract` (its sequential reference extracts too), `tags-filter`, `getid-removeid` (every pbfhogg getid run),
 `add-locations-to-ways` (each engine) and `merge` (`apply-changes`); under
 `derive-changes` it reaches the two `apply-changes` runs, not the `diff
 --format osc` under test. Inspections, normalising sorts, element diffs and
@@ -830,9 +848,11 @@ element), so a listing the classifier does not fully read fails rather than
 passing node or way differences as tolerated relation ones.
 
 `verify getid-removeid` chooses its IDs from the input, not from a fixed
-list: a header-only walk of the PBF's blob framing (`pbf_frames`) reads each
-`BlobHeader` and its indexdata and seeks past every data payload, so the
-choice costs the blob count, never the data, at any scale. For each kind
+list. The include and `--invert` IDs come from a header-only walk of the
+PBF's blob framing (`pbf_frames`), which reads each `BlobHeader` and its
+indexdata and seeks past every data payload, so that choice costs the blob
+count, never the data, at any scale (the `--add-referenced` request below
+also reads the input's relations). For each kind
 present it takes the lowest and highest ID the indexdata claims, which exist
 in any input whose claims are true, drops either if negative (pbfhogg getid
 does not accept negative IDs), and asserts per kind that getid selected
@@ -845,7 +865,42 @@ future version is refused by name. The one payload it reads is the
 `OSMHeader`'s, and a header declaring `HistoricalInformation` is refused,
 since the cardinality assertion needs one object per kind and ID. The
 original's counts for the complement test are the indexdata claims from the
-same walk. The input must not change on disk while the check runs.
+same walk. The input must not change on disk while the check runs. Its domain
+is a snapshot with one record per kind and ID and true indexdata claims;
+repeated records in a file that does not declare history are not looked for
+in the input, but every output the check diffs, pbfhogg's and osmium's, must
+pass the strict order check (an osmium output that fails it is an error), so
+a repeat either tool wrote is caught. It branches on `Sort.Type_then_ID` as
+`extract` does: on unsorted input every osmium run reads the osmium-sorted
+copy `verify sort` shares, each pbfhogg output it diffs must not claim the
+flag and is compared through an osmium-sorted copy (the `--invert` output is
+only counted), and the PASS line opens `on unsorted input`.
+
+The check then compares `getid --add-referenced` with `osmium getid -r`, and
+`--add-referenced --remove-tags` with `-r -t` (`verify_getid_refs`), content
+and tags compared by the same diff. The request is its own: one relation, the
+highest claimed way and the highest claimed node. The relation comes from the
+input's relations as OPL (`osmium cat -t relation -f opl` of the reference
+input, its record count held to the indexdata claim), chosen so recursion
+shows in the output: it holds a relation that holds relations, one of which
+is present in the input and is neither the requested relation nor its direct
+member, so that object is in the closure only through two hops. The lowest
+such relation whose members include both nodes and ways is taken, else the
+lowest including one of them, else the lowest such; without one, the lowest
+relation by the same preference. What the run exercised is read from osmium's `-r` output as
+OPL, never pbfhogg's: the two-hop relation, a pulled-in node and a pulled-in
+way member of a relation, a node only a way pulls in, a tagged pulled-in
+object (which `-t` must strip) and a tagged requested one (which it must
+keep). The PASS line names each the input did not offer. osmium exits 1
+whenever a requested or pulled-in object is missing, the normal case on an
+extract and a documented pbfhogg deviation, and also when an exception ends
+its run; it runs with `-v`, and exit 1 completes it only when the verbose
+output reports `Did not find N object(s).` followed by the final `Done.`,
+which the reference cache requires too before storing or replaying the run.
+An input whose indexdata claims a negative ID is refused, and so is a
+negative node or member reference in any object of osmium's output: osmium
+folds a negative ID to its absolute value and pbfhogg does not, and every
+reference either tool follows belongs to an object osmium wrote.
 
 `verify add-locations-to-ways` runs osmium with `--keep-member-nodes`: pbfhogg
 keeps untagged relation-member nodes unconditionally (a documented pbfhogg

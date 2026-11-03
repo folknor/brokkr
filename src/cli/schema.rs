@@ -830,8 +830,9 @@ In depth: `brokkr man clippy`."
         #[arg(short = 'j', long)]
         jobs: Option<usize>,
     },
-    /// Get elements by hardcoded ID set. Flags:
-    ///   `--add-referenced` - also pull in referenced objects (two-pass);
+    /// Get elements by ID: the dataset's `getid_ids`, else a built-in list.
+    /// Flags:
+    ///   `--add-referenced` - also pull in the objects they reference;
     ///   `--invert` - select everything NOT in the ID set.
     #[command(name = "getid", display_order = 2)]
     Getid {
@@ -839,11 +840,14 @@ In depth: `brokkr man clippy`."
         mode: ModeArgs,
         #[command(flatten)]
         pbf: PbfArgs,
-        /// Two-pass: include objects referenced by the matched set.
-        /// Mutually exclusive with `--invert` (pbfhogg rejects the combo).
+        /// Include the objects the matched set references, as osmium getid
+        /// -r does: relation members recursively, then way nodes. What the
+        /// build does is the build's (relation members are followed from
+        /// pbfhogg d4c97d42 on). Mutually exclusive with `--invert`
+        /// (pbfhogg rejects the combo).
         #[arg(long = "add-referenced", conflicts_with = "invert")]
         add_referenced: bool,
-        /// Select everything NOT in the hardcoded ID set.
+        /// Select everything NOT in the ID set.
         #[arg(long)]
         invert: bool,
         /// Snapshot key to read input from. Use `base` (or omit) for the
@@ -3289,7 +3293,8 @@ pub(crate) enum VerifyCommand {
         #[command(flatten)]
         pbf: VerifyPbfArgs,
     },
-    /// Cross-validate getid/getid --invert against osmium getid
+    /// Cross-validate getid, getid --invert and getid --add-referenced
+    /// (plain and --remove-tags) against osmium getid
     #[command(display_order = 4)]
     GetidRemoveid {
         #[command(flatten)]

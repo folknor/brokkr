@@ -478,7 +478,7 @@ pub struct Findings {
     failures: Vec<String>,
     /// What a PASS of this check establishes, when that is narrower than
     /// the check's name suggests; printed in its PASS line.
-    claim: Option<&'static str>,
+    claim: Option<String>,
 }
 
 impl Findings {
@@ -489,12 +489,19 @@ impl Findings {
     /// Findings whose PASS line states `claim`: what the check's recorded
     /// comparisons establish, so a PASS is not read as more (such as
     /// equivalence with a reference tool whose output it does not gate on).
-    /// Set once here, never overwritten.
-    pub fn claiming(claim: &'static str) -> Self {
+    pub fn claiming(claim: impl Into<String>) -> Self {
         Self {
             failures: Vec::new(),
-            claim: Some(claim),
+            claim: Some(claim.into()),
         }
+    }
+
+    /// These findings with the claim stated once the check knows it: for a
+    /// check whose scope depends on what its input turned out to hold.
+    /// Replaces any claim stated before.
+    pub fn with_claim(mut self, claim: impl Into<String>) -> Self {
+        self.claim = Some(claim.into());
+        self
     }
 
     /// Record one comparison's verdict under `what` (the failure's name in
@@ -525,17 +532,17 @@ impl Findings {
 pub(crate) trait CheckOutcome {
     /// Fold into the check's pass/fail result; a pass carries the check's
     /// claim ([`Findings::claiming`]), if it states one.
-    fn into_check_result(self, name: &str) -> Result<Option<&'static str>, DevError>;
+    fn into_check_result(self, name: &str) -> Result<Option<String>, DevError>;
 }
 
 impl CheckOutcome for () {
-    fn into_check_result(self, _name: &str) -> Result<Option<&'static str>, DevError> {
+    fn into_check_result(self, _name: &str) -> Result<Option<String>, DevError> {
         Ok(None)
     }
 }
 
 impl CheckOutcome for Findings {
-    fn into_check_result(self, name: &str) -> Result<Option<&'static str>, DevError> {
+    fn into_check_result(self, name: &str) -> Result<Option<String>, DevError> {
         if self.failures.is_empty() {
             return Ok(self.claim);
         }
@@ -649,7 +656,7 @@ where
             if !verbose {
                 crate::output::verify_buffer_discard();
             }
-            crate::output::verify_summary(&pass_line(name, &ms, *claim));
+            crate::output::verify_summary(&pass_line(name, &ms, claim.as_deref()));
             Ok(CheckStatus::Passed)
         }
         Err(DevError::Interrupted) => {
@@ -1111,8 +1118,16 @@ mod tests {
     fn a_claim_rides_a_pass_and_never_a_fail() {
         let _serial = ledger_lock();
         let f = Findings::claiming("order only");
-        assert_eq!(f.into_check_result("x").unwrap(), Some("order only"));
+        assert_eq!(
+            f.into_check_result("x").unwrap().as_deref(),
+            Some("order only")
+        );
         assert_eq!(Findings::new().into_check_result("x").unwrap(), None);
+        let f = Findings::new().with_claim(format!("{} kinds", 3));
+        assert_eq!(
+            f.into_check_result("x").unwrap().as_deref(),
+            Some("3 kinds")
+        );
         let mut f = Findings::claiming("order only");
         f.fail("order");
         assert!(f.into_check_result("x").is_err());

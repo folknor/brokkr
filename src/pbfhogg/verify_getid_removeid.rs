@@ -1,13 +1,137 @@
-//! Verify: getid - pbfhogg getid vs osmium getid, plus getid --invert complement test.
+//! Verify: getid - pbfhogg getid vs osmium getid, the getid --invert
+//! complement test, and getid --add-referenced (plain and with
+//! --remove-tags) vs osmium getid -r (plain and with -t), the last in
+//! [`super::verify_getid_refs`].
+//!
+//! Domain: a snapshot with one record per kind and ID, whose indexdata
+//! claims are true. A header declaring `HistoricalInformation` is refused;
+//! repeated records in a file that does not declare it are outside the
+//! domain and not looked for in the input, though every output the check
+//! compares must be in strict order, so a repeat either tool wrote is
+//! caught.
+//!
+//! Input order. pbfhogg branches on `Sort.Type_then_ID` among the input
+//! header's optional features, and so does this check, as verify extract
+//! does. Without it (an unsorted snapshot) every osmium run reads an
+//! osmium-sorted copy of the input, shared with verify sort's cached run,
+//! while pbfhogg reads the input as it is; each pbfhogg output the check
+//! diffs (the `--invert` output is only counted) must then not claim
+//! `Sort.Type_then_ID` and is compared through an osmium-sorted copy,
+//! whose strict order proves it repeats no ID. getid answers by ID alone, so
+//! reading a sorted copy changes no reference answer.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use super::inspect_report;
 use super::pbf_frames::{self, IndexSummary};
-use super::verify::{Findings, PbfArgv, Verdict, VerifyHarness};
+use super::verify::{Findings, PbfArgv, SORT_TYPE_THEN_ID, Verdict, VerifyHarness};
 use super::verify_multi_extract::{Counts, inspect_counts};
 use super::verify_reference::ToolRun;
+use super::verify_sort;
 use crate::error::DevError;
 use crate::output::verify_msg;
+
+/// The claim part a passing check carries on unsorted input.
+const CLAIM_UNSORTED: &str = "on unsorted input, against osmium on an osmium-sorted copy, \
+                              pbfhogg's outputs compared through osmium-sorted copies";
+
+/// Where the check's osmium runs read the input, and whether pbfhogg reads
+/// it as sorted.
+pub(super) struct InputOrder {
+    pub sorted: bool,
+    /// The input itself when sorted, else an osmium-sorted copy of it.
+    pub reference_input: PathBuf,
+}
+
+impl InputOrder {
+    /// Read the input header's claim (its report in the check's directory)
+    /// and, on unsorted input, write the osmium-sorted copy.
+    fn of(harness: &VerifyHarness, pbf: &Path, outdir: &Path) -> Result<Self, DevError> {
+        let sorted =
+            inspect_report::inspect_into(harness, pbf, &outdir.join("input.inspect.json"), false)?
+                .optional_sorted();
+        if sorted {
+            return Ok(Self {
+                sorted,
+                reference_input: pbf.to_path_buf(),
+            });
+        }
+        verify_msg(&format!(
+            "  input header does not declare {SORT_TYPE_THEN_ID} as an optional feature: osmium \
+             reads an osmium-sorted copy, pbfhogg the input as it is"
+        ));
+        // The sort's artifact name and argv are verify sort's, so one cached
+        // run of the same input serves both checks.
+        let dir = outdir.join("osmium-sorted-input");
+        std::fs::create_dir_all(&dir)?;
+        let copy = dir.join(verify_sort::OSMIUM_SORTED);
+        verify_sort::osmium_sort(harness, pbf, &copy, &dir.join("osmium.stdout"))?;
+        Ok(Self {
+            sorted,
+            reference_input: copy,
+        })
+    }
+}
+
+/// Compare pbfhogg's output `ours` of `pbfhogg <label>` with osmium's
+/// `theirs` of `<osmium_label>`: osmium's must be in strict order or the
+/// comparison cannot be made (an error); pbfhogg's must be in strict order
+/// on sorted input, and on unsorted input must not claim `Sort.Type_then_ID`
+/// and is compared through an osmium-sorted copy whose strict order proves
+/// no repeated ID; then the element diff (content and tags; metadata left
+/// out), and on sorted input the sort feature comparison.
+pub(super) fn compare_outputs(
+    harness: &VerifyHarness,
+    order: &InputOrder,
+    label: &str,
+    osmium_label: &str,
+    ours: &Path,
+    theirs: &Path,
+    findings: &mut Findings,
+) -> Result<(), DevError> {
+    if !harness.check_sorted(osmium_label, theirs)?.is_pass() {
+        return Err(DevError::Verify(format!(
+            "{osmium_label} output is not in strict order, so it cannot be compared with \
+             pbfhogg's by ID"
+        )));
+    }
+    let pbfhogg_label = format!("pbfhogg {label}");
+    let compared = if order.sorted {
+        let verdict = harness.check_sorted(&pbfhogg_label, ours)?;
+        findings.record(&format!("{pbfhogg_label} output order"), verdict);
+        ours.to_path_buf()
+    } else {
+        let claims = harness.has_sort_flag(ours)?;
+        verify_msg(&format!(
+            "  {pbfhogg_label}: header {} {SORT_TYPE_THEN_ID} on unsorted input {}",
+            if claims { "claims" } else { "does not claim" },
+            if claims { "FAIL" } else { "PASS" }
+        ));
+        findings.record(
+            &format!("{pbfhogg_label} output claims {SORT_TYPE_THEN_ID} on unsorted input"),
+            Verdict::from_pass(!claims),
+        );
+        let copy = ours.with_extension("sorted.pbf");
+        verify_sort::osmium_sort(harness, ours, &copy, &ours.with_extension("sorted.stdout"))?;
+        let verdict = harness.check_sorted(&format!("{pbfhogg_label} (osmium-sorted)"), &copy)?;
+        findings.record(&format!("{pbfhogg_label} output repeats an ID"), verdict);
+        copy
+    };
+    let diff = harness.diff_pbfs(&compared, theirs, &super::verify::listing_beside(&compared))?;
+    if diff.is_pass() {
+        verify_msg(&format!("  {label}: PASS (identical)"));
+    } else {
+        verify_msg(&format!("  {label}: FAIL (differences found)"));
+    }
+    findings.record(&format!("{label} diff"), diff);
+    if order.sorted {
+        findings.record(
+            &format!("{label} sort feature"),
+            harness.compare_sort_feature(ours, theirs)?,
+        );
+    }
+    Ok(())
+}
 
 const KIND_LETTERS: [char; 3] = ['n', 'w', 'r'];
 
@@ -47,8 +171,9 @@ fn selection_verdicts(ids: &[Vec<i64>; 3], selected: Counts) -> [(&'static str, 
     ]
 }
 
-/// Run getid cross-validation: pbfhogg getid vs osmium getid,
-/// then pbfhogg getid --invert complement test.
+/// Run getid cross-validation: pbfhogg getid vs osmium getid, the pbfhogg
+/// getid --invert complement test, then getid --add-referenced against
+/// osmium getid -r ([`super::verify_getid_refs`]).
 ///
 /// The IDs come from the input itself (see [`endpoint_ids`]), read by a
 /// header-only walk of its blob framing ([`pbf_frames::walk`]): no element
@@ -82,6 +207,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
     }
     verify_msg(&format!("  requesting: {}", requested.join(" ")));
 
+    let order = InputOrder::of(harness, pbf, &outdir)?;
     let mut findings = Findings::new();
 
     verify_msg("--- getid: pbfhogg vs osmium ---");
@@ -114,7 +240,9 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
 
     // osmium getid <pbf> <ids...> -o <out> --overwrite
     let osmium_getid = outdir.join("osmium-getid.osm.pbf");
-    let mut osmium_run = ToolRun::osmium("getid.1").arg("getid").input(pbf);
+    let mut osmium_run = ToolRun::osmium("getid.1")
+        .arg("getid")
+        .input(&order.reference_input);
     for id in &requested {
         osmium_run = osmium_run.arg(id.as_str());
     }
@@ -125,28 +253,15 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
     let captured = harness.reference(&osmium_run, &outdir.join("osmium-getid.stdout"))?;
     harness.check_exit(&captured, "osmium getid")?;
 
-    // Print inspect output for both getid outputs.
-    harness.print_inspect("pbfhogg getid", &pbfhogg_getid)?;
-    harness.print_inspect("osmium getid", &osmium_getid)?;
-
-    // Diff and report.
-    let diff = harness.diff_pbfs(
+    compare_outputs(
+        harness,
+        &order,
+        "getid",
+        "osmium getid",
         &pbfhogg_getid,
         &osmium_getid,
-        &super::verify::listing_beside(&pbfhogg_getid),
+        &mut findings,
     )?;
-    if diff.is_pass() {
-        verify_msg("  getid: PASS (identical)");
-    } else {
-        verify_msg("  getid: FAIL (differences found)");
-    }
-    findings.record("getid diff", diff);
-
-    // Compare sort feature flags.
-    findings.record(
-        "getid sort feature",
-        harness.compare_sort_feature(&pbfhogg_getid, &osmium_getid)?,
-    );
 
     // --- getid --invert: complement test ---
     verify_msg("--- getid --invert: complement test ---");
@@ -197,7 +312,26 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
         findings.record(&format!("getid --invert complement ({kind})"), verdict);
     }
 
-    Ok(findings)
+    // --- getid --add-referenced, plain and --remove-tags ---
+    let mut claim = super::verify_getid_refs::run(
+        harness,
+        &super::verify_getid_refs::RefsInput {
+            outdir: &outdir,
+            pbf,
+            order: &order,
+            summary: &summary,
+            direct_io,
+        },
+        &mut findings,
+    )?;
+    if !order.sorted {
+        claim.insert(0, CLAIM_UNSORTED.to_owned());
+    }
+    Ok(if claim.is_empty() {
+        findings
+    } else {
+        findings.with_claim(claim.join("; "))
+    })
 }
 
 /// `selected + inverted == original`, without overflow on absurd counts.

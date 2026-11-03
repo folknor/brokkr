@@ -486,7 +486,7 @@ With 55+ top-level commands, `--help` is a wall of text. `display_order` groups 
 New flags that could warrant additional `bench commands` variants or verify coverage:
 
 - `tags-filter`: `-i/--invert-match`, `-e/--expressions`, `-t/--remove-tags`
-- `getid`: `-I/--id-osm-file`, `--remove-tags`, `--verbose-ids`
+- `getid`: `-I/--id-osm-file`, `--verbose-ids` (`--remove-tags` has verify coverage in `verify getid-removeid`; no bench variant)
 - `diff`: `--summary`, `--quiet`, `--output`
 - `inspect`: `-e/--extended`, `-g/--get`, `--json`
 - `extract`: `--clean`, `--set-bounds`

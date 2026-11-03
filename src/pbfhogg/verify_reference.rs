@@ -104,14 +104,20 @@ enum RunArg {
     Output { prefix: &'static str, path: PathBuf },
 }
 
+/// What a run's stderr must show for an exit code accepted only on that
+/// condition to complete it.
+pub(crate) type StderrShows = fn(&[u8]) -> bool;
+
 /// One declared reference run: its id (unique per check and run, and
 /// versioned by the caller when the run's meaning changes), its program, its
-/// argv with inputs and outputs marked, and the exit codes that complete it.
+/// argv with inputs and outputs marked, and the outcomes that complete it:
+/// the accepted exit codes, some only when the stderr shows a condition.
 pub(crate) struct ToolRun<'a> {
     id: String,
     program: Program<'a>,
     args: Vec<RunArg>,
     accepted: Vec<i32>,
+    conditions: Vec<(i32, StderrShows)>,
 }
 
 impl<'a> ToolRun<'a> {
@@ -121,6 +127,7 @@ impl<'a> ToolRun<'a> {
             program,
             args: Vec::new(),
             accepted: vec![0],
+            conditions: Vec::new(),
         }
     }
 
@@ -173,6 +180,33 @@ impl<'a> ToolRun<'a> {
     pub(crate) fn accept(mut self, codes: &[i32]) -> Self {
         self.accepted.extend_from_slice(codes);
         self
+    }
+
+    /// Exit `code` completes the run only when `shows` holds for its stderr:
+    /// for a tool whose exit code also means something besides failure, such
+    /// as osmium getid's exit 1, which is both "an object was not found" and
+    /// "an exception ended the run". The condition is checked on a fresh run
+    /// before it is cached and on a stored entry's stderr before it is
+    /// replayed, so a run that did not complete is never published or reused.
+    pub(crate) fn accept_if(mut self, code: i32, shows: StderrShows) -> Self {
+        self.accepted.push(code);
+        self.conditions.push((code, shows));
+        self
+    }
+
+    /// Whether exit `code` with `stderr` completes the run.
+    pub(crate) fn completes(&self, code: i32, stderr: &[u8]) -> bool {
+        self.accepted.contains(&code)
+            && self
+                .conditions
+                .iter()
+                .filter(|(c, _)| *c == code)
+                .all(|(_, shows)| shows(stderr))
+    }
+
+    /// Whether exit `code` completes the run only on a stderr condition.
+    fn conditional(&self, code: i32) -> bool {
+        self.conditions.iter().any(|(c, _)| *c == code)
     }
 
     /// The step label: the program and its first literal argument.
@@ -513,7 +547,7 @@ impl ReferenceCache {
         };
         let completed = captured
             .code()
-            .is_some_and(|code| run.accepted.contains(&code))
+            .is_some_and(|code| run.completes(code, &captured.stderr))
             && outputs
                 .iter()
                 .all(|(name, _)| artifacts.join(name).is_file());
@@ -727,6 +761,17 @@ impl ReferenceCache {
             }
             if restamped {
                 write_manifest(&entry.join(MANIFEST), &manifest).map_err(|e| e.to_string())?;
+            }
+            // Read only once its stamp or digest held above.
+            if run.conditional(manifest.exit_code) {
+                let stderr = fs::read(entry.join(ARTIFACTS).join(STDERR))
+                    .map_err(|e| format!("{STDERR}: {e}"))?;
+                if !run.completes(manifest.exit_code, &stderr) {
+                    return Err(format!(
+                        "stored exit {} without the stderr that completes it",
+                        manifest.exit_code
+                    ));
+                }
             }
             Ok(manifest)
         })();
@@ -1382,5 +1427,46 @@ mod tests {
         };
         let strict = ToolRun::osmium("t.1").arg("diff");
         assert!(cache.lookup(&entry, &key, &strict, &[]).is_none());
+    }
+
+    #[test]
+    fn a_conditional_exit_completes_only_with_its_stderr() {
+        fn says_done(stderr: &[u8]) -> bool {
+            stderr.ends_with(b"Done.\n")
+        }
+        let run = ToolRun::osmium("t.1").arg("getid").accept_if(1, says_done);
+        assert!(run.completes(0, b""));
+        assert!(run.completes(1, b"Done.\n"));
+        assert!(!run.completes(1, b"Out of memory.\n"));
+        assert!(!run.completes(2, b"Done.\n"));
+
+        let root = crate::test_scratch::scratch("verify-reference", "conditional");
+        let cache = ReferenceCache {
+            dir: root.clone(),
+            project_root: root.clone(),
+            identities: RefCell::new(BTreeMap::new()),
+            warned: RefCell::new(std::collections::BTreeSet::new()),
+            seq: Cell::new(0),
+        };
+        for (hex, stderr, found) in [("02", "Done.\n", true), ("03", "boom\n", false)] {
+            let staging = root.join(format!(".staging-1-{hex}"));
+            for sub in [ARTIFACTS, "home", "scratch"] {
+                fs::create_dir_all(staging.join(sub)).unwrap();
+            }
+            fs::write(staging.join(ARTIFACTS).join(STDOUT), "").unwrap();
+            fs::write(staging.join(ARTIFACTS).join(STDERR), stderr).unwrap();
+            let entry = root.join(hex);
+            publish(&staging, &entry, "k", 1, &[]).unwrap();
+            let key = Key {
+                text: "k".into(),
+                hex: hex.into(),
+            };
+            assert_eq!(
+                cache.lookup(&entry, &key, &run, &[]).is_some(),
+                found,
+                "{hex}"
+            );
+            assert_eq!(entry.exists(), found, "{hex}");
+        }
     }
 }
