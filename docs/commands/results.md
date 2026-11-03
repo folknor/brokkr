@@ -230,7 +230,18 @@ on an input with neither assertion is `tilegen=[]`), since `brokkr tilegen`'s
 own argv names only the input. A defaulted digest row or a tilegen row from
 before these carries none and pairs only with other such rows, which mix the
 forms or blocks of their day; an explicit `--form` digest row was never
-qualified and pairs as before. A pbfhogg `read`, `write` or `merge` row, the
+qualified and pairs as before. Every `brokkr suite pbfhogg` row shares the
+suite's argv, so a command preset whose command id another preset shares
+(the `inspect`, `cat`, `tags-filter`, `getid` and `diff` families, the
+preset named after the command included) carries `preset=<name>`, ahead of
+the command's own qualifier and joined to it by `;`; a preset with no
+sibling carries only the command's, so giving one a sibling later re-keys
+it. A suite blob-filter row carries its sub-command (`command=cat-way`,
+`command=inspect-tags-way`, ...). Before these, every preset of one command,
+and every blob-filter sub-command on one input, shared one key, and
+`--compare` kept whichever was stored last; those rows are not migrated, so
+an older unqualified row of a shared command pairs with nothing newer, and
+older rows pair among themselves as before. A pbfhogg `read`, `write` or `merge` row, the
 suite's included, carries the cell it measured, since one invocation runs
 several: `mode=...` for a read mode, `writer=...;compression=...` for a write
 cell, `io=...;compression=...` for a merge cell. Before that every cell of an
@@ -265,7 +276,9 @@ setting nobody passed is that revision's default, and a default that changes
 between two commits is part of the code a comparison compares, even where it
 changes output - except where brokkr holds a choice constant as a workload
 axis, as it does pbfhogg's digest form, which is resolved before the run and
-named in the row. Not in the key: the content behind an input's name (a
+named in the row. A bare pbfhogg `inspect --tags`, which moved from counting
+pairs to counting keys, is such a default; its pair workload is named only by
+an explicit expression (`docs/projects/pbfhogg.md`, Inspect tags). Not in the key: the content behind an input's name (a
 dataset PBF or an ocean file replaced under the same name), and a resource
 the program sizes at run time (the worker count an omitted tilegen `threads`
 resolves to), which the host-condition annotations below do not capture

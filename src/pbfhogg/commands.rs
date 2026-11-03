@@ -22,8 +22,14 @@ pub enum InspectMode {
         extended: bool,
     },
     Nodes,
+    /// `inspect tags`. `expressions` are forwarded in order as pbfhogg's
+    /// positional tag expressions, which decide the workload: none (or none
+    /// with `=`) counts keys from pbfhogg 9c4d6c81 on, while `*=*` counts
+    /// every key=value pair at every revision, the work a bare run did before
+    /// it.
     Tags {
         type_filter: Option<InspectTypeFilter>,
+        expressions: Vec<String>,
     },
 }
 
@@ -399,9 +405,12 @@ fn canonical_bbox(bbox: &Bbox) -> String {
         .join(",")
 }
 
-/// Min-count threshold used by the bench version of `inspect tags`. Set
-/// impossibly high so pbfhogg's default tag-frequency filter never trims
-/// anything - we want the full decode cost measured, not just popular tags.
+/// Min-count threshold every measured `inspect tags` passes. pbfhogg counts
+/// every selected row exactly and only then keeps the rows at or above
+/// `--min-count`, so a threshold meant to exceed any row's count on a real
+/// input leaves no count row: the run
+/// pays for decoding and counting, not for sorting and printing rows. A row
+/// counted at least this often would still be printed.
 pub(crate) const INSPECT_ALL_TAGS_MIN_COUNT: &str = "999999999";
 
 /// Default `verify multi-extract` region count, shared with the CLI schema.
@@ -421,11 +430,12 @@ pub enum PbfhoggCommand {
     /// Unified `inspect`. Flags:
     ///   - `nodes` → `--nodes` (PBF node statistics; mutually exclusive
     ///     with `tags`).
-    ///   - `tags` → `tags` subcommand for tag-frequency (mutually
-    ///     exclusive with `nodes`). Always emits `--min-count 999999999`
-    ///     internally so every tag is reported.
-    ///   - `type_filter` → `--type <node|way|relation>` for the tags
-    ///     subcommand only.
+    ///   - `tags` → `tags` subcommand, tag counting (mutually exclusive
+    ///     with `nodes`). Always emits `--min-count`
+    ///     [`INSPECT_ALL_TAGS_MIN_COUNT`], meant to exceed every row's count
+    ///     so no count row is printed.
+    ///   - `type_filter` → `--type <node|way|relation>` and `expressions` →
+    ///     positional tag expressions, for the tags subcommand only.
     Inspect {
         mode: InspectMode,
     },
@@ -769,6 +779,19 @@ impl PbfhoggCommand {
         {
             return Err(DevError::Usage(message.clone()));
         }
+        // An expression is a positional of pbfhogg's `inspect tags`, and
+        // brokkr appends its axis flags after it, so no `--` can fence the
+        // expressions off: one starting with `-` would be parsed as an option.
+        if let Self::Inspect {
+            mode: InspectMode::Tags { expressions, .. },
+        } = self
+            && let Some(expression) = expressions.iter().find(|e| e.starts_with('-'))
+        {
+            return Err(DevError::Usage(format!(
+                "inspect --tags --expr {expression:?}: an expression starting with '-' \
+                 would reach pbfhogg as an option"
+            )));
+        }
         let refused: Vec<&str> = Axis::ALL
             .into_iter()
             .filter(|&axis| axis.is_set(params) && !self.axis_has_effect(axis))
@@ -1038,8 +1061,14 @@ impl PbfhoggCommand {
             Self::Inspect { mode: inspect_mode } => {
                 let mut argv = CommandArgv::new("inspect");
                 match inspect_mode {
-                    InspectMode::Tags { type_filter } => {
+                    InspectMode::Tags {
+                        type_filter,
+                        expressions,
+                    } => {
                         argv = argv.arg("tags").input(ctx.pbf_str()?)?;
+                        for expression in expressions {
+                            argv = argv.arg(expression.clone());
+                        }
                         if let Some(tf) = type_filter {
                             argv = argv.arg("--type").arg(tf.as_str()?);
                         }
@@ -1734,6 +1763,7 @@ mod tests {
             PbfhoggCommand::Inspect {
                 mode: InspectMode::Tags {
                     type_filter: Some(InspectTypeFilter::Way),
+                    expressions: vec!["highway".into(), "w/building=*".into()],
                 },
             },
             PbfhoggCommand::CheckRefs { relations: false },
@@ -2071,7 +2101,10 @@ mod tests {
     fn inspect_tags_builds_correct_args() {
         let ctx = test_ctx();
         let cmd = PbfhoggCommand::Inspect {
-            mode: InspectMode::Tags { type_filter: None },
+            mode: InspectMode::Tags {
+                type_filter: None,
+                expressions: Vec::new(),
+            },
         };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         assert_eq!(
@@ -2087,11 +2120,58 @@ mod tests {
     }
 
     #[test]
+    fn inspect_tags_forwards_expressions_in_order_after_the_input() {
+        let mut ctx = test_ctx();
+        ctx.params.jobs = Some(4);
+        let cmd = PbfhoggCommand::Inspect {
+            mode: InspectMode::Tags {
+                type_filter: Some(InspectTypeFilter::Way),
+                expressions: vec!["*=*".into(), "name".into(), "a b".into()],
+            },
+        };
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
+        assert_eq!(
+            args,
+            vec![
+                "inspect",
+                "tags",
+                "/data/denmark.osm.pbf",
+                "*=*",
+                "name",
+                "a b",
+                "--type",
+                "way",
+                "--min-count",
+                "999999999",
+                "--jobs",
+                "4",
+            ]
+        );
+    }
+
+    #[test]
+    fn inspect_tags_refuses_an_expression_pbfhogg_would_read_as_an_option() {
+        let ctx = test_ctx();
+        let cmd = PbfhoggCommand::Inspect {
+            mode: InspectMode::Tags {
+                type_filter: None,
+                expressions: vec!["highway".into(), "-x".into()],
+            },
+        };
+        assert!(matches!(
+            cmd.validate_shape(&ctx.params),
+            Err(DevError::Usage(message)) if message.contains("\"-x\"")
+        ));
+        assert!(cmd.build_args(&ctx, ArgMode::Bench).is_err());
+    }
+
+    #[test]
     fn inspect_tags_uses_the_same_filter_in_bench_and_hotpath() {
         let ctx = test_ctx();
         let cmd = PbfhoggCommand::Inspect {
             mode: InspectMode::Tags {
                 type_filter: Some(InspectTypeFilter::Way),
+                expressions: vec!["*=*".into()],
             },
         };
         let bench = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
@@ -2247,7 +2327,10 @@ mod tests {
         let mut ctx = test_ctx();
         ctx.params.jobs = Some(0);
         let cmd = PbfhoggCommand::Inspect {
-            mode: InspectMode::Tags { type_filter: None },
+            mode: InspectMode::Tags {
+                type_filter: None,
+                expressions: Vec::new(),
+            },
         };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         let pos = args

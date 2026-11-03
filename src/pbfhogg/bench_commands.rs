@@ -23,6 +23,7 @@ pub const ALL_COMMANDS: &[&str] = &[
     "inspect-nodes",
     "inspect-tags",
     "inspect-tags-way",
+    "inspect-tags-pairs",
     "check-refs",
     "check-ids",
     "check-index",
@@ -61,12 +62,25 @@ pub(crate) fn preset_to_command(name: &str) -> Result<PbfhoggCommand, DevError> 
         "inspect-nodes" => PbfhoggCommand::Inspect {
             mode: InspectMode::Nodes,
         },
+        // No expression: the build's default, key counting from pbfhogg
+        // 9c4d6c81 and pair counting before it.
         "inspect-tags" => PbfhoggCommand::Inspect {
-            mode: InspectMode::Tags { type_filter: None },
+            mode: InspectMode::Tags {
+                type_filter: None,
+                expressions: Vec::new(),
+            },
         },
         "inspect-tags-way" => PbfhoggCommand::Inspect {
             mode: InspectMode::Tags {
                 type_filter: Some(super::commands::InspectTypeFilter::Way),
+                expressions: Vec::new(),
+            },
+        },
+        // Every key=value pair at every revision: the sharded pair table.
+        "inspect-tags-pairs" => PbfhoggCommand::Inspect {
+            mode: InspectMode::Tags {
+                type_filter: None,
+                expressions: vec!["*=*".into()],
             },
         },
         "check-refs" => PbfhoggCommand::CheckRefs { relations: false },
@@ -133,6 +147,38 @@ pub(crate) fn preset_to_command(name: &str) -> Result<PbfhoggCommand, DevError> 
         },
         _ => return Err(DevError::Config(format!("unknown suite preset: {name}"))),
     })
+}
+
+/// The results pairing qualifier of a suite preset's row. Every suite row's
+/// brokkr argv is the suite's, so the argv key cannot tell presets apart, and
+/// presets of one command share its id: without more, `--compare` would keep
+/// one row of several measured workloads per commit and pair it with
+/// whichever preset ran last on the other side. So a preset whose command id
+/// another preset in [`ALL_COMMANDS`] shares carries `preset=<name>`, ahead
+/// of the command's own qualifier (`ids=...`), joined by `;`. A preset whose
+/// command no sibling shares keeps exactly the command's qualifier, the
+/// identity its rows always had; giving it a sibling later re-keys it.
+pub(crate) fn preset_arm_qualifier(
+    name: &str,
+    command: &PbfhoggCommand,
+    ctx: &CommandContext,
+) -> Result<Option<String>, DevError> {
+    let id = command.id();
+    let mut shared = 0;
+    for preset in ALL_COMMANDS {
+        if preset_to_command(preset)?.id() == id {
+            shared += 1;
+        }
+    }
+    let own = command.arm_qualifier(ctx);
+    if shared < 2 {
+        return Ok(own);
+    }
+    let preset = format!("preset={name}");
+    Ok(Some(match own {
+        Some(own) => format!("{preset};{own}"),
+        None => preset,
+    }))
 }
 
 /// Whether any requested preset needs the merged PBF (apply-changes output).
@@ -317,6 +363,7 @@ pub fn run(
             false,
             *exits,
             expectation.as_ref(),
+            preset_arm_qualifier(name, &cmd, &ctx)?,
         )?;
         crate::pbfhogg::plan::cleanup_output(&cmd, &ctx, crate::pbfhogg::commands::ArgMode::Bench)?;
         Ok(())
@@ -366,6 +413,82 @@ mod tests {
         }
     }
 
+    fn suite_ctx(selection: BenchSelection) -> CommandContext {
+        CommandContext {
+            inputs: ResolvedInputs::Pbf {
+                pbf: std::path::PathBuf::from("/data/denmark.osm.pbf"),
+            },
+            scratch_dir: std::path::PathBuf::from("/data/scratch"),
+            dataset: String::new(),
+            params: CommandParams {
+                selection,
+                ..CommandParams::default()
+            },
+            observations: CommandObservations::default(),
+        }
+    }
+
+    #[test]
+    fn presets_sharing_a_command_are_qualified_by_preset_and_no_others() {
+        let ctx = suite_ctx(BenchSelection::default());
+        let qualified: Vec<(&str, String)> = ALL_COMMANDS
+            .iter()
+            .filter_map(|name| {
+                let cmd = preset_to_command(name).unwrap();
+                preset_arm_qualifier(name, &cmd, &ctx)
+                    .unwrap()
+                    .map(|q| (*name, q))
+            })
+            .collect();
+        let expected = [
+            "inspect",
+            "inspect-nodes",
+            "inspect-tags",
+            "inspect-tags-way",
+            "inspect-tags-pairs",
+            "cat",
+            "cat-way",
+            "cat-relation",
+            "cat-dedupe",
+            "tags-filter-way",
+            "tags-filter-amenity",
+            "tags-filter-twopass",
+            "tags-filter-osc",
+            "getid",
+            "getid-invert",
+            "diff",
+            "diff-osc",
+        ];
+        assert_eq!(
+            qualified.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+            expected
+        );
+        for (name, qualifier) in &qualified {
+            assert_eq!(*qualifier, format!("preset={name}"));
+        }
+    }
+
+    #[test]
+    fn a_preset_qualifier_leads_the_commands_own() {
+        let ids = crate::datasets::ElementIdList::parse(&["n1", "w2"][..]).unwrap();
+        let ctx = suite_ctx(BenchSelection {
+            getid: Some(ids.clone()),
+            getparents: Some(ids),
+        });
+        let invert = preset_to_command("getid-invert").unwrap();
+        assert_eq!(
+            preset_arm_qualifier("getid-invert", &invert, &ctx).unwrap(),
+            Some("preset=getid-invert;ids=n1,w2".into())
+        );
+        // getparents has no sibling: its qualifier is the command's alone.
+        let getparents = preset_to_command("getparents").unwrap();
+        assert_eq!(
+            preset_arm_qualifier("getparents", &getparents, &ctx).unwrap(),
+            getparents.arm_qualifier(&ctx)
+        );
+        assert_eq!(getparents.arm_qualifier(&ctx), Some("ids=n1,w2".into()));
+    }
+
     #[test]
     fn output_kinds_match_legacy_classification() {
         // No-output-file presets (inspect, check-*, diff default).
@@ -374,6 +497,7 @@ mod tests {
             "inspect-nodes",
             "inspect-tags",
             "inspect-tags-way",
+            "inspect-tags-pairs",
             "check-refs",
             "check-ids",
             "check-index",

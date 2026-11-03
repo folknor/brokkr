@@ -31,6 +31,7 @@ impl Command {
                 nodes,
                 tags,
                 type_filter,
+                expr,
                 extended,
                 jobs,
                 snapshot,
@@ -49,6 +50,7 @@ impl Command {
                                 type_filter: type_filter
                                     .as_deref()
                                     .map(InspectTypeFilter::from_cli),
+                                expressions: expr,
                             }
                         } else if nodes {
                             InspectMode::Nodes

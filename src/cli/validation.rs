@@ -555,6 +555,25 @@ mod tests {
     }
 
     #[test]
+    fn inspect_expr_repeats_in_order_and_requires_tags() {
+        let parsed = parse([
+            "brokkr", "inspect", "--tags", "--expr", "*=*", "--expr", "highway",
+        ])
+        .expect("parse");
+        let Command::Inspect { expr, .. } = parsed.command else {
+            panic!("expected inspect command");
+        };
+        assert_eq!(expr, ["*=*", "highway"]);
+
+        assert!(parse(["brokkr", "inspect", "--expr", "highway"]).is_err());
+        assert!(parse(["brokkr", "inspect", "--nodes", "--expr", "highway"]).is_err());
+        assert!(parse(["brokkr", "inspect", "--extended", "--expr", "highway"]).is_err());
+        // The same hole was open for `--type`, dropped silently in routing.
+        assert!(parse(["brokkr", "inspect", "--nodes", "--type", "way"]).is_err());
+        assert!(parse(["brokkr", "inspect", "--extended", "--type", "way"]).is_err());
+    }
+
+    #[test]
     fn validate_since_checks_field_ranges() {
         for good in [
             "2026-03-01",

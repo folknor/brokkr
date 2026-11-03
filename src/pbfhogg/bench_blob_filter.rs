@@ -31,6 +31,9 @@ fn command_args(name: &str, pbf: &str, output: &str, force: bool) -> Result<PbfA
             .arg("--type")
             .arg("relation")
             .output(output)?,
+        // No expression: the build's default workload, way keys from pbfhogg
+        // 9c4d6c81 and way key=value pairs before it. Its subject is indexed
+        // against raw on one build.
         "inspect-tags-way" => PbfArgv::new("inspect")
             .arg("tags")
             .input(pbf)?
@@ -47,6 +50,11 @@ fn command_args(name: &str, pbf: &str, output: &str, force: bool) -> Result<PbfA
         }
     };
     Ok(argv.arg_if(force, "--force"))
+}
+
+/// The results pairing qualifier of one of [`COMMANDS`]' rows.
+fn arm_qualifier(name: &str) -> String {
+    format!("command={name}")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -96,11 +104,12 @@ pub fn run(
 
         let config = BenchConfig {
             command: "blob-filter".into(),
-            // Sub-command + indexed/raw discriminator is visible in
-            // cli_args (different argv per row - e.g. `cat --type way`
-            // with `--force` only on raw) and in input_file (different
-            // PBF per row). Measurement mode and brokkr_args come from
-            // the harness.
+            // Indexed and raw differ by input_file (a different PBF per
+            // row). The sub-command shows only in cli_args, which pairing
+            // does not read, and every row shares the suite's brokkr argv,
+            // so the sub-command is the qualifier (`command=cat-way`):
+            // without it `--compare` kept one of the four per input.
+            // Measurement mode and brokkr_args come from the harness.
             input_file: Some(basename.to_owned()),
             input_mb: Some(file_mb),
             cargo_features: None,
@@ -108,7 +117,7 @@ pub fn run(
             runs,
             cli_args: None,
             metadata: vec![],
-            arm_qualifier: None,
+            arm_qualifier: Some(arm_qualifier(cmd)),
         };
 
         harness
@@ -140,7 +149,18 @@ mod tests {
         clippy::let_underscore_must_use,
         clippy::useless_vec
     )]
-    use super::{COMMANDS, command_args};
+    use super::{COMMANDS, arm_qualifier, command_args};
+
+    #[test]
+    fn every_command_keys_apart() {
+        let qualifiers: std::collections::HashSet<String> =
+            COMMANDS.iter().map(|name| arm_qualifier(name)).collect();
+        assert_eq!(qualifiers.len(), COMMANDS.len());
+        assert_eq!(
+            arm_qualifier("inspect-tags-way"),
+            "command=inspect-tags-way"
+        );
+    }
 
     #[test]
     fn raw_variant_appends_force() {

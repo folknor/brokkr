@@ -370,9 +370,11 @@ fn require_snapshot_output(command: &PbfhoggCommand) -> Result<(), DevError> {
 
 /// Run a single pbfhogg command via the wall-clock harness.
 ///
-/// The suite reuses its already-built session. It produces the same row
-/// identity and argv as individual command plans; the suite owns promotion
-/// after the final sample.
+/// The suite reuses its already-built session. It produces the same command
+/// id and child argv as individual command plans; `arm_qualifier` is the
+/// row's whole qualifier, which the suite composes from the preset and the
+/// command's own (`bench_commands::preset_arm_qualifier`). The suite owns
+/// promotion after the final sample.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_wallclock_core(
     harness: &harness::BenchHarness,
@@ -384,6 +386,7 @@ pub(crate) fn run_wallclock_core(
     announce: bool,
     exits: Exits,
     expectation: Option<&Expectation>,
+    arm_qualifier: Option<String>,
 ) -> Result<(), DevError> {
     let invocation = binary.invocation(command.build_args(cmd_ctx, ArgMode::Bench)?)?;
 
@@ -398,7 +401,7 @@ pub(crate) fn run_wallclock_core(
         runs,
         cli_args: None,
         metadata: command.metadata(&cmd_ctx.observations),
-        arm_qualifier: command.arm_qualifier(cmd_ctx),
+        arm_qualifier,
     };
 
     if announce {

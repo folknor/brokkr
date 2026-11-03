@@ -402,6 +402,41 @@ spellings. A defaulted row from before this carries neither and pairs only
 with other such rows; that set mixes the two forms and nothing recorded
 tells them apart (its `commit` against 16154b0d does).
 
+## Inspect tags
+
+`brokkr inspect --tags` measures `pbfhogg inspect tags PBF [EXPR...]
+[--type KIND] --min-count 999999999`. pbfhogg applies the threshold after
+the exact counts are known and keeps rows at or above it, which no row of a
+real input is meant to reach, so the run pays for decoding and counting and
+prints no count rows, only its summary line; a row counted that often would
+still print. The threshold never bounds the count table.
+
+What is counted is the build's, not brokkr's, unless an expression says.
+pbfhogg 9c4d6c81 made a bare run count keys (osmium tags-count parity); before
+it a bare run counted every key=value pair. At planet those are different
+workloads, about 108 thousand keys in 0.4 GB against 187 million pairs in
+10 GB, under one brokkr argv and so one results identity. A bare
+`--compare` across 9c4d6c81 compares the two workloads, not one workload's
+speed, and stored rows are not marked: a row's `commit` against 9c4d6c81 is
+what tells them apart. The suite's `inspect-tags` and `inspect-tags-way`
+presets and the blob-filter bench's `inspect-tags-way` are bare too, and move
+with it.
+
+`--expr EXPR` (repeatable, `--tags` only) forwards pbfhogg's positional tag
+expressions in order, right after the PBF. It is in the brokkr argv, so each
+spelling keys apart. `--expr '*=*'` counts every pair at every revision with
+expressions, which is the work bare runs did before 9c4d6c81; no spelling
+counts keys before it, where an expression without `=` counted that key's
+pairs. To compare the pair workload across the change, measure both commits
+with the same `--expr '*=*'`: an older bare row never pairs with an explicit
+one. An expression starting with `-` is refused, since brokkr appends its
+flags after the expressions and pbfhogg would read it as an option; the rest
+of the grammar is the build's to accept. Quote expressions holding `*`.
+
+The suite's `inspect-tags-pairs` preset runs `--expr '*=*'`, so the suite
+keeps covering the pair table. Suite presets that share a command id carry
+their preset name in the row (`brokkr man results`, `--compare A B`).
+
 ## Check index
 
 `brokkr check-index` measures `pbfhogg check --index` on the dataset PBF

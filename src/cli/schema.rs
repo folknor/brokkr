@@ -562,8 +562,9 @@ In depth: `brokkr man clippy`."
     /// Inspect PBF. Flags select mode:
     ///   no flag       → metadata (block count / bbox / stats)
     ///   `--nodes`     → node statistics
-    ///   `--tags`      → tag frequencies (optionally narrowed by
-    ///                   `--type node|way|relation`)
+    ///   `--tags`      → tag counting (optionally narrowed by
+    ///                   `--type node|way|relation`; `--expr` picks
+    ///                   what is counted)
     ///   `--extended`  → extended metadata scan (timestamp range, data
     ///                   bbox, metadata coverage, ordering). Default-mode
     ///                   only - rejected with `--nodes` / `--tags`.
@@ -585,8 +586,25 @@ In depth: `brokkr man clippy`."
             value_name = "KIND",
             value_parser = ["node", "way", "relation"],
             requires = "tags",
+            // clap does not enforce `requires = "tags"` once `--nodes` or
+            // `--extended`, which conflict with `--tags`, is given.
+            conflicts_with_all = ["nodes", "extended"],
         )]
         type_filter: Option<String>,
+        /// Tag expression for `--tags`, repeatable, forwarded in order as
+        /// pbfhogg's positional expressions. Without one, pbfhogg from
+        /// 9c4d6c81 counts keys (every key=value pair before it); `'*=*'`
+        /// counts every pair at every revision. Recorded in the argv, so it
+        /// keys apart in results pairing. Refused if it starts with `-`.
+        #[arg(
+            long = "expr",
+            value_name = "EXPR",
+            requires = "tags",
+            // As for `--type`: `requires` alone lets `--nodes` and
+            // `--extended` through.
+            conflicts_with_all = ["nodes", "extended"]
+        )]
+        expr: Vec<String>,
         /// Extended scan of default inspect (timestamp range, data bbox,
         /// metadata coverage, ordering). Only valid in default mode -
         /// clap rejects the combination with `--nodes` / `--tags`.
