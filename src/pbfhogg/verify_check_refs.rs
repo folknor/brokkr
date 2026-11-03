@@ -214,17 +214,23 @@ fn capture_and_log(
 
 /// Run check --refs cross-validation: pbfhogg check --refs vs osmium check-refs.
 ///
-/// Two modes: ways-only (default) and with relations. Both tools may exit
-/// non-zero when missing refs are found, so we do not check exit status.
-pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findings, DevError> {
+/// Two modes: ways-only (default) and with relations. Both tools exit 1 when
+/// they find missing refs, so each side accepts exits 0 and 1
+/// (`capture_and_log`).
+///
+/// No `--direct-io`: pbfhogg refuses it under `check --refs` without `--ids`
+/// or `--index` (exit 64, since pbfhogg 930ddfc9), since the ref check reads
+/// through buffered parallel unaligned preads. Only revisions from fb8dd3c0
+/// until 053def6a read it, through a sequential reader; brokkr verify runs the current
+/// operation set whatever revision `--commit` builds, so O_DIRECT coverage of
+/// those revisions' ref check is given up rather than reached by probing the
+/// binary or retrying a refusal.
+pub fn run(harness: &VerifyHarness, pbf: &Path) -> Result<Findings, DevError> {
     let mut findings = Findings::new();
     let outdir = harness.subdir("check-refs")?;
     // --- Ways only ---
     verify_msg("--- check --refs (ways only) ---");
-    let pbf_ways_args = PbfArgv::new("check")
-        .arg("--refs")
-        .input(pbf)?
-        .arg_if(direct_io, "--direct-io");
+    let pbf_ways_args = PbfArgv::new("check").arg("--refs").input(pbf)?;
     let pbfhogg_text = capture_and_log(
         harness,
         Side::Pbfhogg(pbf_ways_args),
@@ -260,8 +266,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
     let pbf_all_args = PbfArgv::new("check")
         .arg("--refs")
         .input(pbf)?
-        .arg("--check-relations")
-        .arg_if(direct_io, "--direct-io");
+        .arg("--check-relations");
     let pbfhogg_text = capture_and_log(
         harness,
         Side::Pbfhogg(pbf_all_args),

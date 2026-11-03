@@ -646,7 +646,9 @@ impl PbfhoggCommand {
     ///   `merge-changes` (OSC) or `build-geocode-index` (an index), nor an
     ///   OSC tags-filter.
     /// - `--direct-io`: everything but `merge-changes`, `check --locations`
-    ///   and an OSC tags-filter.
+    ///   and an OSC tags-filter. `check --refs` keeps it although pbfhogg
+    ///   930ddfc9 refuses it there: revisions from fb8dd3c0 until 053def6a
+    ///   read it.
     /// - `--jobs`: the commands with a worker pool it sizes: `inspect --nodes`
     ///   and `inspect tags`, a PBF tags-filter that keeps referenced objects
     ///   (`--omit-referenced` has no classify pool), an OSC tags-filter (it
@@ -697,8 +699,9 @@ impl PbfhoggCommand {
                 | Self::MultiExtract { .. } => true,
             },
             Axis::DirectIo => match self {
-                // Every pbfhogg with `check --locations` prints that
-                // `--direct-io` has no effect there (unaligned parallel preads).
+                // No pbfhogg with `check --locations` reads `--direct-io`
+                // there (unaligned parallel preads): it printed a note until
+                // 930ddfc9, which refuses it.
                 Self::MergeChanges { .. } | Self::CheckLocations { .. } => false,
                 Self::TagsFilter { .. } => pbf_tags_filter(self),
                 _ => true,

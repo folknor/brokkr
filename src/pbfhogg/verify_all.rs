@@ -176,11 +176,11 @@ pub fn run(
         }),
     )?;
 
-    // 7. check-refs
+    // 7. check-refs, buffered: pbfhogg refuses --direct-io under check --refs.
     tally(
         &mut counts,
         run_check_status(labels::CHECK_REFS, verbose, || {
-            verify_check_refs::run(harness, pbf, direct_io)
+            verify_check_refs::run(harness, pbf)
         }),
     )?;
 

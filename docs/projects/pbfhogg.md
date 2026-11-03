@@ -445,8 +445,9 @@ revision accepts, so an inapplicable input fails after the build. It is not a
 `brokkr suite pbfhogg` preset: the suite runs every preset on one selected
 input, by default `indexed`, which is generally not LocationsOnWays.
 `--direct-io`, `--io-uring`, `--compression` and `--jobs` are refused, since
-no pbfhogg revision gives any of them effect there; pbfhogg itself notes that
-direct I/O has no effect on its unaligned parallel reads.
+no pbfhogg revision gives any of them effect there; for direct I/O, which its
+unaligned parallel reads never take, pbfhogg printed a note until 930ddfc9
+and refuses it since.
 
 ## Verify subcommands
 
@@ -654,6 +655,24 @@ and `--snapshot` are mutually exclusive. PBF resolution is centralised in
 `resolve_verify_input` (`src/pbfhogg/cmd.rs`), which routes through
 `resolve_snapshot_pbf_path` for both the base and named cases.
 
+**`--direct-io`.** Verify defines one operation set and `--commit` only picks
+the binary that runs it, so a verify subcommand offers `--direct-io` only
+where the current pbfhogg takes it on the step it is forwarded to. It reaches
+the command each check verifies on `sort`, `cat`, `extract`,
+`multi-extract` (its sequential reference extracts too), `tags-filter`, `getid-removeid` (both getid runs),
+`add-locations-to-ways` (each engine) and `merge` (`apply-changes`); under
+`derive-changes` it reaches the two `apply-changes` runs, not the `diff
+--format osc` under test. Inspections, normalising sorts, element diffs and
+`check --locations` steps run buffered. `check-refs`, `renumber` and `diff`
+do not take the flag, so passing it there is a parse error, and `verify all
+--direct-io` runs those three buffered: pbfhogg refuses `--direct-io` under
+`check --refs` alone (exit 64, since 930ddfc9), where its ref check reads
+through buffered parallel unaligned preads. Revisions from fb8dd3c0 until
+053def6a did read it there; O_DIRECT oracle coverage of their ref check is
+given up rather than reached by probing the binary or retrying a refusal.
+Verify builds pbfhogg with the host's configured features and does not enable
+`linux-direct-io` itself.
+
 OSC resolution for the change-consuming verifies (`merge` / `derive-changes`
 / `diff`) is snapshot-aware via `resolve_verify_osc`: a named snapshot that
 carries its own `osc` table (a point-in-time snapshot) is diffed against
@@ -853,7 +872,10 @@ revision built answers. The table lives in `PbfhoggCommand::axis_has_effect`
 
 - `--direct-io` - enable O_DIRECT I/O. Adds `linux-direct-io` cargo feature,
   `--direct-io` binary flag. Every command but `merge-changes`,
-  `check-locations` and `tags-filter --input-kind osc`.
+  `check-locations` and `tags-filter --input-kind osc`. `check-refs` keeps
+  it: pbfhogg revisions from fb8dd3c0 until 053def6a read it. From 930ddfc9
+  pbfhogg refuses it there with exit 64, so a run built from such a revision
+  fails with that refusal. `brokkr verify` differs (Verify subcommands).
 - `--io-uring` - enable io_uring I/O. Adds `linux-io-uring` cargo feature,
   `--io-uring` binary flag. Runs io_uring preflight checks before building.
   Only `apply-changes`, `sort`, `cat --dedupe`, `repack` and `degrade`, the

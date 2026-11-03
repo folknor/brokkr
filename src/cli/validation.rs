@@ -355,8 +355,11 @@ mod tests {
         let VerifyCommand::Sort { pbf } = verify else {
             panic!("expected Verify::Sort");
         };
+        assert_eq!(pbf.source.dataset, crate::cli::DEFAULT_DATASET);
+        assert!(!pbf.direct_io);
         assert_eq!(
-            pbf.input
+            pbf.source
+                .input
                 .as_deref()
                 .map(std::path::Path::display)
                 .map(|d| d.to_string()),
@@ -399,10 +402,99 @@ mod tests {
         let Command::Verify { verify, .. } = parsed.command else {
             panic!("expected Verify");
         };
-        let VerifyCommand::Renumber { input, .. } = verify else {
+        let VerifyCommand::Renumber { pbf, .. } = verify else {
             panic!("expected Verify::Renumber");
         };
-        assert!(input.is_some());
+        assert!(pbf.input.is_some());
+    }
+
+    /// `--input` conflicts with an explicit `--snapshot` through the nested
+    /// flatten too, and on the subcommands that take the input alone.
+    #[test]
+    fn verify_input_conflicts_hold_through_every_flatten() {
+        for argv in [
+            [
+                "brokkr",
+                "verify",
+                "sort",
+                "--input",
+                "x.pbf",
+                "--snapshot",
+                "base",
+            ],
+            [
+                "brokkr",
+                "verify",
+                "all",
+                "--input",
+                "x.pbf",
+                "--variant",
+                "raw",
+            ],
+            [
+                "brokkr",
+                "verify",
+                "check-refs",
+                "--input",
+                "x.pbf",
+                "--dataset",
+                "d",
+            ],
+            [
+                "brokkr",
+                "verify",
+                "renumber",
+                "--input",
+                "x.pbf",
+                "--snapshot",
+                "base",
+            ],
+            [
+                "brokkr",
+                "verify",
+                "diff",
+                "--input",
+                "x.pbf",
+                "--variant",
+                "raw",
+            ],
+        ] {
+            let rendered = argv.join(" ");
+            let Err(err) = parse(argv) else {
+                panic!("{rendered} should conflict");
+            };
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{rendered}"
+            );
+        }
+    }
+
+    /// `--direct-io` is on the verify subcommands whose pbfhogg steps take
+    /// it, `all` included, and absent from check-refs (pbfhogg refuses it
+    /// under check --refs alone), renumber and diff.
+    #[test]
+    fn verify_direct_io_is_offered_only_where_forwarded() {
+        for sub in ["sort", "all", "derive-changes"] {
+            let parsed = parse(["brokkr", "verify", sub, "--direct-io"]).expect(sub);
+            let Command::Verify { verify, .. } = parsed.command else {
+                panic!("expected Verify");
+            };
+            let pbf = match verify {
+                VerifyCommand::Sort { pbf }
+                | VerifyCommand::All { pbf, .. }
+                | VerifyCommand::DeriveChanges { pbf, .. } => pbf,
+                _ => panic!("unexpected verify subcommand for {sub}"),
+            };
+            assert!(pbf.direct_io, "{sub}");
+        }
+        for sub in ["check-refs", "renumber", "diff"] {
+            let Err(err) = parse(["brokkr", "verify", sub, "--direct-io"]) else {
+                panic!("verify {sub} --direct-io should be refused");
+            };
+            assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument, "{sub}");
+        }
     }
 
     #[test]

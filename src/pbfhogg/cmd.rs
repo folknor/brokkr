@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::cli::VerifyCommand;
+use crate::cli::{VerifyCommand, VerifyInputArgs};
 use crate::config;
 use crate::context::{MeasurementSession, bootstrap, bootstrap_config};
 use crate::datasets::resolve::{self, resolve_bbox, resolve_pbf_with_size};
@@ -15,27 +15,31 @@ use crate::tools;
 
 /// Resolve a verify subcommand's input PBF: prefer `--input <PATH>`
 /// (canonicalised, validated to exist), then a `--snapshot <key>` if given,
-/// finally fall back to primary dataset/variant resolution. Used by every
-/// verify variant that takes `VerifyPbfArgs` so handcrafted fixtures
-/// (`--input`) or registered snapshots (`--snapshot`, e.g. an adversarial
-/// encoding from `degrade`/`repack --as-snapshot`) can replace the primary
-/// data. `--input` and `--snapshot` are mutually exclusive at the CLI.
+/// finally fall back to primary dataset/variant resolution. Every pbfhogg
+/// verify variant selects its PBF through `VerifyInputArgs`, so handcrafted
+/// fixtures (`--input`) or registered snapshots (`--snapshot`, e.g. an
+/// adversarial encoding from `degrade`/`repack --as-snapshot`) can replace
+/// the primary data. `--input` and `--snapshot` are mutually exclusive at the
+/// CLI.
 fn resolve_verify_input(
-    input: Option<&Path>,
-    dataset: &str,
-    variant: &str,
-    snapshot: Option<&resolve::SnapshotRef>,
+    source: &VerifyInputArgs,
     paths: &config::ResolvedPaths,
     project_root: &Path,
 ) -> Result<PathBuf, DevError> {
-    if let Some(p) = input {
+    if let Some(p) = source.input.as_deref() {
         return canonical_fixture(p, project_root, "--input");
     }
     // `--snapshot base` / omitted → primary data (identical to the legacy
     // `resolve_pbf_path`); a named key reads the snapshot's pbf table.
-    let snapshot_ref = resolve::SnapshotRef::from_opt(snapshot);
-    resolve::resolve_snapshot_pbf_path(dataset, &snapshot_ref, variant, paths, project_root)
-        .map_err(Into::into)
+    let snapshot_ref = resolve::SnapshotRef::from_opt(source.snapshot.as_ref());
+    resolve::resolve_snapshot_pbf_path(
+        &source.dataset,
+        &snapshot_ref,
+        &source.variant,
+        paths,
+        project_root,
+    )
+    .map_err(Into::into)
 }
 
 /// A handcrafted fixture path (`--input`, `--osc`), relative to the project
@@ -408,14 +412,9 @@ pub(crate) fn verify(
         // so it manages the quiet/verbose behaviour itself rather than being
         // wrapped in a single `run_check`.
         if let VerifyCommand::All { pbf, osc_seq, bbox } = &verify {
-            let pbf_path = resolve_verify_input(
-                pbf.input.as_deref(),
-                &pbf.dataset,
-                &pbf.variant,
-                pbf.snapshot.as_ref(),
-                &paths,
-                project_root,
-            )?;
+            let direct_io = pbf.direct_io;
+            let pbf = &pbf.source;
+            let pbf_path = resolve_verify_input(pbf, &paths, project_root)?;
             // An input that is simply not configured skips the checks needing it;
             // an input that IS configured but fails to resolve - hash mismatch,
             // missing file, ambiguous OSC, malformed bbox - fails the command.
@@ -458,7 +457,7 @@ pub(crate) fn verify(
                 resolved_bbox.as_ref(),
                 &locations_base,
                 &paths.data_dir,
-                pbf.direct_io,
+                direct_io,
                 &pbf.dataset,
                 verbose,
             );
@@ -496,71 +495,29 @@ pub(crate) fn verify(
         let name = verify_name(&verify);
         super::verify::run_check(name, verbose, || match verify {
             VerifyCommand::Sort { pbf } => {
-                let pbf_path = resolve_verify_input(
-                    pbf.input.as_deref(),
-                    &pbf.dataset,
-                    &pbf.variant,
-                    pbf.snapshot.as_ref(),
-                    &paths,
-                    project_root,
-                )?;
+                let pbf_path = resolve_verify_input(&pbf.source, &paths, project_root)?;
                 super::verify_sort::run(&harness, &pbf_path, pbf.direct_io)
             }
             VerifyCommand::Cat { pbf } => {
-                let pbf_path = resolve_verify_input(
-                    pbf.input.as_deref(),
-                    &pbf.dataset,
-                    &pbf.variant,
-                    pbf.snapshot.as_ref(),
-                    &paths,
-                    project_root,
-                )?;
+                let pbf_path = resolve_verify_input(&pbf.source, &paths, project_root)?;
                 super::verify_cat::run(&harness, &pbf_path, pbf.direct_io)
             }
             VerifyCommand::Extract { pbf, bbox } => {
-                let pbf_path = resolve_verify_input(
-                    pbf.input.as_deref(),
-                    &pbf.dataset,
-                    &pbf.variant,
-                    pbf.snapshot.as_ref(),
-                    &paths,
-                    project_root,
-                )?;
-                let bbox = resolve_bbox(bbox.as_ref(), &pbf.dataset, &paths)?;
+                let pbf_path = resolve_verify_input(&pbf.source, &paths, project_root)?;
+                let bbox = resolve_bbox(bbox.as_ref(), &pbf.source.dataset, &paths)?;
                 super::verify_extract::run(&harness, &pbf_path, &bbox, pbf.direct_io)
             }
             VerifyCommand::MultiExtract { pbf, bbox, regions } => {
-                let pbf_path = resolve_verify_input(
-                    pbf.input.as_deref(),
-                    &pbf.dataset,
-                    &pbf.variant,
-                    pbf.snapshot.as_ref(),
-                    &paths,
-                    project_root,
-                )?;
-                let bbox = resolve_bbox(bbox.as_ref(), &pbf.dataset, &paths)?;
+                let pbf_path = resolve_verify_input(&pbf.source, &paths, project_root)?;
+                let bbox = resolve_bbox(bbox.as_ref(), &pbf.source.dataset, &paths)?;
                 super::verify_multi_extract::run(&harness, &pbf_path, &bbox, regions, pbf.direct_io)
             }
             VerifyCommand::TagsFilter { pbf } => {
-                let pbf_path = resolve_verify_input(
-                    pbf.input.as_deref(),
-                    &pbf.dataset,
-                    &pbf.variant,
-                    pbf.snapshot.as_ref(),
-                    &paths,
-                    project_root,
-                )?;
+                let pbf_path = resolve_verify_input(&pbf.source, &paths, project_root)?;
                 super::verify_tags_filter::run(&harness, &pbf_path, pbf.direct_io)
             }
             VerifyCommand::GetidRemoveid { pbf } => {
-                let pbf_path = resolve_verify_input(
-                    pbf.input.as_deref(),
-                    &pbf.dataset,
-                    &pbf.variant,
-                    pbf.snapshot.as_ref(),
-                    &paths,
-                    project_root,
-                )?;
+                let pbf_path = resolve_verify_input(&pbf.source, &paths, project_root)?;
                 super::verify_getid_removeid::run(&harness, &pbf_path, pbf.direct_io)
             }
             VerifyCommand::AddLocationsToWays {
@@ -568,26 +525,12 @@ pub(crate) fn verify(
                 mode,
                 inject_prepass: _,
             } => {
-                let pbf_path = resolve_verify_input(
-                    pbf.input.as_deref(),
-                    &pbf.dataset,
-                    &pbf.variant,
-                    pbf.snapshot.as_ref(),
-                    &paths,
-                    project_root,
-                )?;
+                let pbf_path = resolve_verify_input(&pbf.source, &paths, project_root)?;
                 super::verify_add_locations::run(&harness, &pbf_path, mode, pbf.direct_io)
             }
             VerifyCommand::CheckRefs { pbf } => {
-                let pbf_path = resolve_verify_input(
-                    pbf.input.as_deref(),
-                    &pbf.dataset,
-                    &pbf.variant,
-                    pbf.snapshot.as_ref(),
-                    &paths,
-                    project_root,
-                )?;
-                super::verify_check_refs::run(&harness, &pbf_path, pbf.direct_io)
+                let pbf_path = resolve_verify_input(&pbf, &paths, project_root)?;
+                super::verify_check_refs::run(&harness, &pbf_path)
             }
             VerifyCommand::Merge {
                 pbf,
@@ -595,25 +538,18 @@ pub(crate) fn verify(
                 osc,
                 locations_on_ways,
             } => {
-                let pbf_path = resolve_verify_input(
-                    pbf.input.as_deref(),
-                    &pbf.dataset,
-                    &pbf.variant,
-                    pbf.snapshot.as_ref(),
-                    &paths,
-                    project_root,
-                )?;
+                let pbf_path = resolve_verify_input(&pbf.source, &paths, project_root)?;
                 let osc_path = if let Some(p) = osc.as_deref() {
                     canonical_fixture(p, project_root, "--osc")?
                 } else {
                     let (path, scope) = resolve_verify_osc(
-                        &pbf.dataset,
-                        pbf.snapshot.as_ref(),
+                        &pbf.source.dataset,
+                        pbf.source.snapshot.as_ref(),
                         osc_seq.as_deref(),
                         &paths,
                         project_root,
                     )?;
-                    narrate_osc_scope(pbf.snapshot.as_ref(), scope);
+                    narrate_osc_scope(pbf.source.snapshot.as_ref(), scope);
                     path
                 };
                 // osmosis and osmconvert write no inline locations, so an -l run
@@ -640,14 +576,33 @@ pub(crate) fn verify(
                 )
             }
             VerifyCommand::DeriveChanges { pbf, osc_seq } => {
-                let pbf_path = resolve_verify_input(
-                    pbf.input.as_deref(),
-                    &pbf.dataset,
-                    &pbf.variant,
-                    pbf.snapshot.as_ref(),
+                let pbf_path = resolve_verify_input(&pbf.source, &paths, project_root)?;
+                let (osc_path, scope) = resolve_verify_osc(
+                    &pbf.source.dataset,
+                    pbf.source.snapshot.as_ref(),
+                    osc_seq.as_deref(),
                     &paths,
                     project_root,
                 )?;
+                narrate_osc_scope(pbf.source.snapshot.as_ref(), scope);
+                super::verify_derive_changes::run(&harness, &pbf_path, &osc_path, pbf.direct_io)
+            }
+            VerifyCommand::Renumber {
+                pbf,
+                start_id,
+                verbose,
+            } => {
+                let pbf_path = resolve_verify_input(&pbf, &paths, project_root)?;
+                super::verify_renumber::run(
+                    &harness,
+                    &pbf_path,
+                    &pbf.dataset,
+                    start_id.as_deref(),
+                    verbose,
+                )
+            }
+            VerifyCommand::Diff { pbf, osc_seq } => {
+                let pbf_path = resolve_verify_input(&pbf, &paths, project_root)?;
                 let (osc_path, scope) = resolve_verify_osc(
                     &pbf.dataset,
                     pbf.snapshot.as_ref(),
@@ -656,55 +611,6 @@ pub(crate) fn verify(
                     project_root,
                 )?;
                 narrate_osc_scope(pbf.snapshot.as_ref(), scope);
-                super::verify_derive_changes::run(&harness, &pbf_path, &osc_path, pbf.direct_io)
-            }
-            VerifyCommand::Renumber {
-                dataset,
-                variant,
-                input,
-                snapshot,
-                start_id,
-                verbose,
-            } => {
-                let pbf_path = resolve_verify_input(
-                    input.as_deref(),
-                    &dataset,
-                    &variant,
-                    snapshot.as_ref(),
-                    &paths,
-                    project_root,
-                )?;
-                super::verify_renumber::run(
-                    &harness,
-                    &pbf_path,
-                    &dataset,
-                    start_id.as_deref(),
-                    verbose,
-                )
-            }
-            VerifyCommand::Diff {
-                dataset,
-                variant,
-                input,
-                snapshot,
-                osc_seq,
-            } => {
-                let pbf_path = resolve_verify_input(
-                    input.as_deref(),
-                    &dataset,
-                    &variant,
-                    snapshot.as_ref(),
-                    &paths,
-                    project_root,
-                )?;
-                let (osc_path, scope) = resolve_verify_osc(
-                    &dataset,
-                    snapshot.as_ref(),
-                    osc_seq.as_deref(),
-                    &paths,
-                    project_root,
-                )?;
-                narrate_osc_scope(snapshot.as_ref(), scope);
                 super::verify_diff::run(&harness, &pbf_path, &osc_path)
             }
             // Both returned before this match: `all` (it manages its own output)

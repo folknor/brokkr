@@ -3185,9 +3185,8 @@ impl PbfArgs {
     }
 }
 
-/// Shared dataset/variant/direct_io args for pbfhogg verify subcommands.
-/// (Verify doesn't take `--io-uring` or `--compression` - different surface
-/// than `PbfArgs`, hence a separate struct.)
+/// The input PBF a pbfhogg verify subcommand cross-validates, shared by every
+/// one of them.
 ///
 /// `--input <path>` is the escape hatch for handcrafted fixtures that no
 /// real-world dataset exercises (e.g. overlapping-blob PBFs from
@@ -3197,7 +3196,7 @@ impl PbfArgs {
 /// populate the struct, but clap's `conflicts_with` only triggers on
 /// user-supplied flags).
 #[derive(Args, Clone)]
-pub(crate) struct VerifyPbfArgs {
+pub(crate) struct VerifyInputArgs {
     /// Dataset name from brokkr.toml
     #[arg(long, default_value = DEFAULT_DATASET, conflicts_with = "input")]
     pub(crate) dataset: String,
@@ -3208,17 +3207,27 @@ pub(crate) struct VerifyPbfArgs {
     /// Mutually exclusive with `--dataset` / `--variant`.
     #[arg(long, value_name = "PATH")]
     pub(crate) input: Option<std::path::PathBuf>,
-    /// Snapshot key to cross-validate. Use `base` (or omit) for the
-    /// dataset's primary data; pass a key registered under
+    /// Snapshot key whose PBF to cross-validate. Use `base` (or omit) for
+    /// the dataset's primary data; pass a key registered under
     /// `[dataset.snapshot.<key>]` for a historical or adversarial encoding
     /// (e.g. one produced by `brokkr degrade --unsort --as-snapshot` or
-    /// `brokkr repack --as-snapshot`). OSC changes (for merge/derive-changes
-    /// verifies) come from the snapshot's own OSC table when it has one, and
-    /// from the dataset's primary chain when it has none (encoding-only
-    /// snapshots). Mutually exclusive with `--input`.
+    /// `brokkr repack --as-snapshot`). Mutually exclusive with `--input`.
     #[arg(long, conflicts_with = "input")]
     pub(crate) snapshot: Option<crate::datasets::resolve::SnapshotRef>,
-    /// Use O_DIRECT for file I/O (requires linux-direct-io feature in pbfhogg)
+}
+
+/// The input plus `--direct-io`, for the verify subcommands whose pbfhogg
+/// steps take it. (Verify doesn't take `--io-uring` or `--compression` -
+/// different surface than `PbfArgs`, hence a separate struct.) `check-refs`,
+/// `renumber` and `diff` take [`VerifyInputArgs`] alone.
+#[derive(Args, Clone)]
+pub(crate) struct VerifyPbfArgs {
+    #[command(flatten)]
+    pub(crate) source: VerifyInputArgs,
+    /// Pass --direct-io to the pbfhogg steps that take it (`brokkr man
+    /// pbfhogg verify-subcommands` lists them per check; under `all`,
+    /// check-refs, renumber and diff run without it). Verify builds pbfhogg with the host's configured
+    /// features and does not enable linux-direct-io itself
     #[arg(long)]
     pub(crate) direct_io: bool,
 }
@@ -3288,12 +3297,19 @@ pub(crate) enum VerifyCommand {
         inject_prepass: bool,
     },
     /// Cross-validate check --refs against osmium check-refs
+    ///
+    /// Takes no --direct-io: pbfhogg refuses it under check --refs alone
+    /// (exit 64, since pbfhogg 930ddfc9), where no selected check reads it.
     #[command(display_order = 6)]
     CheckRefs {
         #[command(flatten)]
-        pbf: VerifyPbfArgs,
+        pbf: VerifyInputArgs,
     },
     /// Cross-validate apply-changes against osmium/osmosis/osmconvert
+    ///
+    /// The OSC comes from the snapshot's own OSC table when `--snapshot`
+    /// names one that has it, and from the dataset's primary chain otherwise
+    /// (encoding-only snapshots).
     #[command(display_order = 7)]
     Merge {
         #[command(flatten)]
@@ -3313,6 +3329,10 @@ pub(crate) enum VerifyCommand {
         locations_on_ways: bool,
     },
     /// Cross-validate diff --format osc roundtrip against osmium
+    ///
+    /// The OSC comes from the snapshot's own OSC table when `--snapshot`
+    /// names one that has it, and from the dataset's primary chain otherwise
+    /// (encoding-only snapshots).
     #[command(display_order = 8)]
     DeriveChanges {
         #[command(flatten)]
@@ -3323,18 +3343,8 @@ pub(crate) enum VerifyCommand {
     /// Cross-validate renumber against osmium renumber
     #[command(display_order = 9)]
     Renumber {
-        #[arg(long, default_value = DEFAULT_DATASET, conflicts_with = "input")]
-        dataset: String,
-        #[arg(long, default_value = DEFAULT_INDEXED_VARIANT, conflicts_with = "input")]
-        variant: String,
-        /// Path to a handcrafted input PBF (skips dataset resolution).
-        #[arg(long, value_name = "PATH")]
-        input: Option<std::path::PathBuf>,
-        /// Snapshot key to cross-validate (see `--snapshot` on other verify
-        /// subcommands). Overrides only the PBF input. Mutually exclusive
-        /// with `--input`.
-        #[arg(long, conflicts_with = "input")]
-        snapshot: Option<crate::datasets::resolve::SnapshotRef>,
+        #[command(flatten)]
+        pbf: VerifyInputArgs,
         /// Comma-separated starting IDs (forwarded to both pbfhogg and osmium)
         #[arg(long = "start-id", value_name = "IDS")]
         start_id: Option<String>,
@@ -3343,25 +3353,22 @@ pub(crate) enum VerifyCommand {
         verbose: bool,
     },
     /// Cross-validate diff summary against osmium diff
+    ///
+    /// The OSC comes from the snapshot's own OSC table when `--snapshot`
+    /// names one that has it, and from the dataset's primary chain otherwise
+    /// (encoding-only snapshots).
     #[command(display_order = 10)]
     Diff {
-        #[arg(long, default_value = DEFAULT_DATASET, conflicts_with = "input")]
-        dataset: String,
-        #[arg(long, default_value = DEFAULT_INDEXED_VARIANT, conflicts_with = "input")]
-        variant: String,
-        /// Path to a handcrafted input PBF (skips dataset resolution).
-        #[arg(long, value_name = "PATH")]
-        input: Option<std::path::PathBuf>,
-        /// Snapshot key to cross-validate (see `--snapshot` on other verify
-        /// subcommands). The OSC comes from the snapshot's own OSC table when
-        /// it has one, and from the dataset's primary chain otherwise.
-        /// Mutually exclusive with `--input`.
-        #[arg(long, conflicts_with = "input")]
-        snapshot: Option<crate::datasets::resolve::SnapshotRef>,
+        #[command(flatten)]
+        pbf: VerifyInputArgs,
         #[arg(long)]
         osc_seq: Option<String>,
     },
     /// Run all verify commands sequentially
+    ///
+    /// The OSC-consuming checks take the OSC from the snapshot's own OSC
+    /// table when `--snapshot` names one that has it, and from the dataset's
+    /// primary chain otherwise (encoding-only snapshots).
     #[command(display_order = 11)]
     All {
         #[command(flatten)]
