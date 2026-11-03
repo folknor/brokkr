@@ -465,12 +465,14 @@ fn run_project(
             pbf,
             strategy,
             bbox,
+            polygon,
             snapshot,
         } => {
             let params = crate::pbfhogg::context::CommandParams {
                 io: pbf.io_mode(),
                 compression: pbf.compression.clone(),
                 bbox: bbox.clone(),
+                polygons: polygon.clone().into_iter().collect(),
                 snapshot: snapshot.clone(),
                 strategy_fanout: strategy == "all",
                 ..Default::default()
@@ -516,6 +518,7 @@ fn run_project(
             pbf,
             regions,
             bbox,
+            polygon,
             strategy,
             snapshot,
         } => {
@@ -523,6 +526,7 @@ fn run_project(
                 io: pbf.io_mode(),
                 compression: pbf.compression.clone(),
                 bbox: bbox.clone(),
+                polygons: polygon.clone(),
                 snapshot: snapshot.clone(),
                 strategy_fanout: strategy == "all",
                 ..Default::default()

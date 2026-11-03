@@ -56,6 +56,9 @@ fn suite_result(counts: &Counts) -> Result<(), DevError> {
 const NO_OSC: &str = "SKIPPED (dataset has no osc configured; pass --osc-seq to pick one)";
 /// Why the bbox-consuming checks skip; same contract as [`NO_OSC`].
 const NO_BBOX: &str = "SKIPPED (no --bbox and the dataset has no bbox configured)";
+/// Why `extract` skips: it runs on the bbox or on any dataset polygon.
+const NO_REGION: &str =
+    "SKIPPED (no --bbox, and the dataset has neither a bbox nor a polygon configured)";
 
 /// Result-line name of the `apply-changes --locations-on-ways` merge, which
 /// runs on its own base and so is a check of its own.
@@ -88,12 +91,14 @@ pub const KEEP_UNTAGGED_VARIANT: &str = "altw-keep-untagged";
 ///
 /// `osc`/`bbox` are `None` only when the input is not configured at all; the
 /// checks needing them then print a SKIPPED line and count as skipped.
+/// `polygons` are the dataset's, every one resolved.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn run(
     harness: &VerifyHarness,
     pbf: &Path,
     osc: Option<&Path>,
     bbox: Option<&Bbox>,
+    polygons: &[crate::datasets::resolve::PolygonInput],
     locations_base: &LocationsBase,
     data_dir: &Path,
     direct_io: bool,
@@ -120,20 +125,20 @@ pub fn run(
         }),
     )?;
 
-    // 3. extract
-    if let Some(b) = bbox {
+    // 3. extract, on the bbox and on every dataset polygon
+    if bbox.is_some() || !polygons.is_empty() {
         tally(
             &mut counts,
             run_check_status(labels::EXTRACT, verbose, || {
-                verify_extract::run(harness, pbf, b, direct_io)
+                verify_extract::run(harness, pbf, bbox, polygons, direct_io)
             }),
         )?;
     } else {
-        verify_summary(&format!("extract: {NO_BBOX}"));
+        verify_summary(&format!("extract: {NO_REGION}"));
         skipped += 1;
     }
 
-    // 3b. multi-extract
+    // 3b. multi-extract: its strips need the bbox
     if let Some(b) = bbox {
         tally(
             &mut counts,
@@ -142,6 +147,7 @@ pub fn run(
                     harness,
                     pbf,
                     b,
+                    polygons,
                     super::commands::DEFAULT_MULTI_EXTRACT_REGIONS,
                     direct_io,
                 )

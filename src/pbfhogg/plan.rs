@@ -13,7 +13,7 @@ use crate::output::child::Exits;
 use crate::pbfhogg::binary::{OVERWRITE_FLAG, PbfhoggBinary, STAGING_DIR_FLAG, TMP_DIR_FLAG};
 use crate::pbfhogg::commands::{ArgMode, CommandArgv, OutputKind, PbfhoggCommand, TagsFilterInput};
 use crate::pbfhogg::context::{
-    BenchSelection, CommandContext, CommandObservations, CommandParams, MergedCacheState,
+    BenchSelection, CommandContext, CommandObservations, CommandParams, MergedCacheState, Region,
     ResolvedInputs, SnapshotSide, TwoPbfOrigin,
 };
 use crate::pbfhogg::expect::{self, Expectation};
@@ -244,6 +244,14 @@ impl PlannedCommand for PbfhoggPlan<'_> {
         }
         if let Some(bbox) = state.inputs.bbox() {
             lines.push(format!("bbox: {bbox}"));
+        }
+        for polygon in state.inputs.polygons() {
+            lines.push(format!(
+                "polygon: {} ({}, xxh128 {})",
+                polygon.name,
+                polygon.path.display(),
+                polygon.digest
+            ));
         }
         if let Some(expectation) = &plan.state.expectation {
             lines.push(format!(
@@ -550,12 +558,9 @@ fn build_pbfhogg_context(
             origin: TwoPbfOrigin::Merged,
         },
         PbfhoggCommand::Extract { .. } | PbfhoggCommand::MultiExtract { .. } => {
-            let bbox = resolve_bbox(extra_params.bbox.as_ref(), req.dataset, paths)?;
-            ResolvedInputs::PbfAndBbox {
-                pbf: pbf_path
-                    .ok_or_else(|| DevError::Internal("extract requires a resolved PBF".into()))?,
-                bbox,
-            }
+            let pbf = pbf_path
+                .ok_or_else(|| DevError::Internal("extract requires a resolved PBF".into()))?;
+            extract_inputs(command, pbf, req, paths, extra_params)?
         }
         _ => ResolvedInputs::Pbf {
             pbf: pbf_path.ok_or_else(|| {
@@ -579,6 +584,56 @@ fn build_pbfhogg_context(
         dataset: req.dataset.to_owned(),
         params,
         observations,
+    })
+}
+
+/// An extract's or multi-extract's regions. For `extract` an explicit
+/// polygon is the region, otherwise the bbox, so a dataset that configures
+/// polygons measures what it always did; `multi-extract` cuts its strips
+/// from the bbox and appends the named polygons in argv order.
+fn extract_inputs(
+    command: &PbfhoggCommand,
+    pbf: std::path::PathBuf,
+    req: &MeasureRequest,
+    paths: &config::ResolvedPaths,
+    extra_params: &CommandParams,
+) -> Result<ResolvedInputs, DevError> {
+    let polygon =
+        |name: &str| resolve::resolve_polygon(req.dataset, name, paths, req.project_root.as_path());
+    if !matches!(command, PbfhoggCommand::MultiExtract { .. }) {
+        let region = match extra_params.polygons.as_slice() {
+            [] => Region::Bbox(resolve_bbox(
+                extra_params.bbox.as_ref(),
+                req.dataset,
+                paths,
+            )?),
+            [name] => Region::Polygon(polygon(name)?),
+            _ => {
+                return Err(DevError::Internal(
+                    "extract takes at most one --polygon".into(),
+                ));
+            }
+        };
+        return Ok(ResolvedInputs::PbfAndRegion { pbf, region });
+    }
+    let bbox = resolve_bbox(extra_params.bbox.as_ref(), req.dataset, paths)?;
+    // Each polygon names one output; a repeat would name it twice.
+    for (i, name) in extra_params.polygons.iter().enumerate() {
+        if extra_params.polygons[..i].contains(name) {
+            return Err(DevError::Usage(format!(
+                "multi-extract: --polygon {name} is given twice"
+            )));
+        }
+    }
+    let polygons = extra_params
+        .polygons
+        .iter()
+        .map(|name| polygon(name))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ResolvedInputs::PbfAndRegions {
+        pbf,
+        bbox,
+        polygons,
     })
 }
 

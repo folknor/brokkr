@@ -69,7 +69,8 @@ codes, below). `build-geocode-index` keeps its own
 Every pbfhogg CLI spawn is an invocation produced by a `PbfhoggBinary` for one
 build from a `PbfArgv` (`src/pbfhogg/argv.rs`), the argv and what it reads,
 writes and scratches built by the same calls: a path goes in as an input, an
-output, a directory output or an extract config with the outputs it names, and
+output, a directory output or an extract config with the outputs it names and
+the polygon files it reads, and
 only arguments naming no path go in bare. The overwrite decision follows from
 that (an argv with outputs negotiates `--overwrite` unless it forces its own
 or declares its stance, as a library counterpart may),
@@ -447,6 +448,30 @@ requested way's nodes. The argv is the same on both sides, so a `--compare`
 across d4c97d42 compares two workloads, and stored rows are not marked: a
 row's `commit` against d4c97d42 tells them apart. No suite preset runs it.
 
+## Extract polygons
+
+A dataset's `polygon.<name>` entries (`docs/brokkr.toml.datasets.md`) are
+GeoJSON extract regions. `brokkr extract --polygon <name>` measures `pbfhogg
+extract --polygon <file>` instead of the bbox (the two flags conflict), and
+`brokkr multi-extract --polygon <name>` (repeatable, a name at most once)
+appends `polygon_file` entries after the strips in the generated config,
+naming each file by its absolute path; the config's polygon files are
+declared reads of the launch, as the config itself is. Without the flag
+neither command reads a polygon. The suite's extract bench runs its three
+strategies on the dataset bbox and then on every dataset polygon, by name.
+Every such row carries `polygon=<name>@<xxh128>` in its qualifier (`brokkr
+man results`), so a changed file keys apart under the same name.
+
+What a polygon selects is the build's. pbfhogg took `--polygon` from
+b8bbf723 and `polygon_file` from 0192393a; from 59802597 a polygon node is
+decided by osmium's integer rule, before it by pbfhogg's own point-in-polygon
+test. The
+argv is the same on both sides, so a `--compare` across 59802597 compares two
+membership rules, and stored rows are not marked: a row's `commit` against
+59802597 tells them apart. A polygon region has its own cost profile: pbfhogg
+copies no node blob raw for it, and a config holding any polygon takes another
+single-pass route than an all-bbox one.
+
 ## Check index
 
 `brokkr check-index` measures `pbfhogg check --index` on the dataset PBF
@@ -644,7 +669,33 @@ pbfhogg-only and osmium-only counts, and the strategies' diff OSCs
 only clause is simple's pbfhogg-only relations. A PASS line says `output
 order, element content and membership against osmium: complete_ways and smart
 (-S types=multipolygon,boundary) as osmium's, simple as osmium's but for the
-relations osmium's first-member rule omits`.
+relations osmium's first-member rule omits`, followed by the regions it ran
+on.
+
+`extract` runs every strategy on each region: the bbox (`--bbox`, else the
+dataset's) in `target/verify/extract/`, then every dataset polygon, by name,
+in `polygon-<name>/` below it, pbfhogg with `--polygon <file>` and osmium with
+`-p <file>`, the file an input of the reference run and so keyed by its
+content and extension. Each pass takes every gate above unchanged, and its
+failures, detail sections and summary line name the polygon. With polygons
+configured the bbox is optional; without either the check is a configuration
+error. The PASS line ends `on the bbox and on polygons <names>`, or names the
+kind it did not exercise: `on the bbox only: no dataset polygon is
+configured, ...` or `on polygons <names> only: no bbox is given or
+configured, ...`. Before any run, each polygon file must be one osmium reads
+as pbfhogg does (`verify_polygon`), since pbfhogg's DEVIATIONS.md ("extract:
+polygon input beyond osmium") names three readings where the tools select
+different regions by design: a FeatureCollection of several features
+(pbfhogg unions them, osmium takes the first), an open ring (pbfhogg closes
+it), and a ring with an edge spanning more than 180 degrees of longitude
+(pbfhogg unwraps it across the antimeridian). The gate accepts a bare Polygon
+or MultiPolygon, a Feature holding one, or a FeatureCollection of exactly one
+Feature, every ring closed and no edge, the closing one included, spanning
+more than 180 degrees, judged on coordinates parsed correctly rounded as
+pbfhogg parses them; anything else refuses the check as cannot-compare. What
+a tool refuses outright (a zero-area ring, a coordinate outside WGS84, a third
+coordinate for osmium, a file osmium does not read as GeoJSON by its `.json`
+or `.geojson` extension) fails as that tool's error.
 
 `extract` branches on `Sort.Type_then_ID` among the input header's optional
 features, where pbfhogg's extract reads it. On an input without it (a
@@ -662,10 +713,21 @@ order pbfhogg keeps an unsorted input's elements in is not promised and not
 checked. The PASS line then opens `on unsorted input, against osmium on an
 osmium-sorted copy: no sorted claim and no repeated ID in pbfhogg's output`.
 
-`multi-extract` holds each strip
+`multi-extract` holds each region
 of a simple `--config` run to strict order and diffs it (not its counts)
-against a sequential pbfhogg extract of the strip; it never consults osmium
-and does not prove the single-pass path ran.
+against a sequential pbfhogg extract of the region; it never consults
+osmium's extract membership (on unsorted input osmium only sorts the
+comparison copies) and does not prove the single-pass path ran. It runs two configs: the strips
+alone, and, when the dataset configures polygons, the strips followed by
+every polygon as a `polygon_file` entry (in `mixed/`), since pbfhogg's single
+pass takes another route once any region is a polygon. Both compare against
+the same sequential extracts, one per region. Its PASS line names the configs
+it ran, or that no mixed config ran for lack of a polygon. On an input
+without `Sort.Type_then_ID` among its optional features pbfhogg declines its
+single pass, so no single-pass route is exercised, and the PASS line opens
+saying so: every multi and sequential output must then not claim the flag,
+and each is compared through an osmium-sorted copy whose strict order proves
+it repeats no ID.
 
 **Fresh outputs.** `VerifyHarness::subdir` empties `target/verify/<check>/`
 before handing it back, so every file a check finds there was written or
@@ -742,11 +804,13 @@ and, in the detail, the entry's key and stored exit.
 
 **`verify all` inputs.** The OSC- and bbox-consuming checks skip only when
 the input is not configured at all (no `--osc-seq` and no OSC registered for
-the dataset or named snapshot; no `--bbox` and no dataset `bbox`). A
-configured input that fails to resolve - hash mismatch, missing file, several
-OSCs and no `--osc-seq`, a malformed bbox - fails the command before the suite
-runs rather than turning its checks into skips. osmosis setup failure is
-non-fatal but narrated.
+the dataset or named snapshot; no `--bbox` and no dataset `bbox`, and for
+`extract` no dataset polygon either; `multi-extract` cuts its strips from the
+bbox, so it skips without one). A configured input that fails to resolve -
+hash mismatch, missing file, several OSCs and no `--osc-seq`, a malformed
+bbox, a polygon file that is missing or fails its pin - fails the command
+before the suite runs rather than turning its checks into skips. osmosis
+setup failure is non-fatal but narrated.
 
 Every verify subcommand that takes `--dataset` also accepts `--input <PATH>`
 to skip dataset resolution and use a handcrafted fixture, and `--snapshot

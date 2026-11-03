@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::OscRange;
+use crate::datasets::resolve::PolygonInput;
 use crate::datasets::{Bbox, ElementIdList};
 use crate::error::DevError;
 use crate::pbfhogg::Compression;
@@ -46,6 +47,9 @@ pub struct CommandParams {
     pub io: IoMode,
     pub compression: Option<Compression>,
     pub bbox: Option<Bbox>,
+    /// Dataset polygon names from `--polygon`: `extract`'s region (at most
+    /// one), or the regions `multi-extract` appends after its strips.
+    pub polygons: Vec<String>,
     pub index_type: Option<String>,
     /// Forward the pbfhogg injected-prepass wire-format option.
     pub inject_prepass: bool,
@@ -110,9 +114,17 @@ pub enum ResolvedInputs {
         pbf: PathBuf,
         osc: PathBuf,
     },
-    PbfAndBbox {
+    /// `extract`: the PBF and its one region.
+    PbfAndRegion {
+        pbf: PathBuf,
+        region: Region,
+    },
+    /// `multi-extract`: the PBF, the bbox its strips are cut from, and the
+    /// dataset polygons appended after the strips, in argv order.
+    PbfAndRegions {
         pbf: PathBuf,
         bbox: Bbox,
+        polygons: Vec<PolygonInput>,
     },
     OscOnly {
         oscs: Vec<PathBuf>,
@@ -127,9 +139,10 @@ pub enum ResolvedInputs {
 impl ResolvedInputs {
     pub fn primary_pbf(&self) -> Option<&Path> {
         match self {
-            Self::Pbf { pbf } | Self::PbfAndOsc { pbf, .. } | Self::PbfAndBbox { pbf, .. } => {
-                Some(pbf)
-            }
+            Self::Pbf { pbf }
+            | Self::PbfAndOsc { pbf, .. }
+            | Self::PbfAndRegion { pbf, .. }
+            | Self::PbfAndRegions { pbf, .. } => Some(pbf),
             Self::TwoPbfs { a, .. } => Some(a),
             Self::OscOnly { .. } => None,
         }
@@ -150,12 +163,37 @@ impl ResolvedInputs {
         }
     }
 
+    /// The bbox an extract reads: its region when that is a box, or the box
+    /// a multi-extract cuts its strips from.
     pub fn bbox(&self) -> Option<&Bbox> {
         match self {
-            Self::PbfAndBbox { bbox, .. } => Some(bbox),
+            Self::PbfAndRegion {
+                region: Region::Bbox(bbox),
+                ..
+            }
+            | Self::PbfAndRegions { bbox, .. } => Some(bbox),
             _ => None,
         }
     }
+
+    /// The dataset polygons an extract or multi-extract reads, in argv order.
+    pub fn polygons(&self) -> &[PolygonInput] {
+        match self {
+            Self::PbfAndRegion {
+                region: Region::Polygon(polygon),
+                ..
+            } => std::slice::from_ref(polygon),
+            Self::PbfAndRegions { polygons, .. } => polygons,
+            _ => &[],
+        }
+    }
+}
+
+/// One extract region: a bbox, or a dataset polygon's GeoJSON file.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Region {
+    Bbox(Bbox),
+    Polygon(PolygonInput),
 }
 
 /// Cache observation recorded for diff runs.

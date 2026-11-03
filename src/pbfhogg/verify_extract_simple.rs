@@ -46,6 +46,9 @@ use crate::output::verify_msg;
 /// complete_ways output with its inspected relation count, and the full,
 /// sorted, distinct IDs of the relations only pbfhogg's simple holds.
 pub(super) struct SimpleRelations<'a> {
+    /// The arm's label in failures, `pbfhogg extract --simple` and the
+    /// region it ran on.
+    pub label: &'a str,
     pub outdir: &'a Path,
     pub pbfhogg_simple: &'a Path,
     pub osmium_simple: &'a Path,
@@ -61,12 +64,15 @@ pub(super) fn adjudicate(
     input: &SimpleRelations<'_>,
     findings: &mut Findings,
 ) -> Result<(), DevError> {
-    verify_msg("=== verify extract --simple relations against osmium complete_ways ===");
+    verify_msg(&format!(
+        "=== verify {} relations against osmium complete_ways ===",
+        input.label.trim_start_matches("pbfhogg ")
+    ));
     let (relations, records, requested) = candidate_relations(harness, input)?;
     let present = present_members(harness, input.outdir, input.osmium_simple, &requested)?;
     let left_out = simple_vs_complete(harness, input, findings)?;
     let judged = judge_relations(input, &relations, records, &left_out, &present)?;
-    judged.report(records, input.pbfhogg_only.len(), findings);
+    judged.report(input.label, records, input.pbfhogg_only.len(), findings);
     Ok(())
 }
 
@@ -148,18 +154,18 @@ fn simple_vs_complete(
             "the simple vs complete_ways diff created one relation twice".into(),
         ));
     }
+    let label = input.label;
     if only_simple.total() > 0 {
         only_simple.print("FAIL ", "in simple but not in complete_ways", verify_msg);
         findings.fail(format!(
-            "pbfhogg extract --simple holds {} elements osmium's complete_ways omits",
+            "{label} holds {} elements osmium's complete_ways omits",
             only_simple.total()
         ));
     }
     if content.total() > 0 {
         content.print("FAIL ", "content differs from complete_ways", verify_msg);
         findings.fail(format!(
-            "pbfhogg extract --simple element content differs from osmium's complete_ways on {} \
-             IDs",
+            "{label} element content differs from osmium's complete_ways on {} IDs",
             content.total()
         ));
     }
@@ -238,7 +244,7 @@ fn judge_relations(
 
 impl Judged {
     /// Print the judgement and record its failures.
-    fn report(&self, records: u64, pbfhogg_only: usize, findings: &mut Findings) {
+    fn report(&self, label: &str, records: u64, pbfhogg_only: usize, findings: &mut Findings) {
         let Self {
             expected,
             missing,
@@ -254,7 +260,7 @@ impl Judged {
             agree = false;
             missing.print("FAIL ", "relations simple must hold but omits", verify_msg);
             findings.fail(format!(
-                "pbfhogg extract --simple omits {} relations with a member in the extract",
+                "{label} omits {} relations with a member in the extract",
                 missing.total()
             ));
         }
@@ -266,7 +272,7 @@ impl Judged {
                 verify_msg,
             );
             findings.fail(format!(
-                "pbfhogg extract --simple holds {} relations without a member in the extract",
+                "{label} holds {} relations without a member in the extract",
                 unmatched.total()
             ));
         }
@@ -278,10 +284,9 @@ impl Judged {
                 verify_msg,
             );
             findings.fail(format!(
-            "pbfhogg extract --simple holds {} relations osmium's simple omits for no documented \
-             reason",
-            unexplained.total()
-        ));
+                "{label} holds {} relations osmium's simple omits for no documented reason",
+                unexplained.total()
+            ));
         }
         if agree {
             verify_msg(&format!(

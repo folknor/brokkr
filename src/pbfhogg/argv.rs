@@ -128,14 +128,16 @@ impl PbfArgv {
         Ok(self)
     }
 
-    /// `--config FILE` for `extract`, with every output the config names.
+    /// `--config FILE` for `extract`, with every output the config names and
+    /// every polygon file it reads, as the config's construction listed them.
     pub(crate) fn extract_config(
         mut self,
         config: impl AsRef<Path>,
-        outputs: impl IntoIterator<Item = PathBuf>,
+        built: crate::pbfhogg::commands::MultiExtractConfig,
     ) -> Result<Self, DevError> {
         self = self.read_opt("--config", config)?;
-        self.writes.extend(outputs);
+        self.reads.extend(built.reads);
+        self.writes.extend(built.outputs);
         Ok(self)
     }
 
@@ -234,20 +236,31 @@ mod tests {
     }
 
     #[test]
-    fn an_extract_config_declares_its_outputs_and_reads_the_config() {
+    fn an_extract_config_declares_its_outputs_and_reads_the_config_and_polygons() {
         let argv = PbfArgv::new("extract")
             .input("/d/in.pbf")
             .unwrap()
             .extract_config(
                 "/s/c.json",
-                [PathBuf::from("/s/m/0.pbf"), PathBuf::from("/s/m/1.pbf")],
+                crate::pbfhogg::commands::MultiExtractConfig {
+                    json: String::new(),
+                    outputs: vec![PathBuf::from("/s/m/0.pbf"), PathBuf::from("/s/m/1.pbf")],
+                    reads: vec![PathBuf::from("/d/city.geojson")],
+                },
             )
             .unwrap();
         assert_eq!(
             argv.args(),
             ["extract", "/d/in.pbf", "--config", "/s/c.json"]
         );
-        assert_eq!(argv.reads().len(), 2);
+        assert_eq!(
+            argv.reads(),
+            [
+                PathBuf::from("/d/in.pbf"),
+                PathBuf::from("/s/c.json"),
+                PathBuf::from("/d/city.geojson")
+            ]
+        );
         assert_eq!(argv.writes().len(), 2);
     }
 

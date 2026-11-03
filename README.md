@@ -110,7 +110,7 @@ Several commands are flag-driven umbrellas that previously had separate subcomma
 - `brokkr cat` - bare: adds missing indexdata, normally keeping compressed payloads (an unindexed mixed-kind block is rebuilt); `--type way|relation`: keep one object kind, selecting blobs on their indexdata kind; `--clean`: decode and re-encode each kept data blob (every one without `--type`), stripping the version attribute; `--dedupe`: two-input dedupe path (supports `--io-uring`), refused with `--type` or `--clean`, as pbfhogg refuses it. Bare `cat` defaults to `--variant raw` since that's the natural bootstrap input.
 - `brokkr tags-filter` - `--filter EXPR` (default `w/highway=primary`), `-R` for single-pass (drop referenced; refused with `--remove-tags` and `-j`), `--input-kind osc` to read an OSC diff instead of a PBF
 - `brokkr getid` - the dataset's `getid_ids`, else a built-in ID set; `--add-referenced` to pull in what they reference, `--invert` to negate
-- `brokkr extract` - `--strategy simple|complete|smart` picks the extract algorithm
+- `brokkr extract` - `--strategy simple|complete|smart` picks the extract algorithm; `--polygon NAME` extracts a dataset polygon instead of the bbox (`brokkr multi-extract --polygon NAME` adds one as a region after the strips)
 - `brokkr diff` - `--format default|osc` picks the output shape
 
 `add-locations-to-ways` accepts `--index-type`, forwarded verbatim to pbfhogg (omit it for pbfhogg's default). Lands in `cli_args` verbatim.
@@ -410,7 +410,7 @@ xxhash = "..."
 ```
 
 - `project` - which supported project this config belongs to
-- `[hostname.datasets.*]` - named datasets with PBF variants, OSC diffs, PMTiles entries, and bounding box
+- `[hostname.datasets.*]` - named datasets with PBF variants, OSC diffs, PMTiles entries, bounding box, and (pbfhogg) named GeoJSON extract polygons under `polygon.<name>`
 - `[hostname.datasets.*.snapshot.<key>]` - additional historical snapshots of the dataset (different point-in-time PBFs of the same region). Each snapshot has its own `pbf` and optional `osc` tables. The legacy top-level data is implicitly snapshot `base` (a reserved name). Snapshot keys must match `[a-zA-Z0-9_-]+`. Snapshots are first-class for `diff-snapshots` and addressable via `--snapshot <key>` on every measurable pbfhogg command (`apply-changes`, `merge-changes`, `tags-filter`, `diff` including `--format osc`, `repack`, `degrade`, `sort`, `cat`, `inspect`, `add-locations-to-ways`, `getid`, `getparents`, `renumber`, `check-refs`, `check-ids`, `check-index`, `check-locations`, `digest`, `time-filter`, `extract`, `multi-extract`, `build-geocode-index`). Refresh-mode downloads (`brokkr download <region> --refresh`) populate snapshot blocks automatically by archiving the previous primary state. Generative commands `brokkr repack --as-snapshot KEY`, `brokkr degrade --as-snapshot KEY` and `brokkr cat --as-snapshot KEY` register newly-produced artifacts under this same shape
 - `xxhash` - optional XXH128 hash for file integrity checks (`sha256` accepted as alias during migration). Run `brokkr env` to see computed hashes for updating config
 - `[hostname]` - per-host path overrides, port, drive configuration, and default cargo features; defaults to `data/`, `data/scratch/`, and cargo target dir

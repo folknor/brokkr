@@ -44,6 +44,85 @@ impl FileEntry for config::PmtilesEntry {
     }
 }
 
+impl FileEntry for config::PolygonEntry {
+    fn file(&self) -> &str {
+        &self.file
+    }
+    fn xxhash(&self) -> Option<&FileDigest> {
+        self.xxhash.as_ref()
+    }
+}
+
+/// A resolved dataset polygon: its name, its on-disk GeoJSON file and the
+/// file's content digest, computed whether or not a pin is configured, since
+/// it is the region's identity in a results row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PolygonInput {
+    pub(crate) name: String,
+    pub(crate) path: PathBuf,
+    pub(crate) digest: preflight::Xxh128,
+}
+
+impl PolygonInput {
+    /// `name@digest`: the polygon's pairing identity. The name keeps two
+    /// configured polygons with the same bytes apart, the digest keeps one
+    /// name's rows from pairing across a change of its file.
+    pub(crate) fn identity(&self) -> String {
+        format!("{}@{}", self.name, self.digest)
+    }
+}
+
+/// Resolve the dataset polygon `name`: its file under the data directory,
+/// existence, its pin when one is configured, and its content digest.
+pub(crate) fn resolve_polygon(
+    dataset: &str,
+    name: &str,
+    paths: &config::ResolvedPaths,
+    project_root: &Path,
+) -> Result<PolygonInput, ResolveError> {
+    let ds = get_dataset(dataset, paths)?;
+    let path = resolve_entry_path(
+        &ds.polygon,
+        name,
+        dataset,
+        "polygon",
+        &paths.data_dir,
+        ds.origin.as_deref(),
+        project_root,
+    )?;
+    let digest = match preflight::cached_path_digest(&path, project_root)? {
+        preflight::PathDigest::File(digest) => digest.value(),
+        preflight::PathDigest::Tree(_) => {
+            return Err(ResolveError::Verification(crate::error::DevError::Config(
+                format!(
+                    "dataset '{dataset}' polygon '{name}' is a directory, not a GeoJSON file: {}",
+                    path.display()
+                ),
+            )));
+        }
+    };
+    Ok(PolygonInput {
+        name: name.to_owned(),
+        path,
+        digest,
+    })
+}
+
+/// Every polygon the dataset configures, ordered by name.
+pub(crate) fn resolve_polygons(
+    dataset: &str,
+    paths: &config::ResolvedPaths,
+    project_root: &Path,
+) -> Result<Vec<PolygonInput>, ResolveError> {
+    let ds = get_dataset(dataset, paths)?;
+    let mut names: Vec<&String> = ds.polygon.keys().collect();
+    names.sort();
+    names
+        .into_iter()
+        .map(|name| resolve_polygon(dataset, name, paths, project_root))
+        .collect()
+}
+
 /// Generic file resolver: lookup entry in map -> join path -> check exists -> verify hash.
 fn resolve_entry_path<E: FileEntry>(
     entries: &HashMap<String, E>,

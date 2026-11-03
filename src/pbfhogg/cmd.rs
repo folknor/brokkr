@@ -149,6 +149,20 @@ fn osc_configured(
 
 /// Whether `verify all` has a bbox to resolve: `--bbox`, or the dataset's
 /// configured `bbox`. Same skip-versus-error split as [`osc_configured`].
+/// Every polygon the dataset configures, each resolved (a configured polygon
+/// that fails to resolve is an error, never a skip); none for a dataset the
+/// config does not hold, as with an `--input` fixture and `--bbox`.
+fn dataset_polygons(
+    dataset: &str,
+    paths: &config::ResolvedPaths,
+    project_root: &Path,
+) -> Result<Vec<crate::datasets::resolve::PolygonInput>, DevError> {
+    if !paths.datasets.contains_key(dataset) {
+        return Ok(Vec::new());
+    }
+    Ok(resolve::resolve_polygons(dataset, paths, project_root)?)
+}
+
 fn bbox_configured(
     bbox: Option<&crate::datasets::Bbox>,
     dataset: &str,
@@ -443,6 +457,7 @@ pub(crate) fn verify(
             } else {
                 None
             };
+            let polygons = dataset_polygons(&pbf.dataset, &paths, project_root)?;
             let locations_base = resolve_locations_base(
                 pbf.input.as_deref(),
                 &pbf.dataset,
@@ -455,6 +470,7 @@ pub(crate) fn verify(
                 &pbf_path,
                 osc_path.as_deref(),
                 resolved_bbox.as_ref(),
+                &polygons,
                 &locations_base,
                 &paths.data_dir,
                 direct_io,
@@ -504,13 +520,35 @@ pub(crate) fn verify(
             }
             VerifyCommand::Extract { pbf, bbox } => {
                 let pbf_path = resolve_verify_input(&pbf.source, &paths, project_root)?;
-                let bbox = resolve_bbox(bbox.as_ref(), &pbf.source.dataset, &paths)?;
-                super::verify_extract::run(&harness, &pbf_path, &bbox, pbf.direct_io)
+                let polygons = dataset_polygons(&pbf.source.dataset, &paths, project_root)?;
+                // Without polygons the bbox is required, as it always was.
+                let bbox = if polygons.is_empty()
+                    || bbox_configured(bbox.as_ref(), &pbf.source.dataset, &paths)
+                {
+                    Some(resolve_bbox(bbox.as_ref(), &pbf.source.dataset, &paths)?)
+                } else {
+                    None
+                };
+                super::verify_extract::run(
+                    &harness,
+                    &pbf_path,
+                    bbox.as_ref(),
+                    &polygons,
+                    pbf.direct_io,
+                )
             }
             VerifyCommand::MultiExtract { pbf, bbox, regions } => {
                 let pbf_path = resolve_verify_input(&pbf.source, &paths, project_root)?;
                 let bbox = resolve_bbox(bbox.as_ref(), &pbf.source.dataset, &paths)?;
-                super::verify_multi_extract::run(&harness, &pbf_path, &bbox, regions, pbf.direct_io)
+                let polygons = dataset_polygons(&pbf.source.dataset, &paths, project_root)?;
+                super::verify_multi_extract::run(
+                    &harness,
+                    &pbf_path,
+                    &bbox,
+                    &polygons,
+                    regions,
+                    pbf.direct_io,
+                )
             }
             VerifyCommand::TagsFilter { pbf } => {
                 let pbf_path = resolve_verify_input(&pbf.source, &paths, project_root)?;

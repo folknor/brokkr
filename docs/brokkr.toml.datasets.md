@@ -2,7 +2,7 @@
 
 Host dataset config is used by the map-data projects and by Mogwai's out-of-git
 input pins. Mogwai uses `path` plus `xxh128`; map-data projects use the PBF,
-OSC and PMTiles entries described below. Other project-specific inputs belong
+OSC, PMTiles and polygon entries described below. Other project-specific inputs belong
 to their project config.
 Datasets are host-scoped - they live under `[<hostname>.datasets.<name>]`,
 never a global `[datasets]` table. See the host example in
@@ -64,6 +64,24 @@ paths still resolve against each including project's root.
   maximum. A pbfhogg extract row that took its bbox from here carries it as
   an arm qualifier, so changing the box splits `results --compare` pairing
   (see `docs/commands/results.md`).
+- `polygon.<name>` (pbfhogg, optional) - GeoJSON extract regions keyed by a
+  name matching `[a-zA-Z0-9_-]+`, dataset-level like `bbox` and shared by
+  every variant and snapshot. Each has `file` (under the data directory, like
+  every entry) and optional `xxhash` (XXH128); `brokkr env` lists them as
+  `<dataset>/polygon.<name>`. A file is resolved, and its pin checked, when a
+  command reads it. `brokkr extract --polygon <name>` measures it instead of
+  the bbox and `brokkr multi-extract --polygon <name>` appends it after the
+  strips; a bare `extract` or `multi-extract` still measures the bbox alone.
+  `brokkr suite pbfhogg`'s extract bench and `verify extract` run on every
+  configured polygon after the bbox, and `verify multi-extract` adds a config
+  of the strips and every polygon. A polygon row carries `polygon=<name>@<xxh128>`
+  as an arm qualifier, the digest computed from the file whether or not it is
+  pinned, so changing the file splits `results --compare` pairing (see
+  `docs/commands/results.md`). For `verify extract` the file must be one
+  osmium reads as pbfhogg does: a single Polygon or MultiPolygon (bare, in a
+  Feature, or in a FeatureCollection of one Feature) with closed rings and no
+  edge crossing the antimeridian (`docs/projects/pbfhogg.md`, Verify
+  subcommands).
 - `getid_ids`, `getparents_ids` (pbfhogg, optional) - the element IDs the
   getid and getparents benches request on this dataset, every variant and
   snapshot of it (`brokkr getid`/`getparents` in any measured mode, and the
@@ -105,6 +123,9 @@ diff = { "4705" = "differs" }
 [plantasjen.datasets.denmark.osc.4705]
 file = "denmark-4705.osc.gz"
 xxhash = "fa581f7b..."
+
+[plantasjen.datasets.denmark.polygon.copenhagen]   # pbfhogg only
+file = "polygons/copenhagen.geojson"
 
 ```
 

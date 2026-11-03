@@ -216,9 +216,12 @@ carries it as a qualifier. For pbfhogg that is a dataset's `getid_ids` or
 `getparents_ids` when it differs from the built-in list (`ids=...`), and for
 `extract`, `multi-extract` and the suite's extract bench the bbox when it came
 from the dataset rather than `--bbox` (`bbox=...`, the parsed coordinates, so
-`12` and `12.0` pair) and the strategy when one argv ran every strategy
+`12` and `12.0` pair), every dataset polygon the row extracted, in argv order
+(`polygon=<name>@<xxh128>,...`: the argv names a polygon, not its bytes, and
+the name keeps two polygons with the same bytes apart in the suite, whose rows
+share one argv), and the strategy when one argv ran every strategy
 (`--strategy all`, which is `extract`'s default, or the suite;
-`strategy=...`), joined by `;`. An extract
+`strategy=...`), joined by `;` in that order. An extract
 row from before the bbox and strategy qualifiers existed carries neither, so
 it does not pair with a newer row that does. A pbfhogg `digest` without
 `--form` carries the form it measured (`form=full` or `form=content`;

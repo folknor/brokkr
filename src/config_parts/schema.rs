@@ -1922,6 +1922,15 @@ pub struct PmtilesEntry {
     pub xxhash: Option<FileDigest>,
 }
 
+/// A GeoJSON polygon extract region, keyed by a name matching
+/// `[A-Za-z0-9_-]+` (pbfhogg's extract `--polygon` and `polygon_file`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolygonEntry {
+    pub file: String,
+    pub xxhash: Option<FileDigest>,
+}
+
 /// A historical snapshot of a dataset - a different point-in-time capture
 /// of the same region. Snapshots are first-class for the `diff-snapshots`
 /// command and any future operation that takes a pair of snapshot refs.
@@ -1979,6 +1988,10 @@ pub struct Dataset {
     /// PMTiles archives keyed by variant name (e.g. "elivagar").
     #[serde(default)]
     pub pmtiles: HashMap<String, PmtilesEntry>,
+    /// GeoJSON extract regions keyed by name (pbfhogg): dataset-level like
+    /// `bbox`, shared by every variant and snapshot.
+    #[serde(default)]
+    pub polygon: HashMap<String, PolygonEntry>,
     /// Additional historical snapshots keyed by snapshot name (e.g. a date
     /// like "20260411"). The reserved name "base" is rejected at parse time
     /// because it's the CLI sentinel for the legacy top-level data.

@@ -57,6 +57,14 @@ impl config::ResolvedPaths {
                 &self.data_dir,
                 project_root,
             );
+            check_file_entries(
+                &mut out,
+                name,
+                &dataset.polygon,
+                "polygon.",
+                &self.data_dir,
+                project_root,
+            );
 
             // Plain out-of-git inputs have one configured path and digest.
             // Reporting the computed digest lets the user register the pin.

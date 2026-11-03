@@ -13,6 +13,7 @@ use crate::measure::{ExternalTool, Invocation};
 use crate::output;
 use crate::pbfhogg::bench_cells::{self, Batch, BatchInputs};
 use crate::pbfhogg::binary::PbfhoggBinary;
+use crate::pbfhogg::context::Region;
 use crate::pbfhogg::{bench_blob_filter, bench_commands, bench_extract, bench_planetiler};
 use crate::project::BuildRoot;
 use crate::tools;
@@ -81,7 +82,7 @@ fn run_suite_binary(
     runs: usize,
     project_root: &Path,
 ) -> Result<(), DevError> {
-    // 1. command presets; extract runs later with the dataset's configured bbox.
+    // 1. command presets; extract runs later on the dataset's bbox and polygons.
     output::bench_msg("=== bench commands ===");
     // Resolve a configured OSC through the verified resolver. Ambiguous
     // entries and stale hashes fail the suite instead of looking like an
@@ -170,7 +171,8 @@ fn run_suite_binary(
     )
 }
 
-/// Run benchmarks that depend on optional dataset config fields (osc, bbox, pbf_raw).
+/// Run benchmarks that depend on optional dataset config fields (osc, bbox,
+/// polygon, pbf_raw).
 #[allow(clippy::too_many_arguments)]
 fn run_dataset_dependent(
     mode: &MeasureMode,
@@ -210,23 +212,42 @@ fn run_dataset_dependent(
         output::bench_msg("=== bench merge === (skipped, no osc file)");
     }
 
-    // bench extract -- if bbox is available
-    let bbox = ds.and_then(|dataset| dataset.bbox.clone());
+    // bench extract -- on the dataset bbox, then on each dataset polygon
+    // (ordered by name); a polygon that is configured but fails to resolve
+    // fails the suite rather than skipping its cells.
+    let mut regions: Vec<Region> = ds
+        .and_then(|dataset| dataset.bbox.clone())
+        .into_iter()
+        .map(Region::Bbox)
+        .collect();
+    if ds.is_some() {
+        regions.extend(
+            crate::datasets::resolve::resolve_polygons(dataset, paths, project_root)?
+                .into_iter()
+                .map(Region::Polygon),
+        );
+    }
 
-    if let Some(bbox) = bbox.as_ref() {
-        output::bench_msg("=== bench extract ===");
+    if regions.is_empty() {
+        output::bench_msg("=== bench extract === (skipped, no bbox or polygon in dataset config)");
+    }
+    for region in &regions {
+        match region {
+            Region::Bbox(_) => output::bench_msg("=== bench extract ==="),
+            Region::Polygon(polygon) => {
+                output::bench_msg(&format!("=== bench extract (polygon {}) ===", polygon.name));
+            }
+        }
         bench_extract::run(
             harness,
             binary,
             pbf_path,
             file_mb,
             runs,
-            bbox,
+            region,
             project_root,
             &paths.scratch_dir,
         )?;
-    } else {
-        output::bench_msg("=== bench extract === (skipped, no bbox in dataset config)");
     }
 
     // bench blob-filter -- if raw PBF is available

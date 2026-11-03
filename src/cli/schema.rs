@@ -1056,6 +1056,11 @@ In depth: `brokkr man clippy`."
         /// Falls back to the dataset's configured bbox if omitted.
         #[arg(long)]
         bbox: Option<crate::datasets::Bbox>,
+        /// A dataset polygon (registered name) to extract as one more region,
+        /// after the strips, through a `polygon_file` entry. Repeatable; the
+        /// regions follow the order given
+        #[arg(long, value_name = "NAME")]
+        polygon: Vec<String>,
         /// Extract strategy: simple, complete, smart, or all (runs all
         /// three back-to-back, like `brokkr extract --strategy all`).
         #[arg(long, default_value = "simple")]
@@ -1170,7 +1175,7 @@ Examples:
         #[arg(long)]
         snapshot: Option<crate::datasets::resolve::SnapshotRef>,
     },
-    /// Extract by bounding box (configurable strategy)
+    /// Extract by bounding box or dataset polygon (configurable strategy)
     #[command(name = "extract", display_order = 2)]
     Extract {
         #[command(flatten)]
@@ -1180,9 +1185,14 @@ Examples:
         /// Extract strategy: simple, complete, smart, or all
         #[arg(long, default_value = "all")]
         strategy: String,
-        /// Bounding box (lon_min,lat_min,lon_max,lat_max)
+        /// Bounding box (lon_min,lat_min,lon_max,lat_max). Without it or
+        /// --polygon, the dataset's bbox
         #[arg(long)]
         bbox: Option<crate::datasets::Bbox>,
+        /// Extract the dataset polygon registered under this name
+        /// (`[<host>.datasets.<name>.polygon.<NAME>]`) instead of a bbox
+        #[arg(long, value_name = "NAME", conflicts_with = "bbox")]
+        polygon: Option<String>,
         /// Snapshot key to read input from. Use `base` (or omit) for the
         /// dataset's primary data; pass a key registered under
         /// `[dataset.snapshot.<key>]` for a historical snapshot.
@@ -3268,15 +3278,19 @@ pub(crate) enum VerifyCommand {
         #[command(flatten)]
         pbf: VerifyPbfArgs,
     },
-    /// Cross-validate extract (bbox strategies) against osmium extract
+    /// Cross-validate extract (every strategy, on the bbox and on each
+    /// dataset polygon) against osmium extract
     #[command(display_order = 2)]
     Extract {
         #[command(flatten)]
         pbf: VerifyPbfArgs,
+        /// Bounding box; without it, the dataset's. Optional when the
+        /// dataset configures a polygon
         #[arg(long)]
         bbox: Option<crate::datasets::Bbox>,
     },
-    /// Cross-validate multi-extract (single-pass vs sequential)
+    /// Cross-validate multi-extract (single-pass vs sequential), on strips
+    /// and, with dataset polygons, on strips and polygons together
     #[command(name = "multi-extract", display_order = 2)]
     MultiExtract {
         #[command(flatten)]

@@ -1,13 +1,15 @@
-//! Benchmark: extract strategies (simple/complete/smart) with a dataset bbox.
+//! Benchmark: extract strategies (simple/complete/smart) on one dataset
+//! region, the bbox or a dataset polygon.
 
 use std::path::Path;
 
-use crate::datasets::Bbox;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
 use crate::pbfhogg::binary::PbfhoggBinary;
 use crate::pbfhogg::commands::{ArgMode, ExtractStrategy, PbfhoggCommand, scratch_output_path};
-use crate::pbfhogg::context::{CommandContext, CommandObservations, CommandParams, ResolvedInputs};
+use crate::pbfhogg::context::{
+    CommandContext, CommandObservations, CommandParams, Region, ResolvedInputs,
+};
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -16,20 +18,22 @@ pub fn run(
     pbf_path: &Path,
     file_mb: f64,
     runs: usize,
-    bbox: &Bbox,
+    region: &Region,
     project_root: &Path,
     scratch_dir: &Path,
 ) -> Result<(), DevError> {
     std::fs::create_dir_all(scratch_dir)?;
     let command_ctx = CommandContext {
-        inputs: ResolvedInputs::PbfAndBbox {
+        inputs: ResolvedInputs::PbfAndRegion {
             pbf: pbf_path.to_path_buf(),
-            bbox: bbox.clone(),
+            region: region.clone(),
         },
         scratch_dir: scratch_dir.to_path_buf(),
         dataset: String::new(),
-        // The bbox comes from the dataset (no explicit `params.bbox`) and one
-        // suite argv covers every strategy, so both ride in the qualifier.
+        // The region comes from the dataset (no explicit `params.bbox`) and
+        // one suite argv covers every strategy and region, so the region (the
+        // bbox's coordinates, or the polygon's name and digest) and the
+        // strategy ride in the qualifier.
         params: CommandParams {
             strategy_fanout: true,
             ..CommandParams::default()
@@ -59,7 +63,7 @@ pub fn run(
 
         let config = BenchConfig {
             command: command.id().to_owned(),
-            // Strategy and bbox reach the row's cli_args through the
+            // Strategy and region reach the row's cli_args through the
             // invocation; pairing never reads cli_args, so they also ride in
             // the arm qualifier.
             input_file: Some(basename.clone()),

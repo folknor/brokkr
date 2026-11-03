@@ -2546,6 +2546,16 @@ fn validate_datasets(hosts: &HashMap<String, HostConfig>) -> Result<(), DevError
                     )));
                 }
             }
+            for (name, entry) in &ds.polygon {
+                validate_polygon_name(name).map_err(|e| {
+                    DevError::Config(format!("{host}.datasets.{ds_name}.polygon.{name}: {e}"))
+                })?;
+                if entry.file.is_empty() {
+                    return Err(DevError::Config(format!(
+                        "{host}.datasets.{ds_name}.polygon.{name}: file name is empty"
+                    )));
+                }
+            }
             for (snap_key, snap) in &ds.snapshot {
                 validate_snapshot_key(snap_key).map_err(|e| {
                     DevError::Config(format!(
@@ -2668,6 +2678,22 @@ pub(crate) fn validate_snapshot_key(key: &str) -> Result<(), String> {
     {
         return Err(format!(
             "snapshot key '{key}' must match [a-zA-Z0-9_-]+ (no spaces, dots, or other special characters)"
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a dataset polygon name: `[a-zA-Z0-9_-]+`, since it names verify
+/// directories, multi-extract outputs and results qualifiers.
+fn validate_polygon_name(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(format!(
+            "polygon name '{name}' must match [a-zA-Z0-9_-]+ (no spaces, dots, or other special \
+             characters)"
         ));
     }
     Ok(())

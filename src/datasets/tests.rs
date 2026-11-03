@@ -56,6 +56,7 @@ mod tests {
             pbf: HashMap::new(),
             osc: HashMap::new(),
             pmtiles: HashMap::new(),
+            polygon: HashMap::new(),
             snapshot: HashMap::new(),
             expect: crate::config::DatasetExpect::default(),
             path: None,
@@ -158,6 +159,45 @@ mod tests {
 
         let from_dataset = resolve_bbox(None, "denmark", &paths).expect("bbox");
         assert_eq!(from_dataset.as_str(), "1,2,3,4");
+    }
+
+    #[test]
+    fn polygons_resolve_by_name_with_their_content_digest() {
+        let dir = unique_test_dir("polygons");
+        std::fs::write(dir.join("b.geojson"), "{}").expect("write");
+        std::fs::write(dir.join("a.geojson"), "{}").expect("write");
+        let mut ds = empty_dataset();
+        for (name, file) in [("zeta", "b.geojson"), ("alpha", "a.geojson")] {
+            ds.polygon.insert(
+                name.into(),
+                crate::config::PolygonEntry {
+                    file: file.into(),
+                    xxhash: None,
+                },
+            );
+        }
+        let mut datasets = HashMap::new();
+        datasets.insert(String::from("denmark"), ds);
+        let paths = mk_paths(&dir, datasets);
+        let root = dir.join("root");
+
+        // Every polygon, ordered by name; the same bytes give the same digest
+        // whether or not a pin is configured.
+        let all = resolve_polygons("denmark", &paths, &root).expect("all");
+        let names: Vec<&str> = all.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["alpha", "zeta"]);
+        assert_eq!(all[0].digest, all[1].digest);
+        assert!(all[1].path.ends_with("b.geojson"));
+
+        let one = resolve_polygon("denmark", "zeta", &paths, &root).expect("one");
+        assert_eq!(one, all[1]);
+        let err = resolve_polygon("denmark", "nope", &paths, &root)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no polygon 'nope'"), "got: {err}");
+        assert!(err.contains("alpha, zeta"), "got: {err}");
+
+        drop(std::fs::remove_dir_all(&dir));
     }
 
     #[test]

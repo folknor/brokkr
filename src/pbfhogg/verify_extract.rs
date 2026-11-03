@@ -1,4 +1,14 @@
-//! Verify: extract - pbfhogg extract vs osmium extract for each strategy.
+//! Verify: extract - pbfhogg extract vs osmium extract for each strategy,
+//! on the bbox and on every dataset polygon.
+//!
+//! Regions. Each region is a pass of all three strategies with the same
+//! gates: the bbox (from `--bbox` or the dataset) in the check's directory,
+//! then each dataset polygon, ordered by name, in `polygon-<name>/` below it,
+//! both tools reading the same GeoJSON file (`--polygon` and `-p`). The
+//! membership rules are region-type independent, so a polygon takes them
+//! unchanged. A polygon the two tools read as different regions by design
+//! ([`super::verify_polygon`]) refuses the check before any run. The PASS
+//! line names the regions it ran on and the region kind it did not.
 //!
 //! What a PASS establishes, per strategy: pbfhogg's output order (below),
 //! the element content of everything it writes, and which elements it writes,
@@ -35,6 +45,7 @@
 use std::path::{Path, PathBuf};
 
 use super::commands::{ExtractStrategy, PbfhoggCommand};
+use super::context::Region;
 use super::inspect_report::{self, InspectCounts};
 use super::verify::{Findings, SORT_TYPE_THEN_ID, Verdict, VerifyHarness};
 use super::verify_element_diff::{self as element_diff, PerType};
@@ -42,6 +53,7 @@ use super::verify_extract_simple::{self as simple_relations, SimpleRelations};
 use super::verify_reference::ToolRun;
 use super::verify_sort;
 use crate::datasets::Bbox;
+use crate::datasets::resolve::PolygonInput;
 use crate::error::DevError;
 use crate::osc::{OscAction, OscKind};
 use crate::output::{verify_msg, verify_summary};
@@ -72,15 +84,64 @@ fn osmium_strategy(strategy: ExtractStrategy) -> Vec<&'static str> {
     args
 }
 
+/// What the PASS line adds about the regions the check ran on, naming the
+/// region kind it did not exercise.
+fn coverage_clause(bbox: Option<&Bbox>, polygons: &[PolygonInput]) -> String {
+    let names = polygons
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    match (bbox, polygons.is_empty()) {
+        (Some(_), true) => "; on the bbox only: no dataset polygon is configured, so no polygon \
+                            region is exercised"
+            .into(),
+        (Some(_), false) => format!("; on the bbox and on polygons {names}"),
+        (None, _) => format!(
+            "; on polygons {names} only: no bbox is given or configured, so no bbox region is \
+             exercised"
+        ),
+    }
+}
+
+/// One region the check runs every strategy on.
+struct RegionPass<'a> {
+    region: Region,
+    /// Its directory: the check's own for the bbox, `polygon-<name>/` below
+    /// it for a polygon.
+    dir: PathBuf,
+    /// Appended to every label and message of the pass: empty for the bbox,
+    /// ` on polygon <name>` for a polygon.
+    suffix: String,
+    pbf: &'a Path,
+    osmium_input: &'a Path,
+    input_sorted: bool,
+    direct_io: bool,
+}
+
 /// Cross-validate `pbfhogg extract` against `osmium extract` for
-/// simple, complete-ways, and smart strategies.
-#[allow(clippy::too_many_lines)]
+/// simple, complete-ways, and smart strategies, on the bbox and on every
+/// dataset polygon.
 pub fn run(
     harness: &VerifyHarness,
     pbf: &Path,
-    bbox: &Bbox,
+    bbox: Option<&Bbox>,
+    polygons: &[PolygonInput],
     direct_io: bool,
 ) -> Result<Findings, DevError> {
+    if bbox.is_none() && polygons.is_empty() {
+        return Err(DevError::Config(
+            "verify extract needs a region: no --bbox, and the dataset configures neither a bbox \
+             nor a polygon"
+                .into(),
+        ));
+    }
+    // Before any run: a polygon the tools read as different regions is not a
+    // comparison.
+    for polygon in polygons {
+        crate::pbfhogg::verify_polygon::osmium_reads_alike(&polygon.path)
+            .map_err(DevError::Verify)?;
+    }
     let outdir = harness.subdir("extract")?;
 
     // --- Input order: the header claim pbfhogg branches on ---
@@ -105,14 +166,66 @@ pub fn run(
         sorted
     };
 
-    let mut findings = Findings::claiming(if input_sorted { CLAIM } else { CLAIM_UNSORTED });
+    let claim = if input_sorted { CLAIM } else { CLAIM_UNSORTED };
+    let mut findings = Findings::claiming(format!("{claim}{}", coverage_clause(bbox, polygons)));
+
+    let mut passes = Vec::new();
+    if let Some(bbox) = bbox {
+        passes.push(RegionPass {
+            region: Region::Bbox(bbox.clone()),
+            dir: outdir.clone(),
+            suffix: String::new(),
+            pbf,
+            osmium_input: &osmium_input,
+            input_sorted,
+            direct_io,
+        });
+    }
+    for polygon in polygons {
+        // Below the freshened check directory, so created, never freshened
+        // again: that would take the bbox pass's files and the sorted input.
+        let dir = outdir.join(format!("polygon-{}", polygon.name));
+        std::fs::create_dir_all(&dir)?;
+        passes.push(RegionPass {
+            region: Region::Polygon(polygon.clone()),
+            dir,
+            suffix: format!(" on polygon {}", polygon.name),
+            pbf,
+            osmium_input: &osmium_input,
+            input_sorted,
+            direct_io,
+        });
+    }
+    for pass in &passes {
+        run_region(harness, pass, &mut findings)?;
+    }
+    Ok(findings)
+}
+
+/// Every strategy on one region, recorded into `findings`.
+#[allow(clippy::too_many_lines)]
+fn run_region(
+    harness: &VerifyHarness,
+    pass: &RegionPass<'_>,
+    findings: &mut Findings,
+) -> Result<(), DevError> {
+    let RegionPass {
+        region,
+        dir: outdir,
+        suffix,
+        pbf,
+        osmium_input,
+        input_sorted,
+        direct_io,
+    } = pass;
+    let (input_sorted, direct_io) = (*input_sorted, *direct_io);
     let mut membership = Vec::new();
     let mut simple: Option<SimpleArm> = None;
     let mut complete: Option<(PathBuf, u64)> = None;
 
     for strategy in ExtractStrategy::all() {
         let strategy_name = strategy.name();
-        verify_msg(&format!("=== verify extract --{strategy_name} ==="));
+        verify_msg(&format!("=== verify extract --{strategy_name}{suffix} ==="));
 
         // --- pbfhogg extract ---
         let pbfhogg_out = outdir.join(format!("pbfhogg-{strategy_name}.osm.pbf"));
@@ -120,20 +233,27 @@ pub fn run(
             strategy: *strategy,
         };
         let pbfhogg_args = command
-            .extract_args_for(pbf, bbox, &pbfhogg_out)?
+            .extract_args_for(pbf, region, &pbfhogg_out)?
             .arg_if(direct_io, "--direct-io");
         let captured = harness.run_pbfhogg(pbfhogg_args)?;
         harness.check_exit(&captured, "pbfhogg extract")?;
 
         // --- osmium extract ---
+        // The bbox run's argv is unchanged from before polygons, so its cached
+        // entries still serve; a polygon file is an input, keyed by content
+        // and extension.
         let osmium_out = outdir.join(format!("osmium-{strategy_name}.osm.pbf"));
-        let mut osmium_args = vec!["-b", bbox.as_str()];
-        osmium_args.extend(osmium_strategy(*strategy));
+        let mut tool = ToolRun::osmium("extract.1")
+            .arg("extract")
+            .input(osmium_input);
+        tool = match region {
+            Region::Bbox(bbox) => tool.args(&["-b", bbox.as_str()]),
+            Region::Polygon(polygon) => tool.arg("-p").input(&polygon.path),
+        };
+        let mut osmium_args = osmium_strategy(*strategy);
         osmium_args.push("-o");
         let captured = harness.reference(
-            &ToolRun::osmium("extract.1")
-                .arg("extract")
-                .input(&osmium_input)
+            &tool
                 .args(&osmium_args)
                 .output(&osmium_out)
                 .arg("--overwrite"),
@@ -142,7 +262,7 @@ pub fn run(
         harness.check_exit(&captured, "osmium extract")?;
 
         // --- pbfhogg's order, and the file it is compared through ---
-        let label = format!("pbfhogg extract --{strategy_name}");
+        let label = format!("pbfhogg extract --{strategy_name}{suffix}");
         let (compared, order_failure) = if input_sorted {
             (pbfhogg_out.clone(), format!("{label} output order"))
         } else {
@@ -168,15 +288,17 @@ pub fn run(
         };
         let (ours_sorted, ours) = harness.check_sorted_counted(&label, &compared)?;
         findings.record(&order_failure, ours_sorted);
-        let (theirs_sorted, theirs) = harness
-            .check_sorted_counted(&format!("osmium extract --{strategy_name}"), &osmium_out)?;
+        let (theirs_sorted, theirs) = harness.check_sorted_counted(
+            &format!("osmium extract --{strategy_name}{suffix}"),
+            &osmium_out,
+        )?;
         // A reference output with repeated or out-of-order IDs cannot be
         // compared by key: the diff could pair one copy and list the other
         // as osmium-only, hiding a conflicting content. That is a comparison
         // that could not be made, never a pass.
         if !theirs_sorted.is_pass() {
             return Err(DevError::Verify(format!(
-                "osmium extract --{strategy_name} output is not in strict order, so it \
+                "osmium extract --{strategy_name}{suffix} output is not in strict order, so it \
                  cannot be compared with pbfhogg's by ID"
             )));
         }
@@ -189,7 +311,7 @@ pub fn run(
             &compared,
             &osmium_out,
             &outdir.join(format!("pbfhogg-vs-osmium-{strategy_name}.osc")),
-            &outdir,
+            outdir,
             |action, kind, id| {
                 if keep_relations && action == OscAction::Delete && kind == OscKind::Relation {
                     report.pbfhogg_only_relations.push(id);
@@ -241,23 +363,24 @@ pub fn run(
                 simple_relations::adjudicate(
                     harness,
                     &SimpleRelations {
-                        outdir: &outdir,
+                        label: &format!("pbfhogg extract --simple{suffix}"),
+                        outdir,
                         pbfhogg_simple: &simple.compared,
                         osmium_simple: &simple.osmium_out,
                         osmium_complete: &osmium_complete,
                         complete_relations,
                         pbfhogg_only: &simple.pbfhogg_only,
                     },
-                    &mut findings,
+                    findings,
                 )?;
             } else {
                 // The relation rule reads simple's node and way sets through
                 // osmium's output, which is sound only where they agree;
                 // that they do not is already a failure.
-                verify_msg(
-                    "  simple relations not judged: simple's node and way membership differs \
-                     from osmium's",
-                );
+                verify_msg(&format!(
+                    "  simple relations{suffix} not judged: simple's node and way membership \
+                     differs from osmium's"
+                ));
             }
         }
         _ => {
@@ -267,10 +390,10 @@ pub fn run(
         }
     }
 
-    if let Some(line) = membership_line(&membership, &outdir) {
+    if let Some(line) = membership_line(&membership, suffix, outdir) {
         verify_summary(&line);
     }
-    Ok(findings)
+    Ok(())
 }
 
 /// What the simple strategy hands its relation adjudication.
@@ -399,10 +522,10 @@ fn nonzero_counts(class: &PerType) -> String {
 /// when no strategy differs. On a pass the only difference is the relations
 /// only pbfhogg's simple holds, each judged against the rule. The element
 /// lists stay in each strategy's diff.
-fn membership_line(clauses: &[String], outdir: &Path) -> Option<String> {
+fn membership_line(clauses: &[String], suffix: &str, outdir: &Path) -> Option<String> {
     (!clauses.is_empty()).then(|| {
         format!(
-            "  extract vs osmium, membership differences: {}; element lists in {}",
+            "  extract{suffix} vs osmium, membership differences: {}; element lists in {}",
             clauses.join("; "),
             crate::output::path(&outdir.join("pbfhogg-vs-osmium-<strategy>.osc"))
         )
@@ -514,6 +637,22 @@ mod tests {
             assert_eq!(report.membership_failures(ExtractStrategy::Simple).len(), 1);
             assert!(!report.nodes_and_ways_agree());
         }
+    }
+
+    #[test]
+    fn the_claim_names_the_region_kind_not_exercised() {
+        let bbox = Bbox::parse("12.4,55.6,12.7,55.8").unwrap();
+        let city = PolygonInput {
+            name: "city".into(),
+            path: PathBuf::from("/d/city.geojson"),
+            digest: "a".repeat(32).parse().unwrap(),
+        };
+        assert!(coverage_clause(Some(&bbox), &[]).contains("no polygon region is exercised"));
+        assert_eq!(
+            coverage_clause(Some(&bbox), std::slice::from_ref(&city)),
+            "; on the bbox and on polygons city"
+        );
+        assert!(coverage_clause(None, &[city]).contains("no bbox region is exercised"));
     }
 
     #[test]

@@ -6,9 +6,12 @@
 use std::path::{Path, PathBuf};
 
 use crate::clean::layout::{PbfhoggFileKind, PbfhoggLayout};
+use crate::datasets::resolve::PolygonInput;
 use crate::datasets::{Bbox, ElementIdList};
 use crate::error::DevError;
-use crate::pbfhogg::context::{CommandContext, CommandObservations, CommandParams};
+use crate::pbfhogg::context::{
+    CommandContext, CommandObservations, CommandParams, Region, ResolvedInputs,
+};
 
 // ---------------------------------------------------------------------------
 // Input / output descriptors
@@ -897,9 +900,10 @@ impl PbfhoggCommand {
     ///
     /// Extract and multi-extract likewise qualify by what the brokkr argv
     /// does not show: the bbox when it came from the dataset rather than
-    /// `--bbox`, and the strategy when one argv fans out over every strategy
-    /// (`CommandParams::strategy_fanout`). An explicit `--bbox` with a single
-    /// `--strategy` stays unqualified.
+    /// `--bbox`, every dataset polygon as `name@xxh128` (the argv names a
+    /// polygon, not its bytes), and the strategy when one argv fans out over
+    /// every strategy (`CommandParams::strategy_fanout`), in that order. An
+    /// explicit `--bbox` with a single `--strategy` stays unqualified.
     ///
     /// A `digest` asked for no form qualifies by the form it measures
     /// (`form=full` or `form=content`, [`digest_form`]), which the brokkr argv
@@ -916,6 +920,12 @@ impl PbfhoggCommand {
                     && let Some(bbox) = ctx.inputs.bbox()
                 {
                     parts.push(format!("bbox={}", canonical_bbox(bbox)));
+                }
+                let polygons = ctx.inputs.polygons();
+                if !polygons.is_empty() {
+                    let identities: Vec<String> =
+                        polygons.iter().map(PolygonInput::identity).collect();
+                    parts.push(format!("polygon={}", identities.join(",")));
                 }
                 if ctx.params.strategy_fanout {
                     parts.push(format!("strategy={}", strategy.name()));
@@ -1030,11 +1040,14 @@ impl PbfhoggCommand {
 
     /// Build the core argv for an extract command with an explicit output
     /// path. Shared by measured commands, suite benchmarks and verification,
-    /// keeping the strategy flag and single-token `-b=<bbox>` spelling alike.
+    /// keeping the strategy flag and region spelling alike: a bbox as the
+    /// single token `-b=<bbox>` (a negative longitude stays its value), a
+    /// polygon as `--polygon <file>`, a declared read whose path is absolute
+    /// under the data directory.
     pub(crate) fn extract_args_for(
         &self,
         pbf: &Path,
-        bbox: &Bbox,
+        region: &Region,
         output: &Path,
     ) -> Result<CommandArgv, DevError> {
         let Self::Extract { strategy } = self else {
@@ -1047,7 +1060,11 @@ impl PbfhoggCommand {
         if let Some(flag) = strategy.flag() {
             argv = argv.arg(flag);
         }
-        argv.arg(bbox.to_pbfhogg_arg()).output(output)
+        let argv = match region {
+            Region::Bbox(bbox) => argv.arg(bbox.to_pbfhogg_arg()),
+            Region::Polygon(polygon) => argv.read_opt("--polygon", &polygon.path)?,
+        };
+        argv.output(output)
     }
 
     /// Build the body of the argument vector (no binary prefix), with what it
@@ -1370,16 +1387,12 @@ impl PbfhoggCommand {
                 // dry-run must not touch the filesystem. The real run paths
                 // call `prepare_scratch` to materialise it.
                 let output_dir = scratch_output_path(ctx, self, mode)?;
-                let bbox = ctx
-                    .inputs
-                    .bbox()
-                    .ok_or_else(|| DevError::Config("multi-extract requires a bbox".into()))?;
-                let plan = multi_extract_plan(ctx, output_dir, bbox, *regions)?;
+                let plan = multi_extract_plan(ctx, output_dir, *regions)?;
                 // The outputs are named in the config file; one argv
                 // `--overwrite` covers every one of them.
                 let argv = CommandArgv::new("extract")
                     .input(ctx.pbf_str()?)?
-                    .extract_config(&plan.config_path, plan.outputs)?;
+                    .extract_config(&plan.config_path, plan.config)?;
                 Ok(match strategy.flag() {
                     Some(flag) => argv.arg(flag),
                     None => argv,
@@ -1387,15 +1400,14 @@ impl PbfhoggCommand {
             }
 
             // -----------------------------------------------------------------
-            // Multi-variant: extract (with resolved bbox)
+            // Multi-variant: extract (with resolved region)
             // -----------------------------------------------------------------
             Self::Extract { .. } => {
-                let bbox = ctx
-                    .inputs
-                    .bbox()
-                    .ok_or_else(|| DevError::Config("extract requires a bbox".into()))?;
+                let ResolvedInputs::PbfAndRegion { region, .. } = &ctx.inputs else {
+                    return Err(DevError::Config("extract requires a region".into()));
+                };
                 let output = scratch_output_path(ctx, self, mode)?;
-                self.extract_args_for(Path::new(ctx.pbf_str()?), bbox, &output)
+                self.extract_args_for(Path::new(ctx.pbf_str()?), region, &output)
             }
         }
     }
@@ -1429,15 +1441,11 @@ impl PbfhoggCommand {
             return Ok(());
         };
         let output_dir = scratch_output_path(ctx, self, ArgMode::Bench)?;
-        let bbox = ctx
-            .inputs
-            .bbox()
-            .ok_or_else(|| DevError::Config("multi-extract requires a bbox".into()))?;
-        let plan = multi_extract_plan(ctx, output_dir, bbox, *regions)?;
+        let plan = multi_extract_plan(ctx, output_dir, *regions)?;
         std::fs::create_dir_all(&plan.output_dir)?;
         // A launch reading the config is reserved; the gate refuses to
         // rewrite it under one.
-        crate::reservations::write(&plan.config_path, plan.config_json.as_bytes())?;
+        crate::reservations::write(&plan.config_path, plan.config.json.as_bytes())?;
         Ok(())
     }
 }
@@ -1446,62 +1454,103 @@ impl PbfhoggCommand {
 struct MultiExtractPlan {
     output_dir: PathBuf,
     config_path: PathBuf,
-    config_json: String,
-    outputs: Vec<PathBuf>,
+    config: MultiExtractConfig,
 }
 
-/// Compute multi-extract's config without touching the filesystem.
-///
-/// Splits the bbox into `regions` equal-width longitude strips. The JSON is
-/// built with `serde_json` so the output directory path is escaped properly
-/// (it used to be spliced in with `display()`, which broke on a `"` or `\`).
+/// Compute multi-extract's config without touching the filesystem: the
+/// bbox's `regions` equal-width longitude strips, then the requested dataset
+/// polygons.
 fn multi_extract_plan(
     ctx: &CommandContext,
     output_dir: PathBuf,
-    bbox: &Bbox,
     regions: usize,
 ) -> Result<MultiExtractPlan, DevError> {
-    let strips = bbox.strips(regions)?;
-    let config = multi_extract_config(&output_dir, &strips)?;
+    let ResolvedInputs::PbfAndRegions { bbox, polygons, .. } = &ctx.inputs else {
+        return Err(DevError::Config("multi-extract requires a bbox".into()));
+    };
+    let named = multi_extract_regions(&bbox.strips(regions)?, polygons);
+    let config = multi_extract_config(&output_dir, &named)?;
     Ok(MultiExtractPlan {
         output_dir,
         config_path: multi_extract_config_path(&ctx.scratch_dir),
-        config_json: config.json,
-        outputs: config.outputs,
+        config,
     })
 }
 
-/// A multi-extract config and the outputs it names, from one construction.
+/// One region of a generated multi-extract config, with the stem its output
+/// is named by (`<stem>.osm.pbf`).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct NamedRegion {
+    pub(crate) stem: String,
+    pub(crate) region: Region,
+}
+
+impl NamedRegion {
+    pub(crate) fn output_name(&self) -> String {
+        format!("{}.osm.pbf", self.stem)
+    }
+}
+
+/// The ordered regions of a generated multi-extract config: `strip-<i>` for
+/// each strip, then `polygon-<name>` for each polygon. Polygon names match
+/// `[A-Za-z0-9_-]+` and carry the prefix, so no two stems collide.
+pub(crate) fn multi_extract_regions(
+    strips: &[Bbox],
+    polygons: &[PolygonInput],
+) -> Vec<NamedRegion> {
+    let strips = strips.iter().enumerate().map(|(i, strip)| NamedRegion {
+        stem: format!("strip-{i}"),
+        region: Region::Bbox(strip.clone()),
+    });
+    let polygons = polygons.iter().map(|polygon| NamedRegion {
+        stem: format!("polygon-{}", polygon.name),
+        region: Region::Polygon(polygon.clone()),
+    });
+    strips.chain(polygons).collect()
+}
+
+/// A multi-extract config, the outputs it names and the polygon files it
+/// reads, from one construction, so the reservation a launch makes cannot
+/// disagree with the document.
+#[derive(Debug, Clone)]
 pub(crate) struct MultiExtractConfig {
     pub(crate) json: String,
     pub(crate) outputs: Vec<PathBuf>,
+    pub(crate) reads: Vec<PathBuf>,
 }
 
-/// Encode shared multi-extract strips for a resolved output path. Both the
-/// measured command and `verify multi-extract` use serde_json for escaping.
+/// Encode multi-extract regions for a resolved output path. Both the measured
+/// command and `verify multi-extract` use serde_json for escaping. A bbox
+/// region is written as its coordinates, a polygon as a `polygon_file` entry
+/// naming its absolute path, so pbfhogg's relative-path rule never applies.
 pub(crate) fn multi_extract_config(
     output_dir: &Path,
-    strips: &[Bbox],
+    regions: &[NamedRegion],
 ) -> Result<MultiExtractConfig, DevError> {
-    if strips.is_empty() {
+    if regions.is_empty() {
         return Err(DevError::Config(
             "multi-extract requires at least 1 region".into(),
         ));
     }
     let output_dir_str = crate::utf8_path::path_string(output_dir)?;
-    let names: Vec<String> = (0..strips.len())
-        .map(|i| format!("strip-{i}.osm.pbf"))
-        .collect();
-    let extracts: Vec<serde_json::Value> = strips
-        .iter()
-        .zip(&names)
-        .map(|(bbox, name)| {
-            serde_json::json!({
-                "output": name,
+    let mut reads = Vec::new();
+    let mut extracts = Vec::with_capacity(regions.len());
+    for named in regions {
+        let entry = match &named.region {
+            Region::Bbox(bbox) => serde_json::json!({
+                "output": named.output_name(),
                 "bbox": bbox.coordinates(),
-            })
-        })
-        .collect();
+            }),
+            Region::Polygon(polygon) => {
+                reads.push(polygon.path.clone());
+                serde_json::json!({
+                    "output": named.output_name(),
+                    "polygon_file": crate::utf8_path::path_string(&polygon.path)?,
+                })
+            }
+        };
+        extracts.push(entry);
+    }
     let config = serde_json::json!({
         "directory": output_dir_str,
         "extracts": extracts,
@@ -1511,7 +1560,11 @@ pub(crate) fn multi_extract_config(
 
     Ok(MultiExtractConfig {
         json: config_json,
-        outputs: names.iter().map(|name| output_dir.join(name)).collect(),
+        outputs: regions
+            .iter()
+            .map(|named| output_dir.join(named.output_name()))
+            .collect(),
+        reads,
     })
 }
 
@@ -1593,15 +1646,32 @@ mod tests {
 
     fn test_ctx() -> CommandContext {
         CommandContext {
-            inputs: ResolvedInputs::PbfAndBbox {
+            inputs: ResolvedInputs::PbfAndRegion {
                 pbf: PathBuf::from("/data/denmark.osm.pbf"),
-                bbox: Bbox::parse("12.4,55.6,12.7,55.8").unwrap(),
+                region: Region::Bbox(Bbox::parse("12.4,55.6,12.7,55.8").unwrap()),
             },
             scratch_dir: PathBuf::from("/data/scratch"),
             dataset: "denmark".into(),
             params: CommandParams::default(),
             observations: CommandObservations::default(),
         }
+    }
+
+    fn polygon(name: &str, digit: char) -> PolygonInput {
+        PolygonInput {
+            name: name.into(),
+            path: PathBuf::from(format!("/data/{name}.geojson")),
+            digest: digit.to_string().repeat(32).parse().unwrap(),
+        }
+    }
+
+    /// Multi-extract's input: test_ctx's PBF and box, and `polygons`.
+    fn use_multi_regions(ctx: &mut CommandContext, polygons: Vec<PolygonInput>) {
+        ctx.inputs = ResolvedInputs::PbfAndRegions {
+            pbf: PathBuf::from("/data/denmark.osm.pbf"),
+            bbox: Bbox::parse("12.4,55.6,12.7,55.8").unwrap(),
+            polygons,
+        };
     }
 
     fn getid() -> PbfhoggCommand {
@@ -1708,6 +1778,93 @@ mod tests {
         ctx.params.strategy_fanout = false;
         assert_eq!(extract.arm_qualifier(&ctx), None);
         assert_eq!(multi.arm_qualifier(&ctx), None);
+    }
+
+    #[test]
+    fn a_polygon_qualifies_by_name_and_content_never_by_the_bbox() {
+        let smart = ExtractStrategy::Smart;
+        let extract = PbfhoggCommand::Extract { strategy: smart };
+        let multi = PbfhoggCommand::MultiExtract {
+            regions: 2,
+            strategy: smart,
+        };
+        let a = format!("city@{}", "a".repeat(32));
+        let b = format!("town@{}", "b".repeat(32));
+
+        // An extract's polygon region: the polygon, then the strategy.
+        let mut ctx = test_ctx();
+        ctx.inputs = ResolvedInputs::PbfAndRegion {
+            pbf: PathBuf::from("/data/denmark.osm.pbf"),
+            region: Region::Polygon(polygon("city", 'a')),
+        };
+        assert_eq!(
+            extract.arm_qualifier(&ctx).as_deref(),
+            Some(format!("polygon={a}").as_str())
+        );
+        ctx.params.strategy_fanout = true;
+        assert_eq!(
+            extract.arm_qualifier(&ctx).as_deref(),
+            Some(format!("polygon={a};strategy=smart").as_str())
+        );
+
+        // Multi-extract: the box its strips come from, the polygons in
+        // order, the strategy.
+        let mut ctx = test_ctx();
+        use_multi_regions(&mut ctx, vec![polygon("city", 'a'), polygon("town", 'b')]);
+        ctx.params.strategy_fanout = true;
+        assert_eq!(
+            multi.arm_qualifier(&ctx).as_deref(),
+            Some(format!("bbox=12.4,55.6,12.7,55.8;polygon={a},{b};strategy=smart").as_str())
+        );
+        // Two names on the same bytes stay apart.
+        assert_ne!(
+            polygon("city", 'a').identity(),
+            polygon("copy", 'a').identity()
+        );
+    }
+
+    #[test]
+    fn a_polygon_extract_reads_its_file_through_the_long_flag() {
+        let mut ctx = test_ctx();
+        ctx.inputs = ResolvedInputs::PbfAndRegion {
+            pbf: PathBuf::from("/data/denmark.osm.pbf"),
+            region: Region::Polygon(polygon("city", 'a')),
+        };
+        let argv = PbfhoggCommand::Extract {
+            strategy: ExtractStrategy::Simple,
+        }
+        .build_args(&ctx, ArgMode::Bench)
+        .unwrap();
+        let args = argv.args();
+        let at = args.iter().position(|a| a == "--polygon").unwrap();
+        assert_eq!(args[at + 1], "/data/city.geojson");
+        assert!(!args.iter().any(|a| a.starts_with("-b")));
+        assert!(argv.reads().contains(&PathBuf::from("/data/city.geojson")));
+    }
+
+    #[test]
+    fn a_multi_extract_config_appends_polygon_files_after_the_strips() {
+        let mut ctx = test_ctx();
+        ctx.scratch_dir = PathBuf::from("/data/scratch");
+        use_multi_regions(&mut ctx, vec![polygon("city", 'a')]);
+        let cmd = PbfhoggCommand::MultiExtract {
+            regions: 2,
+            strategy: ExtractStrategy::Simple,
+        };
+        let output_dir = scratch_output_path(&ctx, &cmd, ArgMode::Bench).unwrap();
+        let plan = multi_extract_plan(&ctx, output_dir.clone(), 2).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&plan.config.json).unwrap();
+        let extracts = json["extracts"].as_array().unwrap();
+        assert_eq!(extracts.len(), 3);
+        assert_eq!(extracts[1]["output"], "strip-1.osm.pbf");
+        assert_eq!(extracts[2]["output"], "polygon-city.osm.pbf");
+        assert_eq!(extracts[2]["polygon_file"], "/data/city.geojson");
+        assert!(extracts[2].get("bbox").is_none());
+        assert_eq!(plan.config.reads, [PathBuf::from("/data/city.geojson")]);
+        assert_eq!(
+            plan.config.outputs[2],
+            output_dir.join("polygon-city.osm.pbf")
+        );
     }
 
     #[test]
@@ -1855,7 +2012,9 @@ mod tests {
     /// A context whose inputs fit `cmd`.
     fn ctx_for(cmd: &PbfhoggCommand) -> CommandContext {
         let mut ctx = test_ctx();
-        if matches!(
+        if matches!(cmd, PbfhoggCommand::MultiExtract { .. }) {
+            use_multi_regions(&mut ctx, Vec::new());
+        } else if matches!(
             cmd,
             PbfhoggCommand::Diff { .. } | PbfhoggCommand::DiffSnapshots { .. }
         ) {
@@ -2709,6 +2868,7 @@ mod tests {
     #[test]
     fn multi_extract_build_args_writes_nothing() {
         let mut ctx = test_ctx();
+        use_multi_regions(&mut ctx, Vec::new());
         ctx.scratch_dir = crate::test_scratch::scratch("pbfhogg-commands", "multi_extract_pure");
         let cmd = PbfhoggCommand::MultiExtract {
             regions: 3,
@@ -2730,6 +2890,7 @@ mod tests {
     #[test]
     fn multi_extract_config_escapes_the_directory() {
         let mut ctx = test_ctx();
+        use_multi_regions(&mut ctx, Vec::new());
         ctx.scratch_dir = PathBuf::from("/data/odd \"quoted\\\" dir");
         let output_dir = scratch_output_path(
             &ctx,
@@ -2740,9 +2901,8 @@ mod tests {
             ArgMode::Bench,
         )
         .unwrap();
-        let bbox = ctx.inputs.bbox().unwrap();
-        let plan = multi_extract_plan(&ctx, output_dir, bbox, 1).unwrap();
-        let json: serde_json::Value = serde_json::from_str(&plan.config_json).unwrap();
+        let plan = multi_extract_plan(&ctx, output_dir, 1).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&plan.config.json).unwrap();
         assert_eq!(
             json["directory"].as_str().unwrap(),
             "/data/odd \"quoted\\\" dir/multi-extract"

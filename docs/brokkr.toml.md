@@ -18,7 +18,7 @@ The rest of the universal schema is split by subject:
 
 Project-specific config blocks live in their own docs, so a checkout only ever
 reads the ones that apply to it:
-- Datasets (`[<host>.datasets.*]` pbf/osc/pmtiles) and the `--variant` /
+- Datasets (`[<host>.datasets.*]` pbf/osc/pmtiles/polygon) and the `--variant` /
   `--osc-seq` / `--tiles` flags -> `docs/brokkr.toml.datasets.md` (map-data
   projects only; `brokkr man datasets`)
 - `[<host>.tilegen.*]` -> `docs/brokkr.toml.elivagar.md`
