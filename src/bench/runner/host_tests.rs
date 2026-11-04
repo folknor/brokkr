@@ -5,9 +5,14 @@
 
 use super::*;
 
+static NO_ARGS: std::sync::LazyLock<lua::Args> = std::sync::LazyLock::new(lua::Args::default);
+
 fn setup<'a>(script: &'a lua::Script, root: &'a Path, container: &'a Path) -> IterationSetup<'a> {
     IterationSetup {
         script,
+        args: &NO_ARGS,
+        inputs: &[],
+        config: Arc::new(lua::Value::Table(Vec::new())),
         program: Path::new("/bin/sh"),
         cwd: root,
         state_root: root,
@@ -92,6 +97,50 @@ fn a_descendants_late_markers_land_in_its_childs_evidence() {
         names(&iteration.children[1]).is_empty(),
         "a fresh FIFO per child"
     );
+}
+
+/// A bound file reaches the child through its input handle, the first
+/// handle the iteration holds.
+#[test]
+fn an_input_handle_reaches_the_child() {
+    let _lock = crate::test_scratch::process_global_lock();
+    let root = crate::test_scratch::scratch("bench_runner", "input");
+    let container = root.join("iterations");
+    let input = root.join("in.txt");
+    std::fs::write(&input, b"payload").unwrap();
+    let args = lua::Args {
+        params: vec![(
+            "input".into(),
+            lua::Value::Table(vec![(
+                "file".into(),
+                lua::Value::Handle(lua::HandleRef {
+                    index: 0,
+                    path: input.display().to_string(),
+                }),
+            )]),
+        )],
+        keys: vec![("input".into(), lua::Value::Text("in".into()))],
+    };
+    let script = script(
+        "function bench(params, keys)\n\
+           local r = binary('-c', 'cat \"$1\"', 'sh', params.input.file):ok()\n\
+           record.read = r.stdout\n\
+           record.key = keys.input\n\
+         end",
+    );
+    let inputs = [input.clone()];
+    let mut with_input = setup(&script, &root, &container);
+    with_input.args = &args;
+    with_input.inputs = &inputs;
+    let (iteration, _) = run_iteration(with_input);
+    assert!(
+        matches!(iteration.outcome, store::IterationOutcome::Completed { .. }),
+        "{iteration:?}"
+    );
+    let record = iteration.record.unwrap();
+    assert_eq!(record["read"], "payload");
+    assert_eq!(record["key"], "in");
+    assert_eq!(iteration.children[0].argv[3], input.display().to_string());
 }
 
 #[test]

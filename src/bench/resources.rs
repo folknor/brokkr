@@ -1,8 +1,8 @@
 //! Handles: how a script bench's paths reach its children, and the access
 //! each call declares for them (`reference/bench-resources.md`).
 //!
-//! A handle is a path with an origin. Inputs (the resolved config's file
-//! entries and file-valued params) are read; outputs and scratch, made by
+//! A handle is a path with an origin. Inputs (the bound file-valued params)
+//! are read; outputs and scratch, made by
 //! the iteration, are written; a spool, a finished call's stdout, is read.
 //! A handle passed to a call gets its origin's access by default; the call's
 //! `reads` and `writes` lists override that and also declare handles the
@@ -70,10 +70,6 @@ impl Handle {
 #[derive(Debug)]
 pub(crate) struct Resources {
     iteration: Iteration,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "a run reads no inputs until params bind files")
-    )]
     inputs: Vec<Handle>,
 }
 
@@ -92,10 +88,7 @@ impl Resources {
         })
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "a run reads no inputs until params bind files")
-    )]
+    /// The inputs as handles, in the order `open` took them.
     pub(crate) fn inputs(&self) -> &[Handle] {
         &self.inputs
     }

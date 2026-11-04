@@ -32,14 +32,9 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 pub use document::{
     BoundParam, Build, Child, ChildEnding, Clock, Conditions, DOCUMENT_FORMAT, Evidence, Iteration,
-    IterationOutcome, Loss, Record, ResolvedBuild, RunDocument, RunOutcome, Sample, SinkEnd,
+    IterationOutcome, Loss, ParamValue, Record, ResolvedBuild, RunDocument, RunOutcome, Sample,
+    SinkEnd,
 };
-// Expected to go unfulfilled once a run binds param values.
-#[cfg_attr(
-    not(test),
-    expect(unused_imports, reason = "no run binds a param value yet")
-)]
-pub use document::ParamValue;
 pub use error::StoreError;
 pub use list::{RunFilter, StoredRun};
 

@@ -73,6 +73,29 @@ pub(crate) struct HandleRef {
     pub(crate) path: String,
 }
 
+/// A value the runner hands the script, built without dellingr: the params,
+/// their keys, `config()`'s table. A table's keys are strings; a list is
+/// positions 1..n.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Value {
+    Bool(bool),
+    Number(f64),
+    Text(String),
+    List(Vec<Value>),
+    Table(Vec<(String, Value)>),
+    /// A handle the runner gave out, as `output()` returns one.
+    Handle(HandleRef),
+}
+
+/// What `bench()` is called with: `bench(params, keys)`, both tables.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct Args {
+    /// Each bound param's entry (a plain param's string).
+    pub(crate) params: Vec<(String, Value)>,
+    /// Each bound param's chosen key (a list for a collection).
+    pub(crate) keys: Vec<(String, Value)>,
+}
+
 /// What one `binary()` call hands back to the script.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CallOutcome {
@@ -116,6 +139,8 @@ pub(crate) trait Host: Send + 'static {
     fn since(&mut self, sha: &str) -> Result<bool, Abort>;
     fn output(&mut self, name: &str) -> Result<HandleRef, Abort>;
     fn scratch(&mut self, name: &str) -> Result<HandleRef, Abort>;
+    /// The resolved config, for `config()`; allowed at top level.
+    fn config(&mut self) -> Result<std::sync::Arc<Value>, Abort>;
 }
 
 /// How one sample ended.
@@ -150,9 +175,9 @@ struct Ctx<H> {
 }
 
 /// Run one sample of `script` in a fresh State: the chunk's top level, then
-/// `bench(params)` (params an empty table) timed from its call to its
-/// return, then `record` extracted. Returns the host for the next sample.
-pub(crate) fn run_sample<H: Host>(script: &Script, host: H) -> (Sample, H) {
+/// `bench(params, keys)` timed from its call to its return, then `record`
+/// extracted. Returns the host for the next sample.
+pub(crate) fn run_sample<H: Host>(script: &Script, args: &Args, host: H) -> (Sample, H) {
     let mut state = State::with_callbacks(Box::new(Console));
     let ok = match install::<H>(&mut state) {
         Ok(ok) => ok,
@@ -168,7 +193,7 @@ pub(crate) fn run_sample<H: Host>(script: &Script, host: H) -> (Sample, H) {
         in_bench: false,
         ok,
     }));
-    let sample = sample::<H>(&mut state, script);
+    let sample = sample::<H>(&mut state, script, args);
     let host = state
         .user_data_mut::<Option<Ctx<H>>>()
         .and_then(Option::take)
@@ -188,7 +213,7 @@ fn failed(reason: String, wall: Option<Duration>) -> Sample {
     }
 }
 
-fn sample<H: Host>(state: &mut State, script: &Script) -> Sample {
+fn sample<H: Host>(state: &mut State, script: &Script, args: &Args) -> Sample {
     if let Err(error) = state
         .load(&script.0)
         .and_then(|()| state.call(ArgCount::Fixed(0), RetCount::Fixed(0)))
@@ -204,15 +229,18 @@ fn sample<H: Host>(state: &mut State, script: &Script) -> Sample {
             None,
         );
     }
-    if let Err(error) = state.new_table() {
+    if let Err(error) = push_value(state, &Value::Table(args.params.clone())) {
         return failed(format!("cannot make the params table: {error}"), None);
+    }
+    if let Err(error) = push_value(state, &Value::Table(args.keys.clone())) {
+        return failed(format!("cannot make the keys table: {error}"), None);
     }
     let start = Instant::now();
     if let Some(ctx) = ctx::<H>(state) {
         ctx.in_bench = true;
         ctx.host.begin_block(start);
     }
-    let called = state.call(ArgCount::Fixed(1), RetCount::Fixed(1));
+    let called = state.call(ArgCount::Fixed(2), RetCount::Fixed(1));
     let wall = start.elapsed();
     if let Some(ctx) = ctx::<H>(state) {
         ctx.in_bench = false;
@@ -282,12 +310,13 @@ fn abort_of(error: &Error) -> Option<&Abort> {
 /// The builtins, as globals (so dellingr names them in errors), and the
 /// `record` table. Returns the handle of `result:ok`.
 fn install<H: Host>(state: &mut State) -> Result<RustFnHandle, Error> {
-    let builtins: [(&str, ::dellingr::RustFunc); 5] = [
+    let builtins: [(&str, ::dellingr::RustFunc); 6] = [
         ("binary", lua_binary::<H>),
         ("since", lua_since::<H>),
         ("fail", lua_fail),
         ("output", lua_output::<H>),
         ("scratch", lua_scratch::<H>),
+        ("config", lua_config::<H>),
     ];
     for (name, function) in builtins {
         let handle = state.add_rust_fn(function)?;
@@ -392,6 +421,12 @@ fn make_handle<H: Host>(
     let name = string_arg(state, 1, function)?;
     let made = make(bench_host::<H>(state, function)?, &name);
     let handle = made.map_err(|abort| raise(state, abort))?;
+    push_handle(state, &handle)?;
+    Ok(1)
+}
+
+/// A handle's table: `path`, and its index under the hidden key.
+fn push_handle(state: &mut State, handle: &HandleRef) -> Result<(), Error> {
     state.new_table()?;
     let table = top(state);
     state.push_string("path")?;
@@ -399,7 +434,55 @@ fn make_handle<H: Host>(
     state.set_table_raw(table)?;
     state.push_string(HANDLE_KEY)?;
     state.push_number(f64::from(u32::try_from(handle.index).unwrap_or(u32::MAX)))?;
-    state.set_table_raw(table)?;
+    state.set_table_raw(table)
+}
+
+/// Push `value` as a fresh Lua value. A table with the hidden handle key is
+/// refused, so config data can never pass for a handle the runner made.
+fn push_value(state: &mut State, value: &Value) -> Result<(), Error> {
+    match value {
+        Value::Bool(b) => state.push_boolean(*b),
+        Value::Number(n) => state.push_number(*n),
+        Value::Text(text) => state.push_string(text),
+        Value::Handle(handle) => push_handle(state, handle),
+        Value::List(items) => {
+            state.new_table()?;
+            let table = top(state);
+            for (i, item) in items.iter().enumerate() {
+                #[allow(clippy::cast_precision_loss)] // A list is far shorter than 2^53.
+                state.push_number((i + 1) as f64)?;
+                push_value(state, item)?;
+                state.set_table_raw(table)?;
+            }
+            Ok(())
+        }
+        Value::Table(fields) => {
+            state.new_table()?;
+            let table = top(state);
+            for (key, item) in fields {
+                if key == HANDLE_KEY {
+                    return Err(raise_failed(
+                        state,
+                        format!("the key {HANDLE_KEY} is brokkr's: config data cannot use it"),
+                    ));
+                }
+                state.push_string(key)?;
+                push_value(state, item)?;
+                state.set_table_raw(table)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// `config()`: a fresh copy of the resolved config each call.
+fn lua_config<H: Host>(state: &mut State) -> Result<u8, Error> {
+    let view = match ctx::<H>(state) {
+        Some(ctx) => ctx.host.config(),
+        None => return Err(raise_failed(state, "config(): no bench context".into())),
+    };
+    let view = view.map_err(|abort| raise(state, abort))?;
+    push_value(state, &view)?;
     Ok(1)
 }
 

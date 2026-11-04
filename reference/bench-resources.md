@@ -108,7 +108,7 @@ that passes it:
 
 | origin | made by | default access | writable |
 |---|---|---|---|
-| input | the resolved config's file entries and file-valued params | read | no |
+| input | a bound file-valued param, the first handles an iteration holds | read | no |
 | output | the iteration, a path under `out/`, not created | write | yes |
 | scratch | the iteration, an empty directory under `scratch/` | write | yes |
 | spool | a finished call's stdout, under `stdout/` | read | no |
@@ -118,6 +118,31 @@ handles the argv does not show (a path inside a file the script wrote, a
 `--output=PATH` spelling). A handle in both lists is refused, and so is an
 input or a spool in `writes`. Output and scratch names are one path
 component, each given once per iteration.
+
+Only a bound param makes a file an input. The resolved config `config()`
+returns holds every other file entry as its path string, so a file a script
+picks from it is undeclared, like any literal, and is neither reserved,
+digested nor paired; a script that needs one reserved binds it with a
+param. The file builtins that take handles (`read`, `write`, `filesize`)
+therefore reach a config file only through a bound param.
+
+## The run's inputs
+
+An iteration's owner lease reserves the inputs only while the iteration
+lives, and their digests are taken before the build, so the run itself
+holds them too: once its params are bound, before hashing, the runner takes
+a **read hold**, an untied lease reserving every bound input for reading,
+refused like a launch when any reservation writes an overlapping path or
+any lease cannot be established, and refused outright without a lease
+store (it never degrades to an unreserved run). It is held until the run
+ends, publication included, and lent to no child. Between iterations and
+during the build it is what keeps another lease from writing an input; a
+crash leaves it free, and a scan reclaims it, while any iteration a
+surviving child still uses keeps its own owner lease, pinned by that
+child's borrow, and with it the same inputs. A tree digest (a plain
+dataset's `path` naming a directory) records internal links by their
+target text, so a file reached through a link out of the tree is neither
+reserved nor digested by naming the tree.
 
 ## Stdout spools
 

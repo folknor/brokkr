@@ -5,8 +5,9 @@
 //! compiled, nothing executed), the runner `brokkr bench NAME` drives
 //! (`runner`), the dellingr seam its scripts run through (`lua`), the bench
 //! store with brokkr's adapter to it (`store`, `evidence`), `brokkr results`'
-//! reading of that store (`results`), and the handles a script's paths reach
-//! its children through (`resources`). The store's wire contract
+//! reading of that store (`results`), the resolved config a script sees
+//! (`view`), the params bound against it (`params`), and the handles a
+//! script's paths reach its children through (`resources`). The store's wire contract
 //! (`store::wire`) is served by the `brokkr-results-server` binary, and
 //! `remote` is brokkr's client of it, used in place of the local store when
 //! the user-wide config names a server; `publication` is the retry and
@@ -14,6 +15,7 @@
 
 mod evidence;
 mod lua;
+mod params;
 mod publication;
 mod remote;
 mod resources;
@@ -33,6 +35,7 @@ pub(crate) mod runner;
 pub(crate) mod store;
 #[cfg(test)]
 mod store_tests;
+mod view;
 #[cfg(test)]
 mod wire_tests;
 

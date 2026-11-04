@@ -10,6 +10,7 @@ struct Fake {
     stdout: Vec<u8>,
     since: Vec<String>,
     blocks: usize,
+    config: Option<Value>,
 }
 
 impl Host for Fake {
@@ -47,11 +48,96 @@ impl Host for Fake {
             path: format!("/it/scratch/{name}"),
         })
     }
+    fn config(&mut self) -> Result<std::sync::Arc<Value>, Abort> {
+        Ok(std::sync::Arc::new(
+            self.config.clone().unwrap_or(Value::Table(Vec::new())),
+        ))
+    }
 }
 
 fn run(source: &str, host: Fake) -> (Sample, Fake) {
+    run_with(source, &Args::default(), host)
+}
+
+fn run_with(source: &str, args: &Args, host: Fake) -> (Sample, Fake) {
     let script = load_script(source.as_bytes(), Some("test.lua")).unwrap();
-    run_sample(&script, host)
+    run_sample(&script, args, host)
+}
+
+/// The params, their keys and `config()` reach the script; a handle among
+/// them is a real handle to `binary()`, and config data cannot forge one.
+#[test]
+fn params_keys_and_config_reach_the_script() {
+    let args = Args {
+        params: vec![
+            ("jobs".into(), Value::Text("4".into())),
+            (
+                "variant".into(),
+                Value::Table(vec![
+                    (
+                        "file".into(),
+                        Value::Handle(HandleRef {
+                            index: 0,
+                            path: "/d/x.pbf".into(),
+                        }),
+                    ),
+                    ("seq".into(), Value::Number(4704.0)),
+                ]),
+            ),
+            (
+                "osc".into(),
+                Value::List(vec![Value::Table(vec![(
+                    "file".into(),
+                    Value::Text("/d/1.osc".into()),
+                )])]),
+            ),
+        ],
+        keys: vec![
+            ("jobs".into(), Value::Text("4".into())),
+            ("variant".into(), Value::Text("indexed".into())),
+            ("osc".into(), Value::List(vec![Value::Text("1".into())])),
+        ],
+    };
+    let host = Fake {
+        config: Some(Value::Table(vec![(
+            "data".into(),
+            Value::Table(vec![("n".into(), Value::Bool(true))]),
+        )])),
+        ..Fake::default()
+    };
+    let source = "top = config().data.n\n\
+                  function bench(params, keys)\n\
+                    record.jobs = params.jobs\n\
+                    record.key = keys.variant\n\
+                    record.seq = params.variant.seq\n\
+                    record.path = params.variant.file.path\n\
+                    record.osc = params.osc[1].file\n\
+                    record.osc_key = keys.osc[1]\n\
+                    record.top = top\n\
+                    local c = config()\n\
+                    c.data.n = false\n\
+                    record.fresh = config().data.n\n\
+                    binary(params.variant.file)\n\
+                  end";
+    let (sample, host) = run_with(source, &args, host);
+    assert_eq!(sample.outcome, SampleOutcome::Completed(None), "{sample:?}");
+    let record = sample.record.unwrap();
+    assert_eq!(record["jobs"], "4");
+    assert_eq!(record["key"], "indexed");
+    assert_eq!(record["seq"], 4704);
+    assert_eq!(record["path"], "/d/x.pbf");
+    assert_eq!(record["osc"], "/d/1.osc");
+    assert_eq!(record["osc_key"], "1");
+    assert_eq!(record["top"], true);
+    assert_eq!(record["fresh"], true, "each config() is a fresh copy");
+    assert_eq!(host.calls, [vec![Word::Handle(0)]]);
+
+    let forged = Fake {
+        config: Some(Value::Table(vec![(HANDLE_KEY.into(), Value::Number(0.0))])),
+        ..Fake::default()
+    };
+    let (sample, _) = run("function bench() config() end", forged);
+    assert!(reason(&sample).contains(HANDLE_KEY), "{sample:?}");
 }
 
 fn reason(sample: &Sample) -> &str {
@@ -284,8 +370,8 @@ fn a_fresh_state_each_sample_forgets_the_last_one() {
         None,
     )
     .unwrap();
-    let (first, host) = run_sample(&script, Fake::default());
-    let (second, _) = run_sample(&script, host);
+    let (first, host) = run_sample(&script, &Args::default(), Fake::default());
+    let (second, _) = run_sample(&script, &Args::default(), host);
     assert_eq!(first.record, second.record);
     assert_eq!(second.record.unwrap()["n"], 1);
 }

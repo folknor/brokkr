@@ -228,6 +228,15 @@ would churn every litehtml/sluggrs invocation in CI and docs.
 
 ## Backlog
 
+### `brokkr env` never lists a dataset's snapshot files (2026-11-04)
+
+`src/datasets/status.rs` inventories each dataset's primary `pbf`, `osc`,
+`pmtiles` and `polygon` entries and its plain `path`, never
+`snapshot.<key>.pbf` or `.osc`, so a snapshot file is never shown as
+verified, mismatched or missing, though typed commands and script-bench
+params (through `snapshot.base` and named snapshots) read and verify them.
+Found while building slice 6's resolved view.
+
 ### Untested paths in the library harness and FIFO work (2026-10-29)
 
 Each part below is tested, its whole path is not:

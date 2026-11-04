@@ -61,7 +61,10 @@ iteration and a run whose iterations disagreed are all stored. It holds:
   (the bin and cargo's resolved features) and the artifact digest, each
   only as far as the build got;
 - params by name, each with `many`, its resolved `from` path (`None` for a
-  plain string) and its values in bound order, each a key and, for a file,
+  plain string; otherwise the path into the run's resolved view,
+  `docs/brokkr.toml.bench.md`, with `{param}` references substituted, its
+  segments joined by dots, a segment that is not a bare TOML key quoted)
+  and its values in bound order, each a key and, for a file,
   a digest. An unbound param is absent; a bound empty collection keeps its
   name and path;
 - the configuration text the run was made from, stored once per distinct

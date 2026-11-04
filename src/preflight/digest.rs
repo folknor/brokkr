@@ -483,6 +483,14 @@ pub fn cached_path_digest(path: &Path, project_root: &Path) -> Result<PathDigest
         // fold are what keep a multi-gigabyte delivery from being re-read.
         return compute_tree_digest(path, project_root).map(PathDigest::Tree);
     }
+    if !meta.is_file() {
+        // A FIFO would block, a device hash whatever it yields (forever, for
+        // `/dev/zero`): no content a pin can describe.
+        return Err(DevError::Preflight(vec![format!(
+            "{} is neither a regular file nor a directory: no digest can cover it",
+            path.display()
+        )]));
+    }
     let mut cache = HashCache::load(project_root);
     let digest = hash_file_cached(path, &meta, &mut cache)?;
     cache.save();
@@ -669,10 +677,18 @@ fn collect_tree_entries(
             hasher.update(b"symlink\0");
             hasher.update(target.as_os_str().as_encoded_bytes());
             out.push((rel, Xxh128(hasher.digest128().to_be_bytes())));
-        } else {
-            // A regular file (or other non-directory, non-link): its
-            // `symlink_metadata` is its metadata.
+        } else if meta.is_file() {
+            // A regular file: its `symlink_metadata` is its metadata.
             out.push((rel, hash_file_cached(&path, &meta, cache)?));
+        } else {
+            // A FIFO would block the walk, a device would hash whatever it
+            // yields (forever, for `/dev/zero`), and a socket cannot be read:
+            // none is content a pin can describe.
+            return Err(DevError::Preflight(vec![format!(
+                "{} is neither a regular file, a directory nor a link: a tree digest cannot \
+                 cover it",
+                path.display()
+            )]));
         }
     }
     Ok(())

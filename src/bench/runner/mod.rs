@@ -1,5 +1,9 @@
 //! `brokkr bench NAME`: one script-bench run, end to end.
 //!
+//! Before the attempt, the bench's params are bound against the resolved
+//! view (`super::params`, `super::view`) and its bound files reserved for
+//! reading and digested; a refusal there stores nothing.
+//!
 //! The run is one attempt with one document (`reference/bench-store.md`):
 //! the build the bench's TOML asks for (host features folded in), in the
 //! `--commit` worktree when given, then iterations, each a fresh Lua state
@@ -18,7 +22,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use super::lua;
+use super::params;
 use super::store;
+use super::view;
 use crate::config::bench::{Bench, BenchScript};
 use crate::error::DevError;
 use crate::output;
@@ -58,30 +64,40 @@ pub(crate) fn run(
             )
         })
     })?;
-    if args.params == ["--help"] {
-        describe(bench, detection);
+    let given = params::parse(bench, &args.params)?;
+    let hostname = crate::config::hostname()?;
+    // What the run stores is what the view derives from: the composed table,
+    // the hostname and the live project root.
+    let view = view::build(
+        detection.config_sources.composed(),
+        &hostname,
+        detection.project_root.as_path(),
+    );
+    if given.help {
+        describe(bench, detection, &given, &view);
         return Ok(());
     }
-    if !bench.params.is_empty() {
-        return Err(DevError::Refused(format!(
-            "bench {name} declares params ({}), which this brokkr cannot bind yet",
-            bench.params.keys().cloned().collect::<Vec<_>>().join(", ")
-        )));
-    }
-    if let Some(extra) = args.params.first() {
-        return Err(DevError::Usage(format!(
-            "bench {name} takes no params, but {extra:?} follows its name; brokkr's own options go before the name"
-        )));
-    }
+    // Every refusal from here to the attempt is before anything is stored.
+    let mut bound = params::bind(bench, &given, &view)?;
     let frozen = freeze(bench)?;
     // Opened, or for a results server probed, before anything is built or
     // run and before a stop is caught: a run with nowhere to go is never
     // measured.
     let mut destination = Destination::open(&detection.config)?;
+    // The bound files are reserved for reading before they are hashed and
+    // stay reserved until the run ends, so no lease writes them between
+    // their digest and the last iteration.
+    let inputs = bound.inputs();
+    let _inputs_held = if inputs.is_empty() {
+        None
+    } else {
+        let paths: Vec<&Path> = inputs.iter().map(PathBuf::as_path).collect();
+        Some(crate::reservations::hold_reads(&paths)?)
+    };
+    bound.digest(detection.project_root.as_path(), &detection.config_sources)?;
     let started = Instant::now();
     let started_unix_ms = unix_ms();
     let uuid = crate::db::generate_uuid()?;
-    let hostname = crate::config::hostname()?;
     let keep = crate::context::worktree_keep(&detection.config)?;
     let tree = crate::tree_policy::TreePolicy::of(&detection.config);
     // The whole run, worktree setup and publication included: a stop that
@@ -99,6 +115,10 @@ pub(crate) fn run(
         detection,
         bench,
         frozen: &frozen,
+        bound: &bound,
+        args: bound.args(),
+        inputs,
+        config: std::sync::Arc::new(view.lua()),
         committed: args.commit.is_some(),
         uuid: &uuid,
         hostname: &hostname,
@@ -170,8 +190,10 @@ fn list(benches: &BTreeMap<String, Bench>) {
     output::bench_msg(&lines.join("\n"));
 }
 
-/// `brokkr bench NAME --help`: the bench's build settings and its params.
-fn describe(bench: &Bench, detection: &Detection) {
+/// `brokkr bench NAME --help`: the bench's build settings and its params,
+/// each `from` param with the keys it takes on this host, its parents chosen
+/// from the command line, else their defaults.
+fn describe(bench: &Bench, detection: &Detection, given: &params::Given, view: &view::View) {
     let mut lines = vec![
         format!("bench {}: {}", bench.name, script_origin(bench)),
         format!(
@@ -200,10 +222,19 @@ fn describe(bench: &Bench, detection: &Detection) {
         if let Some(default) = &param.default {
             line.push_str(&format!(" [default {default}]"));
         }
+        if param.many {
+            line.push_str(" (a collection)");
+        }
         if let Some(help) = &param.help {
             line.push_str(&format!(": {help}"));
         }
         lines.push(line);
+        match params::values_for(bench, given, view, name) {
+            None => {}
+            Some(Ok(keys)) if keys.is_empty() => lines.push("      no keys on this host".into()),
+            Some(Ok(keys)) => lines.push(format!("      keys: {}", keys.join(", "))),
+            Some(Err(why)) => lines.push(format!("      keys unknown: it {why}")),
+        }
     }
     output::bench_msg(&lines.join("\n"));
 }
@@ -270,6 +301,11 @@ struct Attempt<'a> {
     detection: &'a Detection,
     bench: &'a Bench,
     frozen: &'a Frozen,
+    bound: &'a params::Bound,
+    /// `bench()`'s arguments, the inputs their handles index, `config()`.
+    args: lua::Args,
+    inputs: Vec<PathBuf>,
+    config: std::sync::Arc<lua::Value>,
     committed: bool,
     uuid: &'a str,
     hostname: &'a str,
@@ -323,7 +359,7 @@ impl Attempt<'_> {
                 resolved: None,
                 artifact: None,
             },
-            params: BTreeMap::new(),
+            params: self.bound.document(),
             config: stored_config::render(self.detection, &self.bench.name, self.frozen),
             iterations_requested: self.iterations,
             outcome: store::RunOutcome::Interrupted,
@@ -419,6 +455,9 @@ impl Attempt<'_> {
             }
             let (iteration, returned) = host::run_iteration(host::IterationSetup {
                 script: &self.frozen.script,
+                args: &self.args,
+                inputs: &self.inputs,
+                config: std::sync::Arc::clone(&self.config),
                 program,
                 cwd: self.detection.project_root.as_path(),
                 state_root: state.root(),

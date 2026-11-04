@@ -12,6 +12,7 @@ brokkr bench NAME                     # run one, three iterations
 brokkr bench --iterations 10 NAME
 brokkr bench --commit v0.5.0 NAME     # build and run that commit
 brokkr bench NAME --help              # its build settings and params
+brokkr bench NAME --dataset denmark   # bind a param
 ```
 
 ## The command line
@@ -26,10 +27,20 @@ collide with a param. brokkr's options:
 - `--iterations N` - how many iterations, default 3. The result is the
   fastest.
 
-Params are not bound yet: a bench that declares any is refused, and so are
-tokens after NAME other than a lone `--help`. A `--commit` that names no
-commit is refused before anything runs; from there on every attempt is
-stored, a worktree that could not be set up included.
+After NAME come the bench's params, `--NAME VALUE` or `--NAME=VALUE`, and
+`--help` or `-h` where a param's name could stand. How they bind against
+the resolved config, and what is refused, is `brokkr man bench-config`
+(Binding params). `NAME --help` lists each param with its `from` path, its
+default and, for a `from` param, the keys it takes on this host, the
+parents it depends on chosen from the same command line, else their
+defaults.
+
+Refused before anything runs, and not stored: a param refusal, a bound
+input another reservation writes or whose pin does not match (the inputs
+are reserved for reading, then hashed, after the script is read and the
+store opened, before any build), and a `--commit` that names no commit;
+from there on every attempt is stored, a worktree that could not be set up
+included.
 
 ## The build
 
@@ -49,8 +60,15 @@ features cargo resolved for it, and the snapshot's digest.
 Each iteration is a fresh Lua state, so no global carries from one to the
 next, running the one copy of the script read when the run began (an edit
 during a run changes nothing). The chunk's top level runs first, untimed;
-then `bench(params)` is called, with `params` an empty table, and the
-iteration's wall runs from that call to its return. The whole block is
+then `bench(params, keys)` is called, and the iteration's wall runs from
+that call to its return. `params.NAME` is each bound param's entry: the
+value at its chosen key in the resolved config (a table, string or number,
+a fresh copy each iteration), with a bound file entry's `file` (or a plain
+dataset's `path`) replaced by an input handle; a plain param's string; a
+`many` param's list of entries. `keys.NAME` is the chosen key (a list for a
+`many` param), since an entry has no room for its own. An unbound param is
+nil in both. TOML integers beyond 2^53 arrive as their decimal text,
+datetimes as their TOML text. The whole block is
 measured: brokkr's own work for each `binary()` call (admitting it,
 preparing its spool and marker FIFO, releasing it) is inside the wall, and
 each child's own wall and start offset are recorded beside it.
@@ -81,13 +99,22 @@ or `require`, so every child goes through brokkr.
   fails the iteration. Allowed at top level too, and each sha is asked once
   per run; asked first inside `bench()`, the git call falls in the first
   iteration's wall, so prefer the top level.
+- `config()` - a fresh copy of the resolved config (`brokkr man
+  bench-config`, The resolved view): this host's datasets, `data`, `host`
+  and every other table as composed, file paths absolute. Allowed at top
+  level too. Its file entries hold plain path strings, not handles: a file
+  a script picks from it is undeclared and unpinned, so bind it with a
+  param to have it reserved, digested and paired.
 - `fail(reason)` - fail the iteration with `reason`.
 - `record` - the table stored with the iteration (above).
 - `print(...)` - a `[bench]` line on brokkr's console.
 
 A handle is a table; its `path` field is the path as a string. Passing the
 handle itself to `binary()` reserves what it names for that call; passing
-the string does not.
+the string does not. An input handle (a bound file) is read for the call;
+an output or scratch handle written. A config table holding the key
+`__brokkr_handle`, which brokkr keeps for handles, makes `config()` fail
+rather than pass for one.
 
 ## `binary()`
 
@@ -147,7 +174,8 @@ project's disk, not the host's scratch disk.
 ## What a run stores
 
 Every attempted run is stored, a failed build or an interrupted iteration
-included, with every child's argv, ending, `/proc` samples, marker FIFO
+included, with its bound params (each key, its `from` path and a file's
+digest), every child's argv, ending, `/proc` samples, marker FIFO
 records and capture losses. A run of a dirty tree is stored and marked
 dirty: `brokkr results` lists it with `-dirty` and never compares it. The
 run's uuid is printed whatever `--verbose` says, as the one handle `brokkr
@@ -175,4 +203,5 @@ build root, under `--commit` too), `[script]` (the bench, the file its script ca
 the exact source, as `source`, or `source_hex` when it is not UTF-8) and
 `[config]` (brokkr.toml as composed, includes folded and the user-wide layer
 beneath, every table's keys sorted). `brokkr results --compare` names what
-moved in it between two paired runs.
+moved in it between two paired runs. The resolved view a script saw is not
+stored: it derives from this document and the run's hostname.

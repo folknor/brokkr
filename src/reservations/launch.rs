@@ -393,6 +393,61 @@ impl Drop for Hold {
     }
 }
 
+/// A read reservation this process holds with no child: a script-bench run's
+/// bound inputs, from before their preflight digests until the run ends, so
+/// no other lease writes them between the hash and the last iteration
+/// (`reference/bench-resources.md`, The run's inputs). Never lent: a crash
+/// leaves it free and a scan reclaims it, while each iteration's owner lease
+/// records the same inputs and is pinned by any borrow still running.
+#[derive(Debug)]
+pub(crate) struct ReadHold {
+    lease: Option<Lease>,
+}
+
+/// Reserve `paths` for reading, refused when any lease writes an overlapping
+/// path or cannot be established. Unlike [`hold`], it fails closed: without
+/// a lease store there is no reservation to stand on, so it is refused.
+pub(crate) fn hold_reads(paths: &[&Path]) -> Result<ReadHold, DevError> {
+    let store = super::store().ok_or_else(|| {
+        DevError::Config("$HOME is not set: the launch lease store has nowhere to live".into())
+    })?;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    let _serial = super::serialize().map_err(|e| io_error("cannot reserve the inputs", e))?;
+    let scan = store.scan();
+    let resources = paths
+        .iter()
+        .map(|path| {
+            Spelled::of(path, &cwd)
+                .map(|s| Resource::new(&s, Access::Read, Disposition::Reserve))
+                .map_err(|e| io_error(&format!("cannot resolve {}", path.display()), e))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    refuse_conflicts(&scan, &resources)?;
+    Ok(ReadHold {
+        lease: Some(
+            store
+                .create(resources)
+                .map_err(|e| io_error("cannot create the input reservation", e))?,
+        ),
+    })
+}
+
+impl Drop for ReadHold {
+    fn drop(&mut self) {
+        let Some(lease) = self.lease.take() else {
+            return;
+        };
+        // Without the critical section the lease is dropped unreleased: its
+        // descriptor closes, so a later scan finds it free and reclaims it.
+        let released = super::serialize().and_then(|_serial| lease.release());
+        if let Err(e) = released {
+            crate::output::warn(&format!(
+                "a bench run could not release its input reservation: {e}"
+            ));
+        }
+    }
+}
+
 /// The private directory's location must exist and sit on the same mount as
 /// every output's directory, or a rename from it could not publish.
 fn check_placement(location: &Path, writes: &[PathBuf], cwd: &Path) -> Result<(), DevError> {

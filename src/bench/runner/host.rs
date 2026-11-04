@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use super::PREVIEW_BYTES;
@@ -48,6 +49,12 @@ impl Since {
 /// What an iteration runs with.
 pub(super) struct IterationSetup<'a> {
     pub(super) script: &'a lua::Script,
+    /// `bench()`'s arguments; their handles index `inputs` in order.
+    pub(super) args: &'a lua::Args,
+    /// The bound file params' paths, the iteration's inputs.
+    pub(super) inputs: &'a [PathBuf],
+    /// `config()`'s table.
+    pub(super) config: Arc<lua::Value>,
     /// The snapshot every child runs.
     pub(super) program: &'a Path,
     /// The live project root, every child's working directory.
@@ -66,7 +73,7 @@ pub(super) fn run_iteration(setup: IterationSetup<'_>) -> (store::Iteration, Sin
     let since = setup.since;
     let resources = std::fs::create_dir_all(setup.container)
         .map_err(DevError::from)
-        .and_then(|()| Resources::open(setup.container, &[]));
+        .and_then(|()| Resources::open(setup.container, setup.inputs));
     let resources = match resources {
         Ok(resources) => resources,
         Err(error) => {
@@ -83,9 +90,13 @@ pub(super) fn run_iteration(setup: IterationSetup<'_>) -> (store::Iteration, Sin
             );
         }
     };
+    // The inputs are the first handles, in order, as the args' handles
+    // index them.
+    let handles = resources.inputs().to_vec();
     let host = IterationHost {
         resources: Some(resources),
-        handles: Vec::new(),
+        handles,
+        config: setup.config,
         program: setup.program.to_path_buf(),
         cwd: setup.cwd.to_path_buf(),
         state_root: setup.state_root.to_path_buf(),
@@ -93,7 +104,7 @@ pub(super) fn run_iteration(setup: IterationSetup<'_>) -> (store::Iteration, Sin
         children: Vec::new(),
         since,
     };
-    let (sample, mut host) = lua::run_sample(setup.script, host);
+    let (sample, mut host) = lua::run_sample(setup.script, setup.args, host);
     if let Some(resources) = host.resources.take()
         && let Err(error) = resources.release()
     {
@@ -134,6 +145,7 @@ struct IterationHost {
     resources: Option<Resources>,
     /// Every handle given out, by the index the script's table carries.
     handles: Vec<Handle>,
+    config: Arc<lua::Value>,
     program: PathBuf,
     cwd: PathBuf,
     state_root: PathBuf,
@@ -364,6 +376,11 @@ impl lua::Host for IterationHost {
             .scratch(name)
             .map_err(|e| Abort::Failed(format!("scratch({name:?}): {e}")))?;
         self.give(handle)
+    }
+
+    fn config(&mut self) -> Result<Arc<lua::Value>, Abort> {
+        stopping()?;
+        Ok(Arc::clone(&self.config))
     }
 }
 

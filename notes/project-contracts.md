@@ -189,10 +189,11 @@ named would change meaning, and it moves to `[host.NAME]`.
   cannot know a bench's flags ahead of time. clap stays for brokkr's
   built-in commands; a bench's arguments are parsed apart from it, since
   they are known only once brokkr.toml loads. Params are declared in the
-  bench's table (`params.jobs = { help = "..." }`), parsed with a lexer
-  such as `lexopt`, handed to the script as a table and stored on the row,
-  which gives real `--help`, typos refused before a build, and structured
-  pairing.
+  bench's table (`params.jobs = { help = "..." }`), parsed by hand over the
+  tokens clap passes through (slice 6: `--NAME VALUE` or `--NAME=VALUE`,
+  help only where a name stands; four rules did not earn a lexer crate),
+  handed to the script as a table and stored on the row, which gives real
+  `--help`, typos refused before a build, and structured pairing.
 - **brokkr's options go before the bench name, the bench's params after
   it** (slice 2, sparred): `brokkr bench --commit X cat --jobs 4`. Mixed on
   one line, every option a later slice adds to the verb would become a
@@ -203,9 +204,10 @@ named would change meaning, and it moves to `[host.NAME]`.
 - **Datasets stay brokkr's.** Downloads, digests, `brokkr env` status and
   snapshot registration are shared by pbfhogg, elivagar and nidhogg, so the
   dataset tables and their resolver stay in brokkr. A script reaches them
-  through one builtin that returns the whole resolved brokkr.toml as a
-  table (includes folded, the host's sections selected, dataset paths
-  absolute); the script picks its inputs.
+  through one builtin, `config()` (slice 6), that returns the whole
+  resolved brokkr.toml as a table (includes folded, the host's sections
+  selected, dataset paths absolute; `docs/brokkr.toml.bench.md`, The
+  resolved view); the script picks its inputs.
 - **A param selects into that config by a `from` path.** Each param names
   a table path whose keys are its valid values, and a path may name
   another param, resolved in dependency order; the script receives the
@@ -223,7 +225,8 @@ named would change meaning, and it moves to `[host.NAME]`.
   the entry's digest.
 - **Snapshots** are another layer (`datasets.X.snapshot.Y.pbf.Z`) and the
   common case in pbfhogg's config. The resolved view exposes each
-  dataset's primary as `snapshot.base`, so
+  dataset's primary as `snapshot.base` (its `pbf`, `osc` and
+  `download_date`; no `seq`, which the primary has only per entry), so
   `from = "datasets.{dataset}.snapshot.{snapshot}.pbf"` with `snapshot`
   defaulting to `base` covers primary and snapshot with one path; a bench
   whose shape fits no single path walks the config in its script. The raw
@@ -332,8 +335,10 @@ settled as follows.
   trio); a bench's own `params` override a set's of the same name.
 - **`from` syntax:** the string form; `{x}` inserts param x's chosen key,
   never its table; params resolve in dependency order and a cycle is
-  refused at load, as is a key containing a dot under a `from` path
-  (snapshot keys already match `[a-zA-Z0-9_-]+`); a dependent param's
+  refused at load; a key containing a dot is refused where it is
+  substituted into a `from` path, at run time (slice 6: the stored path is
+  segments joined by dots; a key selected at a path's end may hold one);
+  a dependent param's
   `--help` lists the values under its parents' defaults; a param without
   `from` is a plain string.
 - **Call style:** as in the user's luash fork, positional arguments in call
@@ -376,9 +381,14 @@ above where they disagree; this section wins.
   the runner lands against dellingr 0.6.0 without it, children being
   interruptible already, and the interrupt and the deadline follow as slice
   13.
-- **Handles.** Paths reach a child as handles: the resolved config's file
-  entries and file-valued params are input handles, `output()` and
-  `scratch()` make output handles. Handles guarantee that declared
+- **Handles.** Paths reach a child as handles: bound file-valued params are
+  input handles, `output()` and `scratch()` make output handles. (Slice 6
+  narrowed "the resolved config's file entries" to bound params, sparred:
+  making every file entry an input would hash and reserve every dataset
+  file, planet included, before each run and refuse a bench over one
+  missing unrelated file; a file a script picks from `config()` is a path
+  string, undeclared, and pairs on nothing, as anything a script computes
+  from neither params nor digests does not.) Handles guarantee that declared
   resources are reserved; they do not confine a child, and a literal
   string the child treats as a path is undeclared. A handle's origin
   gives its default access per `binary()` call (input read, output and
@@ -389,7 +399,10 @@ above where they disagree; this section wins.
   handle, `write()` output and scratch handles only.
 - **Inputs are read-only for the run.** A declared write overlapping a
   preflight-hashed input is refused at the call, so its preflight digest
-  stays current.
+  stays current; and the run holds a read reservation on every input from
+  before its hash to the run's end (slice 6), so no other lease writes it
+  between the digest and the last iteration
+  (`reference/bench-resources.md`, The run's inputs).
 - **Ownership.** Outputs, scratch and stdout spools belong to the
   iteration, which holds an owner lease; each child launches with a borrow
   the owner authorizes, a sub-reservation that does not conflict with its
@@ -499,7 +512,7 @@ from crates.io behind `src/bench/lua.rs`, and check's `bench` phase. Slice
 fields, `from` template syntax, unknown `{param}` references, cycles, a
 `many` param in a `from` path, judged on each bench's effective params),
 so no later slice tightens a loading config; what needs the resolved
-config stays with slices 6 and 7. Slice 3, the evidence model and the
+config went to slice 6 (run time) and, for collections, slice 7. Slice 3, the evidence model and the
 local store (`reference/bench-store.md`): `$XDG_DATA_HOME/brokkr/bench.db`,
 a self-contained `src/bench/store/` a server binary includes by path, one
 validated `RunDocument` per attempted run published in one transaction
@@ -628,22 +641,63 @@ What slice 12 left, none planned:
   need a retained request record, since a deleted run cannot answer its
   replay (`reference/bench-store.md`, Publication).
 
-6. **Params: `from` resolution.** lexopt parsing of what follows NAME
-   (slice 5 hands the tokens over unparsed and refuses a bench with
-   params), dependency order (the graph is already validated at load), the
-   `snapshot.base` view, the dynamic refusals (an unknown key under a
-   resolved path, a dotted key, a default not under its table), per-bench
-   `--help` with value listings (slice 5's `NAME --help` lists the
-   declarations), digest verification in preflight, the params table
-   `bench()` receives, the document's `params` and the iteration's input
-   handles (`Resources::open` takes them; slice 5 passes none). Also the
-   resolved-config builtin, the script's view (host sections selected,
-   dataset paths absolute, `snapshot.base`), derived from what the run
-   already stores; the stored config text does not change form.
+Slice 6, params and `from` resolution (`docs/brokkr.toml.bench.md`, Binding
+params and The resolved view; `docs/commands/bench.md`;
+`reference/bench-resources.md`, The run's inputs): `src/bench/view.rs`
+builds the resolved view from the composed table, hostname and project
+root (what the run stores; the view is not stored): host sections dropped
+and this host's selected (`datasets` top level, the rest as `host` with
+`name` and absolute dirs), file entries absolute (`file` under `datasets`
+against the data dir, under `data` against the project root; a plain
+dataset's `path`), `snapshot.base`, and every file entry recorded by
+segmented path with its pin's raw config path. `src/bench/params.rs`
+parses the tokens by hand, binds in dependency order (given, else default,
+else unbound and absent), refuses at run time an unknown key with the valid
+ones, a default not under its table only when used, a dotted key only where
+substituted, a path needing an unbound param, and every `,`, a `from`
+param's `all` and a `many` param's `..` (a `many` param binds one key as a
+collection of one); bound files are held for reading (`reservations::
+hold_reads`, an untied read lease failing closed without a store, held to
+the run's end) and then hashed, a pin checked file-only for `file` and
+file-or-tree for `path`. `bench(params, keys)` gets each entry with a
+bound file's field replaced by its input handle and the chosen keys;
+`config()` a fresh copy of the view, files as plain strings. `NAME --help`
+lists each `from` param's keys under its parents' given or default keys.
+Sparred against a typed view from `DevConfig`, a raw walker without a
+view, and every view file entry as a handle; the spar added plain
+datasets as inputs, the run-level read hold before hashing, the
+substitution-only dotted rule, help only in name position, no invented
+`base.seq`, segmented node paths and refusing commas in plain values too.
+
+What slice 6 left:
+
+- The read-only veto against an input is tested at the resource layer
+  only: `binary()` has no `writes` list until slice 8, so no script can
+  declare an input written yet; slice 8's call options should test it
+  through the runner (small).
+- A plain dataset's `path` pairs on its digest value alone, so a file
+  replaced by a directory with an equal tree digest would pair; the typed
+  layer has the same limit (`Dataset::path`). Recording the shape would be
+  a new pairing algorithm (small, if ever wanted).
+- `config()` hands file entries as strings, so slice 8's `read()`,
+  `write()` and `filesize()`, which take handles, reach a config file only
+  through a bound param; a script that needs to read an unbound config file
+  would want a handle-making builtin, with its own reservation and digest
+  story (not planned).
+
 7. **Params: collections and fan-out.** `many` values (comma lists,
    ranges, repeats, `all`, a `many` param's `default` in that syntax),
    ordering, fan-out with per-parent resolution and whole-invocation
-   preflight.
+   preflight. Slice 6 refuses exactly the syntax this slice gives meaning:
+   a `,` in any value, `all` for a `from` param, `..` for a `many` param,
+   and a repeated param; lifting those refusals changes no command line
+   that binds today, and a single-key `many` binding already stores the
+   collection of one this slice would. A plain param's `all` is literal
+   since slice 6 and must stay so. Whether a plain param fans out on commas
+   is this slice's call (slice 6 refuses them so it stays open). The
+   whole-invocation preflight has slice 6's pieces to build on: one
+   `params::bind` per arm, and every arm's inputs held (`hold_reads`)
+   before any is hashed.
 8. **Conveniences.** The file and json builtins, call options (`env`,
    `reads`, `writes`; slice 5's `binary()` takes positional words and flag
    tables only, so a path a child sees in another spelling cannot be
@@ -660,7 +714,10 @@ What slice 12 left, none planned:
    the iteration holds: authorize the current target, as call admission
    does, and open without following a link substituted since (a child can
    turn an output into a link to an input); `write` takes output and
-   scratch handles only (`Handle::writable`).
+   scratch handles only (`Handle::writable`). Input handles exist since
+   slice 6 (bound file params, the iteration's first handles); a `writes`
+   entry naming one is refused by `resources::call_access`, and a test
+   through the runner should show it.
 9. **Evidence views of a script-bench run.** The rest of slice 9: the
    store holds every child's samples, FIFO records, capture loss and clock
    check, and `brokkr results <uuid>` shows only their counts. What
