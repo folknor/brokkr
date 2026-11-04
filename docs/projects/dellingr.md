@@ -54,9 +54,9 @@ example = "hotpath"
 
 [dellingr.workloads.same_obj_read]
 file = "bench/same_obj_read.lua"
-xxh128 = "eaa3cf86979bad6b7d091923e9ddb132"
+xxh128 = "<32-hex xxh128 of file>"
 hotpath_file = "examples/fields/same_obj_read.lua"
-hotpath_xxh128 = "..."
+hotpath_xxh128 = "<32-hex xxh128 of hotpath_file>"
 ```
 
 Each pin is a parsed XXH128 file digest: exactly 32 hexadecimal characters.
@@ -123,8 +123,8 @@ before building anything, and refuses on mismatch:
 
 ```
 [error]   preflight: hash mismatch for examples/fields/same_obj_read.lua
-            expected: eaa3cf86979bad6b7d091923e9ddb132
-            actual:   7b1d0c9f42ae86530fd1cc2b19e4a7f0
+            expected: <the hotpath_xxh128 pin>
+            actual:   <the file's current xxh128>
             origin: [dellingr.workloads.same_obj_read].hotpath_file in brokkr.toml
 ```
 
@@ -187,8 +187,8 @@ Rows are filed under the **workload name**, not under `dellingr`:
 
 ```
 uuid      timestamp            commit   command        mode     elapsed  dataset                 args
-9f2a1c04  2026-07-25 11:41:02  4c19ab2  same_obj_read  bench    1240 ms  same_obj_read@eaa3cf86  --lua same_obj_read --bench 5
-77b4f2ad  2026-07-25 11:20:44  8e0d113  same_obj_read  bench    1310 ms  same_obj_read@eaa3cf86  --lua same_obj_read --bench 5 --commit 8e0d113
+9f2a1c04  2026-07-25 11:41:02  4c19ab2  same_obj_read  bench    1240 ms  same_obj_read@<pin>     --lua same_obj_read --bench 5
+77b4f2ad  2026-07-25 11:20:44  8e0d113  same_obj_read  bench    1310 ms  same_obj_read@<pin>     --lua same_obj_read --bench 5 --commit 8e0d113
 ```
 
 One row series per workload is what makes the query surface useful:

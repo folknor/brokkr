@@ -1,9 +1,9 @@
 # Keeping brokkr and its projects in step across versions
 
 Design discussion, 2026-10-30. It records the problem, what triggered it,
-and the ways it could be solved. As of 2026-11-01 the leaning direction is
-approach 4; its design (the pbfhogg dev's proposal and its gaps, below) is
-open.
+and the ways it could be solved. As of 2026-11-04 the leaning direction is
+approach 5, scripted benches in brokkr.toml; the approach 4 sections below
+record the declarative design it replaced and the survey both draw on.
 
 ## The problem
 
@@ -228,11 +228,14 @@ data instead of by prose.
    first. Elivagar's tilegen, the library harness and piners' corpus are
    protocols more than argv lists; they stay as they are or become a second
    kind of declaration later.
-4. **Where definitions live:** in their own file referenced from
-   `brokkr.toml` (for example `benches = "brokkr/benches.toml"`), not
-   inline. `brokkr.toml` carries host sections and include layering, and
-   definitions read at old commits should not be entangled with host
-   configuration. A new key, so the config contract is untouched.
+4. **Where definitions live:** in `brokkr.toml`, as new tables, inline or
+   in a file it pulls in through `include` as the project prefers; no
+   separate definitions key or file is needed. Reading at a commit means
+   brokkr reads the definition tables from X's `brokkr.toml` and the
+   in-tree files it includes, while host sections keep coming from the
+   working tree. An include outside the repository (the user-wide layer)
+   has no state at X, so definitions must come from in-tree files. New
+   tables, so the config contract is untouched.
 5. **The CLI name:** `brokkr bench` is criterion. pbfhogg's commands are
    top-level brokkr subcommands today with project-gated help; declared
    benchmarks could keep that (`brokkr <name>`, resolved dynamically) or
@@ -258,7 +261,294 @@ data instead of by prose.
    pairing because benchmark names match today's command IDs.
 4. Elivagar and nidhogg next, where they fit.
 
-## Separate from all four: a negative answer that is itself the bug
+## Approach 5: benches are scripts in brokkr.toml (2026-11-04)
+
+Approach 4 with the declarative vocabulary dropped. brokkr builds the
+binary under test from the bench's build settings (below); each
+bench is a `[bench.NAME]` table, inline or through `include`, holding a Lua
+script that runs it:
+
+```toml
+[bench.cat]
+script = """
+function bench()
+    return _G.binary("cat", _G.dataset, foo, bar)
+end"""
+```
+
+The script is inline, as above, or in a `.lua` file the entry points at
+(`script = "benches/cat.lua"`), resolved relative to the TOML file that
+declares the entry, as `include` paths are. An entry gives one or the
+other; both is a load error.
+
+- **HEAD's scripts serve every commit.** brokkr reads benches only from the
+  working tree's `brokkr.toml`, never at the commit under test. HEAD knows
+  all of history, so a script that must invoke an older binary differently
+  branches on a builtin, `since("<sha>")`, true when the commit under test
+  descends from that sha (`git merge-base --is-ancestor`):
+  ```lua
+  if exit == 1 and since("854f9465") then return "differs" end
+  ```
+  The projects keep linear history on master, so before and after are one
+  order. A sha `since` cannot resolve is an error, never a guess. Commits
+  from before adoption need no fallback, backfilling history is an edit at
+  HEAD, and a project prunes branches for baselines it no longer cares
+  about.
+- **The script is the logic.** Chaining (`apply-changes` into `diff`),
+  conditional flags, scratch and exit meanings are code, not vocabulary;
+  argv templates, role selectors, derived inputs and answers tables are not
+  needed.
+- **The whole block is measured.** A bench is what its script does; setup
+  that should not be timed belongs in a dataset snapshot or another bench.
+  brokkr's own surfaces work as today: `binary()` wires the marker FIFO,
+  the sidecar and the stdout cap into every child, and `capture_env` is
+  recorded once per run.
+- **The name names the bench; pairing adds its inputs.** Rows pair on the
+  name, the bound params and their resolved keys and digests (open
+  questions, below). A script that changes what a bench measures under the
+  same name is the project's concern, not brokkr's.
+- **Globals come from the project's config**, so their names and shapes are
+  the project's and move with its scripts. brokkr's own surface is the few
+  functions it provides, such as `binary` and `since`.
+- **The build is TOML, through `brokkr build`'s resolution** (decided for
+  now, superseding a Lua `build()`). A bench table names `target`
+  (optional, `[bin] default` otherwise), `profile` and `features`, the
+  vocabulary of `brokkr run`, with `[bin]`, host `features`, `[cargo_env]`
+  and rustflags folding in as today. Targets resolve by name through cargo
+  metadata, at the commit's worktree under `--commit`, so pbfhogg's CLI
+  crate split (ed5f0365) needs nothing: the bin is `pbfhogg` on both sides.
+  `binary()` runs the content-keyed artifact `brokkr build` makes
+  (`.brokkr/artifacts/<xxh128>/<name>`), whose digest the row records.
+  Ancestry-keyed overrides are added only for what discovery cannot see, a
+  renamed bin target or a profile an older commit lacks (ratatoskr's
+  `harness`), when a real case needs one. `brokkr run` deliberately keeps
+  no feature default in config, so the invocation shows what was built; a
+  bench's `features` reverse that, made good by recording the resolved
+  features on the row.
+- **Instruments and I/O modes are the project's.** Hotpath, alloc,
+  `--direct-io` and `--io-uring` are features and flags a project's benches
+  set, not brokkr modes; brokkr keeps no per-mode feature table, host
+  preflight or hotpath report parser for them. A sample is the block's
+  wall and what the script returns.
+- **What brokkr hands the script:** per-iteration scratch and output paths
+  it reserves and cleans, and the resolved brokkr.toml (see the open
+  questions, datasets). A script decides whether
+  to pass scratch on (bz 73, merge-changes).
+- **`binary()` returns a result table, not throwing on a nonzero exit;
+  `bench()` returns the verdict.** Which exits are answers is the script's
+  call (bz 65); which outcomes a script may interpret at all is open
+  (below). Declared
+  answers (`expect`) are not ported: no config uses them, and a script that
+  wants one reads it from the resolved config.
+- **The working tree counts as after every commit** for `since()`, so an
+  uncommitted contract change is live at once. The sha is still resolved
+  first, so a mistyped sha is an error there too.
+- **Every child goes through brokkr:** no `os.execute`, `io.popen` or module
+  loading in the Lua state; the script runs inside the lock hold, and a
+  runaway script answers Ctrl-C.
+- **The typed layer stays.** Script benches are added beside the existing
+  commands; verify, the suite, `--as-snapshot` promotion and the library
+  harness keep using `src/pbfhogg/commands.rs` unchanged.
+- **The verb is `brokkr bench NAME`;** criterion's wrapper moves to
+  `brokkr crit`, and the docs naming `brokkr bench` in protohoggr, pbfhogg,
+  nidhogg and piners follow.
+- **`since()` sees the project's own repo only.** Sibling path dependencies
+  (nidhogg on pbfhogg and elivagar) are linked to the live checkout under
+  `--commit`, so a row should record each sibling's commit and dirty state;
+  that is a fix of its own, independent of approach 5.
+- **brokkr check loads every bench and compiles its Lua** without running
+  anything, which catches syntax errors only: a misspelt builtin compiles.
+  Running benches on a fixture is the project's option, as a
+  `[[script_check]]`.
+- **The engine is dellingr,** the user's pure Rust Lua VM, not vendored
+  `mlua` (decided). dellingr gains an interrupt so Ctrl-C reaches a
+  runaway script (dellingr#9); scripts are dellingr Lua, not Lua 5.4: no
+  `pcall`, long strings, bitwise operators or `goto`, so an error always
+  ends the sample, as approach 5 wants anyway. Identity is taken from
+  the bench's name and inputs, not an evaluated structure, so the determinism that favoured Starlark for
+  approach 4 does not apply.
+
+### Approach 5: open questions
+
+First to settle:
+
+- **Bench parameters and the CLI.** `brokkr bench cat --jobs 4`: brokkr
+  cannot know a bench's flags ahead of time, so who parses them? A bench
+  declares its params (a small schema brokkr parses against), or everything
+  after the name reaches the script raw and the script parses it. This
+  decides what `--help` shows for a bench and what a row can record. clap
+  stays for brokkr's built-in commands (decided); a bench's arguments are
+  parsed apart from it, since they are known only once brokkr.toml loads.
+  Decided: params declared in the bench's table (`params.jobs = { help =
+  "..." }`), parsed with a lexer such as `lexopt`, handed to the script as
+  a table and stored on the row, which gives real `--help`, typos refused
+  before a build, and structured pairing.
+- **Datasets stay brokkr's (decided).** Downloads, digests, `brokkr env`
+  status and snapshot registration are shared by pbfhogg, elivagar and
+  nidhogg, so the dataset tables and their resolver stay in brokkr. A
+  script reaches them through one builtin that returns the whole resolved
+  brokkr.toml as a table (includes folded, the host's sections selected,
+  dataset paths absolute); the script picks its inputs (decided). How a
+  param selects into that config is open; a `type = "dataset"` param reads
+  as magic specific to the dataset projects. The user's starting point,
+  which does not work as written but which an alternative design may
+  spring from: a param is a key into the resolved brokkr.toml.
+
+  ```toml
+  [bench.diff]
+  params.input = { type = "brokkr.toml", key = "$host.datasets.$name.pbf.$type", default = "denmark" }
+  ```
+  ```lua
+  local base = params.input
+  ```
+
+  As written, one CLI value cannot fill two placeholders (`$name`,
+  `$type`), and `$host` is already folded in the resolved config. One
+  derivation: each param names a table path (`from`) whose keys are its
+  valid values, and a path may name another param, resolved in dependency
+  order; the script receives the entry at the chosen key.
+
+  ```toml
+  params.dataset = { from = "datasets", default = "denmark" }
+  params.variant = { from = "datasets.{dataset}.pbf", default = "indexed" }
+  params.osc     = { from = "datasets.{dataset}.osc" }
+  ```
+
+  Nothing in it knows datasets (mogwai targets or elivagar ocean sets work
+  the same); an unknown key is refused before the build with the valid
+  keys; `--help` can list them; the row records each param's chosen key and
+  the entry's digest.
+
+  Snapshots are another layer (`datasets.X.snapshot.Y.pbf.Z`) and the
+  common case in pbfhogg's config. Both answers hold (decided): the
+  resolved view exposes each dataset's primary as `snapshot.base`, so
+  `from = "datasets.{dataset}.snapshot.{snapshot}.pbf"` with `snapshot`
+  defaulting to `base` covers primary and snapshot with one path; and a
+  bench whose shape fits no single path walks the config in its script.
+  The raw TOML does not change.
+
+Also decided:
+
+- **A row pairs on** the bench name, the bound params and each param's
+  resolved key and digest; anything a script computes from neither does
+  not pair. A re-download under the same key splits rows by its digest.
+- **`_G.record`** is an empty table each sample; whatever the script puts
+  in it (serializable values only, anything else an error at the end of the
+  sample) is stored on the row, and takes no part in pairing. It is also
+  how instrumentation is reported: `--hotpath` and `--alloc` die (the typed
+  commands keep them until they are retired), and a
+  bench that profiles names the feature in its build settings, points the report
+  through `binary()`'s `env` table, reads it back and puts what it wants in
+  `record`. brokkr keeps no report parser.
+- **Script bench rows go to a new database,** stored globally per user,
+  not in the project's tree (today's results.db lives in the project's
+  `.brokkr/`). Rows carry the project they belong to; typed-command history
+  stays in results.db. The sidecar's samples and markers are absorbed into
+  the same database rather than a separate sidecar.db.
+- **The user-wide include layer cannot define benches;** `[bench.*]` there
+  is refused at load.
+- **Calling the binary** (decided in the second review, call style), with ideas from the
+  user's luash fork (folknor, version 4): a callable command object for the
+  built binary, flags as a table (`{ jobs = 4 }` to `--jobs=4`, `true` a
+  bare flag, `false` or `nil` dropped, so an unset param drops out), and a
+  result table carrying exit code, signal and stdout. Unlike luash, no
+  shell: arguments become an argv array and every child goes through
+  brokkr's spawn.
+- **Pipelines run eagerly in v1:** one call's result fed to another passes
+  through a brokkr scratch file. Streaming pipes (`cat | inspect -`) and a
+  server with a client wait until a bench needs them; both arrive with one
+  primitive, a non-waiting `spawn` whose stdout another call can take as
+  stdin, waited on at the block's end. A server adds a readiness wait (a
+  stderr line, an HTTP health check or a readiness file) and is killed when
+  the block ends, even on failure. Per-child data already covers what
+  either measures.
+- **Implementation details:** error line numbers mapped back into an
+  inline TOML script; one Lua state per run, `record` reset each sample;
+  Ctrl-C reaching pure Lua and top-level code as well as
+  children.
+
+### Approach 5: second review (2026-11-04)
+
+A second codex review found no settled choice to reopen; its gaps were
+settled as follows.
+
+- **Failure.** A child's exit code and signal reach the script; Ctrl-C, a
+  deadline, a spawn or wait failure, truncated output and a Lua error abort
+  the sample before it sees them. `bench()` returning nothing completes the
+  sample, a string completes it with that verdict, and `fail("reason")` or
+  `error()` fails it. A result's `:ok()` raises unless the exit is 0, which
+  is most benches' whole failure handling.
+- **Container params pair on their key only;** a param resolving to a file
+  pairs on key and digest. The whole resolved brokkr.toml is stored per run
+  as provenance, once per distinct hash, so `--compare` can name a config
+  change (a `bbox` or `getid_ids` edit) between paired rows without
+  splitting them.
+- **OSC ranges:** a `from` param may be repeatable, with `a..b` expanded in
+  numeric order and each key checked, as `--osc-range` does today; every
+  resolved file pairs like a single one.
+- **Several children per sample:** samples and markers are kept per child,
+  in order, on one timeline relative to the block's start.
+- **Scratch, outputs and promotion reuse the existing machinery** (launch
+  reservations, private directories, cleanup and retention,
+  `--as-snapshot` registration); `output()` and `scratch()` are handles
+  onto it.
+- **File builtins** in the sandbox: `read`, `write`, `json.encode` and
+  `json.decode`, `filesize`, and `print` routed through brokkr's output.
+- **The build** was first settled as a Lua `build()` returning
+  `BuildConfig`'s fields, then replaced by the TOML build above, which also
+  removes the duplication across a project's benches.
+- **Project data lives under `[data.*]`** (decided while porting
+  dellingr): a top-level namespace brokkr reserves and never interprets,
+  which `from` paths walk. An unknown top-level table is a host section, so
+  project tables need it. dellingr keeps `[dellingr.workloads]` for
+  `brokkr dellingr` and adds one file entry per scale for `brokkr bench`,
+  `[data.workloads.NAME.bench]` and `.hotpath`, each `file` and `xxh128`,
+  so a `scale` param resolves to a file and pairs on key and digest, and a
+  re-registered workload cuts history as today.
+- **A resolved file with a digest is verified before the build;** a
+  mismatch is refused, naming the drifted pin, as `brokkr dellingr` does
+  today. A file without one is hashed and recorded.
+- **`binary()` runs the child in the live project root,** under `--commit`
+  too, as `brokkr run --commit` does, so relative in-tree inputs keep
+  coming from the working tree (dellingr's split-tree rule). A `cwd`
+  option waits for a bench that needs the worktree.
+- **A param given several values fans out:** `--workload a,b,c`, or `all`
+  for every key under its `from` table, makes one build and one run per
+  value, each its own row; a failure does not stop the rest and the failures
+  are listed at the end; several fanned params give the cross product.
+- **Stderr `key=value` scraping moves to Lua:** brokkr scrapes nothing
+  from a script bench's children; a script parses what it wants into
+  `record`.
+- **A named hotpath table in `record`** (`record.hotpath` holding a hotpath
+  report) is rendered by `brokkr res` with today's pretty printer and
+  `--top N`; display only, nothing is captured or parsed during a run.
+- **External tools** (dellingr's reference interpreters, pbfhogg's osmium)
+  wait for a bench that needs them, through a `tool(name)` command object
+  whose path and version would go on the row. A cross-arm check on
+  dellingr's cost fingerprints is not added: nothing checks them today.
+- **Shared parameter sets:** `[bench_params.NAME]` holds params a bench
+  pulls in with `uses = ["NAME"]` (pbfhogg's dataset, snapshot and variant
+  trio); a bench's own `params` override a set's of the same name.
+- **`from` syntax:** the string form; `{x}` inserts param x's chosen key,
+  never its table; params resolve in dependency order and a cycle is
+  refused at load, as is a key containing a dot under a `from` path
+  (snapshot keys already match `[a-zA-Z0-9_-]+`); a dependent param's
+  `--help` lists the values under its parents' defaults; a param without
+  `from` is a plain string.
+- **Call style:** as in the user's luash fork, positional arguments in call
+  order and a flag table emitted sorted by key, so the recorded argv is
+  stable; `true` a bare flag, `false` or `nil` dropped, a list repeating the
+  flag; a value passed as its own argv entry (`--jobs 4`, never
+  `--jobs=4`), which dellingr's harness requires. The result carries exit code, signal, stdout and stderr (capped as
+  today); `env` adds to the child's environment; feeding one result to
+  another spools through scratch.
+- **The global database:** rows are keyed by project name, the checkout
+  recorded as data, since clones share history. `brokkr res` reads it for
+  now. A run stores one result, the fastest successful iteration with its
+  `record` and per-child data, plus every iteration's wall in execution
+  order, as today (dellingr reads disagreeing walls as a warning).
+
+## Separate from all of them: a negative answer that is itself the bug
 
 bz 65 point 2. `check-refs` on an honest dataset should exit 0; a regression
 that makes it report false violations exits 1 and is stored as a completed
@@ -305,7 +595,8 @@ Drawn from every project's brokkr.toml, not pbfhogg's alone.
 
 - **Two halves, two versioning rules.** Definitions (argv templates, input
   roles, outputs, exit meanings) live in the project tree and are read at
-  the commit under test (`git show X:brokkr/benches.toml`). Artifacts (files,
+  the commit under test (the definition tables of X's `brokkr.toml` and
+  its in-tree includes). Artifacts (files,
   digests, which datasets a host has) stay in the host sections of
   brokkr.toml, always read from the working tree.
 - **Kinds are the seam** (`pbf`, `osc`, `pmtiles`, ...): few, boring, never
@@ -361,9 +652,9 @@ Drawn from every project's brokkr.toml, not pbfhogg's alone.
   `diff-snapshots` by an unordered digest pair, so a multi-input
   expectation has to be keyed by the other roles' content.
 - **The definitions format upgrades as a migration chain (decided).** Any
-  old commit can be a baseline, so brokkr reads every `benches.toml`
+  old commit can be a baseline, so brokkr reads every definitions
   format ever committed. It works like SQL migrations built into an
-  application: the file carries `format = N`; brokkr parses it with the
+  application: the definitions carry `format = N`; brokkr parses it with the
   frozen reader for N and runs it through the upgrade steps N to N+1 to
   ... to the current format, and only the current shape reaches the
   runner. Consequences:
@@ -771,63 +1062,25 @@ Each driven project has several incompatible shapes in its history.
 
 ### Bugs found, fixable today
 
-Checked in code where marked; the rest are the survey's reading.
+Re-verified against the source on 2026-11-04; the entries the survey
+found that have since been fixed or proved deliberate are gone.
 
-- **`[cargo_env]` breaks `--commit` to older commits (checked).** The
-  command comes from HEAD's config and runs in the old commit's checkout
-  (`brokkr man config`, Where it runs). mogwai's
-  `scripts/source_identity.py` arrived 2026-10-16, so every earlier
-  `--commit` build fails; broadarrow has the same exposure.
-- **The build spec is read from the working tree under `--commit`:**
-  ratatoskr's `harness` profile and piners' `piners-harness` package
-  likely fail at older commits.
-- **mogwai's child runs in the live tree under `--commit` (checked):**
-  `src/mogwai/cmd.rs` passes `project_root` where sluggrs passes the build
-  root, so old mogwai code reads HEAD's relative inputs.
-- **`brokkr corpus --alloc` cannot build (checked):** piners-harness has
-  `hotpath` but no `hotpath-alloc` feature. `corpus --hotpath` likely
-  cannot read its report: the `corpus` binary installs no hotpath guard.
-  `BROKKR_HARNESS_ARTEFACT_DIR` and `BROKKR_TEST_BIN_DIR` are set for
-  piners but never read, and `piners.md` presents them as contract.
-- **litehtml's viewport reaches Chrome only (checked):** the pipeline is
-  never passed a width (`src/litehtml/cmd.rs`), so any viewport other than
-  800 compares mismatched renders. Latent: config uses 800.
-- **verify add-locations-to-ways still runs `--index-type dense`
-  (checked)**, which pbfhogg removed in April; the error is read as
-  "allocation failure, skipped", so that variant has been skipped since.
-- **`ELIVAGAR_NODE_STATS=1` is still set (checked)**; elivagar removed its
-  reader (ab935ff).
-- **sluggrs' `gpu` target cannot be reached (checked):** the example is
-  named `gpu-bench`; `--target gpu` builds `gpu_bench`.
-- **pbfhogg flags offered where pbfhogg refuses them:** `--direct-io` and
-  `--compression` on every measured command (merge-changes, check,
-  inspect, digest and diff refuse some), `--io-uring` on diff-osc,
-  tags-filter's `-j` with `-R` or in OSC mode and `-R` with
-  `--remove-tags`; each exits 64.
-- **merge-changes writes scratch** (since c97b9985) but brokkr declares
-  none for it, so its scratch lands outside the per-launch directory.
-- **Defaulted `brokkr digest` rows pair across 16154b0d** but measured
-  different forms.
-- **elivagar tilegen pairing ignores the tilegen block,** so rows from
-  different ocean sets or budgets pair; the archive store key
-  `(dataset, variant, commit)` has the same gap.
-- **`--seam-reconcile-layers` is still emitted when configured** and shown
-  in `brokkr.toml.elivagar.md`; elivagar removed it.
-- **Results pairing does not stop at `--`:** a child argv token like `-v`
-  or `--bench N` after it is stripped from the pairing key
-  (`src/run_invocation.rs`). Latent.
-- **mogwai's self-reported `elapsed_ms` is dropped** silently;
-  mogwai-side comments still describe it as used.
-- **ratatoskr's marker timestamps are UNIX-epoch microseconds,** while
-  `brokkr man measure` says microseconds since process start; span
-  lengths are unaffected.
-- **The nidhogg tiles dry-run prints a different argv** from the one that
-  runs.
-- **The planetiler baseline compiles its Java bench from the project root**
-  while the osmpbf baseline follows `--commit`.
-- **Stale prose:** `ratatoskr.md` and `service.md` (the `app` crate,
-  `test-helpers`, `parent_death_helper` as a bin); `mogwai.md` on pbfhogg
-  registering nothing; pbfhogg.md's I/O and scratch command lists and
-  `--force-altw` composing with `--inject-prepass`; the `--index-type`
-  help; `hotpath.md`'s `--commit v0.3.0` example; sluggrs example
-  comments naming `brokkr sluggrs hotpath`.
+- **`[cargo_env]` commands are unguarded in mogwai and broadarrow:** brokkr
+  now has `if_exists`, but `MOGWAI_SOURCE_IDENTITY` and
+  `BA_SOURCE_IDENTITY` do not use it, so a `--commit` build older than
+  their `scripts/source_identity.py` still fails. The fix is in those two
+  configs.
+- **ratatoskr stamps markers in UNIX-epoch microseconds**
+  (`sidecar_timestamp_us`), while `brokkr man measure` defines the clock
+  as starting at process start and marks such runs off-contract. The fix
+  is in ratatoskr.
+- **mogwai's self-reported `elapsed_ms`** is still emitted and described
+  as the benchmark row on mogwai's side (`measure.rs`,
+  `reference/performance.md`); brokkr records external wall and drops it.
+  mogwai's comments are what is wrong.
+- **Stale sluggrs example comments** name `brokkr sluggrs hotpath` and
+  `--example email-bench` / `email2-bench` where the examples are
+  `email_bench` and `email2_bench`.
+- **`--seam-reconcile-layers`** is still emitted when configured, retained
+  on purpose for config compatibility and documented as refused by
+  elivagar after 099611b; it goes only if the key is retired.

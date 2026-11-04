@@ -79,6 +79,7 @@ from the example name for the default:
 | `--target` | cargo example built | `command` column |
 | --- | --- | --- |
 | `hotpath` (default) | `hotpath` | `render` |
+| `gpu` | `gpu-bench` | `gpu` |
 | anything else, e.g. `email` | `email_bench` | `email` |
 
 The default target's rows are filed as `render` for continuity with historical
@@ -86,7 +87,8 @@ rows, which predate `--target`. So the query for the default benchmark is
 `brokkr results --command render`, not `--command hotpath`. The `_bench` suffix
 on non-default targets is a naming convention in sluggrs's `examples/` dir, not
 something brokkr can discover - a `--target` naming no such example fails in
-cargo, not in brokkr.
+cargo, not in brokkr. `gpu` is the one exception: sluggrs names that example
+with a hyphen, so brokkr maps it by name.
 
 The `hotpath` example exercises two rendering paths: **cache-miss** (first frame,
 cold glyph cache - outline extraction, band building, texture upload) and

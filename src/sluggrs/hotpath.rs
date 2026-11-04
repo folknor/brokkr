@@ -41,14 +41,15 @@ use crate::project::{self, Project};
 
 /// The cargo example target built for `--target NAME`.
 ///
-/// The default `hotpath` target maps to the `hotpath` example directly; every
-/// other target maps to a `{target}_bench` example (e.g. `email` →
+/// The default `hotpath` target maps to the `hotpath` example directly; `gpu`
+/// maps to `gpu-bench`, the one example sluggrs names with a hyphen; every
+/// other target maps to a `{target}_bench` example (e.g. `email` ->
 /// `email_bench`).
 fn example_name(target: &str) -> String {
-    if target == "hotpath" {
-        target.to_owned()
-    } else {
-        format!("{target}_bench")
+    match target {
+        "hotpath" => target.to_owned(),
+        "gpu" => "gpu-bench".to_owned(),
+        _ => format!("{target}_bench"),
     }
 }
 
@@ -215,5 +216,11 @@ mod tests {
     fn other_targets_get_the_bench_suffix() {
         assert_eq!(example_name("email"), "email_bench");
         assert_eq!(command_label("email"), "email");
+    }
+
+    #[test]
+    fn gpu_target_reaches_the_hyphenated_example() {
+        // sluggrs' Cargo.toml names this one example `gpu-bench`.
+        assert_eq!(example_name("gpu"), "gpu-bench");
     }
 }
