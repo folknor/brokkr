@@ -153,6 +153,56 @@ pub fn resolve_commit(repo: &Path, rev: &str) -> Result<Commit, DevError> {
         })
 }
 
+/// Whether `ancestor` is `descendant` or one of its ancestors in `repo`
+/// (`git merge-base --is-ancestor`). Any answer other than yes or no is an
+/// error, never a guess.
+pub fn is_ancestor(repo: &Path, ancestor: &Commit, descendant: &Commit) -> Result<bool, DevError> {
+    let output = crate::output::child::command_output(
+        crate::process::spawn::ChildPolicy::plain_command("git")
+            .args([
+                "merge-base",
+                "--is-ancestor",
+                ancestor.as_str(),
+                descendant.as_str(),
+            ])
+            .current_dir(repo),
+    )
+    .map_err(|error| DevError::Spawn {
+        program: "git".to_owned(),
+        error,
+    })?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(DevError::Subprocess {
+            program: "git merge-base --is-ancestor".to_owned(),
+            ending: crate::error::ProcessEnding::from_status(&output.status),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        }),
+    }
+}
+
+/// The first line of `commit`'s message.
+pub fn commit_subject(repo: &Path, commit: &Commit) -> Result<String, DevError> {
+    let output = crate::output::child::command_output(
+        crate::process::spawn::ChildPolicy::plain_command("git")
+            .args(["log", "-1", "--format=%s", commit.as_str()])
+            .current_dir(repo),
+    )
+    .map_err(|error| DevError::Spawn {
+        program: "git".to_owned(),
+        error,
+    })?;
+    if !output.status.success() {
+        return Err(DevError::Subprocess {
+            program: "git".to_owned(),
+            ending: crate::error::ProcessEnding::from_status(&output.status),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
 /// Whether `repo` has uncommitted changes under the run-record policy.
 /// `None` means git could not answer.
 pub fn has_uncommitted(repo: &Path) -> Option<bool> {

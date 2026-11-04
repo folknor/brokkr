@@ -279,9 +279,12 @@ pub(crate) fn run(req: &MeasureRequest<'_>, command: &impl PlannedCommand) -> Re
     Ok(())
 }
 
-/// Whether a measured run's scratch removals go through the reservation gate
-/// (`crate::reservations`): for pbfhogg, whose launches they can reach; any
-/// other project's are its own and stay outside the lease store.
+/// Whether a measured run's removals go through the pbfhogg reservation gate
+/// (`crate::reservations`), backup walk included: for pbfhogg, whose
+/// launches and backups they can reach. Every other project's scratch trees
+/// still go through the gate without the backup walk, since a script-bench
+/// iteration can sit under a configured directory; its single files are its
+/// own.
 pub(crate) fn gated_for(req: &MeasureRequest<'_>) -> bool {
     req.project == crate::project::Project::Pbfhogg
 }
@@ -290,7 +293,7 @@ fn remove_tree(gated: bool, dir: &Path) -> std::io::Result<()> {
     if gated {
         crate::reservations::remove_dir_all(dir)
     } else {
-        std::fs::remove_dir_all(dir) // gate: another project's own scratch
+        crate::reservations::remove_reserved_tree(dir)
     }
 }
 

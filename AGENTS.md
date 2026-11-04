@@ -32,6 +32,7 @@ A doc with 8+ `##` sections is **section-addressed**: `brokkr man conventions sc
 - `reference/check-internals.md` - how the check/test pipeline is built: invocation selection, harness isolation and the failure roster, direct execution, the prepare plan, journal and execution accounting, diagnostic inventory, watchdog attribution, the stray/orphan reapers, the guard's lease protocol, rustflags sink selection. Read before changing any of them.
 - `docs/commands/clippy.md` - `brokkr clippy`.
 - `docs/commands/deps.md` - `brokkr deps`.
+- `docs/commands/bench.md` - `brokkr bench NAME`: the command line, the build, an iteration, the script's builtins, `binary()`, interrupting a run, where an iteration's files live, what a run stores.
 - `docs/commands/crit.md` - `brokkr crit` (criterion).
 - `docs/commands/run.md` - `brokkr run` / `brokkr build` / `brokkr install`.
 - `docs/commands/clean.md` - `brokkr clean`.
@@ -43,7 +44,7 @@ A doc with 8+ `##` sections is **section-addressed**: `brokkr man conventions sc
 - `reference/bench-store.md` - the per-user store of script-bench runs: the run document, what the store derives, publication with the run uuid as request id, reading (the open that never creates, the listing queries and their order), the wire contract a results server and its clients share (requests, answers, the failure envelope, one protocol version at a time), the frozen migration chain, and why the module is self-contained. Read before changing `src/bench/store/`.
 - `reference/results-server.md` - how `brokkr-results-server` is built: owning the file, the single worker and its job races, admission and bounds, the HTTP layer. Read before changing `src/bin/results_server/`.
 - `docs/results-server.md` - running and deploying `brokkr-results-server`.
-- `reference/bench-resources.md` - what a script-bench iteration owns: the owner lease and the borrow each child launches with, pinning and crash reclamation, call admission (the read-only veto, authority, conflicts), creation without following substitutes, handles and stdout spools, and the placement obligation. Read before changing `src/reservations/iteration.rs` or `src/bench/resources.rs`.
+- `reference/bench-resources.md` - what a script-bench iteration owns: the owner lease and the borrow each child launches with, pinning and crash reclamation, call admission (the read-only veto, authority, conflicts), creation without following substitutes, handles and stdout spools, and placement: where iterations go and which removals the gate covers for them. Read before changing `src/reservations/iteration.rs` or `src/bench/resources.rs`.
 - `docs/commands/visual.md` - litehtml-rs/sluggrs visual commands.
 - `docs/commands/hotpath.md` - sluggrs `brokkr hotpath`.
 - `docs/commands/sync.md` - ratatoskr `sync` / `mock-serve`.
@@ -63,6 +64,7 @@ Single crate: the `brokkr` binary, plus the `brokkr-rustc-guard` and `brokkr-res
 - `src/output/` - console and child-process runners; every spawn goes through `process/spawn.rs`'s `ChildPolicy`.
 - `src/lock/`, `src/hold.rs`, `src/guard.rs`, `src/stray.rs`, `src/test_orphans.rs` - the global lock, compile capability, rustc guard and reapers.
 - `src/measure/`, `src/harness.rs`, `src/db/`, `src/sidecar.rs` - measurement and result stores; `src/bench/store/` is the per-user store of script-bench runs, which `src/bin/results_server/` serves over HTTP.
+- `src/bench/` - script benches: `runner/` runs `brokkr bench NAME`, `lua.rs` is the only seam to the dellingr VM.
 - `src/<project>/` - project-specific commands.
 
 ### Project-scoped help
@@ -72,7 +74,7 @@ Single crate: the `brokkr` binary, plus the `brokkr-rustc-guard` and `brokkr-res
 ## Shared commands quick reference
 
 - `check` / `test` - the validation pipeline (see `docs/commands/check.md`). A markdown-only dirty tree runs the prose phases only.
-- `clippy`, `deps`, `crit`, `run` / `build` / `install`, `clean`, `results` - see their docs above.
+- `bench`, `clippy`, `deps`, `crit`, `run` / `build` / `install`, `clean`, `results` - see their docs above.
 - `man [TOPIC] [SECTION...]` - read the bundled docs.
 - `env` - host facts, tool versions, dataset status and digests, and the sizes and free space of brokkr's own stores.
 - `wc [threshold]` - tracked `.rs` files over `threshold` lines (default 800).

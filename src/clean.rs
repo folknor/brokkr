@@ -59,6 +59,14 @@ impl Cleaner {
         self.dir_by(path, crate::reservations::remove_dir_all)
     }
 
+    /// [`dir`](Self::dir) for a directory whose path comes from
+    /// configuration, through the gate without its pbfhogg backup walk: a
+    /// configured path can name a directory a script-bench iteration sits
+    /// under, which a held borrow keeps.
+    fn reserved_dir(&self, path: &Path) -> Result<bool, DevError> {
+        self.dir_by(path, crate::reservations::remove_reserved_tree)
+    }
+
     fn dir_by(
         &self,
         path: &Path,
@@ -230,11 +238,14 @@ pub(crate) fn cmd_clean(
     let project_root = project_root.as_path();
     let state = layout::ProjectState::new(project_root);
 
+    // Every project's: a script-bench iteration of any project holds an
+    // owner lease in the store, and a crashed one is reclaimed here once
+    // nothing holds a borrow of it.
+    if !dry_run {
+        reclaim_launch_leases();
+    }
     // The verify harness writes only under target/verify.
     if *project == Project::Pbfhogg {
-        if !dry_run {
-            reclaim_launch_leases();
-        }
         let verify_dir = layout::PbfhoggLayout::new(&paths).verify_output();
         if c.guarded_dir(&verify_dir)? {
             output::run_msg(&format!("{} verify output", c.verb()));
@@ -256,7 +267,7 @@ pub(crate) fn cmd_clean(
     // brokkr and belongs to the external tool, so clean leaves it alone.
     if *project == Project::Elivagar {
         let elivagar = layout::ElivagarLayout::new(&paths);
-        if c.dir(&elivagar.corpus_calibrands())? {
+        if c.reserved_dir(&elivagar.corpus_calibrands())? {
             output::run_msg(&format!("{} corpus-calibrands", c.past()));
         }
         if archives {
@@ -356,14 +367,14 @@ fn clean_scratch(
 ) -> Result<(), DevError> {
     if *project == Project::Elivagar {
         let elivagar = layout::ElivagarLayout::new(paths);
-        if c.dir(elivagar.scratch())? {
+        if c.reserved_dir(elivagar.scratch())? {
             if !c.dry_run {
                 std::fs::create_dir_all(elivagar.scratch())?;
             }
             output::run_msg(&format!("{} scratch", c.past()));
         }
         let tmp_dir = elivagar.tilegen_tmp();
-        if tmp_dir.as_path() != elivagar.scratch() && c.dir(&tmp_dir)? {
+        if tmp_dir.as_path() != elivagar.scratch() && c.reserved_dir(&tmp_dir)? {
             output::run_msg(&format!("{} tilegen_tmp", c.past()));
         }
         return Ok(());
@@ -373,7 +384,7 @@ fn clean_scratch(
         // This is the ingest output path declared by NidhoggLayout. The
         // similarly named project-root tmp directories are not created by brokkr.
         let ingest_output = layout::NidhoggLayout::new(paths).bench_ingest_output();
-        if c.dir(&ingest_output)? {
+        if c.reserved_dir(&ingest_output)? {
             output::run_msg(&format!("{} nidhogg ingest output", c.past()));
         }
     }

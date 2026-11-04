@@ -4,9 +4,10 @@ What one script-bench iteration owns, how its children borrow it, and what
 survives a crash. The protocol is `src/reservations/iteration.rs`, an
 extension of the launch-lease store pbfhogg's launches use (`brokkr man
 pbfhogg`, Launch reservations and the private directory); the handles a
-script's paths reach a child through are `src/bench/resources.rs`. Nothing
-drives it before the script-bench runner; its tests run it against real
-children spawned through the one spawn choke point.
+script's paths reach a child through are `src/bench/resources.rs`. The
+script-bench runner (`src/bench/runner/`, `brokkr man bench`) drives it, one
+owner per iteration; its tests run it against real children spawned through
+the one spawn choke point.
 
 ## The owner and its borrows
 
@@ -128,12 +129,51 @@ spool's own descriptor, never its path, with a flag saying whether there was
 more. Truncating the preview fails nothing. Feeding a result onward passes
 the spool, a read-only handle.
 
+The runner previews the first MiB. A child's stderr is not spooled: it is a
+pipe the supervisor drains, keeping the first MiB with a truncated flag and
+reading the rest to its end so the child never blocks, which fails nothing
+either. The script sees both previews, never more.
+
+While a call's borrow release waits for its last holder, the caller may run
+an observer between the window's polls; the runner drains the child's
+marker FIFO there, so a descendant writing records after the child exited is
+never left blocked on a full pipe until the window closes, and only once the
+release proved no holder is the FIFO's capture closed. One FIFO per child, so
+a record lands in the evidence of the child whose borrow wrote it.
+
 ## Placement and cleanup
 
-The caller chooses where the iteration directory goes, and must place it
-where every brokkr removal that can reach it goes through the reservation
-gate: a directory another command wipes plainly (elivagar's scratch, say)
-would remove a pinned iteration whatever its lease says. Inputs are
-protected the same way only against gated mutations. The iteration directory
-is removed by its lease alone, at the owner's release or by a later scan;
-`brokkr clean` has no name for it.
+The runner places every iteration directory in `<project root>/.brokkr/bench-iterations/`,
+the project's state root (`ProjectState::bench_iterations_dir`). The
+iteration directory is removed by its lease alone, at the owner's release or
+by a later scan; `brokkr clean` has no name for it and reclaims free leases
+in every project. The location is on the project's disk, not the host's
+scratch disk.
+
+The obligation the placement meets: every brokkr operation whose operand
+names the container, or one of its ancestors, by path, as brokkr spells it
+from its fixed layout or from configuration, goes through the reservation
+gate or cannot name it.
+
+- A configured path can name it (a host's `scratch = ".brokkr"`, or another
+  project's absolute scratch pointing here), so every recursive removal of a
+  configured directory goes through the gate, without the pbfhogg backup
+  walk outside pbfhogg: the measured runner's scratch trees in every
+  project; in `brokkr clean`, elivagar's scratch, `tilegen_tmp` and corpus
+  calibrands and nidhogg's ingest output; elivagar's tilegen removal of its
+  tmp dir. When that tmp dir is the scratch dir itself elivagar empties it
+  in the child, so it is checked against the gate before the launch; a check
+  suffices there because the global lock admits no new iteration between
+  the check and the child, and a pin that exists is refused. The gate is
+  per user, so another project's operand is refused as this project's is.
+- brokkr's other recursive removals and directory renames (tool caches,
+  staging directories, test-hung snapshots, the artifact store, litehtml
+  caches) target a fixed name under a fixed or configured directory, which
+  equals the container or an ancestor only if that fixed name is a
+  checkout's ancestor's; such a collision is outside the guarantee.
+  Worktree removal, whose target is a checkout, is gated already.
+- An alias, a symlink or a bind mount, that leads an ungated operation into
+  the container is outside the guarantee. A gated operation resolves its
+  operands and the reservations, so it stays protected through any symlink.
+
+Inputs are protected only against gated mutations.

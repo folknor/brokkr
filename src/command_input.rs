@@ -516,6 +516,7 @@ impl Command {
             | Self::Wc { .. }
             | Self::Man { .. }
             | Self::Crit { .. }
+            | Self::Bench { .. }
             | Self::Deps { .. }
             | Self::Env
             | Self::DiffSnapshots { .. }

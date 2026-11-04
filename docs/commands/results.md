@@ -15,8 +15,9 @@ a stamp is never lowered.
 
 Uniform across all projects, piners included (for its hotpath/alloc runs). The
 exception is litehtml, whose only use of `results.db` is the unrelated
-`MechanicalDb` schema - so `results`, `sidecar` and `invalidate` are hidden
-from its `--help`.
+`MechanicalDb` schema: `results` there shows its script-bench runs alone and
+never opens that file, and `sidecar` and `invalidate`, which read nothing
+else, are hidden from its `--help`.
 
 ## The table
 
@@ -465,9 +466,12 @@ ordered by bench, formed before `--limit` applies, and the cap is announced
 as for typed pairs. What the key leaves out is named under the pair rather
 than splitting it:
 
-- `config differs:` the dotted paths of the stored resolved config added
-  (`+`), removed (`-`) or changed, at most six, then counted; a config that
-  reads as neither TOML nor JSON is named by digest.
+- `config differs:` the dotted paths of the stored config added (`+`),
+  removed (`-`) or changed, at most six, then counted; a config that reads
+  as neither TOML nor JSON is named by digest. The stored config is what the
+  run was made from (`brokkr man bench`, What a run stores), so a moved
+  setting shows as `config.<path>`, an edited script as `script.source` and
+  a moved project root as `run.project_root`.
 - `build differs:` the requested target, profile, features and default
   features, and the resolved bin and features; never the artifact digest,
   which differs across commits by construction.

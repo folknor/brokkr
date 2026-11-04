@@ -2,33 +2,27 @@
 //!
 //! The schema is read at load (`crate::config::bench`). Here: the static check
 //! `brokkr check`'s `bench` phase runs (every bench's script read and
-//! compiled, nothing executed), the bench store with brokkr's adapter to
-//! it, `brokkr results`' reading of that store (`results`), and the handles
-//! a script's paths reach its children through (`resources`). Writing the
-//! store and running an iteration wait for the script-bench runner. The
-//! store's wire contract (`store::wire`) is served by the
-//! `brokkr-results-server` binary; brokkr's client of it is still to come.
+//! compiled, nothing executed), the runner `brokkr bench NAME` drives
+//! (`runner`), the dellingr seam its scripts run through (`lua`), the bench
+//! store with brokkr's adapter to it (`store`, `evidence`), `brokkr results`'
+//! reading of that store (`results`), and the handles a script's paths reach
+//! its children through (`resources`). The store's wire contract
+//! (`store::wire`) is served by the `brokkr-results-server` binary; brokkr's
+//! client of it is still to come.
 
-// An expectation goes unfulfilled, and so fails the build, once the runner
-// uses everything it covers: then it is removed.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "no command writes the bench store yet")
-)]
 mod evidence;
 mod lua;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "no command runs a script bench yet")
-)]
 mod resources;
 pub(crate) mod results;
+pub(crate) mod runner;
+// The wire (`store::wire`) has no client in this binary yet, and a reader of
+// a whole stored document or of the transaction state is the server's: an
+// expectation goes unfulfilled, and so fails the build, once they are used.
 #[cfg_attr(
     not(test),
     expect(
         dead_code,
-        unused_imports,
-        reason = "no command writes the bench store yet"
+        reason = "brokkr's client of the results server is not built yet"
     )
 )]
 pub(crate) mod store;
@@ -104,6 +98,7 @@ mod tests {
             target: None,
             profile: None,
             features: Vec::new(),
+            default_features: true,
             uses: Vec::new(),
             params: BTreeMap::new(),
         }

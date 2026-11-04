@@ -528,6 +528,30 @@ In depth: `brokkr man clippy`."
         #[arg(last = true)]
         args: Vec<String>,
     },
+    /// Run a script bench (`[bench.NAME]` in brokkr.toml) and store its run.
+    ///
+    /// Bare lists the benches. brokkr's options go before NAME; everything
+    /// after NAME belongs to the bench (`NAME --help` describes it). Every
+    /// attempted run is stored in the per-user bench store, which `brokkr
+    /// results` reads.
+    ///
+    /// In depth: `brokkr man bench`.
+    #[command(display_order = 0)]
+    Bench {
+        /// Build and run this commit, in a persistent worktree, with the
+        /// working tree's benches.
+        #[arg(long, value_name = "REF")]
+        commit: Option<String>,
+
+        /// Iterations to run; the result is the fastest.
+        #[arg(long, value_name = "N", default_value = DEFAULT_BENCH_RUNS)]
+        iterations: std::num::NonZeroU32,
+
+        /// The bench to run, then its own params; clap reads nothing after
+        /// NAME, `--help` included. Omit for the index.
+        #[arg(value_name = "NAME [PARAMS]", trailing_var_arg = true)]
+        bench: Vec<String>,
+    },
     /// Audit Cargo.lock for dependency smells (duplicate versions, etc.).
     ///
     /// Phase-based; each phase emits zero or more findings. Duplicate-version

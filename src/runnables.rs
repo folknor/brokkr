@@ -393,10 +393,37 @@ pub fn cmd_build(
         profile: resolve_profile(cfg, choice),
     };
     let exe = crate::build::cargo_build(&build, build_root)?;
-    snapshot_executable(&exe.path, store)
+    snapshot_executable(&exe.path, store).map(|(path, _)| path)
 }
 
-/// Copy `exe` to `store/<xxh128>/<file name>` and return that path.
+/// A script bench's build target, resolved as `brokkr build` resolves NAME
+/// (`name` > `[bin] default` > the sole runnable) in `build_root`: its
+/// package, target name and whether it is an example.
+pub(crate) fn resolve_build_target(
+    build_root: &Path,
+    cfg: Option<&BinConfig>,
+    name: Option<&str>,
+) -> Result<(String, String, bool), DevError> {
+    let runnables = discover(build_root)?;
+    let Some(target) = resolve_target(&runnables, cfg, name)? else {
+        return Err(DevError::Refused(
+            "no target chosen: name one in the bench's `target` or set [bin] default".into(),
+        ));
+    };
+    Ok((target.package.clone(), target.name.clone(), target.example))
+}
+
+/// The profile `brokkr build` and a script bench resolve: the given choice
+/// > `[bin] profile` > `[bin] debug` > release.
+pub(crate) fn build_profile(
+    cfg: Option<&BinConfig>,
+    choice: Option<crate::build::RustProfile>,
+) -> crate::build::RustProfile {
+    resolve_profile(cfg, choice)
+}
+
+/// Copy `exe` to `store/<xxh128>/<file name>` and return that path and the
+/// digest naming its directory.
 ///
 /// The cargo-uplifted path is rewritten by the next build of anything sharing
 /// it, so a script holding it runs whatever was built last. The snapshot is
@@ -406,7 +433,7 @@ pub fn cmd_build(
 /// reused as it is. The file keeps its name, so it is the same executable
 /// under another directory - which is all it is: a program that looks beside
 /// itself for siblings or resources sees the snapshot directory.
-fn snapshot_executable(exe: &Path, store: &Path) -> Result<PathBuf, DevError> {
+pub(crate) fn snapshot_executable(exe: &Path, store: &Path) -> Result<(PathBuf, String), DevError> {
     let file_name = exe.file_name().ok_or_else(|| {
         DevError::Build(format!(
             "built executable has no file name: {}",
@@ -420,14 +447,14 @@ fn snapshot_executable(exe: &Path, store: &Path) -> Result<PathBuf, DevError> {
         file_name.to_string_lossy()
     )));
     std::fs::copy(exe, &staging.0)?;
-    let digest = crate::preflight::compute_file_digest(&staging.0)?;
-    let dir = store.join(digest.to_string());
+    let digest = crate::preflight::compute_file_digest(&staging.0)?.to_string();
+    let dir = store.join(&digest);
     let dest = dir.join(file_name);
     if !dest.is_file() {
         std::fs::create_dir_all(&dir)?;
         std::fs::rename(&staging.0, &dest)?;
     }
-    Ok(dest)
+    Ok((dest, digest))
 }
 
 /// Whether `name` is a staging copy [`snapshot_executable`] makes,
@@ -663,15 +690,20 @@ mod tests {
         let store = crate::clean::layout::ProjectState::new(&root).artifacts_dir();
 
         std::fs::write(&exe, b"first build").unwrap();
-        let first = snapshot_executable(&exe, &store).unwrap();
+        let (first, digest) = snapshot_executable(&exe, &store).unwrap();
         assert_eq!(first.file_name().unwrap(), "tool", "the name is kept");
+        assert_eq!(
+            first.parent().unwrap(),
+            store.join(&digest),
+            "named by its digest"
+        );
         // The same bytes again reuse the snapshot rather than rewrite it.
-        assert_eq!(snapshot_executable(&exe, &store).unwrap(), first);
+        assert_eq!(snapshot_executable(&exe, &store).unwrap().0, first);
 
         // A rebuild replaces the uplifted file; the snapshot a script holds
         // keeps the bytes it was handed, and the new build gets its own.
         std::fs::write(&exe, b"second build").unwrap();
-        let second = snapshot_executable(&exe, &store).unwrap();
+        let (second, _) = snapshot_executable(&exe, &store).unwrap();
         assert_ne!(second, first);
         assert_eq!(std::fs::read(&first).unwrap(), b"first build");
         assert_eq!(std::fs::read(&second).unwrap(), b"second build");

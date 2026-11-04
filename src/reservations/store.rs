@@ -650,7 +650,14 @@ impl Lease {
     /// error. So is an iteration owner that a held borrow pins, or that an
     /// unestablished lease may: its record stays for a later scan to reclaim
     /// once nothing can need it.
-    pub(crate) fn release(mut self) -> io::Result<()> {
+    pub(crate) fn release(self) -> io::Result<()> {
+        self.release_with(&mut || {})
+    }
+
+    /// [`release`](Self::release), calling `wait` before each pause of the
+    /// release window, so a caller can keep serving what a lingering holder
+    /// may be blocked on (a script-bench call drains its marker FIFO).
+    pub(crate) fn release_with(mut self, wait: &mut dyn FnMut()) -> io::Result<()> {
         drop(self.file.take());
         let lock_path = self.store.path(&self.id, LOCK_EXT);
         let deadline = Instant::now() + RELEASE_WINDOW;
@@ -681,6 +688,7 @@ impl Lease {
                     lock_path.display()
                 )));
             }
+            wait();
             std::thread::sleep(Duration::from_millis(10));
         }
     }

@@ -76,7 +76,7 @@ end"""
 ```
 
 (Params reach the script as one table, never as globals, so no param can
-shadow a builtin; how the table is handed over is slice 5's to settle.)
+shadow a builtin: `bench(params)`'s argument, settled in slice 5.)
 
 The script is inline in `script`, as above, or in a `.lua` file named by
 `script_file` (`script_file = "benches/cat.lua"`), resolved relative to the
@@ -157,7 +157,8 @@ named would change meaning, and it moves to `[host.NAME]`.
   resolved first, so a mistyped sha is an error.
 - **Every child goes through brokkr:** no `os.execute`, `io.popen` or module
   loading in the Lua state; the script runs inside the lock hold, and a
-  runaway script answers Ctrl-C.
+  runaway script answers Ctrl-C once dellingr's interrupt is linked (slice
+  13; until then pure Lua is stopped only at its next builtin call).
 - **The typed layer stays.** Script benches are added beside the existing
   commands; verify, the suite, `--as-snapshot` promotion and the library
   harness keep using `src/pbfhogg/commands.rs` unchanged.
@@ -265,7 +266,7 @@ named would change meaning, and it moves to `[host.NAME]`.
   either measures.
 - **Implementation details:** error line numbers mapped back into an
   inline TOML script; Ctrl-C reaching pure Lua and top-level code as well
-  as children. The Lua state is per iteration (see the third review).
+  as children (slice 13). The Lua state is per iteration (see the third review).
 
 ### Second review (2026-11-04)
 
@@ -370,8 +371,11 @@ above where they disagree; this section wins.
   raise at top level; pure computation, `json` and the resolved
   config are allowed, since all hashing and digest verification happen in
   preflight. Timing starts when `bench()` is called; the deadline and the
-  interrupt cover state initialization and top-level code too. dellingr's
-  interrupt is therefore a prerequisite of the runner, not a follow-up.
+  interrupt cover state initialization and top-level code too. This was
+  ruled a prerequisite of the runner; the user then ruled (2026-11-04) that
+  the runner lands against dellingr 0.6.0 without it, children being
+  interruptible already, and the interrupt and the deadline follow as slice
+  13.
 - **Handles.** Paths reach a child as handles: the resolved config's file
   entries and file-valued params are input handles, `output()` and
   `scratch()` make output handles. Handles guarantee that declared
@@ -541,60 +545,75 @@ compare-and-swap between claim and withdrawal, the autocommit check, the
 canonical-path flock. Sparred against `StoreError` itself as the envelope,
 REST routes, a lib target, and tolerant versioned answers.
 
-Slice 5 now has to honour, since slice 9 reads before anything writes: a
-run's `project` is the detected project's name (`Project::name`), which is
-what `results` selects by; `started_unix_ms` is the run's real start, the
-order every listing and "latest" use; the stored config is TOML or a JSON
-object, or `--compare` can name a config change only by digest;
-`record.hotpath`, when a script sets it, is the hotpath JSON report as the
-program wrote it; dirty runs, if stored, are listed marked `-dirty` and never
-compared; the run's uuid is printed so `brokkr results <uuid>` finds it; and
-`results` is hidden from litehtml (`MEASURED_DB_ABSENT`), which has to open
-if `brokkr bench` runs there, and then `results_cmd` must also skip the typed
-reader for litehtml, whose `.brokkr/results.db` is `MechanicalDb`'s unrelated
-schema.
+Slice 5, the runner core (`docs/commands/bench.md`, man topic `bench`):
+`brokkr bench [--commit REF] [--iterations N] [NAME [PARAMS...]]`, clap
+reading nothing after NAME; bare lists, `NAME --help` describes; a bench
+declaring params is refused until slice 6. The script is read and compiled
+once per run and every iteration runs it in a fresh State; builtins
+`binary`, `output`, `scratch` (raising at top level), `since` (cached per
+run, allowed at top level), `fail`, `record`, and `print` through the
+console channel, all marshalled in `src/bench/lua.rs` behind a `Host` trait
+with Lua strings crossing as bytes. The build is `brokkr build`'s target
+resolution and snapshot with host features folded in, a new additive
+`default_features` key, and cargo's resolved features read from the
+compiler-artifact record. `binary()` runs on a borrow, stdout spooled,
+stderr a bounded pipe (both previews 1 MiB, truncation failing nothing),
+one marker FIFO per child drained while the borrow's release waits
+(`Call::finish_observed`, the sidecar split into supervision and finish).
+Iterations live in `.brokkr/bench-iterations/`, and every recursive removal
+of a configured directory in any project now goes through an overlap-only
+gate (`reference/bench-resources.md`, Placement and cleanup, with the
+fixed-name and alias exclusions); `brokkr clean` reclaims leases in every
+project. Dirty runs are stored and marked. The stored config is one TOML
+document: `[run]` roots, `[script]` exact source and origin, `[config]` the
+composed table sorted. Publication latches uncertainty across up to three
+republishings, the uuid line is forced, and `results` opens in litehtml
+with the typed reader skipped. Sparred against a Host-free seam, scratch
+placement with enumerated gates, the composed table alone as provenance,
+and reopening one FIFO per iteration; the spar added the per-child FIFO
+with the pumped release, the record shape and depth checks, the byte-exact
+seam, the latched uncertainty, the project root in the stored config and
+the alias boundary.
 
-5. **The runner core, end to end.** Per-iteration Lua state, the top-level
-   restrictions, the TOML build with host features folded in, the worktree
-   under `--commit`, `since()` against HEAD, `binary()` on the resource
-   protocol with the FIFO and sidecar wired in, iterations and their
-   aggregation, the failure semantics, runs written. A param-less bench
-   runs at the end of it. Needs dellingr's interrupt, which is not in a
-   dellingr release yet (0.6.0 has compile only): it needs a release
-   before brokkr can depend on it from crates.io. The verb's grammar is
-   options before NAME, params after (Params and datasets, above).
-   Writing the store is this slice's: build each arm's `RunDocument`
-   (uuid from `db::generate_uuid`, argv through `redact_secret_argv`, a
-   child's env through `evidence::redacted_env`, the config serialized
-   canonically so equal configs hash equal), publish it after an
-   interrupt while the signal window still covers the work, report a
-   failed publication as an error (not history's best-effort), say which
-   uuid an uncertain commit left, and decide whether a dirty tree's runs
-   are stored (the document records `dirty` either way). Remove the
-   `expect(dead_code)` attributes on `bench::store`,
-   `bench::evidence`, `bench::resources` and `reservations::iteration`
-   once they go unfulfilled. The resource protocol leaves this slice
-   three duties (`reference/bench-resources.md`, Placement and cleanup):
-   choose where the iteration directory goes, somewhere every brokkr
-   removal that can reach it is gated, or route the enclosing removals
-   (elivagar's scratch wipe, `tilegen_tmp`, nidhogg's ingest output,
-   whatever encloses the choice) through the gate before any iteration
-   runs; make `brokkr clean` reclaim leases in every project, not only
-   pbfhogg (`src/clean.rs`); and pick the preview bound and what a
-   child's stderr gets, which the protocol leaves alone. A failed
-   `Call::finish` (a borrow still held) yields no result and fails the
-   sample; a failed owner release leaves the iteration to a later scan.
-6. **Params: `from` resolution.** lexopt parsing of what follows NAME,
-   dependency order (the graph is already validated at load), the
+What slice 5 left, with sizes:
+
+- Its per-call overhead: in the first real run (`brokkr bench startup` in
+  brokkr's own config, a 6 ms child) a `binary()` call started about 10 ms
+  into the block and the block took about 22 ms; admission, spool, FIFO and
+  the lease records' syncs are all inside the timed block by the design
+  ("the whole block is measured"). Fine for real workloads, distorting for
+  millisecond ones; slice 10 should judge it on a real bench before anyone
+  optimizes it (small: profile the call path, likely the syncs).
+- The iteration directory sits on the project's disk; a host-chosen
+  location for benches writing large outputs (slice 10's pbfhogg writers)
+  needs a key and the same gate obligation (small).
+- A child's stderr is a 1 MiB preview only; a bench needing all of it wants
+  a stderr spool, a protocol change in `reference/bench-resources.md`
+  (small, slice 8 if a bench needs it).
+
+6. **Params: `from` resolution.** lexopt parsing of what follows NAME
+   (slice 5 hands the tokens over unparsed and refuses a bench with
+   params), dependency order (the graph is already validated at load), the
    `snapshot.base` view, the dynamic refusals (an unknown key under a
    resolved path, a dotted key, a default not under its table), per-bench
-   `--help`, digest verification in preflight.
+   `--help` with value listings (slice 5's `NAME --help` lists the
+   declarations), digest verification in preflight, the params table
+   `bench()` receives, the document's `params` and the iteration's input
+   handles (`Resources::open` takes them; slice 5 passes none). Also the
+   resolved-config builtin, the script's view (host sections selected,
+   dataset paths absolute, `snapshot.base`), derived from what the run
+   already stores; the stored config text does not change form.
 7. **Params: collections and fan-out.** `many` values (comma lists,
    ranges, repeats, `all`, a `many` param's `default` in that syntax),
    ordering, fan-out with per-parent resolution and whole-invocation
    preflight.
-8. **Conveniences.** The file and json builtins, `print`, `env`, feeding
-   one result to another, error line numbers mapped into inline scripts.
+8. **Conveniences.** The file and json builtins, call options (`env`,
+   `reads`, `writes`; slice 5's `binary()` takes positional words and flag
+   tables only, so a path a child sees in another spelling cannot be
+   declared yet), feeding one result to another (the spool handle exists,
+   `resources::spool_handle`), error line numbers mapped into inline
+   scripts (slice 5 names the chunk `[bench.NAME] script`, its lines
+   counting from the string's first).
    `ConfigSources::value_origin` names the file that set `script`, but the
    composed table keeps no spans and TOML strings have escapes and line
    continuations, so the mapping re-reads that file with spans
@@ -638,8 +657,21 @@ schema.
     record, since a deleted run cannot answer its replay
     (`reference/bench-store.md`, Publication); none is planned.
 
+13. **The interrupt and the deadline.** Bump dellingr to the release that
+    carries the interrupt (`StateBuilder::interrupt` / `State::interrupt`,
+    `ErrorKind::Interrupted`, sticky, polled on backward jumps and call
+    admission), wire brokkr's Ctrl-C and `brokkr kill` into it so pure Lua
+    and top-level code stop at once, map `Interrupted` to an interrupted
+    sample in `src/bench/lua.rs`, and define a per-iteration deadline (a
+    `--deadline` before NAME or a bench key; none exists in slice 5) that
+    covers state setup, top level and `bench()` through the same interrupt
+    and kills a running child's group through the supervisor's limit. Test:
+    a `while true do end` bench stopped by a stop request and by the
+    deadline, stored as interrupted and failed. Small; then
+    `docs/commands/bench.md`'s Interrupting a run drops its gap.
+
 Outside brokkr, dellingr's interrupt (dellingr#9) is its own launch in
-dellingr, before slice 5.
+dellingr, before slice 13: it is in dellingr's tree, not yet released.
 
 ## A negative answer that is itself the bug
 

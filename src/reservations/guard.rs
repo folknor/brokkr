@@ -1,5 +1,7 @@
 //! The mutation gate: every brokkr deletion, rename or replacement that can
-//! touch a path a pbfhogg launch uses goes through here.
+//! touch a path a pbfhogg launch uses goes through here, and so does every
+//! recursive removal of a configured directory a script-bench iteration can
+//! sit under (`reference/bench-resources.md`, Placement and cleanup).
 //!
 //! Each operation takes the process-wide reservation mutex, scans the store
 //! (reclaiming free leases on the way), and refuses when any reservation's
@@ -33,6 +35,22 @@ pub(crate) fn remove_file(path: &Path) -> io::Result<()> {
 
 pub(crate) fn remove_dir_all(path: &Path) -> io::Result<()> {
     gated(&[path], Some(path), || std::fs::remove_dir_all(path))
+}
+
+/// [`remove_dir_all`] without the backup walk: for a tree whose path comes
+/// from another project's configuration (elivagar's scratch, a measured
+/// run's scratch tree), which a script-bench iteration can sit under but no
+/// pbfhogg backup can, and which may be too large to walk for one.
+pub(crate) fn remove_reserved_tree(path: &Path) -> io::Result<()> {
+    gated(&[path], None, || std::fs::remove_dir_all(path))
+}
+
+/// Refuse, as a removal of `path` would be refused, without changing
+/// anything: for a directory a child is about to empty itself (elivagar's
+/// `--tmp-dir`). Enough under the global lock, which admits no new
+/// reservation between this check and the child.
+pub(crate) fn check_unreserved(path: &Path) -> io::Result<()> {
+    gated(&[path], None, || Ok(()))
 }
 
 /// `rename(from, to)`, checking both operands.

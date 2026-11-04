@@ -25,11 +25,12 @@ pub fn load_with_sources(
     ),
     crate::error::DevError,
 > {
-    let (root, sources) = compose(&project_root.join("brokkr.toml"))?;
+    let (root, mut sources) = compose(&project_root.join("brokkr.toml"))?;
     let project = parse_project(&root)?;
     let project_config = project_config::ProjectConfig::parse(&project, &root)?;
     let mut config = parse_dev_config(&root, &sources)?;
     refuse_gate_scripts_without_gate(&config, sources.user_layer().map(|u| &u.script_check_names))?;
     config.included_config_files = sources.included().to_vec();
+    sources.composed = root;
     Ok((project, config, project_config, sources))
 }

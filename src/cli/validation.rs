@@ -173,6 +173,40 @@ mod tests {
             .expect("parser thread")
     }
 
+    /// `brokkr bench`: brokkr's options before NAME, and nothing after NAME
+    /// read by clap, `--help` and brokkr's own option names included.
+    #[test]
+    fn bench_options_stop_at_the_bench_name() {
+        let bench = |cli: Cli| match cli.command {
+            Command::Bench {
+                commit,
+                iterations,
+                bench,
+            } => (commit, iterations.get(), bench),
+            _ => panic!("unexpected command"),
+        };
+        let (commit, iterations, rest) = bench(
+            parse([
+                "brokkr",
+                "bench",
+                "--commit",
+                "abc",
+                "--iterations",
+                "5",
+                "cat",
+                "--help",
+                "--commit",
+                "x",
+            ])
+            .unwrap(),
+        );
+        assert_eq!((commit.as_deref(), iterations), (Some("abc"), 5));
+        assert_eq!(rest, ["cat", "--help", "--commit", "x"]);
+        let (_, iterations, rest) = bench(parse(["brokkr", "bench"]).unwrap());
+        assert_eq!((iterations, rest.len()), (3, 0));
+        assert!(parse(["brokkr", "bench", "--iterations", "0", "cat"]).is_err());
+    }
+
     /// check-locations alone defaults to `altw-keep-untagged`, or `altw` with
     /// `--agreement`; an explicit `--variant` still wins, and a sibling check
     /// keeps `indexed`.

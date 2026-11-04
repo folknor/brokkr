@@ -228,10 +228,13 @@ refused target or worktree and goes on with the rest.
 The layer is scoped to pbfhogg and to script-bench iterations, which share
 the store: an iteration's owner lease and its children's borrows are leases
 too, held and reclaimed by the same scans, with a held borrow keeping its
-free owner (`reference/bench-resources.md`). brokkr's own state and config
-files (brokkr.toml, journals, caches) are staged plainly, and other
-projects' scratch and `brokkr clean` targets are removed plainly, so a lease
-store problem never stops them.
+free owner (`reference/bench-resources.md`). Every recursive removal of a
+configured directory, in any project, goes through the gate without the
+backup walk, since a script-bench iteration can sit under one: the measured
+runner's scratch trees, elivagar's scratch, `tilegen_tmp` and calibrands,
+nidhogg's ingest output. brokkr's own state and config files (brokkr.toml,
+journals, caches) are staged plainly, and its fixed-name `brokkr clean`
+targets are removed plainly, so a lease store problem never stops them.
 
 A staged write of a file a launch can use is a reservation of its own
 (`Staged::stable_reserved`, for dataset downloads and the data dir's

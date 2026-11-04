@@ -77,6 +77,15 @@ impl RunStore {
         Ok(Self { results, sidecar })
     }
 
+    /// No typed stores: a project whose `.brokkr/results.db` belongs to
+    /// something else (litehtml's mechanical database) has no typed history.
+    pub(crate) fn absent() -> Self {
+        Self {
+            results: None,
+            sidecar: None,
+        }
+    }
+
     /// Open existing stores for explicit deletion. This path is the only
     /// query facade that also permits migration and writes.
     pub(crate) fn open_for_delete(

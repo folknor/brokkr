@@ -93,7 +93,14 @@ mod visibility_tests {
     /// they must stay.
     #[test]
     fn measured_queries_follow_the_rows() {
-        for name in ["results", "sidecar", "invalidate"] {
+        // `results` also reads script-bench runs, which every project has.
+        for project in Project::ALL.iter().map(|(_, project)| project.clone()) {
+            assert!(
+                visible_in("results", &project),
+                "`results` hidden in {project}"
+            );
+        }
+        for name in ["sidecar", "invalidate"] {
             assert!(
                 !visible_in(name, &Project::Litehtml),
                 "`{name}` in litehtml"
@@ -114,11 +121,11 @@ mod visibility_tests {
     /// built-ins would have dropped.
     #[test]
     fn except_subtracts_without_dropping_other() {
-        assert!(!visible_in("results", &Project::Litehtml));
-        assert!(visible_in("results", &Project::Sluggrs));
-        assert!(visible_in("results", &Project::Piners));
+        assert!(!visible_in("sidecar", &Project::Litehtml));
+        assert!(visible_in("sidecar", &Project::Sluggrs));
+        assert!(visible_in("sidecar", &Project::Piners));
         assert!(visible_in(
-            "results",
+            "sidecar",
             &Project::Other("some-foreign-repo".into())
         ));
     }

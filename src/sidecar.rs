@@ -1709,6 +1709,122 @@ pub(crate) fn run_sidecar_with_deadline(
     capture_cap: child::CaptureCap,
     sampler: &mut dyn SidecarSampler,
 ) -> SidecarRunResult {
+    supervise_sidecar(
+        child_process,
+        fifo,
+        run_idx,
+        start,
+        stop_marker,
+        deadline,
+        tunables,
+        capture_cap,
+        sampler,
+    )
+    .finish(fifo, true)
+}
+
+/// A sidecar-observed child whose supervision is over but whose FIFO capture
+/// is still open: the child has ended and its wall, ending, `/proc` samples
+/// and output are fixed, while records a surviving descendant writes may
+/// still arrive. [`pump`](Self::pump) drains them on the way (a script-bench
+/// call keeps draining while its borrow's release waits for descendants), and
+/// [`finish`](Self::finish) closes the capture.
+pub(crate) struct OpenCapture {
+    run: child::SupervisedChild,
+    samples: Vec<Sample>,
+    capture: FifoCapture,
+    last_hwm: i64,
+    fired_stop_marker: Option<String>,
+    run_idx: usize,
+    max_line_bytes: usize,
+}
+
+impl OpenCapture {
+    /// Drain what the FIFO holds now, under the per-tick budget. Records
+    /// only: no sample is taken and the wall does not move.
+    pub(crate) fn pump(&mut self, fifo: &mut SidecarFifo) {
+        fifo.drain(
+            &mut self.capture,
+            None,
+            self.max_line_bytes,
+            TICK_DRAIN_BUDGET,
+        );
+    }
+
+    /// Close the capture. With `complete`, the last drain reads what is left;
+    /// without it (a descendant may still hold the FIFO), nothing more is
+    /// read and the capture is marked as possibly missing records.
+    pub(crate) fn finish(mut self, fifo: &mut SidecarFifo, complete: bool) -> SidecarRunResult {
+        let run_idx = self.run_idx;
+        let run = self.run;
+        if complete {
+            fifo.drain_after_exit(&mut self.capture, self.max_line_bytes);
+        } else {
+            self.capture.loss.fifo_unread = true;
+        }
+        let mut capture = self.capture;
+        let samples = self.samples;
+        let (stdout_truncated, stderr_truncated) = (run.stdout_truncated, run.stderr_truncated);
+        capture.loss.output_truncated = stdout_truncated || stderr_truncated || run.output_cut;
+        warn_if_truncated(&capture.loss);
+        let (marker_total, counter_total) = capture.kept_counts();
+        let clock = clock_outliers(&capture.records, run.elapsed);
+        if let Some(message) = clock.message(&format!("sidecar run {}", run_idx + 1)) {
+            console::warn(&message);
+        }
+        announce_ending(&run.ending);
+
+        // The shared nearest-millisecond rule, so the sidecar summary agrees
+        // with the results row's rounded wall.
+        let wall_time_ms = crate::harness::elapsed_to_ms(&run.elapsed);
+        console::detail(&run_summary_line(
+            run_idx,
+            [samples.len(), marker_total, counter_total],
+            wall_time_ms,
+        ));
+        let count = |n: usize| i32::try_from(n).unwrap_or(i32::MAX);
+        let (sample_count, marker_count) = (count(samples.len()), count(marker_total));
+        SidecarRunResult {
+            stdout: run.stdout,
+            stderr: run.stderr,
+            stdout_truncated,
+            stderr_truncated,
+            output_cut: run.output_cut,
+            elapsed: run.elapsed,
+            data: SidecarData {
+                samples,
+                records: capture.records,
+                calls_seen: capture.calls_seen,
+                calls: Vec::new(),
+                fired_stop_marker: self.fired_stop_marker,
+                ending: run.ending,
+                summary: SidecarSummary {
+                    vm_hwm_kb: self.last_hwm,
+                    sample_count,
+                    marker_count,
+                    wall_time_ms,
+                    loss: capture.loss,
+                    clock,
+                },
+            },
+        }
+    }
+}
+
+/// The supervision half of [`run_sidecar_with_deadline`]: sample and drain
+/// until the child ends, and hand back the open capture.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn supervise_sidecar(
+    child_process: Child,
+    fifo: &mut SidecarFifo,
+    run_idx: usize,
+    start: Instant,
+    stop_marker: Option<&str>,
+    deadline: Option<Duration>,
+    tunables: &MeasurementTunables,
+    capture_cap: child::CaptureCap,
+    sampler: &mut dyn SidecarSampler,
+) -> OpenCapture {
     // The shared child supervisor owns process polling and process-group
     // signals. This guard only makes the sidecar's own shutdown path observe
     // the process-wide termination request.
@@ -1776,50 +1892,15 @@ pub(crate) fn run_sidecar_with_deadline(
         },
     );
 
-    fifo.drain_after_exit(&mut capture, tunables.max_fifo_line_bytes);
-    let (stdout_truncated, stderr_truncated) = (run.stdout_truncated, run.stderr_truncated);
-    capture.loss.output_truncated = stdout_truncated || stderr_truncated || run.output_cut;
-    warn_if_truncated(&capture.loss);
-    let (marker_total, counter_total) = capture.kept_counts();
-    let clock = clock_outliers(&capture.records, run.elapsed);
-    if let Some(message) = clock.message(&format!("sidecar run {}", run_idx + 1)) {
-        console::warn(&message);
-    }
-    announce_ending(&run.ending);
-
-    // The shared nearest-millisecond rule, so the sidecar summary agrees with
-    // the results row's rounded wall.
-    let wall_time_ms = crate::harness::elapsed_to_ms(&run.elapsed);
-    console::detail(&run_summary_line(
+    drop(shutdown_guard);
+    OpenCapture {
+        run,
+        samples,
+        capture,
+        last_hwm,
+        fired_stop_marker,
         run_idx,
-        [samples.len(), marker_total, counter_total],
-        wall_time_ms,
-    ));
-    let count = |n: usize| i32::try_from(n).unwrap_or(i32::MAX);
-    let (sample_count, marker_count) = (count(samples.len()), count(marker_total));
-    SidecarRunResult {
-        stdout: run.stdout,
-        stderr: run.stderr,
-        stdout_truncated,
-        stderr_truncated,
-        output_cut: run.output_cut,
-        elapsed: run.elapsed,
-        data: SidecarData {
-            samples,
-            records: capture.records,
-            calls_seen: capture.calls_seen,
-            calls: Vec::new(),
-            fired_stop_marker,
-            ending: run.ending,
-            summary: SidecarSummary {
-                vm_hwm_kb: last_hwm,
-                sample_count,
-                marker_count,
-                wall_time_ms,
-                loss: capture.loss,
-                clock,
-            },
-        },
+        max_line_bytes: tunables.max_fifo_line_bytes,
     }
 }
 

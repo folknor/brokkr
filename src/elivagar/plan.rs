@@ -148,9 +148,15 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
             // Emptied here, as elivagar empties its `--tmp-dir` at start
             // anyway, so what sits in it once this returns is this attempt's
             // and [`discard`](Self::discard) may take it.
+            // Through the reservation gate either way: a configured tmp dir
+            // can enclose a script-bench iteration a surviving child still
+            // pins, and when it is the scratch dir itself elivagar empties
+            // it, so the check before the launch is all that refuses that.
             let tmp_dir = layout.tilegen_tmp();
-            if tmp_dir.as_path() != layout.scratch() {
-                match std::fs::remove_dir_all(&tmp_dir) {
+            if tmp_dir.as_path() == layout.scratch() {
+                crate::reservations::check_unreserved(&tmp_dir)?;
+            } else {
+                match crate::reservations::remove_reserved_tree(&tmp_dir) {
                     Ok(()) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(error) => return Err(error.into()),

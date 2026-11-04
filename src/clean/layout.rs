@@ -76,6 +76,13 @@ impl ProjectState {
         self.root.join("bench")
     }
 
+    /// Where script-bench iterations make their directories
+    /// (`reference/bench-resources.md`, Placement and cleanup). Removed by
+    /// nothing but the leases: `brokkr clean` has no name for it.
+    pub(crate) fn bench_iterations_dir(&self) -> PathBuf {
+        self.root.join("bench-iterations")
+    }
+
     pub(crate) fn check_logs_dir(&self) -> PathBuf {
         self.root.join("check-logs")
     }

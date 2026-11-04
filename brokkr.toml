@@ -4,6 +4,15 @@ project = "brokkr"
 [bin]
 default = "brokkr"
 
+# The smallest script bench there is: brokkr's own startup, end to end
+# through `brokkr bench startup` (`brokkr man bench`).
+[bench.startup]
+script = """
+function bench()
+    local r = binary("--version"):ok()
+    record.version = r.stdout:match("%S+%s+(%S+)")
+end"""
+
 [test]
 debug = true
 default_package = "brokkr"

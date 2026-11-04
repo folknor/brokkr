@@ -37,6 +37,9 @@ pub struct Bench {
     pub target: Option<String>,
     pub profile: Option<RustProfile>,
     pub features: Vec<String>,
+    /// Whether cargo builds the package's default features; `true` unless the
+    /// table sets `default_features = false`.
+    pub default_features: bool,
     /// The `[bench_params]` sets this bench pulled in, in the order given.
     pub uses: Vec<String>,
     /// The effective params: every used set's, then the bench's own, which
@@ -176,6 +179,7 @@ struct RawBench {
     profile: Option<RustProfile>,
     #[serde(default)]
     features: Vec<String>,
+    default_features: Option<bool>,
     #[serde(default)]
     uses: Vec<String>,
     #[serde(default)]
@@ -322,6 +326,7 @@ fn parse_bench(
         target: raw.target,
         profile: raw.profile,
         features: raw.features,
+        default_features: raw.default_features.unwrap_or(true),
         uses: raw.uses,
         params,
     })
@@ -532,6 +537,10 @@ mod tests {
         assert_eq!(cat.target.as_deref(), Some("pbfhogg"));
         assert_eq!(cat.profile, Some(RustProfile::Release));
         assert_eq!(cat.features, ["zlib-ng"]);
+        assert!(
+            cat.default_features,
+            "default features unless the table says otherwise"
+        );
     }
 
     #[test]

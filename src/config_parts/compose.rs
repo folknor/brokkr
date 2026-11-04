@@ -60,6 +60,10 @@ pub struct ConfigSources {
     /// The user layer's effective contribution after higher layers shadow
     /// named entries.
     user_layer: Option<UserLayerSources>,
+    /// The composed table itself, as every section was parsed from it; set
+    /// by [`load_with_sources`], empty otherwise. A script-bench run stores
+    /// it as the configuration it ran under.
+    composed: toml::Table,
 }
 
 /// The user-wide config file and the entries it contributed to the composed
@@ -84,6 +88,11 @@ impl ConfigSources {
     /// The project config's included files, lowest precedence first.
     pub fn included(&self) -> &[PathBuf] {
         &self.included_files
+    }
+
+    /// The composed table every section was parsed from.
+    pub fn composed(&self) -> &toml::Table {
+        &self.composed
     }
 
     /// The user-wide config's effective contribution, if its file was read.

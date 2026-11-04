@@ -249,6 +249,20 @@ pub(super) fn run(
             },
             detection,
         ),
+        Command::Bench {
+            commit,
+            iterations,
+            bench,
+        } => crate::bench::runner::run(
+            &crate::bench::runner::BenchArgs {
+                name: bench.first().cloned(),
+                commit: commit.clone(),
+                iterations: *iterations,
+                params: bench.iter().skip(1).cloned().collect(),
+            },
+            require_detection(detection)?,
+            invocation,
+        ),
         Command::Deps {
             json,
             no_fail,
@@ -398,6 +412,7 @@ fn run_project(
         | Command::Clippy { .. }
         | Command::Fmt { .. }
         | Command::Crit { .. }
+        | Command::Bench { .. }
         | Command::Run { .. }
         | Command::Build { .. }
         | Command::Install { .. }

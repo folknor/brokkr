@@ -231,6 +231,9 @@ pub struct BuiltArtifact {
     /// Cargo's resolved profile for this executable, from its
     /// compiler-artifact record ([`crate::build_provenance::unit_pairs`]).
     pub unit_profile: Vec<(String, String)>,
+    /// The features cargo resolved for the executable's unit, from the same
+    /// record, in cargo's order.
+    pub unit_features: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -837,6 +840,7 @@ fn cargo_build_locked(
         target: executable.target,
         build_root: project_root.to_path_buf(),
         unit_profile: executable.unit_profile,
+        unit_features: executable.features,
     };
 
     output::build_msg(&format!(
@@ -964,11 +968,14 @@ fn resolve_bin_name(metadata: &CargoMetadata, config: &BuildConfig) -> Result<St
     Ok(bins[0].name.clone())
 }
 
+#[derive(Clone)]
 pub(crate) struct CargoExecutableArtifact {
     pub(crate) path: PathBuf,
     target: String,
     /// The record's `profile` object, as [`crate::build_provenance::unit_pairs`].
     pub(crate) unit_profile: Vec<(String, String)>,
+    /// The record's `features`: what cargo resolved for this unit.
+    pub(crate) features: Vec<String>,
 }
 
 /// Scan cargo's JSON output for the compiled executable, keeping the target
@@ -1040,25 +1047,29 @@ pub(crate) fn find_executable_artifact(
             .get("profile")
             .map(crate::build_provenance::unit_pairs)
             .unwrap_or_default();
+        let features = val
+            .get("features")
+            .and_then(serde_json::Value::as_array)
+            .map(|features| {
+                features
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
         let artifact = CargoExecutableArtifact {
             path,
             target,
             unit_profile,
+            features,
         };
         if expected_name.is_some()
             && artifact.path.file_stem().and_then(|s| s.to_str()) == expected_name
         {
-            matched_exe = Some(CargoExecutableArtifact {
-                path: artifact.path.clone(),
-                target: artifact.target.clone(),
-                unit_profile: artifact.unit_profile.clone(),
-            });
+            matched_exe = Some(artifact.clone());
         }
-        all_exes.push(CargoExecutableArtifact {
-            path: artifact.path.clone(),
-            target: artifact.target.clone(),
-            unit_profile: artifact.unit_profile.clone(),
-        });
+        all_exes.push(artifact.clone());
         last_exe = Some(artifact);
     }
 

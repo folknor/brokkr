@@ -87,6 +87,7 @@ No flag removes these either. What keeps each in check, where anything does:
 | `.brokkr/verify-reference/` | `verify_reference_budget` per host (`brokkr man config`), applied when each verify ends; absent, nothing; `--verify-reference` removes it whole |
 | `$XDG_DATA_HOME/brokkr/history.db` | nothing: every invocation, never pruned |
 | `$XDG_DATA_HOME/brokkr/bench.db` | nothing: every attempted run with its evidence, never pruned |
+| `.brokkr/bench-iterations/` | each script-bench iteration's directory goes with its lease, at its end or, after a crash, once nothing holding its reservation runs; the empty container stays |
 | `$XDG_DATA_HOME/brokkr/sidecar-backups/` | nothing: three whole copies of each project root's sidecar.db, in a directory per root whose `origin` file names it, never pruned; a moved checkout starts a new one. The kind-keyed `<kind>-sidecar.db`, `.1`, `.2` an earlier brokkr wrote at the top level stay too, never written again; delete either by hand |
 | `.brokkr/hash_cache`, `hash_cache.lock` | a save drops entries for files that no longer exist; a run that only hits the cache does not save |
 | `.brokkr/pbfhogg-capabilities` | capped at 512 lines |
@@ -135,18 +136,22 @@ Bare `brokkr clean`, in order:
   nothing else reaches. Taken from cargo's real resolved target dir, not a
   host `target` override, since that is where the check phase actually built
   them.
+- **Leases**, in every project, first: every free lease in the launch lease
+  store is reclaimed with its private directory, wherever that sits, a
+  script-bench iteration's included unless a borrow of it is still held,
+  and each lease kept is named with why (see "Launch reservations" in
+  `docs/projects/pbfhogg.md`). Script-bench iterations live under
+  `.brokkr/bench-iterations/`, which clean never removes by name.
 - **Scratch**, whose shape differs per project: elivagar's scratch dir (the
   host `scratch`, where tilegen writes before the rename into the durable
   store) is wiped and recreated, and `<data>/tilegen_tmp` (the `--tmp-dir`
-  brokkr hands elivagar) is removed. Nidhogg's constructed
-  `bench-ingest-output/` directory is removed. Pbfhogg removes its known
+  brokkr hands elivagar) is removed. Nidhogg's constructed `bench-ingest-output/` directory is removed. Those
+  removals go through the reservation gate, since a configured directory
+  can enclose a script-bench iteration a surviving child still holds: such
+  a directory is named and kept. Pbfhogg removes its known
   bench/hotpath PBF, OSC and diff text outputs, `multi-extract/`, the `geocode-<dataset>/`
   dirs for configured datasets, merged-PBF cache names constructed from
-  configured PBF/OSC entries. First it reclaims every free lease in the
-  launch lease store with its private directory, wherever that sits, a
-  script-bench iteration's included unless a borrow of it is still held, and
-  names each lease it keeps and why (see "Launch reservations" in
-  `docs/projects/pbfhogg.md`).
+  configured PBF/OSC entries.
   Its removals of pbfhogg's verify output and scratch go through the
   reservation gate, so a path a running pbfhogg launch still uses is named,
   kept and skipped while the rest of the clean goes on, and a tree holding a
@@ -167,7 +172,7 @@ Bare `brokkr clean`, in order:
   each creator holds shared across it and the sweep exclusive (clean waits
   for it); the lock file stays.
 - **Elivagar also**: `corpus-calibrands/` (the default `-o` for
-  `pmtiles-corpus mutate`). The `ocean-build_tmp`, `.ingest_tmp`, and
+  `pmtiles-corpus mutate`), through the reservation gate like scratch. The `ocean-build_tmp`, `.ingest_tmp`, and
   `.tilegen_tmp` names are not brokkr-designated paths and are left alone.
 - **Run-artefact trees**: the named `.brokkr/ratatoskr/{service,service-mock,sync,mock}/`
   trees and child directories under `.brokkr/piners/corpus/` (the `gate.db`

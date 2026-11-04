@@ -85,6 +85,7 @@ Install => ("install", Visibility::Any, Optional, Blocking, true, crate::measure
 Wc => ("wc", Visibility::Any, Optional, None, true, crate::measure::MeasureMode::Run, None, &[]),
 Man => ("man", Visibility::Any, None, None, true, crate::measure::MeasureMode::Run, None, &[]),
 Crit => ("crit", Visibility::Any, Optional, None, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::CRIT), &["cargo"], Direct),
+Bench => ("bench", Visibility::Any, Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::SCRIPT_BENCH), &["cargo"], Direct),
 Deps => ("deps", Visibility::Any, Optional, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
 Env => ("env", Visibility::Any, Required, None, false, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
 Inspect => ("inspect", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
@@ -124,7 +125,7 @@ RunTiles => ("tiles", Visibility::Only(&[Project::Nidhogg]), Required, Blocking,
 GenericHotpath => ("generic-hotpath", Visibility::Any, Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Mode),
 Suite => ("suite", Visibility::Only(&[Project::Pbfhogg, Project::Elivagar, Project::Nidhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
 Passthrough => ("passthrough", Visibility::Any, Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
-Results => ("results", Visibility::Except(MEASURED_DB_ABSENT), Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
+Results => ("results", Visibility::Any, Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
 Sidecar => ("sidecar", Visibility::Except(MEASURED_DB_ABSENT), Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
 Clean => ("clean", Visibility::Any, Required, Blocking, false, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
 Lock => ("lock", Visibility::Any, None, None, true, crate::measure::MeasureMode::Run, None, &[]),
@@ -254,6 +255,7 @@ impl CommandSpec {
                 super::Command::Run { commit, .. }
                 | super::Command::Build { commit, .. }
                 | super::Command::Crit { commit, .. }
+                | super::Command::Bench { commit, .. }
                 | super::Command::Verify { commit, .. }
                 | super::Command::Library { commit, .. }
                 | super::Command::Sync { commit, .. }

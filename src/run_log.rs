@@ -31,6 +31,9 @@ pub(crate) mod run_log_kind {
     /// `brokkr crit`, the criterion runner. Its logs were `bench-<ms>.log`
     /// while the verb was `bench`; those stay where they are, unpruned.
     pub(crate) const CRIT: &str = "crit";
+    /// `brokkr bench`, a script-bench run. Not `bench`: that prefix names
+    /// the logs crit wrote under its old verb.
+    pub(crate) const SCRIPT_BENCH: &str = "script-bench";
 }
 
 /// Reserved before the lock, activated under it, and dropped after the

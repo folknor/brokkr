@@ -5,13 +5,12 @@ benchmark, with the build settings and params it runs with. The scripts run on
 dellingr, a pure Rust Lua VM linked into brokkr; they are dellingr Lua, not Lua
 5.4 (no `pcall`, long strings, bitwise operators or `goto`).
 
-What brokkr does with them today: it loads and validates every table below
-when it reads the config, and `brokkr check`'s `bench` phase compiles every
-bench's script without running any of it. Running a bench (`brokkr bench
-NAME`), resolving its params against the config and recording its results are
-not there yet; until they are, a bench table describes a bench and nothing
-runs it. `brokkr results` already reads recorded runs (`brokkr man results`,
-Script benches), so it lists them once something records them.
+What brokkr does with them: it loads and validates every table below when it
+reads the config, `brokkr check`'s `bench` phase compiles every bench's script
+without running any of it, `brokkr bench NAME` runs one and stores the run
+(`brokkr man bench`), and `brokkr results` reads the stored runs (`brokkr man
+results`, Script benches). Binding params on the command line is not there
+yet: `brokkr bench` refuses a bench that declares any.
 
 Every refusal this page lists happens when the config loads, for every
 command, so a mistake in a bench table is named before anything is built. A
@@ -28,6 +27,7 @@ end"""
 target = "pbfhogg"
 profile = "release"
 features = ["zlib-ng"]
+default_features = true
 uses = ["dataset"]
 params.jobs = { help = "worker threads" }
 ```
@@ -47,7 +47,10 @@ params.jobs = { help = "worker threads" }
 - `profile` - the cargo profile, as `[bin] profile` takes it (`dev`,
   `release`, or a custom profile; the names Cargo or brokkr own under the
   target directory are refused).
-- `features` - cargo features to build with; a blank entry is refused.
+- `features` - cargo features to build with, after the host section's own
+  `features`; a blank entry is refused.
+- `default_features` - `false` builds without the package's default
+  features; absent is `true`.
 - `uses` - `[bench_params]` sets whose params the bench takes (below).
 - `params` - the bench's own params (below).
 

@@ -57,7 +57,10 @@ iteration and a run whose iterations disagreed are all stored. It holds:
   plain string) and its values in bound order, each a key and, for a file,
   a digest. An unbound param is absent; a bound empty collection keeps its
   name and path;
-- the resolved config's text, stored once per distinct text;
+- the configuration text the run was made from, stored once per distinct
+  text (the runner writes one TOML document holding the run's roots, the
+  script's exact source and origin, and the composed brokkr.toml, keys
+  sorted; `brokkr man bench`, What a run stores);
 - the iterations requested, the run's outcome (`completed`, `failed` with a
   reason, `interrupted`), and every iteration that ran, in execution order.
 

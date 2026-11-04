@@ -147,6 +147,13 @@ impl Iteration {
     }
 
     /// The iteration directory.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the runner reaches the iteration through its handles"
+        )
+    )]
     pub(crate) fn dir(&self) -> &Path {
         &self.dir
     }
@@ -361,14 +368,22 @@ impl Call {
     /// Release the borrow. Its spool comes back only when no process holds
     /// the borrow any more: a borrow still held after the release window is
     /// this call's error, stays a live reservation and pins the iteration.
-    pub(crate) fn finish(mut self) -> Result<Spool, DevError> {
-        self.release()?;
+    pub(crate) fn finish(self) -> Result<Spool, DevError> {
+        self.finish_observed(&mut || {})
+    }
+
+    /// [`finish`](Self::finish), calling `wait` while the release window
+    /// waits for the borrow's last holder: a descendant still writing to
+    /// something brokkr drains (the call's marker FIFO) is never left blocked
+    /// on it until the window closes.
+    pub(crate) fn finish_observed(mut self, wait: &mut dyn FnMut()) -> Result<Spool, DevError> {
+        self.release(wait)?;
         self.spool
             .take()
             .ok_or_else(|| DevError::Internal("a call finished twice".into()))
     }
 
-    fn release(&mut self) -> Result<(), DevError> {
+    fn release(&mut self, wait: &mut dyn FnMut()) -> Result<(), DevError> {
         let Some(lease) = self.lease.take() else {
             return Ok(());
         };
@@ -378,7 +393,7 @@ impl Call {
         let _serial =
             super::serialize().map_err(|e| io_error("the call could not release its borrow", e))?;
         lease
-            .release()
+            .release_with(wait)
             .map_err(|e| io_error("the call could not release its borrow", e))
     }
 
@@ -397,7 +412,7 @@ impl Call {
 
 impl Drop for Call {
     fn drop(&mut self) {
-        if let Err(e) = self.release() {
+        if let Err(e) = self.release(&mut || {}) {
             crate::output::warn(&e.to_string());
         }
     }
@@ -406,6 +421,10 @@ impl Drop for Call {
 /// A finished call's stdout, in full in its spool file.
 #[derive(Debug)]
 pub(crate) struct Spool {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "feeding a spool onward is not built yet")
+    )]
     path: PathBuf,
     file: File,
 }
@@ -418,6 +437,10 @@ pub(crate) struct Preview {
 }
 
 impl Spool {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "feeding a spool onward is not built yet")
+    )]
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }

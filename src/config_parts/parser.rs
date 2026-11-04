@@ -2738,6 +2738,15 @@ pub fn captured_env_pairs(config: &DevConfig) -> Vec<crate::db::KvPair> {
     captured_env_pairs_from(config, std::env::vars())
 }
 
+/// The variables `capture_env` selects from brokkr's own environment, by
+/// name, unredacted: a script-bench run's captured environment, which the
+/// caller redacts before storing it.
+pub fn captured_env_map(config: &DevConfig) -> std::collections::BTreeMap<String, String> {
+    std::env::vars()
+        .filter(|(name, _)| matches_capture(name, &config.capture_env))
+        .collect()
+}
+
 /// Build the captured environment snapshot from an explicit iterator. The
 /// public wrapper above uses the inherited process environment, while keeping
 /// the selection and sorting logic independently injectable.

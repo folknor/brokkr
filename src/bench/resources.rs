@@ -25,6 +25,10 @@ pub(crate) enum Origin {
     Input,
     Output,
     Scratch,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "feeding a spool onward is not built yet")
+    )]
     Spool,
 }
 
@@ -39,6 +43,10 @@ impl Handle {
         &self.path
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "nothing branches on a handle's origin yet")
+    )]
     pub(crate) fn origin(&self) -> Origin {
         self.origin
     }
@@ -62,6 +70,10 @@ impl Handle {
 #[derive(Debug)]
 pub(crate) struct Resources {
     iteration: Iteration,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "a run reads no inputs until params bind files")
+    )]
     inputs: Vec<Handle>,
 }
 
@@ -80,6 +92,10 @@ impl Resources {
         })
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "a run reads no inputs until params bind files")
+    )]
     pub(crate) fn inputs(&self) -> &[Handle] {
         &self.inputs
     }
@@ -117,6 +133,10 @@ impl Resources {
 }
 
 /// A finished call's spool as a handle, for feeding it onward.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "feeding a spool onward is not built yet")
+)]
 pub(crate) fn spool_handle(spool: &Spool) -> Handle {
     Handle {
         path: spool.path().to_path_buf(),

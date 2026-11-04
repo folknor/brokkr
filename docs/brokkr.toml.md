@@ -240,8 +240,9 @@ swallowing `raw-fast`) and evict them. `brokkr clean --archives` uses the same
 store pruning operation with its configured keep count and dry-run policy.
 
 **Host feature policy.** Host `features` are added to measured-request builds
-through the shared build context, and to the `passthrough`, `verify`, `serve`,
-`ingest`, and `update` paths. Standalone `run`, `install`, `check`, `clippy`,
+through the shared build context, to the `passthrough`, `verify`, `serve`,
+`ingest`, and `update` paths, and to a script bench's build (`brokkr bench`,
+before the bench's own `features`). Standalone `run`, `install`, `check`, `clippy`,
 `test`, and Criterion `crit` use their own cargo/default or sweep feature
 selection and do not inherit host features. CLI `--features` are additive to
 host features in paths that apply them, with duplicates removed. This is the

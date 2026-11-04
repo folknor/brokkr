@@ -107,7 +107,13 @@ pub(crate) fn cmd_results(
     // results.db would: an unanswerable query is not an empty answer.
     let bench = BenchReader::open(&q.project)?;
     let bench_filter = bench_filter(q);
-    let store = db::RunStore::open_read_only(&db_path, &sidecar_path)?;
+    // litehtml's `.brokkr/results.db` is its mechanical database, another
+    // schema: it has no typed results, only script-bench runs.
+    let store = if q.project == crate::project::Project::Litehtml.name() {
+        db::RunStore::absent()
+    } else {
+        db::RunStore::open_read_only(&db_path, &sidecar_path)?
+    };
     let bench_has_runs = match &bench {
         Some(bench) => bench.has_runs()?,
         None => false,

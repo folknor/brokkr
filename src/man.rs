@@ -106,6 +106,12 @@ const TOPICS: &[Topic] = &[
         commands: &[CommandId::Env],
     },
     Topic {
+        name: "bench",
+        summary: "brokkr bench: running a script bench, its builtins, what a run stores",
+        content: include_str!("../docs/commands/bench.md"),
+        commands: &[CommandId::Env],
+    },
+    Topic {
         name: "crit",
         summary: "the criterion runner: baselines, the environment gate, --compare",
         content: include_str!("../docs/commands/crit.md"),
