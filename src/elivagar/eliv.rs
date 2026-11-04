@@ -65,13 +65,35 @@ fn linked_decode<T>(
     }
 }
 
+/// A failed read through [`Cursor`]: either protohoggr's own malformed-wire
+/// kind, or a panic in the linked decoder contained at the seam. protohoggr's
+/// `WireError` is a closed set of kinds, so the panic needs its own variant.
+#[derive(Clone, Copy, Debug)]
+pub enum WireError {
+    Wire(protohoggr::WireError),
+    Panicked(&'static str),
+}
+
+impl std::fmt::Display for WireError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Wire(error) => error.fmt(f),
+            Self::Panicked(operation) => write!(f, "wire format error: {operation}"),
+        }
+    }
+}
+
+impl std::error::Error for WireError {}
+
+pub type WireResult<T> = Result<T, WireError>;
+
 fn linked_wire<T>(
     operation: &'static str,
     f: impl FnOnce() -> protohoggr::WireResult<T>,
-) -> protohoggr::WireResult<T> {
+) -> WireResult<T> {
     match catch_unwind(AssertUnwindSafe(f)) {
-        Ok(result) => result,
-        Err(_) => Err(protohoggr::WireError { msg: operation }),
+        Ok(result) => result.map_err(WireError::Wire),
+        Err(_) => Err(WireError::Panicked(operation)),
     }
 }
 
@@ -90,15 +112,15 @@ impl<'a> Cursor<'a> {
         self.0.is_empty()
     }
 
-    pub fn read_varint(&mut self) -> protohoggr::WireResult<u64> {
+    pub fn read_varint(&mut self) -> WireResult<u64> {
         linked_wire("protobuf varint decoder panicked", || self.0.read_varint())
     }
 
-    pub fn read_tag(&mut self) -> protohoggr::WireResult<Option<(u32, u32)>> {
+    pub fn read_tag(&mut self) -> WireResult<Option<(u32, u32)>> {
         linked_wire("protobuf tag decoder panicked", || self.0.read_tag())
     }
 
-    pub fn read_len_delimited(&mut self) -> protohoggr::WireResult<&'a [u8]> {
+    pub fn read_len_delimited(&mut self) -> WireResult<&'a [u8]> {
         linked_wire("protobuf field decoder panicked", || {
             self.0.read_len_delimited()
         })
