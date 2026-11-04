@@ -24,8 +24,9 @@ use serde::{Deserialize, Serialize};
 use super::paths::Spelled;
 
 /// Bumped whenever the record's meaning changes; an unknown version reads as
-/// an unknown reservation, never as an empty one.
-const RECORD_VERSION: u32 = 1;
+/// an unknown reservation, never as an empty one. Version 2 added the ties of
+/// an iteration owner and its borrows; a version 1 record reads as untied.
+const RECORD_VERSION: u32 = 2;
 
 const LOCK_EXT: &str = "lock";
 const RECORD_EXT: &str = "record";
@@ -103,6 +104,31 @@ impl Resource {
 struct Record {
     version: u32,
     resources: Vec<Resource>,
+    /// An iteration owner: its borrows pin it (`Tie::Owner`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    owner: bool,
+    /// The owner a borrow belongs to (`Tie::Borrow`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    borrows_from: Option<String>,
+}
+
+/// How a lease relates to others. A launch's or a staged write's lease stands
+/// alone. An iteration owner lease is held by brokkr alone and never lent; each
+/// of its children inherits a borrow naming it instead, and while any borrow
+/// is held the owner is kept even when its own lock is free, so a brokkr that
+/// died under a running child never has its iteration reclaimed under it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Tie {
+    None,
+    Owner,
+    Borrow(String),
+}
+
+/// A published lease as its record states it.
+#[derive(Debug)]
+struct Recorded {
+    resources: Vec<Resource>,
+    tie: Tie,
 }
 
 /// What a scan found besides the dead leases it reclaimed.
@@ -202,6 +228,20 @@ impl Store {
     /// pending name, flocked, then renamed to its final name, then the
     /// record, all durable on return.
     pub(crate) fn create(&self, resources: Vec<Resource>) -> io::Result<Lease> {
+        self.create_tied(resources, Tie::None)
+    }
+
+    /// [`Store::create`] for a lease tied to others: an iteration owner, or a
+    /// borrow of one. A borrow never holds a private resource: what it uses
+    /// is its owner's to remove.
+    pub(crate) fn create_tied(&self, resources: Vec<Resource>, tie: Tie) -> io::Result<Lease> {
+        if matches!(tie, Tie::Borrow(_))
+            && resources
+                .iter()
+                .any(|r| r.disposition == Disposition::Private)
+        {
+            return Err(io::Error::other("a borrow cannot hold a private resource"));
+        }
         self.ensure_root()?;
         let id = crate::lockfile::RunToken::mint()
             .ok_or_else(|| io::Error::other("no entropy for a lease id"))?
@@ -231,6 +271,7 @@ impl Store {
             id,
             file: Some(file),
             resources,
+            tie,
         };
         if let Err(e) = lease.publish() {
             // Nothing the record would describe exists yet. A record that did
@@ -247,15 +288,52 @@ impl Store {
 
     /// Reclaim every free lease and report the rest. An absent store holds
     /// none; one that cannot be read is an unknown reservation.
+    ///
+    /// Two phases, so the order the directory lists leases in decides
+    /// nothing: every lease is classified first, each free one with its
+    /// exclusive flock kept, then the free ones are decided. A free lease
+    /// never becomes held again (nothing holds its description to pass on),
+    /// so a borrow seen held and freed since only delays its owner's
+    /// reclamation, and one seen free cannot revive to need it.
     pub(crate) fn scan(&self) -> Scan {
         let mut scan = Scan::default();
+        let inventory = self.classify(&mut scan);
+        for free in inventory.free {
+            match owner_kept(&free.id, &free.recorded.tie, &inventory.pins, &scan) {
+                Some(retained) => scan.reservations.push(Reservation {
+                    id: free.id,
+                    resources: free.recorded.resources,
+                    retained,
+                }),
+                None => {
+                    if let Err(e) = self.reclaim(&free.id, &free.recorded.resources) {
+                        scan.reservations.push(Reservation {
+                            id: free.id,
+                            resources: free.recorded.resources,
+                            retained: Some(e.to_string()),
+                        });
+                    }
+                }
+            }
+            drop(free.lock);
+        }
+        scan
+    }
+
+    /// Phase one of a scan: held leases become reservations and their
+    /// borrows' owners pins, unestablished ones unknown; the free ones are
+    /// returned undecided, each with its exclusive flock. Pending locks past
+    /// their grace, unpublished free leases and orphaned temporary records,
+    /// none of which anything can depend on, are removed on the way.
+    fn classify(&self, scan: &mut Scan) -> Inventory {
+        let mut inventory = Inventory::default();
         let entries = match std::fs::read_dir(&self.root) {
             Ok(entries) => entries,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return scan,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return inventory,
             Err(e) => {
                 scan.unknown
                     .push(("*".into(), format!("the lease store cannot be read: {e}")));
-                return scan;
+                return inventory;
             }
         };
         let mut ids: Vec<String> = Vec::new();
@@ -291,7 +369,7 @@ impl Store {
             self.reclaim_pending(&id);
         }
         for id in &ids {
-            self.scan_one(id, &mut scan);
+            self.classify_one(id, scan, &mut inventory);
         }
         // A record outlives its lock only outside this protocol: unknown.
         for id in stray_records {
@@ -308,7 +386,7 @@ impl Store {
                 drop(std::fs::remove_file(self.path(&id, TMP_EXT)));
             }
         }
-        scan
+        inventory
     }
 
     /// Remove a pending lock abandoned by a creation that died before its
@@ -329,7 +407,7 @@ impl Store {
         }
     }
 
-    fn scan_one(&self, id: &str, scan: &mut Scan) {
+    fn classify_one(&self, id: &str, scan: &mut Scan, inventory: &mut Inventory) {
         let lock_path = self.path(id, LOCK_EXT);
         let file = match open_lock(&lock_path) {
             Ok(file) => file,
@@ -350,25 +428,26 @@ impl Store {
                             .push((id.to_owned(), format!("its lock cannot be removed: {e}")));
                     }
                 }
-                Ok(Some(resources)) => {
-                    if let Err(e) = self.reclaim(id, &resources) {
-                        scan.reservations.push(Reservation {
-                            id: id.to_owned(),
-                            resources,
-                            retained: Some(e.to_string()),
-                        });
-                    }
-                }
+                Ok(Some(recorded)) => inventory.free.push(Free {
+                    id: id.to_owned(),
+                    recorded,
+                    lock: file,
+                }),
                 Err(e) => scan
                     .unknown
                     .push((id.to_owned(), format!("its record is unreadable: {e}"))),
             },
             Ok(false) => match self.read_record(id) {
-                Ok(Some(resources)) => scan.reservations.push(Reservation {
-                    id: id.to_owned(),
-                    resources,
-                    retained: None,
-                }),
+                Ok(Some(recorded)) => {
+                    if let Tie::Borrow(owner) = recorded.tie {
+                        inventory.pins.insert(owner);
+                    }
+                    scan.reservations.push(Reservation {
+                        id: id.to_owned(),
+                        resources: recorded.resources,
+                        retained: None,
+                    });
+                }
                 Ok(None) => scan
                     .unknown
                     .push((id.to_owned(), "a held lease not yet recorded".into())),
@@ -380,24 +459,65 @@ impl Store {
                 .unknown
                 .push((id.to_owned(), format!("its lock cannot be tested: {e}"))),
         }
-        drop(file);
     }
 
-    /// The record's resources; `None` only when it does not exist.
-    fn read_record(&self, id: &str) -> io::Result<Option<Vec<Resource>>> {
+    /// The record's resources and tie; `None` only when it does not exist. A
+    /// record whose tie breaks the protocol's shape is unreadable.
+    fn read_record(&self, id: &str) -> io::Result<Option<Recorded>> {
         let text = match std::fs::read_to_string(self.path(id, RECORD_EXT)) {
             Ok(text) => text,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
         };
         let record: Record = serde_json::from_str(&text).map_err(io::Error::other)?;
-        if record.version != RECORD_VERSION {
-            return Err(io::Error::other(format!(
-                "record version {}",
-                record.version
-            )));
+        let tie = match (record.version, record.owner, record.borrows_from) {
+            (1, false, None) | (RECORD_VERSION, false, None) => Tie::None,
+            (RECORD_VERSION, true, None) => Tie::Owner,
+            (RECORD_VERSION, false, Some(owner)) => {
+                if crate::lockfile::RunToken::parse(&owner).is_none() {
+                    return Err(io::Error::other(format!(
+                        "a borrow of {owner:?}, which is no lease id"
+                    )));
+                }
+                if record
+                    .resources
+                    .iter()
+                    .any(|r| r.disposition == Disposition::Private)
+                {
+                    return Err(io::Error::other("a borrow holding a private resource"));
+                }
+                Tie::Borrow(owner)
+            }
+            (1 | RECORD_VERSION, _, _) => {
+                return Err(io::Error::other(format!(
+                    "record version {} with an impossible tie",
+                    record.version
+                )));
+            }
+            (version, _, _) => {
+                return Err(io::Error::other(format!("record version {version}")));
+            }
+        };
+        Ok(Some(Recorded {
+            resources: record.resources,
+            tie,
+        }))
+    }
+
+    /// Whether an iteration owner whose own lock is free must be kept, and
+    /// why: phase one again, for this one owner, at its release.
+    fn owner_release_blocked(&self, id: &str) -> Option<String> {
+        let mut scan = Scan::default();
+        let inventory = self.classify(&mut scan);
+        match owner_kept(id, &Tie::Owner, &inventory.pins, &scan) {
+            Some(None) => Some(format!(
+                "a borrow of iteration lease {id} is still held: some process that \
+                 inherited it still runs, so the iteration is kept until a later scan finds \
+                 it free"
+            )),
+            Some(Some(why)) => Some(format!("iteration lease {id} is kept: {why}")),
+            None => None,
         }
-        Ok(Some(record.resources))
     }
 
     /// Remove a free lease: its private directories, then the record, then
@@ -414,17 +534,55 @@ impl Store {
     }
 }
 
-/// One launch's lease, held by this process until [`Lease::release`].
+/// What phase one of a scan leaves to decide.
+#[derive(Default)]
+struct Inventory {
+    free: Vec<Free>,
+    /// The owners named by held borrows.
+    pins: std::collections::BTreeSet<String>,
+}
+
+/// A free lease, its exclusive flock kept until it is decided.
+struct Free {
+    id: String,
+    recorded: Recorded,
+    lock: File,
+}
+
+/// Whether the free lease `id` must be kept rather than reclaimed: only an
+/// iteration owner ever is. `Some(None)` while a held borrow pins it (it is
+/// in use); `Some(Some(why))` while an unestablished lease exists, which may
+/// be a borrow of it. Every other free lease is reclaimed as it always was.
+fn owner_kept(
+    id: &str,
+    tie: &Tie,
+    pins: &std::collections::BTreeSet<String>,
+    scan: &Scan,
+) -> Option<Option<String>> {
+    if *tie != Tie::Owner {
+        return None;
+    }
+    if pins.contains(id) {
+        return Some(None);
+    }
+    scan.unknown.first().map(|(other, why)| {
+        Some(format!(
+            "lease {other} cannot be established ({why}) and may be a borrow of it"
+        ))
+    })
+}
+
+/// One lease, held by this process until [`Lease::release`].
 #[derive(Debug)]
 pub(crate) struct Lease {
     store: Store,
     id: String,
     file: Option<File>,
     resources: Vec<Resource>,
+    tie: Tie,
 }
 
 impl Lease {
-    #[cfg(test)]
     pub(crate) fn id(&self) -> &str {
         &self.id
     }
@@ -464,6 +622,11 @@ impl Lease {
         let record = Record {
             version: RECORD_VERSION,
             resources: self.resources.clone(),
+            owner: self.tie == Tie::Owner,
+            borrows_from: match &self.tie {
+                Tie::Borrow(owner) => Some(owner.clone()),
+                Tie::None | Tie::Owner => None,
+            },
         };
         let text = serde_json::to_vec(&record).map_err(io::Error::other)?;
         let tmp = self.store.path(&self.id, TMP_EXT);
@@ -484,7 +647,9 @@ impl Lease {
     /// Give up this process's hold and, once no process holds the lease any
     /// more, remove it with its private directories. A lease still held after
     /// the release window stays recorded, a live reservation, and is the
-    /// error.
+    /// error. So is an iteration owner that a held borrow pins, or that an
+    /// unestablished lease may: its record stays for a later scan to reclaim
+    /// once nothing can need it.
     pub(crate) fn release(mut self) -> io::Result<()> {
         drop(self.file.take());
         let lock_path = self.store.path(&self.id, LOCK_EXT);
@@ -498,6 +663,12 @@ impl Lease {
                 Err(e) => return Err(e),
             };
             if try_exclusive(&file)? {
+                if self.tie == Tie::Owner
+                    && let Some(why) = self.store.owner_release_blocked(&self.id)
+                {
+                    drop(file);
+                    return Err(io::Error::other(why));
+                }
                 let result = self.store.reclaim(&self.id, &self.resources);
                 drop(file);
                 return result;
@@ -720,6 +891,189 @@ mod tests {
             !store.path(&id, LOCK_EXT).exists(),
             "an unpublished lease is removed"
         );
+    }
+
+    /// An owner lease holding a fresh private directory, and one borrow of it
+    /// whose description a "child" (a duplicate) keeps; both of this
+    /// process's own descriptors are gone, as when brokkr dies mid-borrow.
+    fn abandoned_pair(store: &Store, root: &Path, n: usize) -> (PathBuf, File) {
+        let dir = root.join(format!("iteration-{n}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("out"), b"").unwrap();
+        let mut owner = store.create_tied(vec![private(&dir)], Tie::Owner).unwrap();
+        let meta = std::fs::metadata(&dir).unwrap();
+        owner.set_identity(0, (meta.dev(), meta.ino())).unwrap();
+        let borrow = store
+            .create_tied(Vec::new(), Tie::Borrow(owner.id().to_owned()))
+            .unwrap();
+        let child = borrow.file.as_ref().unwrap().try_clone().unwrap();
+        drop(owner.file.take());
+        drop(owner);
+        let mut borrow = borrow;
+        drop(borrow.file.take());
+        drop(borrow);
+        (dir, child)
+    }
+
+    /// Crash mid-borrow at the store: whatever order the directory lists the
+    /// leases in, a free owner a held borrow names is kept, and once the
+    /// borrow's last holder is gone the next scan reclaims both.
+    #[test]
+    fn a_held_borrow_pins_its_free_owner_in_any_listing_order() {
+        let root = crate::test_scratch::scratch("reservations", "store-pin");
+        let store = Store::at(root.clone(), root.join("leases"));
+        let pairs: Vec<(PathBuf, File)> =
+            (0..8).map(|n| abandoned_pair(&store, &root, n)).collect();
+        let scan = store.scan();
+        assert!(scan.unknown.is_empty(), "{scan:?}");
+        assert_eq!(scan.reservations.len(), 16, "{scan:?}");
+        assert!(scan.reservations.iter().all(|r| r.retained.is_none()));
+        for (dir, _) in &pairs {
+            assert!(dir.exists(), "a pinned owner keeps {}", dir.display());
+        }
+        let dirs: Vec<PathBuf> = pairs
+            .into_iter()
+            .map(|(dir, child)| {
+                drop(child);
+                dir
+            })
+            .collect();
+        let scan = store.scan();
+        assert!(
+            scan.reservations.is_empty() && scan.unknown.is_empty(),
+            "{scan:?}"
+        );
+        for dir in &dirs {
+            assert!(!dir.exists(), "reclaimed with its owner: {}", dir.display());
+        }
+        assert_eq!(std::fs::read_dir(store.root()).unwrap().count(), 0);
+    }
+
+    /// Crash after the child exited: neither lease was released, neither is
+    /// held, and one scan reclaims both with the owner's directory.
+    #[test]
+    fn a_crash_after_the_child_exited_is_reclaimed_by_one_scan() {
+        let root = crate::test_scratch::scratch("reservations", "store-exited");
+        let store = Store::at(root.clone(), root.join("leases"));
+        let (dir, child) = abandoned_pair(&store, &root, 0);
+        drop(child);
+        let scan = store.scan();
+        assert!(
+            scan.reservations.is_empty() && scan.unknown.is_empty(),
+            "{scan:?}"
+        );
+        assert!(!dir.exists());
+        assert_eq!(std::fs::read_dir(store.root()).unwrap().count(), 0);
+    }
+
+    /// An owner's release while a borrow of it is still held is refused and
+    /// keeps the record; the scan after the borrow's holder is gone reclaims.
+    #[test]
+    fn an_owner_release_under_a_held_borrow_keeps_the_iteration() {
+        let root = crate::test_scratch::scratch("reservations", "store-owner-release");
+        let store = Store::at(root.clone(), root.join("leases"));
+        let dir = root.join("iteration");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut owner = store.create_tied(vec![private(&dir)], Tie::Owner).unwrap();
+        let meta = std::fs::metadata(&dir).unwrap();
+        owner.set_identity(0, (meta.dev(), meta.ino())).unwrap();
+        let borrow = store
+            .create_tied(Vec::new(), Tie::Borrow(owner.id().to_owned()))
+            .unwrap();
+        let child = borrow.file.as_ref().unwrap().try_clone().unwrap();
+        let err = borrow.release().unwrap_err();
+        assert!(err.to_string().contains("still held"), "{err}");
+        let err = owner.release().unwrap_err();
+        assert!(err.to_string().contains("borrow"), "{err}");
+        assert!(dir.exists(), "kept while the borrow is held");
+        assert_eq!(store.scan().reservations.len(), 2);
+        drop(child);
+        let scan = store.scan();
+        assert!(
+            scan.reservations.is_empty() && scan.unknown.is_empty(),
+            "{scan:?}"
+        );
+        assert!(!dir.exists());
+    }
+
+    /// A lease whose record cannot be read may be a borrow of any owner, so
+    /// a free owner is kept while it exists; an untied free lease is still
+    /// reclaimed, as before ties existed.
+    #[test]
+    fn an_unknown_lease_keeps_free_owners_but_not_plain_leases() {
+        let root = crate::test_scratch::scratch("reservations", "store-unknown-owner");
+        let store = Store::at(root.clone(), root.join("leases"));
+        let owned = root.join("owned");
+        let plain = root.join("plain");
+        std::fs::create_dir_all(&owned).unwrap();
+        std::fs::create_dir_all(&plain).unwrap();
+        let mut owner = store
+            .create_tied(vec![private(&owned)], Tie::Owner)
+            .unwrap();
+        drop(owner.file.take());
+        drop(owner);
+        let mut launch = store.create(vec![private(&plain)]).unwrap();
+        drop(launch.file.take());
+        drop(launch);
+        let unknown = store.create(Vec::new()).unwrap();
+        std::fs::write(store.path(unknown.id(), RECORD_EXT), b"{garbage").unwrap();
+        let scan = store.scan();
+        assert_eq!(scan.unknown.len(), 1, "{scan:?}");
+        assert_eq!(scan.reservations.len(), 1, "{scan:?}");
+        assert!(scan.reservations[0].retained.is_some());
+        assert!(owned.exists(), "an owner is kept while a borrow may exist");
+        assert!(!plain.exists(), "a plain lease is reclaimed as always");
+        let id = unknown.id().to_owned();
+        std::fs::remove_file(store.path(&id, RECORD_EXT)).unwrap();
+        drop(unknown);
+        let scan = store.scan();
+        assert!(
+            scan.reservations.is_empty() && scan.unknown.is_empty(),
+            "{scan:?}"
+        );
+        assert!(!owned.exists());
+    }
+
+    /// A version 1 record still reads, untied; a tie outside the protocol's
+    /// shape is unreadable.
+    #[test]
+    fn a_version_one_record_reads_untied_and_a_bad_tie_is_unknown() {
+        let root = crate::test_scratch::scratch("reservations", "store-versions");
+        let store = Store::at(root.clone(), root.join("leases"));
+        let dir = root.join("old");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut old = store.create(Vec::new()).unwrap();
+        let v1 = serde_json::json!({ "version": 1, "resources": [private(&dir)] });
+        std::fs::write(store.path(old.id(), RECORD_EXT), v1.to_string()).unwrap();
+        drop(old.file.take());
+        drop(old);
+        let scan = store.scan();
+        assert!(
+            scan.reservations.is_empty() && scan.unknown.is_empty(),
+            "{scan:?}"
+        );
+        assert!(!dir.exists(), "a version 1 lease is reclaimed as before");
+
+        for bad in [
+            serde_json::json!({ "version": 2, "resources": [], "owner": true,
+                                "borrows_from": "x" }),
+            serde_json::json!({ "version": 2, "resources": [], "borrows_from": "not a token" }),
+            serde_json::json!({ "version": 1, "resources": [], "owner": true }),
+            serde_json::json!({ "version": 3, "resources": [] }),
+        ] {
+            let lease = store.create(Vec::new()).unwrap();
+            std::fs::write(store.path(lease.id(), RECORD_EXT), bad.to_string()).unwrap();
+            let scan = store.scan();
+            assert_eq!(scan.unknown.len(), 1, "{bad}: {scan:?}");
+            let id = lease.id().to_owned();
+            std::fs::remove_file(store.path(&id, RECORD_EXT)).unwrap();
+            drop(lease);
+            assert!(store.scan().unknown.is_empty());
+        }
+        let borrow = store
+            .create_tied(vec![private(&dir)], Tie::Borrow("x".into()))
+            .unwrap_err();
+        assert!(borrow.to_string().contains("private"), "{borrow}");
     }
 
     /// A forked child that inherits the description keeps the lease held

@@ -300,6 +300,16 @@ project lists it. Whether `lua` joins the built-in set (it would also start
 scanning every Lua file in dellingr's and ratatoskr's trees) is undecided.
 Found while landing the script-bench schema.
 
+### The launch lease store is missing from brokkr env's store list (2026-11-04)
+
+Found while landing the script-bench resource protocol. `~/.brokkr/launch-leases/`
+(`reservations::store::Store::user`) is per-user state that now holds
+script-bench iterations as well as pbfhogg launches, but it is not among
+`health.rs`'s user stores, so `brokkr env` neither sizes it nor names its
+remedy, and its path is built in `store.rs` rather than through
+`user_dirs`. Its leases are small; the private and iteration directories
+they name live elsewhere and are not counted either.
+
 ### Captured-child termination may leave group members alive (2026-11-02, unverified)
 
 Raised in the spar on brokkr bz 101, not traced here: the captured runner's

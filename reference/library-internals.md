@@ -45,7 +45,12 @@ lease descriptors per child: no race was found that the hierarchy closes and
 this does not. Leases on the role paths alone would not do, since a
 surviving child would leave the request, `cwd/` and the artefacts
 unreserved. The equivalence holds only with serial launches: a change that
-wants two live launches in one run reopens it.
+wants two live launches in one run reopens it. A script-bench iteration does
+use an owner with a borrow per child (`reference/bench-resources.md`), for
+what the library does not need: its resources outlive any one child and
+must survive a crash without a constructed name for clean to find, and each
+call's completion must be provable before the next reads its output. Even
+there a child inherits one descriptor, its borrow, never two.
 
 Release comes before judgment, always: nothing in the run directory is read
 until the launch that could have changed it is released, and a release that

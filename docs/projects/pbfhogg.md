@@ -225,10 +225,13 @@ searched is its target dir's `verify`, where `verify --commit` writes pbfhogg
 outputs, not the whole checkout and cargo target dir. `brokkr clean` names a
 refused target or worktree and goes on with the rest.
 
-The layer is scoped to pbfhogg. brokkr's own state and config files
-(brokkr.toml, journals, caches) are staged plainly, and other projects'
-scratch and `brokkr clean` targets are removed plainly, so a lease store
-problem never stops them.
+The layer is scoped to pbfhogg and to script-bench iterations, which share
+the store: an iteration's owner lease and its children's borrows are leases
+too, held and reclaimed by the same scans, with a held borrow keeping its
+free owner (`reference/bench-resources.md`). brokkr's own state and config
+files (brokkr.toml, journals, caches) are staged plainly, and other
+projects' scratch and `brokkr clean` targets are removed plainly, so a lease
+store problem never stops them.
 
 A staged write of a file a launch can use is a reservation of its own
 (`Staged::stable_reserved`, for dataset downloads and the data dir's
@@ -251,7 +254,9 @@ A launch is refused when one of its
 paths overlaps a reservation's and either side writes it. A lease store that
 cannot be read, or a lease whose record cannot be read, blocks every pbfhogg
 launch and gated mutation until a human resolves it; a lease kept after a
-failed cleanup blocks what overlaps it. Neither is dropped automatically:
+failed cleanup blocks what overlaps it. While a lease cannot be read, no
+free script-bench iteration is reclaimed either, since the unreadable one
+may be a borrow of it. Neither is dropped automatically:
 `brokkr clean` names each one with the two files to remove by hand once
 nothing uses its paths. The rule `pbfhogg-mutations-through-the-gate` in
 brokkr's own `brokkr.toml` keeps raw deletions out of `src/pbfhogg`,
@@ -261,7 +266,8 @@ comment saying why it may.
 The guarantee covers cooperating brokkr processes of one user on one host
 sharing one `HOME` on a local filesystem with kernel `flock` semantics, the
 scope of the global lock and the compile lease, and rests on pbfhogg starting
-no helper process that outlives it. Other users, other hosts, bind-mount
+no helper process that outlives it (for a script bench, on its children
+keeping the borrow they inherited). Other users, other hosts, bind-mount
 aliases of one directory and an NFS `HOME` are outside it.
 
 ## Answer exit codes

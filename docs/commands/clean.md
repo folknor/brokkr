@@ -142,9 +142,11 @@ Bare `brokkr clean`, in order:
   `bench-ingest-output/` directory is removed. Pbfhogg removes its known
   bench/hotpath PBF, OSC and diff text outputs, `multi-extract/`, the `geocode-<dataset>/`
   dirs for configured datasets, merged-PBF cache names constructed from
-  configured PBF/OSC entries. First it reclaims every free pbfhogg launch
-  lease with its private directory, wherever that sits, and names each lease
-  it keeps and why (see "Launch reservations" in `docs/projects/pbfhogg.md`).
+  configured PBF/OSC entries. First it reclaims every free lease in the
+  launch lease store with its private directory, wherever that sits, a
+  script-bench iteration's included unless a borrow of it is still held, and
+  names each lease it keeps and why (see "Launch reservations" in
+  `docs/projects/pbfhogg.md`).
   Its removals of pbfhogg's verify output and scratch go through the
   reservation gate, so a path a running pbfhogg launch still uses is named,
   kept and skipped while the rest of the clean goes on, and a tree holding a

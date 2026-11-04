@@ -1,5 +1,6 @@
-//! Launch reservations: what keeps a pbfhogg child's disposable state, and
-//! the paths it uses, safe from brokkr itself.
+//! Launch reservations: what keeps a pbfhogg child's disposable state, a
+//! script-bench iteration's outputs, scratch and spools, and the paths they
+//! use, safe from brokkr itself.
 //!
 //! A pbfhogg child killed mid-write leaves its staging file and run scratch
 //! behind, and pbfhogg reports such leftovers but never deletes them. So each
@@ -33,27 +34,48 @@
 //! reservation too (`Hold`), lent to the child that writes it (`curl`) as a
 //! launch's lease is to its pbfhogg child.
 //!
-//! The layer is scoped to pbfhogg: its launches, the staged writes of files
-//! they use (dataset downloads, a child's output), and the removals of pbfhogg
-//! scratch, verify output and worktrees. brokkr's own state files and other
-//! projects' scratch stay outside it, so a lease store problem never stops
-//! them.
+//! A script-bench iteration is the one tied shape (`iteration`): an owner
+//! lease brokkr alone holds, naming the run's inputs and the iteration's
+//! private directory, and per child a borrow naming its owner, which the
+//! child inherits instead. A held borrow pins its owner, so a free owner is
+//! kept while any process can still use what it owns
+//! (`reference/bench-resources.md`).
+//!
+//! The layer is scoped to pbfhogg and to script benches: pbfhogg's launches,
+//! the staged writes of files they use (dataset downloads, a child's output),
+//! the removals of pbfhogg scratch, verify output and worktrees, and the
+//! iterations of a script bench of any project. brokkr's own state files and
+//! other projects' scratch stay outside it, so a lease store problem never
+//! stops them.
 //!
 //! The guarantee is for cooperating brokkr processes of one user on one host
 //! sharing one `HOME` on a local filesystem with kernel `flock` semantics, the
 //! scope of the global lock and the compile lease; it rests on pbfhogg
-//! starting no helper process that outlives it. Other users, other hosts,
-//! bind-mount aliases of one directory and an NFS `HOME` are outside it.
+//! starting no helper process that outlives it, and on a script bench's child
+//! and every process it starts keeping the borrow descriptor it inherited
+//! while it can still use the iteration. Other users, other hosts, bind-mount
+//! aliases of one directory and an NFS `HOME` are outside it.
 
 mod guard;
+// An expectation goes unfulfilled, and so fails the build, once the
+// script-bench runner drives iterations: then it is removed.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "no command runs a script bench yet")
+)]
+mod iteration;
+#[cfg(test)]
+mod iteration_tests;
 mod launch;
 mod paths;
 mod store;
 
 pub(crate) use guard::{is_refusal, mutate, remove_dir_all, remove_file, rename, write};
+pub(crate) use iteration::{Call, Iteration, Spool};
 pub(crate) use launch::{
     Hold, LaunchSpec, Launched, PRIVATE_DIR_PLACEHOLDER, hold, inherit_in_child, take_armed,
 };
+pub(crate) use store::Access;
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -89,8 +111,8 @@ pub(crate) fn reclaim() -> Vec<String> {
         .collect();
     lines.extend(scan.unknown.iter().map(|(id, why)| {
         format!(
-            "launch lease {id} cannot be established ({why}); kept, and it blocks pbfhogg launches \
-             and pbfhogg cleanup until resolved; {}",
+            "launch lease {id} cannot be established ({why}); kept, and it blocks pbfhogg launches, \
+             pbfhogg cleanup and script-bench iterations and their reclamation until resolved; {}",
             by_hand(id)
         )
     }));

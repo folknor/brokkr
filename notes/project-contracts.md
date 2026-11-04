@@ -503,12 +503,21 @@ with the run uuid as request id (replay answered, different content
 refused, commit errors reported as uncertain), the result and pairing key
 derived by the store, a frozen migration chain pinned by digest, and
 `src/bench/evidence.rs` converting a sidecar capture. `record` is kept per
-iteration, the result's being its best iteration's.
+iteration, the result's being its best iteration's. Slice 4, the resource
+protocol (`reference/bench-resources.md`): an owner lease per iteration
+that brokkr alone holds and a borrow per child naming it, the child
+inheriting the borrow only; a held borrow pins its free owner, every lease
+classified before any is reclaimed, an unreadable record keeping every
+free owner; call admission by a read-only veto (inputs and earlier
+spools), authority by current resolution and the ordinary conflict rule
+against all but the owner; areas, scratch and spools made through held
+directory descriptors that a displaced area fails; stdout spooled to a
+file with a bounded preview; handles in `src/bench/resources.rs`. Sparred
+against two rivals: the child inheriting the owner's descriptor too
+(an owner-only close would let a crash reclaim the iteration under a
+running child) and the library's serial coverage launches (no crash
+reclamation without a name clean knows, no per-call completion).
 
-4. **Resources.** Handles and their per-call access, the iteration owner
-   lease with authorized borrows, reclamation on the owner's release and
-   after a crash, read-only inputs, stdout spools. A tested protocol with no Lua in it: conflict, borrow, crash
-   mid-borrow, crash after a child's exit.
 5. **The runner core, end to end.** Per-iteration Lua state, the top-level
    restrictions, the TOML build with host features folded in, the worktree
    under `--commit`, `since()` against HEAD, `binary()` on the resource
@@ -526,8 +535,19 @@ iteration, the result's being its best iteration's.
    failed publication as an error (not history's best-effort), say which
    uuid an uncertain commit left, and decide whether a dirty tree's runs
    are stored (the document records `dirty` either way). Remove the
-   `expect(dead_code)` attributes on `bench::store` and
-   `bench::evidence` once they go unfulfilled.
+   `expect(dead_code)` attributes on `bench::store`,
+   `bench::evidence`, `bench::resources` and `reservations::iteration`
+   once they go unfulfilled. The resource protocol leaves this slice
+   three duties (`reference/bench-resources.md`, Placement and cleanup):
+   choose where the iteration directory goes, somewhere every brokkr
+   removal that can reach it is gated, or route the enclosing removals
+   (elivagar's scratch wipe, `tilegen_tmp`, nidhogg's ingest output,
+   whatever encloses the choice) through the gate before any iteration
+   runs; make `brokkr clean` reclaim leases in every project, not only
+   pbfhogg (`src/clean.rs`); and pick the preview bound and what a
+   child's stderr gets, which the protocol leaves alone. A failed
+   `Call::finish` (a borrow still held) yields no result and fails the
+   sample; a failed owner release leaves the iteration to a later scan.
 6. **Params: `from` resolution.** lexopt parsing of what follows NAME,
    dependency order (the graph is already validated at load), the
    `snapshot.base` view, the dynamic refusals (an unknown key under a
@@ -543,7 +563,12 @@ iteration, the result's being its best iteration's.
    composed table keeps no spans and TOML strings have escapes and line
    continuations, so the mapping re-reads that file with spans
    (`toml_edit`) and decodes the string, after checking the bytes still
-   match the script loaded, not offset arithmetic.
+   match the script loaded, not offset arithmetic. `read`, `write` and
+   `filesize` must act on what a handle names now and stay inside what
+   the iteration holds: authorize the current target, as call admission
+   does, and open without following a link substituted since (a child can
+   turn an output into a link to an input); `write` takes output and
+   scratch handles only (`Handle::writable`).
 9. **`brokkr res` on the new store.** Listing, pairing, `--compare` naming
    config changes between paired rows, the `record.hotpath` renderer. The
    store has only `open` (which creates and migrates) and `load(uuid)`:

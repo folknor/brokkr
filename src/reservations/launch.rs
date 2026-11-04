@@ -148,30 +148,7 @@ impl LaunchSpec {
             .map_err(|e| io_error("cannot create a launch lease", e))?;
         if let Some((dir, _)) = &private {
             let index = lease.resources().len() - 1;
-            match std::fs::create_dir(dir) {
-                Err(e) => {
-                    // Never created by this launch (an existing path among
-                    // them): `forget` first, so the release cannot remove it.
-                    let forgotten = lease.forget(index);
-                    let released = lease.release();
-                    return Err(io_error(
-                        &format!("cannot create the private directory {}", dir.display()),
-                        forgotten.and(released).err().unwrap_or(e),
-                    ));
-                }
-                Ok(()) => {
-                    if let Err(e) = record_private(&mut lease, index, dir) {
-                        // Created by this launch and named by its record: the
-                        // release removes it with the lease, or a later scan
-                        // does.
-                        let released = lease.release();
-                        return Err(io_error(
-                            &format!("cannot record the private directory {}", dir.display()),
-                            released.err().unwrap_or(e),
-                        ));
-                    }
-                }
-            }
+            lease = make_private_dir(lease, index, dir)?.0;
         }
         let args = match &private {
             Some((_, dir)) => args
@@ -252,8 +229,44 @@ impl Drop for Launched {
     }
 }
 
+/// Create the private directory `dir`, which the published `lease` names as
+/// its resource at `index`, and record its identity durably; the lease and
+/// the identity on success. On failure the lease is released: a directory
+/// that already existed is forgotten first, so the release never removes
+/// what this lease did not create.
+pub(super) fn make_private_dir(
+    mut lease: Lease,
+    index: usize,
+    dir: &Path,
+) -> Result<(Lease, (u64, u64)), DevError> {
+    match std::fs::create_dir(dir) {
+        Err(e) => {
+            // Never created by this launch (an existing path among them):
+            // `forget` first, so the release cannot remove it.
+            let forgotten = lease.forget(index);
+            let released = lease.release();
+            Err(io_error(
+                &format!("cannot create the private directory {}", dir.display()),
+                forgotten.and(released).err().unwrap_or(e),
+            ))
+        }
+        Ok(()) => match record_private(&mut lease, index, dir) {
+            Ok(identity) => Ok((lease, identity)),
+            Err(e) => {
+                // Created by this launch and named by its record: the release
+                // removes it with the lease, or a later scan does.
+                let released = lease.release();
+                Err(io_error(
+                    &format!("cannot record the private directory {}", dir.display()),
+                    released.err().unwrap_or(e),
+                ))
+            }
+        },
+    }
+}
+
 #[allow(clippy::needless_pass_by_value)] // Called with the error a `map_err` hands over.
-fn io_error(context: &str, e: io::Error) -> DevError {
+pub(super) fn io_error(context: &str, e: io::Error) -> DevError {
     DevError::Io(io::Error::new(e.kind(), format!("{context}: {e}")))
 }
 
@@ -266,7 +279,7 @@ fn refuse_conflicts(scan: &super::store::Scan, ours: &[Resource]) -> Result<(), 
     }
 }
 
-fn conflict(scan: &super::store::Scan, ours: &[Resource]) -> Option<String> {
+pub(super) fn conflict(scan: &super::store::Scan, ours: &[Resource]) -> Option<String> {
     if let Some((id, why)) = scan.unknown.first() {
         return Some(format!(
             "lease {id} in the launch lease store cannot be established ({why}); nothing is \
@@ -416,12 +429,14 @@ fn check_placement(location: &Path, writes: &[PathBuf], cwd: &Path) -> Result<()
 }
 
 /// Make the just-created private directory durable and record its identity.
-fn record_private(lease: &mut Lease, index: usize, dir: &Path) -> io::Result<()> {
+fn record_private(lease: &mut Lease, index: usize, dir: &Path) -> io::Result<(u64, u64)> {
     if let Some(parent) = dir.parent() {
         std::fs::File::open(parent)?.sync_all()?;
     }
     let meta = std::fs::symlink_metadata(dir)?;
-    lease.set_identity(index, (meta.dev(), meta.ino()))
+    let identity = (meta.dev(), meta.ino());
+    lease.set_identity(index, identity)?;
+    Ok(identity)
 }
 
 struct MountIdentity {
@@ -481,7 +496,7 @@ thread_local! {
     static ARMED: RefCell<Option<Armed>> = const { RefCell::new(None) };
 }
 
-fn arm(fd: RawFd, program: &Path) {
+pub(super) fn arm(fd: RawFd, program: &Path) {
     ARMED.with(|slot| {
         *slot.borrow_mut() = Some(Armed {
             fd,
@@ -492,7 +507,7 @@ fn arm(fd: RawFd, program: &Path) {
 
 /// Clear the slot if it still holds `fd`, a lease about to be released whose
 /// child was never spawned; another lease armed since is left armed.
-fn disarm(fd: RawFd) {
+pub(super) fn disarm(fd: RawFd) {
     ARMED.with(|slot| {
         let mut slot = slot.borrow_mut();
         if slot.as_ref().is_some_and(|armed| armed.fd == fd) {

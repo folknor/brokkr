@@ -143,8 +143,8 @@ impl Cleaner {
     }
 }
 
-/// Reclaim every free pbfhogg launch lease (`crate::reservations`), with its
-/// private directories, and say what is kept and why.
+/// Reclaim every free lease in the launch lease store (`crate::reservations`),
+/// with its private directories, and say what is kept and why.
 fn reclaim_launch_leases() {
     let report = crate::reservations::reclaim();
     for line in report {

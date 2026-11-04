@@ -178,11 +178,11 @@ stage = "pre-test"
 # A deletion, rename or replacement of a path a pbfhogg launch can use goes
 # through the reservation gate (src/reservations), which refuses while a
 # launch's lease covers the path. The code that deletes pbfhogg's inputs,
-# outputs and scratch must not reach std::fs around it.
+# outputs and scratch, or a script bench's, must not reach std::fs around it.
 [[textlint]]
 name = "pbfhogg-mutations-through-the-gate"
 pattern = '\bfs::(?:remove_file|remove_dir_all|rename)\b'
-paths = ["src/pbfhogg/**/*.rs", "src/measure/**/*.rs", "src/measure.rs", "src/atomic_write.rs"]
+paths = ["src/pbfhogg/**/*.rs", "src/measure/**/*.rs", "src/measure.rs", "src/atomic_write.rs", "src/bench/**/*.rs"]
 region = "code"
 test_code = "skip"
 # A raw call carries this marker with its reason: the operation a

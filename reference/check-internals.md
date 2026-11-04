@@ -407,8 +407,9 @@ lanes that child is cargo, and the test binary beneath it (or a doctest under
 rustdoc, or anything a test spawned) is reparented and keeps running.
 
 Every process a test runner starts - libtest lanes and nextest lane alike -
-and every reserved pbfhogg launch (`src/reservations/`, which also gives it
-the parent-death signal) carries `BROKKR_TEST_RUN=<token>`, one random token
+and every child that inherits a lease (a reserved pbfhogg launch, a
+script-bench call's borrow: `src/reservations/`, which also gives it the
+parent-death signal) carries `BROKKR_TEST_RUN=<token>`, one random token
 per brokkr process, and
 inheritance carries it to everything below. The same process holds an
 exclusive flock on `~/.brokkr/test-runs/<token>.lock` for its whole life. The
