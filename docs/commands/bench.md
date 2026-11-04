@@ -13,6 +13,8 @@ brokkr bench --iterations 10 NAME
 brokkr bench --commit v0.5.0 NAME     # build and run that commit
 brokkr bench NAME --help              # its build settings and params
 brokkr bench NAME --dataset denmark   # bind a param
+brokkr bench NAME --osc 4705..4710    # a collection: one run over all six
+brokkr bench NAME --dataset all       # fan out: one run per dataset
 ```
 
 ## The command line
@@ -30,17 +32,41 @@ collide with a param. brokkr's options:
 After NAME come the bench's params, `--NAME VALUE` or `--NAME=VALUE`, and
 `--help` or `-h` where a param's name could stand. How they bind against
 the resolved config, and what is refused, is `brokkr man bench-config`
-(Binding params). `NAME --help` lists each param with its `from` path, its
-default and, for a `from` param, the keys it takes on this host, the
-parents it depends on chosen from the same command line, else their
-defaults.
+(Binding params), including lists, ranges and `all`. `NAME --help` lists
+each param with its `from` path, its default and, for a `from` param, the
+keys it takes on this host, in key order, the parents it depends on chosen
+from the same command line, else their defaults; a parent given several
+values lists the keys under each path they lead to.
 
-Refused before anything runs, and not stored: a param refusal, a bound
-input another reservation writes or whose pin does not match (the inputs
-are reserved for reading, then hashed, after the script is read and the
-store opened, before any build), and a `--commit` that names no commit;
-from there on every attempt is stored, a worktree that could not be set up
-included.
+Refused before anything runs, and not stored: a param refusal in any arm, a
+bound input another reservation writes or whose pin does not match (every
+arm's inputs are reserved for reading, then hashed, after the script is
+read and the store opened, before any build), and a `--commit` that names
+no commit; from there on every attempt is stored, a worktree that could not
+be set up included.
+
+## Arms
+
+A param that is not a collection, given several values, fans out: each
+value, and each combination of several fanned params, is an **arm**, run as
+a run of its own, one after another in the order Binding params gives, each
+with its own uuid, worktree setup, build (after the first, cargo finds
+nothing to do and the snapshot already exists) and iterations, and each
+stored on its own. All arms share the script read once, the store opened
+once, the inputs reserved and hashed once, and the commit resolved once.
+With several arms, each starts with an `arm I/N` line naming the params that
+vary, and its result and failure lines carry them (`bench cat
+(dataset=denmark)`).
+
+An arm that fails, at its worktree, its build or an iteration, does not
+stop the rest; its cause is printed when it fails, and once every arm has
+run the command fails naming the failed arms. These end the invocation
+after the arm in flight is stored, the arms after it not run and not
+stored, and named: a stop (Ctrl-C or `brokkr kill`), a run that cannot be
+stored, and, without `--commit`, the checkout's HEAD having moved off the
+commit resolved for the invocation, since the arms left would build the
+live tree under a sha they no longer are. A stop that lands while the last
+arm is being stored ends nothing: every arm ran and was stored.
 
 ## The build
 
@@ -65,8 +91,9 @@ that call to its return. `params.NAME` is each bound param's entry: the
 value at its chosen key in the resolved config (a table, string or number,
 a fresh copy each iteration), with a bound file entry's `file` (or a plain
 dataset's `path`) replaced by an input handle; a plain param's string; a
-`many` param's list of entries. `keys.NAME` is the chosen key (a list for a
-`many` param), since an entry has no room for its own. An unbound param is
+`many` param's list of entries, in bound order. `keys.NAME` is the chosen
+key (a list for a `many` param), since an entry has no room for its own. A
+fanned param holds the arm's one value. An unbound param is
 nil in both. TOML integers beyond 2^53 arrive as their decimal text,
 datetimes as their TOML text. The whole block is
 measured: brokkr's own work for each `binary()` call (admitting it,
@@ -174,8 +201,8 @@ project's disk, not the host's scratch disk.
 ## What a run stores
 
 Every attempted run is stored, a failed build or an interrupted iteration
-included, with its bound params (each key, its `from` path and a file's
-digest), every child's argv, ending, `/proc` samples, marker FIFO
+included, one per arm, with its bound params (each key, its `from` path and
+a file's digest), every child's argv, ending, `/proc` samples, marker FIFO
 records and capture losses. A run of a dirty tree is stored and marked
 dirty: `brokkr results` lists it with `-dirty` and never compares it. The
 run's uuid is printed whatever `--verbose` says, as the one handle `brokkr
@@ -196,7 +223,8 @@ publication whose outcome is unknown always gets one more attempt past
 those limits. A
 Ctrl-C that stopped the run still leaves it one publication attempt; a
 Ctrl-C during the retries ends them once the attempt in flight returns.
-The whole run holds the brokkr lock, publication included.
+The whole invocation holds the brokkr lock, every arm's publication
+included.
 
 The stored config is one TOML document: `[run]` (the live project root and
 build root, under `--commit` too), `[script]` (the bench, the file its script came from and

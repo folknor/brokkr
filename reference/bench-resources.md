@@ -131,11 +131,14 @@ therefore reach a config file only through a bound param.
 An iteration's owner lease reserves the inputs only while the iteration
 lives, and their digests are taken before the build, so the run itself
 holds them too: once its params are bound, before hashing, the runner takes
-a **read hold**, an untied lease reserving every bound input for reading,
+a **read hold**, an untied lease reserving every bound input of every arm
+(`docs/brokkr.toml.bench.md`, Binding params) for reading, each path once,
 refused like a launch when any reservation writes an overlapping path or
 any lease cannot be established, and refused outright without a lease
-store (it never degrades to an unreserved run). It is held until the run
-ends, publication included, and lent to no child. Between iterations and
+store (it never degrades to an unreserved run). It is held until the last
+arm ends, its publication included, and lent to no child. Each arm's
+iterations still list that arm's own inputs, in its handles' order, a file
+two of its values share listed for each. Between iterations and
 during the build it is what keeps another lease from writing an input; a
 crash leaves it free, and a scan reclaims it, while any iteration a
 surviving child still uses keeps its own owner lease, pinned by that

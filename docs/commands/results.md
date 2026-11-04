@@ -432,8 +432,10 @@ row missing its key:
   bound order (`--param osc=12,10` does not match `10,12`), an empty
   collection the empty string. It filters what is displayed, not a pairing
   identity: a scalar `""` and an empty collection both match `NAME=`, a
-  scalar `a` and a one-key collection both match `NAME=a`, and so does a
-  plain key holding a comma. It is case-sensitive, since keys are data, and
+  scalar `a` and a one-key collection both match `NAME=a`, and a key
+  holding a comma (bound only through `all`) matches like the keys its
+  pieces would name. Each arm of a fan-out is a run of its own, so
+  `--param` picks arms apart. It is case-sensitive, since keys are data, and
   excludes every typed row.
 - `--mode`, `--dataset` and `--meta` have no meaning for a script bench and
   exclude every bench run.

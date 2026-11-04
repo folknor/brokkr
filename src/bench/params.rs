@@ -6,12 +6,16 @@
 //!
 //! Every refusal here needs the command line or the resolved config, so it
 //! happens when a bench runs, never at load: what a declaration alone can
-//! refuse was refused when the config loaded. Collections and fan-out are
-//! not built yet, so a value spelled as a list, a range or `all` is refused
-//! rather than read as one key, and no command line changes meaning when
-//! they arrive.
+//! refuse was refused when the config loaded.
+//!
+//! A param's values are every occurrence on the command line (else its
+//! `default`), each split on `,`. A `many` param binds them all as one
+//! collection; any other param given several fans out, one arm per value,
+//! and [`bind`] returns every arm, dependents resolved per parent binding.
+//! Every refusal across every arm is collected before any is returned, so
+//! one invocation is refused whole or not at all.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use super::lua;
@@ -26,12 +30,13 @@ use crate::error::DevError;
 pub(crate) struct Given {
     /// `--help` or `-h` stood where a param's name could.
     pub(crate) help: bool,
-    values: BTreeMap<String, String>,
+    /// Each param's occurrences, in command-line order.
+    values: BTreeMap<String, Vec<String>>,
 }
 
-/// Read the tokens after NAME: `--NAME VALUE` or `--NAME=VALUE`, each param
-/// once; `--help` or `-h` wherever a param's name could stand. A token taken
-/// as a value is data, whatever it looks like.
+/// Read the tokens after NAME: `--NAME VALUE` or `--NAME=VALUE`, a param as
+/// often as it is given; `--help` or `-h` wherever a param's name could
+/// stand. A token taken as a value is data, whatever it looks like.
 pub(crate) fn parse(bench: &Bench, tokens: &[String]) -> Result<Given, DevError> {
     let usage = |why: String| DevError::Usage(format!("bench {}: {why}", bench.name));
     let mut given = Given::default();
@@ -76,14 +81,174 @@ pub(crate) fn parse(bench: &Bench, tokens: &[String]) -> Result<Given, DevError>
                 .cloned()
                 .ok_or_else(|| usage(format!("--{name} needs a value")))?,
         };
-        if value.trim().is_empty() {
-            return Err(usage(format!("--{name} is blank: give a value")));
-        }
-        if given.values.insert(name.to_owned(), value).is_some() {
-            return Err(usage(format!("--{name} is given twice")));
-        }
+        // A blank value is refused when it binds, beside every other
+        // refusal of the invocation.
+        given.values.entry(name.to_owned()).or_default().push(value);
     }
     Ok(given)
+}
+
+/// One item of a param's values, before it meets its table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Item {
+    Key(String),
+    /// A `from` param's `all`: every key of its table.
+    All,
+    /// A `from` collection's `LO..HI`, both ends canonical decimals.
+    Range {
+        lo: u64,
+        hi: u64,
+    },
+}
+
+/// Whether `key` is a canonical decimal: digits only, no sign, no leading
+/// zero (`0` itself is one).
+pub(crate) fn canonical_decimal(key: &str) -> bool {
+    !key.is_empty()
+        && key.bytes().all(|b| b.is_ascii_digit())
+        && (key == "0" || !key.starts_with('0'))
+}
+
+/// A table's keys in key order: numeric when every key is a canonical
+/// decimal (by length, then digits, so no key is too long to order), byte
+/// order otherwise. `all` expands in this order, and every key list brokkr
+/// prints uses it.
+pub(crate) fn key_order(table: &toml::Table) -> Vec<String> {
+    let mut keys: Vec<String> = table.keys().cloned().collect();
+    if keys.iter().all(|k| canonical_decimal(k)) {
+        keys.sort_unstable_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+    } else {
+        keys.sort_unstable();
+    }
+    keys
+}
+
+/// Split a param's occurrences into items. What a value means depends on
+/// the param: `all` is every key only for a `from` param (a plain param's
+/// `all` is the string), and `..` is a range only for a `from` collection (a
+/// plain collection has no keys to range over, and any other param's `..` is
+/// part of its key).
+fn items(param: &Param, raw: &[String]) -> Result<Vec<Item>, String> {
+    let mut items = Vec::new();
+    for occurrence in raw {
+        if occurrence.trim().is_empty() {
+            return Err("is blank: give a value".into());
+        }
+        for item in occurrence.split(',') {
+            if item.trim().is_empty() {
+                return Err("has a blank item: every value between commas must be given".into());
+            }
+            if param.from.is_some() && item == "all" {
+                items.push(Item::All);
+            } else if param.many && item.contains("..") {
+                if param.from.is_none() {
+                    return Err(format!(
+                        "holds the range {item:?}, which only a collection with a `from` path \
+                         takes: a plain collection has no keys to range over"
+                    ));
+                }
+                let (lo, hi) = item.split_once("..").unwrap_or((item, ""));
+                if !canonical_decimal(lo) || !canonical_decimal(hi) {
+                    return Err(format!(
+                        "holds the range {item:?}, whose ends must be decimal keys with no sign \
+                         or leading zero (LO..HI)"
+                    ));
+                }
+                let (Ok(lo), Ok(hi)) = (lo.parse::<u64>(), hi.parse::<u64>()) else {
+                    return Err(format!(
+                        "holds the range {item:?}, whose ends must be at most {}",
+                        u64::MAX
+                    ));
+                };
+                if lo > hi {
+                    return Err(format!("holds the range {item:?}, which runs backwards"));
+                }
+                items.push(Item::Range { lo, hi });
+            } else {
+                items.push(Item::Key(item.to_owned()));
+            }
+        }
+    }
+    if items.len() > 1 && items.contains(&Item::All) {
+        return Err("gives `all` beside other values; `all` already names every key".into());
+    }
+    Ok(items)
+}
+
+/// The keys `items` select from `table` (at `path`), in item order, ranges
+/// ascending in place and `all` in key order; a key that is not there is
+/// refused, every missing one named.
+fn select(table: &toml::Table, path: &[String], items: &[Item]) -> Result<Vec<String>, String> {
+    let mut keys = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
+    for item in items {
+        match item {
+            Item::Key(key) if table.contains_key(key) => keys.push(key.clone()),
+            Item::Key(key) => missing.push(format!("{key:?}")),
+            Item::All => keys.extend(key_order(table)),
+            Item::Range { lo, hi } => {
+                let mut present: Vec<u64> = table
+                    .keys()
+                    .filter(|k| canonical_decimal(k))
+                    .filter_map(|k| k.parse::<u64>().ok())
+                    .filter(|k| (lo..=hi).contains(&k))
+                    .collect();
+                present.sort_unstable();
+                let width = u128::from(*hi) - u128::from(*lo) + 1;
+                let found = u128::try_from(present.len()).unwrap_or(u128::MAX);
+                if found == width {
+                    keys.extend(present.iter().map(u64::to_string));
+                    continue;
+                }
+                // The gaps, from the keys that are there: never a walk over
+                // the whole range, which may be 2^64 wide.
+                const SHOWN: usize = 5;
+                let mut gaps = Vec::new();
+                let mut next = u128::from(*lo);
+                for key in present
+                    .iter()
+                    .map(|k| u128::from(*k))
+                    .chain([u128::from(*hi) + 1])
+                {
+                    while next < key && gaps.len() < SHOWN {
+                        gaps.push(next.to_string());
+                        next += 1;
+                    }
+                    if gaps.len() == SHOWN {
+                        break;
+                    }
+                    next = key + 1;
+                }
+                let more = width - found - u128::try_from(gaps.len()).unwrap_or(0);
+                let mut shown = gaps.join(", ");
+                if more > 0 {
+                    shown.push_str(&format!(" and {more} more"));
+                }
+                missing.push(format!("{lo}..{hi} (lacking {shown})"));
+            }
+        }
+    }
+    if !missing.is_empty() {
+        return Err(format!(
+            "selects {}, not {} under {} (valid: {})",
+            missing.join(", "),
+            if missing.len() == 1 { "a key" } else { "keys" },
+            view::shown(path),
+            keys_of(table)
+        ));
+    }
+    refuse_duplicates(&keys)?;
+    Ok(keys)
+}
+
+fn refuse_duplicates(keys: &[String]) -> Result<(), String> {
+    let mut seen = BTreeSet::new();
+    for key in keys {
+        if !seen.insert(key.as_str()) {
+            return Err(format!("selects {key:?} twice"));
+        }
+    }
+    Ok(())
 }
 
 /// The params in an order where every `{param}` a `from` path references
@@ -148,100 +313,218 @@ enum Source {
     Default,
 }
 
+/// A refusal, with whether it came from the command line or a default.
+struct Refusal {
+    message: String,
+    source: Source,
+}
+
+/// One refusal as itself; several as one preflight list, so a whole
+/// invocation names everything wrong with it at once.
+fn refused(refusals: Vec<Refusal>) -> DevError {
+    let mut seen = BTreeSet::new();
+    let mut distinct: Vec<Refusal> = refusals
+        .into_iter()
+        .filter(|r| seen.insert(r.message.clone()))
+        .collect();
+    if distinct.len() == 1 {
+        let only = distinct.remove(0);
+        return match only.source {
+            Source::Given => DevError::Usage(only.message),
+            Source::Default => DevError::Config(only.message),
+        };
+    }
+    DevError::Preflight(distinct.into_iter().map(|r| r.message).collect())
+}
+
+/// An arm being expanded: what is bound so far, and the params that were
+/// refused in it, whose dependents are then not judged.
+#[derive(Clone)]
+struct Partial {
+    bound: Bound,
+    unavailable: BTreeSet<String>,
+}
+
 /// Bind every param that has a value, from the command line or its
-/// `default`, in dependency order.
-pub(crate) fn bind(bench: &Bench, given: &Given, view: &View) -> Result<Bound, DevError> {
-    let mut bound = Bound::default();
+/// `default`, in dependency order, into every arm the values fan out to:
+/// parents outer, each param's values in their order. Never empty when it
+/// succeeds; one arm when nothing fans out.
+pub(crate) fn bind(bench: &Bench, given: &Given, view: &View) -> Result<Vec<Bound>, DevError> {
+    expand(bench, given, view, |_| true).map_err(refused)
+}
+
+/// [`bind`] over the params `include` admits, its refusals unrendered.
+fn expand(
+    bench: &Bench,
+    given: &Given,
+    view: &View,
+    include: impl Fn(&str) -> bool,
+) -> Result<Vec<Bound>, Vec<Refusal>> {
+    let mut refusals = Vec::new();
+    let mut partials = vec![Partial {
+        bound: Bound::default(),
+        unavailable: BTreeSet::new(),
+    }];
     for name in order(bench) {
+        if !include(name) {
+            continue;
+        }
         let param = &bench.params[name];
-        let (value, source) = match (given.values.get(name), &param.default) {
-            (Some(value), _) => (value.as_str(), Source::Given),
-            (None, Some(default)) => (default.as_str(), Source::Default),
+        let (raw, source): (Vec<String>, Source) = match (given.values.get(name), &param.default) {
+            (Some(values), _) => (values.clone(), Source::Given),
+            (None, Some(default)) => (vec![default.clone()], Source::Default),
             (None, None) => continue,
         };
-        let refuse = |why: String| match source {
-            Source::Given => {
-                DevError::Usage(format!("bench {}: --{name} {value} {why}", bench.name))
-            }
-            Source::Default => DevError::Config(format!(
-                "bench {}: --{name}'s default {value:?} {why}; give --{name} on the command line \
-                 or fix the default",
-                bench.name
-            )),
+        let value = raw.join(",");
+        let refuse = |why: String| Refusal {
+            message: match source {
+                Source::Given => format!("bench {}: --{name} {value} {why}", bench.name),
+                Source::Default => format!(
+                    "bench {}: --{name}'s default {value:?} {why}; give --{name} on the command \
+                     line or fix the default",
+                    bench.name
+                ),
+            },
+            source,
         };
-        if value.contains(',') {
-            return Err(refuse(
-                "is a list of values, which a param does not take yet".into(),
-            ));
+        let items = match items(param, &raw) {
+            Ok(items) => items,
+            Err(why) => {
+                refusals.push(refuse(why));
+                for partial in &mut partials {
+                    partial.unavailable.insert(name.to_owned());
+                }
+                continue;
+            }
+        };
+        let mut next = Vec::with_capacity(partials.len());
+        for mut partial in partials {
+            let blocked = param
+                .from
+                .as_ref()
+                .is_some_and(|from| from.references().any(|p| partial.unavailable.contains(p)));
+            if blocked {
+                // Its parent was refused in this arm: judging it there would
+                // only invent a refusal.
+                partial.unavailable.insert(name.to_owned());
+                next.push(partial);
+                continue;
+            }
+            match resolve(name, param, &items, &partial.bound, view) {
+                Err(why) => {
+                    refusals.push(refuse(why));
+                    partial.unavailable.insert(name.to_owned());
+                    next.push(partial);
+                }
+                Ok((from, values)) if param.many => {
+                    partial.bound.params.insert(
+                        name.to_owned(),
+                        Binding {
+                            many: true,
+                            from,
+                            values,
+                        },
+                    );
+                    next.push(partial);
+                }
+                Ok((from, values)) if values.is_empty() => {
+                    refusals.push(refuse(format!(
+                        "selects no key: {} has none, so there is nothing to run",
+                        from.as_deref().map_or_else(String::new, view::shown)
+                    )));
+                    partial.unavailable.insert(name.to_owned());
+                    next.push(partial);
+                }
+                Ok((from, values)) => {
+                    for value in values {
+                        let mut arm = partial.clone();
+                        arm.bound.params.insert(
+                            name.to_owned(),
+                            Binding {
+                                many: false,
+                                from: from.clone(),
+                                values: vec![value],
+                            },
+                        );
+                        next.push(arm);
+                    }
+                }
+            }
         }
-        if param.from.is_some() && value == "all" {
-            return Err(refuse(
-                "asks for every key, which a param does not take yet".into(),
-            ));
-        }
-        if param.many && value.contains("..") {
-            return Err(refuse(
-                "is a range of keys, which a collection does not take yet".into(),
-            ));
-        }
-        let (from, bound_value) = match &param.from {
-            None => (
-                None,
-                BoundValue {
-                    key: value.to_owned(),
-                    entry: lua::Value::Text(value.to_owned()),
+        partials = next;
+    }
+    if refusals.is_empty() {
+        Ok(partials.into_iter().map(|p| p.bound).collect())
+    } else {
+        Err(refusals)
+    }
+}
+
+/// The values `items` select for `name` in one arm, and its substituted
+/// `from` path.
+fn resolve(
+    name: &str,
+    param: &Param,
+    items: &[Item],
+    bound: &Bound,
+    view: &View,
+) -> Result<(Option<Segments>, Vec<BoundValue>), String> {
+    let Some(from) = &param.from else {
+        let keys: Vec<String> = items
+            .iter()
+            .map(|item| match item {
+                Item::Key(key) => key.clone(),
+                // Neither reaches a plain param: `items` reads its `all` as
+                // a key and refuses its ranges.
+                Item::All => "all".to_owned(),
+                Item::Range { lo, hi } => format!("{lo}..{hi}"),
+            })
+            .collect();
+        refuse_duplicates(&keys)?;
+        return Ok((
+            None,
+            keys.into_iter()
+                .map(|key| BoundValue {
+                    entry: lua::Value::Text(key.clone()),
+                    key,
                     file: None,
                     digest: None,
-                },
-            ),
-            Some(from) => {
-                let path = substitute(name, &from.segments, |p| {
-                    bound
-                        .params
-                        .get(p)
-                        .and_then(|b| b.values.first())
-                        .map(|v| v.key.clone())
                 })
-                .map_err(refuse)?;
-                let table = walk(view.table(), &path).map_err(refuse)?;
-                let Some(entry) = table.get(value) else {
-                    return Err(refuse(format!(
-                        "is not a key under {} (valid: {})",
-                        view::shown(&path),
-                        keys_of(table)
-                    )));
-                };
-                let at: Segments = [path.clone(), vec![value.to_owned()]].concat();
-                let file = view.file(&at).cloned();
-                if let Some(file) = &file
-                    && file.path.to_str().is_none()
-                {
-                    return Err(refuse(format!(
-                        "names {}, which is not UTF-8 and a script cannot pass on",
-                        file.path.display()
-                    )));
-                }
-                (
-                    Some(path),
-                    BoundValue {
-                        key: value.to_owned(),
-                        entry: view::value(entry),
-                        file,
-                        digest: None,
-                    },
-                )
-            }
+                .collect(),
+        ));
+    };
+    let path = substitute(name, &from.segments, |p| {
+        bound
+            .params
+            .get(p)
+            .and_then(|b| b.values.first())
+            .map(|v| v.key.clone())
+    })?;
+    let table = walk(view.table(), &path)?;
+    let mut values = Vec::new();
+    for key in select(table, &path, items)? {
+        let at: Segments = [path.clone(), vec![key.clone()]].concat();
+        let file = view.file(&at).cloned();
+        if let Some(file) = &file
+            && file.path.to_str().is_none()
+        {
+            return Err(format!(
+                "names {}, which is not UTF-8 and a script cannot pass on",
+                file.path.display()
+            ));
+        }
+        // `select` returns only keys of this table.
+        let Some(entry) = table.get(&key) else {
+            return Err(format!("lost the key {key:?} it selected"));
         };
-        bound.params.insert(
-            name.to_owned(),
-            Binding {
-                many: param.many,
-                from,
-                values: vec![bound_value],
-            },
-        );
+        values.push(BoundValue {
+            entry: view::value(entry),
+            key,
+            file,
+            digest: None,
+        });
     }
-    Ok(bound)
+    Ok((Some(path), values))
 }
 
 /// `segments` with each `{param}` replaced by that param's chosen key, which
@@ -316,17 +599,102 @@ fn walk<'a>(table: &'a toml::Table, path: &[String]) -> Result<&'a toml::Table, 
 }
 
 fn keys_of(table: &toml::Table) -> String {
-    let mut keys: Vec<&str> = table.keys().map(String::as_str).collect();
+    let keys = key_order(table);
     if keys.is_empty() {
         return "none".to_owned();
     }
-    keys.sort_unstable();
     keys.join(", ")
+}
+
+/// Every arm's bound files, each once, in first-seen order: what the run's
+/// read hold reserves. Each arm keeps its own ordered [`Bound::inputs`],
+/// which its handles index.
+pub(crate) fn union_inputs(arms: &[Bound]) -> Vec<PathBuf> {
+    let mut seen = BTreeSet::new();
+    arms.iter()
+        .flat_map(Bound::inputs)
+        .filter(|path| seen.insert(path.clone()))
+        .collect()
+}
+
+/// Digest every arm's bound files, every refusal across the arms collected.
+/// Each binding's shape and pin are judged on their own, since two entries
+/// may name one file with different pins; only a file's content hash is
+/// computed once.
+pub(crate) fn digest_arms(
+    arms: &mut [Bound],
+    project_root: &Path,
+    sources: &ConfigSources,
+) -> Result<(), DevError> {
+    let mut hashed = HashMap::new();
+    let mut errors = Vec::new();
+    for arm in arms {
+        arm.digest_with(project_root, sources, &mut hashed, &mut errors);
+    }
+    digest_refused(errors)
+}
+
+/// One digest refusal as itself; several, once each, as one preflight list.
+fn digest_refused(mut errors: Vec<DevError>) -> Result<(), DevError> {
+    if errors.len() <= 1 {
+        return errors.pop().map_or(Ok(()), Err);
+    }
+    let mut seen = BTreeSet::new();
+    let messages: Vec<String> = errors
+        .iter()
+        .flat_map(|error| match error {
+            DevError::Preflight(lines) => lines.clone(),
+            DevError::Config(message) | DevError::Usage(message) => vec![message.clone()],
+            other => vec![other.to_string()],
+        })
+        .filter(|m| seen.insert(m.clone()))
+        .collect();
+    if messages.len() == 1 {
+        return errors.pop().map_or(Ok(()), Err);
+    }
+    Err(DevError::Preflight(messages))
+}
+
+/// For each arm, the params that fan out, as `name=key`, space separated:
+/// the params whose key differs between arms. Empty for a single arm.
+pub(crate) fn arm_labels(arms: &[Bound]) -> Vec<String> {
+    let Some(first) = arms.first() else {
+        return Vec::new();
+    };
+    let varying: Vec<&String> = first
+        .params
+        .iter()
+        .filter(|(name, binding)| {
+            !binding.many
+                && arms.iter().any(|arm| {
+                    arm.params.get(*name).map(|b| &b.values[..]).map(keys_vec)
+                        != Some(keys_vec(&binding.values))
+                })
+        })
+        .map(|(name, _)| name)
+        .collect();
+    arms.iter()
+        .map(|arm| {
+            varying
+                .iter()
+                .filter_map(|name| {
+                    let binding = arm.params.get(*name)?;
+                    Some(format!("{name}={}", keys_vec(&binding.values).join(",")))
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect()
+}
+
+fn keys_vec(values: &[BoundValue]) -> Vec<&str> {
+    values.iter().map(|v| v.key.as_str()).collect()
 }
 
 impl Bound {
     /// The bound files, in the order their handles are numbered: param name,
-    /// then value order.
+    /// then value order. Two values may name one file; it is listed for
+    /// each.
     pub(crate) fn inputs(&self) -> Vec<PathBuf> {
         self.files().map(|file| file.path.clone()).collect()
     }
@@ -341,18 +709,37 @@ impl Bound {
     /// Digest every bound file: a pinned one must match its pin, an
     /// unpinned one is hashed and recorded. `sources` names where a drifted
     /// pin was set. Runs while the inputs are reserved for reading.
+    #[cfg(test)]
     pub(crate) fn digest(
         &mut self,
         project_root: &Path,
         sources: &ConfigSources,
     ) -> Result<(), DevError> {
+        let mut errors = Vec::new();
+        self.digest_with(project_root, sources, &mut HashMap::new(), &mut errors);
+        digest_refused(errors)
+    }
+
+    /// Digest every bound file: a pinned one must match its pin, an
+    /// unpinned one is hashed and recorded, reusing and filling `hashed`,
+    /// each file's content digest by path. Every refusal goes to `errors`,
+    /// the remaining files still judged.
+    fn digest_with(
+        &mut self,
+        project_root: &Path,
+        sources: &ConfigSources,
+        hashed: &mut HashMap<PathBuf, crate::preflight::Xxh128>,
+        errors: &mut Vec<DevError>,
+    ) {
         for (name, binding) in &mut self.params {
             for value in &mut binding.values {
                 let Some(file) = &value.file else { continue };
-                value.digest = Some(digest_one(name, &value.key, file, project_root, sources)?);
+                match digest_one(name, &value.key, file, project_root, sources, hashed) {
+                    Ok(digest) => value.digest = Some(digest),
+                    Err(error) => errors.push(error),
+                }
             }
         }
-        Ok(())
     }
 
     /// The document's `params`.
@@ -427,6 +814,7 @@ fn digest_one(
     file: &FileNode,
     project_root: &Path,
     sources: &ConfigSources,
+    hashed: &mut HashMap<PathBuf, crate::preflight::Xxh128>,
 ) -> Result<String, DevError> {
     let what = format!("--{name} {key}");
     let pin_at = view::shown(&file.pin_at);
@@ -449,7 +837,15 @@ fn digest_one(
             }
         )]));
     }
-    let digest = crate::preflight::cached_path_digest(&file.path, project_root)?.value();
+    // The shape was judged above for this entry; only the content is shared.
+    let digest = match hashed.get(&file.path) {
+        Some(digest) => *digest,
+        None => {
+            let digest = crate::preflight::cached_path_digest(&file.path, project_root)?.value();
+            hashed.insert(file.path.clone(), digest);
+            digest
+        }
+    };
     let Some(pin) = &file.pin else {
         return Ok(digest.to_string());
     };
@@ -473,32 +869,59 @@ fn digest_one(
     Ok(digest.to_string())
 }
 
-/// For `--help`: the keys `name` takes under its `from` path, its parents
-/// chosen from the command line, else their defaults. `None` for a plain
-/// param.
+/// Each distinct `from` path a param's parents lead to, shown, with its keys
+/// in key order.
+pub(crate) type KeysByPath = Vec<(String, Vec<String>)>;
+
+/// For `--help`: the keys `name` takes under its `from` path, in key order,
+/// per distinct path its parents lead to: the parents bound as a run would
+/// bind them, from the command line, else their defaults, fanned out where
+/// they list several. `None` for a plain param; an error when a parent is
+/// refused or the path leads nowhere, as a sentence to print.
 pub(crate) fn values_for(
     bench: &Bench,
     given: &Given,
     view: &View,
     name: &str,
-) -> Option<Result<Vec<String>, String>> {
+) -> Option<Result<KeysByPath, String>> {
     let from = bench.params.get(name)?.from.as_ref()?;
-    let chosen = |p: &str| {
-        given
-            .values
-            .get(p)
-            .cloned()
-            .or_else(|| bench.params.get(p).and_then(|p| p.default.clone()))
+    let mut ancestors = BTreeSet::new();
+    let mut pending: Vec<&str> = from.references().collect();
+    while let Some(p) = pending.pop() {
+        if ancestors.insert(p.to_owned())
+            && let Some(parent) = bench.params.get(p).and_then(|p| p.from.as_ref())
+        {
+            pending.extend(parent.references());
+        }
+    }
+    let arms = match expand(bench, given, view, |p| ancestors.contains(p)) {
+        Ok(arms) => arms,
+        Err(refusals) => {
+            return Some(Err(refusals
+                .into_iter()
+                .map(|r| r.message)
+                .collect::<Vec<_>>()
+                .join("; ")));
+        }
     };
-    Some(
-        substitute(name, &from.segments, chosen)
-            .and_then(|path| walk(view.table(), &path))
-            .map(|table| {
-                let mut keys: Vec<String> = table.keys().cloned().collect();
-                keys.sort_unstable();
-                keys
-            }),
-    )
+    let mut paths: Vec<(String, Vec<String>)> = Vec::new();
+    for arm in &arms {
+        let chosen = |p: &str| {
+            arm.params
+                .get(p)
+                .and_then(|b| b.values.first())
+                .map(|v| v.key.clone())
+        };
+        let listed = substitute(name, &from.segments, chosen).and_then(|path| {
+            walk(view.table(), &path).map(|table| (view::shown(&path), key_order(table)))
+        });
+        match listed {
+            Ok(listed) if paths.iter().any(|(path, _)| *path == listed.0) => {}
+            Ok(listed) => paths.push(listed),
+            Err(why) => return Some(Err(format!("it {why}"))),
+        }
+    }
+    Some(Ok(paths))
 }
 
 #[cfg(test)]

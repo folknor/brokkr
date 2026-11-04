@@ -685,19 +685,58 @@ What slice 6 left:
   would want a handle-making builtin, with its own reservation and digest
   story (not planned).
 
-7. **Params: collections and fan-out.** `many` values (comma lists,
-   ranges, repeats, `all`, a `many` param's `default` in that syntax),
-   ordering, fan-out with per-parent resolution and whole-invocation
-   preflight. Slice 6 refuses exactly the syntax this slice gives meaning:
-   a `,` in any value, `all` for a `from` param, `..` for a `many` param,
-   and a repeated param; lifting those refusals changes no command line
-   that binds today, and a single-key `many` binding already stores the
-   collection of one this slice would. A plain param's `all` is literal
-   since slice 6 and must stay so. Whether a plain param fans out on commas
-   is this slice's call (slice 6 refuses them so it stays open). The
-   whole-invocation preflight has slice 6's pieces to build on: one
-   `params::bind` per arm, and every arm's inputs held (`hold_reads`)
-   before any is hashed.
+Slice 7, collections and fan-out (`docs/brokkr.toml.bench.md`, Binding
+params; `docs/commands/bench.md`, Arms; `reference/bench-resources.md`,
+The run's inputs): every param may repeat and every value splits on `,`,
+for plain params too (`--jobs 1,2,4` fans out; no value holds a comma, a
+comma-bearing table key is reached only through `all`); a `from` param's
+`all`, standing alone, is every key in key order (numeric by length then
+digits when every key is a canonical decimal, byte order otherwise, the
+order every printed key list now uses); `LO..HI` is a range only for a
+`from` collection (canonical u64 ends, ascending in place, every key
+required, the gaps named from the present keys so a 2^64-wide range costs
+nothing), refused for a plain collection, and part of the key for any other
+param; duplicates refused after expansion; a default may be a list or
+`all`. `params::bind` returns every arm, expanded in `params::order` with
+parents outer, a dependent resolved per parent binding; every refusal
+across the arms is collected (a refused param is unavailable in its arm, its
+dependents not judged there), one returned as itself, several as one
+preflight list. A fan-out over no keys under some parent is refused; a
+collection's `all` over an empty table binds an empty collection. One read
+hold over the union of every arm's inputs, then digests: each file hashed
+once, each entry's shape and pin judged on its own. Each arm is a whole
+slice-5 run (its own uuid, start, dirty and host reading, worktree, a build
+that is a no-op after the first, iterations, publication); a failed arm,
+worktree or build included, does not stop the rest, while a stop, a failed
+publication and, without `--commit`, HEAD having moved off the invocation's
+sha end it, the arms left named as not run and not stored; a stop during
+the last arm's publication ends nothing. `--help` lists keys per path the
+ancestors lead to. Sparred against one shared worktree and build for all
+arms (start times excluding the build, N failed documents per build
+failure) and stopping after a build failure (the governing keep-going rule
+names no exception, and a build can fail transiently); the spar added the
+per-binding pin check under a shared hash, each arm's own ordered inputs
+beside the union hold, refusals kept past an independent param's failure,
+the stop check between arms, the HEAD check and the cause line per failed
+arm.
+
+What slice 7 left, with sizes:
+
+- No test drives `runner::run`, so the arm loop (stop rules, not-run naming,
+  the HEAD check, the summary) is exercised only by hand; the binding,
+  ordering and digest layers are unit tested. An end-to-end runner test
+  needs a fixture project that cargo builds inside the test (medium; slice
+  10's first real benches exercise it meanwhile).
+- The HEAD check runs between arms only; within one arm, as in slice 5, a
+  checkout moving during the build is recorded under the sha resolved
+  before it (small: re-resolve after the build and fail the arm).
+- A plain collection's `..` stays refused, open for a bench that wants
+  integer ranges without a table (small).
+- `brokkr results --param` joins a collection's keys with `,`, a lossy
+  projection now that `all` can bind a comma-bearing key (documented in
+  `docs/commands/results.md`; a structured selector would be new syntax,
+  not planned).
+
 8. **Conveniences.** The file and json builtins, call options (`env`,
    `reads`, `writes`; slice 5's `binary()` takes positional words and flag
    tables only, so a path a child sees in another spelling cannot be

@@ -73,8 +73,8 @@ pub(crate) use guard::{
 };
 pub(crate) use iteration::{Call, Iteration, Spool};
 pub(crate) use launch::{
-    Hold, LaunchSpec, Launched, PRIVATE_DIR_PLACEHOLDER, hold, hold_reads, inherit_in_child,
-    take_armed,
+    Hold, LaunchSpec, Launched, PRIVATE_DIR_PLACEHOLDER, ReadHold, hold, hold_reads,
+    inherit_in_child, take_armed,
 };
 pub(crate) use store::Access;
 

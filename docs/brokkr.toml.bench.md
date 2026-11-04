@@ -80,9 +80,11 @@ params.jobs    = { help = "worker threads" }
   or `{NAME}`, which stands for the key another param of the same bench
   chose. A param without `from` takes any string.
 - `default` - the value when the command line gives none, written as the
-  command line would write it.
+  command line would write it, so a list, a range or `all` too (Binding
+  params, below).
 - `many` - `true` makes the param a collection, binding a list of values to
-  one sample.
+  one sample; any other param given several values fans out, one run per
+  value.
 
 Refused at load: an unknown key; a blank `default`; a `from` path with an
 empty segment, or with `{` or `}` anywhere but around a whole segment; a
@@ -101,50 +103,87 @@ bench's name, so none of them can collide with a param.
 ## Binding params
 
 `brokkr bench NAME --dataset denmark --variant=raw`: each param is
-`--NAME VALUE` or `--NAME=VALUE` after the bench's name, at most once; the
-token after `--NAME` is its value whatever it looks like, so `--text --help`
-gives `--text` the value `--help`. `--help` or `-h` where a param's name
-could stand describes the bench instead of running it (`brokkr man bench`).
-A param the command line does not give takes its `default`; one with
-neither is unbound: the script sees nil for it and the run stores nothing
-for it.
+`--NAME VALUE` or `--NAME=VALUE` after the bench's name; the token after
+`--NAME` is its value whatever it looks like, so `--text --help` gives
+`--text` the value `--help`. `--help` or `-h` where a param's name could
+stand describes the bench instead of running it (`brokkr man bench`). A
+param the command line does not give takes its `default`; one with neither
+is unbound: the script sees nil for it and the run stores nothing for it.
+
+**Several values.** A param may be given more than once, and a value is a
+list: it is split on every `,`, and the param's values are every item of
+every occurrence, in command-line order (`--osc 4705,4706 --osc 4710`). A
+`default` is read the same way. No value can hold a `,` as part of a key; a
+table key holding one is reached only through `all`. Two more spellings
+have a meaning for some params:
+
+- `all`, for a `from` param, is every key of its table, in key order:
+  numeric when every key is a canonical decimal (digits, no sign, no
+  leading zero, `0` itself one), byte order otherwise. It stands alone: `all`
+  beside another value is refused. A plain param's `all` is the string
+  `all`.
+- `LO..HI`, for a `many` param with a `from` path, is a range: both ends
+  canonical decimals (at most 2^64 - 1), `LO` not above `HI`, expanded in
+  place ascending, every key in it required under the table. A plain
+  collection's range is refused, since it has no keys to range over, and
+  any other param's `..` is part of its key.
+
+What the values do depends on the param:
+
+- a `many` param binds them all, as one list, to one sample (a collection;
+  one value is a collection of one, and `all` over an empty table an empty
+  collection);
+- any other param given several **fans out**: the bench runs once per value,
+  each run its own arm, stored as its own run. Several fanned params give
+  every combination, parents outer, each param's values in their order. A
+  dependent resolves under each of its parents' values: `--dataset all --variant all`
+  runs every variant of every dataset, each dataset's own.
 
 Params bind in dependency order, so a `{NAME}` in a `from` path stands for a
 key already chosen. A `from` param's value must be a key of the table its
 path names in the resolved view; a plain param's value is taken as it is.
-Refused when the bench runs, before anything is built and without storing a
-run, each naming what it found:
+Every arm is bound before anything runs, and a refusal in any arm refuses
+the whole invocation, before anything is built and without storing a run;
+every refusal is named, each with what it found (a refused param's
+dependents are not judged under it):
 
-- an unknown param, a param given twice, a missing or blank value, or a
-  token that is not `--NAME`;
+- an unknown param, a missing or blank value, a blank item between commas,
+  or a token that is not `--NAME`;
 - a `from` path that does not lead to a table (a missing key on the way, or
   a value that is not a table), and a bound param whose path needs a param
   that has no value;
 - a value that is not a key under its path, with the valid keys listed; for
   a `default`, the refusal says so. A default is judged only when it is
   used, so a dependent default (`indexed`) may be missing under some
-  parents as long as the command line then gives the param;
+  parents as long as the command line then gives the param, and is refused
+  when it is used under any parent that lacks it;
+- a key given twice, after lists, repeats, ranges and `all` are expanded;
+  a range end that is not a canonical decimal, a range running backwards, a
+  range with keys missing (the first few named, and how many more), and
+  `all` beside other values;
+- a fanned param whose values select no key under some parent (`all` over
+  an empty table), since nothing would run there;
 - a key holding a `.` where it is substituted into another param's path,
   since the stored path is its segments joined by dots; a key selected at
-  the end of a path may hold one;
-- a value holding a `,`, a `from` param's value `all`, and a `many` param's
-  value holding `..`: lists, every key and ranges are not taken yet, and are
-  refused rather than read as one key. A `many` param binds one key, as a
-  collection of one.
+  the end of a path may hold one.
 
 A selected entry that is a file entry (The resolved view) is the run's
-input. Before any build, brokkr reserves every bound input for reading,
-refused when another reservation writes it, and keeps it reserved until the
-run ends; then hashes each (XXH128, through the hash cache). A pinned entry
-must match its pin, or the run is refused naming the file, both digests and
-where the pin was set; an unpinned one is hashed and its digest recorded. A
-`file` must be a regular file; a plain dataset's `path` may be a directory,
-digested as a tree, and neither may be a FIFO, device or socket.
+input. Before any build, brokkr reserves every arm's bound inputs for
+reading, refused when another reservation writes one, and keeps them
+reserved until the last arm ends; then hashes each (XXH128, through the hash
+cache), a file several arms share once. A pinned entry must match its pin,
+or the invocation is refused naming the file, both digests and where the pin
+was set; an unpinned one is hashed and its digest recorded. Two entries
+naming one file are each judged against their own pin. A `file` must be a
+regular file; a plain dataset's `path` may be a directory, digested as a
+tree, and neither may be a FIFO, device or socket.
 
-What the run stores (`reference/bench-store.md`, The run document): each
+What each run stores (`reference/bench-store.md`, The run document): each
 bound param with its `from` path, `{NAME}` references substituted, and its
-key; a file's digest beside it. A file pairs on its key and digest, any
-other param on its key alone.
+keys in bound order; a file's digest beside each. A file pairs on its key
+and digest, any other param on its key alone, and a collection on its keys
+and digests in order, so `--osc 4706,4705` and `--osc 4705,4706` do not
+pair.
 
 ## The resolved view
 

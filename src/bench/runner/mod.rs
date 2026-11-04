@@ -1,18 +1,20 @@
-//! `brokkr bench NAME`: one script-bench run, end to end.
+//! `brokkr bench NAME`: a script bench's runs, one per arm, end to end.
 //!
-//! Before the attempt, the bench's params are bound against the resolved
-//! view (`super::params`, `super::view`) and its bound files reserved for
-//! reading and digested; a refusal there stores nothing.
+//! Before any attempt, the bench's params are bound against the resolved
+//! view (`super::params`, `super::view`) into every arm they fan out to, and
+//! every arm's bound files reserved for reading and digested; a refusal
+//! there stores nothing, for any arm.
 //!
-//! The run is one attempt with one document (`reference/bench-store.md`):
+//! Each arm is then one attempt with one document
+//! (`reference/bench-store.md`), run in order; one that fails does not stop
+//! the rest, a stop or a publication failure ends the invocation. An arm is:
 //! the build the bench's TOML asks for (host features folded in), in the
 //! `--commit` worktree when given, then iterations, each a fresh Lua state
 //! over one frozen compiled script, an owner lease and its children on the
 //! resource protocol (`reference/bench-resources.md`), then one publication
 //! to the per-user bench store, local or the configured results server.
-//! Whatever the attempt reached is published,
-//! a failed build or an interrupted iteration included, and then the
-//! command fails as the run did.
+//! Whatever the attempt reached is published, a failed build or an
+//! interrupted iteration included; the command then fails if any arm did.
 
 mod host;
 mod stored_config;
@@ -77,92 +79,166 @@ pub(crate) fn run(
         describe(bench, detection, &given, &view);
         return Ok(());
     }
-    // Every refusal from here to the attempt is before anything is stored.
-    let mut bound = params::bind(bench, &given, &view)?;
+    // Every refusal from here to the first attempt is before anything is
+    // stored, and covers every arm: an invocation is refused whole.
+    let mut arms = params::bind(bench, &given, &view)?;
     let frozen = freeze(bench)?;
     // Opened, or for a results server probed, before anything is built or
     // run and before a stop is caught: a run with nowhere to go is never
     // measured.
     let mut destination = Destination::open(&detection.config)?;
-    // The bound files are reserved for reading before they are hashed and
-    // stay reserved until the run ends, so no lease writes them between
-    // their digest and the last iteration.
-    let inputs = bound.inputs();
-    let _inputs_held = if inputs.is_empty() {
-        None
-    } else {
-        let paths: Vec<&Path> = inputs.iter().map(PathBuf::as_path).collect();
-        Some(crate::reservations::hold_reads(&paths)?)
-    };
-    bound.digest(detection.project_root.as_path(), &detection.config_sources)?;
-    let started = Instant::now();
-    let started_unix_ms = unix_ms();
-    let uuid = crate::db::generate_uuid()?;
+    let _inputs_held = hold_and_digest(&mut arms, detection)?;
     let keep = crate::context::worktree_keep(&detection.config)?;
     let tree = crate::tree_policy::TreePolicy::of(&detection.config);
-    // The whole run, worktree setup and publication included: a stop that
-    // lands between two children, during the build or while publishing is
-    // recorded rather than taking the default action, so the attempt is
+    // The whole invocation, worktree setup and publication included: a stop
+    // that lands between two children, during the build or while publishing
+    // is recorded rather than taking the default action, so the attempt is
     // still published as interrupted.
     let _interrupts = crate::shutdown::SigtermGuard::install();
     // An unknown revision is refused before anything is attempted; from here
-    // on every outcome is published.
+    // on every attempt's outcome is published.
     let commit = crate::git::resolve_commit(
         detection.build_root.as_path(),
         args.commit.as_deref().unwrap_or("HEAD"),
     )?;
-    let attempt = Attempt {
-        detection,
-        bench,
-        frozen: &frozen,
-        bound: &bound,
-        args: bound.args(),
-        inputs,
-        config: std::sync::Arc::new(view.lua()),
-        committed: args.commit.is_some(),
-        uuid: &uuid,
-        hostname: &hostname,
-        started_unix_ms,
-        iterations: args.iterations.get(),
-        argv: crate::history::redact_secret_argv(&invocation.argv),
-    };
-    let mut document = attempt.document(&commit);
-    let worktree = crate::context::with_worktree(
-        Some(&detection.project),
-        &detection.project_root,
-        &detection.build_root,
-        // The sha resolved above, so the tree built is the commit recorded
-        // even if the ref moves meanwhile.
-        args.commit.as_ref().map(|_| commit.as_str()),
-        false,
-        &tree,
-        keep,
-        |build_root| {
-            attempt.execute(build_root.as_path(), &commit, &mut document);
-            Ok(())
-        },
-    );
-    if let Err(error) = worktree {
-        // A git call cut short by the stop reports a spawn or subprocess
-        // error, not an interrupt.
-        document.outcome =
-            if matches!(error, DevError::Interrupted) || crate::shutdown::should_unwind() {
-                store::RunOutcome::Interrupted
-            } else {
-                store::RunOutcome::Failed {
-                    reason: format!("worktree: {}", reason_of(&error)),
-                }
-            };
-    }
-    destination.publish(&document)?;
-    report(&document, &destination.shown(), started);
-    match &document.outcome {
-        store::RunOutcome::Completed => Ok(()),
-        store::RunOutcome::Interrupted => Err(DevError::Interrupted),
-        store::RunOutcome::Failed { reason } => {
-            output::error(&format!("bench {name} failed: {reason}"));
-            Err(DevError::Reported(format!("bench {name} failed")))
+    let config = std::sync::Arc::new(view.lua());
+    let argv = crate::history::redact_secret_argv(&invocation.argv);
+    let labels = params::arm_labels(&arms);
+    let total = arms.len();
+    let mut failed: Vec<&str> = Vec::new();
+    for (index, bound) in arms.iter().enumerate() {
+        let label = labels[index].as_str();
+        if index > 0
+            && let Err(error) = admit_next(name, args, detection, &commit)
+        {
+            not_run(name, &labels[index..]);
+            return Err(error);
         }
+        if total > 1 {
+            output::bench_msg(&format!("arm {}/{total}: {label}", index + 1));
+        }
+        let shown = if label.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{name} ({label})")
+        };
+        let attempt = Attempt {
+            detection,
+            bench,
+            frozen: &frozen,
+            bound,
+            args: bound.args(),
+            inputs: bound.inputs(),
+            config: std::sync::Arc::clone(&config),
+            committed: args.commit.is_some(),
+            hostname: &hostname,
+            iterations: args.iterations.get(),
+            argv: argv.clone(),
+        };
+        let started = Instant::now();
+        let document = match attempt.run(&commit, &tree, keep) {
+            Ok(document) => document,
+            Err(error) => {
+                not_run(name, &labels[index..]);
+                return Err(error);
+            }
+        };
+        if let Err(error) = destination.publish(&document) {
+            // The cause may then be stored nowhere: say it here.
+            if let store::RunOutcome::Failed { reason } = &document.outcome {
+                output::error(&format!("bench {shown} failed: {reason}"));
+            }
+            not_run(name, &labels[index + 1..]);
+            return Err(error);
+        }
+        report(&document, &shown, &destination.shown(), started);
+        match &document.outcome {
+            store::RunOutcome::Completed => {}
+            store::RunOutcome::Interrupted => {
+                not_run(name, &labels[index + 1..]);
+                return Err(DevError::Interrupted);
+            }
+            // An arm that failed, its build or worktree included, does not
+            // stop the rest.
+            store::RunOutcome::Failed { reason } => {
+                output::error(&format!("bench {shown} failed: {reason}"));
+                failed.push(label);
+            }
+        }
+    }
+    summary(name, total, &failed)
+}
+
+/// How the invocation ends once every arm ran: each failed arm's cause was
+/// printed as it failed, so this names them only.
+fn summary(name: &str, total: usize, failed: &[&str]) -> Result<(), DevError> {
+    match failed.len() {
+        0 => Ok(()),
+        _ if total == 1 => Err(DevError::Reported(format!("bench {name} failed"))),
+        n => Err(DevError::Reported(format!(
+            "{n} of {total} arms of bench {name} failed: {}",
+            failed.join("; ")
+        ))),
+    }
+}
+
+/// Reserve every arm's bound files for reading, then digest them: reserved
+/// before any is hashed and held until the last arm ends (the returned
+/// hold), so no lease writes one between its digest and the last iteration.
+fn hold_and_digest(
+    arms: &mut [params::Bound],
+    detection: &Detection,
+) -> Result<Option<crate::reservations::ReadHold>, DevError> {
+    let union = params::union_inputs(arms);
+    let held = if union.is_empty() {
+        None
+    } else {
+        let paths: Vec<&Path> = union.iter().map(PathBuf::as_path).collect();
+        Some(crate::reservations::hold_reads(&paths)?)
+    };
+    params::digest_arms(
+        arms,
+        detection.project_root.as_path(),
+        &detection.config_sources,
+    )?;
+    Ok(held)
+}
+
+/// Whether the arm after a published one may start: not once a stop is
+/// pending, and, without `--commit`, only while HEAD is still the commit
+/// resolved for the invocation, since every arm builds the live tree and
+/// records that sha.
+fn admit_next(
+    name: &str,
+    args: &BenchArgs,
+    detection: &Detection,
+    commit: &crate::git::Commit,
+) -> Result<(), DevError> {
+    if crate::shutdown::should_unwind() {
+        return Err(DevError::Interrupted);
+    }
+    if args.commit.is_some() {
+        return Ok(());
+    }
+    let head = crate::git::resolve_commit(detection.build_root.as_path(), "HEAD")?;
+    if head != *commit {
+        return Err(DevError::Refused(format!(
+            "bench {name}: HEAD moved from {} to {} during the run, so the arms left would be \
+             recorded under a commit they did not build",
+            commit.as_str(),
+            head.as_str()
+        )));
+    }
+    Ok(())
+}
+
+/// Name the arms a stop or a refusal left unattempted.
+fn not_run(name: &str, labels: &[String]) {
+    if !labels.is_empty() {
+        output::warn(&format!(
+            "bench {name}: not run, so not stored: {}",
+            labels.join("; ")
+        ));
     }
 }
 
@@ -231,9 +307,22 @@ fn describe(bench: &Bench, detection: &Detection, given: &params::Given, view: &
         lines.push(line);
         match params::values_for(bench, given, view, name) {
             None => {}
-            Some(Ok(keys)) if keys.is_empty() => lines.push("      no keys on this host".into()),
-            Some(Ok(keys)) => lines.push(format!("      keys: {}", keys.join(", "))),
-            Some(Err(why)) => lines.push(format!("      keys unknown: it {why}")),
+            Some(Ok(paths)) => {
+                let several = paths.len() > 1;
+                for (path, keys) in paths {
+                    let under = if several {
+                        format!(" under {path}")
+                    } else {
+                        String::new()
+                    };
+                    lines.push(if keys.is_empty() {
+                        format!("      no keys{under} on this host")
+                    } else {
+                        format!("      keys{under}: {}", keys.join(", "))
+                    });
+                }
+            }
+            Some(Err(why)) => lines.push(format!("      keys unknown: {why}")),
         }
     }
     output::bench_msg(&lines.join("\n"));
@@ -307,17 +396,61 @@ struct Attempt<'a> {
     inputs: Vec<PathBuf>,
     config: std::sync::Arc<lua::Value>,
     committed: bool,
-    uuid: &'a str,
     hostname: &'a str,
-    started_unix_ms: i64,
     iterations: u32,
     argv: Vec<String>,
 }
 
 impl Attempt<'_> {
+    /// One arm's whole attempt: its document started now, under its own
+    /// uuid, then the worktree, build and iterations, every outcome decided.
+    /// Fails only before the document exists.
+    fn run(
+        &self,
+        commit: &crate::git::Commit,
+        tree: &crate::tree_policy::TreePolicy,
+        keep: usize,
+    ) -> Result<store::RunDocument, DevError> {
+        let uuid = crate::db::generate_uuid()?;
+        let mut document = self.document(commit, &uuid, unix_ms());
+        let worktree = crate::context::with_worktree(
+            Some(&self.detection.project),
+            &self.detection.project_root,
+            &self.detection.build_root,
+            // The sha resolved once, so the tree built is the commit recorded
+            // even if the ref moves meanwhile.
+            self.committed.then_some(commit.as_str()),
+            false,
+            tree,
+            keep,
+            |build_root| {
+                self.execute(build_root.as_path(), commit, &mut document);
+                Ok(())
+            },
+        );
+        if let Err(error) = worktree {
+            // A git call cut short by the stop reports a spawn or subprocess
+            // error, not an interrupt.
+            document.outcome =
+                if matches!(error, DevError::Interrupted) || crate::shutdown::should_unwind() {
+                    store::RunOutcome::Interrupted
+                } else {
+                    store::RunOutcome::Failed {
+                        reason: format!("worktree: {}", reason_of(&error)),
+                    }
+                };
+        }
+        Ok(document)
+    }
+
     /// The document as the attempt starts it: identity, conditions and the
     /// build asked for, its outcome interrupted until something decides it.
-    fn document(&self, commit: &crate::git::Commit) -> store::RunDocument {
+    fn document(
+        &self,
+        commit: &crate::git::Commit,
+        uuid: &str,
+        started_unix_ms: i64,
+    ) -> store::RunDocument {
         let live = self.detection.build_root.as_path();
         let subject = crate::git::commit_subject(live, commit).ok();
         // A `--commit` worktree is always clean; the live tree under the
@@ -334,7 +467,7 @@ impl Attempt<'_> {
         let captured_env = config_env(config);
         store::RunDocument {
             format: store::DOCUMENT_FORMAT,
-            uuid: self.uuid.to_owned(),
+            uuid: uuid.to_owned(),
             project: self.detection.project.name().to_owned(),
             bench: self.bench.name.clone(),
             checkout: self.detection.build_root.as_path().display().to_string(),
@@ -342,7 +475,7 @@ impl Attempt<'_> {
             commit: commit.as_str().to_owned(),
             dirty,
             subject,
-            started_unix_ms: self.started_unix_ms,
+            started_unix_ms,
             brokkr_version: env!("CARGO_PKG_VERSION").to_owned(),
             argv: self.argv.clone(),
             conditions: store::Conditions {
@@ -589,7 +722,7 @@ impl Destination {
 
 /// The run's one result line, never quiet-suppressed: its uuid is the only
 /// handle `brokkr results` finds it by.
-fn report(document: &store::RunDocument, place: &str, started: Instant) {
+fn report(document: &store::RunDocument, shown: &str, place: &str, started: Instant) {
     let outcome = match &document.outcome {
         store::RunOutcome::Completed => {
             let best = document
@@ -610,8 +743,7 @@ fn report(document: &store::RunDocument, place: &str, started: Instant) {
         store::RunOutcome::Interrupted => "interrupted".to_owned(),
     };
     output::result_forced(&format!(
-        "bench {}: run {} {outcome}{} in {} ({}); `brokkr results {}` shows it",
-        document.bench,
+        "bench {shown}: run {} {outcome}{} in {} ({}); `brokkr results {}` shows it",
         document.uuid,
         if document.dirty { ", dirty tree" } else { "" },
         output::format_duration(started.elapsed()),

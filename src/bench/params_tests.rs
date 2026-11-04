@@ -28,6 +28,35 @@ fn tokens(words: &[&str]) -> Vec<String> {
     words.iter().map(|w| (*w).to_owned()).collect()
 }
 
+/// The one arm `words` bind to.
+fn one(f: &Fixture, words: &[&str]) -> Bound {
+    let given = parse(&f.bench, &tokens(words)).unwrap();
+    let mut arms = bind(&f.bench, &given, &f.view).unwrap();
+    assert_eq!(arms.len(), 1, "{words:?} fans out");
+    arms.remove(0)
+}
+
+/// Every arm `words` bind to, each as its params' keys.
+fn arms(f: &Fixture, words: &[&str]) -> Vec<BTreeMap<String, Vec<String>>> {
+    let given = parse(&f.bench, &tokens(words)).unwrap();
+    bind(&f.bench, &given, &f.view)
+        .unwrap()
+        .iter()
+        .map(|arm| {
+            arm.document()
+                .into_iter()
+                .map(|(name, p)| (name, p.values.into_iter().map(|v| v.key).collect()))
+                .collect()
+        })
+        .collect()
+}
+
+/// Why `words` are refused.
+fn refusal(f: &Fixture, words: &[&str]) -> String {
+    let given = parse(&f.bench, &tokens(words)).unwrap();
+    bind(&f.bench, &given, &f.view).unwrap_err().to_string()
+}
+
 const DATASETS: &str = r#"
 [bench.b]
 script = "function bench() end"
@@ -59,8 +88,8 @@ fn tokens_are_name_value_pairs_and_help_only_where_a_name_stands() {
     let f = fixture("parse", DATASETS);
     let given = parse(&f.bench, &tokens(&["--jobs", "--help", "--variant=raw"])).unwrap();
     assert!(!given.help, "--help taken as --jobs's value is data");
-    assert_eq!(given.values["jobs"], "--help");
-    assert_eq!(given.values["variant"], "raw");
+    assert_eq!(given.values["jobs"], ["--help"]);
+    assert_eq!(given.values["variant"], ["raw"]);
     assert!(
         parse(&f.bench, &tokens(&["--jobs", "4", "-h"]))
             .unwrap()
@@ -74,8 +103,18 @@ fn tokens_are_name_value_pairs_and_help_only_where_a_name_stands() {
         err(&["--jbos", "4"])
     );
     assert!(err(&["--jobs"]).contains("needs a value"));
-    assert!(err(&["--jobs", " "]).contains("blank"));
-    assert!(err(&["--jobs", "1", "--jobs", "2"]).contains("twice"));
+    // A blank value is refused when it binds, beside the other refusals.
+    let blank = refusal(&f, &["--jobs", " ", "--dataset", "norway"]);
+    assert!(
+        blank.contains("is blank") && blank.contains("norway"),
+        "{blank}"
+    );
+    let repeated = parse(&f.bench, &tokens(&["--jobs", "1", "--jobs=2,3"])).unwrap();
+    assert_eq!(
+        repeated.values["jobs"],
+        ["1", "2,3"],
+        "occurrences in order"
+    );
     assert!(err(&["4"]).contains("not a param"));
     assert!(err(&["--"]).contains("not a param"));
 }
@@ -83,8 +122,7 @@ fn tokens_are_name_value_pairs_and_help_only_where_a_name_stands() {
 #[test]
 fn params_bind_in_dependency_order_into_the_document() {
     let f = fixture("bind", DATASETS);
-    let given = parse(&f.bench, &tokens(&["--osc", "4705"])).unwrap();
-    let mut bound = bind(&f.bench, &given, &f.view).unwrap();
+    let mut bound = one(&f, &["--osc", "4705"]);
     bound.digest(&f.dir, &f.sources).unwrap_err();
     std::fs::create_dir_all(f.dir.join("data")).unwrap();
     std::fs::write(f.dir.join("data/dk.pbf"), b"pbf").unwrap();
@@ -139,10 +177,7 @@ fn params_bind_in_dependency_order_into_the_document() {
 #[test]
 fn the_dynamic_refusals_name_the_valid_keys() {
     let f = fixture("refusals", DATASETS);
-    let refused = |words: &[&str]| {
-        let given = parse(&f.bench, &tokens(words)).unwrap();
-        bind(&f.bench, &given, &f.view).unwrap_err().to_string()
-    };
+    let refused = |words: &[&str]| refusal(&f, words);
     let err = refused(&["--variant", "locations"]);
     assert!(
         err.contains("not a key under datasets.denmark.snapshot.base.pbf")
@@ -155,21 +190,224 @@ fn the_dynamic_refusals_name_the_valid_keys() {
         err.contains("default \"indexed\"") && err.contains("raw"),
         "{err}"
     );
-    let given = parse(
-        &f.bench,
-        &tokens(&["--dataset", "sweden", "--variant", "raw"]),
-    )
-    .unwrap();
-    bind(&f.bench, &given, &f.view).unwrap();
+    one(&f, &["--dataset", "sweden", "--variant", "raw"]);
     let err = refused(&["--dataset", "norway"]);
     assert!(err.contains("denmark, sweden"), "{err}");
-    // Lists, ranges and `all` are not read as one key.
-    assert!(refused(&["--osc", "4705,4706"]).contains("list"));
-    assert!(refused(&["--osc", "4705..4706"]).contains("range"));
-    assert!(refused(&["--variant", "all"]).contains("every key"));
-    assert!(refused(&["--jobs", "1,2"]).contains("list"));
-    let given = parse(&f.bench, &tokens(&["--jobs", "all"])).unwrap();
-    bind(&f.bench, &given, &f.view).unwrap();
+    assert!(
+        !err.contains("--variant") && !err.contains("--snapshot"),
+        "dependents of a refused parent are not judged: {err}"
+    );
+    // A plain param's `all` stays the string, and its `..` too.
+    let bound = one(&f, &["--jobs", "all"]);
+    assert_eq!(bound.document()["jobs"].values[0].key, "all");
+    let bound = one(&f, &["--jobs", "1..4"]);
+    assert_eq!(bound.document()["jobs"].values[0].key, "1..4");
+}
+
+const COLLECTIONS: &str = r#"
+[bench.b]
+script = "function bench() end"
+params.dataset = { from = "datasets", default = "denmark" }
+params.osc = { from = "datasets.{dataset}.osc", many = true }
+params.words = { many = true }
+
+[box.datasets.denmark.pbf.raw]
+file = "dk.pbf"
+
+[box.datasets.denmark.osc.10]
+file = "10.osc"
+[box.datasets.denmark.osc.4705]
+file = "a.osc"
+[box.datasets.denmark.osc.4706]
+file = "b.osc"
+[box.datasets.denmark.osc.4707]
+file = "c.osc"
+
+[box.datasets.sweden.pbf.raw]
+file = "se.pbf"
+"#;
+
+#[test]
+fn a_collection_binds_lists_ranges_repeats_and_all_in_order() {
+    let f = fixture("collections", COLLECTIONS);
+    let osc = |words: &[&str]| arms(&f, words).remove(0)["osc"].clone();
+    assert_eq!(
+        osc(&["--osc", "4707,4705..4706"]),
+        ["4707", "4705", "4706"],
+        "command-line order, a range ascending in place"
+    );
+    assert_eq!(osc(&["--osc", "4706", "--osc", "4705"]), ["4706", "4705"]);
+    assert_eq!(
+        osc(&["--osc", "all"]),
+        ["10", "4705", "4706", "4707"],
+        "numeric order when every key is a canonical decimal"
+    );
+    assert_eq!(osc(&["--osc", "4706..4706"]), ["4706"]);
+    let bound = one(&f, &["--osc", "4705,4707"]);
+    assert_eq!(bound.inputs().len(), 2, "every value is an input");
+    let lua::Value::List(entries) = &bound.args().params[1].1 else {
+        panic!("a collection is a list")
+    };
+    assert_eq!(entries.len(), 2);
+
+    let refused = |words: &[&str]| refusal(&f, words);
+    let err = refused(&["--osc", "4705,4705..4706"]);
+    assert!(err.contains("\"4705\" twice"), "{err}");
+    let err = refused(&["--osc", "4705..4710"]);
+    assert!(err.contains("lacking 4708, 4709, 4710"), "{err}");
+    let err = refused(&["--osc", "0..18446744073709551615"]);
+    assert!(err.contains("and 18446744073709551607 more"), "{err}");
+    assert!(refused(&["--osc", "04705..4706"]).contains("leading zero"));
+    assert!(refused(&["--osc", "+1..2"]).contains("leading zero"));
+    assert!(refused(&["--osc", "4706..4705"]).contains("backwards"));
+    assert!(refused(&["--osc", "1..18446744073709551616"]).contains("at most"));
+    assert!(refused(&["--osc", "all,4705"]).contains("beside"));
+    assert!(refused(&["--osc", "all", "--osc", "4705"]).contains("beside"));
+    assert!(refused(&["--osc", "4705,"]).contains("blank item"));
+    let err = refused(&["--osc", "4705,4799"]);
+    assert!(
+        err.contains("\"4799\", not a key under datasets.denmark.osc"),
+        "{err}"
+    );
+    // A plain collection takes lists and repeats; it has no keys, so `all`
+    // is a string and a range is refused.
+    assert_eq!(
+        arms(&f, &["--words", "x,all", "--words", "y"]).remove(0)["words"],
+        ["x", "all", "y"]
+    );
+    assert!(refused(&["--words", "1..3"]).contains("plain collection"));
+    assert!(refused(&["--words", "x,x"]).contains("twice"));
+}
+
+#[test]
+fn fanned_params_make_one_arm_per_value_resolved_per_parent() {
+    let f = fixture("fanout", DATASETS);
+    let arms_of = |words: &[&str]| {
+        arms(&f, words)
+            .into_iter()
+            .map(|arm| {
+                ["dataset", "variant", "jobs"]
+                    .iter()
+                    .filter_map(|p| arm.get(*p).map(|keys| keys.join(",")))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        arms_of(&["--dataset", "all", "--variant", "all"]),
+        ["denmark indexed", "denmark raw", "sweden raw"],
+        "parents outer, each dataset's own variants"
+    );
+    assert_eq!(
+        arms_of(&["--variant", "raw", "--jobs", "4,1", "--jobs", "2"]),
+        ["denmark raw 4", "denmark raw 1", "denmark raw 2"],
+        "a plain param fans out on commas and repeats"
+    );
+    let given = parse(
+        &f.bench,
+        &tokens(&["--dataset", "denmark,sweden", "--variant", "raw"]),
+    )
+    .unwrap();
+    let bound = bind(&f.bench, &given, &f.view).unwrap();
+    assert_eq!(
+        arm_labels(&bound),
+        ["dataset=denmark", "dataset=sweden"],
+        "labels name only what varies"
+    );
+    assert_eq!(arm_labels(&bound[..1]), [""]);
+
+    // A default missing under one parent refuses the whole invocation.
+    let err = refusal(&f, &["--dataset", "denmark,sweden"]);
+    assert!(
+        err.contains("default \"indexed\"") && err.contains("datasets.sweden"),
+        "{err}"
+    );
+    let err = refusal(&f, &["--dataset", "sweden,denmark", "--variant", "indexed"]);
+    assert!(err.contains("datasets.sweden"), "{err}");
+    assert!(refusal(&f, &["--jobs", "1,1"]).contains("twice"));
+    // Independent refusals are all named.
+    let err = refusal(&f, &["--dataset", "norway", "--jobs", "1,,2"]);
+    assert!(
+        err.contains("preflight failed") && err.contains("norway") && err.contains("blank item"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_fan_out_over_no_keys_is_refused_and_defaults_may_fan_out() {
+    let body = r#"
+[bench.b]
+script = "function bench() end"
+params.group = { from = "data.groups" }
+params.item = { from = "data.groups.{group}.items" }
+params.n = { default = "1,2" }
+params.coll = { from = "data.groups.{group}.items", many = true }
+
+[data.groups.a.items.x]
+v = 1
+[data.groups.b.items]
+"#;
+    let f = fixture("emptyfan", body);
+    let err = refusal(&f, &["--group", "all", "--item", "all"]);
+    assert!(
+        err.contains("selects no key") && err.contains("data.groups.b.items"),
+        "{err}"
+    );
+    assert_eq!(
+        arms(&f, &["--group", "a", "--item", "all"]).len(),
+        2,
+        "n=1,2"
+    );
+    // A collection over no keys is a value: one empty list per arm.
+    let bound = arms(&f, &["--group", "b", "--coll", "all"]);
+    assert_eq!(bound.len(), 2);
+    assert!(bound[0]["coll"].is_empty());
+}
+
+#[test]
+fn every_entry_is_judged_against_its_own_pin_and_every_refusal_named() {
+    let body = r#"
+[bench.b]
+script = "function bench() end"
+params.w = { from = "data.w" }
+params.c = { from = "data.w", many = true }
+
+[data.w.x]
+file = "f.bin"
+[data.w.y]
+file = "f.bin"
+xxhash = "00000000000000000000000000000000"
+[data.w.z]
+file = "missing.bin"
+[data.w.q]
+file = "gone.bin"
+"#;
+    let f = fixture("sharedpin", body);
+    std::fs::write(f.dir.join("f.bin"), b"f").unwrap();
+    let given = parse(&f.bench, &tokens(&["--w", "x,y"])).unwrap();
+    let mut bound = bind(&f.bench, &given, &f.view).unwrap();
+    assert_eq!(union_inputs(&bound), [f.dir.join("f.bin")]);
+    let err = digest_arms(&mut bound, &f.dir, &f.sources)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("--w y") && err.contains("data.w.y.xxhash") && !err.contains("--w x"),
+        "{err}"
+    );
+    let given = parse(&f.bench, &tokens(&["--w", "x"])).unwrap();
+    let mut bound = bind(&f.bench, &given, &f.view).unwrap();
+    digest_arms(&mut bound, &f.dir, &f.sources).unwrap();
+    // Within one arm too, a refused file does not hide the next.
+    let given = parse(&f.bench, &tokens(&["--c", "z,q"])).unwrap();
+    let mut bound = bind(&f.bench, &given, &f.view).unwrap();
+    let err = digest_arms(&mut bound, &f.dir, &f.sources)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("missing.bin") && err.contains("gone.bin"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -185,8 +423,7 @@ params.leaf = { from = "data.cases" }
 count = 10
 "#;
     let f = fixture("dotted", body);
-    let given = parse(&f.bench, &tokens(&["--leaf", "v1.2"])).unwrap();
-    let bound = bind(&f.bench, &given, &f.view).unwrap();
+    let bound = one(&f, &["--leaf", "v1.2"]);
     assert_eq!(bound.document()["leaf"].values[0].key, "v1.2");
     let given = parse(&f.bench, &tokens(&["--group", "a.b", "--case", "x"])).unwrap();
     let err = bind(&f.bench, &given, &f.view).unwrap_err().to_string();
@@ -212,7 +449,7 @@ xxhash = "00000000000000000000000000000000"
 "#;
     let f = fixture("pin", body);
     std::fs::write(f.dir.join("w.lua"), b"return 1").unwrap();
-    let mut bound = bind(&f.bench, &Given::default(), &f.view).unwrap();
+    let mut bound = one(&f, &[]);
     let err = bound.digest(&f.dir, &f.sources).unwrap_err().to_string();
     assert!(
         err.contains("hash mismatch")
@@ -239,7 +476,7 @@ v = 1
 v = 2
 "#;
     let f = fixture("chain2", body);
-    let bound = bind(&f.bench, &Given::default(), &f.view).unwrap();
+    let bound = one(&f, &[]);
     let doc = bound.document();
     assert_eq!(doc["c"].from.as_deref(), Some("data"));
     assert_eq!(doc["b"].from.as_deref(), Some("data.k"));
@@ -267,7 +504,7 @@ xxhash = 123
     let f = fixture("nested", body);
     std::fs::write(f.dir.join("child.bin"), b"c").unwrap();
     std::fs::write(f.dir.join("p.bin"), b"p").unwrap();
-    let mut bound = bind(&f.bench, &Given::default(), &f.view).unwrap();
+    let mut bound = one(&f, &[]);
     assert_eq!(
         bound.inputs(),
         [f.dir.join("p.bin"), f.dir.join("child.bin")]
@@ -287,7 +524,7 @@ params.dataset = { from = "datasets", default = "null" }
 path = "/dev/null"
 "#;
     let f = fixture("special", body);
-    let mut bound = bind(&f.bench, &Given::default(), &f.view).unwrap();
+    let mut bound = one(&f, &[]);
     let err = bound.digest(&f.dir, &f.sources).unwrap_err().to_string();
     assert!(err.contains("not a regular file or a directory"), "{err}");
 }
@@ -299,11 +536,37 @@ fn help_lists_keys_under_the_parents_given_or_default() {
         let given = parse(&f.bench, &tokens(words)).unwrap();
         values_for(&f.bench, &given, &f.view, name)
     };
-    assert_eq!(keys(&[], "variant").unwrap().unwrap(), ["indexed", "raw"]);
+    let listed = |words: &[&str], name: &str| {
+        keys(words, name)
+            .unwrap()
+            .unwrap()
+            .into_iter()
+            .map(|(path, keys)| format!("{path}: {}", keys.join(",")))
+            .collect::<Vec<_>>()
+    };
     assert_eq!(
-        keys(&["--snapshot", "s1"], "variant").unwrap().unwrap(),
-        ["raw"]
+        listed(&[], "variant"),
+        ["datasets.denmark.snapshot.base.pbf: indexed,raw"]
     );
-    assert_eq!(keys(&[], "snapshot").unwrap().unwrap(), ["base", "s1"]);
+    assert_eq!(
+        listed(&["--snapshot", "s1"], "variant"),
+        ["datasets.denmark.snapshot.s1.pbf: raw"]
+    );
+    assert_eq!(
+        listed(&[], "snapshot"),
+        ["datasets.denmark.snapshot: base,s1"]
+    );
     assert!(keys(&[], "jobs").is_none());
+    // A fanned parent lists each path it leads to.
+    assert_eq!(
+        listed(&["--dataset", "all"], "variant"),
+        [
+            "datasets.denmark.snapshot.base.pbf: indexed,raw",
+            "datasets.sweden.snapshot.base.pbf: raw"
+        ]
+    );
+    let err = keys(&["--dataset", "norway"], "variant")
+        .unwrap()
+        .unwrap_err();
+    assert!(err.contains("norway"), "{err}");
 }

@@ -197,7 +197,11 @@ fn dotted_keys_stay_distinct_nodes_and_values_convert() {
     assert_eq!(shown(&at(&["data", "cases", "a.b"])), "data.cases.\"a.b\"");
     let odd = shown(&at(&["data", "a\u{0}b\u{1}"]));
     let parsed: toml::Table = toml::from_str(&format!("{odd} = 1")).unwrap();
-    assert_eq!(get(&parsed, &["data", "a\u{0}b\u{1}"]).as_integer(), Some(1), "{odd}");
+    assert_eq!(
+        get(&parsed, &["data", "a\u{0}b\u{1}"]).as_integer(),
+        Some(1),
+        "{odd}"
+    );
 
     let big = toml::Value::Integer(i64::MAX);
     assert_eq!(value(&big), lua::Value::Text(i64::MAX.to_string()));
