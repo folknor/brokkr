@@ -237,6 +237,7 @@ pub(crate) struct AuditInputs<'a> {
     pub(crate) header_cfg: Option<&'a HeaderConfig>,
     pub(crate) textlint_rules: &'a [TextlintRule],
     pub(crate) manifest_cfg: Option<&'a ManifestConfig>,
+    pub(crate) benches: &'a Benches,
     pub(crate) dependency_rules: &'a [DependencyRule],
     pub(crate) lints: &'a LintsConfig,
 }
@@ -375,6 +376,8 @@ fn phase_disposition(phase: Phase, plan: &CheckPlan<'_>, i: &PlanInputs<'_>, a: 
         Phase::Textlint if a.textlint_rules.is_empty() => "not configured".to_owned(),
         Phase::Textlint => planned(output::count(a.textlint_rules.len(), "rule")),
         Phase::Manifest if a.manifest_cfg.is_none() => "not configured".to_owned(),
+        Phase::Bench if a.benches.is_empty() => "not configured".to_owned(),
+        Phase::Bench => planned(output::count(a.benches.len(), "bench")),
         Phase::ScriptCheck if i.script_checks.is_empty() => "not configured".to_owned(),
         Phase::ScriptCheck if plan.owed_scripts.is_empty() => "none owed (every entry ruled out by its when)".to_owned(),
         Phase::ScriptCheck => {

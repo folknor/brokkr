@@ -8,9 +8,11 @@ mod verdict;
 pub(crate) use activation::decide_active_sweeps;
 use activation::{build_clippy_sweep, effective_profile_name};
 use conventions::{
-    LazyTree, report_script_stage, run_dependency_rules, run_gremlins, run_header, run_manifest,
-    run_publish_cycle, run_script_checks, run_textlint, scope_order,
+    LazyTree, report_script_stage, run_bench, run_dependency_rules, run_gremlins, run_header,
+    run_manifest, run_publish_cycle, run_script_checks, run_textlint, scope_order,
 };
+/// Every `[bench.*]` by name, as config loading leaves them.
+pub(crate) type Benches = std::collections::BTreeMap<String, crate::config::bench::Bench>;
 use reporter::Reporter;
 
 use crate::test_runner::hash_file;

@@ -17,7 +17,7 @@ pub enum ProjectConfig {
     /// Boxed: the largest section, reached only through [`Self::ratatoskr`].
     Ratatoskr(Box<ratatoskr::RatatoskrConfig>),
     Piners(piners::PinersConfig),
-    Dellingr(dellingr::DellingrConfig),
+    Dellingr(self::dellingr::DellingrConfig),
     Mogwai(mogwai::MogwaiConfig),
     /// Defaulted when the claimed `[pbfhogg]` table is absent.
     Pbfhogg(pbfhogg::PbfhoggConfig),
@@ -36,7 +36,7 @@ impl ProjectConfig {
             // Piners keeps its documented path defaults when the table is
             // absent; the other project handlers require their section.
             Project::Piners => Ok(Self::Piners(piners::parse(table)?.unwrap_or_default())),
-            Project::Dellingr => Ok(Self::Dellingr(dellingr::parse(table)?)),
+            Project::Dellingr => Ok(Self::Dellingr(self::dellingr::parse(table)?)),
             Project::Mogwai => Ok(Self::Mogwai(mogwai::parse(table)?)),
             Project::Pbfhogg => Ok(Self::Pbfhogg(pbfhogg::parse(table)?)),
             _ => Ok(Self::Generic),

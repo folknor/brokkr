@@ -62,8 +62,15 @@ mod tests {
             disable_toolchain: false,
             strip_rustflags: Vec::new(),
             cargo_env: std::collections::BTreeMap::new(),
+            benches: BTreeMap::new(),
             included_config_files: Vec::new(),
         }
+    }
+
+    /// The shared sections of a table composed from no files: what a bench's
+    /// script location needs is absent, so bench tests go through `compose`.
+    fn parse_dev_config(table: &toml::Table) -> Result<DevConfig, DevError> {
+        super::parse_dev_config(table, &ConfigSources::default())
     }
 
     fn textlint_of(src: &str) -> Result<Vec<TextlintRule>, DevError> {
@@ -1649,6 +1656,12 @@ sha256 = "aaa"
         let err = refuse_retired_sha256(table).unwrap_err().to_string();
         assert!(err.contains("myhost.datasets.dk.snapshot.s1.pbf.raw.sha256"), "{err}");
         assert!(err.contains("brokkr env"), "{err}");
+
+        // The explicit host spelling gets the same named refusal.
+        let explicit: toml::Table =
+            toml::from_str("[host.test.datasets.dk.pbf.raw]\nfile = \"f\"\nsha256 = \"aaa\"\n").unwrap();
+        let err = refuse_retired_sha256(&explicit).unwrap_err().to_string();
+        assert!(err.contains("host.test.datasets.dk.pbf.raw.sha256"), "{err}");
     }
 
     #[test]
@@ -3150,7 +3163,14 @@ profile = "corpus"
     /// file is a mistake, not a setting, and saying so beats silently ignoring it.
     #[test]
     fn user_config_rejects_project_shaped_keys() {
-        for body in ["project = \"brokkr\"\n", "[[check]]\nname = \"x\"\n"] {
+        for body in [
+            "project = \"brokkr\"\n",
+            "[[check]]\nname = \"x\"\n",
+            // Benches, their param sets and their data are one project's.
+            "[bench.cat]\nscript = \"x = 1\"\n",
+            "[bench_params.d]\ndataset = {}\n",
+            "[data.workloads]\nw = 1\n",
+        ] {
             let err = parse_user(body, user_path()).unwrap_err();
             let msg = format!("{err}");
             assert!(msg.contains("not allowed in the user-wide config"), "{msg}");

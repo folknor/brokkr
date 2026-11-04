@@ -158,7 +158,7 @@ In depth: `brokkr man check` (one section at a time, e.g. `man check clippy`)."
 
         /// Run the Rust phases (clippy, tests) even when the working tree
         /// holds nothing but markdown edits. Without it, such a tree runs
-        /// the gremlins, textlint and script_check phases only -
+        /// the gremlins, textlint, bench and script_check phases only -
         /// documentation cannot change how the code builds, so clippy and
         /// the tests would be re-proving what the last full run already
         /// established on the same code. Implied by `--gate`, by a

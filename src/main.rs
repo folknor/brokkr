@@ -1,5 +1,6 @@
 mod artefacts;
 mod atomic_write;
+mod bench;
 mod bench_variants;
 mod build;
 mod build_provenance;

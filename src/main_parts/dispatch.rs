@@ -21,9 +21,9 @@ use crate::request::{CorpusQuery, ResultsQuery, SidecarQuery};
 use crate::verify_cmd::cmd_verify;
 use crate::visual_approve_cmd::cmd_approve;
 use crate::{
-    check_cmd, cli, command_input, context, crit_cmd, dellingr, elivagar, history_cmd,
-    invalidate_cmd, litehtml, lockfile, measure, mogwai, nidhogg, output, pbfhogg, piners, project,
-    ratatoskr, results_cmd, runnables, sidecar_cmd, sluggrs, test_cmd,
+    check_cmd, cli, command_input, context, crit_cmd, elivagar, history_cmd, invalidate_cmd,
+    litehtml, lockfile, measure, mogwai, nidhogg, output, pbfhogg, piners, project, ratatoskr,
+    results_cmd, runnables, sidecar_cmd, sluggrs, test_cmd,
 };
 
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
@@ -748,12 +748,12 @@ fn run_project(
         // than inventing a dataset name that would land in the DB.
         Command::Dellingr { mode, lua, all } => {
             let selection = if all {
-                dellingr::cmd::Selection::All
+                crate::dellingr::cmd::Selection::All
             } else {
-                dellingr::cmd::Selection::Named(lua)
+                crate::dellingr::cmd::Selection::Named(lua)
             };
             run_measured(&mode, detection, "", "", invocation, |req| {
-                dellingr::cmd::run(req, &selection)
+                crate::dellingr::cmd::run(req, &selection)
             })
         }
 

@@ -64,6 +64,12 @@ const TOPICS: &[Topic] = &[
         commands: &[CommandId::Env],
     },
     Topic {
+        name: "bench-config",
+        summary: "brokkr.toml script benches: [bench.*], params, [bench_params], [data]",
+        content: include_str!("../docs/brokkr.toml.bench.md"),
+        commands: &[CommandId::Env],
+    },
+    Topic {
         name: "check",
         summary: "the check/test validation pipeline, sweeps, profiles, the gate",
         content: include_str!("../docs/commands/check.md"),

@@ -54,7 +54,7 @@ pub fn load(
     let (root, sources) = compose(&project_root.join("brokkr.toml"))?;
     let project = parse_project(&root)?;
     let project_config = project_config::ProjectConfig::parse(&project, &root)?;
-    let config = parse_dev_config(&root)?;
+    let config = parse_dev_config(&root, &sources)?;
     refuse_gate_scripts_without_gate(&config, sources.user_layer().map(|u| &u.script_check_names))?;
     Ok((project, config, project_config))
 }
@@ -80,8 +80,8 @@ pub fn unmatched_host_note(config: &DevConfig, hostname: &str) -> Option<String>
 /// Parse a normal config from the user-wide layer alone, for a check run in a
 /// tree without `brokkr.toml`.
 pub fn load_user_only() -> Result<DevConfig, DevError> {
-    let (root, _sources) = compose_user_only()?;
-    parse_dev_config(&root)
+    let (root, sources) = compose_user_only()?;
+    parse_dev_config(&root, &sources)
 }
 
 fn parse_project(table: &toml::Table) -> Result<Project, DevError> {
@@ -95,7 +95,9 @@ fn parse_project(table: &toml::Table) -> Result<Project, DevError> {
     Ok(project)
 }
 
-fn parse_dev_config(table: &toml::Table) -> Result<DevConfig, DevError> {
+/// Parse the shared sections of a composed table. `sources` is the
+/// composition's provenance, which locates the file behind a bench's script.
+fn parse_dev_config(table: &toml::Table, sources: &ConfigSources) -> Result<DevConfig, DevError> {
     let dependency_rules = parse_dependency_rules(table)?;
     let check = parse_check(table)?;
     let test = parse_test(table)?;
@@ -118,6 +120,7 @@ fn parse_dev_config(table: &toml::Table) -> Result<DevConfig, DevError> {
     let disable_toolchain = parse_disable_toolchain(table)?;
     let strip_rustflags = parse_strip_rustflags(table)?;
     let cargo_env = parse_cargo_env(table, &capture_env)?;
+    let benches = bench::parse(table, sources)?;
     refuse_retired_sha256(table)?;
     let hosts = parse_hosts(table)?;
     validate_datasets(&hosts)?;
@@ -146,6 +149,7 @@ fn parse_dev_config(table: &toml::Table) -> Result<DevConfig, DevError> {
         disable_toolchain,
         strip_rustflags,
         cargo_env,
+        benches,
         included_config_files: Vec::new(),
     })
 }
@@ -1091,6 +1095,9 @@ pub(crate) const SECTIONS: &[&str] = &[
     "fixture_lint",
     "disable_toolchain",
     "cargo_env",
+    "bench",
+    "bench_params",
+    "data",
 ];
 
 /// Top-level keys brokkr claims only when their value is not a table. A
@@ -2512,7 +2519,20 @@ fn refuse_retired_sha256(table: &toml::Table) -> Result<(), DevError> {
         }
         Ok(())
     }
-    for (host, value) in table {
+    // Host sections in both spellings. The script-bench namespaces are not
+    // host sections and hold data brokkr does not interpret, so a `datasets`
+    // table inside them is not a dataset registry.
+    let explicit = table
+        .get("host")
+        .and_then(toml::Value::as_table)
+        .into_iter()
+        .flatten()
+        .map(|(name, value)| (format!("host.{name}"), value));
+    let legacy = table
+        .iter()
+        .filter(|(key, _)| !matches!(key.as_str(), "host" | "bench" | "bench_params" | "data"))
+        .map(|(name, value)| (name.clone(), value));
+    for (host, value) in explicit.chain(legacy) {
         if let Some(datasets) = value.as_table().and_then(|t| t.get("datasets")) {
             walk(datasets, &format!("{host}.datasets"))?;
         }

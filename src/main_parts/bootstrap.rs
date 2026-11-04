@@ -648,6 +648,7 @@ pub(super) fn run_check(
         textlint_rules,
         script_checks,
         manifest_cfg,
+        benches,
         rustdoc_cfg,
         clippy_cfg,
     ) = if let Some(d) = detection {
@@ -666,6 +667,7 @@ pub(super) fn run_check(
             d.config.textlint.as_slice(),
             d.config.script_checks.as_slice(),
             d.config.manifest.as_ref(),
+            &d.config.benches,
             d.config.rustdoc.as_ref(),
             d.config.lints.as_ref(),
         )
@@ -688,6 +690,7 @@ pub(super) fn run_check(
             user.textlint.as_slice(),
             user.script_checks.as_slice(),
             None,
+            &user.benches,
             None,
             None,
         )
@@ -736,6 +739,7 @@ pub(super) fn run_check(
                 header_cfg,
                 textlint_rules,
                 manifest_cfg,
+                benches,
                 dependency_rules,
                 lints,
             },
@@ -765,6 +769,7 @@ pub(super) fn run_check(
         textlint_rules,
         script_checks,
         manifest_cfg,
+        benches,
         rustdoc_cfg,
         lints,
         features,

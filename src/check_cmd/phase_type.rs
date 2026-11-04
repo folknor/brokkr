@@ -6,6 +6,7 @@ pub enum Phase {
     Header,
     Textlint,
     Manifest,
+    Bench,
     ScriptCheck,
     DependencyRules,
     PublishCycle,
@@ -25,6 +26,7 @@ impl Phase {
             Self::Header => "header",
             Self::Textlint => "textlint",
             Self::Manifest => "manifest",
+            Self::Bench => "bench",
             Self::ScriptCheck => "script_check",
             Self::DependencyRules => "dependency_rules",
             Self::PublishCycle => "publish_cycle",
@@ -82,11 +84,12 @@ impl From<crate::error::DevError> for PhaseFailure {
 }
 
 impl Phase {
-    pub(super) const ALL: [Self; 14] = [
+    pub(super) const ALL: [Self; 15] = [
         Self::Gremlins,
         Self::Header,
         Self::Textlint,
         Self::Manifest,
+        Self::Bench,
         Self::ScriptCheck,
         Self::DependencyRules,
         Self::PublishCycle,
@@ -114,8 +117,12 @@ impl Phase {
         !matches!(self, Self::Prepare | Self::Coverage)
     }
 
-    pub(super) const fn reads_prose(self) -> bool {
-        matches!(self, Self::Gremlins | Self::Textlint | Self::ScriptCheck)
+    /// The phases the markdown-only shortcut still runs: those that read
+    /// prose, and `bench`, whose scripts may live outside the checkout (a
+    /// `script_file` beside an included config file) where the tree's dirt
+    /// cannot vouch for them.
+    pub(super) const fn runs_on_prose_only_tree(self) -> bool {
+        matches!(self, Self::Gremlins | Self::Textlint | Self::Bench | Self::ScriptCheck)
     }
 
     pub(super) const fn ceiling(self) -> std::time::Duration {

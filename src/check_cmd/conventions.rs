@@ -219,6 +219,33 @@ pub(super) fn run_manifest(
     )
 }
 
+/// The `bench` phase: read and compile every `[bench.*]` script, running
+/// none of it. Inert when the config declares no bench. Every bench is
+/// checked, so one run names every broken script.
+pub(super) fn run_bench(benches: &super::Benches) -> Result<(), DevError> {
+    if benches.is_empty() {
+        phase_inert(Phase::Bench);
+        return Ok(());
+    }
+    let findings: Vec<crate::bench::ScriptFinding> = benches
+        .values()
+        .filter_map(|bench| crate::bench::check_script(bench).err())
+        .collect();
+    if findings.is_empty() {
+        phase_ok(
+            Phase::Bench.label(),
+            Some(output::count(benches.len(), "script")),
+        );
+        return Ok(());
+    }
+    report_findings(
+        "bench",
+        "bench scripts failed to compile",
+        &findings,
+        ToString::to_string,
+    )
+}
+
 /// The selector-hygiene findings `brokkr check --audit` reports: configured
 /// paths that select nothing, and exclusions that excuse everything their
 /// selector picked. Resolved against the tracked file list alone; no content

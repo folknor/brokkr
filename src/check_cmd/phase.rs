@@ -54,6 +54,7 @@ pub(crate) fn cmd_check(
     textlint_rules: &[TextlintRule],
     script_checks: &[ScriptCheck],
     manifest_cfg: Option<&ManifestConfig>,
+    benches: &Benches,
     rustdoc_cfg: Option<&RustdocConfig>,
     lints: &LintsConfig,
     features: &[String],
@@ -143,6 +144,7 @@ pub(crate) fn cmd_check(
                 header_cfg,
                 textlint_rules,
                 manifest_cfg,
+                benches,
                 script_checks,
                 dependency_rules,
                 fix_gremlins,
@@ -685,12 +687,12 @@ fn prose_only_skips(project_root: &Path, build_requested: bool, narrate: &Narrat
     let skipped: Vec<Phase> = Phase::ALL
         .iter()
         .copied()
-        .filter(|phase| phase.skippable() && !phase.reads_prose())
+        .filter(|phase| phase.skippable() && !phase.runs_on_prose_only_tree())
         .collect();
     let kept = Phase::ALL
         .iter()
         .copied()
-        .filter(|phase| phase.reads_prose())
+        .filter(|phase| phase.runs_on_prose_only_tree())
         .map(Phase::as_str)
         .collect::<Vec<_>>()
         .join(", ");
@@ -717,14 +719,15 @@ fn start_phase(failing_phase: &mut Option<Phase>, phase: Phase) {
     begin_phase(failing_phase, phase);
 }
 
-/// Everything the seven convention phases (gremlins through dependency
-/// rules) need, bundled so `cmd_check` stays readable.
+/// Everything the convention phases (gremlins through publish cycle) need,
+/// bundled so `cmd_check` stays readable.
 struct ConventionPhaseArgs<'a> {
     project_root: &'a Path,
     gremlins_cfg: Option<&'a GremlinsConfig>,
     header_cfg: Option<&'a HeaderConfig>,
     textlint_rules: &'a [TextlintRule],
     manifest_cfg: Option<&'a ManifestConfig>,
+    benches: &'a Benches,
     script_checks: &'a [ScriptCheck],
     dependency_rules: &'a [DependencyRule],
     fix_gremlins: bool,
@@ -738,8 +741,8 @@ fn run_convention_phases(
     skip: &dyn Fn(Phase) -> bool,
     failing_phase: &mut Option<Phase>,
 ) -> Result<(), DevError> {
-    // The seven phases share one green line: each is seconds at most and
-    // "ok" plus its counts is all a pass has to say.
+    // The convention phases share one green line: each is seconds at most
+    // and "ok" plus its counts is all a pass has to say.
     let started = std::time::Instant::now();
     conventions_open();
     let result = run_convention_phases_inner(a, skip, failing_phase);
@@ -773,6 +776,11 @@ fn run_convention_phases_inner(
     if !skip(Phase::Manifest) {
         start_phase(failing_phase, Phase::Manifest);
         run_manifest(&tree, a.manifest_cfg)?;
+    }
+
+    if !skip(Phase::Bench) {
+        start_phase(failing_phase, Phase::Bench);
+        run_bench(a.benches)?;
     }
 
     if !skip(Phase::ScriptCheck) {

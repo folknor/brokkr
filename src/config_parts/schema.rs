@@ -206,6 +206,10 @@ pub struct DevConfig {
     /// path that must exist for it to apply) whose output brokkr sets on
     /// every cargo it launches. See [`crate::cargo_env`].
     pub cargo_env: std::collections::BTreeMap<String, crate::cargo_env::Entry>,
+    /// `[bench.*]` script benches by name, their params composed with the
+    /// `[bench_params]` sets they use. Empty when none are declared. See
+    /// [`bench`](mod@bench).
+    pub benches: BTreeMap<String, bench::Bench>,
     /// Absolute paths of the files this config's `include` graph pulled in
     /// (composition provenance, not a TOML key). Measurement provenance
     /// exempts them from the dirty-tree policy exactly as `brokkr.toml`

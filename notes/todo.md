@@ -290,6 +290,16 @@ it dispatches. Either the refusal goes for pbfhogg (the branch is a working
 dry run) or the branch goes. Found while respelling the retired `bench all`
 name.
 
+### Bench `.lua` files are outside the gremlins scan (2026-11-04)
+
+The gremlins phase scans a fixed extension set (`SCANNED_EXTENSIONS` in
+`src/globs.rs`: rs, toml, md, sh, py, js, yaml and friends) plus a project's
+`[gremlins] include` globs. An inline bench `script` is scanned as part of
+its `.toml`, but a `script_file` is a `.lua` file and is not, unless the
+project lists it. Whether `lua` joins the built-in set (it would also start
+scanning every Lua file in dellingr's and ratatoskr's trees) is undecided.
+Found while landing the script-bench schema.
+
 ### Captured-child termination may leave group members alive (2026-11-02, unverified)
 
 Raised in the spar on brokkr bz 101, not traced here: the captured runner's

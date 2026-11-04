@@ -103,6 +103,19 @@ exclude = ["src/elivagar/eliv.rs", "src/main.rs", "src/main_parts/bootstrap.rs",
 region = "code"
 message = "reach the elivagar and protohoggr crates through src/elivagar/eliv.rs"
 
+# The linked dellingr crate (the Lua VM script benches run on) is reached
+# through one seam by its absolute `::dellingr` path, since brokkr's own
+# `dellingr` module (the `brokkr dellingr` command) shares the name. Matches a
+# bare or absolute `dellingr::`; `crate::dellingr::` and `self::dellingr::`
+# name the module and pass.
+[[textlint]]
+name = "dellingr-crate-through-the-seam"
+pattern = '(?:^|[^\w:])(?:::)?dellingr::'
+paths = ["src/**/*.rs"]
+exclude = ["src/bench/lua.rs"]
+region = "code"
+message = "reach the dellingr crate through src/bench/lua.rs; brokkr's own module is crate::dellingr"
+
 # pbfhogg's overwrite boundary (src/pbfhogg/binary.rs): code under src/pbfhogg
 # may hold a pbfhogg executable brokkr built only as a PbfhoggBinary, so it
 # cannot pair one with arguments that skipped --overwrite negotiation. The

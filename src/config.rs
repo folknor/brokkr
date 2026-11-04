@@ -1,3 +1,5 @@
+#[path = "config_parts/bench.rs"]
+pub mod bench;
 #[path = "config_parts/check.rs"]
 pub mod check;
 #[path = "config_parts/project_config/mod.rs"]
@@ -26,7 +28,7 @@ pub fn load_with_sources(
     let (root, sources) = compose(&project_root.join("brokkr.toml"))?;
     let project = parse_project(&root)?;
     let project_config = project_config::ProjectConfig::parse(&project, &root)?;
-    let mut config = parse_dev_config(&root)?;
+    let mut config = parse_dev_config(&root, &sources)?;
     refuse_gate_scripts_without_gate(&config, sources.user_layer().map(|u| &u.script_check_names))?;
     config.included_config_files = sources.included().to_vec();
     Ok((project, config, project_config, sources))

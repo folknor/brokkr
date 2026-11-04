@@ -15,6 +15,8 @@ The rest of the universal schema is split by subject:
 - Sweeps and test policy (`[[check]]`, `[[lint_sweep]]`, `parallel`, `[test]`
   and its profiles, `[[quarantine]]`) -> `docs/brokkr.toml.sweeps.md`
   (`brokkr man sweeps`)
+- Script benches (`[bench.*]`, `[bench_params.*]`, `[data]`) ->
+  `docs/brokkr.toml.bench.md` (`brokkr man bench-config`)
 
 Project-specific config blocks live in their own docs, so a checkout only ever
 reads the ones that apply to it:
@@ -83,8 +85,8 @@ It accepts three top-level keys and nothing else:
 | `[textlint_preset.<name>]` | presets for those rules |
 | `[[script_check]]` | gates, exactly as in a project config |
 
-Any other key - `project`, `[[check]]`, a host section - is an error naming the
-file. The rest of the schema describes one project (its datasets, its sweeps,
+Any other key - `project`, `[[check]]`, a host section, `[bench.*]` - is an
+error naming the file. The rest of the schema describes one project (its datasets, its sweeps,
 its bin targets) and has no meaning machine-wide; a project-shaped key in a
 machine-wide file is a mistake, not a setting, and rejecting it beats
 silently ignoring it.
@@ -151,10 +153,13 @@ include overrides an earlier one. Merging is key by key:
 | anything else | the including side's value replaces the included one |
 
 **Paths.** `include` paths resolve against the directory of the file naming
-them. Every *other* path in an included file (dataset files, `[[script_check]]`
-commands, globs) means what it means in `brokkr.toml`: it resolves against the
-project root. An included file is config for the project that includes it,
-not a project of its own.
+them, and so does a bench's `script_file` (`brokkr man bench-config`): both
+name a piece of the config's own file layout. Every *other* path in an
+included file (dataset files, `[[script_check]]` commands, globs) means what
+it means in `brokkr.toml`: it resolves against the project root. An included
+file is config for the project that includes it, not a project of its own.
+The directory is the file's real one: a file reached through a symlink
+resolves beside its target.
 
 **Errors, not skips.** A missing, unreadable or malformed include is an error
 naming the file that included it, as is a cycle, or a file reached twice (its
@@ -252,7 +257,11 @@ Reserved top-level keys parsed as config sections, or consumed by composition:
 `dependency_rule`, `test`, `quarantine`, `capture_env`, `gremlins`, `header`,
 `textlint`, `textlint_preset`, `script_check`, `manifest`, `rustdoc`, `deps`,
 `lints` (and its `clippy` alias), `bin`, `member_check`, `fixture_lint`,
-`disable_toolchain`, `cargo_env`.
+`disable_toolchain`, `cargo_env`, `bench`, `bench_params`, `data`.
+
+`bench`, `bench_params` and `data` (the script-bench sections, `brokkr man
+bench-config`) were hostname sections before brokkr claimed them; a host
+literally named one of them is written `[host.<name>]`.
 
 `strip_rustflags`, `lint_sweep` and `install` are also brokkr's, but only as
 non-table values: a `[strip_rustflags]`, `[lint_sweep]` or `[install]` table

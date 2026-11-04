@@ -26,8 +26,8 @@ This doc covers the command, its output, and the phases up to the tests, then
 
 ## `brokkr check`
 
-Gremlins + header + textlint + manifest + script checks + dependency rules +
-publish cycle + clippy + optional rustdoc + prepare + tests + coverage under a
+Gremlins + header + textlint + manifest + bench scripts + script checks +
+dependency rules + publish cycle + clippy + optional rustdoc + prepare + tests + coverage under a
 complete claim + member-check and fixture-lint when configured. Trailing args after
 `brokkr check --` are split on a literal `--`: tokens before it go to
 `cargo test` (e.g.
@@ -492,9 +492,11 @@ finds.
 ## The markdown-only shortcut
 
 In a git repo where **everything uncommitted is markdown**, `check` runs the
-`gremlins`, `textlint` and `script_check` phases and nothing else. Clippy and
-the tests would be re-proving what the last full run already established on
-the same code.
+`gremlins`, `textlint`, `bench` and `script_check` phases and nothing else.
+Clippy and the tests would be re-proving what the last full run already
+established on the same code. `bench` stays because a bench's `script_file`
+may sit beside an included config file outside the checkout, where the
+tree's status cannot vouch for it.
 
 Markdown never counts as code, including markdown a Rust source compiles in
 (brokkr's own `include_str!`'d `man` pages, a crate's `#![doc =
@@ -529,7 +531,7 @@ than no shortcut at all: `--gate` has to mean the same thing on every tree it is
 ever run on.
 
 A shortened run says so twice - `markdown-only tree: running gremlins,
-textlint, script_check (--force-rust to check the build too)` up front, and
+textlint, bench, script_check (--force-rust to check the build too)` up front, and
 `check passed (markdown only - build phases skipped)` at the end, because the
 announcement has scrolled away by the time the verdict is read. The `--json`
 trailer carries it as `scope: "prose_only"`.
@@ -608,6 +610,18 @@ the inline table, are their own group and never ordered against it.
 (section/crate-type/package-field order, `[lints] workspace`, bin/example flags
 - the same set a `cargo-fuzz = true` stub skips) while still sort-checking it;
 `exclude` skips the file entirely. See `src/manifest.rs`.
+
+## `bench` phase
+
+Runs next, only when the config declares `[bench.*]` script benches (inert
+otherwise). It reads every bench's Lua - the inline `script`, or the
+`script_file` from disk - and compiles it with dellingr without running any of
+it, so it catches syntax errors and unreadable files, not a misspelt function
+call. Every bench is checked; each failure names the bench, the file to open
+and the line, and a clean run counts the scripts on the conventions line
+(`bench (3 scripts)`). It also runs on a markdown-only tree. Skippable as
+`bench` in a partial profile's `skip_phases`. The schema is in `brokkr man
+bench-config`.
 
 ## `script_check` phase
 

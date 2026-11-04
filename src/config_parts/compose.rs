@@ -12,7 +12,9 @@
 // The merge rules, applied key by key:
 // - table + table: merged recursively (a host section split across files),
 //   except a `[cargo_env]` entry's inline table, which the higher layer
-//   replaces whole.
+//   replaces whole. In a `[bench.NAME]` table, `script` and `script_file`
+//   are one setting: a layer giving either removes both from the layers
+//   beneath it.
 // - array of tables + array of tables (`[[check]]`, `[[textlint]]`, ...):
 //   joined, lower-precedence entries first, and an entry whose `name` the
 //   higher-precedence side reuses is dropped - a higher layer can redefine
@@ -23,12 +25,16 @@
 // section supports inclusion without knowing it exists. The price is that a
 // parser's error names the section, not the file. [`ConfigSources`] records
 // which files define every table, so the one place brokkr *writes* its config
-// (dataset registration) can edit the file that actually holds the entry.
+// (dataset registration) can edit the file that actually holds the entry, and
+// which file supplied every other value (an array of tables aside, whose
+// entries join across files), so a bench's script is located and
+// named by the file that set it.
 //
 // Paths *inside* an included file (dataset files, script commands, globs) mean
-// what they mean in `brokkr.toml`: relative to the project root. Only the
-// `include` paths themselves resolve against their own file, because they are
-// the one thing whose meaning is the file layout.
+// what they mean in `brokkr.toml`: relative to the project root. Only `include`
+// paths and a bench's `script_file` resolve against their own file's
+// directory, because they are the things whose meaning is the file layout: a
+// script file is config split out of the TOML that names it.
 
 /// Where each part of a composed config came from.
 #[derive(Debug, Clone, Default)]
@@ -39,9 +45,18 @@ pub struct ConfigSources {
     /// Project include files only. The user layer is a composition source but
     /// must not be treated as an in-tree include by dirty-check callers.
     included_files: Vec<PathBuf>,
+    /// The directory each file's relative paths resolve against, aligned with
+    /// `files`: the canonical parent, as `include` entries use, even where
+    /// `files` keeps the root's spelling for messages (a symlinked
+    /// `brokkr.toml` resolves beside its target).
+    bases: Vec<PathBuf>,
     /// Table path -> the files (indices into `files`) that define it, whether
     /// with a header of their own or implicitly through a sub-table.
     tables: BTreeMap<Vec<String>, BTreeSet<usize>>,
+    /// Value path -> the file that supplied the value the composition kept,
+    /// for every value that is not a table. A plain array is one value; an
+    /// array of tables is not tracked, since its entries join across files.
+    values: BTreeMap<Vec<String>, usize>,
     /// The user layer's effective contribution after higher layers shadow
     /// named entries.
     user_layer: Option<UserLayerSources>,
@@ -121,11 +136,33 @@ impl ConfigSources {
         Ok(root)
     }
 
-    /// Forget every table at or below `prefix`: a higher-precedence file
-    /// replaced that value outright.
+    /// The file that supplied the value at `path`, and the directory a
+    /// relative path in it resolves against. `None` for a table, or a path
+    /// the composition does not hold.
+    pub fn value_origin(&self, path: &[&str]) -> Option<ValueOrigin<'_>> {
+        let key: Vec<String> = path.iter().map(|s| (*s).to_owned()).collect();
+        let &idx = self.values.get(&key)?;
+        Some(ValueOrigin {
+            file: self.files[idx].as_path(),
+            base: self.bases[idx].as_path(),
+        })
+    }
+
+    /// Forget every table and value at or below `prefix`: a higher-precedence
+    /// file replaced that value outright.
     fn forget(&mut self, prefix: &[String]) {
         self.tables.retain(|path, _| !path.starts_with(prefix));
+        self.values.retain(|path, _| !path.starts_with(prefix));
     }
+}
+
+/// Where one composed value came from: [`ConfigSources::value_origin`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ValueOrigin<'a> {
+    /// The config file, spelled as messages show it.
+    pub file: &'a Path,
+    /// The canonical directory the file's relative paths resolve against.
+    pub base: &'a Path,
 }
 
 /// Read the user-wide config, `root`, and everything it includes, and fold
@@ -148,18 +185,22 @@ pub fn compose_user_only() -> Result<(toml::Table, ConfigSources), DevError> {
 fn compose_layers(root: Option<&Path>) -> Result<(toml::Table, ConfigSources), DevError> {
     let user_layer = selected_user_table()?;
     let mut seen = HashSet::new();
+    let mut user_base = None;
     if let Some((path, _)) = &user_layer {
         let canonical = std::fs::canonicalize(path)
             .map_err(|e| DevError::Config(format!("{}: {e}", path.display())))?;
+        user_base = Some(canonical.parent().map(Path::to_path_buf).unwrap_or_default());
         seen.insert(canonical);
     }
 
     let mut files = Vec::new();
+    let mut bases = Vec::new();
     {
         let mut walk = Walk {
             stack: Vec::new(),
             seen,
             out: &mut files,
+            bases: &mut bases,
         };
         if let Some(root) = root {
             walk.visit(root, None)?;
@@ -186,10 +227,12 @@ fn compose_layers(root: Option<&Path>) -> Result<(toml::Table, ConfigSources), D
     });
     if let Some(user_layer) = user_layer {
         files.insert(0, user_layer);
+        bases.insert(0, user_base.unwrap_or_default());
     }
 
     let mut sources = ConfigSources {
         included_files,
+        bases,
         user_layer: user_sources,
         ..ConfigSources::default()
     };
@@ -301,6 +344,8 @@ struct Walk<'a> {
     /// Canonical paths of every file reached so far.
     seen: HashSet<PathBuf>,
     out: &'a mut Vec<(PathBuf, toml::Table)>,
+    /// Each collected file's canonical directory, aligned with `out`.
+    bases: &'a mut Vec<PathBuf>,
 }
 
 impl Walk<'_> {
@@ -361,6 +406,7 @@ impl Walk<'_> {
         }
         self.stack.pop();
         self.out.push((shown, table));
+        self.bases.push(dir);
         Ok(())
     }
 }
@@ -376,6 +422,7 @@ fn merge_into(
     sources: &mut ConfigSources,
 ) {
     sources.tables.entry(path.clone()).or_default().insert(idx);
+    clear_replaced_alternatives(base, &overlay, path, sources);
     for (key, value) in overlay {
         path.push(key.clone());
         match (base.get_mut(&key), value) {
@@ -396,12 +443,44 @@ fn merge_into(
                         base.insert(key, toml::Value::Table(fresh));
                     }
                     other => {
+                        // An array of tables may later join entries from
+                        // several files, so no one file supplied it.
+                        let joinable = other.as_array().is_some_and(|items| is_table_array(items));
+                        if !joinable {
+                            sources.values.insert(path.clone(), idx);
+                        }
                         base.insert(key, other);
                     }
                 }
             }
         }
         path.pop();
+    }
+}
+
+/// Keys that are alternatives for one setting: a layer setting any of them
+/// replaces whichever the lower layers set. A bench's script is inline
+/// (`script`) or a file (`script_file`), so an including file can swap one
+/// for the other. The lower alternatives are removed once, before the
+/// overlay merges, so an overlay holding both keeps both and the parser
+/// refuses it.
+fn clear_replaced_alternatives(
+    base: &mut toml::Table,
+    overlay: &toml::Table,
+    path: &mut Vec<String>,
+    sources: &mut ConfigSources,
+) {
+    const SCRIPT: [&str; 2] = ["script", "script_file"];
+    let is_bench = matches!(path.as_slice(), [table, _] if table == "bench");
+    if !is_bench || !SCRIPT.iter().any(|key| overlay.contains_key(*key)) {
+        return;
+    }
+    for key in SCRIPT {
+        if base.remove(key).is_some() {
+            path.push(key.to_owned());
+            sources.forget(path);
+            path.pop();
+        }
     }
 }
 
@@ -538,6 +617,55 @@ mod compose_tests {
         ]);
         let (_, sources) = compose(&dir.join("brokkr.toml")).unwrap();
         assert!(sources.table_files(&["h", "datasets", "x"]).is_empty());
+    }
+
+    #[test]
+    fn every_value_knows_the_file_that_supplied_it() {
+        let dir = tree("values", &[
+            ("brokkr.toml", "project = \"p\"\ninclude = [\"sub/a.toml\"]\n[h]\nport = 2\n"),
+            ("sub/a.toml", "[h]\nport = 1\ndata = \"d\"\n[t]\nx = 1\n"),
+        ]);
+        let root = dir.join("brokkr.toml");
+        let sub = std::fs::canonicalize(dir.join("sub")).unwrap();
+        let (_, s) = compose(&root).unwrap();
+        let port = s.value_origin(&["h", "port"]).unwrap();
+        assert_eq!(port.file, root);
+        assert_eq!(port.base, std::fs::canonicalize(&dir).unwrap());
+        let data = s.value_origin(&["h", "data"]).unwrap();
+        assert_eq!(data.file, sub.join("a.toml"));
+        assert_eq!(data.base, sub);
+        // A table is not a value, and neither is an array of tables, whose
+        // entries may come from several files.
+        assert!(s.value_origin(&["h"]).is_none());
+        let arrays = tree("values_arrays", &[
+            ("brokkr.toml", "project = \"p\"\ninclude = [\"a.toml\"]\n[[check]]\nname = \"b\"\n"),
+            ("a.toml", "[[check]]\nname = \"a\"\n"),
+        ]);
+        let (_, s) = compose(&arrays.join("brokkr.toml")).unwrap();
+        assert!(s.value_origin(&["check"]).is_none());
+
+        // A higher layer replacing a table with a value takes the values
+        // beneath it along.
+        let replaced = tree("values_replaced", &[
+            ("brokkr.toml", "project = \"p\"\ninclude = [\"a.toml\"]\nt = 3\n"),
+            ("a.toml", "[t]\nx = 1\n"),
+        ]);
+        let (_, s) = compose(&replaced.join("brokkr.toml")).unwrap();
+        assert!(s.value_origin(&["t", "x"]).is_none());
+        assert!(s.value_origin(&["t"]).is_some());
+    }
+
+    #[test]
+    fn a_symlinked_root_resolves_beside_its_target() {
+        let dir = tree("symlinked_root", &[("shared/config.toml", "project = \"p\"\nx = 1\n")]);
+        std::fs::create_dir_all(dir.join("proj")).unwrap();
+        std::os::unix::fs::symlink(dir.join("shared/config.toml"), dir.join("proj/brokkr.toml")).unwrap();
+        let root = dir.join("proj/brokkr.toml");
+        let (_, s) = compose(&root).unwrap();
+        let origin = s.value_origin(&["x"]).unwrap();
+        // Shown as spelled, resolved where the file really is.
+        assert_eq!(origin.file, root);
+        assert_eq!(origin.base, std::fs::canonicalize(dir.join("shared")).unwrap());
     }
 
     #[test]

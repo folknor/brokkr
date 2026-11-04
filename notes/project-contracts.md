@@ -70,17 +70,22 @@ holding a Lua script that runs it:
 ```toml
 [bench.cat]
 script = """
-function bench()
-    return _G.binary("cat", _G.dataset, foo, bar)
+function bench(params)
+    return binary("cat", params.dataset)
 end"""
 ```
 
+(Params reach the script as one table, never as globals, so no param can
+shadow a builtin; how the table is handed over is slice 5's to settle.)
+
 The script is inline in `script`, as above, or in a `.lua` file named by
 `script_file` (`script_file = "benches/cat.lua"`), resolved relative to the
-TOML file that set that field, as `include` paths are; composition tracks
-provenance per field, not per table, since a bench's script and build
-settings may come from different files. An entry gives one or the other;
-both is a load error.
+real directory of the TOML file that set that field, as `include` paths
+are; composition tracks provenance per field, not per table, since a
+bench's script and build settings may come from different files. An entry
+gives one or the other; both in one file is a load error, and a higher
+layer giving either replaces whichever a lower one gave (landed in slice
+2, `docs/brokkr.toml.bench.md`).
 
 The top-level names `bench`, `bench_params` and `data` are reserved as
 sections (approved by the user, 2026-11-04): only a host literally so
@@ -187,6 +192,13 @@ named would change meaning, and it moves to `[host.NAME]`.
   such as `lexopt`, handed to the script as a table and stored on the row,
   which gives real `--help`, typos refused before a build, and structured
   pairing.
+- **brokkr's options go before the bench name, the bench's params after
+  it** (slice 2, sparred): `brokkr bench --commit X cat --jobs 4`. Mixed on
+  one line, every option a later slice adds to the verb would become a
+  reserved param name and turn a loading config into an error; split, the
+  only reserved param name is `help`, refused at load since slice 2. After
+  NAME, clap consumes nothing, help included. Bench names are not reserved
+  against brokkr's commands: under `bench NAME` they cannot collide.
 - **Datasets stay brokkr's.** Downloads, digests, `brokkr env` status and
   snapshot registration are shared by pbfhogg, elivagar and nidhogg, so the
   dataset tables and their resolver stay in brokkr. A script reaches them
@@ -472,14 +484,17 @@ with codex to consensus (2026-11-04): the store and the resource protocol
 come before the runner, so the runner does not decide them by accident,
 and params come after it, exercised against a running bench. The
 contracts the slices build against are the sections above; the third
-review was slice 0, and slice 1, the criterion wrapper's move from
-`brokkr bench` to `brokkr crit`, has landed.
+review was slice 0. Landed: slice 1, the criterion wrapper's move from
+`brokkr bench` to `brokkr crit`; slice 2, the config schema
+(`docs/brokkr.toml.bench.md`): `[bench.*]`, `[bench_params.*]` with
+`uses`, `[data]`, per-value provenance in `ConfigSources`, dellingr 0.6.0
+from crates.io behind `src/bench/lua.rs`, and check's `bench` phase. Slice
+2 also took every static load-time refusal of a param declaration (strict
+fields, `from` template syntax, unknown `{param}` references, cycles, a
+`many` param in a `from` path, judged on each bench's effective params),
+so no later slice tightens a loading config; what needs the resolved
+config stays with slices 6 and 7.
 
-2. **Config schema.** `[bench.*]` with `script` or `script_file`,
-   `[bench_params.*]` and `uses`, `[data.*]`; per-field provenance through
-   composition; the user-wide layer and names colliding with built-ins
-   refused at load; the dellingr dependency; `brokkr check` compiling
-   every bench's Lua.
 3. **The evidence model and the local store.** Schema and migration chain
    under `$XDG_DATA_HOME/brokkr/`: attempted runs with outcomes,
    iterations and children beneath them, the optional result with its
@@ -495,14 +510,26 @@ review was slice 0, and slice 1, the criterion wrapper's move from
    under `--commit`, `since()` against HEAD, `binary()` on the resource
    protocol with the FIFO and sidecar wired in, iterations and their
    aggregation, the failure semantics, runs written. A param-less bench
-   runs at the end of it. Needs dellingr's interrupt.
-6. **Params: `from` resolution.** Declarations, lexopt parsing, dependency
-   order with cycles refused, the `snapshot.base` view, per-bench
+   runs at the end of it. Needs dellingr's interrupt, which is not in a
+   dellingr release yet (0.6.0 has compile only): it needs a release
+   before brokkr can depend on it from crates.io. The verb's grammar is
+   options before NAME, params after (Params and datasets, above).
+6. **Params: `from` resolution.** lexopt parsing of what follows NAME,
+   dependency order (the graph is already validated at load), the
+   `snapshot.base` view, the dynamic refusals (an unknown key under a
+   resolved path, a dotted key, a default not under its table), per-bench
    `--help`, digest verification in preflight.
-7. **Params: collections and fan-out.** `many`, ranges, ordering, fan-out
-   with per-parent resolution and whole-invocation preflight.
+7. **Params: collections and fan-out.** `many` values (comma lists,
+   ranges, repeats, `all`, a `many` param's `default` in that syntax),
+   ordering, fan-out with per-parent resolution and whole-invocation
+   preflight.
 8. **Conveniences.** The file and json builtins, `print`, `env`, feeding
    one result to another, error line numbers mapped into inline scripts.
+   `ConfigSources::value_origin` names the file that set `script`, but the
+   composed table keeps no spans and TOML strings have escapes and line
+   continuations, so the mapping re-reads that file with spans
+   (`toml_edit`) and decodes the string, after checking the bytes still
+   match the script loaded, not offset arithmetic.
 9. **`brokkr res` on the new store.** Listing, pairing, `--compare` naming
    config changes between paired rows, the `record.hotpath` renderer.
 10. **The first real benches.** dellingr's workloads and pbfhogg's
