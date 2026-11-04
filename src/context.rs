@@ -455,7 +455,7 @@ where
                 output::warn(&format!("worktree bookkeeping: {e}"));
             }
             // The one line naming the commit. Neutral wording: this serves
-            // `run`, `bench` and the measured commands alike. Quiet-gated like
+            // `run`, `crit` and the measured commands alike. Quiet-gated like
             // the bench narration it replaces.
             if !output::is_quiet() {
                 output::run_msg(&format!("commit {} ({})", wt.commit(), wt.subject()));

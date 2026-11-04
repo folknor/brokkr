@@ -128,8 +128,8 @@ pub(crate) fn state_stores(state_root: &Path) -> Vec<Store> {
             remedy: "bounded: the newest 10 check runs",
         },
         Store {
-            name: "bench",
-            path: state.bench_dir(),
+            name: "crit",
+            path: state.crit_dir(),
             remedy: "no pruning: criterion baselines",
         },
         Store {

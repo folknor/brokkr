@@ -19,7 +19,7 @@ pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
         req.project_root.as_path(),
     )?;
     let file_mb = crate::datasets::resolve::file_size_mb(&pbf.path)?;
-    // `bench all`'s self arm is a tilegen run and takes the same contract one
+    // `suite elivagar`'s self arm is a tilegen run and takes the same contract one
     // gets. It used to hardcode a bare PipelineOpts and lean on ocean
     // auto-detection, so what it measured depended on what was in data/.
     let tilegen = super::resolve_tilegen(req.dev_config, super::DEFAULT_TILEGEN)?;

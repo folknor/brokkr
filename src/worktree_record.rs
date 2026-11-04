@@ -16,7 +16,7 @@
 //!
 //! Not in a command's own directory: [`crate::worktree::Worktree::create`] is
 //! shared machinery, and `--commit` exists on `dellingr`, `sluggrs hotpath`,
-//! pbfhogg's benches and `ratatoskr sync` as well as `bench`. A record kept
+//! pbfhogg's benches and `ratatoskr sync` as well as `crit`. A record kept
 //! under one command's store would date only that command's worktrees and leave
 //! the rest invisible to eviction, so the bound would silently fail to apply to
 //! most of its subjects.

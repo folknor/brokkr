@@ -15,7 +15,7 @@
 //! only reliable discriminator is behavioural - criterion implements `--list`
 //! and iai does not - which costs a build to ask. So the index lists every
 //! bench target, and a baseline verb aimed at a non-criterion one fails when
-//! the child rejects the flag. See `docs/commands/bench.md`.
+//! the child rejects the flag. See `docs/commands/crit.md`.
 
 use std::path::Path;
 
@@ -59,7 +59,7 @@ pub fn resolve<'a>(targets: &'a [BenchTarget], wanted: &str) -> Result<&'a Bench
     let matches: Vec<&BenchTarget> = targets.iter().filter(|t| t.name == wanted).collect();
     match matches.as_slice() {
         [] => Err(DevError::Refused(format!(
-            "no bench target named '{wanted}'; bare `brokkr bench` lists what exists"
+            "no bench target named '{wanted}'; bare `brokkr crit` lists what exists"
         ))),
         [one] => Ok(*one),
         many => {
@@ -83,6 +83,6 @@ pub fn index(targets: &[BenchTarget]) -> String {
             msg.push_str(&format!("  {} ({})\n", t.name, t.package));
         }
     }
-    msg.push_str("measure one with `brokkr bench <name>`");
+    msg.push_str("measure one with `brokkr crit <name>`");
     msg
 }

@@ -515,7 +515,7 @@ impl Command {
             | Self::Install { .. }
             | Self::Wc { .. }
             | Self::Man { .. }
-            | Self::Bench { .. }
+            | Self::Crit { .. }
             | Self::Deps { .. }
             | Self::Env
             | Self::DiffSnapshots { .. }

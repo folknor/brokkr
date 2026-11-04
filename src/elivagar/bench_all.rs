@@ -102,7 +102,7 @@ pub fn run(
         Ok(())
     } else {
         Err(DevError::Reported(format!(
-            "bench all: {} failed",
+            "suite elivagar: {} failed",
             failures.join(", ")
         )))
     }
@@ -153,7 +153,7 @@ fn run_tilegen(
         // The same block identity a `brokkr tilegen` row carries.
         arm_qualifier: command.arm_qualifier(Some(opts))?,
     };
-    // `bench all`'s self arm only measures output; clear any artifact left by
+    // `suite elivagar`'s self arm only measures output; clear any artifact left by
     // an earlier interrupted run before starting this sample.
     cleanup_outputs(&command, layout)?;
     let measurement = harness.measure_external(

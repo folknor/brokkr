@@ -1,14 +1,15 @@
-# `brokkr bench`
+# `brokkr crit`
 
 The criterion runner. Not project-gated: any Rust repo with criterion bench
-targets, like `run`, `deps` and `clippy`.
+targets, like `run`, `deps` and `clippy`. It was `brokkr bench` until
+2026-11; the old name is not an alias for it.
 
 ```
-brokkr bench                          # list the workspace's bench targets
-brokkr bench NAME                     # measure, saving a baseline named for HEAD
-brokkr bench NAME --commit REF        # measure REF in a worktree
-brokkr bench NAME --compare A B       # diff two stored baselines, sampling nothing
-brokkr bench --baselines              # list what has been recorded
+brokkr crit                           # list the workspace's bench targets
+brokkr crit NAME                      # measure, saving a baseline named for HEAD
+brokkr crit NAME --commit REF         # measure REF in a worktree
+brokkr crit NAME --compare A B        # diff two stored baselines, sampling nothing
+brokkr crit --baselines               # list what has been recorded
 ```
 
 ## Measurement and comparison are separate verbs
@@ -18,7 +19,7 @@ brokkr bench --baselines              # list what has been recorded
 destroys the previous reference. That is fine for a tight edit loop and useless
 for studying a series of commits: the second measurement eats the first.
 
-So `brokkr bench` splits the two operations. A measuring run always saves under
+So `brokkr crit` splits the two operations. A measuring run always saves under
 a name, and comparison is a separate invocation that samples nothing -
 criterion's `--load-baseline` supplies the new side from storage instead of
 measuring it. The expensive work happens once per commit, and you can ask as
@@ -28,10 +29,10 @@ A three-commit study is therefore three measurements and as many comparisons as
 you want:
 
 ```
-brokkr bench black_scholes --commit 03062cce63
-brokkr bench black_scholes --commit 8fa769d4eb
-brokkr bench black_scholes
-brokkr bench black_scholes --compare 03062cce 8fa769d4
+brokkr crit black_scholes --commit 03062cce63
+brokkr crit black_scholes --commit 8fa769d4eb
+brokkr crit black_scholes
+brokkr crit black_scholes --compare 03062cce 8fa769d4
 ```
 
 `--compare A B` reads *B against A*: `A` is the reference, `B` is the side being
@@ -115,7 +116,8 @@ Limits worth knowing:
 ## Where baselines live
 
 Under `.brokkr/bench/`, via criterion's `CRITERION_HOME`, rather than the
-default `target/criterion`.
+default `target/criterion`. The directory kept its name through the rename
+from `brokkr bench`, so the baselines recorded before it keep reading.
 
 `.brokkr/` is anchored to the **project root** - the directory holding
 `brokkr.toml` - like every other brokkr state directory, not to the build root
@@ -170,7 +172,7 @@ brokkr.
 
 ## Toolchain
 
-`bench` takes the global lock, so a `disable_toolchain` project's pinned
+`crit` takes the global lock, so a `disable_toolchain` project's pinned
 `rust-toolchain.toml` is moved aside for the window cargo runs in - the same
 mechanism every build path uses.
 
@@ -185,7 +187,7 @@ one in the tree being built.
 
 ## Worktree isolation
 
-A `--commit` run builds in a persistent worktree, and `brokkr bench` pins its
+A `--commit` run builds in a persistent worktree, and `brokkr crit` pins its
 Cargo invocation to a per-worktree `CARGO_TARGET_DIR`. The shared Cargo build
 and workspace metadata helpers use the same target-dir resolver. The dir sits
 under the project's own target
@@ -201,8 +203,10 @@ then measures a different commit's code under the requested commit's baseline
 name, reports success, and produces a number with nothing obviously wrong about
 it. The cost is a full build per worktree; the alternative is baselines that are
 silently attributed to the wrong commit. The isolation is not announced on
-every run (it is the same each time); its narration goes to `bench`'s
-run log (`.brokkr/check-logs/bench-<ms>.log`, the newest ten kept).
+every run (it is the same each time); its narration goes to `crit`'s
+run log (`.brokkr/check-logs/crit-<ms>.log`, the newest ten kept; the
+`bench-<ms>.log` files the command wrote under its old name are left as they
+are).
 
 Worktrees persist and are reused, so the cost is one cold build per commit
 rather than per run. They are also expensive to keep - the isolated `target/` is

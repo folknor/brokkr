@@ -102,8 +102,8 @@ impl ProjectRoot {
     pub(crate) fn state(&self) -> crate::clean::layout::ProjectState {
         crate::clean::layout::ProjectState::new(&self.0)
     }
-    pub fn bench_home(&self) -> PathBuf {
-        self.state().bench_dir()
+    pub fn crit_home(&self) -> PathBuf {
+        self.state().crit_dir()
     }
 }
 
@@ -187,7 +187,7 @@ pub struct Detection {
     pub build_root: BuildRoot,
     /// Which files the composed config came from (user layer, includes,
     /// `brokkr.toml`), recorded once at startup so later consumers (`env`,
-    /// `bench`'s dirty check) never recompose.
+    /// `crit`'s dirty check) never recompose.
     pub config_sources: ConfigSources,
 }
 

@@ -84,7 +84,7 @@ Build => ("build", Visibility::Any, Optional, Blocking, true, crate::measure::Me
 Install => ("install", Visibility::Any, Optional, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
 Wc => ("wc", Visibility::Any, Optional, None, true, crate::measure::MeasureMode::Run, None, &[]),
 Man => ("man", Visibility::Any, None, None, true, crate::measure::MeasureMode::Run, None, &[]),
-Bench => ("bench", Visibility::Any, Optional, None, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::BENCH), &["cargo"], Direct),
+Crit => ("crit", Visibility::Any, Optional, None, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::CRIT), &["cargo"], Direct),
 Deps => ("deps", Visibility::Any, Optional, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
 Env => ("env", Visibility::Any, Required, None, false, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
 Inspect => ("inspect", Visibility::Only(&[Project::Pbfhogg]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo", "osmium"], Mode),
@@ -253,7 +253,7 @@ impl CommandSpec {
             WorktreePolicy::Direct => match command {
                 super::Command::Run { commit, .. }
                 | super::Command::Build { commit, .. }
-                | super::Command::Bench { commit, .. }
+                | super::Command::Crit { commit, .. }
                 | super::Command::Verify { commit, .. }
                 | super::Command::Library { commit, .. }
                 | super::Command::Sync { commit, .. }

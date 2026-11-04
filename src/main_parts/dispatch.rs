@@ -21,7 +21,7 @@ use crate::request::{CorpusQuery, ResultsQuery, SidecarQuery};
 use crate::verify_cmd::cmd_verify;
 use crate::visual_approve_cmd::cmd_approve;
 use crate::{
-    bench_cmd, check_cmd, cli, command_input, context, dellingr, elivagar, history_cmd,
+    check_cmd, cli, command_input, context, crit_cmd, dellingr, elivagar, history_cmd,
     invalidate_cmd, litehtml, lockfile, measure, mogwai, nidhogg, output, pbfhogg, piners, project,
     ratatoskr, results_cmd, runnables, sidecar_cmd, sluggrs, test_cmd,
 };
@@ -226,7 +226,7 @@ pub(super) fn run(
             detection,
         ),
         Command::Wc { threshold } => run_wc(*threshold, detection),
-        Command::Bench {
+        Command::Crit {
             target,
             commit,
             compare,
@@ -234,8 +234,8 @@ pub(super) fn run(
             name,
             lenient,
             args,
-        } => bench_cmd::run(
-            &bench_cmd::BenchArgs {
+        } => crit_cmd::run(
+            &crit_cmd::CritArgs {
                 target: target.clone(),
                 commit: commit.clone(),
                 compare: compare
@@ -397,7 +397,7 @@ fn run_project(
         | Command::Check { .. }
         | Command::Clippy { .. }
         | Command::Fmt { .. }
-        | Command::Bench { .. }
+        | Command::Crit { .. }
         | Command::Run { .. }
         | Command::Build { .. }
         | Command::Install { .. }

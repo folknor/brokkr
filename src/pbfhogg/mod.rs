@@ -46,10 +46,10 @@ use std::str::FromStr;
 
 use crate::error::DevError;
 
-/// Default compression list used by the `bench all` write preset.
+/// Default compression list used by the `suite pbfhogg` write preset.
 pub const DEFAULT_BENCH_WRITE_COMPRESSIONS: &str = "none,zlib:6,zstd:3";
 
-/// Default compression list used by the `bench all` merge preset.
+/// Default compression list used by the `suite pbfhogg` merge preset.
 pub const DEFAULT_BENCH_MERGE_COMPRESSIONS: &str = "zlib,none";
 
 const DEFAULT_ZLIB_LEVEL: u8 = 6;

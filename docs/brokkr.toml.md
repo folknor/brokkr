@@ -237,7 +237,7 @@ store pruning operation with its configured keep count and dry-run policy.
 **Host feature policy.** Host `features` are added to measured-request builds
 through the shared build context, and to the `passthrough`, `verify`, `serve`,
 `ingest`, and `update` paths. Standalone `run`, `install`, `check`, `clippy`,
-`test`, and Criterion `bench` use their own cargo/default or sweep feature
+`test`, and Criterion `crit` use their own cargo/default or sweep feature
 selection and do not inherit host features. CLI `--features` are additive to
 host features in paths that apply them, with duplicates removed. This is the
 complete policy for which Cargo builds inherit host features. Host `port` is
@@ -412,7 +412,7 @@ non-tracked window can leave it moved aside as `rust-toolchain.toml.brokkr-disab
 the next brokkr run in that directory adopts the leftover and restores it,
 printing a `[warn]` that it did so. The routine move aside is identical on
 every run, so a command that keeps a run log (`check`, `test`, measured runs,
-`bench`) records it there only; any other command prints it as a quiet-gated
+`crit`) records it there only; any other command prints it as a quiet-gated
 `[run]` line rather than drop it.
 Worktree builds (`--commit`) run in a separate checkout that may carry its own
 committed pin; brokkr re-points the disable there for the build, so the

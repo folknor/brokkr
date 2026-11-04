@@ -470,7 +470,7 @@ In depth: `brokkr man clippy`."
     ///
     /// The `docs/**.md` files are compiled into the binary and rendered to the
     /// terminal. Topics are filtered by the detected project, except the
-    /// project-agnostic topics (such as check, clean, bench, config and
+    /// project-agnostic topics (such as check, clean, crit, config and
     /// measure), which are listed everywhere. A long topic lists its
     /// sections instead of dumping the file: `brokkr man conventions script_check`
     /// reads one, `--full` reads the lot.
@@ -492,9 +492,9 @@ In depth: `brokkr man clippy`."
     /// baseline named for the commit; `--compare A B` diffs two stored
     /// baselines without sampling anything.
     ///
-    /// In depth: `brokkr man bench`.
+    /// In depth: `brokkr man crit`.
     #[command(display_order = 0)]
-    Bench {
+    Crit {
         /// Bench target to run. Omit for the index.
         #[arg(value_name = "TARGET")]
         target: Option<String>,
@@ -1423,7 +1423,7 @@ Examples:
   brokkr results --command read                     # last 20 matching 'read'
   brokkr results 0b74fb6f                           # look up by UUID prefix
   brokkr results --commit a65a                      # filter by commit prefix
-  brokkr results --command 'bench read'             # filter by command
+  brokkr results --command check                    # substring: check-refs, check-ids, ...
   brokkr results --mode hotpath                     # filter by measurement mode
   brokkr results --dataset europe                   # filter by dataset (substring match on input file)
   brokkr results --command tags-filter --dataset eu # combine filters
@@ -1448,7 +1448,7 @@ In depth: `brokkr man results`."
         #[arg(long, num_args = 2, value_names = ["COMMIT_A", "COMMIT_B"])]
         compare: Option<Vec<String>>,
 
-        /// Filter by command (substring match, e.g. "read" matches "bench read")
+        /// Filter by command (substring match, e.g. "check" matches "check-refs")
         #[arg(long)]
         command: Option<String>,
 

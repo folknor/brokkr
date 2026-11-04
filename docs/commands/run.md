@@ -81,7 +81,7 @@ brokkr run bench -- --preset mtf --repeat 3
 ```
 
 is an A/B of two builds of the same target. `--commit REF` builds the target
-in a persistent worktree of `REF` (the one `bench` and the measured commands
+in a persistent worktree of `REF` (the one `crit` and the measured commands
 use - LRU-retained by `worktree_keep`, removed by `brokkr clean --worktrees`),
 then runs the binary **from the directory `brokkr run` was invoked in**.
 

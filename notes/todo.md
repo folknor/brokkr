@@ -281,6 +281,15 @@ one discards it, but a failed run keeps it, and `clean_scratch` in
 the next run of that mode. Adding them to the nidhogg layout's clean list
 closes it; clean.md names only the bench dir today.
 
+### `suite pbfhogg`'s dry-run branch is unreachable (2026-11-04)
+
+`pbfhogg::cmd::bench_all` opens with a `req.dry_run` branch that resolves
+the PBF and prints `ok (suite pbfhogg)`, but its one caller, the `suite` arm
+in `src/main_parts/dispatch.rs`, refuses `--dry-run` for every suite before
+it dispatches. Either the refusal goes for pbfhogg (the branch is a working
+dry run) or the branch goes. Found while respelling the retired `bench all`
+name.
+
 ### Captured-child termination may leave group members alive (2026-11-02, unverified)
 
 Raised in the spar on brokkr bz 101, not traced here: the captured runner's

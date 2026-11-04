@@ -5,7 +5,7 @@
 //! into the Cargo shape. Command differences are policy data, not launcher
 //! decisions. Host `features` never enter here: measured builds receive them
 //! already merged into their feature list (`command_args`), and the standalone
-//! purposes (run, install, check, clippy, test, bench) do not inherit them -
+//! purposes (run, install, check, clippy, test, crit) do not inherit them -
 //! the host feature policy in `docs/brokkr.toml.md`. Computed `[cargo_env]`
 //! values remain spawn-time inputs: resolving a shape must not evaluate or
 //! cache commands that the contract requires before every Cargo launch.
@@ -27,7 +27,8 @@ pub(crate) enum Purpose {
     MemberCheck,
     Check,
     Test,
-    Bench,
+    /// `brokkr crit`'s `cargo bench`.
+    Crit,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,7 +38,7 @@ pub(crate) enum Profile {
     Bench,
     /// A custom `[profile.<name>]`. Constructible only by [`profile`], which
     /// refuses it for a purpose whose policy lacks `named_profile` - so no
-    /// sweep, member-check or bench request can carry one.
+    /// sweep, member-check or crit request can carry one.
     Named(NamedProfile),
 }
 
@@ -125,7 +126,7 @@ impl Purpose {
                 dev_flag: None,
                 release_flag: Some("--release"),
             },
-            Self::Bench => Policy {
+            Self::Crit => Policy {
                 default_profile: Profile::Bench,
                 configurable_profile: false,
                 named_profile: false,
@@ -156,7 +157,7 @@ pub(crate) fn profile(
     let policy = purpose.policy();
     let requested = inputs.invocation.or(inputs.configured);
     // Checked before the fixed-profile return, so a purpose that ignores
-    // profile inputs (bench) still refuses a custom one rather than
+    // profile inputs (crit) still refuses a custom one rather than
     // dropping it.
     if let Some(crate::build::RustProfile::Named(name)) = &requested
         && !policy.named_profile
@@ -271,7 +272,7 @@ impl Features {
 pub(crate) struct Request<'a> {
     pub(crate) purpose: Purpose,
     /// Already resolved: [`profile`] for build/run/install, the sweep's own
-    /// profile for check and test, the purpose's fixed profile for bench.
+    /// profile for check and test, the purpose's fixed profile for crit.
     pub(crate) profile: Profile,
     /// Canonical package selection argv, produced by metadata discovery or
     /// the selection planner. The resolver never guesses workspace members.
@@ -375,7 +376,7 @@ mod tests {
             (Purpose::Install, Profile::Release),
             (Purpose::Test, Profile::Release),
             (Purpose::Check, Profile::Dev),
-            (Purpose::Bench, Profile::Bench),
+            (Purpose::Crit, Profile::Bench),
         ] {
             assert_eq!(profile(purpose, Profiles::default()).unwrap(), expected);
         }
@@ -404,7 +405,7 @@ mod tests {
         );
         assert!(
             profile(
-                Purpose::Bench,
+                Purpose::Crit,
                 Profiles {
                     configured: Some(corpus.clone()),
                     ..Default::default()
@@ -474,7 +475,7 @@ mod tests {
             Purpose::Install,
             Purpose::Check,
             Purpose::Test,
-            Purpose::Bench,
+            Purpose::Crit,
         ] {
             let shape = resolve(Request {
                 purpose,
@@ -486,7 +487,7 @@ mod tests {
                 env: Vec::new(),
                 build_root: None,
             });
-            if matches!(purpose, Purpose::Install | Purpose::Bench) {
+            if matches!(purpose, Purpose::Install | Purpose::Crit) {
                 assert!(
                     !shape
                         .args

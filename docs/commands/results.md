@@ -61,7 +61,8 @@ All narrow the table, and all AND together:
   match selects each side of `--compare`. A stored commit that is not a hash
   at all (legacy text such as `unknown`) never makes a query fail: the row is
   shown with that text verbatim.
-- `--command <SUB>` - substring, so `read` matches `bench read`.
+- `--command <SUB>` - substring, so `check` matches `check-refs` and
+  `check-ids`.
 - `--mode <SUB>` - substring; the exact values are `bench`, `hotpath`,
   `alloc`. `--variant` is accepted as a legacy alias.
 - `--dataset <SUB>` - substring against the input filename, so `eu` matches
@@ -225,8 +226,8 @@ share one argv), and the strategy when one argv ran every strategy
 row from before the bbox and strategy qualifiers existed carries neither, so
 it does not pair with a newer row that does. A pbfhogg `digest` without
 `--form` carries the form it measured (`form=full` or `form=content`;
-`docs/projects/pbfhogg.md`, Digest). An elivagar `tilegen` row, the `bench
-all` self arm's included, carries every flag its tilegen block and input
+`docs/projects/pbfhogg.md`, Digest). An elivagar `tilegen` row, the `suite
+elivagar` self arm's included, carries every flag its tilegen block and input
 assertions passed (`tilegen=` and a JSON array of them, ocean entries under
 their brokkr.toml names rather than the host's resolved paths; an empty block
 on an input with neither assertion is `tilegen=[]`), since `brokkr tilegen`'s

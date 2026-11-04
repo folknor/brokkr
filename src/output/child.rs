@@ -1335,7 +1335,8 @@ pub fn run_passthrough_timed(
 /// Same lifecycle guarantees - that is the point of having it. A caller needing
 /// to set `cwd` or an env var previously had to reach for a bare
 /// `Command::status()`, which silently gave up the `SigtermGuard`, the OOM
-/// marking and the lockfile PID publication. `brokkr bench` did exactly that.
+/// marking and the lockfile PID publication. The criterion runner (`brokkr
+/// crit`) did exactly that.
 pub fn run_passthrough_in(
     program: &str,
     args: &[&str],

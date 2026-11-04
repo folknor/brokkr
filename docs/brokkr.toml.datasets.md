@@ -56,7 +56,7 @@ paths still resolve against each including project's root.
   `file`, optional `xxhash` (XXH128).
 - `pmtiles.<variant>` - PMTiles archive entries keyed by variant name (e.g.
   `elivagar`). Each has `file`, optional `xxhash` (XXH128).
-  Used by nidhogg `serve` and `bench tiles`.
+  Used by nidhogg `serve` and `tiles`.
 - Top-level dataset fields: `origin`, `download_date`, `bbox`, `data_dir`
   (nidhogg only). `bbox` is parsed at config load as four finite
   `lon_min,lat_min,lon_max,lat_max` coordinates; longitude must be within

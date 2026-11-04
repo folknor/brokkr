@@ -56,10 +56,10 @@ The measurement stores are never removed, by any flag combination:
 | `.brokkr/piners/corpus/runs.db` | the corpus run store, source of truth |
 | `.brokkr/ratatoskr/gate.db` | the gate baselines |
 | `.brokkr/library-certifications/` | `brokkr library --all` certification records |
-| `.brokkr/bench/` | criterion baselines + their environment stamps |
+| `.brokkr/bench/` | `brokkr crit`'s criterion baselines + their environment stamps |
 | `$XDG_DATA_HOME/brokkr/sidecar-backups/` | durable profiler backups |
 
-`.brokkr/bench/` is why `brokkr bench` points `CRITERION_HOME` there instead of
+`.brokkr/bench/` is why `brokkr crit` points `CRITERION_HOME` there instead of
 leaving criterion in its default `target/criterion`. A baseline costs minutes to
 produce and cannot be reconstructed from the source tree, so it is a result, not
 an artifact - and a result must not live in a directory whose whole purpose is
@@ -81,7 +81,7 @@ No flag removes these either. What keeps each in check, where anything does:
 
 | state | what limits it |
 | --- | --- |
-| `.brokkr/check-logs/` | each new log prunes its kind to the newest 10, best effort; a single log's size is not capped |
+| `.brokkr/check-logs/` | each new log prunes its kind to the newest 10, best effort; a single log's size is not capped. The `bench-` logs `brokkr crit` wrote under its old name are no longer any kind's, so nothing prunes them |
 | `.brokkr/accounting/` | each new check run prunes to the newest 10, itself among them, best effort; a plan or journal's size is not capped |
 | `.brokkr/verify-reference/` | `verify_reference_budget` per host (`brokkr man config`), applied when each verify ends; absent, nothing; `--verify-reference` removes it whole |
 | `$XDG_DATA_HOME/brokkr/history.db` | nothing: every invocation, never pruned |
@@ -97,7 +97,7 @@ Some files exist only while their writer runs, and a writer killed with
 SIGKILL leaves them behind. These, made only by commands that hold the brokkr
 lock, are removed by store maintenance (`src/maintenance.rs`) the next time
 dispatch takes a fresh hold for a command whose spec locks (`check`, `test`,
-`build`, `run`, `clean`, `verify` and the measured commands; not `bench`,
+`build`, `run`, `clean`, `verify` and the measured commands; not `crit`,
 `fmt` or `env`, which lock inside their own handler), before that command
 does anything, with one line saying how many went and the allocated bytes
 observed. `clean --dry-run` only lists them, and `clean --verify-reference`

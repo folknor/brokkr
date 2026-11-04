@@ -345,7 +345,7 @@ pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
         let paths = dry_run_paths(req)?;
         let _ =
             resolve_pbf_with_size(req.dataset, req.variant, &paths, req.project_root.as_path())?;
-        output::dry_run_msg("ok (bench all)");
+        output::dry_run_msg("ok (suite pbfhogg)");
         return Ok(());
     }
 

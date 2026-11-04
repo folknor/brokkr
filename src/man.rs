@@ -100,9 +100,9 @@ const TOPICS: &[Topic] = &[
         commands: &[CommandId::Env],
     },
     Topic {
-        name: "bench",
+        name: "crit",
         summary: "the criterion runner: baselines, the environment gate, --compare",
-        content: include_str!("../docs/commands/bench.md"),
+        content: include_str!("../docs/commands/crit.md"),
         commands: &[CommandId::Env],
     },
     Topic {

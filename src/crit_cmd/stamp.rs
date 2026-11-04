@@ -222,13 +222,13 @@ pub fn validate_label(label: &str) -> Result<(), DevError> {
 
 /// Where a baseline's stamp lives. Keyed by baseline name alone, matching
 /// criterion's own scoping: a baseline name spans every bench in a run.
-pub fn stamp_path(bench_home: &Path, baseline: &str) -> PathBuf {
-    bench_home.join("stamps").join(format!("{baseline}.txt"))
+pub fn stamp_path(crit_home: &Path, baseline: &str) -> PathBuf {
+    crit_home.join("stamps").join(format!("{baseline}.txt"))
 }
 
 /// Write a stamp, creating the directory.
-pub fn write(bench_home: &Path, baseline: &str, stamp: &Stamp) -> Result<(), DevError> {
-    let path = stamp_path(bench_home, baseline);
+pub fn write(crit_home: &Path, baseline: &str, stamp: &Stamp) -> Result<(), DevError> {
+    let path = stamp_path(crit_home, baseline);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -239,8 +239,8 @@ pub fn write(bench_home: &Path, baseline: &str, stamp: &Stamp) -> Result<(), Dev
 /// Read a stamp. `Ok(None)` when none was recorded; any other failure to read
 /// it is an error, so a caller gating on the stamp cannot mistake "could not
 /// read" for "nothing to compare".
-pub fn read(bench_home: &Path, baseline: &str) -> Result<Option<Stamp>, DevError> {
-    let path = stamp_path(bench_home, baseline);
+pub fn read(crit_home: &Path, baseline: &str) -> Result<Option<Stamp>, DevError> {
+    let path = stamp_path(crit_home, baseline);
     match std::fs::read_to_string(&path) {
         Ok(t) => Ok(Some(Stamp::parse(&t))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -298,7 +298,7 @@ mod tests {
     /// build-root config explicitly, so two new stamps always share them.
     #[test]
     fn a_capture_records_absence_explicitly() {
-        let root = crate::test_scratch::scratch("bench_stamp", "absence");
+        let root = crate::test_scratch::scratch("crit_stamp", "absence");
         let stamp = Stamp::capture(&root);
         for key in [
             "rustflags",

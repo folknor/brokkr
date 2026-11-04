@@ -191,7 +191,7 @@ pub fn status(msg: &str) {
 /// Narration for the run log only: what a passing run no longer prints but a
 /// reader investigating one (a slow build, a cross-host comparison) needs.
 /// Dropped when no log is open - so call it only from code that runs under a
-/// command that opens one (`check`, `test`, measured runs, `bench`); code
+/// command that opens one (`check`, `test`, measured runs, `crit`); code
 /// shared with commands that do not must use [`detail_or_console`].
 pub fn detail(msg: &str) {
     log_write(&prefixed("[run]     ", msg), false);

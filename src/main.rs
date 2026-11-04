@@ -1,6 +1,5 @@
 mod artefacts;
 mod atomic_write;
-mod bench_cmd;
 mod bench_variants;
 mod build;
 mod build_provenance;
@@ -19,6 +18,7 @@ mod command_input;
 mod config;
 mod context;
 mod cpu_topology;
+mod crit_cmd;
 mod datasets;
 mod db;
 mod dellingr;

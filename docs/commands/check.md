@@ -197,7 +197,7 @@ Output:
   the same way.
 - **The run log.** Each run attempts to write `.brokkr/check-logs/check-<ms>.log`
   (under the config dir), the newest ten `check-` logs kept (`brokkr test`,
-  measured runs and `brokkr bench` write `test-`, `measure-` and `bench-`
+  measured runs and `brokkr crit` write `test-`, `measure-` and `crit-`
   logs beside them, each kind pruned only against its own ten). Reserved before
   the lock and opened under it, before the compile-lease drain and toolchain
   narration. Waiting commands cannot open or prune logs; an open failure warns

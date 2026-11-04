@@ -109,7 +109,7 @@ meaning therefore lived in the filesystem rather than the invocation: two runs
 of the same binary on the same PBF could produce different ocean geometry
 without recording which inputs were selected. Explicit inputs make artifact
 use and computed output identifiable in each bench row, including the self arm
-of `bench all`.
+of `suite elivagar`.
 
 Only the `default` tilegen block is currently selected; sibling blocks are not
 runnable because the CLI has no block selector. Add that selector before using

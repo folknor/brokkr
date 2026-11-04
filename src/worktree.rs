@@ -119,7 +119,7 @@ pub fn record_prefix(git_root: &Path) -> String {
 /// worktree brokkr cut: the slot's [`TARGET_LINK`]. `None` for every other
 /// tree, which keeps whatever target dir its own config gives it.
 ///
-/// Used by the shared Cargo build and discovery helpers and `brokkr bench` to
+/// Used by the shared Cargo build and discovery helpers and `brokkr crit` to
 /// pin `CARGO_TARGET_DIR`, which overrides any inherited `build.target-dir` or
 /// exported `CARGO_TARGET_DIR` that would otherwise put the worktree's build
 /// in the live tree's target. Hand-built Cargo invocations need the same

@@ -387,7 +387,7 @@ pub(super) fn run_program(
             Some(&lock),
         );
     };
-    // `--commit`: `bench`'s shape. The worktree is cut from the build
+    // `--commit`: `crit`'s shape. The worktree is cut from the build
     // root, its bookkeeping lives under the project root, and the lock is
     // taken inside the closure so the toolchain-disable lands on the
     // worktree rather than the live tree.

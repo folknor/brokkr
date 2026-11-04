@@ -1,4 +1,4 @@
-//! `brokkr bench` - the criterion runner.
+//! `brokkr crit` - the criterion runner.
 //!
 //! Not project-gated: any Rust repo with criterion bench targets, the same
 //! posture as `run`, `deps` and `clippy`.
@@ -20,8 +20,9 @@
 //! ## Where baselines live
 //!
 //! Under `.brokkr/bench/`, via criterion's `CRITERION_HOME`, rather than the
-//! default `target/criterion`. Baselines are results, not build artifacts: they
-//! cost minutes each to produce and are not reconstructible from the source
+//! default `target/criterion`. The directory keeps the name it had while this
+//! command was `brokkr bench`, so baselines recorded then keep reading.
+//! Baselines are results, not build artifacts: they cost minutes each to produce and are not reconstructible from the source
 //! tree, so they must not sit in a directory whose entire purpose is being safe
 //! to delete. Putting them in a brokkr-designated directory also means `clean`
 //! spares them by the existing rule rather than by a special case, and a user's
@@ -49,8 +50,8 @@ use crate::output;
 
 pub use discover::BenchTarget;
 
-/// Parsed `brokkr bench` invocation.
-pub struct BenchArgs {
+/// Parsed `brokkr crit` invocation.
+pub struct CritArgs {
     /// Bench target name; `None` is the bare index.
     pub target: Option<String>,
     /// Measure this commit in a persistent worktree instead of the live tree.
@@ -67,13 +68,10 @@ pub struct BenchArgs {
     pub args: Vec<String>,
 }
 
-/// Entry point. Startup detection is optional because `bench` also works in a
+/// Entry point. Startup detection is optional because `crit` also works in a
 /// tree with no `brokkr.toml`; when present, it supplies the already-loaded
 /// config and source provenance used by tree-state policy.
-pub fn run(
-    args: &BenchArgs,
-    detection: Option<&crate::project::Detection>,
-) -> Result<(), DevError> {
+pub fn run(args: &CritArgs, detection: Option<&crate::project::Detection>) -> Result<(), DevError> {
     // The two roots are distinct and both matter here. `project_root` holds
     // `brokkr.toml` and anchors everything brokkr owns, including `.brokkr/`;
     // `build_root` is the working directory where cargo and git run. They
@@ -110,7 +108,7 @@ pub fn run(
             ),
             (None, None) => {
                 return Err(DevError::Internal(
-                    "bench roots were not resolved for an unconfigured tree".into(),
+                    "crit roots were not resolved for an unconfigured tree".into(),
                 ));
             }
         };
@@ -120,7 +118,7 @@ pub fn run(
     // measured at different commits land in one store rather than following
     // each `--commit` worktree, and a config one level above a foreign
     // checkout keeps them out of a repo that isn't ours.
-    let home = project_root.bench_home();
+    let home = project_root.crit_home();
 
     // Listing what we recorded needs neither cargo nor the lock.
     if args.baselines {
@@ -159,7 +157,7 @@ pub fn run(
     // checked out is the code tree rather than the config directory above it.
     // Worktree, toolchain and target-dir narration is run-log only.
     let _log =
-        crate::run_log::RunLog::begin(project_root.as_path(), crate::run_log::run_log_kind::BENCH);
+        crate::run_log::RunLog::begin(project_root.as_path(), crate::run_log::run_log_kind::CRIT);
     with_worktree(
         project.as_ref(),
         project_root,
@@ -206,7 +204,7 @@ fn measure(
     build_root: &Path,
     target: &BenchTarget,
     baseline: &str,
-    args: &BenchArgs,
+    args: &CritArgs,
     lock: &crate::lockfile::LockGuard,
 ) -> Result<(), DevError> {
     let mut criterion_args = vec!["--save-baseline".to_owned(), baseline.to_owned()];
@@ -238,7 +236,7 @@ fn measure(
     // can't have.
     stamp::write(home, baseline, &stamp::Stamp::capture(build_root))?;
     output::bench_msg(&format!(
-        "saved baseline '{baseline}' - compare with `brokkr bench {} --compare {baseline} <other>`",
+        "saved baseline '{baseline}' - compare with `brokkr crit {} --compare {baseline} <other>`",
         target.name
     ));
     Ok(())
@@ -298,7 +296,7 @@ fn compare_baselines(
     target: &BenchTarget,
     a: &str,
     b: &str,
-    args: &BenchArgs,
+    args: &CritArgs,
     lock: &crate::lockfile::LockGuard,
 ) -> Result<(), DevError> {
     let a = &resolve_stored_baseline(home, build_root, a)?;
@@ -335,7 +333,7 @@ fn resolve_stored_baseline(home: &Path, build_root: &Path, name: &str) -> Result
     }
     let missing = || {
         DevError::Refused(format!(
-            "no baseline '{name}' recorded; `brokkr bench --baselines` lists what exists"
+            "no baseline '{name}' recorded; `brokkr crit --baselines` lists what exists"
         ))
     };
     let Ok(commit) = crate::git::resolve_commit(build_root, name) else {
@@ -449,7 +447,7 @@ fn check_environments(home: &Path, a: &str, b: &str, lenient: bool) -> Result<()
 fn resolve_baseline_name(
     build_root: &Path,
     included_config_files: &[PathBuf],
-    args: &BenchArgs,
+    args: &CritArgs,
 ) -> Result<String, DevError> {
     if let Some(name) = &args.name {
         stamp::validate_label(name)?;
@@ -505,7 +503,7 @@ fn is_dirty(build_root: &Path, included_config_files: &[PathBuf]) -> Result<bool
 fn list_baselines(home: &Path) -> Result<(), DevError> {
     let mut names = stored_baseline_names(home);
     if names.is_empty() {
-        output::run_msg("no baselines recorded; `brokkr bench <target>` measures one");
+        output::run_msg("no baselines recorded; `brokkr crit <target>` measures one");
         return Ok(());
     }
     names.sort();
@@ -541,7 +539,7 @@ fn cargo_bench(
     std::fs::create_dir_all(home)?;
 
     let shape = crate::build_purpose::resolve(crate::build_purpose::Request {
-        purpose: crate::build_purpose::Purpose::Bench,
+        purpose: crate::build_purpose::Purpose::Crit,
         profile: crate::build_purpose::Profile::Bench,
         packages: vec!["-p".into(), target.package.clone()],
         features: crate::build_purpose::Features::default(),
@@ -608,7 +606,7 @@ mod tests {
     /// this one are not mistaken for this run's work.
     #[test]
     fn only_estimates_this_run_wrote_count_as_measured() {
-        let dir = crate::test_scratch::scratch("bench_cmd", "measured");
+        let dir = crate::test_scratch::scratch("crit_cmd", "measured");
         estimate(&dir, "group/old_bench", "abc123");
         estimate(&dir, "group/other", "def456");
         let before = saved_estimates(&dir, "abc123");

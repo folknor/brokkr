@@ -26,7 +26,7 @@ they still wait for the lock so they do not overlap other locked work.
 
 - `data_dir` field on dataset entries is nidhogg-specific (used for the
   ingested data directory layout).
-- `pmtiles.<variant>` entries are consumed by `serve` and `bench tiles`.
+- `pmtiles.<variant>` entries are consumed by `serve` and `tiles`.
 - Variant default is `raw` (same as elivagar).
 
 ## Server commands
@@ -67,7 +67,7 @@ and files that had no write bit before never gain one. Ctrl-C and `brokkr kill`
 during the test are caught and turned into an early exit that runs the restore
 (exit 130); only `brokkr kill --hard` (SIGKILL) can still skip it.
 
-HTTP checks fail loudly: `bench api` treats an HTTP error or a request over its
+HTTP checks fail loudly: `api` treats an HTTP error or a request over its
 time ceiling as a failed sample rather than a fast one, and its post-run
 element/byte report errors instead of printing zeros; the verify commands'
 FAIL lines carry curl's exit code, error line and a response-body preview; a
@@ -76,9 +76,9 @@ call runs under the shared child supervisor's wall deadline (the budgets live
 in `src/nidhogg/policy.rs`), so a server that accepts and hangs cannot stall a
 command; a health check past its deadline reads as "not up".
 
-## `bench api` timing
+## `api --bench` timing
 
-`bench api` runs each query N times through `run_distribution` and records one
+`api --bench` runs each query N times through `run_distribution` and records one
 row per query (`command = api-<query>`) with the min/p50/p95/max of the N
 samples. A sample is curl's `%{time_total}` - the HTTP round trip, excluding
 process spawn - kept at curl's microsecond resolution. Queries against a warm

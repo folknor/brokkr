@@ -42,7 +42,7 @@ row, the `[run] commit` line for `--commit`) is specified in
 The prefixed printers in `src/output/console.rs` (`[build]`, `[run]`, `[lock]`, `[strays]`,
 `[guard]`, `[bench]`, `[verify]`, `[sidecar]`, `[dry-run]`, ...) all go through
 one renderer, which tees each line into the run log when the command keeps one
-(`check`, `test`, measured runs, `bench`; `.brokkr/check-logs/<kind>-<ms>.log`)
+(`check`, `test`, measured runs, `crit`; `.brokkr/check-logs/<kind>-<ms>.log`)
 and keeps a drawn status line intact; none writes to the console directly.
 Each prefix is padded to ten columns, and a longer tag (`[ratatoskr]`) overflows
 by one space instead of being cut. Lines go to stdout, except `[sidecar]`

@@ -28,8 +28,9 @@ pub(crate) mod run_log_kind {
     /// Measured runs (`--bench`/`--hotpath`/`--alloc` and plain runs through
     /// the measurement harness, `sync --bench`).
     pub(crate) const MEASURE: &str = "measure";
-    /// `brokkr bench`, the criterion runner.
-    pub(crate) const BENCH: &str = "bench";
+    /// `brokkr crit`, the criterion runner. Its logs were `bench-<ms>.log`
+    /// while the verb was `bench`; those stay where they are, unpruned.
+    pub(crate) const CRIT: &str = "crit";
 }
 
 /// Reserved before the lock, activated under it, and dropped after the

@@ -69,7 +69,10 @@ impl ProjectState {
         self.root.join("sidecar.db")
     }
 
-    pub(crate) fn bench_dir(&self) -> PathBuf {
+    /// `brokkr crit`'s store: criterion's home and the baseline stamps. Named
+    /// `bench` because it predates the verb's rename; it keeps the name so the
+    /// baselines already recorded there keep reading.
+    pub(crate) fn crit_dir(&self) -> PathBuf {
         self.root.join("bench")
     }
 
