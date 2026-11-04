@@ -128,14 +128,15 @@ message = "reach the dellingr crate through src/bench/lua.rs; brokkr's own modul
 # The bench store is self-contained (std, rusqlite, serde, serde_json and
 # xxhash-rust only), so brokkr-results-server includes it by path and serves
 # the same document, validation, migration chain, transaction and wire. The
-# rule holds it off brokkr's own modules and off the server's HTTP stack,
-# which the wire must not need; anything brokkr-specific belongs in
-# src/bench/evidence.rs, anything HTTP in src/bin/results_server/.
+# rule holds it off brokkr's own modules and off both HTTP stacks, the
+# server's and brokkr's client, which the wire must not need; anything
+# brokkr-specific belongs in src/bench/evidence.rs, server HTTP in
+# src/bin/results_server/, client HTTP in src/bench/remote.rs.
 [[textlint]]
 name = "bench-store-self-contained"
-pattern = '\bcrate::|\b(?:tokio|hyper|hyper_util|http_body_util)::'
+pattern = '\bcrate::|\b(?:tokio|hyper|hyper_util|http_body_util|ureq)::'
 paths = ["src/bench/store/**/*.rs"]
-message = "the bench store reaches no brokkr module and no HTTP crate; put brokkr-specific code in src/bench/evidence.rs and HTTP in src/bin/results_server/"
+message = "the bench store reaches no brokkr module and no HTTP crate; put brokkr-specific code in src/bench/evidence.rs, server HTTP in src/bin/results_server/ and client HTTP in src/bench/remote.rs"
 
 # pbfhogg's overwrite boundary (src/pbfhogg/binary.rs): code under src/pbfhogg
 # may hold a pbfhogg executable brokkr built only as a PbfhoggBinary, so it

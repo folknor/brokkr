@@ -1,8 +1,9 @@
 //! `brokkr results` over the bench store: the current project's script-bench
 //! runs, listed, looked up by uuid and compared between two commits, beside
 //! the typed rows of `results.db` (`docs/commands/results.md`, Script
-//! benches). The store answers the queries (`store::RunFilter`); this module
-//! maps `results`' filters onto them and renders what comes back.
+//! benches). The store answers the queries (`store::RunFilter`), locally or
+//! on the results server the user-wide config names (`super::remote`); this
+//! module maps `results`' filters onto them and renders what comes back.
 
 mod compare;
 mod config_diff;
@@ -13,7 +14,7 @@ pub(crate) use compare::format_compare;
 pub(crate) use single::format_single;
 pub(crate) use table::format_table;
 
-use super::store::{self, RunFilter, StoredRun};
+use super::store::{self, RunFilter, StoredRun, wire};
 use crate::error::DevError;
 
 /// `results`' row filters as they apply to bench runs.
@@ -33,12 +34,20 @@ pub(crate) struct BenchFilter {
     pub(crate) limit: usize,
 }
 
-/// The per-user bench store, opened for reading on behalf of one project.
+/// The per-user bench store, opened for reading on behalf of one project:
+/// the local file, or the results server the user-wide config names.
 pub(crate) struct BenchReader {
-    store: store::Store,
+    backend: Backend,
     project: String,
-    /// The store's file, named by every error.
-    path: std::path::PathBuf,
+}
+
+enum Backend {
+    Local {
+        store: store::Store,
+        /// The store's file, named by every error.
+        path: std::path::PathBuf,
+    },
+    Remote(super::remote::Client),
 }
 
 /// What a uuid prefix found among the project's bench runs.
@@ -57,6 +66,18 @@ fn named(path: &std::path::Path, error: &store::StoreError) -> DevError {
     DevError::Database(format!("{}: {error}", path.display()))
 }
 
+/// A remote answer of another kind than the request asked for.
+fn mismatched(client: &super::remote::Client, asked: &str, answer: &wire::Answer) -> DevError {
+    let kind = serde_json::to_value(answer)
+        .ok()
+        .and_then(|v| v.as_object().and_then(|o| o.keys().next().cloned()))
+        .unwrap_or_else(|| "something else".into());
+    DevError::Database(format!(
+        "results server {}: a {asked} request was answered {kind}",
+        client.shown()
+    ))
+}
+
 fn require_prefix(value: &str, what: &str) -> Result<(), DevError> {
     if value.is_empty() {
         return Err(DevError::Usage(format!(
@@ -67,41 +88,131 @@ fn require_prefix(value: &str, what: &str) -> Result<(), DevError> {
 }
 
 impl BenchReader {
-    /// Open the bench store for `project`. `None` when there is no store: no
-    /// file, or no data home to name one in. A store that exists but cannot
-    /// be read (a newer schema, a foreign file) is an error.
-    pub(crate) fn open(project: &str) -> Result<Option<Self>, DevError> {
+    /// Open the bench store for `project`: the results server `server`
+    /// names when there is one, which is never probed here (a first query
+    /// that cannot be answered fails the command), else the local file.
+    /// `None` when there is no local store: no file, or no data home to name
+    /// one in. A store that exists but cannot be read (a newer schema, a
+    /// foreign file) is an error.
+    pub(crate) fn open(
+        project: &str,
+        server: Option<&crate::config::ResultsServer>,
+    ) -> Result<Option<Self>, DevError> {
+        if let Some(server) = server {
+            return Ok(Some(Self::remote(
+                super::remote::Client::new(server),
+                project,
+            )));
+        }
         let Ok(path) = super::evidence::store_path() else {
             return Ok(None);
         };
         Self::at(&path, project)
     }
 
-    /// [`Self::open`] on the store at `path`.
+    /// [`Self::open`] on the local store at `path`.
     pub(crate) fn at(path: &std::path::Path, project: &str) -> Result<Option<Self>, DevError> {
         let store = store::Store::open_read_only(path).map_err(|e| named(path, &e))?;
         Ok(store.map(|store| Self {
-            store,
+            backend: Backend::Local {
+                store,
+                path: path.to_owned(),
+            },
             project: project.to_owned(),
-            path: path.to_owned(),
         }))
     }
 
-    /// A store error naming the file, whether the open or a later query
-    /// failed.
-    fn named(&self, error: &store::StoreError) -> DevError {
-        named(&self.path, error)
+    /// [`Self::open`] through `client`.
+    pub(crate) fn remote(client: super::remote::Client, project: &str) -> Self {
+        Self {
+            backend: Backend::Remote(client),
+            project: project.to_owned(),
+        }
     }
 
     /// Whether the project has any bench run, whatever its outcome.
     pub(crate) fn has_runs(&self) -> Result<bool, DevError> {
-        self.store
-            .has_runs(&self.project)
-            .map_err(|e| self.named(&e))
+        match &self.backend {
+            Backend::Local { store, path } => {
+                store.has_runs(&self.project).map_err(|e| named(path, &e))
+            }
+            Backend::Remote(client) => {
+                match client.request(&wire::Request::HasRuns {
+                    project: self.project.clone(),
+                })? {
+                    wire::Answer::HasRuns(has) => Ok(has),
+                    other => Err(mismatched(client, "has_runs", &other)),
+                }
+            }
+        }
     }
 
     fn select(&self, filter: &RunFilter) -> Result<Vec<String>, DevError> {
-        self.store.select(filter).map_err(|e| self.named(&e))
+        match &self.backend {
+            Backend::Local { store, path } => store.select(filter).map_err(|e| named(path, &e)),
+            Backend::Remote(client) => {
+                match client.request(&wire::Request::Select {
+                    filter: filter.clone(),
+                })? {
+                    wire::Answer::Runs(uuids) => Ok(uuids),
+                    other => Err(mismatched(client, "select", &other)),
+                }
+            }
+        }
+    }
+
+    /// One run, children on request. A remote answer must say it read
+    /// exactly what was asked: a summary passed off as a whole run, or the
+    /// reverse, is refused.
+    fn run(&self, uuid: &str, children: bool) -> Result<Option<StoredRun>, DevError> {
+        match &self.backend {
+            Backend::Local { store, path } => {
+                store.run(uuid, children).map_err(|e| named(path, &e))
+            }
+            Backend::Remote(client) => {
+                match client.request(&wire::Request::Run {
+                    uuid: uuid.to_owned(),
+                    children,
+                })? {
+                    wire::Answer::Run(run) => match run {
+                        Some(run) if run.children_loaded != children => {
+                            Err(DevError::Database(format!(
+                                "results server {}: run {uuid} came back with children_loaded {}, asked {children}",
+                                client.shown(),
+                                run.children_loaded
+                            )))
+                        }
+                        run => Ok(run.map(|run| *run)),
+                    },
+                    other => Err(mismatched(client, "run", &other)),
+                }
+            }
+        }
+    }
+
+    fn elsewhere(&self, prefix: &str) -> Result<Vec<(String, String)>, DevError> {
+        match &self.backend {
+            Backend::Local { store, path } => store
+                .elsewhere(&self.project, prefix)
+                .map_err(|e| named(path, &e)),
+            Backend::Remote(client) => {
+                match client.request(&wire::Request::Elsewhere {
+                    project: self.project.clone(),
+                    prefix: prefix.to_owned(),
+                })? {
+                    wire::Answer::Elsewhere(runs) => Ok(runs),
+                    other => Err(mismatched(client, "elsewhere", &other)),
+                }
+            }
+        }
+    }
+
+    /// Where the store is, as an error names it.
+    fn shown(&self) -> String {
+        match &self.backend {
+            Backend::Local { path, .. } => path.display().to_string(),
+            Backend::Remote(client) => format!("results server {}", client.shown()),
+        }
     }
 
     fn filter(&self, filter: &BenchFilter) -> RunFilter {
@@ -121,15 +232,12 @@ impl BenchReader {
         uuids
             .iter()
             .map(|uuid| {
-                self.store
-                    .run(uuid, children)
-                    .map_err(|e| self.named(&e))?
-                    .ok_or_else(|| {
-                        DevError::Database(format!(
-                            "{}: bench run {uuid} vanished while reading",
-                            self.path.display()
-                        ))
-                    })
+                self.run(uuid, children)?.ok_or_else(|| {
+                    DevError::Database(format!(
+                        "{}: bench run {uuid} vanished while reading",
+                        self.shown()
+                    ))
+                })
             })
             .collect()
     }
@@ -167,9 +275,7 @@ impl BenchReader {
         let omitted = uuids.len().saturating_sub(filter.limit);
         uuids.truncate(filter.limit);
         let elsewhere = if candidates == 0 {
-            self.store
-                .elsewhere(&self.project, prefix)
-                .map_err(|e| self.named(&e))?
+            self.elsewhere(prefix)?
         } else {
             Vec::new()
         };
@@ -301,5 +407,7 @@ fn hotpath_report(
     )
 }
 
+// Visible to the rest of `bench`, whose remote client tests read runs built
+// by its fixtures.
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

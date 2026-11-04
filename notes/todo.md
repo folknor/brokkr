@@ -324,6 +324,16 @@ keeps the raw value. A strict reader (refuse or flag unknown shapes) would
 serve the capture path, the library profile reader and the results view
 alike.
 
+### A stop during bench-store retries is untested (2026-11-04)
+
+Found while landing the remote client. `bench::publication::Admission`
+ends retries when `shutdown::should_unwind()` turns true, before a pause,
+during it and after it, but no test drives that: the flag is process-global,
+so a unit test setting it would stop every concurrent test's retries too.
+An injectable stop probe on `Admission` (the production one reading
+`shutdown`) would let the latch tests cover "a stop leaves one attempt and
+keeps the latch".
+
 ### Captured-child termination may leave group members alive (2026-11-02, unverified)
 
 Raised in the spar on brokkr bz 101, not traced here: the captured runner's

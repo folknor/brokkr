@@ -92,9 +92,12 @@ restarts it.
   being read; hyper sends no `100 Continue` for a body never polled.
 - **The body** (120 s), then the queue (`busy` when full).
 - **The wait** (60 s) for the worker's answer.
-- **The connection** (300 s), head to last byte, which the three phases fit
-  inside (a compile-time assertion), so a request that is not stuck has its
-  answer written before the deadline cuts the connection.
+- **The connection** (300 s, `wire::CONNECTION_DEADLINE`), head to last
+  byte, which the three phases fit inside (a compile-time assertion), so a
+  request that is not stuck has its answer written before the deadline cuts
+  the connection. It lives in the wire module because brokkr's client
+  reads it too: a client attempt outlasts it (`reference/bench-store.md`,
+  brokkr's client).
 
 The admission moves into the job and is released when the worker drops the
 job, not when its handler gives up: a withdrawn job keeps its queue slot,

@@ -64,6 +64,7 @@ mod tests {
             cargo_env: std::collections::BTreeMap::new(),
             benches: BTreeMap::new(),
             included_config_files: Vec::new(),
+            results_server: None,
         }
     }
 
@@ -3240,6 +3241,111 @@ profile = "corpus"
         assert_eq!(rules[0].paths, vec!["project/**/*.md".to_owned()]);
         assert_eq!(rules[1].paths, vec!["user/**/*.md".to_owned()]);
         assert_eq!(rules[2].pattern, "###");
+    }
+
+    /// A project tree on disk plus a user layer given to composition the way
+    /// production reads one, so the user-only key goes through the real path.
+    fn compose_with_user(
+        name: &str,
+        user: &str,
+        files: &[(&str, &str)],
+    ) -> Result<(toml::Table, ConfigSources), DevError> {
+        let dir = crate::test_scratch::scratch("config_results_server", name);
+        for (rel, text) in files {
+            std::fs::write(dir.join(rel), text).unwrap();
+        }
+        let user_file = dir.join("user.toml");
+        std::fs::write(&user_file, user).unwrap();
+        let table = parse_user_table(user, &user_file)?;
+        compose_layers_with(Some((user_file, table)), Some(&dir.join("brokkr.toml")))
+    }
+
+    #[test]
+    fn the_results_server_is_the_users_and_never_reaches_the_composed_config() {
+        let (merged, sources) = compose_with_user(
+            "taken",
+            &format!("results_server = \"https://bench.example:8443/brokkr/\"\n{USER_RULE}"),
+            &[("brokkr.toml", "project = \"p\"\n")],
+        )
+        .unwrap();
+        assert!(merged.get("results_server").is_none(), "{merged:?}");
+        let config = super::parse_dev_config(&merged, &sources).unwrap();
+        let server = config.results_server.unwrap();
+        assert_eq!(server.shown, "https://bench.example:8443/brokkr");
+        assert_eq!(server.endpoint, "https://bench.example:8443/brokkr/bench");
+        // The rest of the layer composes as before.
+        assert_eq!(config.textlint.len(), 1);
+
+        let (_, sources) = compose_with_user("absent", USER_RULE, &[("brokkr.toml", "project = \"p\"\n")]).unwrap();
+        assert!(super::parse_dev_config(&toml::Table::new(), &sources).unwrap().results_server.is_none());
+    }
+
+    #[test]
+    fn a_project_layer_naming_the_results_server_is_refused_naming_its_file() {
+        let server = "results_server = \"https://h\"\n";
+        let err = compose_with_user("root", "", &[("brokkr.toml", &format!("project = \"p\"\n{server}"))])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("brokkr.toml") && err.contains("belongs to the user"), "{err}");
+
+        // In an include, even when a higher layer's table of the same name
+        // would replace it in the merge.
+        let err = compose_with_user("include", "", &[
+            (
+                "brokkr.toml",
+                "project = \"p\"\ninclude = [\"a.toml\"]\n[results_server]\nport = 1\n",
+            ),
+            ("a.toml", server),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("a.toml") && err.contains("belongs to the user"), "{err}");
+
+        // A table of that name is the hostname section it always was.
+        let (merged, sources) = compose_with_user("host", "", &[(
+            "brokkr.toml",
+            "project = \"p\"\n[results_server]\nport = 1\n",
+        )])
+        .unwrap();
+        let config = super::parse_dev_config(&merged, &sources).unwrap();
+        assert_eq!(config.hosts["results_server"].port, Some(1));
+        assert!(config.results_server.is_none());
+    }
+
+    #[test]
+    fn a_results_server_url_is_validated_once_naming_the_user_file() {
+        for (case, (value, expect)) in [
+            ("1", "must be a URL string"),
+            ("\"ftp://h\"", "http:// or https://"),
+            ("\"https://user:pw@h\"", "carries credentials"),
+            ("\"https://h/?x=1\"", "no query or fragment"),
+            ("\"/relative\"", "http:// or https://"),
+            ("\"https://:8443\"", "names no host"),
+            ("\"https://h:99999\"", "not a number from 0 to 65535"),
+            ("\"https://h:abc\"", "not a number from 0 to 65535"),
+            ("\"https://h:\"", "not a number from 0 to 65535"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let err = compose_with_user(&format!("invalid_{case}"), &format!("results_server = {value}\n"), &[(
+                "brokkr.toml",
+                "project = \"p\"\n",
+            )])
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("user.toml: results_server: ") && err.contains(expect), "{value}: {err}");
+        }
+        for (value, endpoint) in [
+            ("https://h", "https://h/bench"),
+            ("https://h/", "https://h/bench"),
+            ("http://127.0.0.1:8650", "http://127.0.0.1:8650/bench"),
+            ("https://h/p//", "https://h/p/bench"),
+            ("http://[::1]", "http://[::1]/bench"),
+            ("http://[::1]:8650", "http://[::1]:8650/bench"),
+        ] {
+            assert_eq!(ResultsServer::parse(value).unwrap().endpoint, endpoint, "{value}");
+        }
     }
 
     /// An explicit empty override is the opt-out, not a path to a file named "".

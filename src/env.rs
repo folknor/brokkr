@@ -31,6 +31,8 @@ pub struct UserConfigStatus {
     pub present: bool,
     pub textlint: usize,
     pub script_checks: usize,
+    /// The results server it names, shown as configured.
+    pub results_server: Option<String>,
 }
 
 /// Collect all environment information.
@@ -109,12 +111,14 @@ fn collect_user_config(sources: &crate::config::ConfigSources) -> Option<UserCon
             present: true,
             textlint: user.textlint,
             script_checks: user.script_checks,
+            results_server: user.results_server.as_ref().map(|s| s.shown.clone()),
         }),
         None => Some(UserConfigStatus {
             path: configured_path?,
             present: false,
             textlint: 0,
             script_checks: 0,
+            results_server: None,
         }),
     }
 }
@@ -194,6 +198,12 @@ fn print_header(info: &EnvInfo) {
             format!("{} (absent)", uc.path.display())
         };
         println!("{:<12} {}", "user cfg:", summary);
+        if let Some(server) = &uc.results_server {
+            println!(
+                "{:<12} {server} (results server; bench.db unused)",
+                "bench runs:"
+            );
+        }
     }
 }
 

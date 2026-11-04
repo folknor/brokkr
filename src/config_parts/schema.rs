@@ -216,6 +216,11 @@ pub struct DevConfig {
     /// itself is, since brokkr writes dataset registrations into them. Set by
     /// [`load_with_sources`]; empty for a config parsed without composition.
     pub included_config_files: Vec<std::path::PathBuf>,
+    /// The results server the user-wide `results_server` names, where
+    /// script-bench runs are published and read; `None` keeps them in the
+    /// local bench store. Never set by a project config, which refuses the
+    /// key.
+    pub results_server: Option<ResultsServer>,
 }
 
 /// `[bin]` section: shared defaults for `brokkr run` and `brokkr install`.

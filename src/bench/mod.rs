@@ -7,22 +7,27 @@
 //! store with brokkr's adapter to it (`store`, `evidence`), `brokkr results`'
 //! reading of that store (`results`), and the handles a script's paths reach
 //! its children through (`resources`). The store's wire contract
-//! (`store::wire`) is served by the `brokkr-results-server` binary; brokkr's
-//! client of it is still to come.
+//! (`store::wire`) is served by the `brokkr-results-server` binary, and
+//! `remote` is brokkr's client of it, used in place of the local store when
+//! the user-wide config names a server; `publication` is the retry and
+//! uncertainty latch both share.
 
 mod evidence;
 mod lua;
+mod publication;
+mod remote;
 mod resources;
 pub(crate) mod results;
 pub(crate) mod runner;
-// The wire (`store::wire`) has no client in this binary yet, and a reader of
-// a whole stored document or of the transaction state is the server's: an
-// expectation goes unfulfilled, and so fails the build, once they are used.
+// The server's side of the wire (`wire::execute`, `wire::serve`) and the
+// readers of a whole stored document and of the transaction state are the
+// server's alone: an expectation goes unfulfilled, and so fails the build,
+// once brokkr uses them all.
 #[cfg_attr(
     not(test),
     expect(
         dead_code,
-        reason = "brokkr's client of the results server is not built yet"
+        reason = "the store's server-side entry points are used by brokkr-results-server only"
     )
 )]
 pub(crate) mod store;

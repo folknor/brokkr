@@ -102,10 +102,12 @@ pub(crate) fn cmd_results(
     let sidecar_path = sidecar_db_path(project_root);
     let matcher = DatasetMatcher::new(config::all_dataset_keys(dev_config));
 
-    // The per-user bench store holds this project's script-bench runs. One
-    // that exists but cannot be read fails the command like an unreadable
-    // results.db would: an unanswerable query is not an empty answer.
-    let bench = BenchReader::open(&q.project)?;
+    // The per-user bench store holds this project's script-bench runs,
+    // locally or on the configured results server. One that exists but cannot
+    // be read, or a server that cannot be reached, fails the command like an
+    // unreadable results.db would: an unanswerable query is not an empty
+    // answer.
+    let bench = BenchReader::open(&q.project, dev_config.results_server.as_ref())?;
     let bench_filter = bench_filter(q);
     // litehtml's `.brokkr/results.db` is its mechanical database, another
     // schema: it has no typed results, only script-bench runs.

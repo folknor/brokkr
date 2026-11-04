@@ -11,12 +11,19 @@ stays in each project's `.brokkr/results.db` and `.brokkr/sidecar.db`.
 One SQLite file per user, `$XDG_DATA_HOME/brokkr/bench.db`
 (`user_dirs::bench_db`), shared by every project: each run carries its
 project, and its checkout as data, since clones of one project share its
-history. `brokkr env` lists it and `brokkr check`'s free-space probe covers
-it; `brokkr clean` never removes it, and nothing prunes it.
+history. `brokkr env` lists it (and names a configured results server) and
+`brokkr check`'s free-space probe covers it; `brokkr clean` never removes it, and nothing prunes it.
 
 The file must be on a local filesystem: opening it refuses a file where WAL
 does not take. SQLite on a network mount is not supported; a results server
 owns its file locally and is reached over the network instead.
+
+When the user-wide config names a server (`results_server`,
+`docs/brokkr.toml.md`), brokkr uses it in place of this file for every
+project: `brokkr bench` publishes there and `brokkr results` reads there,
+and the local file is neither read nor written. The two are one store
+behind two backends, never merged: runs already in the local file stay
+there.
 
 ## The seam
 
@@ -243,7 +250,54 @@ attempts, since the uncertain one may still commit; only a successful answer
 (`stored` or `already_stored`) settles it, and republishing the same
 document is how to get one. A 200 to a publication acknowledges it even when
 its body cannot be read. The HTTP status is advisory (400, 404, 405, 408,
-409, 411, 413, 500, 503, 504); the envelope decides.
+409, 411, 413, 500, 503, 504); the envelope decides. A run answer's
+`children_loaded` is checked against what was asked, and every request
+carries the protocol header.
+
+**brokkr's client** (`src/bench/remote.rs`) keeps those duties, with these
+rules of its own:
+
+- **By status alone**, for an answer without a well-formed envelope: a 4xx
+  is proved unapplied and final, 408 and 429 unapplied and retryable,
+  since a 4xx without an envelope was refused before a brokkr server ran
+  the request (by a proxy, or by the HTTP layer on malformed HTTP), which
+  assumes an intermediary uses its statuses faithfully; anything else, a
+  proxy's bare 502 or 503 included, is uncertain and retryable.
+- **A transport error** is proved unapplied only when the connection never
+  existed: the name did not resolve, connecting timed out, or it was
+  refused. Each attempt makes one fresh connection (no redirects, no idle
+  pool, no retry inside the HTTP client), and on Linux a TCP socket reports
+  a refusal only before it connected. Every other transport error is
+  uncertain.
+- **An attempt is never cut short of the server's deadline**: it may take
+  `wire::CONNECTION_DEADLINE` (the server's connection deadline, 300 s)
+  plus 30 s for a proxy, so a server that is not stuck always answers or
+  closes first.
+- **Retries** (`src/bench/publication.rs`) start only inside a window from
+  the first attempt and under a cap: 120 s and 8 attempts for a
+  publication, 20 s and 6 for a read or the probe, with a backoff from
+  250 ms. A publication whose uncertainty is latched gets one attempt past
+  either, so an attempt that timed out late still has a republication to
+  settle it. A final failure ends the retries; a pending stop ends them
+  after the first attempt, during a backoff too, but never cuts the
+  attempt in flight. No pause is taken when no attempt would follow it, and
+  admission is checked again after the pause. These bound the network
+  waiting and backoff, not the command: a publication's worst case is its
+  window plus two whole attempts plus the pause before the last (at most
+  8 s); a read's, its window plus one whole attempt plus a pause (at most
+  4 s).
+- **Before a run is measured**, `brokkr bench` probes the server
+  (`GET /bench`, its protocol checked), as it opens the local store first:
+  a server that cannot be reached, or speaks another protocol, fails the
+  command before anything is built. The probe proves reachability, not that
+  the publication will be stored.
+- **Reads** are retried without a latch (they are idempotent), and a 200
+  whose body does not decode as the expected answer is final. A listing
+  costs one `run` request per run, since protocol 1 has no batch read.
+
+The same latch serves the local store: a `StoreError` is classified by the
+kind it would travel as (`Kind::of`), so a local `Failed` is retried and a
+final error after an uncertain attempt ends the publication uncertain.
 
 ## The migration chain
 

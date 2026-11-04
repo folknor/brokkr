@@ -120,6 +120,11 @@ tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "time", "syn
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
+# brokkr's client of a results server (src/bench/remote.rs): blocking, as the
+# rest of brokkr is, with rustls (ring, webpki roots) because the documented
+# deployment is HTTPS behind a TLS proxy. Defaults off: no gzip, since the
+# server never compresses.
+ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
 # The results server's job-race tests run the handler on a paused clock, so

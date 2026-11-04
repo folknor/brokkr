@@ -18,7 +18,7 @@ A doc with 8+ `##` sections is **section-addressed**: `brokkr man conventions sc
 
 - `reference/architecture.md` - the full module map: what each source file owns and why. Read before changing a module you have not touched this session.
 - `reference/output.md` - operator output channel conventions.
-- `docs/brokkr.toml.md` - config core: where it lives, the user-wide layer, `include` composition, top-level shape and host sections, `worktree_keep`, `verify_reference_budget`, `disable_toolchain`, `strip_rustflags`, `[cargo_env]`, `[deps]`, `[bin]`, `[[install]]`, `[member_check]`, `[lints]`.
+- `docs/brokkr.toml.md` - config core: where it lives, the user-wide layer and its user-only `results_server`, `include` composition, top-level shape and host sections, `worktree_keep`, `verify_reference_budget`, `disable_toolchain`, `strip_rustflags`, `[cargo_env]`, `[deps]`, `[bin]`, `[[install]]`, `[member_check]`, `[lints]`.
 - `docs/brokkr.toml.conventions.md` - convention gates: `[gremlins]`, shared path selectors, `[header]`, `[[textlint]]`, `[textlint_preset]`, `[[script_check]]`, `[manifest]`, `[rustdoc]`, `[[fixture_lint]]`, `[[dependency_rule]]`.
 - `docs/brokkr.toml.bench.md` - script benches: `[bench.*]` with `script` or `script_file`, params and their `from` paths, `[bench_params.*]` and `uses`, `[data]`, the reserved names, the `bench` check phase.
 - `docs/brokkr.toml.sweeps.md` - `[[check]]` sweeps, `[[lint_sweep]]` (linted, never tested), the `parallel` lane, `[test]` and its profiles, `[[quarantine]]`.
@@ -41,7 +41,7 @@ A doc with 8+ `##` sections is **section-addressed**: `brokkr man conventions sc
 - `docs/commands/output-channels.md` - where a run's output goes (stdout/stderr/FIFO, results.db vs sidecar.db).
 - `docs/commands/library.md` - pbfhogg `brokkr library`, `[pbfhogg.library]`, the library harness protocol, `--bench`/`--hotpath`/`--alloc` measurement and `--all` certification.
 - `reference/library-internals.md` - how the library harness consumer is built and why: the strict reader, the run directory's reservation and serial launches, profiled runs, capture, refusal counterparts, seeds and publications, identity and recording, library against CLI timing. Read before changing `src/pbfhogg/library/`.
-- `reference/bench-store.md` - the per-user store of script-bench runs: the run document, what the store derives, publication with the run uuid as request id, reading (the open that never creates, the listing queries and their order), the wire contract a results server and its clients share (requests, answers, the failure envelope, one protocol version at a time), the frozen migration chain, and why the module is self-contained. Read before changing `src/bench/store/`.
+- `reference/bench-store.md` - the per-user store of script-bench runs: the run document, what the store derives, publication with the run uuid as request id, reading (the open that never creates, the listing queries and their order), the wire contract a results server and its clients share (requests, answers, the failure envelope, one protocol version at a time, what a client owes it and how brokkr's client classifies and retries), the frozen migration chain, and why the module is self-contained. Read before changing `src/bench/store/`.
 - `reference/results-server.md` - how `brokkr-results-server` is built: owning the file, the single worker and its job races, admission and bounds, the HTTP layer. Read before changing `src/bin/results_server/`.
 - `docs/results-server.md` - running and deploying `brokkr-results-server`.
 - `reference/bench-resources.md` - what a script-bench iteration owns: the owner lease and the borrow each child launches with, pinning and crash reclamation, call admission (the read-only veto, authority, conflicts), creation without following substitutes, handles and stdout spools, and placement: where iterations go and which removals the gate covers for them. Read before changing `src/reservations/iteration.rs` or `src/bench/resources.rs`.
@@ -63,7 +63,7 @@ Single crate: the `brokkr` binary, plus the `brokkr-rustc-guard` and `brokkr-res
 - `src/config.rs`, `src/config_parts/` - config schema, composition, project sections.
 - `src/output/` - console and child-process runners; every spawn goes through `process/spawn.rs`'s `ChildPolicy`.
 - `src/lock/`, `src/hold.rs`, `src/guard.rs`, `src/stray.rs`, `src/test_orphans.rs` - the global lock, compile capability, rustc guard and reapers.
-- `src/measure/`, `src/harness.rs`, `src/db/`, `src/sidecar.rs` - measurement and result stores; `src/bench/store/` is the per-user store of script-bench runs, which `src/bin/results_server/` serves over HTTP.
+- `src/measure/`, `src/harness.rs`, `src/db/`, `src/sidecar.rs` - measurement and result stores; `src/bench/store/` is the per-user store of script-bench runs, which `src/bin/results_server/` serves over HTTP and `src/bench/remote.rs` reaches when the user-wide config names a server.
 - `src/bench/` - script benches: `runner/` runs `brokkr bench NAME`, `lua.rs` is the only seam to the dellingr VM.
 - `src/<project>/` - project-specific commands.
 

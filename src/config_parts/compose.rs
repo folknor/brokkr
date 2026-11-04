@@ -77,6 +77,9 @@ pub struct UserLayerSources {
     /// contributed. Disjoint from every project-layer entry's name, since a
     /// project entry reusing a name shadows the user one.
     pub script_check_names: BTreeSet<String>,
+    /// The results server its `results_server` names, taken out of the
+    /// table before composition so no project layer ever sees it.
+    pub results_server: Option<ResultsServer>,
 }
 
 impl ConfigSources {
@@ -192,7 +195,19 @@ pub fn compose_user_only() -> Result<(toml::Table, ConfigSources), DevError> {
 }
 
 fn compose_layers(root: Option<&Path>) -> Result<(toml::Table, ConfigSources), DevError> {
-    let user_layer = selected_user_table()?;
+    compose_layers_with(selected_user_table()?, root)
+}
+
+/// [`compose_layers`] with the user layer given rather than read, so tests
+/// compose a user layer through the same path production does.
+fn compose_layers_with(
+    mut user_layer: Option<(PathBuf, toml::Table)>,
+    root: Option<&Path>,
+) -> Result<(toml::Table, ConfigSources), DevError> {
+    let results_server = match &mut user_layer {
+        Some((path, table)) => take_results_server(table, path)?,
+        None => None,
+    };
     let mut seen = HashSet::new();
     let mut user_base = None;
     if let Some((path, _)) = &user_layer {
@@ -215,6 +230,9 @@ fn compose_layers(root: Option<&Path>) -> Result<(toml::Table, ConfigSources), D
             walk.visit(root, None)?;
         }
     }
+    // Checked layer by layer, before merging: a higher layer's table of the
+    // same name would otherwise hide a lower layer's refused value.
+    refuse_project_results_server(&files)?;
     let included_files: Vec<PathBuf> = if root.is_some() {
         files
             .iter()
@@ -232,6 +250,7 @@ fn compose_layers(root: Option<&Path>) -> Result<(toml::Table, ConfigSources), D
             textlint: surviving_user_entries(table, "textlint", &files).len(),
             script_checks: scripts.len(),
             script_check_names: scripts.into_iter().filter_map(entry_name).map(str::to_owned).collect(),
+            results_server: results_server.clone(),
         }
     });
     if let Some(user_layer) = user_layer {

@@ -30,6 +30,11 @@ pub const PATH: &str = "/bench";
 /// publishable to a local store but refused remotely as `too_large`.
 pub const MAX_REQUEST_BYTES: u64 = 256 << 20;
 
+/// How long the server keeps one connection, head to the last byte of its
+/// answer. A client attempt waits longer than this, so a server that is not
+/// stuck always answers or closes before the client gives up on it.
+pub const CONNECTION_DEADLINE: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// One request. Externally tagged, so a large document is decoded in place
 /// rather than buffered to find its tag.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

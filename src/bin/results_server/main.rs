@@ -48,8 +48,9 @@ struct Args {
     listen: SocketAddr,
 }
 
-/// Every bound the server keeps, in one place. A client's budget must
-/// outlast `connection` for an attempt to see the server's own answer.
+/// Every bound the server keeps, in one place. A client attempt outlasts
+/// `connection` (`store::wire::CONNECTION_DEADLINE`, which brokkr's client
+/// reads too) so it sees the server's own answer.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Limits {
     /// Open connections; one past this is closed unanswered.
@@ -85,7 +86,7 @@ impl Limits {
         head: Duration::from_secs(10),
         body: Duration::from_secs(120),
         wait: Duration::from_secs(60),
-        connection: Duration::from_secs(300),
+        connection: store::wire::CONNECTION_DEADLINE,
     };
 }
 

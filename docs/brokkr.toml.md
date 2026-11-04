@@ -77,16 +77,38 @@ against the cwd). It holds the conventions
 that belong to *you* rather than to any one tree, and it applies in every
 project brokkr detects.
 
-It accepts three top-level keys and nothing else:
+It accepts these top-level keys and nothing else:
 
 | Key | |
 |---|---|
 | `[[textlint]]` | rules, exactly as in a project config |
 | `[textlint_preset.<name>]` | presets for those rules |
 | `[[script_check]]` | gates, exactly as in a project config |
+| `results_server` | the results server your script-bench runs go to (below); user-only |
 
 Any other key - `project`, `[[check]]`, a host section, `[bench.*]` - is an
-error naming the file. The rest of the schema describes one project (its datasets, its sweeps,
+error naming the file.
+
+**`results_server`** names a `brokkr-results-server` (`brokkr man
+results-server`) by URL:
+
+```toml
+results_server = "https://bench.example.ts.net:8443"
+```
+
+With it set, `brokkr bench` publishes every run there and `brokkr results`
+reads script-bench runs from there, in every project; the local
+`$XDG_DATA_HOME/brokkr/bench.db` is neither read nor written. Without it,
+everything stays in that local file. The URL is `http://` or `https://`
+with a host (and a port, if given, that is a number), no credentials (the server has no authentication), no query
+or fragment; a path is a prefix for a proxy that routes by path, trailing
+slashes dropped, and every request goes to it with `/bench` appended. An
+invalid value fails every command, naming the file. The key belongs to you,
+not to a project: composition takes it out of the user layer before any
+merge, so it never appears in the composed config or in a run's stored
+config, and a project's `brokkr.toml` or any file it includes setting it to
+a value is an error naming that file (a `[results_server]` table there is
+a host section, as it always was). The rest of the schema describes one project (its datasets, its sweeps,
 its bin targets) and has no meaning machine-wide; a project-shaped key in a
 machine-wide file is a mistake, not a setting, and rejecting it beats
 silently ignoring it.
@@ -128,7 +150,11 @@ would let one typo switch off every rule you wrote.
 
 `brokkr env` prints a `user cfg:` line with the resolved path and how many
 entries of each kind it contributed - a rule that comes from outside the tree is
-otherwise invisible from inside it.
+otherwise invisible from inside it - and, when `results_server` is set, a
+`bench runs:` line naming the server.
+
+`BROKKR_USER_CONFIG=` switches `results_server` off with the rest of the
+layer, so script-bench runs go back to the local store.
 
 ## `include` - composing brokkr.toml from several files
 

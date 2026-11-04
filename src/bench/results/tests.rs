@@ -70,7 +70,13 @@ fn iteration(wall_us: i64, verdict: Option<&str>, record: &serde_json::Value) ->
 }
 
 /// A completed run of `bench` at `commit`, started at `started`.
-fn run(uuid_tail: u8, bench: &str, commit: char, started: i64, wall_us: i64) -> RunDocument {
+pub(in crate::bench) fn run(
+    uuid_tail: u8,
+    bench: &str,
+    commit: char,
+    started: i64,
+    wall_us: i64,
+) -> RunDocument {
     RunDocument {
         format: DOCUMENT_FORMAT,
         uuid: format!("{:032x}", u128::from(uuid_tail) | (0xabcd << 64)),
@@ -122,7 +128,7 @@ fn publish(path: &std::path::Path, docs: &[RunDocument]) {
     }
 }
 
-fn filter() -> BenchFilter {
+pub(in crate::bench) fn filter() -> BenchFilter {
     BenchFilter {
         limit: 20,
         ..BenchFilter::default()

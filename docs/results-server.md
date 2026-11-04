@@ -6,9 +6,24 @@ from several machines can live in one database on one host. It is a binary of
 its own, installed beside `brokkr` by `brokkr install` and unused until
 started; it is not a brokkr subcommand.
 
-brokkr itself does not talk to a results server yet: every brokkr reads and
-writes its own local store. Running a server today gives a store that only
-direct HTTP clients reach.
+brokkr uses one when your user-wide config names it (`brokkr man config`,
+The user-wide brokkr.toml):
+
+```toml
+# ~/.config/brokkr/brokkr.toml
+results_server = "https://bench.example.ts.net:8443"
+```
+
+Every `brokkr bench` on that machine then publishes its runs there, and
+`brokkr results` reads script-bench runs from there, in every project; the
+local `bench.db` is no longer read or written (runs already in it stay
+there). Without the key, nothing changes: brokkr keeps its own local store.
+A configured server that cannot be reached fails the command after retrying
+for a bounded time; there is no offline spool. `brokkr bench` checks the
+server answers, with this brokkr's protocol, before it builds anything, so
+an unreachable server costs no measurement; a server lost during the run
+fails the publication, and the error says whether the run may still have
+landed (`brokkr results <uuid>` then shows whether it did).
 
 ## Running it
 

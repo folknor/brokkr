@@ -5,7 +5,8 @@
 //! `--commit` worktree when given, then iterations, each a fresh Lua state
 //! over one frozen compiled script, an owner lease and its children on the
 //! resource protocol (`reference/bench-resources.md`), then one publication
-//! to the per-user bench store. Whatever the attempt reached is published,
+//! to the per-user bench store, local or the configured results server.
+//! Whatever the attempt reached is published,
 //! a failed build or an interrupted iteration included, and then the
 //! command fails as the run did.
 
@@ -36,10 +37,6 @@ pub(crate) struct BenchArgs {
 
 /// The stdout and stderr preview a script sees of each child, in bytes.
 pub(crate) const PREVIEW_BYTES: usize = 1024 * 1024;
-
-/// How many times a publication whose commit errored is republished before
-/// the command gives up and reports the run as possibly stored.
-const REPUBLISH_ATTEMPTS: usize = 3;
 
 pub(crate) fn run(
     args: &BenchArgs,
@@ -77,10 +74,10 @@ pub(crate) fn run(
         )));
     }
     let frozen = freeze(bench)?;
-    let store_path = super::evidence::store_path()?;
-    // Opened before anything is built or run: a run that cannot be stored is
-    // never measured.
-    let mut bench_store = super::evidence::open_store(&store_path)?;
+    // Opened, or for a results server probed, before anything is built or
+    // run and before a stop is caught: a run with nowhere to go is never
+    // measured.
+    let mut destination = Destination::open(&detection.config)?;
     let started = Instant::now();
     let started_unix_ms = unix_ms();
     let uuid = crate::db::generate_uuid()?;
@@ -137,8 +134,8 @@ pub(crate) fn run(
                 }
             };
     }
-    publish(&mut bench_store, &document)?;
-    report(&document, &store_path, started);
+    destination.publish(&document)?;
+    report(&document, &destination.shown(), started);
     match &document.outcome {
         store::RunOutcome::Completed => Ok(()),
         store::RunOutcome::Interrupted => Err(DevError::Interrupted),
@@ -502,34 +499,58 @@ fn reason_of(error: &DevError) -> String {
     }
 }
 
-/// Publish `document`, republishing it while its commit's outcome is
-/// unknown. Once an attempt is uncertain the run may be stored whatever
-/// later attempts say, so only a success settles it.
-fn publish(bench_store: &mut store::Store, document: &store::RunDocument) -> Result<(), DevError> {
-    let mut uncertain: Option<store::StoreError> = None;
-    for _ in 0..=REPUBLISH_ATTEMPTS {
-        match bench_store.publish(document) {
-            Ok(_) => return Ok(()),
-            Err(error) if error.outcome_uncertain() => uncertain = Some(error),
-            Err(error) if uncertain.is_none() => {
-                return Err(DevError::Database(format!(
-                    "run {} was not stored: {error}",
-                    document.uuid
-                )));
-            }
-            Err(_) => {}
+/// Where a run is published: the local bench store, or the results server
+/// the user-wide config names.
+enum Destination {
+    Local { store: store::Store, path: PathBuf },
+    Remote(super::remote::Client),
+}
+
+impl Destination {
+    fn open(config: &crate::config::DevConfig) -> Result<Self, DevError> {
+        if let Some(server) = &config.results_server {
+            let client = super::remote::Client::new(server);
+            client.probe()?;
+            return Ok(Self::Remote(client));
+        }
+        let path = super::evidence::store_path()?;
+        Ok(Self::Local {
+            store: super::evidence::open_store(&path)?,
+            path,
+        })
+    }
+
+    fn shown(&self) -> String {
+        match self {
+            Self::Local { path, .. } => output::path(path).to_string(),
+            Self::Remote(client) => format!("results server {}", client.shown()),
         }
     }
-    Err(DevError::Database(format!(
-        "run {} may or may not have been stored: {}",
-        document.uuid,
-        uncertain.map_or_else(String::new, |e| e.to_string())
-    )))
+
+    /// Publish `document`, latching uncertainty: once an attempt's outcome
+    /// is unknown, only a success settles it (`super::publication`).
+    fn publish(&mut self, document: &store::RunDocument) -> Result<(), DevError> {
+        match self {
+            Self::Local { store, path } => {
+                let place = path.display().to_string();
+                super::publication::publish(
+                    &document.uuid,
+                    &place,
+                    super::publication::Policy::LOCAL,
+                    || {
+                        let published = store.publish(document);
+                        super::publication::local_attempt(published.as_ref().map(drop))
+                    },
+                )
+            }
+            Self::Remote(client) => client.publish(document),
+        }
+    }
 }
 
 /// The run's one result line, never quiet-suppressed: its uuid is the only
 /// handle `brokkr results` finds it by.
-fn report(document: &store::RunDocument, store_path: &Path, started: Instant) {
+fn report(document: &store::RunDocument, place: &str, started: Instant) {
     let outcome = match &document.outcome {
         store::RunOutcome::Completed => {
             let best = document
@@ -555,7 +576,7 @@ fn report(document: &store::RunDocument, store_path: &Path, started: Instant) {
         document.uuid,
         if document.dirty { ", dirty tree" } else { "" },
         output::format_duration(started.elapsed()),
-        output::path(store_path),
+        place,
         crate::db::short_uuid(&document.uuid),
     ));
 }

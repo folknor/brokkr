@@ -475,8 +475,8 @@ public with third-party users, which is where the two part.
   out the async servers. brokkr already links tokio through
   nextest-runner, so the server uses `hyper` or `axum` on it, with request
   and idle timeouts and a cap on requests in flight (bz answers 503 beyond
-  64). The client stays blocking (bz uses `ureq`; brokkr links no HTTP
-  client yet).
+  64). The client stays blocking: ureq 3 with rustls, as bz uses (slice
+  12, `src/bench/remote.rs`).
 - **Deployment is documented, not automated:** a systemd user unit and a
   Tailscale Serve route as an example, and backups through `sqlite3
   .backup`. bz's hostname-gated `bz deploy` is specific to one host and is
@@ -591,6 +591,43 @@ What slice 5 left, with sizes:
   a stderr spool, a protocol change in `reference/bench-resources.md`
   (small, slice 8 if a bench needs it).
 
+Slice 12, the remote client, taken before 6 (`reference/bench-store.md`,
+brokkr's client; `docs/brokkr.toml.md`, `results_server`;
+`docs/results-server.md`): `results_server` in the user-wide config, taken
+out of the user table before any merge (so never in the composed or stored
+config) and refused as a value in every project layer, checked file by
+file before merging (a table of that name stays a host section);
+`ResultsServer` validated once; `compose_layers_with` as the test seam.
+`src/bench/remote.rs` is blocking ureq 3 with rustls, one connection per
+attempt, no redirects, an attempt timeout of `wire::CONNECTION_DEADLINE`
+(moved there from the server's `Limits`) plus 30 s; an answer classified by
+its envelope, else by status alone (bare 4xx unapplied and final, 408 and
+429 retryable, anything else uncertain), a transport error unapplied only
+for a connection that never existed (a refusal included, by the Linux TCP
+and ureq argument in the code). `src/bench/publication.rs` is the latch and
+retry admission both destinations share: a retry-start window and a cap
+(120 s and 8 for a publication, 20 s and 6 for reads), one attempt past
+either for a latched publication, a pending stop ending retries after the
+first attempt. `brokkr bench` probes the server (`GET /bench`, protocol
+checked) before building; `BenchReader` reads either backend, a remote
+`run` answer's `children_loaded` checked; `brokkr env` names the server.
+Sparred against a `[results]` table (a host section today), an env var,
+and stripping the key at storage; the spar added the per-layer refusal
+before merging, the retry-start window with the latched exception, the
+narrowed never-sent set, the composition test seam and the probe's
+honest scope.
+
+What slice 12 left, none planned:
+
+- Runs already in a local `bench.db` stay there once a server is
+  configured; pushing them would read whole documents with `Store::load`
+  and publish each (small, if the user wants it).
+- A listing costs one `run` request per run; a batch read is a new
+  protocol version (small, when a remote `results` is too slow).
+- A write kind that deletes runs (an `invalidate` for script benches) would
+  need a retained request record, since a deleted run cannot answer its
+  replay (`reference/bench-store.md`, Publication).
+
 6. **Params: `from` resolution.** lexopt parsing of what follows NAME
    (slice 5 hands the tokens over unparsed and refuses a bench with
    params), dependency order (the graph is already validated at load), the
@@ -629,7 +666,9 @@ What slice 5 left, with sizes:
    check, and `brokkr results <uuid>` shows only their counts. What
    `brokkr sidecar` shows for a typed run (phases, samples, markers,
    counters, stalls, `--compare`) is wanted per child of a bench run's
-   iteration, read through `Store::run(uuid, true)`; `brokkr sidecar`
+   iteration, read through `BenchReader`'s run read (`Store::run(uuid,
+   true)` locally, a `run` request when a results server is configured,
+   slice 12); `brokkr sidecar`
    resolves through `RunStore`, which does not read the bench store, so
    this is a selection boundary to design, not a flag. One launch,
    smaller than the slices around it; best after slice 10 shows which
@@ -637,26 +676,6 @@ What slice 5 left, with sizes:
 10. **The first real benches.** dellingr's workloads and pbfhogg's
     read-only commands, mostly in their brokkr.toml, shaking out slices 3
     to 8.
-12. **The remote client.** The user-only server URL, a blocking HTTP
-    client, retries and outcome unknown. `brokkr results` reads through it
-    when a server is configured (`bench::results::BenchReader` opens the
-    local file today); an unreachable server fails the command, as an
-    unreadable local store does. The wire is landed (slice 11): the client
-    decodes `store::wire`'s types, classifies a failure with
-    `Failure::classify` and a body without an envelope by status alone, and
-    owes the contract's client duties (`reference/bench-store.md`, On the
-    wire): an uncertain publication stays uncertain across later refusals
-    until a success answers it, a 200 to a publication acknowledges it even
-    when its body is unreadable, a `run` answer's `children_loaded` is
-    checked against what was asked, and the protocol header is sent on
-    every request. The client's budget must outlast the server's
-    connection deadline (`Limits` in `src/bin/results_server/main.rs`).
-    `docs/results-server.md` then drops "brokkr itself does not talk to a
-    results server yet" and names the URL key. A write kind that deletes
-    runs (an `invalidate` for script benches) would need a retained request
-    record, since a deleted run cannot answer its replay
-    (`reference/bench-store.md`, Publication); none is planned.
-
 13. **The interrupt and the deadline.** Bump dellingr to the release that
     carries the interrupt (`StateBuilder::interrupt` / `State::interrupt`,
     `ErrorKind::Interrupted`, sticky, polled on backward jumps and call

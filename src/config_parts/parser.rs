@@ -151,6 +151,9 @@ fn parse_dev_config(table: &toml::Table, sources: &ConfigSources) -> Result<DevC
         cargo_env,
         benches,
         included_config_files: Vec::new(),
+        results_server: sources
+            .user_layer()
+            .and_then(|user| user.results_server.clone()),
     })
 }
 

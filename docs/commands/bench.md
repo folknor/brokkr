@@ -2,7 +2,9 @@
 
 Run a script bench, a `[bench.NAME]` table in brokkr.toml (`brokkr man
 bench-config`), and store the run in the per-user bench store, which `brokkr
-results` reads (`brokkr man results`, Script benches).
+results` reads (`brokkr man results`, Script benches): the local file, or
+the results server your user-wide config names (`results_server`, `brokkr
+man config`).
 
 ```
 brokkr bench                          # the benches this project declares
@@ -149,8 +151,24 @@ included, with every child's argv, ending, `/proc` samples, marker FIFO
 records and capture losses. A run of a dirty tree is stored and marked
 dirty: `brokkr results` lists it with `-dirty` and never compares it. The
 run's uuid is printed whatever `--verbose` says, as the one handle `brokkr
-results <uuid>` finds it by. A run that cannot be stored fails the command
-naming its uuid; one whose storing may or may not have landed says so.
+results <uuid>` finds it by, with where it went. A run that cannot be
+stored fails the command naming its uuid; one whose storing may or may not
+have landed says so, naming the attempt whose outcome is unknown, and
+`brokkr results <uuid>` then shows whether it did.
+
+**Where it goes.** The store is opened before anything is built: the local
+`bench.db`, or with `results_server` set, the server is checked to answer
+with this brokkr's protocol, so a server that cannot be reached fails the
+command before any measurement. Publishing retries what may succeed on a
+repeat: locally a few times at once; to a server with a growing pause, a
+retry starting only within two minutes of the first attempt and eight
+attempts at most, each attempt waiting as long as the server's own deadline
+(five minutes and a proxy's allowance) before giving up on it, and a
+publication whose outcome is unknown always gets one more attempt past
+those limits. A
+Ctrl-C that stopped the run still leaves it one publication attempt; a
+Ctrl-C during the retries ends them once the attempt in flight returns.
+The whole run holds the brokkr lock, publication included.
 
 The stored config is one TOML document: `[run]` (the live project root and
 build root, under `--commit` too), `[script]` (the bench, the file its script came from and

@@ -407,6 +407,17 @@ file, in every view: a history that cannot be read is not an empty one. With
 no data home to name the store in (neither `XDG_DATA_HOME` nor `HOME`) there
 is no store.
 
+With `results_server` set in the user-wide config (`brokkr man config`), the
+script-bench runs come from that server instead and the local file is not
+opened. A server that cannot be reached, or answers what it was not asked,
+fails the command naming the server: an unreachable history is not an empty
+one either. A request that may succeed on a repeat is retried, a retry
+starting only within twenty seconds of the first attempt and six attempts
+at most, with a short growing pause; each attempt may itself wait as long as
+the server's own deadline (five minutes and a proxy's allowance), so a
+server that accepts connections and then stalls holds the command that
+long. Each run listed is one request to the server.
+
 **Filters.** A filter a run cannot answer excludes it, as `--meta` excludes a
 row missing its key:
 
