@@ -377,7 +377,7 @@ always accepted.
 
 ### Sidecar: result+sidecar persistence is not atomic
 
-The benchmark result row is committed first, then sidecar rows are inserted in separate per-run transactions. If sidecar storage fails after the result is committed, the DB has a result with partial/no sidecar data. Not catastrophic (partial data is better than none), but could be wrapped in a single transaction.
+The benchmark result row is committed to results.db first, then the whole sidecar session goes to sidecar.db in one transaction (`SidecarDb::store_session`). Two databases cannot share a transaction, so if the sidecar store fails after the result is committed, results.db holds a row whose session sidecar.db lacks entirely. Not catastrophic, and `record` returns the error. Script benches do not have the gap: the bench store holds a run and its evidence in one file and one transaction.
 
 A library measurement already orders the other way (trajectories and the
 session metadata first, the results group last, which publishes), so its

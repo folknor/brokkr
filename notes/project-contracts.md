@@ -459,7 +459,9 @@ public with third-party users, which is where the two part.
   instead of applied twice, and a write that may have landed without an
   answer is reported as outcome unknown, naming the id. A proxy's 5xx is
   retried; the server's own errors say whether the write is known
-  unapplied or uncertain (third review).
+  unapplied or uncertain (third review). For publishing a run the request
+  id is the run's own uuid and the stored run is the outcome record
+  (slice 3, `reference/bench-store.md`).
 - **Its own binary.** The server is a separate binary in this crate,
   beside `brokkr-rustc-guard`, not a brokkr subcommand.
 - **A maintained HTTP stack, not bz's.** bz's hand-written HTTP/1.1 subset
@@ -493,14 +495,16 @@ from crates.io behind `src/bench/lua.rs`, and check's `bench` phase. Slice
 fields, `from` template syntax, unknown `{param}` references, cycles, a
 `many` param in a `from` path, judged on each bench's effective params),
 so no later slice tightens a loading config; what needs the resolved
-config stays with slices 6 and 7.
+config stays with slices 6 and 7. Slice 3, the evidence model and the
+local store (`reference/bench-store.md`): `$XDG_DATA_HOME/brokkr/bench.db`,
+a self-contained `src/bench/store/` a server binary includes by path, one
+validated `RunDocument` per attempted run published in one transaction
+with the run uuid as request id (replay answered, different content
+refused, commit errors reported as uncertain), the result and pairing key
+derived by the store, a frozen migration chain pinned by digest, and
+`src/bench/evidence.rs` converting a sidecar capture. `record` is kept per
+iteration, the result's being its best iteration's.
 
-3. **The evidence model and the local store.** Schema and migration chain
-   under `$XDG_DATA_HOME/brokkr/`: attempted runs with outcomes,
-   iterations and children beneath them, the optional result with its
-   pairing identity and `record`, every iteration's wall, config
-   provenance once per hash, and the sidecar's full evidence per child
-   with origin offsets.
 4. **Resources.** Handles and their per-call access, the iteration owner
    lease with authorized borrows, reclamation on the owner's release and
    after a crash, read-only inputs, stdout spools. A tested protocol with no Lua in it: conflict, borrow, crash
@@ -514,6 +518,16 @@ config stays with slices 6 and 7.
    dellingr release yet (0.6.0 has compile only): it needs a release
    before brokkr can depend on it from crates.io. The verb's grammar is
    options before NAME, params after (Params and datasets, above).
+   Writing the store is this slice's: build each arm's `RunDocument`
+   (uuid from `db::generate_uuid`, argv through `redact_secret_argv`, a
+   child's env through `evidence::redacted_env`, the config serialized
+   canonically so equal configs hash equal), publish it after an
+   interrupt while the signal window still covers the work, report a
+   failed publication as an error (not history's best-effort), say which
+   uuid an uncertain commit left, and decide whether a dirty tree's runs
+   are stored (the document records `dirty` either way). Remove the
+   `expect(dead_code)` attributes on `bench::store` and
+   `bench::evidence` once they go unfulfilled.
 6. **Params: `from` resolution.** lexopt parsing of what follows NAME,
    dependency order (the graph is already validated at load), the
    `snapshot.base` view, the dynamic refusals (an unknown key under a
@@ -531,13 +545,25 @@ config stays with slices 6 and 7.
    (`toml_edit`) and decodes the string, after checking the bytes still
    match the script loaded, not offset arithmetic.
 9. **`brokkr res` on the new store.** Listing, pairing, `--compare` naming
-   config changes between paired rows, the `record.hotpath` renderer.
+   config changes between paired rows, the `record.hotpath` renderer. The
+   store has only `open` (which creates and migrates) and `load(uuid)`:
+   this slice adds a read-only open that never creates a file, as
+   `brokkr results` promises for its stores, and the listing queries.
+   Pairing uses the stored `bench-pair-v1` key only among rows of one
+   algorithm. The command today is `brokkr results`; `res` here is
+   shorthand unless this slice adds the name.
 10. **The first real benches.** dellingr's workloads and pbfhogg's
     read-only commands, mostly in their brokkr.toml, shaking out slices 3
     to 8.
-11. **The wire contract and the server.** The request-id contract with
-    replay atomic in the write transaction, hyper or axum, the single
-    writer, the flock, migrations at startup, the in-flight cap.
+11. **The wire contract and the server.** The document over the wire,
+    `StoreError`'s three classes mapped to responses, hyper or axum, the
+    single writer, the flock, migrations at startup, the in-flight cap.
+    Publication's request-id contract landed with the store (the run uuid,
+    replay answered inside the write transaction); a write kind that
+    deletes runs (an `invalidate` for script benches) needs a retained
+    request record, since a deleted run cannot answer its replay. The
+    server includes `src/bench/store/` by path or the crate gains a lib
+    target; either works.
 12. **The remote client.** The user-only server URL, a blocking HTTP
     client, retries and outcome unknown, the deployment example in the
     docs.

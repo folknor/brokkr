@@ -40,6 +40,7 @@ A doc with 8+ `##` sections is **section-addressed**: `brokkr man conventions sc
 - `docs/commands/output-channels.md` - where a run's output goes (stdout/stderr/FIFO, results.db vs sidecar.db).
 - `docs/commands/library.md` - pbfhogg `brokkr library`, `[pbfhogg.library]`, the library harness protocol, `--bench`/`--hotpath`/`--alloc` measurement and `--all` certification.
 - `reference/library-internals.md` - how the library harness consumer is built and why: the strict reader, the run directory's reservation and serial launches, profiled runs, capture, refusal counterparts, seeds and publications, identity and recording, library against CLI timing. Read before changing `src/pbfhogg/library/`.
+- `reference/bench-store.md` - the per-user store of script-bench runs: the run document, what the store derives, publication with the run uuid as request id, the frozen migration chain, and why the module is self-contained. Read before changing `src/bench/store/`.
 - `docs/commands/visual.md` - litehtml-rs/sluggrs visual commands.
 - `docs/commands/hotpath.md` - sluggrs `brokkr hotpath`.
 - `docs/commands/sync.md` - ratatoskr `sync` / `mock-serve`.
@@ -58,7 +59,7 @@ Single crate, single binary (plus the `brokkr-rustc-guard` bin). No workspace. T
 - `src/config.rs`, `src/config_parts/` - config schema, composition, project sections.
 - `src/output/` - console and child-process runners; every spawn goes through `process/spawn.rs`'s `ChildPolicy`.
 - `src/lock/`, `src/hold.rs`, `src/guard.rs`, `src/stray.rs`, `src/test_orphans.rs` - the global lock, compile capability, rustc guard and reapers.
-- `src/measure/`, `src/harness.rs`, `src/db/`, `src/sidecar.rs` - measurement and result stores.
+- `src/measure/`, `src/harness.rs`, `src/db/`, `src/sidecar.rs` - measurement and result stores; `src/bench/store/` is the per-user store of script-bench runs.
 - `src/<project>/` - project-specific commands.
 
 ### Project-scoped help

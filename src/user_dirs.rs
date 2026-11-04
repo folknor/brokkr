@@ -51,6 +51,11 @@ pub(crate) fn history_db() -> Option<PathBuf> {
     xdg_data_home().map(|dir| dir.join("brokkr").join("history.db"))
 }
 
+/// The bench store: every attempted script-bench run of every project.
+pub(crate) fn bench_db() -> Option<PathBuf> {
+    xdg_data_home().map(|dir| dir.join("brokkr").join("bench.db"))
+}
+
 /// Durable backups of sidecar samples, stored outside every project tree.
 pub(crate) fn sidecar_backups_dir() -> Option<PathBuf> {
     xdg_data_home().map(|dir| dir.join("brokkr").join("sidecar-backups"))

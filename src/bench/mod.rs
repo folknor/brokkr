@@ -1,10 +1,30 @@
 //! Script benches: `[bench.NAME]` tables holding the Lua that runs a bench.
 //!
-//! The schema is read at load (`crate::config::bench`). What lives here so far
-//! is the static check `brokkr check`'s `bench` phase runs: every bench's
-//! script read and compiled, nothing executed.
+//! The schema is read at load (`crate::config::bench`). Here: the static check
+//! `brokkr check`'s `bench` phase runs (every bench's script read and
+//! compiled, nothing executed), and the bench store with brokkr's adapter to
+//! it, which nothing in the binary writes or reads before the script-bench
+//! runner does.
 
+// An expectation goes unfulfilled, and so fails the build, once the runner
+// uses everything it covers: then it is removed.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "no command writes or reads the bench store yet")
+)]
+mod evidence;
 mod lua;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        unused_imports,
+        reason = "no command writes or reads the bench store yet"
+    )
+)]
+pub(crate) mod store;
+#[cfg(test)]
+mod store_tests;
 
 use crate::config::bench::{Bench, BenchScript};
 use std::path::PathBuf;

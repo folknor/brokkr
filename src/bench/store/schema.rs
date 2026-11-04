@@ -1,0 +1,276 @@
+//! The frozen migration chain and the open policy.
+//!
+//! [`MIGRATIONS`] owns the schema: step N takes `user_version` N to N + 1,
+//! and a step once shipped never changes, since every store and the results
+//! server replay the same chain. A new column or table is a new step. The
+//! golden test in `tests.rs` fails when a shipped step's product changes.
+
+use std::path::Path;
+use std::time::Duration;
+
+use rusqlite::Connection;
+
+use super::StoreError;
+
+/// Version 1: the evidence model. Sample columns are spelled out here, not
+/// generated from [`super::Sample`], so a later sample field is a new step.
+const V1: &str = "
+CREATE TABLE configs (
+    digest TEXT PRIMARY KEY NOT NULL,
+    text   TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE runs (
+    id                   INTEGER PRIMARY KEY,
+    uuid                 TEXT NOT NULL UNIQUE,
+    format               INTEGER NOT NULL,
+    project              TEXT NOT NULL,
+    bench                TEXT NOT NULL,
+    checkout             TEXT NOT NULL,
+    hostname             TEXT NOT NULL,
+    git_commit           TEXT NOT NULL,
+    dirty                INTEGER NOT NULL CHECK (dirty IN (0, 1)),
+    subject              TEXT,
+    started_unix_ms      INTEGER NOT NULL,
+    brokkr_version       TEXT NOT NULL,
+    argv                 TEXT NOT NULL,
+    kernel               TEXT,
+    cpu_governor         TEXT,
+    avail_memory_mb      INTEGER,
+    captured_env         TEXT NOT NULL,
+    target               TEXT,
+    profile              TEXT NOT NULL,
+    features             TEXT NOT NULL,
+    default_features     INTEGER NOT NULL CHECK (default_features IN (0, 1)),
+    resolved_bin         TEXT,
+    resolved_features    TEXT,
+    artifact             TEXT,
+    config_digest        TEXT NOT NULL REFERENCES configs(digest),
+    iterations_requested INTEGER NOT NULL CHECK (iterations_requested > 0),
+    outcome              TEXT NOT NULL CHECK (outcome IN ('completed', 'failed', 'interrupted')),
+    failure              TEXT,
+    best_iteration       INTEGER,
+    pairing_key          TEXT NOT NULL,
+    CHECK ((outcome = 'completed') = (best_iteration IS NOT NULL)),
+    CHECK ((outcome = 'failed') = (failure IS NOT NULL)),
+    CHECK ((resolved_bin IS NULL) = (resolved_features IS NULL))
+) STRICT;
+CREATE INDEX runs_by_pairing ON runs(project, pairing_key);
+CREATE INDEX runs_by_bench ON runs(project, bench, started_unix_ms);
+
+CREATE TABLE run_params (
+    run_id    INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    name      TEXT NOT NULL,
+    many      INTEGER NOT NULL CHECK (many IN (0, 1)),
+    from_path TEXT,
+    PRIMARY KEY (run_id, name)
+) STRICT;
+
+CREATE TABLE run_param_values (
+    run_id   INTEGER NOT NULL,
+    name     TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    key      TEXT NOT NULL,
+    digest   TEXT,
+    PRIMARY KEY (run_id, name, position),
+    FOREIGN KEY (run_id, name) REFERENCES run_params(run_id, name) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE iterations (
+    run_id  INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    idx     INTEGER NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('completed', 'failed', 'interrupted')),
+    verdict TEXT,
+    failure TEXT,
+    wall_us INTEGER,
+    record  TEXT,
+    PRIMARY KEY (run_id, idx),
+    CHECK (outcome = 'completed' OR verdict IS NULL),
+    CHECK ((outcome = 'failed') = (failure IS NOT NULL))
+) STRICT;
+
+CREATE TABLE children (
+    id                   INTEGER PRIMARY KEY,
+    run_id               INTEGER NOT NULL,
+    iteration            INTEGER NOT NULL,
+    idx                  INTEGER NOT NULL,
+    program              TEXT NOT NULL,
+    argv                 TEXT NOT NULL,
+    env                  TEXT NOT NULL,
+    pid                  INTEGER,
+    origin_offset_us     INTEGER NOT NULL,
+    wall_us              INTEGER NOT NULL,
+    ending_kind          TEXT NOT NULL CHECK (ending_kind IN
+        ('exited', 'signal', 'stop_marker', 'deadline', 'interrupted', 'wait_failed')),
+    ending_value         INTEGER,
+    ending_text          TEXT,
+    rejected_lines       INTEGER NOT NULL,
+    fifo_unread          INTEGER NOT NULL CHECK (fifo_unread IN (0, 1)),
+    records_capped       INTEGER NOT NULL CHECK (records_capped IN (0, 1)),
+    samples_capped       INTEGER NOT NULL CHECK (samples_capped IN (0, 1)),
+    output_truncated     INTEGER NOT NULL CHECK (output_truncated IN (0, 1)),
+    clock_outliers       INTEGER NOT NULL,
+    clock_outlier_min_us INTEGER,
+    calls_seen           TEXT NOT NULL,
+    calls_overflowed     INTEGER NOT NULL CHECK (calls_overflowed IN (0, 1)),
+    UNIQUE (run_id, iteration, idx),
+    FOREIGN KEY (run_id, iteration) REFERENCES iterations(run_id, idx) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE samples (
+    child_id              INTEGER NOT NULL REFERENCES children(id) ON DELETE CASCADE,
+    sample_idx            INTEGER NOT NULL,
+    timestamp_us          INTEGER NOT NULL,
+    rss_kb                INTEGER NOT NULL,
+    anon_kb               INTEGER NOT NULL,
+    file_kb               INTEGER NOT NULL,
+    shmem_kb              INTEGER NOT NULL,
+    swap_kb               INTEGER NOT NULL,
+    vsize_kb              INTEGER NOT NULL,
+    vm_hwm_kb             INTEGER NOT NULL,
+    utime                 INTEGER NOT NULL,
+    stime                 INTEGER NOT NULL,
+    num_threads           INTEGER NOT NULL,
+    minflt                INTEGER NOT NULL,
+    majflt                INTEGER NOT NULL,
+    rchar                 INTEGER NOT NULL,
+    wchar                 INTEGER NOT NULL,
+    read_bytes            INTEGER NOT NULL,
+    write_bytes           INTEGER NOT NULL,
+    cancelled_write_bytes INTEGER NOT NULL,
+    syscr                 INTEGER NOT NULL,
+    syscw                 INTEGER NOT NULL,
+    vol_cs                INTEGER NOT NULL,
+    nonvol_cs             INTEGER NOT NULL,
+    PRIMARY KEY (child_id, sample_idx)
+) STRICT;
+
+CREATE TABLE markers (
+    child_id     INTEGER NOT NULL REFERENCES children(id) ON DELETE CASCADE,
+    record_idx   INTEGER NOT NULL,
+    marker_idx   INTEGER NOT NULL,
+    timestamp_us INTEGER NOT NULL,
+    call_id      TEXT,
+    name         TEXT NOT NULL,
+    PRIMARY KEY (child_id, record_idx),
+    UNIQUE (child_id, marker_idx)
+) STRICT;
+
+CREATE TABLE counters (
+    child_id     INTEGER NOT NULL REFERENCES children(id) ON DELETE CASCADE,
+    record_idx   INTEGER NOT NULL,
+    timestamp_us INTEGER NOT NULL,
+    call_id      TEXT,
+    name         TEXT NOT NULL,
+    value        INTEGER NOT NULL,
+    PRIMARY KEY (child_id, record_idx)
+) STRICT;
+
+CREATE TABLE sink_records (
+    child_id     INTEGER NOT NULL REFERENCES children(id) ON DELETE CASCADE,
+    record_idx   INTEGER NOT NULL,
+    timestamp_us INTEGER NOT NULL,
+    call_id      TEXT NOT NULL,
+    kind         TEXT NOT NULL CHECK (kind IN ('sealing', 'terminal')),
+    name         TEXT,
+    value        INTEGER,
+    end_state    TEXT,
+    drops        TEXT,
+    PRIMARY KEY (child_id, record_idx),
+    CHECK ((kind = 'sealing') = (name IS NOT NULL AND value IS NOT NULL)),
+    CHECK ((kind = 'terminal') = (end_state IS NOT NULL AND drops IS NOT NULL))
+) STRICT;
+";
+
+/// The chain. Shipped steps are frozen; append only.
+pub(super) const MIGRATIONS: &[&str] = &[V1];
+
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The schema version this code writes.
+pub(super) fn schema_version() -> i64 {
+    i64::try_from(MIGRATIONS.len()).unwrap_or(i64::MAX)
+}
+
+/// Open the store at `path`, creating the file (not its directory), and bring
+/// it to [`schema_version`]. Refused: a store newer than this code or stamped
+/// negative, a file
+/// with tables but no version stamp (not this store's), and a filesystem
+/// where WAL does not take.
+pub(super) fn open(path: &Path) -> Result<Connection, StoreError> {
+    let conn = Connection::open(path)?;
+    conn.busy_timeout(BUSY_TIMEOUT)?;
+    conn.pragma_update(None, "foreign_keys", true)?;
+    refuse_newer(&conn)?;
+    let mode: String =
+        conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        return Err(StoreError::Refused(format!(
+            "{} cannot use WAL (journal mode stayed {mode}); the store must be on a local filesystem",
+            path.display()
+        )));
+    }
+    migrate(&conn)?;
+    Ok(conn)
+}
+
+fn user_version(conn: &Connection) -> Result<i64, StoreError> {
+    Ok(conn.pragma_query_value(None, "user_version", |row| row.get(0))?)
+}
+
+fn refuse_newer(conn: &Connection) -> Result<i64, StoreError> {
+    let current = user_version(conn)?;
+    let known = schema_version();
+    if current > known {
+        return Err(StoreError::Refused(format!(
+            "schema version {current} is newer than this brokkr knows ({known}); upgrade brokkr"
+        )));
+    }
+    if current < 0 {
+        return Err(StoreError::Refused(format!(
+            "schema version {current} is no version of the bench store"
+        )));
+    }
+    Ok(current)
+}
+
+/// Apply the pending steps under one `BEGIN IMMEDIATE`, the stamp re-read
+/// inside it so two first writers cannot both plan from a stale one.
+fn migrate(conn: &Connection) -> Result<(), StoreError> {
+    if refuse_newer(conn)? == schema_version() {
+        return Ok(());
+    }
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let applied = (|| {
+        let current = refuse_newer(conn)?;
+        if current == 0 {
+            let tables: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'",
+                [],
+                |row| row.get(0),
+            )?;
+            if tables > 0 {
+                return Err(StoreError::Refused(
+                    "the file holds tables but no schema version; it is not a bench store"
+                        .to_owned(),
+                ));
+            }
+        }
+        let start = usize::try_from(current).unwrap_or(usize::MAX);
+        for step in MIGRATIONS.iter().skip(start) {
+            conn.execute_batch(step)?;
+        }
+        conn.pragma_update(None, "user_version", schema_version())?;
+        Ok(())
+    })();
+    if let Err(error) = applied {
+        // The original error is the one worth reporting.
+        conn.execute_batch("ROLLBACK").ok();
+        return Err(error);
+    }
+    if let Err(error) = conn.execute_batch("COMMIT") {
+        conn.execute_batch("ROLLBACK").ok();
+        return Err(error.into());
+    }
+    Ok(())
+}

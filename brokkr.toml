@@ -116,6 +116,16 @@ exclude = ["src/bench/lua.rs"]
 region = "code"
 message = "reach the dellingr crate through src/bench/lua.rs; brokkr's own module is crate::dellingr"
 
+# The bench store is self-contained (std, rusqlite, serde, serde_json and
+# xxhash-rust only), so a second binary can include it by path and serve the
+# same document, validation, migration chain and transaction. Anything
+# brokkr-specific belongs in src/bench/evidence.rs.
+[[textlint]]
+name = "bench-store-self-contained"
+pattern = '\bcrate::'
+paths = ["src/bench/store/**/*.rs"]
+message = "the bench store reaches no brokkr module; put brokkr-specific code in src/bench/evidence.rs"
+
 # pbfhogg's overwrite boundary (src/pbfhogg/binary.rs): code under src/pbfhogg
 # may hold a pbfhogg executable brokkr built only as a PbfhoggBinary, so it
 # cannot pair one with arguments that skipped --overwrite negotiation. The

@@ -198,6 +198,11 @@ fn user_stores() -> Vec<Store> {
             "no pruning: the command history",
         ),
         (
+            "bench.db",
+            crate::user_dirs::bench_db(),
+            "no pruning: the script-bench record",
+        ),
+        (
             "litehtml-prepare",
             crate::user_dirs::litehtml_scripts_dir(),
             "brokkr clean, in a litehtml project",
