@@ -3,13 +3,19 @@
 use std::path::Path;
 
 use super::verify::{Findings, PbfArgv, VerifyHarness};
+use super::verify_input_order::{CLAIM_UNSORTED, InputOrder, compare_outputs};
 use super::verify_reference::ToolRun;
 use crate::error::DevError;
 use crate::output::verify_msg;
 
 /// Cross-validate `pbfhogg cat` against `osmium cat` for node/way/relation types.
+///
+/// pbfhogg cat takes unsorted input and keeps its order, so on input without
+/// the sort claim osmium reads an osmium-sorted copy and each pbfhogg output
+/// is compared through one ([`compare_outputs`]).
 pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findings, DevError> {
     let outdir = harness.subdir("cat")?;
+    let order = InputOrder::of(harness, pbf, &outdir)?;
 
     let mut findings = Findings::new();
 
@@ -35,7 +41,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
         let captured = harness.reference(
             &ToolRun::osmium("cat.1")
                 .arg("cat")
-                .input(pbf)
+                .input(&order.reference_input)
                 .args(&["-t", elem_type, "-o"])
                 .output(&osmium_out)
                 .arg("--overwrite"),
@@ -47,25 +53,20 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
         harness.print_inspect("pbfhogg", &pbfhogg_out)?;
         harness.print_inspect("osmium", &osmium_out)?;
 
-        // --- Diff ---
-        let diff = harness.diff_pbfs(
+        compare_outputs(
+            harness,
+            &order,
+            &format!("cat -t {elem_type}"),
+            "osmium cat",
             &pbfhogg_out,
             &osmium_out,
-            &super::verify::listing_beside(&pbfhogg_out),
+            &mut findings,
         )?;
-        if diff.is_pass() {
-            verify_msg(&format!("  diff ({elem_type}): PASS (identical)"));
-        } else {
-            verify_msg(&format!("  diff ({elem_type}): FAIL (differences found)"));
-        }
-        findings.record(&format!("cat -t {elem_type} diff"), diff);
-
-        // --- Sort feature comparison ---
-        findings.record(
-            &format!("cat -t {elem_type} sort feature"),
-            harness.compare_sort_feature(&pbfhogg_out, &osmium_out)?,
-        );
     }
 
-    Ok(findings)
+    Ok(if order.sorted {
+        findings
+    } else {
+        findings.with_claim(CLAIM_UNSORTED)
+    })
 }

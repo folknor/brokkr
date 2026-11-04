@@ -24,15 +24,11 @@ use std::path::Path;
 
 use super::pbf_frames::{self, IndexSummary};
 use super::verify::{Findings, PbfArgv, Verdict, VerifyHarness};
-use super::verify_input_order::{InputOrder, compare_outputs};
+use super::verify_input_order::{CLAIM_UNSORTED, InputOrder, compare_outputs};
 use super::verify_multi_extract::{Counts, inspect_counts};
 use super::verify_reference::ToolRun;
 use crate::error::DevError;
 use crate::output::verify_msg;
-
-/// The claim part a passing check carries on unsorted input.
-const CLAIM_UNSORTED: &str = "on unsorted input, against osmium on an osmium-sorted copy, \
-                              pbfhogg's outputs compared through osmium-sorted copies";
 
 const KIND_LETTERS: [char; 3] = ['n', 'w', 'r'];
 

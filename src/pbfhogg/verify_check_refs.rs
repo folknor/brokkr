@@ -10,16 +10,33 @@
 //! - With-relations mode: pbfhogg reports "Missing relation members: 706 (777
 //!   references)" where 777 is the occurrence count that matches osmium's output.
 //!   We extract the trailing number (the references count) for comparison.
+//!
+//! Each side's exit must agree with its report: exit 1 exactly when something
+//! is missing. pbfhogg is the command under test, so a disagreement there is
+//! a failed finding. osmium also exits 1 when an exception ends its run
+//! before any count, so its exit 1 is accepted only on a complete summary
+//! (`ToolRun::accept_if`, at publication, at lookup and here), and a report
+//! that does not parse or contradicts its exit is an error: nothing can be
+//! compared with it.
+//!
+//! `check --refs` takes input in any order; `osmium check-refs` refuses
+//! out-of-order input, so on input without the sort claim it reads the
+//! osmium-sorted copy (`verify_input_order`), whose elements are the input's.
 
 use std::fs;
 use std::path::Path;
 
 use super::verify::{Findings, PbfArgv, Verdict, VerifyHarness};
+use super::verify_input_order::InputOrder;
 use super::verify_reference::ToolRun;
 use crate::error::DevError;
 use crate::output::verify_msg;
 
-/// Parsed check-refs counts for structural comparison.
+/// What a passing check establishes on input without the sort claim.
+const CLAIM_UNSORTED: &str = "on unsorted input, osmium check-refs reads an osmium-sorted copy, \
+                              pbfhogg the input as it is";
+
+/// Parsed pbfhogg check --refs counts for structural comparison.
 #[derive(Default)]
 struct CheckRefCounts {
     /// Missing node references in ways (ways-only and with-relations modes).
@@ -31,68 +48,80 @@ struct CheckRefCounts {
     /// Missing relation member references (occurrences). pbfhogg outputs
     /// "N (M references)" - we extract M. osmium outputs M directly.
     relations_in_relations: Option<u64>,
-    /// pbfhogg only: the distinct missing relation members, the N of
-    /// "N (M references)". It is N, not M, that sums into the total.
+    /// The distinct missing relation members, the N of "N (M references)".
+    /// It is N, not M, that sums into the total.
     relations_distinct: Option<u64>,
-    /// pbfhogg only: the N of "Referential integrity: FAILED (N missing
-    /// references)".
+    /// The N of "Referential integrity: FAILED (N missing references)".
     total_missing: Option<u64>,
     /// Whether the output indicates all checks passed with no issues.
     integrity_ok: bool,
+    /// A verdict or class line in an unknown shape, or one repeated.
+    malformed: bool,
 }
 
-/// Extract the last number from a line (the count is always at the end).
-fn trailing_number(line: &str) -> Option<u64> {
-    line.split(|c: char| !c.is_ascii_digit())
-        .rev()
-        .find(|s| !s.is_empty())?
-        .parse()
-        .ok()
-}
-
-/// Extract the first number after the line's first `:`.
-fn leading_number_after_colon(line: &str) -> Option<u64> {
-    let (_, rest) = line.split_once(':')?;
-    rest.split(|c: char| !c.is_ascii_digit())
-        .find(|s| !s.is_empty())?
-        .parse()
-        .ok()
+impl CheckRefCounts {
+    /// A clean report: the OK verdict with no FAILED verdict and no class
+    /// line beside it. Either beside it contradicts it, and a malformed
+    /// report is neither clean nor dirty.
+    fn clean(&self) -> Option<bool> {
+        if self.malformed {
+            return None;
+        }
+        let any_class = [
+            self.nodes_in_ways,
+            self.nodes_in_relations,
+            self.ways_in_relations,
+            self.relations_in_relations,
+        ]
+        .iter()
+        .any(Option::is_some);
+        match (self.integrity_ok, self.total_missing.is_some() || any_class) {
+            (true, true) => None,
+            (ok, _) => Some(ok),
+        }
+    }
 }
 
 /// pbfhogg's ways-only missing-node-in-ways count.
 ///
-/// The parser recognises no per-class line for this mode: a clean file says
-/// `Referential integrity: OK` (0), a dirty one `FAILED (N missing
-/// references)`, and with only way node refs checked that N is the count.
+/// A clean file says `Referential integrity: OK` (0), a dirty one `Missing
+/// node refs in ways: N` and `FAILED (N missing references)`; with only way
+/// node refs checked the two must be equal. Anything else is `None`.
 fn pbfhogg_ways_only(counts: &CheckRefCounts) -> Option<u64> {
-    if counts.integrity_ok {
-        Some(0)
-    } else {
-        counts.nodes_in_ways.or(counts.total_missing)
+    if counts.clean()? {
+        return Some(0);
     }
+    let in_ways = counts.nodes_in_ways?;
+    (counts.nodes_in_relations.is_none()
+        && counts.ways_in_relations.is_none()
+        && counts.relations_in_relations.is_none()
+        && counts.total_missing == Some(in_ways))
+    .then_some(in_ways)
 }
 
-/// pbfhogg's with-relations counts as `(nodes in relations, ways in
-/// relations, relation member references)`.
+/// pbfhogg's with-relations counts as `[nodes in ways, nodes in relations,
+/// ways in relations, relation member references]`.
 ///
-/// A clean file prints only `Referential integrity: OK`, which is all zeros -
-/// the case that used to read as "could not parse counts". A dirty file
-/// omits the lines of classes with nothing missing (the sample in
-/// [`parse_pbfhogg`] has no nodes-in-ways line), so an absent class line is
-/// taken as 0 - but only when the classes present account for the whole
-/// FAILED total. If they do not, some line went unrecognised and this returns
-/// `None` rather than guess.
-fn pbfhogg_with_relations(counts: &CheckRefCounts) -> Option<(u64, u64, u64)> {
-    if counts.integrity_ok {
-        return Some((0, 0, 0));
+/// A clean file prints only `Referential integrity: OK`, which is all zeros.
+/// A dirty file omits the lines of classes with nothing missing, so an absent
+/// class line is taken as 0 - but only when the classes present account for
+/// the whole FAILED total. If they do not, some line went unrecognised and
+/// this returns `None` rather than guess.
+fn pbfhogg_with_relations(counts: &CheckRefCounts) -> Option<[u64; 4]> {
+    if counts.clean()? {
+        return Some([0; 4]);
     }
     let total = counts.total_missing?;
+    let in_ways = counts.nodes_in_ways.unwrap_or(0);
     let nodes = counts.nodes_in_relations.unwrap_or(0);
     let ways = counts.ways_in_relations.unwrap_or(0);
     let rel_distinct = counts.relations_distinct.unwrap_or(0);
     let rel_refs = counts.relations_in_relations.unwrap_or(0);
-    let accounted = nodes.checked_add(ways)?.checked_add(rel_distinct)?;
-    (accounted == total).then_some((nodes, ways, rel_refs))
+    let accounted = in_ways
+        .checked_add(nodes)?
+        .checked_add(ways)?
+        .checked_add(rel_distinct)?;
+    (accounted == total).then_some([in_ways, nodes, ways, rel_refs])
 }
 
 /// Parse pbfhogg check --refs output.
@@ -111,27 +140,134 @@ fn pbfhogg_with_relations(counts: &CheckRefCounts) -> Option<(u64, u64, u64)> {
 /// Missing relation members: 706 (777 references)
 /// Referential integrity: FAILED (34090 missing references)
 /// ```
+///
+/// Every line starting `Referential integrity` or `Missing ` must be one of
+/// these shapes, each at most once; anything else marks the report
+/// malformed, which leaves no count to compare.
 fn parse_pbfhogg(text: &str) -> CheckRefCounts {
     let mut counts = CheckRefCounts::default();
-    for line in text.lines() {
-        let lower = line.to_lowercase();
-        if lower.contains("referential integrity: ok") {
+    let mut ok_lines = 0;
+    for line in text.lines().map(str::trim) {
+        if !(line.starts_with("Referential integrity") || line.starts_with("Missing ")) {
+            continue;
+        }
+        let parsed = if line == "Referential integrity: OK" {
+            ok_lines += 1;
             counts.integrity_ok = true;
-        } else if lower.contains("referential integrity: failed") {
-            counts.total_missing = leading_number_after_colon(line);
-        } else if lower.contains("missing node members in relations") {
-            counts.nodes_in_relations = trailing_number(line);
-        } else if lower.contains("missing way refs in relations") {
-            counts.ways_in_relations = trailing_number(line);
-        } else if lower.contains("missing relation members") {
-            counts.relations_in_relations = trailing_number(line);
-            counts.relations_distinct = leading_number_after_colon(line);
+            ok_lines == 1
+        } else if let Some(rest) = line.strip_prefix("Referential integrity: FAILED (") {
+            rest.strip_suffix(" missing references)")
+                .and_then(decimal)
+                .is_some_and(|n| set_once(&mut counts.total_missing, n))
+        } else if let Some(rest) = line.strip_prefix("Missing node refs in ways: ") {
+            decimal(rest).is_some_and(|n| set_once(&mut counts.nodes_in_ways, n))
+        } else if let Some(rest) = line.strip_prefix("Missing node members in relations: ") {
+            decimal(rest).is_some_and(|n| set_once(&mut counts.nodes_in_relations, n))
+        } else if let Some(rest) = line.strip_prefix("Missing way refs in relations: ") {
+            decimal(rest).is_some_and(|n| set_once(&mut counts.ways_in_relations, n))
+        } else if let Some(rest) = line.strip_prefix("Missing relation members: ") {
+            let (distinct, refs) = match rest.split_once(" (") {
+                Some((distinct, refs)) => (distinct, refs.strip_suffix(" references)")),
+                None => (rest, Some(rest)),
+            };
+            match (decimal(distinct), refs.and_then(decimal)) {
+                (Some(d), Some(r)) => {
+                    set_once(&mut counts.relations_distinct, d)
+                        && set_once(&mut counts.relations_in_relations, r)
+                }
+                _ => false,
+            }
+        } else {
+            false
+        };
+        if !parsed {
+            counts.malformed = true;
         }
     }
     counts
 }
 
-/// Parse osmium check-refs output.
+/// A plain decimal count.
+fn decimal(s: &str) -> Option<u64> {
+    if is_decimal(s) { s.parse().ok() } else { None }
+}
+
+/// Store `n` in a field not yet set; false when it already was.
+fn set_once(field: &mut Option<u64>, n: u64) -> bool {
+    field.replace(n).is_none()
+}
+
+/// pbfhogg's verdict line.
+#[derive(Debug, PartialEq, Eq)]
+enum Integrity {
+    Ok,
+    Failed(u64),
+}
+
+/// The one verdict line of a pbfhogg report: `Referential integrity: OK` or
+/// `Referential integrity: FAILED (N missing references)`. None when there
+/// is no such line, more than one, or one in another shape.
+fn pbfhogg_integrity(text: &str) -> Option<Integrity> {
+    let mut found = None;
+    for line in text.lines() {
+        let Some(rest) = line.trim().strip_prefix("Referential integrity: ") else {
+            continue;
+        };
+        if found.is_some() {
+            return None;
+        }
+        found = Some(if rest == "OK" {
+            Integrity::Ok
+        } else {
+            let n = rest
+                .strip_prefix("FAILED (")?
+                .strip_suffix(" missing references)")?;
+            if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            Integrity::Failed(n.parse().ok()?)
+        });
+    }
+    found
+}
+
+/// Whether pbfhogg's exit agrees with its verdict: 0 with OK, 1 with a
+/// FAILED naming a positive count.
+fn pbfhogg_exit_agrees(code: i32, integrity: Option<&Integrity>) -> bool {
+    match (code, integrity) {
+        (0, Some(Integrity::Ok)) => true,
+        (1, Some(Integrity::Failed(n))) => *n > 0,
+        _ => false,
+    }
+}
+
+/// osmium check-refs's summary, which it prints to stderr only once its whole
+/// read is done: `There are N nodes, M ways, and K relations in this file.`
+/// followed by the count lines of its mode.
+#[derive(Debug, PartialEq, Eq)]
+struct OsmiumReport {
+    /// The mode's counts in the order osmium prints them: nodes in ways,
+    /// and with relations also nodes, ways and relations in relations.
+    counts: Vec<u64>,
+}
+
+impl OsmiumReport {
+    /// Whether osmium found anything missing, which is its exit 1.
+    fn any_missing(&self) -> bool {
+        self.counts.iter().any(|&n| n > 0)
+    }
+}
+
+/// The count lines of each mode, whitespace collapsed.
+const WAYS_ONLY_LINES: &[&str] = &["Nodes in ways missing"];
+const WITH_RELATIONS_LINES: &[&str] = &[
+    "Nodes in ways missing",
+    "Nodes in relations missing",
+    "Ways in relations missing",
+    "Relations in relations missing",
+];
+
+/// Parse osmium check-refs's summary from its stderr.
 ///
 /// Ways-only format:
 /// ```text
@@ -147,76 +283,146 @@ fn parse_pbfhogg(text: &str) -> CheckRefCounts {
 /// Ways      in relations missing: 32943
 /// Relations in relations missing: 777
 /// ```
-fn parse_osmium(text: &str) -> CheckRefCounts {
-    let mut counts = CheckRefCounts::default();
-    for line in text.lines() {
-        let lower = line.to_lowercase();
-        // Normalize whitespace for matching (osmium uses padding)
-        let normalized: String = lower.split_whitespace().collect::<Vec<_>>().join(" ");
-        if normalized.contains("nodes in ways missing") {
-            counts.nodes_in_ways = trailing_number(line);
-        } else if normalized.contains("nodes in relations missing") {
-            counts.nodes_in_relations = trailing_number(line);
-        } else if normalized.contains("ways in relations missing") {
-            counts.ways_in_relations = trailing_number(line);
-        } else if normalized.contains("relations in relations missing") {
-            counts.relations_in_relations = trailing_number(line);
-        }
+///
+/// The summary must be the last lines, complete and in order; an earlier
+/// line that reads as part of a summary makes the report ambiguous. Anything
+/// else is `None`: the run did not complete (an exception, such as `Node IDs
+/// out of order`, ends it before the summary) or printed something this
+/// reader does not know.
+fn osmium_report(stderr: &[u8], with_relations: bool) -> Option<OsmiumReport> {
+    let text = std::str::from_utf8(stderr).ok()?;
+    let labels = if with_relations {
+        WITH_RELATIONS_LINES
+    } else {
+        WAYS_ONLY_LINES
+    };
+    let lines: Vec<String> = text
+        .lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|l| !l.is_empty())
+        .collect();
+    let start = lines.len().checked_sub(labels.len() + 1)?;
+    let (before, summary) = lines.split_at(start);
+    let summary_like = |line: &str| {
+        line.starts_with("There are ")
+            || WITH_RELATIONS_LINES
+                .iter()
+                .any(|label| line.starts_with(&format!("{label}:")))
+    };
+    if before.iter().any(|l| summary_like(l)) {
+        return None;
     }
-    counts
+    let totals = summary[0]
+        .strip_prefix("There are ")?
+        .strip_suffix(" relations in this file.")?;
+    let (nodes, rest) = totals.split_once(" nodes, ")?;
+    let (ways, relations) = rest.split_once(" ways, and ")?;
+    if ![nodes, ways, relations].iter().all(|n| is_decimal(n)) {
+        return None;
+    }
+    let mut counts = Vec::with_capacity(labels.len());
+    for (line, label) in summary[1..].iter().zip(labels) {
+        let n = line.strip_prefix(label)?.strip_prefix(": ")?;
+        if !is_decimal(n) {
+            return None;
+        }
+        counts.push(n.parse().ok()?);
+    }
+    Some(OsmiumReport { counts })
 }
 
-/// One side of the comparison and what it runs.
-enum Side<'a> {
-    Pbfhogg(PbfArgv),
-    Osmium(ToolRun<'a>),
+fn is_decimal(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// Largest osmium check-refs report accepted: it prints a handful of count
-/// lines, whatever the input's size.
-const REPORT_CAP: u64 = 1024 * 1024;
+/// The completion conditions osmium's exit 1 is accepted on, per mode.
+fn osmium_ways_only_completed(stderr: &[u8]) -> bool {
+    osmium_report(stderr, false).is_some()
+}
 
-/// Capture output from one side, save to file, and print with prefix.
-fn capture_and_log(
+fn osmium_with_relations_completed(stderr: &[u8]) -> bool {
+    osmium_report(stderr, true).is_some()
+}
+
+/// Run pbfhogg's side, save and print its report, and hold its exit to it:
+/// exits 0 and 1 are answers, anything else an error. Returns the report and
+/// whether its exit agrees with it.
+fn run_pbfhogg_side(
     harness: &VerifyHarness,
-    side: Side<'_>,
+    argv: PbfArgv,
     out_file: &Path,
     label: &str,
-) -> Result<String, DevError> {
-    let (captured, stdout) = match side {
-        // check --refs reports to stdout; the log file is brokkr's own write.
-        Side::Pbfhogg(argv) => {
-            let captured = harness.run_pbfhogg(argv)?;
-            let stdout = String::from_utf8_lossy(&captured.stdout).into_owned();
-            (captured, stdout)
-        }
-        // A reference run writes its stdout to a file; check-refs without
-        // --show-ids prints counts only, so its report is read whole.
-        Side::Osmium(run) => {
-            let sink = out_file.with_extension("stdout");
-            let captured = harness.reference(&run, &sink)?;
-            let stdout = super::verify_stream::read_bounded(&sink, REPORT_CAP)?;
-            (captured, stdout)
-        }
-    };
-    // Both tools exit 1 when they find missing refs; any other non-zero exit
-    // or a signal means the report cannot be trusted, however complete it
-    // looks.
+) -> Result<(String, Verdict), DevError> {
+    let captured = harness.run_pbfhogg(argv)?;
     captured.check_success_or(label, crate::output::child::Exits::answer(&[0, 1]))?;
-    let text = format!("{stdout}{}", String::from_utf8_lossy(&captured.stderr));
+    // check --refs reports to stdout; the log file is brokkr's own write.
+    let text = String::from_utf8_lossy(&captured.stdout).into_owned();
     fs::write(out_file, &text)?;
     verify_msg(&format!("  {label}:"));
     for line in text.lines() {
         verify_msg(&format!("    {line}"));
     }
-    Ok(text)
+    let code = captured
+        .code()
+        .ok_or_else(|| DevError::Internal(format!("{label} answered without an exit code")))?;
+    let agrees = pbfhogg_exit_agrees(code, pbfhogg_integrity(&text).as_ref());
+    if !agrees {
+        verify_msg(&format!(
+            "  {label}: exit {code} disagrees with its report's one integrity verdict FAIL"
+        ));
+    }
+    Ok((text, Verdict::from_pass(agrees)))
+}
+
+/// Run osmium's side and read its summary. Exit 1 is accepted only on a
+/// complete summary (the run's `accept_if`, checked again here); the exit
+/// must agree with the counts, and a summary that does not parse is an error.
+fn run_osmium_side(
+    harness: &VerifyHarness,
+    run: &ToolRun<'_>,
+    out_file: &Path,
+    label: &str,
+    with_relations: bool,
+) -> Result<OsmiumReport, DevError> {
+    let sink = out_file.with_extension("stdout");
+    let captured = harness.reference(run, &sink)?;
+    captured.check_success_or(label, crate::output::child::Exits::answer(&[0, 1]))?;
+    // Without --show-ids osmium writes nothing to stdout; its report is the
+    // stderr summary.
+    let printed = fs::metadata(&sink)?.len();
+    if printed > 0 {
+        return Err(DevError::Verify(format!(
+            "{label} wrote {printed} bytes to stdout ({}), where without --show-ids it \
+             writes nothing",
+            sink.display()
+        )));
+    }
+    let text = String::from_utf8_lossy(&captured.stderr).into_owned();
+    fs::write(out_file, &text)?;
+    verify_msg(&format!("  {label}:"));
+    for line in text.lines() {
+        verify_msg(&format!("    {line}"));
+    }
+    let report = osmium_report(&captured.stderr, with_relations).ok_or_else(|| {
+        DevError::Verify(format!(
+            "{label} did not complete: its stderr does not end in the summary osmium \
+             check-refs prints after a whole read, so nothing can be compared with it"
+        ))
+    })?;
+    let code = captured.code();
+    if code != Some(i32::from(report.any_missing())) {
+        return Err(DevError::Verify(format!(
+            "{label} exited {code:?}, which contradicts its summary {:?}",
+            report.counts
+        )));
+    }
+    Ok(report)
 }
 
 /// Run check --refs cross-validation: pbfhogg check --refs vs osmium check-refs.
 ///
 /// Two modes: ways-only (default) and with relations. Both tools exit 1 when
-/// they find missing refs, so each side accepts exits 0 and 1
-/// (`capture_and_log`).
+/// they find missing refs.
 ///
 /// No `--direct-io`: pbfhogg refuses it under `check --refs` without `--ids`
 /// or `--index` (exit 64, since pbfhogg 930ddfc9), since the ref check reads
@@ -228,94 +434,93 @@ fn capture_and_log(
 pub fn run(harness: &VerifyHarness, pbf: &Path) -> Result<Findings, DevError> {
     let mut findings = Findings::new();
     let outdir = harness.subdir("check-refs")?;
+    let order = InputOrder::of(harness, pbf, &outdir)?;
+
     // --- Ways only ---
     verify_msg("--- check --refs (ways only) ---");
-    let pbf_ways_args = PbfArgv::new("check").arg("--refs").input(pbf)?;
-    let pbfhogg_text = capture_and_log(
+    let (pbfhogg_text, agrees) = run_pbfhogg_side(
         harness,
-        Side::Pbfhogg(pbf_ways_args),
+        PbfArgv::new("check").arg("--refs").input(pbf)?,
         &outdir.join("pbfhogg-ways.txt"),
         "pbfhogg (ways only)",
     )?;
-    let osmium_text = capture_and_log(
+    findings.record("pbfhogg (ways only) exit agrees with its report", agrees);
+    let osmium = run_osmium_side(
         harness,
-        Side::Osmium(
-            ToolRun::osmium("check-refs.1")
-                .arg("check-refs")
-                .input(pbf)
-                .accept(&[1]),
-        ),
+        &ToolRun::osmium("check-refs.1")
+            .arg("check-refs")
+            .input(&order.reference_input)
+            .accept_if(1, osmium_ways_only_completed),
         &outdir.join("osmium-ways.txt"),
         "osmium (ways only)",
+        false,
     )?;
-
-    let pbf_counts = parse_pbfhogg(&pbfhogg_text);
-    let osm_counts = parse_osmium(&osmium_text);
-
     findings.record(
         "ways only",
         compare_count(
             "ways only",
-            pbfhogg_ways_only(&pbf_counts),
-            osm_counts.nodes_in_ways,
+            pbfhogg_ways_only(&parse_pbfhogg(&pbfhogg_text)),
+            osmium.counts.first().copied(),
         ),
     );
 
     // --- With relations ---
     verify_msg("--- check --refs (with relations) ---");
-    let pbf_all_args = PbfArgv::new("check")
-        .arg("--refs")
-        .input(pbf)?
-        .arg("--check-relations");
-    let pbfhogg_text = capture_and_log(
+    let (pbfhogg_text, agrees) = run_pbfhogg_side(
         harness,
-        Side::Pbfhogg(pbf_all_args),
+        PbfArgv::new("check")
+            .arg("--refs")
+            .input(pbf)?
+            .arg("--check-relations"),
         &outdir.join("pbfhogg-all.txt"),
         "pbfhogg (with relations)",
     )?;
-    let osmium_text = capture_and_log(
+    findings.record(
+        "pbfhogg (with relations) exit agrees with its report",
+        agrees,
+    );
+    let osmium = run_osmium_side(
         harness,
-        Side::Osmium(
-            ToolRun::osmium("check-refs.1")
-                .args(&["check-refs", "-r"])
-                .input(pbf)
-                .accept(&[1]),
-        ),
+        &ToolRun::osmium("check-refs.1")
+            .args(&["check-refs", "-r"])
+            .input(&order.reference_input)
+            .accept_if(1, osmium_with_relations_completed),
         &outdir.join("osmium-all.txt"),
         "osmium (with relations)",
+        true,
     )?;
 
-    let pbf_counts = parse_pbfhogg(&pbfhogg_text);
-    let osm_counts = parse_osmium(&osmium_text);
-
-    let pbf_rel = pbfhogg_with_relations(&pbf_counts);
+    let pbf_rel = pbfhogg_with_relations(&parse_pbfhogg(&pbfhogg_text));
     if pbf_rel.is_none() {
         verify_msg(
             "  pbfhogg (with relations): per-class counts do not reconcile with the \
              FAILED total (or no verdict line) - output format changed?",
         );
     }
-    for (label, pbfhogg, osmium) in [
-        (
-            "nodes in relations",
-            pbf_rel.map(|(n, _, _)| n),
-            osm_counts.nodes_in_relations,
-        ),
-        (
-            "ways in relations",
-            pbf_rel.map(|(_, w, _)| w),
-            osm_counts.ways_in_relations,
-        ),
-        (
-            "relation members",
-            pbf_rel.map(|(_, _, r)| r),
-            osm_counts.relations_in_relations,
-        ),
-    ] {
-        findings.record(label, compare_count(label, pbfhogg, osmium));
+    for (i, label) in [
+        "nodes in ways",
+        "nodes in relations",
+        "ways in relations",
+        "relation members",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        findings.record(
+            label,
+            compare_count(
+                label,
+                pbf_rel.map(|counts| counts[i]),
+                osmium.counts.get(i).copied(),
+            ),
+        );
     }
 
-    Ok(findings)
+    Ok(if order.sorted {
+        findings
+    } else {
+        findings.with_claim(CLAIM_UNSORTED)
+    })
 }
 
 fn compare_count(label: &str, pbfhogg: Option<u64>, osmium: Option<u64>) -> Verdict {
@@ -368,6 +573,12 @@ Ways      in relations missing: 32943
 Relations in relations missing: 777
 ";
 
+    const OSMIUM_OUT_OF_ORDER: &str = "\
+Node IDs out of order: 7658480
+This command expects the input file to be ordered: First nodes in order of ID,
+then ways in order of ID, then relations in order of ID.
+";
+
     #[test]
     fn pbfhogg_ways_only_clean_is_zero() {
         let c = parse_pbfhogg(PBFHOGG_WAYS_OK);
@@ -376,8 +587,39 @@ Relations in relations missing: 777
     }
 
     #[test]
-    fn pbfhogg_ways_only_failed_uses_total() {
+    fn pbfhogg_ways_only_failed_uses_its_count() {
+        // A FAILED total with no class line names no count.
         let c = parse_pbfhogg("Referential integrity: FAILED (12 missing references)\n");
+        assert_eq!(pbfhogg_ways_only(&c), None);
+        // A class count the total does not equal.
+        let c = parse_pbfhogg(
+            "Missing node refs in ways: 12\nReferential integrity: FAILED (13 missing \
+             references)\n",
+        );
+        assert_eq!(pbfhogg_ways_only(&c), None);
+        // An OK verdict beside a class count contradicts it.
+        let c = parse_pbfhogg("Missing node refs in ways: 5\nReferential integrity: OK\n");
+        assert_eq!(pbfhogg_ways_only(&c), None);
+        assert_eq!(pbfhogg_with_relations(&c), None);
+        // A class line that does not parse, or one repeated, is malformed.
+        for text in [
+            "Missing node refs in ways: invalid\nReferential integrity: OK\n",
+            "Missing node refs in ways: 5\nMissing node refs in ways: 5\nReferential \
+             integrity: FAILED (5 missing references)\n",
+            "Missing node refs in ways: +5\nReferential integrity: FAILED (5 missing \
+             references)\n",
+            "Referential integrity: OK\nReferential integrity: OK\n",
+        ] {
+            let c = parse_pbfhogg(text);
+            assert!(c.malformed, "{text}");
+            assert_eq!(pbfhogg_ways_only(&c), None, "{text}");
+            assert_eq!(pbfhogg_with_relations(&c), None, "{text}");
+        }
+        let c = parse_pbfhogg(
+            "Missing node refs in ways: 12\nReferential integrity: FAILED (12 missing \
+             references)\n",
+        );
+        assert_eq!(c.nodes_in_ways, Some(12));
         assert_eq!(pbfhogg_ways_only(&c), Some(12));
     }
 
@@ -389,7 +631,20 @@ Relations in relations missing: 777
         assert_eq!(c.relations_in_relations, Some(777));
         assert_eq!(c.relations_distinct, Some(706));
         assert_eq!(c.total_missing, Some(34_090));
-        assert_eq!(pbfhogg_with_relations(&c), Some((441, 32_943, 777)));
+        assert_eq!(pbfhogg_with_relations(&c), Some([0, 441, 32_943, 777]));
+    }
+
+    #[test]
+    fn pbfhogg_with_relations_counts_node_refs_in_ways() {
+        let text = "\
+Missing node refs in ways: 3
+Missing way refs in relations: 10
+Referential integrity: FAILED (13 missing references)
+";
+        assert_eq!(
+            pbfhogg_with_relations(&parse_pbfhogg(text)),
+            Some([3, 0, 10, 0])
+        );
     }
 
     #[test]
@@ -401,7 +656,7 @@ Elements: 52489653 nodes, 6616526 ways, 46103 relations
 Referential integrity: OK
 ";
         let c = parse_pbfhogg(text);
-        assert_eq!(pbfhogg_with_relations(&c), Some((0, 0, 0)));
+        assert_eq!(pbfhogg_with_relations(&c), Some([0; 4]));
     }
 
     #[test]
@@ -411,7 +666,7 @@ Missing way refs in relations: 10
 Referential integrity: FAILED (10 missing references)
 ";
         let c = parse_pbfhogg(text);
-        assert_eq!(pbfhogg_with_relations(&c), Some((0, 10, 0)));
+        assert_eq!(pbfhogg_with_relations(&c), Some([0, 0, 10, 0]));
     }
 
     #[test]
@@ -430,23 +685,64 @@ Referential integrity: FAILED (15 missing references)
     }
 
     #[test]
+    fn pbfhogg_exit_must_agree_with_one_verdict() {
+        let ok = pbfhogg_integrity(PBFHOGG_WAYS_OK);
+        let failed = pbfhogg_integrity(PBFHOGG_RELATIONS_FAILED);
+        assert_eq!(ok, Some(Integrity::Ok));
+        assert_eq!(failed, Some(Integrity::Failed(34_090)));
+        assert!(pbfhogg_exit_agrees(0, ok.as_ref()));
+        assert!(pbfhogg_exit_agrees(1, failed.as_ref()));
+        assert!(!pbfhogg_exit_agrees(1, ok.as_ref()));
+        assert!(!pbfhogg_exit_agrees(0, failed.as_ref()));
+        let zero = pbfhogg_integrity("Referential integrity: FAILED (0 missing references)\n");
+        assert!(!pbfhogg_exit_agrees(1, zero.as_ref()));
+        assert_eq!(
+            pbfhogg_integrity("Referential integrity: OK\nReferential integrity: OK\n"),
+            None
+        );
+        assert_eq!(pbfhogg_integrity("Referential integrity: fine\n"), None);
+        assert!(!pbfhogg_exit_agrees(0, None));
+    }
+
+    #[test]
     fn osmium_samples_parse() {
-        let w = parse_osmium(OSMIUM_WAYS);
-        assert_eq!(w.nodes_in_ways, Some(0));
-        let r = parse_osmium(OSMIUM_RELATIONS);
-        assert_eq!(r.nodes_in_ways, Some(0));
-        assert_eq!(r.nodes_in_relations, Some(441));
-        assert_eq!(r.ways_in_relations, Some(32_943));
-        assert_eq!(r.relations_in_relations, Some(777));
+        let w = osmium_report(OSMIUM_WAYS.as_bytes(), false).unwrap();
+        assert_eq!(w.counts, [0]);
+        assert!(!w.any_missing());
+        let r = osmium_report(OSMIUM_RELATIONS.as_bytes(), true).unwrap();
+        assert_eq!(r.counts, [0, 441, 32_943, 777]);
+        assert!(r.any_missing());
+    }
+
+    #[test]
+    fn an_incomplete_osmium_run_has_no_report() {
+        assert_eq!(osmium_report(OSMIUM_OUT_OF_ORDER.as_bytes(), false), None);
+        assert_eq!(osmium_report(OSMIUM_OUT_OF_ORDER.as_bytes(), true), None);
+        assert!(!osmium_ways_only_completed(OSMIUM_OUT_OF_ORDER.as_bytes()));
+        // The other mode's summary is not this mode's.
+        assert_eq!(osmium_report(OSMIUM_WAYS.as_bytes(), true), None);
+        assert_eq!(osmium_report(OSMIUM_RELATIONS.as_bytes(), false), None);
+        // A summary cut short, or one repeated, is not a report.
+        let cut = OSMIUM_RELATIONS.rsplit_once("Relations").unwrap().0;
+        assert_eq!(osmium_report(cut.as_bytes(), true), None);
+        let twice = format!("{OSMIUM_WAYS}{OSMIUM_WAYS}");
+        assert_eq!(osmium_report(twice.as_bytes(), false), None);
+        // A count that is not a plain decimal.
+        let signed = OSMIUM_WAYS.replace("missing: 0", "missing: +0");
+        assert_eq!(osmium_report(signed.as_bytes(), false), None);
+    }
+
+    #[test]
+    fn osmium_report_ignores_earlier_unrelated_lines() {
+        let warned = format!("Warning: something unrelated\n{OSMIUM_WAYS}");
+        assert_eq!(osmium_report(warned.as_bytes(), false).unwrap().counts, [0]);
     }
 
     #[test]
     fn samples_agree_across_tools() {
         let p = pbfhogg_with_relations(&parse_pbfhogg(PBFHOGG_RELATIONS_FAILED)).unwrap();
-        let o = parse_osmium(OSMIUM_RELATIONS);
-        assert_eq!(Some(p.0), o.nodes_in_relations);
-        assert_eq!(Some(p.1), o.ways_in_relations);
-        assert_eq!(Some(p.2), o.relations_in_relations);
+        let o = osmium_report(OSMIUM_RELATIONS.as_bytes(), true).unwrap();
+        assert_eq!(p.to_vec(), o.counts);
     }
 
     #[test]

@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use super::verify::{Findings, PbfArgv, VerifyHarness};
+use super::verify_input_order::{CLAIM_UNSORTED, InputOrder, compare_outputs};
 use super::verify_reference::ToolRun;
 use crate::error::DevError;
 use crate::output::verify_msg;
@@ -15,14 +16,19 @@ const EXPRESSIONS: &[(&str, &str)] = &[
 ];
 
 /// Run tags-filter cross-validation: pbfhogg vs osmium, 3 expressions with `-R`.
+///
+/// pbfhogg tags-filter takes unsorted input and keeps its order, so on input
+/// without the sort claim osmium reads an osmium-sorted copy and each pbfhogg
+/// output is compared through one ([`compare_outputs`]).
 pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findings, DevError> {
     let outdir = harness.subdir("tags-filter")?;
+    let order = InputOrder::of(harness, pbf, &outdir)?;
     let mut findings = Findings::new();
 
     for (expr, label) in EXPRESSIONS {
         verify_msg(&format!("--- tags-filter {expr} -R ---"));
 
-        // pbfhogg: tags-filter <pbf> -R <expr> -o <out>
+        // pbfhogg: tags-filter <pbf> --omit-referenced <expr> -o <out>
         let pbfhogg_out = outdir.join(format!("pbfhogg-{label}.osm.pbf"));
         let captured = harness.run_pbfhogg(
             PbfArgv::new("tags-filter")
@@ -39,7 +45,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
         let captured = harness.reference(
             &ToolRun::osmium("tags-filter.1")
                 .arg("tags-filter")
-                .input(pbf)
+                .input(&order.reference_input)
                 .args(&[expr, "-R", "-o"])
                 .output(&osmium_out)
                 .arg("--overwrite"),
@@ -51,25 +57,20 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
         harness.print_inspect("pbfhogg", &pbfhogg_out)?;
         harness.print_inspect("osmium", &osmium_out)?;
 
-        // Diff and report.
-        let diff = harness.diff_pbfs(
+        compare_outputs(
+            harness,
+            &order,
+            &format!("tags-filter --omit-referenced {expr}"),
+            "osmium tags-filter -R",
             &pbfhogg_out,
             &osmium_out,
-            &super::verify::listing_beside(&pbfhogg_out),
+            &mut findings,
         )?;
-        if diff.is_pass() {
-            verify_msg(&format!("  {label}: PASS (identical)"));
-        } else {
-            verify_msg(&format!("  {label}: FAIL (differences found)"));
-        }
-        findings.record(&format!("{label} diff"), diff);
-
-        // Compare sort feature flags.
-        findings.record(
-            &format!("{label} sort feature"),
-            harness.compare_sort_feature(&pbfhogg_out, &osmium_out)?,
-        );
     }
 
-    Ok(findings)
+    Ok(if order.sorted {
+        findings
+    } else {
+        findings.with_claim(CLAIM_UNSORTED)
+    })
 }

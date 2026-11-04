@@ -5,10 +5,11 @@
 use std::path::{Path, PathBuf};
 
 use super::verify::{Findings, PbfArgv, Verdict, VerifyHarness};
+use super::verify_input_order::{self, InputOrder, Refusal, compare_outputs};
 use super::verify_reference::ToolRun;
 use crate::cli::AltwMode;
 use crate::error::DevError;
-use crate::output::{CapturedOutput, verify_msg};
+use crate::output::verify_msg;
 
 /// What a PASS of a single-engine run establishes. `pbfhogg diff` compares
 /// way tags and refs but treats `LocationsOnWays` coordinates as derived data,
@@ -28,6 +29,21 @@ const SINGLE_CLAIM: &str = "element content and sort declaration match osmium; i
 const ALL_CLAIM: &str = "element content and sort declaration match osmium; inline locations \
                          pass pbfhogg check --locations --agreement; sparse and external agree \
                          on full element records; inline locations are not compared with osmium";
+
+/// [`SINGLE_CLAIM`] for the sparse engine on input without the sort claim:
+/// osmium reads an osmium-sorted copy, and sparse's output must not claim
+/// the sort and is compared through an osmium-sorted copy, whose strict
+/// order proves it repeats no ID. The copy keeps no inline location, which
+/// the diff does not read anyway; `check --locations` runs on the output
+/// itself.
+const SPARSE_UNSORTED_CLAIM: &str = "on unsorted input, against osmium on an osmium-sorted copy: \
+                                     sparse's output claims no sort, repeats no ID and, through \
+                                     an osmium-sorted copy, matches osmium's element content; \
+                                     inline locations pass pbfhogg check --locations \
+                                     --agreement; inline locations are not compared with osmium";
+
+/// The external engine's command line, as a refusal claim names it.
+const EXTERNAL_COMMAND: &str = "pbfhogg add-locations-to-ways --index-type external";
 
 /// A node-index engine pbfhogg's `add-locations-to-ways --index-type` ships.
 ///
@@ -58,15 +74,24 @@ impl Engine {
 /// `mode` selects the engines: `Sparse` or `External` runs that one, `All`
 /// runs both and also requires them to agree on full element records.
 ///
+/// The input header's `Sort.Type_then_ID` claim picks each engine's route
+/// (`verify_input_order`). Sparse takes any order: on input without the
+/// claim osmium reads an osmium-sorted copy and sparse's output is compared
+/// through one. External's documented contract refuses such input, so there
+/// it is held to that refusal and never compared; under `--mode external`
+/// osmium does not run at all, and under `all` the engines are not compared
+/// with each other. A header that claims the flag over disordered content
+/// takes the ordinary route.
+///
 /// Every engine run is launched before any check reads an output, so one
 /// engine's refusal or a later check's error never keeps the other from
-/// running. An engine that exits non-zero is a recorded failure, never a skip
-/// and never read as anything more specific: brokkr does not re-derive
-/// pbfhogg's input preconditions (external needs sorted, indexed input
-/// without negative node IDs; `check --locations` refuses a history file), so
-/// an input outside that domain fails the check rather than passing it. Each
-/// successful output is diffed against osmium's, has its sort declaration
-/// compared, and goes through `check --locations --agreement`.
+/// running. On the ordinary route an engine that exits non-zero is a
+/// recorded failure, never a skip and never read as anything more specific:
+/// brokkr does not re-derive pbfhogg's other input preconditions (external
+/// needs indexed input without negative node IDs; `check --locations`
+/// refuses a history file), so an input outside that domain fails the check
+/// rather than passing it. Each successful output is compared with osmium's
+/// ([`compare_outputs`]) and goes through `check --locations --agreement`.
 pub fn run(
     harness: &VerifyHarness,
     pbf: &Path,
@@ -77,7 +102,18 @@ pub fn run(
 
     verify_msg("=== verify add-locations-to-ways ===");
 
-    let pbf_str = pbf.display().to_string();
+    let sorted = verify_input_order::input_header(harness, pbf, &outdir)?.optional_sorted();
+    if !sorted && matches!(mode, AltwMode::External) {
+        // Nothing runs against osmium here, so no reference input is made.
+        let mut findings = Findings::claiming(verify_input_order::refusal_claim(
+            EXTERNAL_COMMAND,
+            "",
+            direct_io,
+        ));
+        hold_external_refusal(harness, pbf, &outdir, direct_io, &mut findings)?;
+        return Ok(findings);
+    }
+    let order = InputOrder::from_claim(harness, pbf, &outdir, sorted)?;
 
     // Osmium runs once as the reference for every engine. pbfhogg always
     // keeps untagged relation-member nodes (a documented deviation in
@@ -86,7 +122,7 @@ pub fn run(
     let captured = harness.reference(
         &ToolRun::osmium("add-locations-to-ways.1")
             .args(&["add-locations-to-ways", "--keep-member-nodes"])
-            .input(pbf)
+            .input(&order.reference_input)
             .arg("-o")
             .output(&osmium_out)
             .arg("--overwrite"),
@@ -95,10 +131,20 @@ pub fn run(
     harness.check_exit(&captured, "osmium add-locations-to-ways")?;
     harness.print_inspect("osmium", &osmium_out)?;
 
-    let (engines, claim): (&[Engine], &'static str) = match mode {
-        AltwMode::Sparse => (&[Engine::Sparse], SINGLE_CLAIM),
-        AltwMode::External => (&[Engine::External], SINGLE_CLAIM),
-        AltwMode::All => (&[Engine::Sparse, Engine::External], ALL_CLAIM),
+    let (engines, claim): (&[Engine], String) = match (mode, sorted) {
+        (AltwMode::Sparse, true) => (&[Engine::Sparse], SINGLE_CLAIM.to_owned()),
+        (AltwMode::External, true) => (&[Engine::External], SINGLE_CLAIM.to_owned()),
+        (AltwMode::All, true) => (&[Engine::Sparse, Engine::External], ALL_CLAIM.to_owned()),
+        (AltwMode::Sparse, false) => (&[Engine::Sparse], SPARSE_UNSORTED_CLAIM.to_owned()),
+        // `--mode external` on claimless input returned above.
+        (AltwMode::External | AltwMode::All, false) => (
+            &[Engine::Sparse, Engine::External],
+            format!(
+                "{SPARSE_UNSORTED_CLAIM}; external held to its documented refusal: {}; the \
+                 engines are not compared with each other",
+                verify_input_order::refusal_terms(EXTERNAL_COMMAND, "", direct_io)
+            ),
+        ),
     };
     let mut findings = Findings::claiming(claim);
 
@@ -106,15 +152,12 @@ pub fn run(
     // engine from being exercised.
     let mut produced: Vec<(Engine, PathBuf)> = Vec::new();
     for &engine in engines {
-        let out_path = outdir.join(format!("pbfhogg-{}.osm.pbf", engine.name()));
-        if run_engine(
-            harness,
-            &pbf_str,
-            &out_path,
-            engine,
-            direct_io,
-            &mut findings,
-        )? {
+        if !sorted && engine == Engine::External {
+            hold_external_refusal(harness, pbf, &outdir, direct_io, &mut findings)?;
+            continue;
+        }
+        let out_path = output_path(&outdir, engine);
+        if run_engine(harness, pbf, &out_path, engine, direct_io, &mut findings)? {
             produced.push((engine, out_path));
         }
     }
@@ -122,6 +165,7 @@ pub fn run(
     for (engine, out_path) in &produced {
         check_output(
             harness,
+            &order,
             osmium_out.as_path(),
             out_path,
             *engine,
@@ -139,12 +183,44 @@ pub fn run(
     Ok(findings)
 }
 
+fn output_path(outdir: &Path, engine: Engine) -> PathBuf {
+    outdir.join(format!("pbfhogg-{}.osm.pbf", engine.name()))
+}
+
+/// Hold the external engine to its documented refusal of input without the
+/// sort claim (`verify_input_order::expect_unsorted_refusal`).
+fn hold_external_refusal(
+    harness: &VerifyHarness,
+    pbf: &Path,
+    outdir: &Path,
+    direct_io: bool,
+    findings: &mut Findings,
+) -> Result<(), DevError> {
+    verify_input_order::expect_unsorted_refusal(
+        harness,
+        engine_argv(
+            harness,
+            pbf,
+            &output_path(outdir, Engine::External),
+            Engine::External,
+            direct_io,
+        )?,
+        &Refusal {
+            label: "add-locations-to-ways --index-type external",
+            operand: pbf,
+            answers: &[0],
+            stdout: None,
+        },
+        findings,
+    )
+}
+
 /// Run one engine. Returns whether it produced an output; a non-zero exit is
 /// recorded on `findings` with its stderr echoed. Launch errors and
 /// interruption propagate.
 fn run_engine(
     harness: &VerifyHarness,
-    pbf_str: &str,
+    pbf: &Path,
     out_path: &Path,
     engine: Engine,
     direct_io: bool,
@@ -154,7 +230,7 @@ fn run_engine(
     verify_msg(&format!(
         "--- pbfhogg add-locations-to-ways --index-type {name} ---"
     ));
-    let captured = run_pbfhogg_engine(harness, pbf_str, out_path, engine, direct_io)?;
+    let captured = harness.run_pbfhogg(engine_argv(harness, pbf, out_path, engine, direct_io)?)?;
     if captured.success() {
         return Ok(true);
     }
@@ -168,10 +244,12 @@ fn run_engine(
     Ok(false)
 }
 
-/// The per-output checks: element diff and sort declaration against osmium,
-/// and pbfhogg's inline-location consistency check.
+/// The per-output checks: the comparison with osmium's output, and pbfhogg's
+/// inline-location consistency check on the output itself (an osmium-sorted
+/// copy keeps no inline location).
 fn check_output(
     harness: &VerifyHarness,
+    order: &InputOrder,
     osmium_out: &Path,
     out_path: &Path,
     engine: Engine,
@@ -179,51 +257,34 @@ fn check_output(
 ) -> Result<(), DevError> {
     let name = engine.name();
     harness.print_inspect(&format!("pbfhogg ({name})"), out_path)?;
-    findings.record(
-        &format!("{name} vs osmium diff"),
-        report_diff(harness, osmium_out, out_path, &format!("{name} vs osmium"))?,
-    );
-    findings.record(
-        &format!("{name} sort feature"),
-        harness.compare_sort_feature(out_path, osmium_out)?,
-    );
+    compare_outputs(
+        harness,
+        order,
+        &format!("add-locations-to-ways --index-type {name}"),
+        "osmium add-locations-to-ways",
+        out_path,
+        osmium_out,
+        findings,
+    )?;
     let (verdict, _) = harness.check_locations(&format!("pbfhogg ({name})"), out_path, true)?;
     findings.record(&format!("{name} inline locations"), verdict);
     Ok(())
 }
 
-fn run_pbfhogg_engine(
+fn engine_argv(
     harness: &VerifyHarness,
-    pbf_str: &str,
+    pbf: &Path,
     out_path: &Path,
     engine: Engine,
     direct_io: bool,
-) -> Result<CapturedOutput, DevError> {
-    let argv = PbfArgv::new("add-locations-to-ways")
-        .input(pbf_str)?
+) -> Result<PbfArgv, DevError> {
+    Ok(PbfArgv::new("add-locations-to-ways")
+        .input(pbf)?
         .output(out_path)?
         .scratch(&harness.output_dir)
         .arg("--index-type")
         .arg(engine.name())
-        .arg_if(direct_io, "--direct-io");
-    harness.run_pbfhogg(argv)
-}
-
-/// Diff `a` against `b`, narrate the outcome, and hand the verdict back for
-/// the caller to record.
-fn report_diff(
-    harness: &VerifyHarness,
-    a: &Path,
-    b: &Path,
-    label: &str,
-) -> Result<Verdict, DevError> {
-    let verdict = harness.diff_pbfs(a, b, &super::verify::listing_beside(b))?;
-    if verdict.is_pass() {
-        verify_msg(&format!("  diff ({label}): PASS (identical)"));
-    } else {
-        verify_msg(&format!("  diff ({label}): FAIL (differences found)"));
-    }
-    Ok(verdict)
+        .arg_if(direct_io, "--direct-io"))
 }
 
 /// Whether two engines' outputs agree on full element records: the node, way

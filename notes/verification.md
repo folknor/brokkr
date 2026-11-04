@@ -3,19 +3,17 @@
 Standing list of gaps in what `brokkr verify` proves or how it scales. Current
 gaps only; remove an entry when it is resolved.
 
-## cat, tags-filter, add-locations-to-ways and check-refs FAIL on unsorted input
+## check-refs FAILs nodes in ways wherever a missing node is referenced twice
 
-Measured on bygg, `verify all` on the denmark `unsorted` snapshot: `cat` and
-`tags-filter` fail at `pbfhogg diff` (exit 2, "Old PBF does not declare
-Sort.Type_then_ID") because they diff pbfhogg's output, which rightly claims
-no sort on unsorted input, directly rather than through an osmium-sorted copy.
-`add-locations-to-ways` fails the same way on osmium's output; its stated
-domain is sorted input, yet the sparse engine takes unsorted input and so goes
-unverified there, while the external engine refuses it. `check-refs` fails
-because `osmium check-refs` refuses out-of-order input ("Node IDs out of
-order") and its counts then do not parse. None follows the osmium-sorted-copy
-route extract, multi-extract and getid take, nor the refusal route merge,
-derive-changes, diff and renumber take (`verify_input_order`).
+Measured on bygg, `verify check-refs` on the denmark `ways-only` snapshot:
+pbfhogg reports 49285109 missing node refs in ways, osmium 60832065. pbfhogg
+counts distinct missing IDs, osmium every reference, and pbfhogg's report
+carries no occurrence figure for this class (it does for relation members),
+so the ways-only comparison and the with-relations nodes-in-ways comparison
+FAIL on any input where a missing node is referenced more than once; denmark
+has none missing, so it passes. Waits on pbfhogg#45 (report the occurrence
+count, or document the deviation); with an occurrence figure the check should
+compare it as it does for relation members.
 
 ## multi-extract never constructs identical or deliberately empty regions
 

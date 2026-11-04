@@ -122,23 +122,6 @@ pub(super) fn first_difference(a: &Path, b: &Path) -> Result<Option<u64>, DevErr
     })
 }
 
-/// The whole file as text when it is at most `cap` bytes; larger is an
-/// error naming the file, for a report whose size does not scale with the
-/// data (a reference tool's counts) and so is never legitimately large.
-pub(super) fn read_bounded(path: &Path, cap: u64) -> Result<String, DevError> {
-    let len = std::fs::metadata(path)
-        .map_err(|e| read_error(path, &e))?
-        .len();
-    if len > cap {
-        return Err(DevError::Verify(format!(
-            "{} is {len} bytes, more than the {cap} a report of counts can need",
-            path.display()
-        )));
-    }
-    let bytes = std::fs::read(path).map_err(|e| read_error(path, &e))?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -192,7 +175,5 @@ mod tests {
         let (lines, more) = super::preview(&a, 2, 2).unwrap();
         assert_eq!(lines, vec!["on".to_owned(), "tw".to_owned()]);
         assert!(more);
-        assert!(super::read_bounded(&a, 4).is_err());
-        assert_eq!(super::read_bounded(&a, 64).unwrap(), "one\ntwo\nthree\n");
     }
 }

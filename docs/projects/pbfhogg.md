@@ -731,6 +731,27 @@ saying so: every multi and sequential output must then not claim the flag,
 and each is compared through an osmium-sorted copy whose strict order proves
 it repeats no ID.
 
+`cat` and `tags-filter` take any order and keep it, and branch the same way
+(`verify_input_order`): on sorted input each pbfhogg output must be in strict
+order and its sort declaration is compared with osmium's; on an input
+without the claim osmium reads the osmium-sorted copy, each pbfhogg output
+must not claim the flag and is compared through an osmium-sorted copy, and
+the PASS line opens `on unsorted input`. On either, an osmium output that is
+not in strict order is an error. `check-refs` has no output to compare:
+pbfhogg's `check --refs` reads the input as it is, `osmium check-refs`
+(which refuses out-of-order input) the osmium-sorted copy, whose elements are
+the input's, and the PASS line says so. Its comparison is the missing count
+per class (nodes in ways, and with `--check-relations` also nodes, ways and
+relations in relations), and each tool's exit must agree with its report:
+exit 1 exactly when something is missing. pbfhogg's report must carry one
+integrity verdict, `OK` with exit 0 or `FAILED` naming a positive count with
+exit 1, or the check fails; an `OK` beside a class line or a `FAILED` total
+its class lines do not account for leaves no count to compare, a FAIL too. osmium prints its summary to stderr only after a
+whole read and also exits 1 when an exception ends its run (`Node IDs out of
+order`), so its exit 1 completes the run only on a complete summary for its
+mode as the last lines of stderr; a summary that is missing, ambiguous or
+contradicts its exit, or anything on its stdout, is an error.
+
 `merge`, `derive-changes`, `diff` and `renumber` verify commands whose
 documented contract refuses input without `Sort.Type_then_ID` (pbfhogg's
 `apply-changes` takes a sorted base, `diff` in both formats needs both inputs
@@ -802,7 +823,7 @@ and, in the detail, the entry's key and stored exit.
   (whitespace, quotes, backslashes), osmosis runs without those two properties
   and is never cached.
 - **Publication**: only a run that exited with an accepted code (0, or 1 for
-  `osmium diff` and `check-refs`; 1 for `osmium getid -r` only when its
+  `osmium diff`; 1 for `osmium getid -r` and `check-refs` only when its
   stderr shows the run completed, `ToolRun::accept_if`), wrote every declared
   output, and whose key
   is unchanged when recomputed after the run is published: artifacts made
@@ -1064,22 +1085,40 @@ It verifies pbfhogg's node-index engines by name, each run with an explicit
 `--index-type`: `--mode sparse`, `--mode external`, or `--mode all` (the
 default, and what `verify all` runs) for both. `auto` is not verified on its
 own, since it routes to one of the two and its output is that engine's. Every
-engine runs before any check reads an output. An engine that exits non-zero
-is a recorded failure with its stderr in the detail, never a skip, and brokkr
-does not re-derive why: the domain is the input both engines and the checks
-accept - sorted, indexed, no negative node IDs or references, no
-`HistoricalInformation` header - and an input outside it fails the check
-without that alleging an engine defect (verify an input external refuses with
-`--mode sparse`). Each output that was produced gets:
+engine runs before any check reads an output.
 
-- the element diff against osmium's output and the sort-declaration
-  comparison;
+The input header's `Sort.Type_then_ID` claim (among its optional features)
+picks each engine's route (`verify_input_order`). Sparse takes any order: on
+input without the claim osmium reads the osmium-sorted copy, and sparse's
+output must not claim the flag and is compared through an osmium-sorted copy,
+whose strict order proves it repeats no ID (the copy keeps no inline
+location, which the diff does not read). External's documented contract
+refuses such input, so there it is held to that refusal as `merge` is (exit
+2, the one `Unsorted` advice naming the input, nothing published) and never
+compared: under `--mode external` osmium does not run and the PASS line opens
+`on input without Sort.Type_then_ID among its optional features, refusal
+only`; under `all` the PASS line names sparse's comparison, external's
+refusal and that the engines are not compared with each other. A header that
+claims the flag over disordered content takes the ordinary route.
+
+On the ordinary route an engine that exits non-zero is a recorded failure
+with its stderr in the detail, never a skip, and brokkr does not re-derive
+why: the domain is the input both engines and the checks accept - indexed, no
+negative node IDs or references, no `HistoricalInformation` header - and an
+input outside it fails the check without that alleging an engine defect
+(verify an input external refuses with `--mode sparse`). Each output that was
+produced gets:
+
+- the comparison with osmium's output: strict order and the sort-declaration
+  comparison on sorted input, the header and repeated-ID checks above on
+  input without the claim, then the element diff;
 - `pbfhogg check --locations --agreement`. `pbfhogg diff` treats inline
   coordinates as derived data, not content, so the diff never sees one; this
   holds each coordinate to the node record the output keeps and, for a node
-  it dropped (most untagged nodes), to the other references to that node.
+  it dropped (most untagged nodes), to the other references to that node. It
+  runs on the output itself, never a sorted copy.
 
-Under `all`, the two outputs' node, way and relation lines of `pbfhogg digest
+Under `all`, when both engines produced an output, the two outputs' node, way and relation lines of `pbfhogg digest
 --form full`, which cover metadata and exact way coordinates, must be
 identical; the overall line is ignored, since it also covers the header. A
 digest that fails or prints a malformed report, or two reports of different

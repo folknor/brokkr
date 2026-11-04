@@ -7,19 +7,24 @@
 //! it a check takes one of two routes, by what the command it verifies
 //! promises for such input:
 //!
-//! - A command that takes unsorted input (extract, multi-extract, getid)
-//!   reads it as it is; every osmium run reads an osmium-sorted copy, and
-//!   pbfhogg's outputs are compared through osmium-sorted copies
+//! - A command that takes unsorted input (cat, extract, multi-extract,
+//!   tags-filter, getid, add-locations-to-ways with the sparse index, check
+//!   --refs) reads it as it is; every osmium run reads an osmium-sorted copy,
+//!   and pbfhogg's outputs are compared through osmium-sorted copies
 //!   ([`InputOrder`], [`compare_outputs`]).
 //! - A command whose documented contract refuses it (apply-changes, diff in
-//!   both formats, renumber) is held to that refusal on the input itself
-//!   ([`expect_unsorted_refusal`]): exit 2, the advice pbfhogg's CLI gives
-//!   every `Unsorted` refusal naming the claimless operand as the argv spelled
-//!   it, and nothing published. No reference comparison is made. Which of
-//!   pbfhogg's order checks raised the refusal (the header gate, or a later
-//!   one finding the content out of order) is not established: the property
-//!   held is that such input is refused rather than accepted, which pbfhogg's
-//!   general apply-changes path once did, silently dropping creates.
+//!   both formats, renumber, add-locations-to-ways with the external index) is
+//!   held to that refusal on the input itself ([`expect_unsorted_refusal`]):
+//!   exit 2, the advice pbfhogg's CLI gives every `Unsorted` refusal naming
+//!   the claimless operand as the argv spelled it, and nothing published. No
+//!   reference comparison is made. Which of pbfhogg's order checks raised the
+//!   refusal (the header gate, or a later one finding the content out of
+//!   order) is not established: the property held is that such input is
+//!   refused rather than accepted, which pbfhogg's general apply-changes path
+//!   once did, silently dropping creates.
+//!
+//! A header that claims the flag over disordered content takes the ordinary
+//! path in every check, where a refusal of it is an error.
 
 use std::path::{Path, PathBuf};
 
@@ -67,6 +72,17 @@ impl InputOrder {
     /// and, on unsorted input, write the osmium-sorted copy.
     pub(super) fn of(harness: &VerifyHarness, pbf: &Path, outdir: &Path) -> Result<Self, DevError> {
         let sorted = input_header(harness, pbf, outdir)?.optional_sorted();
+        Self::from_claim(harness, pbf, outdir, sorted)
+    }
+
+    /// [`of`](Self::of) for a check that has already read the claim, as
+    /// one that branches on it before any reference runs.
+    pub(super) fn from_claim(
+        harness: &VerifyHarness,
+        pbf: &Path,
+        outdir: &Path,
+        sorted: bool,
+    ) -> Result<Self, DevError> {
         if sorted {
             return Ok(Self {
                 sorted,
@@ -144,14 +160,29 @@ pub(super) fn compare_outputs(
     Ok(())
 }
 
+/// The claim part a passing check on unsorted input carries when every
+/// pbfhogg output it judges went through [`compare_outputs`].
+pub(super) const CLAIM_UNSORTED: &str = "on unsorted input, against osmium on an osmium-sorted \
+                                         copy, pbfhogg's outputs compared through \
+                                         osmium-sorted copies";
+
 /// What a passing refusal check establishes: `command` refused the input,
 /// `runs` saying how it ran when not once on the input alone. Under
 /// `--direct-io` a refusal proves no O_DIRECT read either.
 pub(super) fn refusal_claim(command: &str, runs: &str, direct_io: bool) -> String {
     format!(
-        "on input without {SORT_TYPE_THEN_ID} among its optional features, refusal only: \
-         {command} refused it as Unsorted, naming it, and published nothing{runs}; nothing is \
-         compared with osmium, and which of pbfhogg's order checks refused is not established{}",
+        "on input without {SORT_TYPE_THEN_ID} among its optional features, refusal only, \
+         nothing compared with osmium: {}",
+        refusal_terms(command, runs, direct_io)
+    )
+}
+
+/// What one held refusal establishes, for a claim that also states other
+/// work: [`refusal_claim`] without its opening.
+pub(super) fn refusal_terms(command: &str, runs: &str, direct_io: bool) -> String {
+    format!(
+        "{command} refused it as Unsorted, naming it, and published nothing{runs}; which of \
+         pbfhogg's order checks refused is not established{}",
         if direct_io {
             ", nor that any O_DIRECT read ran"
         } else {
