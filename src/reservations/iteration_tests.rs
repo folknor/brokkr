@@ -62,6 +62,7 @@ fn a_call_borrows_from_its_iteration_and_the_owner_release_reclaims_it() {
                 (out.clone(), Access::Write),
                 (scratch.clone(), Access::Write),
             ],
+            None,
         )
         .unwrap();
     let mut child = spawn(
@@ -106,19 +107,19 @@ fn conflicting_declarations_are_refused_at_the_call() {
     );
 
     let err = iteration
-        .call(Path::new(SH), &[(input.clone(), Access::Write)])
+        .call(Path::new(SH), &[(input.clone(), Access::Write)], None)
         .unwrap_err();
     assert!(err.to_string().contains("read-only for the run"), "{err}");
     let err = iteration
-        .call(Path::new(SH), &[(outside.clone(), Access::Read)])
+        .call(Path::new(SH), &[(outside.clone(), Access::Read)], None)
         .unwrap_err();
     assert!(err.to_string().contains("not within"), "{err}");
 
     let first = iteration
-        .call(Path::new(SH), &[(out.clone(), Access::Write)])
+        .call(Path::new(SH), &[(out.clone(), Access::Write)], None)
         .unwrap();
     let err = iteration
-        .call(Path::new(SH), &[(out.clone(), Access::Read)])
+        .call(Path::new(SH), &[(out.clone(), Access::Read)], None)
         .unwrap_err();
     assert!(
         err.to_string().contains("overlaps"),
@@ -129,6 +130,7 @@ fn conflicting_declarations_are_refused_at_the_call() {
         .call(
             Path::new(SH),
             &[(spool.path().to_path_buf(), Access::Write)],
+            None,
         )
         .unwrap_err();
     assert!(err.to_string().contains("read-only for the run"), "{err}");
@@ -139,6 +141,7 @@ fn conflicting_declarations_are_refused_at_the_call() {
                 (out.clone(), Access::Read),
                 (spool.path().to_path_buf(), Access::Read),
             ],
+            None,
         )
         .unwrap()
         .finish()
@@ -155,7 +158,7 @@ fn scratch_creation_respects_a_sibling_borrow() {
     let mut iteration = Iteration::admit(&root, std::slice::from_ref(&input)).unwrap();
     let area = iteration.dir().join("scratch");
     let reader = iteration
-        .call(Path::new(SH), &[(area.clone(), Access::Read)])
+        .call(Path::new(SH), &[(area.clone(), Access::Read)], None)
         .unwrap();
     let err = iteration.scratch("tmp").unwrap_err();
     assert!(err.to_string().contains("overlaps"), "{err}");
@@ -183,7 +186,7 @@ fn the_veto_follows_an_input_spelling_retargeted_since_admission() {
     std::fs::remove_file(&link).unwrap();
     std::os::unix::fs::symlink(out.join("sub"), &link).unwrap();
     let err = iteration
-        .call(Path::new(SH), &[(out.join("in.txt"), Access::Write)])
+        .call(Path::new(SH), &[(out.join("in.txt"), Access::Write)], None)
         .unwrap_err();
     assert!(err.to_string().contains("read-only for the run"), "{err}");
     iteration.release().unwrap();
@@ -198,7 +201,7 @@ fn a_crash_mid_borrow_keeps_the_iteration_until_the_child_is_gone() {
     let (root, input) = fixture("iteration-crash-mid");
     let mut iteration = Iteration::admit(&root, std::slice::from_ref(&input)).unwrap();
     let dir = iteration.dir().to_path_buf();
-    let call = iteration.call(Path::new(SH), &[]).unwrap();
+    let call = iteration.call(Path::new(SH), &[], None).unwrap();
     let mut child = spawn(&call, "exec sleep 30", &[]);
     call.abandon_for_test();
     iteration.abandon_for_test();
@@ -226,7 +229,7 @@ fn a_crash_after_the_child_exited_is_reclaimed_by_the_next_scan() {
     let (root, input) = fixture("iteration-crash-after");
     let mut iteration = Iteration::admit(&root, std::slice::from_ref(&input)).unwrap();
     let dir = iteration.dir().to_path_buf();
-    let call = iteration.call(Path::new(SH), &[]).unwrap();
+    let call = iteration.call(Path::new(SH), &[], None).unwrap();
     let mut child = spawn(&call, "echo gone", &[]);
     assert!(child.wait().unwrap().success());
     call.abandon_for_test();
@@ -244,7 +247,7 @@ fn an_owner_release_under_a_surviving_descendant_keeps_the_iteration() {
     let (root, input) = fixture("iteration-survivor");
     let mut iteration = Iteration::admit(&root, std::slice::from_ref(&input)).unwrap();
     let dir = iteration.dir().to_path_buf();
-    let call = iteration.call(Path::new(SH), &[]).unwrap();
+    let call = iteration.call(Path::new(SH), &[], None).unwrap();
     let mut child = spawn(&call, "exec sleep 30", &[]);
     let err = call.finish().unwrap_err();
     assert!(err.to_string().contains("still held"), "{err}");
@@ -271,11 +274,11 @@ fn a_displaced_area_fails_the_next_creation() {
 
     std::fs::rename(dir.join("stdout"), dir.join("moved")).unwrap();
     std::fs::create_dir(dir.join("stdout")).unwrap();
-    let err = iteration.call(Path::new(SH), &[]).unwrap_err();
+    let err = iteration.call(Path::new(SH), &[], None).unwrap_err();
     assert!(err.to_string().contains("replaced"), "{err}");
     std::fs::remove_dir(dir.join("stdout")).unwrap();
     std::os::unix::fs::symlink(&elsewhere, dir.join("stdout")).unwrap();
-    assert!(iteration.call(Path::new(SH), &[]).is_err());
+    assert!(iteration.call(Path::new(SH), &[], None).is_err());
 
     std::fs::rename(dir.join("scratch"), dir.join("moved-scratch")).unwrap();
     std::os::unix::fs::symlink(&elsewhere, dir.join("scratch")).unwrap();
@@ -297,7 +300,7 @@ fn a_spool_keeps_everything_and_previews_a_bounded_start() {
     let _lock = crate::test_scratch::process_global_lock();
     let (root, input) = fixture("iteration-spool");
     let mut iteration = Iteration::admit(&root, std::slice::from_ref(&input)).unwrap();
-    let call = iteration.call(Path::new(SH), &[]).unwrap();
+    let call = iteration.call(Path::new(SH), &[], None).unwrap();
     let mut child = spawn(
         &call,
         "i=0; while [ $i -lt 100 ]; do printf x; i=$((i+1)); done",

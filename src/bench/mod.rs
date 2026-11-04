@@ -14,6 +14,7 @@
 //! uncertainty latch both share.
 
 mod evidence;
+mod json;
 mod lua;
 mod params;
 mod publication;
@@ -21,6 +22,7 @@ mod remote;
 mod resources;
 pub(crate) mod results;
 pub(crate) mod runner;
+mod script_lines;
 // The server's side of the wire (`wire::execute`, `wire::serve`) and the
 // readers of a whole stored document and of the transaction state are the
 // server's alone: an expectation goes unfulfilled, and so fails the build,
@@ -40,7 +42,7 @@ mod view;
 mod wire_tests;
 
 use crate::config::bench::{Bench, BenchScript};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Why one bench's script failed the static check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,8 +66,49 @@ impl std::fmt::Display for ScriptFinding {
     }
 }
 
-/// Read and compile one bench's script. An inline script's line numbers
-/// count from the first line of the `script` string, not of its config file.
+/// How an inline script's errors name it: by its config file and that file's
+/// lines when they can be mapped (`script_lines`), else as the bench's
+/// script, its lines counted from the string's first, with why not.
+pub(crate) struct InlineLines {
+    pub(crate) chunk: String,
+    pub(crate) lines: Option<script_lines::LineMap>,
+    why_not: Option<String>,
+}
+
+impl InlineLines {
+    pub(crate) fn of(bench: &str, source: &str, declared_in: &Path) -> Self {
+        match script_lines::locate(declared_in, bench, source) {
+            Ok(lines) => Self {
+                chunk: declared_in.display().to_string(),
+                lines: Some(lines),
+                why_not: None,
+            },
+            Err(why) => Self {
+                chunk: format!("[bench.{bench}] script"),
+                lines: None,
+                why_not: Some(why),
+            },
+        }
+    }
+
+    /// Why the lines are the string's own, when they are.
+    pub(crate) fn why_not(&self) -> Option<&str> {
+        self.why_not.as_deref()
+    }
+
+    /// A compile error as a finding's problem, after the config file's name.
+    pub(crate) fn problem(&self, error: &lua::CompileError) -> String {
+        match &self.why_not {
+            None => error.to_string(),
+            Some(why) => {
+                format!("inline script, {error} (lines count from the script string, since {why})")
+            }
+        }
+    }
+}
+
+/// Read and compile one bench's script. An inline script's line numbers are
+/// its config file's when they can be mapped, else the string's own.
 pub(crate) fn check_script(bench: &Bench) -> Result<(), ScriptFinding> {
     let finding = |file: PathBuf, problem: String| ScriptFinding {
         bench: bench.name.clone(),
@@ -76,8 +119,11 @@ pub(crate) fn check_script(bench: &Bench) -> Result<(), ScriptFinding> {
         BenchScript::Inline {
             source,
             declared_in,
-        } => lua::compile(source.as_bytes())
-            .map_err(|e| finding(declared_in.clone(), format!("inline script, {e}"))),
+        } => {
+            let lines = InlineLines::of(&bench.name, source, declared_in);
+            lua::compile(source.as_bytes(), lines.lines.as_ref())
+                .map_err(|e| finding(declared_in.clone(), lines.problem(&e)))
+        }
         BenchScript::File { path, declared_in } => {
             let source = std::fs::read(path).map_err(|e| {
                 finding(
@@ -88,7 +134,7 @@ pub(crate) fn check_script(bench: &Bench) -> Result<(), ScriptFinding> {
                     ),
                 )
             })?;
-            lua::compile(&source).map_err(|e| finding(path.clone(), e.to_string()))
+            lua::compile(&source, None).map_err(|e| finding(path.clone(), e.to_string()))
         }
     }
 }
@@ -124,6 +170,35 @@ mod tests {
             shown.starts_with("[bench.cat] brokkr.toml: inline script, line "),
             "{shown}"
         );
+    }
+
+    /// When the declaring file still holds the script, the finding names the
+    /// file's own line; once it no longer does, the string's, saying why.
+    #[test]
+    fn an_inline_failure_names_the_config_files_line_when_it_can() {
+        let dir = crate::test_scratch::scratch("bench_check", "mapped");
+        let file = dir.join("brokkr.toml");
+        let source = "x = 1\nfunction bench(\n";
+        std::fs::write(
+            &file,
+            format!("project = \"x\"\n\n[bench.cat]\nscript = \"\"\"\n{source}\"\"\"\n"),
+        )
+        .unwrap();
+        let inline = BenchScript::Inline {
+            source: source.into(),
+            declared_in: file.clone(),
+        };
+        let shown = check_script(&bench(inline.clone()))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            shown.starts_with(&format!("[bench.cat] {}: line 7: ", file.display())),
+            "{shown}"
+        );
+        std::fs::write(&file, "[bench.cat]\nscript = \"edited\"\n").unwrap();
+        let shown = check_script(&bench(inline)).unwrap_err().to_string();
+        assert!(shown.contains("inline script, line 3: "), "{shown}");
+        assert!(shown.contains("has changed since it was loaded"), "{shown}");
     }
 
     #[test]

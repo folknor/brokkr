@@ -8,8 +8,8 @@ use std::time::Instant;
 
 use super::PREVIEW_BYTES;
 use crate::bench::evidence;
-use crate::bench::lua::{self, Abort, CallOutcome, HandleRef, Word};
-use crate::bench::resources::{Handle, Resources};
+use crate::bench::lua::{self, Abort, CallOptions, CallOutcome, HandleRef, Word};
+use crate::bench::resources::{self, Handle, Resources};
 use crate::bench::store;
 use crate::error::DevError;
 use crate::output::child::Ending;
@@ -179,9 +179,17 @@ impl IterationHost {
         })
     }
 
+    /// The handle the script's table carries `index` of.
+    fn handle(&self, index: usize, function: &str) -> Result<Handle, Abort> {
+        self.handles
+            .get(index)
+            .cloned()
+            .ok_or_else(|| Abort::Failed(format!("{function}: handle {index} was never given out")))
+    }
+
     /// Launch one child and wait for it and its borrow; its evidence is kept
     /// whatever happens after the spawn.
-    fn launch(&mut self, argv: &[String], handles: &[Handle]) -> Result<CallOutcome, Abort> {
+    fn launch(&mut self, argv: &[String], call: &Declared) -> Result<CallOutcome, Abort> {
         let failed = |what: &str, e: &dyn std::fmt::Display| Abort::Failed(format!("{what}: {e}"));
         let program = self.program.clone();
         let program_str = program.display().to_string();
@@ -197,15 +205,26 @@ impl IterationHost {
             .path_str()
             .map_err(|e| failed("cannot name the marker FIFO", &e))?
             .to_owned();
-        let refs: Vec<&Handle> = handles.iter().collect();
-        let call = self
+        let argv_handles: Vec<&Handle> = call.argv.iter().collect();
+        let reads: Vec<&Handle> = call.reads.iter().collect();
+        let writes: Vec<&Handle> = call.writes.iter().collect();
+        let mut admitted = self
             .resources()?
-            .call(&program, &refs, &[], &[])
+            .call(
+                &program,
+                &argv_handles,
+                &reads,
+                &writes,
+                call.stdin.as_ref(),
+            )
             .map_err(|e| failed("the call was refused", &e))?;
-        let stdout = call
+        let stdin = admitted.take_stdin();
+        let call_stdout = admitted
             .stdout()
             .map_err(|e| failed("cannot open the stdout spool", &e))?;
-        let env = [(crate::sidecar::MARKER_FIFO_ENV, fifo_path.as_str())];
+        let mut env: Vec<(&str, &str)> =
+            vec![(crate::sidecar::MARKER_FIFO_ENV, fifo_path.as_str())];
+        env.extend(call.env.iter().map(|(n, v)| (n.as_str(), v.as_str())));
         let arg_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
         let guard = crate::shutdown::SigtermGuard::install();
         let command = crate::process::spawn::ChildPolicy::plain().command(
@@ -218,8 +237,8 @@ impl IterationHost {
         let start = Instant::now();
         let child = command.and_then(|mut command| {
             command
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::from(stdout))
+                .stdin(stdin.map_or_else(std::process::Stdio::null, std::process::Stdio::from))
+                .stdout(std::process::Stdio::from(call_stdout))
                 .stderr(std::process::Stdio::piped());
             crate::process::spawn::spawn(command, None)
         });
@@ -228,7 +247,7 @@ impl IterationHost {
             Err(error) => {
                 drop(guard);
                 // Never spawned: the borrow has no holder to wait for.
-                drop(call.finish());
+                drop(admitted.finish());
                 return Err(failed(&format!("cannot start {short}"), &error));
             }
         };
@@ -259,8 +278,30 @@ impl IterationHost {
         // drained, so a descendant still writing markers is never blocked on
         // it, and only once no holder is left is the capture closed.
         let mut open = open;
-        let finished = call.finish_observed(&mut || open.pump(&mut fifo));
+        let finished = admitted.finish_observed(&mut || open.pump(&mut fifo));
         let run = open.finish(&mut fifo, finished.is_ok());
+        self.keep_child(program_str, argv, &env, pid, start, &run);
+        let spool = finished.map_err(|e| {
+            failed(
+                &format!("{short} exited but something it started still holds its borrow"),
+                &e,
+            )
+        })?;
+        let mut outcome = call_outcome(short, &run, &spool)?;
+        outcome.stdout_file = Some(self.give(resources::spool_handle(&spool))?);
+        Ok(outcome)
+    }
+
+    /// A spawned child's evidence, for the document.
+    fn keep_child(
+        &mut self,
+        program: String,
+        argv: &[String],
+        env: &[(&str, &str)],
+        pid: u32,
+        start: Instant,
+        run: &crate::sidecar::SidecarRunResult,
+    ) {
         let origin = self.block_start.map_or(0, |at| {
             i64::try_from(start.saturating_duration_since(at).as_micros()).unwrap_or(i64::MAX)
         });
@@ -269,7 +310,7 @@ impl IterationHost {
             .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
             .collect();
         self.children.push(store::Child {
-            program: program_str.clone(),
+            program,
             argv: crate::history::redact_secret_argv(argv),
             env: evidence::redacted_env(&added),
             pid: Some(pid),
@@ -278,14 +319,17 @@ impl IterationHost {
             ending: evidence::child_ending(&run.data.ending),
             evidence: evidence::evidence(&run.data),
         });
-        let spool = finished.map_err(|e| {
-            failed(
-                &format!("{short} exited but something it started still holds its borrow"),
-                &e,
-            )
-        })?;
-        call_outcome(short, &run, &spool)
     }
+}
+
+/// One call's handles as declared: those in its argv, its `reads`, `writes`
+/// and `stdin`, and its environment additions.
+struct Declared {
+    argv: Vec<Handle>,
+    reads: Vec<Handle>,
+    writes: Vec<Handle>,
+    stdin: Option<Handle>,
+    env: Vec<(String, String)>,
 }
 
 /// What the script sees of a finished child, or why the sample ends.
@@ -318,6 +362,7 @@ fn call_outcome(
         stdout_truncated: preview.truncated,
         stderr: run.stderr.clone(),
         stderr_truncated: run.stderr_truncated || run.output_cut,
+        stdout_file: None,
     })
 }
 
@@ -332,32 +377,77 @@ fn stopping() -> Result<(), Abort> {
 }
 
 impl lua::Host for IterationHost {
+    fn stop(&mut self) -> Result<(), Abort> {
+        stopping()
+    }
+
     fn begin_block(&mut self, at: Instant) {
         self.block_start = Some(at);
     }
 
-    fn binary(&mut self, words: Vec<Word>) -> Result<CallOutcome, Abort> {
+    fn binary(&mut self, words: Vec<Word>, options: CallOptions) -> Result<CallOutcome, Abort> {
         stopping()?;
         let mut argv = Vec::with_capacity(words.len());
-        let mut handles = Vec::new();
+        let mut declared = Declared {
+            argv: Vec::new(),
+            reads: Vec::new(),
+            writes: Vec::new(),
+            stdin: None,
+            env: options.env,
+        };
         for word in words {
             match word {
                 Word::Text(text) => argv.push(text),
                 Word::Handle(index) => {
-                    let handle = self.handles.get(index).cloned().ok_or_else(|| {
-                        Abort::Failed(format!("binary(): handle {index} was never given out"))
-                    })?;
+                    let handle = self.handle(index, "binary()")?;
                     argv.push(handle.path().display().to_string());
-                    handles.push(handle);
+                    declared.argv.push(handle);
                 }
             }
         }
-        self.launch(&argv, &handles)
+        for index in options.reads {
+            declared
+                .reads
+                .push(self.handle(index, "binary_with(): reads")?);
+        }
+        for index in options.writes {
+            declared
+                .writes
+                .push(self.handle(index, "binary_with(): writes")?);
+        }
+        if let Some(index) = options.stdin {
+            declared.stdin = Some(self.handle(index, "binary_with(): stdin")?);
+        }
+        self.launch(&argv, &declared)
     }
 
     fn since(&mut self, sha: &str) -> Result<bool, Abort> {
         stopping()?;
         self.since.ask(sha)
+    }
+
+    fn read(&mut self, index: usize) -> Result<Vec<u8>, Abort> {
+        stopping()?;
+        let handle = self.handle(index, "read()")?;
+        self.resources()?
+            .read(&handle, lua::MAX_STRING_BYTES)
+            .map_err(|e| Abort::Failed(format!("read(): {e}")))
+    }
+
+    fn write(&mut self, index: usize, contents: &[u8]) -> Result<(), Abort> {
+        stopping()?;
+        let handle = self.handle(index, "write()")?;
+        self.resources()?
+            .write(&handle, contents)
+            .map_err(|e| Abort::Failed(format!("write(): {e}")))
+    }
+
+    fn filesize(&mut self, index: usize) -> Result<u64, Abort> {
+        stopping()?;
+        let handle = self.handle(index, "filesize()")?;
+        self.resources()?
+            .filesize(&handle)
+            .map_err(|e| Abort::Failed(format!("filesize(): {e}")))
     }
 
     fn output(&mut self, name: &str) -> Result<HandleRef, Abort> {

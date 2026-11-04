@@ -29,7 +29,7 @@
 //! guarantee: handles reserve, they do not confine.
 
 use std::collections::BTreeSet;
-use std::ffi::CString;
+use std::ffi::{CString, OsStr};
 use std::fs::File;
 use std::io;
 use std::os::fd::{AsRawFd as _, FromRawFd as _};
@@ -86,8 +86,17 @@ pub(crate) struct Iteration {
     inputs: Vec<PathBuf>,
     /// The output and scratch names given out, so none is given twice.
     given: BTreeSet<(Area, String)>,
-    /// Every spool made, read-only to every later call.
-    spools: Vec<PathBuf>,
+    /// Every spool made, read-only to every later call, each with a
+    /// descriptor kept open until the iteration ends: it pins the inode, so
+    /// the identity a later open of the spool is checked against cannot be
+    /// reused by a file a child put in its place.
+    spools: Vec<PinnedSpool>,
+}
+
+#[derive(Debug)]
+struct PinnedSpool {
+    path: PathBuf,
+    file: File,
 }
 
 impl Iteration {
@@ -194,12 +203,16 @@ impl Iteration {
 
     /// Admit one call of `program` declaring `resources` (absolute paths,
     /// each with the access this call needs) and make its stdout spool.
-    /// The borrow's descriptor is armed for the next spawn of `program` on
-    /// this thread; pass [`Call::stdout`] as the child's stdout.
+    /// `stdin`, one of `resources` declared for reading, is opened as
+    /// [`Iteration::open_file`] opens a file, against the same admission and
+    /// inside the same critical section. The borrow's descriptor is armed
+    /// for the next spawn of `program` on this thread; pass [`Call::stdout`]
+    /// as the child's stdout and [`Call::take_stdin`] as its stdin.
     pub(crate) fn call(
         &mut self,
         program: &Path,
         resources: &[(PathBuf, Access)],
+        stdin: Option<&Path>,
     ) -> Result<Call, DevError> {
         let store = super::store().ok_or_else(|| {
             DevError::Config("$HOME is not set: the launch lease store has nowhere to live".into())
@@ -212,9 +225,30 @@ impl Iteration {
         let stdout = self.verified(Area::Stdout)?;
         let name = self.spools.len().to_string();
         let spool_path = self.dir.join(Area::Stdout.name()).join(&name);
+        // Spelled once: the admission judges stdin as this, and it is opened
+        // as this.
+        let stdin = match stdin {
+            Some(path) => {
+                if !resources
+                    .iter()
+                    .any(|(p, a)| p == path && *a == Access::Read)
+                {
+                    return Err(DevError::Internal(format!(
+                        "stdin {} is not declared read by its call",
+                        path.display()
+                    )));
+                }
+                Some((path, spell(path)?))
+            }
+            None => None,
+        };
         let mut declared = Vec::new();
         for (path, access) in resources {
-            declared.push(Resource::new(&spell(path)?, *access, Disposition::Reserve));
+            let spelled = match &stdin {
+                Some((stdin_path, spelled)) if *stdin_path == path.as_path() => spelled.clone(),
+                _ => spell(path)?,
+            };
+            declared.push(Resource::new(&spelled, *access, Disposition::Reserve));
         }
         // The child writes its spool through stdout: an implicit write.
         declared.push(Resource::new(
@@ -223,6 +257,10 @@ impl Iteration {
             Disposition::Reserve,
         ));
         self.admit_declared(&store, &declared)?;
+        let stdin = match &stdin {
+            Some((path, spelled)) => Some(self.open_admitted(path, spelled)?),
+            None => None,
+        };
         let file = open_at(
             &stdout.file,
             &name,
@@ -230,7 +268,13 @@ impl Iteration {
         )
         .map_err(|e| io_error(&format!("cannot make spool {}", spool_path.display()), e))?;
         // It exists now: read-only to every later call, admitted or not.
-        self.spools.push(spool_path.clone());
+        let pin = file
+            .try_clone()
+            .map_err(|e| io_error(&format!("cannot pin spool {}", spool_path.display()), e))?;
+        self.spools.push(PinnedSpool {
+            path: spool_path.clone(),
+            file: pin,
+        });
         names_inode(&spool_path, &file)?;
         let borrow = store
             .create_tied(declared, Tie::Borrow(owner.id().to_owned()))
@@ -244,7 +288,158 @@ impl Iteration {
                 path: spool_path,
                 file,
             }),
+            stdin,
         })
+    }
+
+    /// Open the file at `path` for brokkr's own reading (`read()`,
+    /// `filesize()`): admitted as a call reading it would be (the read-only
+    /// veto, authority, conflicts) inside the store's critical section, then
+    /// opened against that admission without following a link, and refused
+    /// unless it is a regular file.
+    pub(crate) fn open_file(&mut self, path: &Path) -> Result<File, DevError> {
+        let store = super::store().ok_or_else(|| {
+            DevError::Config("$HOME is not set: the launch lease store has nowhere to live".into())
+        })?;
+        let _serial = super::serialize().map_err(|e| io_error("cannot open a file", e))?;
+        let spelled = spell(path)?;
+        self.admit_declared(
+            &store,
+            &[Resource::new(&spelled, Access::Read, Disposition::Reserve)],
+        )?;
+        self.open_admitted(path, &spelled)
+    }
+
+    /// Replace the output at `path` (`write()`) with `contents`, admitted as
+    /// a call writing it would be. Through `out/`'s held descriptor: whatever
+    /// entry the name holds is removed first, a directory refused, and the
+    /// file is created afresh, exclusively and without following a link, so
+    /// an entry a child made a hard link to another file is cut, never
+    /// written through.
+    pub(crate) fn write_file(&mut self, path: &Path, contents: &[u8]) -> Result<(), DevError> {
+        let name = match self.place(path) {
+            Some((Area::Out, name)) => name.to_owned(),
+            _ => {
+                return Err(DevError::Config(format!(
+                    "{} is not an output of this iteration: only an output's file is written",
+                    path.display()
+                )));
+            }
+        };
+        let store = super::store().ok_or_else(|| {
+            DevError::Config("$HOME is not set: the launch lease store has nowhere to live".into())
+        })?;
+        let _serial = super::serialize().map_err(|e| io_error("cannot write a file", e))?;
+        self.admit_declared(
+            &store,
+            &[Resource::new(
+                &spell(path)?,
+                Access::Write,
+                Disposition::Reserve,
+            )],
+        )?;
+        let area = self.verified(Area::Out)?;
+        let failed = |e: io::Error| io_error(&format!("cannot write {}", path.display()), e);
+        match unlink_at(&area.file, &name) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) if e.raw_os_error() == Some(libc::EISDIR) => {
+                return Err(DevError::Config(format!(
+                    "{} is a directory: write() writes a file",
+                    path.display()
+                )));
+            }
+            Err(e) => return Err(failed(e)),
+        }
+        let mut file = open_at(
+            &area.file,
+            &name,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+        )
+        .map_err(failed)?;
+        io::Write::write_all(&mut file, contents).map_err(failed)?;
+        names_inode(path, &file)
+    }
+
+    /// Where `path` sits in the iteration directory, if it is one entry of
+    /// an area: the handles carry exactly the paths brokkr made.
+    fn place<'p>(&self, path: &'p Path) -> Option<(Area, &'p str)> {
+        let name = path.file_name()?.to_str()?;
+        let parent = path.parent()?;
+        Area::ALL
+            .into_iter()
+            .find(|area| parent == self.dir.join(area.name()))
+            .map(|area| (area, name))
+    }
+
+    /// Open `path` for reading, as admitted by `spelled`: an entry of the
+    /// iteration through its area's held descriptor (a spool only as the
+    /// inode it was made as), anything else by walking its resolved form
+    /// without following a link, so a link substituted since the admission
+    /// fails the open. Displacement is detected, not prevented: what a
+    /// child does to the namespace meanwhile can only make the open fail.
+    fn open_admitted(&self, path: &Path, spelled: &Spelled) -> Result<File, DevError> {
+        let failed = |e: io::Error| {
+            if e.raw_os_error() == Some(libc::ELOOP) {
+                DevError::Config(format!(
+                    "{} is a link, which brokkr does not follow",
+                    path.display()
+                ))
+            } else {
+                io_error(&format!("cannot open {}", path.display()), e)
+            }
+        };
+        let flags = libc::O_RDONLY | libc::O_NONBLOCK;
+        let file = match self.place(path) {
+            Some((Area::Scratch, _)) => {
+                return Err(DevError::Config(format!(
+                    "{} is a scratch directory, not a file",
+                    path.display()
+                )));
+            }
+            Some((area, name)) => {
+                let dir = self.verified(area)?;
+                let file = open_at(&dir.file, name, flags).map_err(failed)?;
+                if area == Area::Stdout {
+                    self.check_spool(path, &file)?;
+                }
+                // After the open too: an area moved since it was verified
+                // makes the advertised path name something else.
+                self.verified(area)?;
+                still_names(path, &file)?;
+                file
+            }
+            None => {
+                let file = open_resolved(&spelled.resolved, flags).map_err(failed)?;
+                still_names(&spelled.resolved, &file)?;
+                file
+            }
+        };
+        let meta = file.metadata().map_err(failed)?;
+        if !meta.is_file() {
+            return Err(DevError::Config(format!(
+                "{} is not a regular file",
+                path.display()
+            )));
+        }
+        Ok(file)
+    }
+
+    /// Fail unless `file`, opened at the spool path `path`, is the spool
+    /// this iteration made there.
+    fn check_spool(&self, path: &Path, file: &File) -> Result<(), DevError> {
+        let pinned = self.spools.iter().find(|s| s.path == path).ok_or_else(|| {
+            DevError::Config(format!("{} is no spool of this iteration", path.display()))
+        })?;
+        let (a, b) = (file.metadata()?, pinned.file.metadata()?);
+        if (a.dev(), a.ino()) == (b.dev(), b.ino()) {
+            Ok(())
+        } else {
+            Err(DevError::Config(format!(
+                "{} is no longer the spool its call wrote: something replaced it",
+                path.display()
+            )))
+        }
     }
 
     /// Release the owner lease. The directory goes once no borrow of it is
@@ -286,7 +481,8 @@ impl Iteration {
             .lease
             .as_ref()
             .ok_or_else(|| DevError::Internal("an admission on a released iteration".into()))?;
-        authorize(owner.resources(), &self.inputs, &self.spools, declared)?;
+        let spools: Vec<PathBuf> = self.spools.iter().map(|s| s.path.clone()).collect();
+        authorize(owner.resources(), &self.inputs, &spools, declared)?;
         let mut scan = store.scan();
         scan.reservations.retain(|r| r.id != owner.id());
         match conflict(&scan, declared) {
@@ -354,9 +550,16 @@ impl Drop for Iteration {
 pub(crate) struct Call {
     lease: Option<Lease>,
     spool: Option<Spool>,
+    stdin: Option<File>,
 }
 
 impl Call {
+    /// The child's stdin, opened at admission; `None` when the call has none
+    /// (or it was taken already).
+    pub(crate) fn take_stdin(&mut self) -> Option<File> {
+        self.stdin.take()
+    }
+
     /// A descriptor on the spool for the child's stdout.
     pub(crate) fn stdout(&self) -> io::Result<File> {
         match &self.spool {
@@ -421,10 +624,6 @@ impl Drop for Call {
 /// A finished call's stdout, in full in its spool file.
 #[derive(Debug)]
 pub(crate) struct Spool {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "feeding a spool onward is not built yet")
-    )]
     path: PathBuf,
     file: File,
 }
@@ -437,10 +636,6 @@ pub(crate) struct Preview {
 }
 
 impl Spool {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "feeding a spool onward is not built yet")
-    )]
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
@@ -576,11 +771,28 @@ fn names_inode(path: &Path, made: &File) -> Result<(), DevError> {
     }
 }
 
-fn c_name(name: &str) -> io::Result<CString> {
-    CString::new(Path::new(name).as_os_str().as_bytes()).map_err(io::Error::other)
+/// Fail unless `path`, read without following a link at its end, names the
+/// inode `opened` was opened on: a name replaced while brokkr opened it.
+fn still_names(path: &Path, opened: &File) -> Result<(), DevError> {
+    let opened = opened.metadata()?;
+    let named = std::fs::symlink_metadata(path)
+        .map(|m| (m.dev(), m.ino()) == (opened.dev(), opened.ino()))
+        .unwrap_or(false);
+    if named {
+        Ok(())
+    } else {
+        Err(DevError::Config(format!(
+            "{} no longer names the file brokkr opened there: something replaced it",
+            path.display()
+        )))
+    }
 }
 
-fn mkdir_at(parent: &File, name: &str) -> io::Result<()> {
+fn c_name(name: impl AsRef<OsStr>) -> io::Result<CString> {
+    CString::new(name.as_ref().as_bytes()).map_err(io::Error::other)
+}
+
+fn mkdir_at(parent: &File, name: impl AsRef<OsStr>) -> io::Result<()> {
     let name = c_name(name)?;
     // SAFETY: an open directory descriptor and a valid C string for the
     // call's duration.
@@ -592,7 +804,7 @@ fn mkdir_at(parent: &File, name: &str) -> io::Result<()> {
 }
 
 /// `openat` below `parent`, never following a link in `name`.
-fn open_at(parent: &File, name: &str, flags: libc::c_int) -> io::Result<File> {
+fn open_at(parent: &File, name: impl AsRef<OsStr>, flags: libc::c_int) -> io::Result<File> {
     let name = c_name(name)?;
     let mode: libc::c_uint = 0o600;
     // SAFETY: as for `mkdir_at`; the returned descriptor is owned here.
@@ -611,6 +823,43 @@ fn open_at(parent: &File, name: &str, flags: libc::c_int) -> io::Result<File> {
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
-fn open_dir_at(parent: &File, name: &str) -> io::Result<File> {
+fn open_dir_at(parent: &File, name: impl AsRef<OsStr>) -> io::Result<File> {
     open_at(parent, name, libc::O_RDONLY | libc::O_DIRECTORY)
+}
+
+/// `unlinkat` below `parent`, never following a link and never removing a
+/// directory (`EISDIR`).
+fn unlink_at(parent: &File, name: impl AsRef<OsStr>) -> io::Result<()> {
+    let name = c_name(name)?;
+    // SAFETY: as for `mkdir_at`.
+    if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Open the absolute, already resolved `path` one component at a time from
+/// `/`, following no link anywhere: a link put on the way since it was
+/// resolved fails the open (`ELOOP` or `ENOTDIR`).
+fn open_resolved(path: &Path, flags: libc::c_int) -> io::Result<File> {
+    let mut names = Vec::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::RootDir => {}
+            std::path::Component::Normal(name) => names.push(name),
+            _ => return Err(io::Error::other("the path is not resolved")),
+        }
+    }
+    let Some((last, parents)) = names.split_last() else {
+        return Err(io::Error::other("the root is not a file"));
+    };
+    let mut dir = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open("/")?;
+    for name in parents {
+        dir = open_dir_at(&dir, name)?;
+    }
+    open_at(&dir, last, flags)
 }

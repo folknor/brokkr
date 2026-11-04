@@ -347,14 +347,15 @@ pub(super) struct Frozen {
 }
 
 fn freeze(bench: &Bench) -> Result<Frozen, DevError> {
-    let (bytes, origin, chunk) = match &bench.script {
+    let (bytes, origin, chunk, lines) = match &bench.script {
         BenchScript::Inline {
             source,
             declared_in,
         } => (
             source.as_bytes().to_vec(),
             declared_in.clone(),
-            format!("[bench.{}] script", bench.name),
+            None,
+            Some(super::InlineLines::of(&bench.name, source, declared_in)),
         ),
         BenchScript::File { path, declared_in } => (
             std::fs::read(path).map_err(|e| {
@@ -366,12 +367,35 @@ fn freeze(bench: &Bench) -> Result<Frozen, DevError> {
                 ))
             })?,
             path.clone(),
-            path.display().to_string(),
+            Some(path.display().to_string()),
+            None,
         ),
     };
-    let script = lua::load_script(&bytes, Some(&chunk)).map_err(|e| {
-        DevError::Config(format!("[bench.{}] {}: {e}", bench.name, origin.display()))
+    // An inline script is named by its config file, and numbered by that
+    // file's lines, when they can be mapped; the map is frozen with it.
+    let chunk = match (&chunk, &lines) {
+        (Some(chunk), _) => chunk.clone(),
+        (None, Some(lines)) => lines.chunk.clone(),
+        (None, None) => format!("[bench.{}] script", bench.name),
+    };
+    let map = lines.as_ref().and_then(|l| l.lines.clone());
+    let script = lua::load_script(&bytes, Some(&chunk), map).map_err(|e| {
+        let problem = match &lines {
+            Some(lines) => lines.problem(&e),
+            None => e.to_string(),
+        };
+        DevError::Config(format!(
+            "[bench.{}] {}: {problem}",
+            bench.name,
+            origin.display()
+        ))
     })?;
+    if let Some(why) = lines.as_ref().and_then(super::InlineLines::why_not) {
+        output::warn(&format!(
+            "[bench.{}] script errors count lines from the script string, since {why}",
+            bench.name
+        ));
+    }
     Ok(Frozen {
         bytes,
         origin,

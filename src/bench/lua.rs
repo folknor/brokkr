@@ -12,17 +12,40 @@
 //! cross as bytes, text fields are checked from those exact bytes, and a
 //! builtin's failure travels back through Lua as an [`Abort`] inside a host
 //! error, recovered by downcast. dellingr 0.6.0 has no interrupt, so a script
-//! spinning in pure Lua is stopped only at its next builtin call.
+//! spinning in pure Lua is stopped only at its next builtin call: every
+//! builtin but `print` asks the host for a pending stop before anything else.
+//!
+//! What a table is to brokkr is never a data key, so config data and decoded
+//! JSON are only data: a JSON array carries one metatable and `json.null` is
+//! one table, both made at setup, protected (`__metatable` false, so a
+//! script can neither read nor replace a protected metatable) and recognised
+//! by identity through the State's registry; a handle carries its index in a
+//! protected metatable of its own, read raw. A script can build a lookalike
+//! handle on purpose; that gains nothing, since a handle resolves only to one
+//! the host gave out.
+//!
+//! An inline script's line numbers are mapped to its config file's
+//! (`super::script_lines`) when the script carries a map: compile errors,
+//! every traceback frame and the location a builtin's failure is given.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ::dellingr::error::{Error, ErrorKind};
+use ::dellingr::error::{Error, ErrorKind, StackFrame};
 use ::dellingr::{ArgCount, LuaType, RetCount, RustFnHandle, State};
+
+use super::json;
+use super::script_lines::LineMap;
+
+/// The longest string a script can hold, dellingr's limit: `read()` refuses
+/// a file past it.
+pub(crate) const MAX_STRING_BYTES: usize = ::dellingr::limits::MAX_STRING_BYTES;
 
 /// Why a script did not compile.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CompileError {
-    /// 1-based line of the failure in the script, 0 when unknown.
+    /// 1-based line of the failure, in the config file when the script
+    /// carries a line map, else in the script; 0 when unknown.
     pub(crate) line: u32,
     /// What dellingr reported, without the chunk-name and line prefix.
     pub(crate) message: String,
@@ -40,22 +63,39 @@ impl std::fmt::Display for CompileError {
 
 /// Compile `source` without running any of it. Only what the parser and
 /// code generator reject is caught: a call to a misspelt builtin compiles.
-pub(crate) fn compile(source: &[u8]) -> Result<(), CompileError> {
-    load_script(source, None).map(|_| ())
+pub(crate) fn compile(source: &[u8], lines: Option<&LineMap>) -> Result<(), CompileError> {
+    load_script(source, None, lines.cloned()).map(|_| ())
 }
 
-/// A compiled script, run unchanged in every iteration of a run.
+/// A compiled script, run unchanged in every iteration of a run, with the
+/// map of its lines into the config file that holds it, for an inline one.
 #[derive(Clone)]
-pub(crate) struct Script(::dellingr::Program);
+pub(crate) struct Script {
+    program: ::dellingr::Program,
+    lines: Option<Arc<LineMap>>,
+}
 
 /// Compile `source` under `chunk`, the name errors and tracebacks give it.
-pub(crate) fn load_script(source: &[u8], chunk: Option<&str>) -> Result<Script, CompileError> {
+pub(crate) fn load_script(
+    source: &[u8],
+    chunk: Option<&str>,
+    lines: Option<LineMap>,
+) -> Result<Script, CompileError> {
+    let lines = lines.map(Arc::new);
     ::dellingr::Program::compile(source, chunk.map(str::as_bytes))
-        .map(Script)
+        .map(|program| Script {
+            program,
+            lines: lines.clone(),
+        })
         .map_err(|error| CompileError {
-            line: error.line_num(),
+            line: mapped(lines.as_deref(), error.line_num()),
             message: error.kind().to_string(),
         })
+}
+
+/// `line` in the config file, or as it is without a map (0 stays 0).
+fn mapped(lines: Option<&LineMap>, line: u32) -> u32 {
+    lines.and_then(|m| m.file_line(line)).unwrap_or(line)
 }
 
 /// One argv word of a `binary()` call: text, or a handle the runner gave out
@@ -73,11 +113,13 @@ pub(crate) struct HandleRef {
     pub(crate) path: String,
 }
 
-/// A value the runner hands the script, built without dellingr: the params,
-/// their keys, `config()`'s table. A table's keys are strings; a list is
-/// positions 1..n.
+/// A value crossing the seam without dellingr: the params, their keys,
+/// `config()`'s table, and what `json` and `record` convert. A table's keys
+/// are strings; a list is positions 1..n.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Value {
+    /// JSON's null: Lua's nil at the root, `json.null` inside a table.
+    Null,
     Bool(bool),
     Number(f64),
     Text(String),
@@ -96,6 +138,17 @@ pub(crate) struct Args {
     pub(crate) keys: Vec<(String, Value)>,
 }
 
+/// A `binary_with()` call's options, every handle by its index.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct CallOptions {
+    /// Added to the child's environment, sorted by name.
+    pub(crate) env: Vec<(String, String)>,
+    pub(crate) reads: Vec<usize>,
+    pub(crate) writes: Vec<usize>,
+    /// The file the child reads as its stdin.
+    pub(crate) stdin: Option<usize>,
+}
+
 /// What one `binary()` call hands back to the script.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CallOutcome {
@@ -107,6 +160,8 @@ pub(crate) struct CallOutcome {
     pub(crate) stdout_truncated: bool,
     pub(crate) stderr: Vec<u8>,
     pub(crate) stderr_truncated: bool,
+    /// The child's whole stdout, its spool, as a handle.
+    pub(crate) stdout_file: Option<HandleRef>,
 }
 
 /// Why a builtin ended the sample.
@@ -131,16 +186,24 @@ impl std::error::Error for Abort {}
 
 /// What the runner decides for a script's builtins. A call reaching here
 /// has its arguments read and checked; whether it may run at top level is
-/// decided here too (`binary`, `output` and `scratch` raise there).
+/// decided here too (`binary`, `output`, `scratch`, `read`, `write` and
+/// `filesize` raise there).
 pub(crate) trait Host: Send + 'static {
+    /// A pending stop, asked first by every builtin but `print`.
+    fn stop(&mut self) -> Result<(), Abort>;
     /// `bench()` is about to be called: the block starts now.
     fn begin_block(&mut self, at: Instant);
-    fn binary(&mut self, words: Vec<Word>) -> Result<CallOutcome, Abort>;
+    fn binary(&mut self, words: Vec<Word>, options: CallOptions) -> Result<CallOutcome, Abort>;
     fn since(&mut self, sha: &str) -> Result<bool, Abort>;
     fn output(&mut self, name: &str) -> Result<HandleRef, Abort>;
     fn scratch(&mut self, name: &str) -> Result<HandleRef, Abort>;
     /// The resolved config, for `config()`; allowed at top level.
-    fn config(&mut self) -> Result<std::sync::Arc<Value>, Abort>;
+    fn config(&mut self) -> Result<Arc<Value>, Abort>;
+    /// The whole file a handle names, at most [`MAX_STRING_BYTES`].
+    fn read(&mut self, handle: usize) -> Result<Vec<u8>, Abort>;
+    /// Replace the file an output handle names with `contents`.
+    fn write(&mut self, handle: usize, contents: &[u8]) -> Result<(), Abort>;
+    fn filesize(&mut self, handle: usize) -> Result<u64, Abort>;
 }
 
 /// How one sample ended.
@@ -161,17 +224,23 @@ pub(crate) struct Sample {
     pub(crate) record: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
-/// The deepest a record may nest: the store refuses past 64 levels.
-const MAX_RECORD_DEPTH: usize = 64;
-
-/// The hidden field a handle table carries its index in.
-const HANDLE_KEY: &str = "__brokkr_handle";
+/// The metatable key a handle carries its index under.
+const HANDLE_MARK: &str = "__brokkr_handle";
 
 /// The per-State context a builtin reaches through the State's user data.
 struct Ctx<H> {
     host: H,
     in_bench: bool,
     ok: RustFnHandle,
+    marks: Marks,
+}
+
+/// The values brokkr recognises by identity, held in the State's registry:
+/// the one protected metatable every JSON array carries, and `json.null`.
+#[derive(Clone)]
+struct Marks {
+    array: Arc<::dellingr::Anchor>,
+    null: Arc<::dellingr::Anchor>,
 }
 
 /// Run one sample of `script` in a fresh State: the chunk's top level, then
@@ -179,8 +248,8 @@ struct Ctx<H> {
 /// extracted. Returns the host for the next sample.
 pub(crate) fn run_sample<H: Host>(script: &Script, args: &Args, host: H) -> (Sample, H) {
     let mut state = State::with_callbacks(Box::new(Console));
-    let ok = match install::<H>(&mut state) {
-        Ok(ok) => ok,
+    let (ok, marks) = match install::<H>(&mut state) {
+        Ok(installed) => installed,
         Err(error) => {
             return (
                 failed(format!("cannot set up the Lua state: {error}"), None),
@@ -192,8 +261,9 @@ pub(crate) fn run_sample<H: Host>(script: &Script, args: &Args, host: H) -> (Sam
         host,
         in_bench: false,
         ok,
+        marks: marks.clone(),
     }));
-    let sample = sample::<H>(&mut state, script, args);
+    let sample = sample::<H>(&mut state, script, args, &marks);
     let host = state
         .user_data_mut::<Option<Ctx<H>>>()
         .and_then(Option::take)
@@ -213,12 +283,13 @@ fn failed(reason: String, wall: Option<Duration>) -> Sample {
     }
 }
 
-fn sample<H: Host>(state: &mut State, script: &Script, args: &Args) -> Sample {
+fn sample<H: Host>(state: &mut State, script: &Script, args: &Args, marks: &Marks) -> Sample {
+    let lines = script.lines.as_deref();
     if let Err(error) = state
-        .load(&script.0)
+        .load(&script.program)
         .and_then(|()| state.call(ArgCount::Fixed(0), RetCount::Fixed(0)))
     {
-        return ended(&error, None);
+        return ended(error, lines, None);
     }
     if let Err(error) = state.get_global("bench") {
         return failed(format!("cannot read bench: {error}"), None);
@@ -229,10 +300,10 @@ fn sample<H: Host>(state: &mut State, script: &Script, args: &Args) -> Sample {
             None,
         );
     }
-    if let Err(error) = push_value(state, &Value::Table(args.params.clone())) {
+    if let Err(error) = push_value(state, &Value::Table(args.params.clone()), marks) {
         return failed(format!("cannot make the params table: {error}"), None);
     }
-    if let Err(error) = push_value(state, &Value::Table(args.keys.clone())) {
+    if let Err(error) = push_value(state, &Value::Table(args.keys.clone()), marks) {
         return failed(format!("cannot make the keys table: {error}"), None);
     }
     let start = Instant::now();
@@ -246,7 +317,7 @@ fn sample<H: Host>(state: &mut State, script: &Script, args: &Args) -> Sample {
         ctx.in_bench = false;
     }
     if let Err(error) = called {
-        return ended(&error, Some(wall));
+        return ended(error, lines, Some(wall));
     }
     let verdict = match state.typ(-1) {
         LuaType::Nil => None,
@@ -269,7 +340,7 @@ fn sample<H: Host>(state: &mut State, script: &Script, args: &Args) -> Sample {
             );
         }
     };
-    match extract_record(state) {
+    match extract_record(state, marks) {
         Ok(record) => Sample {
             outcome: SampleOutcome::Completed(verdict),
             wall: Some(wall),
@@ -279,15 +350,18 @@ fn sample<H: Host>(state: &mut State, script: &Script, args: &Args) -> Sample {
     }
 }
 
-/// A sample ended by an error out of the chunk or `bench()`.
-fn ended(error: &Error, wall: Option<Duration>) -> Sample {
-    let outcome = match abort_of(error) {
+/// A sample ended by an error out of the chunk or `bench()`. A builtin's
+/// failure is its reason after the script line that called it; any other
+/// error is dellingr's own rendering, its traceback included, with every
+/// line mapped.
+fn ended(error: Error, lines: Option<&LineMap>, wall: Option<Duration>) -> Sample {
+    let outcome = match abort_of(&error) {
         Some(Abort::Interrupted) => SampleOutcome::Interrupted,
-        Some(Abort::Failed(why)) => SampleOutcome::Failed(why.clone()),
+        Some(Abort::Failed(why)) => SampleOutcome::Failed(located(&error, lines, why)),
         None => {
-            let shown = error.to_string();
+            let shown = rendered(error, lines);
             SampleOutcome::Failed(if shown.trim().is_empty() {
-                format!("the script failed ({:?})", error.kind())
+                "the script failed".to_owned()
             } else {
                 shown
             })
@@ -300,6 +374,50 @@ fn ended(error: &Error, wall: Option<Duration>) -> Sample {
     }
 }
 
+/// `why` after `chunk:line:` of the innermost script frame, or alone when no
+/// frame knows its line.
+fn located(error: &Error, lines: Option<&LineMap>, why: &str) -> String {
+    let frame = error
+        .stack_trace()
+        .iter()
+        .find(|f| f.source.is_some() && f.line != 0);
+    match frame.and_then(|f| f.source.as_deref().map(|s| (s, f.line))) {
+        Some((source, line)) => format!(
+            "{}:{}: {why}",
+            String::from_utf8_lossy(source),
+            mapped(lines, line)
+        ),
+        None => why.to_owned(),
+    }
+}
+
+/// dellingr's rendering of `error` with every frame's lines mapped.
+fn rendered(error: Error, lines: Option<&LineMap>) -> String {
+    let Some(lines) = lines else {
+        return error.to_string();
+    };
+    if error.stack_trace().is_empty() {
+        // Rendered from the error's own position, which no frame carries.
+        let at = mapped(Some(lines), error.line_num());
+        return match error.source_name() {
+            Some(source) if at != 0 => {
+                format!("{}:{at}: {}", String::from_utf8_lossy(source), error.kind())
+            }
+            _ => error.kind().to_string(),
+        };
+    }
+    let frames: Vec<StackFrame> = error
+        .stack_trace()
+        .iter()
+        .map(|frame| StackFrame {
+            line: mapped(Some(lines), frame.line),
+            defined_line: mapped(Some(lines), frame.defined_line),
+            ..frame.clone()
+        })
+        .collect();
+    error.with_stack_trace(frames).to_string()
+}
+
 fn abort_of(error: &Error) -> Option<&Abort> {
     match error.kind() {
         ErrorKind::HostError(inner) => inner.downcast_ref::<Abort>(),
@@ -307,16 +425,21 @@ fn abort_of(error: &Error) -> Option<&Abort> {
     }
 }
 
-/// The builtins, as globals (so dellingr names them in errors), and the
-/// `record` table. Returns the handle of `result:ok`.
-fn install<H: Host>(state: &mut State) -> Result<RustFnHandle, Error> {
-    let builtins: [(&str, ::dellingr::RustFunc); 6] = [
+/// The builtins, as globals (so dellingr names them in errors), the `json`
+/// table and the `record` table. Returns the handle of `result:ok` and the
+/// anchored marks.
+fn install<H: Host>(state: &mut State) -> Result<(RustFnHandle, Marks), Error> {
+    let builtins: [(&str, ::dellingr::RustFunc); 10] = [
         ("binary", lua_binary::<H>),
+        ("binary_with", lua_binary_with::<H>),
         ("since", lua_since::<H>),
-        ("fail", lua_fail),
+        ("fail", lua_fail::<H>),
         ("output", lua_output::<H>),
         ("scratch", lua_scratch::<H>),
         ("config", lua_config::<H>),
+        ("read", lua_read::<H>),
+        ("write", lua_write::<H>),
+        ("filesize", lua_filesize::<H>),
     ];
     for (name, function) in builtins {
         let handle = state.add_rust_fn(function)?;
@@ -324,8 +447,44 @@ fn install<H: Host>(state: &mut State) -> Result<RustFnHandle, Error> {
         state.set_global(name)?;
     }
     state.new_table()?;
+    let table = top(state);
+    let functions: [(&str, ::dellingr::RustFunc); 2] = [
+        ("encode", lua_json_encode::<H>),
+        ("decode", lua_json_decode::<H>),
+    ];
+    for (name, function) in functions {
+        let handle = state.add_rust_fn(function)?;
+        state.push_string(name)?;
+        state.push_rust_fn(handle)?;
+        state.set_table_raw(table)?;
+    }
+    // The array metatable and json.null: each a table only brokkr holds a
+    // reference to, behind a protected metatable a script cannot read or
+    // replace.
+    protected_metatable(state)?;
+    let array = Arc::new(state.anchor()?);
+    state.push_string("null")?;
+    state.new_table()?;
+    let null = top(state);
+    protected_metatable(state)?;
+    state.set_metatable_of(null)?;
+    let null = Arc::new(state.anchor_at(null)?);
+    state.set_table_raw(table)?;
+    state.set_global("json")?;
+    state.new_table()?;
     state.set_global("record")?;
-    state.add_rust_fn(lua_result_ok)
+    let ok = state.add_rust_fn(lua_result_ok::<H>)?;
+    Ok((ok, Marks { array, null }))
+}
+
+/// Push a fresh empty metatable with `__metatable` false: `getmetatable`
+/// answers false and `setmetatable` refuses on whatever carries it.
+fn protected_metatable(state: &mut State) -> Result<(), Error> {
+    state.new_table()?;
+    let meta = top(state);
+    state.push_string("__metatable")?;
+    state.push_boolean(false)?;
+    state.set_table_raw(meta)
 }
 
 fn ctx<H: Host>(state: &mut State) -> Option<&mut Ctx<H>> {
@@ -343,6 +502,16 @@ fn raise_failed(state: &State, why: String) -> Error {
     raise(state, Abort::Failed(why))
 }
 
+/// Every builtin's first step but `print`'s: a pending stop ends the sample
+/// here, the one place a script spinning in Lua meets it.
+fn stop_first<H: Host>(state: &mut State) -> Result<(), Error> {
+    let stopped = match ctx::<H>(state) {
+        Some(ctx) => ctx.host.stop(),
+        None => Err(Abort::Failed("no bench context".into())),
+    };
+    stopped.map_err(|abort| raise(state, abort))
+}
+
 /// The host, for a builtin only `bench()` may call.
 fn bench_host<'a, H: Host>(state: &'a mut State, name: &str) -> Result<&'a mut H, Error> {
     let in_bench = ctx::<H>(state).is_some_and(|c| c.in_bench);
@@ -351,6 +520,17 @@ fn bench_host<'a, H: Host>(state: &'a mut State, name: &str) -> Result<&'a mut H
             state,
             format!("{name}() is only available inside bench(), not at the script's top level"),
         ));
+    }
+    match ctx::<H>(state) {
+        Some(ctx) => Ok(&mut ctx.host),
+        None => Err(raise_failed(state, format!("{name}(): no bench context"))),
+    }
+}
+
+/// The host, for a builtin allowed at top level too.
+fn any_host<'a, H: Host>(state: &'a mut State, name: &str) -> Result<&'a mut H, Error> {
+    if ctx::<H>(state).is_none() {
+        return Err(raise_failed(state, format!("{name}(): no bench context")));
     }
     match ctx::<H>(state) {
         Some(ctx) => Ok(&mut ctx.host),
@@ -370,16 +550,22 @@ fn text_at(state: &State, idx: isize, what: &str) -> Result<String, Error> {
 
 /// A string argument (the name of `output`, `scratch`, the sha of `since`).
 fn string_arg(state: &mut State, idx: isize, function: &str) -> Result<String, Error> {
-    state.check_type(idx, LuaType::String)?;
+    if state.typ(idx) != LuaType::String {
+        return Err(raise_failed(
+            state,
+            format!(
+                "{function}()'s argument {idx} is a {}: expected a string",
+                state.typ(idx).as_str()
+            ),
+        ));
+    }
     text_at(state, idx, &format!("{function}()'s argument"))
 }
 
 fn lua_since<H: Host>(state: &mut State) -> Result<u8, Error> {
+    stop_first::<H>(state)?;
     let sha = string_arg(state, 1, "since")?;
-    let answer = match ctx::<H>(state) {
-        Some(ctx) => ctx.host.since(&sha),
-        None => return Err(raise_failed(state, "since(): no bench context".into())),
-    };
+    let answer = any_host::<H>(state, "since")?.since(&sha);
     match answer {
         Ok(yes) => {
             state.push_boolean(yes)?;
@@ -389,7 +575,8 @@ fn lua_since<H: Host>(state: &mut State) -> Result<u8, Error> {
     }
 }
 
-fn lua_fail(state: &mut State) -> Result<u8, Error> {
+fn lua_fail<H: Host>(state: &mut State) -> Result<u8, Error> {
+    stop_first::<H>(state)?;
     let reason = if top(state) >= 1 && state.typ(1) == LuaType::String {
         text_at(state, 1, "fail()'s reason")?
     } else if top(state) >= 1 && state.typ(1) == LuaType::Number {
@@ -418,6 +605,8 @@ fn make_handle<H: Host>(
     function: &str,
     make: impl FnOnce(&mut H, &str) -> Result<HandleRef, Abort>,
 ) -> Result<u8, Error> {
+    stop_first::<H>(state)?;
+    bench_host::<H>(state, function)?;
     let name = string_arg(state, 1, function)?;
     let made = make(bench_host::<H>(state, function)?, &name);
     let handle = made.map_err(|abort| raise(state, abort))?;
@@ -425,22 +614,35 @@ fn make_handle<H: Host>(
     Ok(1)
 }
 
-/// A handle's table: `path`, and its index under the hidden key.
+/// A handle's table: `path`, and its index in a protected metatable of its
+/// own, under [`HANDLE_MARK`].
 fn push_handle(state: &mut State, handle: &HandleRef) -> Result<(), Error> {
     state.new_table()?;
     let table = top(state);
     state.push_string("path")?;
     state.push_string(&handle.path)?;
     state.set_table_raw(table)?;
-    state.push_string(HANDLE_KEY)?;
+    protected_metatable(state)?;
+    let meta = top(state);
+    state.push_string(HANDLE_MARK)?;
     state.push_number(f64::from(u32::try_from(handle.index).unwrap_or(u32::MAX)))?;
-    state.set_table_raw(table)
+    state.set_table_raw(meta)?;
+    state.set_metatable_of(table)
 }
 
-/// Push `value` as a fresh Lua value. A table with the hidden handle key is
-/// refused, so config data can never pass for a handle the runner made.
-fn push_value(state: &mut State, value: &Value) -> Result<(), Error> {
+/// The marks, for a builtin.
+fn marks<H: Host>(state: &mut State) -> Result<Marks, Error> {
+    match ctx::<H>(state) {
+        Some(ctx) => Ok(ctx.marks.clone()),
+        None => Err(raise_failed(state, "no bench context".into())),
+    }
+}
+
+/// Push `value` as a fresh Lua value. A list carries the JSON array
+/// metatable, so an empty one stays a list; a null is `json.null`.
+fn push_value(state: &mut State, value: &Value, marks: &Marks) -> Result<(), Error> {
     match value {
+        Value::Null => state.push_anchor(&marks.null),
         Value::Bool(b) => state.push_boolean(*b),
         Value::Number(n) => state.push_number(*n),
         Value::Text(text) => state.push_string(text),
@@ -451,23 +653,18 @@ fn push_value(state: &mut State, value: &Value) -> Result<(), Error> {
             for (i, item) in items.iter().enumerate() {
                 #[allow(clippy::cast_precision_loss)] // A list is far shorter than 2^53.
                 state.push_number((i + 1) as f64)?;
-                push_value(state, item)?;
+                push_value(state, item, marks)?;
                 state.set_table_raw(table)?;
             }
-            Ok(())
+            state.push_anchor(&marks.array)?;
+            state.set_metatable_of(table)
         }
         Value::Table(fields) => {
             state.new_table()?;
             let table = top(state);
             for (key, item) in fields {
-                if key == HANDLE_KEY {
-                    return Err(raise_failed(
-                        state,
-                        format!("the key {HANDLE_KEY} is brokkr's: config data cannot use it"),
-                    ));
-                }
                 state.push_string(key)?;
-                push_value(state, item)?;
+                push_value(state, item, marks)?;
                 state.set_table_raw(table)?;
             }
             Ok(())
@@ -477,42 +674,109 @@ fn push_value(state: &mut State, value: &Value) -> Result<(), Error> {
 
 /// `config()`: a fresh copy of the resolved config each call.
 fn lua_config<H: Host>(state: &mut State) -> Result<u8, Error> {
-    let view = match ctx::<H>(state) {
-        Some(ctx) => ctx.host.config(),
-        None => return Err(raise_failed(state, "config(): no bench context".into())),
-    };
+    stop_first::<H>(state)?;
+    let view = any_host::<H>(state, "config")?.config();
     let view = view.map_err(|abort| raise(state, abort))?;
-    push_value(state, &view)?;
+    let marks = marks::<H>(state)?;
+    push_value(state, &view, &marks)?;
     Ok(1)
 }
 
-/// The handle index a table at `idx` carries, if it is a handle.
-fn handle_index(state: &mut State, idx: isize) -> Result<Option<usize>, Error> {
-    state.push_string(HANDLE_KEY)?;
-    state.get_table_raw(idx)?;
-    let index = if state.typ(-1) == LuaType::Number {
-        let n = state.to_number(-1)?;
-        (n >= 0.0 && n.fract() == 0.0 && n < 4_294_967_296.0).then(|| {
-            // An exact non-negative integer below 2^32.
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let n = n as usize;
-            n
-        })
-    } else {
-        None
+/// What a table is to brokkr.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Marker {
+    Plain,
+    Handle(usize),
+    Array,
+    Null,
+}
+
+/// What the value at `idx` (absolute) is, from its real metatable read raw:
+/// a handle by the index its own metatable holds, an array by carrying the
+/// anchored array metatable, a null by being the anchored `json.null`. Only
+/// a table is ever anything but plain.
+fn marker(state: &mut State, idx: isize, marks: Option<&Marks>) -> Result<Marker, Error> {
+    if state.typ(idx) != LuaType::Table {
+        return Ok(Marker::Plain);
+    }
+    if let Some(marks) = marks {
+        state.push_anchor(&marks.null)?;
+        let null = state.raw_equal(idx, -1);
+        state.pop(1)?;
+        if null {
+            return Ok(Marker::Null);
+        }
+    }
+    state.get_metatable_of(idx)?;
+    if state.typ(-1) != LuaType::Table {
+        state.pop(1)?;
+        return Ok(Marker::Plain);
+    }
+    let meta = top(state);
+    if let Some(marks) = marks {
+        state.push_anchor(&marks.array)?;
+        let array = state.raw_equal(meta, -1);
+        state.pop(1)?;
+        if array {
+            state.pop(1)?;
+            return Ok(Marker::Array);
+        }
+    }
+    state.push_string(HANDLE_MARK)?;
+    state.get_table_raw(meta)?;
+    let handle = match state.typ(-1) {
+        LuaType::Nil => None,
+        LuaType::Number => Some(exact_index(state.to_number(-1)?)),
+        _ => Some(None),
     };
-    state.pop(1)?;
-    Ok(index)
+    state.pop(2)?;
+    match handle {
+        None => Ok(Marker::Plain),
+        Some(Some(index)) => Ok(Marker::Handle(index)),
+        Some(None) => Err(raise_failed(
+            state,
+            "a table whose metatable carries a malformed handle index".into(),
+        )),
+    }
+}
+
+/// An exact non-negative integer below 2^32 as an index.
+fn exact_index(n: f64) -> Option<usize> {
+    (n >= 0.0 && n.fract() == 0.0 && n < 4_294_967_296.0).then(|| {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let n = n as usize;
+        n
+    })
+}
+
+/// The handle index the value at `idx` carries, if it is a handle.
+fn handle_index(state: &mut State, idx: isize) -> Result<Option<usize>, Error> {
+    Ok(match marker(state, idx, None)? {
+        Marker::Handle(index) => Some(index),
+        _ => None,
+    })
+}
+
+/// A handle argument of a file builtin.
+fn handle_arg(state: &mut State, idx: isize, function: &str) -> Result<usize, Error> {
+    match handle_index(state, idx)? {
+        Some(index) => Ok(index),
+        None => Err(raise_failed(
+            state,
+            format!(
+                "{function}()'s argument {idx} is a {}: expected a handle (a bound file, \
+                 output(), or a result's stdout_file)",
+                state.typ(idx).as_str()
+            ),
+        )),
+    }
 }
 
 /// One argv word from a string, number or handle at `idx`.
 fn word_at(state: &mut State, idx: isize, what: &str) -> Result<Word, Error> {
     match state.typ(idx) {
         LuaType::String => Ok(Word::Text(text_at(state, idx, what)?)),
-        LuaType::Number => {
-            let rendered = state.tostring_bytes(idx)?;
-            Ok(Word::Text(String::from_utf8_lossy(&rendered).into_owned()))
-        }
+        LuaType::Number => Ok(Word::Text(number_text(state, idx)?)),
         LuaType::Table => match handle_index(state, idx)? {
             Some(index) => Ok(Word::Handle(index)),
             None => Err(raise_failed(
@@ -528,6 +792,12 @@ fn word_at(state: &mut State, idx: isize, what: &str) -> Result<Word, Error> {
             ),
         )),
     }
+}
+
+/// A number as Lua writes it, the spelling argv and env values take.
+fn number_text(state: &mut State, idx: isize) -> Result<String, Error> {
+    let rendered = state.tostring_bytes(idx)?;
+    Ok(String::from_utf8_lossy(&rendered).into_owned())
 }
 
 /// The value of one flag of a flag table.
@@ -563,13 +833,15 @@ fn flags_at(state: &mut State, table: isize, words: &mut Vec<Word>) -> Result<()
             LuaType::Boolean if state.to_boolean(value_idx) => Flag::Bare,
             LuaType::Boolean => Flag::Dropped,
             LuaType::Table if handle_index(state, value_idx)?.is_none() => {
-                Flag::Many(list_at(state, value_idx, &what)?)
+                Flag::Many(list_at(state, value_idx, &what, word_at)?)
             }
             _ => Flag::One(word_at(state, value_idx, &what)?),
         };
         flags.push((key, flag));
         state.pop(1)?;
     }
+    // The finished iteration leaves its nil key behind.
+    state.pop(1)?;
     flags.sort_by(|a, b| a.0.cmp(&b.0));
     for (key, flag) in flags {
         let spelled = if key.chars().count() == 1 {
@@ -595,10 +867,15 @@ fn flags_at(state: &mut State, table: isize, words: &mut Vec<Word>) -> Result<()
     Ok(())
 }
 
-/// A flag's list: exactly the positions 1..n, each a string, number or
-/// handle, in order. A named key or a gap is refused rather than dropped.
-fn list_at(state: &mut State, table: isize, what: &str) -> Result<Vec<Word>, Error> {
-    let mut items: Vec<(usize, Word)> = Vec::new();
+/// A list's items: exactly the positions 1..n, each read by `item`, in
+/// order. A named key or a gap is refused rather than dropped.
+fn list_at<T>(
+    state: &mut State,
+    table: isize,
+    what: &str,
+    item: fn(&mut State, isize, &str) -> Result<T, Error>,
+) -> Result<Vec<T>, Error> {
+    let mut items: Vec<(usize, T)> = Vec::new();
     state.push_nil()?;
     while state.table_next(table)? {
         let key_idx = top(state) - 1;
@@ -606,17 +883,16 @@ fn list_at(state: &mut State, table: isize, what: &str) -> Result<Vec<Word>, Err
         let position = (state.typ(key_idx) == LuaType::Number)
             .then(|| state.to_number(key_idx))
             .transpose()?
-            .filter(|n| *n >= 1.0 && n.fract() == 0.0 && *n < 4_294_967_296.0);
+            .filter(|n| *n >= 1.0)
+            .and_then(exact_index);
         let Some(position) = position else {
             return Err(raise_failed(
                 state,
                 format!("{what} is a table that is neither a handle nor a list 1..n"),
             ));
         };
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let position = position as usize;
-        let item = word_at(state, value_idx, &format!("{what}[{position}]"))?;
-        items.push((position, item));
+        let read = item(state, value_idx, &format!("{what}[{position}]"))?;
+        items.push((position, read));
         state.pop(1)?;
     }
     // The finished iteration leaves its nil key behind.
@@ -628,19 +904,189 @@ fn list_at(state: &mut State, table: isize, what: &str) -> Result<Vec<Word>, Err
     Ok(items.into_iter().map(|(_, item)| item).collect())
 }
 
-fn lua_binary<H: Host>(state: &mut State) -> Result<u8, Error> {
+/// `binary()`'s argv words from the arguments at `first` and after.
+fn words_from(state: &mut State, first: isize) -> Result<Vec<Word>, Error> {
     let count = top(state);
     let mut words = Vec::new();
-    for idx in 1..=count {
-        let what = format!("binary()'s argument {idx}");
+    for idx in first..=count {
+        let what = format!("binary()'s argument {}", idx - first + 1);
         if state.typ(idx) == LuaType::Table && handle_index(state, idx)?.is_none() {
             flags_at(state, idx, &mut words)?;
         } else {
             words.push(word_at(state, idx, &what)?);
         }
     }
+    Ok(words)
+}
+
+fn lua_binary<H: Host>(state: &mut State) -> Result<u8, Error> {
+    stop_first::<H>(state)?;
+    bench_host::<H>(state, "binary")?;
+    let words = words_from(state, 1)?;
+    call_binary::<H>(state, "binary", words, CallOptions::default())
+}
+
+fn lua_binary_with<H: Host>(state: &mut State) -> Result<u8, Error> {
+    stop_first::<H>(state)?;
+    bench_host::<H>(state, "binary_with")?;
+    let options = options_at(state, 1)?;
+    let words = words_from(state, 2)?;
+    call_binary::<H>(state, "binary_with", words, options)
+}
+
+/// `binary_with()`'s first argument: a plain table of `env`, `reads`,
+/// `writes` and `stdin`, every other key refused.
+fn options_at(state: &mut State, idx: isize) -> Result<CallOptions, Error> {
+    if state.typ(idx) != LuaType::Table || handle_index(state, idx)?.is_some() {
+        return Err(raise_failed(
+            state,
+            format!(
+                "binary_with()'s first argument is a {}: expected a table of options \
+                 (env, reads, writes, stdin)",
+                state.typ(idx).as_str()
+            ),
+        ));
+    }
+    let mut options = CallOptions::default();
+    state.push_nil()?;
+    while state.table_next(idx)? {
+        let key_idx = top(state) - 1;
+        let value_idx = top(state);
+        let key = if state.typ(key_idx) == LuaType::String {
+            text_at(state, key_idx, "an option name")?
+        } else {
+            String::new()
+        };
+        match key.as_str() {
+            "env" => options.env = env_at(state, value_idx)?,
+            "reads" | "writes" => {
+                let what = format!("binary_with(): {key}");
+                if state.typ(value_idx) != LuaType::Table
+                    || handle_index(state, value_idx)?.is_some()
+                {
+                    return Err(raise_failed(state, format!("{what} is a list of handles")));
+                }
+                let handles = list_at(state, value_idx, &what, listed_handle)?;
+                if key == "reads" {
+                    options.reads = handles;
+                } else {
+                    options.writes = handles;
+                }
+            }
+            "stdin" => {
+                options.stdin = Some(listed_handle(state, value_idx, "binary_with(): stdin")?);
+            }
+            _ => {
+                let shown = if key.is_empty() {
+                    format!("a {} key", state.typ(key_idx).as_str())
+                } else {
+                    format!("{key:?}")
+                };
+                return Err(raise_failed(
+                    state,
+                    format!(
+                        "binary_with(): unknown option {shown}: options are env, reads, writes and stdin"
+                    ),
+                ));
+            }
+        }
+        state.pop(1)?;
+    }
+    state.pop(1)?;
+    Ok(options)
+}
+
+/// A handle in an option, refused when it is anything else (a path string
+/// declares nothing).
+fn listed_handle(state: &mut State, idx: isize, what: &str) -> Result<usize, Error> {
+    match handle_index(state, idx)? {
+        Some(index) => Ok(index),
+        None => Err(raise_failed(
+            state,
+            format!(
+                "{what} is a {}: expected a handle (a path string declares nothing)",
+                state.typ(idx).as_str()
+            ),
+        )),
+    }
+}
+
+/// `env`: names `[A-Za-z_][A-Za-z0-9_]*` outside brokkr's `BROKKR_`, values
+/// strings or finite numbers, no NUL; sorted by name.
+fn env_at(state: &mut State, table: isize) -> Result<Vec<(String, String)>, Error> {
+    if state.typ(table) != LuaType::Table || handle_index(state, table)?.is_some() {
+        return Err(raise_failed(
+            state,
+            "binary_with(): env is a table of NAME = value".into(),
+        ));
+    }
+    let mut env = Vec::new();
+    state.push_nil()?;
+    while state.table_next(table)? {
+        let key_idx = top(state) - 1;
+        let value_idx = top(state);
+        if state.typ(key_idx) != LuaType::String {
+            return Err(raise_failed(
+                state,
+                "binary_with(): env's keys are variable names (strings)".into(),
+            ));
+        }
+        let name = text_at(state, key_idx, "an env name")?;
+        let well_formed = name
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+            && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+        if !well_formed {
+            return Err(raise_failed(
+                state,
+                format!("binary_with(): env name {name:?} is not [A-Za-z_][A-Za-z0-9_]*"),
+            ));
+        }
+        if name.starts_with("BROKKR_") {
+            return Err(raise_failed(
+                state,
+                format!(
+                    "binary_with(): env name {name} is brokkr's: BROKKR_* carries brokkr's own channel to a child"
+                ),
+            ));
+        }
+        let what = format!("binary_with(): env {name}");
+        let value = match state.typ(value_idx) {
+            LuaType::String => text_at(state, value_idx, &what)?,
+            LuaType::Number if state.to_number(value_idx)?.is_finite() => {
+                number_text(state, value_idx)?
+            }
+            other => {
+                return Err(raise_failed(
+                    state,
+                    format!(
+                        "{what} is a {}: expected a string or a finite number",
+                        other.as_str()
+                    ),
+                ));
+            }
+        };
+        if value.contains('\0') {
+            return Err(raise_failed(state, format!("{what} holds a NUL byte")));
+        }
+        env.push((name, value));
+        state.pop(1)?;
+    }
+    state.pop(1)?;
+    env.sort();
+    Ok(env)
+}
+
+/// Run the call and push its result table.
+fn call_binary<H: Host>(
+    state: &mut State,
+    function: &str,
+    words: Vec<Word>,
+    options: CallOptions,
+) -> Result<u8, Error> {
     let ok = ctx::<H>(state).map(|c| c.ok);
-    let outcome = bench_host::<H>(state, "binary")?.binary(words);
+    let outcome = bench_host::<H>(state, function)?.binary(words, options);
     let outcome = outcome.map_err(|abort| raise(state, abort))?;
     state.new_table()?;
     let table = top(state);
@@ -655,6 +1101,11 @@ fn lua_binary<H: Host>(state: &mut State) -> Result<u8, Error> {
     set_bool(state, table, "stdout_truncated", outcome.stdout_truncated)?;
     set_str(state, table, "stderr", &outcome.stderr)?;
     set_bool(state, table, "stderr_truncated", outcome.stderr_truncated)?;
+    if let Some(spool) = &outcome.stdout_file {
+        state.push_string("stdout_file")?;
+        push_handle(state, spool)?;
+        state.set_table_raw(table)?;
+    }
     if let Some(ok) = ok {
         state.push_string("ok")?;
         state.push_rust_fn(ok)?;
@@ -681,10 +1132,243 @@ fn set_bool(state: &mut State, table: isize, key: &str, value: bool) -> Result<(
     state.set_table_raw(table)
 }
 
+/// `read(h)`: the whole file a handle names, as a string.
+fn lua_read<H: Host>(state: &mut State) -> Result<u8, Error> {
+    stop_first::<H>(state)?;
+    bench_host::<H>(state, "read")?;
+    let handle = handle_arg(state, 1, "read")?;
+    let read = bench_host::<H>(state, "read")?.read(handle);
+    let bytes = read.map_err(|abort| raise(state, abort))?;
+    state.push_bytes(&bytes)?;
+    Ok(1)
+}
+
+/// `write(h, data)`: an output's file replaced by `data`.
+fn lua_write<H: Host>(state: &mut State) -> Result<u8, Error> {
+    stop_first::<H>(state)?;
+    bench_host::<H>(state, "write")?;
+    let handle = handle_arg(state, 1, "write")?;
+    if state.typ(2) != LuaType::String {
+        return Err(raise_failed(
+            state,
+            format!(
+                "write()'s argument 2 is a {}: expected a string",
+                state.typ(2).as_str()
+            ),
+        ));
+    }
+    let contents = state.to_bytes(2)?.to_vec();
+    let written = bench_host::<H>(state, "write")?.write(handle, &contents);
+    written.map_err(|abort| raise(state, abort))?;
+    Ok(0)
+}
+
+/// `filesize(h)`: the size in bytes of the file a handle names.
+fn lua_filesize<H: Host>(state: &mut State) -> Result<u8, Error> {
+    stop_first::<H>(state)?;
+    bench_host::<H>(state, "filesize")?;
+    let handle = handle_arg(state, 1, "filesize")?;
+    let size = bench_host::<H>(state, "filesize")?.filesize(handle);
+    let size = size.map_err(|abort| raise(state, abort))?;
+    if size > 1 << 53 {
+        return Err(raise_failed(
+            state,
+            format!(
+                "filesize(): {size} bytes is past 2^53, which a Lua number cannot hold exactly"
+            ),
+        ));
+    }
+    #[allow(clippy::cast_precision_loss)] // At most 2^53, exact.
+    state.push_number(size as f64)?;
+    Ok(1)
+}
+
+/// `json.encode(v)`: `v` as compact JSON text.
+fn lua_json_encode<H: Host>(state: &mut State) -> Result<u8, Error> {
+    stop_first::<H>(state)?;
+    if top(state) < 1 {
+        state.push_nil()?;
+    }
+    let marks = marks::<H>(state)?;
+    let refused =
+        |state: &State, why: String| raise_failed(state, format!("json.encode(): the value {why}"));
+    let value = value_at(state, 1, 1, &marks).map_err(|why| refused(state, why))?;
+    let text = json::encode(&value).map_err(|why| refused(state, why))?;
+    state.push_bytes(&text)?;
+    Ok(1)
+}
+
+/// `json.decode(s)`: one JSON document as Lua values, every array carrying
+/// the array metatable and every null `json.null`.
+fn lua_json_decode<H: Host>(state: &mut State) -> Result<u8, Error> {
+    stop_first::<H>(state)?;
+    if state.typ(1) != LuaType::String {
+        return Err(raise_failed(
+            state,
+            format!(
+                "json.decode()'s argument is a {}: expected a string",
+                state.typ(1).as_str()
+            ),
+        ));
+    }
+    let text = state.to_bytes(1)?.to_vec();
+    let value =
+        json::decode(&text).map_err(|why| raise_failed(state, format!("json.decode(): {why}")))?;
+    let marks = marks::<H>(state)?;
+    push_value(state, &value, &marks)?;
+    Ok(1)
+}
+
+fn empty(state: &mut State, table: isize) -> Result<bool, Error> {
+    state.push_nil()?;
+    if state.table_next(table)? {
+        state.pop(2)?;
+        Ok(false)
+    } else {
+        state.pop(1)?;
+        Ok(true)
+    }
+}
+
+/// `record` in the shape the store admits.
+fn extract_record(
+    state: &mut State,
+    marks: &Marks,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    state
+        .get_global("record")
+        .map_err(|e| format!("cannot be read: {e}"))?;
+    if state.typ(-1) != LuaType::Table {
+        return Err(format!(
+            "is a {}: it must stay a table",
+            state.typ(-1).as_str()
+        ));
+    }
+    let at = top(state);
+    let value = value_at(state, at, 1, marks)?;
+    json::record(&value)
+}
+
+/// The value at `idx` (absolute), nested `level` deep (the root is 1), as a
+/// [`Value`]: a table with string keys a table, a marked array or a table
+/// keyed 1..n a list, an empty plain table an empty table, `json.null` (and
+/// nil) a null. A handle, a function, a non-finite number or a string that is
+/// not UTF-8 is refused, and so is anything past [`json::MAX_DEPTH`], which
+/// also ends a table that holds itself.
+fn value_at(state: &mut State, idx: isize, level: usize, marks: &Marks) -> Result<Value, String> {
+    let lua = |e: Error| format!("cannot be read: {e}");
+    match state.typ(idx) {
+        LuaType::Nil => Ok(Value::Null),
+        LuaType::Boolean => Ok(Value::Bool(state.to_boolean(idx))),
+        LuaType::Number => {
+            let n = state.to_number(idx).map_err(lua)?;
+            if n.is_finite() {
+                Ok(Value::Number(n))
+            } else {
+                Err(format!("holds {n}, which JSON cannot"))
+            }
+        }
+        LuaType::String => {
+            let bytes = state.to_bytes(idx).map_err(lua)?.to_vec();
+            String::from_utf8(bytes)
+                .map(Value::Text)
+                .map_err(|_| "holds a string that is not UTF-8".to_owned())
+        }
+        LuaType::Table => table_value(state, idx, level, marks),
+        LuaType::Function => Err(
+            "holds a function: only nil, booleans, numbers, strings and tables are stored"
+                .to_owned(),
+        ),
+    }
+}
+
+fn table_value(
+    state: &mut State,
+    idx: isize,
+    level: usize,
+    marks: &Marks,
+) -> Result<Value, String> {
+    let lua = |e: Error| format!("cannot be read: {e}");
+    // A handle or json.null is a value, not a container: judged before the
+    // depth a container would add.
+    let kind = marker(state, idx, Some(marks)).map_err(lua)?;
+    if level > json::MAX_DEPTH && matches!(kind, Marker::Array | Marker::Plain) {
+        return Err(format!(
+            "nests deeper than {} levels or refers to itself",
+            json::MAX_DEPTH
+        ));
+    }
+    match kind {
+        Marker::Handle(_) => {
+            return Err("holds a handle: store or encode its path (h.path) instead".to_owned());
+        }
+        Marker::Null => {
+            return if empty(state, idx).map_err(lua)? {
+                Ok(Value::Null)
+            } else {
+                Err("holds a json.null that has fields set in it".to_owned())
+            };
+        }
+        Marker::Array | Marker::Plain => {}
+    }
+    let mut object: Vec<(String, Value)> = Vec::new();
+    let mut array: Vec<(usize, Value)> = Vec::new();
+    state.push_nil().map_err(lua)?;
+    while state.table_next(idx).map_err(lua)? {
+        let key_idx = top(state) - 1;
+        let value_idx = top(state);
+        let value = value_at(state, value_idx, level + 1, marks)?;
+        match state.typ(key_idx) {
+            LuaType::String => {
+                let bytes = state.to_bytes(key_idx).map_err(lua)?.to_vec();
+                let key = String::from_utf8(bytes)
+                    .map_err(|_| "has a key that is not UTF-8".to_owned())?;
+                object.push((key, value));
+            }
+            LuaType::Number => {
+                let n = state.to_number(key_idx).map_err(lua)?;
+                let Some(position) = (n >= 1.0).then_some(n).and_then(exact_index) else {
+                    return Err(format!("has a key {n} that is no position"));
+                };
+                array.push((position, value));
+            }
+            other => {
+                return Err(format!(
+                    "has a {} key: keys are strings, or positions 1..n",
+                    other.as_str()
+                ));
+            }
+        }
+        state.pop(1).map_err(lua)?;
+    }
+    state.pop(1).map_err(lua)?;
+    if !object.is_empty() && (kind == Marker::Array || !array.is_empty()) {
+        return Err(if kind == Marker::Array {
+            "has string keys in a JSON array".to_owned()
+        } else {
+            "mixes string keys and list positions in one table".to_owned()
+        });
+    }
+    if array.is_empty() && kind == Marker::Plain {
+        return Ok(Value::Table(object));
+    }
+    array.sort_by_key(|(position, _)| *position);
+    if array.iter().enumerate().any(|(i, (p, _))| *p != i + 1) {
+        return Err("has a list with gaps: positions must run 1..n".to_owned());
+    }
+    Ok(Value::List(array.into_iter().map(|(_, v)| v).collect()))
+}
+
 /// `result:ok()`: the result itself when the child exited 0; otherwise the
 /// sample fails, naming how the child ended and its last stderr line.
-fn lua_result_ok(state: &mut State) -> Result<u8, Error> {
-    state.check_type(1, LuaType::Table)?;
+fn lua_result_ok<H: Host>(state: &mut State) -> Result<u8, Error> {
+    stop_first::<H>(state)?;
+    if state.typ(1) != LuaType::Table {
+        return Err(raise_failed(
+            state,
+            "ok() is a method of a binary() result: call it as r:ok()".into(),
+        ));
+    }
     let field = |state: &mut State, key: &str| -> Result<(), Error> {
         state.push_string(key)?;
         state.get_table_raw(1)
@@ -728,148 +1412,6 @@ fn lua_result_ok(state: &mut State) -> Result<u8, Error> {
         why.push_str(line.trim());
     }
     Err(raise_failed(state, why))
-}
-
-/// `record` as a JSON object, in the shape the store admits.
-fn extract_record(state: &mut State) -> Result<serde_json::Map<String, serde_json::Value>, String> {
-    state
-        .get_global("record")
-        .map_err(|e| format!("cannot be read: {e}"))?;
-    if state.typ(-1) != LuaType::Table {
-        return Err(format!(
-            "is a {}: it must stay a table",
-            state.typ(-1).as_str()
-        ));
-    }
-    let at = top(state);
-    let value = table_json(state, at, 1, true).map_err(|e| e.to_string())?;
-    match value {
-        serde_json::Value::Object(map) => Ok(map),
-        _ => Err("must be a table with string keys".to_owned()),
-    }
-}
-
-/// The table at `idx`, nested `level` deep (the root is 1), as JSON: string
-/// keys an object, keys 1..n an array (below the root only), an empty table
-/// an empty object.
-fn table_json(
-    state: &mut State,
-    idx: isize,
-    level: usize,
-    root: bool,
-) -> Result<serde_json::Value, RecordError> {
-    if level > MAX_RECORD_DEPTH {
-        return Err(RecordError(format!(
-            "nests deeper than {MAX_RECORD_DEPTH} levels or refers to itself"
-        )));
-    }
-    let mut object = serde_json::Map::new();
-    let mut array: Vec<(usize, serde_json::Value)> = Vec::new();
-    state.push_nil().map_err(RecordError::lua)?;
-    while state.table_next(idx).map_err(RecordError::lua)? {
-        let key_idx = top(state) - 1;
-        let value_idx = top(state);
-        let value = value_json(state, value_idx, level)?;
-        match state.typ(key_idx) {
-            LuaType::String => {
-                let bytes = state.to_bytes(key_idx).map_err(RecordError::lua)?.to_vec();
-                let key = String::from_utf8(bytes)
-                    .map_err(|_| RecordError("has a key that is not UTF-8".to_owned()))?;
-                object.insert(key, value);
-            }
-            LuaType::Number => {
-                let n = state.to_number(key_idx).map_err(RecordError::lua)?;
-                if !(n >= 1.0 && n.fract() == 0.0 && n < 4_294_967_296.0) {
-                    return Err(RecordError(format!("has a key {n} that is no position")));
-                }
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let position = n as usize;
-                array.push((position, value));
-            }
-            other => {
-                return Err(RecordError(format!(
-                    "has a {} key: keys are strings, or positions 1..n",
-                    other.as_str()
-                )));
-            }
-        }
-        state.pop(1).map_err(RecordError::lua)?;
-    }
-    state.pop(1).map_err(RecordError::lua)?;
-    match (object.is_empty(), array.is_empty()) {
-        (_, true) => Ok(serde_json::Value::Object(object)),
-        (true, false) if !root => {
-            array.sort_by_key(|(position, _)| *position);
-            if array.iter().enumerate().any(|(i, (p, _))| *p != i + 1) {
-                return Err(RecordError(
-                    "has a list with gaps: positions must run 1..n".to_owned(),
-                ));
-            }
-            Ok(serde_json::Value::Array(
-                array.into_iter().map(|(_, v)| v).collect(),
-            ))
-        }
-        (true, false) => Err(RecordError(
-            "must be a table with string keys, not a list".to_owned(),
-        )),
-        (false, false) => Err(RecordError(
-            "mixes string keys and list positions in one table".to_owned(),
-        )),
-    }
-}
-
-fn value_json(
-    state: &mut State,
-    idx: isize,
-    level: usize,
-) -> Result<serde_json::Value, RecordError> {
-    match state.typ(idx) {
-        LuaType::Nil => Ok(serde_json::Value::Null),
-        LuaType::Boolean => Ok(serde_json::Value::Bool(state.to_boolean(idx))),
-        LuaType::Number => {
-            let n = state.to_number(idx).map_err(RecordError::lua)?;
-            if !n.is_finite() {
-                return Err(RecordError(format!("holds {n}, which JSON cannot")));
-            }
-            if n.fract() == 0.0 && n.abs() < 9_007_199_254_740_992.0 {
-                #[allow(clippy::cast_possible_truncation)]
-                let int = n as i64;
-                Ok(serde_json::Value::from(int))
-            } else {
-                serde_json::Number::from_f64(n)
-                    .map(serde_json::Value::Number)
-                    .ok_or_else(|| RecordError(format!("holds {n}, which JSON cannot")))
-            }
-        }
-        LuaType::String => {
-            let bytes = state.to_bytes(idx).map_err(RecordError::lua)?.to_vec();
-            String::from_utf8(bytes)
-                .map(serde_json::Value::String)
-                .map_err(|_| RecordError("holds a string that is not UTF-8".to_owned()))
-        }
-        LuaType::Table => table_json(state, idx, level + 1, false),
-        LuaType::Function => Err(RecordError(
-            "holds a function: only nil, booleans, numbers, strings and tables are stored"
-                .to_owned(),
-        )),
-    }
-}
-
-/// Why `record` could not be stored.
-#[derive(Debug)]
-struct RecordError(String);
-
-impl RecordError {
-    #[allow(clippy::needless_pass_by_value)] // `map_err` hands the error over.
-    fn lua(error: Error) -> Self {
-        Self(format!("cannot be read: {error}"))
-    }
-}
-
-impl std::fmt::Display for RecordError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
 }
 
 /// `print`, routed through brokkr's console channel rather than straight to

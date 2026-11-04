@@ -260,9 +260,32 @@ benches belong to one project.
 That catches what the parser rejects - a syntax error, an unreadable or
 missing file - and nothing else: a call to a misspelt function compiles.
 Every bench is checked, so one run names every broken script, each with the
-bench, the file to open, and the line; an inline script's line counts from the
-first line of the `script` string. Running benches on a fixture is a
+bench, the file to open, and the line. An inline script's line is the config
+file's (Inline line numbers, below). Running benches on a fixture is a
 project's option, as a `[[script_check]]`.
+
+## Inline line numbers
+
+An inline `script` is a TOML string, so its Lua lines are not the file's:
+the string starts partway down the file, and escapes, a multi-line string's
+trimmed first newline and a line-ending backslash move lines about. brokkr
+reads the file that set `script` again (per value, so under `include` the
+layer that gave the script, wherever its build settings came from), finds
+`bench.NAME.script` in any TOML spelling (a table, dotted keys, an inline
+table, quoted keys), and decodes the string itself, keeping each byte's file
+line. The map is used only when that decoding, the TOML parser's and the
+script brokkr loaded are the same bytes; otherwise the lines count from the
+string's first, the chunk is named `[bench.NAME] script`, and brokkr says
+why (the file was edited since it was read, say): in the check finding
+itself, and as a warning when `brokkr bench` reads the script. A Lua line is named by the file line its first byte came from,
+so a line joined by a line-ending backslash is named by its first file line,
+and several Lua lines written with `\n` escapes on one file line all name it.
+
+With a map, everything that names a line names the file's: the `bench` check
+phase, a compile failure when `brokkr bench` reads the script, and every
+failure of an iteration, a Lua error's traceback included, under the config
+file's path as the chunk's name (`/p/brokkr.toml:14: attempt to call a nil
+value`). A `script_file` is its own file, so its lines need no map.
 
 The phase is inert in a config without benches, is skipped by name as `bench`
 in a partial profile's `skip_phases`, and runs on a markdown-only tree too: a

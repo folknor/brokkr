@@ -6,19 +6,34 @@ use super::*;
 #[derive(Default)]
 struct Fake {
     calls: Vec<Vec<Word>>,
+    options: Vec<CallOptions>,
     exit: Option<i32>,
     stdout: Vec<u8>,
     since: Vec<String>,
     blocks: usize,
     config: Option<Value>,
+    files: std::collections::BTreeMap<usize, Vec<u8>>,
+    stops: usize,
+    stop_now: bool,
+    /// A stop pending from this stop check on (1-based).
+    stop_from: Option<usize>,
 }
 
 impl Host for Fake {
+    fn stop(&mut self) -> Result<(), Abort> {
+        self.stops += 1;
+        if self.stop_now || self.stop_from.is_some_and(|n| self.stops >= n) {
+            Err(Abort::Interrupted)
+        } else {
+            Ok(())
+        }
+    }
     fn begin_block(&mut self, _at: Instant) {
         self.blocks += 1;
     }
-    fn binary(&mut self, words: Vec<Word>) -> Result<CallOutcome, Abort> {
+    fn binary(&mut self, words: Vec<Word>, options: CallOptions) -> Result<CallOutcome, Abort> {
         self.calls.push(words);
+        self.options.push(options);
         Ok(CallOutcome {
             program: "tool".into(),
             exit: self.exit,
@@ -27,7 +42,24 @@ impl Host for Fake {
             stdout_truncated: false,
             stderr: b"line one\nlast words\n".to_vec(),
             stderr_truncated: false,
+            stdout_file: Some(HandleRef {
+                index: 9,
+                path: "/it/stdout/0".into(),
+            }),
         })
+    }
+    fn read(&mut self, handle: usize) -> Result<Vec<u8>, Abort> {
+        self.files
+            .get(&handle)
+            .cloned()
+            .ok_or_else(|| Abort::Failed(format!("read(): no file {handle}")))
+    }
+    fn write(&mut self, handle: usize, contents: &[u8]) -> Result<(), Abort> {
+        self.files.insert(handle, contents.to_vec());
+        Ok(())
+    }
+    fn filesize(&mut self, handle: usize) -> Result<u64, Abort> {
+        Ok(self.files.get(&handle).map_or(0, |f| f.len() as u64))
     }
     fn since(&mut self, sha: &str) -> Result<bool, Abort> {
         self.since.push(sha.to_owned());
@@ -60,8 +92,13 @@ fn run(source: &str, host: Fake) -> (Sample, Fake) {
 }
 
 fn run_with(source: &str, args: &Args, host: Fake) -> (Sample, Fake) {
-    let script = load_script(source.as_bytes(), Some("test.lua")).unwrap();
+    let script = load_script(source.as_bytes(), Some("test.lua"), None).unwrap();
     run_sample(&script, args, host)
+}
+
+fn completed(sample: &Sample) -> serde_json::Map<String, serde_json::Value> {
+    assert_eq!(sample.outcome, SampleOutcome::Completed(None), "{sample:?}");
+    sample.record.clone().unwrap()
 }
 
 /// The params, their keys and `config()` reach the script; a handle among
@@ -132,12 +169,21 @@ fn params_keys_and_config_reach_the_script() {
     assert_eq!(record["fresh"], true, "each config() is a fresh copy");
     assert_eq!(host.calls, [vec![Word::Handle(0)]]);
 
-    let forged = Fake {
-        config: Some(Value::Table(vec![(HANDLE_KEY.into(), Value::Number(0.0))])),
+    // A key that looks like brokkr's is only data: no table in config()
+    // is a handle, whatever it holds.
+    let lookalike = Fake {
+        config: Some(Value::Table(vec![(HANDLE_MARK.into(), Value::Number(0.0))])),
         ..Fake::default()
     };
-    let (sample, _) = run("function bench() config() end", forged);
-    assert!(reason(&sample).contains(HANDLE_KEY), "{sample:?}");
+    let (sample, host) = run("function bench() binary(config()) end", lookalike);
+    assert_eq!(sample.outcome, SampleOutcome::Completed(None), "{sample:?}");
+    assert_eq!(
+        host.calls,
+        [vec![
+            Word::Text(format!("--{HANDLE_MARK}")),
+            Word::Text("0".into())
+        ]]
+    );
 }
 
 fn reason(sample: &Sample) -> &str {
@@ -151,14 +197,14 @@ fn reason(sample: &Sample) -> &str {
 fn a_valid_chunk_compiles_and_runs_nothing() {
     // `error()` at top level would fail if the chunk ran.
     assert_eq!(
-        compile(b"function bench()\n  return nil\nend\nerror('ran')\n"),
+        compile(b"function bench()\n  return nil\nend\nerror('ran')\n", None),
         Ok(())
     );
 }
 
 #[test]
 fn a_syntax_error_names_its_line() {
-    let err = compile(b"function bench()\n  return (\nend\n").unwrap_err();
+    let err = compile(b"function bench()\n  return (\nend\n", None).unwrap_err();
     assert_eq!(err.line, 3, "{err}");
     assert!(!err.message.is_empty());
 }
@@ -166,9 +212,43 @@ fn a_syntax_error_names_its_line() {
 #[test]
 fn a_misspelt_builtin_still_compiles() {
     assert_eq!(
-        compile(b"function bench() return binray('x') end\n"),
+        compile(b"function bench() return binray('x') end\n", None),
         Ok(())
     );
+}
+
+/// The config file's lines: TOML whose script starts on line 3.
+fn mapped_lines() -> crate::bench::script_lines::LineMap {
+    let dir = crate::test_scratch::scratch("bench_lua", "lines");
+    let file = dir.join("brokkr.toml");
+    let source = "function bench()\n  local x = nil\n  x()\nend\n";
+    std::fs::write(
+        &file,
+        format!("[bench.cat]\nscript = \"\"\"\n{source}\"\"\"\n"),
+    )
+    .unwrap();
+    crate::bench::script_lines::locate(&file, "cat", source).unwrap()
+}
+
+/// With a map, compile errors, a Lua error's traceback and a builtin's
+/// failure all name the config file's lines.
+#[test]
+fn errors_name_the_config_files_lines() {
+    let lines = mapped_lines();
+    let err = compile(b"function bench()\n  return (\nend\n", Some(&lines)).unwrap_err();
+    assert_eq!(err.line, 5, "{err}");
+
+    let source = "function bench()\n  local x = nil\n  x()\nend\n";
+    let script = load_script(source.as_bytes(), Some("brokkr.toml"), Some(lines.clone())).unwrap();
+    let (sample, _) = run_sample(&script, &Args::default(), Fake::default());
+    let why = reason(&sample);
+    assert!(why.starts_with("brokkr.toml:5:"), "{why}");
+    assert!(why.contains("\n\tbrokkr.toml:5: in "), "{why}");
+
+    let source = "function bench()\n  local x = 1\n  fail('no good')\nend\n";
+    let script = load_script(source.as_bytes(), Some("brokkr.toml"), Some(lines)).unwrap();
+    let (sample, _) = run_sample(&script, &Args::default(), Fake::default());
+    assert_eq!(reason(&sample), "brokkr.toml:5: no good");
 }
 
 #[test]
@@ -308,17 +388,23 @@ fn the_result_carries_the_ending_and_ok_raises_unless_it_exited_zero() {
         ..Fake::default()
     };
     let (sample, _) = run("function bench() binary('x'):ok() end", host);
-    assert_eq!(reason(&sample), "tool exited 2: last words");
+    assert_eq!(reason(&sample), "test.lua:1: tool exited 2: last words");
 }
 
 #[test]
 fn fail_always_carries_a_reason() {
     let (sample, _) = run("function bench() fail('no good') end", Fake::default());
-    assert_eq!(reason(&sample), "no good");
+    assert_eq!(reason(&sample), "test.lua:1: no good");
     let (sample, _) = run("function bench() fail('') end", Fake::default());
-    assert_eq!(reason(&sample), "fail() called without a reason");
-    let (sample, _) = run("function bench() fail() end", Fake::default());
-    assert_eq!(reason(&sample), "fail() called without a reason");
+    assert_eq!(
+        reason(&sample),
+        "test.lua:1: fail() called without a reason"
+    );
+    let (sample, _) = run("function bench()\n\n fail() end", Fake::default());
+    assert_eq!(
+        reason(&sample),
+        "test.lua:3: fail() called without a reason"
+    );
 }
 
 #[test]
@@ -368,10 +454,258 @@ fn a_fresh_state_each_sample_forgets_the_last_one() {
     let script = load_script(
         b"function bench() COUNT = (COUNT or 0) + 1; record.n = COUNT end",
         None,
+        None,
     )
     .unwrap();
     let (first, host) = run_sample(&script, &Args::default(), Fake::default());
     let (second, _) = run_sample(&script, &Args::default(), host);
     assert_eq!(first.record, second.record);
     assert_eq!(second.record.unwrap()["n"], 1);
+}
+
+/// `binary_with`'s options reach the host as handles and sorted env; the
+/// rest of its arguments are `binary()`'s grammar.
+#[test]
+fn binary_with_takes_options_then_binarys_arguments() {
+    let (sample, host) = run(
+        "function bench()\n\
+           local out = output('o')\n\
+           local r = binary('x')\n\
+           binary_with({env = {B = 2, A = 'one'}, reads = {r.stdout_file}, writes = {out},\n\
+                        stdin = r.stdout_file}, 'cat', {env = 'flag'})\n\
+         end",
+        Fake::default(),
+    );
+    assert_eq!(sample.outcome, SampleOutcome::Completed(None), "{sample:?}");
+    let text = |s: &str| Word::Text(s.into());
+    assert_eq!(host.calls[1], [text("cat"), text("--env"), text("flag")]);
+    assert_eq!(
+        host.options[1],
+        CallOptions {
+            env: vec![("A".into(), "one".into()), ("B".into(), "2".into())],
+            reads: vec![9],
+            writes: vec![7],
+            stdin: Some(9),
+        }
+    );
+    assert_eq!(host.options[0], CallOptions::default());
+
+    for (options, needle) in [
+        ("{wrtes = {}}", "unknown option \"wrtes\""),
+        ("{reads = {'/a/path'}}", "a path string declares nothing"),
+        ("{reads = output('o')}", "list of handles"),
+        ("{stdin = '/x'}", "expected a handle"),
+        ("{env = {BROKKR_MARKER_FIFO = 'x'}}", "is brokkr's"),
+        ("{env = {['1X'] = 'x'}}", "is not [A-Za-z_]"),
+        ("{env = {X = 1/0}}", "finite number"),
+        ("{env = {X = 'a\\0b'}}", "NUL"),
+        ("'x'", "expected a table of options"),
+    ] {
+        let (sample, host) = run(
+            &format!("function bench() binary_with({options}, 'x') end"),
+            Fake::default(),
+        );
+        assert!(reason(&sample).contains(needle), "{options}: {sample:?}");
+        assert!(host.calls.is_empty(), "{options}: refused before the call");
+    }
+}
+
+/// read, write and filesize take handles only, inside bench() only.
+#[test]
+fn file_builtins_take_handles_inside_bench() {
+    let (sample, host) = run(
+        "function bench()\n\
+           local out = output('o')\n\
+           write(out, 'payload')\n\
+           record.back = read(out)\n\
+           record.size = filesize(out)\n\
+         end",
+        Fake::default(),
+    );
+    let record = completed(&sample);
+    assert_eq!(record["back"], "payload");
+    assert_eq!(record["size"], 7);
+    assert_eq!(host.files[&7], b"payload");
+
+    for source in [
+        "local x = read\nx({})\nfunction bench() end",
+        "function bench() read('/etc/passwd') end",
+        "function bench() write(output('o'), 3) end",
+        "function bench() filesize() end",
+    ] {
+        let (sample, _) = run(source, Fake::default());
+        assert!(
+            matches!(sample.outcome, SampleOutcome::Failed(_)),
+            "{source}: {sample:?}"
+        );
+    }
+    let (sample, _) = run("x = filesize({})\nfunction bench() end", Fake::default());
+    assert!(
+        reason(&sample).contains("only available inside bench()"),
+        "{sample:?}"
+    );
+}
+
+/// JSON round-trips arrays, empty arrays and nulls, is allowed at top
+/// level, and recognises brokkr's own values by identity, not by keys.
+#[test]
+fn json_keeps_arrays_and_nulls_and_data_stays_data() {
+    let (sample, _) = run(
+        "TOP = json.encode({b = {}, a = 1})\n\
+         function bench()\n\
+           local v = json.decode('{\"x\":[],\"y\":[1,null,3],\"z\":null,\"__brokkr_handle\":0}')\n\
+           record.top = TOP\n\
+           record.again = json.encode(v)\n\
+           record.null = v.z == json.null\n\
+           record.second = v.y[2] == json.null\n\
+           record.len = #v.y\n\
+           record.decoded = v\n\
+           record.meta = getmetatable(v.x)\n\
+           record.list = json.encode({1, 2})\n\
+         end",
+        Fake::default(),
+    );
+    let record = completed(&sample);
+    assert_eq!(record["top"], r#"{"a":1,"b":{}}"#);
+    assert_eq!(
+        record["again"],
+        r#"{"__brokkr_handle":0,"x":[],"y":[1,null,3],"z":null}"#
+    );
+    assert_eq!(
+        (record["null"].clone(), record["second"].clone()),
+        (true.into(), true.into())
+    );
+    assert_eq!(record["len"], 3);
+    assert_eq!(
+        record["decoded"],
+        serde_json::json!({"__brokkr_handle": 0, "x": [], "y": [1, null, 3], "z": null})
+    );
+    assert_eq!(record["meta"], false, "brokkr's metatable is protected");
+    assert_eq!(record["list"], "[1,2]");
+
+    let refused = |source: &str, needle: &str| {
+        let (sample, _) = run(source, Fake::default());
+        assert!(reason(&sample).contains(needle), "{source}: {sample:?}");
+    };
+    refused(
+        "function bench() json.decode('{\"a\":1,\"a\":2}') end",
+        "given twice",
+    );
+    refused("function bench() json.decode('[1') end", "json.decode()");
+    refused("function bench() json.encode(output('o')) end", "h.path");
+    refused(
+        "function bench() rawset(json.null, 'x', 1); json.encode({json.null}) end",
+        "fields set",
+    );
+    refused(
+        "function bench() local a = json.decode('[]'); a.k = 1; json.encode(a) end",
+        "string keys in a JSON array",
+    );
+    refused(
+        "function bench() setmetatable(json.decode('[]'), {}) end",
+        "protected",
+    );
+    refused(
+        "function bench() record = json.decode('[]') end",
+        "not a list",
+    );
+    refused("function bench() record = json.null end", "not json.null");
+
+    // Replacing json.null changes what the script compares against, not
+    // what decode produces.
+    let (sample, _) = run(
+        "function bench()\n\
+           local real = json.null\n\
+           json.null = {}\n\
+           record.same = json.decode('null') == real\n\
+         end",
+        Fake::default(),
+    );
+    assert_eq!(completed(&sample)["same"], true);
+}
+
+/// json.null is a value, not a container: it takes no nesting level.
+#[test]
+fn a_null_at_the_deepest_level_round_trips() {
+    let deep = format!("{}null{}", "[".repeat(64), "]".repeat(64));
+    let (sample, _) = run(
+        &format!("function bench() record.s = json.encode(json.decode('{deep}')) end"),
+        Fake::default(),
+    );
+    assert_eq!(completed(&sample)["s"], deep);
+}
+
+/// A handle's table is recognised by its protected metatable alone.
+#[test]
+fn a_handle_is_its_metatable_not_its_keys() {
+    let (sample, host) = run(
+        "function bench()\n\
+           local out = output('o')\n\
+           record.path = out.path\n\
+           record.meta = getmetatable(out)\n\
+           binary(out, {output = out}, {__brokkr_handle = 7})\n\
+         end",
+        Fake::default(),
+    );
+    let record = completed(&sample);
+    assert_eq!(record["path"], "/it/out/o");
+    assert_eq!(record["meta"], false);
+    assert_eq!(
+        host.calls[0],
+        [
+            Word::Handle(7),
+            Word::Text("--output".into()),
+            Word::Handle(7),
+            Word::Text("--__brokkr_handle".into()),
+            Word::Text("7".into()),
+        ]
+    );
+    let (sample, _) = run(
+        "function bench() record.h = output('o') end",
+        Fake::default(),
+    );
+    assert!(reason(&sample).contains("h.path"), "{sample:?}");
+}
+
+/// Every builtin but print asks for a stop before its arguments.
+#[test]
+fn every_builtin_but_print_meets_a_pending_stop() {
+    for call in [
+        "binary(nil)",
+        "binary_with(nil)",
+        "since(nil)",
+        "fail()",
+        "output(nil)",
+        "scratch(nil)",
+        "config()",
+        "read(nil)",
+        "write(nil)",
+        "filesize(nil)",
+        "json.encode(nil)",
+        "json.decode(nil)",
+    ] {
+        let host = Fake {
+            stop_now: true,
+            ..Fake::default()
+        };
+        let (sample, _) = run(&format!("function bench() {call} end"), host);
+        assert_eq!(sample.outcome, SampleOutcome::Interrupted, "{call}");
+    }
+    // r:ok() on a call made before the stop: the stop meets ok() first, so
+    // the failing exit is never reported.
+    let host = Fake {
+        exit: Some(2),
+        stop_from: Some(2),
+        ..Fake::default()
+    };
+    let (sample, host) = run("function bench() binary('x'):ok() end", host);
+    assert_eq!(sample.outcome, SampleOutcome::Interrupted);
+    assert_eq!((host.calls.len(), host.stops), (1, 2));
+    let host = Fake {
+        stop_now: true,
+        ..Fake::default()
+    };
+    let (sample, host) = run("function bench() print('x') end", host);
+    assert_eq!(sample.outcome, SampleOutcome::Completed(None));
+    assert_eq!(host.stops, 0);
 }

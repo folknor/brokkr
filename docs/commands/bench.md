@@ -103,8 +103,8 @@ each child's own wall and start offset are recorded beside it.
 `bench()` returning nothing completes the iteration with a nil verdict, a
 string completes it with that verdict, anything else fails it. Then `record`
 is read: a table with string keys, below it tables (string keys, or a list
-1..n), strings, finite numbers and booleans, nested at most 64 deep;
-anything else fails the iteration. `record` starts empty every iteration.
+1..n), strings, finite numbers, booleans and `json.null`, nested at most 64
+deep; anything else, a handle included, fails the iteration (JSON, below). `record` starts empty every iteration.
 
 The run stops at the first iteration that does not complete. All completed
 with one verdict, the run completed and its result is the first fastest
@@ -117,10 +117,16 @@ or `require`, so every child goes through brokkr.
 
 - `binary(...)` - run the built executable once and wait for it. Only inside
   `bench()`.
+- `binary_with(options, ...)` - `binary()` with call options (below). Only
+  inside `bench()`.
 - `output(name)` - a handle on a fresh path under the iteration's `out/`,
   not created. Only inside `bench()`.
 - `scratch(name)` - a handle on a fresh empty directory under the
   iteration's `scratch/`. Only inside `bench()`.
+- `read(h)`, `write(h, data)`, `filesize(h)` - brokkr's own file access
+  through a handle (Files, below). Only inside `bench()`.
+- `json.encode(v)`, `json.decode(s)`, `json.null` - JSON (below). Allowed at
+  top level too.
 - `since(sha)` - whether the commit under test (the `--commit` one, else the
   checkout's HEAD) is `sha` or descends from it. A sha git cannot resolve
   fails the iteration. Allowed at top level too, and each sha is asked once
@@ -139,9 +145,18 @@ or `require`, so every child goes through brokkr.
 A handle is a table; its `path` field is the path as a string. Passing the
 handle itself to `binary()` reserves what it names for that call; passing
 the string does not. An input handle (a bound file) is read for the call;
-an output or scratch handle written. A config table holding the key
-`__brokkr_handle`, which brokkr keeps for handles, makes `config()` fail
-rather than pass for one.
+an output or scratch handle written; a result's `stdout_file` read. What
+makes a table a handle is a metatable brokkr made and protected
+(`getmetatable` answers `false`, `setmetatable` refuses), never a key, so
+no table of config data or decoded JSON is ever taken for one. `record` and
+`json.encode` refuse a handle: store `h.path`.
+
+Every builtin but `print` meets a pending stop before it looks at its
+arguments (Interrupting a run). A builtin's failure ends the iteration with
+its reason after the script line that called it (`brokkr.toml:14: binary():
+the call was refused: ...`), `fail(reason)` and `r:ok()` included; a Lua
+error keeps dellingr's message and traceback. An inline script's lines are
+its config file's (`brokkr man bench-config`, Inline line numbers).
 
 ## `binary()`
 
@@ -157,7 +172,7 @@ local r = binary("cat", input, { jobs = 4, output = output("out.pbf") })
 ```
 
 The child runs in the live project root, under `--commit` too, with stdin
-empty, stdout written in full to a spool in the iteration directory, stderr
+empty (unless `binary_with` gives one), stdout written in full to a spool in the iteration directory, stderr
 captured, and the marker FIFO (`BROKKR_MARKER_FIFO`) and sidecar wired in,
 one FIFO per child. The result is a table:
 
@@ -167,6 +182,10 @@ one FIFO per child. The result is a table:
   `stdout_truncated`, `stderr_truncated` - whether there was more. A
   truncated preview fails nothing.
 - `program` - the executable's file name.
+- `stdout_file` - a handle on the spool holding the child's whole stdout:
+  pass it to another call (read), as its `stdin`, or to `read()` and
+  `filesize()`. Pipelines run eagerly: one call's output reaches the next
+  through this file, never a pipe between two running children.
 - `r:ok()` - returns `r` when the child exited 0, and otherwise fails the
   iteration naming how it ended and its last stderr line.
 
@@ -175,6 +194,81 @@ itself. These end the iteration before the script sees a result: Ctrl-C or
 `brokkr kill` (the child's process group is stopped; the iteration is
 interrupted), a child that could not start or be waited for, and a child
 whose descendants still hold its reservation two seconds after it exited.
+
+## `binary_with()`
+
+`binary_with(options, ...)` is `binary(...)` with a table of options first;
+the arguments after it follow `binary()`'s rules exactly, so a child's own
+`--env` flag is still `{env = ...}` among them.
+
+```lua
+local cfg = output("cfg.json")
+write(cfg, json.encode({ input = params.input.file.path }))
+local r = binary_with({
+    env = { RUST_LOG = "info" },
+    reads = { params.input.file },
+    stdin = earlier.stdout_file,
+}, "run", "--config=" .. cfg.path)
+```
+
+- `env` - variables added to the child's environment, `NAME = value`:
+  names `[A-Za-z_][A-Za-z0-9_]*`, `BROKKR_*` refused (brokkr's own channel
+  to a child, the marker FIFO among it), values strings or finite numbers
+  (written as an argv number is), no NUL. They are stored with the child,
+  beside `BROKKR_MARKER_FIFO`, redacted as credentials are.
+- `reads`, `writes` - lists of handles the call reads or writes, overriding
+  what passing a handle gives it and declaring a handle the argv does not
+  show (a path inside a file the script wrote, a `--output=PATH`
+  spelling). Handles only: a path string declares nothing. A handle in
+  both is refused, and so is an input or a `stdout_file` in `writes`: both
+  are read-only for the run.
+- `stdin` - a file handle (an input, an output or a `stdout_file`) the child
+  reads as its stdin, from its start, opened by brokkr as `read()` opens a
+  file and declared read for the call (over an output's default write; in
+  `writes` too it is refused).
+
+Any other key is refused, so a misspelt `writes` never runs a call with
+less declared than meant.
+
+## Files
+
+`read(h)` returns the whole file a handle names, `filesize(h)` its size in
+bytes, `write(h, data)` replaces an output's file with the string `data`.
+Each is admitted as a call reading (writing) the handle would be
+(`reference/bench-resources.md`, brokkr's own file access), so a file a child turned into a link out of what the iteration
+holds, or onto an input for `write`, is refused, and the file is opened
+without following a link.
+
+- `read` and `filesize` take an input, an output or a `stdout_file`; a
+  `stdout_file` reads as the bytes its call wrote, and one a later child
+  replaced is refused. `read` refuses a file past 16 MiB, the most a
+  script's string holds, and `filesize` a size past 2^53.
+- `write` takes an output only: an input and a `stdout_file` are read-only
+  for the run. It removes whatever the name holds (a directory refused) and
+  creates the file afresh, so an output a child hard-linked to another file
+  is cut, never written through.
+- A scratch handle names a directory, which none of them takes.
+
+## JSON
+
+`json.encode(v)` returns compact JSON text, object keys sorted;
+`json.decode(s)` one JSON document as Lua values. The shape is `record`'s:
+string keys an object, a list 1..n an array, nothing nested deeper than 64,
+finite numbers, UTF-8 strings, no handle or function.
+
+- An array `json.decode` makes, and every list brokkr hands a script
+  (`params`, `keys`, `config()`), carries brokkr's array metatable, so an
+  empty one encodes, and records, as `[]`; a plain empty table is `{}`.
+- `json.null` stands for null inside a table, so `[1,null,3]` decodes to
+  three elements; `v == json.null` tests for it. Decoding always uses
+  brokkr's own, whatever the script assigns to `json.null`; a `json.null`
+  with keys set in it is refused.
+- `json.decode` refuses a key given twice in one object. An integer within
+  2^53 is a number and one beyond it, up to 64 bits, its decimal text (as
+  the resolved view hands TOML integers); a number with a fraction or an
+  exponent, or an integer past 64 bits, is a double. Whole numbers within
+  2^53 encode as integers.
+- `json.encode` refuses output past 16 MiB.
 
 ## Interrupting a run
 

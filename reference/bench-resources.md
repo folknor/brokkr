@@ -94,6 +94,43 @@ resolves each input as the caller spelled it at admission, not its recorded
 form, whose `..` were folded textually; an input that no longer resolves
 refuses the admission.
 
+## brokkr's own file access
+
+The script's file builtins and a call's stdin are brokkr reading and
+writing through a handle (`docs/commands/bench.md`, Files), so each is
+admitted as a call declaring that one path would be, read or write, inside
+the store's critical section, and acts on the path as that admission
+resolved it:
+
+- **Opening for reading** (`read()`, `filesize()`, a call's `stdin`, the
+  last opened against the call's own admission, inside the same critical
+  section, and handed to the child as a fresh descriptor at offset zero):
+  an entry of the iteration through its area's held descriptor, after the
+  area is checked to be where its path says, with `O_NOFOLLOW`; anything
+  else, which authority leaves only an input, by walking its resolved path
+  from `/` one component at a time, following no link. A link substituted
+  after the admission resolved the path fails the open; the file must be a
+  regular one. A spool opens only as the inode its call wrote: the
+  iteration keeps a descriptor on every spool until it ends, so the
+  identity it checks cannot be reused by a file a child put in its place.
+- **Writing** (`write()`, an output only): admitted as a write, so the
+  read-only veto refuses a name a child turned into a link onto an input;
+  then through `out/`'s held descriptor, whatever entry the name holds is
+  unlinked (a directory refused) and the file created with `O_CREAT |
+  O_EXCL | O_NOFOLLOW`, and the path checked to name what was made.
+  Removing a name never writes the inode it named, so an output a child
+  hard-linked to an input is cut from it, its contents untouched; a child
+  recreating the name in between makes the exclusive create fail.
+
+The boundary is the namespace's, as for creations: a child moving a held
+directory or replacing a name while brokkr works is detected afterwards
+where a check can see it, and makes the operation fail; it is not
+prevented, and a check after the fact undoes no I/O. A spool's inode check
+proves the file is the one its call wrote, not that nothing wrote it since;
+only declared writes are refused.
+
+## What a child does with a path
+
 What a child does with a path after its admission is outside the guarantee:
 handles reserve what they name, they do not confine a child, and a literal
 string a child treats as a path is undeclared. The guarantee rests on a
@@ -111,13 +148,19 @@ that passes it:
 | input | a bound file-valued param, the first handles an iteration holds | read | no |
 | output | the iteration, a path under `out/`, not created | write | yes |
 | scratch | the iteration, an empty directory under `scratch/` | write | yes |
-| spool | a finished call's stdout, under `stdout/` | read | no |
+| spool | a finished call's stdout, under `stdout/` (a result's `stdout_file`) | read | no |
 
 A call's `reads` and `writes` lists override the default and also declare
 handles the argv does not show (a path inside a file the script wrote, a
-`--output=PATH` spelling). A handle in both lists is refused, and so is an
-input or a spool in `writes`. Output and scratch names are one path
-component, each given once per iteration.
+`--output=PATH` spelling); its `stdin` is read, over its argv default. A
+handle in both lists is refused, and so is an input or a spool in `writes`,
+and the stdin handle in `writes`; every refusal is judged on the lists as
+given, before they fold into one access per path. Output and scratch names
+are one path component, each given once per iteration. The file builtins
+take a file's handle: `read()`, `filesize()` and `stdin` an input, an
+output or a spool, `write()` an output; a scratch handle names a
+directory, and none of them takes it. A handle is recognised by a
+protected metatable brokkr made, never a key, so no data can pass for one.
 
 Only a bound param makes a file an input. The resolved config `config()`
 returns holds every other file entry as its path string, so a file a script
@@ -155,12 +198,13 @@ so nothing about it is bounded. The spool comes back from the call only when
 its borrow's release succeeded; a preview reads its first bytes through the
 spool's own descriptor, never its path, with a flag saying whether there was
 more. Truncating the preview fails nothing. Feeding a result onward passes
-the spool, a read-only handle.
+the spool, a read-only handle, as an argument or as the next call's stdin.
 
 The runner previews the first MiB. A child's stderr is not spooled: it is a
 pipe the supervisor drains, keeping the first MiB with a truncated flag and
 reading the rest to its end so the child never blocks, which fails nothing
-either. The script sees both previews, never more.
+either. The script sees both previews, and the whole stdout through the
+spool's handle; of stderr, never more than its preview.
 
 While a call's borrow release waits for its last holder, the caller may run
 an observer between the window's polls; the runner drains the child's

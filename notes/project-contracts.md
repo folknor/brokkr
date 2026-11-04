@@ -243,7 +243,7 @@ named would change meaning, and it moves to `[host.NAME]`.
   how instrumentation is reported: `--hotpath` and `--alloc` die (the typed
   commands keep them until they are retired), and a bench that profiles
   names the feature in its build settings, points the report through
-  `binary()`'s `env` table, reads it back and puts what it wants in
+  `binary_with()`'s `env` table (slice 8), reads it back and puts what it wants in
   `record`. brokkr keeps no report parser.
 - **Script bench rows go to a new database,** per user rather than in the
   project's tree (today's results.db lives in the project's `.brokkr/`),
@@ -268,8 +268,9 @@ named would change meaning, and it moves to `[host.NAME]`.
   the block ends, even on failure. Per-child data already covers what
   either measures.
 - **Implementation details:** error line numbers mapped back into an
-  inline TOML script; Ctrl-C reaching pure Lua and top-level code as well
-  as children (slice 13). The Lua state is per iteration (see the third review).
+  inline TOML script (slice 8); Ctrl-C reaching pure Lua and top-level code
+  as well as children (slice 13). The Lua state is per iteration (see the
+  third review).
 
 ### Second review (2026-11-04)
 
@@ -395,8 +396,9 @@ above where they disagree; this section wins.
   scratch write; write implies read); a call's `reads` and `writes` lists
   override it and also declare paths embedded where brokkr cannot see a
   handle (a JSON or config file the script wrote, a `--output=PATH`
-  spelling); a handle in both lists is refused. `read()` takes any
-  handle, `write()` output and scratch handles only.
+  spelling); a handle in both lists is refused. `read()` takes a file's
+  handle (input, output, spool), `write()` an output's only (slice 8: a
+  scratch handle names a directory, so no file builtin takes it).
 - **Inputs are read-only for the run.** A declared write overlapping a
   preflight-hashed input is refused at the call, so its preflight digest
   stays current; and the run holds a read reservation on every input from
@@ -602,7 +604,7 @@ What slice 5 left, with sizes:
   needs a key and the same gate obligation (small).
 - A child's stderr is a 1 MiB preview only; a bench needing all of it wants
   a stderr spool, a protocol change in `reference/bench-resources.md`
-  (small, slice 8 if a bench needs it).
+  (small, when a bench needs it; slice 8 found none that does).
 
 Slice 12, the remote client, taken before 6 (`reference/bench-store.md`,
 brokkr's client; `docs/brokkr.toml.md`, `results_server`;
@@ -671,19 +673,15 @@ substitution-only dotted rule, help only in name position, no invented
 
 What slice 6 left:
 
-- The read-only veto against an input is tested at the resource layer
-  only: `binary()` has no `writes` list until slice 8, so no script can
-  declare an input written yet; slice 8's call options should test it
-  through the runner (small).
 - A plain dataset's `path` pairs on its digest value alone, so a file
   replaced by a directory with an equal tree digest would pair; the typed
   layer has the same limit (`Dataset::path`). Recording the shape would be
   a new pairing algorithm (small, if ever wanted).
-- `config()` hands file entries as strings, so slice 8's `read()`,
-  `write()` and `filesize()`, which take handles, reach a config file only
-  through a bound param; a script that needs to read an unbound config file
-  would want a handle-making builtin, with its own reservation and digest
-  story (not planned).
+- `config()` hands file entries as strings, so `read()`, `write()` and
+  `filesize()`, which take handles, reach a config file only through a
+  bound param; a script that needs to read an unbound config file would
+  want a handle-making builtin, with its own reservation and digest story
+  (not planned).
 
 Slice 7, collections and fan-out (`docs/brokkr.toml.bench.md`, Binding
 params; `docs/commands/bench.md`, Arms; `reference/bench-resources.md`,
@@ -737,26 +735,59 @@ What slice 7 left, with sizes:
   `docs/commands/results.md`; a structured selector would be new syntax,
   not planned).
 
-8. **Conveniences.** The file and json builtins, call options (`env`,
-   `reads`, `writes`; slice 5's `binary()` takes positional words and flag
-   tables only, so a path a child sees in another spelling cannot be
-   declared yet), feeding one result to another (the spool handle exists,
-   `resources::spool_handle`), error line numbers mapped into inline
-   scripts (slice 5 names the chunk `[bench.NAME] script`, its lines
-   counting from the string's first).
-   `ConfigSources::value_origin` names the file that set `script`, but the
-   composed table keeps no spans and TOML strings have escapes and line
-   continuations, so the mapping re-reads that file with spans
-   (`toml_edit`) and decodes the string, after checking the bytes still
-   match the script loaded, not offset arithmetic. `read`, `write` and
-   `filesize` must act on what a handle names now and stay inside what
-   the iteration holds: authorize the current target, as call admission
-   does, and open without following a link substituted since (a child can
-   turn an output into a link to an input); `write` takes output and
-   scratch handles only (`Handle::writable`). Input handles exist since
-   slice 6 (bound file params, the iteration's first handles); a `writes`
-   entry naming one is refused by `resources::call_access`, and a test
-   through the runner should show it.
+Slice 8, conveniences (`docs/commands/bench.md`, `binary_with()`, Files,
+JSON; `docs/brokkr.toml.bench.md`, Inline line numbers;
+`reference/bench-resources.md`, brokkr's own file access): call options are
+a separate builtin, `binary_with(options, ...)`, the rest of its arguments
+`binary()`'s grammar, so no options table is ever confused with a flag
+table and a child's own `--env` stays expressible; options `env` (names
+`[A-Za-z_][A-Za-z0-9_]*`, `BROKKR_*` refused, recorded on the child),
+`reads`, `writes` (handles only) and `stdin` (an implicit read over the
+argv default, opened inside the call's own admission, a fresh descriptor
+per call), any other key refused. A result carries `stdout_file`, its spool
+as a handle. `read`, `filesize` (input, output, spool) and `write` (output
+only; the note's "output and scratch" corrected, since scratch names a
+directory) are admitted as a call would be and open against that
+admission: an area entry through its held descriptor with `O_NOFOLLOW`,
+anything else along its resolved path one component at a time without
+following a link; a spool only as the inode its call wrote, pinned by a
+descriptor for the iteration's life; `write` unlinks the name and creates
+it `O_EXCL`, so a hard link onto an input is cut, never written through;
+`read` counts bytes read against 16 MiB, `filesize` refuses past 2^53.
+`json.encode`/`json.decode` over one Lua-to-`Value` conversion shared with
+`record` (`src/bench/json.rs`): duplicate keys refused in the visitor,
+integer tokens exact (decimal text past 2^53), depth 64 checked before Lua,
+encode capped at 16 MiB; decoded arrays carry one protected metatable and
+nulls are one `json.null`, both recognised by identity through dellingr's
+registry (`Anchor`), so `[]` and `[1,null,3]` round-trip; handles moved from
+a data key to a protected per-handle metatable, so config data and JSON keys
+are only data, and `record` and `json.encode` refuse a handle. Every
+builtin but `print` asks for a stop before reading its arguments, `fail`
+and `r:ok()` included, and a builtin's failure is stored after the calling
+line. Inline scripts are numbered by their config file
+(`src/bench/script_lines.rs`): the declaring file reread with toml_edit's
+spans, the literal decoded with each byte's line, the map used only when
+that, toml_edit's decoding and the loaded script agree, compile errors,
+traceback frames (`line` and `defined_line`) and builtin failures mapped,
+the chunk named by the config file. Sparred against an options table
+marked by a hidden key (`with{}`), field-marked metatables, null as nil, a
+temp-and-rename write and a split stdin admission; the spar added the
+spool pin, the identity marks once the registry was found, the stop at the
+seam, the located builtin failures and the end-of-script line.
+
+What slice 8 left, with sizes:
+
+- The file builtins and `stdin` go through admission's store scan like a
+  call, inside the timed block; slice 10 should see whether a bench that
+  reads many small files pays for it (small, with slice 5's per-call
+  overhead).
+- Lua cannot hold an integer past 2^53 exactly, so `json.decode` hands one
+  as its decimal text and `json.encode` writes that back as a string, not a
+  number; a bench round-tripping such a document would want an integer
+  wrapper (small, not planned).
+- No end-to-end test still: the new builtins are tested through
+  `run_iteration` against real children, as slice 7's residue describes.
+
 9. **Evidence views of a script-bench run.** The rest of slice 9: the
    store holds every child's samples, FIFO records, capture loss and clock
    check, and `brokkr results <uuid>` shows only their counts. What
