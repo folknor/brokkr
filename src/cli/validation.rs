@@ -20,6 +20,18 @@ pub(super) fn validate_meta_filter(s: &str) -> Result<String, String> {
     Ok(s.to_owned())
 }
 
+/// Validate `results --param NAME=VALUE`: a non-empty NAME before the first
+/// `=` (a param name holds none), then VALUE, which may hold `=` itself
+/// since a plain param's key is any string.
+pub(super) fn validate_param_filter(s: &str) -> Result<String, String> {
+    match s.split_once('=') {
+        Some((name, _)) if !name.is_empty() => Ok(s.to_owned()),
+        _ => Err(format!(
+            "expected NAME=VALUE with a non-empty NAME, got '{s}' (use --param NAME=VALUE)"
+        )),
+    }
+}
+
 /// Validate `--env KEY=VALUE` for `brokkr clippy`: exactly one `=`, a
 /// **non-empty** KEY (an env var must be named - unlike `results --meta`, whose
 /// validator deliberately allows an empty key for row filtering), and any VALUE

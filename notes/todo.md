@@ -310,6 +310,20 @@ remedy, and its path is built in `store.rs` rather than through
 `user_dirs`. Its leases are small; the private and iteration directories
 they name live elsewhere and are not counted either.
 
+### The hotpath report parser accepts what it half understands (2026-11-04)
+
+Found while landing `brokkr results` over the bench store, whose
+`record.hotpath` goes through the same parser as typed rows.
+`db::hotpath_data_from_json` returns a profile when any of
+`functions_timing`, `functions_alloc` or `threads` is present, and inside
+them keeps function entries with an empty name or missing metrics rather
+than refusing them, so a report from a changed hotpath version renders as
+whatever was recognized, with no note that part was dropped. Typed rows
+store only the parsed form, so what was dropped is gone; a bench record
+keeps the raw value. A strict reader (refuse or flag unknown shapes) would
+serve the capture path, the library profile reader and the results view
+alike.
+
 ### Captured-child termination may leave group members alive (2026-11-02, unverified)
 
 Raised in the spar on brokkr bz 101, not traced here: the captured runner's

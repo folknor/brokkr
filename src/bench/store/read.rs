@@ -10,6 +10,7 @@ use super::document::{
     IterationOutcome, Loss, ParamValue, Record, ResolvedBuild, RunDocument, RunOutcome, Sample,
     SinkEnd,
 };
+use super::list::StoredRun;
 
 fn unreadable(what: &str) -> StoreError {
     StoreError::Failed(format!("stored {what} does not read back"))
@@ -25,17 +26,38 @@ fn index(value: i64) -> Result<usize, StoreError> {
 
 /// The run stored under `uuid`, or `None`.
 pub(super) fn load(conn: &Connection, uuid: &str) -> Result<Option<RunDocument>, StoreError> {
-    let Some((run_id, columns)) = conn
+    Ok(load_run(conn, uuid, true)?.map(|run| run.doc))
+}
+
+/// The run stored under `uuid` with what the store derived from it, its
+/// children loaded only when `children` is set.
+pub(super) fn load_run(
+    conn: &Connection,
+    uuid: &str,
+    children: bool,
+) -> Result<Option<StoredRun>, StoreError> {
+    let Some((run_id, columns, derived)) = conn
         .query_row(
             "SELECT r.id, r.format, r.project, r.bench, r.checkout, r.hostname, r.git_commit,
                     r.dirty, r.subject, r.started_unix_ms, r.brokkr_version, r.argv, r.kernel,
                     r.cpu_governor, r.avail_memory_mb, r.captured_env, r.target, r.profile,
                     r.features, r.default_features, r.resolved_bin, r.resolved_features,
-                    r.artifact, c.text, r.iterations_requested, r.outcome, r.failure
+                    r.artifact, c.text, r.iterations_requested, r.outcome, r.failure,
+                    r.config_digest, r.pairing_key, r.best_iteration
              FROM runs r JOIN configs c ON c.digest = r.config_digest
              WHERE r.uuid = ?1",
             [uuid],
-            |row| Ok((row.get::<_, i64>(0)?, run_columns(row)?)),
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    run_columns(row)?,
+                    (
+                        row.get::<_, String>(27)?,
+                        row.get::<_, String>(28)?,
+                        row.get::<_, Option<i64>>(29)?,
+                    ),
+                ))
+            },
         )
         .optional()?
     else {
@@ -56,8 +78,19 @@ pub(super) fn load(conn: &Connection, uuid: &str) -> Result<Option<RunDocument>,
         });
     }
     doc.params = load_params(conn, run_id)?;
-    doc.iterations = load_iterations(conn, run_id)?;
-    Ok(Some(doc))
+    doc.iterations = load_iterations(conn, run_id, children)?;
+    let (config_digest, pairing_key, best) = derived;
+    let best_iteration = best.map(index).transpose()?;
+    if best_iteration.is_some_and(|best| best >= doc.iterations.len()) {
+        return Err(unreadable("best iteration"));
+    }
+    Ok(Some(StoredRun {
+        doc,
+        config_digest,
+        pairing_key,
+        best_iteration,
+        children_loaded: children,
+    }))
 }
 
 /// The JSON-encoded and paired columns of a run row, decoded after the row
@@ -165,7 +198,11 @@ fn load_params(conn: &Connection, run_id: i64) -> Result<BTreeMap<String, BoundP
     Ok(params)
 }
 
-fn load_iterations(conn: &Connection, run_id: i64) -> Result<Vec<Iteration>, StoreError> {
+fn load_iterations(
+    conn: &Connection,
+    run_id: i64,
+    children: bool,
+) -> Result<Vec<Iteration>, StoreError> {
     let mut stmt = conn.prepare_cached(
         "SELECT idx, outcome, verdict, failure, wall_us, record FROM iterations
          WHERE run_id = ?1 ORDER BY idx",
@@ -196,7 +233,11 @@ fn load_iterations(conn: &Connection, run_id: i64) -> Result<Vec<Iteration>, Sto
             outcome,
             wall_us,
             record: record.as_deref().map(json).transpose()?,
-            children: load_children(conn, run_id, idx)?,
+            children: if children {
+                load_children(conn, run_id, idx)?
+            } else {
+                Vec::new()
+            },
         });
     }
     Ok(iterations)

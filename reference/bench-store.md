@@ -127,6 +127,34 @@ version or the file) and `Conflict` and `Failed` (anything before the
 commit) are known unapplied; `CommitUncertain` (the commit itself errored)
 may have landed, and republishing the same document settles it.
 
+## Reading
+
+`Store::open_read_only` opens an existing store and never creates its file:
+a missing file is `None`, which a reader treats as no history. A store at the
+current version opens read-only and `query_only`. One on an older version is
+migrated first through a writable connection opened without
+`SQLITE_OPEN_CREATE` (so a file removed in between is an error, not a fresh
+store), then reopened read-only; a newer or negative stamp and a file with
+tables but no stamp are refused, as by `Store::open`. The promise is about
+the database file: SQLite may make the `-wal` and `-shm` files a WAL read
+needs.
+
+The listing queries live here, not in the reader, so a results server answers
+the same queries from the same SQL. `RunFilter` always names a project, and
+selects by uuid prefix, commit prefix (of the full sha), bench substring,
+captured env, a bound param's value (its keys joined by `,` in bound order),
+literal invocation terms (brokkr's argv, every child's argv and environment
+additions, the captured env, each element matched as stored rather than as
+JSON text), and whether the run has a result or a clean tree. Every listing
+is in one total order, newest first by `started_unix_ms` then uuid, never by
+insertion: publication may arrive late or be replayed from another client.
+`Store::run` returns a run with what the store derived (config digest,
+pairing key, result iteration), its children read only on request.
+
+Two runs pair when their stored pairing keys are equal. The algorithm tag is
+inside the key, so rows of two algorithms never match; a reader that needs
+the tag reads it from the key.
+
 ## The migration chain
 
 `schema.rs`'s `MIGRATIONS` owns the schema: step N takes `user_version` N to

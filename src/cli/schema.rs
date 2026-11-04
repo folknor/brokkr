@@ -1,8 +1,8 @@
 //! Clap command and argument definitions.
 
 use super::validation::{
-    validate_env_kv, validate_meta_filter, validate_since, validate_snapshot_key_arg,
-    validate_test_name,
+    validate_env_kv, validate_meta_filter, validate_param_filter, validate_since,
+    validate_snapshot_key_arg, validate_test_name,
 };
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
@@ -1416,7 +1416,8 @@ Examples:
     #[command(
         display_order = 3,
         long_about = "\
-Query benchmark results from .brokkr/results.db.
+Query benchmark results from .brokkr/results.db, and this project's
+script-bench runs from the per-user bench store, listed after the typed rows.
 
 Examples:
   brokkr results                                    # last 20 results
@@ -1429,6 +1430,7 @@ Examples:
   brokkr results --command tags-filter --dataset eu # combine filters
   brokkr results --compare a65a 911c                # compare two commits
   brokkr results --compare a65a 911c --mode bench   # compare, filtered
+  brokkr results --param dataset=denmark            # script-bench runs with that param
 
 In a piners project this queries the same .brokkr/results.db (hotpath/alloc
 runs). The corpus run store has its own command - see `brokkr corpus-results`.
@@ -1477,6 +1479,13 @@ In depth: `brokkr man results`."
         /// on the off runs rather than relying on absence.
         #[arg(long, value_parser = validate_meta_filter)]
         env: Vec<String>,
+
+        /// Filter script-bench runs by a bound param, NAME=VALUE (multiple
+        /// allowed, AND semantics). VALUE is the param's value as the table
+        /// lists it: a collection's keys joined by `,` in bound order.
+        /// Typed rows carry no params, so this excludes all of them.
+        #[arg(long, value_parser = validate_param_filter)]
+        param: Vec<String>,
 
         /// Substring match against the run's invocation: the subprocess
         /// invocation (`cli_args`), the brokkr invocation (`brokkr_args`), or a

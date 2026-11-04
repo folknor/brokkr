@@ -15,7 +15,13 @@ pub(crate) enum ResultsView {
 pub(crate) struct ResultsQuery {
     pub(crate) view: ResultsView,
     pub(crate) filter: QueryFilter,
+    /// `--param NAME=VALUE`: script-bench runs only, so a non-empty list
+    /// excludes every typed row.
+    pub(crate) params: Vec<(String, String)>,
     pub(crate) top: usize,
+    /// The detected project's name, which selects its runs in the per-user
+    /// bench store.
+    pub(crate) project: String,
 }
 
 /// Query parameters for the `corpus-results` command (piners only) - the

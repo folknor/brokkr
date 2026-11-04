@@ -870,11 +870,19 @@ fn run_project(
             dataset,
             meta,
             env,
+            param,
             grep,
             grep_v,
             limit,
             top,
         } => {
+            let params = param
+                .iter()
+                .filter_map(|s| {
+                    s.split_once('=')
+                        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                })
+                .collect();
             let filter = crate::db::QueryFilter {
                 commit,
                 command,
@@ -907,7 +915,13 @@ fn run_project(
             } else {
                 crate::request::ResultsView::Table
             };
-            let rq = ResultsQuery { view, filter, top };
+            let rq = ResultsQuery {
+                view,
+                filter,
+                params,
+                top,
+                project: project.name().to_owned(),
+            };
             results_cmd::cmd_results(dev_config, project_root, &rq)
         }
         Command::CorpusResults {

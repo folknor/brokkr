@@ -1,0 +1,305 @@
+//! One script-bench run as a labelled block: identity, params, outcome and
+//! walls, host and build, every iteration and its children, the result's
+//! record and its `record.hotpath` report.
+
+use std::fmt::Write;
+
+use super::super::store::{
+    Child, ChildEnding, IterationOutcome, RunDocument, RunOutcome, StoredRun,
+};
+use super::{hotpath_report, ms, short_commit, timestamp, verdict};
+
+type Record = serde_json::Map<String, serde_json::Value>;
+
+fn field(out: &mut String, label: &str, value: &str) {
+    writeln!(out, "{label:<10}  {value}").expect("write to String is infallible");
+}
+
+fn ending(ending: &ChildEnding) -> String {
+    match ending {
+        ChildEnding::Exited { code } => format!("exit {code}"),
+        ChildEnding::Signalled { signal } => format!("signal {signal}"),
+        ChildEnding::StopMarker { marker } => format!("stopped at marker {marker}"),
+        ChildEnding::Deadline { secs, nanos } => format!("deadline {secs}.{nanos:09} s"),
+        ChildEnding::Interrupted => "interrupted".to_owned(),
+        ChildEnding::WaitFailed { reason } => format!("wait failed: {reason}"),
+    }
+}
+
+fn iteration_outcome(outcome: &IterationOutcome) -> String {
+    match outcome {
+        IterationOutcome::Completed { verdict: v } => {
+            format!("completed, verdict {}", verdict(v.as_ref()))
+        }
+        IterationOutcome::Failed { reason } => format!("failed: {reason}"),
+        IterationOutcome::Interrupted => "interrupted".to_owned(),
+    }
+}
+
+fn params(out: &mut String, doc: &RunDocument) {
+    for (i, (name, param)) in doc.params.iter().enumerate() {
+        let values: Vec<String> = param
+            .values
+            .iter()
+            .map(|v| match &v.digest {
+                Some(digest) => format!("{}@{}", v.key, digest.chars().take(8).collect::<String>()),
+                None => v.key.clone(),
+            })
+            .collect();
+        let (open, close) = if param.many { ("[", "]") } else { ("", "") };
+        let from = param
+            .from
+            .as_deref()
+            .map_or_else(String::new, |from| format!(" (from {from})"));
+        field(
+            out,
+            if i == 0 { "params" } else { "" },
+            &format!("{name}={open}{}{close}{from}", values.join(",")),
+        );
+    }
+}
+
+/// Uuid, start, commit, bench, params, outcome, the result's wall and
+/// verdict.
+fn identity(out: &mut String, run: &StoredRun) {
+    let doc = &run.doc;
+    field(out, "uuid", &doc.uuid.chars().take(8).collect::<String>());
+    field(out, "started", &timestamp(doc.started_unix_ms));
+    let commit = match &doc.subject {
+        Some(subject) => format!("{} ({subject})", short_commit(run)),
+        None => short_commit(run),
+    };
+    field(out, "commit", &commit);
+    field(
+        out,
+        "bench",
+        &format!("{} (project {})", doc.bench, doc.project),
+    );
+    params(out, doc);
+    let outcome = match &doc.outcome {
+        RunOutcome::Completed => "completed".to_owned(),
+        RunOutcome::Failed { reason } => format!("failed: {reason}"),
+        RunOutcome::Interrupted => "interrupted".to_owned(),
+    };
+    field(out, "outcome", &outcome);
+    if let Some(best) = run.best_iteration {
+        let wall = |w: Option<i64>| w.map_or_else(|| "--".to_owned(), ms);
+        let walls: Vec<String> = doc.iterations.iter().map(|i| wall(i.wall_us)).collect();
+        let detail = if walls.len() > 1 {
+            format!(
+                " (iteration {best}, best of {}: {})",
+                walls.len(),
+                walls.join(" / ")
+            )
+        } else {
+            String::new()
+        };
+        field(
+            out,
+            "elapsed",
+            &format!("{}{detail}", wall(doc.iterations[best].wall_us)),
+        );
+        if let IterationOutcome::Completed { verdict: v } = &doc.iterations[best].outcome {
+            field(out, "verdict", &verdict(v.as_ref()));
+        }
+    }
+    field(
+        out,
+        "iterations",
+        &format!(
+            "{} of {} requested",
+            doc.iterations.len(),
+            doc.iterations_requested
+        ),
+    );
+}
+
+/// Host, conditions, captured env, build, config and brokkr's invocation.
+fn context(out: &mut String, run: &StoredRun) {
+    let doc = &run.doc;
+    let unknown = |v: Option<&String>| v.map_or("(unknown)", String::as_str).to_owned();
+    field(out, "host", &doc.hostname);
+    field(out, "checkout", &doc.checkout);
+    let c = &doc.conditions;
+    field(out, "kernel", &unknown(c.kernel.as_ref()));
+    field(out, "governor", &unknown(c.cpu_governor.as_ref()));
+    field(
+        out,
+        "memory",
+        &c.avail_memory_mb
+            .map_or_else(|| "(unknown)".to_owned(), |mb| format!("{mb} MB available")),
+    );
+    for (i, (name, value)) in c.captured_env.iter().enumerate() {
+        field(
+            out,
+            if i == 0 { "env" } else { "" },
+            &format!("{name}={value}"),
+        );
+    }
+    let b = &doc.build;
+    let mut build = format!(
+        "{} {}, features [{}]{}",
+        b.target.as_deref().unwrap_or("(default bin)"),
+        b.profile,
+        b.features.join(","),
+        if b.default_features {
+            ""
+        } else {
+            ", no default features"
+        }
+    );
+    if let Some(resolved) = &b.resolved {
+        write!(
+            build,
+            "; resolved {} with [{}]",
+            resolved.bin,
+            resolved.features.join(",")
+        )
+        .expect("write to String is infallible");
+    }
+    if let Some(artifact) = &b.artifact {
+        write!(build, "; artifact {artifact}").expect("write to String is infallible");
+    }
+    field(out, "build", &build);
+    field(out, "config", &format!("xxh3-128 {}", run.config_digest));
+    field(
+        out,
+        "brokkr",
+        &format!("{} {}", doc.brokkr_version, doc.argv.join(" ")),
+    );
+}
+
+/// One child: when it started and how long it ran, how it ended, what it
+/// ran, and what its capture kept and lost.
+fn child(out: &mut String, idx: usize, child: &Child) {
+    let e = &child.evidence;
+    let mut losses = Vec::new();
+    if e.loss.rejected_lines > 0 {
+        losses.push(format!("{} rejected lines", e.loss.rejected_lines));
+    }
+    for (lost, what) in [
+        (e.loss.fifo_unread, "fifo unread"),
+        (e.loss.records_capped, "records capped"),
+        (e.loss.samples_capped, "samples capped"),
+        (e.loss.output_truncated, "output truncated"),
+        (e.calls_overflowed, "call census overflowed"),
+    ] {
+        if lost {
+            losses.push(what.to_owned());
+        }
+    }
+    if e.clock.outliers > 0 {
+        losses.push(format!("{} clock outliers", e.clock.outliers));
+    }
+    let loss = if losses.is_empty() {
+        String::new()
+    } else {
+        format!("; {}", losses.join(", "))
+    };
+    writeln!(
+        out,
+        "  child {idx}  at +{}  {}  {}  {} {}",
+        ms(child.origin_offset_us),
+        ms(child.wall_us),
+        ending(&child.ending),
+        child.program,
+        child.argv.join(" ")
+    )
+    .expect("write to String is infallible");
+    writeln!(
+        out,
+        "           {} samples, {} records{loss}",
+        e.samples.len(),
+        e.records.len()
+    )
+    .expect("write to String is infallible");
+}
+
+fn iterations(out: &mut String, run: &StoredRun) {
+    for (idx, iteration) in run.doc.iterations.iter().enumerate() {
+        let result = if run.best_iteration == Some(idx) {
+            " (result)"
+        } else {
+            ""
+        };
+        let wall = iteration.wall_us.map_or_else(|| "no wall".to_owned(), ms);
+        writeln!(
+            out,
+            "iteration {idx}{result}  {wall}  {}",
+            iteration_outcome(&iteration.outcome)
+        )
+        .expect("write to String is infallible");
+        if run.children_loaded {
+            for (c, each) in iteration.children.iter().enumerate() {
+                child(out, c, each);
+            }
+        }
+    }
+}
+
+/// One record's entries, `hotpath` aside, as compact JSON; a readable
+/// `record.hotpath` joins `reports`, an unreadable one is shown as it is.
+fn record(out: &mut String, label: &str, record: &Record, top: usize, reports: &mut Vec<String>) {
+    let entries: Vec<String> = record
+        .iter()
+        .filter(|(key, _)| key.as_str() != "hotpath")
+        .map(|(key, value)| format!("{key} = {value}"))
+        .collect();
+    if entries.is_empty() && !record.contains_key("hotpath") {
+        field(out, label, "(empty)");
+    }
+    for (i, entry) in entries.iter().enumerate() {
+        field(out, if i == 0 { label } else { "" }, entry);
+    }
+    match hotpath_report(record, top) {
+        Some(Ok(report)) => reports.push(report),
+        Some(Err(raw)) => field(
+            out,
+            if entries.is_empty() { label } else { "" },
+            &format!("hotpath = {raw} (not a hotpath report brokkr can read)"),
+        ),
+        None => {}
+    }
+}
+
+/// Render one run in full. Its children must be loaded to be shown.
+pub(crate) fn format_single(run: &StoredRun, top: usize) -> String {
+    let doc = &run.doc;
+    let mut out = String::new();
+    identity(&mut out, run);
+    out.push('\n');
+    context(&mut out, run);
+    out.push('\n');
+    iterations(&mut out, run);
+
+    // The result's record, or for a run without one each record extracted.
+    let records: Vec<(String, &Record)> = match run.best_iteration {
+        Some(best) => doc.iterations[best]
+            .record
+            .iter()
+            .map(|r| ("record".to_owned(), r))
+            .collect(),
+        None => doc
+            .iterations
+            .iter()
+            .enumerate()
+            .filter_map(|(i, it)| it.record.as_ref().map(|r| (format!("record {i}"), r)))
+            .collect(),
+    };
+    if !records.is_empty() {
+        out.push('\n');
+    }
+    let mut reports = Vec::new();
+    for (label, each) in records {
+        record(&mut out, &label, each, top, &mut reports);
+    }
+    for report in reports {
+        out.push('\n');
+        out.push_str(&report);
+        out.push('\n');
+    }
+    while out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}

@@ -10,7 +10,8 @@ when it reads the config, and `brokkr check`'s `bench` phase compiles every
 bench's script without running any of it. Running a bench (`brokkr bench
 NAME`), resolving its params against the config and recording its results are
 not there yet; until they are, a bench table describes a bench and nothing
-runs it.
+runs it. `brokkr results` already reads recorded runs (`brokkr man results`,
+Script benches), so it lists them once something records them.
 
 Every refusal this page lists happens when the config loads, for every
 command, so a mistake in a bench table is named before anything is built. A

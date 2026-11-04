@@ -516,7 +516,30 @@ file with a bounded preview; handles in `src/bench/resources.rs`. Sparred
 against two rivals: the child inheriting the owner's descriptor too
 (an owner-only close would let a crash reclaim the iteration under a
 running child) and the library's serial coverage launches (no crash
-reclamation without a name clean knows, no per-call completion).
+reclamation without a name clean knows, no per-call completion). Slice 9,
+taken before 5 (`docs/commands/results.md`, Script benches): `brokkr
+results` itself reads the store (no `res` name), the current project's runs
+after the typed output in every view; a read-only open that never creates
+the file; `RunFilter` and the listing queries in the store module, in one
+total order (start time, then uuid); filters mapped (`--command` to the
+bench name, `--param` new, `--mode`/`--dataset`/`--meta` excluding bench
+runs); `--compare` on completed clean runs, latest per stored key, naming
+config paths, build, host, env, verdict and record moves, collapsed arms and
+an equal-context pointer; `record.hotpath` through the typed printer. Sparred
+against a selector flag and a separate verb.
+
+Slice 5 now has to honour, since slice 9 reads before anything writes: a
+run's `project` is the detected project's name (`Project::name`), which is
+what `results` selects by; `started_unix_ms` is the run's real start, the
+order every listing and "latest" use; the stored config is TOML or a JSON
+object, or `--compare` can name a config change only by digest;
+`record.hotpath`, when a script sets it, is the hotpath JSON report as the
+program wrote it; dirty runs, if stored, are listed marked `-dirty` and never
+compared; the run's uuid is printed so `brokkr results <uuid>` finds it; and
+`results` is hidden from litehtml (`MEASURED_DB_ABSENT`), which has to open
+if `brokkr bench` runs there, and then `results_cmd` must also skip the typed
+reader for litehtml, whose `.brokkr/results.db` is `MechanicalDb`'s unrelated
+schema.
 
 5. **The runner core, end to end.** Per-iteration Lua state, the top-level
    restrictions, the TOML build with host features folded in, the worktree
@@ -569,14 +592,16 @@ reclamation without a name clean knows, no per-call completion).
    does, and open without following a link substituted since (a child can
    turn an output into a link to an input); `write` takes output and
    scratch handles only (`Handle::writable`).
-9. **`brokkr res` on the new store.** Listing, pairing, `--compare` naming
-   config changes between paired rows, the `record.hotpath` renderer. The
-   store has only `open` (which creates and migrates) and `load(uuid)`:
-   this slice adds a read-only open that never creates a file, as
-   `brokkr results` promises for its stores, and the listing queries.
-   Pairing uses the stored `bench-pair-v1` key only among rows of one
-   algorithm. The command today is `brokkr results`; `res` here is
-   shorthand unless this slice adds the name.
+9. **Evidence views of a script-bench run.** The rest of slice 9: the
+   store holds every child's samples, FIFO records, capture loss and clock
+   check, and `brokkr results <uuid>` shows only their counts. What
+   `brokkr sidecar` shows for a typed run (phases, samples, markers,
+   counters, stalls, `--compare`) is wanted per child of a bench run's
+   iteration, read through `Store::run(uuid, true)`; `brokkr sidecar`
+   resolves through `RunStore`, which does not read the bench store, so
+   this is a selection boundary to design, not a flag. One launch,
+   smaller than the slices around it; best after slice 10 shows which
+   views a real bench needs.
 10. **The first real benches.** dellingr's workloads and pbfhogg's
     read-only commands, mostly in their brokkr.toml, shaking out slices 3
     to 8.
@@ -588,10 +613,15 @@ reclamation without a name clean knows, no per-call completion).
     deletes runs (an `invalidate` for script benches) needs a retained
     request record, since a deleted run cannot answer its replay. The
     server includes `src/bench/store/` by path or the crate gains a lib
-    target; either works.
+    target; either works. It answers the reads slice 9 put in the store
+    too (`RunFilter` selections, `Store::run` with or without children,
+    `has_runs`, `elsewhere`), so their wire form is this slice's.
 12. **The remote client.** The user-only server URL, a blocking HTTP
     client, retries and outcome unknown, the deployment example in the
-    docs.
+    docs. `brokkr results` reads through it when a server is configured
+    (`bench::results::BenchReader` opens the local file today); an
+    unreachable server fails the command, as an unreadable local store
+    does.
 
 Outside brokkr, dellingr's interrupt (dellingr#9) is its own launch in
 dellingr, before slice 5.

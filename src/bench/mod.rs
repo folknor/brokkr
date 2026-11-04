@@ -3,15 +3,15 @@
 //! The schema is read at load (`crate::config::bench`). Here: the static check
 //! `brokkr check`'s `bench` phase runs (every bench's script read and
 //! compiled, nothing executed), the bench store with brokkr's adapter to
-//! it, and the handles a script's paths reach its children through
-//! (`resources`), none of which the binary uses before the script-bench
-//! runner does.
+//! it, `brokkr results`' reading of that store (`results`), and the handles
+//! a script's paths reach its children through (`resources`). Writing the
+//! store and running an iteration wait for the script-bench runner.
 
 // An expectation goes unfulfilled, and so fails the build, once the runner
 // uses everything it covers: then it is removed.
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "no command writes or reads the bench store yet")
+    expect(dead_code, reason = "no command writes the bench store yet")
 )]
 mod evidence;
 mod lua;
@@ -20,12 +20,13 @@ mod lua;
     expect(dead_code, reason = "no command runs a script bench yet")
 )]
 mod resources;
+pub(crate) mod results;
 #[cfg_attr(
     not(test),
     expect(
         dead_code,
         unused_imports,
-        reason = "no command writes or reads the bench store yet"
+        reason = "no command writes the bench store yet"
     )
 )]
 pub(crate) mod store;

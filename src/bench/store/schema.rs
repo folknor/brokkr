@@ -8,7 +8,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 use super::StoreError;
 
@@ -198,7 +198,20 @@ pub(super) fn schema_version() -> i64 {
 /// with tables but no version stamp (not this store's), and a filesystem
 /// where WAL does not take.
 pub(super) fn open(path: &Path) -> Result<Connection, StoreError> {
-    let conn = Connection::open(path)?;
+    open_writable(path, true)
+}
+
+/// [`open`], creating the file only when `create` is set: a reader's
+/// migration opens without it, so a file removed since the reader found it
+/// is an error rather than a fresh store.
+fn open_writable(path: &Path, create: bool) -> Result<Connection, StoreError> {
+    let mut flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+        | OpenFlags::SQLITE_OPEN_URI
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    if create {
+        flags |= OpenFlags::SQLITE_OPEN_CREATE;
+    }
+    let conn = Connection::open_with_flags(path, flags)?;
     conn.busy_timeout(BUSY_TIMEOUT)?;
     conn.pragma_update(None, "foreign_keys", true)?;
     refuse_newer(&conn)?;
@@ -212,6 +225,48 @@ pub(super) fn open(path: &Path) -> Result<Connection, StoreError> {
     }
     migrate(&conn)?;
     Ok(conn)
+}
+
+/// Open an existing store for reading, never creating its file: `None` when
+/// there is no file at `path`. A store on an older schema is migrated first,
+/// through a writable connection that may not create the file, then reopened
+/// read-only; a newer or negative stamp and a file with tables but no stamp
+/// are refused, as [`open`] refuses them. SQLite may still make the `-wal`
+/// and `-shm` files a WAL read needs.
+pub(super) fn open_read_only(path: &Path) -> Result<Option<Connection>, StoreError> {
+    let read_only = || -> Result<Option<Connection>, StoreError> {
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        match Connection::open_with_flags(path, flags) {
+            Ok(conn) => {
+                conn.busy_timeout(BUSY_TIMEOUT)?;
+                conn.pragma_update(None, "query_only", true)?;
+                Ok(Some(conn))
+            }
+            // Absent only when the file is confirmed missing: a path the
+            // user cannot search is an error, not an empty history.
+            Err(error) => match std::fs::metadata(path) {
+                Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(other) => Err(StoreError::Failed(format!(
+                    "{} cannot be read: {other}",
+                    path.display()
+                ))),
+                Ok(_) => Err(error.into()),
+            },
+        }
+    };
+    let Some(conn) = read_only()? else {
+        return Ok(None);
+    };
+    if refuse_newer(&conn)? == schema_version() {
+        return Ok(Some(conn));
+    }
+    drop(conn);
+    drop(open_writable(path, false)?);
+    read_only()?
+        .ok_or_else(|| StoreError::Failed(format!("{} vanished after migration", path.display())))
+        .map(Some)
 }
 
 fn user_version(conn: &Connection) -> Result<i64, StoreError> {

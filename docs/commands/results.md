@@ -3,6 +3,8 @@
 Query the results database, `.brokkr/results.db` - the durable record every
 measured run writes. The sibling command `brokkr sidecar` queries the profiler
 store (`sidecar.db`); see `docs/commands/measure.md` for what lands in which.
+The current project's script-bench runs, kept in the per-user bench store,
+are listed after these rows (Script benches, below).
 
 `results` and `sidecar` open existing stores read-only and do not create
 databases. A store on an older schema is migrated first (the same transactional
@@ -19,8 +21,9 @@ from its `--help`.
 ## The table
 
 Bare `brokkr results` prints the last `-n` rows (default 20), newest first. No
-database yet reads as `no results yet (run a benchmark first)` rather than an
-error - not having measured anything is a normal state.
+database yet, and no script-bench run of the project, reads as `no results yet
+(run a benchmark first)` rather than an error - not having measured anything
+is a normal state.
 
 `--limit N` caps rows in table and UUID-prefix views, and comparison pairs in
 `--compare` (default 20). Compare pairs are formed before the cap is applied.
@@ -151,7 +154,9 @@ scenario) is the scenario row alone, with its profile.
 
 A prefix matching several runs falls back to the table plus per-row details.
 UUID resolution considers both stores; results lists result rows and reports
-any matching sidecar-only UUIDs separately. `sidecar` requires a prefix to
+any matching sidecar-only UUIDs separately, then any matching script-bench
+runs (Script benches, below); `sidecar` and `invalidate` do not read the bench
+store. `sidecar` requires a prefix to
 name one run and lists candidates when it is ambiguous. An empty prefix is
 refused rather than matching every row.
 
@@ -382,3 +387,106 @@ one shown. A row without provenance (everything recorded before brokkr kept
 it) is unknown, never equal to anything: one side missing prints `build
 provenance: not recorded on A` (or `B`), and two unrecorded rows are never
 offered as the like-for-like pair.
+
+## Script benches
+
+Script-bench runs (`brokkr man bench-config`) are kept in one per-user store,
+`$XDG_DATA_HOME/brokkr/bench.db`, shared by every project and every clone of
+it; `results` shows the runs whose project is the one detected here. Every
+view prints its typed output first, exactly as above, then the script-bench
+section when it has runs to show; with none, the typed output is unchanged.
+When the bench section has runs, the typed view's own empty answer (`no
+matching results`, `(no results)`) is left out, and its other notices
+(sidecar-only runs, the `--limit` cap) still print.
+
+The store is opened read-only and never created. A store on an older schema
+is migrated first, as results.db is; one stamped newer than this brokkr, or a
+file at that path that is not a bench store, fails the command naming the
+file, in every view: a history that cannot be read is not an empty one. With
+no data home to name the store in (neither `XDG_DATA_HOME` nor `HOME`) there
+is no store.
+
+**Filters.** A filter a run cannot answer excludes it, as `--meta` excludes a
+row missing its key:
+
+- `--commit` is a prefix of the run's full commit sha, ASCII case ignored.
+- `--command` is a literal substring of the bench name, ASCII case ignored.
+- `--env NAME=VALUE` matches a captured variable exactly.
+- `--grep` / `--grep-v` are literal substrings of the run's invocation:
+  each element of brokkr's argv, each element of every child's argv, each
+  child's environment addition and each captured variable as `NAME=VALUE`.
+- `--param NAME=VALUE` matches a bound param whose value, as the table lists
+  it, is exactly VALUE: a scalar's key, a collection's keys joined by `,` in
+  bound order (`--param osc=12,10` does not match `10,12`), an empty
+  collection the empty string. It filters what is displayed, not a pairing
+  identity: a scalar `""` and an empty collection both match `NAME=`, a
+  scalar `a` and a one-key collection both match `NAME=a`, and so does a
+  plain key holding a comma. It is case-sensitive, since keys are data, and
+  excludes every typed row.
+- `--mode`, `--dataset` and `--meta` have no meaning for a script bench and
+  exclude every bench run.
+
+**The table** lists runs newest first by start time (then uuid, so the order
+is total whatever order runs were stored in), at most `-n`: uuid, start
+(UTC), the commit's first eight digits (`-dirty` for a run of a dirty tree),
+the bench, the result (the fastest iteration's wall at microsecond
+precision, or `failed` / `interrupted` for a run without one), its params,
+then a verdict column when some run has a verdict other than nil and an env
+column when some run captured variables. Every attempted run is listed,
+failed and interrupted ones included.
+
+**A uuid prefix** matching exactly one run in any store prints that run as a
+labelled block: identity and params (with each value's `from` path and file
+digest), the outcome, the result's wall with every iteration's in execution
+order and its verdict (nil, or the string quoted, so `""` stays visible),
+host, conditions, captured env, the build asked for and as resolved, the
+config digest, brokkr's argv, then each iteration with its outcome and each
+child with its start offset, wall, ending, argv and what its capture kept
+and lost. Then the result's `record` (for a run without a result, each
+iteration's that was extracted), one entry per line as compact JSON. Viewing
+a child's samples and markers is not there yet. A prefix matching several
+runs prints the table. A prefix that names no run of this project but names
+another project's says which project it belongs to.
+
+**`record.hotpath`.** A script that profiles puts the hotpath JSON report its
+program wrote into `record.hotpath`. It is rendered by the printer typed rows
+use, capped by `--top`, and a pair holding one on both sides gets the
+function diff after the comparison. A value with nothing recognizable as a
+report is shown as JSON with a note; one only partly recognized renders what
+was recognized, as for a typed row.
+
+**`--compare A B`.** Each side is the completed runs of a clean tree whose
+commit starts with that prefix and that pass the filters; a dirty run never
+stands for a commit, and a run without a result never pairs or compares. Two
+runs pair when their stored pairing keys are equal (`reference/bench-store.md`:
+project, bench and every bound param with its keys and file digests in bound
+order), and the latest run per key on each side is compared. Pairs are
+ordered by bench, formed before `--limit` applies, and the cap is announced
+as for typed pairs. What the key leaves out is named under the pair rather
+than splitting it:
+
+- `config differs:` the dotted paths of the stored resolved config added
+  (`+`), removed (`-`) or changed, at most six, then counted; a config that
+  reads as neither TOML nor JSON is named by digest.
+- `build differs:` the requested target, profile, features and default
+  features, and the resolved bin and features; never the artifact digest,
+  which differs across commits by construction.
+- `host:` hostname, memory, governor and kernel, and `env:` the captured
+  variables, as for typed pairs.
+- `verdict:` when the results' verdicts differ, nil against `""` included:
+  the sides measured different answers.
+- `record:` the result records' entries that moved, `hotpath` aside.
+- `other runs under this key with a different env or build:` how many runs
+  each side holds under the key whose captured env or requested build differ
+  from the compared one, naming the newest: an arm the pair collapsed.
+- `older pair with equal captured env and requested build:` when the
+  compared pair differs in either, the pair under the key whose older run is
+  latest among pairs equal in both, with its walls and its own build and
+  host differences. A pointer within the query, never substituted for the
+  pair shown.
+
+A run on one side only gets a line naming the other side's latest run of the
+same bench and every identity difference from it (a param bound on one side
+only, a collection against a scalar, values differing in key, order or
+digest, or keys of different pairing algorithms): a candidate for why it has
+no partner, not proof.

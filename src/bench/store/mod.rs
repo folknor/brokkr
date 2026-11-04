@@ -13,11 +13,13 @@
 //! applies it in one `BEGIN IMMEDIATE` transaction. The run uuid is the
 //! request id: a uuid already stored is answered from the stored run when
 //! the documents are equal and refused when they differ, and the lookup,
-//! comparison and insert share the transaction. `reference/bench-store.md`
-//! is the contract.
+//! comparison and insert share the transaction. Readers open the store
+//! without creating it ([`Store::open_read_only`]) and list runs through
+//! [`RunFilter`]. `reference/bench-store.md` is the contract.
 
 mod document;
 mod error;
+mod list;
 mod read;
 mod schema;
 mod write;
@@ -32,6 +34,7 @@ pub use document::{
     SinkEnd,
 };
 pub use error::StoreError;
+pub use list::{RunFilter, StoredRun};
 
 /// What a publication did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,9 +90,42 @@ impl Store {
         Ok(Published::Stored)
     }
 
+    /// Open an existing store for reading without creating it: `None` when
+    /// there is no file at `path`. An older schema is migrated first; a
+    /// newer one or a foreign file is refused, as by [`Store::open`].
+    pub fn open_read_only(path: &Path) -> Result<Option<Self>, StoreError> {
+        Ok(schema::open_read_only(path)?.map(|conn| Self { conn }))
+    }
+
     /// The run stored under `uuid`, as it was published.
     pub fn load(&self, uuid: &str) -> Result<Option<RunDocument>, StoreError> {
         read::load(&self.conn, uuid)
+    }
+
+    /// The run stored under `uuid` with what the store derived from it,
+    /// its children read only when `children` is set.
+    pub fn run(&self, uuid: &str, children: bool) -> Result<Option<StoredRun>, StoreError> {
+        read::load_run(&self.conn, uuid, children)
+    }
+
+    /// The uuids `filter` selects, newest first by start time, then uuid.
+    pub fn select(&self, filter: &RunFilter) -> Result<Vec<String>, StoreError> {
+        list::select(&self.conn, filter)
+    }
+
+    /// Whether `project` has any stored run, whatever its outcome.
+    pub fn has_runs(&self, project: &str) -> Result<bool, StoreError> {
+        list::has_runs(&self.conn, project)
+    }
+
+    /// Runs of other projects whose uuid starts with `prefix`, as
+    /// `(uuid, project)`.
+    pub fn elsewhere(
+        &self,
+        project: &str,
+        prefix: &str,
+    ) -> Result<Vec<(String, String)>, StoreError> {
+        list::elsewhere(&self.conn, project, prefix)
     }
 
     /// The connection, for tests that inspect the schema itself.
