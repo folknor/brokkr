@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "Shared development tooling for multiple Rust and data projects"
-# Both bins are declared explicitly below; without this, target
-# auto-discovery would also pick up src/bin/rustc_guard.rs under its file
-# name and the guard would build twice under two names.
+# Every bin is declared explicitly below; without this, target
+# auto-discovery would also pick up the files under src/bin/ under their
+# file names and build them twice under two names.
 autobins = false
 
 [[bin]]
@@ -20,6 +20,13 @@ path = "src/main.rs"
 [[bin]]
 name = "brokkr-rustc-guard"
 path = "src/bin/rustc_guard.rs"
+
+# The results server: the bench store (src/bench/store/, included by path)
+# behind HTTP, run by whoever hosts one. Installed with the others, unused
+# until started.
+[[bin]]
+name = "brokkr-results-server"
+path = "src/bin/results_server/main.rs"
 
 [dependencies]
 clap = { version = "4.6.1", features = ["derive"] }
@@ -105,6 +112,19 @@ nextest-metadata = "0.15"
 guppy = "0.19.1"
 nextest-filtering = "0.23.0"
 camino = "1"
+# The results server's HTTP stack (src/bin/results_server/): hyper's HTTP/1.1
+# server on the tokio nextest-runner already links, which adds `net` here.
+# A maintained stack rather than a hand-written one; HTTP/1.1 only, since the
+# server sits behind a TLS proxy that speaks it to the backend.
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+
+[dev-dependencies]
+# The results server's job-race tests run the handler on a paused clock, so
+# its wait expires when the test says, not when the scheduler does.
+tokio = { version = "1.54.1", features = ["test-util"] }
 
 [lints.clippy]
 print_stdout = "deny"

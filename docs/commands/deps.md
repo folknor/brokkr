@@ -48,8 +48,8 @@ deserializes a minimal subset (packages, workspace membership, declared deps,
 and resolve edges) into one indexed `Graph` per metadata load. The graph owns
 `PackageId` lookups, source classification, membership, and reverse
 Normal-kind adjacency. No extra crate dependencies. Network phases shell out
-to existing tools (`ccu` today, `cargo audit` planned) - no native network
-code in brokkr.
+to existing tools (`ccu` today, `cargo audit` planned) - `deps` has no
+native network code of its own.
 
 `--locked` is what makes "audits `Cargo.lock`" true: without it cargo
 re-resolves whenever the lockfile is missing or behind a manifest,
@@ -427,4 +427,4 @@ Ship in this order, each as its own PR:
 
 That's v1 done. Next: `advisory` via `cargo audit --json` - same
 shell-out pattern, same graceful `ToolMissing` skip. No native network
-code, no advisory-db cache management in brokkr itself.
+code, no advisory-db cache management in `deps` itself.

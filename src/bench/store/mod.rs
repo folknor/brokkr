@@ -15,13 +15,15 @@
 //! the documents are equal and refused when they differ, and the lookup,
 //! comparison and insert share the transaction. Readers open the store
 //! without creating it ([`Store::open_read_only`]) and list runs through
-//! [`RunFilter`]. `reference/bench-store.md` is the contract.
+//! [`RunFilter`]. A results server answers the same calls over HTTP through
+//! [`wire`]. `reference/bench-store.md` is the contract.
 
 mod document;
 mod error;
 mod list;
 mod read;
 mod schema;
+pub mod wire;
 mod write;
 
 use std::path::Path;
@@ -37,7 +39,8 @@ pub use error::StoreError;
 pub use list::{RunFilter, StoredRun};
 
 /// What a publication did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Published {
     /// The run is new and now stored.
     Stored,
@@ -126,6 +129,13 @@ impl Store {
         prefix: &str,
     ) -> Result<Vec<(String, String)>, StoreError> {
         list::elsewhere(&self.conn, project, prefix)
+    }
+
+    /// Whether the connection is inside a transaction. A long-lived owner
+    /// checks this after every operation: one left open by a failed
+    /// rollback would poison every later request.
+    pub fn in_transaction(&self) -> bool {
+        !self.conn.is_autocommit()
     }
 
     /// The connection, for tests that inspect the schema itself.

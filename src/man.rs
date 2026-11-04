@@ -132,6 +132,12 @@ const TOPICS: &[Topic] = &[
         commands: &[CommandId::Results],
     },
     Topic {
+        name: "results-server",
+        summary: "brokkr-results-server: the bench store over HTTP, running and deploying it",
+        content: include_str!("../docs/results-server.md"),
+        commands: &[CommandId::Env],
+    },
+    Topic {
         name: "measure",
         summary: "--bench/--hotpath/--alloc, the sidecar profiler, marker FIFOs",
         content: include_str!("../docs/commands/measure.md"),

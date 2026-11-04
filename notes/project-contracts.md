@@ -527,6 +527,19 @@ runs); `--compare` on completed clean runs, latest per stored key, naming
 config paths, build, host, env, verdict and record moves, collapsed arms and
 an equal-context pointer; `record.hotpath` through the typed printer. Sparred
 against a selector flag and a separate verb.
+Slice 11, taken before 5 (`reference/bench-store.md`, On the wire;
+`reference/results-server.md`; `docs/results-server.md`): the wire lives in
+the store (`src/bench/store/wire.rs`), one `POST /bench` with externally
+tagged requests and answers, strict, one protocol version at a time with
+frozen fingerprints and frozen decoding refusals; a failure envelope of its
+own (kind, message, `applied` only when proved for that attempt, `retry`),
+tolerant and stable across versions, from which a client rebuilds a
+`StoreError` only when the envelope is exactly one; `brokkr-results-server`
+as a third bin including the store by `#[path]`, hyper 1 on tokio, one
+request per connection, admission before the body, a single worker with a
+compare-and-swap between claim and withdrawal, the autocommit check, the
+canonical-path flock. Sparred against `StoreError` itself as the envelope,
+REST routes, a lib target, and tolerant versioned answers.
 
 Slice 5 now has to honour, since slice 9 reads before anything writes: a
 run's `project` is the detected project's name (`Project::name`), which is
@@ -605,23 +618,25 @@ schema.
 10. **The first real benches.** dellingr's workloads and pbfhogg's
     read-only commands, mostly in their brokkr.toml, shaking out slices 3
     to 8.
-11. **The wire contract and the server.** The document over the wire,
-    `StoreError`'s three classes mapped to responses, hyper or axum, the
-    single writer, the flock, migrations at startup, the in-flight cap.
-    Publication's request-id contract landed with the store (the run uuid,
-    replay answered inside the write transaction); a write kind that
-    deletes runs (an `invalidate` for script benches) needs a retained
-    request record, since a deleted run cannot answer its replay. The
-    server includes `src/bench/store/` by path or the crate gains a lib
-    target; either works. It answers the reads slice 9 put in the store
-    too (`RunFilter` selections, `Store::run` with or without children,
-    `has_runs`, `elsewhere`), so their wire form is this slice's.
 12. **The remote client.** The user-only server URL, a blocking HTTP
-    client, retries and outcome unknown, the deployment example in the
-    docs. `brokkr results` reads through it when a server is configured
-    (`bench::results::BenchReader` opens the local file today); an
-    unreachable server fails the command, as an unreadable local store
-    does.
+    client, retries and outcome unknown. `brokkr results` reads through it
+    when a server is configured (`bench::results::BenchReader` opens the
+    local file today); an unreachable server fails the command, as an
+    unreadable local store does. The wire is landed (slice 11): the client
+    decodes `store::wire`'s types, classifies a failure with
+    `Failure::classify` and a body without an envelope by status alone, and
+    owes the contract's client duties (`reference/bench-store.md`, On the
+    wire): an uncertain publication stays uncertain across later refusals
+    until a success answers it, a 200 to a publication acknowledges it even
+    when its body is unreadable, a `run` answer's `children_loaded` is
+    checked against what was asked, and the protocol header is sent on
+    every request. The client's budget must outlast the server's
+    connection deadline (`Limits` in `src/bin/results_server/main.rs`).
+    `docs/results-server.md` then drops "brokkr itself does not talk to a
+    results server yet" and names the URL key. A write kind that deletes
+    runs (an `invalidate` for script benches) would need a retained request
+    record, since a deleted run cannot answer its replay
+    (`reference/bench-store.md`, Publication); none is planned.
 
 Outside brokkr, dellingr's interrupt (dellingr#9) is its own launch in
 dellingr, before slice 5.

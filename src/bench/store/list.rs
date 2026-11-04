@@ -4,13 +4,15 @@
 //! answers the same queries from the same SQL.
 
 use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
 
 use super::StoreError;
 use super::document::RunDocument;
 
 /// Which runs a listing selects. Every condition ANDs; an empty filter
 /// selects every run of the project.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RunFilter {
     /// The project the runs belong to; required, so one project's history
     /// never leaks into another's.
@@ -41,7 +43,8 @@ pub struct RunFilter {
 /// One stored run with what the store derived from it. A listing loads it
 /// without children (`children_loaded` false: every iteration's `children`
 /// is empty because it was not read, not because none ran).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StoredRun {
     pub doc: RunDocument,
     pub config_digest: String,

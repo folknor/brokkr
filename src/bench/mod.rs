@@ -5,7 +5,9 @@
 //! compiled, nothing executed), the bench store with brokkr's adapter to
 //! it, `brokkr results`' reading of that store (`results`), and the handles
 //! a script's paths reach its children through (`resources`). Writing the
-//! store and running an iteration wait for the script-bench runner.
+//! store and running an iteration wait for the script-bench runner. The
+//! store's wire contract (`store::wire`) is served by the
+//! `brokkr-results-server` binary; brokkr's client of it is still to come.
 
 // An expectation goes unfulfilled, and so fails the build, once the runner
 // uses everything it covers: then it is removed.
@@ -32,6 +34,8 @@ pub(crate) mod results;
 pub(crate) mod store;
 #[cfg(test)]
 mod store_tests;
+#[cfg(test)]
+mod wire_tests;
 
 use crate::config::bench::{Bench, BenchScript};
 use std::path::PathBuf;

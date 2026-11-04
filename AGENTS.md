@@ -40,7 +40,9 @@ A doc with 8+ `##` sections is **section-addressed**: `brokkr man conventions sc
 - `docs/commands/output-channels.md` - where a run's output goes (stdout/stderr/FIFO, results.db vs sidecar.db).
 - `docs/commands/library.md` - pbfhogg `brokkr library`, `[pbfhogg.library]`, the library harness protocol, `--bench`/`--hotpath`/`--alloc` measurement and `--all` certification.
 - `reference/library-internals.md` - how the library harness consumer is built and why: the strict reader, the run directory's reservation and serial launches, profiled runs, capture, refusal counterparts, seeds and publications, identity and recording, library against CLI timing. Read before changing `src/pbfhogg/library/`.
-- `reference/bench-store.md` - the per-user store of script-bench runs: the run document, what the store derives, publication with the run uuid as request id, reading (the open that never creates, the listing queries and their order), the frozen migration chain, and why the module is self-contained. Read before changing `src/bench/store/`.
+- `reference/bench-store.md` - the per-user store of script-bench runs: the run document, what the store derives, publication with the run uuid as request id, reading (the open that never creates, the listing queries and their order), the wire contract a results server and its clients share (requests, answers, the failure envelope, one protocol version at a time), the frozen migration chain, and why the module is self-contained. Read before changing `src/bench/store/`.
+- `reference/results-server.md` - how `brokkr-results-server` is built: owning the file, the single worker and its job races, admission and bounds, the HTTP layer. Read before changing `src/bin/results_server/`.
+- `docs/results-server.md` - running and deploying `brokkr-results-server`.
 - `reference/bench-resources.md` - what a script-bench iteration owns: the owner lease and the borrow each child launches with, pinning and crash reclamation, call admission (the read-only veto, authority, conflicts), creation without following substitutes, handles and stdout spools, and the placement obligation. Read before changing `src/reservations/iteration.rs` or `src/bench/resources.rs`.
 - `docs/commands/visual.md` - litehtml-rs/sluggrs visual commands.
 - `docs/commands/hotpath.md` - sluggrs `brokkr hotpath`.
@@ -53,14 +55,14 @@ A doc with 8+ `##` sections is **section-addressed**: `brokkr man conventions sc
 
 ## Architecture
 
-Single crate, single binary (plus the `brokkr-rustc-guard` bin). No workspace. The per-file map lives in `reference/architecture.md`; the landmarks:
+Single crate: the `brokkr` binary, plus the `brokkr-rustc-guard` and `brokkr-results-server` bins, which include shared sources by path. No workspace. The per-file map lives in `reference/architecture.md`; the landmarks:
 
 - `src/main.rs`, `src/main_parts/` - startup and dispatch. `src/cli/` - clap schema, and `visibility.rs`'s `CommandSpec` catalogue, which drives the project gate, help visibility, lock policy, worktree selection and man topics.
 - `src/check_cmd/`, `src/test_runner/`, `src/test_cmd/`, `src/build_purpose/` - the check/test/clippy pipeline.
 - `src/config.rs`, `src/config_parts/` - config schema, composition, project sections.
 - `src/output/` - console and child-process runners; every spawn goes through `process/spawn.rs`'s `ChildPolicy`.
 - `src/lock/`, `src/hold.rs`, `src/guard.rs`, `src/stray.rs`, `src/test_orphans.rs` - the global lock, compile capability, rustc guard and reapers.
-- `src/measure/`, `src/harness.rs`, `src/db/`, `src/sidecar.rs` - measurement and result stores; `src/bench/store/` is the per-user store of script-bench runs.
+- `src/measure/`, `src/harness.rs`, `src/db/`, `src/sidecar.rs` - measurement and result stores; `src/bench/store/` is the per-user store of script-bench runs, which `src/bin/results_server/` serves over HTTP.
 - `src/<project>/` - project-specific commands.
 
 ### Project-scoped help
