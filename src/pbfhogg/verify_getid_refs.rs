@@ -48,7 +48,7 @@ use std::path::{Path, PathBuf};
 
 use super::pbf_frames::IndexSummary;
 use super::verify::{Findings, PbfArgv, VerifyHarness};
-use super::verify_getid_removeid::{InputOrder, compare_outputs};
+use super::verify_input_order::{InputOrder, compare_outputs};
 use super::verify_opl::{self as opl, OplObject, OplRelation};
 use super::verify_reference::ToolRun;
 use crate::error::DevError;

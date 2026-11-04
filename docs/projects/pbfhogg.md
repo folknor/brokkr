@@ -731,6 +731,39 @@ saying so: every multi and sequential output must then not claim the flag,
 and each is compared through an osmium-sorted copy whose strict order proves
 it repeats no ID.
 
+`merge`, `derive-changes`, `diff` and `renumber` verify commands whose
+documented contract refuses input without `Sort.Type_then_ID` (pbfhogg's
+`apply-changes` takes a sorted base, `diff` in both formats needs both inputs
+to claim it, `renumber` requires sorted input), and osmium's
+`apply-changes` and `renumber` require sorted input too, so on such input
+(read from the header's optional features, as the checks above read it)
+nothing can be compared and the check is held to that refusal instead
+(`verify_input_order`). The command under test runs on the input with the
+argv the check would give it (`--direct-io`, `--locations-on-ways` and
+`--start-id` included): an answering exit (0, or 1 for a diff) fails the check
+as acceptance of input pbfhogg refuses, which its general apply-changes path
+once did, silently dropping creates; so does an output under any name the
+argv writes, or a text diff listing on stdout, whatever the run's ending. Exit
+2 must carry exactly one of the `pbfhogg sort --distrust-metadata <input> -o
+sorted.osm.pbf` advice lines pbfhogg's CLI gives every `Unsorted` refusal,
+its shell word decoded and equal to the claimless operand as the argv spelled
+it (one naming another file is a failed finding); exit 2 without it, another
+exit or a signal is an error, a failure of another kind. `merge` and
+`renumber` run once; `apply-changes` itself is the step that refuses, so
+`derive-changes` and `diff` never build their new PBF and instead run the
+command under test twice, the input as OLD and then as NEW against an
+osmium-sorted copy (verify sort's cached run) that must itself declare the
+flag, each with an output of its own. A mixed indexed pair, so neither diff
+engine is exercised. Under `--locations-on-ways` the base must declare
+`LocationsOnWays`, or the check is an error before apply-changes runs, since pbfhogg
+refuses that too and the check would otherwise depend on which refusal it
+raises first. No osmium run is compared. The PASS line opens `on input without
+Sort.Type_then_ID among its optional features, refusal only` and says what it
+does not establish: which of pbfhogg's order checks refused (the header gate,
+or a later one meeting the content out of order), and under `--direct-io`
+that any O_DIRECT read ran. A base that claims the flag over disordered
+content takes the ordinary path, where pbfhogg's refusal of it is an error.
+
 **Fresh outputs.** `VerifyHarness::subdir` empties `target/verify/<check>/`
 before handing it back, so every file a check finds there was written or
 placed by this run. Checks rely on that: `verify_merge` treats the diff OSC's

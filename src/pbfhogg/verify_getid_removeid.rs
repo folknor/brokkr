@@ -20,118 +20,19 @@
 //! whose strict order proves it repeats no ID. getid answers by ID alone, so
 //! reading a sorted copy changes no reference answer.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use super::inspect_report;
 use super::pbf_frames::{self, IndexSummary};
-use super::verify::{Findings, PbfArgv, SORT_TYPE_THEN_ID, Verdict, VerifyHarness};
+use super::verify::{Findings, PbfArgv, Verdict, VerifyHarness};
+use super::verify_input_order::{InputOrder, compare_outputs};
 use super::verify_multi_extract::{Counts, inspect_counts};
 use super::verify_reference::ToolRun;
-use super::verify_sort;
 use crate::error::DevError;
 use crate::output::verify_msg;
 
 /// The claim part a passing check carries on unsorted input.
 const CLAIM_UNSORTED: &str = "on unsorted input, against osmium on an osmium-sorted copy, \
                               pbfhogg's outputs compared through osmium-sorted copies";
-
-/// Where the check's osmium runs read the input, and whether pbfhogg reads
-/// it as sorted.
-pub(super) struct InputOrder {
-    pub sorted: bool,
-    /// The input itself when sorted, else an osmium-sorted copy of it.
-    pub reference_input: PathBuf,
-}
-
-impl InputOrder {
-    /// Read the input header's claim (its report in the check's directory)
-    /// and, on unsorted input, write the osmium-sorted copy.
-    fn of(harness: &VerifyHarness, pbf: &Path, outdir: &Path) -> Result<Self, DevError> {
-        let sorted =
-            inspect_report::inspect_into(harness, pbf, &outdir.join("input.inspect.json"), false)?
-                .optional_sorted();
-        if sorted {
-            return Ok(Self {
-                sorted,
-                reference_input: pbf.to_path_buf(),
-            });
-        }
-        verify_msg(&format!(
-            "  input header does not declare {SORT_TYPE_THEN_ID} as an optional feature: osmium \
-             reads an osmium-sorted copy, pbfhogg the input as it is"
-        ));
-        // The sort's artifact name and argv are verify sort's, so one cached
-        // run of the same input serves both checks.
-        let dir = outdir.join("osmium-sorted-input");
-        std::fs::create_dir_all(&dir)?;
-        let copy = dir.join(verify_sort::OSMIUM_SORTED);
-        verify_sort::osmium_sort(harness, pbf, &copy, &dir.join("osmium.stdout"))?;
-        Ok(Self {
-            sorted,
-            reference_input: copy,
-        })
-    }
-}
-
-/// Compare pbfhogg's output `ours` of `pbfhogg <label>` with osmium's
-/// `theirs` of `<osmium_label>`: osmium's must be in strict order or the
-/// comparison cannot be made (an error); pbfhogg's must be in strict order
-/// on sorted input, and on unsorted input must not claim `Sort.Type_then_ID`
-/// and is compared through an osmium-sorted copy whose strict order proves
-/// no repeated ID; then the element diff (content and tags; metadata left
-/// out), and on sorted input the sort feature comparison.
-pub(super) fn compare_outputs(
-    harness: &VerifyHarness,
-    order: &InputOrder,
-    label: &str,
-    osmium_label: &str,
-    ours: &Path,
-    theirs: &Path,
-    findings: &mut Findings,
-) -> Result<(), DevError> {
-    if !harness.check_sorted(osmium_label, theirs)?.is_pass() {
-        return Err(DevError::Verify(format!(
-            "{osmium_label} output is not in strict order, so it cannot be compared with \
-             pbfhogg's by ID"
-        )));
-    }
-    let pbfhogg_label = format!("pbfhogg {label}");
-    let compared = if order.sorted {
-        let verdict = harness.check_sorted(&pbfhogg_label, ours)?;
-        findings.record(&format!("{pbfhogg_label} output order"), verdict);
-        ours.to_path_buf()
-    } else {
-        let claims = harness.has_sort_flag(ours)?;
-        verify_msg(&format!(
-            "  {pbfhogg_label}: header {} {SORT_TYPE_THEN_ID} on unsorted input {}",
-            if claims { "claims" } else { "does not claim" },
-            if claims { "FAIL" } else { "PASS" }
-        ));
-        findings.record(
-            &format!("{pbfhogg_label} output claims {SORT_TYPE_THEN_ID} on unsorted input"),
-            Verdict::from_pass(!claims),
-        );
-        let copy = ours.with_extension("sorted.pbf");
-        verify_sort::osmium_sort(harness, ours, &copy, &ours.with_extension("sorted.stdout"))?;
-        let verdict = harness.check_sorted(&format!("{pbfhogg_label} (osmium-sorted)"), &copy)?;
-        findings.record(&format!("{pbfhogg_label} output repeats an ID"), verdict);
-        copy
-    };
-    let diff = harness.diff_pbfs(&compared, theirs, &super::verify::listing_beside(&compared))?;
-    if diff.is_pass() {
-        verify_msg(&format!("  {label}: PASS (identical)"));
-    } else {
-        verify_msg(&format!("  {label}: FAIL (differences found)"));
-    }
-    findings.record(&format!("{label} diff"), diff);
-    if order.sorted {
-        findings.record(
-            &format!("{label} sort feature"),
-            harness.compare_sort_feature(ours, theirs)?,
-        );
-    }
-    Ok(())
-}
 
 const KIND_LETTERS: [char; 3] = ['n', 'w', 'r'];
 

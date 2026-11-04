@@ -89,10 +89,13 @@ impl InspectSummary {
     /// one place pbfhogg's commands read the claim from when they choose a
     /// sorted or an unsorted path (`HeaderBlock::is_sorted`).
     pub(super) fn optional_sorted(&self) -> bool {
-        self.header
-            .optional_features
-            .iter()
-            .any(|f| f == SORT_TYPE_THEN_ID)
+        self.optional_feature(SORT_TYPE_THEN_ID)
+    }
+
+    /// Whether the header's optional features hold `feature`, where pbfhogg
+    /// reads its header claims (`HeaderBlock::has_locations_on_ways` too).
+    pub(super) fn optional_feature(&self, feature: &str) -> bool {
+        self.header.optional_features.iter().any(|f| f == feature)
     }
 
     /// The computed element order (standard ordering and per-kind ID

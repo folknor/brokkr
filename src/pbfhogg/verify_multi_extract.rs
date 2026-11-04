@@ -112,13 +112,8 @@ pub fn run(
     ));
 
     // --- Input order: the header claim the single pass needs ---
-    let input_sorted = super::inspect_report::inspect_into(
-        harness,
-        pbf,
-        &outdir.join("input.inspect.json"),
-        false,
-    )?
-    .optional_sorted();
+    let input_sorted =
+        super::verify_input_order::input_header(harness, pbf, &outdir)?.optional_sorted();
     if !input_sorted {
         verify_msg(&format!(
             "  input header does not declare {SORT_TYPE_THEN_ID} as an optional feature: \

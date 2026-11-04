@@ -5,12 +5,16 @@ use std::path::{Path, PathBuf};
 
 use super::verify::{self, ExternalTool, Findings, PbfArgv, VerifyHarness};
 use super::verify_element_diff::{self as element_diff, PerType};
+use super::verify_input_order;
 use super::verify_reference::{Program, ToolRun};
 use crate::error::DevError;
 use crate::osc::{self, OscAction, OscKind};
 use crate::output;
 use crate::output::verify_msg;
 use crate::tools::OsmosisTools;
+
+/// The header feature `--locations-on-ways` requires of its base.
+const LOCATIONS_ON_WAYS: &str = "LocationsOnWays";
 
 /// Cross-validate `pbfhogg apply-changes` against osmium; print optional
 /// osmosis and osmconvert output for additional context.
@@ -24,6 +28,10 @@ use crate::tools::OsmosisTools;
 /// index can itself write stale coordinates (several versions of one node,
 /// unsorted lookups), so it is not the oracle. osmosis and osmconvert, which
 /// write no inline locations, are not run.
+///
+/// On a base whose header lacks `Sort.Type_then_ID` among its optional
+/// features, apply-changes is held to its documented refusal instead and no
+/// reference runs (`super::verify_input_order`).
 pub fn run(
     harness: &VerifyHarness,
     pbf: &Path,
@@ -43,14 +51,29 @@ pub fn run(
 
     // --- pbfhogg apply-changes ---
     let pbfhogg_out = outdir.join("pbfhogg.osm.pbf");
-
-    verify_msg("--- pbfhogg apply-changes ---");
     let pbfhogg_args = PbfArgv::new("apply-changes")
         .input(pbf)?
         .input(osc)?
         .output(&pbfhogg_out)?
         .arg_if(direct_io, "--direct-io")
         .arg_if(locations_on_ways, "--locations-on-ways");
+
+    // A base without the sorted claim is one apply-changes refuses by
+    // contract, as osmium requires sorted input: the run is held to that
+    // refusal and nothing is compared (`verify_input_order`).
+    let header = verify_input_order::input_header(harness, pbf, &outdir)?;
+    if !header.optional_sorted() {
+        return refused(
+            harness,
+            pbf,
+            &header,
+            pbfhogg_args,
+            direct_io,
+            locations_on_ways,
+        );
+    }
+
+    verify_msg("--- pbfhogg apply-changes ---");
     let captured = harness.run_pbfhogg(pbfhogg_args)?;
     harness.check_exit(&captured, "pbfhogg apply-changes")?;
 
@@ -155,6 +178,48 @@ pub fn run(
     // elements, or content-level `<modify>` differences) fails verify.
     verify_pbfhogg_vs_osmium(harness, osc, &pbfhogg_out, &osmium_sorted, &outdir)?;
 
+    Ok(findings)
+}
+
+/// The check on a base whose header lacks `Sort.Type_then_ID` among its
+/// optional features: `args`, the apply-changes run [`run`] would make, held
+/// to its refusal of the base.
+///
+/// With `-l` pbfhogg refuses a base without `LocationsOnWays` too, so the
+/// base must meet that prerequisite: the check then does not depend on which
+/// of the two refusals pbfhogg raises first.
+fn refused(
+    harness: &VerifyHarness,
+    pbf: &Path,
+    header: &super::inspect_report::InspectSummary,
+    args: PbfArgv,
+    direct_io: bool,
+    locations_on_ways: bool,
+) -> Result<Findings, DevError> {
+    if locations_on_ways && !header.optional_feature(LOCATIONS_ON_WAYS) {
+        return Err(DevError::Verify(format!(
+            "{} declares neither {} nor {LOCATIONS_ON_WAYS}, two refusals of apply-changes \
+             --locations-on-ways, so neither can be held alone",
+            pbf.display(),
+            verify::SORT_TYPE_THEN_ID
+        )));
+    }
+    let mut findings = Findings::claiming(verify_input_order::refusal_claim(
+        "pbfhogg apply-changes",
+        "",
+        direct_io,
+    ));
+    verify_input_order::expect_unsorted_refusal(
+        harness,
+        args,
+        &verify_input_order::Refusal {
+            label: "apply-changes",
+            operand: pbf,
+            answers: &[0],
+            stdout: None,
+        },
+        &mut findings,
+    )?;
     Ok(findings)
 }
 

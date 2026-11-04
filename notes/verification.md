@@ -3,16 +3,19 @@
 Standing list of gaps in what `brokkr verify` proves or how it scales. Current
 gaps only; remove an entry when it is resolved.
 
-## the apply-changes checks FAIL on unsorted input at a documented refusal
+## cat, tags-filter, add-locations-to-ways and check-refs FAIL on unsorted input
 
-`verify diff` (and, by the same first step, `verify merge` and `verify
-derive-changes`) runs pbfhogg `apply-changes` on the input, which refuses a
-base without `Sort.Type_then_ID` by contract (exit 2, "requires a sorted
-base PBF"); `pbfhogg diff` refuses such input too. On the denmark `unsorted`
-snapshot `verify diff` reports this as a FAIL of pbfhogg, measured on bygg;
-merge and derive-changes were not run. These checks follow neither the
-osmium-sorted-copy route the extract, multi-extract and getid checks take nor
-a cannot-compare refusal naming the unsorted input.
+Measured on bygg, `verify all` on the denmark `unsorted` snapshot: `cat` and
+`tags-filter` fail at `pbfhogg diff` (exit 2, "Old PBF does not declare
+Sort.Type_then_ID") because they diff pbfhogg's output, which rightly claims
+no sort on unsorted input, directly rather than through an osmium-sorted copy.
+`add-locations-to-ways` fails the same way on osmium's output; its stated
+domain is sorted input, yet the sparse engine takes unsorted input and so goes
+unverified there, while the external engine refuses it. `check-refs` fails
+because `osmium check-refs` refuses out-of-order input ("Node IDs out of
+order") and its counts then do not parse. None follows the osmium-sorted-copy
+route extract, multi-extract and getid take, nor the refusal route merge,
+derive-changes, diff and renumber take (`verify_input_order`).
 
 ## multi-extract never constructs identical or deliberately empty regions
 

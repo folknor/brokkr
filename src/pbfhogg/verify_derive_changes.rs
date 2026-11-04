@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use super::verify::{Findings, PbfArgv, Verdict, VerifyHarness};
+use super::verify_input_order;
 use super::verify_reference::ToolRun;
 use crate::error::DevError;
 use crate::osc;
@@ -41,6 +42,8 @@ fn osc_diff(
 /// so an O_DIRECT fault in building it would pass, and one in the roundtrip
 /// would fail the derive for a fault that is not its own. `verify merge`
 /// holds apply-changes under `--direct-io` to osmium instead.
+///
+/// Input without the sorted claim takes [`refused`] instead.
 #[allow(clippy::too_many_lines)]
 pub fn run(
     harness: &VerifyHarness,
@@ -56,6 +59,10 @@ pub fn run(
         "  osc: {} (used to create 'new' via apply-changes)",
         crate::output::path(osc)
     ));
+
+    if !verify_input_order::input_header(harness, pbf, &outdir)?.optional_sorted() {
+        return refused(harness, &outdir, pbf, direct_io);
+    }
 
     // Step 1: Create "new" PBF by applying the OSC.
     let new_pbf = outdir.join("new.osm.pbf");
@@ -198,6 +205,43 @@ pub fn run(
         harness.check_sorted("roundtrip-pbfhogg", &rt_pbfhogg)?,
     );
 
+    Ok(findings)
+}
+
+/// The check on input whose header lacks `Sort.Type_then_ID` among its
+/// optional features, which `diff --format osc` refuses on either side by
+/// contract (and the apply-changes that builds "new" refuses too): the derive
+/// runs twice, the input as OLD and then as NEW against an osmium-sorted copy
+/// of it, each held to the refusal naming the input, each with an output of
+/// its own (`verify_input_order`). A mixed indexed pair, so no comparison
+/// engine is exercised; both runs are made whatever the first one shows.
+fn refused(
+    harness: &VerifyHarness,
+    outdir: &Path,
+    pbf: &Path,
+    direct_io: bool,
+) -> Result<Findings, DevError> {
+    let copy = verify_input_order::sorted_counterpart(harness, pbf, outdir)?;
+    let mut findings = Findings::claiming(verify_input_order::refusal_claim(
+        "pbfhogg diff --format osc",
+        ", as OLD and as NEW, the other side an osmium-sorted copy of it",
+        direct_io,
+    ));
+    for (side, old, new) in [("old", pbf, copy.as_path()), ("new", copy.as_path(), pbf)] {
+        let out = outdir.join(format!("refused-as-{side}.osc.gz"));
+        let label = format!("diff --format osc (input as {})", side.to_uppercase());
+        verify_input_order::expect_unsorted_refusal(
+            harness,
+            osc_diff(outdir, old, new, &out, direct_io)?,
+            &verify_input_order::Refusal {
+                label: &label,
+                operand: pbf,
+                answers: &[0, 1],
+                stdout: None,
+            },
+            &mut findings,
+        )?;
+    }
     Ok(findings)
 }
 

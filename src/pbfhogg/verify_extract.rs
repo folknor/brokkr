@@ -46,10 +46,11 @@ use std::path::{Path, PathBuf};
 
 use super::commands::{ExtractStrategy, PbfhoggCommand};
 use super::context::Region;
-use super::inspect_report::{self, InspectCounts};
+use super::inspect_report::InspectCounts;
 use super::verify::{Findings, SORT_TYPE_THEN_ID, Verdict, VerifyHarness};
 use super::verify_element_diff::{self as element_diff, PerType};
 use super::verify_extract_simple::{self as simple_relations, SimpleRelations};
+use super::verify_input_order;
 use super::verify_reference::ToolRun;
 use super::verify_sort;
 use crate::datasets::Bbox;
@@ -146,24 +147,15 @@ pub fn run(
 
     // --- Input order: the header claim pbfhogg branches on ---
     // The report goes to the check's directory, never beside the input.
-    let input_sorted =
-        inspect_report::inspect_into(harness, pbf, &outdir.join("input.inspect.json"), false)?
-            .optional_sorted();
+    let input_sorted = verify_input_order::input_header(harness, pbf, &outdir)?.optional_sorted();
     let osmium_input = if input_sorted {
         pbf.to_path_buf()
     } else {
         verify_msg(&format!(
             "  input header does not declare {SORT_TYPE_THEN_ID} as an optional feature: osmium \
-             extracts an \
-             osmium-sorted copy, pbfhogg the input as it is"
+             extracts an osmium-sorted copy, pbfhogg the input as it is"
         ));
-        // The sort's artifact name and argv are verify sort's, so one cached
-        // run of the same input serves both checks.
-        let dir = outdir.join("osmium-sorted-input");
-        std::fs::create_dir_all(&dir)?;
-        let sorted = dir.join(verify_sort::OSMIUM_SORTED);
-        verify_sort::osmium_sort(harness, pbf, &sorted, &dir.join("osmium.stdout"))?;
-        sorted
+        verify_input_order::osmium_sorted_copy(harness, pbf, &outdir)?
     };
 
     let claim = if input_sorted { CLAIM } else { CLAIM_UNSORTED };

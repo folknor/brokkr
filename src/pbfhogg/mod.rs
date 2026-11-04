@@ -30,6 +30,7 @@ pub mod verify_extract;
 pub(crate) mod verify_extract_simple;
 pub(crate) mod verify_getid_refs;
 pub mod verify_getid_removeid;
+pub(crate) mod verify_input_order;
 pub mod verify_merge;
 pub mod verify_multi_extract;
 pub(crate) mod verify_opl;

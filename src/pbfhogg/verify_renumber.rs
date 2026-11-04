@@ -10,6 +10,10 @@
 //! - any node or way diffs appear
 //! - relation diff count exceeds `0.10 * total_relations` (sanity threshold)
 //!
+//! Input whose header lacks `Sort.Type_then_ID` among its optional features
+//! is input both tools refuse; pbfhogg's renumber is then held to its
+//! documented refusal and nothing is compared (`super::verify_input_order`).
+//!
 //! Scratch files are cleaned up on success and preserved on failure for
 //! human review.
 
@@ -184,6 +188,37 @@ pub fn run(
     let pbfhogg_out = outdir.join(format!("pbfhogg-renumber-{dataset}.osm.pbf"));
     let diff_log = outdir.join(format!("verify-renumber-{dataset}-diff.txt"));
 
+    let mut pbfhogg_args = PbfArgv::new("renumber")
+        .input(pbf)?
+        .output(&pbfhogg_out)?
+        .arg_if(direct_io, "--direct-io");
+    if let Some(sid) = start_id {
+        pbfhogg_args = pbfhogg_args.arg("--start-id").arg(sid);
+    }
+
+    // Input without the sorted claim is input renumber refuses by contract,
+    // and osmium renumber requires sorted input: pbfhogg's run is held to
+    // that refusal and osmium does not run (`verify_input_order`).
+    if !super::verify_input_order::input_header(harness, pbf, &outdir)?.optional_sorted() {
+        let mut findings = Findings::claiming(super::verify_input_order::refusal_claim(
+            "pbfhogg renumber",
+            "",
+            direct_io,
+        ));
+        super::verify_input_order::expect_unsorted_refusal(
+            harness,
+            pbfhogg_args,
+            &super::verify_input_order::Refusal {
+                label: "renumber",
+                operand: pbf,
+                answers: &[0],
+                stdout: None,
+            },
+            &mut findings,
+        )?;
+        return Ok(findings);
+    }
+
     // --- osmium renumber ------------------------------------------------
     let mut osmium_run = ToolRun::osmium("renumber.1")
         .arg("renumber")
@@ -205,13 +240,6 @@ pub fn run(
     ));
 
     // --- pbfhogg renumber -----------------------------------------------
-    let mut pbfhogg_args = PbfArgv::new("renumber")
-        .input(pbf)?
-        .output(&pbfhogg_out)?
-        .arg_if(direct_io, "--direct-io");
-    if let Some(sid) = start_id {
-        pbfhogg_args = pbfhogg_args.arg("--start-id").arg(sid);
-    }
     let captured = harness.run_pbfhogg(pbfhogg_args)?;
     harness.check_exit(&captured, "pbfhogg renumber")?;
     let pbfhogg_elapsed = captured.elapsed;

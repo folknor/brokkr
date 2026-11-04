@@ -29,6 +29,10 @@
 //! then wrongly calls common, would pass; `verify merge` is the check that
 //! holds `apply-changes` to osmium. Detail judgement limits are in
 //! [`super::verify_diff_detail`].
+//!
+//! Input whose header lacks `Sort.Type_then_ID` among its optional features
+//! is input pbfhogg diff refuses on either side; the check then holds it to
+//! that refusal and compares nothing (`refused`).
 
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write as _};
@@ -37,6 +41,7 @@ use std::path::{Path, PathBuf};
 use super::verify::{Findings, PbfArgv, Verdict, VerifyHarness};
 use super::verify_diff_detail::{self as detail, Coverage, Expected};
 use super::verify_diff_opl::{DiffGroups, Object, ObjectReader, kind_char, order_key};
+use super::verify_input_order;
 use super::verify_reference::ToolRun;
 use super::verify_stream;
 use crate::error::DevError;
@@ -105,6 +110,10 @@ pub fn run(
         crate::output::path(osc)
     ));
 
+    if !verify_input_order::input_header(harness, pbf, &outdir)?.optional_sorted() {
+        return refused(harness, &outdir, pbf, direct_io);
+    }
+
     let new_pbf = outdir.join("new.osm.pbf");
     verify_msg("--- creating 'new' PBF via apply-changes ---");
     let captured = harness.run_pbfhogg(
@@ -133,6 +142,43 @@ pub fn run(
     );
     runs.check(&mut findings, judgement.expected)?;
     Ok(with_claim(findings, &judgement.coverage))
+}
+
+/// The check on input whose header lacks `Sort.Type_then_ID` among its
+/// optional features, which the text diff refuses on either side by contract
+/// (and the apply-changes that builds "new" refuses too): the plain diff runs
+/// twice, the input as OLD and then as NEW against an osmium-sorted copy of
+/// it, each held to the refusal naming the input with an empty stdout
+/// (`verify_input_order`). A mixed indexed pair, so no comparison engine is
+/// exercised; both runs are made whatever the first one shows.
+fn refused(
+    harness: &VerifyHarness,
+    outdir: &Path,
+    pbf: &Path,
+    direct_io: bool,
+) -> Result<Findings, DevError> {
+    let copy = verify_input_order::sorted_counterpart(harness, pbf, outdir)?;
+    let mut findings = Findings::claiming(verify_input_order::refusal_claim(
+        "the plain pbfhogg text diff",
+        ", as OLD and as NEW, the other side an osmium-sorted copy of it",
+        direct_io,
+    ));
+    for (side, old, new) in [("old", pbf, copy.as_path()), ("new", copy.as_path(), pbf)] {
+        let stdout = outdir.join(format!("refused-as-{side}.txt"));
+        let label = format!("diff (input as {})", side.to_uppercase());
+        verify_input_order::expect_unsorted_refusal(
+            harness,
+            text_diff(old, new, false, direct_io)?,
+            &verify_input_order::Refusal {
+                label: &label,
+                operand: pbf,
+                answers: &[0, 1],
+                stdout: Some(&stdout),
+            },
+            &mut findings,
+        )?;
+    }
+    Ok(findings)
 }
 
 /// The four pbfhogg diffs of the pair: indexed and stripped of indexdata,
