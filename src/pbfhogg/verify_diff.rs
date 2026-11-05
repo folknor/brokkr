@@ -1015,16 +1015,16 @@ fn parse_summary_line(line: &str) -> Option<Counts> {
 }
 
 /// osmium's `--summary` counts.
-#[derive(Debug, PartialEq, Eq)]
-struct OsmiumSummary {
-    left: u64,
-    right: u64,
-    same: u64,
-    different: u64,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct OsmiumSummary {
+    pub left: u64,
+    pub right: u64,
+    pub same: u64,
+    pub different: u64,
 }
 
 /// Exactly one `Summary: left=N right=N same=N different=N` line.
-fn parse_osmium_summary(text: &str) -> Option<OsmiumSummary> {
+pub(super) fn parse_osmium_summary(text: &str) -> Option<OsmiumSummary> {
     let mut found = None;
     for line in text.lines() {
         let Some(rest) = line.trim().strip_prefix("Summary: ") else {

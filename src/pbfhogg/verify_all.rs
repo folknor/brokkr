@@ -5,9 +5,10 @@ use std::time::Instant;
 
 use super::verify::{CheckStatus, ENVIRONMENT_EXIT_CODE, VerifyHarness, labels, run_check_status};
 use super::{
-    verify_add_locations, verify_cat, verify_check_ids, verify_check_refs, verify_derive_changes,
-    verify_diff, verify_extract, verify_getid_removeid, verify_getparents, verify_merge,
-    verify_multi_extract, verify_renumber, verify_sort, verify_tags_filter,
+    verify_add_locations, verify_cat, verify_check_ids, verify_check_refs, verify_degrade,
+    verify_derive_changes, verify_diff, verify_extract, verify_getid_removeid, verify_getparents,
+    verify_merge, verify_multi_extract, verify_renumber, verify_repack, verify_sort,
+    verify_tags_filter,
 };
 use crate::datasets::Bbox;
 use crate::error::DevError;
@@ -203,6 +204,22 @@ pub fn run(
         &mut counts,
         run_check_status(labels::CHECK_IDS, verbose, || {
             verify_check_ids::run(harness, pbf, direct_io)
+        }),
+    )?;
+
+    // 7c. repack
+    tally(
+        &mut counts,
+        run_check_status(labels::REPACK, verbose, || {
+            verify_repack::run(harness, pbf, direct_io)
+        }),
+    )?;
+
+    // 7d. degrade
+    tally(
+        &mut counts,
+        run_check_status(labels::DEGRADE, verbose, || {
+            verify_degrade::run(harness, pbf, direct_io)
         }),
     )?;
 

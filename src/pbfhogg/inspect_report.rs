@@ -98,6 +98,13 @@ impl InspectSummary {
         self.header.optional_features.iter().any(|f| f == feature)
     }
 
+    /// Whether the data blobs fall in at most one run per kind, nodes then
+    /// ways then relations, none mixed (`ordering.standard`): kinds grouped
+    /// in order, whatever the IDs within a kind do.
+    pub(super) fn standard_order(&self) -> bool {
+        self.ordering.standard
+    }
+
     /// The computed element order (standard ordering and per-kind ID
     /// monotonicity), `None` unless the report is extended.
     pub(super) fn objects_ordered(&self) -> Option<bool> {

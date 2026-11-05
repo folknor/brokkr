@@ -530,6 +530,8 @@ mod tests {
             "diff",
             "check-ids",
             "getparents",
+            "repack",
+            "degrade",
         ] {
             let parsed = parse(["brokkr", "verify", sub, "--direct-io"]).expect(sub);
             let Command::Verify { verify, .. } = parsed.command else {
@@ -542,7 +544,9 @@ mod tests {
                 | VerifyCommand::Renumber { pbf, .. }
                 | VerifyCommand::Diff { pbf, .. }
                 | VerifyCommand::CheckIds { pbf }
-                | VerifyCommand::Getparents { pbf } => pbf,
+                | VerifyCommand::Getparents { pbf }
+                | VerifyCommand::Repack { pbf }
+                | VerifyCommand::Degrade { pbf } => pbf,
                 _ => panic!("unexpected verify subcommand for {sub}"),
             };
             assert!(pbf.direct_io, "{sub}");

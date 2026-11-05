@@ -3,11 +3,15 @@
 //! `verify getid-removeid` picks the IDs it requests from the dataset under
 //! test, and at planet scale it may not read the dataset to do so; `verify
 //! check-ids` reads from the same walk the kind claims pbfhogg judges type
-//! order from ([`framing`]). This walk
+//! order from ([`framing`]), and `verify repack` and `verify degrade` read
+//! every blob's claim, pulled one blob at a time ([`Claims`]), to hold an
+//! output's block layout to a prediction. This walk
 //! reads each blob's `BlobHeader` (a few dozen bytes) and seeks past the
 //! payload without reading it, so its I/O is proportional to the blob count,
 //! never to the data. The one payload it reads is the leading `OSMHeader`'s,
-//! for the header's required features.
+//! for the header's required features; [`blob_ids`] reads one named data
+//! blob's elements on request, the bounded exception `verify degrade` takes
+//! for the few elements it locates.
 //!
 //! The indexdata decoder follows pbfhogg's wire format (its `blob_meta`
 //! module): a version byte (1 with exactly 26 bytes, 2 or 3 with exactly 42),
@@ -166,18 +170,94 @@ fn walk_frames(
     len: u64,
     mut on_data: impl FnMut(Indexdata) -> Result<(), String>,
 ) -> Result<Vec<String>, String> {
-    let mut required_features = Vec::new();
-    let mut offset: u64 = 0;
-    let mut ordinal: u64 = 0;
-    let mut seen_header = false;
-    while offset < len {
-        let at = |why: String| format!("blob {ordinal} at byte {offset}: {why}");
-        let header_len_end = offset
+    let mut frames = FrameWalk::open(r, len)?;
+    while let Some(frame) = frames.next_data()? {
+        let at = frame.at();
+        on_data(frame.indexdata).map_err(|why| format!("{at}: {why}"))?;
+    }
+    Ok(frames.required_features)
+}
+
+/// One data blob's frame: its indexdata and where its payload lies.
+struct DataFrame {
+    indexdata: Indexdata,
+    /// The frame's ordinal among every blob, the OSMHeader's being 0.
+    ordinal: u64,
+    /// Where the frame starts.
+    offset: u64,
+    payload_offset: u64,
+    datasize: u64,
+}
+
+impl DataFrame {
+    fn at(&self) -> String {
+        format!("blob {} at byte {}", self.ordinal, self.offset)
+    }
+}
+
+/// The frames of one PBF, pulled one data blob at a time: the leading
+/// `OSMHeader` is read by [`open`](Self::open), every data payload is sought
+/// past, never read.
+struct FrameWalk<'r, R> {
+    r: &'r mut R,
+    len: u64,
+    offset: u64,
+    ordinal: u64,
+    required_features: Vec<String>,
+}
+
+impl<'r, R: Read + Seek> FrameWalk<'r, R> {
+    fn open(r: &'r mut R, len: u64) -> Result<Self, String> {
+        let mut walk = Self {
+            r,
+            len,
+            offset: 0,
+            ordinal: 0,
+            required_features: Vec::new(),
+        };
+        if len == 0 {
+            return Err("no OSMHeader blob".into());
+        }
+        let (header, payload_end) = walk.frame_header()?;
+        let at = walk.at();
+        if header.blob_type != "OSMHeader" {
+            return Err(format!(
+                "{at}: {}",
+                if header.blob_type == "OSMData" {
+                    "data blob before the OSMHeader".to_owned()
+                } else {
+                    format!("unknown blob type {:?}", header.blob_type)
+                }
+            ));
+        }
+        let size = usize::try_from(header.datasize).map_err(|e| format!("{at}: {e}"))?;
+        let mut payload = vec![0u8; size];
+        walk.r
+            .read_exact(&mut payload)
+            .map_err(|e| format!("{at}: {e}"))?;
+        let block = blob_content(&payload).map_err(|why| format!("{at}: {why}"))?;
+        walk.required_features = header_features(&block).map_err(|why| format!("{at}: {why}"))?;
+        walk.offset = payload_end;
+        walk.ordinal = 1;
+        Ok(walk)
+    }
+
+    fn at(&self) -> String {
+        format!("blob {} at byte {}", self.ordinal, self.offset)
+    }
+
+    /// Read the frame header at the current offset, leaving the reader at
+    /// its payload; returns the header and where the payload ends.
+    fn frame_header(&mut self) -> Result<(BlobHeader, u64), String> {
+        let at = |why: String| format!("blob {} at byte {}: {why}", self.ordinal, self.offset);
+        let header_len_end = self
+            .offset
             .checked_add(4)
-            .filter(|end| *end <= len)
+            .filter(|end| *end <= self.len)
             .ok_or_else(|| at("truncated blob header length".into()))?;
         let mut len_bytes = [0u8; 4];
-        r.read_exact(&mut len_bytes)
+        self.r
+            .read_exact(&mut len_bytes)
             .map_err(|e| at(e.to_string()))?;
         let header_len = u32::from_be_bytes(len_bytes);
         if header_len == 0 || header_len >= MAX_HEADER_LEN {
@@ -185,43 +265,326 @@ fn walk_frames(
         }
         let header_end = header_len_end
             .checked_add(u64::from(header_len))
-            .filter(|end| *end <= len)
+            .filter(|end| *end <= self.len)
             .ok_or_else(|| at("truncated blob header".into()))?;
         let mut header = vec![0u8; header_len as usize];
-        r.read_exact(&mut header).map_err(|e| at(e.to_string()))?;
+        self.r
+            .read_exact(&mut header)
+            .map_err(|e| at(e.to_string()))?;
         let header = parse_blob_header(&header).map_err(at)?;
         if header.datasize >= MAX_BLOB_LEN {
             return Err(at(format!("datasize {} out of range", header.datasize)));
         }
         let payload_end = header_end
             .checked_add(header.datasize)
-            .filter(|end| *end <= len)
+            .filter(|end| *end <= self.len)
             .ok_or_else(|| at("truncated blob payload".into()))?;
-        match header.blob_type.as_str() {
-            "OSMHeader" if !seen_header && ordinal == 0 => {
-                seen_header = true;
-                let size = usize::try_from(header.datasize).map_err(|e| at(e.to_string()))?;
-                let mut payload = vec![0u8; size];
-                r.read_exact(&mut payload).map_err(|e| at(e.to_string()))?;
-                let block = blob_content(&payload).map_err(at)?;
-                required_features = header_features(&block).map_err(at)?;
-            }
-            "OSMHeader" => return Err(at("OSMHeader not first, or repeated".into())),
-            "OSMData" if seen_header => {
-                on_data(header.indexdata).map_err(at)?;
-                r.seek(SeekFrom::Start(payload_end))
-                    .map_err(|e| at(e.to_string()))?;
-            }
-            "OSMData" => return Err(at("data blob before the OSMHeader".into())),
-            other => return Err(at(format!("unknown blob type {other:?}"))),
+        Ok((header, payload_end))
+    }
+
+    /// The next data blob, its payload sought past; `None` at the end.
+    fn next_data(&mut self) -> Result<Option<DataFrame>, String> {
+        if self.offset >= self.len {
+            return Ok(None);
         }
-        offset = payload_end;
-        ordinal += 1;
+        let (header, payload_end) = self.frame_header()?;
+        let at = self.at();
+        match header.blob_type.as_str() {
+            "OSMData" => {}
+            "OSMHeader" => return Err(format!("{at}: OSMHeader not first, or repeated")),
+            other => return Err(format!("{at}: unknown blob type {other:?}")),
+        }
+        let frame = DataFrame {
+            indexdata: header.indexdata,
+            ordinal: self.ordinal,
+            offset: self.offset,
+            payload_offset: payload_end - header.datasize,
+            datasize: header.datasize,
+        };
+        self.r
+            .seek(SeekFrom::Start(payload_end))
+            .map_err(|e| format!("{at}: {e}"))?;
+        self.offset = payload_end;
+        self.ordinal += 1;
+        Ok(Some(frame))
     }
-    if !seen_header {
-        return Err("no OSMHeader blob".into());
+}
+
+/// What one data blob's indexdata claims about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct BlobClaim {
+    /// Node 0, way 1, relation 2.
+    pub kind: usize,
+    pub min_id: i64,
+    pub max_id: i64,
+    pub count: u64,
+}
+
+/// One data blob as [`Claims`] reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ClaimedBlob {
+    /// `None` for a blob without indexdata.
+    pub claim: Option<BlobClaim>,
+    /// The blob's ordinal among the data blobs, from 0.
+    pub index: u64,
+    /// Where its payload (the `Blob` message) lies, for [`blob_ids`].
+    pub payload_offset: u64,
+    pub datasize: u64,
+}
+
+/// The data blobs of a PBF with what each one's indexdata claims, pulled one
+/// at a time by the same header-only walk as [`walk`]: two files can be read
+/// side by side in constant memory. A blob with two non-empty indexdata
+/// fields, or with one that does not decode, is an error.
+pub(super) struct Claims {
+    path: std::path::PathBuf,
+    file: std::io::BufReader<std::fs::File>,
+    len: u64,
+    offset: u64,
+    ordinal: u64,
+    index: u64,
+    required_features: Vec<String>,
+}
+
+impl Claims {
+    pub(super) fn open(path: &Path) -> Result<Self, DevError> {
+        let file = std::fs::File::open(path)
+            .map_err(|e| DevError::Verify(format!("cannot open {}: {e}", path.display())))?;
+        let len = file
+            .metadata()
+            .map_err(|e| DevError::Verify(format!("cannot stat {}: {e}", path.display())))?
+            .len();
+        let mut file = std::io::BufReader::new(file);
+        let walk = FrameWalk::open(&mut file, len).map_err(|why| Self::error_at(path, &why))?;
+        let (offset, ordinal, required_features) =
+            (walk.offset, walk.ordinal, walk.required_features);
+        Ok(Self {
+            path: path.to_path_buf(),
+            file,
+            len,
+            offset,
+            ordinal,
+            index: 0,
+            required_features,
+        })
     }
-    Ok(required_features)
+
+    fn error_at(path: &Path, why: &str) -> DevError {
+        DevError::Verify(format!(
+            "cannot read the blob claims of {}: {why}",
+            path.display()
+        ))
+    }
+
+    /// The header's required features.
+    pub(super) fn required_features(&self) -> &[String] {
+        &self.required_features
+    }
+
+    /// The next data blob, `None` at the end of the file.
+    pub(super) fn next_blob(&mut self) -> Result<Option<ClaimedBlob>, DevError> {
+        let mut walk = FrameWalk {
+            r: &mut self.file,
+            len: self.len,
+            offset: self.offset,
+            ordinal: self.ordinal,
+            required_features: Vec::new(),
+        };
+        let frame = walk
+            .next_data()
+            .map_err(|why| Self::error_at(&self.path, &why))?;
+        self.offset = walk.offset;
+        self.ordinal = walk.ordinal;
+        let Some(frame) = frame else {
+            return Ok(None);
+        };
+        let claim = match &frame.indexdata {
+            Indexdata::Absent => None,
+            Indexdata::Conflicting => {
+                return Err(Self::error_at(
+                    &self.path,
+                    &format!("{}: data blob has two indexdata fields", frame.at()),
+                ));
+            }
+            Indexdata::Present(bytes) => {
+                let index = decode_index(bytes)
+                    .map_err(|why| Self::error_at(&self.path, &format!("{}: {why}", frame.at())))?;
+                Some(BlobClaim {
+                    kind: index.kind,
+                    min_id: index.min_id,
+                    max_id: index.max_id,
+                    count: index.count,
+                })
+            }
+        };
+        let blob = ClaimedBlob {
+            claim,
+            index: self.index,
+            payload_offset: frame.payload_offset,
+            datasize: frame.datasize,
+        };
+        self.index += 1;
+        Ok(Some(blob))
+    }
+}
+
+/// The elements of one data blob, as `(kind, id)` in the order the blob
+/// stores them: its groups in turn, and within a group its nodes, dense
+/// nodes, ways and relations in field order. The payload at
+/// `payload_offset` (`datasize` bytes, as [`Claims`] reports them) is read
+/// and decompressed, raw or zlib; any other compression is an error naming
+/// it. A group holding changesets is an error. Bounded by one blob.
+pub(super) fn blob_ids(
+    path: &Path,
+    payload_offset: u64,
+    datasize: u64,
+) -> Result<Vec<(usize, i64)>, DevError> {
+    let fail = |why: String| {
+        DevError::Verify(format!(
+            "cannot read the data blob at byte {payload_offset} of {}: {why}",
+            path.display()
+        ))
+    };
+    if datasize >= MAX_BLOB_LEN {
+        return Err(fail(format!("datasize {datasize} out of range")));
+    }
+    let mut file = std::fs::File::open(path).map_err(|e| fail(e.to_string()))?;
+    file.seek(SeekFrom::Start(payload_offset))
+        .map_err(|e| fail(e.to_string()))?;
+    let size = usize::try_from(datasize).map_err(|e| fail(e.to_string()))?;
+    let mut payload = vec![0u8; size];
+    file.read_exact(&mut payload)
+        .map_err(|e| fail(e.to_string()))?;
+    let block = blob_content(&payload).map_err(fail)?;
+    block_ids(&block).map_err(fail)
+}
+
+/// The `(kind, id)` of every element of a `PrimitiveBlock`.
+fn block_ids(block: &[u8]) -> Result<Vec<(usize, i64)>, String> {
+    let mut ids = Vec::new();
+    for field in Fields::new(block) {
+        match field? {
+            (2, Value::Bytes(group)) => group_ids(group, &mut ids)?,
+            (2, _) => return Err("primitivegroup has the wrong wire type".into()),
+            _ => {}
+        }
+    }
+    Ok(ids)
+}
+
+fn group_ids(group: &[u8], ids: &mut Vec<(usize, i64)>) -> Result<(), String> {
+    for field in Fields::new(group) {
+        match field? {
+            (1, Value::Bytes(node)) => ids.push((0, zigzag(message_id(node)?))),
+            (2, Value::Bytes(dense)) => dense_ids(dense, ids)?,
+            (3, Value::Bytes(way)) => ids.push((1, int64(message_id(way)?))),
+            (4, Value::Bytes(relation)) => ids.push((2, int64(message_id(relation)?))),
+            (5, _) => return Err("a group holds changesets".into()),
+            (1..=4, _) => return Err("group field has the wrong wire type".into()),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Field 1 of a `Node`, `Way` or `Relation` message, as its raw varint.
+fn message_id(message: &[u8]) -> Result<u64, String> {
+    let mut id = None;
+    for field in Fields::new(message) {
+        match field? {
+            (1, Value::Varint(v)) => {
+                if id.replace(v).is_some() {
+                    return Err("an element carries two ids".into());
+                }
+            }
+            (1, _) => return Err("element id has the wrong wire type".into()),
+            _ => {}
+        }
+    }
+    id.ok_or_else(|| "an element without an id".to_owned())
+}
+
+/// `DenseNodes.id` (field 1): delta-coded `sint64`, packed or not.
+fn dense_ids(dense: &[u8], ids: &mut Vec<(usize, i64)>) -> Result<(), String> {
+    let mut last: i64 = 0;
+    let mut push = |raw: u64| -> Result<(), String> {
+        last = last
+            .checked_add(zigzag(raw))
+            .ok_or("dense node id overflows")?;
+        ids.push((0, last));
+        Ok(())
+    };
+    for field in Fields::new(dense) {
+        match field? {
+            (1, Value::Bytes(packed)) => {
+                let mut values = Fields::new(packed);
+                while !values.rest.is_empty() {
+                    push(values.varint()?)?;
+                }
+            }
+            (1, Value::Varint(v)) => push(v)?,
+            (1, _) => return Err("dense ids have the wrong wire type".into()),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn zigzag(v: u64) -> i64 {
+    #[allow(clippy::cast_possible_wrap)] // zigzag decoding is a bit pattern
+    let half = (v >> 1) as i64;
+    if v & 1 == 0 { half } else { !half }
+}
+
+fn int64(v: u64) -> i64 {
+    #[allow(clippy::cast_possible_wrap)] // protobuf int64 is the bit pattern
+    let signed = v as i64;
+    signed
+}
+
+/// Whether the data blobs of `a` and `b` carry the same payload bytes in the
+/// same sequence, whatever their blob headers say: what a header-only
+/// rewrite (`degrade --strip-indexdata`) must keep. `Err` names the first
+/// blob that differs; I/O and framing failures are the outer error.
+pub(super) fn same_data_payloads(a: &Path, b: &Path) -> Result<Result<(), String>, DevError> {
+    let mut left = Claims::open(a)?;
+    let mut right = Claims::open(b)?;
+    let mut fa = std::fs::File::open(a)
+        .map_err(|e| DevError::Verify(format!("cannot open {}: {e}", a.display())))?;
+    let mut fb = std::fs::File::open(b)
+        .map_err(|e| DevError::Verify(format!("cannot open {}: {e}", b.display())))?;
+    let (mut ba, mut bb) = (vec![0u8; 64 * 1024], vec![0u8; 64 * 1024]);
+    loop {
+        let (x, y) = match (left.next_blob()?, right.next_blob()?) {
+            (None, None) => return Ok(Ok(())),
+            (Some(x), None) => {
+                return Ok(Err(format!("data blob {} is only in the first", x.index)));
+            }
+            (None, Some(y)) => {
+                return Ok(Err(format!("data blob {} is only in the second", y.index)));
+            }
+            (Some(x), Some(y)) => (x, y),
+        };
+        if x.datasize != y.datasize {
+            return Ok(Err(format!(
+                "data blob {} holds {} payload bytes in the first and {} in the second",
+                x.index, x.datasize, y.datasize
+            )));
+        }
+        fa.seek(SeekFrom::Start(x.payload_offset))?;
+        fb.seek(SeekFrom::Start(y.payload_offset))?;
+        let mut rest = x.datasize;
+        while rest > 0 {
+            let n = usize::try_from(rest.min(ba.len() as u64))
+                .map_err(|e| DevError::Internal(e.to_string()))?;
+            fa.read_exact(&mut ba[..n])?;
+            fb.read_exact(&mut bb[..n])?;
+            if ba[..n] != bb[..n] {
+                return Ok(Err(format!("data blob {} payload bytes differ", x.index)));
+            }
+            rest -= n as u64;
+        }
+    }
 }
 
 /// Append to the PBF at `path` one `OSMData` blob holding an empty
@@ -436,7 +799,7 @@ fn blob_content(bytes: &[u8]) -> Result<Vec<u8>, String> {
     match payload {
         Some((1, raw)) => {
             if raw.len() as u64 >= MAX_BLOB_LEN {
-                return Err("raw header block too large".into());
+                return Err("raw block too large".into());
             }
             // raw_size is optional on a raw blob, but a declared one must
             // match, as pbfhogg checks.
@@ -444,7 +807,7 @@ fn blob_content(bytes: &[u8]) -> Result<Vec<u8>, String> {
                 && size != raw.len() as u64
             {
                 return Err(format!(
-                    "raw header block is {} bytes, raw_size says {size}",
+                    "raw block is {} bytes, raw_size says {size}",
                     raw.len()
                 ));
             }
@@ -460,17 +823,17 @@ fn blob_content(bytes: &[u8]) -> Result<Vec<u8>, String> {
             let mut decoder = flate2::read::ZlibDecoder::new(zlib).take(size as u64 + 1);
             decoder
                 .read_to_end(&mut out)
-                .map_err(|e| format!("header block does not inflate: {e}"))?;
+                .map_err(|e| format!("block does not inflate: {e}"))?;
             if out.len() != size {
                 return Err(format!(
-                    "header block inflates to {} bytes, raw_size says {size}",
+                    "block inflates to {} bytes, raw_size says {size}",
                     out.len()
                 ));
             }
             Ok(out)
         }
-        Some((field, _)) => Err(format!("header blob compression field {field} unsupported")),
-        None => Err("header blob has no payload".into()),
+        Some((field, _)) => Err(format!("blob compression field {field} unsupported")),
+        None => Err("blob has no payload".into()),
     }
 }
 
@@ -788,6 +1151,90 @@ mod tests {
         assert!(read_framing(&file(&[vec![index(3, 0, 1, 2, 2)], vec![]], &[])).is_err());
         let good = index(3, 0, 1, 2, 2);
         assert!(read_framing(&file(&[vec![good.clone(), good]], &[])).is_err());
+    }
+
+    /// A raw `Blob` holding a `PrimitiveBlock` of one group.
+    fn data_blob(group: &[u8]) -> Vec<u8> {
+        let mut block = Vec::new();
+        bytes_field(1, &[], &mut block);
+        bytes_field(2, group, &mut block);
+        let mut blob = Vec::new();
+        bytes_field(1, &block, &mut blob);
+        blob
+    }
+
+    fn element(id_varint: u64) -> Vec<u8> {
+        let mut m = Vec::new();
+        varint(1 << 3, &mut m);
+        varint(id_varint, &mut m);
+        m
+    }
+
+    #[test]
+    fn claims_stream_per_blob_and_a_named_blob_decodes_its_ids() {
+        // Dense nodes 5, 7, 9 (zigzag deltas 5, 2, 2), then ways 10 and 11.
+        let mut packed = Vec::new();
+        for delta in [10u64, 4, 4] {
+            varint(delta, &mut packed);
+        }
+        let mut dense = Vec::new();
+        bytes_field(1, &packed, &mut dense);
+        let mut nodes = Vec::new();
+        bytes_field(2, &dense, &mut nodes);
+        let mut ways = Vec::new();
+        bytes_field(3, &element(10), &mut ways);
+        bytes_field(3, &element(11), &mut ways);
+        let mut bytes = Vec::new();
+        frame("OSMHeader", &[], &header_payload(&[], true), &mut bytes);
+        frame(
+            "OSMData",
+            &[&index(3, 0, 5, 9, 3)],
+            &data_blob(&nodes),
+            &mut bytes,
+        );
+        frame("OSMData", &[], &data_blob(&ways), &mut bytes);
+        let dir = crate::test_scratch::scratch("pbf-frames", "claims");
+        let path = dir.join("f.osm.pbf");
+        std::fs::write(&path, &bytes).unwrap();
+
+        let mut claims = super::Claims::open(&path).unwrap();
+        let first = claims.next_blob().unwrap().unwrap();
+        assert_eq!(
+            first.claim,
+            Some(super::BlobClaim {
+                kind: 0,
+                min_id: 5,
+                max_id: 9,
+                count: 3
+            })
+        );
+        let second = claims.next_blob().unwrap().unwrap();
+        assert_eq!((second.index, second.claim), (1, None));
+        assert!(claims.next_blob().unwrap().is_none());
+        assert_eq!(
+            super::blob_ids(&path, first.payload_offset, first.datasize).unwrap(),
+            [(0, 5), (0, 7), (0, 9)]
+        );
+        assert_eq!(
+            super::blob_ids(&path, second.payload_offset, second.datasize).unwrap(),
+            [(1, 10), (1, 11)]
+        );
+        assert_eq!(super::zigzag(3), -2);
+
+        // The same payloads under other headers are the same payloads.
+        let mut stripped = Vec::new();
+        frame("OSMHeader", &[], &header_payload(&[], false), &mut stripped);
+        frame("OSMData", &[], &data_blob(&nodes), &mut stripped);
+        frame("OSMData", &[], &data_blob(&ways), &mut stripped);
+        let other = dir.join("g.osm.pbf");
+        std::fs::write(&other, &stripped).unwrap();
+        assert_eq!(super::same_data_payloads(&path, &other).unwrap(), Ok(()));
+        let mut changed = Vec::new();
+        frame("OSMHeader", &[], &header_payload(&[], false), &mut changed);
+        frame("OSMData", &[], &data_blob(&nodes), &mut changed);
+        frame("OSMData", &[], &data_blob(&nodes), &mut changed);
+        std::fs::write(&other, &changed).unwrap();
+        assert!(super::same_data_payloads(&path, &other).unwrap().is_err());
     }
 
     #[test]

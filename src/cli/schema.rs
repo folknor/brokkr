@@ -1044,7 +1044,8 @@ In depth: `brokkr man clippy`."
         #[arg(long)]
         snapshot: Option<crate::datasets::resolve::SnapshotRef>,
         /// Clear `Sort.Type_then_ID` and produce one adjacent same-kind blob
-        /// pair per kind with overlapping ID ranges.
+        /// pair with overlapping ID ranges per kind holding more elements
+        /// than the cap (8000).
         #[arg(long)]
         unsort: bool,
         /// Drop `LocationsOnWays` (clears the header feature and re-encodes
@@ -3403,6 +3404,22 @@ pub(crate) enum VerifyCommand {
     /// it and fixed fixtures
     #[command(display_order = 6)]
     CheckIds {
+        #[command(flatten)]
+        pbf: VerifyPbfArgs,
+    },
+    /// Cross-validate repack at the default cap, cap 3000 and cap 64000, and
+    /// the input stripped of indexdata with --force, against osmium diff of
+    /// the input and repack's documented block layout
+    #[command(display_order = 6)]
+    Repack {
+        #[command(flatten)]
+        pbf: VerifyPbfArgs,
+    },
+    /// Cross-validate degrade's decode path (--strip-locations, --drop-ids,
+    /// --unsort, --unsort-intra) against osmium diff of the input, the
+    /// documented block layout and each unsort swap's position
+    #[command(display_order = 6)]
+    Degrade {
         #[command(flatten)]
         pbf: VerifyPbfArgs,
     },

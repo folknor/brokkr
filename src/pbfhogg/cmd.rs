@@ -578,6 +578,14 @@ pub(crate) fn verify(
                 let pbf_path = resolve_verify_input(&pbf.source, &paths, project_root)?;
                 super::verify_getparents::run(&harness, &pbf_path, pbf.direct_io)
             }
+            VerifyCommand::Repack { pbf } => {
+                let pbf_path = resolve_verify_input(&pbf.source, &paths, project_root)?;
+                super::verify_repack::run(&harness, &pbf_path, pbf.direct_io)
+            }
+            VerifyCommand::Degrade { pbf } => {
+                let pbf_path = resolve_verify_input(&pbf.source, &paths, project_root)?;
+                super::verify_degrade::run(&harness, &pbf_path, pbf.direct_io)
+            }
             VerifyCommand::Merge {
                 pbf,
                 osc_seq,
@@ -698,6 +706,8 @@ fn verify_name(verify: &VerifyCommand) -> &'static str {
         VerifyCommand::CheckRefs { .. } => super::verify::labels::CHECK_REFS,
         VerifyCommand::CheckIds { .. } => super::verify::labels::CHECK_IDS,
         VerifyCommand::Getparents { .. } => super::verify::labels::GETPARENTS,
+        VerifyCommand::Repack { .. } => super::verify::labels::REPACK,
+        VerifyCommand::Degrade { .. } => super::verify::labels::DEGRADE,
         VerifyCommand::Merge { .. } => super::verify::labels::APPLY_CHANGES,
         VerifyCommand::DeriveChanges { .. } => super::verify::labels::DIFF_OSC,
         VerifyCommand::Renumber { .. } => super::verify::labels::RENUMBER,

@@ -622,7 +622,10 @@ keeping the counts and the verdict and counting the violations, which
 pbfhogg bounds by its `--max-errors` default; osmium's `fileinfo` report is
 read the same way. `verify getparents` holds the objects of one osmium
 output at a time, outputs of a handful of requested IDs, and from the
-input's relations only the first member of each kind.
+input's relations only the first member of each kind. `verify repack` and
+`verify degrade` read osmium diff's listings one identity at a time, pull the
+input's and the output's blob claims side by side, and decode at most one
+output blob at a time, for the few IDs they locate.
 
 **Verdicts.** A check fails by returning `Err` (a tool crashed, output could
 not be parsed) or by returning `Findings` that carry a failed comparison;
@@ -898,7 +901,8 @@ reaches every run of the command a check verifies, and nothing else: `sort`,
 `cat`, `extract`, `multi-extract` (the single-pass runs), `tags-filter`,
 `getid-removeid` (every pbfhogg getid run), `getparents` (every pbfhogg
 getparents run), `add-locations-to-ways` (each
-engine), `check-ids` (every `check --ids` run, plain and `--full`), `merge`
+engine), `check-ids` (every `check --ids` run, plain and `--full`), `repack`
+(every `repack` run) and `degrade` (every decode-path `degrade` run), `merge`
 (`apply-changes`), `derive-changes` (`diff --format osc`,
 on the indexed pair and on the pair stripped of indexdata), `renumber`
 (`renumber`) and `diff` (the text diff, indexed and stripped, plain and
@@ -910,7 +914,7 @@ PBF, `degrade --strip-indexdata`, `check-ids`' `degrade --unsort` and
 `--unsort-intra` copies and its `cat` fixtures), references (`multi-extract`'s sequential
 single-region extracts, `derive-changes`' roundtrip `apply-changes`) and
 comparators (inspections, normalising sorts, element diffs, `renumber`'s
-comparison `diff`, `check --locations`). `verify merge` and `verify extract`
+comparison `diff`, `check --locations`, `check --index`). `verify merge` and `verify extract`
 hold `apply-changes` and the single-region extract to osmium under the flag.
 `check-refs` does not take the flag, so passing it there is a parse error,
 and `verify all --direct-io` runs it buffered: pbfhogg refuses
@@ -1162,6 +1166,81 @@ and `--full` reports each as untrackable), and one whose framing mixes blobs
 with and without indexdata too. Kind claims must be true: a blob whose
 decoded kind contradicts its claim stops pbfhogg's check without an answer,
 an error here.
+
+`verify repack` and `verify degrade` hold pbfhogg's two re-encoders to
+osmium's reading of the input and to their documented block layout
+(`verify_reencode`, shared). Elements: `osmium diff --suppress-common
+--output-format opl,locations_on_ways=true --summary` of a reference against
+the output. osmium walks both files as a merge on object order and counts a
+pair same only when a checksum over visible, timestamp, tags, changeset, uid,
+user and the location, way node references with their coordinates or members
+agrees, so no left, right or different object means the two sequences are
+identical element by element, whatever their order (barring a checksum
+collision; tags are fed without lengths). An object it lists as moved or
+removed is printed, not checksummed, so its lines are compared byte for byte,
+way coordinates included. The reference is the input when its kinds are
+grouped in order (`inspect`'s `ordering.standard`), else a stable partition
+osmium builds (`osmium cat -t` per kind, then `osmium cat` of the three: each
+kind keeps its input order); for degrade it is written without way
+coordinates (plain `osmium cat`), since every re-encode drops them. Layout:
+each output's indexdata must be on every blob and true by `pbfhogg check
+--index`, which decodes every blob independently of the writer's
+`BlockBuilder`; then the header-only claims walk (`pbf_frames::Claims`,
+pulling input and output blobs side by side in constant memory) holds the
+output's blobs, in order, to the documented rule run over the input's
+claims, which on an indexed input must pass `check --index` too (else an
+error: they feed the prediction). Every output must also claim
+`Sort.Type_then_ID` and `LocationsOnWays` as its command documents, hold no
+blob over the cap or empty, and keep kinds in order. Both arms read the input
+with `osmium fileinfo -e` and refuse a negative ID and a header requiring
+`HistoricalInformation` (one object per kind and ID is the domain); `--force`
+is passed only on an unindexed input, which also gets no layout prediction
+(the PASS line says so). A run pbfhogg refuses as too large for the format
+(exit 2 with its CLI's `; lower --elements-per-blob` advice, nothing
+published) is named in the PASS line as refused, its representability and
+correctness not established; an arm all of whose runs refuse is an error.
+
+`verify repack` runs the default cap (no `--elements-per-blob`, held to the
+documented 8000), 3000 (a cap that does not divide 8000-element blobs) and
+64000 (one that grows them), each of which must leave the element sequence
+identical, metadata and way coordinates included, and claim both header
+features as the input does; on an indexed input the layout must be repack's
+rule exactly: per kind, a blob of at least the cap flushes the builder and is
+written as full blocks of the cap and its remainder alone, a smaller one goes
+element by element into the builder, which flushes at the cap. A fourth case
+repacks the input stripped of indexdata (`degrade --strip-indexdata`,
+required to be unindexed and to hold the input's data payloads byte for byte,
+else an error) with `--force` at the default cap, its layout predicted from
+the original's claims. The PASS line names a shape no cap met: a shrink
+blob's remainder followed by a smaller blob of its kind (the remainder must
+not take it), or a blob smaller than the cap coalescing into a nonempty
+builder.
+
+`verify degrade` runs the decode path at the default cap. `--strip-locations`
+must leave the sequence identical and, on an indexed input, re-encode each
+input blob alone (full blocks, then the remainder). On an input osmium reads
+in strict order with at least four objects, three more run, else the PASS line
+says they did not. `--drop-ids N:SEED`, N the smaller of 10000 and a quarter
+of the objects, must remove exactly N objects and change nothing else (each a
+`-` line alone), its layout predicted from each input blob's survivors (the
+removed IDs counted into the blob whose claimed range holds them); it runs
+twice with one seed, the outputs identical, and once with another, held to
+the same checks. Which objects go is not compared with pbfhogg's selection,
+which is not documented, and whether the second seed chose another set is
+named, never a verdict. `--unsort` and `--unsort-intra` must move exactly one
+object per kind with more objects than the cap (two or more for intra), its
+two lines identical, and change nothing else. For `--unsort` each kind must
+be packed continuously (full blocks, then the rest), exactly the kind's first
+two blobs may overlap, and brokkr decodes three IDs itself
+(`pbf_frames::blob_ids`, raw or zlib, its count and kinds held to the claim):
+the moved object must open the kind's second blob and fall between the last
+two IDs of its first, which holds the cap's worth. With the rest of the
+sequence unchanged and ascending, that places the input's objects at the cap
+and one past it swapped, and nothing else. For `--unsort-intra` the moved
+object must be the kind's lowest ID by osmium and decode second in the kind's
+first blob, and no blob ranges may overlap. The unsort modes must not claim
+`Sort.Type_then_ID`; the other cases claim it as the input does; none claims
+`LocationsOnWays`.
 
 `verify add-locations-to-ways` runs osmium with `--keep-member-nodes`: pbfhogg
 keeps untagged relation-member nodes unconditionally (a documented pbfhogg

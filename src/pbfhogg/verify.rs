@@ -30,6 +30,8 @@ pub(super) mod labels {
     pub const ADD_LOCATIONS_TO_WAYS: &str = "add-locations-to-ways";
     pub const CHECK_REFS: &str = "check-refs";
     pub const CHECK_IDS: &str = "check-ids";
+    pub const REPACK: &str = "repack";
+    pub const DEGRADE: &str = "degrade";
     pub const APPLY_CHANGES: &str = "apply-changes";
     pub const DIFF_OSC: &str = "diff --format osc";
     pub const RENUMBER: &str = "renumber";

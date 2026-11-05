@@ -643,6 +643,7 @@ New flags that could warrant additional `bench commands` variants or verify cove
 - `check-refs`: `--show-ids`
 - `derive-changes`: `--update-timestamp`, `--increment-version`
 - `tags-count`: `-M`, `-s`
+- `degrade`: the typed measured command forwards only `--unsort`, `--strip-locations` and `--strip-indexdata`; pbfhogg's `--unsort-intra`, `--drop-ids N:SEED`, `--elements-per-blob`, `--force`, `--strip-tagdata`, `--strip-bbox` and the `--corrupt-*` rewrites have no `brokkr degrade` flag, so no measured run or `--as-snapshot` artifact can use them. `verify degrade` (brokkr#117) drives the decode-path flags through its own argv and needs none of this.
 
 ### elivagar: memory-budget run flags not exposed
 
