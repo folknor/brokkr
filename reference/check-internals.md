@@ -88,6 +88,12 @@ requests and compile inputs, with the effective debug answer (`--debug`/
 `--release` over the sweep's pin over `[test] debug`) in place of the profile,
 plus `doc_only` - so a sweep and its doctest twin stay two runs, and two
 sweeps narrowed to the same package with the same build fold into one. The
+same per-sweep answer can instead be a profile conflict (a flag contradicting
+a `profile_required` pin, `build_purpose::eligible_sweep_profile`): that lane
+is `Excluded` with a profile cause after the package rules and before any
+request or dedupe candidate is built, so it neither absorbs an eligible twin
+nor folds onto one, and the journal, built from attempted lanes only, holds
+nothing for it. The
 coverage audit still groups by the configured shape (`build_shape_key`): it
 identifies the declared sweep, and a complete profile refuses `-p` anyway.
 

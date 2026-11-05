@@ -1,4 +1,4 @@
-use super::{LintsConfig, ParallelBinaries, SweepProfile};
+use super::{CheckEntry, LintsConfig, ParallelBinaries, ProfilePin, SweepProfile};
 
 /// The `-A <lint>` flag pairs the test phase injects into the build's
 /// rustflags: `allow` plus the lint names behind `allow_exact`, deduped and
@@ -186,7 +186,28 @@ impl EffectiveUnification {
     }
 }
 
+impl CheckEntry {
+    /// The entry's `profile` and `profile_required` as one value. Loading
+    /// refuses `profile_required` without a `profile`, the one pair this
+    /// would otherwise have to drop.
+    pub fn profile_pin(&self) -> ProfilePin {
+        match (self.profile, self.profile_required) {
+            (None, _) => ProfilePin::Unset,
+            (Some(p), false) => ProfilePin::Pinned(p),
+            (Some(p), true) => ProfilePin::Required(p),
+        }
+    }
+}
+
 impl SweepProfile {
+    /// The profile's name as the config spells it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Dev => "dev",
+            Self::Release => "release",
+        }
+    }
+
     /// The subdirectory of `target/` this profile's artifacts land in -
     /// what `BROKKR_TEST_BIN_DIR` must point at.
     pub fn target_subdir(self) -> &'static str {

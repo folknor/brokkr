@@ -40,11 +40,12 @@ pub(crate) use crate::build_purpose::features::FeatureOracle;
 pub(crate) use crate::build_purpose::features::feature_fixture;
 pub(crate) use crate::build_purpose::requests::SupportRequest;
 pub(crate) use selection::{
-    AdmissionNote, AdmissionRule, Attempt, CheckSelections, DeclaredShape, ForwardedArgs,
-    GatedPhases, LaneEntry, MemberSelection, PackageSource, PhaseSelection, ReachLedger, ReproLine,
-    Resolution, ResolutionRun, RunSweeps, Selection, SelectionPhase, ShapeId,
-    derive_doctest_carriers, feature_drop_lines, join_notes, reject_direct_execution_args,
-    reject_forwarded_package_selectors, resolve_invocation_sweeps, resolve_planned_sweep,
+    AdmissionNote, AdmissionRule, Attempt, CheckSelections, DeclaredShape, Excluded,
+    ExclusionCause, ForwardedArgs, GatedPhases, LaneEntry, MemberSelection, PackageSource,
+    PhaseSelection, ReachLedger, ReproLine, Resolution, ResolutionRun, RunSweeps, Selection,
+    SelectionPhase, ShapeId, derive_doctest_carriers, feature_drop_lines, join_notes,
+    reject_direct_execution_args, reject_forwarded_package_selectors, resolve_invocation_sweeps,
+    resolve_planned_sweep,
 };
 #[cfg(test)]
 pub(crate) use selection::{package_args, resolve_unification};

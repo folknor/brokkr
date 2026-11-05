@@ -1369,6 +1369,15 @@ pub struct CheckEntry {
     /// two different lint surfaces, and neither may dedupe into the other.
     #[serde(default)]
     pub profile: Option<SweepProfile>,
+    /// The sweep can only be run under its `profile`: a `brokkr test
+    /// --debug`/`--release` asking for the other profile leaves it out of the
+    /// run (a `SKIP`, never a build) instead of overriding the pin. For a
+    /// sweep whose features or tests need `debug_assertions` (or need them
+    /// off). Requires `profile`. Not part of the build shape: it decides
+    /// which invocations run the sweep, never what is compiled. Absent or
+    /// false, a CLI flag overrides the pin as it always has.
+    #[serde(default)]
+    pub profile_required: bool,
     /// The target triple this sweep compiles and runs for, passed as
     /// `--target` to every cargo run of the sweep. Unset builds for the host,
     /// which is what every sweep did before this key existed. A bare triple
@@ -1506,6 +1515,39 @@ pub enum SweepProfile {
     Release,
 }
 
+/// A sweep's `[[check]]` `profile` and `profile_required`, as one value, so
+/// a requirement without a profile cannot be represented.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ProfilePin {
+    /// No `profile`: the command's own default decides.
+    #[default]
+    Unset,
+    /// `profile` alone: a `brokkr test --debug`/`--release` overrides it.
+    Pinned(SweepProfile),
+    /// `profile` with `profile_required`: the only profile the sweep runs
+    /// under; an invocation asking for the other leaves the sweep out.
+    Required(SweepProfile),
+}
+
+impl ProfilePin {
+    /// The pinned profile, required or not: what the sweep's build shape
+    /// and every compile read.
+    pub fn profile(self) -> Option<SweepProfile> {
+        match self {
+            Self::Unset => None,
+            Self::Pinned(p) | Self::Required(p) => Some(p),
+        }
+    }
+
+    /// The profile the sweep must run under, when it has one.
+    pub fn required(self) -> Option<SweepProfile> {
+        match self {
+            Self::Required(p) => Some(p),
+            _ => None,
+        }
+    }
+}
+
 /// `[test]` section.
 ///
 /// - `default_package` is the cargo package `brokkr test` should pass to
@@ -1527,8 +1569,10 @@ pub enum SweepProfile {
 /// - `debug` flips `brokkr test`'s cargo profile from release (the
 ///   default) to dev, so projects whose tests aren't profile-sensitive can
 ///   pin the faster-compiling build without typing `--debug` every time.
-///   The CLI wins: `--debug` forces dev, `--release` forces release, and
-///   only when neither is passed does this field decide.
+///   It is the last word on a sweep with no `[[check]] profile` of its own:
+///   a sweep's pin beats it, and `--debug`/`--release` beat both, except
+///   that a sweep with `profile_required` is left out of a run asking for
+///   the other profile rather than overridden.
 /// - `doctests` decides whether the test phase's serial lanes run doctests
 ///   inline, outside a complete claim. It defaults to `false` for cost:
 ///   rustdoc compiles and runs doctests in a pass of its own (each example

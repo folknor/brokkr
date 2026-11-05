@@ -393,7 +393,7 @@ mod clippy_sweep_tests {
         );
         assert_eq!(check[0].env, clippy.env);
         assert_eq!(check[0].packages, clippy.packages);
-        assert_eq!(check[0].profile, clippy.profile);
+        assert_eq!(check[0].profile_pin, clippy.profile_pin);
     }
 
     #[test]

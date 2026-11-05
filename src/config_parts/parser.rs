@@ -1852,6 +1852,13 @@ fn validate_check_entry(entry: &CheckEntry, section: &str) -> Result<(), DevErro
     }
     reject_reserved_sweep_env(&entry.env, &at)?;
     validate_check_entry_target(entry, &at)?;
+    if entry.profile_required && entry.profile.is_none() {
+        return Err(DevError::Config(format!(
+            "{at} sets `profile_required = true` with no `profile`. The key says the sweep runs \
+             only under its pinned profile - name it with `profile = \"dev\"` or \
+             `profile = \"release\"`, or drop `profile_required`."
+        )));
+    }
     if entry.curated
         && entry.tests.is_empty()
         && !entry.lib_tests

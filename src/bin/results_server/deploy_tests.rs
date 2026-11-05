@@ -47,18 +47,27 @@ fn responder(answer: Vec<u8>) -> SocketAddr {
 fn a_server_answering_with_this_build_confirms_the_deploy() {
     let server = server("deploy-ok", Limits::DEFAULT);
     let cwd = scratch("deploy-ok-home");
-    let declaration = declared(format!("http://{}/bench", server.addr), &["touch", "ran"], 10);
+    let declaration = declared(
+        format!("http://{}/bench", server.addr),
+        &["touch", "ran"],
+        10,
+    );
     converge(&declaration, BUILD, &cwd).unwrap();
-    assert!(cwd.join("ran").exists(), "the restart runs from the home directory");
+    assert!(
+        cwd.join("ran").exists(),
+        "the restart runs from the home directory"
+    );
 }
 
 #[test]
 fn another_build_answering_fails_at_the_deadline_naming_it() {
     let server = server("deploy-other", Limits::DEFAULT);
     let declaration = declared(format!("http://{}/bench", server.addr), &["true"], 1);
-    let error =
-        converge(&declaration, &"f".repeat(32), &scratch("deploy-other-home")).unwrap_err();
-    assert!(error.contains(&format!("answered with build {BUILD}")), "{error}");
+    let error = converge(&declaration, &"f".repeat(32), &scratch("deploy-other-home")).unwrap_err();
+    assert!(
+        error.contains(&format!("answered with build {BUILD}")),
+        "{error}"
+    );
 }
 
 #[test]
@@ -75,7 +84,8 @@ fn nothing_listening_fails_at_the_deadline() {
 #[test]
 fn a_failed_status_or_an_oversized_answer_never_counts() {
     let cwd = scratch("deploy-scripted-home");
-    let identity = format!(r#"{{"server":"brokkr-results-server","protocol":1,"build":"{BUILD}"}}"#);
+    let identity =
+        format!(r#"{{"server":"brokkr-results-server","protocol":1,"build":"{BUILD}"}}"#);
     let busy = responder(
         format!(
             "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{identity}",
@@ -83,8 +93,12 @@ fn a_failed_status_or_an_oversized_answer_never_counts() {
         )
         .into_bytes(),
     );
-    let error =
-        converge(&declared(format!("http://{busy}/bench"), &["true"], 1), BUILD, &cwd).unwrap_err();
+    let error = converge(
+        &declared(format!("http://{busy}/bench"), &["true"], 1),
+        BUILD,
+        &cwd,
+    )
+    .unwrap_err();
     assert!(error.contains("status 503"), "{error}");
 
     let padding = " ".repeat(70 * 1024);
@@ -95,8 +109,12 @@ fn a_failed_status_or_an_oversized_answer_never_counts() {
         )
         .into_bytes(),
     );
-    let error =
-        converge(&declared(format!("http://{large}/bench"), &["true"], 1), BUILD, &cwd).unwrap_err();
+    let error = converge(
+        &declared(format!("http://{large}/bench"), &["true"], 1),
+        BUILD,
+        &cwd,
+    )
+    .unwrap_err();
     assert!(error.contains("could not be read"), "{error}");
 }
 
@@ -106,11 +124,17 @@ fn a_failing_or_hanging_restart_fails_before_any_probe() {
     let url = format!("http://{}/bench", server.addr);
     let cwd = scratch("deploy-restart-home");
     let failed = converge(&declared(url.clone(), &["false"], 10), BUILD, &cwd).unwrap_err();
-    assert!(failed.contains("the restart command `false` failed"), "{failed}");
+    assert!(
+        failed.contains("the restart command `false` failed"),
+        "{failed}"
+    );
 
     let started = Instant::now();
     let hung = converge(&declared(url, &["sleep", "30"], 1), BUILD, &cwd).unwrap_err();
-    assert!(hung.contains("did not finish within the deadline"), "{hung}");
+    assert!(
+        hung.contains("did not finish within the deadline"),
+        "{hung}"
+    );
     assert!(hung.contains("was killed"), "{hung}");
     assert!(started.elapsed() < std::time::Duration::from_secs(10));
 }
@@ -139,15 +163,29 @@ fn a_deadline_already_passed_runs_no_restart() {
 
 #[test]
 fn only_an_answer_made_for_the_probe_by_this_protocol_counts() {
-    let good = format!(r#"{{"server":"brokkr-results-server","protocol":1,"probe":"ab","build":"{BUILD}"}}"#);
+    let good = format!(
+        r#"{{"server":"brokkr-results-server","protocol":1,"probe":"ab","build":"{BUILD}"}}"#
+    );
     assert_eq!(deploy::judge(good.as_bytes(), "ab").unwrap(), BUILD);
-    assert!(deploy::judge(good.as_bytes(), "cd").unwrap_err().contains("not made for this probe"));
+    assert!(
+        deploy::judge(good.as_bytes(), "cd")
+            .unwrap_err()
+            .contains("not made for this probe")
+    );
     let other = good.replace("brokkr-results-server", "nginx");
     assert!(deploy::judge(other.as_bytes(), "ab").is_err());
     let protocol = good.replace(r#""protocol":1"#, r#""protocol":2"#);
-    assert!(deploy::judge(protocol.as_bytes(), "ab").unwrap_err().contains("protocol 2"));
+    assert!(
+        deploy::judge(protocol.as_bytes(), "ab")
+            .unwrap_err()
+            .contains("protocol 2")
+    );
     let no_build = r#"{"server":"brokkr-results-server","protocol":1,"probe":"ab"}"#;
-    assert!(deploy::judge(no_build.as_bytes(), "ab").unwrap_err().contains("no build"));
+    assert!(
+        deploy::judge(no_build.as_bytes(), "ab")
+            .unwrap_err()
+            .contains("no build")
+    );
     assert!(deploy::judge(b"<html>", "ab").is_err());
 }
 
@@ -157,7 +195,11 @@ fn a_missing_declaration_is_no_server_and_a_bad_one_is_refused() {
     let path = dir.join("deploy.toml");
     assert!(deploy::load(&path).unwrap().is_none());
 
-    std::fs::write(&path, "url = \"http://127.0.0.1:8650/bench\"\nrestart = [\"true\"]\n").unwrap();
+    std::fs::write(
+        &path,
+        "url = \"http://127.0.0.1:8650/bench\"\nrestart = [\"true\"]\n",
+    )
+    .unwrap();
     let loaded = deploy::load(&path).unwrap().unwrap();
     assert_eq!(loaded.timeout_secs, 300);
 
@@ -167,15 +209,32 @@ fn a_missing_declaration_is_no_server_and_a_bad_one_is_refused() {
     );
     std::fs::write(&path, huge).unwrap();
     let loaded = deploy::load(&path).unwrap().unwrap();
-    assert!(loaded.deadline(Instant::now()).unwrap_err().contains("too large"));
+    assert!(
+        loaded
+            .deadline(Instant::now())
+            .unwrap_err()
+            .contains("too large")
+    );
 
     for (text, expect) in [
-        ("url = \"ftp://h/bench\"\nrestart = [\"true\"]\n", "not http"),
+        (
+            "url = \"ftp://h/bench\"\nrestart = [\"true\"]\n",
+            "not http",
+        ),
         ("url = \"http://\"\nrestart = [\"true\"]\n", "url"),
-        ("url = \"http://h/bench?x=1\"\nrestart = [\"true\"]\n", "query"),
+        (
+            "url = \"http://h/bench?x=1\"\nrestart = [\"true\"]\n",
+            "query",
+        ),
         ("url = \"http://h/bench\"\nrestart = []\n", "no command"),
-        ("url = \"http://h/bench\"\nrestart = [\"true\"]\ntimeout_secs = 0\n", "is 0"),
-        ("url = \"http://h/bench\"\nrestart = [\"true\"]\nhost = \"x\"\n", "unknown field"),
+        (
+            "url = \"http://h/bench\"\nrestart = [\"true\"]\ntimeout_secs = 0\n",
+            "is 0",
+        ),
+        (
+            "url = \"http://h/bench\"\nrestart = [\"true\"]\nhost = \"x\"\n",
+            "unknown field",
+        ),
     ] {
         std::fs::write(&path, text).unwrap();
         let error = deploy::load(&path).unwrap_err();

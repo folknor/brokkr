@@ -66,11 +66,13 @@ pub struct SweepDecl {
     /// universe. Audit policy only - never part of the build shape, and the
     /// audit exempts a shape only when *every* sweep producing it is curated.
     pub curated: bool,
-    /// The `[[check]]` entry's `profile`: the cargo profile this sweep
-    /// compiles and runs under, or `None` for the command's default (dev
-    /// under `brokkr check`; the CLI/`[test] debug` answer under `brokkr
-    /// test`). Part of the build shape.
-    pub profile: Option<SweepProfile>,
+    /// The `[[check]]` entry's `profile` and `profile_required`: the cargo
+    /// profile this sweep compiles and runs under, or `Unset` for the
+    /// command's default (dev under `brokkr check`; the CLI/`[test] debug`
+    /// answer under `brokkr test`). The profile is part of the build shape
+    /// and is read through [`SweepDecl::profile`]; whether it is required
+    /// only decides which `brokkr test` invocations run the sweep.
+    pub profile_pin: crate::config::ProfilePin,
     /// The `[[check]]` entry's `target`: the triple every cargo run of the
     /// sweep passes as `--target`, or `None` for the host. Part of the build
     /// shape.
@@ -207,7 +209,7 @@ impl PlannedSweep {
         crate::build_purpose::profile_for_sweep(
             crate::build_purpose::SweepPurpose::Check,
             crate::build_purpose::SweepProfiles {
-                sweep: self.profile,
+                sweep: self.profile(),
                 ..Default::default()
             },
         )
@@ -778,6 +780,13 @@ impl LaneFilters {
 }
 
 impl SweepDecl {
+    /// The `[[check]]` entry's `profile`, required or not: the cargo profile
+    /// this sweep compiles under when nothing overrides it. Part of the
+    /// build shape.
+    pub fn profile(&self) -> Option<SweepProfile> {
+        self.profile_pin.profile()
+    }
+
     /// The resolved execution policy.
     pub fn lane_exec(&self) -> LaneExec {
         self.lane_exec
@@ -815,7 +824,7 @@ impl PlannedSweep {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
             self.build_packages.clone(),
-            self.profile,
+            self.profile(),
             self.effective_unification,
         )
     }
@@ -917,7 +926,7 @@ fn sweep_decl_from_entry(
         rustflags: entry.rustflags.clone(),
         lane_exec,
         curated: entry.curated,
-        profile: entry.profile,
+        profile_pin: entry.profile_pin(),
         target: entry.target.clone(),
         feature_unification: entry.feature_unification,
         entry_name: entry.name.clone(),
@@ -1779,10 +1788,24 @@ sweeps = ["timing"]
 "#,
         );
         let resolved = resolve(&cfg, &checks, "timing").unwrap();
-        assert_eq!(resolved[0].profile, Some(SweepProfile::Release));
+        assert_eq!(resolved[0].profile(), Some(SweepProfile::Release));
         assert_eq!(
-            sweep_from_check_entry(&checks[0]).profile,
+            sweep_from_check_entry(&checks[0]).profile(),
             Some(SweepProfile::Release)
+        );
+
+        // Requiring the profile changes which invocations run the sweep,
+        // never what it compiles: the same build shape.
+        let mut required_entry = checks[0].clone();
+        required_entry.profile_required = true;
+        let required = sweep_from_check_entry(&required_entry);
+        assert_eq!(
+            required.profile_pin,
+            crate::config::ProfilePin::Required(SweepProfile::Release)
+        );
+        assert_eq!(
+            plan_decl(required).build_shape_key(),
+            plan_decl(resolved[0].clone()).build_shape_key()
         );
 
         // Unlike `curated` and `isolation`, the profile IS the build shape:

@@ -2380,15 +2380,17 @@ In depth: `brokkr man nidhogg`."
     },
     /// Run the cargo tests matching a name (release by default; --debug for dev)
     ///
-    /// Every test harness of the package runs, each in its own cargo
-    /// invocation after one build, so a failing or crashing harness never
+    /// Every test harness of the package holding a match runs, each as its
+    /// own process after one build, so a failing or crashing harness never
     /// hides the ones after it; every failure is listed, tagged with its
     /// harness.
     /// Always: --include-ignored and --nocapture. Test thread count comes
     /// from the selected profile when set, otherwise it defaults to one.
-    /// Adds --release unless dev profile is selected. Profile precedence:
-    /// `--debug` / `--release` on the CLI win; otherwise `[test] debug` in
-    /// brokkr.toml decides (default release).
+    /// Adds --release unless dev profile is selected. Profile precedence,
+    /// per sweep: `--debug` / `--release` on the CLI, then the sweep's
+    /// `[[check]] profile`, then `[test] debug` in brokkr.toml (default
+    /// release). A sweep with `profile_required` is left out of a run whose
+    /// flag asks for the other profile, rather than overridden.
     /// Sweep selection follows the configured profile or [[check]] entries,
     /// and defaults to one --all-features sweep when none are configured.
     /// Streams the test's own stdout/stderr live and prints a [test]
@@ -2436,11 +2438,13 @@ In depth: `brokkr man nidhogg`."
         jobs: Option<u32>,
         /// Build and run the test in dev profile instead of release.
         /// BROKKR_TEST_BIN_DIR points at <target>/debug accordingly.
-        /// Overrides `[test] debug` from brokkr.toml.
+        /// Overrides `[test] debug` and a sweep's `profile` from brokkr.toml;
+        /// a sweep requiring release (`profile_required`) is skipped.
         #[arg(long, conflicts_with = "release")]
         debug: bool,
-        /// Force the release profile, overriding `[test] debug = true`
-        /// from brokkr.toml. Mutually exclusive with --debug.
+        /// Force the release profile, overriding `[test] debug = true` and a
+        /// sweep's `profile` from brokkr.toml; a sweep requiring dev
+        /// (`profile_required`) is skipped. Mutually exclusive with --debug.
         #[arg(long)]
         release: bool,
         /// Override the per-test watchdog ceiling, in seconds. Without this

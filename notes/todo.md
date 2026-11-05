@@ -42,6 +42,17 @@ Skipping it by default would make a focused run silently cover fewer shapes than
 `check` does, so this is a policy question, not a fix. Today `--sweep LABEL`
 already narrows a run to one sweep.
 
+## `for_brokkr_test`'s `untargeted` slice is positional and fails open (2026-11-05)
+
+`PhaseSelection::for_brokkr_test` takes `untargeted: &[bool]` aligned by index
+with the sweeps, read as `untargeted.get(i).unwrap_or(false)`: a slice shorter
+than the sweep list silently admits the sweeps past its end, running them with
+no selector (every harness). The one production caller builds it from the same
+vector, so nothing is wrong today, but the shape lets a future caller get it
+wrong without an error. The profile-conflict exclusion added beside it was
+deliberately made a per-sweep closure instead; `untargeted` could become one
+too, or a length mismatch could refuse construction.
+
 ## Structural debt (last audited 2026-04-17.)
 
 The high-impact items have been worked off. What's listed below is

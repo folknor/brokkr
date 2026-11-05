@@ -4,6 +4,7 @@
 use std::fmt::{self, Display, Formatter};
 use std::path::Path;
 
+use crate::build_purpose::ProfileConflict;
 use crate::build_purpose::features::{DroppedToken, FeatureOracle};
 use crate::build_purpose::requests::SupportRequest;
 use crate::check_cmd::{LaneIdx, Lanes};
@@ -614,7 +615,7 @@ impl DeclaredShape {
                 .iter()
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect(),
-            profile: sweep.profile,
+            profile: sweep.profile(),
             unification: sweep.effective_unification(),
             target: sweep.target.clone(),
         }
@@ -1177,20 +1178,48 @@ impl Attempt {
     }
 }
 
-/// A lane whose rules admit none of the invocation's packages.
+/// A lane the invocation leaves out before anything is built.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Excluded {
+    cause: ExclusionCause,
+    /// The invocation packages the lane's rules did not admit. Under
+    /// [`ExclusionCause::Packages`] they are the whole explanation; under a
+    /// profile cause they are only what the package rules also said.
     notes: Vec<AdmissionNote>,
 }
 
+/// Why a lane was left out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExclusionCause {
+    /// Its rules admit none of the invocation's packages; the notes say how.
+    Packages,
+    /// It requires the profile the invocation's `--debug`/`--release` did
+    /// not ask for (`profile_required`, `brokkr test` only).
+    Profile(ProfileConflict),
+}
+
 impl Excluded {
-    pub(crate) fn notes(&self) -> &[AdmissionNote] {
+    fn packages(notes: Vec<AdmissionNote>) -> Self {
+        Self {
+            cause: ExclusionCause::Packages,
+            notes,
+        }
+    }
+
+    pub(crate) fn cause(&self) -> ExclusionCause {
+        self.cause
+    }
+
+    pub(crate) fn package_notes(&self) -> &[AdmissionNote] {
         &self.notes
     }
 
-    /// Every note, joined: why the lane is not attempted.
+    /// Why the lane is not attempted.
     pub(crate) fn reason(&self) -> String {
-        join_notes(&self.notes)
+        match self.cause {
+            ExclusionCause::Packages => join_notes(&self.notes),
+            ExclusionCause::Profile(conflict) => conflict.to_string(),
+        }
     }
 }
 
@@ -1266,7 +1295,7 @@ impl LaneEntry {
     pub(crate) fn notes(&self) -> &[AdmissionNote] {
         match self {
             Self::Disabled(_) => &[],
-            Self::Excluded(e) => e.notes(),
+            Self::Excluded(e) => e.package_notes(),
             Self::Attempt(a) => a.notes(),
             Self::Deduped(d) => d.notes(),
             Self::NotApplicable(n) => &n.admission().notes,
@@ -1321,7 +1350,7 @@ pub(crate) fn derive_doctest_carriers(
     let test = PhaseSelection::for_check(SelectionPhase::Test, sweeps, &[], oracle)?;
     let key = |i: usize, sweep: &PlannedSweep| {
         test.attempt(LaneIdx::new(i))
-            .map(|a| a.effective_build(sweep, sweep.profile, SupportIdentity::Include))
+            .map(|a| a.effective_build(sweep, sweep.profile(), SupportIdentity::Include))
     };
     let mut carried: Vec<EffectiveBuild> = sweeps
         .iter()
@@ -1349,7 +1378,7 @@ pub(crate) fn derive_doctest_carriers(
         {
             continue;
         }
-        let build = attempt.effective_build(sweep, sweep.profile, SupportIdentity::Include);
+        let build = attempt.effective_build(sweep, sweep.profile(), SupportIdentity::Include);
         if carried.contains(&build) {
             continue;
         }
@@ -1378,8 +1407,24 @@ enum Dedupe<'a> {
     /// surface.
     BuildShape,
     /// `brokkr test`: two lanes that would execute identically
-    /// ([`ExecProjection`]), with each sweep's effective debug answer.
-    Execution(&'a dyn Fn(&PlannedSweep) -> bool),
+    /// ([`ExecProjection`]), with each sweep's effective profile. A sweep
+    /// whose required profile the invocation contradicts has none: it is
+    /// excluded before any request or dedupe candidate is built.
+    Execution(&'a dyn Fn(&PlannedSweep) -> Result<SweepProfile, ProfileConflict>),
+}
+
+impl Dedupe<'_> {
+    /// The profile a lane executes under where the dedupe compares it
+    /// (`None` elsewhere), or the conflict that leaves the lane out.
+    fn execution_profile(
+        &self,
+        sweep: &PlannedSweep,
+    ) -> Result<Option<SweepProfile>, ProfileConflict> {
+        match self {
+            Self::Execution(profile_of) => profile_of(sweep).map(Some),
+            Self::Never | Self::BuildShape => Ok(None),
+        }
+    }
 }
 
 /// A selection refusal with structured fields; its displayed wording is
@@ -1472,18 +1517,20 @@ impl PhaseSelection {
 
     /// `brokkr test`'s selection: its resolved package ALWAYS overrides,
     /// whatever its source, and lanes that would execute identically
-    /// dedupe ([`ExecProjection`]). `debug_of` is each sweep's effective
-    /// debug answer (`resolve_debug`). Apply `--sweep` before this.
+    /// dedupe ([`ExecProjection`]). `profile_of` is each sweep's effective
+    /// profile, or the conflict that leaves it out of the run
+    /// (`resolve_eligible`). Apply `--sweep` before this.
     /// `untargeted[i]` marks a sweep whose target selection, projected onto
     /// `package`, selects nothing: it is excluded, ahead of the dedupe and of
     /// any support build, rather than run with no selector - which would
-    /// select every test target.
+    /// select every test target. A profile conflict excludes a sweep at the
+    /// same point, after the package rules.
     pub(crate) fn for_brokkr_test(
         sweeps: &[PlannedSweep],
         package: &str,
         source: PackageSource,
         untargeted: &[bool],
-        debug_of: &dyn Fn(&PlannedSweep) -> bool,
+        profile_of: &dyn Fn(&PlannedSweep) -> Result<SweepProfile, ProfileConflict>,
         oracle: &FeatureOracle<'_>,
     ) -> Result<Self, DevError> {
         Self::construct(
@@ -1492,7 +1539,7 @@ impl PhaseSelection {
             &[package.to_owned()],
             Some(Provenance::ResolvedPackage(source)),
             untargeted,
-            &Dedupe::Execution(debug_of),
+            &Dedupe::Execution(profile_of),
             oracle,
         )
     }
@@ -1515,8 +1562,8 @@ impl PhaseSelection {
                 None => Admission::default(),
             };
             if untargeted.get(i.get()).copied().unwrap_or(false) && !admission.kept.is_empty() {
-                return Ok(LaneEntry::Excluded(Excluded {
-                    notes: admission
+                return Ok(LaneEntry::Excluded(Excluded::packages(
+                    admission
                         .kept
                         .iter()
                         .map(|package| AdmissionNote {
@@ -1524,7 +1571,7 @@ impl PhaseSelection {
                             rule: AdmissionRule::NoSelectedTarget,
                         })
                         .collect(),
-                }));
+                )));
             }
             if phase == SelectionPhase::Rustdoc
                 && matches!(sweep.lane_exec(), crate::profile::LaneExec::DocOnly { .. })
@@ -1549,13 +1596,23 @@ impl PhaseSelection {
             let configured = Selection::configured(sweep, phase);
             let selection = match provenance {
                 Some(_) if kept.is_empty() => {
-                    return Ok(LaneEntry::Excluded(Excluded { notes }));
+                    return Ok(LaneEntry::Excluded(Excluded::packages(notes)));
                 }
                 Some(provenance) => Selection::Override {
                     packages: kept,
                     provenance,
                 },
                 None => configured.clone(),
+            };
+            // A required profile the invocation contradicts leaves the lane
+            // out like a package rule does: no request, no dedupe candidate,
+            // so it neither absorbs an eligible twin nor folds onto one.
+            let execution_profile = match dedupe.execution_profile(sweep) {
+                Ok(profile) => profile,
+                Err(conflict) => {
+                    let cause = ExclusionCause::Profile(conflict);
+                    return Ok(LaneEntry::Excluded(Excluded { cause, notes }));
+                }
             };
             // Validated for every lane that has a selection, deduped ones
             // included: an invalid pairing is never repaired, nor hidden.
@@ -1566,7 +1623,7 @@ impl PhaseSelection {
                 Dedupe::Never => None,
                 Dedupe::BuildShape => {
                     let build =
-                        attempt.effective_build(sweep, sweep.profile, SupportIdentity::Exclude);
+                        attempt.effective_build(sweep, sweep.profile(), SupportIdentity::Exclude);
                     let onto = shapes
                         .iter()
                         .find(|(candidate, _)| *candidate == build)
@@ -1576,8 +1633,9 @@ impl PhaseSelection {
                     }
                     onto
                 }
-                Dedupe::Execution(debug_of) => {
-                    let p = ExecProjection::of(sweep, &attempt, debug_of(sweep));
+                Dedupe::Execution(_) => {
+                    let debug = execution_profile == Some(SweepProfile::Dev);
+                    let p = ExecProjection::of(sweep, &attempt, debug);
                     let onto = projections.iter().find(|(k, _)| *k == p).map(|(_, j)| *j);
                     if onto.is_none() {
                         projections.push((p, i));
@@ -2063,7 +2121,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
-    use crate::config::{FeatureUnification, SweepProfile};
+    use crate::config::{FeatureUnification, ProfilePin, SweepProfile};
 
     fn planned(declaration: crate::profile::SweepDecl) -> PlannedSweep {
         PlannedSweep::resolve(declaration, false)
@@ -2154,14 +2212,14 @@ mod tests {
         sweeps: &[PlannedSweep],
         package: &str,
         source: PackageSource,
-        debug_of: &dyn Fn(&PlannedSweep) -> bool,
+        profile_of: &dyn Fn(&PlannedSweep) -> Result<SweepProfile, ProfileConflict>,
     ) -> Result<PhaseSelection, DevError> {
         PhaseSelection::for_brokkr_test(
             sweeps,
             package,
             source,
             &[],
-            debug_of,
+            profile_of,
             &FeatureOracle::unavailable(),
         )
     }
@@ -2616,33 +2674,117 @@ mod tests {
         );
     }
 
-    fn debug_of(debug: bool) -> impl Fn(&PlannedSweep) -> bool {
-        move |_| debug
+    /// Every sweep under the same profile, whatever it pins.
+    fn debug_of(debug: bool) -> impl Fn(&PlannedSweep) -> Result<SweepProfile, ProfileConflict> {
+        move |_| {
+            Ok(if debug {
+                SweepProfile::Dev
+            } else {
+                SweepProfile::Release
+            })
+        }
+    }
+
+    /// The real `brokkr test` rule under an invocation's flag (`Some(true)`
+    /// is `--debug`) and `[test] debug = configured`.
+    fn under(
+        invocation: Option<bool>,
+        configured: Option<bool>,
+    ) -> impl Fn(&PlannedSweep) -> Result<SweepProfile, ProfileConflict> {
+        move |s| {
+            crate::build_purpose::eligible_sweep_profile(
+                crate::build_purpose::SweepPurpose::Test,
+                crate::build_purpose::SweepProfiles {
+                    invocation,
+                    sweep: s.profile(),
+                    configured,
+                },
+                s.profile_pin.required(),
+            )
+        }
+    }
+
+    fn pinned(label: &str, pin: ProfilePin) -> PlannedSweep {
+        with_sweep(sweep(label), |sweep| sweep.profile_pin = pin)
     }
 
     #[test]
     fn exec_projection_collapses_profile_pins_under_one_override() {
         // `--debug` overrides both sweeps' pins: they execute identically.
-        let dev = with_sweep(sweep("dev"), |sweep| {
-            sweep.profile = Some(SweepProfile::Dev);
-        });
-        let rel = with_sweep(sweep("rel"), |sweep| {
-            sweep.profile = Some(SweepProfile::Release);
-        });
+        let dev = pinned("dev", ProfilePin::Pinned(SweepProfile::Dev));
+        let rel = pinned("rel", ProfilePin::Pinned(SweepProfile::Release));
         let sel = for_brokkr_test(
             &[dev.clone(), rel.clone()],
             "a",
             PackageSource::Cli,
-            &debug_of(true),
+            &under(Some(true), None),
         )
         .unwrap();
         assert!(
             matches!(sel.entry(LaneIdx::new(1)), Some(LaneEntry::Deduped(d)) if d.onto() == LaneIdx::new(0))
         );
-        // Without the override each pin decides its own debug answer.
-        let pinned = |s: &PlannedSweep| s.profile == Some(SweepProfile::Dev);
-        let sel = for_brokkr_test(&[dev, rel], "a", PackageSource::Cli, &pinned).unwrap();
+        // Without the override each pin decides its own profile.
+        let sel =
+            for_brokkr_test(&[dev, rel], "a", PackageSource::Cli, &under(None, None)).unwrap();
         assert!(sel.entries().iter().all(|e| e.attempt().is_some()));
+    }
+
+    /// A contrary flag excludes a required sweep before the dedupe, in either
+    /// order beside an otherwise identical eligible sweep: the excluded one
+    /// neither absorbs the eligible one nor folds onto it.
+    #[test]
+    fn a_contrary_flag_excludes_a_required_sweep_ahead_of_the_dedupe() {
+        let required = pinned("required", ProfilePin::Required(SweepProfile::Dev));
+        let plain = sweep("plain");
+        for sweeps in [
+            vec![required.clone(), plain.clone()],
+            vec![plain.clone(), required.clone()],
+        ] {
+            let sel = for_brokkr_test(&sweeps, "a", PackageSource::Cli, &under(Some(false), None))
+                .unwrap();
+            for (s, e) in sweeps.iter().zip(sel.entries().iter()) {
+                if s.label == "required" {
+                    let LaneEntry::Excluded(x) = e else {
+                        panic!("required sweep not excluded: {e:?}");
+                    };
+                    assert_eq!(
+                        x.cause(),
+                        ExclusionCause::Profile(ProfileConflict {
+                            required: SweepProfile::Dev,
+                            requested: SweepProfile::Release,
+                        })
+                    );
+                    assert!(x.package_notes().is_empty());
+                    assert_eq!(x.reason(), "requires dev; requested release");
+                } else {
+                    assert!(e.attempt().is_some(), "eligible sweep not attempted: {e:?}");
+                }
+            }
+        }
+        // The agreeing flag, and no flag, run it; under the agreeing flag it
+        // executes what the unpinned sweep does and dedupes onto it.
+        let sweeps = [plain.clone(), required.clone()];
+        let sel =
+            for_brokkr_test(&sweeps, "a", PackageSource::Cli, &under(Some(true), None)).unwrap();
+        assert!(
+            matches!(sel.entry(LaneIdx::new(1)), Some(LaneEntry::Deduped(d)) if d.onto() == LaneIdx::new(0))
+        );
+        // No flag: the required pin beats an opposite `[test] debug` default.
+        let sel = for_brokkr_test(
+            std::slice::from_ref(&required),
+            "a",
+            PackageSource::Cli,
+            &under(None, Some(false)),
+        )
+        .unwrap();
+        assert!(sel.entries().iter().all(|e| e.attempt().is_some()));
+        assert_eq!(under(None, Some(false))(&required), Ok(SweepProfile::Dev));
+        // A merely pinned sweep is overridden, as it always was.
+        let overridable = pinned("pinned", ProfilePin::Pinned(SweepProfile::Dev));
+        assert_eq!(
+            under(Some(false), Some(true))(&overridable),
+            Ok(SweepProfile::Release)
+        );
     }
 
     #[test]

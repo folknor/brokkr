@@ -17,6 +17,16 @@ can take `[test] debug = true` for the fast inner loop without the documented
 `brokkr test <a release-only timing test>` quietly switching to dev and failing
 on the build profile rather than on the code.
 
+A sweep that can only run under its profile also sets `profile_required =
+true`: then a flag asking for the other profile does not override the pin but
+leaves the sweep out of the run, before anything is built, as a package-scope
+exclusion does (below) - the plan line names it under `requires dev:` (or
+`requires release:`), and a run resolving to that one sweep prints `SKIP
+<pkg>::<name> - requires dev; requested release`. Out, not run at its pin:
+the flag asked to observe one profile, and a pass from the other would answer
+a different question. With no flag, or the agreeing one, the sweep runs as
+any pinned sweep does.
+
 A `<NAME>` that matches every test in the package is refused. As a substring
 filter, `""`, `_` or a single letter turns `brokkr test` into a whole-suite
 run under `--nocapture` that floods the terminal with every test's output;
@@ -151,7 +161,8 @@ and a single-sweep run drops the prefix. A multi-sweep run opens with one plan
 line rendered from the run's selection (see "Invocation selection" in `brokkr man check`), naming the
 sweeps it is eligible to go through, those out of the package's scope with
 their reason (`not this package:` for a `packages` list the target isn't in,
-`excluded by test_exclude_packages:`, `none of their test targets here:`), and
+`excluded by test_exclude_packages:`, `none of their test targets here:`), those
+whose required profile the flag contradicts (`requires dev:`), and
 those deduped onto an earlier sweep
 that would execute the same thing (`deduped: serial/all (as tier1/all)`). That
 line is the only place an out-of-scope or deduped sweep is named: it prints no
@@ -247,9 +258,11 @@ Flags:
   failed A alone
 - `-j <n>` - cargo `-j N` for parallel compile
 - `--debug` - dev profile instead of release (overrides both `[test] debug` and
-  a sweep's `[[check]] profile`)
+  a sweep's `[[check]] profile`; a sweep with `profile = "release"` and
+  `profile_required = true` is left out instead)
 - `--release` - force release, overriding `[test] debug = true` and a sweep's
-  `profile = "dev"` (mutually exclusive with `--debug`)
+  `profile = "dev"`; a sweep requiring dev (`profile_required`) is left out
+  instead (mutually exclusive with `--debug`)
 - `--timeout <SECS>` - raise the per-test watchdog ceiling (1-280s)
 - `--timings` - after the run, print every test that ran, slowest first, with
   its wall time (the per-test tracker's clock, from libtest's start event to

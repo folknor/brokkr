@@ -95,12 +95,22 @@ mod tests {
 
     /// `brokkr test`'s selection for `pkg`, every sweep resolving to release.
     fn selection_for(sweeps: &[PlannedSweep], pkg: &str) -> check_cmd::PhaseSelection {
+        selection_under(sweeps, pkg, None)
+    }
+
+    /// The selection under `--debug` (`Some(true)`), `--release`
+    /// (`Some(false)`) or neither, with no `[test]` section.
+    fn selection_under(
+        sweeps: &[PlannedSweep],
+        pkg: &str,
+        profile_override: Option<bool>,
+    ) -> check_cmd::PhaseSelection {
         check_cmd::PhaseSelection::for_brokkr_test(
             sweeps,
             pkg,
             check_cmd::PackageSource::Cli,
             &[],
-            &|_| false,
+            &|s| resolve_eligible(profile_override, None, s),
             // Every package unknown: projection is the identity, so these
             // tests see the configured features. Routing has its own tests
             // in `check_cmd`'s selection module.
@@ -522,7 +532,7 @@ mod tests {
             "pkg",
             check_cmd::PackageSource::Cli,
             &[false, false, true],
-            &|_| false,
+            &|_| Ok(SweepProfile::Release),
             &check_cmd::FeatureOracle::empty(),
         )
         .unwrap();
@@ -1222,7 +1232,7 @@ include_ignored = false
             "piners-strategy",
             check_cmd::PackageSource::Cli,
             &[],
-            &|_| false,
+            &|_| Ok(SweepProfile::Release),
             &check_cmd::FeatureOracle::fixed(ws),
         )
         .unwrap();
@@ -1711,7 +1721,7 @@ include_ignored = false
         match selection_for(std::slice::from_ref(sweep), pkg)
             .entry(crate::check_cmd::LaneIdx::new(0))
         {
-            Some(LaneEntry::Excluded(e)) => exclusion_rule(e.notes()),
+            Some(LaneEntry::Excluded(e)) => exclusion_rule(e.package_notes()),
             _ => None,
         }
     }
@@ -1796,12 +1806,57 @@ include_ignored = false
             exclusion_of(&sweep, "nautilus-pyo3"),
             Some(check_cmd::AdmissionRule::TestExcluded)
         );
+        let sel = selection_for(std::slice::from_ref(&sweep), "nautilus-pyo3");
+        let Some(LaneEntry::Excluded(e)) = sel.entry(crate::check_cmd::LaneIdx::new(0)) else {
+            panic!("not excluded");
+        };
         assert_eq!(
-            exclusion_describe(&[check_cmd::AdmissionNote {
-                package: "nautilus-pyo3".into(),
-                rule: check_cmd::AdmissionRule::TestExcluded
-            }]),
+            exclusion_describe(e),
             "package excluded from this sweep (test_exclude_packages)"
         );
+    }
+
+    /// dellingr's case: sweeps whose features only compile with debug
+    /// assertions, and `brokkr test NAME --release`. A required dev sweep is
+    /// left out before anything builds and said so; the others run.
+    #[test]
+    fn a_flag_contradicting_a_required_profile_skips_the_sweep() {
+        let decl = |label: &str, pin| {
+            crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
+                label: label.into(),
+                profile_pin: pin,
+                ..crate::profile::SweepDecl::default()
+            })
+        };
+        use crate::config::ProfilePin;
+        let sweeps = vec![
+            decl("default", ProfilePin::Unset),
+            decl("faults", ProfilePin::Required(SweepProfile::Dev)),
+            decl("stack", ProfilePin::Pinned(SweepProfile::Release)),
+        ];
+        let sel = selection_under(&sweeps, "pkg", Some(false));
+        assert_eq!(
+            sweep_plan_line(&sweeps, &sel, "pkg"),
+            "[test]    1 sweep for pkg: default (requires dev: faults; deduped: stack (as default))"
+        );
+        // No flag, or the agreeing one: it runs (with no `[test]` section the
+        // unpinned sweep is release, so the release pin folds onto it).
+        assert_eq!(attempted(&sweeps, "pkg"), ["default", "faults"]);
+        // Under `--debug` everything is dev, so the required sweep is in the
+        // run and executes what the unpinned one does.
+        let sel = selection_under(&sweeps, "pkg", Some(true));
+        assert!(matches!(
+            sel.entry(crate::check_cmd::LaneIdx::new(1)),
+            Some(LaneEntry::Deduped(_))
+        ));
+        // `--sweep faults --release`: a lone sweep, so the SKIP line carries
+        // the reason (and the run then closes on its no-match error).
+        let lone = &sweeps[1..2];
+        let sel = selection_under(lone, "pkg", Some(false));
+        let Some(LaneEntry::Excluded(e)) = sel.entry(crate::check_cmd::LaneIdx::new(0)) else {
+            panic!("not excluded");
+        };
+        assert_eq!(exclusion_describe(e), "requires dev; requested release");
+        assert!(e.package_notes().is_empty());
     }
 }

@@ -488,7 +488,10 @@ fn package_rules_lines(sweeps: &[PlannedSweep], selections: &CheckSelections) ->
                 let flags: Vec<String> = kept.iter().map(|p| format!("-p {p}")).collect();
                 format!("eligible with {} ({})", flags.join(" "), not(a.notes()))
             }
-            LaneEntry::Excluded(e) => format!("excluded ({})", not(e.notes())),
+            LaneEntry::Excluded(e) => match e.cause() {
+                ExclusionCause::Packages => format!("excluded ({})", not(e.package_notes())),
+                ExclusionCause::Profile(conflict) => format!("excluded ({conflict})"),
+            },
             LaneEntry::Deduped(d) if d.notes().is_empty() => format!("deduped onto {}", label(d.onto())),
             LaneEntry::Deduped(d) => {
                 let kept = d.selection().packages().unwrap_or_default();

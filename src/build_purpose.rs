@@ -175,7 +175,9 @@ pub(crate) fn profile(
 
 /// Sweep profile inputs: the CLI `--debug`/`--release`, the `[[check]]`
 /// entry's pin, and `[test] debug`. Precedence invocation > sweep pin >
-/// config > purpose default. Sweeps build under dev or release only.
+/// config > purpose default. Sweeps build under dev or release only. A sweep
+/// whose pin is required never reaches this under a contrary invocation:
+/// [`sweep_profile_conflict`] leaves it out of the run first.
 #[derive(Default, Clone, Copy)]
 pub(crate) struct SweepProfiles {
     pub(crate) invocation: Option<bool>,
@@ -219,6 +221,59 @@ pub(crate) fn profile_for_sweep(purpose: SweepPurpose, inputs: SweepProfiles) ->
         .or(inputs.sweep)
         .or_else(|| inputs.configured.map(from_debug))
         .unwrap_or_else(|| from_debug(default == Profile::Dev))
+}
+
+/// An invocation's `--debug`/`--release` against a sweep that requires the
+/// other profile (`profile_required`): the sweep is left out of that run,
+/// never overridden and never built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProfileConflict {
+    pub(crate) required: SweepProfile,
+    pub(crate) requested: SweepProfile,
+}
+
+impl std::fmt::Display for ProfileConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "requires {}; requested {}",
+            self.required.name(),
+            self.requested.name()
+        )
+    }
+}
+
+/// Whether a sweep may run under this invocation's profile choice. Only an
+/// explicit `--debug`/`--release` can conflict: a required pin already
+/// beats `[test] debug` and the purpose default in [`profile_for_sweep`].
+pub(crate) fn sweep_profile_conflict(
+    invocation: Option<bool>,
+    required: Option<SweepProfile>,
+) -> Option<ProfileConflict> {
+    let requested = match invocation? {
+        true => SweepProfile::Dev,
+        false => SweepProfile::Release,
+    };
+    let required = required?;
+    (required != requested).then_some(ProfileConflict {
+        required,
+        requested,
+    })
+}
+
+/// A sweep's profile for this invocation, or the conflict that leaves it out:
+/// eligibility first, then [`profile_for_sweep`]'s precedence. `required` is
+/// the sweep's required pin (`ProfilePin::required`); `inputs.sweep` its pin
+/// either way.
+pub(crate) fn eligible_sweep_profile(
+    purpose: SweepPurpose,
+    inputs: SweepProfiles,
+    required: Option<SweepProfile>,
+) -> Result<SweepProfile, ProfileConflict> {
+    match sweep_profile_conflict(inputs.invocation, required) {
+        Some(conflict) => Err(conflict),
+        None => Ok(profile_for_sweep(purpose, inputs)),
+    }
 }
 
 /// Feature values retain their caller's rendering contract. Joining values
@@ -457,6 +512,25 @@ mod tests {
             ),
             SweepProfile::Release
         );
+    }
+
+    /// Only an explicit flag naming the other profile conflicts with a
+    /// required pin; no flag, or the agreeing one, runs the sweep.
+    #[test]
+    fn only_a_contrary_flag_conflicts_with_a_required_profile() {
+        let dev = Some(SweepProfile::Dev);
+        assert_eq!(sweep_profile_conflict(None, dev), None);
+        assert_eq!(sweep_profile_conflict(Some(true), dev), None);
+        let conflict = sweep_profile_conflict(Some(false), dev).unwrap();
+        assert_eq!(conflict.to_string(), "requires dev; requested release");
+        assert_eq!(
+            sweep_profile_conflict(Some(true), Some(SweepProfile::Release))
+                .unwrap()
+                .to_string(),
+            "requires release; requested dev"
+        );
+        // An unrequired sweep never conflicts: the flag overrides its pin.
+        assert_eq!(sweep_profile_conflict(Some(false), None), None);
     }
 
     #[test]

@@ -17,7 +17,7 @@ use super::display::{RepeatState, lone_test_tag, show_failed_invocation, show_re
 use super::plan::{
     BuildShape, FocusedPlan, NoMatchNote, ReadySweep, Searched, SweepContext, SweepOutcome,
     direct_libtest_args, exclusion_describe, lint_allow_flags, prebuild_targets, prepare_sweep,
-    project_targets, resolve_debug, resolve_package, resolve_sweeps, run_pre_build, single_run,
+    project_targets, resolve_eligible, resolve_package, resolve_sweeps, run_pre_build, single_run,
     sweep_plan_line, test_argv,
 };
 use super::verdict::{
@@ -184,15 +184,14 @@ pub(super) fn run_sweeps(
             // sweep's features - forcing the build would fail on a foreign
             // feature (e.g. `-p nautilus-hyperliquid` under an ffi sweep it
             // isn't a member of). SKIP it like the zero-tests-matched case;
-            // other sweeps still get their chance to run the test. Under
-            // several sweeps the plan line already named it and why; a lone
-            // sweep has no plan line, so it says so here.
+            // other sweeps still get their chance to run the test. A sweep
+            // whose required profile the flag contradicts is the same: its
+            // build is not this run's to make. Under several sweeps the plan
+            // line already named it and why; a lone sweep has no plan line,
+            // so it says so here.
             LaneEntry::Excluded(e) => {
                 if !multi {
-                    output::test_msg(&format!(
-                        "SKIP {pkg}::{name} - {}",
-                        exclusion_describe(e.notes())
-                    ));
+                    output::test_msg(&format!("SKIP {pkg}::{name} - {}", exclusion_describe(e)));
                 }
                 reports.push(RunReport::bare(Outcome::NoMatch));
                 continue;
@@ -261,8 +260,9 @@ pub(super) fn run_sweeps(
 /// Each sweep's target selection is first narrowed to the package; a sweep
 /// left selecting nothing there is excluded rather than widened. Then the
 /// resolved package always overrides each sweep's own selection, sweeps whose
-/// rules leave it out are excluded, and sweeps that would execute exactly what
-/// an earlier one does are deduped. After `--sweep`, so a lane-qualified label
+/// rules leave it out are excluded, so is a sweep whose required profile
+/// (`profile_required`) the `--debug`/`--release` flag contradicts, and sweeps
+/// that would execute exactly what an earlier one does are deduped. After `--sweep`, so a lane-qualified label
 /// reaches a sweep the dedupe would otherwise fold away. Each sweep's features
 /// are projected onto the one package: a token only another of the sweep's
 /// packages routes is dropped, and said so.
@@ -276,14 +276,14 @@ fn select_for_package(
 ) -> Result<(Vec<PlannedSweep>, check_cmd::PhaseSelection), DevError> {
     let (sweeps, untargeted) = project_targets(sweeps, pkg, project_root)?;
     let test_cfg = dev_config.test.as_ref();
-    let debug_of = |s: &PlannedSweep| resolve_debug(profile_override, test_cfg, s.profile);
+    let profile_of = |s: &PlannedSweep| resolve_eligible(profile_override, test_cfg, s);
     let oracle = check_cmd::FeatureOracle::at(project_root);
     let selection = check_cmd::PhaseSelection::for_brokkr_test(
         &sweeps,
         pkg,
         source,
         &untargeted,
-        &debug_of,
+        &profile_of,
         &oracle,
     )?;
     Ok((sweeps, selection))

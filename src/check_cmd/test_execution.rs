@@ -99,7 +99,7 @@ pub(crate) fn describe_sweep(
     // from scratch there, and an unexplained full rebuild is exactly what a
     // collapsed log must not hide. Only when set - an unset profile is the
     // command's default and says nothing.
-    if let Some(p) = sweep.profile {
+    if let Some(p) = sweep.profile() {
         parts.push(format!("profile {}", p.target_subdir()));
     }
     // Same reason: a target sweep compiles everything again under

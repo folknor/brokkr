@@ -1487,7 +1487,7 @@ warning: `b` (manifest) generated 1 warning
     fn release_sweep() -> PlannedSweep {
         crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             label: "timing".into(),
-            profile: Some(crate::config::SweepProfile::Release),
+            profile_pin: crate::config::ProfilePin::Pinned(crate::config::SweepProfile::Release),
             ..crate::profile::SweepDecl::default()
         })
     }

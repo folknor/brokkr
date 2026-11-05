@@ -229,6 +229,26 @@ env = { HIGH_PRECISION = "1" }
   `[test] debug = true` for the fast inner loop without the documented
   `brokkr test tape_lateness_under_acceleration` silently switching to dev and
   failing on the build profile rather than on the code.
+- `profile_required` (optional, default `false`) - the sweep can only run
+  under its `profile`, which it then requires (refused without one). For a
+  sweep whose features only compile with `debug_assertions` (a
+  `compile_error!` under `not(debug_assertions)`), or whose tests assert what
+  only one profile does. It changes `brokkr test` alone, the one command with a
+  profile flag: a `--debug`/`--release` asking for the other profile leaves the
+  sweep out of the run before anything is built, named on the plan line
+  (`requires dev: <sweep>`) or, for a lone sweep, on a `SKIP` line, instead of
+  overriding the pin into a guaranteed `BUILD FAILED`. With no flag, or the
+  agreeing one, nothing changes. Not part of the build shape - it decides
+  which runs include the sweep, never what is compiled - and not accepted on
+  `[[lint_sweep]]`, whose profile nothing overrides.
+
+  ```toml
+  [[check]]
+  name = "fault-injection"
+  features = ["fault-injection"]
+  profile = "dev"
+  profile_required = true
+  ```
 - `target` (optional, unset) - the target triple this sweep compiles and runs
   for, as a bare name (`"x86_64-unknown-linux-musl"`; custom `.json` specs are
   refused). Unset builds for the host, as every sweep did before the key
@@ -348,7 +368,8 @@ the same load checks: `name` (required), `features`, `no_default_features`,
 `packages`, `env`, `rustflags`, `profile`, `target` and `feature_unification`,
 plus `when` (below). Every test-shaping key - `tests`, `lib_tests`,
 `exclude_tests`, `skip`, `only`, `curated`, `parallel`, `harness`, `doc_only`,
-`build_packages`, `test_exclude_packages` - is an unknown key and a load error.
+`build_packages`, `test_exclude_packages` - is an unknown key and a load error,
+and so is `profile_required`, since no command overrides a lint sweep's profile.
 The entry is the whole shape: no profile references a lint sweep, and no
 profile's `env` reaches it.
 

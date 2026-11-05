@@ -22,8 +22,8 @@ use super::verdict::{Outcome, RunReport};
 /// It is also the only place a scope-excluded or deduped sweep is named -
 /// those print no SKIP line of their own - so it keeps the reasons apart: a
 /// sweep whose `packages` list leaves the package out, one that excludes it by
-/// `test_exclude_packages`, and one that would run exactly what an earlier
-/// sweep runs.
+/// `test_exclude_packages`, one requiring the profile the invocation's flag
+/// did not ask for, and one that would run exactly what an earlier sweep runs.
 pub(super) fn sweep_plan_line(
     sweeps: &[PlannedSweep],
     selection: &check_cmd::PhaseSelection,
@@ -33,14 +33,25 @@ pub(super) fn sweep_plan_line(
     let mut not_listed: Vec<&str> = Vec::new();
     let mut excluded: Vec<&str> = Vec::new();
     let mut untargeted: Vec<&str> = Vec::new();
+    // By required profile; one invocation asks for one profile, so in
+    // practice a single group.
+    let mut requiring: Vec<(SweepProfile, Vec<&str>)> = Vec::new();
     let mut deduped: Vec<String> = Vec::new();
     for (s, entry) in sweeps.iter().zip(selection.entries().iter()) {
         match entry {
             LaneEntry::Attempt(_) => eligible.push(&s.label),
-            LaneEntry::Excluded(e) => match exclusion_rule(e.notes()) {
-                Some(check_cmd::AdmissionRule::TestExcluded) => excluded.push(&s.label),
-                Some(check_cmd::AdmissionRule::NoSelectedTarget) => untargeted.push(&s.label),
-                _ => not_listed.push(&s.label),
+            LaneEntry::Excluded(e) => match e.cause() {
+                check_cmd::ExclusionCause::Profile(conflict) => {
+                    match requiring.iter_mut().find(|(p, _)| *p == conflict.required) {
+                        Some((_, labels)) => labels.push(&s.label),
+                        None => requiring.push((conflict.required, vec![&s.label])),
+                    }
+                }
+                check_cmd::ExclusionCause::Packages => match exclusion_rule(e.package_notes()) {
+                    Some(check_cmd::AdmissionRule::TestExcluded) => excluded.push(&s.label),
+                    Some(check_cmd::AdmissionRule::NoSelectedTarget) => untargeted.push(&s.label),
+                    _ => not_listed.push(&s.label),
+                },
             },
             LaneEntry::Deduped(d) => {
                 let onto = sweeps.get(d.onto().get()).map_or("?", |o| o.label.as_str());
@@ -70,6 +81,13 @@ pub(super) fn sweep_plan_line(
             untargeted.join(", ")
         ));
     }
+    for (profile, labels) in &requiring {
+        out.push(format!(
+            "requires {}: {}",
+            profile.name(),
+            labels.join(", ")
+        ));
+    }
     if !deduped.is_empty() {
         out.push(format!("deduped: {}", deduped.join(", ")));
     }
@@ -88,8 +106,11 @@ pub(super) fn exclusion_rule(
 }
 
 /// The lone-sweep SKIP line's wording for an exclusion.
-pub(super) fn exclusion_describe(notes: &[check_cmd::AdmissionNote]) -> &'static str {
-    match exclusion_rule(notes) {
+pub(super) fn exclusion_describe(excluded: &check_cmd::Excluded) -> String {
+    if let check_cmd::ExclusionCause::Profile(conflict) = excluded.cause() {
+        return conflict.to_string();
+    }
+    match exclusion_rule(excluded.package_notes()) {
         Some(check_cmd::AdmissionRule::TestExcluded) => {
             "package excluded from this sweep (test_exclude_packages)"
         }
@@ -98,6 +119,7 @@ pub(super) fn exclusion_describe(notes: &[check_cmd::AdmissionNote]) -> &'static
         }
         _ => "package not in this sweep's packages list",
     }
+    .to_owned()
 }
 
 /// What one sweep came to before any test ran.
@@ -138,7 +160,9 @@ pub(super) fn prepare_sweep<'s>(
     // as a `check` test phase's builds and runs do.
     check_cmd::enter_phase(check_cmd::Phase::Test);
 
-    let profile = resolve_profile(profile_override, cx.test_cfg, sweep.profile);
+    // Only an attempt reaches here, so the selection has already ruled out
+    // a flag contradicting a required profile: precedence alone decides.
+    let profile = resolve_profile(profile_override, cx.test_cfg, sweep.profile());
     let profile_dir = profile.target_subdir();
 
     let (env_owned, allow_args) = sweep_env(
@@ -229,7 +253,8 @@ pub(super) struct SweepContext<'a> {
     pub(super) name: &'a str,
     pub(super) jobs: Option<u32>,
     pub(super) multi: bool,
-    /// `--debug`/`--release`, which outranks a sweep's own profile pin.
+    /// `--debug`/`--release`, which outranks a sweep's own profile pin
+    /// unless the pin is required (that sweep is then not in the run).
     pub(super) profile_override: Option<bool>,
     /// `--timeout`, each matched test's raised cap.
     pub(super) timeout: Option<u64>,
@@ -965,7 +990,9 @@ pub(super) fn lint_allow_flags(dev_config: &DevConfig) -> Vec<String> {
 /// Resolve one sweep's cargo profile for `brokkr test` as its typed profile,
 /// in precedence order:
 ///   1. An explicit `--debug`/`--release` on the CLI - the per-invocation
-///      answer always wins.
+///      answer wins over everything below. A sweep whose pin is required
+///      (`profile_required`) is not overridden: [`resolve_eligible`] leaves
+///      it out of a run asking for the other profile, so it never gets here.
 ///   2. The sweep's own `[[check]] profile`, when it names one. A sweep that
 ///      declares its profile has a reason (a wall-clock contract that only
 ///      holds optimized, a lane pinned to dev for speed), and a project-wide
@@ -981,16 +1008,39 @@ pub(super) fn resolve_profile(
 ) -> SweepProfile {
     crate::build_purpose::profile_for_sweep(
         crate::build_purpose::SweepPurpose::Test,
-        crate::build_purpose::SweepProfiles {
-            invocation: profile_override,
-            sweep: sweep_profile,
-            configured: test_cfg.map(|t| t.debug),
-        },
+        profile_inputs(profile_override, test_cfg, sweep_profile),
     )
 }
 
-/// The selection planner compares debug/release as a boolean; command argv
-/// and target paths keep the resolved `SweepProfile` itself.
+/// A sweep's profile for this run, or the conflict between the invocation's
+/// flag and the sweep's required profile that leaves it out of the run - the
+/// selection's per-sweep answer, decided before anything is built.
+pub(super) fn resolve_eligible(
+    profile_override: Option<bool>,
+    test_cfg: Option<&crate::config::TestConfig>,
+    sweep: &PlannedSweep,
+) -> Result<SweepProfile, crate::build_purpose::ProfileConflict> {
+    crate::build_purpose::eligible_sweep_profile(
+        crate::build_purpose::SweepPurpose::Test,
+        profile_inputs(profile_override, test_cfg, sweep.profile()),
+        sweep.profile_pin.required(),
+    )
+}
+
+fn profile_inputs(
+    profile_override: Option<bool>,
+    test_cfg: Option<&crate::config::TestConfig>,
+    sweep_profile: Option<crate::config::SweepProfile>,
+) -> crate::build_purpose::SweepProfiles {
+    crate::build_purpose::SweepProfiles {
+        invocation: profile_override,
+        sweep: sweep_profile,
+        configured: test_cfg.map(|t| t.debug),
+    }
+}
+
+/// The resolved profile as the dev/release boolean some callers compare.
+#[cfg(test)]
 pub(super) fn resolve_debug(
     profile_override: Option<bool>,
     test_cfg: Option<&crate::config::TestConfig>,

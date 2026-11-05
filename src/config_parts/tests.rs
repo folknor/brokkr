@@ -2362,6 +2362,32 @@ sweeps = ["all"]
         assert!(msg.contains("[[lint_sweep]] entry 'a'"), "{msg}");
     }
 
+    /// `profile_required` needs a `profile` to require, and only `[[check]]`
+    /// takes it: no invocation overrides a lint sweep's profile.
+    #[test]
+    fn profile_required_needs_a_profile_and_a_check_entry() {
+        let parse = |src: &str| parse_dev_config(&root_table(src));
+        let msg = parse("[[check]]\nname = \"a\"\nprofile_required = true\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            msg.contains("[[check]] entry 'a'") && msg.contains("no `profile`"),
+            "{msg}"
+        );
+        let cfg = parse("[[check]]\nname = \"a\"\nprofile = \"dev\"\nprofile_required = true\n")
+            .unwrap();
+        assert_eq!(
+            cfg.check[0].profile_pin(),
+            ProfilePin::Required(SweepProfile::Dev)
+        );
+        // Absent, and false, keep today's overridable pin.
+        let cfg = parse("[[check]]\nname = \"a\"\nprofile = \"dev\"\n").unwrap();
+        assert_eq!(cfg.check[0].profile_pin(), ProfilePin::Pinned(SweepProfile::Dev));
+        let cfg = parse("[[check]]\nname = \"a\"\nprofile_required = false\n").unwrap();
+        assert_eq!(cfg.check[0].profile_pin(), ProfilePin::Unset);
+        assert!(parse("[[lint_sweep]]\nname = \"a\"\nprofile = \"dev\"\nprofile_required = true\n").is_err());
+    }
+
     #[test]
     fn a_gate_lint_sweep_needs_a_complete_profile() {
         const GATE: &str = "[[lint_sweep]]\nname = \"arm\"\nwhen = \"gate\"\n\n\
