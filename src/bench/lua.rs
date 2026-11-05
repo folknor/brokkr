@@ -147,10 +147,12 @@ pub(crate) struct CallOptions {
     pub(crate) writes: Vec<usize>,
     /// The file the child reads as its stdin.
     pub(crate) stdin: Option<usize>,
+    /// Capture the child's hotpath report as typed commands do.
+    pub(crate) hotpath: bool,
 }
 
 /// What one `binary()` call hands back to the script.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CallOutcome {
     /// The program's file name, for messages (`result:ok()`).
     pub(crate) program: String,
@@ -162,6 +164,8 @@ pub(crate) struct CallOutcome {
     pub(crate) stderr_truncated: bool,
     /// The child's whole stdout, its spool, as a handle.
     pub(crate) stdout_file: Option<HandleRef>,
+    /// The decoded hotpath report of a `hotpath = true` call that exited 0.
+    pub(crate) hotpath: Option<Value>,
 }
 
 /// Why a builtin ended the sample.
@@ -942,7 +946,7 @@ fn options_at(state: &mut State, idx: isize) -> Result<CallOptions, Error> {
             state,
             format!(
                 "binary_with()'s first argument is a {}: expected a table of options \
-                 (env, reads, writes, stdin)",
+                 (env, reads, writes, stdin, hotpath)",
                 state.typ(idx).as_str()
             ),
         ));
@@ -976,6 +980,18 @@ fn options_at(state: &mut State, idx: isize) -> Result<CallOptions, Error> {
             "stdin" => {
                 options.stdin = Some(listed_handle(state, value_idx, "binary_with(): stdin")?);
             }
+            "hotpath" => {
+                if state.typ(value_idx) != LuaType::Boolean {
+                    return Err(raise_failed(
+                        state,
+                        format!(
+                            "binary_with(): hotpath is a {}: expected a boolean",
+                            state.typ(value_idx).as_str()
+                        ),
+                    ));
+                }
+                options.hotpath = state.to_boolean(value_idx);
+            }
             _ => {
                 let shown = if key.is_empty() {
                     format!("a {} key", state.typ(key_idx).as_str())
@@ -985,7 +1001,8 @@ fn options_at(state: &mut State, idx: isize) -> Result<CallOptions, Error> {
                 return Err(raise_failed(
                     state,
                     format!(
-                        "binary_with(): unknown option {shown}: options are env, reads, writes and stdin"
+                        "binary_with(): unknown option {shown}: options are env, reads, writes, \
+                         stdin and hotpath"
                     ),
                 ));
             }
@@ -993,6 +1010,18 @@ fn options_at(state: &mut State, idx: isize) -> Result<CallOptions, Error> {
         state.pop(1)?;
     }
     state.pop(1)?;
+    if options.hotpath
+        && let Some((name, _)) = options.env.iter().find(|(n, _)| n.starts_with("HOTPATH_"))
+    {
+        let name = name.clone();
+        return Err(raise_failed(
+            state,
+            format!(
+                "binary_with(): env name {name} is brokkr's beside hotpath = true: \
+                 brokkr sets HOTPATH_* to capture the report"
+            ),
+        ));
+    }
     Ok(options)
 }
 
@@ -1104,6 +1133,12 @@ fn call_binary<H: Host>(
     if let Some(spool) = &outcome.stdout_file {
         state.push_string("stdout_file")?;
         push_handle(state, spool)?;
+        state.set_table_raw(table)?;
+    }
+    if let Some(report) = &outcome.hotpath {
+        let marks = marks::<H>(state)?;
+        state.push_string("hotpath")?;
+        push_value(state, report, &marks)?;
         state.set_table_raw(table)?;
     }
     if let Some(ok) = ok {

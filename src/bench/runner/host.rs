@@ -102,6 +102,8 @@ pub(super) fn run_iteration(setup: IterationSetup<'_>) -> (store::Iteration, Sin
         state_root: setup.state_root.to_path_buf(),
         block_start: None,
         children: Vec::new(),
+        hotpath_reports: Vec::new(),
+        hotpath_calls: 0,
         since,
     };
     let (sample, mut host) = lua::run_sample(setup.script, setup.args, host);
@@ -124,7 +126,9 @@ pub(super) fn run_iteration(setup: IterationSetup<'_>) -> (store::Iteration, Sin
         lua::SampleOutcome::Interrupted => store::IterationOutcome::Interrupted,
     };
     let record = match outcome {
-        store::IterationOutcome::Completed { .. } => sample.record,
+        store::IterationOutcome::Completed { .. } => sample
+            .record
+            .map(|record| with_hotpath(record, &host.hotpath_reports)),
         _ => None,
     };
     (
@@ -151,10 +155,71 @@ struct IterationHost {
     state_root: PathBuf,
     block_start: Option<Instant>,
     children: Vec<store::Child>,
+    /// Every report a `hotpath = true` call captured, in call order.
+    hotpath_reports: Vec<serde_json::Value>,
+    /// `hotpath = true` calls so far, each one's report its own name.
+    hotpath_calls: usize,
     since: Since,
 }
 
+/// The file name of the iteration's `n`th (0-based) hotpath report under
+/// `out/`; a script's own `output()` of the same name is refused as a reuse.
+fn hotpath_report_name(n: usize) -> String {
+    format!("brokkr-hotpath-{n}.json")
+}
+
+/// `record` with `hotpath` filled from the one report the iteration
+/// captured. With none or several, or a `hotpath` the script set itself,
+/// it is left as the script made it.
+fn with_hotpath(
+    mut record: serde_json::Map<String, serde_json::Value>,
+    reports: &[serde_json::Value],
+) -> serde_json::Map<String, serde_json::Value> {
+    if let [report] = reports
+        && !record.contains_key("hotpath")
+    {
+        record.insert("hotpath".into(), report.clone());
+    }
+    record
+}
+
 impl IterationHost {
+    /// The report a `hotpath = true` call left at `report`, once its child
+    /// exited 0: none written fails the call, as does one brokkr cannot read
+    /// as a hotpath profile. A child that failed is the script's to judge.
+    fn take_hotpath(
+        &mut self,
+        report: &Handle,
+        outcome: &mut CallOutcome,
+    ) -> Result<(), Abort> {
+        if outcome.exit != Some(0) {
+            return Ok(());
+        }
+        let short = outcome.program.clone();
+        let bytes = self
+            .resources()?
+            .read(report, crate::bench::json::MAX_ENCODED)
+            .map_err(|e| Abort::Failed(format!("{short}'s hotpath report: {e}")))?;
+        if bytes.is_empty() {
+            return Err(Abort::Failed(format!(
+                "{short} was called with hotpath = true but wrote no hotpath report: \
+                 is it built with hotpath instrumentation?"
+            )));
+        }
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|e| Abort::Failed(format!("{short}'s hotpath report is not JSON: {e}")))?;
+        if crate::db::hotpath_data_from_json(&parsed).is_none() {
+            return Err(Abort::Failed(format!(
+                "{short}'s hotpath report holds no profile brokkr can read"
+            )));
+        }
+        let value = crate::bench::json::decode(&bytes)
+            .map_err(|e| Abort::Failed(format!("{short}'s hotpath report: {e}")))?;
+        outcome.hotpath = Some(value);
+        self.hotpath_reports.push(parsed);
+        Ok(())
+    }
+
     fn resources(&mut self) -> Result<&mut Resources, Abort> {
         self.resources
             .as_mut()
@@ -363,6 +428,7 @@ fn call_outcome(
         stderr: run.stderr.clone(),
         stderr_truncated: run.stderr_truncated || run.output_cut,
         stdout_file: None,
+        hotpath: None,
     })
 }
 
@@ -418,7 +484,31 @@ impl lua::Host for IterationHost {
         if let Some(index) = options.stdin {
             declared.stdin = Some(self.handle(index, "binary_with(): stdin")?);
         }
-        self.launch(&argv, &declared)
+        if !options.hotpath {
+            return self.launch(&argv, &declared);
+        }
+        // Pre-created empty, so a child built without hotpath, which writes
+        // nothing, is told from one that wrote a report.
+        let failed = |e: DevError| Abort::Failed(format!("binary_with(): hotpath: {e}"));
+        let name = hotpath_report_name(self.hotpath_calls);
+        self.hotpath_calls += 1;
+        let report = self.resources()?.output(&name).map_err(failed)?;
+        self.resources()?.write(&report, b"").map_err(failed)?;
+        let path = report.path().to_str().map(str::to_owned).ok_or_else(|| {
+            Abort::Failed(format!(
+                "{} is not UTF-8, which hotpath cannot be told",
+                report.path().display()
+            ))
+        })?;
+        declared.env.extend([
+            ("HOTPATH_METRICS_SERVER_OFF".to_owned(), "true".to_owned()),
+            ("HOTPATH_OUTPUT_FORMAT".to_owned(), "json".to_owned()),
+            ("HOTPATH_OUTPUT_PATH".to_owned(), path),
+        ]);
+        declared.writes.push(report.clone());
+        let mut outcome = self.launch(&argv, &declared)?;
+        self.take_hotpath(&report, &mut outcome)?;
+        Ok(outcome)
     }
 
     fn since(&mut self, sha: &str) -> Result<bool, Abort> {

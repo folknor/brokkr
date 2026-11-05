@@ -245,6 +245,22 @@ local r = binary_with({
   reads as its stdin, from its start, opened by brokkr as `read()` opens a
   file and declared read for the call (over an output's default write; in
   `writes` too it is refused).
+- `hotpath` - a boolean; `true` captures the child's hotpath report as the
+  typed commands do. brokkr sets `HOTPATH_METRICS_SERVER_OFF=true`,
+  `HOTPATH_OUTPUT_FORMAT=json` and `HOTPATH_OUTPUT_PATH`, a path under the
+  iteration's `out/` (`brokkr-hotpath-N.json`, N counting the iteration's
+  `hotpath` calls from 0, so a script's own `output()` of that name is
+  refused as a reuse), declared written for the call and created empty
+  first. Any `HOTPATH_*` in `env` beside it is refused. When the child exits
+  0 its report is decoded into the result's `hotpath` table; a report that
+  is missing (still empty: a build without hotpath instrumentation), not
+  JSON, larger than 16 MiB, or holding no profile brokkr can read fails the
+  iteration. A child that exits otherwise gets no `hotpath` and fails
+  nothing, its exit being the script's to judge. When exactly one call of
+  the iteration captured a report and the script set no `record.hotpath`,
+  brokkr stores that report as `record.hotpath`; with several the script
+  picks one. Per call, so a pipeline with one instrumented stage profiles
+  only that stage.
 
 Any other key is refused, so a misspelt `writes` never runs a call with
 less declared than meant.

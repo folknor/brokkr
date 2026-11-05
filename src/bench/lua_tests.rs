@@ -33,6 +33,7 @@ impl Host for Fake {
     }
     fn binary(&mut self, words: Vec<Word>, options: CallOptions) -> Result<CallOutcome, Abort> {
         self.calls.push(words);
+        let options_hotpath = options.hotpath;
         self.options.push(options);
         Ok(CallOutcome {
             program: "tool".into(),
@@ -45,6 +46,12 @@ impl Host for Fake {
             stdout_file: Some(HandleRef {
                 index: 9,
                 path: "/it/stdout/0".into(),
+            }),
+            hotpath: options_hotpath.then(|| {
+                Value::Table(vec![(
+                    "functions_timing".into(),
+                    Value::Table(vec![("calls".into(), Value::Number(3.0))]),
+                )])
             }),
         })
     }
@@ -486,6 +493,7 @@ fn binary_with_takes_options_then_binarys_arguments() {
             reads: vec![9],
             writes: vec![7],
             stdin: Some(9),
+            hotpath: false,
         }
     );
     assert_eq!(host.options[0], CallOptions::default());
@@ -500,6 +508,11 @@ fn binary_with_takes_options_then_binarys_arguments() {
         ("{env = {X = 1/0}}", "finite number"),
         ("{env = {X = 'a\\0b'}}", "NUL"),
         ("'x'", "expected a table of options"),
+        ("{hotpath = 1}", "expected a boolean"),
+        (
+            "{hotpath = true, env = {HOTPATH_OUTPUT_PATH = 'x'}}",
+            "beside hotpath = true",
+        ),
     ] {
         let (sample, host) = run(
             &format!("function bench() binary_with({options}, 'x') end"),
@@ -508,6 +521,24 @@ fn binary_with_takes_options_then_binarys_arguments() {
         assert!(reason(&sample).contains(needle), "{options}: {sample:?}");
         assert!(host.calls.is_empty(), "{options}: refused before the call");
     }
+}
+
+/// `hotpath = true` reaches the host, and the report it decoded is the
+/// result's `hotpath` table; a plain call's result has none.
+#[test]
+fn binary_with_hotpath_hands_back_the_decoded_report() {
+    let (sample, host) = run(
+        "function bench()\n\
+           local r = binary_with({hotpath = true, env = {OTHER = 'x'}}, 'x')\n\
+           record.calls = r.hotpath.functions_timing.calls\n\
+           record.plain = binary('y').hotpath == nil\n\
+         end",
+        Fake::default(),
+    );
+    let record = completed(&sample);
+    assert_eq!(record["calls"], 3);
+    assert_eq!(record["plain"], true);
+    assert!(host.options[0].hotpath);
 }
 
 /// read, write and filesize take handles only, inside bench() only.

@@ -466,7 +466,9 @@ table. A prefix that names no run of this project but names
 another project's says which project it belongs to.
 
 **`record.hotpath`.** A script that profiles puts the hotpath JSON report its
-program wrote into `record.hotpath`. It is rendered by the printer typed rows
+program wrote into `record.hotpath`, or calls it with `binary_with({hotpath
+= true}, ...)`, which captures the report and fills `record.hotpath` when it
+is the iteration's only one (`brokkr man bench`, `binary_with()`). It is rendered by the printer typed rows
 use, capped by `--top`, and a pair holding one on both sides gets the
 function diff after the comparison. A value with nothing recognizable as a
 report is shown as JSON with a note; one only partly recognized renders what

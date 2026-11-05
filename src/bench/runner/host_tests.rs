@@ -225,6 +225,72 @@ fn a_child_runs_on_its_borrow_and_reaches_the_script() {
     assert_eq!(std::fs::read_dir(&container).unwrap().count(), 0);
 }
 
+/// A hotpath report as the crate writes one, as a shell `printf` argument.
+const REPORT: &str = r#"{"functions_timing":{"data":[{"name":"decode","calls":12,"avg":"2 ms","total":"24 ms","percent_total":"40%","p50":"1.8 ms","p95":"3.0 ms","p99":"3.8 ms"}]}}"#;
+
+/// `hotpath = true` sets the three variables, decodes the report into
+/// `r.hotpath`, and the one report fills `record.hotpath`.
+#[test]
+fn a_hotpath_call_captures_its_report_into_the_record() {
+    let _lock = crate::test_scratch::process_global_lock();
+    let root = crate::test_scratch::scratch("bench_runner", "hotpath");
+    let container = root.join("iterations");
+    let script = script(&format!(
+        "function bench()\n\
+           local r = binary_with({{hotpath = true, env = {{R = '{REPORT}'}}}}, '-c',\n\
+             'test \"$HOTPATH_METRICS_SERVER_OFF\" = true && test \"$HOTPATH_OUTPUT_FORMAT\" = json \
+              && printf %s \"$R\" > \"$HOTPATH_OUTPUT_PATH\"'):ok()\n\
+           record.calls = r.hotpath.functions_timing.data[1].calls\n\
+         end"
+    ));
+    let (iteration, _) = run_iteration(setup(&script, &root, &container));
+    let record = record(&iteration);
+    assert_eq!(record["calls"], 12);
+    assert_eq!(
+        record["hotpath"],
+        serde_json::from_str::<serde_json::Value>(REPORT).unwrap()
+    );
+}
+
+/// An instrumented call that exits 0 having written no report fails; one
+/// that fails is the script's to judge; two reports leave the record alone.
+#[test]
+fn a_hotpath_call_without_a_report_fails_and_several_fill_nothing() {
+    let _lock = crate::test_scratch::process_global_lock();
+    let root = crate::test_scratch::scratch("bench_runner", "hotpath-none");
+    let container = root.join("iterations");
+    let bare = script("function bench() binary_with({hotpath = true}, '-c', 'true') end");
+    let (iteration, _) = run_iteration(setup(&bare, &root, &container));
+    assert!(
+        failure(&iteration).contains("wrote no hotpath report"),
+        "{iteration:?}"
+    );
+
+    let failing = script(
+        "function bench()\n\
+           local r = binary_with({hotpath = true}, '-c', 'exit 4')\n\
+           record.exit = r.exit\n\
+           record.none = r.hotpath == nil\n\
+         end",
+    );
+    let (iteration, _) = run_iteration(setup(&failing, &root, &container));
+    let shown = record(&iteration);
+    assert_eq!(shown["exit"], 4);
+    assert_eq!(shown["none"], true);
+    assert!(!shown.contains_key("hotpath"));
+
+    let twice = script(&format!(
+        "function bench()\n\
+           local o = {{hotpath = true, env = {{R = '{REPORT}'}}}}\n\
+           local w = 'printf %s \"$R\" > \"$HOTPATH_OUTPUT_PATH\"'\n\
+           binary_with(o, '-c', w):ok()\n\
+           binary_with(o, '-c', w):ok()\n\
+         end"
+    ));
+    let (iteration, _) = run_iteration(setup(&twice, &root, &container));
+    assert!(!record(&iteration).contains_key("hotpath"), "{iteration:?}");
+}
+
 #[test]
 fn a_descendants_late_markers_land_in_its_childs_evidence() {
     let _lock = crate::test_scratch::process_global_lock();
