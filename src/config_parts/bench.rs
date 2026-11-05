@@ -72,6 +72,9 @@ pub struct Param {
     pub default: Option<String>,
     /// A collection: one sample binds the whole list of values.
     pub many: bool,
+    /// The command line must give it: its absence is refused when the bench
+    /// binds, before anything is built. Never beside a `default`.
+    pub required: bool,
     /// Where the declaration came from.
     pub origin: ParamOrigin,
 }
@@ -168,6 +171,8 @@ struct RawParam {
     default: Option<String>,
     #[serde(default)]
     many: bool,
+    #[serde(default)]
+    required: bool,
 }
 
 #[derive(Deserialize)]
@@ -280,11 +285,18 @@ fn parse_param(
             "{at}: default is blank - give a value or remove the key"
         ));
     }
+    if raw.required && raw.default.is_some() {
+        return Err(format!(
+            "{at}: required and default exclude each other - a param with a default is never \
+             absent; remove one"
+        ));
+    }
     Ok(Param {
         help: raw.help,
         from,
         default: raw.default,
         many: raw.many,
+        required: raw.required,
         origin,
     })
 }
@@ -755,6 +767,24 @@ mod tests {
             "[bench.c]\nscript = \"x = 1\"\nparams.j = { flag = \"x\" }\n",
         );
         assert!(err.contains("flag"), "{err}");
+        let err = err_of(
+            "param_required_default",
+            "[bench.c]\nscript = \"x = 1\"\nparams.j = { required = true, default = \"1\" }\n",
+        );
+        assert!(err.contains("required and default"), "{err}");
+        // Judged on the declaration, so in a set no bench uses too.
+        let err = err_of(
+            "set_required_default",
+            "[bench_params.s]\nj = { required = true, default = \"1\" }\n",
+        );
+        assert!(err.contains("required and default"), "{err}");
+        let benches = single(
+            "param_required",
+            "[bench.c]\nscript = \"x = 1\"\nparams.j = { required = true }\nparams.k = {}\n",
+        )
+        .unwrap();
+        assert!(benches["c"].params["j"].required);
+        assert!(!benches["c"].params["k"].required, "absent means optional");
         single(
             "param_kebab",
             "[bench.c]\nscript = \"x = 1\"\nparams.osc-range = { many = true }\n",

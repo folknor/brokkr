@@ -300,6 +300,9 @@ fn describe(bench: &Bench, detection: &Detection, given: &params::Given, view: &
         if let Some(default) = &param.default {
             line.push_str(&format!(" [default {default}]"));
         }
+        if param.required {
+            line.push_str(" (required)");
+        }
         if param.many {
             line.push_str(" (a collection)");
         }

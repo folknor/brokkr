@@ -347,8 +347,9 @@ struct Partial {
 
 /// Bind every param that has a value, from the command line or its
 /// `default`, in dependency order, into every arm the values fan out to:
-/// parents outer, each param's values in their order. Never empty when it
-/// succeeds; one arm when nothing fans out.
+/// parents outer, each param's values in their order; a param with neither
+/// is unbound, unless it is `required`, which refuses its absence. Never
+/// empty when it succeeds; one arm when nothing fans out.
 pub(crate) fn bind(bench: &Bench, given: &Given, view: &View) -> Result<Vec<Bound>, DevError> {
     expand(bench, given, view, |_| true).map_err(refused)
 }
@@ -373,6 +374,10 @@ fn expand(
         let (raw, source): (Vec<String>, Source) = match (given.values.get(name), &param.default) {
             (Some(values), _) => (values.clone(), Source::Given),
             (None, Some(default)) => (vec![default.clone()], Source::Default),
+            (None, None) if param.required => {
+                refusals.push(absent(bench, name, param, &mut partials, view));
+                continue;
+            }
             (None, None) => continue,
         };
         let value = raw.join(",");
@@ -458,6 +463,72 @@ fn expand(
     } else {
         Err(refusals)
     }
+}
+
+/// The one refusal of a `required` param the command line did not give. For
+/// a `from` param it lists the keys under each distinct path the arms'
+/// parents lead to, in arm order, as detail only: an arm whose parent was
+/// refused, or whose path leads nowhere, adds nothing, so neither the number
+/// of paths nor a failed lookup changes what is refused or how.
+///
+/// The param is absent whatever its parents bind, so it is reported even in
+/// an arm whose parent was refused; it is made unavailable in every arm, so
+/// its dependents are judged in none.
+fn absent(
+    bench: &Bench,
+    name: &str,
+    param: &Param,
+    partials: &mut [Partial],
+    view: &View,
+) -> Refusal {
+    let message = absence(bench, name, param, partials, view);
+    for partial in partials {
+        partial.unavailable.insert(name.to_owned());
+    }
+    Refusal {
+        message,
+        source: Source::Given,
+    }
+}
+
+fn absence(bench: &Bench, name: &str, param: &Param, partials: &[Partial], view: &View) -> String {
+    let mut message = format!(
+        "bench {}: --{name} is required: give it on the command line",
+        bench.name
+    );
+    if let Some(from) = &param.from {
+        let mut listed: Vec<String> = Vec::new();
+        for partial in partials {
+            if from.references().any(|p| partial.unavailable.contains(p)) {
+                continue;
+            }
+            let chosen = |p: &str| {
+                partial
+                    .bound
+                    .params
+                    .get(p)
+                    .and_then(|b| b.values.first())
+                    .map(|v| v.key.clone())
+            };
+            let Ok(path) = substitute(name, &from.segments, chosen) else {
+                continue;
+            };
+            let Ok(table) = walk(view.table(), &path) else {
+                continue;
+            };
+            let shown = view::shown(&path);
+            if listed.contains(&shown) {
+                continue;
+            }
+            message.push_str(&if table.is_empty() {
+                format!("\n  no keys under {shown} on this host")
+            } else {
+                format!("\n  valid under {shown}: {}", keys_of(table))
+            });
+            listed.push(shown);
+        }
+    }
+    message
 }
 
 /// The values `items` select for `name` in one arm, and its substituted

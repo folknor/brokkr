@@ -72,6 +72,7 @@ params.dataset = { from = "datasets", default = "denmark" }
 params.variant = { from = "datasets.{dataset}.pbf", default = "indexed" }
 params.osc     = { from = "datasets.{dataset}.osc", many = true }
 params.jobs    = { help = "worker threads" }
+params.mode    = { required = true }
 ```
 
 - `help` - the text the bench's `--help` shows.
@@ -85,8 +86,14 @@ params.jobs    = { help = "worker threads" }
 - `many` - `true` makes the param a collection, binding a list of values to
   one sample; any other param given several values fans out, one run per
   value.
+- `required` - `true` makes the command line give the param: its absence
+  is refused when the bench binds (Binding params, below), before anything
+  is built and without storing a run, where a script's own refusal would
+  come only after the build, as a failed run. Absent or `false`, a param
+  the command line does not give is unbound or takes its `default`.
 
-Refused at load: an unknown key; a blank `default`; a `from` path with an
+Refused at load: an unknown key; a blank `default`; `required = true`
+beside a `default`, which would never be used; a `from` path with an
 empty segment, or with `{` or `}` anywhere but around a whole segment; a
 `{NAME}` that is not a param of the bench; params whose `from` paths reference
 each other in a cycle; and a `{NAME}` naming a `many` param, since a path takes
@@ -108,7 +115,10 @@ bench's name, so none of them can collide with a param.
 `--text` the value `--help`. `--help` or `-h` where a param's name could
 stand describes the bench instead of running it (`brokkr man bench`). A
 param the command line does not give takes its `default`; one with neither
-is unbound: the script sees nil for it and the run stores nothing for it.
+is unbound: the script sees nil for it and the run stores nothing for it,
+unless it is `required`, which is refused. A required param counts as given
+by any value on the command line: a blank one meets the blank refusal, and
+a collection's `all` over an empty table binds an empty collection.
 
 **Several values.** A param may be given more than once, and a value is a
 list: it is split on every `,`, and the param's values are every item of
@@ -149,6 +159,11 @@ dependents are not judged under it):
 
 - an unknown param, a missing or blank value, a blank item between commas,
   or a token that is not `--NAME`;
+- a `required` param the command line does not give, refused once however
+  many arms there are, even in an arm whose parent was refused, and its
+  dependents not judged; for a `from` param the refusal lists the keys
+  under each distinct path the arms' bound parents lead to, where that path
+  is a table;
 - a `from` path that does not lead to a table (a missing key on the way, or
   a value that is not a table), and a bound param whose path needs a param
   that has no value;

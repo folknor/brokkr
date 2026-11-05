@@ -204,6 +204,159 @@ fn the_dynamic_refusals_name_the_valid_keys() {
     assert_eq!(bound.document()["jobs"].values[0].key, "1..4");
 }
 
+const REQUIRED: &str = r#"
+[bench.b]
+script = "function bench() end"
+params.scale = { from = "data.workloads", default = "bench" }
+params.workload = { from = "data.workloads.{scale}", required = true }
+params.field = { from = "data.workloads.{scale}.{workload}", default = "nope" }
+params.mode = { required = true }
+params.tags = { from = "data.tags", many = true, required = true }
+
+[data.workloads.bench.a]
+file = "a.lua"
+[data.workloads.bench.b]
+file = "b.lua"
+[data.workloads.hotpath.a]
+file = "ha.lua"
+[data.workloads.empty]
+
+[data.tags]
+"#;
+
+#[test]
+fn a_required_param_absent_is_one_refusal_whatever_its_arms() {
+    let f = fixture("required", REQUIRED);
+    let bind_err = |words: &[&str]| {
+        let given = parse(&f.bench, &tokens(words)).unwrap();
+        bind(&f.bench, &given, &f.view).unwrap_err()
+    };
+
+    // Every absent required param named, each once; the dependent `field`,
+    // whose default is no key, is not judged under the absent `workload`.
+    let DevError::Preflight(lines) = bind_err(&[]) else {
+        panic!("several absences are a preflight list");
+    };
+    // In dependency order: `field` pulls `scale` and `workload` first.
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert_eq!(
+        lines[0],
+        "bench b: --workload is required: give it on the command line\n  valid under \
+         data.workloads.bench: a, b"
+    );
+    assert_eq!(
+        lines[1], "bench b: --mode is required: give it on the command line",
+        "a plain param has no keys to list"
+    );
+    assert_eq!(
+        lines[2],
+        "bench b: --tags is required: give it on the command line\n  no keys under data.tags \
+         on this host"
+    );
+
+    // One absence under several paths is still one refusal, a usage error,
+    // its paths detail in arm order; an empty one says so.
+    let err = bind_err(&[
+        "--mode",
+        "m",
+        "--tags",
+        "all",
+        "--scale",
+        "hotpath,bench,empty",
+    ]);
+    let DevError::Usage(message) = &err else {
+        panic!("one absence is a usage error: {err:?}");
+    };
+    assert_eq!(
+        message,
+        "bench b: --workload is required: give it on the command line\n  valid under \
+         data.workloads.hotpath: a\n  valid under data.workloads.bench: a, b\n  no keys \
+         under data.workloads.empty on this host"
+    );
+
+    // A refused parent adds no detail and does not hide the absence.
+    let DevError::Preflight(lines) = bind_err(&["--mode", "m", "--tags", "all", "--scale", "x"])
+    else {
+        panic!("a refused parent and an absence are two refusals");
+    };
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines[0].contains("--scale x selects \"x\""), "{lines:?}");
+    assert_eq!(
+        lines[1],
+        "bench b: --workload is required: give it on the command line"
+    );
+
+    // Given blank is the blank refusal, not an absence.
+    let err = refusal(
+        &f,
+        &[
+            "--mode",
+            "m",
+            "--tags",
+            "all",
+            "--workload",
+            " ",
+            "--field",
+            "file",
+        ],
+    );
+    assert!(
+        err.contains("is blank") && !err.contains("required"),
+        "{err}"
+    );
+
+    // Given, it binds; a required collection may bind empty.
+    let bound = one(
+        &f,
+        &[
+            "--mode",
+            "m",
+            "--tags",
+            "all",
+            "--workload",
+            "a",
+            "--field",
+            "file",
+        ],
+    );
+    let doc = bound.document();
+    assert_eq!(doc["workload"].values[0].key, "a");
+    assert!(
+        doc["tags"].values.is_empty(),
+        "an empty collection is given"
+    );
+}
+
+#[test]
+fn help_names_a_required_absence_once() {
+    let f = fixture("required_help", REQUIRED);
+    // Help never fails over it: a dependent's keys are unknown, the absence
+    // said once.
+    let help = parse(&f.bench, &tokens(&["--help"])).unwrap();
+    let Some(Err(why)) = values_for(&f.bench, &help, &f.view, "field") else {
+        panic!("field's keys need --workload");
+    };
+    assert_eq!(why.matches("--workload is required").count(), 1, "{why}");
+    let Some(Ok(paths)) = values_for(&f.bench, &help, &f.view, "workload") else {
+        panic!("workload's own keys are listed");
+    };
+    assert_eq!(paths[0].1, ["a", "b"]);
+    // Said once under several arms too.
+    let help = parse(
+        &f.bench,
+        &tokens(&["--scale", "hotpath,bench,empty", "--help"]),
+    )
+    .unwrap();
+    let Some(Err(why)) = values_for(&f.bench, &help, &f.view, "field") else {
+        panic!("field's keys need --workload");
+    };
+    assert_eq!(why.matches("--workload is required").count(), 1, "{why}");
+    assert!(
+        why.contains("valid under data.workloads.hotpath: a"),
+        "{why}"
+    );
+}
+
 const COLLECTIONS: &str = r#"
 [bench.b]
 script = "function bench() end"

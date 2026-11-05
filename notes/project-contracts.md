@@ -824,10 +824,15 @@ What slice 10 left, with sizes:
 - `check-locations` is not declared: no small dataset on the user's hosts
   has a LocationsOnWays variant, so it could not be exercised (small, once
   one is registered).
-- A param cannot be declared required: a bench without a natural default
-  (dellingr's `--workload`) refuses its absence only inside the script,
-  after the build, and the refusal is stored as a failed run (small: a
-  `required` key, refused at binding).
+
+A param may now be declared `required` (`docs/brokkr.toml.bench.md`,
+Params and Binding params), landed after slice 10 for dellingr's
+`--workload`: beside a `default` refused at load, its absence refused at
+binding as one usage refusal however many arms there are, reported even
+under a refused parent, its dependents not judged, the keys under each path
+the parents lead to only detail. Sparred against an inverted `optional`
+key (the config contract), a bench-level `required` list and a check in
+`bind` outside the arm expansion.
 
 The rest of slice 9, the evidence views (`docs/commands/measure.md`,
 Script-bench children): `brokkr sidecar` resolves a prefix across

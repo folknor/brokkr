@@ -33,12 +33,14 @@ After NAME come the bench's params, `--NAME VALUE` or `--NAME=VALUE`, and
 `--help` or `-h` where a param's name could stand. How they bind against
 the resolved config, and what is refused, is `brokkr man bench-config`
 (Binding params), including lists, ranges and `all`. `NAME --help` lists
-each param with its `from` path, its default and, for a `from` param, the
-keys it takes on this host, in key order, the parents it depends on chosen
+each param with its `from` path, its default or `(required)` and, for a
+`from` param, the keys it takes on this host, in key order, the parents it
+depends on chosen
 from the same command line, else their defaults; a parent given several
 values lists the keys under each path they lead to.
 
-Refused before anything runs, and not stored: a param refusal in any arm, a
+Refused before anything runs, and not stored: a param refusal in any arm (a
+`required` param not given among them), a
 bound input another reservation writes or whose pin does not match (every
 arm's inputs are reserved for reading, then hashed, after the script is
 read and the store opened, before any build), and a `--commit` that names
@@ -94,7 +96,7 @@ dataset's `path`) replaced by an input handle; a plain param's string; a
 `many` param's list of entries, in bound order. `keys.NAME` is the chosen
 key (a list for a `many` param), since an entry has no room for its own. A
 fanned param holds the arm's one value. An unbound param is
-nil in both. TOML integers beyond 2^53 arrive as their decimal text,
+nil in both; a `required` one never is. TOML integers beyond 2^53 arrive as their decimal text,
 datetimes as their TOML text. The whole block is
 measured: brokkr's own work for each `binary()` call (admitting it,
 preparing its spool and marker FIFO, releasing it) is inside the wall, and
