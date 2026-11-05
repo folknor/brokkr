@@ -353,6 +353,27 @@ though both only read the config (and `--help` the resolved view), so
 either blocks behind any running check or bench. The lock policy is the
 verb's `CommandSpec`; a listing could take none, as `results` does.
 
+### A typed call stream's sink ends without boundaries render nothing (2026-11-05)
+
+Found while landing the script-bench evidence views. `print_call_timelines`
+reports a call's terminal record and sealing count only inside the record a
+`CallSpan` (a library call document) gives it, so a typed run whose child
+wrote tagged `!sealed drops=N` lines with no call document stored shows the
+call's heading (human) or nothing (JSONL), its drop account hidden. A
+script-bench child gets a `call_sink` record for exactly this (`brokkr man
+measure`, Script-bench children); it was kept off typed runs only because
+their output was not to change in that slice. Turning it on for typed runs
+is one condition in `print_call_timelines`.
+
+### The sidecar views print no direct test output (2026-11-05)
+
+Every `print_*` in `src/sidecar_fmt.rs` writes stdout itself, so no test
+asserts a rendered table or JSONL record; the bench views were checked by
+hand against stored runs and the typed ones byte for byte against the
+installed binary. A writer parameter (or String-returning renderers) would
+let the bench-specific fields (`end_us`, `duration_us`, null readings,
+`call_sink`, sample `run`) be pinned.
+
 ### A stop during bench-store retries is untested (2026-11-04)
 
 Found while landing the remote client. `bench::publication::Admission`

@@ -80,7 +80,7 @@ Single crate: the `brokkr` binary, plus the `brokkr-rustc-guard` and `brokkr-res
 - `wc [threshold]` - tracked `.rs` files over `threshold` lines (default 800).
 - `history` - global command history.
 - `lock`, `strays [--kill]`, `guard [--install|--remove]`, `kill [--hard]` - lock status and process hygiene (see `docs/commands/check.hygiene.md`).
-- `sidecar <uuid>` - sidecar profiler data (see `docs/commands/measure.md`).
+- `sidecar <uuid>` - sidecar profiler data, a typed run's or one script-bench child's (see `docs/commands/measure.md`).
 - `fmt` - locked `cargo fmt` wrapper.
 - Project-specific: `corpus-results`, `dellingr`, `mogwai`, `hotpath`, `library`, `pmtiles-stats`, `pmtiles-corpus`, `ocean-build` - see the project docs.
 

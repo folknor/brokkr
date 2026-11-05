@@ -19,10 +19,34 @@
 use std::collections::HashMap;
 
 use super::{
-    PhaseStats, avg_cores_f64, avg_cores_str, build_phases, clk_tck_per_second, phase_stats,
+    PhaseStats, Process, avg_cores_f64, avg_cores_str, build_phases, clk_tck_per_second,
+    phase_stats,
 };
-use crate::db;
 use crate::sidecar;
+
+/// One side of a comparison: a typed run's selected run, or one child of a
+/// script-bench run's iteration.
+pub(crate) struct CompareSide<'a> {
+    /// The run's full uuid.
+    pub(crate) uuid: &'a str,
+    /// For a script-bench side, the iteration and the child compared.
+    pub(crate) child: Option<(usize, usize)>,
+    pub(crate) samples: &'a [sidecar::Sample],
+    pub(crate) markers: &'a [sidecar::Marker],
+    pub(crate) process: Process,
+}
+
+impl CompareSide<'_> {
+    /// The side as the table heads it: the short uuid, and for a bench child
+    /// its iteration and child, `uuid/ITER/CHILD` as an operand names it.
+    fn label(&self) -> String {
+        let short = crate::db::short_uuid(self.uuid);
+        match self.child {
+            Some((iteration, child)) => format!("{short}/{iteration}/{child}"),
+            None => short,
+        }
+    }
+}
 
 /// One row of the comparison: the indices into each run's segment list.
 #[derive(Debug, PartialEq, Eq)]
@@ -135,17 +159,9 @@ fn side<'a>(
 /// Print the comparison of two sidecar timelines. Default is JSONL (a
 /// `compare_summary` record, then one `compare_phase` record per row);
 /// `human = true` gives the fixed-width table.
-pub(crate) fn print_compare_timeline(
-    uuid_a: &db::RunId,
-    samples_a: &[sidecar::Sample],
-    markers_a: &[sidecar::Marker],
-    uuid_b: &db::RunId,
-    samples_b: &[sidecar::Sample],
-    markers_b: &[sidecar::Marker],
-    human: bool,
-) {
-    let phases_a = build_phases(markers_a, samples_a);
-    let phases_b = build_phases(markers_b, samples_b);
+pub(crate) fn print_compare_timeline(a: &CompareSide<'_>, b: &CompareSide<'_>, human: bool) {
+    let phases_a = build_phases(a.markers, a.samples, a.process);
+    let phases_b = build_phases(b.markers, b.samples, b.process);
     let names_a: Vec<&str> = phases_a.iter().map(|(n, _, _)| n.as_str()).collect();
     let names_b: Vec<&str> = phases_b.iter().map(|(n, _, _)| n.as_str()).collect();
     let pairs = pair_by_ordinal(&names_a, &names_b);
@@ -153,23 +169,16 @@ pub(crate) fn print_compare_timeline(
         .iter()
         .map(|pair| CompareRow {
             pair,
-            a: side(&phases_a, samples_a, pair.a),
-            b: side(&phases_b, samples_b, pair.b),
+            a: side(&phases_a, a.samples, pair.a),
+            b: side(&phases_b, b.samples, pair.b),
         })
         .collect();
     let clk_tck = clk_tck_per_second();
 
     if human {
-        print_human(uuid_a, uuid_b, &rows, clk_tck);
+        print_human(a, b, &rows, clk_tck);
     } else {
-        print_jsonl(
-            uuid_a,
-            uuid_b,
-            phases_a.len(),
-            phases_b.len(),
-            &rows,
-            clk_tck,
-        );
+        print_jsonl(a, b, phases_a.len(), phases_b.len(), &rows, clk_tck);
     }
 }
 
@@ -190,10 +199,21 @@ impl CompareRow<'_> {
 }
 
 /// The 31-column cell for one side: duration, peak anon, disk read, cores.
-fn human_cell(side: Option<&Side>, clk_tck: i64) -> String {
+/// A script-bench child's phase no sample landed in has its readings shown
+/// as `-`: absent, not zero.
+fn human_cell(side: Option<&Side>, process: Process, clk_tck: i64) -> String {
     side.map_or_else(
         || "(no match)".to_owned(),
         |s| {
+            if process.is_child() && s.stats.samples == 0 {
+                return format!(
+                    "{:>5}ms {:>8} {:>7} {:>6}",
+                    s.duration_us / 1_000,
+                    "-",
+                    "-",
+                    "-"
+                );
+            }
             format!(
                 "{:>5}ms {:>6}kB {:>5}MB {:>5}c",
                 s.duration_us / 1_000,
@@ -206,7 +226,7 @@ fn human_cell(side: Option<&Side>, clk_tck: i64) -> String {
 }
 
 #[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
-fn print_human(uuid_a: &db::RunId, uuid_b: &db::RunId, rows: &[CompareRow], clk_tck: i64) {
+fn print_human(a: &CompareSide<'_>, b: &CompareSide<'_>, rows: &[CompareRow], clk_tck: i64) {
     let name_width = rows
         .iter()
         .map(|r| r.name().chars().count())
@@ -226,8 +246,8 @@ fn print_human(uuid_a: &db::RunId, uuid_b: &db::RunId, rows: &[CompareRow], clk_
         "{:<name_width$}{} {:>31} {:>31} {:>7}",
         "Phase",
         ordinal("#"),
-        format!("Run A ({})", uuid_a.short()),
-        format!("Run B ({})", uuid_b.short()),
+        format!("Run A ({})", a.label()),
+        format!("Run B ({})", b.label()),
         "Delta",
     );
     for row in rows {
@@ -243,16 +263,19 @@ fn print_human(uuid_a: &db::RunId, uuid_b: &db::RunId, rows: &[CompareRow], clk_
             "{:<name_width$}{} {:>31} {:>31} {:>7}",
             row.name(),
             ordinal(&occurrence),
-            human_cell(row.a.as_ref(), clk_tck),
-            human_cell(row.b.as_ref(), clk_tck),
+            human_cell(row.a.as_ref(), a.process, clk_tck),
+            human_cell(row.b.as_ref(), b.process, clk_tck),
             delta,
         );
     }
 }
 
-fn side_json(side: Option<&Side>, clk_tck: i64) -> serde_json::Value {
+/// One side as JSON. A script-bench child's side also carries `end_us` and
+/// `duration_us`, and its readings are `null` for a phase no sample landed
+/// in; a typed side keeps the fields it always had.
+fn side_json(side: Option<&Side>, process: Process, clk_tck: i64) -> serde_json::Value {
     side.map_or(serde_json::Value::Null, |s| {
-        serde_json::json!({
+        let mut obj = serde_json::json!({
             "index": s.index,
             "start_us": s.start_us,
             "duration_ms": s.duration_us / 1_000,
@@ -261,26 +284,52 @@ fn side_json(side: Option<&Side>, clk_tck: i64) -> serde_json::Value {
             "cpu_delta_jiffies": s.stats.cpu_delta_jiffies,
             "sample_span_us": s.stats.sample_span_us,
             "avg_cores": avg_cores_f64(s.stats.cpu_delta_jiffies, s.stats.sample_span_us, clk_tck),
-        })
+        });
+        if process.is_child()
+            && let Some(map) = obj.as_object_mut()
+        {
+            map.insert("end_us".to_owned(), (s.start_us + s.duration_us).into());
+            map.insert("duration_us".to_owned(), s.duration_us.into());
+            map.insert("samples".to_owned(), s.stats.samples.into());
+            if s.stats.samples == 0 {
+                for field in [
+                    "peak_anon_kb",
+                    "disk_read_kb",
+                    "cpu_delta_jiffies",
+                    "sample_span_us",
+                ] {
+                    map.insert(field.to_owned(), serde_json::Value::Null);
+                }
+            }
+        }
+        obj
     })
 }
 
 #[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 fn print_jsonl(
-    uuid_a: &db::RunId,
-    uuid_b: &db::RunId,
+    a: &CompareSide<'_>,
+    b: &CompareSide<'_>,
     a_phases: usize,
     b_phases: usize,
     rows: &[CompareRow],
     clk_tck: i64,
 ) {
-    let header = serde_json::json!({
+    let mut header = serde_json::json!({
         "type": "compare_summary",
-        "a_uuid": uuid_a.as_str(),
-        "b_uuid": uuid_b.as_str(),
+        "a_uuid": a.uuid,
+        "b_uuid": b.uuid,
         "a_phases": a_phases,
         "b_phases": b_phases,
     });
+    if let Some(map) = header.as_object_mut() {
+        for (prefix, side) in [("a", a), ("b", b)] {
+            if let Some((iteration, child)) = side.child {
+                map.insert(format!("{prefix}_iteration"), iteration.into());
+                map.insert(format!("{prefix}_child"), child.into());
+            }
+        }
+    }
     println!("{header}");
 
     for row in rows {
@@ -290,8 +339,8 @@ fn print_jsonl(
             "type": "compare_phase",
             "name": row.name(),
             "occurrence": row.pair.occurrence,
-            "a": side_json(row.a.as_ref(), clk_tck),
-            "b": side_json(row.b.as_ref(), clk_tck),
+            "a": side_json(row.a.as_ref(), a.process, clk_tck),
+            "b": side_json(row.b.as_ref(), b.process, clk_tck),
             "delta_pct": delta,
         });
         println!("{obj}");
@@ -405,13 +454,37 @@ mod tests {
         };
         let markers = [marker(0, 0, "A"), marker(1, 500_000, "B")];
         let samples = [sample(100_000), sample(200_000)];
-        let phases = build_phases(&markers, &samples);
+        let phases = build_phases(&markers, &samples, Process::Sampled);
         assert_eq!(
             phases,
             [
                 ("A".to_owned(), 0, 500_000),
                 ("B".to_owned(), 500_000, 500_000)
             ]
+        );
+
+        // A bench child's known wall closes its last phase, samples or not;
+        // a marker past the wall moves only the boundary; a markerless child
+        // is its whole interval.
+        let child = Process::Child { wall_us: 900_000 };
+        assert_eq!(
+            build_phases(&markers, &[], child),
+            [
+                ("A".to_owned(), 0, 500_000),
+                ("B".to_owned(), 500_000, 900_000)
+            ]
+        );
+        let short = Process::Child { wall_us: 400_000 };
+        assert_eq!(
+            build_phases(&markers, &samples, short),
+            [
+                ("A".to_owned(), 0, 500_000),
+                ("B".to_owned(), 500_000, 500_000)
+            ]
+        );
+        assert_eq!(
+            build_phases(&[], &[], child),
+            [("(all)".to_owned(), 0, 900_000)]
         );
     }
 }

@@ -472,6 +472,8 @@ pub(crate) struct TimelineSegment {
 pub(crate) struct Timeline<'a> {
     markers: Vec<&'a Marker>,
     final_us: Option<i64>,
+    /// Where a markerless stream's `(all)` segment starts: the first sample,
+    /// or 0 for a child whose interval is known.
     first_sample_us: Option<i64>,
 }
 
@@ -496,6 +498,25 @@ impl<'a> Timeline<'a> {
             markers,
             final_us: Some(final_us),
             first_sample_us: samples.first().map(|s| s.timestamp_us),
+        }
+    }
+
+    /// The process stream of a script-bench child, whose wall is known: its
+    /// process ran from 0 to `wall_us` on the samples' clock, so the final
+    /// segment ends there and a markerless child is one `(all)` segment over
+    /// the whole interval. A marker stamped past the wall (off the contract
+    /// clock, or written by a descendant after the exit) moves the boundary
+    /// to it, the guard [`Self::new`] applies, so no interval is reversed;
+    /// the wall itself is never taken from this boundary.
+    pub(crate) fn walled(markers: &'a [Marker], wall_us: i64) -> Self {
+        let markers = chronological(markers);
+        let final_us = markers
+            .last()
+            .map_or(wall_us, |last| wall_us.max(last.timestamp_us));
+        Self {
+            markers,
+            final_us: Some(final_us),
+            first_sample_us: Some(0),
         }
     }
 

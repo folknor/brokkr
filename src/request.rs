@@ -82,6 +82,8 @@ pub(crate) struct SidecarQuery {
     pub(crate) stat: Option<String>,
     pub(crate) human: bool,
     pub(crate) run: Option<String>,
+    /// `--child`: the child of each selected iteration of a script-bench run.
+    pub(crate) child: Option<usize>,
     pub(crate) phase: Option<String>,
     /// Substring filter on counter names, for the `--counters` view.
     pub(crate) grep: Option<String>,

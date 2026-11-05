@@ -11,7 +11,7 @@ mod single;
 mod table;
 
 pub(crate) use compare::format_compare;
-pub(crate) use single::format_single;
+pub(crate) use single::{ending as child_ending, format_single};
 pub(crate) use table::format_table;
 
 use super::store::{self, RunFilter, StoredRun, wire};
@@ -60,6 +60,17 @@ pub(crate) struct Lookup {
     pub(crate) candidates: usize,
     /// Runs of other projects the prefix names, as `(uuid, project)`.
     pub(crate) elsewhere: Vec<(String, String)>,
+}
+
+/// What a uuid prefix names among the project's runs ([`BenchReader::resolve`]).
+pub(crate) enum Resolved {
+    /// Exactly one run, its children loaded.
+    One(Box<StoredRun>),
+    /// Several runs' uuids, in the store's order.
+    Ambiguous(Vec<String>),
+    /// None of this project's; other projects' runs it names, as
+    /// `(uuid, project)`.
+    Missing { elsewhere: Vec<(String, String)> },
 }
 
 fn named(path: &std::path::Path, error: &store::StoreError) -> DevError {
@@ -287,6 +298,30 @@ impl BenchReader {
         })
     }
 
+    /// What `prefix` names among the project's runs, for a command that reads
+    /// one run's evidence (`brokkr sidecar`): the run with its children when
+    /// it names exactly one, the candidates when several, and otherwise the
+    /// other projects' runs it names. Only one run is ever read whole.
+    pub(crate) fn resolve(&self, prefix: &str) -> Result<Resolved, DevError> {
+        require_prefix(prefix, "uuid")?;
+        let mut uuids = self.select(&RunFilter {
+            project: self.project.clone(),
+            uuid_prefix: Some(prefix.to_owned()),
+            ..RunFilter::default()
+        })?;
+        match uuids.len() {
+            0 => Ok(Resolved::Missing {
+                elsewhere: self.elsewhere(prefix)?,
+            }),
+            1 => {
+                let uuid = uuids.remove(0);
+                let mut runs = self.load(std::slice::from_ref(&uuid), true)?;
+                Ok(Resolved::One(Box::new(runs.remove(0))))
+            }
+            _ => Ok(Resolved::Ambiguous(uuids)),
+        }
+    }
+
     /// Each side of a comparison: the completed runs of a clean tree whose
     /// commit starts with that side's prefix and pass the filters, newest
     /// first and uncapped (pairs are formed before `--limit` applies).
@@ -377,7 +412,7 @@ fn short_commit(run: &StoredRun) -> String {
 
 /// A run's start as `YYYY-MM-DD HH:MM:SS` UTC, the form `results.db` rows
 /// carry.
-fn timestamp(unix_ms: i64) -> String {
+pub(crate) fn timestamp(unix_ms: i64) -> String {
     let secs = unix_ms.div_euclid(1000);
     let rem = secs.rem_euclid(86_400);
     match crate::civil_date::CivilDate::from_unix_timestamp(secs) {
@@ -407,7 +442,7 @@ fn hotpath_report(
     )
 }
 
-// Visible to the rest of `bench`, whose remote client tests read runs built
-// by its fixtures.
+// Visible to the rest of the crate: the remote client tests and `brokkr
+// sidecar`'s read runs built by its fixtures.
 #[cfg(test)]
-pub(super) mod tests;
+pub(crate) mod tests;

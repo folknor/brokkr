@@ -13,7 +13,7 @@
 //! the user-wide config names a server; `publication` is the retry and
 //! uncertainty latch both share.
 
-mod evidence;
+pub(crate) mod evidence;
 mod json;
 mod lua;
 mod params;

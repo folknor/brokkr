@@ -2,7 +2,8 @@
 
 Query the results database, `.brokkr/results.db` - the durable record every
 measured run writes. The sibling command `brokkr sidecar` queries the profiler
-store (`sidecar.db`); see `docs/commands/measure.md` for what lands in which.
+store (`sidecar.db`), and a script-bench child's evidence in the bench store;
+see `docs/commands/measure.md` for what lands in which.
 The current project's script-bench runs, kept in the per-user bench store,
 are listed after these rows (Script benches, below).
 
@@ -15,9 +16,9 @@ a stamp is never lowered.
 
 Uniform across all projects, piners included (for its hotpath/alloc runs). The
 exception is litehtml, whose only use of `results.db` is the unrelated
-`MechanicalDb` schema: `results` there shows its script-bench runs alone and
-never opens that file, and `sidecar` and `invalidate`, which read nothing
-else, are hidden from its `--help`.
+`MechanicalDb` schema: `results` and `sidecar` there read its script-bench
+runs alone and never open that file, and `invalidate`, which reads nothing
+else, is hidden from its `--help`.
 
 ## The table
 
@@ -156,10 +157,10 @@ scenario) is the scenario row alone, with its profile.
 A prefix matching several runs falls back to the table plus per-row details.
 UUID resolution considers both stores; results lists result rows and reports
 any matching sidecar-only UUIDs separately, then any matching script-bench
-runs (Script benches, below); `sidecar` and `invalidate` do not read the bench
-store. `sidecar` requires a prefix to
-name one run and lists candidates when it is ambiguous. An empty prefix is
-refused rather than matching every row.
+runs (Script benches, below); `sidecar` resolves across all three the same
+way, and `invalidate` does not read the bench store. `sidecar` requires a
+prefix to name one run and lists candidates when it is ambiguous. An empty
+prefix is refused rather than matching every row.
 
 A UUID with sidecar data but no results row reports itself as a **sidecar-only
 run** (a dirty tree, or a run that failed before it could file a result) and
@@ -454,12 +455,14 @@ labelled block: identity and params (with each value's `from` path and file
 digest), the outcome, the result's wall with every iteration's in execution
 order and its verdict (nil, or the string quoted, so `""` stays visible),
 host, conditions, captured env, the build asked for and as resolved, the
-config digest, brokkr's argv, then each iteration with its outcome and each
-child with its start offset, wall, ending, argv and what its capture kept
-and lost. Then the result's `record` (for a run without a result, each
-iteration's that was extracted), one entry per line as compact JSON. Viewing
-a child's samples and markers is not there yet. A prefix matching several
-runs prints the table. A prefix that names no run of this project but names
+config digest, brokkr's argv, a `sidecar` field naming the `brokkr sidecar`
+invocation that reads a child's samples, markers and counters (`brokkr man
+measure`, Script-bench children) when some iteration launched one, then
+each iteration with its outcome and each child with its start offset, wall,
+ending, argv and what its capture kept and lost. Then the result's `record`
+(for a run without a result, each iteration's that was extracted), one
+entry per line as compact JSON. A prefix matching several runs prints the
+table. A prefix that names no run of this project but names
 another project's says which project it belongs to.
 
 **`record.hotpath`.** A script that profiles puts the hotpath JSON report its

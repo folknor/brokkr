@@ -297,7 +297,9 @@ project's disk, not the host's scratch disk.
 Every attempted run is stored, a failed build or an interrupted iteration
 included, one per arm, with its bound params (each key, its `from` path and
 a file's digest), every child's argv, ending, `/proc` samples, marker FIFO
-records and capture losses. A run of a dirty tree is stored and marked
+records and capture losses; `brokkr sidecar <uuid>` reads one child's
+through the sidecar views (`brokkr man measure`, Script-bench children). A
+run of a dirty tree is stored and marked
 dirty: `brokkr results` lists it with `-dirty` and never compares it. The
 run's uuid is printed whatever `--verbose` says, as the one handle `brokkr
 results <uuid>` finds it by, with where it went. A run that cannot be

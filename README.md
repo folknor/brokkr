@@ -265,7 +265,11 @@ brokkr sidecar <uuid> --stat anon                  # min/max/avg/p50/p95 for a f
 brokkr sidecar <uuid> --stat anon --phase STAGE2   # per-phase stat
 brokkr sidecar --compare <uuid_a> <uuid_b>         # phase-aligned comparison
 brokkr sidecar dirty --stat anon                   # inspect last failed/dirty run
+brokkr sidecar <bench-uuid> --run 2 --child 0      # a script-bench run: one child of an iteration
+brokkr sidecar --compare <uuid_a>/0/1 <uuid_b>     # a bench side may name ITER/CHILD
 ```
+
+A script-bench run's uuid works too: each view reads one child of each selected iteration (`--run`, `--child`), its interval known from spawn to wall ("Script-bench children" in `brokkr man measure`).
 
 Filter flags (`--phase`, `--range`, `--where`) compose with `--samples` and `--stat`; `--phase` also composes with `--counters`. `--grep <SUBSTR>` filters `--counters` by counter name, and composes with `--phase`.
 

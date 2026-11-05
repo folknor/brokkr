@@ -292,7 +292,8 @@ settled as follows.
   and each key checked, as `--osc-range` does today; every resolved file
   pairs like a single one (ordering and fan-out in the third review).
 - **Several children per sample:** samples and markers are kept per child,
-  in order, on one timeline relative to the block's start.
+  in order, each on its own clock with its start offset in the block (the
+  third review: never rebased).
 - **Scratch and outputs build on the existing machinery** (launch
   reservations, private directories, cleanup and retention); `output()`
   and `scratch()` are handles onto it. The third review extends the lease
@@ -828,22 +829,43 @@ What slice 10 left, with sizes:
   after the build, and the refusal is stored as a failed run (small: a
   `required` key, refused at binding).
 
-9. **Evidence views of a script-bench run.** The rest of slice 9: the
-   store holds every child's samples, FIFO records, capture loss and clock
-   check, and `brokkr results <uuid>` shows only their counts. What
-   `brokkr sidecar` shows for a typed run (phases, samples, markers,
-   counters, stalls, `--compare`) is wanted per child of a bench run's
-   iteration, read through `BenchReader`'s run read (`Store::run(uuid,
-   true)` locally, a `run` request when a results server is configured,
-   slice 12); `brokkr sidecar`
-   resolves through `RunStore`, which does not read the bench store, so
-   this is a selection boundary to design, not a flag. One launch,
-   smaller than the slices around it. Slice 10's real benches name the
-   first views: dellingr's harness emits PARSE, SETUP, COLD and WARM
-   markers per child (`brokkr dellingr` users read SETUP and WARM through
-   `brokkr sidecar` before calling a delta), and pbfhogg's children emit
-   `CLI_COMMAND_START`/`END` and counters, all stored per child and shown
-   today only as counts.
+The rest of slice 9, the evidence views (`docs/commands/measure.md`,
+Script-bench children): `brokkr sidecar` resolves a prefix across
+results.db, sidecar.db and the project's bench runs at once
+(`BenchReader::resolve`, one run read whole), a typed candidate counting
+whatever its evidence and a cross-store collision ambiguous, so a typed
+query now fails when the bench store cannot be read, as `results` already
+did; litehtml gets `sidecar` with its typed stores absent. A bench run is
+read one child per selected iteration: `--run` the iteration (default the
+result's, else the last stored), a new `--child`, the whole selection
+judged before anything prints. The views are written once over a source
+(typed: the old queries, byte-identical output checked against the
+installed binary on pbfhogg's typed runs) and the printers take
+`sidecar_fmt::Process`: a bench child's wall closes its timeline, keeps
+sampleless phases with absent readings, adds `end_us`/`duration_us`, a
+`run` on samples and a boundary-free `call_sink` record. `--compare`
+operands take `UUID/ITER/CHILD` per side, and a run without a result never
+compares. Sparred against a new verb, view flags on `results`,
+path-addressed refs everywhere and a flattened child index; the spar added
+the per-side compare operands, the sample `run`, the gated `call_sink`, the
+known-wall timeline, null readings per phase, the census-only `--call`
+diagnosis and the whole-selection refusals. Checked by hand on slice 10's
+runs: pbfhogg `inspect` and `check-refs` (summary, durations, counters,
+stalls), dellingr `workload` durations (SETUP 205 ms, WARM 4 ms, 20
+WARM_BLOCK spans), `workload-alloc` samples over `--run all`, a compare of
+two dellingr children, a failed run with no child, an ambiguous prefix
+across stores, another project's run.
+
+What it left, with sizes:
+
+- Every human table prints whole milliseconds, so a 0.2 ms phase of a
+  2 ms pbfhogg child reads `0ms`; the JSONL has the microseconds. A
+  precision rule for human durations would change typed tables too
+  (small).
+- JSONL names a bench child's iteration as `run` but not the child, which
+  the selection fixes and the header names (small, if several-child
+  benches want it in the records).
+
 13. **The interrupt and the deadline.** Bump dellingr to the release that
     carries the interrupt (`StateBuilder::interrupt` / `State::interrupt`,
     `ErrorKind::Interrupted`, sticky, polled on backward jumps and call

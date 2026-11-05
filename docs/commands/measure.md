@@ -354,7 +354,67 @@ the default view and `--stat`/`--phase` read that best run unless another
 The UUID argument is a prefix, matched literally (`_`/`%` are not wildcards),
 and it must name **one** session: a prefix shared by several sessions is an
 error listing the candidates rather than a merged timeline, and an empty
-prefix is refused.
+prefix is refused. It resolves across `results.db`, `sidecar.db` and the
+current project's script-bench runs at once (below), so a prefix naming a
+typed run and a bench run is ambiguous too, the bench candidates marked
+`(script bench)`; a typed run counts whether or not it has sidecar data. A
+prefix naming only another project's bench run says which project it
+belongs to. Reading the bench store means a typed query fails when that
+store cannot be read, or the configured results server cannot be reached,
+as `brokkr results` does.
+
+## Script-bench children
+
+A script-bench run (`brokkr man bench`) stores, for every child of every
+iteration, what the sidecar captured: samples, markers, counters, sink ends,
+capture losses by cause and the clock check (`brokkr man results`, Script
+benches). `brokkr sidecar <uuid>` reads one child of each selected
+iteration through every view above, the child's records under its own
+clock as they were written, nothing rebased.
+
+- `--run N` selects the iteration (`all` for every one); by default the
+  result's iteration, or for a run without a result the last one stored.
+- `--child N` selects the child within each selected iteration, in launch
+  order; by default the iteration's only child. The whole selection is
+  judged before anything prints: an iteration that launched several
+  children without `--child`, none, or fewer than `--child` names refuses
+  the query, naming every such iteration. One selected iteration that
+  launched no child, with no `--child`, prints its outcome and `launched no
+  child` instead. `--child` on a typed run is refused.
+- JSONL `run` is the iteration, in sample records too (a typed sample
+  carries none). The provenance header on stderr names the bench, project,
+  start, commit and outcome, then the iteration, the child's argv, PID,
+  start offset in the block, wall and any abnormal ending. Each selected
+  child's capture loss is warned with its exact causes, and its clock check
+  as for a typed run, labelled `--run N --child N`.
+- A child's interval is known, from its spawn to its stored wall, so its
+  process timeline closes at the wall, not at its last sample: the last
+  phase ends there (or at a marker stamped past it, which moves only the
+  segment end), a markerless child is one `(all)` segment from 0 to the
+  wall, and the default summary and `--compare` need no sample. A phase no
+  sample landed in is still a phase: the `--human` table shows it with `-`
+  readings, JSONL with `samples: 0`, and its readings `null` on a
+  `--compare` side, never zero. Phase records and `--compare` sides add
+  `end_us` and `duration_us`; the summary record's `wall_ms` and `wall_us`
+  are the child's wall, with `samples` and `peak_threads` (`null` without a
+  sample). `--stalls` reads against the child's wall.
+- A child's call streams have no stored boundaries, so the default summary
+  adds a `call_sink` record (`run`, `call`, the terminal record that arrived
+  or `null`, the sealing count) for a call whose sink ends arrived, which a
+  typed run without boundaries does not print. `--call` knows a call by its
+  records or the child's census of call ids; one only the census names is
+  said to have records the capture did not keep, and an unknown one under
+  an overflowed census is said to be possibly unrecorded.
+- `--compare` takes `UUID`, `UUID/ITER` or `UUID/ITER/CHILD` per side,
+  each side on its own: a bench side is its result's iteration and that
+  iteration's only child unless the operand names others, and a run without
+  a result never compares, as `brokkr results --compare` holds. A typed side
+  takes no qualifier and is its best run; typed and bench sides mix, both
+  being one process stream. `compare_summary` gains `a_iteration`/`a_child`
+  (and `b_`) for a bench side, and the table heads it `uuid/ITER/CHILD`.
+
+Every human table prints whole milliseconds, so a sub-millisecond phase of a
+short child reads `0ms` there; the JSONL carries microseconds.
 
 ## Sample fields
 

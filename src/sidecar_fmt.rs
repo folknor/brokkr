@@ -7,7 +7,48 @@ use crate::sidecar;
 
 mod compare;
 
-pub(crate) use compare::print_compare_timeline;
+pub(crate) use compare::{CompareSide, print_compare_timeline};
+
+/// What is known of the process a view reads, which decides how its stream
+/// is bounded and rendered (`docs/commands/measure.md`, Script-bench
+/// children). A typed run's process is known through its samples alone, and
+/// its views keep the output they always had. A script-bench child's
+/// interval is known exactly, from its spawn to its stored wall, so its
+/// timeline closes at the wall, a phase no sample landed in is still a
+/// phase (its resource readings absent, never zero), phase records carry
+/// microseconds, and a call's sink end shows without boundaries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Process {
+    Sampled,
+    Child { wall_us: i64 },
+}
+
+impl Process {
+    /// The child's actual wall; `None` for a typed run, whose wall is not
+    /// stored with its samples.
+    pub(crate) fn wall_us(self) -> Option<i64> {
+        match self {
+            Self::Sampled => None,
+            Self::Child { wall_us } => Some(wall_us),
+        }
+    }
+
+    fn is_child(self) -> bool {
+        matches!(self, Self::Child { .. })
+    }
+
+    /// The process stream's timeline over `markers` (that stream's only).
+    fn timeline<'a>(
+        self,
+        markers: &'a [sidecar::Marker],
+        samples: &[sidecar::Sample],
+    ) -> sidecar::Timeline<'a> {
+        match self {
+            Self::Sampled => sidecar::Timeline::new(markers, samples),
+            Self::Child { wall_us } => sidecar::Timeline::walled(markers, wall_us),
+        }
+    }
+}
 
 /// Format a Unix epoch as a local ISO-8601 timestamp.
 /// The provenance line for an abnormal ending, `None` for a clean exit or an
@@ -173,11 +214,12 @@ pub(crate) fn resolve_phase_range(
     samples: &[sidecar::Sample],
     call: Option<&str>,
     span: Option<&sidecar::CallSpan>,
+    process: Process,
 ) -> Result<(i64, i64), DevError> {
     let stream = stream_markers(markers, call);
     let (phases, tail) = split_call(&stream, span);
     let timeline = match (call, span) {
-        (None, _) => sidecar::Timeline::new(&stream, samples),
+        (None, _) => process.timeline(&stream, samples),
         (Some(_), Some(span)) => sidecar::Timeline::closed(&phases, span.return_us),
         (Some(_), None) => sidecar::Timeline::open(&stream),
     };
@@ -364,18 +406,21 @@ fn parse_where_cond(cond: &str) -> Result<(&str, &str, i64), DevError> {
     )))
 }
 
-/// Apply --where, --every, --head, --tail filters to a sample list. A
-/// malformed `--where` is an error, never a skipped filter.
-pub(crate) fn apply_timeline_filter<'a>(
-    samples: &'a [sidecar::Sample],
+/// Apply --where, --every, --head, --tail filters to a sample list, as the
+/// positions of the samples kept, so a caller can carry something beside
+/// each sample (a script-bench child's iteration). A malformed `--where` is
+/// an error, never a skipped filter.
+pub(crate) fn timeline_filter_indices(
+    samples: &[sidecar::Sample],
     q: &SidecarQuery,
-) -> Result<Vec<&'a sidecar::Sample>, DevError> {
-    let mut result: Vec<&sidecar::Sample> = samples.iter().collect();
+) -> Result<Vec<usize>, DevError> {
+    let mut result: Vec<usize> = (0..samples.len()).collect();
 
     // --where filter
     if let Some(ref cond) = q.where_cond {
         let (field, op, threshold) = parse_where_cond(cond)?;
-        result.retain(|s| {
+        result.retain(|&i| {
+            let s = &samples[i];
             if let Some(val) = s.field_value(field) {
                 match op {
                     ">" => val > threshold,
@@ -451,10 +496,13 @@ pub(crate) fn print_field_stat(samples: &[&sidecar::Sample], field: &str) -> Res
 ///
 /// `t` is output as fractional seconds (e.g. `1.234`) not microseconds.
 /// When `fields` is `None`, all fields are output. When `Some`, only the
-/// listed fields are included (plus `t` is always included).
+/// listed fields are included (plus `t` is always included). `run` names the
+/// sample's iteration for a script-bench child (`"run"` after `t`, under any
+/// projection); a typed sample carries none, as it never has.
 pub(crate) fn sidecar_sample_json_projected(
     s: &sidecar::Sample,
     fields: Option<&Vec<String>>,
+    run: Option<usize>,
 ) -> String {
     // t is always fractional seconds.
     #[allow(clippy::cast_precision_loss)]
@@ -463,6 +511,9 @@ pub(crate) fn sidecar_sample_json_projected(
     let capacity = fields.map_or(sidecar::SAMPLE_FIELDS.len(), Vec::len) + 1;
     let mut parts = Vec::with_capacity(capacity);
     parts.push(format!("\"t\":{t_sec:.3}"));
+    if let Some(run) = run {
+        parts.push(format!("\"run\":{run}"));
+    }
     match fields {
         None => {
             // `i` is a selectable field, but the unprojected sample has
@@ -518,9 +569,13 @@ pub(crate) fn sidecar_marker_json(m: &sidecar::Marker) -> String {
 /// sink's own account and the terminal record that arrived (or none), and
 /// the phases are the markers up to the return, the last ending there; the
 /// markers after it are the tail, points. Without boundaries a call's final
-/// interval has no known end (`end_us: null`, `-` in the table).
+/// interval has no known end (`end_us: null`, `-` in the table). For a
+/// script-bench child ([`Process::Child`]) a call without boundaries whose
+/// sink ends arrived also gets a `call_sink` record (the terminal that
+/// arrived, or `null`, and the sealing count), since its drop account is
+/// evidence no boundary is needed to report; a typed run keeps its output.
 #[allow(clippy::print_stdout, clippy::too_many_lines)] // Data output; preserve its bytes and stdout stream.
-pub(crate) fn print_call_timelines(streams: &CallStreams<'_>, human: bool) {
+pub(crate) fn print_call_timelines(streams: &CallStreams<'_>, process: Process, human: bool) {
     let CallStreams {
         markers,
         calls,
@@ -568,6 +623,7 @@ pub(crate) fn print_call_timelines(streams: &CallStreams<'_>, human: bool) {
             || "none observed".to_owned(),
             |(end, drops)| format!("{end} drops={drops}"),
         );
+        let sink_without_span = span.is_none() && !ends.is_empty() && process.is_child();
         if human {
             println!();
             println!("{}", stream_heading(run_idx, call));
@@ -582,6 +638,8 @@ pub(crate) fn print_call_timelines(streams: &CallStreams<'_>, human: bool) {
                     span.stream_state,
                     span.stream_drops,
                 );
+            } else if sink_without_span {
+                println!("  no boundaries; terminal {observed}, {sealing} sealing emissions");
             }
             for s in &segments {
                 let end = s
@@ -610,6 +668,16 @@ pub(crate) fn print_call_timelines(streams: &CallStreams<'_>, human: bool) {
                 "seal_us": span.seal_us,
                 "wall_us": span.return_us - span.entry_us,
                 "stream": {"state": span.stream_state, "drops": span.stream_drops.to_string()},
+                "terminal": terminal.map(|(end, drops)| {
+                    serde_json::json!({"state": end, "drops": drops.to_string()})
+                }),
+                "sealing": sealing,
+            });
+            stream_fields(&mut obj, run_idx, call);
+            println!("{obj}");
+        } else if sink_without_span {
+            let mut obj = serde_json::json!({
+                "type": "call_sink",
                 "terminal": terminal.map(|(end, drops)| {
                     serde_json::json!({"state": end, "drops": drops.to_string()})
                 }),
@@ -655,6 +723,7 @@ pub(crate) fn print_call_timelines(streams: &CallStreams<'_>, human: bool) {
 struct PhaseSummary {
     name: String,
     start_us: i64,
+    end_us: i64,
     duration_ms: i64,
     samples: u32,
     /// Fields below are 0 when `samples == 0` (phase too short to land a
@@ -762,6 +831,7 @@ fn compute_phase_summary(
     PhaseSummary {
         name: name.to_owned(),
         start_us,
+        end_us,
         duration_ms: (end_us - start_us) / 1_000,
         samples: count,
         peak_rss_kb: peak_rss,
@@ -787,11 +857,12 @@ fn compute_phase_summary(
 pub(crate) fn print_phase_summary(
     samples: &[sidecar::Sample],
     markers: &[sidecar::Marker],
+    process: Process,
     human: bool,
 ) {
     // Shared with `--compare`: each marker opens a segment ending at the next
     // marker, regardless of its name.
-    let phases = build_phases(markers, samples);
+    let phases = build_phases(markers, samples, process);
     let clk_tck = clk_tck_per_second();
 
     let summaries: Vec<PhaseSummary> = phases
@@ -800,14 +871,14 @@ pub(crate) fn print_phase_summary(
         .collect();
 
     if human {
-        print_phase_summary_human(&summaries, clk_tck);
+        print_phase_summary_human(&summaries, process, clk_tck);
     } else {
-        print_phase_summary_jsonl(&summaries, samples, clk_tck);
+        print_phase_summary_jsonl(&summaries, samples, process, clk_tck);
     }
 }
 
 #[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
-fn print_phase_summary_human(summaries: &[PhaseSummary], clk_tck: i64) {
+fn print_phase_summary_human(summaries: &[PhaseSummary], process: Process, clk_tck: i64) {
     println!(
         "{:<24} {:>8} {:>10} {:>10} {:>10} {:>12} {:>12} {:>10}",
         "Phase",
@@ -823,9 +894,17 @@ fn print_phase_summary_human(summaries: &[PhaseSummary], clk_tck: i64) {
     for s in summaries {
         if s.samples == 0 {
             // Phase is shorter than the 100ms sampling interval or landed
-            // between two sample ticks. No /proc data to show, so skip the
-            // row entirely - the JSONL form keeps the zero-sample record
-            // for tooling that wants it.
+            // between two sample ticks. No /proc data to show, so a typed
+            // run skips the row entirely - the JSONL form keeps the
+            // zero-sample record for tooling that wants it. A script-bench
+            // child's phases are bounded exactly, so the phase is still
+            // shown, its readings absent.
+            if process.is_child() {
+                println!(
+                    "{:<24} {:>6}ms {:>10} {:>10} {:>10} {:>12} {:>12} {:>10}",
+                    s.name, s.duration_ms, "-", "-", "-", "-", "-", "-",
+                );
+            }
             continue;
         }
         let avg_cores = avg_cores_str(s.cpu_delta_jiffies, s.sample_span_us, clk_tck);
@@ -857,23 +936,38 @@ fn print_phase_summary_human(summaries: &[PhaseSummary], clk_tck: i64) {
 fn print_phase_summary_jsonl(
     summaries: &[PhaseSummary],
     samples: &[sidecar::Sample],
+    process: Process,
     clk_tck: i64,
 ) {
     // Top-level summary record: how many phases, total wall time, peak
     // thread count observed across the whole run. Always emitted first so
-    // a streaming parser can allocate based on `phases`.
-    let wall_ms = samples
-        .first()
-        .zip(samples.last())
-        .map(|(a, b)| (b.timestamp_us - a.timestamp_us) / 1_000)
-        .unwrap_or(0);
-    let peak_threads = samples.iter().map(|s| s.num_threads).max().unwrap_or(0);
-    let header = serde_json::json!({
-        "type": "summary",
-        "phases": summaries.len(),
-        "wall_ms": wall_ms,
-        "peak_threads": peak_threads,
-    });
+    // a streaming parser can allocate based on `phases`. A typed run's wall
+    // is its sample span; a script-bench child's is its actual wall, and
+    // with no sample its peak thread count is unknown, not 0.
+    let header = match process.wall_us() {
+        None => {
+            let wall_ms = samples
+                .first()
+                .zip(samples.last())
+                .map(|(a, b)| (b.timestamp_us - a.timestamp_us) / 1_000)
+                .unwrap_or(0);
+            let peak_threads = samples.iter().map(|s| s.num_threads).max().unwrap_or(0);
+            serde_json::json!({
+                "type": "summary",
+                "phases": summaries.len(),
+                "wall_ms": wall_ms,
+                "peak_threads": peak_threads,
+            })
+        }
+        Some(wall_us) => serde_json::json!({
+            "type": "summary",
+            "phases": summaries.len(),
+            "wall_ms": wall_us / 1_000,
+            "wall_us": wall_us,
+            "samples": samples.len(),
+            "peak_threads": samples.iter().map(|s| s.num_threads).max(),
+        }),
+    };
     println!("{header}");
 
     for s in summaries {
@@ -916,6 +1010,13 @@ fn print_phase_summary_jsonl(
                 "peak_threads": s.peak_threads,
             })
         };
+        let mut obj = obj;
+        if process.is_child()
+            && let Some(map) = obj.as_object_mut()
+        {
+            map.insert("end_us".to_owned(), s.end_us.into());
+            map.insert("duration_us".to_owned(), (s.end_us - s.start_us).into());
+        }
         println!("{obj}");
     }
 }
@@ -1168,6 +1269,9 @@ fn print_marker_durations_human(
 }
 
 struct PhaseStats {
+    /// Samples inside the phase; with none, every reading below is absent,
+    /// not zero.
+    samples: usize,
     peak_anon: i64,
     disk_read_kb: i64,
     /// CPU jiffies accumulated between the first and last sample inside the
@@ -1225,11 +1329,13 @@ fn phase_stats(samples: &[sidecar::Sample], start_us: i64, end_us: i64) -> Phase
     let mut last_cpu: i64 = 0;
     let mut first_ts: Option<i64> = None;
     let mut last_ts: i64 = 0;
+    let mut count = 0;
 
     for s in samples
         .iter()
         .filter(|s| s.timestamp_us >= start_us && s.timestamp_us < end_us)
     {
+        count += 1;
         if s.anon_kb > peak_anon {
             peak_anon = s.anon_kb;
         }
@@ -1249,6 +1355,7 @@ fn phase_stats(samples: &[sidecar::Sample], start_us: i64, end_us: i64) -> Phase
     }
 
     PhaseStats {
+        samples: count,
         peak_anon,
         // Clamp negative deltas (historical pre-fix-sidecar samples could
         // regress to zero when the process exited between /proc reads).
@@ -1265,9 +1372,11 @@ fn phase_stats(samples: &[sidecar::Sample], start_us: i64, end_us: i64) -> Phase
 fn build_phases(
     markers: &[sidecar::Marker],
     samples: &[sidecar::Sample],
+    process: Process,
 ) -> Vec<(String, i64, i64)> {
-    let process = stream_markers(markers, None);
-    sidecar::Timeline::new(&process, samples)
+    let stream = stream_markers(markers, None);
+    process
+        .timeline(&stream, samples)
         .segments()
         .into_iter()
         // The process timeline always has a final boundary.
@@ -1628,19 +1737,33 @@ mod stall_tests {
             stream_drops: 0,
             run_idx: 0,
         };
+        let sampled = Process::Sampled;
         assert_eq!(
-            resolve_phase_range("WRITE", &markers, &[], Some("a"), Some(&span)).unwrap(),
+            resolve_phase_range("WRITE", &markers, &[], Some("a"), Some(&span), sampled).unwrap(),
             (40, 60)
         );
-        let tail = resolve_phase_range("CLEANUP", &markers, &[], Some("a"), Some(&span))
+        let tail = resolve_phase_range("CLEANUP", &markers, &[], Some("a"), Some(&span), sampled)
             .unwrap_err()
             .to_string();
         assert!(tail.contains("after it returned"), "{tail}");
         // Without boundaries the last marker still has no known end.
-        assert!(resolve_phase_range("CLEANUP", &markers, &[], Some("a"), None).is_err());
+        assert!(resolve_phase_range("CLEANUP", &markers, &[], Some("a"), None, sampled).is_err());
         assert_eq!(
-            resolve_phase_range("WRITE", &markers, &[], Some("a"), None).unwrap(),
+            resolve_phase_range("WRITE", &markers, &[], Some("a"), None, sampled).unwrap(),
             (40, 90)
+        );
+        // A known child wall bounds no call stream: its last marker still
+        // has no known end.
+        assert!(
+            resolve_phase_range(
+                "CLEANUP",
+                &markers,
+                &[],
+                Some("a"),
+                None,
+                Process::Child { wall_us: 1_000 }
+            )
+            .is_err()
         );
     }
 

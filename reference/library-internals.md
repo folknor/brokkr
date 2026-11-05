@@ -196,7 +196,7 @@ visible in the record, never hidden behind an equal digest.
 
 `sidecar --compare` stays process-only, and `--durations` pairs START/END
 over a whole call stream; both are adjudicated at their code sites in
-`src/sidecar_cmd.rs`.
+`src/sidecar_cmd/`.
 
 ## Library against CLI timing
 

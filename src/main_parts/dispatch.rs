@@ -988,6 +988,7 @@ fn run_project(
             compare,
             human,
             run,
+            child,
             phase,
             grep,
             call,
@@ -1027,6 +1028,7 @@ fn run_project(
                 stat,
                 human,
                 run,
+                child,
                 phase,
                 grep,
                 call,
@@ -1037,7 +1039,7 @@ fn run_project(
                 head,
                 tail,
             };
-            sidecar_cmd::cmd_sidecar(project_root, &sq)
+            sidecar_cmd::cmd_sidecar(dev_config, project_root, project.name(), &sq)
         }
         Command::Invalidate {
             uuid,

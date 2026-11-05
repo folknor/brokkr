@@ -70,7 +70,7 @@ fn iteration(wall_us: i64, verdict: Option<&str>, record: &serde_json::Value) ->
 }
 
 /// A completed run of `bench` at `commit`, started at `started`.
-pub(in crate::bench) fn run(
+pub(crate) fn run(
     uuid_tail: u8,
     bench: &str,
     commit: char,

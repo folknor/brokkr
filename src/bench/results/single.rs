@@ -15,7 +15,8 @@ fn field(out: &mut String, label: &str, value: &str) {
     writeln!(out, "{label:<10}  {value}").expect("write to String is infallible");
 }
 
-fn ending(ending: &ChildEnding) -> String {
+/// A child's ending as every view words it.
+pub(crate) fn ending(ending: &ChildEnding) -> String {
     match ending {
         ChildEnding::Exited { code } => format!("exit {code}"),
         ChildEnding::Signalled { signal } => format!("signal {signal}"),
@@ -167,6 +168,18 @@ fn context(out: &mut String, run: &StoredRun) {
         "brokkr",
         &format!("{} {}", doc.brokkr_version, doc.argv.join(" ")),
     );
+    // Where a child's evidence is read, as a typed block names its sidecar.
+    if run.children_loaded && doc.iterations.iter().any(|i| !i.children.is_empty()) {
+        field(
+            out,
+            "sidecar",
+            &format!(
+                "brokkr sidecar {} [--run ITER] [--child N] ({})",
+                doc.uuid.chars().take(8).collect::<String>(),
+                crate::sidecar_cmd::view_selector_hint()
+            ),
+        );
+    }
 }
 
 /// One child: when it started and how long it ran, how it ended, what it

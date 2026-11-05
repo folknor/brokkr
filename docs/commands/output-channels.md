@@ -26,6 +26,9 @@ Both live under the project root's `.brokkr/` (never a `--commit` worktree's)
 and are resolved identically for every project by `BenchHarness::new_with_lock`
 (`src/measure.rs`), which reads git provenance from the build root.
 See `docs/commands/measure.md` for the sidecar's sampling/marker protocol.
+A script bench's children (`brokkr man bench`) are captured the same way but
+stored in the per-user bench store instead, each child's records apart;
+`brokkr results` and `brokkr sidecar <uuid>` read them there.
 
 The `.brokkr/` directory ignores itself: every command that reads config
 creates it with a `.gitignore` of `*` (left alone if one is already there), so

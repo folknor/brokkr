@@ -120,6 +120,135 @@ fn record(r: &Record) -> store::Record {
     }
 }
 
+/// One child's stored evidence in the forms `brokkr sidecar`'s views read,
+/// each record tagged with the child's iteration as its run.
+pub(crate) struct ChildEvidence {
+    pub(crate) samples: Vec<crate::sidecar::Sample>,
+    pub(crate) markers: Vec<crate::sidecar::Marker>,
+    pub(crate) counters: Vec<crate::sidecar::Counter>,
+    pub(crate) sink_ends: Vec<crate::sidecar::StoredSinkEnd>,
+}
+
+fn position<T: TryFrom<usize> + Copy>(idx: usize, max: T) -> T {
+    T::try_from(idx).unwrap_or(max)
+}
+
+/// The reverse of [`evidence`] for one child of `iteration`: a sample's index
+/// is its position, a marker's its position among markers, a sink end's its
+/// arrival position across every kind, the positions the store derives
+/// (`reference/bench-store.md`).
+pub(crate) fn child_evidence(stored: &store::Evidence, iteration: usize) -> ChildEvidence {
+    use crate::sidecar::{Counter, Marker, Sample, SinkEndKind, StoredSinkEnd};
+    let samples = stored
+        .samples
+        .iter()
+        .enumerate()
+        .map(|(idx, s)| Sample {
+            sample_idx: position(idx, i32::MAX),
+            timestamp_us: s.timestamp_us,
+            rss_kb: s.rss_kb,
+            anon_kb: s.anon_kb,
+            file_kb: s.file_kb,
+            shmem_kb: s.shmem_kb,
+            swap_kb: s.swap_kb,
+            vsize_kb: s.vsize_kb,
+            vm_hwm_kb: s.vm_hwm_kb,
+            utime: s.utime,
+            stime: s.stime,
+            num_threads: s.num_threads,
+            minflt: s.minflt,
+            majflt: s.majflt,
+            rchar: s.rchar,
+            wchar: s.wchar,
+            read_bytes: s.read_bytes,
+            write_bytes: s.write_bytes,
+            cancelled_write_bytes: s.cancelled_write_bytes,
+            syscr: s.syscr,
+            syscw: s.syscw,
+            vol_cs: s.vol_cs,
+            nonvol_cs: s.nonvol_cs,
+        })
+        .collect();
+    let mut out = ChildEvidence {
+        samples,
+        markers: Vec::new(),
+        counters: Vec::new(),
+        sink_ends: Vec::new(),
+    };
+    for (record_idx, record) in stored.records.iter().enumerate() {
+        match record {
+            store::Record::Marker {
+                timestamp_us,
+                call,
+                name,
+            } => out.markers.push(Marker {
+                marker_idx: position(out.markers.len(), i32::MAX),
+                timestamp_us: *timestamp_us,
+                name: name.clone(),
+                run_idx: iteration,
+                call: call.clone(),
+            }),
+            store::Record::Counter {
+                timestamp_us,
+                call,
+                name,
+                value,
+            } => out.counters.push(Counter {
+                timestamp_us: *timestamp_us,
+                name: name.clone(),
+                value: *value,
+                run_idx: iteration,
+                call: call.clone(),
+            }),
+            store::Record::Sealing {
+                timestamp_us,
+                call,
+                name,
+                value,
+            } => out.sink_ends.push(StoredSinkEnd {
+                run_idx: iteration,
+                record_idx: position(record_idx, i64::MAX),
+                timestamp_us: *timestamp_us,
+                call: call.clone(),
+                kind: SinkEndKind::Sealing {
+                    name: name.clone(),
+                    value: *value,
+                },
+            }),
+            store::Record::Terminal {
+                timestamp_us,
+                call,
+                end,
+                drops,
+            } => out.sink_ends.push(StoredSinkEnd {
+                run_idx: iteration,
+                record_idx: position(record_idx, i64::MAX),
+                timestamp_us: *timestamp_us,
+                call: call.clone(),
+                kind: SinkEndKind::Terminal {
+                    end: match end {
+                        store::SinkEnd::Sealed => SinkEnd::Sealed,
+                        store::SinkEnd::Failed => SinkEnd::Failed,
+                    },
+                    drops: *drops,
+                },
+            }),
+        }
+    }
+    out
+}
+
+/// A child's stored loss as the capture's own type, for its wording.
+pub(crate) fn capture_loss(loss: &store::Loss) -> crate::sidecar::CaptureLoss {
+    crate::sidecar::CaptureLoss {
+        rejected_lines: usize::try_from(loss.rejected_lines).unwrap_or(usize::MAX),
+        fifo_unread: loss.fifo_unread,
+        records_capped: loss.records_capped,
+        samples_capped: loss.samples_capped,
+        output_truncated: loss.output_truncated,
+    }
+}
+
 /// Everything a capture holds for one child. Call boundaries are left out:
 /// only a library call document supplies them, and a script bench parses
 /// none.

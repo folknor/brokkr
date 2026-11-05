@@ -1608,7 +1608,10 @@ In depth: `brokkr man measure`.",
         #[arg(long, conflicts_with_all = ["samples", "markers", "durations", "counters", "compare"])]
         stat: Option<String>,
 
-        /// Compare two results phase-by-phase (no UUID argument)
+        /// Compare two results phase-by-phase (no UUID argument). A
+        /// script-bench side may name its iteration and child,
+        /// `UUID/ITER/CHILD`; bare, it is the result's iteration and its only
+        /// child.
         #[arg(long, num_args = 2, value_names = ["UUID_A", "UUID_B"],
               conflicts_with_all = ["query", "samples", "markers", "durations", "counters", "stat"])]
         compare: Option<Vec<String>>,
@@ -1620,8 +1623,16 @@ In depth: `brokkr man measure`.",
         human: bool,
 
         /// Show a specific run index (0-based), or "all" for all runs. Defaults to the best run.
+        /// For a script-bench run, the iteration: by default its result's, or
+        /// the last one for a run without a result.
         #[arg(long)]
         run: Option<String>,
+
+        /// For a script-bench run, the child (0-based, launch order) of each
+        /// selected iteration. Defaults to the iteration's only child; needed
+        /// when it launched several. Refused for a typed run.
+        #[arg(long, value_name = "N", conflicts_with = "compare")]
+        child: Option<usize>,
 
         /// Filter to a marker phase (e.g. "STAGE2"). Requires --samples,
         /// --stat, or --counters.

@@ -93,26 +93,25 @@ mod visibility_tests {
     /// they must stay.
     #[test]
     fn measured_queries_follow_the_rows() {
-        // `results` also reads script-bench runs, which every project has.
-        for project in Project::ALL.iter().map(|(_, project)| project.clone()) {
-            assert!(
-                visible_in("results", &project),
-                "`results` hidden in {project}"
-            );
-        }
-        for name in ["sidecar", "invalidate"] {
-            assert!(
-                !visible_in(name, &Project::Litehtml),
-                "`{name}` in litehtml"
-            );
-            for project in Project::ALL
-                .iter()
-                .map(|(_, project)| project.clone())
-                .filter(|project| *project != Project::Litehtml)
-                .chain([Project::Other("some-foreign-repo".into())])
-            {
+        // `results` and `sidecar` also read script-bench runs, which every
+        // project has.
+        for name in ["results", "sidecar"] {
+            for project in Project::ALL.iter().map(|(_, project)| project.clone()) {
                 assert!(visible_in(name, &project), "`{name}` hidden in {project}");
             }
+        }
+        // `invalidate` deletes typed rows only, and litehtml has none.
+        assert!(!visible_in("invalidate", &Project::Litehtml));
+        for project in Project::ALL
+            .iter()
+            .map(|(_, project)| project.clone())
+            .filter(|project| *project != Project::Litehtml)
+            .chain([Project::Other("some-foreign-repo".into())])
+        {
+            assert!(
+                visible_in("invalidate", &project),
+                "`invalidate` hidden in {project}"
+            );
         }
     }
 
@@ -121,11 +120,11 @@ mod visibility_tests {
     /// built-ins would have dropped.
     #[test]
     fn except_subtracts_without_dropping_other() {
-        assert!(!visible_in("sidecar", &Project::Litehtml));
-        assert!(visible_in("sidecar", &Project::Sluggrs));
-        assert!(visible_in("sidecar", &Project::Piners));
+        assert!(!visible_in("invalidate", &Project::Litehtml));
+        assert!(visible_in("invalidate", &Project::Sluggrs));
+        assert!(visible_in("invalidate", &Project::Piners));
         assert!(visible_in(
-            "sidecar",
+            "invalidate",
             &Project::Other("some-foreign-repo".into())
         ));
     }
