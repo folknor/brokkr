@@ -236,7 +236,7 @@ follow bench names' rules; each declaration follows the param rules above.
 ## `[data]`
 
 ```toml
-[data.workloads.same_obj_read.bench]
+[data.workloads.hotpath.same_obj_read]
 file = "examples/fields/same_obj_read.lua"
 xxhash = "..."
 ```
@@ -245,6 +245,15 @@ Project data that bench params select from with `from` paths. brokkr reserves
 the name and does not interpret what is inside it, beyond requiring a table: a
 project's own tables need a home, since any other unknown top-level table is a
 hostname section.
+
+The table's shape is how a project limits what a param can select. With the
+scale outer and the workload inner, as above, a bench that must never run a
+seconds-scale file (one built with a profiler that backlogs on it) binds
+`workload = { from = "data.workloads.hotpath" }`, so that file is not a value
+it can take, while another bench binds `scale = { from = "data.workloads" }`
+and `workload = { from = "data.workloads.{scale}" }` over both. A refusal a
+script makes instead comes only once the build has run, and is stored as a
+failed run.
 
 ## Reserved names and the user-wide layer
 

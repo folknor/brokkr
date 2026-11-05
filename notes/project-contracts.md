@@ -307,9 +307,13 @@ settled as follows.
   which `from` paths walk. An unknown top-level table is a host section, so
   project tables need it. dellingr keeps `[dellingr.workloads]` for
   `brokkr dellingr` and adds one file entry per scale for `brokkr bench`,
-  `[data.workloads.NAME.bench]` and `.hotpath`, each `file` and `xxhash`,
-  so a `scale` param resolves to a file and pairs on key and digest, and a
-  re-registered workload cuts history as today.
+  `[data.workloads.bench.NAME]` and `[data.workloads.hotpath.NAME]`, each
+  `file` and `xxhash`, so a `scale` param resolves to a file and pairs on
+  key and digest, and a re-registered workload cuts history as today.
+  (Slice 10 put the scale outer, sparred: the instrumented benches bind
+  `data.workloads.hotpath` alone, so the seconds-scale file that backlogs a
+  profiler is not a value they can take, where a script refusal would come
+  only after the build.)
 - **A resolved file with a digest is verified before the build;** a
   mismatch is refused, naming the drifted pin, as `brokkr dellingr` does
   today. A file without one is hashed and recorded.
@@ -592,16 +596,10 @@ the alias boundary.
 
 What slice 5 left, with sizes:
 
-- Its per-call overhead: in the first real run (`brokkr bench startup` in
-  brokkr's own config, a 6 ms child) a `binary()` call started about 10 ms
-  into the block and the block took about 22 ms; admission, spool, FIFO and
-  the lease records' syncs are all inside the timed block by the design
-  ("the whole block is measured"). Fine for real workloads, distorting for
-  millisecond ones; slice 10 should judge it on a real bench before anyone
-  optimizes it (small: profile the call path, likely the syncs).
 - The iteration directory sits on the project's disk; a host-chosen
-  location for benches writing large outputs (slice 10's pbfhogg writers)
-  needs a key and the same gate obligation (small).
+  location for benches writing large outputs (pbfhogg's writers, `sort` and
+  `cat`, which slice 10 did not declare for this reason) needs a key and the
+  same gate obligation (small).
 - A child's stderr is a 1 MiB preview only; a bench needing all of it wants
   a stderr spool, a protocol change in `reference/bench-resources.md`
   (small, when a bench needs it; slice 8 found none that does).
@@ -723,8 +721,9 @@ What slice 7 left, with sizes:
 - No test drives `runner::run`, so the arm loop (stop rules, not-run naming,
   the HEAD check, the summary) is exercised only by hand; the binding,
   ordering and digest layers are unit tested. An end-to-end runner test
-  needs a fixture project that cargo builds inside the test (medium; slice
-  10's first real benches exercise it meanwhile).
+  needs a fixture project that cargo builds inside the test (medium). Slice
+  10's real benches exercised it by hand: a 25-arm fan-out, failed arms, a
+  `--commit` arm and binding refusals; still no automated test.
 - The HEAD check runs between arms only; within one arm, as in slice 5, a
   checkout moving during the build is recorded under the sha resolved
   before it (small: re-resolve after the build and fail the arm).
@@ -777,16 +776,57 @@ seam, the located builtin failures and the end-of-script line.
 
 What slice 8 left, with sizes:
 
-- The file builtins and `stdin` go through admission's store scan like a
-  call, inside the timed block; slice 10 should see whether a bench that
-  reads many small files pays for it (small, with slice 5's per-call
-  overhead).
 - Lua cannot hold an integer past 2^53 exactly, so `json.decode` hands one
   as its decimal text and `json.encode` writes that back as a string, not a
   number; a bench round-tripping such a document would want an integer
   wrapper (small, not planned).
 - No end-to-end test still: the new builtins are tested through
   `run_iteration` against real children, as slice 7's residue describes.
+
+Slice 10, the first real benches, written and run in both projects but
+committed in neither, so each is that project's ticket (pbfhogg#47,
+blocked on pbfhogg#48, its own check red at HEAD over an unaudited
+hotpath release; dellingr#10). pbfhogg's are seven,
+inline, beside the typed layer (`inspect`, `inspect-nodes`,
+`inspect-tags`, `check-refs`, `check-ids`, `check-index`, `digest`), over a
+shared `pbf` set (dataset, snapshot defaulting to `base`, variant) and an
+`io` set (buffered or direct-io), each contract change a `since()`:
+854f9465 for exit 1 as an answer, 98ce4840 for `check --index`, 16154b0d
+for `digest --form`, and 9c4d6c81, before which a bare `inspect tags` and
+any expression without `=` counted pairs, so there only `=` expressions
+run; a check's verdict is its answer, a digest's its validated digest
+line. dellingr's tree was dirty with another agent's work, so its three
+benches (`workload` over both scales, `workload-hotpath` and
+`workload-alloc` over the ms-scale files alone, with the
+`[data.workloads.SCALE.NAME]` registry) were run from a clone of its HEAD
+and filed as dellingr's ticket rather than committed. The first real run
+showed the per-call overhead slice 5 left: a 1.8 ms `pbfhogg inspect` child
+in an 18 ms block, eight fsyncs of the borrow lease per `binary()` call.
+Sparred to consensus against hiding it from the wall (a clock paused around
+brokkr's bookkeeping) and a pre-made borrow pool: a borrow is not durable
+(`reference/bench-resources.md`, The owner and its borrows), named apart
+(`<id>.borrow.lock`, `<id>.borrow.record`) so a scan clears a free one
+whatever its record says and removes a lockless record, while a held one
+must hold a valid borrow record and a borrow under the ordinary names keeps
+its old meaning. The same bench then took 2.1 ms, the child starting 0.2 ms
+into the block; a `read()` and `json.decode` of a hotpath report after its
+child cost about half a millisecond, so slice 8's file-builtin residue is
+closed with it. Refused in the spar: exempting a bench's `script_file` from
+the dirty mark, since nothing stops a project's build from including that
+file.
+
+What slice 10 left, with sizes:
+
+- The benches themselves land in pbfhogg and dellingr through their
+  tickets, once pbfhogg's check is green and dellingr's tree is free; the
+  text is final and was run (small, in those projects).
+- `check-locations` is not declared: no small dataset on the user's hosts
+  has a LocationsOnWays variant, so it could not be exercised (small, once
+  one is registered).
+- A param cannot be declared required: a bench without a natural default
+  (dellingr's `--workload`) refuses its absence only inside the script,
+  after the build, and the refusal is stored as a failed run (small: a
+  `required` key, refused at binding).
 
 9. **Evidence views of a script-bench run.** The rest of slice 9: the
    store holds every child's samples, FIFO records, capture loss and clock
@@ -798,11 +838,12 @@ What slice 8 left, with sizes:
    slice 12); `brokkr sidecar`
    resolves through `RunStore`, which does not read the bench store, so
    this is a selection boundary to design, not a flag. One launch,
-   smaller than the slices around it; best after slice 10 shows which
-   views a real bench needs.
-10. **The first real benches.** dellingr's workloads and pbfhogg's
-    read-only commands, mostly in their brokkr.toml, shaking out slices 3
-    to 8.
+   smaller than the slices around it. Slice 10's real benches name the
+   first views: dellingr's harness emits PARSE, SETUP, COLD and WARM
+   markers per child (`brokkr dellingr` users read SETUP and WARM through
+   `brokkr sidecar` before calling a delta), and pbfhogg's children emit
+   `CLI_COMMAND_START`/`END` and counters, all stored per child and shown
+   today only as counts.
 13. **The interrupt and the deadline.** Bump dellingr to the release that
     carries the interrupt (`StateBuilder::interrupt` / `State::interrupt`,
     `ErrorKind::Interrupted`, sticky, polled on backward jumps and call

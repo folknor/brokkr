@@ -632,7 +632,10 @@ pub fn count(n: usize, noun: &str) -> String {
             .is_some_and(|c| c.is_ascii_alphabetic() && !"aeiou".contains(c))
     {
         format!("{n} {stem}ies")
-    } else if noun.ends_with('s') {
+    } else if ["s", "x", "z", "ch", "sh"]
+        .iter()
+        .any(|end| noun.ends_with(end))
+    {
         format!("{n} {noun}es")
     } else {
         format!("{n} {noun}s")
@@ -705,6 +708,8 @@ mod count_tests {
         assert_eq!(super::count(0, "entry"), "0 entries");
         assert_eq!(super::count(2, "key"), "2 keys");
         assert_eq!(super::count(2, "process"), "2 processes");
+        assert_eq!(super::count(7, "bench"), "7 benches");
+        assert_eq!(super::count(2, "box"), "2 boxes");
     }
 
     /// The prefix field is 10 columns; a wider tag overflows by one space

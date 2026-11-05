@@ -42,17 +42,39 @@ owner's own release keeps it, as its error, for the same reason. So:
 
 A scan classifies every lease before it reclaims any, holding each free
 one's exclusive flock meanwhile, so the order the store lists leases in
-decides nothing. A free lease never becomes held again, so a borrow seen
-held that exits during the scan only delays its owner's reclamation. A lease
-whose record cannot be read may be a borrow of any owner: while one exists,
-no free owner is reclaimed (it is kept, with that reason, and blocks what
-overlaps it). Leases with no tie, a pbfhogg launch's and a staged write's,
+decides nothing; a free borrow-named lease (below), which owns and pins
+nothing, is the one removed as the scan meets it. A free lease never becomes
+held again, so a borrow seen held that exits during the scan only delays its
+owner's reclamation. A lease whose record cannot be read, other than a free
+borrow-named one, may be a borrow of any owner: while one exists, no free
+owner is reclaimed (it is kept, with that reason, and blocks what overlaps
+it). Leases with no tie, a pbfhogg launch's and a staged write's,
 are reclaimed exactly as before ties existed.
 
 The record says which a lease is: version 2 adds `owner` and
 `borrows_from`, and a version 1 record reads as untied. A record with both,
 a borrow holding a private resource, or a `borrows_from` that is no lease id
 is unreadable, an unknown reservation.
+
+**A borrow is not durable.** Every other lease's lock and record are synced
+(file and directory) before anything they describe exists, so that after a
+power loss no private directory is left without a record naming it. A
+borrow holds no private resource, and it pins its owner only while held,
+which no lease is after a power loss, so no reader needs its record across
+one: it matters only to the admissions and scans running beside it, which
+see the page cache. A borrow is therefore created, recorded and removed with
+no sync at all, which keeps each call's own bookkeeping, inside the measured
+block, to plain file operations. Its files are named apart for it,
+`<id>.borrow.lock` and `<id>.borrow.record` (made under the same pending
+name and flocked before the rename as every lease), and the name is what
+lets a scan clear what a power loss can leave: a free borrow-named lease is
+removed without its record being read (temporary, record, then the lock, so
+a removal that fails leaves the lock for the next scan, with a warning, and
+blocks nothing), as is a borrow whose record could not be published, and a borrow-named
+record or temporary is removed once its lock and pending name are certainly
+absent. A held borrow-named lease must hold a valid borrow record, else it
+is unknown. A borrow under the ordinary names, which brokkr wrote before
+the split, is read, pins its owner and is reclaimed as an ordinary lease is.
 
 ## Admitting a call
 

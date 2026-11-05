@@ -333,6 +333,26 @@ keeps the raw value. A strict reader (refuse or flag unknown shapes) would
 serve the capture path, the library profile reader and the results view
 alike.
 
+### A script bench's dirty mark sees a script_file edit but not an inline one (2026-11-05)
+
+Found while declaring the first real benches. `Attempt::document` marks a
+run dirty by `TreeState::for_measurement`, which exempts `brokkr.toml` and
+included config files, so an edited inline `script` leaves the run clean
+while the same edit in a `script_file` `.lua` marks it dirty; the script's
+bytes are stored with the run either way. Exempting script files was
+sparred and refused: nothing stops a project's build from reading the same
+file (`include_str!`, a build script), and an unused bench could name a
+build input. The asymmetry stays a convention; a fix would need a declared
+bench-only file set the build is proved not to read.
+
+### `brokkr bench` takes the global lock to list or describe (2026-11-05)
+
+Found while declaring the first real benches. Bare `brokkr bench` and
+`brokkr bench NAME --help` wait for the global brokkr lock like a run,
+though both only read the config (and `--help` the resolved view), so
+either blocks behind any running check or bench. The lock policy is the
+verb's `CommandSpec`; a listing could take none, as `results` does.
+
 ### A stop during bench-store retries is untested (2026-11-04)
 
 Found while landing the remote client. `bench::publication::Admission`

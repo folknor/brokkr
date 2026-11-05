@@ -21,6 +21,8 @@
 //!   removed by reclamation: one whose recorded identity matches, or, when a
 //!   crash came between its creation and the record of its identity (and for
 //!   a disposable file, which has none), the one at its 128-bit random name.
+//!   A script-bench call's borrow, which holds nothing private, is the one
+//!   lease left unsynced (`store`).
 //! - **Every mutation is gated.** Deletions, renames and replacements that can
 //!   touch such paths go through `guard`, which refuses when a reservation's
 //!   resource overlaps an operand, and refuses to remove a tree holding a
@@ -94,11 +96,8 @@ pub(crate) fn reclaim() -> Vec<String> {
     let root = store.root().display().to_string();
     // A kept lease is never dropped automatically; these say what to remove
     // by hand, once whatever it names is no longer in use.
-    let by_hand = |id: &str| {
-        format!(
-            "once nothing uses its paths, remove {root}/{id}.lock and {root}/{id}.record by hand"
-        )
-    };
+    let by_hand =
+        |id: &str| format!("once nothing uses its paths, remove every {root}/{id}.* file by hand");
     let mut lines: Vec<String> = scan
         .reservations
         .iter()
