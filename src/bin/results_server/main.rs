@@ -1,12 +1,15 @@
 //! `brokkr-results-server`: the bench store with a network layer in front.
 //!
-//! One process owns one SQLite file (`--db`): it takes an exclusive lock
-//! beside it, opens and migrates it through the store's own open, and serves
-//! the store's wire contract (`store::wire`) on `--listen` over HTTP/1.1. Every
-//! request runs on one worker thread that alone holds the connection, so
-//! every write is serial under `BEGIN IMMEDIATE`. Nothing deployment-specific
-//! is compiled in: the file and the address are always given, and who can
-//! reach the address is the network's business (no application auth).
+//! `serve`: one process owns one SQLite file (`--db`): it takes an exclusive
+//! lock beside it, opens and migrates it through the store's own open, and
+//! serves the store's wire contract (`store::wire`) on `--listen` over
+//! HTTP/1.1. Every request runs on one worker thread that alone holds the
+//! connection, so every write is serial under `BEGIN IMMEDIATE`. Nothing
+//! deployment-specific is compiled in: the file and the address are always
+//! given, and who can reach the address is the network's business (no
+//! application auth). `deploy` (`deploy.rs`) restarts the server a host
+//! declares and confirms it runs this build, by the executable digest its
+//! identity route reports (`identity.rs`).
 //!
 //! Self-contained like the rustc guard: the store is included by path, and
 //! nothing else of the brokkr crate is linked. `reference/results-server.md`
@@ -18,10 +21,14 @@
 #[path = "../../bench/store/mod.rs"]
 mod store;
 
+mod deploy;
 mod http;
+mod identity;
 mod owner;
 mod worker;
 
+#[cfg(test)]
+mod deploy_tests;
 #[cfg(test)]
 mod tests;
 
@@ -31,12 +38,28 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
-/// Serve the bench store over HTTP.
+/// The bench store over HTTP.
 #[derive(Debug, Parser)]
 #[command(name = "brokkr-results-server", version)]
-struct Args {
+struct Cli {
+    #[command(subcommand)]
+    command: Cmd,
+}
+
+#[derive(Debug, Subcommand)]
+enum Cmd {
+    /// Serve the bench store over HTTP.
+    Serve(ServeArgs),
+    /// Restart this host's server, if ~/.config/brokkr-results-server/deploy.toml
+    /// declares one, and confirm it answers with this build; nothing, and
+    /// success, on a host without that file.
+    Deploy,
+}
+
+#[derive(Debug, clap::Args)]
+struct ServeArgs {
     /// The SQLite file to own: an absolute path, created with its directory
     /// if missing. It must be on a local filesystem and belong to this server
     /// alone.
@@ -107,8 +130,11 @@ pub(crate) fn log(message: &str) {
 }
 
 fn main() -> ExitCode {
-    let args = Args::parse();
-    match run(&args) {
+    let ran = match Cli::parse().command {
+        Cmd::Serve(args) => serve(&args),
+        Cmd::Deploy => deploy::run().map_err(|message| format!("deploy: {message}")),
+    };
+    match ran {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             log(&message);
@@ -117,7 +143,14 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(args: &Args) -> Result<(), String> {
+fn serve(args: &ServeArgs) -> Result<(), String> {
+    // Read before anything else, from the opened executable, so it names
+    // the file this process runs even if an install replaces the path while
+    // the store migrates. A digest that cannot be read is no reason not to
+    // serve: the identity route omits it, and a deploy then fails.
+    let build = identity::executable_digest()
+        .map_err(|e| log(&format!("no build digest on the identity route: {e}")))
+        .ok();
     let owned = owner::own(&args.db)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -130,13 +163,13 @@ fn run(args: &Args) -> Result<(), String> {
         let bound = listener
             .local_addr()
             .map_err(|e| format!("cannot read the listening address: {e}"))?;
+        let path = owned.path.display().to_string();
+        let (queue, worker_gone) = worker::start(owned.store, Limits::DEFAULT.queue)?;
         log(&format!(
-            "serving {} on {bound}, protocol {}",
-            owned.path.display(),
+            "serving {path} on {bound}, protocol {}",
             store::wire::PROTOCOL_VERSION
         ));
-        let (queue, worker_gone) = worker::start(owned.store, Limits::DEFAULT.queue);
-        let shared = Arc::new(http::Shared::new(Limits::DEFAULT, queue));
+        let shared = Arc::new(http::Shared::new(Limits::DEFAULT, queue, build));
         let ended = http::serve(listener, shared, worker_gone, std::future::pending()).await;
         // The lock is held until here, past the last request served.
         drop(owned.lock);

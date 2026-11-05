@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::{Bytes, Incoming};
-use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE};
+use hyper::header::{CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
@@ -45,10 +45,15 @@ pub(crate) struct Shared {
     connections: Arc<Semaphore>,
     pub(crate) in_flight: Arc<Semaphore>,
     budget: Arc<Semaphore>,
+    /// The digest of the executable this process runs
+    /// ([`crate::identity::executable_digest`]), none when it could not be
+    /// read: the identity route then omits it, and no deploy can confirm
+    /// this server.
+    build: Option<String>,
 }
 
 impl Shared {
-    pub(crate) fn new(limits: Limits, queue: Queue) -> Self {
+    pub(crate) fn new(limits: Limits, queue: Queue, build: Option<String>) -> Self {
         let units = usize::try_from(limits.budget_bytes / BUDGET_UNIT).unwrap_or(usize::MAX);
         Self {
             limits,
@@ -56,6 +61,7 @@ impl Shared {
             connections: Arc::new(Semaphore::new(limits.connections)),
             in_flight: Arc::new(Semaphore::new(limits.in_flight)),
             budget: Arc::new(Semaphore::new(units.min(Semaphore::MAX_PERMITS))),
+            build,
         }
     }
 }
@@ -131,6 +137,9 @@ fn respond(code: StatusCode, body: Vec<u8>) -> Response<Full<Bytes>> {
     Response::builder()
         .status(code)
         .header(CONTENT_TYPE, "application/json")
+        // No answer is a fact to replay: a cached identity could report a
+        // build no live process runs.
+        .header(CACHE_CONTROL, "no-store")
         .header(wire::PROTOCOL_HEADER, wire::PROTOCOL_VERSION.to_string())
         .body(Full::new(Bytes::from(body)))
         .unwrap_or_else(|_| Response::new(Full::new(Bytes::new())))
@@ -157,13 +166,26 @@ fn log_failure(code: StatusCode, kind: Kind) {
     crate::log(&format!("answered {} {}", code.as_u16(), kind.name()));
 }
 
-/// The server's identity, for a health check: no store access.
-fn identity() -> Response<Full<Bytes>> {
-    let body = serde_json::json!({
-        "server": "brokkr-results-server",
+/// The server's identity, for a health check and for `deploy`: no store
+/// access. `build` is the running executable's digest; `probe`, when the
+/// query gives one, is echoed, so a caller knows the answer was made for its
+/// request.
+fn identity(shared: &Shared, query: Option<&str>) -> Response<Full<Bytes>> {
+    let probe = match crate::identity::probe_of(query) {
+        Ok(probe) => probe,
+        Err(message) => return refuse(StatusCode::BAD_REQUEST, Kind::BadRequest, message),
+    };
+    let mut body = serde_json::json!({
+        "server": crate::identity::SERVER,
         "version": env!("CARGO_PKG_VERSION"),
         "protocol": wire::PROTOCOL_VERSION,
     });
+    if let Some(build) = &shared.build {
+        body["build"] = build.as_str().into();
+    }
+    if let Some(probe) = probe {
+        body["probe"] = probe.into();
+    }
     respond(StatusCode::OK, body.to_string().into_bytes())
 }
 
@@ -172,7 +194,7 @@ async fn handle(request: Request<Incoming>, shared: &Shared) -> Response<Full<By
         return refuse(StatusCode::NOT_FOUND, Kind::BadRequest, "no such route");
     }
     match *request.method() {
-        Method::GET => return identity(),
+        Method::GET => return identity(shared, request.uri().query()),
         Method::POST => {}
         _ => {
             return refuse(

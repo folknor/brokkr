@@ -21,7 +21,7 @@ use crate::worker::{self, Job, RUNNING, WITHDRAWN};
 
 /// A fresh directory under the crate's gitignored `target/test-tmp/`; each
 /// test names its own.
-fn scratch(name: &str) -> PathBuf {
+pub(crate) fn scratch(name: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("target/test-tmp/results-server")
         .join(name);
@@ -70,9 +70,12 @@ fn document(uuid: &str, project: &str) -> RunDocument {
 
 const UUID: &str = "0123456789abcdef0123456789abcdef";
 
+/// The executable digest a test server reports.
+pub(crate) const BUILD: &str = "00112233445566778899aabbccddeeff";
+
 /// A running server on a loopback port; dropping it stops the runtime.
-struct Server {
-    addr: SocketAddr,
+pub(crate) struct Server {
+    pub(crate) addr: SocketAddr,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
     runtime: Option<tokio::runtime::Runtime>,
 }
@@ -86,7 +89,7 @@ impl Drop for Server {
     }
 }
 
-fn server(name: &str, limits: Limits) -> Server {
+pub(crate) fn server(name: &str, limits: Limits) -> Server {
     let dir = scratch(name);
     let owned = crate::owner::own(&dir.join("bench.db")).unwrap();
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -98,8 +101,8 @@ fn server(name: &str, limits: Limits) -> Server {
         .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
         .unwrap();
     let addr = listener.local_addr().unwrap();
-    let (queue, gone) = worker::start(owned.store, limits.queue);
-    let shared = Arc::new(crate::http::Shared::new(limits, queue));
+    let (queue, gone) = worker::start(owned.store, limits.queue).unwrap();
+    let shared = Arc::new(crate::http::Shared::new(limits, queue, Some(BUILD.into())));
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let lock = owned.lock;
     runtime.spawn(async move {
@@ -276,6 +279,33 @@ fn a_request_is_refused_from_its_head_before_its_body_is_read() {
     let identity = exchange(addr, "GET /bench HTTP/1.1\r\nHost: t\r\n\r\n", b"");
     assert_eq!(identity.status, 200);
     assert_eq!(identity.json()["protocol"], 1);
+    assert_eq!(identity.json()["build"], BUILD);
+    assert!(identity.json().get("probe").is_none());
+    assert!(
+        identity
+            .headers
+            .lines()
+            .any(|line| line.eq_ignore_ascii_case("cache-control: no-store")),
+        "{}",
+        identity.headers
+    );
+
+    let probed = exchange(
+        addr,
+        "GET /bench?probe=0a1b2c3d HTTP/1.1\r\nHost: t\r\n\r\n",
+        b"",
+    );
+    assert_eq!(probed.status, 200);
+    assert_eq!(probed.json()["probe"], "0a1b2c3d");
+    for bad in ["probe=", "probe=XYZ", "probe=ab&probe=cd"] {
+        let refused = exchange(
+            addr,
+            &format!("GET /bench?{bad} HTTP/1.1\r\nHost: t\r\n\r\n"),
+            b"",
+        );
+        assert_eq!(refused.status, 400, "{bad}");
+        assert_eq!(refused.failure().kind, "bad_request");
+    }
 
     let route = exchange(addr, "GET /other HTTP/1.1\r\nHost: t\r\n\r\n", b"");
     assert_eq!(route.status, 404);
@@ -385,7 +415,7 @@ impl Pending {
                 .start_paused(true)
                 .build()
                 .unwrap(),
-            shared: Arc::new(crate::http::Shared::new(limits, queue)),
+            shared: Arc::new(crate::http::Shared::new(limits, queue, None)),
             jobs,
         }
     }

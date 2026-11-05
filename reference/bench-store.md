@@ -179,7 +179,8 @@ the tag reads it from the key.
 `wire.rs` is the contract a results server and its clients share, with no
 HTTP in it. One route, `POST /bench`, takes one request and answers it;
 `GET /bench` answers the server's identity (`server`, `version`,
-`protocol`) without touching the store. Every request carries the
+`protocol`, and from `brokkr-results-server` its executable digest `build`
+and an echoed `probe`) without touching the store. Every request carries the
 `brokkr-bench-protocol` header naming `PROTOCOL_VERSION`, and every answer
 the server writes carries it back.
 

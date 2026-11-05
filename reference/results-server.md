@@ -16,15 +16,17 @@ It is not a brokkr subcommand: a server is a long-running process with its
 own lifecycle, run by whoever hosts one, and brokkr's global lock, project
 detection and run logs have nothing to say about it.
 
-Nothing deployment-specific is compiled in: the database file (`--db`) and
-the listening address (`--listen`) are always given. There is no
-application auth: who can reach the address is the network's business, and
-the documented deployment listens on loopback behind a TLS proxy.
+Nothing deployment-specific is compiled in: `serve` is always given the
+database file (`--db`) and the listening address (`--listen`), and `deploy`
+reads what a host declares. There is no application auth: who can reach the
+address is the network's business, and the documented deployment listens
+on loopback behind a TLS proxy.
 
-`main.rs` holds the arguments, `Limits` and startup; `owner.rs` the file's
-ownership; `worker.rs` the single worker and the job state machine;
-`http.rs` the HTTP layer; `tests.rs` the server against its contract over
-real loopback HTTP.
+`main.rs` holds the two subcommands, `Limits` and startup; `owner.rs` the
+file's ownership; `worker.rs` the single worker and the job state machine;
+`http.rs` the HTTP layer; `identity.rs` the executable digest and the probe;
+`deploy.rs` the deploy; `tests.rs` the server against its contract over
+real loopback HTTP, `deploy_tests.rs` deploy against such a server.
 
 ## Owning the file
 
@@ -71,9 +73,9 @@ connection is back in autocommit (`Store::in_transaction`): a connection
 left inside a transaction would poison every later request, so the worker
 stops instead, and the answer is never sent. The worker's whole lifetime is
 covered by a guard that signals the server when it ends, however it ends (a
-panic outside a job, the queue closing, a poisoned connection, a failed
-thread spawn), and the server then exits non-zero so its service manager
-restarts it.
+panic outside a job, the queue closing, a poisoned connection), and the
+server then exits non-zero so its service manager restarts it. A thread
+that cannot be spawned fails startup before anything is served.
 
 ## Admission and bounds
 
@@ -132,11 +134,77 @@ from the head, `busy`) is delivered best effort: there is no drain, so a peer
 still sending its body may see the connection reset instead, which a client
 counts as possibly sent and retries, idempotent by the run uuid.
 
+`GET /bench` is answered by this layer, never the worker: the server, its
+version and protocol, `build` and an echoed `probe` (Deploy, below). Every
+answer the service composes carries `Cache-Control: no-store`, since a
+replayed identity could report a build no live process runs.
+
 Failures are logged on stderr, one line each with the status and kind, for
 the service manager's journal; there is no access log. On SIGTERM the process
 ends without draining: SQLite rolls back an interrupted transaction, and a
 publication whose commit landed but whose answer was lost is answered from
 the stored run when the client republishes.
+
+## Deploy
+
+What deploy has to establish: after an install, the process serving the
+declared endpoint runs the executable deploy itself was started as (which a
+hook that installs and then runs it makes the one just installed; an
+install racing the deploy can separate the two), and if it does not, the
+deploy fails so the hook that ran it keeps it owed. The proof comes
+from that process, not from a service manager. At startup, before taking
+the file, the server streams an xxh3-128 digest of its opened
+`/proc/self/exe`, which names the file object it runs even if the path is
+replaced or unlinked while it migrates; deploy digests its own the same way
+and accepts only an answer that echoes the fresh random probe it sent, from
+a server of its protocol, reporting the same digest, before its deadline.
+The identity route exists only once the accept loop runs, after ownership,
+migration, the bind and a spawned worker (`worker::start` fails startup
+when the thread cannot spawn). A digest the server cannot read is logged
+and omitted, so the server still serves and deploy fails. xxh3 detects
+accidental mismatches, not forgery, and the digest covers the executable's
+bytes, not libraries or configuration.
+
+There is no freshness check: a server already running this build has
+nothing left to deploy, whatever the restart command did, and a restart
+that restarts nothing is caught at the next install that changes the
+executable, when the old digest answers. Rejected on that ground: a baseline instance compared before and
+after (an unobtainable baseline proves nothing), and a start time on a
+shared clock (a time sampled by startup code is not process birth, and time
+namespaces break the comparison).
+
+Rejected shapes, and why: a hostname compiled in (brokkr is public); a gate
+on `systemctl is-enabled` (its exit status counts static, alias, generated
+and transient units, and an unreachable manager looked like no server); a
+unit deploy writes and converges (drop-ins, unit lookup precedence and
+concurrent deploys stay independent inputs, and withdrawing loses the
+evidence that it was unfinished); `sd_notify` readiness behind a fixed
+`TimeoutStartSec` (a migration has no duration that separates slow from
+stuck, and the probe already gives readiness); a `[[install]]` step (it
+would restart services on every development install); the server exiting
+when its binary is replaced (a new build that fails to start would be
+invisible to the hook).
+
+The declaration's path is fixed under `$HOME` without XDG lookup, because a
+fleet hook's stripped environment and a login shell must find the same file;
+an absent file is the one outcome that touches nothing. The restart command
+is an argv the operator writes, run without a shell from the home
+directory, so whatever its launcher needs (`XDG_RUNTIME_DIR` for `systemctl
+--user`) is written there rather than guessed here. One deadline on the
+monotonic clock, fixed before anything else, covers the self digest, the
+command, which is not started once the deadline has passed and which deploy
+tries to kill at it (one that cannot be killed is left running, not waited
+for; what it started may continue), and every probe, each capped by what
+remains, with no proxy, no redirects, a bounded answer and a probe drawn
+without blocking on the kernel's generator. The work runs on a thread of its
+own (`deploy::watched`) the caller waits for until the deadline and a
+second's grace, so a spawn, a reap or a TLS handshake that ignores its own
+timeout cannot hold it past its bound; the grace is for the work's own
+report, not for new operations. Writing deploy's last line is outside the
+bound: a caller that never reads a full pipe can still hold it. Another build's answer is remembered and
+named at the deadline, not fatal on sight, since an asynchronous restart may
+still replace it. Deploy holds no lock and keeps no state: two overlapping
+deploys each report what they observed, not which build serves at the end.
 
 ## Tests
 
@@ -149,5 +217,10 @@ when the test blocks on it and no scheduling window decides a race (a handler dr
 job, which never runs; a wait expiring before the claim is proved unapplied;
 a wait expiring after the claim is uncertain while the job still lands), each
 checking the admission is held until the worker drops the job; and ownership (a second server, a
-symlinked alias, a hard link, a dangling link, a relative path). The wire
-without HTTP is `src/bench/wire_tests.rs`, in the main crate.
+symlinked alias, a hard link, a dangling link, a relative path).
+`deploy_tests.rs` runs deploy's convergence against such a server: this
+build confirmed, another build, an empty port, a failed status and an
+oversized answer failing at the deadline, a failing and a hanging restart
+command, the answers that do not count, and the declaration's refusals (a
+dangling link and an unrepresentable deadline among them). The wire without HTTP is
+`src/bench/wire_tests.rs`, in the main crate.

@@ -60,22 +60,23 @@ impl Drop for Gone {
     }
 }
 
-/// Start the worker on `store`. The receiver fires when it stops.
-pub(crate) fn start(store: Store, capacity: usize) -> (Queue, oneshot::Receiver<()>) {
+/// Start the worker on `store`. The receiver fires when it stops. A thread
+/// that cannot be spawned fails startup, so nothing is served, and nothing
+/// answers the identity route, without a worker behind it.
+pub(crate) fn start(
+    store: Store,
+    capacity: usize,
+) -> Result<(Queue, oneshot::Receiver<()>), String> {
     let (queue, jobs) = sync_channel(capacity);
     let (gone, worker_gone) = oneshot::channel();
-    let spawned = std::thread::Builder::new()
+    std::thread::Builder::new()
         .name("store-worker".into())
         .spawn(move || {
             let _gone = Gone(Some(gone));
             run(store, &jobs);
-        });
-    if let Err(error) = spawned {
-        // The closure, and with it the Gone guard, was dropped unrun, so
-        // the server sees the worker gone and stops.
-        crate::log(&format!("cannot start the store worker: {error}"));
-    }
-    (queue, worker_gone)
+        })
+        .map_err(|e| format!("cannot start the store worker: {e}"))?;
+    Ok((queue, worker_gone))
 }
 
 fn run(mut store: Store, jobs: &Receiver<Job>) {
