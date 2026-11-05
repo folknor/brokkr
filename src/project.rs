@@ -225,16 +225,27 @@ pub fn detect_optional() -> Result<Option<Detection>, DevError> {
     let Some(config_dir) = find_config_dir(&cwd) else {
         return Ok(None);
     };
-    let (project, config, project_config, config_sources) = config::load_with_sources(&config_dir)?;
-    crate::cargo_env::install(&config.cargo_env);
-    Ok(Some(Detection {
-        project,
-        config,
-        project_config,
-        project_root: ProjectRoot(config_dir),
-        build_root: BuildRoot::live(cwd),
-        config_sources,
-    }))
+    let detection = Detection::load(config_dir, cwd)?;
+    crate::cargo_env::install(&detection.config.cargo_env);
+    Ok(Some(detection))
+}
+
+impl Detection {
+    /// The project whose `brokkr.toml` is in `config_dir`, built from `cwd`:
+    /// what [`detect_optional`] finds, without reading the working directory
+    /// or installing `[cargo_env]`, so a test can detect a fixture project.
+    pub(crate) fn load(config_dir: PathBuf, cwd: PathBuf) -> Result<Self, DevError> {
+        let (project, config, project_config, config_sources) =
+            config::load_with_sources(&config_dir)?;
+        Ok(Self {
+            project,
+            config,
+            project_config,
+            project_root: ProjectRoot(config_dir),
+            build_root: BuildRoot::live(cwd),
+            config_sources,
+        })
+    }
 }
 
 /// Require the current project matches the expected project.

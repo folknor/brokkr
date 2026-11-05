@@ -382,7 +382,26 @@ during it and after it, but no test drives that: the flag is process-global,
 so a unit test setting it would stop every concurrent test's retries too.
 An injectable stop probe on `Admission` (the production one reading
 `shutdown`) would let the latch tests cover "a stop leaves one attempt and
-keeps the latch".
+keeps the latch". Since 2026-11-05 the runner's end-to-end tests
+(`src/bench/runner/run_tests.rs`) raise a guard-scoped stop from a loopback
+server under `test_scratch::process_global_lock` and see it cleared when the
+run's guard drops; a server that answers 503 and requests the stop on the
+first attempt would drive this through the real client without a probe.
+
+### A `--commit` worktree shares a configured cargo build dir (2026-11-05)
+
+Found while sparring the runner's end-to-end test. A worktree build is kept
+out of the live tree's target by pinning `CARGO_TARGET_DIR`
+(`worktree::isolated_target_dir`, the stale-binary bug its comment in
+`build.rs` describes), but cargo's separate build directory
+(`CARGO_BUILD_BUILD_DIR` or `build.build-dir`), which holds the intermediate
+artifacts and fingerprints, is not pinned: on a host that configures one, a
+worktree build and the live tree's share it. Check already serialises its
+builds when one is configured (`check_cmd/concurrency.rs`); the worktree path
+does not separate them. Pinning `CARGO_BUILD_BUILD_DIR` beside the target
+for an isolated build root would, once someone confirms cargo's fingerprints
+there reproduce the stale-binary case. The runner tests' fixture sets its own
+`build.build-dir` and refuses an inherited `CARGO_BUILD_BUILD_DIR` instead.
 
 ### Captured-child termination may leave group members alive (2026-11-02, unverified)
 

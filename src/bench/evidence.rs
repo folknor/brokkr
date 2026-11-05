@@ -17,8 +17,25 @@ impl From<store::StoreError> for DevError {
     }
 }
 
-/// The per-user bench store's path, `$XDG_DATA_HOME/brokkr/bench.db`.
+/// The bench store a run publishes to: [`user_store_path`], or under
+/// `cfg(test)` one scratch store per test process, so no test reads or
+/// writes the user's bench.db.
 pub(crate) fn store_path() -> Result<PathBuf, DevError> {
+    #[cfg(test)]
+    {
+        static STORE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        Ok(STORE
+            .get_or_init(|| crate::test_scratch::scratch("bench_evidence", "process-store"))
+            .join("bench.db"))
+    }
+    #[cfg(not(test))]
+    {
+        user_store_path()
+    }
+}
+
+/// The per-user bench store's path, `$XDG_DATA_HOME/brokkr/bench.db`.
+pub(crate) fn user_store_path() -> Result<PathBuf, DevError> {
     crate::user_dirs::bench_db().ok_or_else(|| {
         DevError::Config(
             "cannot determine data directory: neither XDG_DATA_HOME nor HOME is set".into(),

@@ -90,6 +90,23 @@ pub(super) const HOST_EFFECTS_FOR_COMMAND: HoldEffects = HoldEffects {
     ..HOST_EFFECTS_WITHOUT_TREE
 };
 
+/// The effects every test hold uses: no drain of the real compile lease
+/// (and so no stray reap, which SIGKILLs host processes), no tree
+/// activation, no capability attached to the hold, no post-hold reap, and no
+/// free-space gate (a test must not fail because the host's disk is full).
+/// What remains is the flock, re-entry, and the lock-file metadata.
+#[cfg(test)]
+pub(super) const INERT: HoldEffects = HoldEffects {
+    service: |_| Ok(None),
+    disk_gate: |_, _| Ok(()),
+    drain: || Ok(None),
+    tree: no_tree,
+    capability: |_| None,
+    after_fresh_hold: || {},
+    cgroup: |_| None,
+    maintenance: false,
+};
+
 fn host_service(
     ctx: &LockContext<'_>,
 ) -> Result<Option<(AcqId, crate::lock_service::Service)>, DevError> {

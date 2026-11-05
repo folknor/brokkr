@@ -125,6 +125,12 @@ pub fn record_prefix(git_root: &Path) -> String {
 /// in the live tree's target. Hand-built Cargo invocations need the same
 /// override as well, since their callers still launch Cargo independently.
 pub fn isolated_target_dir(build_root: &Path) -> Option<PathBuf> {
+    // A test's cargo fixture builds in its own target, never the outer
+    // test build's (`test_scratch::cargo_fixture_target`).
+    #[cfg(test)]
+    if let Some(target) = crate::test_scratch::cargo_fixture_target(build_root) {
+        return Some(target);
+    }
     let container = container().ok()?;
     let slot = build_root.parent()?;
     (slot.parent()?.parent()? == container).then(|| slot.join(TARGET_LINK))

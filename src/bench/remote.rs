@@ -296,4 +296,4 @@ fn transport(error: &ureq::Error) -> Failure {
 
 #[cfg(test)]
 #[path = "remote_tests.rs"]
-mod tests;
+pub(super) mod tests;

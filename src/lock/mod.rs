@@ -16,7 +16,7 @@ mod record;
 pub(crate) mod report;
 use self::hold_protocol::{HOST_EFFECTS, HOST_EFFECTS_WITHOUT_TREE, acquire_at};
 #[cfg(test)]
-use self::hold_protocol::{HoldEffects, LOCK_POLL, wait_for_flock};
+use self::hold_protocol::{HoldEffects, INERT, LOCK_POLL, wait_for_flock};
 pub use self::presentation::{same_agent_hint, verified_uptime_for};
 pub use self::record::LockInfo;
 use self::record::{invalidate_metadata, publish, read_lock_contents};
@@ -452,7 +452,7 @@ impl Drop for TreeRegistration {
 /// builds it serialises. If `$HOME` is unset or empty there is no defensible
 /// default, so this errors rather than inventing a cwd-relative one.
 fn lock_path() -> Result<PathBuf, DevError> {
-    let path = crate::user_dirs::lock_file().ok_or_else(|| {
+    let path = crate::user_dirs::lock_file_at(lock_home().as_deref()).ok_or_else(|| {
         DevError::Lock(LockError::from(
             "$HOME is not set or is empty - cannot locate the brokkr lock",
         ))
@@ -462,6 +462,51 @@ fn lock_path() -> Result<PathBuf, DevError> {
     })?;
     std::fs::create_dir_all(dir)?;
     Ok(path)
+}
+
+/// The home both lock files live under: `$HOME`. Under `cfg(test)` it is one
+/// scratch directory per test process instead, so no test takes, reads or
+/// drains the real lock or compile lease through this module, as
+/// `reservations::store` keeps tests off the real leases. A test that needs
+/// `build::cargo_build` holds that scratch lock through `test_hold`.
+fn lock_home() -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        static HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        Some(
+            HOME.get_or_init(|| crate::test_scratch::scratch("lockfile", "process-home"))
+                .clone(),
+        )
+    }
+    #[cfg(not(test))]
+    {
+        crate::user_dirs::home()
+    }
+}
+
+/// A hold on this test process's scratch lock ([`lock_home`]) with no host
+/// effects: no control service, no drain, no capability of its own, no reap,
+/// no tree policy and no disk gate. It is what [`current_hold`] finds, so code
+/// under test may build; a cargo it starts keeps the capability the test
+/// process inherited, which is what admits its compilers.
+#[cfg(test)]
+pub(crate) fn test_hold(
+    project_root: &crate::project::ProjectRoot,
+    build_root: &crate::project::BuildRoot,
+) -> LockGuard {
+    let path = lock_path().unwrap_or_else(|e| panic!("the test lock path: {e}"));
+    acquire_at(
+        &path,
+        &LockContext {
+            project: "test",
+            command: crate::cli::CommandId::Bench,
+            project_root,
+            build_root,
+            tree: None,
+        },
+        &hold_protocol::INERT,
+    )
+    .unwrap_or_else(|e| panic!("the test hold: {e}"))
 }
 
 /// Acquire an exclusive lock on the global lock file, blocking until free.
@@ -718,7 +763,7 @@ fn open_lock_file_raw(c_path: &std::ffi::CString) -> std::io::Result<RawFd> {
 pub fn compile_lock_path() -> Result<PathBuf, DevError> {
     // `lock_path` first: it creates the shared directory and owns the error.
     lock_path()?;
-    crate::user_dirs::compile_lock().ok_or_else(|| {
+    crate::user_dirs::compile_lock_at(lock_home().as_deref()).ok_or_else(|| {
         DevError::Lock(LockError::from(
             "$HOME is not set or is empty - cannot locate the compile lock",
         ))
@@ -751,54 +796,6 @@ mod tests {
     /// none of them ever touch the real global lock.
     fn tmp_lock(name: &str) -> PathBuf {
         crate::test_scratch::scratch_path("lockfile", name)
-    }
-
-    fn no_drain() -> Result<Option<OwnedFd>, DevError> {
-        Ok(None)
-    }
-
-    fn no_tree(_: &LockContext<'_>) -> Result<Option<crate::tree_policy::HeldTree>, DevError> {
-        Ok(None)
-    }
-
-    fn nothing_after() {}
-
-    fn no_service(
-        _: &LockContext<'_>,
-    ) -> Result<Option<(AcqId, crate::lock_service::Service)>, DevError> {
-        Ok(None)
-    }
-
-    fn no_capability(_: Nonce) -> Option<Nonce> {
-        None
-    }
-
-    fn no_disk_gate(
-        _: crate::cli::CommandId,
-        _: &crate::project::BuildRoot,
-    ) -> Result<(), DevError> {
-        Ok(())
-    }
-
-    /// The effects every test hold uses: no drain of the real compile lease
-    /// (and so no stray reap, which SIGKILLs host processes), no tree
-    /// activation, no capability attached to the hold, no
-    /// post-hold reap, and no free-space gate (a test must not fail because
-    /// the host's disk is full). What remains is exactly what these tests are
-    /// about: the flock, re-entry, and the lock-file metadata.
-    const INERT: HoldEffects = HoldEffects {
-        service: no_service,
-        disk_gate: no_disk_gate,
-        drain: no_drain,
-        tree: no_tree,
-        capability: no_capability,
-        after_fresh_hold: nothing_after,
-        cgroup: no_cgroup,
-        maintenance: false,
-    };
-
-    fn no_cgroup(_: &AcqId) -> Option<(cgroup::HoldCgroup, cgroup::CgroupView)> {
-        None
     }
 
     /// A holder on `path` publishing `auth`, as a second descriptor of this

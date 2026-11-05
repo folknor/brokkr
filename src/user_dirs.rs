@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 mod paths;
 
-pub(crate) use paths::{brokkr_state_dir, compile_lock, home, lock_file};
+pub(crate) use paths::{brokkr_state_dir, compile_lock_at, home, lock_file_at};
 
 /// An environment variable's value, with an empty value treated as unset.
 fn non_empty_var(name: &str) -> Option<OsString> {

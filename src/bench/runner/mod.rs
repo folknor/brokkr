@@ -17,6 +17,8 @@
 //! interrupted iteration included; the command then fails if any arm did.
 
 mod host;
+#[cfg(test)]
+mod run_tests;
 mod stored_config;
 
 use std::collections::BTreeMap;

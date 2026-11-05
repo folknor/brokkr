@@ -102,6 +102,34 @@ pub(crate) fn scratch_path(module: &str, name: &str) -> PathBuf {
     path
 }
 
+/// The module every cargo fixture's directory is allocated under.
+const CARGO_FIXTURES: &str = "cargo-fixtures";
+
+/// A fresh, empty directory for a project a test builds with cargo, named
+/// like [`scratch`]. A build root inside one builds in its own `target`
+/// ([`cargo_fixture_target`]).
+pub(crate) fn cargo_fixture(name: &str) -> PathBuf {
+    scratch(CARGO_FIXTURES, name)
+}
+
+/// The target directory a build root under the cargo fixtures builds in, its
+/// own `target`, or `None` for any other tree. `worktree::isolated_target_dir`
+/// answers this first under `cfg(test)`, so every cargo brokkr runs on a
+/// fixture is pinned there, whatever `CARGO_TARGET_DIR` or ancestor cargo
+/// config the test process inherited: a fixture build never shares the outer
+/// test build's target or waits on its lock. Not created here.
+pub(crate) fn cargo_fixture_target(build_root: &Path) -> Option<PathBuf> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target/test-tmp")
+        .join(CARGO_FIXTURES);
+    let canonical = |path: &Path| std::fs::canonicalize(path).ok();
+    let inside = build_root.starts_with(&root)
+        || canonical(build_root)
+            .zip(canonical(&root))
+            .is_some_and(|(tree, root)| tree.starts_with(root));
+    inside.then(|| build_root.join("target"))
+}
+
 /// The one lock serialising unit tests that mutate process-global state, such
 /// as the compilation capability slot (`hold`).
 ///

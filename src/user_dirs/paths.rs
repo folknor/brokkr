@@ -23,20 +23,13 @@ pub(crate) fn brokkr_state_dir_at(home: Option<&std::path::Path>) -> Option<Path
     home.map(|home| home.join(protocol::STATE_DIRECTORY))
 }
 
-/// The global brokkr lock file.
-pub(crate) fn lock_file() -> Option<PathBuf> {
-    lock_file_at(home().as_deref())
-}
-
+/// The global brokkr lock file under `home`.
 pub(crate) fn lock_file_at(home: Option<&std::path::Path>) -> Option<PathBuf> {
     brokkr_state_dir_at(home).map(|dir| dir.join(protocol::LOCK_FILE))
 }
 
-/// The lock shared by rustc compilers and drained exclusively by a fresh hold.
-pub(crate) fn compile_lock() -> Option<PathBuf> {
-    compile_lock_at(home().as_deref())
-}
-
+/// The lock shared by rustc compilers and drained exclusively by a fresh
+/// hold, under `home`.
 pub(crate) fn compile_lock_at(home: Option<&std::path::Path>) -> Option<PathBuf> {
     brokkr_state_dir_at(home).map(|dir| dir.join(protocol::COMPILE_LOCK_FILE))
 }

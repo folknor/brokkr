@@ -719,12 +719,14 @@ arm.
 
 What slice 7 left, with sizes:
 
-- No test drives `runner::run`, so the arm loop (stop rules, not-run naming,
-  the HEAD check, the summary) is exercised only by hand; the binding,
-  ordering and digest layers are unit tested. An end-to-end runner test
-  needs a fixture project that cargo builds inside the test (medium). Slice
-  10's real benches exercised it by hand: a 25-arm fan-out, failed arms, a
-  `--commit` arm and binding refusals; still no automated test.
+- A `--commit` arm is still exercised only by hand: its worktree, a
+  worktree failure stored as the arm's failure, and its exemption from the
+  HEAD check. The end-to-end runner test (`src/bench/runner/run_tests.rs`,
+  landed 2026-11-05) drives `runner::run` over a fixture crate cargo builds
+  inside the test and covers the rest of the arm loop, but worktrees live
+  under the real `$HOME/.brokkr/worktrees`, so a `--commit` case first
+  needs that directory under the test process's scratch home too, as the
+  lock and the bench store are (small).
 - The HEAD check runs between arms only; within one arm, as in slice 5, a
   checkout moving during the build is recorded under the sha resolved
   before it (small: re-resolve after the build and fail the arm).
@@ -781,8 +783,6 @@ What slice 8 left, with sizes:
   as its decimal text and `json.encode` writes that back as a string, not a
   number; a bench round-tripping such a document would want an integer
   wrapper (small, not planned).
-- No end-to-end test still: the new builtins are tested through
-  `run_iteration` against real children, as slice 7's residue describes.
 
 Slice 10, the first real benches, written and run in both projects but
 committed in neither, so each is that project's ticket (pbfhogg#47,

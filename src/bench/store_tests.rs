@@ -20,10 +20,19 @@ fn store(name: &str) -> Store {
 }
 
 /// The store sits beside history.db under the data home, whatever this
-/// host's data home is; the environment is read, never changed.
+/// host's data home is; the environment is read, never changed. A test
+/// publishes to a scratch store instead.
 #[test]
 fn the_store_lives_in_the_per_user_data_home() {
-    match (evidence::store_path(), crate::user_dirs::xdg_data_home()) {
+    assert_ne!(
+        evidence::store_path().ok(),
+        evidence::user_store_path().ok(),
+        "a test must never reach the user's bench.db"
+    );
+    match (
+        evidence::user_store_path(),
+        crate::user_dirs::xdg_data_home(),
+    ) {
         (Ok(path), Some(home)) => assert_eq!(path, home.join("brokkr").join("bench.db")),
         (Err(_), None) => {}
         (found, home) => panic!("store path {found:?} disagrees with data home {home:?}"),

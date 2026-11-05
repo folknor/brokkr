@@ -27,11 +27,11 @@ const QUICK: Policy = Policy {
 
 /// One request the scripted server read.
 #[derive(Debug, Clone)]
-struct Seen {
-    method: String,
-    path: String,
-    protocol: Option<String>,
-    body: Vec<u8>,
+pub(crate) struct Seen {
+    pub(crate) method: String,
+    pub(crate) path: String,
+    pub(crate) protocol: Option<String>,
+    pub(crate) body: Vec<u8>,
 }
 
 /// What the scripted server does with a request.
@@ -83,7 +83,8 @@ fn serve(
     (server, seen)
 }
 
-fn read_request(stream: &mut TcpStream) -> Option<Seen> {
+/// Read one HTTP/1.1 request, head and body, as the scripted server sees it.
+pub(crate) fn read_request(stream: &mut TcpStream) -> Option<Seen> {
     let mut buffer = Vec::new();
     let mut byte = [0u8; 1];
     while !buffer.ends_with(b"\r\n\r\n") {
@@ -120,13 +121,15 @@ fn read_request(stream: &mut TcpStream) -> Option<Seen> {
     })
 }
 
+/// The identity answer a probe gets, as status and body.
+pub(crate) fn identity_body(protocol: u32) -> Vec<u8> {
+    serde_json::json!({"server": "brokkr-results-server", "version": "0", "protocol": protocol})
+        .to_string()
+        .into_bytes()
+}
+
 fn identity(protocol: u32) -> Reply {
-    Reply::Answer(
-        200,
-        serde_json::json!({"server": "brokkr-results-server", "version": "0", "protocol": protocol})
-            .to_string()
-            .into_bytes(),
-    )
+    Reply::Answer(200, identity_body(protocol))
 }
 
 fn envelope(status: u16, kind: wire::Kind) -> Reply {
