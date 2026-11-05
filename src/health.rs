@@ -7,8 +7,14 @@
 //! store, so it stays cheap on every run; a filesystem under
 //! [`PRESSURE_FREE_PERCENT`] free is reported as a warning naming the stores
 //! on it and what shrinks each, and never fails the check. `brokkr env` walks
-//! every store for its allocated size as well. Nothing here removes
-//! anything; leftovers are `crate::maintenance`'s, retention is each store's.
+//! every store for its allocated size as well, over the same list, so the two
+//! report the same findings. The project's configured trees (cargo target,
+//! scratch, data) are not brokkr state and are never in that list: walking a
+//! large build dir or dataset tree took minutes, and their free space is
+//! `brokkr env`'s `storage:` block, read by `statvfs` alone. A store root that
+//! is itself a symlink into one of them is still walked, as [`usage`] follows
+//! a root. Nothing here removes anything; leftovers are
+//! `crate::maintenance`'s, retention is each store's.
 
 use std::collections::HashSet;
 use std::os::unix::fs::MetadataExt as _;
@@ -213,29 +219,6 @@ fn user_stores() -> Vec<Store> {
         .collect()
 }
 
-/// [`state_stores`] and the project's configured trees, for `brokkr env`.
-pub(crate) fn all_stores(state_root: &Path, paths: &crate::config::ResolvedPaths) -> Vec<Store> {
-    let mut stores = state_stores(state_root);
-    stores.extend([
-        Store {
-            name: "target",
-            path: paths.target_dir.clone(),
-            remedy: "brokkr clean --cargo",
-        },
-        Store {
-            name: "scratch",
-            path: paths.scratch_dir.clone(),
-            remedy: "brokkr clean",
-        },
-        Store {
-            name: "data",
-            path: paths.data_dir.clone(),
-            remedy: "no pruning: the datasets",
-        },
-    ]);
-    stores
-}
-
 /// A filesystem under pressure and the stores on it.
 pub(crate) struct Pressure<'s> {
     pub storage: StorageInfo,
@@ -321,10 +304,11 @@ pub(crate) fn describe(pressure: &Pressure<'_>) -> Vec<String> {
 
 /// `brokkr env`'s block: every store with its allocated size, each
 /// filesystem's free space, the stores whose filesystem could not be read,
-/// and the same pressure findings `brokkr check` gives.
+/// and the same pressure findings `brokkr check` gives, over the stores it
+/// probes and nothing else.
 #[allow(clippy::print_stdout)] // Data output, like the rest of `brokkr env`.
-pub(crate) fn print_env(state_root: &Path, paths: &crate::config::ResolvedPaths) {
-    let stores = all_stores(state_root, paths);
+pub(crate) fn print_env(state_root: &Path) {
+    let stores = state_stores(state_root);
     let width = stores.iter().map(|s| s.name.len()).max().unwrap_or(0) + 1;
     println!(
         "{:<12} allocated; stores can share files, so the rows do not sum",

@@ -15,7 +15,11 @@ pub struct EnvInfo {
     pub cpu: crate::host::cpu::CpuInfo,
     pub memory: crate::host::memory::MemoryInfo,
     pub drives: Vec<(String, String)>,
-    pub storage: Vec<StorageInfo>,
+    /// One row per configured tree (data, scratch, target), in that order;
+    /// `None` when no mount holding it could be identified. The trees' free
+    /// space is reported here and only here: `crate::health` covers brokkr's
+    /// own state, and no part of `env` walks these trees.
+    pub storage: Vec<(String, Option<StorageInfo>)>,
     pub tools: Vec<(String, String)>,
     pub datasets: Vec<(String, DatasetStatus)>,
     /// The user-wide `brokkr.toml` layer: where it is looked for, and what it
@@ -47,6 +51,14 @@ pub fn collect(
         ("scratch", &paths.scratch_dir),
         ("target", &paths.target_dir),
     ];
+    let probed = crate::host::storage::probe_paths(&storage_paths);
+    let storage = storage_paths
+        .iter()
+        .map(|(label, _)| {
+            let info = probed.iter().find(|info| info.label == *label).cloned();
+            ((*label).to_owned(), info)
+        })
+        .collect();
 
     EnvInfo {
         hostname: paths.hostname.clone(),
@@ -54,7 +66,7 @@ pub fn collect(
         cpu: crate::host::cpu::collect(),
         memory: crate::host::memory::collect(),
         drives: collect_drives(paths),
-        storage: crate::host::storage::probe_paths(&storage_paths),
+        storage,
         tools: collect_tools(project, project_root),
         datasets: paths.dataset_status(project_root),
         user_config: collect_user_config(sources),
@@ -91,7 +103,7 @@ pub(crate) fn cmd_env(
 
     let info = collect(&paths, project, project_root.as_path(), sources);
     print(&info);
-    crate::health::print_env(project_root.as_path(), &paths);
+    crate::health::print_env(project_root.as_path());
     if let Some(note) = crate::config::unmatched_host_note(dev_config, &paths.hostname) {
         output::warn(&format!(
             "{note}. Host-specific settings are ignored and defaults apply."
@@ -224,33 +236,57 @@ fn print_drives(info: &EnvInfo) {
 
 #[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 fn print_storage(info: &EnvInfo) {
-    if info.storage.is_empty() {
-        return;
+    for line in storage_lines(&info.storage) {
+        println!("{line}");
     }
-    let label_width = info
-        .storage
+}
+
+/// The `storage:` rows. A row repeating the previous row's mount folds to
+/// `(same mount)`, but only after a row that showed that mount's figures: an
+/// unreadable row, a mount not identified or a `statvfs` that failed, never
+/// folds and resets the fold, so the next readable row prints in full.
+fn storage_lines(storage: &[(String, Option<StorageInfo>)]) -> Vec<String> {
+    let label_width = storage
         .iter()
-        .map(|s| s.label.len())
+        .map(|(label, _)| label.len())
         .max()
         .unwrap_or(0);
     let mut prev_key: Option<(String, String)> = None;
-    for (i, s) in info.storage.iter().enumerate() {
+    let mut lines = Vec::with_capacity(storage.len());
+    for (i, (label, info)) in storage.iter().enumerate() {
         let header = if i == 0 { "storage:" } else { "" };
-        let key = (s.mount_point.clone(), s.device.clone());
-        let body = if prev_key.as_ref() == Some(&key) {
-            "(same mount)".to_owned()
-        } else {
-            format_storage_row(s)
+        let body = match info {
+            None => {
+                prev_key = None;
+                "filesystem could not be read".to_owned()
+            }
+            Some(s) if s.total_bytes == 0 => {
+                prev_key = None;
+                format!(
+                    "{}  {}  free space could not be read",
+                    s.mount_point, s.device
+                )
+            }
+            Some(s) => {
+                let key = (s.mount_point.clone(), s.device.clone());
+                let body = if prev_key.as_ref() == Some(&key) {
+                    "(same mount)".to_owned()
+                } else {
+                    format_storage_row(s)
+                };
+                prev_key = Some(key);
+                body
+            }
         };
-        println!(
+        lines.push(format!(
             "{:<12} {:<width$}  {}",
             header,
-            format!("{}:", s.label),
+            format!("{label}:"),
             body,
             width = label_width + 1,
-        );
-        prev_key = Some(key);
+        ));
     }
+    lines
 }
 
 fn format_storage_row(s: &StorageInfo) -> String {
@@ -446,6 +482,50 @@ mod tests {
             " (3.0%, under the 5% floor - locked commands refuse)"
         );
         assert_eq!(free_share(0, 0), ""); // unreadable size
+    }
+
+    fn mounted(label: &str, mount: &str, total: u64) -> (String, Option<StorageInfo>) {
+        let info = StorageInfo {
+            label: label.to_owned(),
+            mount_point: mount.to_owned(),
+            device: "/dev/x".to_owned(),
+            fstype: "ext4".to_owned(),
+            options: "rw".to_owned(),
+            model: None,
+            rotational: None,
+            free_bytes: total / 2,
+            total_bytes: total,
+        };
+        (label.to_owned(), Some(info))
+    }
+
+    /// Every configured tree gets a row, an unreadable one says so, and only
+    /// a row after one that showed the mount's figures folds.
+    #[test]
+    fn storage_rows_name_unreadable_trees_and_fold_only_after_figures() {
+        let lines = storage_lines(&[
+            mounted("data", "/m", 0),
+            mounted("scratch", "/m", 100),
+            mounted("target", "/m", 100),
+        ]);
+        assert!(
+            lines[0].ends_with("data:     /m  /dev/x  free space could not be read"),
+            "{lines:?}"
+        );
+        assert!(lines[1].contains("50B free / 100B"), "{lines:?}");
+        assert!(lines[2].ends_with("(same mount)"), "{lines:?}");
+
+        let lines = storage_lines(&[
+            mounted("data", "/m", 100),
+            ("scratch".to_owned(), None),
+            mounted("target", "/m", 100),
+        ]);
+        assert!(lines[0].starts_with("storage:"), "{lines:?}");
+        assert!(
+            lines[1].ends_with("scratch:  filesystem could not be read"),
+            "{lines:?}"
+        );
+        assert!(lines[2].contains("50B free / 100B"), "{lines:?}");
     }
 
     // -----------------------------------------------------------------------
