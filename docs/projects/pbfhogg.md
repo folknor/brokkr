@@ -617,6 +617,12 @@ twice), only the relations that hold relations with their relation members,
 and the objects of osmium's `getid -r` output, one closure. `verify diff` holds the identities to fetch:
 those its input OSC touches and those pbfhogg reports modified, as a sorted
 vector, O(change set), and the identities of osmium's listing, O(differences).
+`verify check-ids` reads each `check --ids --json` report from its file,
+keeping the counts and the verdict and counting the violations, which
+pbfhogg bounds by its `--max-errors` default; osmium's `fileinfo` report is
+read the same way. `verify getparents` holds the objects of one osmium
+output at a time, outputs of a handful of requested IDs, and from the
+input's relations only the first member of each kind.
 
 **Verdicts.** A check fails by returning `Err` (a tool crashed, output could
 not be parsed) or by returning `Findings` that carry a failed comparison;
@@ -890,15 +896,18 @@ the binary that runs it, so a verify subcommand offers `--direct-io` only
 where the current pbfhogg takes it on the step it is forwarded to. It
 reaches every run of the command a check verifies, and nothing else: `sort`,
 `cat`, `extract`, `multi-extract` (the single-pass runs), `tags-filter`,
-`getid-removeid` (every pbfhogg getid run), `add-locations-to-ways` (each
-engine), `merge` (`apply-changes`), `derive-changes` (`diff --format osc`,
+`getid-removeid` (every pbfhogg getid run), `getparents` (every pbfhogg
+getparents run), `add-locations-to-ways` (each
+engine), `check-ids` (every `check --ids` run, plain and `--full`), `merge`
+(`apply-changes`), `derive-changes` (`diff --format osc`,
 on the indexed pair and on the pair stripped of indexdata), `renumber`
 (`renumber`) and `diff` (the text diff, indexed and stripped, plain and
 `--verbose`). The steps a
 verdict is judged against run buffered, so an O_DIRECT fault cannot sit on
 both sides of a comparison or hand both tools the same wrong input: fixture
 builders (the `apply-changes` that makes `derive-changes`' and `diff`'s new
-PBF, `degrade --strip-indexdata`), references (`multi-extract`'s sequential
+PBF, `degrade --strip-indexdata`, `check-ids`' `degrade --unsort` and
+`--unsort-intra` copies and its `cat` fixtures), references (`multi-extract`'s sequential
 single-region extracts, `derive-changes`' roundtrip `apply-changes`) and
 comparators (inspections, normalising sorts, element diffs, `renumber`'s
 comparison `diff`, `check --locations`). `verify merge` and `verify extract`
@@ -1085,6 +1094,74 @@ An input whose indexdata claims a negative ID is refused, and so is a
 negative node or member reference in any object of osmium's output: osmium
 folds a negative ID to its absolute value and pbfhogg does not, and every
 reference either tool follows belongs to an object osmium wrote.
+
+`verify getparents` compares `pbfhogg getparents` with `osmium getparents`,
+each request with and without pbfhogg's `--add-self` (osmium's `-s`), by
+`compare_outputs` as getid is: osmium reads the reference input (the
+osmium-sorted copy on input without `Sort.Type_then_ID`) and pbfhogg the
+input. The requests are one per element kind, since what a request holds
+decides which blob kinds pbfhogg reads (a node request needs way and
+relation blobs, a way or relation request relation blobs, and `--add-self`
+adds the requested kind's own), so each exercises its own combination, and
+one of every kind: W is the lowest and
+highest way and the first way member of the lowest relation holding one, R
+the same for relations, N the lowest and highest node, the first node member
+of the lowest relation holding one and the first ref of a requested way (read
+from osmium's W `-s` output), and M all of them. Lowest and highest come from
+`osmium fileinfo -e` of the reference input, which must also show no ID
+repeated, since the outputs are compared by ID, and no negative ID. Members
+come from the input's relations as OPL, the run `verify getid-removeid`
+reads, so one cached execution serves both. A member or ref need not exist:
+a parent is found by its reference. osmium matches a reference by its
+absolute value and pbfhogg does not, so every osmium output is read as OPL
+before any comparison records a verdict, and a negative way ref or relation
+member in any of them is an error: that is where every match its folding
+adds would show. The same reading gives what the run exercised, never from
+pbfhogg's output: a way parent of a requested node, a relation parent of a
+requested node, way and relation, and per kind a requested object only
+`--add-self` selects. The PASS line names each one the input did not offer.
+A pass establishes selection, element content and tags compared by ID; not
+metadata, the header, which blobs either tool skipped, or which of pbfhogg's
+scan arms ran (the full-scan arm is chosen only from 150000 estimated blobs
+up, so a regional dataset runs the header-walker arm).
+
+`verify check-ids` runs `pbfhogg check --ids` and `check --ids --full`, both
+`--json` with the report written to the check's directory. osmium has no ID
+check, so the expectation comes from two readings of each file: `osmium
+fileinfo -e -j --no-crc` (`verify_fileinfo`), whose `objects_ordered` and
+`multiple_versions` say whether the decoded objects strictly ascend by kind
+and then ID in canonical order (libosmium's `id_order` is pbfhogg's), and
+brokkr's header-only reading of the framing (`pbf_frames::framing`), since on
+an indexed file pbfhogg judges type order from the kind every data blob
+claims, an empty blob's included. A file passes when osmium reads it in
+strict order and, if indexed, its claims never step back a kind. An ordered
+report without `multiple_versions` is an error, never read as false. Each
+mode must exit as its report says (0 with a pass and no violation, 1 with a
+failure and at least one), answer as expected, count each kind as osmium
+does (what catches a reader that skips objects), and report `indexed`
+exactly when the framing carries indexdata. The violations themselves and
+`--full`'s duplicate detail are not compared, and the PASS line says so. The
+cases: the input; when osmium reads it in strict order, three copies the
+check derives, the input stripped of indexdata (when it has any), `degrade
+--unsort --elements-per-blob 8000` (a step down across blobs, indexed) and
+`degrade --unsort-intra --strip-indexdata` (one inside a blob, unindexed),
+each required to keep the input's counts, its framing, and to be out of
+order exactly when its degradation fires on those counts (a kind above the
+cap, a kind with two objects), else the check is an error; and five fixed
+fixtures, written as OPL and converted by `osmium cat`, then rewritten by
+`pbfhogg cat` for an indexed form: a way before its nodes and an adjacent
+repeated ID in both forms, and an ordered file with an empty blob claiming
+nodes appended after its way blob, which osmium reads as ordered and pbfhogg
+must fail. Each fixture must show the property it exists for, read from
+osmium and the framing. The PASS line names each kind of case, indexed or
+not and in order or not, that neither the input nor a copy derived from it
+gave (an input osmium reads out of order derives nothing, and neither does
+one with no object); the fixtures do not count toward it. An input with
+a negative ID is refused (pbfhogg rejects negative input IDs project-wide,
+and `--full` reports each as untrackable), and one whose framing mixes blobs
+with and without indexdata too. Kind claims must be true: a blob whose
+decoded kind contradicts its claim stops pbfhogg's check without an answer,
+an error here.
 
 `verify add-locations-to-ways` runs osmium with `--keep-member-nodes`: pbfhogg
 keeps untagged relation-member nodes unconditionally (a documented pbfhogg

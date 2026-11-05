@@ -1,7 +1,9 @@
 //! A header-only walk of a PBF's blob framing and its blob-level indexdata.
 //!
 //! `verify getid-removeid` picks the IDs it requests from the dataset under
-//! test, and at planet scale it may not read the dataset to do so. This walk
+//! test, and at planet scale it may not read the dataset to do so; `verify
+//! check-ids` reads from the same walk the kind claims pbfhogg judges type
+//! order from ([`framing`]). This walk
 //! reads each blob's `BlobHeader` (a few dozen bytes) and seeks past the
 //! payload without reading it, so its I/O is proportional to the blob count,
 //! never to the data. The one payload it reads is the leading `OSMHeader`'s,
@@ -82,6 +84,89 @@ pub(super) fn walk(path: &Path) -> Result<IndexSummary, DevError> {
 
 fn walk_reader(r: &mut (impl Read + Seek), len: u64) -> Result<IndexSummary, String> {
     let mut summary = IndexSummary::default();
+    let features = walk_frames(r, len, |indexdata| {
+        let index = match indexdata {
+            Indexdata::Absent => return Err("data blob has no indexdata".into()),
+            Indexdata::Conflicting => return Err("data blob has two indexdata fields".into()),
+            Indexdata::Present(bytes) => decode_index(&bytes)?,
+        };
+        fold(&mut summary, index)
+    })?;
+    summary.required_features = features;
+    Ok(summary)
+}
+
+/// How a PBF's data blobs carry indexdata, read by the same header-only walk:
+/// what pbfhogg's `check --ids` reads its kind claims from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Framing {
+    /// No data blob carries indexdata.
+    Unindexed,
+    /// Every data blob carries indexdata, or there is no data blob (pbfhogg
+    /// reads a header-only file as indexed). `claims_in_kind_order` is
+    /// whether the kind every data blob claims, an empty one's included,
+    /// never decreases from node to way to relation: on an indexed file
+    /// pbfhogg's `check --ids` judges type order from those claims, not from
+    /// the decoded elements.
+    Indexed { claims_in_kind_order: bool },
+}
+
+/// Read `path`'s [`Framing`], refusing what pbfhogg could not read through
+/// its indexdata (as [`walk`] does) and a file mixing data blobs with and
+/// without indexdata, which pbfhogg classifies by its first blob alone.
+pub(super) fn framing(path: &Path) -> Result<Framing, DevError> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| DevError::Verify(format!("cannot open {}: {e}", path.display())))?;
+    let len = file
+        .metadata()
+        .map_err(|e| DevError::Verify(format!("cannot stat {}: {e}", path.display())))?
+        .len();
+    framing_reader(&mut file, len).map_err(|why| {
+        DevError::Verify(format!(
+            "cannot read the framing of {}: {why}",
+            path.display()
+        ))
+    })
+}
+
+fn framing_reader(r: &mut (impl Read + Seek), len: u64) -> Result<Framing, String> {
+    let (mut with, mut without) = (0u64, 0u64);
+    let mut highest: Option<usize> = None;
+    let mut in_order = true;
+    walk_frames(r, len, |indexdata| {
+        match indexdata {
+            Indexdata::Absent => without += 1,
+            Indexdata::Conflicting => return Err("data blob has two indexdata fields".into()),
+            Indexdata::Present(bytes) => {
+                let index = decode_index(&bytes)?;
+                with += 1;
+                if highest.is_some_and(|h| index.kind < h) {
+                    in_order = false;
+                }
+                highest = Some(highest.map_or(index.kind, |h| h.max(index.kind)));
+            }
+        }
+        Ok(())
+    })?;
+    match (with, without) {
+        (_, 0) => Ok(Framing::Indexed {
+            claims_in_kind_order: in_order,
+        }),
+        (0, _) => Ok(Framing::Unindexed),
+        (with, without) => Err(format!(
+            "{with} data blobs carry indexdata and {without} do not"
+        )),
+    }
+}
+
+/// Walk every frame, handing each data blob's indexdata to `on_data` and
+/// seeking past its payload; returns the header's required features.
+fn walk_frames(
+    r: &mut (impl Read + Seek),
+    len: u64,
+    mut on_data: impl FnMut(Indexdata) -> Result<(), String>,
+) -> Result<Vec<String>, String> {
+    let mut required_features = Vec::new();
     let mut offset: u64 = 0;
     let mut ordinal: u64 = 0;
     let mut seen_header = false;
@@ -119,18 +204,11 @@ fn walk_reader(r: &mut (impl Read + Seek), len: u64) -> Result<IndexSummary, Str
                 let mut payload = vec![0u8; size];
                 r.read_exact(&mut payload).map_err(|e| at(e.to_string()))?;
                 let block = blob_content(&payload).map_err(at)?;
-                summary.required_features = required_features(&block).map_err(at)?;
+                required_features = header_features(&block).map_err(at)?;
             }
             "OSMHeader" => return Err(at("OSMHeader not first, or repeated".into())),
             "OSMData" if seen_header => {
-                let index = match header.indexdata {
-                    Indexdata::Absent => return Err(at("data blob has no indexdata".into())),
-                    Indexdata::Conflicting => {
-                        return Err(at("data blob has two indexdata fields".into()));
-                    }
-                    Indexdata::Present(bytes) => decode_index(&bytes).map_err(at)?,
-                };
-                fold(&mut summary, index).map_err(at)?;
+                on_data(header.indexdata).map_err(at)?;
                 r.seek(SeekFrom::Start(payload_end))
                     .map_err(|e| at(e.to_string()))?;
             }
@@ -143,7 +221,68 @@ fn walk_reader(r: &mut (impl Read + Seek), len: u64) -> Result<IndexSummary, Str
     if !seen_header {
         return Err("no OSMHeader blob".into());
     }
-    Ok(summary)
+    Ok(required_features)
+}
+
+/// Append to the PBF at `path` one `OSMData` blob holding an empty
+/// `PrimitiveBlock` (an empty string table, no groups) whose indexdata
+/// (version 1) claims `kind` with no elements: a fixture whose decoded
+/// elements can be in order while its kind claims are not. Written raw,
+/// uncompressed.
+pub(super) fn append_empty_claim(path: &Path, kind: usize) -> Result<(), DevError> {
+    use std::io::Write as _;
+    let kind = u8::try_from(kind)
+        .ok()
+        .filter(|k| *k <= 2)
+        .ok_or_else(|| DevError::Internal(format!("element kind {kind} unknown")))?;
+    let mut block = Vec::new();
+    bytes_field(1, &[], &mut block);
+    let mut blob = Vec::new();
+    bytes_field(1, &block, &mut blob);
+    varint(2 << 3, &mut blob);
+    varint(block.len() as u64, &mut blob);
+    let mut index = vec![1, kind];
+    index.extend_from_slice(&0i64.to_le_bytes());
+    index.extend_from_slice(&0i64.to_le_bytes());
+    index.extend_from_slice(&0u64.to_le_bytes());
+    let mut header = Vec::new();
+    bytes_field(1, b"OSMData", &mut header);
+    bytes_field(2, &index, &mut header);
+    varint(3 << 3, &mut header);
+    varint(blob.len() as u64, &mut header);
+    let header_len = u32::try_from(header.len())
+        .map_err(|e| DevError::Internal(format!("blob header length: {e}")))?;
+    let mut frame = header_len.to_be_bytes().to_vec();
+    frame.extend_from_slice(&header);
+    frame.extend_from_slice(&blob);
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .map_err(|e| DevError::Verify(format!("cannot open {}: {e}", path.display())))?;
+    file.write_all(&frame)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+/// A protobuf varint.
+fn varint(mut v: u64, out: &mut Vec<u8>) {
+    loop {
+        #[allow(clippy::cast_possible_truncation)] // masked to seven bits
+        let b = (v & 0x7f) as u8;
+        v >>= 7;
+        if v == 0 {
+            out.push(b);
+            return;
+        }
+        out.push(b | 0x80);
+    }
+}
+
+/// A length-delimited protobuf field.
+fn bytes_field(number: u64, v: &[u8], out: &mut Vec<u8>) {
+    varint(number << 3 | 2, out);
+    varint(v.len() as u64, out);
+    out.extend_from_slice(v);
 }
 
 fn fold(summary: &mut IndexSummary, index: BlobIndex) -> Result<(), String> {
@@ -336,7 +475,7 @@ fn blob_content(bytes: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 /// `HeaderBlock.required_features` (field 4, repeated string).
-fn required_features(block: &[u8]) -> Result<Vec<String>, String> {
+fn header_features(block: &[u8]) -> Result<Vec<String>, String> {
     let mut features = Vec::new();
     for field in Fields::new(block) {
         match field? {
@@ -441,26 +580,10 @@ impl<'a> Iterator for Fields<'a> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::cast_possible_truncation)]
-    use super::{IndexSummary, KindClaim, walk_reader};
+    use super::{
+        Framing, IndexSummary, KindClaim, bytes_field, framing_reader, varint, walk_reader,
+    };
     use std::io::{Cursor, Write};
-
-    fn varint(mut v: u64, out: &mut Vec<u8>) {
-        loop {
-            let b = (v & 0x7f) as u8;
-            v >>= 7;
-            if v == 0 {
-                out.push(b);
-                return;
-            }
-            out.push(b | 0x80);
-        }
-    }
-
-    fn bytes_field(number: u64, v: &[u8], out: &mut Vec<u8>) {
-        varint(number << 3 | 2, out);
-        varint(v.len() as u64, out);
-        out.extend_from_slice(v);
-    }
 
     fn index(version: u8, kind: u8, min: i64, max: i64, count: u64) -> Vec<u8> {
         let mut b = vec![version, kind];
@@ -612,5 +735,76 @@ mod tests {
         let mut zero = vec![0u8; 4];
         zero.extend_from_slice(&bytes);
         assert!(run(&zero).is_err(), "zero header length");
+    }
+
+    fn read_framing(bytes: &[u8]) -> Result<Framing, String> {
+        framing_reader(&mut Cursor::new(bytes), bytes.len() as u64)
+    }
+
+    #[test]
+    fn framing_reads_claim_order_over_every_blob_an_empty_one_included() {
+        let ordered = file(
+            &[
+                vec![index(3, 0, 1, 2, 2)],
+                vec![index(3, 0, 3, 3, 1)],
+                vec![index(1, 1, 5, 5, 1)],
+                vec![index(3, 2, 7, 7, 1)],
+            ],
+            &[],
+        );
+        assert_eq!(
+            read_framing(&ordered).unwrap(),
+            Framing::Indexed {
+                claims_in_kind_order: true
+            }
+        );
+        // An empty node claim after a way claim is out of order, though no
+        // element is.
+        let empty_after = file(
+            &[
+                vec![index(3, 0, 1, 2, 2)],
+                vec![index(3, 1, 5, 5, 1)],
+                vec![index(1, 0, 0, 0, 0)],
+            ],
+            &[],
+        );
+        assert_eq!(
+            read_framing(&empty_after).unwrap(),
+            Framing::Indexed {
+                claims_in_kind_order: false
+            }
+        );
+        // A header-only file is indexed, as pbfhogg reads it.
+        assert_eq!(
+            read_framing(&file(&[], &[])).unwrap(),
+            Framing::Indexed {
+                claims_in_kind_order: true
+            }
+        );
+        assert_eq!(
+            read_framing(&file(&[vec![], vec![]], &[])).unwrap(),
+            Framing::Unindexed
+        );
+        assert!(read_framing(&file(&[vec![index(3, 0, 1, 2, 2)], vec![]], &[])).is_err());
+        let good = index(3, 0, 1, 2, 2);
+        assert!(read_framing(&file(&[vec![good.clone(), good]], &[])).is_err());
+    }
+
+    #[test]
+    fn an_appended_empty_claim_reads_back_as_one() {
+        let dir = crate::test_scratch::scratch("pbf-frames", "empty-claim");
+        let path = dir.join("f.osm.pbf");
+        std::fs::write(&path, file(&[vec![index(3, 1, 5, 5, 1)]], &[])).unwrap();
+        super::append_empty_claim(&path, 0).unwrap();
+        assert_eq!(
+            super::framing(&path).unwrap(),
+            Framing::Indexed {
+                claims_in_kind_order: false
+            }
+        );
+        let summary = super::walk(&path).unwrap();
+        assert_eq!(summary.count(0), 0);
+        assert_eq!(summary.count(1), 1);
+        assert!(super::append_empty_claim(&path, 3).is_err());
     }
 }

@@ -27,6 +27,30 @@ use std::path::Path;
 use crate::error::DevError;
 use crate::osc::OscKind;
 
+/// The relations of `reference_input` (the input osmium reads) as OPL, at
+/// `outdir/input-relations.opl`: `osmium cat -t relation -f opl`, one
+/// declared reference run, so every check reading the relations of the same
+/// file (`verify getid-removeid`, `verify getparents`) shares its cached
+/// execution.
+pub(super) fn input_relations(
+    harness: &super::verify::VerifyHarness,
+    reference_input: &Path,
+    outdir: &Path,
+) -> Result<std::path::PathBuf, DevError> {
+    let relations = outdir.join("input-relations.opl");
+    let captured = harness.reference(
+        &super::verify_reference::ToolRun::osmium("getid-relations.1")
+            .arg("cat")
+            .input(reference_input)
+            .args(&["-t", "relation", "-f", "opl", "-o"])
+            .output(&relations)
+            .arg("--overwrite"),
+        &outdir.join("input-relations.stdout"),
+    )?;
+    harness.check_exit(&captured, "osmium cat -t relation")?;
+    Ok(relations)
+}
+
 /// One relation record: its ID and its members as `(kind, ref)`.
 pub(super) struct OplRelation {
     pub id: i64,

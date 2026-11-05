@@ -522,7 +522,15 @@ mod tests {
     /// refuses it under check --refs alone).
     #[test]
     fn verify_direct_io_is_offered_only_where_forwarded() {
-        for sub in ["sort", "all", "derive-changes", "renumber", "diff"] {
+        for sub in [
+            "sort",
+            "all",
+            "derive-changes",
+            "renumber",
+            "diff",
+            "check-ids",
+            "getparents",
+        ] {
             let parsed = parse(["brokkr", "verify", sub, "--direct-io"]).expect(sub);
             let Command::Verify { verify, .. } = parsed.command else {
                 panic!("expected Verify");
@@ -532,7 +540,9 @@ mod tests {
                 | VerifyCommand::All { pbf, .. }
                 | VerifyCommand::DeriveChanges { pbf, .. }
                 | VerifyCommand::Renumber { pbf, .. }
-                | VerifyCommand::Diff { pbf, .. } => pbf,
+                | VerifyCommand::Diff { pbf, .. }
+                | VerifyCommand::CheckIds { pbf }
+                | VerifyCommand::Getparents { pbf } => pbf,
                 _ => panic!("unexpected verify subcommand for {sub}"),
             };
             assert!(pbf.direct_io, "{sub}");

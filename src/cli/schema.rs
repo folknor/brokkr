@@ -3363,6 +3363,13 @@ pub(crate) enum VerifyCommand {
         #[command(flatten)]
         pbf: VerifyPbfArgs,
     },
+    /// Cross-validate getparents, plain and --add-self, against osmium
+    /// getparents, one request per element kind and one of every kind
+    #[command(display_order = 4)]
+    Getparents {
+        #[command(flatten)]
+        pbf: VerifyPbfArgs,
+    },
     /// Cross-validate add-locations-to-ways against osmium
     #[command(display_order = 5)]
     AddLocationsToWays {
@@ -3390,6 +3397,14 @@ pub(crate) enum VerifyCommand {
     CheckRefs {
         #[command(flatten)]
         pbf: VerifyInputArgs,
+    },
+    /// Cross-validate check --ids, plain and --full, against osmium fileinfo
+    /// and the input's indexdata claims, on the input, copies derived from
+    /// it and fixed fixtures
+    #[command(display_order = 6)]
+    CheckIds {
+        #[command(flatten)]
+        pbf: VerifyPbfArgs,
     },
     /// Cross-validate apply-changes against osmium/osmosis/osmconvert
     ///

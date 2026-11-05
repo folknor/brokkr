@@ -5,9 +5,9 @@ use std::time::Instant;
 
 use super::verify::{CheckStatus, ENVIRONMENT_EXIT_CODE, VerifyHarness, labels, run_check_status};
 use super::{
-    verify_add_locations, verify_cat, verify_check_refs, verify_derive_changes, verify_diff,
-    verify_extract, verify_getid_removeid, verify_merge, verify_multi_extract, verify_renumber,
-    verify_sort, verify_tags_filter,
+    verify_add_locations, verify_cat, verify_check_ids, verify_check_refs, verify_derive_changes,
+    verify_diff, verify_extract, verify_getid_removeid, verify_getparents, verify_merge,
+    verify_multi_extract, verify_renumber, verify_sort, verify_tags_filter,
 };
 use crate::datasets::Bbox;
 use crate::error::DevError;
@@ -174,6 +174,14 @@ pub fn run(
         }),
     )?;
 
+    // 5b. getparents
+    tally(
+        &mut counts,
+        run_check_status(labels::GETPARENTS, verbose, || {
+            verify_getparents::run(harness, pbf, direct_io)
+        }),
+    )?;
+
     // 6. add-locations-to-ways
     tally(
         &mut counts,
@@ -187,6 +195,14 @@ pub fn run(
         &mut counts,
         run_check_status(labels::CHECK_REFS, verbose, || {
             verify_check_refs::run(harness, pbf)
+        }),
+    )?;
+
+    // 7b. check-ids
+    tally(
+        &mut counts,
+        run_check_status(labels::CHECK_IDS, verbose, || {
+            verify_check_ids::run(harness, pbf, direct_io)
         }),
     )?;
 

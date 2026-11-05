@@ -26,8 +26,10 @@ pub(super) mod labels {
     pub const MULTI_EXTRACT: &str = "multi-extract";
     pub const TAGS_FILTER: &str = "tags-filter";
     pub const GETID_REMOVEID: &str = "getid-removeid";
+    pub const GETPARENTS: &str = "getparents";
     pub const ADD_LOCATIONS_TO_WAYS: &str = "add-locations-to-ways";
     pub const CHECK_REFS: &str = "check-refs";
+    pub const CHECK_IDS: &str = "check-ids";
     pub const APPLY_CHANGES: &str = "apply-changes";
     pub const DIFF_OSC: &str = "diff --format osc";
     pub const RENUMBER: &str = "renumber";

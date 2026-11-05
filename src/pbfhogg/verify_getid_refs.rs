@@ -276,18 +276,7 @@ struct Choice {
 /// The input's relations as OPL, read twice: the holders of relations,
 /// then the presence of their members that hold none.
 fn choose_relation(harness: &VerifyHarness, input: &RefsInput<'_>) -> Result<Choice, DevError> {
-    let relations = input.outdir.join("input-relations.opl");
-    let captured = harness.reference(
-        &ToolRun::osmium("getid-relations.1")
-            .arg("cat")
-            .input(&input.order.reference_input)
-            .args(&["-t", "relation", "-f", "opl", "-o"])
-            .output(&relations)
-            .arg("--overwrite"),
-        &input.outdir.join("input-relations.stdout"),
-    )?;
-    harness.check_exit(&captured, "osmium cat -t relation")?;
-
+    let relations = opl::input_relations(harness, &input.order.reference_input, input.outdir)?;
     let mut nesting = Nesting::default();
     let records = opl::scan_relations(&relations, |r| nesting.add(r))?;
     let claimed = input.summary.count(2);

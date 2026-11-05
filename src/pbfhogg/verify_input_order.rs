@@ -8,8 +8,8 @@
 //! promises for such input:
 //!
 //! - A command that takes unsorted input (cat, extract, multi-extract,
-//!   tags-filter, getid, add-locations-to-ways with the sparse index, check
-//!   --refs) reads it as it is; every osmium run reads an osmium-sorted copy,
+//!   tags-filter, getid, getparents, add-locations-to-ways with the sparse
+//!   index, check --refs) reads it as it is; every osmium run reads an osmium-sorted copy,
 //!   and pbfhogg's outputs are compared through osmium-sorted copies
 //!   ([`InputOrder`], [`compare_outputs`]).
 //! - A command whose documented contract refuses it (apply-changes, diff in
