@@ -138,7 +138,8 @@ declared by what pbfhogg's implementation actually does:
 `add-locations-to-ways`, `build-geocode-index` and `diff --format osc` on
 every path, and `merge-changes` only where it can spill: several inputs, no
 `--simplify`, and a `--jobs` other than 1 (an omitted or 0 `--jobs` is auto
-and counts, whatever it resolves to on the host). Since pbfhogg 2b1c6ba1 only
+and counts, whatever it resolves to on the host; the typed command and `verify
+merge-changes` ask one predicate, `commands::merge_changes_spills`). Since pbfhogg 2b1c6ba1 only
 those make a run directory, and every other merge-changes refuses `--tmp-dir`
 as a usage error. Builds from c97b9985, which gave merge-changes `--tmp-dir`,
 up to 2b1c6ba1 made a run directory on every merge-changes; the flag probe
@@ -625,7 +626,11 @@ output at a time, outputs of a handful of requested IDs, and from the
 input's relations only the first member of each kind. `verify repack` and
 `verify degrade` read osmium diff's listings one identity at a time, pull the
 input's and the output's blob claims side by side, and decode at most one
-output blob at a time, for the few IDs they locate.
+output blob at a time, for the few IDs they locate. `verify merge-changes`
+and `verify tags-filter-osc` write every change listing and every expected
+output to files and compare them record by record; the simplify model is an
+external sort with a bounded buffer and fan-in, its expected records fetched
+from the listing by offset.
 
 **Verdicts.** A check fails by returning `Err` (a tool crashed, output could
 not be parsed) or by returning `Findings` that carry a failed comparison;
@@ -922,12 +927,15 @@ and `verify all --direct-io` runs it buffered: pbfhogg refuses
 its ref check reads through buffered parallel unaligned preads. Revisions
 from fb8dd3c0 until 053def6a did read it there; O_DIRECT oracle coverage of
 their ref check is given up rather than reached by probing the binary or
-retrying a refusal.
+retrying a refusal. `merge-changes` and `tags-filter-osc` do not take the
+flag either, since pbfhogg refuses it for both commands, and `verify all
+--direct-io` runs them without it.
 Verify builds pbfhogg with the host's configured features and does not enable
 `linux-direct-io` itself.
 
 OSC resolution for the change-consuming verifies (`merge` / `derive-changes`
-/ `diff`) is snapshot-aware via `resolve_verify_osc`: a named snapshot that
+/ `diff` / `merge-changes` / `tags-filter-osc`) is snapshot-aware via
+`resolve_verify_osc` (and `resolve_verify_osc_range` for a range): a named snapshot that
 carries its own `osc` table (a point-in-time snapshot) is diffed against
 *that* chain; an encoding-only snapshot (degrade/repack has no OSC table)
 falls back to the dataset's primary chain - the logically-correct diff stream,
@@ -1294,6 +1302,77 @@ Under `--commit` nothing is negotiated: a build lacking what the selected
 mode runs - its engine, `check --agreement`, and under `all` both engines
 and `digest --form` - fails the check.
 
+`verify merge-changes` and `verify tags-filter-osc` read change files only,
+from `--osc-seq` (or a dataset's only OSC), `--osc PATH`, or, for
+merge-changes, `--osc-range LO..HI` (every sequence registered, merged in
+sequence order) or `--osc` repeated (merged in the given order); the OSC
+table follows the snapshot rule above. Neither takes `--direct-io`, which
+pbfhogg refuses for both commands, and `verify all` runs both, on its one
+OSC, without it. Every change file either reads, input or output, becomes a
+change listing (`verify_change_listing`): osmium's `osmium cat -f opl`
+(run id `osc-opl.1`) joined by position with brokkr's strict XML scan
+(`scan_osc_changes`), each position required to name the same kind and ID
+and the XML version to be osmium's (`v0` for none), with no change left over
+on either side. The XML side carries what osmium cannot: the container's
+action (libosmium's writer derives create or modify from the version) and
+the metadata attributes as written. Comparisons are record for record: the
+action, the metadata attributes, and osmium's decoding of the object. The
+expected side is read as pbfhogg writes a change, a delete as its identity
+and metadata with no body (tags, coordinates, refs or members) and an empty
+attribute as none, and the actual side is held to that, so pbfhogg's output
+must carry no delete body and no empty attribute. pbfhogg's user
+documentation does not say it drops a delete's body, which osmium keeps;
+each PASS line counts the deletes concerned. Section boundaries are not
+compared. Each command also runs with `--jobs 1` to a plain `.osc`, whose
+decompressed content must equal the automatic run's `.osc.gz`, which
+pbfhogg promises for default `merge-changes` and an OSC `tags-filter`.
+
+`merge-changes` is not judged by `osmium merge-changes`, which sorts every
+change by type, ID, version and timestamp in both modes: its default mode
+discards the order pbfhogg keeps, and its `-s` keeps the highest version,
+then the later timestamp, then the later input, where pbfhogg keeps the last
+change by position. Default mode must equal its inputs' listings
+concatenated. `--simplify` must equal a model computed with an external sort
+of fixed-size change records (`verify_extsort`: bounded chunks and fan-in,
+one object's history scanned at a time): each object's last change by input
+position, in a create, a modify and a delete group, each in (kind, signed ID)
+order. The model also applies pbfhogg's version floor (DEVIATIONS.md, "Change
+stream: version precedence is enforced"): a change claiming a lower version
+than one claimed earlier for its object is a regression, an unversioned
+change claims nothing, and pbfhogg reports the one at the smallest position;
+where the model finds one, both `--simplify` runs must exit 2 naming that
+object and both versions, with no output published, and `--simplify
+--allow-version-regression` must equal the positional model. The same scan
+predicts what `osmium merge-changes -s` keeps, and osmium's run (`-f opl`,
+run id `merge-changes-simplify.1`) must keep exactly that: a cross-check of
+the reading and the model, which counts the objects where the two rules pick
+different changes. libosmium compares timestamps only when both are valid,
+no consistent order when one object mixes changes with and without one, so
+the cross-check runs only when no object does, and the PASS line says when
+it did not. Cases: the inputs; the inputs twice over, several inputs and so
+the run that can spill (scratch declared by the same predicate as the typed
+command), whose replay is a regression wherever an object's version
+advances within the inputs; and fixtures brokkr writes: equal-version
+changes decided by position (modify then delete, delete then modify, two
+modifies whose bodies, metadata and timestamps oppose their order), a create
+at version 5 and deletes with bodies; a backward pair, refused and then
+allowed; a v9, unversioned, v8 history, refused on the v8; and two objects
+regressing in the opposite order to their IDs, refused on the earlier. Each
+fixture's model must show what the fixture exists for, or the check errors.
+
+`tags-filter-osc` uses `osmium tags-filter -R` as the reference: osmium takes
+no change file, but with `-R` it is a pure predicate on each object's own
+tags in input order, and its manual admits it under `-R` on a file of several
+versions per object, which osmium's OPL of the change file is (run id
+`tags-filter-osc.1`, `-F opl -f opl`). The expected output walks the input
+listing in lockstep with osmium's: a create or modify is kept exactly when it
+is osmium's next line, which is exact since identical records get identical
+decisions, every delete is kept, and osmium's output must be used up. pbfhogg
+must write those changes as one create, one modify and one delete section,
+each holding its node, way and relation changes in input order. It runs
+`highway=primary`, `amenity=restaurant`, `w/highway=primary` and the pair
+`n/amenity r/type=route`.
+
 ## OSC parser (`src/osc.rs`)
 
 Minimal `.osc` / `.osc.gz` reader. `scan_osc_file` calls back once per
@@ -1301,15 +1380,21 @@ element entry with its (`<create>` / `<modify>` / `<delete>`) action, kind
 and ID, in file order, and keeps nothing between entries; what is retained
 is the caller's choice. Used by `verify_merge` for the delete-set carve-out
 and the streamed classification of the element diff, and by `verify_diff`,
-strictly, for the identities its input OSC touches.
+strictly, for the identities its input OSC touches. `scan_osc_changes`, also
+strict, adds each entry's metadata attributes (`version` as an integer;
+`timestamp`, `changeset`, `uid`, `user` and `visible` decoded, references
+resolved and literal whitespace normalised as an XML parser does, an absent
+attribute apart from an empty one) for the change listings of `verify
+merge-changes` and `verify tags-filter-osc`; an entry whose attributes cannot
+be read is an error.
 
 Streaming hand-rolled tag scanner; gzip and plain XML are consumed in bounded
 chunks, and the scanner retains only its current tag rather than the entire
 decompressed file. It is tolerant of XML comments, processing
 instructions, self-closing elements, and single-quoted attributes, and a `>`
 inside a quoted attribute value does not end the tag (XML allows it raw). Element
-bodies (tags / refs / members / coords / metadata) are deliberately skipped -
-only IDs are needed. The document itself is checked: the first element must
+bodies (tags / refs / members / coords) are deliberately skipped, and so is
+metadata outside `scan_osc_changes`. The document itself is checked: the first element must
 be the `<osmChange>` root and the root must be closed, with nothing after it.
 An empty file, a non-OSC document or a truncated diff is an error, not an
 empty scan - `verify_merge` would otherwise report it as

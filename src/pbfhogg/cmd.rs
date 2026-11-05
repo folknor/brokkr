@@ -105,6 +105,33 @@ fn resolve_verify_osc(
     paths: &config::ResolvedPaths,
     project_root: &Path,
 ) -> Result<(PathBuf, OscScope), DevError> {
+    let (scope_ref, scope) = osc_scope(dataset, snapshot, paths);
+    let (path, _seq) =
+        resolve::resolve_single_osc(dataset, &scope_ref, osc_seq, paths, project_root)?;
+    Ok((path, scope))
+}
+
+/// [`resolve_verify_osc`] for a range of sequences, every one registered,
+/// in sequence order (`verify merge-changes --osc-range`).
+fn resolve_verify_osc_range(
+    dataset: &str,
+    snapshot: Option<&resolve::SnapshotRef>,
+    range: &config::OscRange,
+    paths: &config::ResolvedPaths,
+    project_root: &Path,
+) -> Result<(Vec<PathBuf>, OscScope), DevError> {
+    let (scope_ref, scope) = osc_scope(dataset, snapshot, paths);
+    let oscs = resolve::resolve_osc_range(dataset, &scope_ref, range, paths, project_root)?;
+    Ok((oscs, scope))
+}
+
+/// The OSC table a verify reads: the named snapshot's own when it has one,
+/// else the dataset's primary chain.
+fn osc_scope(
+    dataset: &str,
+    snapshot: Option<&resolve::SnapshotRef>,
+    paths: &config::ResolvedPaths,
+) -> (resolve::SnapshotRef, OscScope) {
     let snapshot_ref = resolve::SnapshotRef::from_opt(snapshot);
     let use_snapshot = match &snapshot_ref {
         resolve::SnapshotRef::Base => false,
@@ -114,14 +141,11 @@ fn resolve_verify_osc(
             .and_then(|ds| ds.snapshot.get(key))
             .is_some_and(|snap| !snap.osc.is_empty()),
     };
-    let (scope_ref, scope) = if use_snapshot {
+    if use_snapshot {
         (snapshot_ref, OscScope::Snapshot)
     } else {
         (resolve::SnapshotRef::Base, OscScope::Base)
-    };
-    let (path, _seq) =
-        resolve::resolve_single_osc(dataset, &scope_ref, osc_seq, paths, project_root)?;
-    Ok((path, scope))
+    }
 }
 
 /// Whether `verify all` has an OSC to resolve at all: `--osc-seq` was given,
@@ -629,6 +653,54 @@ pub(crate) fn verify(
                     locations_on_ways,
                 )
             }
+            VerifyCommand::MergeChanges {
+                osc_source,
+                osc_range,
+                osc,
+            } => {
+                let oscs = if !osc.is_empty() {
+                    osc.iter()
+                        .map(|p| canonical_fixture(p, project_root, "--osc"))
+                        .collect::<Result<Vec<_>, _>>()?
+                } else if let Some(range) = &osc_range {
+                    let (oscs, scope) = resolve_verify_osc_range(
+                        &osc_source.dataset,
+                        osc_source.snapshot.as_ref(),
+                        range,
+                        &paths,
+                        project_root,
+                    )?;
+                    narrate_osc_scope(osc_source.snapshot.as_ref(), scope);
+                    oscs
+                } else {
+                    let (path, scope) = resolve_verify_osc(
+                        &osc_source.dataset,
+                        osc_source.snapshot.as_ref(),
+                        osc_source.osc_seq.as_deref(),
+                        &paths,
+                        project_root,
+                    )?;
+                    narrate_osc_scope(osc_source.snapshot.as_ref(), scope);
+                    vec![path]
+                };
+                super::verify_merge_changes::run(&harness, &oscs)
+            }
+            VerifyCommand::TagsFilterOsc { osc_source, osc } => {
+                let osc_path = if let Some(p) = osc.as_deref() {
+                    canonical_fixture(p, project_root, "--osc")?
+                } else {
+                    let (path, scope) = resolve_verify_osc(
+                        &osc_source.dataset,
+                        osc_source.snapshot.as_ref(),
+                        osc_source.osc_seq.as_deref(),
+                        &paths,
+                        project_root,
+                    )?;
+                    narrate_osc_scope(osc_source.snapshot.as_ref(), scope);
+                    path
+                };
+                super::verify_tags_filter_osc::run(&harness, &osc_path)
+            }
             VerifyCommand::DeriveChanges { pbf, osc_seq } => {
                 let pbf_path = resolve_verify_input(&pbf.source, &paths, project_root)?;
                 let (osc_path, scope) = resolve_verify_osc(
@@ -709,6 +781,8 @@ fn verify_name(verify: &VerifyCommand) -> &'static str {
         VerifyCommand::Repack { .. } => super::verify::labels::REPACK,
         VerifyCommand::Degrade { .. } => super::verify::labels::DEGRADE,
         VerifyCommand::Merge { .. } => super::verify::labels::APPLY_CHANGES,
+        VerifyCommand::MergeChanges { .. } => super::verify::labels::MERGE_CHANGES,
+        VerifyCommand::TagsFilterOsc { .. } => super::verify::labels::TAGS_FILTER_OSC,
         VerifyCommand::DeriveChanges { .. } => super::verify::labels::DIFF_OSC,
         VerifyCommand::Renumber { .. } => super::verify::labels::RENUMBER,
         VerifyCommand::Diff { .. } => super::verify::labels::DIFF,

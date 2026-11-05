@@ -395,6 +395,20 @@ fn bench_ids(
     (ids, qualifier)
 }
 
+/// Whether a `merge-changes` of `inputs` change files writes run scratch,
+/// so its argv declares it: only where the run can spill, several inputs, no
+/// `--simplify`, and a `--jobs` other than 1 (0 or none is auto and counts,
+/// whatever it resolves to). Since pbfhogg 2b1c6ba1 only those make a run
+/// directory, and every other shape refuses `--tmp-dir` as a usage error.
+/// Builds from c97b9985 up to it made one on every shape, so on the others
+/// their run directory lands beside the output, removed on completion and
+/// left by a killed child; the flag probe cannot tell the two apart, and
+/// that loss is accepted. Builds before c97b9985 lack the flag and make
+/// none. The typed command and `verify merge-changes` both ask here.
+pub(crate) fn merge_changes_spills(inputs: usize, simplify: bool, jobs: Option<usize>) -> bool {
+    inputs > 1 && !simplify && jobs != Some(1)
+}
+
 /// A bbox's pairing identity: its parsed coordinates in Rust's shortest
 /// round-trip form, signed zero folded, so two spellings of one box (`12` and
 /// `12.0`) pair. pbfhogg parses each component as an f64 too, so equal
@@ -1240,22 +1254,12 @@ impl PbfhoggCommand {
                 let output = scratch_output_path(ctx, self, mode)?;
                 let mut argv = CommandArgv::new("merge-changes");
                 let oscs = ctx.osc_strs()?;
-                let several = oscs.len() > 1;
+                let inputs = oscs.len();
                 for o in oscs {
                     argv = argv.input(o)?;
                 }
                 let argv = argv.output(&output)?;
-                // Scratch only where the run can spill: several inputs, no
-                // `--simplify`, and a `--jobs` other than 1 (0 or none is
-                // auto and counts, whatever it resolves to). Since pbfhogg
-                // 2b1c6ba1 only those make a run directory, and every other
-                // shape refuses `--tmp-dir` as a usage error. Builds from
-                // c97b9985 up to it made one on every shape, so on the others
-                // their run directory lands beside the output, removed on
-                // completion and left by a killed child; the flag probe
-                // cannot tell the two apart, and that loss is accepted.
-                // Builds before c97b9985 lack the flag and make none.
-                let argv = if several && !*simplify && ctx.params.jobs != Some(1) {
+                let argv = if merge_changes_spills(inputs, *simplify, ctx.params.jobs) {
                     argv.scratch(&ctx.scratch_dir)
                 } else {
                     argv

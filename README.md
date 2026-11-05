@@ -143,7 +143,7 @@ brokkr diff-snapshots --dataset planet --from 20260411 --to 20260418 --format os
 
 `suite pbfhogg` runs the full benchmark suite.
 
-**Verification** (`brokkr verify <subcommand>`): cross-validates against osmium, osmosis, and osmconvert. Subcommands: `sort`, `cat`, `extract`, `multi-extract`, `tags-filter`, `getid-removeid`, `getparents`, `add-locations-to-ways`, `check-refs`, `check-ids`, `repack`, `degrade` (its decode path), `merge` (apply-changes), `derive-changes` (diff → osc roundtrip), `renumber`, `diff`, and `all` (runs them all). Verify subcommands keep their own short names; they don't mirror the consolidated CLI umbrella shape.
+**Verification** (`brokkr verify <subcommand>`): cross-validates against osmium, osmosis, and osmconvert. Subcommands: `sort`, `cat`, `extract`, `multi-extract`, `tags-filter`, `getid-removeid`, `getparents`, `add-locations-to-ways`, `check-refs`, `check-ids`, `repack`, `degrade` (its decode path), `merge` (apply-changes), `merge-changes` (default and `--simplify`), `tags-filter-osc` (`tags-filter --input-kind osc`), `derive-changes` (diff → osc roundtrip), `renumber`, `diff`, and `all` (runs them all). Verify subcommands keep their own short names; they don't mirror the consolidated CLI umbrella shape.
 
 `verify renumber` is a special case. Most verify commands require pbfhogg's output to be byte-identical (or element-identical) with osmium's. `renumber` does not: pbfhogg's orphan-reference handling in relation members is an intentional deviation documented in pbfhogg's `DEVIATIONS.md`, so a small non-zero diff is expected and does not indicate a regression. The goal of the command is to separate "expected delta" from "actual regression" without a human having to triage every diff.
 

@@ -10,10 +10,13 @@
 //! blocks, the `<create>` / `<modify>` / `<delete>` containers, and
 //! `<node id="N">` / `<way id="N">` / `<relation id="N">` element
 //! starts within them. It does **not** parse element bodies (tags,
-//! refs, members, coordinates, metadata) - those aren't needed for
+//! refs, members, coordinates) - those aren't needed for
 //! the carve-out and pulling in a full XML stack just to discard them
-//! would be churn. It scans incrementally and retains only the current tag,
-//! so large Planet or regional diffs do not need to fit in memory.
+//! would be churn. [`scan_osc_changes`] also decodes each entry's metadata
+//! attributes, the part of a change an OPL reading cannot tell apart
+//! (`verify merge-changes` and `verify tags-filter-osc`). It scans
+//! incrementally and retains only the current tag, so large Planet or
+//! regional diffs do not need to fit in memory.
 
 use std::fs::File;
 use std::io::{self, BufRead, Cursor, Read};
@@ -65,9 +68,166 @@ impl OscKind {
 /// first member boundary and would yield a truncated-but-valid-looking OSC.
 pub fn scan_osc_file(
     path: &Path,
-    each: impl FnMut(OscAction, OscKind, i64),
+    mut each: impl FnMut(OscAction, OscKind, i64),
 ) -> Result<(), DevError> {
-    scan_osc_file_as(path, Ids::Lenient, each)
+    scan_osc_file_as(path, Ids::Lenient, |action, kind, id, _| {
+        each(action, kind, id);
+        Ok(())
+    })
+}
+
+/// The metadata attributes of one change entry that pbfhogg's OSC writers
+/// carry through: `version` parsed as an integer, as pbfhogg parses it, and
+/// the other five as their attribute values decoded (entity and character
+/// references resolved, literal tabs and line breaks normalised to spaces,
+/// as an XML parser normalises an attribute value). `None` is an absent
+/// attribute.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OscMeta {
+    pub version: Option<i64>,
+    pub timestamp: Option<String>,
+    pub changeset: Option<String>,
+    pub uid: Option<String>,
+    pub user: Option<String>,
+    pub visible: Option<String>,
+}
+
+/// One change entry as [`scan_osc_changes`] reads it: the action of the
+/// container it sits in, its kind and ID, and its metadata attributes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OscChange {
+    pub action: OscAction,
+    pub kind: OscKind,
+    pub id: i64,
+    pub meta: OscMeta,
+}
+
+/// [`scan_osc_file_strict`] that also reads each entry's metadata
+/// attributes ([`OscMeta`]). An entry whose attributes cannot be read (an
+/// unterminated or unquoted value, an unknown entity, a repeated
+/// attribute, a `version` that is not an integer) is an error, so the entry
+/// a caller sees always carries what the document says.
+pub fn scan_osc_changes(path: &Path, mut each: impl FnMut(OscChange)) -> Result<(), DevError> {
+    scan_osc_file_as(path, Ids::Strict, |action, kind, id, attrs| {
+        let meta = parse_meta(attrs)?;
+        each(OscChange {
+            action,
+            kind,
+            id,
+            meta,
+        });
+        Ok(())
+    })
+}
+
+/// The [`OscMeta`] of an entry's attribute text.
+fn parse_meta(attrs: &str) -> Result<OscMeta, String> {
+    let mut meta = OscMeta::default();
+    let mut seen: Vec<&str> = Vec::new();
+    for (name, raw) in parse_attributes(attrs)? {
+        if seen.contains(&name) {
+            return Err(format!("attribute {name} repeated"));
+        }
+        seen.push(name);
+        let slot = match name {
+            "version" => {
+                let value = decode_attribute(raw)?;
+                meta.version = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("version {value:?} is not an integer"))?,
+                );
+                continue;
+            }
+            "timestamp" => &mut meta.timestamp,
+            "changeset" => &mut meta.changeset,
+            "uid" => &mut meta.uid,
+            "user" => &mut meta.user,
+            "visible" => &mut meta.visible,
+            _ => continue,
+        };
+        *slot = Some(decode_attribute(raw)?);
+    }
+    Ok(meta)
+}
+
+/// Every `name="value"` (or single-quoted) pair of a start tag's attribute
+/// text, values raw. Anything else is an error.
+fn parse_attributes(attrs: &str) -> Result<Vec<(&str, &str)>, String> {
+    let mut out = Vec::new();
+    let mut rest = attrs.trim_start();
+    while !rest.is_empty() {
+        let name_end = rest
+            .find(|c: char| c == '=' || c.is_ascii_whitespace())
+            .ok_or_else(|| format!("attribute {rest:?} has no value"))?;
+        let name = &rest[..name_end];
+        rest = rest[name_end..].trim_start();
+        rest = rest
+            .strip_prefix('=')
+            .ok_or_else(|| format!("attribute {name} has no value"))?
+            .trim_start();
+        let quote = rest
+            .chars()
+            .next()
+            .filter(|&c| c == '"' || c == '\'')
+            .ok_or_else(|| format!("attribute {name} value is not quoted"))?;
+        rest = &rest[1..];
+        let end = rest
+            .find(quote)
+            .ok_or_else(|| format!("attribute {name} value is unterminated"))?;
+        out.push((name, &rest[..end]));
+        rest = rest[end + 1..].trim_start();
+    }
+    Ok(out)
+}
+
+/// An attribute value as an XML parser reports it: a literal tab, line feed,
+/// carriage return or CR LF pair becomes one space, then the five predefined
+/// entities and numeric character references are resolved.
+fn decode_attribute(raw: &str) -> Result<String, String> {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.char_indices().peekable();
+    while let Some((at, c)) = chars.next() {
+        match c {
+            '\r' => {
+                if chars.peek().is_some_and(|&(_, next)| next == '\n') {
+                    chars.next();
+                }
+                out.push(' ');
+            }
+            '\n' | '\t' => out.push(' '),
+            '&' => {
+                let end = raw[at..]
+                    .find(';')
+                    .ok_or_else(|| format!("unterminated reference in {raw:?}"))?;
+                let name = &raw[at + 1..at + end];
+                let decoded = match name {
+                    "amp" => '&',
+                    "lt" => '<',
+                    "gt" => '>',
+                    "quot" => '"',
+                    "apos" => '\'',
+                    _ => {
+                        let code = if let Some(hex) = name.strip_prefix("#x") {
+                            u32::from_str_radix(hex, 16).ok()
+                        } else if let Some(dec) = name.strip_prefix('#') {
+                            dec.parse().ok()
+                        } else {
+                            None
+                        };
+                        code.and_then(char::from_u32)
+                            .ok_or_else(|| format!("unknown reference &{name}; in {raw:?}"))?
+                    }
+                };
+                out.push(decoded);
+                while chars.peek().is_some_and(|&(i, _)| i <= at + end) {
+                    chars.next();
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    Ok(out)
 }
 
 /// [`scan_osc_file`] for an OSC a tool generated as a comparison: a node,
@@ -79,9 +239,12 @@ pub fn scan_osc_file(
 /// unseen.
 pub fn scan_osc_file_strict(
     path: &Path,
-    each: impl FnMut(OscAction, OscKind, i64),
+    mut each: impl FnMut(OscAction, OscKind, i64),
 ) -> Result<(), DevError> {
-    scan_osc_file_as(path, Ids::Strict, each)
+    scan_osc_file_as(path, Ids::Strict, |action, kind, id, _| {
+        each(action, kind, id);
+        Ok(())
+    })
 }
 
 /// Whether an action entry without a parsable `id` is skipped or refused.
@@ -93,10 +256,13 @@ enum Ids {
     Strict,
 }
 
+/// The scan behind every file entry point. `each` gets an entry's action,
+/// kind, ID and its start tag's attribute text; an `Err` from it stops the
+/// scan as a document error.
 fn scan_osc_file_as(
     path: &Path,
     ids: Ids,
-    each: impl FnMut(OscAction, OscKind, i64),
+    each: impl FnMut(OscAction, OscKind, i64, &str) -> Result<(), String>,
 ) -> Result<(), DevError> {
     let (input, compressed) = open_osc(path)?;
     scan_osc_reader(input, ids, each).map_err(|error| match error {
@@ -243,7 +409,7 @@ impl Utf8Validator {
 fn scan_osc_reader<R: Read>(
     mut reader: R,
     ids: Ids,
-    each: impl FnMut(OscAction, OscKind, i64),
+    each: impl FnMut(OscAction, OscKind, i64, &str) -> Result<(), String>,
 ) -> Result<(), OscReadError> {
     let mut parser = OscParser::new(ids, each);
     let mut validator = Utf8Validator::default();
@@ -278,9 +444,12 @@ pub fn scan_osc_text(text: &str, each: impl FnMut(OscAction, OscKind, i64)) -> R
 fn scan_osc_text_as(
     text: &str,
     ids: Ids,
-    each: impl FnMut(OscAction, OscKind, i64),
+    mut each: impl FnMut(OscAction, OscKind, i64),
 ) -> Result<(), String> {
-    let mut parser = OscParser::new(ids, each);
+    let mut parser = OscParser::new(ids, |action, kind, id, _: &str| {
+        each(action, kind, id);
+        Ok(())
+    });
     parser.feed(text.as_bytes())?;
     parser.finish()
 }
@@ -318,7 +487,7 @@ fn next_quote(quote: Option<u8>, byte: u8) -> Option<u8> {
     }
 }
 
-impl<F: FnMut(OscAction, OscKind, i64)> OscParser<F> {
+impl<F: FnMut(OscAction, OscKind, i64, &str) -> Result<(), String>> OscParser<F> {
     fn new(ids: Ids, each: F) -> Self {
         Self {
             each,
@@ -418,7 +587,8 @@ impl<F: FnMut(OscAction, OscKind, i64)> OscParser<F> {
             "delete" => self.section = Section::Delete,
             "node" | "way" | "relation" => {
                 match (extract_id(attrs), self.section.action(), kind_of(name)) {
-                    (Some(id), Some(action), Some(kind)) => (self.each)(action, kind, id),
+                    (Some(id), Some(action), Some(kind)) => (self.each)(action, kind, id, attrs)
+                        .map_err(|why| format!("<{name} id=\"{id}\">: {why}"))?,
                     (None, Some(_), _) if self.ids == Ids::Strict => {
                         return Err(format!("<{name}> in an action block without a parsable id"));
                     }
@@ -661,7 +831,10 @@ mod tests {
 
     fn parse_osc_reader(input: impl Read) -> Result<Seen, OscReadError> {
         let mut seen = Seen::default();
-        scan_osc_reader(input, Ids::Lenient, |a, k, id| seen.record(a, k, id))?;
+        scan_osc_reader(input, Ids::Lenient, |a, k, id, _| {
+            seen.record(a, k, id);
+            Ok(())
+        })?;
         Ok(seen)
     }
 
@@ -1077,6 +1250,65 @@ mod tests {
         assert_eq!(extract_id(r#"version="1" id="42""#), Some(42));
         assert_eq!(extract_id(r#"id="42" version="1""#), Some(42));
         assert_eq!(extract_id(r#"  id =  "42"  "#), Some(42));
+    }
+
+    #[test]
+    fn metadata_is_decoded_with_absence_kept_apart_from_empty() {
+        let meta = parse_meta(
+            "id=\"1\" version=\"07\" user='a &amp; b&#10;c\td' uid=\"\" timestamp=\"t\" \
+             visible=\"false\" lat=\"1\"",
+        )
+        .unwrap();
+        assert_eq!(meta.version, Some(7));
+        assert_eq!(meta.user.as_deref(), Some("a & b\nc d"));
+        assert_eq!(meta.uid.as_deref(), Some(""));
+        assert_eq!(meta.timestamp.as_deref(), Some("t"));
+        assert_eq!(meta.visible.as_deref(), Some("false"));
+        assert_eq!(meta.changeset, None);
+        assert_eq!(decode_attribute("a\r\nb\rc&#x41;&lt;").unwrap(), "a b cA<");
+    }
+
+    #[test]
+    fn unreadable_metadata_is_refused() {
+        for attrs in [
+            "id=\"1\" version=\"x\"",
+            "id=\"1\" user=\"a",
+            "id=\"1\" user=a",
+            "id=\"1\" user=\"&nope;\"",
+            "id=\"1\" user=\"a\" user=\"b\"",
+            "id=\"1\" user",
+        ] {
+            assert!(parse_meta(attrs).is_err(), "{attrs}");
+        }
+    }
+
+    #[test]
+    fn the_change_scan_names_the_entry_whose_metadata_it_refuses() {
+        let path = crate::test_scratch::scratch_path("osc", "bad-version.osc");
+        std::fs::write(
+            &path,
+            r#"<osmChange><modify><node id="4" version="v"/></modify></osmChange>"#,
+        )
+        .unwrap();
+        let err = scan_osc_changes(&path, |_| {}).unwrap_err().to_string();
+        assert!(
+            err.contains("id=\"4\"") && err.contains("not an integer"),
+            "{err}"
+        );
+
+        let path = crate::test_scratch::scratch_path("osc", "good-meta.osc");
+        std::fs::write(
+            &path,
+            r#"<osmChange><delete><way id="9" version="3" user="u"><nd ref="1"/></way></delete></osmChange>"#,
+        )
+        .unwrap();
+        let mut seen = Vec::new();
+        scan_osc_changes(&path, |c| seen.push(c)).unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].action, OscAction::Delete);
+        assert_eq!(seen[0].kind, OscKind::Way);
+        assert_eq!(seen[0].meta.version, Some(3));
+        assert_eq!(seen[0].meta.user.as_deref(), Some("u"));
     }
 
     #[test]

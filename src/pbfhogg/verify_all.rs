@@ -7,8 +7,8 @@ use super::verify::{CheckStatus, ENVIRONMENT_EXIT_CODE, VerifyHarness, labels, r
 use super::{
     verify_add_locations, verify_cat, verify_check_ids, verify_check_refs, verify_degrade,
     verify_derive_changes, verify_diff, verify_extract, verify_getid_removeid, verify_getparents,
-    verify_merge, verify_multi_extract, verify_renumber, verify_repack, verify_sort,
-    verify_tags_filter,
+    verify_merge, verify_merge_changes, verify_multi_extract, verify_renumber, verify_repack,
+    verify_sort, verify_tags_filter, verify_tags_filter_osc,
 };
 use crate::datasets::Bbox;
 use crate::error::DevError;
@@ -265,6 +265,27 @@ pub fn run(
             verify_summary(&format!("{APPLY_CHANGES_LOCATIONS}: {why}"));
             skipped += 1;
         }
+    }
+
+    // 8c. merge-changes and 8d. tags-filter --input-kind osc, on the OSC
+    // alone and without --direct-io, which pbfhogg refuses for both.
+    if let Some(osc_path) = osc {
+        tally(
+            &mut counts,
+            run_check_status(labels::MERGE_CHANGES, verbose, || {
+                verify_merge_changes::run(harness, &[osc_path.to_path_buf()])
+            }),
+        )?;
+        tally(
+            &mut counts,
+            run_check_status(labels::TAGS_FILTER_OSC, verbose, || {
+                verify_tags_filter_osc::run(harness, osc_path)
+            }),
+        )?;
+    } else {
+        verify_summary(&format!("{}: {NO_OSC}", labels::MERGE_CHANGES));
+        verify_summary(&format!("{}: {NO_OSC}", labels::TAGS_FILTER_OSC));
+        skipped += 2;
     }
 
     // 9. diff --format osc

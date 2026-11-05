@@ -551,10 +551,73 @@ mod tests {
             };
             assert!(pbf.direct_io, "{sub}");
         }
-        let Err(err) = parse(["brokkr", "verify", "check-refs", "--direct-io"]) else {
-            panic!("verify check-refs --direct-io should be refused");
+        for sub in ["check-refs", "merge-changes", "tags-filter-osc"] {
+            let Err(err) = parse(["brokkr", "verify", sub, "--direct-io"]) else {
+                panic!("verify {sub} --direct-io should be refused");
+            };
+            assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument, "{sub}");
+        }
+    }
+
+    #[test]
+    fn verify_merge_changes_takes_one_source_of_change_files() {
+        let parsed = parse([
+            "brokkr",
+            "verify",
+            "merge-changes",
+            "--osc",
+            "a.osc",
+            "--osc",
+            "b.osc.gz",
+        ])
+        .expect("repeated --osc");
+        let Command::Verify { verify, .. } = parsed.command else {
+            panic!("expected Verify");
         };
-        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+        let VerifyCommand::MergeChanges { osc, osc_range, .. } = verify else {
+            panic!("expected merge-changes");
+        };
+        assert_eq!(osc.len(), 2);
+        assert!(osc_range.is_none());
+        let parsed = parse([
+            "brokkr",
+            "verify",
+            "merge-changes",
+            "--osc-range",
+            "4705..4712",
+        ])
+        .expect("--osc-range");
+        let Command::Verify { verify, .. } = parsed.command else {
+            panic!("expected Verify");
+        };
+        assert!(matches!(
+            verify,
+            VerifyCommand::MergeChanges {
+                osc_range: Some(_),
+                ..
+            }
+        ));
+        for argv in [
+            &["--osc-seq", "4705", "--osc-range", "4705..4706"][..],
+            &["--osc-seq", "4705", "--osc", "a.osc"],
+            &["--osc-range", "4705..4706", "--osc", "a.osc"],
+        ] {
+            let mut full = vec!["brokkr", "verify", "merge-changes"];
+            full.extend_from_slice(argv);
+            assert!(parse(full).is_err(), "{argv:?} should conflict");
+        }
+        assert!(
+            parse([
+                "brokkr",
+                "verify",
+                "tags-filter-osc",
+                "--osc-seq",
+                "4705",
+                "--osc",
+                "a.osc"
+            ])
+            .is_err()
+        );
     }
 
     #[test]

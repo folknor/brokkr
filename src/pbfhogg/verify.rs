@@ -33,6 +33,8 @@ pub(super) mod labels {
     pub const REPACK: &str = "repack";
     pub const DEGRADE: &str = "degrade";
     pub const APPLY_CHANGES: &str = "apply-changes";
+    pub const MERGE_CHANGES: &str = "merge-changes";
+    pub const TAGS_FILTER_OSC: &str = "tags-filter --input-kind osc";
     pub const DIFF_OSC: &str = "diff --format osc";
     pub const RENUMBER: &str = "renumber";
     pub const DIFF: &str = "diff";

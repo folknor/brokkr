@@ -3314,6 +3314,27 @@ pub(crate) struct VerifyPbfArgs {
     pub(crate) direct_io: bool,
 }
 
+/// Where the change files of an OSC-only verify subcommand come from: a
+/// dataset's registered OSCs, through the same snapshot rule as the
+/// change-consuming checks (a named snapshot with its own `osc` table, else
+/// the dataset's primary chain). Neither subcommand taking it offers
+/// `--direct-io`: pbfhogg refuses it for `merge-changes` and an OSC
+/// `tags-filter`.
+#[derive(Args, Clone)]
+pub(crate) struct VerifyOscArgs {
+    /// Dataset name from brokkr.toml
+    #[arg(long, default_value = DEFAULT_DATASET)]
+    pub(crate) dataset: String,
+    /// Snapshot key whose OSC table to read; `base` (or omitted), or a
+    /// snapshot without one, reads the dataset's primary chain
+    #[arg(long)]
+    pub(crate) snapshot: Option<crate::datasets::resolve::SnapshotRef>,
+    /// OSC sequence number from brokkr.toml (needed when several are
+    /// registered)
+    #[arg(long)]
+    pub(crate) osc_seq: Option<String>,
+}
+
 #[derive(Subcommand)]
 pub(crate) enum VerifyCommand {
     /// Cross-validate sort against osmium sort
@@ -3445,6 +3466,38 @@ pub(crate) enum VerifyCommand {
         /// its untagged nodes. osmosis and osmconvert are skipped.
         #[arg(long)]
         locations_on_ways: bool,
+    },
+    /// Cross-validate merge-changes, default and --simplify, against
+    /// osmium's reading of its inputs, the documented merge and osmium
+    /// merge-changes -s, on the inputs, the inputs twice and fixtures
+    ///
+    /// The inputs are one registered OSC (`--osc-seq`, or the only one), a
+    /// registered range (`--osc-range LO..HI`, merged in sequence order), or
+    /// handcrafted change files (`--osc PATH`, repeated, in the given
+    /// order). Takes no --direct-io: pbfhogg refuses it for merge-changes.
+    #[command(name = "merge-changes", display_order = 7)]
+    MergeChanges {
+        #[command(flatten)]
+        osc_source: VerifyOscArgs,
+        /// OSC sequence range LO..HI (inclusive), every sequence registered
+        #[arg(long, conflicts_with_all = ["osc_seq", "osc"])]
+        osc_range: Option<crate::config::OscRange>,
+        /// Path to a handcrafted change file (skips OSC resolution); repeat
+        /// for several, merged in the given order
+        #[arg(long, value_name = "PATH", conflicts_with = "osc_seq")]
+        osc: Vec<std::path::PathBuf>,
+    },
+    /// Cross-validate tags-filter --input-kind osc against osmium
+    /// tags-filter -R on osmium's reading of the change file
+    ///
+    /// Takes no --direct-io: pbfhogg refuses it for an OSC tags-filter.
+    #[command(name = "tags-filter-osc", display_order = 7)]
+    TagsFilterOsc {
+        #[command(flatten)]
+        osc_source: VerifyOscArgs,
+        /// Path to a handcrafted change file (skips OSC resolution)
+        #[arg(long, value_name = "PATH", conflicts_with = "osc_seq")]
+        osc: Option<std::path::PathBuf>,
     },
     /// Cross-validate diff --format osc roundtrip against osmium
     ///
