@@ -585,10 +585,14 @@ fn call_outcome(
     })
 }
 
-/// Every builtin's first step: a pending stop ends the sample here, the one
-/// place a script spinning in Lua meets it.
+/// Whether a stop is pending: Ctrl-C, `brokkr kill`, or a committed stop.
+fn stop_pending() -> bool {
+    crate::shutdown::should_unwind() || !crate::shutdown::admits_new_work()
+}
+
+/// Every builtin's first step: a pending stop ends the sample here.
 fn stopping() -> Result<(), Abort> {
-    if crate::shutdown::should_unwind() || !crate::shutdown::admits_new_work() {
+    if stop_pending() {
         Err(Abort::Interrupted)
     } else {
         Ok(())
@@ -598,6 +602,10 @@ fn stopping() -> Result<(), Abort> {
 impl lua::Host for IterationHost {
     fn stop(&mut self) -> Result<(), Abort> {
         stopping()
+    }
+
+    fn stop_requested() -> bool {
+        stop_pending()
     }
 
     fn begin_block(&mut self, at: Instant) {

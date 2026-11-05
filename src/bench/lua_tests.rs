@@ -29,6 +29,9 @@ impl Host for Fake {
             Ok(())
         }
     }
+    fn stop_requested() -> bool {
+        false
+    }
     fn begin_block(&mut self, _at: Instant) {
         self.blocks += 1;
     }
@@ -780,4 +783,58 @@ fn every_builtin_but_print_meets_a_pending_stop() {
     let (sample, host) = run("function bench() print('x') end", host);
     assert_eq!(sample.outcome, SampleOutcome::Completed(None));
     assert_eq!(host.stops, 0);
+}
+
+/// A host whose watcher probe always reports a pending stop, while its
+/// builtins never do: only the State's interrupt can end a spin.
+struct Spinner;
+
+impl Host for Spinner {
+    fn stop(&mut self) -> Result<(), Abort> {
+        Ok(())
+    }
+    fn stop_requested() -> bool {
+        true
+    }
+    fn begin_block(&mut self, _at: Instant) {}
+    fn binary(&mut self, _: Vec<Word>, _: CallOptions) -> Result<CallOutcome, Abort> {
+        Err(Abort::Failed("no binary".into()))
+    }
+    fn since(&mut self, _: &str) -> Result<bool, Abort> {
+        Ok(false)
+    }
+    fn output(&mut self, _: &str) -> Result<HandleRef, Abort> {
+        Err(Abort::Failed("no output".into()))
+    }
+    fn scratch(&mut self, _: &str) -> Result<HandleRef, Abort> {
+        Err(Abort::Failed("no scratch".into()))
+    }
+    fn config(&mut self) -> Result<std::sync::Arc<Value>, Abort> {
+        Ok(std::sync::Arc::new(Value::Table(Vec::new())))
+    }
+    fn read(&mut self, _: usize) -> Result<Vec<u8>, Abort> {
+        Err(Abort::Failed("no read".into()))
+    }
+    fn write(&mut self, _: usize, _: &[u8]) -> Result<(), Abort> {
+        Ok(())
+    }
+    fn filesize(&mut self, _: usize) -> Result<u64, Abort> {
+        Ok(0)
+    }
+}
+
+/// A script spinning in pure Lua, calling no builtin, is interrupted, at
+/// the top level and inside `bench()`, in a loop and in endless tail
+/// recursion, which has no backward jump.
+#[test]
+fn a_stop_interrupts_a_script_spinning_in_pure_lua() {
+    for source in [
+        "while true do end function bench() end",
+        "function bench() while true do end end",
+        "local function f() return f() end function bench() return f() end",
+    ] {
+        let script = load_script(source.as_bytes(), Some("test.lua"), None).unwrap();
+        let (sample, _) = run_sample(&script, &Args::default(), Spinner);
+        assert_eq!(sample.outcome, SampleOutcome::Interrupted, "{source}");
+    }
 }

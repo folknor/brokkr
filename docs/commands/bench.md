@@ -369,10 +369,10 @@ finite numbers, UTF-8 strings, no handle or function.
 
 Ctrl-C during a child stops the child and ends the iteration interrupted;
 the run is then stored as interrupted and the command exits as an
-interrupt. During pure Lua it is seen only at the next call of a builtin
-other than `print`, at the end of `bench()` or between iterations: the Lua VM brokkr links cannot yet
-be interrupted mid-script, so a script spinning in a loop that calls no
-such builtin cannot be stopped by the first Ctrl-C. An iteration a stop
+interrupt. During Lua, at the top level or in `bench()`, it is seen
+within a few milliseconds at the VM's next safepoint (a loop's backward
+jump or a call), so a script spinning in a loop that calls no builtin
+stops too. An iteration a stop
 reached is stored as interrupted, whatever it would otherwise have been. A second Ctrl-C while the
 first is pending takes the default action and kills brokkr at once: that run
 is not stored, and its iteration directory is reclaimed by a later `brokkr

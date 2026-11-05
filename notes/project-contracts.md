@@ -157,8 +157,7 @@ named would change meaning, and it moves to `[host.NAME]`.
   resolved first, so a mistyped sha is an error.
 - **Every child goes through brokkr:** no `os.execute`, `io.popen` or module
   loading in the Lua state; the script runs inside the lock hold, and a
-  runaway script answers Ctrl-C once dellingr's interrupt is linked (slice
-  13; until then pure Lua is stopped only at its next builtin call).
+  runaway script answers Ctrl-C through dellingr's interrupt.
 - **The typed layer stays.** Script benches are added beside the existing
   commands; verify, the suite, `--as-snapshot` promotion and the library
   harness keep using `src/pbfhogg/commands.rs` unchanged.
@@ -881,21 +880,13 @@ What it left, with sizes:
   the selection fixes and the header names (small, if several-child
   benches want it in the records).
 
-13. **The interrupt and the deadline.** Bump dellingr to the release that
-    carries the interrupt (`StateBuilder::interrupt` / `State::interrupt`,
-    `ErrorKind::Interrupted`, sticky, polled on backward jumps and call
-    admission), wire brokkr's Ctrl-C and `brokkr kill` into it so pure Lua
-    and top-level code stop at once, map `Interrupted` to an interrupted
-    sample in `src/bench/lua.rs`, and define a per-iteration deadline (a
-    `--deadline` before NAME or a bench key; none exists in slice 5) that
+13. **The deadline.** The interrupt half has landed: a watcher thread per
+    sample triggers the State's interrupt on a pending stop. Left: a
+    per-iteration deadline (a `--deadline` before NAME or a bench key) that
     covers state setup, top level and `bench()` through the same interrupt
-    and kills a running child's group through the supervisor's limit. Test:
-    a `while true do end` bench stopped by a stop request and by the
-    deadline, stored as interrupted and failed. Small; then
-    `docs/commands/bench.md`'s Interrupting a run drops its gap.
-
-Outside brokkr, dellingr's interrupt (dellingr#9) is its own launch in
-dellingr, before slice 13: it is in dellingr's tree, not yet released.
+    and kills a running child's group through the supervisor's limit,
+    stored as failed. Test: a `while true do end` bench stopped by the
+    deadline.
 
 ## A negative answer that is itself the bug
 

@@ -10,9 +10,12 @@
 //! runner through [`Host`], whose types carry no dellingr value: Lua strings
 //! cross as bytes, text fields are checked from those exact bytes, and a
 //! builtin's failure travels back through Lua as an [`Abort`] inside a host
-//! error, recovered by downcast. dellingr 0.6.0 has no interrupt, so a script
-//! spinning in pure Lua is stopped only at its next builtin call: every
-//! builtin but `print` asks the host for a pending stop before anything else.
+//! error, recovered by downcast. A pending stop reaches the script two ways:
+//! every builtin but `print` asks the host for one before anything else, and
+//! while a sample runs a watcher thread polls [`Host::stop_requested`] and
+//! triggers the State's interrupt, so a script spinning in pure Lua fails
+//! with dellingr's `Interrupted` at its next safepoint (a backward jump or a
+//! call); both end the sample interrupted.
 //!
 //! What a table is to brokkr is never a data key, so config data and decoded
 //! JSON are only data: a JSON array carries one metatable and `json.null` is
@@ -211,6 +214,9 @@ impl std::error::Error for Abort {}
 pub(crate) trait Host: Send + 'static {
     /// A pending stop, asked first by every builtin but `print`.
     fn stop(&mut self) -> Result<(), Abort>;
+    /// Whether a stop is pending, asked from a watcher thread while the
+    /// sample runs, so a script spinning in pure Lua is interrupted too.
+    fn stop_requested() -> bool;
     /// `bench()` is about to be called: the block starts now.
     fn begin_block(&mut self, at: Instant);
     fn binary(&mut self, words: Vec<Word>, options: CallOptions) -> Result<CallOutcome, Abort>;
@@ -267,7 +273,11 @@ struct Marks {
 /// `bench(params, keys)` timed from its call to its return, then `record`
 /// extracted. Returns the host for the next sample.
 pub(crate) fn run_sample<H: Host>(script: &Script, args: &Args, host: H) -> (Sample, H) {
-    let mut state = State::builder().callbacks(Box::new(Console)).build();
+    let interrupt = ::dellingr::Interrupt::new();
+    let mut state = State::builder()
+        .callbacks(Box::new(Console))
+        .interrupt(interrupt.clone())
+        .build();
     let (ok, marks) = match install::<H>(&mut state) {
         Ok(installed) => installed,
         Err(error) => {
@@ -283,7 +293,7 @@ pub(crate) fn run_sample<H: Host>(script: &Script, args: &Args, host: H) -> (Sam
         ok,
         marks: marks.clone(),
     }));
-    let sample = sample::<H>(&mut state, script, args, &marks);
+    let sample = watched::<H, _>(&interrupt, || sample::<H>(&mut state, script, args, &marks));
     let host = state
         .user_data_mut::<Option<Ctx<H>>>()
         .and_then(Option::take)
@@ -293,6 +303,30 @@ pub(crate) fn run_sample<H: Host>(script: &Script, args: &Args, host: H) -> (Sam
         // The context is set above and only taken here.
         None => unreachable!("the sample's host context went missing"),
     }
+}
+
+/// How often the watcher asks the host for a pending stop.
+const STOP_POLL: Duration = Duration::from_millis(10);
+
+/// Run `work` while a watcher thread triggers `interrupt` once the host
+/// reports a pending stop. The watcher ends with `work`.
+fn watched<H: Host, T>(interrupt: &::dellingr::Interrupt, work: impl FnOnce() -> T) -> T {
+    let done = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let watcher = scope.spawn(|| {
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                if H::stop_requested() {
+                    interrupt.trigger();
+                    return;
+                }
+                std::thread::park_timeout(STOP_POLL);
+            }
+        });
+        let result = work();
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        watcher.thread().unpark();
+        result
+    })
 }
 
 fn failed(reason: String, wall: Option<Duration>) -> Sample {
@@ -376,6 +410,7 @@ fn sample<H: Host>(state: &mut State, script: &Script, args: &Args, marks: &Mark
 /// line mapped.
 fn ended(error: Error, lines: Option<&LineMap>, wall: Option<Duration>) -> Sample {
     let outcome = match abort_of(&error) {
+        _ if matches!(error.kind(), ErrorKind::Interrupted) => SampleOutcome::Interrupted,
         Some(Abort::Interrupted) => SampleOutcome::Interrupted,
         Some(Abort::Failed(why)) => SampleOutcome::Failed(located(&error, lines, why)),
         None => {
