@@ -230,6 +230,42 @@ fn a_child_runs_on_its_borrow_and_reaches_the_script() {
 /// A hotpath report as the crate writes one, as a shell `printf` argument.
 const REPORT: &str = r#"{"functions_timing":{"data":[{"name":"decode","calls":12,"avg":"2 ms","total":"24 ms","percent_total":"40%","p50":"1.8 ms","p95":"3.0 ms","p99":"3.8 ms"}]}}"#;
 
+/// `stop_at` ends a child once its marker arrives: the result says where,
+/// with no exit, the stored ending is that marker, and a child that never
+/// emits it ends on its own.
+#[test]
+fn a_stop_marker_ends_the_child_and_is_its_ending() {
+    let _lock = crate::test_scratch::process_global_lock();
+    let root = crate::test_scratch::scratch("bench_runner", "stop-at");
+    let container = root.join("iterations");
+    let script = script(
+        "function bench()\n\
+           local r = binary_with({stop_at = 'SETUP_END'}, '-c',\n\
+             'echo \"1 SETUP_START\" > \"$BROKKR_MARKER_FIFO\"; \
+              echo \"2 SETUP_END\" > \"$BROKKR_MARKER_FIFO\"; exec sleep 30'):ok()\n\
+           record.at = r.stopped_at\n\
+           record.exited = r.exit ~= nil\n\
+           local n = binary_with({stop_at = 'SETUP_END'}, '-c', 'exit 3')\n\
+           record.natural = n.exit\n\
+           record.unstopped = n.stopped_at == nil\n\
+         end",
+    );
+    let started = std::time::Instant::now();
+    let (iteration, _, _) = run_iteration(setup(&script, &root, &container));
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    let shown = record(&iteration);
+    assert_eq!(shown["at"], "SETUP_END");
+    assert_eq!(shown["exited"], false);
+    assert_eq!(shown["natural"], 3);
+    assert_eq!(shown["unstopped"], true);
+    assert_eq!(
+        iteration.children[0].ending,
+        store::ChildEnding::StopMarker {
+            marker: "SETUP_END".into()
+        }
+    );
+}
+
 fn capture(child: &store::Child) -> &store::HotpathCapture {
     child.hotpath.as_ref().unwrap()
 }

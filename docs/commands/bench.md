@@ -215,8 +215,9 @@ one FIFO per child. The result is a table:
   pass it to another call (read), as its `stdin`, or to `read()` and
   `filesize()`. Pipelines run eagerly: one call's output reaches the next
   through this file, never a pipe between two running children.
-- `r:ok()` - returns `r` when the child exited 0, and otherwise fails the
-  iteration naming how it ended and its last stderr line.
+- `r:ok()` - returns `r` when the child exited 0 or was stopped at its
+  `stop_at` marker (`binary_with()`), and otherwise fails the iteration
+  naming how it ended and its last stderr line.
 
 An exit code is the script's to judge, so a nonzero exit fails nothing by
 itself. These end the iteration before the script sees a result: Ctrl-C or
@@ -259,6 +260,22 @@ local r = binary_with({
   first, then letters, digits, `_` or `-`) marking the call as an
   instrumented stage whose hotpath report brokkr captures (Hotpath capture,
   below). Any `HOTPATH_*` in `env` beside it is refused.
+- `stop_at` - an exact span-end marker name, `FOO_END`, of letters, digits
+  and `_` (so never the FIFO's `@` counter or `%` call-tag form): brokkr ends the
+  child, its whole process group, once it sees the first marker of that
+  name on the child's own marker stream (a call-tagged marker never stops
+  it). The lenient `FOO` and the `-FOO` shorthand `--stop` takes are
+  refused, since a bare name matches two markers. The result then carries
+  `stopped_at`, that name, and no `exit` or `signal`: the marker wins over
+  whatever the child did after it, a nonzero exit included, since the
+  phase it ends was complete; `r:ok()` passes it, and the child is stored
+  with that marker as its ending. A child that never emits the marker ends
+  on its own and has no `stopped_at`; the script judges that. The FIFO is
+  read on the supervisor's ticks and when the child exits, so the child is
+  stopped once the marker is recognized, with no bound on how long after
+  it; the marker's stamp in the child's evidence is the precise end of the
+  phase (`brokkr sidecar`). Refused beside `hotpath`: a child stopped at a
+  marker is killed and writes no report.
 
 Any other key is refused, so a misspelt `writes` never runs a call with
 less declared than meant.

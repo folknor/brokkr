@@ -22,7 +22,6 @@ mod cpu_topology;
 mod crit_cmd;
 mod datasets;
 mod db;
-mod dellingr;
 mod dependency_rules;
 mod deps;
 mod diagnostic;

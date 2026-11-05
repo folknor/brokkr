@@ -52,7 +52,7 @@ A doc with 8+ `##` sections is **section-addressed**: `brokkr man conventions sc
 - `docs/commands/service.md` - ratatoskr `service`.
 - `docs/commands/corpus.md` - piners `brokkr corpus`.
 - `docs/projects/pbfhogg-vs-elivagar.md` - how the two dispatch layers differ.
-- `docs/projects/pbfhogg.md`, `elivagar.md`, `nidhogg.md`, `dellingr.md`, `mogwai.md`, `litehtml.md`, `sluggrs.md`, `ratatoskr.md`, `piners.md` - per-project commands and internals.
+- `docs/projects/pbfhogg.md`, `elivagar.md`, `nidhogg.md`, `mogwai.md`, `litehtml.md`, `sluggrs.md`, `ratatoskr.md`, `piners.md` - per-project commands and internals.
 
 ## Architecture
 
@@ -82,7 +82,7 @@ Single crate: the `brokkr` binary, plus the `brokkr-rustc-guard` and `brokkr-res
 - `lock`, `strays [--kill]`, `guard [--install|--remove]`, `kill [--hard]` - lock status and process hygiene (see `docs/commands/check.hygiene.md`).
 - `sidecar <uuid>` - sidecar profiler data, a typed run's or one script-bench child's (see `docs/commands/measure.md`).
 - `fmt` - locked `cargo fmt` wrapper.
-- Project-specific: `corpus-results`, `dellingr`, `mogwai`, `hotpath`, `library`, `pmtiles-stats`, `pmtiles-corpus`, `ocean-build` - see the project docs.
+- Project-specific: `corpus-results`, `mogwai`, `hotpath`, `library`, `pmtiles-stats`, `pmtiles-corpus`, `ocean-build` - see the project docs.
 
 ## Conventions
 

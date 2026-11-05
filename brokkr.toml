@@ -113,17 +113,17 @@ region = "code"
 message = "reach the elivagar and protohoggr crates through src/elivagar/eliv.rs"
 
 # The linked dellingr crate (the Lua VM script benches run on) is reached
-# through one seam by its absolute `::dellingr` path, since brokkr's own
-# `dellingr` module (the `brokkr dellingr` command) shares the name. Matches a
-# bare or absolute `dellingr::`; `crate::dellingr::` and `self::dellingr::`
-# name the module and pass.
+# through one seam, src/bench/lua.rs, by its absolute `::dellingr` path, so a
+# change in its API touches that file alone. Matches a bare or absolute
+# `dellingr::`; a path through `crate::` or `self::` names a brokkr module
+# and passes.
 [[textlint]]
 name = "dellingr-crate-through-the-seam"
 pattern = '(?:^|[^\w:])(?:::)?dellingr::'
 paths = ["src/**/*.rs"]
 exclude = ["src/bench/lua.rs"]
 region = "code"
-message = "reach the dellingr crate through src/bench/lua.rs; brokkr's own module is crate::dellingr"
+message = "reach the dellingr crate through src/bench/lua.rs"
 
 # The bench store is self-contained (std, rusqlite, serde, serde_json and
 # xxhash-rust only), so brokkr-results-server includes it by path and serves

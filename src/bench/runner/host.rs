@@ -392,7 +392,7 @@ impl IterationHost {
             &mut fifo,
             self.children.len(),
             start,
-            None,
+            call.stop_at.as_deref(),
             None,
             &crate::sidecar::DEFAULT_MEASUREMENT_TUNABLES,
             crate::output::child::CaptureCap {
@@ -542,6 +542,8 @@ struct Declared {
     env: Vec<(String, String)>,
     /// The stage a `hotpath` call is marked with.
     hotpath: Option<String>,
+    /// The exact span-end marker that ends the child.
+    stop_at: Option<String>,
 }
 
 /// What the script sees of a finished child, or why the sample ends.
@@ -550,9 +552,12 @@ fn call_outcome(
     run: &crate::sidecar::SidecarRunResult,
     spool: &crate::reservations::Spool,
 ) -> Result<CallOutcome, Abort> {
-    let (exit, signal) = match &run.data.ending {
-        Ending::Exited(code) => (Some(*code), None),
-        Ending::Signalled(signal) => (None, Some(*signal)),
+    // A stop marker wins over whatever the child did after it: the phase it
+    // ends was complete, and the rest is what the stop cuts short.
+    let (exit, signal, stopped_at) = match &run.data.ending {
+        Ending::Exited(code) => (Some(*code), None, None),
+        Ending::Signalled(signal) => (None, Some(*signal), None),
+        Ending::StopMarker(marker) => (None, None, Some(marker.clone())),
         Ending::Interrupted => return Err(Abort::Interrupted),
         Ending::WaitFailed(why) => {
             return Err(Abort::Failed(format!("waiting for {short} failed: {why}")));
@@ -576,6 +581,7 @@ fn call_outcome(
         stderr_truncated: run.stderr_truncated || run.output_cut,
         stdout_file: None,
         hotpath: None,
+        stopped_at,
     })
 }
 
@@ -608,6 +614,7 @@ impl lua::Host for IterationHost {
             stdin: None,
             env: options.env,
             hotpath: options.hotpath,
+            stop_at: options.stop_at,
         };
         for word in words {
             match word {

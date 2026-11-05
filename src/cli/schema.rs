@@ -2568,45 +2568,6 @@ In depth: `brokkr man nidhogg`."
         target: String,
     },
 
-    // ----- dellingr-only commands (display_order = 57) -----
-    /// Benchmark a registered Lua workload
-    ///
-    /// Builds the `[dellingr] example` harness target and runs it against the
-    /// workloads `--lua` names, resolved through the `[dellingr.workloads.*]`
-    /// registry and verified against their pinned `xxh128`.
-    ///
-    /// `--lua` takes several workloads, repeated or comma-separated
-    /// (`--lua a,b`), or `--all` selects every registered one. Every one is
-    /// resolved and verified before the single build, then each runs in turn
-    /// as its own row; one failing does not skip the rest.
-    ///
-    /// The mode selects the build: `--bench` builds the harness bare (the
-    /// uninstrumented walls, the ones worth comparing), `--hotpath` adds the
-    /// `hotpath` feature, `--alloc` adds `hotpath-alloc`. With no mode it runs
-    /// once and stores nothing.
-    ///
-    /// Under `--commit`, the *harness* comes from the old commit's worktree
-    /// but the *workload* still comes from the registration in the current
-    /// tree. A baseline exists to vary the VM while holding the workload
-    /// fixed; taking the old commit's copy of the script would conflate the
-    /// two.
-    ///
-    /// In depth: `brokkr man dellingr`.
-    #[command(name = "dellingr", display_order = 57)]
-    Dellingr {
-        #[command(flatten)]
-        mode: ModeArgs,
-
-        /// Registered workload name from `[dellingr.workloads.*]`; repeat it
-        /// or comma-separate names to run several
-        #[arg(long, required_unless_present = "all", value_delimiter = ',')]
-        lua: Vec<String>,
-
-        /// Run every registered workload; under `--hotpath` / `--alloc`,
-        /// every one with a hotpath variant
-        #[arg(long, conflicts_with = "lua")]
-        all: bool,
-    },
 
     // ----- mogwai-only commands (display_order = 58) -----
     /// Benchmark a mogwai surface (CLI invocation or harness target)

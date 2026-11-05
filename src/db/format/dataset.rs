@@ -9,8 +9,8 @@
 //! filename that doesn't match any of them - it falls back to the first
 //! dash-separated component of the basename.
 //!
-//! A content-addressed input (`PATH@<32 hex xxh128>`, what `brokkr dellingr`
-//! records for a workload) is labelled by its path part plus a digest prefix,
+//! A content-addressed input (`PATH@<32 hex xxh128>`, what the retired
+//! `brokkr dellingr` driver recorded for a workload, still in the history) is labelled by its path part plus a digest prefix,
 //! so two generations of one file never render alike. The prefix is the
 //! shortest one - at least [`MIN_GENERATION_HEX`] characters - that tells
 //! apart every generation of that path among the rows being rendered, which

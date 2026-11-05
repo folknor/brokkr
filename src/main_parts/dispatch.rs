@@ -759,21 +759,6 @@ fn run_project(
             )
         }
 
-        // ----- dellingr commands -----
-        // Dataset/variant are the `run_measured` scaffolding every measured
-        // command shares; dellingr has neither, so both stay empty rather
-        // than inventing a dataset name that would land in the DB.
-        Command::Dellingr { mode, lua, all } => {
-            let selection = if all {
-                crate::dellingr::cmd::Selection::All
-            } else {
-                crate::dellingr::cmd::Selection::Named(lua)
-            };
-            run_measured(&mode, detection, "", "", invocation, |req| {
-                crate::dellingr::cmd::run(req, &selection)
-            })
-        }
-
         // ----- mogwai commands -----
         // Dataset/variant stay empty: brokkr does not know what a mogwai
         // surface reads. An input the argv names is captured verbatim with it;

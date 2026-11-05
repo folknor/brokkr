@@ -164,7 +164,6 @@ Prepare => ("prepare", Visibility::Only(&[Project::Litehtml]), Required, Blockin
 HtmlExtract => ("html-extract", Visibility::Only(&[Project::Litehtml]), Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
 Outline => ("outline", Visibility::Only(&[Project::Litehtml]), Required, None, true, crate::measure::MeasureMode::Run, None, &[]),
 Hotpath => ("hotpath", Visibility::Only(&[Project::Sluggrs]), Required, Blocking, true, crate::measure::MeasureMode::Hotpath { runs: std::num::NonZeroUsize::MIN }, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Mode),
-Dellingr => ("dellingr", Visibility::Only(&[Project::Dellingr]), Required, Blocking, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Mode),
 Mogwai => ("mogwai", Visibility::Only(&[Project::Mogwai]), Required, None, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Mode),
 Service => ("service", Visibility::Only(&[Project::Ratatoskr]), Required, None, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"]),
 Sync => ("sync", Visibility::Only(&[Project::Ratatoskr]), Required, None, true, crate::measure::MeasureMode::Run, Some(crate::run_log::run_log_kind::MEASURE), &["cargo"], Direct),
@@ -241,7 +240,6 @@ impl CommandSpec {
                     | super::Command::GenericHotpath { mode, .. }
                     | super::Command::Suite { mode, .. }
                     | super::Command::Hotpath { mode, .. }
-                    | super::Command::Dellingr { mode, .. }
                     | super::Command::Mogwai { mode, .. } => Some(mode),
                     _ => None,
                 };

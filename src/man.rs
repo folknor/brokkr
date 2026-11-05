@@ -264,12 +264,6 @@ const TOPICS: &[Topic] = &[
         commands: &[CommandId::Corpus],
     },
     Topic {
-        name: "dellingr",
-        summary: "the lua-workload bench: [dellingr] config, hash pins, --commit",
-        content: include_str!("../docs/projects/dellingr.md"),
-        commands: &[CommandId::Dellingr],
-    },
-    Topic {
         name: "mogwai",
         summary: "benching mogwai surfaces: the [mogwai.targets.*] registry, counters, datasets",
         content: include_str!("../docs/projects/mogwai.md"),

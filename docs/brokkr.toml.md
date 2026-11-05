@@ -30,7 +30,10 @@ reads the ones that apply to it:
 - `[ratatoskr]` and `[ratatoskr.harness]` -> `docs/projects/ratatoskr.md`
 - `[piners]` and `[piners.harness]` -> `docs/brokkr.toml.piners.md`; runner
   behaviour is in `docs/commands/corpus.md`
-- `[dellingr]` and `[dellingr.workloads.*]` -> `docs/projects/dellingr.md`
+- `[dellingr]` is retired with the `brokkr dellingr` driver: it still loads
+  in a dellingr project, whatever it holds, unvalidated and with a warning,
+  and stays in the composed config a script's `config()` sees; dellingr
+  benchmarks through `[bench.*]` (`docs/brokkr.toml.bench.md`)
 - `[mogwai]` and `[mogwai.targets.*]` -> `docs/projects/mogwai.md`
 - `[pbfhogg.library]`, `[pbfhogg.library.harness]` and
   `[pbfhogg.library.require]` -> `docs/commands/library.md` (`brokkr man
@@ -233,7 +236,7 @@ legacy hostname section, and an unrecognized non-table value is rejected.
 `[litehtml]`, `[sluggrs]`, `[ratatoskr]`, `[piners]`, `[dellingr]`, and
 `[mogwai]` belong only to projects with the matching `project` value; a
 section for a different project is a load error. The matching section is
-required for `litehtml-rs`, `sluggrs`, `ratatoskr`, `dellingr`, and `mogwai`.
+required for `litehtml-rs`, `sluggrs`, `ratatoskr` and `mogwai`.
 Piners keeps its default corpus and registry paths when `[piners]` is absent.
 Project-specific config details are in the linked project docs at the top of
 this document.

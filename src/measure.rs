@@ -156,8 +156,7 @@ impl MeasureMode {
 pub struct MeasureRequest<'a> {
     /// Parsed `brokkr.toml` configuration.
     pub dev_config: &'a config::DevConfig,
-    /// The section parsed for `project` (dellingr's workloads, mogwai's
-    /// targets, piners' paths).
+    /// The section parsed for `project` (mogwai's targets, piners' paths).
     pub project_config: &'a config::project_config::ProjectConfig,
     /// Which project we are running in.
     pub project: Project,

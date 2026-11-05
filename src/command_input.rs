@@ -574,7 +574,6 @@ impl Command {
             | Self::HtmlExtract { .. }
             | Self::Outline { .. }
             | Self::Hotpath { .. }
-            | Self::Dellingr { .. }
             | Self::Mogwai { .. }
             | Self::Service { .. }
             | Self::Sync { .. }

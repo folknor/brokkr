@@ -8,6 +8,7 @@ struct Fake {
     calls: Vec<Vec<Word>>,
     options: Vec<CallOptions>,
     exit: Option<i32>,
+    stopped_at: Option<String>,
     stdout: Vec<u8>,
     since: Vec<String>,
     blocks: usize,
@@ -55,6 +56,7 @@ impl Host for Fake {
                 )])),
                 error: None,
             }),
+            stopped_at: self.stopped_at.clone(),
         })
     }
     fn read(&mut self, handle: usize) -> Result<Vec<u8>, Abort> {
@@ -496,6 +498,7 @@ fn binary_with_takes_options_then_binarys_arguments() {
             writes: vec![7],
             stdin: Some(9),
             hotpath: None,
+            stop_at: None,
         }
     );
     assert_eq!(host.options[0], CallOptions::default());
@@ -511,6 +514,16 @@ fn binary_with_takes_options_then_binarys_arguments() {
         ("{env = {X = 'a\\0b'}}", "NUL"),
         ("'x'", "expected a table of options"),
         ("{hotpath = true}", "expected a stage name"),
+        ("{stop_at = 'SETUP'}", "not an exact span-end marker"),
+        ("{stop_at = '-SETUP'}", "not an exact span-end marker"),
+        ("{stop_at = '_END'}", "not an exact span-end marker"),
+        ("{stop_at = '@SETUP_END'}", "not an exact span-end marker"),
+        ("{stop_at = '%SETUP_END'}", "not an exact span-end marker"),
+        ("{stop_at = 1}", "expected a marker name"),
+        (
+            "{stop_at = 'SETUP_END', hotpath = 's'}",
+            "hotpath and stop_at exclude each other",
+        ),
         ("{hotpath = 'Decode'}", "is not a name"),
         (
             "{hotpath = 'decode', env = {HOTPATH_OUTPUT_PATH = 'x'}}",
@@ -545,6 +558,28 @@ fn binary_with_hotpath_hands_back_the_capture() {
     assert_eq!(record["status"], "captured");
     assert_eq!(record["plain"], true);
     assert_eq!(host.options[0].hotpath.as_deref(), Some("decode"));
+}
+
+/// `stop_at` reaches the host; a child stopped at its marker passes
+/// `r:ok()` and carries `stopped_at` with no exit.
+#[test]
+fn a_child_stopped_at_its_marker_is_ok() {
+    let host = Fake {
+        stopped_at: Some("SETUP_END".into()),
+        ..Fake::default()
+    };
+    let (sample, host) = run(
+        "function bench()\n\
+           local r = binary_with({stop_at = 'SETUP_END'}, 'x'):ok()\n\
+           record.at = r.stopped_at\n\
+           record.exit = r.exit == nil\n\
+         end",
+        host,
+    );
+    let record = completed(&sample);
+    assert_eq!(record["at"], "SETUP_END");
+    assert_eq!(record["exit"], true);
+    assert_eq!(host.options[0].stop_at.as_deref(), Some("SETUP_END"));
 }
 
 /// read, write and filesize take handles only, inside bench() only.

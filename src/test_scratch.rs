@@ -11,7 +11,7 @@
 //! calling the allocator with a name of its own. Any fixed name such a helper
 //! picks is shared by every one of its callers:
 //!
-//! - `dellingr::workload`'s `config_with` used `tmpdir("cfg")`, so concurrent
+//! - the since-retired dellingr driver's `config_with` used `tmpdir("cfg")`, so concurrent
 //!   tests deleted each other's `brokkr.toml` mid-run. Green serially, three
 //!   failures at `--test-threads=8`, and the symptom was a hash mismatch or a
 //!   missing file - a fixture race wearing the costume of a bug in the code

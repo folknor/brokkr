@@ -1,9 +1,8 @@
 //! The seam to the linked dellingr crate, the Lua VM script benches run on.
 //!
-//! brokkr has a module of its own named `dellingr` (the `brokkr dellingr`
-//! command), so the crate is reached only here, by its absolute `::dellingr`
-//! path; a textlint rule keeps every other file off it, and a change in the
-//! crate's API touches this file alone.
+//! The crate is reached only here, by its absolute `::dellingr` path; a
+//! textlint rule keeps every other file off it, and a change in the crate's
+//! API touches this file alone.
 //!
 //! Two uses: [`compile`] for `brokkr check`'s `bench` phase, which runs
 //! nothing, and [`run_sample`], one iteration of a script bench in a fresh
@@ -150,6 +149,9 @@ pub(crate) struct CallOptions {
     /// `hotpath = STAGE`: capture the child's hotpath report under this
     /// stage name.
     pub(crate) hotpath: Option<String>,
+    /// `stop_at = NAME_END`: end the child once that process-stream marker
+    /// is seen.
+    pub(crate) stop_at: Option<String>,
 }
 
 /// What one `binary()` call hands back to the script.
@@ -167,6 +169,9 @@ pub(crate) struct CallOutcome {
     pub(crate) stdout_file: Option<HandleRef>,
     /// A marked call's capture, as the script sees it.
     pub(crate) hotpath: Option<Capture>,
+    /// The `stop_at` marker that ended the child; then `exit` and `signal`
+    /// are absent, whatever the child did after it.
+    pub(crate) stopped_at: Option<String>,
 }
 
 /// What a marked call's result carries of its capture: `hotpath_status`
@@ -957,7 +962,7 @@ fn options_at(state: &mut State, idx: isize) -> Result<CallOptions, Error> {
             state,
             format!(
                 "binary_with()'s first argument is a {}: expected a table of options \
-                 (env, reads, writes, stdin, hotpath)",
+                 (env, reads, writes, stdin, hotpath, stop_at)",
                 state.typ(idx).as_str()
             ),
         ));
@@ -991,28 +996,8 @@ fn options_at(state: &mut State, idx: isize) -> Result<CallOptions, Error> {
             "stdin" => {
                 options.stdin = Some(listed_handle(state, value_idx, "binary_with(): stdin")?);
             }
-            "hotpath" => {
-                if state.typ(value_idx) != LuaType::String {
-                    return Err(raise_failed(
-                        state,
-                        format!(
-                            "binary_with(): hotpath is a {}: expected a stage name",
-                            state.typ(value_idx).as_str()
-                        ),
-                    ));
-                }
-                let stage = text_at(state, value_idx, "binary_with(): hotpath")?;
-                if !crate::config::bench::is_param_name(&stage) {
-                    return Err(raise_failed(
-                        state,
-                        format!(
-                            "binary_with(): hotpath stage {stage:?} is not a name: lowercase, \
-                             starting with a letter, then letters, digits, '_' or '-'"
-                        ),
-                    ));
-                }
-                options.hotpath = Some(stage);
-            }
+            "hotpath" => options.hotpath = Some(stage_at(state, value_idx)?),
+            "stop_at" => options.stop_at = Some(stop_marker_at(state, value_idx)?),
             _ => {
                 let shown = if key.is_empty() {
                     format!("a {} key", state.typ(key_idx).as_str())
@@ -1023,7 +1008,7 @@ fn options_at(state: &mut State, idx: isize) -> Result<CallOptions, Error> {
                     state,
                     format!(
                         "binary_with(): unknown option {shown}: options are env, reads, writes, \
-                         stdin and hotpath"
+                         stdin, hotpath and stop_at"
                     ),
                 ));
             }
@@ -1031,6 +1016,14 @@ fn options_at(state: &mut State, idx: isize) -> Result<CallOptions, Error> {
         state.pop(1)?;
     }
     state.pop(1)?;
+    if options.hotpath.is_some() && options.stop_at.is_some() {
+        return Err(raise_failed(
+            state,
+            "binary_with(): hotpath and stop_at exclude each other: a child stopped at a \
+             marker is killed and writes no report"
+                .into(),
+        ));
+    }
     if options.hotpath.is_some()
         && let Some((name, _)) = options.env.iter().find(|(n, _)| n.starts_with("HOTPATH_"))
     {
@@ -1044,6 +1037,60 @@ fn options_at(state: &mut State, idx: isize) -> Result<CallOptions, Error> {
         ));
     }
     Ok(options)
+}
+
+/// `hotpath`: a stage name, a param name's grammar.
+fn stage_at(state: &mut State, idx: isize) -> Result<String, Error> {
+    if state.typ(idx) != LuaType::String {
+        return Err(raise_failed(
+            state,
+            format!(
+                "binary_with(): hotpath is a {}: expected a stage name",
+                state.typ(idx).as_str()
+            ),
+        ));
+    }
+    let stage = text_at(state, idx, "binary_with(): hotpath")?;
+    if !crate::config::bench::is_param_name(&stage) {
+        return Err(raise_failed(
+            state,
+            format!(
+                "binary_with(): hotpath stage {stage:?} is not a name: lowercase, starting with \
+                 a letter, then letters, digits, '_' or '-'"
+            ),
+        ));
+    }
+    Ok(stage)
+}
+
+/// `stop_at`: an exact span-end marker name, `FOO_END`. The lenient `FOO`
+/// and the `-FOO` shorthand `--stop` takes are refused: a bare name matches
+/// two markers, and which one ends the child would depend on how the FIFO
+/// was drained.
+fn stop_marker_at(state: &mut State, idx: isize) -> Result<String, Error> {
+    let what = "binary_with(): stop_at";
+    if state.typ(idx) != LuaType::String {
+        return Err(raise_failed(
+            state,
+            format!("{what} is a {}: expected a marker name", state.typ(idx).as_str()),
+        ));
+    }
+    let marker = text_at(state, idx, what)?;
+    // Letters, digits and `_` only: a leading `@` or `%` is the FIFO's
+    // counter or call-tag syntax, never a process-stream marker.
+    let exact = marker.len() > "_END".len()
+        && marker.ends_with("_END")
+        && marker.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    if !exact {
+        return Err(raise_failed(
+            state,
+            format!(
+                "{what} {marker:?} is not an exact span-end marker: name the one that ends the \
+                 phase, as FOO_END"
+            ),
+        ));
+    }
+    Ok(marker)
 }
 
 /// A handle in an option, refused when it is anything else (a path string
@@ -1155,6 +1202,9 @@ fn call_binary<H: Host>(
         state.push_string("stdout_file")?;
         push_handle(state, spool)?;
         state.set_table_raw(table)?;
+    }
+    if let Some(marker) = &outcome.stopped_at {
+        set_str(state, table, "stopped_at", marker.as_bytes())?;
     }
     if let Some(capture) = &outcome.hotpath {
         set_str(state, table, "hotpath_status", capture.status.as_bytes())?;
@@ -1421,7 +1471,8 @@ fn table_value(
     Ok(Value::List(array.into_iter().map(|(_, v)| v).collect()))
 }
 
-/// `result:ok()`: the result itself when the child exited 0; otherwise the
+/// `result:ok()`: the result itself when the child exited 0 or was stopped
+/// at its `stop_at` marker; otherwise the
 /// sample fails, naming how the child ended and its last stderr line.
 fn lua_result_ok<H: Host>(state: &mut State) -> Result<u8, Error> {
     stop_first::<H>(state)?;
@@ -1440,7 +1491,10 @@ fn lua_result_ok<H: Host>(state: &mut State) -> Result<u8, Error> {
         .then(|| state.to_number(-1))
         .transpose()?;
     state.pop(1)?;
-    if exit == Some(0.0) {
+    field(state, "stopped_at")?;
+    let stopped = state.typ(-1) == LuaType::String;
+    state.pop(1)?;
+    if exit == Some(0.0) || stopped {
         state.push_value(1)?;
         return Ok(1);
     }
