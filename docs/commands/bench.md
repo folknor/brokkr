@@ -60,15 +60,20 @@ With several arms, each starts with an `arm I/N` line naming the params that
 vary, and its result and failure lines carry them (`bench cat
 (dataset=denmark)`).
 
-An arm that fails, at its worktree, its build or an iteration, does not
-stop the rest; its cause is printed when it fails, and once every arm has
-run the command fails naming the failed arms. These end the invocation
-after the arm in flight is stored, the arms after it not run and not
-stored, and named: a stop (Ctrl-C or `brokkr kill`), a run that cannot be
-stored, and, without `--commit`, the checkout's HEAD having moved off the
-commit resolved for the invocation, since the arms left would build the
-live tree under a sha they no longer are. A stop that lands while the last
-arm is being stored ends nothing: every arm ran and was stored.
+An arm that fails, at its worktree, its build, the check after its build
+(The build) or an iteration, does not stop the rest; its cause is printed
+when it fails, and once every arm has run the command fails naming the
+failed arms. These end the invocation after the arm in flight is stored,
+the arms after it not run and not stored, and named: a stop (Ctrl-C or
+`brokkr kill`), a run that cannot be stored, and, without `--commit`, the
+checkout's HEAD having moved off the commit resolved for the invocation,
+since the arms left would build the live tree under a sha they no longer
+are. HEAD moving during an arm's own build fails that arm (The build);
+without `--commit` the invocation then ends the same way, unless the live
+HEAD is back at that commit by the next arm. HEAD moving
+while an arm iterates changes nothing it measured, since its children run
+the snapshot already built. A stop that lands while the last arm is being
+stored ends nothing: every arm ran and was stored.
 
 ## The build
 
@@ -82,6 +87,18 @@ drops the package's defaults. The built executable is snapshotted into
 `.brokkr/artifacts/<xxh128>/<name>` as `brokkr build` does, and every child
 runs that snapshot. The run records what was asked for, the bin and the
 features cargo resolved for it, and the snapshot's digest.
+
+Once the build and its snapshot have succeeded, and unless a stop is
+already pending (the arm is then interrupted with no iteration), the tree
+built (under `--commit` the worktree) is checked again: if its HEAD is no
+longer the commit resolved for the invocation, the build may have read
+either tree, so the arm fails there, stored with what it built and no
+iteration. Otherwise, without `--commit`, the live tree's state is read
+again, and the run is dirty if the tree was dirty before the build or is
+now (What a run stores). An arm whose build or snapshot fails gets neither
+second reading. The check compares two observations, so a change present
+at neither (a checkout moved and moved back, an edit undone before the
+check) is not seen.
 
 ## An iteration
 
@@ -301,8 +318,12 @@ included, one per arm, with its bound params (each key, its `from` path and
 a file's digest), every child's argv, ending, `/proc` samples, marker FIFO
 records and capture losses; `brokkr sidecar <uuid>` reads one child's
 through the sidecar views (`brokkr man measure`, Script-bench children). A
-run of a dirty tree is stored and marked
-dirty: `brokkr results` lists it with `-dirty` and never compares it. The
+run of a dirty tree, dirty as its attempt starts or after its build (The
+build), is stored and marked dirty: `brokkr results` lists it with `-dirty`
+and never compares it. Dirty is the measurement policy's: a change to the
+root `brokkr.toml`, to a config file it includes (one that is not
+`Cargo.lock` or a toolchain file) or to a `.md` file does not make a tree
+dirty, and a `--commit` worktree counts as clean. The
 run's uuid is printed whatever `--verbose` says, as the one handle `brokkr
 results <uuid>` finds it by, with where it went. A run that cannot be
 stored fails the command naming its uuid; one whose storing may or may not

@@ -720,16 +720,26 @@ arm.
 What slice 7 left, with sizes:
 
 - A `--commit` arm is still exercised only by hand: its worktree, a
-  worktree failure stored as the arm's failure, and its exemption from the
-  HEAD check. The end-to-end runner test (`src/bench/runner/run_tests.rs`,
+  worktree failure stored as the arm's failure, its exemption from the
+  between-arms HEAD check, and the check of the worktree's HEAD after its
+  build. The end-to-end runner test (`src/bench/runner/run_tests.rs`,
   landed 2026-11-05) drives `runner::run` over a fixture crate cargo builds
   inside the test and covers the rest of the arm loop, but worktrees live
   under the real `$HOME/.brokkr/worktrees`, so a `--commit` case first
   needs that directory under the test process's scratch home too, as the
   lock and the bench store are (small).
-- The HEAD check runs between arms only; within one arm, as in slice 5, a
-  checkout moving during the build is recorded under the sha resolved
-  before it (small: re-resolve after the build and fail the arm).
+- The check after an arm's build (landed 2026-11-05: HEAD of the tree built
+  re-resolved once the build and snapshot are done, a move failing the arm,
+  the live tree's dirty state read again and joined with the first reading)
+  compares two observations, so a change present at neither is not seen,
+  and a `--commit` worktree a build script dirties still counts as clean.
+  The first needs a build-input boundary enforced for the whole build;
+  building from a copy of the checkout was refused, since it changes what
+  is built and freezes neither path deps nor what a build script reads. The
+  second a post-build cleanliness check of the worktree could catch, but
+  that reopens the ruling that a `--commit` worktree is clean, and would
+  need a policy that tells brokkr's own edits and build outputs from dirt
+  (neither planned).
 - A plain collection's `..` stays refused, open for a bench that wants
   integer ranges without a table (small).
 - `brokkr results --param` joins a collection's keys with `,`, a lossy

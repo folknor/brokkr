@@ -345,6 +345,38 @@ file (`include_str!`, a build script), and an unused bench could name a
 build input. The asymmetry stays a convention; a fix would need a declared
 bench-only file set the build is proved not to read.
 
+The same exemption reaches the build (2026-11-05, found landing the check
+after the build): the dirty state is now read before and after an arm's
+build, but `brokkr.toml`, its included config files (lockfiles and toolchain
+files aside) and `.md` files are exempt
+from both readings, so a build that embeds one of them (`include_str!` of a
+config, a build script reading it) can embed an edit while the run stays
+clean, and the stored config holds the contents loaded at invocation start,
+not what the build read.
+
+### A bench invocation's arms share one cached cargo metadata answer (2026-11-05)
+
+Found landing the check after the build. `resolve_build_target` reads
+`cargo::metadata::load`, which caches per invocation by root, query and
+environment, with no tree identity, and caches a failed query too. So a
+target resolution that fails once (a transient cargo error) fails every
+later arm without being retried, against slice 7's rule that a build can
+fail transiently and the rest still run, and an edit between arms that
+moves the bench's target to another package is not seen, the later arms
+building the package the first resolution named. A fix would key the cache
+on the tree (or bypass it per arm) and not cache failures for the runner.
+
+### Typed measured commands read git before their build and never again (2026-11-05)
+
+Found landing the check after a script bench's build. `MeasurementSession::
+with_build_config` builds the session, which collects the commit and
+cleanliness (`BenchHarness::new_with_lock`), before `cargo_build`, and
+nothing re-reads them, so a typed row whose checkout moves or dirties
+during the build is stored under the earlier commit and cleanliness, the
+race script benches now catch (`docs/commands/bench.md`, The build). Its doc
+comment's "lock -> cargo_build -> BenchHarness lifecycle" also names the
+order backwards. The script runner's two-observation check is the model.
+
 ### `brokkr bench` takes the global lock to list or describe (2026-11-05)
 
 Found while declaring the first real benches. Bare `brokkr bench` and

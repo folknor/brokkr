@@ -7,9 +7,11 @@
 //!
 //! Each arm is then one attempt with one document
 //! (`reference/bench-store.md`), run in order; one that fails does not stop
-//! the rest, a stop or a publication failure ends the invocation. An arm is:
-//! the build the bench's TOML asks for (host features folded in), in the
-//! `--commit` worktree when given, then iterations, each a fresh Lua state
+//! the rest, a stop, a publication failure or (without `--commit`) HEAD moving
+//! off the invocation's commit ends the invocation. An arm is: the build the
+//! bench's TOML asks for (host features folded in), in the `--commit` worktree
+//! when given, failing the arm when the tree built is no longer at that
+//! commit once it is done, then iterations, each a fresh Lua state
 //! over one frozen compiled script, an owner lease and its children on the
 //! resource protocol (`reference/bench-resources.md`), then one publication
 //! to the per-user bench store, local or the configured results server.
@@ -95,7 +97,7 @@ pub(crate) fn run(
     // The whole invocation, worktree setup and publication included: a stop
     // that lands between two children, during the build or while publishing
     // is recorded rather than taking the default action, so the attempt is
-    // still published as interrupted.
+    // still published (interrupted, unless something it observed decided it).
     let _interrupts = crate::shutdown::SigtermGuard::install();
     // An unknown revision is refused before anything is attempted; from here
     // on every attempt's outcome is published.
@@ -209,7 +211,8 @@ fn hold_and_digest(
 /// Whether the arm after a published one may start: not once a stop is
 /// pending, and, without `--commit`, only while HEAD is still the commit
 /// resolved for the invocation, since every arm builds the live tree and
-/// records that sha.
+/// records that sha. A move during an arm's own build fails that arm
+/// (`Attempt::built_as_recorded`); this refuses the arms after it.
 fn admit_next(
     name: &str,
     args: &BenchArgs,
@@ -482,14 +485,9 @@ impl Attempt<'_> {
     ) -> store::RunDocument {
         let live = self.detection.build_root.as_path();
         let subject = crate::git::commit_subject(live, commit).ok();
-        // A `--commit` worktree is always clean; the live tree under the
-        // measurement policy, its config files exempt.
-        let dirty = !self.committed
-            && !crate::git::TreeState::read_for_measurement(
-                live,
-                &self.detection.config.included_config_files,
-            )
-            .is_some_and(|state| !state.for_measurement());
+        // A `--commit` worktree counts as clean; the live tree is read again
+        // once the build is done (`built_as_recorded`).
+        let dirty = !self.committed && self.live_dirty();
         let config = &self.detection.config;
         let profile = self.profile();
         let features = crate::command_args::resolve_features(config, &self.bench.features);
@@ -553,7 +551,74 @@ impl Attempt<'_> {
                 return;
             }
         };
+        if !self.built_as_recorded(build_root, commit, document) {
+            return;
+        }
         self.iterate(&program, commit, document);
+    }
+
+    /// Whether the build just made is still what the document records,
+    /// observed again once it and its snapshot are done: the tree built must
+    /// still be at the recorded commit, else the arm fails with no iteration
+    /// run, and the live tree is dirty if it was before the build or is now.
+    /// Two observations, so a change present at neither is not seen.
+    fn built_as_recorded(
+        &self,
+        build_root: &Path,
+        commit: &crate::git::Commit,
+        document: &mut store::RunDocument,
+    ) -> bool {
+        // No iteration would run; a git read now would be cut short anyway.
+        if crate::shutdown::should_unwind() {
+            document.outcome = store::RunOutcome::Interrupted;
+            return false;
+        }
+        let head = match crate::git::resolve_commit(build_root, "HEAD") {
+            Ok(head) => head,
+            Err(error) => {
+                document.outcome = if crate::shutdown::should_unwind() {
+                    store::RunOutcome::Interrupted
+                } else {
+                    store::RunOutcome::Failed {
+                        reason: format!(
+                            "HEAD could not be read after the build: {}",
+                            reason_of(&error)
+                        ),
+                    }
+                };
+                return false;
+            }
+        };
+        // An observed move fails the arm whatever a stop does meanwhile: the
+        // build may have read either tree, so the commit it records is false.
+        if head != *commit {
+            document.outcome = store::RunOutcome::Failed {
+                reason: format!(
+                    "HEAD moved from {} to {} during the build, so what was built is not the \
+                     commit recorded",
+                    commit.as_str(),
+                    head.as_str()
+                ),
+            };
+            return false;
+        }
+        if !self.committed {
+            // Read even when already dirty, then joined: once dirty, a run
+            // stays dirty, since the build may have read what was there.
+            let dirty_after = self.live_dirty();
+            document.dirty = document.dirty || dirty_after;
+        }
+        true
+    }
+
+    /// The live tree under the measurement policy, its config files exempt;
+    /// a tree git cannot read counts as dirty.
+    fn live_dirty(&self) -> bool {
+        !crate::git::TreeState::read_for_measurement(
+            self.detection.build_root.as_path(),
+            &self.detection.config.included_config_files,
+        )
+        .is_some_and(|state| !state.for_measurement())
     }
 
     fn profile(&self) -> crate::build::RustProfile {

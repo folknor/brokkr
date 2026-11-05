@@ -2,7 +2,9 @@
 //! builds inside the test, in a git repository of its own, every arm rule of
 //! `docs/commands/bench.md` (Arms) met for real. The fixture's executable acts
 //! on its first argument: it moves HEAD (`commit`), sends brokkr the stop
-//! `brokkr kill` sends (`stop`), or prints it. Runs go to this process's
+//! `brokkr kill` sends (`stop`), or prints it; a fixture given the build
+//! script moves HEAD or changes the tree during the build itself, by the
+//! features built. Runs go to this process's
 //! scratch bench store, or to a loopback results server over a real store
 //! that can request a stop while acknowledging a publication, or refuse one.
 //!
@@ -73,8 +75,45 @@ publish = false
 
 [features]
 broken = []
+moves = []
+dirties = []
+cleans = []
 
 [workspace]
+"#;
+
+/// The build script a fixture gets only when it asks for one: by the
+/// features built, it moves HEAD (`moves`), leaves an untracked file in the
+/// tree (`dirties`) or removes that file (`cleans`), all during the build.
+const BUILD_RS: &str = r#"use std::path::Path;
+use std::process::Command;
+
+fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    let root = std::env::var_os("CARGO_MANIFEST_DIR").unwrap();
+    let root = Path::new(&root);
+    if std::env::var_os("CARGO_FEATURE_MOVES").is_some() {
+        let mut git = Command::new("git");
+        for (name, _) in std::env::vars_os() {
+            if name.to_string_lossy().starts_with("GIT_") {
+                git.env_remove(name);
+            }
+        }
+        let moved = git
+            .current_dir(root)
+            .args(["-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"])
+            .args(["commit", "--allow-empty", "--quiet", "-m", "moved in the build"])
+            .status()
+            .is_ok_and(|status| status.success());
+        assert!(moved, "the build script could not move HEAD");
+    }
+    if std::env::var_os("CARGO_FEATURE_DIRTIES").is_some() {
+        std::fs::write(root.join("dirt"), "left by the build\n").unwrap();
+    }
+    if std::env::var_os("CARGO_FEATURE_CLEANS").is_some() {
+        std::fs::remove_file(root.join("dirt")).unwrap();
+    }
+}
 "#;
 
 /// Deeper than any ancestor's config, so neither the target nor the build
@@ -97,6 +136,33 @@ end"""
 [bench.broken]
 profile = "dev"
 features = ["broken"]
+params.mode = { default = "plain" }
+script = """
+function bench(params)
+    binary(params.mode):ok()
+end"""
+
+[bench.moves]
+profile = "dev"
+features = ["moves"]
+params.mode = { default = "plain" }
+script = """
+function bench(params)
+    binary(params.mode):ok()
+end"""
+
+[bench.dirties]
+profile = "dev"
+features = ["dirties"]
+params.mode = { default = "plain" }
+script = """
+function bench(params)
+    binary(params.mode):ok()
+end"""
+
+[bench.cleans]
+profile = "dev"
+features = ["cleans"]
 params.mode = { default = "plain" }
 script = """
 function bench(params)
@@ -128,6 +194,12 @@ struct Fixture {
 
 impl Fixture {
     fn new(name: &str) -> Self {
+        Self::with_files(name, &[])
+    }
+
+    /// As [`Fixture::new`], with `files` (relative path, content) committed
+    /// beside the crate.
+    fn with_files(name: &str, files: &[(&str, &str)]) -> Self {
         for var in GIT_REDIRECTS {
             assert!(
                 std::env::var_os(var).is_none(),
@@ -150,6 +222,9 @@ impl Fixture {
             format!("project = \"e2e-{name}\"\n{BENCHES}"),
         )
         .unwrap();
+        for (path, content) in files {
+            std::fs::write(root.join(path), content).unwrap();
+        }
         git(&root, &["init", "--quiet"]);
         git(&root, &["config", "user.name", "brokkr test"]);
         git(&root, &["config", "user.email", "test@example.invalid"]);
@@ -507,6 +582,8 @@ fn a_build_failure_fails_its_arm_and_the_rest_still_run() {
 /// Without `--commit`, an arm builds the live tree under the sha resolved for
 /// the invocation, so HEAD moving off it ends the invocation once the arm in
 /// flight is stored; the arms after it are named, never run and never stored.
+/// Moved by a child, after the build: the arm measured its snapshot, built at
+/// the recorded commit, so it completes.
 #[test]
 fn head_moving_off_the_invocations_commit_ends_it_before_the_next_arm() {
     let _serial = crate::test_scratch::process_global_lock();
@@ -532,6 +609,93 @@ fn head_moving_off_the_invocations_commit_ends_it_before_the_next_arm() {
     assert_eq!(mode(&runs[0]), "commit");
     assert_eq!(runs[0].outcome, store::RunOutcome::Completed);
     assert_eq!(runs[0].commit, before);
+}
+
+/// HEAD moving during an arm's own build fails that arm: stored with what it
+/// built and no iteration, under the commit it was meant to be, and the move
+/// then ends the invocation before the next arm.
+#[test]
+fn head_moving_during_the_build_fails_the_arm() {
+    let _serial = crate::test_scratch::process_global_lock();
+    let fixture = Fixture::with_files("build-moves", &[("build.rs", BUILD_RS)]);
+    let _hold = crate::lockfile::test_hold(
+        &fixture.detection.project_root,
+        &fixture.detection.build_root,
+    );
+    let before = fixture.head();
+
+    let ran = fixture.bench("build-moves", "moves", 1, &["--mode", "a,b"]);
+    let after = fixture.head();
+    assert_ne!(before, after, "the build script moved HEAD");
+    let moved = format!("HEAD moved from {before} to {after}");
+    ran.says(&format!(
+        "bench moves (mode=a) failed: {moved} during the build"
+    ));
+    let error = ran.error();
+    assert!(
+        error.contains(&format!("{moved} during the run")),
+        "{error}"
+    );
+    ran.says("not run, so not stored: mode=b");
+
+    let runs: Vec<_> = fixture
+        .stored()
+        .into_iter()
+        .filter(|run| run.bench == "moves")
+        .collect();
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    let run = &runs[0];
+    assert_eq!(mode(run), "a");
+    assert_eq!(run.commit, before);
+    assert!(
+        failed_reason(run).starts_with(&format!("{moved} during the build")),
+        "{run:?}"
+    );
+    assert!(run.build.resolved.is_some() && run.build.artifact.is_some());
+    assert!(run.iterations.is_empty());
+}
+
+/// The live tree is read again once the build is done: a run is dirty if the
+/// tree was before its build or is after it, and a dirty run still runs and
+/// completes.
+#[test]
+fn a_tree_dirty_before_or_after_the_build_marks_the_run_dirty() {
+    let _serial = crate::test_scratch::process_global_lock();
+    let fixture = Fixture::with_files("build-dirt", &[("build.rs", BUILD_RS)]);
+    let _hold = crate::lockfile::test_hold(
+        &fixture.detection.project_root,
+        &fixture.detection.build_root,
+    );
+    let head = fixture.head();
+    let run_of = |bench: &str| {
+        let runs: Vec<_> = fixture
+            .stored()
+            .into_iter()
+            .filter(|run| run.bench == bench)
+            .collect();
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        let run = runs.into_iter().next().unwrap();
+        assert_eq!(run.outcome, store::RunOutcome::Completed, "{run:?}");
+        assert_eq!(run.commit, head);
+        run
+    };
+
+    // Clean before, dirty after: the build left a file.
+    let ran = fixture.bench("dirties", "dirties", 1, &[]);
+    assert!(ran.result.is_ok(), "{:?}\n{}", ran.result, ran.console);
+    assert!(fixture.root.join("dirt").exists());
+    assert!(run_of("dirties").dirty);
+
+    // Dirty before, clean after: the build removed it.
+    let ran = fixture.bench("cleans", "cleans", 1, &[]);
+    assert!(ran.result.is_ok(), "{:?}\n{}", ran.result, ran.console);
+    assert!(!fixture.root.join("dirt").exists());
+    assert!(run_of("cleans").dirty);
+
+    // Clean on both sides.
+    let ran = fixture.bench("clean", "probe", 1, &[]);
+    assert!(ran.result.is_ok(), "{:?}\n{}", ran.result, ran.console);
+    assert!(!run_of("probe").dirty);
 }
 
 /// A stop while a child runs (what `brokkr kill` sends, from the child
