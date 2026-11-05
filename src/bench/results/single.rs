@@ -1,11 +1,13 @@
 //! One script-bench run as a labelled block: identity, params, outcome and
 //! walls, host and build, every iteration and its children, the result's
-//! record and its `record.hotpath` report.
+//! record and its `record.hotpath` report, and each child's captured
+//! hotpath report.
 
 use std::fmt::Write;
 
 use super::super::store::{
-    Child, ChildEnding, IterationOutcome, RunDocument, RunOutcome, StoredRun,
+    CaptureOutcome, Child, ChildEnding, IterationOutcome, Measurement, RunDocument, RunOutcome,
+    StoredRun,
 };
 use super::{hotpath_report, ms, short_commit, timestamp, verdict};
 
@@ -83,6 +85,9 @@ fn identity(out: &mut String, run: &StoredRun) {
         RunOutcome::Interrupted => "interrupted".to_owned(),
     };
     field(out, "outcome", &outcome);
+    if doc.measurement == Measurement::Hotpath {
+        field(out, "measured", "hotpath (--hotpath)");
+    }
     if let Some(best) = run.best_iteration {
         let wall = |w: Option<i64>| w.map_or_else(|| "--".to_owned(), ms);
         let walls: Vec<String> = doc.iterations.iter().map(|i| wall(i.wall_us)).collect();
@@ -226,6 +231,47 @@ fn child(out: &mut String, idx: usize, child: &Child) {
         e.records.len()
     )
     .expect("write to String is infallible");
+    if let Some(capture) = &child.hotpath {
+        let status = match &capture.outcome {
+            CaptureOutcome::Captured { .. } => "captured".to_owned(),
+            CaptureOutcome::Missing => "missing (no report was written)".to_owned(),
+            CaptureOutcome::Invalid { reason } => format!("invalid: {reason}"),
+            CaptureOutcome::Unreadable { reason } => format!("unreadable: {reason}"),
+            CaptureOutcome::OverBudget => "over budget, not read".to_owned(),
+        };
+        writeln!(
+            out,
+            "           hotpath {} #{}: {status}",
+            capture.stage, capture.occurrence
+        )
+        .expect("write to String is infallible");
+    }
+}
+
+/// Each captured report of `iterations`, rendered by the typed rows'
+/// printer under its stage, occurrence and iteration; one brokkr cannot
+/// render is named instead.
+fn captures(out: &mut Vec<String>, run: &StoredRun, iterations: &[usize], top: usize) {
+    for &idx in iterations {
+        for child in &run.doc.iterations[idx].children {
+            let Some(capture) = &child.hotpath else {
+                continue;
+            };
+            let CaptureOutcome::Captured { report } = &capture.outcome else {
+                continue;
+            };
+            let heading = format!(
+                "hotpath {} #{} (iteration {idx})",
+                capture.stage, capture.occurrence
+            );
+            let rendered = crate::db::hotpath_data_from_json(report)
+                .and_then(|data| crate::hotpath_fmt::format_hotpath_report(&data, top));
+            out.push(match rendered {
+                Some(report) => format!("{heading}\n{report}"),
+                None => format!("{heading}: holds nothing brokkr can render"),
+            });
+        }
+    }
 }
 
 fn iterations(out: &mut String, run: &StoredRun) {
@@ -305,6 +351,13 @@ pub(crate) fn format_single(run: &StoredRun, top: usize) -> String {
     let mut reports = Vec::new();
     for (label, each) in records {
         record(&mut out, &label, each, top, &mut reports);
+    }
+    if run.children_loaded {
+        let shown: Vec<usize> = match run.best_iteration {
+            Some(best) => vec![best],
+            None => (0..doc.iterations.len()).collect(),
+        };
+        captures(&mut reports, run, &shown, top);
     }
     for report in reports {
         out.push('\n');

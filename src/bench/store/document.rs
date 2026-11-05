@@ -43,6 +43,8 @@ pub struct RunDocument {
     pub argv: Vec<String>,
     pub conditions: Conditions,
     pub build: Build,
+    /// What the operator asked to measure.
+    pub measurement: Measurement,
     /// Bound params by name. An unbound param is absent.
     pub params: BTreeMap<String, BoundParam>,
     /// The resolved brokkr.toml as the writer serialized it; stored once per
@@ -90,6 +92,44 @@ pub struct ResolvedBuild {
     pub bin: String,
     /// The features cargo resolved for the package.
     pub features: Vec<String>,
+}
+
+/// What a run was asked to measure: `brokkr bench` plain, or `brokkr bench
+/// --hotpath`, built with the bench's `hotpath_features`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Measurement {
+    Timing,
+    Hotpath,
+}
+
+impl Measurement {
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Self::Timing => "timing",
+            Self::Hotpath => "hotpath",
+        }
+    }
+
+    pub(super) fn parse(name: &str) -> Option<Self> {
+        match name {
+            "timing" => Some(Self::Timing),
+            "hotpath" => Some(Self::Hotpath),
+            _ => None,
+        }
+    }
+}
+
+/// The class a run pairs in: what was asked, and what was observed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairingClass {
+    /// Asked for timing and no child captured a profile.
+    Timing,
+    /// Asked for a hotpath profile.
+    Hotpath,
+    /// Asked for timing, but some child captured a profile: the build was
+    /// instrumented by other means.
+    Incidental,
 }
 
 /// One bound param. A scalar has exactly one value; a collection keeps its
@@ -174,6 +214,48 @@ pub struct Child {
     pub wall_us: i64,
     pub ending: ChildEnding,
     pub evidence: Evidence,
+    /// A call marked `hotpath = STAGE`: what became of its report. Absent
+    /// for an unmarked call.
+    pub hotpath: Option<HotpathCapture>,
+}
+
+/// One marked call's hotpath capture.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HotpathCapture {
+    /// The script's name for the stage.
+    pub stage: String,
+    /// The stage's marked calls so far in the iteration, this one included,
+    /// whatever became of each: from 1.
+    pub occurrence: u32,
+    pub outcome: CaptureOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub enum CaptureOutcome {
+    /// The report, as parsed: a JSON object.
+    Captured { report: serde_json::Value },
+    /// The report file was still empty: nothing wrote one.
+    Missing,
+    /// The report was read but is not one brokkr can take.
+    Invalid { reason: String },
+    /// The report could not be read.
+    Unreadable { reason: String },
+    /// Over the per-report or per-iteration budget: not read.
+    OverBudget,
+}
+
+impl CaptureOutcome {
+    pub(super) fn name(&self) -> &'static str {
+        match self {
+            Self::Captured { .. } => "captured",
+            Self::Missing => "missing",
+            Self::Invalid { .. } => "invalid",
+            Self::Unreadable { .. } => "unreadable",
+            Self::OverBudget => "over_budget",
+        }
+    }
 }
 
 /// How a child ended, as its supervisor assigned it, without loss: a
@@ -465,6 +547,25 @@ impl RunDocument {
                         ));
                     }
                 }
+                if self.measurement == Measurement::Hotpath {
+                    for (idx, iteration) in self.iterations.iter().enumerate() {
+                        let captures: Vec<&HotpathCapture> = iteration
+                            .children
+                            .iter()
+                            .filter_map(|c| c.hotpath.as_ref())
+                            .collect();
+                        if captures.is_empty()
+                            || captures
+                                .iter()
+                                .any(|c| !matches!(c.outcome, CaptureOutcome::Captured { .. }))
+                        {
+                            return Err(refuse(format!(
+                                "a completed hotpath run whose iteration {idx} did not capture \
+                                 every marked call, or marked none"
+                            )));
+                        }
+                    }
+                }
                 Ok(())
             }
         }
@@ -486,10 +587,31 @@ impl RunDocument {
         best.map(|(idx, _)| idx)
     }
 
+    /// The class the run pairs in: [`Measurement::Hotpath`] as asked; a
+    /// timing run any of whose children, in any iteration, captured a
+    /// report is incidental; any other is timing.
+    pub fn pairing_class(&self) -> PairingClass {
+        let captured = self.iterations.iter().any(|iteration| {
+            iteration.children.iter().any(|child| {
+                child
+                    .hotpath
+                    .as_ref()
+                    .is_some_and(|c| matches!(c.outcome, CaptureOutcome::Captured { .. }))
+            })
+        });
+        match (self.measurement, captured) {
+            (Measurement::Hotpath, _) => PairingClass::Hotpath,
+            (Measurement::Timing, true) => PairingClass::Incidental,
+            (Measurement::Timing, false) => PairingClass::Timing,
+        }
+    }
+
     /// The identity runs pair on: project, bench, and each bound param's
     /// keys and digests in bound order, params by name. Versioned, so a
     /// later algorithm is a new projection and never a silent rewrite;
-    /// rows compare only under one algorithm.
+    /// rows compare only under one algorithm. A timing run's key is
+    /// `bench-pair-v1`, unchanged; a profiled or incidental run's is
+    /// `bench-pair-v2` with its class, so neither ever pairs with timing.
     pub fn pairing_key(&self) -> String {
         let params: Vec<serde_json::Value> = self
             .params
@@ -503,7 +625,22 @@ impl RunDocument {
                 serde_json::json!([name, param.many, values])
             })
             .collect();
-        serde_json::json!(["bench-pair-v1", self.project, self.bench, params]).to_string()
+        match self.pairing_class() {
+            PairingClass::Timing => {
+                serde_json::json!(["bench-pair-v1", self.project, self.bench, params])
+            }
+            PairingClass::Hotpath => {
+                serde_json::json!(["bench-pair-v2", "hotpath", self.project, self.bench, params])
+            }
+            PairingClass::Incidental => serde_json::json!([
+                "bench-pair-v2",
+                "incidental",
+                self.project,
+                self.bench,
+                params
+            ]),
+        }
+        .to_string()
     }
 }
 
@@ -531,8 +668,46 @@ impl Iteration {
         {
             return Err(format!("record nests deeper than {MAX_RECORD_DEPTH}"));
         }
+        let mut occurrences: BTreeMap<&str, u32> = BTreeMap::new();
         for (idx, child) in self.children.iter().enumerate() {
             child.validate().map_err(|e| format!("child {idx}: {e}"))?;
+            if let Some(capture) = &child.hotpath {
+                let seen = occurrences.entry(capture.stage.as_str()).or_insert(0);
+                *seen += 1;
+                if capture.occurrence != *seen {
+                    return Err(format!(
+                        "child {idx}: stage {:?} occurrence {} where {} follows",
+                        capture.stage, capture.occurrence, *seen
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl HotpathCapture {
+    fn validate(&self) -> Result<(), String> {
+        if self.stage.is_empty() {
+            return Err("a hotpath capture with an empty stage".to_owned());
+        }
+        match &self.outcome {
+            CaptureOutcome::Captured { report } => {
+                if !report.is_object() {
+                    return Err("a captured hotpath report that is not a JSON object".to_owned());
+                }
+                if depth(report) > MAX_RECORD_DEPTH {
+                    return Err(format!(
+                        "a hotpath report nests deeper than {MAX_RECORD_DEPTH}"
+                    ));
+                }
+            }
+            CaptureOutcome::Invalid { reason } | CaptureOutcome::Unreadable { reason }
+                if reason.is_empty() =>
+            {
+                return Err("a hotpath capture failure with an empty reason".to_owned());
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -564,6 +739,9 @@ impl Child {
             || i64::try_from(evidence.loss.rejected_lines).is_err()
         {
             return Err("a capture count past the store's range".to_owned());
+        }
+        if let Some(capture) = &self.hotpath {
+            capture.validate()?;
         }
         Ok(())
     }

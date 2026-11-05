@@ -40,6 +40,10 @@ pub struct Bench {
     /// Whether cargo builds the package's default features; `true` unless the
     /// table sets `default_features = false`.
     pub default_features: bool,
+    /// The package's own features that instrument it for hotpath: added to
+    /// the build under `brokkr bench --hotpath`, and refused in a timing
+    /// run's resolved features. Empty means the bench cannot be profiled.
+    pub hotpath_features: Vec<String>,
     /// The `[bench_params]` sets this bench pulled in, in the order given.
     pub uses: Vec<String>,
     /// The effective params: every used set's, then the bench's own, which
@@ -146,8 +150,9 @@ impl FromPath {
 }
 
 /// A param name: also its `--NAME` flag, so lowercase, starting with a
-/// letter, then letters, digits, `_` or `-`.
-fn is_param_name(name: &str) -> bool {
+/// letter, then letters, digits, `_` or `-`. A hotpath stage name follows
+/// the same grammar.
+pub fn is_param_name(name: &str) -> bool {
     let mut chars = name.chars();
     chars.next().is_some_and(|c| c.is_ascii_lowercase())
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
@@ -185,6 +190,8 @@ struct RawBench {
     #[serde(default)]
     features: Vec<String>,
     default_features: Option<bool>,
+    #[serde(default)]
+    hotpath_features: Vec<String>,
     #[serde(default)]
     uses: Vec<String>,
     #[serde(default)]
@@ -330,6 +337,28 @@ fn parse_bench(
     if raw.features.iter().any(|f| f.trim().is_empty()) {
         return Err(err("features has a blank entry".into()));
     }
+    // The package's own feature names, as cargo reports the package's
+    // resolved features: a dependency's (`dep/feat`) or an optional
+    // dependency (`dep:name`) is not one brokkr can find in that list.
+    if let Some(bad) = raw
+        .hotpath_features
+        .iter()
+        .find(|f| f.trim().is_empty() || f.contains(['/', ':']) || f.contains(char::is_whitespace))
+    {
+        return Err(err(format!(
+            "hotpath_features entry {bad:?} is not one of the package's own feature names"
+        )));
+    }
+    if let Some(both) = raw
+        .hotpath_features
+        .iter()
+        .find(|f| raw.features.contains(f))
+    {
+        return Err(err(format!(
+            "{both:?} is in both features and hotpath_features: a timing run would be \
+             instrumented"
+        )));
+    }
     let params = effective_params(&raw.uses, raw.params, sets).map_err(err)?;
     check_references(&params).map_err(err)?;
     Ok(Bench {
@@ -339,6 +368,7 @@ fn parse_bench(
         profile: raw.profile,
         features: raw.features,
         default_features: raw.default_features.unwrap_or(true),
+        hotpath_features: raw.hotpath_features,
         uses: raw.uses,
         params,
     })
@@ -553,6 +583,38 @@ mod tests {
             cat.default_features,
             "default features unless the table says otherwise"
         );
+    }
+
+    #[test]
+    fn hotpath_features_are_the_packages_own_and_apart_from_features() {
+        let benches = single(
+            "hotpath_features",
+            "[bench.cat]\nscript = \"x = 1\"\nhotpath_features = [\"hotpath\"]\n",
+        )
+        .unwrap();
+        assert_eq!(benches["cat"].hotpath_features, ["hotpath"]);
+        assert!(
+            single("hotpath_absent", "[bench.cat]\nscript = \"x = 1\"\n").unwrap()["cat"]
+                .hotpath_features
+                .is_empty()
+        );
+        for (name, list) in [
+            ("hotpath_dep", "[\"dep/hotpath\"]"),
+            ("hotpath_optional", "[\"dep:hotpath\"]"),
+            ("hotpath_blank", "[\" \"]"),
+        ] {
+            let err = err_of(
+                name,
+                &format!("[bench.cat]\nscript = \"x = 1\"\nhotpath_features = {list}\n"),
+            );
+            assert!(err.contains("own feature names"), "{name}: {err}");
+        }
+        let err = err_of(
+            "hotpath_both",
+            "[bench.cat]\nscript = \"x = 1\"\nfeatures = [\"hotpath\"]\n\
+             hotpath_features = [\"hotpath\"]\n",
+        );
+        assert!(err.contains("both features and hotpath_features"), "{err}");
     }
 
     #[test]

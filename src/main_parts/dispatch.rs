@@ -252,12 +252,14 @@ pub(super) fn run(
         Command::Bench {
             commit,
             iterations,
+            hotpath,
             bench,
         } => crate::bench::runner::run(
             &crate::bench::runner::BenchArgs {
                 name: bench.first().cloned(),
                 commit: commit.clone(),
                 iterations: *iterations,
+                hotpath: *hotpath,
                 params: bench.iter().skip(1).cloned().collect(),
             },
             require_detection(detection)?,

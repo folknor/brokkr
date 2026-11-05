@@ -190,7 +190,8 @@ fn a_run_publishes_and_reads_back_through_the_wire_with_the_protocol_on_every_re
     let seen = seen.lock().unwrap();
     assert!(seen.iter().all(|s| s.path == "/bench"), "{seen:?}");
     assert!(
-        seen.iter().all(|s| s.protocol.as_deref() == Some("1")),
+        seen.iter()
+            .all(|s| s.protocol.as_deref() == Some(wire::PROTOCOL_VERSION.to_string().as_str())),
         "{seen:?}"
     );
 }

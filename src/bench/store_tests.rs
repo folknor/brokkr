@@ -9,9 +9,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::evidence;
 use super::store::{
-    BoundParam, Build, Child, ChildEnding, Clock, Conditions, DOCUMENT_FORMAT, Evidence, Iteration,
-    IterationOutcome, Loss, ParamValue, Published, Record, ResolvedBuild, RunDocument, RunOutcome,
-    Sample, SinkEnd, Store, StoreError,
+    BoundParam, Build, CaptureOutcome, Child, ChildEnding, Clock, Conditions, DOCUMENT_FORMAT,
+    Evidence, HotpathCapture, Iteration, IterationOutcome, Loss, Measurement, ParamValue,
+    Published, Record, ResolvedBuild, RunDocument, RunOutcome, Sample, SinkEnd, Store, StoreError,
 };
 
 fn store(name: &str) -> Store {
@@ -122,6 +122,24 @@ fn child(offset: i64, ending: ChildEnding) -> Child {
             calls_seen: BTreeSet::from(["c1".to_owned(), "c2".to_owned()]),
             calls_overflowed: true,
         },
+        hotpath: None,
+    }
+}
+
+/// `child` marked with stage `decode`, its `occurrence`, and `outcome`.
+fn marked(offset: i64, occurrence: u32, outcome: CaptureOutcome) -> Child {
+    let mut child = child(offset, ChildEnding::Exited { code: 0 });
+    child.hotpath = Some(HotpathCapture {
+        stage: "decode".into(),
+        occurrence,
+        outcome,
+    });
+    child
+}
+
+fn captured() -> CaptureOutcome {
+    CaptureOutcome::Captured {
+        report: serde_json::json!({"functions_timing": {"data": [{"name": "f", "calls": 2}]}}),
     }
 }
 
@@ -194,6 +212,7 @@ fn document(uuid: &str) -> RunDocument {
             }),
             artifact: Some("00112233445566778899aabbccddeeff".into()),
         },
+        measurement: Measurement::Timing,
         params: BTreeMap::from([
             (
                 "dataset".into(),
@@ -474,6 +493,146 @@ fn the_pairing_key_keeps_collection_order_and_digests_and_ignores_the_rest() {
     let mut unbound = base;
     unbound.params.remove("none");
     assert_ne!(unbound.pairing_key(), key);
+}
+
+/// `document` as a `--hotpath` run: each iteration's first child captured
+/// stage `decode` once.
+fn profiled(uuid: &str) -> RunDocument {
+    let mut doc = document(uuid);
+    doc.measurement = Measurement::Hotpath;
+    for iteration in &mut doc.iterations {
+        iteration.children[0] = marked(10, 1, captured());
+    }
+    doc
+}
+
+#[test]
+fn captures_and_the_measurement_read_back_as_published() {
+    let mut store = store("captures");
+    let doc = profiled("0000000000000000000000000000000a");
+    store.publish(&doc).unwrap();
+    assert_eq!(store.load(&doc.uuid).unwrap().as_ref(), Some(&doc));
+
+    // Every outcome, in a timing run that fails, where none is required.
+    let mut timing = document("0000000000000000000000000000000b");
+    timing.outcome = RunOutcome::Failed {
+        reason: "later".into(),
+    };
+    timing.iterations[0].children = vec![
+        marked(1, 1, CaptureOutcome::Missing),
+        marked(
+            2,
+            2,
+            CaptureOutcome::Invalid {
+                reason: "not JSON".into(),
+            },
+        ),
+        marked(
+            3,
+            3,
+            CaptureOutcome::Unreadable {
+                reason: "gone".into(),
+            },
+        ),
+        marked(4, 4, CaptureOutcome::OverBudget),
+    ];
+    store.publish(&timing).unwrap();
+    assert_eq!(store.load(&timing.uuid).unwrap().as_ref(), Some(&timing));
+}
+
+/// Timing keeps `bench-pair-v1` as it was; a profiled run and a timing run
+/// that captured anyway each pair in a class of their own.
+#[test]
+fn the_pairing_class_separates_profiled_and_incidental_runs() {
+    let timing = document("0000000000000000000000000000000c");
+    let key = timing.pairing_key();
+    assert!(key.starts_with("[\"bench-pair-v1\",\"pbfhogg\",\"cat\","), "{key}");
+
+    let mut uncaptured = timing.clone();
+    uncaptured.iterations[0].children[0] = marked(10, 1, CaptureOutcome::Missing);
+    assert_eq!(uncaptured.pairing_key(), key, "nothing captured is timing");
+
+    let hotpath = profiled("0000000000000000000000000000000d").pairing_key();
+    assert!(hotpath.starts_with("[\"bench-pair-v2\",\"hotpath\","), "{hotpath}");
+
+    let mut incidental = timing.clone();
+    incidental.outcome = RunOutcome::Failed {
+        reason: "x".into(),
+    };
+    incidental.iterations[2].children[0] = marked(10, 1, captured());
+    let incidental = incidental.pairing_key();
+    assert!(
+        incidental.starts_with("[\"bench-pair-v2\",\"incidental\","),
+        "{incidental}"
+    );
+    assert_ne!(incidental, hotpath);
+}
+
+#[test]
+fn a_profiled_run_must_capture_every_marked_call() {
+    profiled("0000000000000000000000000000000e").validate().unwrap();
+
+    let mut none_marked = profiled("0000000000000000000000000000000e");
+    none_marked.iterations[1].children[0].hotpath = None;
+    refused(&none_marked, "did not capture every marked call");
+
+    let mut missing = profiled("0000000000000000000000000000000e");
+    missing.iterations[0].children[1] = marked(900, 2, CaptureOutcome::Missing);
+    refused(&missing, "did not capture every marked call");
+
+    // A failed profiled run keeps what it got.
+    missing.outcome = RunOutcome::Failed {
+        reason: "--hotpath".into(),
+    };
+    missing.validate().unwrap();
+
+    let mut gap = document("0000000000000000000000000000000e");
+    gap.iterations[0].children[1] = marked(900, 2, captured());
+    refused(&gap, "occurrence 2 where 1 follows");
+
+    let mut blank = document("0000000000000000000000000000000e");
+    blank.iterations[0].children[0] = marked(10, 1, captured());
+    blank.iterations[0].children[0].hotpath.as_mut().unwrap().stage = String::new();
+    refused(&blank, "empty stage");
+
+    let mut scalar = document("0000000000000000000000000000000e");
+    scalar.iterations[0].children[0] = marked(
+        10,
+        1,
+        CaptureOutcome::Captured {
+            report: serde_json::json!([1]),
+        },
+    );
+    refused(&scalar, "not a JSON object");
+}
+
+/// A store made before captures existed upgrades in place: its runs read
+/// back as timing runs whose children captured nothing.
+#[test]
+fn a_version_one_store_upgrades_and_its_runs_read_as_timing() {
+    let dir = crate::test_scratch::scratch("bench_store", "upgrade");
+    let path = dir.join("bench.db");
+    let doc = document("0000000000000000000000000000000f");
+    {
+        let mut store = Store::open(&path).unwrap();
+        store.publish(&doc).unwrap();
+        // Back to version 1 as it shipped: neither the column nor the table.
+        store
+            .conn()
+            .execute_batch(
+                "DROP TABLE child_hotpath;
+                 ALTER TABLE runs DROP COLUMN measurement;
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    let version: i64 = store
+        .conn()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 2);
+    assert_eq!(store.load(&doc.uuid).unwrap(), Some(doc));
 }
 
 #[test]

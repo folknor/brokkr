@@ -17,7 +17,7 @@ use super::list::{RunFilter, StoredRun};
 use super::{Published, Store, StoreError};
 
 /// The protocol both sides speak. A request naming another is refused.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// The header carrying [`PROTOCOL_VERSION`], on every request and on every
 /// answer the server itself writes.
@@ -341,4 +341,7 @@ pub fn serve(store: &mut Store, body: &[u8]) -> Reply {
 /// never changes; a change to the encoding is a new entry and a new
 /// [`PROTOCOL_VERSION`].
 #[cfg(test)]
-pub(crate) const SHIPPED_PROTOCOLS: &[&str] = &["79350d76b49bcb1a44e2d467a7cc838c"];
+pub(crate) const SHIPPED_PROTOCOLS: &[&str] = &[
+    "79350d76b49bcb1a44e2d467a7cc838c",
+    "84fb92d68285c0f19cfad661fa755ac3",
+];

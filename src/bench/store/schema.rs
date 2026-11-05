@@ -182,8 +182,27 @@ CREATE TABLE sink_records (
 ) STRICT;
 ";
 
+/// Version 2: hotpath capture. A run's measurement, every earlier run a
+/// timing run, and each marked child's capture beside it.
+const V2: &str = "
+ALTER TABLE runs ADD COLUMN measurement TEXT NOT NULL DEFAULT 'timing'
+    CHECK (measurement IN ('timing', 'hotpath'));
+
+CREATE TABLE child_hotpath (
+    child_id   INTEGER PRIMARY KEY REFERENCES children(id) ON DELETE CASCADE,
+    stage      TEXT NOT NULL,
+    occurrence INTEGER NOT NULL CHECK (occurrence > 0),
+    status     TEXT NOT NULL CHECK (status IN
+        ('captured', 'missing', 'invalid', 'unreadable', 'over_budget')),
+    reason     TEXT,
+    report     TEXT,
+    CHECK ((status = 'captured') = (report IS NOT NULL)),
+    CHECK ((status IN ('invalid', 'unreadable')) = (reason IS NOT NULL))
+) STRICT;
+";
+
 /// The chain. Shipped steps are frozen; append only.
-pub(super) const MIGRATIONS: &[&str] = &[V1];
+pub(super) const MIGRATIONS: &[&str] = &[V1, V2];
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 

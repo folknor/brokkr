@@ -20,7 +20,7 @@ A doc with 8+ `##` sections is **section-addressed**: `brokkr man conventions sc
 - `reference/output.md` - operator output channel conventions.
 - `docs/brokkr.toml.md` - config core: where it lives, the user-wide layer and its user-only `results_server`, `include` composition, top-level shape and host sections, `worktree_keep`, `verify_reference_budget`, `disable_toolchain`, `strip_rustflags`, `[cargo_env]`, `[deps]`, `[bin]`, `[[install]]`, `[member_check]`, `[lints]`.
 - `docs/brokkr.toml.conventions.md` - convention gates: `[gremlins]`, shared path selectors, `[header]`, `[[textlint]]`, `[textlint_preset]`, `[[script_check]]`, `[manifest]`, `[rustdoc]`, `[[fixture_lint]]`, `[[dependency_rule]]`.
-- `docs/brokkr.toml.bench.md` - script benches: `[bench.*]` with `script` or `script_file`, params and their `from` paths, binding params on the command line (lists, ranges, `all`, collections and fan-out) and its run-time refusals, the resolved view `from` paths walk and `config()` returns, `[bench_params.*]` and `uses`, `[data]`, the reserved names, the `bench` check phase.
+- `docs/brokkr.toml.bench.md` - script benches: `[bench.*]` with `script` or `script_file` and its `hotpath_features`, params and their `from` paths, binding params on the command line (lists, ranges, `all`, collections and fan-out) and its run-time refusals, the resolved view `from` paths walk and `config()` returns, `[bench_params.*]` and `uses`, `[data]`, the reserved names, the `bench` check phase.
 - `docs/brokkr.toml.sweeps.md` - `[[check]]` sweeps, `[[lint_sweep]]` (linted, never tested), the `parallel` lane, `[test]` and its profiles, `[[quarantine]]`.
 - `docs/brokkr.toml.elivagar.md` - `[<host>.tilegen.*]` blocks (elivagar).
 - `docs/brokkr.toml.datasets.md` - `[<host>.datasets.*]` and the variant-selection CLI flags (pbfhogg/elivagar/nidhogg).
@@ -32,7 +32,7 @@ A doc with 8+ `##` sections is **section-addressed**: `brokkr man conventions sc
 - `reference/check-internals.md` - how the check/test pipeline is built: invocation selection, harness isolation and the failure roster, direct execution, the prepare plan, journal and execution accounting, diagnostic inventory, watchdog attribution, the stray/orphan reapers, the guard's lease protocol, rustflags sink selection. Read before changing any of them.
 - `docs/commands/clippy.md` - `brokkr clippy`.
 - `docs/commands/deps.md` - `brokkr deps`.
-- `docs/commands/bench.md` - `brokkr bench NAME`: the command line, arms, the build, an iteration, the script's builtins, `binary()`, interrupting a run, where an iteration's files live, what a run stores.
+- `docs/commands/bench.md` - `brokkr bench NAME`: the command line, arms, the build, an iteration, the script's builtins, `binary()`, `binary_with()`, hotpath capture and `--hotpath`, interrupting a run, where an iteration's files live, what a run stores.
 - `docs/commands/crit.md` - `brokkr crit` (criterion).
 - `docs/commands/run.md` - `brokkr run` / `brokkr build` / `brokkr install`.
 - `docs/commands/clean.md` - `brokkr clean`.
@@ -44,7 +44,7 @@ A doc with 8+ `##` sections is **section-addressed**: `brokkr man conventions sc
 - `reference/bench-store.md` - the per-user store of script-bench runs: the run document, what the store derives, publication with the run uuid as request id, reading (the open that never creates, the listing queries and their order), the wire contract a results server and its clients share (requests, answers, the failure envelope, one protocol version at a time, what a client owes it and how brokkr's client classifies and retries), the frozen migration chain, and why the module is self-contained. Read before changing `src/bench/store/`.
 - `reference/results-server.md` - how `brokkr-results-server` is built: owning the file, the single worker and its job races, admission and bounds, the HTTP layer. Read before changing `src/bin/results_server/`.
 - `docs/results-server.md` - running and deploying `brokkr-results-server`.
-- `reference/bench-resources.md` - what a script-bench iteration owns: the owner lease and the borrow each child launches with, pinning and crash reclamation, call admission (the read-only veto, authority, conflicts), creation without following substitutes, handles and stdout spools, and placement: where iterations go and which removals the gate covers for them. Read before changing `src/reservations/iteration.rs` or `src/bench/resources.rs`.
+- `reference/bench-resources.md` - what a script-bench iteration owns: the owner lease and the borrow each child launches with, pinning and crash reclamation, call admission (the read-only veto, authority, conflicts), creation without following substitutes, handles, stdout spools and hotpath reports, and placement: where iterations go and which removals the gate covers for them. Read before changing `src/reservations/iteration.rs` or `src/bench/resources.rs`.
 - `docs/commands/visual.md` - litehtml-rs/sluggrs visual commands.
 - `docs/commands/hotpath.md` - sluggrs `brokkr hotpath`.
 - `docs/commands/sync.md` - ratatoskr `sync` / `mock-serve`.

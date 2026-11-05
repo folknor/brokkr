@@ -147,8 +147,9 @@ pub(crate) struct CallOptions {
     pub(crate) writes: Vec<usize>,
     /// The file the child reads as its stdin.
     pub(crate) stdin: Option<usize>,
-    /// Capture the child's hotpath report as typed commands do.
-    pub(crate) hotpath: bool,
+    /// `hotpath = STAGE`: capture the child's hotpath report under this
+    /// stage name.
+    pub(crate) hotpath: Option<String>,
 }
 
 /// What one `binary()` call hands back to the script.
@@ -164,8 +165,18 @@ pub(crate) struct CallOutcome {
     pub(crate) stderr_truncated: bool,
     /// The child's whole stdout, its spool, as a handle.
     pub(crate) stdout_file: Option<HandleRef>,
-    /// The decoded hotpath report of a `hotpath = true` call that exited 0.
-    pub(crate) hotpath: Option<Value>,
+    /// A marked call's capture, as the script sees it.
+    pub(crate) hotpath: Option<Capture>,
+}
+
+/// What a marked call's result carries of its capture: `hotpath_status`
+/// always, `hotpath` the report as Lua values when captured, and
+/// `hotpath_error` the reason when invalid or unreadable.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Capture {
+    pub(crate) status: &'static str,
+    pub(crate) report: Option<Value>,
+    pub(crate) error: Option<String>,
 }
 
 /// Why a builtin ended the sample.
@@ -981,16 +992,26 @@ fn options_at(state: &mut State, idx: isize) -> Result<CallOptions, Error> {
                 options.stdin = Some(listed_handle(state, value_idx, "binary_with(): stdin")?);
             }
             "hotpath" => {
-                if state.typ(value_idx) != LuaType::Boolean {
+                if state.typ(value_idx) != LuaType::String {
                     return Err(raise_failed(
                         state,
                         format!(
-                            "binary_with(): hotpath is a {}: expected a boolean",
+                            "binary_with(): hotpath is a {}: expected a stage name",
                             state.typ(value_idx).as_str()
                         ),
                     ));
                 }
-                options.hotpath = state.to_boolean(value_idx);
+                let stage = text_at(state, value_idx, "binary_with(): hotpath")?;
+                if !crate::config::bench::is_param_name(&stage) {
+                    return Err(raise_failed(
+                        state,
+                        format!(
+                            "binary_with(): hotpath stage {stage:?} is not a name: lowercase, \
+                             starting with a letter, then letters, digits, '_' or '-'"
+                        ),
+                    ));
+                }
+                options.hotpath = Some(stage);
             }
             _ => {
                 let shown = if key.is_empty() {
@@ -1010,15 +1031,15 @@ fn options_at(state: &mut State, idx: isize) -> Result<CallOptions, Error> {
         state.pop(1)?;
     }
     state.pop(1)?;
-    if options.hotpath
+    if options.hotpath.is_some()
         && let Some((name, _)) = options.env.iter().find(|(n, _)| n.starts_with("HOTPATH_"))
     {
         let name = name.clone();
         return Err(raise_failed(
             state,
             format!(
-                "binary_with(): env name {name} is brokkr's beside hotpath = true: \
-                 brokkr sets HOTPATH_* to capture the report"
+                "binary_with(): env name {name} is brokkr's beside hotpath: brokkr sets \
+                 HOTPATH_* to capture the report"
             ),
         ));
     }
@@ -1135,11 +1156,17 @@ fn call_binary<H: Host>(
         push_handle(state, spool)?;
         state.set_table_raw(table)?;
     }
-    if let Some(report) = &outcome.hotpath {
-        let marks = marks::<H>(state)?;
-        state.push_string("hotpath")?;
-        push_value(state, report, &marks)?;
-        state.set_table_raw(table)?;
+    if let Some(capture) = &outcome.hotpath {
+        set_str(state, table, "hotpath_status", capture.status.as_bytes())?;
+        if let Some(report) = &capture.report {
+            let marks = marks::<H>(state)?;
+            state.push_string("hotpath")?;
+            push_value(state, report, &marks)?;
+            state.set_table_raw(table)?;
+        }
+        if let Some(error) = &capture.error {
+            set_str(state, table, "hotpath_error", error.as_bytes())?;
+        }
     }
     if let Some(ok) = ok {
         state.push_string("ok")?;

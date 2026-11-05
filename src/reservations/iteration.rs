@@ -51,16 +51,19 @@ enum Area {
     Out,
     Scratch,
     Stdout,
+    /// Hotpath reports, one per marked call; brokkr's own, never a handle.
+    Profile,
 }
 
 impl Area {
-    const ALL: [Self; 3] = [Self::Out, Self::Scratch, Self::Stdout];
+    const ALL: [Self; 4] = [Self::Out, Self::Scratch, Self::Stdout, Self::Profile];
 
     fn name(self) -> &'static str {
         match self {
             Self::Out => "out",
             Self::Scratch => "scratch",
             Self::Stdout => "stdout",
+            Self::Profile => "profile",
         }
     }
 }
@@ -207,12 +210,15 @@ impl Iteration {
     /// [`Iteration::open_file`] opens a file, against the same admission and
     /// inside the same critical section. The borrow's descriptor is armed
     /// for the next spawn of `program` on this thread; pass [`Call::stdout`]
-    /// as the child's stdout and [`Call::take_stdin`] as its stdin.
+    /// as the child's stdout and [`Call::take_stdin`] as its stdin. With
+    /// `report`, an empty hotpath report is made under `profile/`, named as
+    /// the spool is and declared written as the spool is (`Call::report`).
     pub(crate) fn call(
         &mut self,
         program: &Path,
         resources: &[(PathBuf, Access)],
         stdin: Option<&Path>,
+        report: bool,
     ) -> Result<Call, DevError> {
         let store = super::store().ok_or_else(|| {
             DevError::Config("$HOME is not set: the launch lease store has nowhere to live".into())
@@ -256,6 +262,17 @@ impl Iteration {
             Access::Write,
             Disposition::Reserve,
         ));
+        let report_path = if report {
+            let path = self.dir.join(Area::Profile.name()).join(&name);
+            declared.push(Resource::new(
+                &spell(&path)?,
+                Access::Write,
+                Disposition::Reserve,
+            ));
+            Some(path)
+        } else {
+            None
+        };
         self.admit_declared(&store, &declared)?;
         let stdin = match &stdin {
             Some((path, spelled)) => Some(self.open_admitted(path, spelled)?),
@@ -276,6 +293,18 @@ impl Iteration {
             file: pin,
         });
         names_inode(&spool_path, &file)?;
+        if let Some(path) = &report_path {
+            // Made empty and closed: the child writes it by path, and a
+            // report still empty after the call is one nothing wrote.
+            let profile = self.verified(Area::Profile)?;
+            let made = open_at(
+                &profile.file,
+                &name,
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+            )
+            .map_err(|e| io_error(&format!("cannot make report {}", path.display()), e))?;
+            names_inode(path, &made)?;
+        }
         let borrow = store
             .create_tied(declared, Tie::Borrow(owner.id().to_owned()))
             .map_err(|e| io_error("cannot create a borrow lease", e))?;
@@ -289,6 +318,7 @@ impl Iteration {
                 file,
             }),
             stdin,
+            report: report_path,
         })
     }
 
@@ -551,9 +581,17 @@ pub(crate) struct Call {
     lease: Option<Lease>,
     spool: Option<Spool>,
     stdin: Option<File>,
+    report: Option<PathBuf>,
 }
 
 impl Call {
+    /// The call's hotpath report path under `profile/`, when it asked for
+    /// one: read it back with [`Iteration::open_file`] once the call is
+    /// finished.
+    pub(crate) fn report(&self) -> Option<&Path> {
+        self.report.as_deref()
+    }
+
     /// The child's stdin, opened at admission; `None` when the call has none
     /// (or it was taken already).
     pub(crate) fn take_stdin(&mut self) -> Option<File> {

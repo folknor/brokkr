@@ -182,6 +182,7 @@ mod tests {
                 commit,
                 iterations,
                 bench,
+                ..
             } => (commit, iterations.get(), bench),
             _ => panic!("unexpected command"),
         };

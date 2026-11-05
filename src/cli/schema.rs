@@ -547,6 +547,11 @@ In depth: `brokkr man clippy`."
         #[arg(long, value_name = "N", default_value = DEFAULT_BENCH_RUNS)]
         iterations: std::num::NonZeroU32,
 
+        /// Profile: build with the bench's hotpath_features and require
+        /// every call marked hotpath to capture its report.
+        #[arg(long)]
+        hotpath: bool,
+
         /// The bench to run, then its own params; clap reads nothing after
         /// NAME, `--help` included. Omit for the index.
         #[arg(value_name = "NAME [PARAMS]", trailing_var_arg = true)]

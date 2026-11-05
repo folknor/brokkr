@@ -14,7 +14,7 @@ the one spawn choke point.
 An iteration holds an **owner lease**: a lease in the per-user store whose
 record names every input the run reads (read) and one private **iteration
 directory** (write), `.brokkr-iteration-<128-bit token>` in a location the
-caller names, holding `out/`, `scratch/` and `stdout/`. brokkr alone holds
+caller names, holding `out/`, `scratch/`, `stdout/` and `profile/`. brokkr alone holds
 the owner's descriptor; it is never lent to a child.
 
 Each child launches with a **borrow**: a lease of its own whose record names
@@ -79,7 +79,8 @@ the split, is read, pins its owner and is reclaimed as an ordinary lease is.
 ## Admitting a call
 
 A call declares resources, absolute paths each with the access the call
-needs, plus, implicitly, its own stdout spool for writing. Every path is
+needs, plus, implicitly, its own stdout spool for writing and, for a call
+marked `hotpath`, its report (Hotpath reports, below). Every path is
 spelled as it resolves at the call, never as an earlier resolution recorded
 it, and admission runs inside the store's critical section:
 
@@ -102,7 +103,7 @@ its directory conflict with any reservation.
 
 ## brokkr's own creations
 
-brokkr makes the iteration's areas, scratch directories and spools through
+brokkr makes the iteration's areas, scratch directories, spools and reports through
 directory descriptors it opened when it laid the iteration out, never
 following a link, and before each creation checks that the iteration
 directory and the area still name the directories it made (by identity,
@@ -227,6 +228,21 @@ pipe the supervisor drains, keeping the first MiB with a truncated flag and
 reading the rest to its end so the child never blocks, which fails nothing
 either. The script sees both previews, and the whole stdout through the
 spool's handle; of stderr, never more than its preview.
+
+## Hotpath reports
+
+A call marked `hotpath` (`docs/commands/bench.md`, Hotpath capture) gets a
+report file under `profile/`, named as its spool is, declared written by its
+borrow beside the spool inside the same admission, and created empty with
+`O_CREAT | O_EXCL | O_NOFOLLOW` through the area's held descriptor once
+admitted; the child is told its path in `HOTPATH_OUTPUT_PATH` and writes it
+by that path. No handle ever names it, so no script output or call can
+claim it, and while the call's borrow is held any other call declaring it
+conflicts. It is read once the borrow's release proved no holder is left,
+admitted and opened as `read()` opens a file; a report read while something
+the child started still holds the call is not read at all. Unlike a spool,
+its inode is not pinned: what a child wrote there is evidence it supplied,
+and a report a child replaced is read as what it is.
 
 While a call's borrow release waits for its last holder, the caller may run
 an observer between the window's polls; the runner drains the child's

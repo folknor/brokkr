@@ -33,7 +33,7 @@ impl Host for Fake {
     }
     fn binary(&mut self, words: Vec<Word>, options: CallOptions) -> Result<CallOutcome, Abort> {
         self.calls.push(words);
-        let options_hotpath = options.hotpath;
+        let options_hotpath = options.hotpath.is_some();
         self.options.push(options);
         Ok(CallOutcome {
             program: "tool".into(),
@@ -47,11 +47,13 @@ impl Host for Fake {
                 index: 9,
                 path: "/it/stdout/0".into(),
             }),
-            hotpath: options_hotpath.then(|| {
-                Value::Table(vec![(
+            hotpath: options_hotpath.then(|| Capture {
+                status: "captured",
+                report: Some(Value::Table(vec![(
                     "functions_timing".into(),
                     Value::Table(vec![("calls".into(), Value::Number(3.0))]),
-                )])
+                )])),
+                error: None,
             }),
         })
     }
@@ -493,7 +495,7 @@ fn binary_with_takes_options_then_binarys_arguments() {
             reads: vec![9],
             writes: vec![7],
             stdin: Some(9),
-            hotpath: false,
+            hotpath: None,
         }
     );
     assert_eq!(host.options[0], CallOptions::default());
@@ -508,10 +510,11 @@ fn binary_with_takes_options_then_binarys_arguments() {
         ("{env = {X = 1/0}}", "finite number"),
         ("{env = {X = 'a\\0b'}}", "NUL"),
         ("'x'", "expected a table of options"),
-        ("{hotpath = 1}", "expected a boolean"),
+        ("{hotpath = true}", "expected a stage name"),
+        ("{hotpath = 'Decode'}", "is not a name"),
         (
-            "{hotpath = true, env = {HOTPATH_OUTPUT_PATH = 'x'}}",
-            "beside hotpath = true",
+            "{hotpath = 'decode', env = {HOTPATH_OUTPUT_PATH = 'x'}}",
+            "beside hotpath",
         ),
     ] {
         let (sample, host) = run(
@@ -523,22 +526,25 @@ fn binary_with_takes_options_then_binarys_arguments() {
     }
 }
 
-/// `hotpath = true` reaches the host, and the report it decoded is the
-/// result's `hotpath` table; a plain call's result has none.
+/// `hotpath = STAGE` reaches the host, and the capture comes back as the
+/// result's `hotpath_status` and `hotpath` table; a plain call has neither.
 #[test]
-fn binary_with_hotpath_hands_back_the_decoded_report() {
+fn binary_with_hotpath_hands_back_the_capture() {
     let (sample, host) = run(
         "function bench()\n\
-           local r = binary_with({hotpath = true, env = {OTHER = 'x'}}, 'x')\n\
+           local r = binary_with({hotpath = 'decode', env = {OTHER = 'x'}}, 'x')\n\
            record.calls = r.hotpath.functions_timing.calls\n\
-           record.plain = binary('y').hotpath == nil\n\
+           record.status = r.hotpath_status\n\
+           local p = binary('y')\n\
+           record.plain = p.hotpath == nil and p.hotpath_status == nil\n\
          end",
         Fake::default(),
     );
     let record = completed(&sample);
     assert_eq!(record["calls"], 3);
+    assert_eq!(record["status"], "captured");
     assert_eq!(record["plain"], true);
-    assert!(host.options[0].hotpath);
+    assert_eq!(host.options[0].hotpath.as_deref(), Some("decode"));
 }
 
 /// read, write and filesize take handles only, inside bench() only.

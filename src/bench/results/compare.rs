@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
-use super::super::store::{Build, StoredRun};
+use super::super::store::{Build, CaptureOutcome, StoredRun};
 use super::{config_diff, ms, params_summary, result_verdict, result_wall, verdict};
 
 /// The order "latest" means everywhere: start time, then uuid.
@@ -170,6 +170,57 @@ fn result_record(run: &StoredRun) -> Option<&serde_json::Map<String, serde_json:
     run.doc.iterations.get(run.best_iteration?)?.record.as_ref()
 }
 
+/// Each captured report of a run's result iteration, by stage and
+/// occurrence (`decode #1`).
+fn result_captures(run: &StoredRun) -> BTreeMap<String, &serde_json::Value> {
+    let Some(iteration) = run.best_iteration.and_then(|i| run.doc.iterations.get(i)) else {
+        return BTreeMap::new();
+    };
+    iteration
+        .children
+        .iter()
+        .filter_map(|child| {
+            let capture = child.hotpath.as_ref()?;
+            match &capture.outcome {
+                CaptureOutcome::Captured { report } => {
+                    Some((format!("{} #{}", capture.stage, capture.occurrence), report))
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// The function diff of every capture both result iterations hold under one
+/// stage and occurrence, and a line naming those only one side holds. The
+/// correspondence is by name and count: a call one side made conditionally
+/// shifts the later occurrences of its stage.
+fn capture_diffs(a: &StoredRun, b: &StoredRun, top: usize) -> (Vec<(String, String)>, Option<String>) {
+    let (ca, cb) = (result_captures(a), result_captures(b));
+    let mut diffs = Vec::new();
+    let mut unmatched = Vec::new();
+    let names: BTreeSet<&String> = ca.keys().chain(cb.keys()).collect();
+    for name in names {
+        match (ca.get(name), cb.get(name)) {
+            (Some(x), Some(y)) => {
+                let parsed = crate::db::hotpath_data_from_json(x)
+                    .zip(crate::db::hotpath_data_from_json(y));
+                if let Some((hx, hy)) = parsed
+                    && let Some(diff) = crate::hotpath_fmt::format_hotpath_diff(&hx, &hy, top)
+                {
+                    diffs.push((name.clone(), diff));
+                }
+            }
+            (Some(_), None) => unmatched.push(format!("{name} on A only")),
+            (None, Some(_)) => unmatched.push(format!("{name} on B only")),
+            (None, None) => {}
+        }
+    }
+    let line = (!unmatched.is_empty())
+        .then(|| format!("  hotpath captures unpaired: {}", unmatched.join(", ")));
+    (diffs, line)
+}
+
 /// The result records' entries that moved, `hotpath` aside: what turns "12%
 /// faster" into "12% faster on 8% less work".
 fn record_line(a: &StoredRun, b: &StoredRun) -> Option<String> {
@@ -266,6 +317,18 @@ fn pointer_line(
     Some(line)
 }
 
+/// The class a run pairs in, read from its stored key: `timing` under
+/// `bench-pair-v1`, else the class `bench-pair-v2` names.
+fn pairing_class(run: &StoredRun) -> String {
+    let value: Option<serde_json::Value> = serde_json::from_str(&run.pairing_key).ok();
+    let parts = value.as_ref().and_then(serde_json::Value::as_array);
+    match parts.and_then(|p| Some((p.first()?.as_str()?, p.get(1)?.as_str()))) {
+        Some(("bench-pair-v1", _)) => "timing".to_owned(),
+        Some(("bench-pair-v2", Some(class))) => class.to_owned(),
+        _ => "(unknown)".to_owned(),
+    }
+}
+
 /// Why a one-sided run may have no partner: every identity difference from
 /// the other side's latest run of the same bench. That run is a candidate,
 /// not proof of the cause.
@@ -276,7 +339,10 @@ fn unpaired_line(run: &StoredRun, other: &[StoredRun], other_side: &str) -> Opti
         .max_by(|x, y| order(x).cmp(&order(y)))?;
     let (tag, other_tag) = (run.pairing_algorithm(), latest.pairing_algorithm());
     let mut parts = Vec::new();
-    if tag != other_tag {
+    let (class, other_class) = (pairing_class(run), pairing_class(latest));
+    if class != other_class {
+        parts.push(format!("measured {class} vs {other_class}"));
+    } else if tag != other_tag {
         parts.push(format!(
             "pairing algorithm {} vs {}",
             tag.as_deref().unwrap_or("(unreadable)"),
@@ -315,7 +381,7 @@ fn unpaired_line(run: &StoredRun, other: &[StoredRun], other_side: &str) -> Opti
             (None, None) => {}
         }
     }
-    if parts.is_empty() && tag == other_tag {
+    if parts.is_empty() && tag == other_tag && class == other_class {
         parts.push("equal identity but a different stored key (an inconsistent key)".to_owned());
     }
     Some(format!(
@@ -437,15 +503,19 @@ pub(crate) fn format_compare(
                         .and_then(|r| r.get("hotpath"))
                         .and_then(crate::db::hotpath_data_from_json)
                 };
+                let heading = format!("{} {} - {commit_a} vs {commit_b}", x.doc.bench, params_summary(x));
                 if let (Some(ha), Some(hb)) = (parse(x), parse(y))
                     && let Some(diff) = crate::hotpath_fmt::format_hotpath_diff(&ha, &hb, top)
                 {
-                    diffs.push(format!(
-                        "{} {} - {commit_a} vs {commit_b}\n{diff}",
-                        x.doc.bench,
-                        params_summary(x)
-                    ));
+                    diffs.push(format!("{heading}\n{diff}"));
                 }
+                let (stage_diffs, unmatched) = capture_diffs(x, y, top);
+                diffs.extend(
+                    stage_diffs
+                        .into_iter()
+                        .map(|(stage, diff)| format!("{heading}, hotpath {stage}\n{diff}")),
+                );
+                lines.extend(unmatched);
             }
             (Some(x), None) => lines.extend(unpaired_line(x, runs_b, "B")),
             (None, Some(y)) => lines.extend(unpaired_line(y, runs_a, "A")),

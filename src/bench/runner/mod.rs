@@ -43,6 +43,9 @@ pub(crate) struct BenchArgs {
     /// Run the commit's build, in a persistent worktree.
     pub(crate) commit: Option<String>,
     pub(crate) iterations: std::num::NonZeroU32,
+    /// `--hotpath`: build with the bench's `hotpath_features` and require
+    /// every marked call to capture.
+    pub(crate) hotpath: bool,
     /// Everything after NAME, unparsed: the bench's own params.
     pub(crate) params: Vec<String>,
 }
@@ -60,16 +63,8 @@ pub(crate) fn run(
         list(benches);
         return Ok(());
     };
-    let bench = benches.get(name).ok_or_else(|| {
-        DevError::Refused(if benches.is_empty() {
-            format!("no bench named {name}: this project's brokkr.toml declares none")
-        } else {
-            format!(
-                "no bench named {name}; declared: {}",
-                benches.keys().cloned().collect::<Vec<_>>().join(", ")
-            )
-        })
-    })?;
+    let bench = find(benches, name)?;
+    let measurement = measurement_of(args, bench)?;
     let given = params::parse(bench, &args.params)?;
     let hostname = crate::config::hostname()?;
     // What the run stores is what the view derives from: the composed table,
@@ -138,6 +133,7 @@ pub(crate) fn run(
             hostname: &hostname,
             iterations: args.iterations.get(),
             argv: argv.clone(),
+            measurement,
         };
         let started = Instant::now();
         let document = match attempt.run(&commit, &tree, keep) {
@@ -171,6 +167,36 @@ pub(crate) fn run(
         }
     }
     summary(name, total, &failed)
+}
+
+/// The bench named `name`, or a refusal naming the ones declared.
+fn find<'a>(benches: &'a BTreeMap<String, Bench>, name: &str) -> Result<&'a Bench, DevError> {
+    benches.get(name).ok_or_else(|| {
+        DevError::Refused(if benches.is_empty() {
+            format!("no bench named {name}: this project's brokkr.toml declares none")
+        } else {
+            format!(
+                "no bench named {name}; declared: {}",
+                benches.keys().cloned().collect::<Vec<_>>().join(", ")
+            )
+        })
+    })
+}
+
+/// What the invocation measures: `--hotpath` only for a bench that names
+/// the features instrumenting its build.
+fn measurement_of(args: &BenchArgs, bench: &Bench) -> Result<store::Measurement, DevError> {
+    if !args.hotpath {
+        return Ok(store::Measurement::Timing);
+    }
+    if bench.hotpath_features.is_empty() {
+        return Err(DevError::Refused(format!(
+            "bench {0} cannot be profiled: [bench.{0}] sets no hotpath_features, the features \
+             that instrument its build",
+            bench.name
+        )));
+    }
+    Ok(store::Measurement::Hotpath)
 }
 
 /// How the invocation ends once every arm ran: each failed arm's cause was
@@ -292,6 +318,12 @@ fn describe(bench: &Bench, detection: &Detection, given: &params::Given, view: &
             }
         ),
     ];
+    if !bench.hotpath_features.is_empty() {
+        lines.push(format!(
+            "  profiled with --hotpath: features [{}] added",
+            bench.hotpath_features.join(", ")
+        ));
+    }
     if bench.params.is_empty() {
         lines.push("  no params".into());
     }
@@ -431,6 +463,7 @@ struct Attempt<'a> {
     hostname: &'a str,
     iterations: u32,
     argv: Vec<String>,
+    measurement: store::Measurement,
 }
 
 impl Attempt<'_> {
@@ -490,7 +523,14 @@ impl Attempt<'_> {
         let dirty = !self.committed && self.live_dirty();
         let config = &self.detection.config;
         let profile = self.profile();
-        let features = crate::command_args::resolve_features(config, &self.bench.features);
+        let mut features = crate::command_args::resolve_features(config, &self.bench.features);
+        if self.measurement == store::Measurement::Hotpath {
+            for feature in &self.bench.hotpath_features {
+                if !features.contains(feature) {
+                    features.push(feature.clone());
+                }
+            }
+        }
         let captured_env = config_env(config);
         store::RunDocument {
             format: store::DOCUMENT_FORMAT,
@@ -519,6 +559,7 @@ impl Attempt<'_> {
                 resolved: None,
                 artifact: None,
             },
+            measurement: self.measurement,
             params: self.bound.document(),
             config: stored_config::render(self.detection, &self.bench.name, self.frozen),
             iterations_requested: self.iterations,
@@ -656,6 +697,21 @@ impl Attempt<'_> {
             bin: built.target.clone(),
             features: built.unit_features.clone(),
         });
+        // The timing recipe is the bench's features without its hotpath
+        // ones, judged on what cargo resolved in the tree built: a default
+        // or another feature that enables one is caught here.
+        if self.measurement == store::Measurement::Timing
+            && let Some(on) = self
+                .bench
+                .hotpath_features
+                .iter()
+                .find(|f| built.unit_features.contains(f))
+        {
+            return Err(DevError::Refused(format!(
+                "the timing build resolved hotpath feature {on:?}, which instruments it: run \
+                 with --hotpath, or keep {on:?} out of the bench's features and their defaults"
+            )));
+        }
         let artifacts =
             crate::clean::layout::ProjectState::new(self.detection.project_root.as_path())
                 .artifacts_dir();
@@ -674,13 +730,14 @@ impl Attempt<'_> {
     ) {
         let state = crate::clean::layout::ProjectState::new(self.detection.project_root.as_path());
         let mut since = host::Since::new(self.detection.build_root.as_path(), commit.clone());
+        let mut report_budget = host::RUN_REPORT_BYTES;
         let total = self.iterations;
         for index in 0..total {
             if crate::shutdown::should_unwind() {
                 document.outcome = store::RunOutcome::Interrupted;
                 return;
             }
-            let (iteration, returned) = host::run_iteration(host::IterationSetup {
+            let (iteration, returned, budget_left) = host::run_iteration(host::IterationSetup {
                 script: &self.frozen.script,
                 args: &self.args,
                 inputs: &self.inputs,
@@ -691,8 +748,11 @@ impl Attempt<'_> {
                 container: &state.bench_iterations_dir(),
                 index: usize::try_from(index).unwrap_or(usize::MAX),
                 since,
+                measurement: self.measurement,
+                report_budget,
             });
             since = returned;
+            report_budget = budget_left;
             let label = format!("iteration {}/{total}", index + 1);
             let outcome = iteration.outcome.clone();
             match (&outcome, iteration.wall_us) {

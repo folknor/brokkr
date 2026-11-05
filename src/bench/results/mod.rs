@@ -324,7 +324,9 @@ impl BenchReader {
 
     /// Each side of a comparison: the completed runs of a clean tree whose
     /// commit starts with that side's prefix and pass the filters, newest
-    /// first and uncapped (pairs are formed before `--limit` applies).
+    /// first and uncapped (pairs are formed before `--limit` applies). A run
+    /// under a profiled or incidental key is read with its children, where
+    /// its captures are; a timing run captured nothing, so it is not.
     pub(crate) fn compare_sides(
         &self,
         commit_a: &str,
@@ -343,7 +345,14 @@ impl BenchReader {
                 clean: true,
                 ..self.filter(filter)
             })?;
-            self.load(&uuids, false)
+            let mut runs = self.load(&uuids, false)?;
+            for run in &mut runs {
+                if run.pairing_algorithm().as_deref() != Some("bench-pair-v1") {
+                    let uuid = run.doc.uuid.clone();
+                    *run = self.load(std::slice::from_ref(&uuid), true)?.remove(0);
+                }
+            }
+            Ok(runs)
         };
         Ok((side(commit_a)?, side(commit_b)?))
     }

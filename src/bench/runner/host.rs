@@ -65,12 +65,25 @@ pub(super) struct IterationSetup<'a> {
     pub(super) container: &'a Path,
     pub(super) index: usize,
     pub(super) since: Since,
+    pub(super) measurement: store::Measurement,
+    /// The report bytes the run may still capture.
+    pub(super) report_budget: usize,
 }
 
+/// The most one hotpath report may hold.
+pub(super) const REPORT_BYTES: usize = 16 * 1024 * 1024;
+
+/// The most every report of a run may hold together as the store
+/// serializes them: half the 256 MiB a results server takes in one
+/// publication, which bounds the reports, not the whole run.
+pub(super) const RUN_REPORT_BYTES: usize = 128 * 1024 * 1024;
+
 /// Run one iteration: its owner lease, a fresh Lua state, the sample, the
-/// release. Returns the document's iteration and the `since` answers.
-pub(super) fn run_iteration(setup: IterationSetup<'_>) -> (store::Iteration, Since) {
+/// release. Returns the document's iteration, the `since` answers and the
+/// report budget left.
+pub(super) fn run_iteration(setup: IterationSetup<'_>) -> (store::Iteration, Since, usize) {
     let since = setup.since;
+    let report_budget = setup.report_budget;
     let resources = std::fs::create_dir_all(setup.container)
         .map_err(DevError::from)
         .and_then(|()| Resources::open(setup.container, setup.inputs));
@@ -87,6 +100,7 @@ pub(super) fn run_iteration(setup: IterationSetup<'_>) -> (store::Iteration, Sin
                     children: Vec::new(),
                 },
                 since,
+                report_budget,
             );
         }
     };
@@ -102,8 +116,8 @@ pub(super) fn run_iteration(setup: IterationSetup<'_>) -> (store::Iteration, Sin
         state_root: setup.state_root.to_path_buf(),
         block_start: None,
         children: Vec::new(),
-        hotpath_reports: Vec::new(),
-        hotpath_calls: 0,
+        stages: BTreeMap::new(),
+        report_budget,
         since,
     };
     let (sample, mut host) = lua::run_sample(setup.script, setup.args, host);
@@ -119,16 +133,28 @@ pub(super) fn run_iteration(setup: IterationSetup<'_>) -> (store::Iteration, Sin
     // A stop pending at the end of the iteration interrupts it whatever the
     // sample said: a completed block ran under it, and a failure may be the
     // stop's own doing (a git call or a child it cut short).
+    let mut profile_failed = false;
     let outcome = match sample.outcome {
         _ if crate::shutdown::should_unwind() => store::IterationOutcome::Interrupted,
-        lua::SampleOutcome::Completed(verdict) => store::IterationOutcome::Completed { verdict },
+        lua::SampleOutcome::Completed(verdict) => match profile_failure(
+            setup.measurement,
+            &host.children,
+        ) {
+            // A completed sample under --hotpath fails here, its children
+            // and their captures stored as they came.
+            Some(reason) => {
+                profile_failed = true;
+                store::IterationOutcome::Failed { reason }
+            }
+            None => store::IterationOutcome::Completed { verdict },
+        },
         lua::SampleOutcome::Failed(reason) => store::IterationOutcome::Failed { reason },
         lua::SampleOutcome::Interrupted => store::IterationOutcome::Interrupted,
     };
-    let record = match outcome {
-        store::IterationOutcome::Completed { .. } => sample
-            .record
-            .map(|record| with_hotpath(record, &host.hotpath_reports)),
+    // A record extracted is kept when only the --hotpath requirement failed
+    // the iteration: it is the script's account of what it saw.
+    let record = match (&outcome, profile_failed) {
+        (store::IterationOutcome::Completed { .. }, _) | (_, true) => sample.record,
         _ => None,
     };
     (
@@ -141,7 +167,41 @@ pub(super) fn run_iteration(setup: IterationSetup<'_>) -> (store::Iteration, Sin
             children: host.children,
         },
         host.since,
+        host.report_budget,
     )
+}
+
+/// Why a completed sample of a `--hotpath` run fails: no call was marked,
+/// or a marked one did not capture. `None` for a timing run, whose
+/// captures are evidence only.
+fn profile_failure(measurement: store::Measurement, children: &[store::Child]) -> Option<String> {
+    if measurement != store::Measurement::Hotpath {
+        return None;
+    }
+    let mut marked = children.iter().filter_map(|c| c.hotpath.as_ref()).peekable();
+    if marked.peek().is_none() {
+        return Some("--hotpath: no call of the iteration was marked hotpath".to_owned());
+    }
+    let failed: Vec<String> = marked
+        .filter_map(|capture| {
+            let why = match &capture.outcome {
+                store::CaptureOutcome::Captured { .. } => return None,
+                store::CaptureOutcome::Missing => {
+                    "no report was written (is the build instrumented?)".to_owned()
+                }
+                store::CaptureOutcome::Invalid { reason } => format!("invalid report: {reason}"),
+                store::CaptureOutcome::Unreadable { reason } => {
+                    format!("unreadable report: {reason}")
+                }
+                store::CaptureOutcome::OverBudget => "the report is over budget".to_owned(),
+            };
+            Some(format!(
+                "stage {} occurrence {}: {why}",
+                capture.stage, capture.occurrence
+            ))
+        })
+        .collect();
+    (!failed.is_empty()).then(|| format!("--hotpath: {}", failed.join("; ")))
 }
 
 /// The builtins' side for one iteration.
@@ -155,69 +215,65 @@ struct IterationHost {
     state_root: PathBuf,
     block_start: Option<Instant>,
     children: Vec<store::Child>,
-    /// Every report a `hotpath = true` call captured, in call order.
-    hotpath_reports: Vec<serde_json::Value>,
-    /// `hotpath = true` calls so far, each one's report its own name.
-    hotpath_calls: usize,
+    /// Each stage's marked calls so far, whatever became of them.
+    stages: BTreeMap<String, u32>,
+    /// The report bytes the run may still capture.
+    report_budget: usize,
     since: Since,
 }
 
-/// The file name of the iteration's `n`th (0-based) hotpath report under
-/// `out/`; a script's own `output()` of the same name is refused as a reuse.
-fn hotpath_report_name(n: usize) -> String {
-    format!("brokkr-hotpath-{n}.json")
-}
-
-/// `record` with `hotpath` filled from the one report the iteration
-/// captured. With none or several, or a `hotpath` the script set itself,
-/// it is left as the script made it.
-fn with_hotpath(
-    mut record: serde_json::Map<String, serde_json::Value>,
-    reports: &[serde_json::Value],
-) -> serde_json::Map<String, serde_json::Value> {
-    if let [report] = reports
-        && !record.contains_key("hotpath")
-    {
-        record.insert("hotpath".into(), report.clone());
-    }
-    record
-}
-
 impl IterationHost {
-    /// The report a `hotpath = true` call left at `report`, once its child
-    /// exited 0: none written fails the call, as does one brokkr cannot read
-    /// as a hotpath profile. A child that failed is the script's to judge.
-    fn take_hotpath(
-        &mut self,
-        report: &Handle,
-        outcome: &mut CallOutcome,
-    ) -> Result<(), Abort> {
-        if outcome.exit != Some(0) {
-            return Ok(());
-        }
-        let short = outcome.program.clone();
-        let bytes = self
-            .resources()?
-            .read(report, crate::bench::json::MAX_ENCODED)
-            .map_err(|e| Abort::Failed(format!("{short}'s hotpath report: {e}")))?;
-        if bytes.is_empty() {
-            return Err(Abort::Failed(format!(
-                "{short} was called with hotpath = true but wrote no hotpath report: \
-                 is it built with hotpath instrumentation?"
-            )));
-        }
-        let parsed: serde_json::Value = serde_json::from_slice(&bytes)
-            .map_err(|e| Abort::Failed(format!("{short}'s hotpath report is not JSON: {e}")))?;
-        if crate::db::hotpath_data_from_json(&parsed).is_none() {
-            return Err(Abort::Failed(format!(
-                "{short}'s hotpath report holds no profile brokkr can read"
-            )));
-        }
-        let value = crate::bench::json::decode(&bytes)
-            .map_err(|e| Abort::Failed(format!("{short}'s hotpath report: {e}")))?;
-        outcome.hotpath = Some(value);
-        self.hotpath_reports.push(parsed);
-        Ok(())
+    /// What became of a finished marked call's report at `path`, read once
+    /// nothing holds the call's borrow, and its projection for the script.
+    /// Never an error: a failure is the capture's outcome.
+    fn capture(&mut self, path: &Path) -> (store::CaptureOutcome, lua::Capture) {
+        let limit = REPORT_BYTES.min(self.report_budget);
+        let read = match self.resources() {
+            Ok(resources) => resources.read_report(path, limit),
+            Err(Abort::Failed(why)) => Err(DevError::Internal(why)),
+            Err(Abort::Interrupted) => Err(DevError::Interrupted),
+        };
+        let outcome = match read {
+            Err(error) => store::CaptureOutcome::Unreadable {
+                reason: error.to_string(),
+            },
+            Ok(None) => store::CaptureOutcome::OverBudget,
+            Ok(Some(bytes)) if bytes.is_empty() => store::CaptureOutcome::Missing,
+            Ok(Some(bytes)) => match decode_report(&bytes) {
+                Err(reason) => store::CaptureOutcome::Invalid { reason },
+                // Charged as the store will hold it, which may be longer
+                // than the file (`1e9` reserialized as `1000000000.0`).
+                Ok((report, _)) if stored_len(&report) > self.report_budget => {
+                    store::CaptureOutcome::OverBudget
+                }
+                Ok((report, projection)) => {
+                    self.report_budget = self.report_budget.saturating_sub(stored_len(&report));
+                    return (
+                        store::CaptureOutcome::Captured { report },
+                        lua::Capture {
+                            status: "captured",
+                            report: Some(projection),
+                            error: None,
+                        },
+                    );
+                }
+            },
+        };
+        let (status, error) = match &outcome {
+            store::CaptureOutcome::Captured { .. } => ("captured", None),
+            store::CaptureOutcome::Missing => ("missing", None),
+            store::CaptureOutcome::Invalid { reason } => ("invalid", Some(reason.clone())),
+            store::CaptureOutcome::Unreadable { reason } => ("unreadable", Some(reason.clone())),
+            store::CaptureOutcome::OverBudget => ("over_budget", None),
+        };
+        (
+            outcome,
+            lua::Capture {
+                status,
+                report: None,
+                error,
+            },
+        )
     }
 
     fn resources(&mut self) -> Result<&mut Resources, Abort> {
@@ -252,6 +308,20 @@ impl IterationHost {
             .ok_or_else(|| Abort::Failed(format!("{function}: handle {index} was never given out")))
     }
 
+    /// A fresh marker FIFO for one child, and its path.
+    fn marker_fifo(&self) -> Result<(crate::sidecar::SidecarFifo, String), Abort> {
+        let fifo = crate::sidecar::SidecarFifo::create(
+            &self.state_root,
+            &crate::sidecar::DEFAULT_MEASUREMENT_TUNABLES,
+        )
+        .map_err(|e| Abort::Failed(format!("cannot make the marker FIFO: {e}")))?;
+        let path = fifo
+            .path_str()
+            .map_err(|e| Abort::Failed(format!("cannot name the marker FIFO: {e}")))?
+            .to_owned();
+        Ok((fifo, path))
+    }
+
     /// Launch one child and wait for it and its borrow; its evidence is kept
     /// whatever happens after the spawn.
     fn launch(&mut self, argv: &[String], call: &Declared) -> Result<CallOutcome, Abort> {
@@ -261,15 +331,7 @@ impl IterationHost {
         let short = program
             .file_name()
             .map_or_else(|| program_str.clone(), |n| n.to_string_lossy().into_owned());
-        let mut fifo = crate::sidecar::SidecarFifo::create(
-            &self.state_root,
-            &crate::sidecar::DEFAULT_MEASUREMENT_TUNABLES,
-        )
-        .map_err(|e| failed("cannot make the marker FIFO", &e))?;
-        let fifo_path = fifo
-            .path_str()
-            .map_err(|e| failed("cannot name the marker FIFO", &e))?
-            .to_owned();
+        let (mut fifo, fifo_path) = self.marker_fifo()?;
         let argv_handles: Vec<&Handle> = call.argv.iter().collect();
         let reads: Vec<&Handle> = call.reads.iter().collect();
         let writes: Vec<&Handle> = call.writes.iter().collect();
@@ -281,15 +343,19 @@ impl IterationHost {
                 &reads,
                 &writes,
                 call.stdin.as_ref(),
+                call.hotpath.is_some(),
             )
             .map_err(|e| failed("the call was refused", &e))?;
         let stdin = admitted.take_stdin();
         let call_stdout = admitted
             .stdout()
             .map_err(|e| failed("cannot open the stdout spool", &e))?;
+        let report = admitted.report().map(Path::to_path_buf);
+        let report_str = report.as_deref().map(utf8_report).transpose()?;
         let mut env: Vec<(&str, &str)> =
             vec![(crate::sidecar::MARKER_FIFO_ENV, fifo_path.as_str())];
         env.extend(call.env.iter().map(|(n, v)| (n.as_str(), v.as_str())));
+        env.extend(report_str.as_deref().map(hotpath_env).into_iter().flatten());
         let arg_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
         let guard = crate::shutdown::SigtermGuard::install();
         let command = crate::process::spawn::ChildPolicy::plain().command(
@@ -346,6 +412,12 @@ impl IterationHost {
         let finished = admitted.finish_observed(&mut || open.pump(&mut fifo));
         let run = open.finish(&mut fifo, finished.is_ok());
         self.keep_child(program_str, argv, &env, pid, start, &run);
+        // Judged after every launch that was reaped, whatever its exit, and
+        // stored on the child before anything below can end the call.
+        let projection = match (&call.hotpath, &report) {
+            (Some(stage), Some(path)) => Some(self.keep_capture(stage, path, finished.is_ok())),
+            _ => None,
+        };
         let spool = finished.map_err(|e| {
             failed(
                 &format!("{short} exited but something it started still holds its borrow"),
@@ -354,7 +426,41 @@ impl IterationHost {
         })?;
         let mut outcome = call_outcome(short, &run, &spool)?;
         outcome.stdout_file = Some(self.give(resources::spool_handle(&spool))?);
+        outcome.hotpath = projection;
         Ok(outcome)
+    }
+
+    /// The last child's capture under `stage`, its occurrence counted
+    /// whatever becomes of it: read from `path` when the call's borrow was
+    /// released (`released`), else unreadable, since something may still
+    /// write it. Returns what the script sees.
+    fn keep_capture(&mut self, stage: &str, path: &Path, released: bool) -> lua::Capture {
+        let seen = self.stages.entry(stage.to_owned()).or_insert(0);
+        *seen += 1;
+        let occurrence = *seen;
+        let (outcome, shown) = if released {
+            self.capture(path)
+        } else {
+            let reason = "something the child started still held its borrow".to_owned();
+            (
+                store::CaptureOutcome::Unreadable {
+                    reason: reason.clone(),
+                },
+                lua::Capture {
+                    status: "unreadable",
+                    report: None,
+                    error: Some(reason),
+                },
+            )
+        };
+        if let Some(child) = self.children.last_mut() {
+            child.hotpath = Some(store::HotpathCapture {
+                stage: stage.to_owned(),
+                occurrence,
+                outcome,
+            });
+        }
+        shown
     }
 
     /// A spawned child's evidence, for the document.
@@ -383,8 +489,47 @@ impl IterationHost {
             wall_us: i64::try_from(run.elapsed.as_micros()).unwrap_or(i64::MAX),
             ending: evidence::child_ending(&run.data.ending),
             evidence: evidence::evidence(&run.data),
+            hotpath: None,
         });
     }
+}
+
+/// A report's length as the store serializes it.
+fn stored_len(report: &serde_json::Value) -> usize {
+    serde_json::to_vec(report).map_or(usize::MAX, |bytes| bytes.len())
+}
+
+/// The report path as the child is told it.
+fn utf8_report(path: &Path) -> Result<String, Abort> {
+    path.to_str().map(str::to_owned).ok_or_else(|| {
+        Abort::Failed(format!(
+            "the report path {} is not UTF-8",
+            path.display()
+        ))
+    })
+}
+
+/// The variables a marked call's child gets, whatever the build: an
+/// instrumented one never starts the metrics server or prints its table,
+/// and writes its report to `report`.
+fn hotpath_env(report: &str) -> [(&'static str, &str); 3] {
+    [
+        ("HOTPATH_METRICS_SERVER_OFF", "true"),
+        ("HOTPATH_OUTPUT_FORMAT", "json"),
+        ("HOTPATH_OUTPUT_PATH", report),
+    ]
+}
+
+/// A report as the store keeps it, a JSON object as parsed, and as the
+/// script sees it, through the strict decoding `json.decode` uses; refused
+/// when either refuses it.
+fn decode_report(bytes: &[u8]) -> Result<(serde_json::Value, lua::Value), String> {
+    let projection = crate::bench::json::decode(bytes)?;
+    let report: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    if !report.is_object() {
+        return Err("the report is not a JSON object".to_owned());
+    }
+    Ok((report, projection))
 }
 
 /// One call's handles as declared: those in its argv, its `reads`, `writes`
@@ -395,6 +540,8 @@ struct Declared {
     writes: Vec<Handle>,
     stdin: Option<Handle>,
     env: Vec<(String, String)>,
+    /// The stage a `hotpath` call is marked with.
+    hotpath: Option<String>,
 }
 
 /// What the script sees of a finished child, or why the sample ends.
@@ -460,6 +607,7 @@ impl lua::Host for IterationHost {
             writes: Vec::new(),
             stdin: None,
             env: options.env,
+            hotpath: options.hotpath,
         };
         for word in words {
             match word {
@@ -484,31 +632,7 @@ impl lua::Host for IterationHost {
         if let Some(index) = options.stdin {
             declared.stdin = Some(self.handle(index, "binary_with(): stdin")?);
         }
-        if !options.hotpath {
-            return self.launch(&argv, &declared);
-        }
-        // Pre-created empty, so a child built without hotpath, which writes
-        // nothing, is told from one that wrote a report.
-        let failed = |e: DevError| Abort::Failed(format!("binary_with(): hotpath: {e}"));
-        let name = hotpath_report_name(self.hotpath_calls);
-        self.hotpath_calls += 1;
-        let report = self.resources()?.output(&name).map_err(failed)?;
-        self.resources()?.write(&report, b"").map_err(failed)?;
-        let path = report.path().to_str().map(str::to_owned).ok_or_else(|| {
-            Abort::Failed(format!(
-                "{} is not UTF-8, which hotpath cannot be told",
-                report.path().display()
-            ))
-        })?;
-        declared.env.extend([
-            ("HOTPATH_METRICS_SERVER_OFF".to_owned(), "true".to_owned()),
-            ("HOTPATH_OUTPUT_FORMAT".to_owned(), "json".to_owned()),
-            ("HOTPATH_OUTPUT_PATH".to_owned(), path),
-        ]);
-        declared.writes.push(report.clone());
-        let mut outcome = self.launch(&argv, &declared)?;
-        self.take_hotpath(&report, &mut outcome)?;
-        Ok(outcome)
+        self.launch(&argv, &declared)
     }
 
     fn since(&mut self, sha: &str) -> Result<bool, Abort> {

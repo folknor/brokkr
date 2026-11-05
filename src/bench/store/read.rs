@@ -6,9 +6,9 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::StoreError;
 use super::document::{
-    BoundParam, Build, Child, ChildEnding, Clock, Conditions, Evidence, Iteration,
-    IterationOutcome, Loss, ParamValue, Record, ResolvedBuild, RunDocument, RunOutcome, Sample,
-    SinkEnd,
+    BoundParam, Build, CaptureOutcome, Child, ChildEnding, Clock, Conditions, Evidence,
+    HotpathCapture, Iteration, IterationOutcome, Loss, Measurement, ParamValue, Record,
+    ResolvedBuild, RunDocument, RunOutcome, Sample, SinkEnd,
 };
 use super::list::StoredRun;
 
@@ -43,7 +43,7 @@ pub(super) fn load_run(
                     r.cpu_governor, r.avail_memory_mb, r.captured_env, r.target, r.profile,
                     r.features, r.default_features, r.resolved_bin, r.resolved_features,
                     r.artifact, c.text, r.iterations_requested, r.outcome, r.failure,
-                    r.config_digest, r.pairing_key, r.best_iteration
+                    r.config_digest, r.pairing_key, r.best_iteration, r.measurement
              FROM runs r JOIN configs c ON c.digest = r.config_digest
              WHERE r.uuid = ?1",
             [uuid],
@@ -68,6 +68,8 @@ pub(super) fn load_run(
         json: cols,
     } = columns.ok_or_else(|| unreadable("run outcome"))?;
     doc.uuid = uuid.to_owned();
+    doc.measurement =
+        Measurement::parse(&cols.measurement).ok_or_else(|| unreadable("run measurement"))?;
     doc.argv = json(&cols.argv)?;
     doc.conditions.captured_env = json(&cols.captured_env)?;
     doc.build.features = json(&cols.features)?;
@@ -101,6 +103,7 @@ struct RunJson {
     features: String,
     resolved_bin: Option<String>,
     resolved_features: Option<String>,
+    measurement: String,
 }
 
 struct RunColumns {
@@ -144,6 +147,7 @@ fn run_columns(row: &Row<'_>) -> rusqlite::Result<Option<RunColumns>> {
             resolved: None,
             artifact: row.get(22)?,
         },
+        measurement: Measurement::Timing,
         params: BTreeMap::new(),
         config: row.get(23)?,
         iterations_requested: row.get(24)?,
@@ -158,6 +162,7 @@ fn run_columns(row: &Row<'_>) -> rusqlite::Result<Option<RunColumns>> {
             features: row.get(18)?,
             resolved_bin: row.get(20)?,
             resolved_features: row.get(21)?,
+            measurement: row.get(30)?,
         },
     }))
 }
@@ -347,9 +352,46 @@ fn load_children(conn: &Connection, run_id: i64, iteration: i64) -> Result<Vec<C
                 calls_seen: json(&row.calls_seen)?,
                 calls_overflowed: row.calls_overflowed,
             },
+            hotpath: load_capture(conn, row.id)?,
         });
     }
     Ok(children)
+}
+
+fn load_capture(conn: &Connection, child_id: i64) -> Result<Option<HotpathCapture>, StoreError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT stage, occurrence, status, reason, report FROM child_hotpath
+         WHERE child_id = ?1",
+    )?;
+    let row = stmt
+        .query_row([child_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u32>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })
+        .optional()?;
+    let Some((stage, occurrence, status, reason, report)) = row else {
+        return Ok(None);
+    };
+    let outcome = match (status.as_str(), reason, report) {
+        ("captured", None, Some(report)) => CaptureOutcome::Captured {
+            report: json(&report)?,
+        },
+        ("missing", None, None) => CaptureOutcome::Missing,
+        ("invalid", Some(reason), None) => CaptureOutcome::Invalid { reason },
+        ("unreadable", Some(reason), None) => CaptureOutcome::Unreadable { reason },
+        ("over_budget", None, None) => CaptureOutcome::OverBudget,
+        _ => return Err(unreadable("hotpath capture")),
+    };
+    Ok(Some(HotpathCapture {
+        stage,
+        occurrence,
+        outcome,
+    }))
 }
 
 fn load_samples(conn: &Connection, child_id: i64) -> Result<Vec<Sample>, StoreError> {

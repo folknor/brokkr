@@ -31,9 +31,9 @@ use std::path::Path;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 pub use document::{
-    BoundParam, Build, Child, ChildEnding, Clock, Conditions, DOCUMENT_FORMAT, Evidence, Iteration,
-    IterationOutcome, Loss, ParamValue, Record, ResolvedBuild, RunDocument, RunOutcome, Sample,
-    SinkEnd,
+    BoundParam, Build, CaptureOutcome, Child, ChildEnding, Clock, Conditions, DOCUMENT_FORMAT,
+    Evidence, HotpathCapture, Iteration, IterationOutcome, Loss, Measurement,
+    ParamValue, Record, ResolvedBuild, RunDocument, RunOutcome, Sample, SinkEnd,
 };
 pub use error::StoreError;
 pub use list::{RunFilter, StoredRun};
@@ -149,7 +149,10 @@ impl Store {
 /// never changes once shipped: a schema change is a new step, and its hash
 /// is appended here.
 #[cfg(test)]
-const SHIPPED_STEPS: &[&str] = &["b9c408fb4eb3abd989cb949079736110"];
+const SHIPPED_STEPS: &[&str] = &[
+    "b9c408fb4eb3abd989cb949079736110",
+    "b55bb417cdff92577ede441700a98333",
+];
 
 #[cfg(test)]
 mod frozen {

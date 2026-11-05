@@ -459,27 +459,32 @@ config digest, brokkr's argv, a `sidecar` field naming the `brokkr sidecar`
 invocation that reads a child's samples, markers and counters (`brokkr man
 measure`, Script-bench children) when some iteration launched one, then
 each iteration with its outcome and each child with its start offset, wall,
-ending, argv and what its capture kept and lost. Then the result's `record`
+ending, argv and what its capture kept and lost, and for a call marked
+`hotpath` its stage, occurrence and capture status; a `--hotpath` run says
+`measured hotpath`. Then the result's `record`
 (for a run without a result, each iteration's that was extracted), one
 entry per line as compact JSON. A prefix matching several runs prints the
 table. A prefix that names no run of this project but names
 another project's says which project it belongs to.
 
-**`record.hotpath`.** A script that profiles puts the hotpath JSON report its
-program wrote into `record.hotpath`, or calls it with `binary_with({hotpath
-= true}, ...)`, which captures the report and fills `record.hotpath` when it
-is the iteration's only one (`brokkr man bench`, `binary_with()`). It is rendered by the printer typed rows
-use, capped by `--top`, and a pair holding one on both sides gets the
-function diff after the comparison. A value with nothing recognizable as a
-report is shown as JSON with a note; one only partly recognized renders what
-was recognized, as for a typed row.
+**Hotpath reports.** Each report a marked call captured (`brokkr man bench`,
+Hotpath capture) is rendered by the printer typed rows use, capped by
+`--top`, under its stage and occurrence (`hotpath decode #1 (iteration
+2)`): the result iteration's, or for a run without a result every
+iteration's. One with nothing recognizable is named instead. A script may
+also put a report into `record.hotpath` itself, which brokkr never does; it
+is rendered the same way, and a value with nothing recognizable as a report
+is shown as JSON with a note. One only partly recognized renders what was
+recognized, as for a typed row.
 
 **`--compare A B`.** Each side is the completed runs of a clean tree whose
 commit starts with that prefix and that pass the filters; a dirty run never
 stands for a commit, and a run without a result never pairs or compares. Two
 runs pair when their stored pairing keys are equal (`reference/bench-store.md`:
 project, bench and every bound param with its keys and file digests in bound
-order), and the latest run per key on each side is compared. Pairs are
+order, and what was measured: timing, `--hotpath`, or incidental, a timing
+run that captured a report anyway), and the latest run per key on each side
+is compared. Pairs are
 ordered by bench, formed before `--limit` applies, and the cap is announced
 as for typed pairs. What the key leaves out is named under the pair rather
 than splitting it:
@@ -498,6 +503,9 @@ than splitting it:
 - `verdict:` when the results' verdicts differ, nil against `""` included:
   the sides measured different answers.
 - `record:` the result records' entries that moved, `hotpath` aside.
+- `hotpath captures unpaired:` a stage and occurrence one result iteration
+  captured and the other did not. Every one both captured gets its function
+  diff after the comparison, as `record.hotpath` held on both sides does.
 - `other runs under this key with a different env or build:` how many runs
   each side holds under the key whose captured env or requested build differ
   from the compared one, naming the newest: an arm the pair collapsed.
@@ -510,5 +518,6 @@ than splitting it:
 A run on one side only gets a line naming the other side's latest run of the
 same bench and every identity difference from it (a param bound on one side
 only, a collection against a scalar, values differing in key, order or
-digest, or keys of different pairing algorithms): a candidate for why it has
+digest, a different measurement class, or keys of different pairing
+algorithms): a candidate for why it has
 no partner, not proof.

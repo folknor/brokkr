@@ -1,5 +1,5 @@
 //! The store's wire contract (`store::wire`) without HTTP: the frozen
-//! encoding of protocol 1, the strictness of what it decodes, `serve`'s
+//! encoding of the current protocol, the strictness of what it decodes, `serve`'s
 //! mapping of every store answer, and the failure envelope a client reads.
 
 #![allow(clippy::unwrap_used, clippy::panic)]
@@ -10,9 +10,10 @@ use super::store::wire::{
     self, Answer, Failure, Kind, PROTOCOL_VERSION, Request, SHIPPED_PROTOCOLS,
 };
 use super::store::{
-    BoundParam, Build, Child, ChildEnding, Clock, Conditions, DOCUMENT_FORMAT, Evidence, Iteration,
-    IterationOutcome, Loss, ParamValue, Published, Record, ResolvedBuild, RunDocument, RunFilter,
-    RunOutcome, Sample, SinkEnd, Store, StoreError, StoredRun,
+    BoundParam, Build, CaptureOutcome, Child, ChildEnding, Clock, Conditions, DOCUMENT_FORMAT,
+    Evidence, HotpathCapture, Iteration, IterationOutcome, Loss, Measurement, ParamValue,
+    Published, Record, ResolvedBuild, RunDocument, RunFilter, RunOutcome, Sample, SinkEnd, Store,
+    StoreError, StoredRun,
 };
 
 /// The fixture's one child: every record kind and a deadline ending.
@@ -93,7 +94,28 @@ fn frozen_child() -> Child {
             calls_seen: BTreeSet::from(["c1".to_owned()]),
             calls_overflowed: false,
         },
+        hotpath: Some(HotpathCapture {
+            stage: "decode".into(),
+            occurrence: 1,
+            outcome: CaptureOutcome::Captured {
+                report: serde_json::json!({"functions_timing": {"data": []}}),
+            },
+        }),
     }
+}
+
+/// Every capture outcome but the fixture child's, frozen with the protocol.
+fn frozen_capture_outcomes() -> Vec<CaptureOutcome> {
+    vec![
+        CaptureOutcome::Missing,
+        CaptureOutcome::Invalid {
+            reason: "not JSON".into(),
+        },
+        CaptureOutcome::Unreadable {
+            reason: "gone".into(),
+        },
+        CaptureOutcome::OverBudget,
+    ]
 }
 
 /// The protocol's fixture document. Frozen with the protocol: changing it
@@ -134,6 +156,7 @@ fn frozen_document() -> RunDocument {
             }),
             artifact: Some("00112233445566778899aabbccddeeff".into()),
         },
+        measurement: Measurement::Hotpath,
         params: BTreeMap::from([(
             "osc".into(),
             BoundParam {
@@ -216,6 +239,8 @@ fn frozen_encoding() -> String {
         .map(|r| serde_json::to_string(r).unwrap())
         .collect();
     lines.extend(answers.iter().map(|a| serde_json::to_string(a).unwrap()));
+    lines.push(serde_json::to_string(&frozen_capture_outcomes()).unwrap());
+    lines.push(serde_json::to_string(&[Measurement::Timing, Measurement::Hotpath]).unwrap());
     lines.extend(
         [
             Kind::Refused,

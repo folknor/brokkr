@@ -15,7 +15,7 @@ use std::time::Duration;
 use crate::Limits;
 use crate::store::wire::{self, Failure, Kind};
 use crate::store::{
-    Build, Conditions, DOCUMENT_FORMAT, RunDocument, RunOutcome, Store, StoreError,
+    Build, Conditions, DOCUMENT_FORMAT, Measurement, RunDocument, RunOutcome, Store, StoreError,
 };
 use crate::worker::{self, Job, RUNNING, WITHDRAWN};
 
@@ -60,6 +60,7 @@ fn document(uuid: &str, project: &str) -> RunDocument {
             resolved: None,
             artifact: None,
         },
+        measurement: Measurement::Timing,
         params: BTreeMap::new(),
         config: "project = \"demo\"\n".into(),
         iterations_requested: 1,
@@ -138,8 +139,13 @@ impl Answer {
     fn has_protocol(&self) -> bool {
         self.headers
             .lines()
-            .any(|line| line.eq_ignore_ascii_case("brokkr-bench-protocol: 1"))
+            .any(|line| line.eq_ignore_ascii_case(&protocol_header()))
     }
+}
+
+/// The protocol header line this build sends and answers with.
+fn protocol_header() -> String {
+    format!("brokkr-bench-protocol: {}", wire::PROTOCOL_VERSION)
 }
 
 /// One raw HTTP/1.1 exchange; the server closes the connection after its
@@ -169,7 +175,8 @@ fn exchange(addr: SocketAddr, head: &str, body: &[u8]) -> Answer {
 fn post(addr: SocketAddr, request: &wire::Request) -> Answer {
     let body = serde_json::to_vec(request).unwrap();
     let head = format!(
-        "POST /bench HTTP/1.1\r\nHost: test\r\nbrokkr-bench-protocol: 1\r\nContent-Length: {}\r\n\r\n",
+        "POST /bench HTTP/1.1\r\nHost: test\r\n{}\r\nContent-Length: {}\r\n\r\n",
+        protocol_header(),
         body.len()
     );
     exchange(addr, &head, &body)
@@ -278,7 +285,7 @@ fn a_request_is_refused_from_its_head_before_its_body_is_read() {
 
     let identity = exchange(addr, "GET /bench HTTP/1.1\r\nHost: t\r\n\r\n", b"");
     assert_eq!(identity.status, 200);
-    assert_eq!(identity.json()["protocol"], 1);
+    assert_eq!(identity.json()["protocol"], wire::PROTOCOL_VERSION);
     assert_eq!(identity.json()["build"], BUILD);
     assert!(identity.json().get("probe").is_none());
     assert!(
@@ -324,25 +331,32 @@ fn a_request_is_refused_from_its_head_before_its_body_is_read() {
 
     let other_protocol = exchange(
         addr,
-        "POST /bench HTTP/1.1\r\nHost: t\r\nbrokkr-bench-protocol: 2\r\nContent-Length: 2\r\n\r\n",
+        &format!(
+            "POST /bench HTTP/1.1\r\nHost: t\r\nbrokkr-bench-protocol: {}\r\nContent-Length: 2\r\n\r\n",
+            wire::PROTOCOL_VERSION + 1
+        ),
         b"{}",
     );
     assert!(
-        other_protocol.failure().message.contains("protocol 1"),
+        other_protocol
+            .failure()
+            .message
+            .contains(&format!("protocol {}", wire::PROTOCOL_VERSION)),
         "{:?}",
         other_protocol.failure()
     );
 
+    let header = protocol_header();
     let chunked = exchange(
         addr,
-        "POST /bench HTTP/1.1\r\nHost: t\r\nbrokkr-bench-protocol: 1\r\nTransfer-Encoding: chunked\r\n\r\n",
+        &format!("POST /bench HTTP/1.1\r\nHost: t\r\n{header}\r\nTransfer-Encoding: chunked\r\n\r\n"),
         b"2\r\n{}\r\n0\r\n\r\n",
     );
     assert_eq!(chunked.status, 411);
 
     let large = exchange(
         addr,
-        "POST /bench HTTP/1.1\r\nHost: t\r\nbrokkr-bench-protocol: 1\r\nContent-Length: 65\r\n\r\n",
+        &format!("POST /bench HTTP/1.1\r\nHost: t\r\n{header}\r\nContent-Length: 65\r\n\r\n"),
         b"",
     );
     assert_eq!(large.status, 413);
@@ -350,7 +364,7 @@ fn a_request_is_refused_from_its_head_before_its_body_is_read() {
 
     let malformed = exchange(
         addr,
-        "POST /bench HTTP/1.1\r\nHost: t\r\nbrokkr-bench-protocol: 1\r\nContent-Length: 12\r\n\r\n",
+        &format!("POST /bench HTTP/1.1\r\nHost: t\r\n{header}\r\nContent-Length: 12\r\n\r\n"),
         b"{\"drop\":{}}x",
     );
     assert_eq!(malformed.status, 400);

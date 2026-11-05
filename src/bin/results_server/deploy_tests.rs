@@ -163,8 +163,10 @@ fn a_deadline_already_passed_runs_no_restart() {
 
 #[test]
 fn only_an_answer_made_for_the_probe_by_this_protocol_counts() {
+    let current = crate::store::wire::PROTOCOL_VERSION;
+    let next = current + 1;
     let good = format!(
-        r#"{{"server":"brokkr-results-server","protocol":1,"probe":"ab","build":"{BUILD}"}}"#
+        r#"{{"server":"brokkr-results-server","protocol":{current},"probe":"ab","build":"{BUILD}"}}"#
     );
     assert_eq!(deploy::judge(good.as_bytes(), "ab").unwrap(), BUILD);
     assert!(
@@ -174,13 +176,17 @@ fn only_an_answer_made_for_the_probe_by_this_protocol_counts() {
     );
     let other = good.replace("brokkr-results-server", "nginx");
     assert!(deploy::judge(other.as_bytes(), "ab").is_err());
-    let protocol = good.replace(r#""protocol":1"#, r#""protocol":2"#);
+    let protocol = good.replace(
+        &format!(r#""protocol":{current}"#),
+        &format!(r#""protocol":{next}"#),
+    );
     assert!(
         deploy::judge(protocol.as_bytes(), "ab")
             .unwrap_err()
-            .contains("protocol 2")
+            .contains(&format!("protocol {next}"))
     );
-    let no_build = r#"{"server":"brokkr-results-server","protocol":1,"probe":"ab"}"#;
+    let no_build =
+        format!(r#"{{"server":"brokkr-results-server","protocol":{current},"probe":"ab"}}"#);
     assert!(
         deploy::judge(no_build.as_bytes(), "ab")
             .unwrap_err()

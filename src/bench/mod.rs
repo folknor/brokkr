@@ -153,6 +153,7 @@ mod tests {
             profile: None,
             features: Vec::new(),
             default_features: true,
+            hotpath_features: Vec::new(),
             uses: Vec::new(),
             params: BTreeMap::new(),
         }

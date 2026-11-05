@@ -5,8 +5,8 @@ use rusqlite::{Connection, params};
 
 use super::StoreError;
 use super::document::{
-    Child, ChildEnding, Evidence, Iteration, IterationOutcome, Record, RunDocument, RunOutcome,
-    Sample,
+    CaptureOutcome, Child, ChildEnding, Evidence, HotpathCapture, Iteration, IterationOutcome,
+    Record, RunDocument, RunOutcome, Sample,
 };
 
 /// A count or index in SQLite's integer domain.
@@ -69,9 +69,9 @@ fn insert_run(tx: &Connection, doc: &RunDocument, config_digest: &str) -> Result
             started_unix_ms, brokkr_version, argv, kernel, cpu_governor, avail_memory_mb,
             captured_env, target, profile, features, default_features, resolved_bin,
             resolved_features, artifact, config_digest, iterations_requested, outcome,
-            failure, best_iteration, pairing_key
+            failure, best_iteration, pairing_key, measurement
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                   ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)",
+                   ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30)",
         params![
             doc.uuid,
             doc.format,
@@ -102,6 +102,7 @@ fn insert_run(tx: &Connection, doc: &RunDocument, config_digest: &str) -> Result
             failure,
             doc.best_iteration().map(int),
             doc.pairing_key(),
+            doc.measurement.name(),
         ],
     )?;
     Ok(tx.last_insert_rowid())
@@ -156,7 +157,37 @@ fn insert_iteration(
     for (child_idx, child) in iteration.children.iter().enumerate() {
         let child_id = insert_child(tx, run_id, idx, child_idx, child)?;
         insert_evidence(tx, child_id, &child.evidence)?;
+        if let Some(capture) = &child.hotpath {
+            insert_capture(tx, child_id, capture)?;
+        }
     }
+    Ok(())
+}
+
+fn insert_capture(
+    tx: &Connection,
+    child_id: i64,
+    capture: &HotpathCapture,
+) -> Result<(), StoreError> {
+    let (reason, report) = match &capture.outcome {
+        CaptureOutcome::Captured { report } => (None, Some(serde_json::to_string(report)?)),
+        CaptureOutcome::Invalid { reason } | CaptureOutcome::Unreadable { reason } => {
+            (Some(reason.as_str()), None)
+        }
+        CaptureOutcome::Missing | CaptureOutcome::OverBudget => (None, None),
+    };
+    tx.execute(
+        "INSERT INTO child_hotpath (child_id, stage, occurrence, status, reason, report)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            child_id,
+            capture.stage,
+            capture.occurrence,
+            capture.outcome.name(),
+            reason,
+            report
+        ],
+    )?;
     Ok(())
 }
 

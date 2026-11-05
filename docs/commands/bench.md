@@ -11,6 +11,7 @@ brokkr bench                          # the benches this project declares
 brokkr bench NAME                     # run one, three iterations
 brokkr bench --iterations 10 NAME
 brokkr bench --commit v0.5.0 NAME     # build and run that commit
+brokkr bench --hotpath NAME           # profile: its marked calls' reports
 brokkr bench NAME --help              # its build settings and params
 brokkr bench NAME --dataset denmark   # bind a param
 brokkr bench NAME --osc 4705..4710    # a collection: one run over all six
@@ -28,6 +29,11 @@ collide with a param. brokkr's options:
   HEAD's scripts serve every commit, and branch on `since()` (below).
 - `--iterations N` - how many iterations, default 3. The result is the
   fastest.
+- `--hotpath` - profile: build with the bench's `hotpath_features` (`brokkr
+  man bench-config`) added, and require every call marked `hotpath`
+  (`binary_with()`, below) to capture its report. Refused, before anything
+  runs, for a bench that sets no `hotpath_features`. A profiled run pairs
+  only with profiled runs (What a run stores).
 
 After NAME come the bench's params, `--NAME VALUE` or `--NAME=VALUE`, and
 `--help` or `-h` where a param's name could stand. How they bind against
@@ -82,8 +88,12 @@ runnable) is resolved by cargo metadata in the tree being built, under
 `--commit` the worktree, so a target that moved between crates is found by
 name on both sides. The profile is the bench's `profile`, else `[bin]
 profile` / `[bin] debug`, else release. Features are the host section's `features`
-(`brokkr man config`) followed by the bench's; `default_features = false`
-drops the package's defaults. The built executable is snapshotted into
+(`brokkr man config`) followed by the bench's, and under `--hotpath` its
+`hotpath_features`; `default_features = false`
+drops the package's defaults. A timing run (no `--hotpath`) of a bench that
+sets `hotpath_features` fails its arm when cargo resolved any of them, as a
+default or through another feature does: that build is instrumented. The
+built executable is snapshotted into
 `.brokkr/artifacts/<xxh128>/<name>` as `brokkr build` does, and every child
 runs that snapshot. The run records what was asked for, the bin and the
 features cargo resolved for it, and the snapshot's digest.
@@ -245,25 +255,58 @@ local r = binary_with({
   reads as its stdin, from its start, opened by brokkr as `read()` opens a
   file and declared read for the call (over an output's default write; in
   `writes` too it is refused).
-- `hotpath` - a boolean; `true` captures the child's hotpath report as the
-  typed commands do. brokkr sets `HOTPATH_METRICS_SERVER_OFF=true`,
-  `HOTPATH_OUTPUT_FORMAT=json` and `HOTPATH_OUTPUT_PATH`, a path under the
-  iteration's `out/` (`brokkr-hotpath-N.json`, N counting the iteration's
-  `hotpath` calls from 0, so a script's own `output()` of that name is
-  refused as a reuse), declared written for the call and created empty
-  first. Any `HOTPATH_*` in `env` beside it is refused. When the child exits
-  0 its report is decoded into the result's `hotpath` table; a report that
-  is missing (still empty: a build without hotpath instrumentation), not
-  JSON, larger than 16 MiB, or holding no profile brokkr can read fails the
-  iteration. A child that exits otherwise gets no `hotpath` and fails
-  nothing, its exit being the script's to judge. When exactly one call of
-  the iteration captured a report and the script set no `record.hotpath`,
-  brokkr stores that report as `record.hotpath`; with several the script
-  picks one. Per call, so a pipeline with one instrumented stage profiles
-  only that stage.
+- `hotpath` - a stage name (a param name's grammar: lowercase, a letter
+  first, then letters, digits, `_` or `-`) marking the call as an
+  instrumented stage whose hotpath report brokkr captures (Hotpath capture,
+  below). Any `HOTPATH_*` in `env` beside it is refused.
 
 Any other key is refused, so a misspelt `writes` never runs a call with
 less declared than meant.
+
+## Hotpath capture
+
+A call marked `hotpath = STAGE` gets `HOTPATH_METRICS_SERVER_OFF=true`,
+`HOTPATH_OUTPUT_FORMAT=json` and `HOTPATH_OUTPUT_PATH`, a report file brokkr
+makes empty under the iteration's private `profile/` area and declares
+written by the call, in every run, `--hotpath` or not: an instrumented
+build then never starts hotpath's metrics server or prints its table. The
+script never holds the report's path as a handle.
+
+Once the call has finished (its child reaped and nothing it started still
+holding its reservation), whatever its exit, brokkr judges the report and
+stores what it found on the child: `captured` with the report, `missing`
+(still empty: nothing wrote one, as an uninstrumented build does not),
+`invalid` (not a JSON object, or not one `json.decode` takes), `unreadable`
+(it could not be read, or something the child started still held the call),
+or `over_budget` (past 16 MiB as read, or past what is left of the run's
+128 MiB of reports, charged as the store serializes each; it is not kept
+and spends nothing). The budget bounds the reports alone: records, evidence
+and a report a script copies into `record` count besides, and nothing
+bounds a whole run against the 256 MiB a results server takes in one
+publication. The result carries
+`hotpath_status`, the report as Lua values in `hotpath` when captured, and
+`hotpath_error` for invalid and unreadable. A capture is never a builtin
+failure: the script still sees the child's exit and output.
+
+Each capture is identified by its stage and its occurrence, the stage's
+marked calls so far in the iteration counted from 1 whatever became of
+them; `brokkr results` shows and compares captures by both, so a call one
+side makes only conditionally shifts the later occurrences of its stage.
+
+Under `--hotpath` an iteration that completed fails if any marked call did
+not capture, naming each, or if no call was marked; its children,
+captures and record are stored as they came. Without `--hotpath` nothing is required:
+a capture is evidence only, and a run that captured anything pairs as
+incidental, never with clean timing runs (What a run stores).
+
+One report producer in the whole process tree a marked call launches: an
+instrumented program that runs another instrumented program hands it the
+same `HOTPATH_OUTPUT_PATH`, and the file holds whichever wrote last. brokkr
+cannot tell which process wrote it. Per call, so a pipeline marks only its
+instrumented stage.
+
+`record.hotpath` is the script's own: brokkr never fills it. A script that
+sets it (to `r.hotpath`, say) gets it rendered beside the record.
 
 ## Files
 
@@ -321,8 +364,8 @@ clean` or lease scan.
 ## Where an iteration's files live
 
 Each iteration owns one directory, `.brokkr/bench-iterations/.brokkr-iteration-<token>`
-under the project root, holding `out/`, `scratch/` and the children's stdout
-spools, on the resource protocol `reference/bench-resources.md` describes: it
+under the project root, holding `out/`, `scratch/`, the children's stdout
+spools and the marked calls' hotpath reports, on the resource protocol `reference/bench-resources.md` describes: it
 is removed when the iteration ends, and one a crash left behind goes once
 nothing that inherited its reservation is still running. It sits on the
 project's disk, not the host's scratch disk.
@@ -331,9 +374,13 @@ project's disk, not the host's scratch disk.
 
 Every attempted run is stored, a failed build or an interrupted iteration
 included, one per arm, with its bound params (each key, its `from` path and
-a file's digest), every child's argv, ending, `/proc` samples, marker FIFO
-records and capture losses; `brokkr sidecar <uuid>` reads one child's
-through the sidecar views (`brokkr man measure`, Script-bench children). A
+a file's digest), what it measured (timing, or `--hotpath`), every child's
+argv, ending, `/proc` samples, marker FIFO records and capture losses, and a
+marked child's hotpath capture; `brokkr sidecar <uuid>` reads one child's
+through the sidecar views (`brokkr man measure`, Script-bench children).
+Runs pair in three classes that never pair with each other: timing,
+`--hotpath`, and incidental, a timing run any of whose children captured a
+report, since its build was instrumented by other means. A
 run of a dirty tree, dirty as its attempt starts or after its build (The
 build), is stored and marked dirty: `brokkr results` lists it with `-dirty`
 and never compares it. Dirty is the measurement policy's: a change to the

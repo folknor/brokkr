@@ -53,6 +53,13 @@ params.jobs = { help = "worker threads" }
   `features`; a blank entry is refused.
 - `default_features` - `false` builds without the package's default
   features; absent is `true`.
+- `hotpath_features` - the package's own features that instrument it for
+  hotpath, added to the build under `brokkr bench --hotpath`; absent or
+  empty, the bench cannot be profiled. Each is a feature name of the built
+  package itself: a dependency's (`dep/feature`), an optional dependency
+  (`dep:name`), a blank entry and one also in `features` are refused. A
+  timing run whose resolved features include one fails its arm (`brokkr man
+  bench`, The build).
 - `uses` - `[bench_params]` sets whose params the bench takes (below).
 - `params` - the bench's own params (below).
 

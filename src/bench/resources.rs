@@ -120,7 +120,8 @@ impl Resources {
     }
 
     /// Admit one call of `program` passing `argv` handles, with `reads` and
-    /// `writes` overriding and adding, and `stdin` read.
+    /// `writes` overriding and adding, and `stdin` read; with `report`, an
+    /// empty hotpath report made for it (`Call::report`).
     pub(crate) fn call(
         &mut self,
         program: &Path,
@@ -128,10 +129,27 @@ impl Resources {
         reads: &[&Handle],
         writes: &[&Handle],
         stdin: Option<&Handle>,
+        report: bool,
     ) -> Result<Call, DevError> {
         let declared = call_access(argv, reads, writes, stdin)?;
         self.iteration
-            .call(program, &declared, stdin.map(Handle::path))
+            .call(program, &declared, stdin.map(Handle::path), report)
+    }
+
+    /// A finished call's hotpath report, `None` when it holds more than
+    /// `limit` bytes (counted as read).
+    pub(crate) fn read_report(
+        &mut self,
+        path: &Path,
+        limit: usize,
+    ) -> Result<Option<Vec<u8>>, DevError> {
+        let file = self.iteration.open_file(path)?;
+        let mut bytes = Vec::new();
+        let cap = u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1);
+        file.take(cap)
+            .read_to_end(&mut bytes)
+            .map_err(|e| DevError::Config(format!("cannot read {}: {e}", path.display())))?;
+        Ok((bytes.len() <= limit).then_some(bytes))
     }
 
     /// The whole file `handle` names, refused past `limit` bytes (counted
@@ -328,14 +346,14 @@ mod tests {
         assert_eq!(scratch.default_access(), Access::Write);
         let sh = Path::new("/bin/true");
         let spool = resources
-            .call(sh, &[&input, &out], &[], &[], None)
+            .call(sh, &[&input, &out], &[], &[], None, false)
             .unwrap()
             .finish()
             .unwrap();
         let spool = spool_handle(&spool);
-        assert!(resources.call(sh, &[], &[], &[&spool], None).is_err());
+        assert!(resources.call(sh, &[], &[], &[&spool], None, false).is_err());
         resources
-            .call(sh, &[&spool], &[&out], &[], None)
+            .call(sh, &[&spool], &[&out], &[], None, false)
             .unwrap()
             .finish()
             .unwrap();

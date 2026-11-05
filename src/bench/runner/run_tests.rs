@@ -40,6 +40,11 @@ compile_error!("the broken feature does not build");
 
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_default();
+    #[cfg(feature = "profiled")]
+    if let Some(path) = std::env::var_os("HOTPATH_OUTPUT_PATH") {
+        std::fs::write(path, "{\"functions_timing\":{\"data\":[{\"name\":\"main\",\"calls\":1}]}}")
+            .unwrap();
+    }
     match mode.as_str() {
         "commit" => {
             let mut git = Command::new("git");
@@ -78,6 +83,8 @@ broken = []
 moves = []
 dirties = []
 cleans = []
+profiled = []
+instrumented = ["profiled"]
 
 [workspace]
 "#;
@@ -168,6 +175,25 @@ script = """
 function bench(params)
     binary(params.mode):ok()
 end"""
+
+[bench.profiled]
+profile = "dev"
+hotpath_features = ["profiled"]
+params.mode = { default = "plain" }
+script = """
+function bench(params)
+    record.status = binary_with({hotpath = "main"}, params.mode):ok().hotpath_status
+end"""
+
+[bench.leaky]
+profile = "dev"
+features = ["instrumented"]
+hotpath_features = ["profiled"]
+params.mode = { default = "plain" }
+script = """
+function bench(params)
+    binary(params.mode):ok()
+end"""
 "#;
 
 /// Environment that would point a git call of this test, brokkr's own
@@ -241,11 +267,24 @@ impl Fixture {
     /// `brokkr bench --iterations N BENCH PARAMS...`, its console lines
     /// captured from the run log.
     fn bench(&self, log: &str, bench: &str, iterations: u32, params: &[&str]) -> Ran {
+        self.bench_as(log, bench, iterations, false, params)
+    }
+
+    /// [`Fixture::bench`], with `--hotpath` when `hotpath` is set.
+    fn bench_as(
+        &self,
+        log: &str,
+        bench: &str,
+        iterations: u32,
+        hotpath: bool,
+        params: &[&str],
+    ) -> Ran {
         let console = Console::open(log);
         let args = BenchArgs {
             name: Some(bench.to_owned()),
             commit: None,
             iterations: std::num::NonZeroU32::new(iterations).unwrap(),
+            hotpath,
             params: params.iter().map(|p| (*p).to_owned()).collect(),
         };
         let mut argv = vec!["brokkr".to_owned(), "bench".to_owned(), bench.to_owned()];
@@ -547,6 +586,54 @@ fn every_arm_runs_and_is_stored_and_the_failed_ones_are_named() {
     let ran = fixture.bench("single", "probe", 1, &["--mode", "fail"]);
     assert_eq!(ran.error(), "bench probe failed");
     assert!(!ran.console.contains("arm 1/1"), "{}", ran.console);
+}
+
+/// `--hotpath` builds with the bench's hotpath features and stores each
+/// marked child's report; the same bench under timing builds without them,
+/// and its marked call, uninstrumented, writes nothing and fails nothing. A
+/// timing build that resolves a hotpath feature through another feature is
+/// refused, and `--hotpath` on a bench with no hotpath features is refused
+/// before anything is stored.
+#[test]
+fn hotpath_runs_profile_with_their_features_and_timing_runs_stay_clean() {
+    let _serial = crate::test_scratch::process_global_lock();
+    let fixture = Fixture::new("hotpath");
+    let _hold = crate::lockfile::test_hold(
+        &fixture.detection.project_root,
+        &fixture.detection.build_root,
+    );
+    let ran = fixture.bench_as("hotpath", "profiled", 2, true, &["--mode", "p"]);
+    assert!(ran.result.is_ok(), "{}", ran.console);
+    let ran = fixture.bench_as("timing", "profiled", 1, false, &["--mode", "t"]);
+    assert!(ran.result.is_ok(), "{}", ran.console);
+    let runs: Vec<_> = fixture
+        .stored()
+        .into_iter()
+        .filter(|run| run.bench == "profiled")
+        .collect();
+    let [profiled, timing] = runs.as_slice() else {
+        panic!("{runs:?}");
+    };
+    assert_eq!(profiled.measurement, store::Measurement::Hotpath);
+    assert!(profiled.build.features.contains(&"profiled".to_owned()));
+    for iteration in &profiled.iterations {
+        assert_eq!(iteration.record.as_ref().unwrap()["status"], "captured");
+        let capture = iteration.children[0].hotpath.as_ref().unwrap();
+        assert_eq!((capture.stage.as_str(), capture.occurrence), ("main", 1));
+        assert!(matches!(capture.outcome, store::CaptureOutcome::Captured { .. }));
+    }
+    assert!(profiled.pairing_key().contains("\"hotpath\""));
+    assert_eq!(timing.measurement, store::Measurement::Timing);
+    assert!(!timing.build.features.contains(&"profiled".to_owned()));
+    assert_eq!(timing.iterations[0].record.as_ref().unwrap()["status"], "missing");
+    assert!(timing.pairing_key().starts_with("[\"bench-pair-v1\""));
+
+    let ran = fixture.bench("leaky", "leaky", 1, &[]);
+    ran.error();
+    ran.says("resolved hotpath feature \"profiled\"");
+
+    let ran = fixture.bench_as("unprofilable", "probe", 1, true, &[]);
+    assert!(ran.error().contains("sets no hotpath_features"), "{}", ran.error());
 }
 
 /// A build failure is an arm's failure like any other: every arm builds,

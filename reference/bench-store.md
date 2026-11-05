@@ -60,6 +60,8 @@ iteration and a run whose iterations disagreed are all stored. It holds:
   features folded in, default features), always; what resolution produced
   (the bin and cargo's resolved features) and the artifact digest, each
   only as far as the build got;
+- what was asked to be measured: `timing`, or `hotpath` for `brokkr bench
+  --hotpath`. A run stored before the field existed reads as `timing`;
 - params by name, each with `many`, its resolved `from` path (`None` for a
   plain string; otherwise the path into the run's resolved view,
   `docs/brokkr.toml.bench.md`, with `{param}` references substituted, its
@@ -93,15 +95,26 @@ Stamps stay on the child's own clock and are never rebased; an off-contract
 stamp is kept as it came. Library call boundaries are not stored: only a
 library call document supplies them, and a script bench parses none.
 
+A child of a call marked `hotpath` also holds its **capture**: the stage
+name, its occurrence (the stage's marked calls so far in the iteration,
+from 1, whatever became of each, so within an iteration a stage's
+occurrences run 1..n in launch order) and the outcome: `captured` with the
+report, a JSON object as the child wrote it and the reader's parser takes
+it (nested at most 64 deep, as a record), `missing`, `invalid` or
+`unreadable` each with its reason, or `over_budget`. An unmarked child has
+none. A `completed` run measured `hotpath` holds a capture in every
+iteration, and every capture it holds is `captured`; any other run may hold
+any outcome.
+
 Every struct refuses unknown fields and the document carries `format`, so a
 document a newer writer extended is refused rather than stored short of its
 new fields. The outcome and ending enums are externally tagged for the same
 reason: an internally tagged unit variant would drop any field beside its
 tag.
 
-Publication also refuses what would not read back as it came: a record
-nesting deeper than 64 levels (the reader's JSON parser stops at 128), and
-a capture count past SQLite's signed 64-bit range.
+Publication also refuses what would not read back as it came: a record or
+a captured report nesting deeper than 64 levels (the reader's JSON parser
+stops at 128), and a capture count past SQLite's signed 64-bit range.
 
 ## Derived, not submitted
 
@@ -119,13 +132,20 @@ and a replayed document compares equal to the stored one:
 - **Positions.** A sample's index is its position; a record's arrival index
   is its position across every kind; a marker's index is its position among
   markers.
-- **The pairing key**, `bench-pair-v1`: project, bench, and each bound param
-  by name with its `many` flag and its values' keys and digests in bound
-  order. Collection order, a digest change and a param bound or not all
-  split it; the commit, the config text, the build and the record do not.
-  The key is a projection of the stored params: a later algorithm is a new
-  projection computed from them, and two rows compare only under one
-  algorithm, never by matching a `v1` string against another version's.
+- **The pairing key**: project, bench, and each bound param by name with
+  its `many` flag and its values' keys and digests in bound order, tagged by
+  what the run measured. A run measured `timing` none of whose children, in
+  any iteration, captured a report is keyed `bench-pair-v1`, exactly as
+  every run was before captures existed, so that history keeps pairing. A
+  run measured `hotpath` is keyed `bench-pair-v2` with the class `hotpath`,
+  and a `timing` run that captured anyway, its build instrumented by other
+  means, `bench-pair-v2` with `incidental`: the three never pair with each
+  other. Collection order, a digest change, a param bound or not and the
+  class all split it; the commit, the config text, the build and the record
+  do not. The key is a projection of the stored params and children: a
+  later algorithm is a new projection computed from them, and two rows
+  compare only under one algorithm, never by matching one tag's string
+  against another's.
 - **The config digest**: xxh3-128 of the text, as 32 hex digits. A digest
   already naming a different text is refused, not shared.
 
@@ -297,7 +317,7 @@ rules of its own:
   the publication will be stored.
 - **Reads** are retried without a latch (they are idempotent), and a 200
   whose body does not decode as the expected answer is final. A listing
-  costs one `run` request per run, since protocol 1 has no batch read.
+  costs one `run` request per run, since the protocol has no batch read.
 
 The same latch serves the local store: a `StoreError` is classified by the
 kind it would travel as (`Kind::of`), so a local `Failed` is retried and a

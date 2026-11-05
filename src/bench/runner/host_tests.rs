@@ -19,6 +19,8 @@ fn setup<'a>(script: &'a lua::Script, root: &'a Path, container: &'a Path) -> It
         container,
         index: 0,
         since: Since::new(root, "0".repeat(40).parse().unwrap()),
+        measurement: store::Measurement::Timing,
+        report_budget: RUN_REPORT_BYTES,
     }
 }
 
@@ -77,7 +79,7 @@ fn an_input_in_writes_is_refused_at_the_call() {
     let mut with_input = setup(&script, &root, &container);
     with_input.args = &args;
     with_input.inputs = &inputs;
-    let (iteration, _) = run_iteration(with_input);
+    let (iteration, _, _) = run_iteration(with_input);
     let reason = failure(&iteration);
     assert!(reason.contains("read-only for the run"), "{reason}");
     assert!(reason.starts_with("test:2: "), "{reason}");
@@ -108,7 +110,7 @@ fn a_substituted_output_never_lets_write_reach_an_input() {
         let mut with_input = setup(&linking, &root, &container);
         with_input.args = &args;
         with_input.inputs = &inputs;
-        let (iteration, _) = run_iteration(with_input);
+        let (iteration, _, _) = run_iteration(with_input);
         if expect_refusal {
             let reason = failure(&iteration);
             assert!(reason.contains("read-only for the run"), "{reason}");
@@ -142,7 +144,7 @@ fn spools_feed_onward_and_a_replaced_one_is_refused() {
            return 'ok'\n\
          end",
     );
-    let (iteration, _) = run_iteration(setup(&feeding, &root, &container));
+    let (iteration, _, _) = run_iteration(setup(&feeding, &root, &container));
     let found = record(&iteration);
     assert_eq!(found["size"], 5);
     assert_eq!(found["read"], "hello");
@@ -160,7 +162,7 @@ fn spools_feed_onward_and_a_replaced_one_is_refused() {
            read(r.stdout_file)\n\
          end",
     );
-    let (iteration, _) = run_iteration(setup(&replacing, &root, &container));
+    let (iteration, _, _) = run_iteration(setup(&replacing, &root, &container));
     let reason = failure(&iteration);
     assert!(reason.contains("no longer the spool"), "{reason}");
 
@@ -180,7 +182,7 @@ fn spools_feed_onward_and_a_replaced_one_is_refused() {
     let mut with_input = setup(&linking, &root, &container);
     with_input.args = &args;
     with_input.inputs = &inputs;
-    let (iteration, _) = run_iteration(with_input);
+    let (iteration, _, _) = run_iteration(with_input);
     let reason = failure(&iteration);
     assert!(
         reason.contains("is a link, which brokkr does not follow"),
@@ -204,7 +206,7 @@ fn a_child_runs_on_its_borrow_and_reaches_the_script() {
            return 'done'\n\
          end",
     );
-    let (iteration, _) = run_iteration(setup(&script, &root, &container));
+    let (iteration, _, _) = run_iteration(setup(&script, &root, &container));
     assert_eq!(
         iteration.outcome,
         store::IterationOutcome::Completed {
@@ -228,67 +230,124 @@ fn a_child_runs_on_its_borrow_and_reaches_the_script() {
 /// A hotpath report as the crate writes one, as a shell `printf` argument.
 const REPORT: &str = r#"{"functions_timing":{"data":[{"name":"decode","calls":12,"avg":"2 ms","total":"24 ms","percent_total":"40%","p50":"1.8 ms","p95":"3.0 ms","p99":"3.8 ms"}]}}"#;
 
-/// `hotpath = true` sets the three variables, decodes the report into
-/// `r.hotpath`, and the one report fills `record.hotpath`.
+fn capture(child: &store::Child) -> &store::HotpathCapture {
+    child.hotpath.as_ref().unwrap()
+}
+
+/// A marked call gets the three variables and a report under `profile/`;
+/// the report is stored on the child, the script sees it as `r.hotpath`,
+/// and nothing fills `record.hotpath`. An unmarked call has no capture.
 #[test]
-fn a_hotpath_call_captures_its_report_into_the_record() {
+fn a_marked_call_stores_its_report_on_the_child() {
     let _lock = crate::test_scratch::process_global_lock();
     let root = crate::test_scratch::scratch("bench_runner", "hotpath");
     let container = root.join("iterations");
     let script = script(&format!(
         "function bench()\n\
-           local r = binary_with({{hotpath = true, env = {{R = '{REPORT}'}}}}, '-c',\n\
+           local r = binary_with({{hotpath = 'decode', env = {{R = '{REPORT}'}}}}, '-c',\n\
              'test \"$HOTPATH_METRICS_SERVER_OFF\" = true && test \"$HOTPATH_OUTPUT_FORMAT\" = json \
               && printf %s \"$R\" > \"$HOTPATH_OUTPUT_PATH\"'):ok()\n\
            record.calls = r.hotpath.functions_timing.data[1].calls\n\
+           record.status = r.hotpath_status\n\
+           binary('-c', 'true')\n\
          end"
     ));
-    let (iteration, _) = run_iteration(setup(&script, &root, &container));
-    let record = record(&iteration);
-    assert_eq!(record["calls"], 12);
+    let mut with = setup(&script, &root, &container);
+    with.measurement = store::Measurement::Hotpath;
+    let (iteration, _, left) = run_iteration(with);
+    let shown = record(&iteration);
+    assert_eq!(shown["calls"], 12);
+    assert_eq!(shown["status"], "captured");
+    assert!(!shown.contains_key("hotpath"), "no auto-fill");
+    let marked = capture(&iteration.children[0]);
+    assert_eq!((marked.stage.as_str(), marked.occurrence), ("decode", 1));
     assert_eq!(
-        record["hotpath"],
-        serde_json::from_str::<serde_json::Value>(REPORT).unwrap()
+        marked.outcome,
+        store::CaptureOutcome::Captured {
+            report: serde_json::from_str(REPORT).unwrap()
+        }
     );
+    assert!(iteration.children[0].env["HOTPATH_OUTPUT_PATH"].contains("/profile/"));
+    assert!(iteration.children[1].hotpath.is_none());
+    assert_eq!(left, RUN_REPORT_BYTES - REPORT.len());
 }
 
-/// An instrumented call that exits 0 having written no report fails; one
-/// that fails is the script's to judge; two reports leave the record alone.
+/// Whatever the exit, the capture is judged and stored and the script sees
+/// its status; under timing nothing fails, under --hotpath an iteration
+/// with a capture that failed, or with no marked call, does. Occurrences
+/// count every marked call of a stage.
 #[test]
-fn a_hotpath_call_without_a_report_fails_and_several_fill_nothing() {
+fn capture_failures_are_latched_for_hotpath_and_evidence_for_timing() {
     let _lock = crate::test_scratch::process_global_lock();
-    let root = crate::test_scratch::scratch("bench_runner", "hotpath-none");
+    let root = crate::test_scratch::scratch("bench_runner", "hotpath-latched");
     let container = root.join("iterations");
-    let bare = script("function bench() binary_with({hotpath = true}, '-c', 'true') end");
-    let (iteration, _) = run_iteration(setup(&bare, &root, &container));
+    let source = format!(
+        "function bench()\n\
+           local o = {{hotpath = 'stage', env = {{R = '{REPORT}'}}}}\n\
+           local bare = binary_with({{hotpath = 'stage'}}, '-c', 'exit 4')\n\
+           local bad = binary_with({{hotpath = 'stage'}}, '-c', 'echo nope > \"$HOTPATH_OUTPUT_PATH\"')\n\
+           local late = binary_with(o, '-c', 'printf %s \"$R\" > \"$HOTPATH_OUTPUT_PATH\"; exit 2')\n\
+           record.bare = bare.hotpath_status .. ' ' .. bare.exit\n\
+           record.bad = bad.hotpath_status\n\
+           record.bad_error = bad.hotpath_error ~= nil\n\
+           record.late = late.hotpath_status\n\
+         end"
+    );
+    let script = script(&source);
+    let (timing, _, _) = run_iteration(setup(&script, &root, &container));
+    let shown = record(&timing);
+    assert_eq!(shown["bare"], "missing 4");
+    assert_eq!(shown["bad"], "invalid");
+    assert_eq!(shown["bad_error"], true);
+    assert_eq!(shown["late"], "captured", "a nonzero exit keeps its report");
+    let occurrences: Vec<u32> = timing.children.iter().map(|c| capture(c).occurrence).collect();
+    assert_eq!(occurrences, [1, 2, 3]);
+
+    let mut profiled = setup(&script, &root, &container);
+    profiled.measurement = store::Measurement::Hotpath;
+    let (iteration, _, _) = run_iteration(profiled);
+    let why = failure(&iteration);
     assert!(
-        failure(&iteration).contains("wrote no hotpath report"),
-        "{iteration:?}"
+        why.contains("stage stage occurrence 1: no report was written")
+            && why.contains("occurrence 2: invalid report"),
+        "{why}"
     );
-
-    let failing = script(
-        "function bench()\n\
-           local r = binary_with({hotpath = true}, '-c', 'exit 4')\n\
-           record.exit = r.exit\n\
-           record.none = r.hotpath == nil\n\
-         end",
+    assert_eq!(
+        iteration.record.as_ref().unwrap()["bare"],
+        "missing 4",
+        "the script's record is kept"
     );
-    let (iteration, _) = run_iteration(setup(&failing, &root, &container));
-    let shown = record(&iteration);
-    assert_eq!(shown["exit"], 4);
-    assert_eq!(shown["none"], true);
-    assert!(!shown.contains_key("hotpath"));
+    assert_eq!(iteration.children.len(), 3, "the evidence is kept");
 
-    let twice = script(&format!(
+    let unmarked = self::script("function bench() binary('-c', 'true') end");
+    let mut profiled = setup(&unmarked, &root, &container);
+    profiled.measurement = store::Measurement::Hotpath;
+    let (iteration, _, _) = run_iteration(profiled);
+    assert!(failure(&iteration).contains("no call of the iteration was marked"));
+}
+
+/// A report past the run's remaining budget is over budget, not read, and
+/// spends nothing.
+#[test]
+fn a_report_past_the_budget_is_over_budget() {
+    let _lock = crate::test_scratch::process_global_lock();
+    let root = crate::test_scratch::scratch("bench_runner", "hotpath-budget");
+    let container = root.join("iterations");
+    let script = script(&format!(
         "function bench()\n\
-           local o = {{hotpath = true, env = {{R = '{REPORT}'}}}}\n\
-           local w = 'printf %s \"$R\" > \"$HOTPATH_OUTPUT_PATH\"'\n\
-           binary_with(o, '-c', w):ok()\n\
-           binary_with(o, '-c', w):ok()\n\
+           record.status = binary_with({{hotpath = 's', env = {{R = '{REPORT}'}}}}, '-c',\n\
+             'printf %s \"$R\" > \"$HOTPATH_OUTPUT_PATH\"').hotpath_status\n\
          end"
     ));
-    let (iteration, _) = run_iteration(setup(&twice, &root, &container));
-    assert!(!record(&iteration).contains_key("hotpath"), "{iteration:?}");
+    let mut tight = setup(&script, &root, &container);
+    tight.report_budget = 8;
+    let (iteration, _, left) = run_iteration(tight);
+    assert_eq!(record(&iteration)["status"], "over_budget");
+    assert_eq!(
+        capture(&iteration.children[0]).outcome,
+        store::CaptureOutcome::OverBudget
+    );
+    assert_eq!(left, 8);
 }
 
 #[test]
@@ -303,7 +362,7 @@ fn a_descendants_late_markers_land_in_its_childs_evidence() {
            binary('-c', 'true'):ok()\n\
          end",
     );
-    let (iteration, _) = run_iteration(setup(&script, &root, &container));
+    let (iteration, _, _) = run_iteration(setup(&script, &root, &container));
     assert!(
         matches!(iteration.outcome, store::IterationOutcome::Completed { .. }),
         "{iteration:?}"
@@ -360,7 +419,7 @@ fn an_input_handle_reaches_the_child() {
     let mut with_input = setup(&script, &root, &container);
     with_input.args = &args;
     with_input.inputs = &inputs;
-    let (iteration, _) = run_iteration(with_input);
+    let (iteration, _, _) = run_iteration(with_input);
     assert!(
         matches!(iteration.outcome, store::IterationOutcome::Completed { .. }),
         "{iteration:?}"
@@ -377,7 +436,7 @@ fn a_failed_iteration_keeps_its_children_and_never_extracts_record() {
     let root = crate::test_scratch::scratch("bench_runner", "failed");
     let container = root.join("iterations");
     let script = script("function bench() record.x = 1; binary('-c', 'exit 1'):ok() end");
-    let (iteration, _) = run_iteration(setup(&script, &root, &container));
+    let (iteration, _, _) = run_iteration(setup(&script, &root, &container));
     let store::IterationOutcome::Failed { reason } = &iteration.outcome else {
         panic!("{iteration:?}");
     };

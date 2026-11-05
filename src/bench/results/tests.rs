@@ -8,8 +8,9 @@ use std::path::PathBuf;
 
 use super::super::evidence;
 use super::super::store::{
-    BoundParam, Build, Child, ChildEnding, Clock, Conditions, DOCUMENT_FORMAT, Evidence, Iteration,
-    IterationOutcome, Loss, ParamValue, ResolvedBuild, RunDocument, RunOutcome, Store,
+    BoundParam, Build, CaptureOutcome, Child, ChildEnding, Clock, Conditions, DOCUMENT_FORMAT,
+    Evidence, HotpathCapture, Iteration, IterationOutcome, Loss, Measurement, ParamValue,
+    ResolvedBuild, RunDocument, RunOutcome, Store,
 };
 use super::{BenchFilter, BenchReader, format_compare, format_single, format_table};
 
@@ -65,6 +66,7 @@ fn iteration(wall_us: i64, verdict: Option<&str>, record: &serde_json::Value) ->
                 calls_seen: std::collections::BTreeSet::new(),
                 calls_overflowed: false,
             },
+            hotpath: None,
         }],
     }
 }
@@ -113,6 +115,7 @@ pub(crate) fn run(
             }),
             artifact: Some("00112233445566778899aabbccddeeff".into()),
         },
+        measurement: Measurement::Timing,
         params: BTreeMap::from([("dataset".into(), param(false, &[("denmark", None)]))]),
         config: "[datasets.denmark]\nbbox = \"1,2,3,4\"\n".into(),
         iterations_requested: 1,
@@ -165,10 +168,15 @@ fn a_read_only_open_creates_nothing_and_refuses_what_a_writer_refuses() {
 
     // A foreign file stamped with the current version opens, and its first
     // query fails naming the file.
+    let current: i64 = Store::open(&path.with_file_name("current.db"))
+        .unwrap()
+        .conn()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
     let stamped = path.with_file_name("stamped.db");
     rusqlite::Connection::open(&stamped)
         .unwrap()
-        .pragma_update(None, "user_version", 1)
+        .pragma_update(None, "user_version", current)
         .unwrap();
     let error = BenchReader::at(&stamped, "pbfhogg")
         .unwrap()
@@ -457,6 +465,66 @@ fn compare_pairs_the_latest_result_per_key_and_names_what_the_key_leaves_out() {
         "{capped}"
     );
     assert!(reader.compare_sides("", "bbbb", &filter()).is_err());
+}
+
+/// `run` as a `--hotpath` run whose one child captured `decode` with one
+/// function of `calls` calls, and a second stage on A only.
+fn profiled(uuid_tail: u8, commit: char, started: i64, calls: u64, extra: bool) -> RunDocument {
+    let mut doc = run(uuid_tail, "cat", commit, started, 1_000);
+    doc.measurement = Measurement::Hotpath;
+    let report = |calls: u64| CaptureOutcome::Captured {
+        report: serde_json::json!({"functions_timing": {"data": [
+            {"name": "decode", "calls": calls, "avg": "2 ms", "total": "24 ms",
+             "percent_total": "40%", "p50": "1.8 ms", "p95": "3.0 ms", "p99": "3.8 ms"}
+        ]}}),
+    };
+    let base = doc.iterations[0].children[0].clone();
+    let mut children = vec![Child {
+        hotpath: Some(HotpathCapture {
+            stage: "decode".into(),
+            occurrence: 1,
+            outcome: report(calls),
+        }),
+        ..base.clone()
+    }];
+    if extra {
+        children.push(Child {
+            hotpath: Some(HotpathCapture {
+                stage: "write".into(),
+                occurrence: 1,
+                outcome: report(1),
+            }),
+            ..base
+        });
+    }
+    doc.iterations[0].children = children;
+    doc
+}
+
+/// A capture is shown on its child and rendered under its stage; a compare
+/// of two profiled runs diffs the stage both hold and names the one only
+/// one side holds; profiled and timing runs never pair.
+#[test]
+fn captures_render_per_stage_and_compare_by_stage() {
+    let path = scratch("captures");
+    let a = profiled(1, 'a', 1_000, 12, true);
+    let b = profiled(2, 'b', 2_000, 20, false);
+    let timing_b = run(3, "cat", 'b', 3_000, 900);
+    publish(&path, &[a.clone(), b, timing_b]);
+    let reader = reader(&path);
+
+    let shown = format_single(&reader.lookup(&a.uuid, &filter()).unwrap().runs[0], 10);
+    assert!(shown.contains("measured    hotpath (--hotpath)"), "{shown}");
+    assert!(shown.contains("hotpath decode #1: captured"), "{shown}");
+    assert!(shown.contains("hotpath write #1 (iteration 0)"), "{shown}");
+
+    let (sa, sb) = reader.compare_sides("a", "b", &filter()).unwrap();
+    assert!(sa[0].children_loaded, "a profiled run is read with its children");
+    assert!(sb.iter().any(|r| !r.children_loaded), "a timing run is not");
+    let out = format_compare("a", &sa, "b", &sb, 10, 20);
+    assert!(out.contains("hotpath decode #1"), "{out}");
+    assert!(out.contains("hotpath captures unpaired: write #1 on A only"), "{out}");
+    assert!(out.contains("measured timing vs hotpath"), "{out}");
 }
 
 #[test]
