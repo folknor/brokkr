@@ -267,7 +267,7 @@ struct Marks {
 /// `bench(params, keys)` timed from its call to its return, then `record`
 /// extracted. Returns the host for the next sample.
 pub(crate) fn run_sample<H: Host>(script: &Script, args: &Args, host: H) -> (Sample, H) {
-    let mut state = State::with_callbacks(Box::new(Console));
+    let mut state = State::builder().callbacks(Box::new(Console)).build();
     let (ok, marks) = match install::<H>(&mut state) {
         Ok(installed) => installed,
         Err(error) => {
@@ -462,7 +462,7 @@ fn install<H: Host>(state: &mut State) -> Result<(RustFnHandle, Marks), Error> {
         ("filesize", lua_filesize::<H>),
     ];
     for (name, function) in builtins {
-        let handle = state.add_rust_fn(function)?;
+        let handle = state.add_rust_fn(name, function)?;
         state.push_rust_fn(handle)?;
         state.set_global(name)?;
     }
@@ -473,7 +473,7 @@ fn install<H: Host>(state: &mut State) -> Result<(RustFnHandle, Marks), Error> {
         ("decode", lua_json_decode::<H>),
     ];
     for (name, function) in functions {
-        let handle = state.add_rust_fn(function)?;
+        let handle = state.add_rust_fn(name, function)?;
         state.push_string(name)?;
         state.push_rust_fn(handle)?;
         state.set_table_raw(table)?;
@@ -493,7 +493,7 @@ fn install<H: Host>(state: &mut State) -> Result<(RustFnHandle, Marks), Error> {
     state.set_global("json")?;
     state.new_table()?;
     state.set_global("record")?;
-    let ok = state.add_rust_fn(lua_result_ok::<H>)?;
+    let ok = state.add_rust_fn("ok", lua_result_ok::<H>)?;
     Ok((ok, Marks { array, null }))
 }
 

@@ -692,9 +692,9 @@ checksum = "ffe7ed1d93f4553003e20b629abe9085e1e81b1429520f897f8f8860bc6dfc21"
 
 [[package]]
 name = "dellingr"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ded1b6133ca4b1131180679fe824b5810a6da1ae2cb4e4cb2c6d7eae6ea203ae"
+checksum = "6dee15e61eb3fdb70c3c8dfe2e179c36fde1e677e2c708ad99885bb73c766f6a"
 dependencies = [
  "foldhash 0.2.0",
  "hashbrown 0.17.1",
