@@ -934,8 +934,10 @@ impl Pin {
     }
 
     /// The blessed verdict, `None` when never blessed. [`check_pins`] refuses
-    /// a pin whose `expected`, `death` and `cause` do not fit, so on a
-    /// loaded pin `None` only ever means unblessed.
+    /// a pin whose `expected`, `death` and `cause` do not fit, except a
+    /// failure pin with no `cause`, blessed before piners sent one, which is
+    /// unblessed until a bless stamps it; so on a loaded pin `None` only
+    /// ever means unblessed.
     pub const fn expectation(&self) -> Option<Verdict> {
         match self.expected {
             Some(label) => Verdict::new(label, self.death, self.cause),
@@ -1116,9 +1118,12 @@ fn abort_contract(pin: &Pin) -> Option<String> {
     }
 }
 
-/// Why a pin's failure contract does not hold, `None` when it does: `cause`
-/// is present exactly when `expected` is `compile_fail` or `runtime_fail`,
-/// and a `compile_fail` never holds `panic`.
+/// Why a pin's failure contract does not hold, `None` when it does: a
+/// `cause` appears only where `expected` is `compile_fail` or
+/// `runtime_fail`, and a `compile_fail` never holds `panic`. A failure pin
+/// without one loads, and reads as unblessed ([`Pin::expectation`]): it was
+/// blessed before piners sent a cause, so the gate demands a bless and the
+/// bless adopts the line's cause, as it adopts an unpinned leg.
 fn failure_contract(pin: &Pin) -> Option<String> {
     let failure = matches!(
         pin.expected,
@@ -1126,10 +1131,6 @@ fn failure_contract(pin: &Pin) -> Option<String> {
     );
     let label = pin.expected.unwrap_or(PinnedDisposition::RuntimeFail);
     match (failure, pin.cause) {
-        (true, None) => Some(format!(
-            "expects {} without the `cause` it was blessed on - re-bless it",
-            label.as_str()
-        )),
         (true, Some(c)) if !c.fits(label) => Some(format!(
             "expects {} with cause `{c}`, which only a runtime_fail carries",
             label.as_str()
@@ -2129,9 +2130,12 @@ csv = { path = \"p/old/tv_trades.csv\", xxh128 = \"bb\" }
         ] {
             assert_eq!(load(extra).unwrap().probes["p"].expectation(), Some(want));
         }
+        // A failure pin blessed before piners sent a cause loads, unblessed,
+        // so a bless can adopt the line's cause.
+        for extra in ["expected = \"compile_fail\"\n", "expected = \"runtime_fail\"\n"] {
+            assert_eq!(load(extra).unwrap().probes["p"].expectation(), None, "{extra}");
+        }
         for (extra, says) in [
-            ("expected = \"compile_fail\"\n", "without the `cause`"),
-            ("expected = \"runtime_fail\"\n", "without the `cause`"),
             (
                 "expected = \"compile_fail\"\ncause = \"panic\"\n",
                 "which only a runtime_fail carries",

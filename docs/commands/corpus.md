@@ -482,9 +482,11 @@ process's outer boundary. Bless stamps it and the gate compares it with the
 label, so a pinned typed stop that turns into a panic deviates, `expected
 runtime_fail (budget), got runtime_fail (panic)`, and leaves exit 1
 unexplained. A cause is a classification, not an identity: one script
-refusal replacing another keeps its cause and passes. `pins.toml` refuses a
-failure pin without a `cause`, `panic` on a `compile_fail`, and a `cause` on
-any other pin.
+refusal replacing another keeps its cause and passes. `pins.toml` refuses
+`panic` on a `compile_fail` and a `cause` on any other pin. A failure pin
+without a `cause`, blessed before piners sent one, still loads but reads as
+unblessed: the gate fails it as `not blessed`, and a `--bless` adopts the
+cause its line reports.
 
 `harness_abort` is the harness's own verdict on a probe whose process died
 (a signal, an abort, an OOM kill) or replied with no complete record set (see

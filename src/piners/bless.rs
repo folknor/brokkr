@@ -434,6 +434,30 @@ mod tests {
         assert!(!written.contains("attribution"), "{written}");
     }
 
+    /// A failure pin blessed before piners sent a cause still loads, reads
+    /// as unblessed, and a bless adopts the line's cause, so the corpus is
+    /// never locked out of the bless that repairs it.
+    #[test]
+    fn a_causeless_failure_pin_loads_and_bless_adopts_the_line_cause() {
+        let dir = crate::test_scratch::scratch("piners_bless", "causeless_failure");
+        let pins_path = dir.join("pins.toml");
+        let old = "[probes.a]\nexpected = \"runtime_fail\"\n\
+                   pine = { path = \"p/strategy.pine\", xxh128 = \"00\" }\n\
+                   csv = { path = \"p/tv_trades.csv\", xxh128 = \"11\" }\n";
+        let loaded = registry::parse_pins(old, &pins_path).unwrap();
+        assert_eq!(loaded.probes["a"].expectation(), None);
+        let mut reg = registry_of(loaded.probes);
+        let ids = ["a".to_owned()];
+        let line = report(r#"{"probe":"a","outcome":"runtime_fail","cause":"capability","error":"x"}"#);
+        apply(&pins_path, &mut reg, &line, &ids).unwrap();
+        let written = std::fs::read_to_string(&pins_path).unwrap();
+        assert!(written.contains("cause = \"capability\""), "{written}");
+        assert_eq!(
+            registry::parse_pins(&written, &pins_path).unwrap().probes["a"].expectation(),
+            Some(Verdict::RuntimeFail(registry::Cause::Capability))
+        );
+    }
+
     #[test]
     fn attribute_flags_split_at_the_first_equals_and_name_a_probe_once() {
         let flags = |f: &[&str]| parse_attributions(&f.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());
