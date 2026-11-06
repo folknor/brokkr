@@ -446,6 +446,8 @@ mod tests {
             expected: Some(disposition.to_owned()),
             expected_death: None,
             death: None,
+            expected_cause: None,
+            cause: None,
             gate_ok,
             matched: 0,
             ours_only: 0,

@@ -1294,7 +1294,7 @@ mod tests {
     #[test]
     fn protocol_violations_fail_a_complete_clean_run() {
         let nd = format!(
-            "{A_OK}{A_OK}{{\"probe\":\"zz\",\"outcome\":\"compile_fail\",\"error\":\"x\"}}\nnoise\n"
+            "{A_OK}{A_OK}{{\"probe\":\"zz\",\"outcome\":\"compile_fail\",\"cause\":\"script\",\"error\":\"x\"}}\nnoise\n"
         );
         let r = reasons(&["a"], &nd, HarnessEnd::Code(0), false, false);
         assert_eq!(
@@ -1420,7 +1420,7 @@ mod tests {
         // a broken report is protocol-invalid even on an abnormal end - never
         // classified as a crash first.
         let extra =
-            format!("{A_OK}{{\"probe\":\"zz\",\"outcome\":\"compile_fail\",\"error\":\"x\"}}\n");
+            format!("{A_OK}{{\"probe\":\"zz\",\"outcome\":\"compile_fail\",\"cause\":\"script\",\"error\":\"x\"}}\n");
         assert!(matches!(
             classify(&["a"], &extra, HarnessEnd::Code(0), false),
             isolate::AttemptVerdict::Failed(isolate::Failure::ProtocolInvalid(_))

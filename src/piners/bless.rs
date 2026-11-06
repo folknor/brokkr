@@ -14,6 +14,7 @@
 //! `expected = "compile_fail"` and the gate will later catch it silently
 //! starting to compile. The one outcome it refuses is `unevaluated`: an
 //! experiment that was not conducted records nothing about the engine. A
+//! `compile_fail` or `runtime_fail` is stamped with its cause. A
 //! `harness_abort` is stamped with its death and needs a human attribution
 //! (`--attribute`) wherever the pin does not already hold that very death.
 //!
@@ -426,7 +427,7 @@ mod tests {
         let err = apply(&pins_path, &mut reg, &report(OOM), &ids).unwrap_err();
         assert!(err.to_string().contains("for a (harness_abort (signal 9))"), "{err}");
         // Recovery clears both.
-        let ok = report(r#"{"probe":"a","outcome":"runtime_fail","error":"x"}"#);
+        let ok = report(r#"{"probe":"a","outcome":"runtime_fail","cause":"script","error":"x"}"#);
         apply(&pins_path, &mut reg, &ok, &ids).unwrap();
         let written = std::fs::read_to_string(&pins_path).unwrap();
         assert!(!written.contains("death"), "{written}");
@@ -483,7 +484,7 @@ mod tests {
         pins.insert("untouched".to_owned(), pin(Some("byte_exact"))); // out of scope
 
         let rep = report(
-            "{\"probe\":\"a\",\"outcome\":\"parity\",\"acceptance\":{\"tier\":\"count_divergent\"}}\n{\"probe\":\"b\",\"outcome\":\"compile_fail\",\"error\":\"x\"}",
+            "{\"probe\":\"a\",\"outcome\":\"parity\",\"acceptance\":{\"tier\":\"count_divergent\"}}\n{\"probe\":\"b\",\"outcome\":\"compile_fail\",\"cause\":\"script\",\"error\":\"x\"}",
         );
 
         let mut reg = registry_of(pins);
@@ -538,7 +539,7 @@ mod tests {
         pins.insert("c".to_owned(), pin(None)); // old harness: stays unpinned
         let rep = report(&format!(
             "{{\"probe\":\"a\",\"outcome\":\"parity\",\"acceptance\":{{\"tier\":\"accepted\"}},{CENSUS}}}\n\
-             {{\"probe\":\"b\",\"outcome\":\"compile_fail\",\"error\":\"x\"}}\n\
+             {{\"probe\":\"b\",\"outcome\":\"compile_fail\",\"cause\":\"script\",\"error\":\"x\"}}\n\
              {{\"probe\":\"c\",\"outcome\":\"parity\",\"acceptance\":{{\"tier\":\"accepted\"}}}}"
         ));
         let mut reg = registry_of(pins);
@@ -645,7 +646,7 @@ mod tests {
             written.contains("excursions = { run_up = 4, drawdown = 1 }"),
             "{written}"
         );
-        let broke = report(r#"{"probe":"a","outcome":"runtime_fail","error":"x"}"#);
+        let broke = report(r#"{"probe":"a","outcome":"runtime_fail","cause":"script","error":"x"}"#);
         apply(&pins_path, &mut reg, &broke, &["a".to_owned()]).unwrap();
         let written = std::fs::read_to_string(&pins_path).unwrap();
         assert!(!written.contains("excursions"), "{written}");
@@ -688,7 +689,7 @@ mod tests {
         let mut reg = registry_of(pins);
         reg.pins_text = LOADED.to_owned();
         let rep = report(
-            "{\"probe\":\"a\",\"outcome\":\"compile_fail\",\"error\":\"x\"}\n{\"probe\":\"b\",\"outcome\":\"parity\"}",
+            "{\"probe\":\"a\",\"outcome\":\"compile_fail\",\"cause\":\"script\",\"error\":\"x\"}\n{\"probe\":\"b\",\"outcome\":\"parity\"}",
         );
         let err = apply(
             &pins_path,
@@ -706,7 +707,7 @@ mod tests {
         // A tier posing as an outcome derives a pinnable-looking label and is
         // still refused.
         let rep = report(
-            "{\"probe\":\"a\",\"outcome\":\"accepted\"}\n{\"probe\":\"b\",\"outcome\":\"compile_fail\",\"error\":\"x\"}",
+            "{\"probe\":\"a\",\"outcome\":\"accepted\"}\n{\"probe\":\"b\",\"outcome\":\"compile_fail\",\"cause\":\"script\",\"error\":\"x\"}",
         );
         let err = apply(
             &pins_path,
@@ -722,7 +723,7 @@ mod tests {
         );
         // A record whose own disposition field contradicts it is unstampable too.
         let rep = report(
-            "{\"probe\":\"a\",\"outcome\":\"compile_fail\",\"error\":\"x\",\"disposition\":\"runtime_fail\"}\n{\"probe\":\"b\",\"outcome\":\"compile_fail\",\"error\":\"x\"}",
+            "{\"probe\":\"a\",\"outcome\":\"compile_fail\",\"cause\":\"script\",\"error\":\"x\",\"disposition\":\"runtime_fail\"}\n{\"probe\":\"b\",\"outcome\":\"compile_fail\",\"cause\":\"script\",\"error\":\"x\"}",
         );
         let err = apply(
             &pins_path,
@@ -739,7 +740,7 @@ mod tests {
         assert_eq!(reg.pins["a"].expected, None);
         // A retired outcome on a new line is unstampable as well.
         let rep = report(
-            "{\"probe\":\"a\",\"outcome\":\"no_tv_data\"}\n{\"probe\":\"b\",\"outcome\":\"compile_fail\",\"error\":\"x\"}",
+            "{\"probe\":\"a\",\"outcome\":\"no_tv_data\"}\n{\"probe\":\"b\",\"outcome\":\"compile_fail\",\"cause\":\"script\",\"error\":\"x\"}",
         );
         let err = apply(
             &pins_path,
@@ -770,7 +771,7 @@ mod tests {
         let rep = report(
             "{\"probe\":\"a\",\"outcome\":\"unevaluated\",\"disposition\":\"unevaluated\",\
              \"reason\":\"no_overlap\",\"error\":\"disjoint\"}\n\
-             {\"probe\":\"b\",\"outcome\":\"compile_fail\",\"error\":\"x\"}",
+             {\"probe\":\"b\",\"outcome\":\"compile_fail\",\"cause\":\"script\",\"error\":\"x\"}",
         );
         assert!(rep.invalid.is_empty(), "{:?}", rep.invalid);
         let err = apply(

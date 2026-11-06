@@ -22,10 +22,10 @@ use rusqlite::params;
 use super::CorpusDb;
 use crate::db::store::as_i64;
 use crate::error::DevError;
-use crate::piners::gate::GateVerdict;
+use crate::piners::gate::{GateDiff, GateVerdict};
 use crate::piners::integrity::Reconciliation;
 use crate::piners::ratchet::{Assessment, RatchetKind};
-use crate::piners::registry::{Death, Expectation, Verdict};
+use crate::piners::registry::{Cause, Death, Expectation, Verdict};
 use crate::piners::report::{HarnessReport, ProbeLine, TradeDiffLine};
 use crate::piners::run_model::RunVerdict;
 
@@ -368,24 +368,37 @@ fn record_inner(
     // its disposition row.
     for d in &gate.dispositions {
         if d.actual.is_none() {
-            let attribution = expected.get(&d.probe).and_then(|e| e.attribution.clone());
-            conn.execute(
-                "INSERT OR IGNORE INTO gate_miss \
-                 (run_id, probe, expected, actual, expected_death, expected_attribution) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    run_id,
-                    d.probe,
-                    d.expected.map(|v| v.label().as_str()),
-                    d.actual,
-                    d.expected.and_then(Verdict::death).map(Death::json),
-                    attribution,
-                ],
-            )?;
+            let attribution = expected.get(&d.probe).and_then(|e| e.attribution.as_deref());
+            insert_gate_miss(conn, run_id, d, attribution)?;
         }
     }
 
     Ok(run_id)
+}
+
+/// Store one selected probe that emitted no line, with its pinned contract.
+fn insert_gate_miss(
+    conn: &rusqlite::Connection,
+    run_id: i64,
+    d: &GateDiff,
+    attribution: Option<&str>,
+) -> Result<(), DevError> {
+    conn.execute(
+        "INSERT OR IGNORE INTO gate_miss \
+         (run_id, probe, expected, actual, expected_death, expected_attribution, \
+          expected_cause) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            run_id,
+            d.probe,
+            d.expected.map(|v| v.label().as_str()),
+            d.actual,
+            d.expected.and_then(Verdict::death).map(Death::json),
+            attribution,
+            d.expected.and_then(Verdict::cause).map(Cause::as_str),
+        ],
+    )?;
+    Ok(())
 }
 
 /// brokkr's own verdicts on one stored row.
@@ -427,6 +440,7 @@ fn insert_disposition(
         "defect",
         "expected_death",
         "expected_attribution",
+        "expected_cause",
     ];
     let pinned = expected.get(&p.probe);
     let mut values: Vec<rusqlite::types::Value> = vec![
@@ -444,6 +458,10 @@ fn insert_disposition(
         annotation.defect.clone().into(),
         pinned.and_then(Expectation::death_json).into(),
         pinned.and_then(|e| e.attribution.clone()).into(),
+        pinned
+            .and_then(Expectation::cause_label)
+            .map(str::to_owned)
+            .into(),
     ];
     // Each ratchet's pin and verdict, in its own column pair.
     for (kind, assessment) in RatchetKind::ALL.into_iter().zip(annotation.ratchets) {
@@ -494,7 +512,8 @@ mod tests {
         Reconciliation::reconcile(&ids, report, Vec::new())
     }
 
-    /// Non-abort expectations by label.
+    /// Non-abort expectations by label, a failure on the `script` cause the
+    /// fixture lines carry.
     fn expected_map(pairs: &[(&str, Option<&str>)]) -> BTreeMap<String, Expectation> {
         pairs
             .iter()
@@ -502,7 +521,12 @@ mod tests {
                 let verdict = e.map(|label| {
                     let d = crate::piners::registry::PinnedDisposition::from_label(label)
                         .expect("test label");
-                    Verdict::new(d, None).expect("a non-abort test label")
+                    let cause = matches!(
+                        label,
+                        "compile_fail" | "runtime_fail"
+                    )
+                    .then_some(Cause::Script);
+                    Verdict::new(d, None, cause).expect("a non-abort test label")
                 });
                 (
                     (*p).to_owned(),
@@ -589,6 +613,69 @@ mod tests {
                 Some("supervisor refusal".to_owned()),
             )
         );
+    }
+
+    /// A pinned failure's cause reaches both tables beside the bare label,
+    /// and the line's own cause reads through the projection.
+    #[test]
+    fn a_failure_expectation_keeps_its_cause_on_both_tables() {
+        let fail = Expectation {
+            verdict: Some(Verdict::RuntimeFail(Cause::Script)),
+            attribution: None,
+        };
+        let expected: BTreeMap<String, Expectation> = [
+            ("ran".to_owned(), fail.clone()),
+            ("gone".to_owned(), fail),
+        ]
+        .into_iter()
+        .collect();
+        let report = parse(
+            br#"{"probe":"ran","outcome":"runtime_fail","cause":"panic","error":"e"}"#,
+        );
+        let gate = GateVerdict::from(vec![
+            GateDiff {
+                probe: "ran".to_owned(),
+                expected: Some(Verdict::RuntimeFail(Cause::Script)),
+                actual: Some("runtime_fail (panic)".to_owned()),
+            },
+            GateDiff {
+                probe: "gone".to_owned(),
+                expected: Some(Verdict::RuntimeFail(Cause::Script)),
+                actual: None,
+            },
+        ]);
+        let db = CorpusDb::open_in_memory().unwrap();
+        let run = RunRecord {
+            run_id: None,
+            started_at: None,
+            commit_sha: None,
+            dirty: None,
+            selector: "{}",
+            context: None,
+            gated: true,
+            verdict: &RunVerdict::Fail("2 gate deviation(s)".to_owned()),
+            harness_exit_code: Some(1),
+            stderr: "",
+            wall_ms: None,
+            protocol_violations: Some(0),
+            run_error: None,
+        };
+        let run_id = db
+            .record_run(&run, &report, &reconciled(&expected, &report), &expected, &gate)
+            .unwrap();
+        let row = db.disposition_for_probe(run_id, "ran").unwrap().unwrap();
+        assert_eq!(row.expected.as_deref(), Some("runtime_fail"));
+        assert_eq!(row.expected_cause.as_deref(), Some("script"));
+        assert_eq!(row.cause.as_deref(), Some("panic"));
+        let miss: Option<String> = db
+            .conn()
+            .query_row(
+                "SELECT expected_cause FROM gate_miss WHERE probe = 'gone'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(miss.as_deref(), Some("script"));
     }
 
     #[test]
@@ -813,8 +900,8 @@ mod tests {
         let mut report = parse(
             br#"{"probe":"bad","outcome":"parity","matched":218,"dense_na_sites":[{"name":"ta.ema","call_site":"s:1","na_count":3}]}
 {"probe":"extra","outcome":"accepted","matched":4}
-{"probe":"tainted","outcome":"compile_fail","error":"x","disposition":"accepted"}
-{"probe":"tainted","outcome":"compile_fail","error":"x"}
+{"probe":"tainted","outcome":"compile_fail","cause":"script","error":"x","disposition":"accepted"}
+{"probe":"tainted","outcome":"compile_fail","cause":"script","error":"x"}
 {"probe":"ok","outcome":"parity","acceptance":{"tier":"accepted"}}
 "#,
         );

@@ -40,8 +40,9 @@
 //! projections, the `trade_diff` excursion and held-quantity projections,
 //! and the `scalar_pair` view; version 20 adds `expected_death` and
 //! `expected_attribution` to `disposition` and `gate_miss`, a pinned abort's
-//! death and attribution, and the `disposition.death` projection. On a
-//! fresh database,
+//! death and attribution, and the `disposition.death` projection; version
+//! 21 adds `expected_cause` to both, a pinned failure's cause, and the
+//! `disposition.cause` projection. On a fresh database,
 //! the schema DDL in `schema.rs` creates the current tables (columns included)
 //! inside the shared migration transaction. Schema inspection uses the shared
 //! `db::store` helpers, which preserve errors and recognize generated columns.
@@ -59,7 +60,7 @@ use crate::error::DevError;
 use crate::piners::ratchet::RatchetKind;
 
 /// Current schema version. Increment when adding a migration below.
-pub(super) const SCHEMA_VERSION: i64 = 20;
+pub(super) const SCHEMA_VERSION: i64 = 21;
 
 /// Run pending migrations through the shared store policy. The v5 rebuild
 /// preserves historical orphan dispositions, so foreign-key enforcement is
@@ -255,6 +256,29 @@ fn migrate_from(conn: &rusqlite::Connection, current: i64) -> Result<(), DevErro
     add_performance_columns(conn, current)?;
     add_v19_columns(conn, current)?;
     add_death_columns(conn, current)?;
+    add_cause_columns(conn, current)?;
+    Ok(())
+}
+
+/// v20 -> v21: a pinned failure's cause beside the bare `expected` label,
+/// on `disposition` and `gate_miss`, and the `cause` projection of the line
+/// itself. Nullable, no default: no older pin held a cause, and an older
+/// line sent none, so its projection reads unknown.
+fn add_cause_columns(conn: &rusqlite::Connection, current: i64) -> Result<(), DevError> {
+    if current >= 21 {
+        return Ok(());
+    }
+    for table in ["disposition", "gate_miss"] {
+        if has_table(conn, table)? && !has_column(conn, table, "expected_cause")? {
+            conn.execute(
+                &format!("ALTER TABLE {table} ADD COLUMN expected_cause TEXT"),
+                [],
+            )?;
+        }
+    }
+    if has_table(conn, "disposition")? {
+        add_projections(conn, 21, &["cause"])?;
+    }
     Ok(())
 }
 
@@ -1045,6 +1069,55 @@ mod tests {
             )
             .unwrap();
         assert_eq!(miss, (None, None));
+    }
+
+    /// A v20 store gains a pinned failure's cause on both tables, NULL on
+    /// every older row, and the `cause` projection, which reads a stored
+    /// line that sent one and NULL on one that did not.
+    #[test]
+    fn v21_adds_the_failure_cause_columns_and_reads_stored_causes() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(super::super::schema::SCHEMA).unwrap();
+        conn.execute_batch(&disposition_ddl("disposition")).unwrap();
+        conn.execute_batch(&trade_diff_ddl("trade_diff")).unwrap();
+        for col in ["cause", "expected_cause"] {
+            conn.execute(&format!("ALTER TABLE disposition DROP COLUMN {col}"), [])
+                .unwrap();
+        }
+        conn.execute("ALTER TABLE gate_miss DROP COLUMN expected_cause", [])
+            .unwrap();
+        conn.execute_batch(
+            "INSERT INTO run (run_id, started_at, selector, gated, result, probe_count) \
+                 VALUES (1, 'then', '{}', 1, 'fail', 3);
+             INSERT INTO disposition (run_id, probe, disposition, expected, gate_ok, raw_source, \
+                 raw_json) VALUES \
+                 (1, 'new', 'runtime_fail', 'runtime_fail', 1, 'harness', \
+                  '{\"outcome\":\"runtime_fail\",\"cause\":\"panic\"}'), \
+                 (1, 'old', 'runtime_fail', NULL, 0, 'harness', '{\"outcome\":\"runtime_fail\"}');
+             INSERT INTO gate_miss (run_id, probe, expected, actual) VALUES (1, 'gone', 'accepted', NULL);",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 20).unwrap();
+
+        run_migrations(&conn).unwrap();
+        let rows: Vec<(String, Option<String>, Option<String>)> = conn
+            .prepare("SELECT probe, cause, expected_cause FROM disposition ORDER BY probe")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("new".to_owned(), Some("panic".to_owned()), None),
+                ("old".to_owned(), None, None),
+            ]
+        );
+        let miss: Option<String> = conn
+            .query_row("SELECT expected_cause FROM gate_miss", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(miss, None);
     }
 
     /// A v16 store gains `scored`/`defect`: every row of a run that counted

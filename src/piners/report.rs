@@ -39,7 +39,7 @@ use serde::Deserialize;
 use crate::output;
 use crate::piners::line_value;
 use crate::piners::ratchet::{self, Census, RatchetKind};
-use crate::piners::registry::{Death, PinnedDisposition, UNEVALUATED, Verdict};
+use crate::piners::registry::{Cause, Death, PinnedDisposition, UNEVALUATED, Verdict};
 
 /// Acceptance detail, present only when `outcome == "parity"`. Models what
 /// brokkr reads for the gate and the console; the p90 magnitudes and anything
@@ -245,7 +245,8 @@ pub enum ProbeOutcome {
 }
 
 impl ProbeOutcome {
-    /// The label with an abort's death, as a gate diff shows it.
+    /// The label with an abort's death or a failure's cause, as a gate diff
+    /// shows it.
     pub fn shown(&self) -> String {
         match self {
             Self::Evaluated(v) => v.to_string(),
@@ -419,6 +420,37 @@ fn death_of(d: PinnedDisposition, value: &serde_json::Value) -> Result<Option<De
             d.as_str()
         )),
         (_, None) => Ok(None),
+    }
+}
+
+/// The `cause` an evaluated line of label `d` carries, given its whole
+/// value: a `compile_fail` or `runtime_fail` line needs one closed
+/// [`Cause`] that fits it (never `panic` on `compile_fail`), and any other
+/// line may not carry the key, a null included. A causeless failure, from a
+/// piners predating the field, is therefore an invalid record.
+fn cause_of(d: PinnedDisposition, value: &serde_json::Value) -> Result<Option<Cause>, String> {
+    let failure = matches!(
+        d,
+        PinnedDisposition::CompileFail | PinnedDisposition::RuntimeFail
+    );
+    match (failure, value.get("cause")) {
+        (true, Some(v)) => {
+            let cause = Cause::from_json(v)?;
+            if cause.fits(d) {
+                Ok(Some(cause))
+            } else {
+                Err(format!(
+                    "a {} line carries cause `{cause}`, which only a runtime_fail line has",
+                    d.as_str()
+                ))
+            }
+        }
+        (true, None) => Err(format!("a {} line carries no cause", d.as_str())),
+        (false, Some(v)) => Err(format!(
+            "a {} line carries a cause {v}, which only a compile_fail or runtime_fail line has",
+            d.as_str()
+        )),
+        (false, None) => Ok(None),
     }
 }
 
@@ -599,9 +631,10 @@ impl ProbeLine {
         match label {
             LineLabel::Evaluated(d) => {
                 let death = death_of(d, value)?;
-                Verdict::new(d, death)
+                let cause = cause_of(d, value)?;
+                Verdict::new(d, death, cause)
                     .map(ProbeOutcome::Evaluated)
-                    .ok_or_else(|| "internal: a death that does not fit its label".to_owned())
+                    .ok_or_else(|| "internal: a payload that does not fit its label".to_owned())
             }
             LineLabel::Unevaluated => refusal_of(value).map(ProbeOutcome::Unevaluated),
         }
@@ -1471,9 +1504,14 @@ fn format_probe(p: &ProbeLine) -> String {
         );
     }
     if let Some(err) = &p.error {
-        // A valid abort shows its death; anything else its raw outcome.
+        // A valid abort shows its death and a valid failure its cause;
+        // anything else its raw outcome.
         let shown = match p.outcome() {
-            Some(o @ ProbeOutcome::Evaluated(Verdict::HarnessAbort(_))) => o.shown(),
+            Some(
+                o @ ProbeOutcome::Evaluated(
+                    Verdict::HarnessAbort(_) | Verdict::CompileFail(_) | Verdict::RuntimeFail(_),
+                ),
+            ) => o.shown(),
             _ => p.outcome.clone(),
         };
         return format!("{}: {shown} - {err}", p.probe);
@@ -1549,7 +1587,7 @@ mod tests {
     fn parses_enriched_probe_lines_and_skips_legacy_summary() {
         let nd = br#"{"probe":"p1","outcome":"parity","matched":42,"ours_only":0,"tv_only":0,"count_tier":"exact","acceptance":{"tier":"byte_exact","profile":"production","failing":[]}}
 {"probe":"p2","outcome":"parity","matched":218,"count_tier":"drift","acceptance":{"tier":"actionable_drift","profile":"production","failing":["exit_price"]},"signature":{"domain":"broker-fidelity","leg":"exit","dimension":"exit_price","dimension_breaches":3},"dense_na_sites":[{"name":"strategy.exit","call_site":"s.pine:12","na_count":7}]}
-{"probe":"p3","outcome":"compile_fail","error":"unexpected token"}
+{"probe":"p3","outcome":"compile_fail","cause":"script","error":"unexpected token"}
 {"summary":true,"total":3,"parity":2}
 "#;
         let r = parse(nd);
@@ -1566,7 +1604,7 @@ mod tests {
     fn disposition_maps_parity_to_tier_and_else_to_outcome() {
         let r = parse(
             br#"{"probe":"p1","outcome":"parity","acceptance":{"tier":"accepted"}}
-{"probe":"p2","outcome":"compile_fail","error":"x"}
+{"probe":"p2","outcome":"compile_fail","cause":"script","error":"x"}
 {"probe":"p3","outcome":"parity"}
 "#,
         );
@@ -1581,7 +1619,7 @@ mod tests {
             br#"{"probe":"a","outcome":"parity","count_tier":"exact","acceptance":{"tier":"byte_exact"}}
 {"probe":"b","outcome":"parity","count_tier":"drift","acceptance":{"tier":"actionable_drift"}}
 {"probe":"c","outcome":"parity","count_tier":"near","acceptance":{"tier":"count_divergent"}}
-{"probe":"d","outcome":"compile_fail","error":"x"}
+{"probe":"d","outcome":"compile_fail","cause":"script","error":"x"}
 {"probe":"e","outcome":"unevaluated","reason":"no_overlap","error":"disjoint"}
 {"probe":"f","outcome":"no_tv_data"}
 "#,
@@ -1638,7 +1676,7 @@ mod tests {
             assert_eq!(r.probes[0].refusal(), None, "{bad}");
         }
         // A `reason` on any other line is ignored, whatever its type.
-        let other = parse(br#"{"probe":"p","outcome":"compile_fail","error":"x","reason":3}"#);
+        let other = parse(br#"{"probe":"p","outcome":"compile_fail","cause":"script","error":"x","reason":3}"#);
         assert!(other.invalid.is_empty());
         assert_eq!(other.probes[0].refusal(), None);
     }
@@ -1977,7 +2015,7 @@ mod tests {
         let mut r = parse(
             br#"{"probe":"a","outcome":"parity","acceptance":{"tier":"accepted"}}
 {"probe":"b","outcome":"parity","acceptance":{"tier":"accepted"}}
-{"probe":"a","outcome":"compile_fail","error":"x"}
+{"probe":"a","outcome":"compile_fail","cause":"script","error":"x"}
 {"kind":"trade_diff","probe":"b","our_index":1,"tv_index":1,"our_entry_ts":1,"our_exit_ts":2,"our_entry_price":1.0,"our_exit_price":2.0,"our_qty":1.0,"our_pnl":1.0}
 {"kind":"trade_diff","probe":"b","our_index":1,"tv_index":1,"our_entry_ts":1,"our_exit_ts":2,"our_entry_price":1.0,"our_exit_price":2.0,"our_qty":1.0,"our_pnl":9.0}
 "#,
@@ -2112,8 +2150,8 @@ mod tests {
     #[test]
     fn only_a_real_legacy_summary_is_skipped() {
         let r = parse(
-            b"{\"kind\":\"disposition\",\"probe\":\"a\",\"outcome\":\"compile_fail\",\"error\":\"x\",\"disposition\":\"accepted\",\"summary\":true}\n\
-{\"probe\":\"b\",\"outcome\":\"compile_fail\",\"error\":\"x\",\"summary\":true}\n\
+            b"{\"kind\":\"disposition\",\"probe\":\"a\",\"outcome\":\"compile_fail\",\"cause\":\"script\",\"error\":\"x\",\"disposition\":\"accepted\",\"summary\":true}\n\
+{\"probe\":\"b\",\"outcome\":\"compile_fail\",\"cause\":\"script\",\"error\":\"x\",\"summary\":true}\n\
 {\"summary\":true,\"total\":2}\n\
 {\"kind\":\"disposition\",\"summary\":true}\n",
         );
@@ -2187,7 +2225,7 @@ mod tests {
         let r = line("\"outcome\":\"harness_abort\"");
         assert!(r.probes[0].record_defect().unwrap().contains("carries no death"));
         for death in ["null", r#"{"kind":"reply_failure"}"#] {
-            let r = line(&format!("\"outcome\":\"runtime_fail\",\"death\":{death}"));
+            let r = line(&format!("\"outcome\":\"runtime_fail\",\"cause\":\"script\",\"death\":{death}"));
             assert!(
                 r.probes[0]
                     .record_defect()
@@ -2204,14 +2242,72 @@ mod tests {
     }
 
     #[test]
+    fn a_failure_line_needs_a_closed_cause_and_no_other_line_carries_one() {
+        let line = |fields: &str| {
+            parse(format!("{{\"probe\":\"a\",\"error\":\"e\",{fields}}}").as_bytes())
+        };
+        for (outcome, cause, want) in [
+            ("compile_fail", "script", Verdict::CompileFail(Cause::Script)),
+            ("compile_fail", "capability", Verdict::CompileFail(Cause::Capability)),
+            ("runtime_fail", "budget", Verdict::RuntimeFail(Cause::Budget)),
+            (
+                "runtime_fail",
+                "interpreter_fault",
+                Verdict::RuntimeFail(Cause::InterpreterFault),
+            ),
+            ("runtime_fail", "panic", Verdict::RuntimeFail(Cause::Panic)),
+        ] {
+            let r = line(&format!("\"outcome\":\"{outcome}\",\"cause\":\"{cause}\""));
+            assert_eq!(
+                r.probes[0].outcome(),
+                Some(&ProbeOutcome::Evaluated(want)),
+                "{outcome} {cause}"
+            );
+            assert!(format_probe(&r.probes[0]).contains(&format!("{outcome} ({cause})")));
+        }
+        for (fields, says) in [
+            ("\"outcome\":\"compile_fail\"", "a compile_fail line carries no cause"),
+            ("\"outcome\":\"runtime_fail\"", "a runtime_fail line carries no cause"),
+            (
+                "\"outcome\":\"compile_fail\",\"cause\":\"panic\"",
+                "which only a runtime_fail line has",
+            ),
+            ("\"outcome\":\"runtime_fail\",\"cause\":\"oom\"", "is not one of"),
+            ("\"outcome\":\"runtime_fail\",\"cause\":null", "its cause null"),
+            ("\"outcome\":\"runtime_fail\",\"cause\":3", "its cause 3"),
+            (
+                "\"outcome\":\"harness_abort\",\"death\":{\"kind\":\"reply_failure\"},\"cause\":\"script\"",
+                "which only a compile_fail or runtime_fail line has",
+            ),
+            (
+                "\"outcome\":\"parity\",\"acceptance\":{\"tier\":\"accepted\"},\"cause\":null",
+                "which only a compile_fail or runtime_fail line has",
+            ),
+        ] {
+            let r = line(fields);
+            assert_eq!(r.probes[0].outcome(), None, "{fields}");
+            assert!(
+                r.probes[0].record_defect().unwrap().contains(says),
+                "{fields}: {:?}",
+                r.probes[0].record_defect()
+            );
+        }
+        // An unevaluated line's closed shape already refuses one.
+        let r = parse(
+            br#"{"probe":"a","outcome":"unevaluated","reason":"no_overlap","error":"e","cause":"script"}"#,
+        );
+        assert_eq!(r.probes[0].outcome(), None);
+    }
+
+    #[test]
     fn a_missing_disposition_field_is_told_apart_from_a_null_one() {
         let r = parse(
-            b"{\"probe\":\"a\",\"outcome\":\"compile_fail\",\"error\":\"x\"}\n{\"probe\":\"b\",\"outcome\":\"compile_fail\",\"error\":\"x\",\"disposition\":null}\n",
+            b"{\"probe\":\"a\",\"outcome\":\"compile_fail\",\"cause\":\"script\",\"error\":\"x\"}\n{\"probe\":\"b\",\"outcome\":\"compile_fail\",\"cause\":\"script\",\"error\":\"x\",\"disposition\":null}\n",
         );
         assert_eq!(r.probes[0].declared, None);
         assert_eq!(
             r.probes[0].outcome(),
-            Some(&ProbeOutcome::Evaluated(Verdict::CompileFail))
+            Some(&ProbeOutcome::Evaluated(Verdict::CompileFail(Cause::Script)))
         );
         assert_eq!(r.probes[1].declared, Some(serde_json::Value::Null));
         assert_eq!(r.probes[1].outcome(), None);
@@ -2311,7 +2407,7 @@ mod tests {
     fn a_non_string_kind_is_invalid_on_every_disposition_line() {
         for rest in [
             r#""outcome":"parity","acceptance":{"tier":"accepted"}"#,
-            r#""outcome":"compile_fail","error":"x""#,
+            r#""outcome":"compile_fail","cause":"script","error":"x""#,
             r#""outcome":"harness_abort","error":"x""#,
         ] {
             for kind in ["null", "3", "{}", "[\"disposition\"]", "true"] {
@@ -2334,7 +2430,7 @@ mod tests {
         assert!(r.contract.is_empty());
         assert_eq!(r.invalid.len(), 2, "{:?}", r.invalid);
         // A string kind is still routed by its value.
-        let r = parse(b"{\"kind\":\"future\",\"probe\":\"p\"}\n{\"kind\":\"disposition\",\"probe\":\"p\",\"outcome\":\"compile_fail\",\"error\":\"x\"}\n");
+        let r = parse(b"{\"kind\":\"future\",\"probe\":\"p\"}\n{\"kind\":\"disposition\",\"probe\":\"p\",\"outcome\":\"compile_fail\",\"cause\":\"script\",\"error\":\"x\"}\n");
         assert!(r.invalid.is_empty(), "{:?}", r.invalid);
         assert_eq!(r.probes.len(), 1);
     }
@@ -2342,10 +2438,10 @@ mod tests {
     #[test]
     fn a_repeated_key_is_routed_by_the_lines_kind() {
         let r = parse(
-            br#"{"probe":"a","outcome":"parity","acceptance":{"tier":"accepted"},"outcome":"compile_fail"}
-{"probe":"b","outcome":"compile_fail","error":"x","dense_na_sites":[{"name":"f","name":"g"}]}
-{"probe":"c","probe":"d","outcome":"compile_fail","error":"x"}
-{"kind":"trade_diff","kind":"disposition","probe":"e","outcome":"compile_fail"}
+            br#"{"probe":"a","outcome":"parity","acceptance":{"tier":"accepted"},"outcome":"compile_fail","cause":"script"}
+{"probe":"b","outcome":"compile_fail","cause":"script","error":"x","dense_na_sites":[{"name":"f","name":"g"}]}
+{"probe":"c","probe":"d","outcome":"compile_fail","cause":"script","error":"x"}
+{"kind":"trade_diff","kind":"disposition","probe":"e","outcome":"compile_fail","cause":"script"}
 {"kind":"trade_diff","probe":"f","our_index":1,"tv_index":1,"our_index":2}
 {"kind":"future","probe":"g","x":1,"x":2}
 {"summary":true,"summary":true}

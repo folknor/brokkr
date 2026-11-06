@@ -117,8 +117,14 @@ Emits **one NDJSON object per probe, no summary line** (brokkr aggregates):
   to 255) or `{"kind":"reply_failure"}`, no other key. An abort without a
   valid `death`, and a `death` on any other line, a null included, is an
   invalid record. An engine panic is not an abort: piners reports it as
-  `runtime_fail`. A break (exit 1), never retried; a pin holds it with its
+  `runtime_fail` with cause `panic`. A break (exit 1), never retried; a pin holds it with its
   death and a human attribution (the gate in `docs/commands/corpus.md`).
+  `compile_fail` and `runtime_fail` carry a closed string `cause`: `script`,
+  `capability`, `budget` or `interpreter_fault` for a typed stop, and on
+  `runtime_fail` alone `panic`, for an engine panic caught at the probe
+  process's outer boundary. A failure without a valid `cause`, `panic` on a
+  `compile_fail`, and a `cause` on any other line, a null included, is an
+  invalid record. A pin holds a failure with its cause.
   brokkr derives the gate label itself (the tier for
   `parity`, else the outcome) and accepts an outcome/tier pair only as a
   whole (`report::valid_label`). The line's own `disposition` field is
@@ -329,7 +335,9 @@ The store has per-db `PRAGMA user_version` migrations and WAL, mirroring
   attribution, beside the bare `expected` label, so `expected =
   'harness_abort'` matches every abort pin; `NULL` on every other pin and
   every older row; `gate_miss` carries the same pair, so an abort probe
-  that emitted no line keeps them too). A deviation is stored as
+  that emitted no line keeps them too), `expected_cause` (v21: a pinned
+  `compile_fail` or `runtime_fail`'s cause, `NULL` on every other pin and
+  every older row, on `gate_miss` too). A deviation is stored as
   `{leg, pinned, actual, compared}` plus `ambiguous` and `tolerance` where
   the census carries them, or `{leg, missing, pinned}`; a label row stored
   before v19 holds the older whole-census `{missing, pinned: {entry, exit}}`,
@@ -369,7 +377,9 @@ The store has per-db `PRAGMA user_version` migrations and WAL, mirroring
   that carried none - so a row from before piners sent one reads unknown,
   never some death; run detail and `--compare` show it beside the
   disposition, as `harness_abort (signal 9)`, and `--compare` counts a
-  death that moves as a move), and
+  death that moves as a move), `cause` (v21: the line's `cause` string,
+  `NULL` on a line that carried none, shown and compared the same way, as
+  `runtime_fail (panic)`), and
   the ratchet censuses, one rule for every kind -
   `<prefix>_<leg>_<field>` over `$.<key>.<leg>.<field>`, `NULL` where the
   line carried no such leg: `perf_{equity,scalars}_{compared,mismatched,tolerance}`

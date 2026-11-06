@@ -38,14 +38,16 @@ pub struct GateDiff {
     pub probe: String,
     /// Pinned expectation; `None` = never blessed.
     pub expected: Option<Verdict>,
-    /// Actual disposition this run, an abort with its death; `None` =
+    /// Actual disposition this run, an abort with its death and a failure
+    /// with its cause; `None` =
     /// harness emitted no line.
     pub actual: Option<String>,
 }
 
 /// Whether `outcome` satisfies the pin `expected`: the one comparison the
 /// gate and the exit-one acceptance share, plain [`Verdict`] equality, so a
-/// pinned abort holds only its own death on both paths.
+/// pinned abort holds only its own death, and a pinned failure only its own
+/// cause, on both paths.
 fn holds(expected: Option<Verdict>, outcome: Option<Verdict>) -> bool {
     matches!((expected, outcome), (Some(e), Some(g)) if e == g)
 }
@@ -311,6 +313,13 @@ mod tests {
         p.expected = expected.map(|label| {
             PinnedDisposition::from_label(label).expect("test disposition is recognized")
         });
+        // A failure pin holds the cause the fixture lines carry.
+        if matches!(
+            p.expected,
+            Some(PinnedDisposition::CompileFail | PinnedDisposition::RuntimeFail)
+        ) {
+            p.cause = Some(crate::piners::registry::Cause::Script);
+        }
         p
     }
 
@@ -360,7 +369,7 @@ mod tests {
     fn a_pinned_break_explains_exit_one() {
         let reg = registry(&[("a", Some("compile_fail")), ("b", Some("accepted"))]);
         let rep = report(
-            "{\"probe\":\"a\",\"outcome\":\"compile_fail\",\"error\":\"x\"}\n{\"probe\":\"b\",\"outcome\":\"parity\",\"acceptance\":{\"tier\":\"accepted\"}}",
+            "{\"probe\":\"a\",\"outcome\":\"compile_fail\",\"cause\":\"script\",\"error\":\"x\"}\n{\"probe\":\"b\",\"outcome\":\"parity\",\"acceptance\":{\"tier\":\"accepted\"}}",
         );
         let ids = ["a".to_owned(), "b".to_owned()];
         assert!(evaluate(&ids, &reg, &rep).is_empty());
@@ -372,10 +381,10 @@ mod tests {
     fn an_unpinned_or_unselected_break_does_not_explain_exit_one() {
         // `a` expects a runtime_fail but compile-failed: mispinned.
         let reg = registry(&[("a", Some("runtime_fail")), ("c", Some("compile_fail"))]);
-        let rep = report(r#"{"probe":"a","outcome":"compile_fail","error":"x"}"#);
+        let rep = report(r#"{"probe":"a","outcome":"compile_fail","cause":"script","error":"x"}"#);
         assert!(!breaks_all_pinned(&["a".to_owned()], &reg, &rep));
         // `c` is pinned to its break but was not selected.
-        let rep = report(r#"{"probe":"c","outcome":"compile_fail","error":"x"}"#);
+        let rep = report(r#"{"probe":"c","outcome":"compile_fail","cause":"script","error":"x"}"#);
         assert!(!breaks_all_pinned(&["a".to_owned()], &reg, &rep));
         // No break line at all: exit 1 is unexplained.
         let rep = report(r#"{"probe":"a","outcome":"parity","acceptance":{"tier":"accepted"}}"#);
@@ -401,7 +410,7 @@ mod tests {
     #[test]
     fn a_contradictory_disposition_field_never_satisfies_a_pin_or_explains_a_break() {
         // Pinned to the field's claim, and to the derived label: neither passes.
-        let rep = report(r#"{"probe":"a","outcome":"compile_fail","disposition":"accepted"}"#);
+        let rep = report(r#"{"probe":"a","outcome":"compile_fail","cause":"script","disposition":"accepted"}"#);
         let ids = ["a".to_owned()];
         for pin in ["accepted", "compile_fail"] {
             let reg = registry(&[("a", Some(pin))]);
@@ -414,7 +423,7 @@ mod tests {
     #[test]
     fn a_contradictory_then_clean_repeat_never_satisfies_its_pin() {
         let mut rep = report(
-            "{\"probe\":\"a\",\"outcome\":\"compile_fail\",\"disposition\":\"accepted\"}\n{\"probe\":\"a\",\"outcome\":\"compile_fail\"}",
+            "{\"probe\":\"a\",\"outcome\":\"compile_fail\",\"cause\":\"script\",\"disposition\":\"accepted\"}\n{\"probe\":\"a\",\"outcome\":\"compile_fail\",\"cause\":\"script\"}",
         );
         rep.take_duplicates();
         let ids = ["a".to_owned()];
@@ -451,7 +460,7 @@ mod tests {
         let expected: BTreeMap<String, crate::piners::registry::Expectation> = [(
             "a".to_owned(),
             crate::piners::registry::Expectation {
-                verdict: Some(Verdict::CompileFail),
+                verdict: Some(Verdict::CompileFail(crate::piners::registry::Cause::Script)),
                 attribution: None,
             },
         )]
@@ -507,6 +516,31 @@ mod tests {
         let unpinned = registry(&[("a", Some("accepted"))]);
         assert_eq!(evaluate(&ids, &unpinned, &rep).len(), 1);
         assert!(!breaks_all_pinned(&ids, &unpinned, &rep));
+    }
+
+    #[test]
+    fn a_pinned_failure_holds_its_cause_on_both_paths() {
+        let reg = registry(&[("a", Some("runtime_fail"))]);
+        let fail = |cause: &str| {
+            report(&format!(
+                r#"{{"probe":"a","outcome":"runtime_fail","cause":"{cause}","error":"e"}}"#
+            ))
+        };
+        let ids = ["a".to_owned()];
+        let rep = fail("script");
+        assert!(evaluate(&ids, &reg, &rep).is_empty());
+        assert!(breaks_all_pinned(&ids, &reg, &rep));
+        // A typed stop that turns into a panic deviates and leaves exit 1
+        // unexplained.
+        let panic = fail("panic");
+        let diffs = evaluate(&ids, &reg, &panic);
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].actual.as_deref(), Some("runtime_fail (panic)"));
+        assert_eq!(
+            diffs[0].expected.map(|v| v.to_string()).as_deref(),
+            Some("runtime_fail (script)")
+        );
+        assert!(!breaks_all_pinned(&ids, &reg, &panic));
     }
 
     #[test]
@@ -605,7 +639,7 @@ mod tests {
         );
         let rep = report(
             "{\"probe\":\"a\",\"outcome\":\"parity\",\"acceptance\":{\"tier\":\"accepted\"}}\n\
-             {\"probe\":\"b\",\"outcome\":\"compile_fail\",\"error\":\"x\"}",
+             {\"probe\":\"b\",\"outcome\":\"compile_fail\",\"cause\":\"script\",\"error\":\"x\"}",
         );
         let v = GateVerdict::evaluate(&ids, &reg, &rep);
         assert!(v.is_empty());
@@ -630,7 +664,7 @@ mod tests {
         assert_eq!(labels(&v).coverage, Coverage::default()); // missing, not unpinned
         // A non-parity line under a labels pin whose disposition matches.
         let reg = labelled("a", "compile_fail", Some((0, 0)));
-        let rep = report(r#"{"probe":"a","outcome":"compile_fail","error":"x"}"#);
+        let rep = report(r#"{"probe":"a","outcome":"compile_fail","cause":"script","error":"x"}"#);
         assert_eq!(
             labels(&GateVerdict::evaluate(&ids, &reg, &rep))
                 .deviations

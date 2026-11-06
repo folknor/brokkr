@@ -19,6 +19,8 @@
 //!   move. So is an abort's `death` (v20): a `SIGSEGV` turning into an OOM
 //!   `SIGKILL` keeps outcome and disposition both `harness_abort`, and a row
 //!   from before piners sent one reads unknown rather than as some death.
+//!   A failure's `cause` (v21) likewise: a typed stop turning into a panic
+//!   keeps the label `runtime_fail`.
 //! - A line its run did not count (`scored = 0`, v17) is marked `(invalid)`
 //!   when its record was unusable and gets no direction either way; a row
 //!   stored before the mark reads as counted, as it always did.
@@ -54,6 +56,9 @@ pub struct Side {
     /// unknown, distinct from every death, and is never revalidated against
     /// today's record rules.
     pub death: Option<String>,
+    /// The line's `cause` as stored (the `cause` projection, v21), `None`
+    /// where it carried none, read as [`Side::death`] is.
+    pub cause: Option<String>,
     /// Whether the harness line carried all three trade counts as numbers.
     /// The projections read 0 for an absent or non-numeric count, so without
     /// this a missing count would compare as a real zero.
@@ -204,7 +209,8 @@ impl CorpusDb {
             format!("COALESCE(json_type(raw_json, '{path}') IN ('integer', 'real'), 0)")
         };
         let sql = format!(
-            "SELECT probe, outcome, disposition, count_tier, death, matched, ours_only, tv_only, \
+            "SELECT probe, outcome, disposition, count_tier, death, cause, matched, ours_only, \
+                    tv_only, \
                     ({} AND {} AND {}) AS has_counts, scored, defect IS NOT NULL AS has_defect \
              FROM disposition WHERE run_id = ?1",
             numeric("$.matched"),
@@ -232,6 +238,7 @@ impl CorpusDb {
                     disposition: r.get("disposition")?,
                     count_tier: r.get("count_tier")?,
                     death: r.get("death")?,
+                    cause: r.get("cause")?,
                     has_counts: r.get::<_, i64>("has_counts")? != 0,
                     matched: r.get("matched")?,
                     ours_only: r.get("ours_only")?,
@@ -510,7 +517,7 @@ mod tests {
         let b = record(
             &db,
             &["p"],
-            "{\"probe\":\"p\",\"outcome\":\"compile_fail\",\"error\":\"boom\"}\n",
+            "{\"probe\":\"p\",\"outcome\":\"compile_fail\",\"cause\":\"script\",\"error\":\"boom\"}\n",
             &[],
         );
         let c = db.compare_runs(a, b).unwrap();
@@ -531,6 +538,7 @@ mod tests {
             disposition: "harness_abort".into(),
             count_tier: None,
             death: death.map(str::to_owned),
+            cause: None,
             has_counts: false,
             matched: 0,
             ours_only: 0,
@@ -549,6 +557,31 @@ mod tests {
     }
 
     #[test]
+    fn a_failure_whose_cause_moves_is_a_move() {
+        let side = |cause: Option<&str>| Side {
+            selection: Selection::Selected,
+            standing: Standing::Counted,
+            outcome: "runtime_fail".into(),
+            disposition: "runtime_fail".into(),
+            count_tier: None,
+            death: None,
+            cause: cause.map(str::to_owned),
+            has_counts: false,
+            matched: 0,
+            ours_only: 0,
+            tv_only: 0,
+        };
+        let delta = |a, b| ProbeDelta {
+            probe: "p".into(),
+            a: Presence::Ran(side(a)),
+            b: Presence::Ran(side(b)),
+        };
+        assert!(delta(Some("script"), Some("panic")).moved());
+        assert!(delta(None, Some("script")).moved());
+        assert!(!delta(Some("budget"), Some("budget")).moved());
+    }
+
+    #[test]
     fn opposing_unmatched_moves_are_mixed_not_cancelled() {
         let side = |o, t| Side {
             selection: Selection::Selected,
@@ -557,6 +590,7 @@ mod tests {
             disposition: "accepted".into(),
             count_tier: None,
             death: None,
+            cause: None,
             has_counts: true,
             matched: 10,
             ours_only: o,

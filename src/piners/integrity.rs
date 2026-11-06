@@ -689,8 +689,8 @@ mod tests {
             br#"{"probe":"a","outcome":"parity","acceptance":{"tier":"accepted"}}
 {"probe":"b","outcome":"parity"}
 {"probe":"x","outcome":"parity","acceptance":{"tier":"accepted"}}
-{"probe":"c","outcome":"compile_fail","error":"e"}
-{"probe":"c","outcome":"compile_fail","error":"e"}
+{"probe":"c","outcome":"compile_fail","cause":"script","error":"e"}
+{"probe":"c","outcome":"compile_fail","cause":"script","error":"e"}
 {"probe":"d","outcome":false}
 not json at all
 "#,
@@ -727,7 +727,7 @@ not json at all
         let report = parse(
             br#"{"probe":"a","outcome":"accepted"}
 {"probe":"b","outcome":"parity","acceptance":{"tier":"runtime_fail"}}
-{"probe":"c","outcome":"compile_fail","acceptance":{"tier":"accepted"}}
+{"probe":"c","outcome":"compile_fail","cause":"script","acceptance":{"tier":"accepted"}}
 "#,
         );
         let r = Reconciliation::reconcile(&ids(&["a", "b", "c"]), &report, Vec::new());
@@ -739,7 +739,7 @@ not json at all
     #[test]
     fn an_extra_is_never_scored_and_a_clean_report_is_complete() {
         let report = parse(
-            br#"{"probe":"a","outcome":"compile_fail","error":"e"}
+            br#"{"probe":"a","outcome":"compile_fail","cause":"script","error":"e"}
 {"probe":"zz","outcome":"parity","acceptance":{"tier":"accepted"}}
 "#,
         );
@@ -783,7 +783,7 @@ not json at all
 
     fn complete() -> Reconciliation {
         let report = parse(
-            br#"{"probe":"a","outcome":"compile_fail","error":"e"}
+            br#"{"probe":"a","outcome":"compile_fail","cause":"script","error":"e"}
 "#,
         );
         Reconciliation::reconcile(&ids(&["a"]), &report, Vec::new())
@@ -902,11 +902,12 @@ not json at all
             s.push_str(&format!(
                 "{{\"kind\":\"probe_start\",{V1},\"probe\":\"{p}\"}}\n"
             ));
-            // An abort carries the death the supervisor observed.
-            let death = if outcome == "harness_abort" {
-                ",\"death\":{\"kind\":\"signal\",\"number\":11}"
-            } else {
-                ""
+            // An abort carries the death the supervisor observed, a
+            // failure its cause.
+            let death = match outcome {
+                "harness_abort" => ",\"death\":{\"kind\":\"signal\",\"number\":11}",
+                "compile_fail" | "runtime_fail" => ",\"cause\":\"script\"",
+                _ => "",
             };
             s.push_str(&format!(
                 "{{\"probe\":\"{p}\",\"outcome\":\"{outcome}\"{death}}}\n"
@@ -1120,8 +1121,8 @@ not json at all
     #[test]
     fn an_earlier_contradiction_is_not_hidden_by_a_later_clean_repeat() {
         let sel = ids(&["a"]);
-        let nd = "{\"probe\":\"a\",\"outcome\":\"compile_fail\",\"disposition\":\"accepted\"}\n\
-                  {\"probe\":\"a\",\"outcome\":\"compile_fail\",\"disposition\":\"compile_fail\"}\n";
+        let nd = "{\"probe\":\"a\",\"outcome\":\"compile_fail\",\"cause\":\"script\",\"disposition\":\"accepted\"}\n\
+                  {\"probe\":\"a\",\"outcome\":\"compile_fail\",\"cause\":\"script\",\"disposition\":\"compile_fail\"}\n";
         let a = assess(&sel, nd.as_bytes(), HarnessEnd::Code(0), false);
         assert_eq!(a.rec.invalid.len(), 1, "{:?}", a.rec.invalid);
         assert_eq!(a.rec.duplicates.len(), 1);
@@ -1132,11 +1133,11 @@ not json at all
     #[test]
     fn an_invalid_record_for_an_unselected_probe_is_an_extra_either_way() {
         let sel = ids(&["a"]);
-        let a_ok = "{\"probe\":\"a\",\"outcome\":\"compile_fail\"}\n";
+        let a_ok = "{\"probe\":\"a\",\"outcome\":\"compile_fail\",\"cause\":\"script\"}\n";
         // Unparsable, and parseable but contradictory: both invalid plus extra.
         for bad in [
             "{\"probe\":\"zz\"}\n",
-            "{\"probe\":\"zz\",\"outcome\":\"compile_fail\",\"disposition\":\"x\"}\n",
+            "{\"probe\":\"zz\",\"outcome\":\"compile_fail\",\"cause\":\"script\",\"disposition\":\"x\"}\n",
         ] {
             let nd = format!("{a_ok}{bad}");
             let a = assess(&sel, nd.as_bytes(), HarnessEnd::Code(0), false);
@@ -1149,7 +1150,7 @@ not json at all
     fn no_contract_is_said_and_keeps_the_old_rules() {
         let a = assess(
             &ids(&["a"]),
-            b"{\"probe\":\"a\",\"outcome\":\"compile_fail\"}\n",
+            b"{\"probe\":\"a\",\"outcome\":\"compile_fail\",\"cause\":\"script\"}\n",
             HarnessEnd::Code(0),
             false,
         );

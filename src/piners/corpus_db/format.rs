@@ -209,30 +209,33 @@ fn side_label(s: &compare::Side) -> String {
         "{}/{}{}{selection}{standing}",
         s.outcome,
         s.disposition,
-        death_suffix(s.death.as_deref())
+        payload_suffix(s.death.as_deref(), s.cause.as_deref())
     )
 }
 
-/// An abort's stored death as ` (signal 9)`, empty when there is none. Read
-/// as stored and shown as sent where it does not parse: history is never
-/// held to today's record rules.
-fn death_suffix(stored: Option<&str>) -> String {
-    stored
-        .map(|text| {
-            let shown = serde_json::from_str(text)
-                .ok()
-                .and_then(|v| crate::piners::registry::Death::from_json(&v).ok())
-                .map_or_else(|| text.to_owned(), |d| d.to_string());
-            format!(" ({shown})")
-        })
-        .unwrap_or_default()
+/// An abort's stored death as ` (signal 9)` and a failure's stored cause as
+/// ` (panic)`, empty when there is neither. Read as stored and shown as
+/// sent where it does not parse: history is never held to today's record
+/// rules.
+fn payload_suffix(death: Option<&str>, cause: Option<&str>) -> String {
+    let death = death.map(|text| {
+        serde_json::from_str(text)
+            .ok()
+            .and_then(|v| crate::piners::registry::Death::from_json(&v).ok())
+            .map_or_else(|| text.to_owned(), |d| d.to_string())
+    });
+    death
+        .into_iter()
+        .chain(cause.map(str::to_owned))
+        .map(|shown| format!(" ({shown})"))
+        .collect()
 }
 
-/// A stored label with its death, `-` when there is no label.
-fn with_death(label: Option<&str>, death: Option<&str>) -> String {
+/// A stored label with its death or cause, `-` when there is no label.
+fn with_payload(label: Option<&str>, death: Option<&str>, cause: Option<&str>) -> String {
     label.map_or_else(
         || "-".to_owned(),
-        |label| format!("{label}{}", death_suffix(death)),
+        |label| format!("{label}{}", payload_suffix(death, cause)),
     )
 }
 
@@ -357,8 +360,12 @@ pub fn dispositions_table(rows: &[DispositionRow]) -> String {
             let mut row = vec![
                 d.probe.clone(),
                 d.outcome.clone(),
-                with_death(Some(&d.disposition), d.death.as_deref()),
-                with_death(d.expected.as_deref(), d.expected_death.as_deref()),
+                with_payload(Some(&d.disposition), d.death.as_deref(), d.cause.as_deref()),
+                with_payload(
+                    d.expected.as_deref(),
+                    d.expected_death.as_deref(),
+                    d.expected_cause.as_deref(),
+                ),
                 gate_cell(d.gate_ok, d.scored, d.defect.as_deref()),
             ];
             row.extend(d.ratchet_gates.iter().map(|g| ratchet_cell(g.as_deref())));
@@ -416,7 +423,11 @@ pub fn gate_misses_block(rows: &[GateMissRow]) -> String {
         .map(|m| {
             vec![
                 m.probe.clone(),
-                with_death(m.expected.as_deref(), m.expected_death.as_deref()),
+                with_payload(
+                    m.expected.as_deref(),
+                    m.expected_death.as_deref(),
+                    m.expected_cause.as_deref(),
+                ),
                 fs(&m.actual),
             ]
         })

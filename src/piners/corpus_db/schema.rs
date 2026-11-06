@@ -38,6 +38,8 @@
 //! as JSON and its attribution, beside the bare `expected` label; NULL on
 //! every other pin and on every older row; `gate_miss` carries the same
 //! pair, so an abort probe that emitted no line keeps them too),
+//! `expected_cause` (v21: a pinned compile_fail or runtime_fail's cause;
+//! NULL on every other pin and on every older row; on `gate_miss` too),
 //! and `raw_source`. `raw_source` is `harness` for a parsed harness line and
 //! `reconstructed` for a row migrated from the typed schema (v4 and older),
 //! whose record was rebuilt from exactly the columns it kept - so on such a
@@ -162,7 +164,7 @@ impl Projection {
 /// NULL, `acc_failing` is `'[]'` when absent, and `sig_breaches` is present
 /// exactly when a signature object is. Declared types give the projections
 /// their affinity, so an integral p90 reads back REAL as it was stored.
-const PROJECTIONS: [(&str, Projection); 40] = [
+const PROJECTIONS: [(&str, Projection); 41] = [
     ("outcome", Projection::Text("$.outcome")),
     ("matched", Projection::CountOr0("$.matched")),
     ("ours_only", Projection::CountOr0("$.ours_only")),
@@ -243,6 +245,9 @@ const PROJECTIONS: [(&str, Projection); 40] = [
     // NULL on a line that carried none, so a row from before piners sent
     // it reads unknown, never some death.
     ("death", Projection::Object("$.death")),
+    // Why a compile_fail or runtime_fail probe stopped, as the line sent it
+    // (v21); NULL on a line that carried none, so an older row reads unknown.
+    ("cause", Projection::Text("$.cause")),
 ];
 
 /// One ratchet census projection: its kind, column name, JSON path, and
@@ -350,6 +355,7 @@ pub(super) fn disposition_ddl(name: &str) -> String {
     excursion_gate TEXT,
     expected_death TEXT,
     expected_attribution TEXT,
+    expected_cause TEXT,
 {},
     PRIMARY KEY (run_id, probe)
 );
@@ -533,6 +539,7 @@ CREATE TABLE IF NOT EXISTS gate_miss (
     actual   TEXT,
     expected_death TEXT,
     expected_attribution TEXT,
+    expected_cause TEXT,
     PRIMARY KEY (run_id, probe)
 );
 

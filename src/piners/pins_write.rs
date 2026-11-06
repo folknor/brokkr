@@ -34,8 +34,9 @@ use crate::piners::toml_writer::{self, set_block_prefix, set_value, sort_fields,
 
 /// Field order inside a `[probes.<id>]` entry: the blessed contract first,
 /// then the volatile hashes.
-const PROBE_FIELDS: [&str; 10] = [
+const PROBE_FIELDS: [&str; 11] = [
     "expected",
+    "cause",
     "death",
     "attribution",
     "labels",
@@ -220,6 +221,7 @@ fn fill_probe(table: &mut Table, pin: &Pin) -> Result<(), DevError> {
         pin.expected
             .map(|disposition| Value::from(disposition.as_str())),
     );
+    sync_opt(table, "cause", pin.cause.map(|c| Value::from(c.as_str())));
     sync_opt(
         table,
         "death",
@@ -568,6 +570,7 @@ csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
         probes.insert("alpha-01".to_owned(), alpha);
         let mut zulu = pin("zulu-09", "zz");
         zulu.expected = Some(registry::PinnedDisposition::CompileFail); // first bless
+        zulu.cause = Some(registry::Cause::Script);
         probes.insert("zulu-09".to_owned(), zulu);
 
         let text = render(Some(COMMENTED), &feeds, &BTreeMap::new(), &probes).unwrap();
@@ -575,6 +578,11 @@ csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
         let zulu_at = text.find("[probes.zulu-09]").unwrap();
         let block = &text[zulu_at..];
         assert!(block.find("expected = \"compile_fail\"").unwrap() < block.find("pine").unwrap());
+        assert!(
+            block.find("expected = \"compile_fail\"").unwrap()
+                < block.find("cause = \"script\"").unwrap()
+        );
+        assert!(block.find("cause = \"script\"").unwrap() < block.find("pine").unwrap());
         // Untouched neighbours keep their bytes.
         assert!(text.contains("expected = \"accepted\" # blessed 2026-05"));
         assert!(text.contains("# zulu is on its way out"));

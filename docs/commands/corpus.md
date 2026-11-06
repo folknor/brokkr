@@ -209,9 +209,10 @@ Probes are pinned in the registry (`registry_dir`), two file kinds:
   `drawdown`; each is absent until a bless of a parity line carrying its
   census, and loading refuses a leg its kind does not have, an empty table,
   and a `labels` missing a leg. A pin expecting `harness_abort` also holds
-  `death` and `attribution` (the gate, below). A probe entry holds nothing else: it is
-  machine-stamped (reseed writes its hashes, bless its `expected`, an abort's
-  death and attribution, and its ratchet counts), and reseed drops it when the probe's directory vanishes.
+  `death` and `attribution`, and one expecting `compile_fail` or
+  `runtime_fail` holds `cause` (the gate, below). A probe entry holds nothing else: it is
+  machine-stamped (reseed writes its hashes, bless its `expected`, a failure's
+  cause, an abort's death and attribution, and its ratchet counts), and reseed drops it when the probe's directory vanishes.
   A brokkr older than a ratchet refuses a `pins.toml` holding its key.
 
   **`[probe_config."<prefix>"]` - how each probe runs.** Four optional
@@ -466,10 +467,29 @@ byte_exact | accepted | actionable_drift | count_divergent                  (par
 compile_fail | runtime_fail | harness_abort                                 (outcomes)
 ```
 
+A pinned `compile_fail` or `runtime_fail` holds **the cause it was blessed
+on**, the line's closed `cause`:
+
+```toml
+[probes.deep-loop-01]
+expected = "runtime_fail"
+cause = "budget"
+```
+
+`cause` is one of `script`, `capability`, `budget` or `interpreter_fault`,
+and on `runtime_fail` alone `panic`, an engine panic caught at the probe
+process's outer boundary. Bless stamps it and the gate compares it with the
+label, so a pinned typed stop that turns into a panic deviates, `expected
+runtime_fail (budget), got runtime_fail (panic)`, and leaves exit 1
+unexplained. A cause is a classification, not an identity: one script
+refusal replacing another keeps its cause and passes. `pins.toml` refuses a
+failure pin without a `cause`, `panic` on a `compile_fail`, and a `cause` on
+any other pin.
+
 `harness_abort` is the harness's own verdict on a probe whose process died
 (a signal, an abort, an OOM kill) or replied with no complete record set (see
 crash containment in `docs/projects/piners.md`). An engine panic is not one:
-piners reports it as `runtime_fail`. What is left is the residue the harness
+piners reports it as `runtime_fail` with cause `panic`. What is left is the residue the harness
 cannot attribute - it cannot say whether the engine or the harness died - so
 a pin holds an abort by **the death it was blessed on**, plus a human
 **attribution**:
@@ -607,7 +627,7 @@ harness's.
 (`compile_fail`, `runtime_fail`, `harness_abort` or `unevaluated`), including a probe pinned
 `expected = "compile_fail"` that is doing exactly what its pin says. brokkr therefore accepts exit 1 when every break line in the report
 belongs to a selected probe pinned to that same break - an abort to that same
-death, the comparison the gate makes; an unpinned, mispinned
+death, a failure to that same cause, the comparison the gate makes; an unpinned, mispinned
 or unselected break still fails the run (gated or `--no-gate` alike), and so
 does an `unevaluated` line, which no pin can hold.
 
@@ -653,7 +673,13 @@ separate categories:
   does make such a run's diagnostic attempt protocol-invalid rather than
   completed, and a `--bless --commit` at such a commit cannot adopt the
   abort. A `death` on any other line, a null included, makes that line
-  invalid. Every other line tolerates keys
+  invalid. A `compile_fail` or `runtime_fail` line must carry a closed
+  string `cause`, one of `script`, `capability`, `budget`,
+  `interpreter_fault`, and on `runtime_fail` alone `panic`; a missing,
+  null or unknown cause, or `panic` on a `compile_fail`, makes it invalid,
+  so a failure from a piners predating the field fails as an invalid record,
+  with the same consequences as a deathless abort. A `cause` on any other
+  line, a null included, makes that line invalid. Every other line tolerates keys
   brokkr does not read. The record must also agree with itself: when the harness's own
   `disposition` field is **present** it must be exactly the derived label, as
   a string - a different label, a null, a number, an object or an empty
@@ -956,8 +982,8 @@ refreshes every group), and every
 `[harness_files]` entry (`--probe` included - an edited facts file is
 re-stamped by any reseed), preserves
 `[probe_config]` verbatim, and carries each surviving probe's `expected`
-and ratchet counts (`labels`, `performance`, `excursions`) forward, with an
-abort's `death` and `attribution`. It decides nothing about how a probe runs, so a newly discovered or
+and ratchet counts (`labels`, `performance`, `excursions`) forward, with a
+failure's `cause` and an abort's `death` and `attribution`. It decides nothing about how a probe runs, so a newly discovered or
 re-added probe runs under whatever `[probe_config]` declares for its
 directory and stays unblessed. A blessed probe that gained or lost a
 `record` - so is now judged against a different oracle - keeps its
@@ -973,7 +999,9 @@ build + harness), then stamps each probe's current disposition into
 `performance` and `excursions` (the ratchets, above): a non-parity line
 clears them, and a parity line without a leg leaves an unpinned leg unpinned
 (a harness predating a census still blesses) but refuses the bless where the
-pin already holds a count it would drop. A `harness_abort` is stamped with
+pin already holds a count it would drop. A `compile_fail` or `runtime_fail`
+is stamped with the `cause` its line reports, and any other stamp clears
+`cause`. A `harness_abort` is stamped with
 the `death` its line reports and an attribution:
 `--attribute PROBE=TEXT` (repeatable, once per probe, split at the first
 `=`, one nonblank line) supplies it, and is required where the abort is new
@@ -982,7 +1010,7 @@ another death. On an unchanged abort the pinned attribution is kept, or
 replaced by a flag. A flag naming an unselected probe, or one whose line is
 not an abort, refuses the bless. Any other stamp clears `death` and
 `attribution`. `changed` counts a probe whose
-`expected`, death, attribution or any ratchet count moved.
+`expected`, cause, death, attribution or any ratchet count moved.
 Records reality including fails (a probe exercising an
 unimplemented feature legitimately pins `expected = "compile_fail"`; the
 gate then catches it starting to compile). Never gates. Prints `blessed N

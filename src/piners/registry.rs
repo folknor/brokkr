@@ -283,34 +283,130 @@ impl<'de> Deserialize<'de> for Death {
     }
 }
 
+/// Why a probe stopped with `compile_fail` or `runtime_fail`: the closed
+/// `cause` both lines carry and a pinned failure holds. A classification,
+/// not an identity: one script refusal replacing another keeps its cause.
+/// The spellings are piners harness literals, not its internal names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Cause {
+    /// The script itself was refused.
+    Script,
+    /// A capability the engine does not have.
+    Capability,
+    /// A budget ran out.
+    Budget,
+    /// A typed stop the engine classified as its own fault.
+    InterpreterFault,
+    /// An engine panic caught at the probe's outer boundary; `runtime_fail`
+    /// only, since a compile stop is always typed.
+    Panic,
+}
+
+/// Every cause, in its stable order.
+pub const ALL_CAUSES: [Cause; 5] = [
+    Cause::Script,
+    Cause::Capability,
+    Cause::Budget,
+    Cause::InterpreterFault,
+    Cause::Panic,
+];
+
+impl Cause {
+    /// The stable spelling of lines, pins and the run store.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Script => "script",
+            Self::Capability => "capability",
+            Self::Budget => "budget",
+            Self::InterpreterFault => "interpreter_fault",
+            Self::Panic => "panic",
+        }
+    }
+
+    pub fn from_label(label: &str) -> Option<Self> {
+        ALL_CAUSES.into_iter().find(|c| c.as_str() == label)
+    }
+
+    /// Parse a harness line's `cause` value: one closed string.
+    pub fn from_json(value: &serde_json::Value) -> Result<Self, String> {
+        value
+            .as_str()
+            .and_then(Self::from_label)
+            .ok_or_else(|| format!("its cause {value} is not one of {}", cause_list()))
+    }
+
+    /// Whether a failure of `label` may carry this cause: a panic is never
+    /// a compile failure.
+    pub const fn fits(self, label: PinnedDisposition) -> bool {
+        match label {
+            PinnedDisposition::CompileFail => !matches!(self, Self::Panic),
+            PinnedDisposition::RuntimeFail => true,
+            _ => false,
+        }
+    }
+}
+
+fn cause_list() -> String {
+    ALL_CAUSES.map(Cause::as_str).join(", ")
+}
+
+impl std::fmt::Display for Cause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Cause {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let label = String::deserialize(deserializer)?;
+        Self::from_label(&label).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "unknown cause `{label}`, expected one of {}",
+                cause_list()
+            ))
+        })
+    }
+}
+
 /// What the gate compares: an evaluated probe's disposition with the payload
 /// that disposition carries. A [`PinnedDisposition`] is the label vocabulary;
 /// a verdict is the value a pin holds and a line delivers, so a pinned abort
-/// matches only an abort with the same [`Death`], by plain equality, in every
-/// comparison that holds a probe to its pin.
+/// matches only an abort with the same [`Death`], and a pinned failure only a
+/// failure with the same [`Cause`], by plain equality, in every comparison
+/// that holds a probe to its pin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     ByteExact,
     Accepted,
     ActionableDrift,
     CountDivergent,
-    CompileFail,
-    RuntimeFail,
+    CompileFail(Cause),
+    RuntimeFail(Cause),
     HarnessAbort(Death),
 }
 
 impl Verdict {
     /// The verdict a label and its payload stand for: `None` when they do not
-    /// fit, an abort without a death or a death on anything else.
-    pub const fn new(label: PinnedDisposition, death: Option<Death>) -> Option<Self> {
-        Some(match (label, death) {
-            (PinnedDisposition::ByteExact, None) => Self::ByteExact,
-            (PinnedDisposition::Accepted, None) => Self::Accepted,
-            (PinnedDisposition::ActionableDrift, None) => Self::ActionableDrift,
-            (PinnedDisposition::CountDivergent, None) => Self::CountDivergent,
-            (PinnedDisposition::CompileFail, None) => Self::CompileFail,
-            (PinnedDisposition::RuntimeFail, None) => Self::RuntimeFail,
-            (PinnedDisposition::HarnessAbort, Some(d)) => Self::HarnessAbort(d),
+    /// fit - an abort without a death, a failure without a cause that fits
+    /// it, or either payload on any other label.
+    pub const fn new(
+        label: PinnedDisposition,
+        death: Option<Death>,
+        cause: Option<Cause>,
+    ) -> Option<Self> {
+        Some(match (label, death, cause) {
+            (PinnedDisposition::ByteExact, None, None) => Self::ByteExact,
+            (PinnedDisposition::Accepted, None, None) => Self::Accepted,
+            (PinnedDisposition::ActionableDrift, None, None) => Self::ActionableDrift,
+            (PinnedDisposition::CountDivergent, None, None) => Self::CountDivergent,
+            (PinnedDisposition::CompileFail, None, Some(c)) if c.fits(label) => {
+                Self::CompileFail(c)
+            }
+            (PinnedDisposition::RuntimeFail, None, Some(c)) => Self::RuntimeFail(c),
+            (PinnedDisposition::HarnessAbort, Some(d), None) => Self::HarnessAbort(d),
             _ => return None,
         })
     }
@@ -322,8 +418,8 @@ impl Verdict {
             Self::Accepted => PinnedDisposition::Accepted,
             Self::ActionableDrift => PinnedDisposition::ActionableDrift,
             Self::CountDivergent => PinnedDisposition::CountDivergent,
-            Self::CompileFail => PinnedDisposition::CompileFail,
-            Self::RuntimeFail => PinnedDisposition::RuntimeFail,
+            Self::CompileFail(_) => PinnedDisposition::CompileFail,
+            Self::RuntimeFail(_) => PinnedDisposition::RuntimeFail,
             Self::HarnessAbort(_) => PinnedDisposition::HarnessAbort,
         }
     }
@@ -335,13 +431,22 @@ impl Verdict {
             _ => None,
         }
     }
+
+    /// The cause of a compile or runtime failure.
+    pub const fn cause(self) -> Option<Cause> {
+        match self {
+            Self::CompileFail(c) | Self::RuntimeFail(c) => Some(c),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for Verdict {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.death() {
-            Some(d) => write!(f, "{} ({d})", self.label().as_str()),
-            None => f.write_str(self.label().as_str()),
+        match (self.death(), self.cause()) {
+            (Some(d), _) => write!(f, "{} ({d})", self.label().as_str()),
+            (_, Some(c)) => write!(f, "{} ({c})", self.label().as_str()),
+            _ => f.write_str(self.label().as_str()),
         }
     }
 }
@@ -372,6 +477,11 @@ impl Expectation {
     /// An abort's death as the run store keeps it.
     pub fn death_json(&self) -> Option<String> {
         self.verdict.and_then(Verdict::death).map(Death::json)
+    }
+
+    /// A failure's cause as the run store keeps it.
+    pub fn cause_label(&self) -> Option<&'static str> {
+        self.verdict.and_then(Verdict::cause).map(Cause::as_str)
     }
 }
 
@@ -750,6 +860,13 @@ pub struct Pin {
     pub death: Option<Death>,
     #[serde(default)]
     pub attribution: Option<String>,
+    /// The cause a pinned `compile_fail` or `runtime_fail` was blessed on,
+    /// present exactly when `expected` is one of the two ([`check_pins`]),
+    /// and never `panic` on a `compile_fail`. Compared ([`Verdict`]), so a
+    /// pinned typed stop that turns into a panic deviates. Stamped, cleared
+    /// and carried with `expected`.
+    #[serde(default)]
+    pub cause: Option<Cause>,
     /// The blessed per-leg mismatch counts of the three ratchets
     /// (`ratchet.rs`): the displayed-label census (`entry`, `exit`, both
     /// required), the performance census (`equity`, `scalars`) and the
@@ -794,6 +911,7 @@ impl Pin {
             expected: None,
             death: None,
             attribution: None,
+            cause: None,
             labels: None,
             performance: None,
             excursions: None,
@@ -816,11 +934,11 @@ impl Pin {
     }
 
     /// The blessed verdict, `None` when never blessed. [`check_pins`] refuses
-    /// a pin whose `expected` and `death` do not fit, so on a loaded pin
-    /// `None` only ever means unblessed.
+    /// a pin whose `expected`, `death` and `cause` do not fit, so on a
+    /// loaded pin `None` only ever means unblessed.
     pub const fn expectation(&self) -> Option<Verdict> {
         match self.expected {
-            Some(label) => Verdict::new(label, self.death),
+            Some(label) => Verdict::new(label, self.death, self.cause),
             None => None,
         }
     }
@@ -829,6 +947,7 @@ impl Pin {
     pub fn set_expectation(&mut self, verdict: Verdict, attribution: Option<String>) {
         self.expected = Some(verdict.label());
         self.death = verdict.death();
+        self.cause = verdict.cause();
         self.attribution = attribution;
     }
 
@@ -997,6 +1116,32 @@ fn abort_contract(pin: &Pin) -> Option<String> {
     }
 }
 
+/// Why a pin's failure contract does not hold, `None` when it does: `cause`
+/// is present exactly when `expected` is `compile_fail` or `runtime_fail`,
+/// and a `compile_fail` never holds `panic`.
+fn failure_contract(pin: &Pin) -> Option<String> {
+    let failure = matches!(
+        pin.expected,
+        Some(PinnedDisposition::CompileFail | PinnedDisposition::RuntimeFail)
+    );
+    let label = pin.expected.unwrap_or(PinnedDisposition::RuntimeFail);
+    match (failure, pin.cause) {
+        (true, None) => Some(format!(
+            "expects {} without the `cause` it was blessed on - re-bless it",
+            label.as_str()
+        )),
+        (true, Some(c)) if !c.fits(label) => Some(format!(
+            "expects {} with cause `{c}`, which only a runtime_fail carries",
+            label.as_str()
+        )),
+        (false, Some(_)) => Some(
+            "carries a `cause`, which only a pin expecting compile_fail or runtime_fail holds"
+                .to_owned(),
+        ),
+        _ => None,
+    }
+}
+
 /// The structural rules every pin obeys: at least one oracle, a probe dir
 /// below the corpus root, and every pinned file in that dir under its fixed
 /// name. Returns every violation, one per line. (An unpinnable `expected`
@@ -1011,6 +1156,9 @@ fn check_pins(probes: &BTreeMap<String, Pin>) -> Vec<String> {
             ));
         }
         if let Some(why) = abort_contract(pin) {
+            problems.push(format!("{id}: {why}"));
+        }
+        if let Some(why) = failure_contract(pin) {
             problems.push(format!("{id}: {why}"));
         }
         for kind in RatchetKind::ALL {
@@ -1879,7 +2027,7 @@ csv = { path = \"p/old/tv_trades.csv\", xxh128 = \"bb\" }
                  csv = {{ path = \"d/p/tv_trades.csv\", xxh128 = \"bb\" }}\n"
             )
         };
-        for ok in ["accepted", "compile_fail"] {
+        for ok in ["accepted", "count_divergent"] {
             let data = parse_pins(&text(ok), Path::new("pins.toml")).unwrap();
             assert_eq!(
                 data.probes["p"].expected.map(PinnedDisposition::as_str),
@@ -1948,6 +2096,54 @@ csv = { path = \"p/old/tv_trades.csv\", xxh128 = \"bb\" }
             (
                 "expected = \"harness_abort\"\ndeath = { kind = \"oom\" }\nattribution = \"x\"\n",
                 "is not one of",
+            ),
+        ] {
+            let err = load(extra).unwrap_err();
+            assert!(format!("{err}").contains(says), "{extra}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_pinned_failure_holds_its_cause_and_nothing_else_may() {
+        let text = |extra: &str| {
+            format!(
+                "[probes.p]\n{extra}\
+                 pine = {{ path = \"d/p/strategy.pine\", xxh128 = \"aa\" }}\n\
+                 csv = {{ path = \"d/p/tv_trades.csv\", xxh128 = \"bb\" }}\n"
+            )
+        };
+        let load = |extra: &str| parse_pins(&text(extra), Path::new("pins.toml"));
+        for (extra, want) in [
+            (
+                "expected = \"compile_fail\"\ncause = \"script\"\n",
+                Verdict::CompileFail(Cause::Script),
+            ),
+            (
+                "expected = \"runtime_fail\"\ncause = \"panic\"\n",
+                Verdict::RuntimeFail(Cause::Panic),
+            ),
+            (
+                "expected = \"runtime_fail\"\ncause = \"interpreter_fault\"\n",
+                Verdict::RuntimeFail(Cause::InterpreterFault),
+            ),
+        ] {
+            assert_eq!(load(extra).unwrap().probes["p"].expectation(), Some(want));
+        }
+        for (extra, says) in [
+            ("expected = \"compile_fail\"\n", "without the `cause`"),
+            ("expected = \"runtime_fail\"\n", "without the `cause`"),
+            (
+                "expected = \"compile_fail\"\ncause = \"panic\"\n",
+                "which only a runtime_fail carries",
+            ),
+            (
+                "expected = \"accepted\"\ncause = \"script\"\n",
+                "only a pin expecting compile_fail or runtime_fail",
+            ),
+            ("cause = \"budget\"\n", "only a pin expecting compile_fail"),
+            (
+                "expected = \"runtime_fail\"\ncause = \"oom\"\n",
+                "unknown cause `oom`",
             ),
         ] {
             let err = load(extra).unwrap_err();
