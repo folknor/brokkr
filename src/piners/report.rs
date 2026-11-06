@@ -39,7 +39,7 @@ use serde::Deserialize;
 use crate::output;
 use crate::piners::line_value;
 use crate::piners::ratchet::{self, Census, RatchetKind};
-use crate::piners::registry::{PinnedDisposition, UNEVALUATED};
+use crate::piners::registry::{Death, PinnedDisposition, UNEVALUATED, Verdict};
 
 /// Acceptance detail, present only when `outcome == "parity"`. Models what
 /// brokkr reads for the gate and the console; the p90 magnitudes and anything
@@ -240,33 +240,38 @@ pub struct Refusal {
 /// stamp can hold by construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeOutcome {
-    Evaluated(PinnedDisposition),
+    Evaluated(Verdict),
     Unevaluated(Refusal),
 }
 
 impl ProbeOutcome {
-    /// The gate label as stored and displayed.
-    pub fn label(&self) -> &'static str {
+    /// The label with an abort's death, as a gate diff shows it.
+    pub fn shown(&self) -> String {
         match self {
-            Self::Evaluated(d) => d.as_str(),
-            Self::Unevaluated(_) => UNEVALUATED,
+            Self::Evaluated(v) => v.to_string(),
+            Self::Unevaluated(_) => UNEVALUATED.to_owned(),
         }
     }
 
     /// Whether the harness signals this outcome with exit code 1.
     pub fn is_break(&self) -> bool {
         match self {
-            Self::Evaluated(d) => d.is_break(),
+            Self::Evaluated(v) => v.label().is_break(),
             Self::Unevaluated(_) => true,
         }
     }
 
-    /// The disposition of an evaluated probe.
-    pub fn evaluated(&self) -> Option<PinnedDisposition> {
+    /// The verdict of an evaluated probe, what a pin is compared with.
+    pub fn evaluated(&self) -> Option<Verdict> {
         match self {
-            Self::Evaluated(d) => Some(*d),
+            Self::Evaluated(v) => Some(*v),
             Self::Unevaluated(_) => None,
         }
+    }
+
+    /// The disposition label of an evaluated probe.
+    pub fn disposition(&self) -> Option<PinnedDisposition> {
+        self.evaluated().map(Verdict::label)
     }
 
     /// The refusal of an unevaluated probe.
@@ -394,6 +399,27 @@ fn unevaluated_shape(value: &serde_json::Value) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// The `death` an evaluated line of label `d` carries, given its whole
+/// value: a `harness_abort` line needs a valid closed one ([`Death`]), and
+/// any other line may not carry the key at all, a null included. Presence
+/// is read on the value, so a present null is never mistaken for absence.
+/// A deathless abort, from a piners predating the field, is therefore an
+/// invalid record: no pin can hold one, so it fails only a run the abort
+/// already failed.
+fn death_of(d: PinnedDisposition, value: &serde_json::Value) -> Result<Option<Death>, String> {
+    match (d, value.get("death")) {
+        (PinnedDisposition::HarnessAbort, Some(v)) => Death::from_json(v).map(Some),
+        (PinnedDisposition::HarnessAbort, None) => {
+            Err("a harness_abort line carries no death".to_owned())
+        }
+        (_, Some(v)) => Err(format!(
+            "a {} line carries a death {v}, which only a harness_abort line has",
+            d.as_str()
+        )),
+        (_, None) => Ok(None),
+    }
 }
 
 /// An `unevaluated` line's refusal, given its whole value: a known `reason`
@@ -571,7 +597,12 @@ impl ProbeLine {
         // clean repeat cannot launder it.
         censuses?;
         match label {
-            LineLabel::Evaluated(d) => Ok(ProbeOutcome::Evaluated(d)),
+            LineLabel::Evaluated(d) => {
+                let death = death_of(d, value)?;
+                Verdict::new(d, death)
+                    .map(ProbeOutcome::Evaluated)
+                    .ok_or_else(|| "internal: a death that does not fit its label".to_owned())
+            }
             LineLabel::Unevaluated => refusal_of(value).map(ProbeOutcome::Unevaluated),
         }
     }
@@ -1183,7 +1214,8 @@ pub fn summarize(probes: &[ProbeLine]) -> Summary {
         // Keep its classification tied to the record validator as well, so
         // malformed raw outcomes cannot enter a disposition total directly.
         match p.outcome() {
-            Some(ProbeOutcome::Evaluated(disposition)) => {
+            Some(ProbeOutcome::Evaluated(verdict)) => {
+                let disposition = verdict.label();
                 if disposition.is_parity() {
                     s.parity += 1;
                     match p.count_tier.as_deref() {
@@ -1328,7 +1360,7 @@ impl<'a> RenderPlan<'a> {
                 || matches!(
                     p.outcome(),
                     Some(
-                        ProbeOutcome::Evaluated(PinnedDisposition::HarnessAbort)
+                        ProbeOutcome::Evaluated(Verdict::HarnessAbort(_))
                             | ProbeOutcome::Unevaluated(_)
                     )
                 )
@@ -1439,7 +1471,12 @@ fn format_probe(p: &ProbeLine) -> String {
         );
     }
     if let Some(err) = &p.error {
-        return format!("{}: {} - {err}", p.probe, p.outcome);
+        // A valid abort shows its death; anything else its raw outcome.
+        let shown = match p.outcome() {
+            Some(o @ ProbeOutcome::Evaluated(Verdict::HarnessAbort(_))) => o.shown(),
+            _ => p.outcome.clone(),
+        };
+        return format!("{}: {shown} - {err}", p.probe);
     }
     let mut line = format!("{}: {}", p.probe, p.outcome);
     if let Some(a) = &p.acceptance {
@@ -2052,7 +2089,7 @@ mod tests {
         let r = parse(
             b"{\"kind\":\"setup_stage\",\"version\":1,\"stage\":\"manifest\"}\n\
 {\"kind\":\"probe_start\",\"probe\":\"a\"}\n\
-{\"probe\":\"a\",\"outcome\":\"harness_abort\",\"error\":\"signal 11\"}\n\
+{\"probe\":\"a\",\"outcome\":\"harness_abort\",\"error\":\"signal 11\",\"death\":{\"kind\":\"signal\",\"number\":11}}\n\
 {\"kind\":\"future\",\"x\":1}\n\
 {\"kind\":\"run_end\",\"version\":\"1\",\"exit\":1}",
         );
@@ -2109,6 +2146,64 @@ mod tests {
     }
 
     #[test]
+    fn an_abort_line_needs_a_closed_death_and_no_other_line_carries_one() {
+        let line = |fields: &str| {
+            parse(format!("{{\"probe\":\"a\",\"error\":\"e\",{fields}}}").as_bytes())
+        };
+        let abort = |death: &str| line(&format!("\"outcome\":\"harness_abort\",\"death\":{death}"));
+        for (death, want) in [
+            (r#"{"kind":"signal","number":6}"#, Death::Signal(6)),
+            (r#"{"kind":"exit","code":4}"#, Death::Exit(4)),
+            (r#"{"kind":"reply_failure"}"#, Death::ReplyFailure),
+        ] {
+            let r = abort(death);
+            assert_eq!(
+                r.probes[0].outcome(),
+                Some(&ProbeOutcome::Evaluated(Verdict::HarnessAbort(want))),
+                "{death}"
+            );
+            assert!(format_probe(&r.probes[0]).contains(&format!("harness_abort ({want})")));
+        }
+        for (bad, says) in [
+            ("null", "its death null"),
+            (r#"{"kind":"signal"}"#, "exactly a `number`"),
+            (r#"{"kind":"signal","number":-1}"#, "is not a signal"),
+            (r#"{"kind":"exit","code":0}"#, "is not a nonzero exit"),
+            (r#"{"kind":"reply_failure","code":1}"#, "carries no number"),
+            (r#"{"kind":"signal","number":9,"x":1}"#, "unknown field"),
+            (r#"{"kind":"oom"}"#, "is not one of"),
+            (r#"{"kind":"signal","number":11,"code":null}"#, "`code` is null"),
+            (r#"{"kind":"reply_failure","number":null}"#, "`number` is null"),
+        ] {
+            let r = abort(bad);
+            assert_eq!(r.probes[0].outcome(), None, "{bad}");
+            assert!(
+                r.probes[0].record_defect().unwrap().contains(says),
+                "{bad}: {:?}",
+                r.probes[0].record_defect()
+            );
+        }
+        // Absent on an abort, present on anything else, a null included.
+        let r = line("\"outcome\":\"harness_abort\"");
+        assert!(r.probes[0].record_defect().unwrap().contains("carries no death"));
+        for death in ["null", r#"{"kind":"reply_failure"}"#] {
+            let r = line(&format!("\"outcome\":\"runtime_fail\",\"death\":{death}"));
+            assert!(
+                r.probes[0]
+                    .record_defect()
+                    .unwrap()
+                    .contains("which only a harness_abort line has"),
+                "{death}"
+            );
+        }
+        // An unevaluated line's closed shape already refuses one.
+        let r = parse(
+            br#"{"probe":"a","outcome":"unevaluated","reason":"no_overlap","error":"e","death":{"kind":"reply_failure"}}"#,
+        );
+        assert_eq!(r.probes[0].outcome(), None);
+    }
+
+    #[test]
     fn a_missing_disposition_field_is_told_apart_from_a_null_one() {
         let r = parse(
             b"{\"probe\":\"a\",\"outcome\":\"compile_fail\",\"error\":\"x\"}\n{\"probe\":\"b\",\"outcome\":\"compile_fail\",\"error\":\"x\",\"disposition\":null}\n",
@@ -2116,7 +2211,7 @@ mod tests {
         assert_eq!(r.probes[0].declared, None);
         assert_eq!(
             r.probes[0].outcome(),
-            Some(&ProbeOutcome::Evaluated(PinnedDisposition::CompileFail))
+            Some(&ProbeOutcome::Evaluated(Verdict::CompileFail))
         );
         assert_eq!(r.probes[1].declared, Some(serde_json::Value::Null));
         assert_eq!(r.probes[1].outcome(), None);
@@ -2138,7 +2233,7 @@ mod tests {
     #[test]
     fn a_pinned_crash_stays_visible_and_output_is_sorted_by_id() {
         let r = parse(
-            br#"{"probe":"z","outcome":"harness_abort","error":"killed by signal 9"}
+            br#"{"probe":"z","outcome":"harness_abort","error":"killed by signal 9","death":{"kind":"signal","number":9}}
 {"probe":"m","outcome":"parity","acceptance":{"tier":"accepted"},"signature":{"domain":"d","dimension":"x"}}
 {"probe":"b","outcome":"parity","acceptance":{"tier":"accepted"},"signature":{"domain":"d","dimension":"x"}}
 "#,

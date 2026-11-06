@@ -89,6 +89,9 @@ pub struct CorpusArgs {
     /// its `expected` field. Handled inline after the harness run (the run
     /// pipeline is shared); see [`crate::piners::bless`].
     pub bless: bool,
+    /// `--attribute PROBE=TEXT`, by probe: the attribution a blessed
+    /// `harness_abort` pins ([`crate::piners::bless::parse_attributions`]).
+    pub attributions: BTreeMap<String, String>,
     /// Run + aggregate + report the per-probe gate diff, but never fail on
     /// it. Covers the bless-everything rollout and ad-hoc "just show me"
     /// runs. The harness exit and report integrity still govern pass/fail.
@@ -466,16 +469,9 @@ pub fn corpus(
     // Persist the run BEFORE any pins mutation or finalize, using the pinned
     // expectations as they stand at run time. An ingest failure preserves the
     // dir (the on-disk stdout is the evidence) and propagates.
-    let expected: BTreeMap<String, Option<String>> = ids
+    let expected: BTreeMap<String, registry::Expectation> = ids
         .iter()
-        .map(|id| {
-            let exp = registry
-                .pins
-                .get(id)
-                .and_then(|p| p.expected)
-                .map(|disposition| disposition.as_str().to_owned());
-            (id.clone(), exp)
-        })
+        .map(|id| (id.clone(), registry::Expectation::of(registry.pins.get(id))))
         .collect();
     // The run_error is stored whole, as structured JSON, in the run's own
     // transaction; the shared verdict above is its readable projection.
@@ -610,7 +606,13 @@ pub fn corpus(
             return Err(DevError::ExitCode(1));
         }
         let pins_path = registry_dir.join(registry::PINS_FILE);
-        crate::piners::bless::apply(&pins_path, &mut registry, report, &ids)?;
+        crate::piners::bless::apply(
+            &pins_path,
+            &mut registry,
+            report,
+            &ids,
+            &args.attributions,
+        )?;
         finish(artefacts)?;
         return Ok(());
     }
@@ -1077,7 +1079,7 @@ fn ingest_run(
     record: &RunRecord<'_>,
     report: &report::HarnessReport,
     rec: &integrity::Reconciliation,
-    expected: &BTreeMap<String, Option<String>>,
+    expected: &BTreeMap<String, registry::Expectation>,
     gate: &crate::piners::gate::GateVerdict,
 ) -> Result<(), DevError> {
     let db = CorpusDb::open(db_path)?;
@@ -1433,11 +1435,19 @@ mod tests {
                 if w.contains("cut short")
         ));
         // A harness_abort the harness attributed counts as a completed attempt.
-        let crash = "{\"probe\":\"a\",\"outcome\":\"harness_abort\",\"error\":\"signal 11\"}\n";
+        let crash = "{\"probe\":\"a\",\"outcome\":\"harness_abort\",\"error\":\"signal 11\",\
+                     \"death\":{\"kind\":\"signal\",\"number\":11}}\n";
         assert_eq!(
             classify(&["a"], crash, HarnessEnd::Code(1), false),
             isolate::AttemptVerdict::Completed
         );
+        // An abort without its death, from a piners predating it, is an
+        // invalid record, not a completed attempt.
+        let deathless = "{\"probe\":\"a\",\"outcome\":\"harness_abort\",\"error\":\"signal 11\"}\n";
+        assert!(matches!(
+            classify(&["a"], deathless, HarnessEnd::Code(1), false),
+            isolate::AttemptVerdict::Failed(isolate::Failure::ProtocolInvalid(_))
+        ));
         // An unevaluated probe completes the attempt; the refusal rides
         // beside the verdict, on a failed attempt as on a completed one.
         assert_eq!(

@@ -38,7 +38,10 @@
 //! `disposition.expected_excursions` and `disposition.excursion_gate`, the
 //! excursion ratchet's pin and verdict, the `label_*` and `exc_*` census
 //! projections, the `trade_diff` excursion and held-quantity projections,
-//! and the `scalar_pair` view. On a fresh database,
+//! and the `scalar_pair` view; version 20 adds `expected_death` and
+//! `expected_attribution` to `disposition` and `gate_miss`, a pinned abort's
+//! death and attribution, and the `disposition.death` projection. On a
+//! fresh database,
 //! the schema DDL in `schema.rs` creates the current tables (columns included)
 //! inside the shared migration transaction. Schema inspection uses the shared
 //! `db::store` helpers, which preserve errors and recognize generated columns.
@@ -56,7 +59,7 @@ use crate::error::DevError;
 use crate::piners::ratchet::RatchetKind;
 
 /// Current schema version. Increment when adding a migration below.
-pub(super) const SCHEMA_VERSION: i64 = 19;
+pub(super) const SCHEMA_VERSION: i64 = 20;
 
 /// Run pending migrations through the shared store policy. The v5 rebuild
 /// preserves historical orphan dispositions, so foreign-key enforcement is
@@ -251,6 +254,32 @@ fn migrate_from(conn: &rusqlite::Connection, current: i64) -> Result<(), DevErro
     }
     add_performance_columns(conn, current)?;
     add_v19_columns(conn, current)?;
+    add_death_columns(conn, current)?;
+    Ok(())
+}
+
+/// v19 -> v20: a pinned abort's death and attribution beside the bare
+/// `expected` label, on `disposition` and on `gate_miss` (an abort probe
+/// that emitted no line has no disposition row), and the `death` projection
+/// of the line itself. Nullable, no default: no older pin held a death, and
+/// an older line's death, if it sent one, reads through the projection.
+fn add_death_columns(conn: &rusqlite::Connection, current: i64) -> Result<(), DevError> {
+    if current >= 20 {
+        return Ok(());
+    }
+    for table in ["disposition", "gate_miss"] {
+        if !has_table(conn, table)? {
+            continue;
+        }
+        for col in ["expected_death", "expected_attribution"] {
+            if !has_column(conn, table, col)? {
+                conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {col} TEXT"), [])?;
+            }
+        }
+    }
+    if has_table(conn, "disposition")? {
+        add_projections(conn, 20, &["death"])?;
+    }
     Ok(())
 }
 
@@ -957,6 +986,65 @@ mod tests {
             )
             .unwrap();
         assert_eq!(figures, 1);
+    }
+
+    /// A v19 store gains a pinned abort's death and attribution on both
+    /// tables, NULL on every older row, and the `death` projection, which
+    /// reads every stored line that sent one and NULL on one that did not.
+    #[test]
+    fn v20_adds_the_abort_death_columns_and_reads_stored_deaths() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(super::super::schema::SCHEMA).unwrap();
+        conn.execute_batch(&disposition_ddl("disposition")).unwrap();
+        conn.execute_batch(&trade_diff_ddl("trade_diff")).unwrap();
+        for col in ["death", "expected_death", "expected_attribution"] {
+            conn.execute(&format!("ALTER TABLE disposition DROP COLUMN {col}"), [])
+                .unwrap();
+        }
+        for col in ["expected_death", "expected_attribution"] {
+            conn.execute(&format!("ALTER TABLE gate_miss DROP COLUMN {col}"), [])
+                .unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO run (run_id, started_at, selector, gated, result, probe_count) \
+                 VALUES (1, 'then', '{}', 1, 'fail', 3);
+             INSERT INTO disposition (run_id, probe, disposition, expected, gate_ok, raw_source, \
+                 raw_json) VALUES \
+                 (1, 'new', 'harness_abort', 'harness_abort', 1, 'harness', \
+                  '{\"outcome\":\"harness_abort\",\"death\":{\"kind\":\"signal\",\"number\":6}}'), \
+                 (1, 'old', 'harness_abort', NULL, 0, 'harness', '{\"outcome\":\"harness_abort\"}');
+             INSERT INTO gate_miss (run_id, probe, expected, actual) VALUES (1, 'gone', 'accepted', NULL);",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 19).unwrap();
+
+        run_migrations(&conn).unwrap();
+        let rows: Vec<(String, Option<String>, Option<String>)> = conn
+            .prepare("SELECT probe, death, expected_death FROM disposition ORDER BY probe")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "new".to_owned(),
+                    Some("{\"kind\":\"signal\",\"number\":6}".to_owned()),
+                    None
+                ),
+                ("old".to_owned(), None, None),
+            ]
+        );
+        let miss: (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT expected_death, expected_attribution FROM gate_miss",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(miss, (None, None));
     }
 
     /// A v16 store gains `scored`/`defect`: every row of a run that counted

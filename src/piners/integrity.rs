@@ -142,7 +142,8 @@ impl RunAssessment {
             // outcome is the line's own parse-time verdict, so a raw outcome
             // never counts as an abort on its own.
             .filter(|p| {
-                p.outcome() == Some(&ProbeOutcome::Evaluated(PinnedDisposition::HarnessAbort))
+                p.outcome().and_then(ProbeOutcome::disposition)
+                    == Some(PinnedDisposition::HarnessAbort)
                     && self.rec.valid.contains(&p.probe)
             })
             .map(|p| p.probe.as_str())
@@ -901,8 +902,14 @@ not json at all
             s.push_str(&format!(
                 "{{\"kind\":\"probe_start\",{V1},\"probe\":\"{p}\"}}\n"
             ));
+            // An abort carries the death the supervisor observed.
+            let death = if outcome == "harness_abort" {
+                ",\"death\":{\"kind\":\"signal\",\"number\":11}"
+            } else {
+                ""
+            };
             s.push_str(&format!(
-                "{{\"probe\":\"{p}\",\"outcome\":\"{outcome}\"}}\n"
+                "{{\"probe\":\"{p}\",\"outcome\":\"{outcome}\"{death}}}\n"
             ));
             s.push_str(&format!(
                 "{{\"kind\":\"probe_end\",{V1},\"probe\":\"{p}\"}}\n"
@@ -939,7 +946,7 @@ not json at all
     #[test]
     fn an_unevaluated_probe_completes_the_stream_but_never_passes() {
         let stream = clean_stream(&["a", "b"], "harness_abort", 1).replace(
-            r#"{"probe":"a","outcome":"harness_abort"}"#,
+            r#"{"probe":"a","outcome":"harness_abort","death":{"kind":"signal","number":11}}"#,
             r#"{"probe":"a","outcome":"unevaluated","reason":"witness_contract","error":"w"}"#,
         );
         let a = assess(

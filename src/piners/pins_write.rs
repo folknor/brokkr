@@ -34,8 +34,10 @@ use crate::piners::toml_writer::{self, set_block_prefix, set_value, sort_fields,
 
 /// Field order inside a `[probes.<id>]` entry: the blessed contract first,
 /// then the volatile hashes.
-const PROBE_FIELDS: [&str; 8] = [
+const PROBE_FIELDS: [&str; 10] = [
     "expected",
+    "death",
+    "attribution",
     "labels",
     "performance",
     "excursions",
@@ -217,6 +219,18 @@ fn fill_probe(table: &mut Table, pin: &Pin) -> Result<(), DevError> {
         "expected",
         pin.expected
             .map(|disposition| Value::from(disposition.as_str())),
+    );
+    sync_opt(
+        table,
+        "death",
+        pin.death
+            .map(|d| toml_writer::parse_value(&d.toml(), "piners: pins.toml"))
+            .transpose()?,
+    );
+    sync_opt(
+        table,
+        "attribution",
+        pin.attribution.as_deref().map(Value::from),
     );
     for kind in RatchetKind::ALL {
         sync_opt(

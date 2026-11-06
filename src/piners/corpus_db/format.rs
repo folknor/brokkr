@@ -205,7 +205,35 @@ fn side_label(s: &compare::Side) -> String {
         compare::Standing::Invalid => " (invalid)",
         compare::Standing::Counted | compare::Standing::Unscored => "",
     };
-    format!("{}/{}{selection}{standing}", s.outcome, s.disposition)
+    format!(
+        "{}/{}{}{selection}{standing}",
+        s.outcome,
+        s.disposition,
+        death_suffix(s.death.as_deref())
+    )
+}
+
+/// An abort's stored death as ` (signal 9)`, empty when there is none. Read
+/// as stored and shown as sent where it does not parse: history is never
+/// held to today's record rules.
+fn death_suffix(stored: Option<&str>) -> String {
+    stored
+        .map(|text| {
+            let shown = serde_json::from_str(text)
+                .ok()
+                .and_then(|v| crate::piners::registry::Death::from_json(&v).ok())
+                .map_or_else(|| text.to_owned(), |d| d.to_string());
+            format!(" ({shown})")
+        })
+        .unwrap_or_default()
+}
+
+/// A stored label with its death, `-` when there is no label.
+fn with_death(label: Option<&str>, death: Option<&str>) -> String {
+    label.map_or_else(
+        || "-".to_owned(),
+        |label| format!("{label}{}", death_suffix(death)),
+    )
 }
 
 fn compare_cells(d: &ProbeDelta) -> Vec<String> {
@@ -329,8 +357,8 @@ pub fn dispositions_table(rows: &[DispositionRow]) -> String {
             let mut row = vec![
                 d.probe.clone(),
                 d.outcome.clone(),
-                d.disposition.clone(),
-                fs(&d.expected),
+                with_death(Some(&d.disposition), d.death.as_deref()),
+                with_death(d.expected.as_deref(), d.expected_death.as_deref()),
                 gate_cell(d.gate_ok, d.scored, d.defect.as_deref()),
             ];
             row.extend(d.ratchet_gates.iter().map(|g| ratchet_cell(g.as_deref())));
@@ -385,7 +413,13 @@ pub fn dispositions_table(rows: &[DispositionRow]) -> String {
 pub fn gate_misses_block(rows: &[GateMissRow]) -> String {
     let cells: Vec<Vec<String>> = rows
         .iter()
-        .map(|m| vec![m.probe.clone(), fs(&m.expected), fs(&m.actual)])
+        .map(|m| {
+            vec![
+                m.probe.clone(),
+                with_death(m.expected.as_deref(), m.expected_death.as_deref()),
+                fs(&m.actual),
+            ]
+        })
         .collect();
     grid(&["probe", "expected", "actual"], &cells)
 }

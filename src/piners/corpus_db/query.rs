@@ -47,6 +47,11 @@ pub struct DispositionRow {
     pub outcome: String,
     pub disposition: String,
     pub expected: Option<String>,
+    /// A pinned abort's death as stored JSON (v20); `None` on any other pin
+    /// and on an older row.
+    pub expected_death: Option<String>,
+    /// The line's own `death` as stored JSON (the v20 projection).
+    pub death: Option<String>,
     pub gate_ok: bool,
     pub matched: i64,
     pub ours_only: i64,
@@ -143,6 +148,8 @@ pub struct RuntimeRow {
 pub struct GateMissRow {
     pub probe: String,
     pub expected: Option<String>,
+    /// As [`DispositionRow::expected_death`] (v20).
+    pub expected_death: Option<String>,
     pub actual: Option<String>,
 }
 
@@ -204,6 +211,8 @@ fn disposition_row(row: &Row<'_>) -> rusqlite::Result<DispositionRow> {
         outcome: row.get("outcome")?,
         disposition: row.get("disposition")?,
         expected: row.get("expected")?,
+        expected_death: row.get("expected_death")?,
+        death: row.get("death")?,
         gate_ok: row.get::<_, i64>("gate_ok")? != 0,
         matched: row.get("matched")?,
         ours_only: row.get("ours_only")?,
@@ -237,7 +246,7 @@ fn runtime_row(row: &Row<'_>) -> rusqlite::Result<RuntimeRow> {
 }
 
 const DISPOSITION_COLS: &str = "\
-probe, outcome, disposition, expected, gate_ok, matched, ours_only, tv_only, \
+probe, outcome, disposition, expected, expected_death, death, gate_ok, matched, ours_only, tv_only, \
 boundary_ours, boundary_tv, count_tier, p90_entry, p90_exit, p90_pnl, \
 sig_domain, sig_dimension, error, reason, label_gate, performance_gate, excursion_gate, scored, \
 defect";
@@ -322,7 +331,13 @@ pub static DISPOSITION_COLUMNS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
         let (pin, verdict) = kind.columns();
         cols.extend([pin, verdict]);
     }
-    cols.extend(["scored", "defect", "raw_source"]);
+    cols.extend([
+        "scored",
+        "defect",
+        "expected_death",
+        "expected_attribution",
+        "raw_source",
+    ]);
     cols.extend(super::schema::disposition_projection_names());
     cols.push("raw_json");
     cols
@@ -570,12 +585,14 @@ impl CorpusDb {
     /// Selected probes that produced no disposition line, for a run.
     pub fn gate_misses_for_run(&self, run_id: i64) -> Result<Vec<GateMissRow>, DevError> {
         let mut stmt = self.conn().prepare(
-            "SELECT probe, expected, actual FROM gate_miss WHERE run_id = ?1 ORDER BY probe",
+            "SELECT probe, expected, expected_death, actual FROM gate_miss WHERE run_id = ?1 \
+             ORDER BY probe",
         )?;
         let rows = stmt.query_map([run_id], |r| {
             Ok(GateMissRow {
                 probe: r.get("probe")?,
                 expected: r.get("expected")?,
+                expected_death: r.get("expected_death")?,
                 actual: r.get("actual")?,
             })
         })?;

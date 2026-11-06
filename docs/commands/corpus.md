@@ -208,9 +208,10 @@ Probes are pinned in the registry (`registry_dir`), two file kinds:
   both of `equity` and `scalars`, `excursions` either or both of `run_up` and
   `drawdown`; each is absent until a bless of a parity line carrying its
   census, and loading refuses a leg its kind does not have, an empty table,
-  and a `labels` missing a leg. A probe entry holds nothing else: it is
-  machine-stamped (reseed writes its hashes, bless its `expected` and its
-  ratchet counts), and reseed drops it when the probe's directory vanishes.
+  and a `labels` missing a leg. A pin expecting `harness_abort` also holds
+  `death` and `attribution` (the gate, below). A probe entry holds nothing else: it is
+  machine-stamped (reseed writes its hashes, bless its `expected`, an abort's
+  death and attribution, and its ratchet counts), and reseed drops it when the probe's directory vanishes.
   A brokkr older than a ratchet refuses a `pins.toml` holding its key.
 
   **`[probe_config."<prefix>"]` - how each probe runs.** Four optional
@@ -467,10 +468,33 @@ compile_fail | runtime_fail | harness_abort                                 (out
 
 `harness_abort` is the harness's own verdict on a probe whose process died
 (a signal, an abort, an OOM kill) or replied with no complete record set (see
-crash containment in `docs/projects/piners.md`). It is a break like
-`runtime_fail` and is pinned and blessed the same way. A crash stays visible
-even when pinned: its line is always printed, never folded into `matching
-their pin`, and the summary always carries a `harness_abort=N` count.
+crash containment in `docs/projects/piners.md`). An engine panic is not one:
+piners reports it as `runtime_fail`. What is left is the residue the harness
+cannot attribute - it cannot say whether the engine or the harness died - so
+a pin holds an abort by **the death it was blessed on**, plus a human
+**attribution**:
+
+```toml
+[probes.deep-recursion-01]
+expected = "harness_abort"
+death = { kind = "signal", number = 6 }
+attribution = "engine recursion overflows the stack on this script"
+```
+
+`death` is the line's own closed `death` (`signal` with its `number`, `exit`
+with its nonzero `code`, or `reply_failure`), stamped by bless, and the gate
+compares it with the label: a pinned abort on signal 6 that dies on signal 9
+deviates, `expected harness_abort (signal 6), got harness_abort (signal 9)`,
+and leaves exit 1 unexplained, gated or `--no-gate`. The attribution is the
+human's statement the pin was accepted with. It is not compared: the gate
+holds the death class, not the explanation, so a fixed defect replaced by
+another with the same death passes, and `reply_failure` covers the widest
+range of causes. `pins.toml` refuses a `death` or `attribution` on a pin not
+expecting `harness_abort`, and an abort pin missing either, or with an
+attribution that is not one nonblank line. A crash stays visible even when
+pinned: its line is always printed with its death, never folded into
+`matching their pin`, and the summary always carries a `harness_abort=N`
+count.
 
 **`unevaluated`** is the harness's line for a probe whose experiment could
 not be conducted: the oracle does not read, holds no comparable round, fails
@@ -582,7 +606,8 @@ harness's.
 **Pinned breaks.** The harness exits 1 whenever any probe breaks
 (`compile_fail`, `runtime_fail`, `harness_abort` or `unevaluated`), including a probe pinned
 `expected = "compile_fail"` that is doing exactly what its pin says. brokkr therefore accepts exit 1 when every break line in the report
-belongs to a selected probe pinned to that same break; an unpinned, mispinned
+belongs to a selected probe pinned to that same break - an abort to that same
+death, the comparison the gate makes; an unpinned, mispinned
 or unselected break still fails the run (gated or `--no-gate` alike), and so
 does an `unevaluated` line, which no pin can hold.
 
@@ -618,7 +643,17 @@ separate categories:
   keys; a line whose values do not read into brokkr's typed fields
   (`"matched": null`, a non-string `error`) is invalid with the
   deserialization error instead. A missing or unknown reason, or a missing, blank
-  or multi-line error, makes it invalid too. Every other line tolerates keys
+  or multi-line error, makes it invalid too. A `harness_abort` line must
+  carry a closed `death`: `{"kind":"signal","number":N}` with N from 1 to
+  64, `{"kind":"exit","code":N}` with N from 1 to 255, or
+  `{"kind":"reply_failure"}`, and no other key inside it. A missing, null or
+  malformed death makes the abort invalid, so an abort from a piners that
+  predates the field fails as an invalid record rather than as a break. That
+  changes nothing for an ordinary run, which the abort failed anyway. It
+  does make such a run's diagnostic attempt protocol-invalid rather than
+  completed, and a `--bless --commit` at such a commit cannot adopt the
+  abort. A `death` on any other line, a null included, makes that line
+  invalid. Every other line tolerates keys
   brokkr does not read. The record must also agree with itself: when the harness's own
   `disposition` field is **present** it must be exactly the derived label, as
   a string - a different label, a null, a number, an object or an empty
@@ -921,14 +956,15 @@ refreshes every group), and every
 `[harness_files]` entry (`--probe` included - an edited facts file is
 re-stamped by any reseed), preserves
 `[probe_config]` verbatim, and carries each surviving probe's `expected`
-and ratchet counts (`labels`, `performance`, `excursions`) forward. It decides nothing about how a probe runs, so a newly discovered or
+and ratchet counts (`labels`, `performance`, `excursions`) forward, with an
+abort's `death` and `attribution`. It decides nothing about how a probe runs, so a newly discovered or
 re-added probe runs under whatever `[probe_config]` declares for its
 directory and stays unblessed. A blessed probe that gained or lost a
 `record` - so is now judged against a different oracle - keeps its
 `expected` and ratchet counts but is named in a re-bless warning, since a disposition or count that
 happens to match across the switch would otherwise pass the gate unnoticed.
 A content change that breaks a `[probe_config]` rule - the probe gained a
-`record` under a declared CSV timezone, or the last probe under an exact-dir
+`record` under a declared CSV timezone or bar budget, or the last probe under an exact-dir
 declaration vanished - refuses the reseed, naming the declaration to edit.
 
 `--bless [--all|--keyword <k>|--probe <id>]` runs the selection (verify +
@@ -937,8 +973,16 @@ build + harness), then stamps each probe's current disposition into
 `performance` and `excursions` (the ratchets, above): a non-parity line
 clears them, and a parity line without a leg leaves an unpinned leg unpinned
 (a harness predating a census still blesses) but refuses the bless where the
-pin already holds a count it would drop. `changed` counts a probe whose
-`expected` or any ratchet count moved.
+pin already holds a count it would drop. A `harness_abort` is stamped with
+the `death` its line reports and an attribution:
+`--attribute PROBE=TEXT` (repeatable, once per probe, split at the first
+`=`, one nonblank line) supplies it, and is required where the abort is new
+to the pin or its death moved, since the old statement was written for
+another death. On an unchanged abort the pinned attribution is kept, or
+replaced by a flag. A flag naming an unselected probe, or one whose line is
+not an abort, refuses the bless. Any other stamp clears `death` and
+`attribution`. `changed` counts a probe whose
+`expected`, death, attribution or any ratchet count moved.
 Records reality including fails (a probe exercising an
 unimplemented feature legitimately pins `expected = "compile_fail"`; the
 gate then catches it starting to compile). Never gates. Prints `blessed N
@@ -951,7 +995,8 @@ lines it signals (recording them is the point); exit 2, any other code, a
 signal, the hang backstop, a `run_error`, a missing or invalid record, a
 repeated record, a report-only extra, a contract violation or any
 `unevaluated` probe leaves `pins.toml` untouched and exits non-zero, naming
-why. A `harness_abort` is stampable like any break; an `unevaluated` line is
+why, and so does an abort missing the attribution it needs. A
+`harness_abort` is otherwise stampable like any break; an `unevaluated` line is
 not, since an experiment that was not conducted records nothing about the
 engine. The run row records `gated = no` - bless ignores the gate verdict.
 

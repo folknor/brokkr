@@ -29,7 +29,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use crate::output;
 use crate::piners::ratchet::{self, Assessment, Coverage, Deviation, RatchetKind};
-use crate::piners::registry::{PinnedDisposition, Registry};
+use crate::piners::registry::{Pin, PinnedDisposition, Registry, Verdict};
 use crate::piners::report::{HarnessReport, ProbeLine, ProbeOutcome};
 
 /// One probe whose actual disposition does not satisfy its pinned `expected`.
@@ -37,9 +37,17 @@ use crate::piners::report::{HarnessReport, ProbeLine, ProbeOutcome};
 pub struct GateDiff {
     pub probe: String,
     /// Pinned expectation; `None` = never blessed.
-    pub expected: Option<String>,
-    /// Actual disposition this run; `None` = harness emitted no line.
+    pub expected: Option<Verdict>,
+    /// Actual disposition this run, an abort with its death; `None` =
+    /// harness emitted no line.
     pub actual: Option<String>,
+}
+
+/// Whether `outcome` satisfies the pin `expected`: the one comparison the
+/// gate and the exit-one acceptance share, plain [`Verdict`] equality, so a
+/// pinned abort holds only its own death on both paths.
+fn holds(expected: Option<Verdict>, outcome: Option<Verdict>) -> bool {
+    matches!((expected, outcome), (Some(e), Some(g)) if e == g)
 }
 
 /// Compare each selected probe's actual disposition to its pinned `expected`.
@@ -55,7 +63,7 @@ pub fn evaluate(ids: &[String], registry: &Registry, report: &HarnessReport) -> 
     let tainted = report.tainted();
     // Per probe: what the line shows, and the evaluated disposition it can
     // satisfy a pin with - none for an invalid, tainted or unevaluated line.
-    let actual: BTreeMap<&str, (String, Option<PinnedDisposition>)> = report
+    let actual: BTreeMap<&str, (String, Option<Verdict>)> = report
         .probes
         .iter()
         .map(|p| {
@@ -68,7 +76,7 @@ pub fn evaluate(ids: &[String], registry: &Registry, report: &HarnessReport) -> 
                     ),
                     None,
                 ),
-                Some(outcome) => (outcome.label().to_owned(), outcome.evaluated()),
+                Some(outcome) => (outcome.shown(), outcome.evaluated()),
             };
             (p.probe.as_str(), got)
         })
@@ -76,13 +84,12 @@ pub fn evaluate(ids: &[String], registry: &Registry, report: &HarnessReport) -> 
 
     let mut diffs = Vec::new();
     for id in ids {
-        let expected = registry.pins.get(id).and_then(|p| p.expected);
+        let expected = registry.pins.get(id).and_then(Pin::expectation);
         let got = actual.get(id.as_str());
-        let satisfied = matches!((expected, got), (Some(e), Some((_, Some(g)))) if e == *g);
-        if !satisfied {
+        if !holds(expected, got.and_then(|(_, g)| *g)) {
             diffs.push(GateDiff {
                 probe: id.clone(),
-                expected: expected.map(|d| d.as_str().to_owned()),
+                expected,
                 actual: got.map(|(shown, _)| shown.clone()),
             });
         }
@@ -143,7 +150,7 @@ impl GateVerdict {
                 .filter(|p| p.outcome().is_some() && !tainted.contains(id.as_str()));
             let parity = line
                 .and_then(|p| p.outcome())
-                .and_then(ProbeOutcome::evaluated)
+                .and_then(ProbeOutcome::disposition)
                 .is_some_and(PinnedDisposition::is_parity);
             let pin = registry.pins.get(id);
             for (kind, verdict) in &mut ratchets {
@@ -246,11 +253,12 @@ pub fn breaks_all_pinned(ids: &[String], registry: &Registry, report: &HarnessRe
         any = true;
         // A probe with an invalid occurrence explains nothing, and neither
         // does an unevaluated one: it has no disposition a pin could hold.
-        let pinned = outcome.evaluated().is_some_and(|disp| {
-            !tainted.contains(p.probe.as_str())
-                && selected.contains(p.probe.as_str())
-                && registry.pins.get(&p.probe).and_then(|pin| pin.expected) == Some(disp)
-        });
+        let pinned = !tainted.contains(p.probe.as_str())
+            && selected.contains(p.probe.as_str())
+            && holds(
+                registry.pins.get(&p.probe).and_then(Pin::expectation),
+                outcome.evaluated(),
+            );
         if !pinned {
             return false;
         }
@@ -440,10 +448,15 @@ mod tests {
             protocol_violations: Some(2),
             run_error: None,
         };
-        let expected: BTreeMap<String, Option<String>> =
-            [("a".to_owned(), Some("compile_fail".to_owned()))]
-                .into_iter()
-                .collect();
+        let expected: BTreeMap<String, crate::piners::registry::Expectation> = [(
+            "a".to_owned(),
+            crate::piners::registry::Expectation {
+                verdict: Some(Verdict::CompileFail),
+                attribution: None,
+            },
+        )]
+        .into_iter()
+        .collect();
         let rec = crate::piners::integrity::Reconciliation::reconcile(&ids, &rep, Vec::new());
         let run_id = db
             .record_run(&run, &rep, &rec, &expected, &GateVerdict::from(diffs))
@@ -462,13 +475,34 @@ mod tests {
 
     #[test]
     fn a_pinned_harness_abort_passes_and_explains_exit_one() {
-        let reg = registry(&[("a", Some("harness_abort"))]);
-        let rep =
-            report(r#"{"probe":"a","outcome":"harness_abort","error":"killed by signal 11"}"#);
+        let mut reg = registry(&[("a", Some("accepted"))]);
+        if let Some(p) = reg.pins.get_mut("a") {
+            p.set_expectation(
+                Verdict::HarnessAbort(crate::piners::registry::Death::Signal(11)),
+                Some("engine recursion".to_owned()),
+            );
+        }
+        let abort = |n: i32| {
+            report(&format!(
+                r#"{{"probe":"a","outcome":"harness_abort","error":"killed by signal {n}","death":{{"kind":"signal","number":{n}}}}}"#
+            ))
+        };
+        let rep = abort(11);
         let ids = ["a".to_owned()];
         assert!(evaluate(&ids, &reg, &rep).is_empty());
         assert!(report_has_break(&rep));
         assert!(breaks_all_pinned(&ids, &reg, &rep));
+        // The same label on another death deviates and leaves exit 1
+        // unexplained, on both paths.
+        let moved = abort(9);
+        let diffs = evaluate(&ids, &reg, &moved);
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].actual.as_deref(), Some("harness_abort (signal 9)"));
+        assert_eq!(
+            diffs[0].expected.map(|v| v.to_string()).as_deref(),
+            Some("harness_abort (signal 11)")
+        );
+        assert!(!breaks_all_pinned(&ids, &reg, &moved));
         // Unpinned, the crash is a deviation and leaves exit 1 unexplained.
         let unpinned = registry(&[("a", Some("accepted"))]);
         assert_eq!(evaluate(&ids, &unpinned, &rep).len(), 1);

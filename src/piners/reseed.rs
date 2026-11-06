@@ -511,14 +511,17 @@ fn stamp_file(
     }))
 }
 
-/// Copy each surviving probe's blessed contract - `expected` and its ratchet
-/// counts (`labels`, `performance`, `excursions`) - from the old pin set into
+/// Copy each surviving probe's blessed contract - `expected`, an abort's
+/// `death` and `attribution`, and its ratchet counts (`labels`,
+/// `performance`, `excursions`) - from the old pin set into
 /// the freshly stamped one. A probe new to
 /// the corpus stays `expected: None` (unblessed), which the gate treats as a
 /// hard "must bless".
 fn carry_expected(new: &mut BTreeMap<String, Pin>, old: &BTreeMap<String, Pin>) {
     registry_io::carry_by_id(new, old, |pin, previous| {
         pin.expected = previous.expected;
+        pin.death = previous.death;
+        pin.attribution.clone_from(&previous.attribution);
         for kind in RatchetKind::ALL {
             *pin.ratchet_mut(kind) = previous.ratchet(kind).cloned();
         }

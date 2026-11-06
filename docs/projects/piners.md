@@ -112,8 +112,14 @@ Emits **one NDJSON object per probe, no summary line** (brokkr aggregates):
   `harness_abort` is the harness supervisor's line for a probe
   whose process died or replied with no complete record set: its `error`
   carries the exit status or signal, the reason and the process's stderr
-  tail. A break (exit 1), never retried, gated and blessed like
-  `runtime_fail`. brokkr derives the gate label itself (the tier for
+  tail, and its closed `death` the observed death, one of
+  `{"kind":"signal","number":N}` (1 to 64), `{"kind":"exit","code":N}` (1
+  to 255) or `{"kind":"reply_failure"}`, no other key. An abort without a
+  valid `death`, and a `death` on any other line, a null included, is an
+  invalid record. An engine panic is not an abort: piners reports it as
+  `runtime_fail`. A break (exit 1), never retried; a pin holds it with its
+  death and a human attribution (the gate in `docs/commands/corpus.md`).
+  brokkr derives the gate label itself (the tier for
   `parity`, else the outcome) and accepts an outcome/tier pair only as a
   whole (`report::valid_label`). The line's own `disposition` field is
   cross-checked, not trusted: when present it must equal that derived label
@@ -318,7 +324,12 @@ The store has per-db `PRAGMA user_version` migrations and WAL, mirroring
   (v18: the same pair for the performance ratchet, the pin holding only its
   pinned legs; run detail renders the verdict as the `perf` column),
   `expected_excursions` and `excursion_gate` (v19: the same pair for the
-  excursion ratchet; run detail's `exc` column). A deviation is stored as
+  excursion ratchet; run detail's `exc` column), `expected_death` and
+  `expected_attribution` (v20: a pinned abort's death as JSON and its
+  attribution, beside the bare `expected` label, so `expected =
+  'harness_abort'` matches every abort pin; `NULL` on every other pin and
+  every older row; `gate_miss` carries the same pair, so an abort probe
+  that emitted no line keeps them too). A deviation is stored as
   `{leg, pinned, actual, compared}` plus `ambiguous` and `tolerance` where
   the census carries them, or `{leg, missing, pinned}`; a label row stored
   before v19 holds the older whole-census `{missing, pinned: {entry, exit}}`,
@@ -353,7 +364,12 @@ The store has per-db `PRAGMA user_version` migrations and WAL, mirroring
   string - on an `unevaluated` row, why the probe could not be evaluated;
   `NULL` wherever the line carried no string `reason`, which piners sends on
   no other outcome, though a stray one on another line is tolerated and
-  projected as sent; run detail shows it ahead of the `error` detail), and
+  projected as sent; run detail shows it ahead of the `error` detail),
+  `death` (v20: the line's `death` object as JSON text, `NULL` on a line
+  that carried none - so a row from before piners sent one reads unknown,
+  never some death; run detail and `--compare` show it beside the
+  disposition, as `harness_abort (signal 9)`, and `--compare` counts a
+  death that moves as a move), and
   the ratchet censuses, one rule for every kind -
   `<prefix>_<leg>_<field>` over `$.<key>.<leg>.<field>`, `NULL` where the
   line carried no such leg: `perf_{equity,scalars}_{compared,mismatched,tolerance}`

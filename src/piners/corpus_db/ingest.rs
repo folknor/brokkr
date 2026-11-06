@@ -25,6 +25,7 @@ use crate::error::DevError;
 use crate::piners::gate::GateVerdict;
 use crate::piners::integrity::Reconciliation;
 use crate::piners::ratchet::{Assessment, RatchetKind};
+use crate::piners::registry::{Death, Expectation, Verdict};
 use crate::piners::report::{HarnessReport, ProbeLine, TradeDiffLine};
 use crate::piners::run_model::RunVerdict;
 
@@ -97,7 +98,7 @@ impl CorpusDb {
         run: &RunRecord<'_>,
         report: &HarnessReport,
         rec: &Reconciliation,
-        expected: &BTreeMap<String, Option<String>>,
+        expected: &BTreeMap<String, Expectation>,
         gate: &GateVerdict,
     ) -> Result<i64, DevError> {
         self.conn().execute("BEGIN", [])?;
@@ -240,7 +241,7 @@ pub(super) fn stored_context(context: &RunContext) -> Result<(String, String), D
 struct Stored<'a> {
     report: &'a HarnessReport,
     rec: &'a Reconciliation,
-    expected: &'a BTreeMap<String, Option<String>>,
+    expected: &'a BTreeMap<String, Expectation>,
     gate: &'a GateVerdict,
 }
 
@@ -367,10 +368,19 @@ fn record_inner(
     // its disposition row.
     for d in &gate.dispositions {
         if d.actual.is_none() {
+            let attribution = expected.get(&d.probe).and_then(|e| e.attribution.clone());
             conn.execute(
-                "INSERT OR IGNORE INTO gate_miss (run_id, probe, expected, actual) \
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![run_id, d.probe, d.expected, d.actual],
+                "INSERT OR IGNORE INTO gate_miss \
+                 (run_id, probe, expected, actual, expected_death, expected_attribution) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    run_id,
+                    d.probe,
+                    d.expected.map(|v| v.label().as_str()),
+                    d.actual,
+                    d.expected.and_then(Verdict::death).map(Death::json),
+                    attribution,
+                ],
             )?;
         }
     }
@@ -394,7 +404,7 @@ fn insert_disposition(
     conn: &rusqlite::Connection,
     run_id: i64,
     p: &ProbeLine,
-    expected: &BTreeMap<String, Option<String>>,
+    expected: &BTreeMap<String, Expectation>,
     annotation: &Annotation<'_>,
 ) -> Result<(), DevError> {
     if p.raw.is_empty() {
@@ -415,17 +425,25 @@ fn insert_disposition(
         "raw_json",
         "scored",
         "defect",
+        "expected_death",
+        "expected_attribution",
     ];
+    let pinned = expected.get(&p.probe);
     let mut values: Vec<rusqlite::types::Value> = vec![
         run_id.into(),
         p.probe.clone().into(),
         p.disposition().into(),
-        expected.get(&p.probe).cloned().flatten().into(),
+        pinned
+            .and_then(Expectation::label)
+            .map(str::to_owned)
+            .into(),
         i64::from(annotation.gate_ok).into(),
         "harness".to_owned().into(),
         p.raw.clone().into(),
         i64::from(annotation.scored).into(),
         annotation.defect.clone().into(),
+        pinned.and_then(Expectation::death_json).into(),
+        pinned.and_then(|e| e.attribution.clone()).into(),
     ];
     // Each ratchet's pin and verdict, in its own column pair.
     for (kind, assessment) in RatchetKind::ALL.into_iter().zip(annotation.ratchets) {
@@ -469,18 +487,108 @@ mod tests {
     /// The reconciliation of `report` against the selection `expected`
     /// keys, as a run makes it.
     fn reconciled(
-        expected: &BTreeMap<String, Option<String>>,
+        expected: &BTreeMap<String, Expectation>,
         report: &HarnessReport,
     ) -> Reconciliation {
         let ids: Vec<String> = expected.keys().cloned().collect();
         Reconciliation::reconcile(&ids, report, Vec::new())
     }
 
-    fn expected_map(pairs: &[(&str, Option<&str>)]) -> BTreeMap<String, Option<String>> {
+    /// Non-abort expectations by label.
+    fn expected_map(pairs: &[(&str, Option<&str>)]) -> BTreeMap<String, Expectation> {
         pairs
             .iter()
-            .map(|(p, e)| ((*p).to_owned(), e.map(str::to_owned)))
+            .map(|(p, e)| {
+                let verdict = e.map(|label| {
+                    let d = crate::piners::registry::PinnedDisposition::from_label(label)
+                        .expect("test label");
+                    Verdict::new(d, None).expect("a non-abort test label")
+                });
+                (
+                    (*p).to_owned(),
+                    Expectation {
+                        verdict,
+                        attribution: None,
+                    },
+                )
+            })
             .collect()
+    }
+
+    /// A pinned abort's death and attribution reach both tables beside the
+    /// bare label, for a probe that reported and one that emitted nothing.
+    #[test]
+    fn an_abort_expectation_is_snapshotted_whole_on_both_tables() {
+        let abort = |attribution: &str| Expectation {
+            verdict: Some(Verdict::HarnessAbort(Death::Signal(6))),
+            attribution: Some(attribution.to_owned()),
+        };
+        let expected: BTreeMap<String, Expectation> = [
+            ("ran".to_owned(), abort("engine recursion")),
+            ("gone".to_owned(), abort("supervisor refusal")),
+        ]
+        .into_iter()
+        .collect();
+        let report = parse(
+            br#"{"probe":"ran","outcome":"harness_abort","error":"e","death":{"kind":"signal","number":9}}"#,
+        );
+        let gate = GateVerdict::from(vec![
+            GateDiff {
+                probe: "ran".to_owned(),
+                expected: Some(Verdict::HarnessAbort(Death::Signal(6))),
+                actual: Some("harness_abort (signal 9)".to_owned()),
+            },
+            GateDiff {
+                probe: "gone".to_owned(),
+                expected: Some(Verdict::HarnessAbort(Death::Signal(6))),
+                actual: None,
+            },
+        ]);
+        let db = CorpusDb::open_in_memory().unwrap();
+        let run = RunRecord {
+            run_id: None,
+            started_at: None,
+            commit_sha: None,
+            dirty: None,
+            selector: "{}",
+            context: None,
+            gated: true,
+            verdict: &RunVerdict::Fail("2 gate deviation(s)".to_owned()),
+            harness_exit_code: Some(1),
+            stderr: "",
+            wall_ms: None,
+            protocol_violations: Some(0),
+            run_error: None,
+        };
+        let run_id = db
+            .record_run(&run, &report, &reconciled(&expected, &report), &expected, &gate)
+            .unwrap();
+        let row = db.disposition_for_probe(run_id, "ran").unwrap().unwrap();
+        assert_eq!(row.expected.as_deref(), Some("harness_abort"));
+        assert_eq!(
+            row.expected_death.as_deref(),
+            Some("{\"kind\":\"signal\",\"number\":6}")
+        );
+        assert_eq!(row.death.as_deref(), Some("{\"kind\":\"signal\",\"number\":9}"));
+        let attribution: (Option<String>, Option<String>, Option<String>, Option<String>) = db
+            .conn()
+            .query_row(
+                "SELECT d.expected_attribution, g.expected, g.expected_death, \
+                 g.expected_attribution FROM disposition d, gate_miss g \
+                 WHERE d.probe = 'ran' AND g.probe = 'gone'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            attribution,
+            (
+                Some("engine recursion".to_owned()),
+                Some("harness_abort".to_owned()),
+                Some("{\"kind\":\"signal\",\"number\":6}".to_owned()),
+                Some("supervisor refusal".to_owned()),
+            )
+        );
     }
 
     #[test]
@@ -494,7 +602,7 @@ mod tests {
         // p2 was selected but emitted no line -> a gate miss.
         let gate_diffs = vec![GateDiff {
             probe: "p2".to_owned(),
-            expected: Some("accepted".to_owned()),
+            expected: Some(Verdict::Accepted),
             actual: None,
         }];
 
@@ -653,7 +761,7 @@ mod tests {
         let expected = expected_map(&[("p1", Some("byte_exact"))]);
         let gate_diffs = vec![GateDiff {
             probe: "p1".to_owned(),
-            expected: Some("byte_exact".to_owned()),
+            expected: Some(Verdict::ByteExact),
             actual: Some("accepted".to_owned()),
         }];
         let db = CorpusDb::open_in_memory().unwrap();

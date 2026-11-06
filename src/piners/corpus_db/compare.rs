@@ -16,7 +16,9 @@
 //!   failure has no trade counts). Such a side is shown as `no counts` rather
 //!   than as a fall to zero, which would read as a divergence improvement.
 //! - `count_tier` is compared NULL-safely: a tier appearing or vanishing is a
-//!   move.
+//!   move. So is an abort's `death` (v20): a `SIGSEGV` turning into an OOM
+//!   `SIGKILL` keeps outcome and disposition both `harness_abort`, and a row
+//!   from before piners sent one reads unknown rather than as some death.
 //! - A line its run did not count (`scored = 0`, v17) is marked `(invalid)`
 //!   when its record was unusable and gets no direction either way; a row
 //!   stored before the mark reads as counted, as it always did.
@@ -47,6 +49,11 @@ pub struct Side {
     pub outcome: String,
     pub disposition: String,
     pub count_tier: Option<String>,
+    /// The line's `death` as stored (the `death` projection, v20), `None`
+    /// where it carried none: a row from before piners sent one reads
+    /// unknown, distinct from every death, and is never revalidated against
+    /// today's record rules.
+    pub death: Option<String>,
     /// Whether the harness line carried all three trade counts as numbers.
     /// The projections read 0 for an absent or non-numeric count, so without
     /// this a missing count would compare as a real zero.
@@ -197,7 +204,7 @@ impl CorpusDb {
             format!("COALESCE(json_type(raw_json, '{path}') IN ('integer', 'real'), 0)")
         };
         let sql = format!(
-            "SELECT probe, outcome, disposition, count_tier, matched, ours_only, tv_only, \
+            "SELECT probe, outcome, disposition, count_tier, death, matched, ours_only, tv_only, \
                     ({} AND {} AND {}) AS has_counts, scored, defect IS NOT NULL AS has_defect \
              FROM disposition WHERE run_id = ?1",
             numeric("$.matched"),
@@ -224,6 +231,7 @@ impl CorpusDb {
                     outcome: r.get::<_, Option<String>>("outcome")?.unwrap_or_default(),
                     disposition: r.get("disposition")?,
                     count_tier: r.get("count_tier")?,
+                    death: r.get("death")?,
                     has_counts: r.get::<_, i64>("has_counts")? != 0,
                     matched: r.get("matched")?,
                     ours_only: r.get("ours_only")?,
@@ -339,7 +347,7 @@ mod tests {
             .iter()
             .map(|p| GateDiff {
                 probe: (*p).to_owned(),
-                expected: Some("accepted".to_owned()),
+                expected: Some(crate::piners::registry::Verdict::Accepted),
                 actual: None,
             })
             .collect();
@@ -515,6 +523,32 @@ mod tests {
     }
 
     #[test]
+    fn an_abort_whose_death_moves_is_a_move_and_an_unknown_death_differs_from_any() {
+        let side = |death: Option<&str>| Side {
+            selection: Selection::Selected,
+            standing: Standing::Counted,
+            outcome: "harness_abort".into(),
+            disposition: "harness_abort".into(),
+            count_tier: None,
+            death: death.map(str::to_owned),
+            has_counts: false,
+            matched: 0,
+            ours_only: 0,
+            tv_only: 0,
+        };
+        let delta = |a, b| ProbeDelta {
+            probe: "p".into(),
+            a: Presence::Ran(side(a)),
+            b: Presence::Ran(side(b)),
+        };
+        let segv = Some(r#"{"kind":"signal","number":11}"#);
+        let kill = Some(r#"{"kind":"signal","number":9}"#);
+        assert!(delta(segv, kill).moved());
+        assert!(delta(None, segv).moved());
+        assert!(!delta(segv, segv).moved());
+    }
+
+    #[test]
     fn opposing_unmatched_moves_are_mixed_not_cancelled() {
         let side = |o, t| Side {
             selection: Selection::Selected,
@@ -522,6 +556,7 @@ mod tests {
             outcome: "parity".into(),
             disposition: "accepted".into(),
             count_tier: None,
+            death: None,
             has_counts: true,
             matched: 10,
             ours_only: o,

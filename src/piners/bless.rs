@@ -13,7 +13,9 @@
 //! outcomes - so a probe known to exercise an unimplemented feature can pin
 //! `expected = "compile_fail"` and the gate will later catch it silently
 //! starting to compile. The one outcome it refuses is `unevaluated`: an
-//! experiment that was not conducted records nothing about the engine.
+//! experiment that was not conducted records nothing about the engine. A
+//! `harness_abort` is stamped with its death and needs a human attribution
+//! (`--attribute`) wherever the pin does not already hold that very death.
 //!
 //! Unlike reseed, bless runs the harness first (the run pipeline is shared
 //! with [`crate::piners::cmd`]); it then merges dispositions for the
@@ -28,27 +30,49 @@ use crate::error::DevError;
 use crate::output;
 use crate::piners::pins_write;
 use crate::piners::ratchet::{self, LegPin, RatchetKind};
-use crate::piners::registry::{PinnedDisposition, Registry};
+use crate::piners::registry::{Pin, Registry, Verdict, valid_attribution};
 use crate::piners::registry_io;
 use crate::piners::report::{HarnessReport, ProbeLine, ProbeOutcome};
 
 /// What a bless stamps into one probe's pin: its disposition and each
 /// ratchet kind's counts.
 struct Stamp {
-    disposition: PinnedDisposition,
+    verdict: Verdict,
+    /// An abort's attribution; `None` on every other verdict.
+    attribution: Option<String>,
     ratchets: BTreeMap<RatchetKind, Option<LegPin>>,
 }
 
+/// Every reason a bless is refused, each naming its probes.
+#[derive(Default)]
+struct Refusals<'a> {
+    missing: Vec<&'a str>,
+    rejected: Vec<String>,
+    unevaluated: Vec<String>,
+    unpinned: Vec<&'a str>,
+    /// Per ratchet kind, each probe whose parity line does not carry a leg
+    /// its pin holds, with those legs.
+    lost: BTreeMap<RatchetKind, Vec<String>>,
+    /// Aborts that are new to their pin or moved death, with no
+    /// `--attribute`.
+    unattributed: Vec<String>,
+    /// `--attribute` flags that cannot apply: an unselected probe, a line
+    /// that is not an abort, or a text that is not one nonblank line.
+    misattributed: Vec<String>,
+}
+
 /// Why a bless is refused, naming every probe per reason; `None` when it
-/// may proceed. `lost` holds, per ratchet kind, each probe whose parity line
-/// does not carry a leg its pin holds, with those legs.
-fn refusal(
-    missing: &[&str],
-    rejected: &[String],
-    unevaluated: &[String],
-    unpinned: &[&str],
-    lost: &BTreeMap<RatchetKind, Vec<String>>,
-) -> Option<String> {
+/// may proceed.
+fn refusal(r: &Refusals<'_>) -> Option<String> {
+    let Refusals {
+        missing,
+        rejected,
+        unevaluated,
+        unpinned,
+        lost,
+        unattributed,
+        misattributed,
+    } = r;
     let mut why = Vec::new();
     if !missing.is_empty() {
         why.push(format!("no disposition for {}", missing.join(", ")));
@@ -77,7 +101,41 @@ fn refusal(
             ));
         }
     }
+    if !unattributed.is_empty() {
+        why.push(format!(
+            "a harness_abort new to its pin or on a moved death needs \
+             `--attribute PROBE=TEXT` saying what died, for {}",
+            unattributed.join(", ")
+        ));
+    }
+    if !misattributed.is_empty() {
+        why.push(format!(
+            "an --attribute that cannot apply: {}",
+            misattributed.join(", ")
+        ));
+    }
     (!why.is_empty()).then(|| why.join("; "))
+}
+
+/// The `--attribute PROBE=TEXT` flags by probe, split at the first `=` (an
+/// attribution may hold another). Refuses a flag with no `=` or an empty
+/// probe, and a probe named twice; whether each applies is
+/// [`plan_stamps`]'s, once the run has reported.
+pub fn parse_attributions(flags: &[String]) -> Result<BTreeMap<String, String>, DevError> {
+    let mut out = BTreeMap::new();
+    for flag in flags {
+        let Some((probe, text)) = flag.split_once('=').filter(|(p, _)| !p.is_empty()) else {
+            return Err(DevError::Config(format!(
+                "corpus --attribute {flag}: expected PROBE=TEXT"
+            )));
+        };
+        if out.insert(probe.to_owned(), text.to_owned()).is_some() {
+            return Err(DevError::Config(format!(
+                "corpus --attribute: {probe} is attributed twice"
+            )));
+        }
+    }
+    Ok(out)
 }
 
 /// Every selected probe's stamp, validated before anything is mutated, or
@@ -86,6 +144,7 @@ fn plan_stamps<'a>(
     registry: &Registry,
     report: &'a HarnessReport,
     scope_ids: &'a [String],
+    attributions: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<&'a str, Stamp>, DevError> {
     // Each line, with its derived label (for naming a refusal), its
     // validated outcome (the parse-time verdict integrity and the gate
@@ -95,31 +154,58 @@ fn plan_stamps<'a>(
         .iter()
         .map(|p| (p.probe.as_str(), p))
         .collect();
-    let mut missing: Vec<&str> = Vec::new();
-    let mut rejected: Vec<String> = Vec::new();
-    let mut unevaluated: Vec<String> = Vec::new();
-    let mut unpinned: Vec<&str> = Vec::new();
-    let mut lost: BTreeMap<RatchetKind, Vec<String>> = BTreeMap::new();
+    let mut r = Refusals::default();
+    for (id, text) in attributions {
+        if !scope_ids.contains(id) {
+            r.misattributed.push(format!("{id} is not selected"));
+        } else if !valid_attribution(text) {
+            r.misattributed
+                .push(format!("{id}'s text is not one nonblank line"));
+        } else if !matches!(
+            lines.get(id.as_str()).and_then(|l| l.outcome()),
+            Some(ProbeOutcome::Evaluated(Verdict::HarnessAbort(_)))
+        ) {
+            r.misattributed
+                .push(format!("{id} did not report a harness_abort"));
+        }
+    }
     let mut stamps: BTreeMap<&str, Stamp> = BTreeMap::new();
     for id in scope_ids {
         let Some(line) = lines.get(id.as_str()) else {
-            missing.push(id);
+            r.missing.push(id);
             continue;
         };
         match line.outcome() {
-            None => rejected.push(format!("{id} ({})", line.disposition())),
-            Some(ProbeOutcome::Unevaluated(r)) => {
-                unevaluated.push(format!("{id} ({})", r.reason.label()));
+            None => r.rejected.push(format!("{id} ({})", line.disposition())),
+            Some(ProbeOutcome::Unevaluated(refused)) => {
+                r.unevaluated
+                    .push(format!("{id} ({})", refused.reason.label()));
             }
-            Some(_) if !registry.pins.contains_key(id) => unpinned.push(id),
-            Some(ProbeOutcome::Evaluated(disp)) => {
+            Some(_) if !registry.pins.contains_key(id) => r.unpinned.push(id),
+            Some(ProbeOutcome::Evaluated(verdict)) => {
                 let pin = registry.pins.get(id);
+                // An abort keeps its pinned attribution only where the pin
+                // already holds this very verdict; a new abort or a moved
+                // death needs a fresh statement.
+                let attribution = match verdict {
+                    Verdict::HarnessAbort(_) => match attributions.get(id) {
+                        Some(text) => Some(text.clone()),
+                        None if pin.and_then(Pin::expectation) == Some(*verdict) => {
+                            pin.and_then(|p| p.attribution.clone())
+                        }
+                        None => {
+                            r.unattributed.push(format!("{id} ({verdict})"));
+                            continue;
+                        }
+                    },
+                    _ => None,
+                };
                 let mut ratchets = BTreeMap::new();
                 let mut stampable = true;
                 for kind in RatchetKind::ALL {
                     match ratchet::stamp(
                         kind,
-                        disp.is_parity(),
+                        verdict.label().is_parity(),
                         line.census(kind),
                         pin.and_then(|p| p.ratchet(kind)),
                     ) {
@@ -128,7 +214,8 @@ fn plan_stamps<'a>(
                         }
                         Err(legs) => {
                             stampable = false;
-                            lost.entry(kind)
+                            r.lost
+                                .entry(kind)
                                 .or_default()
                                 .push(format!("{id} ({})", legs.join(", ")));
                         }
@@ -138,7 +225,8 @@ fn plan_stamps<'a>(
                     stamps.insert(
                         id,
                         Stamp {
-                            disposition: *disp,
+                            verdict: *verdict,
+                            attribution,
                             ratchets,
                         },
                     );
@@ -146,7 +234,7 @@ fn plan_stamps<'a>(
             }
         }
     }
-    match refusal(&missing, &rejected, &unevaluated, &unpinned, &lost) {
+    match refusal(&r) {
         Some(why) => Err(DevError::Config(format!(
             "corpus --bless: nothing blessed, pins.toml untouched - every selected probe needs \
              a stampable disposition ({why})"
@@ -180,6 +268,7 @@ pub fn apply(
     registry: &mut Registry,
     report: &HarnessReport,
     scope_ids: &[String],
+    attributions: &BTreeMap<String, String>,
 ) -> Result<(), DevError> {
     // Edit the text the run loaded, in place, so hand-written comments
     // survive - and only if it is still what is on disk (see above).
@@ -196,7 +285,7 @@ pub fn apply(
         )));
     }
 
-    let stamps = plan_stamps(registry, report, scope_ids)?;
+    let stamps = plan_stamps(registry, report, scope_ids, attributions)?;
 
     let mut blessed = 0usize;
     let mut changed = 0usize;
@@ -205,14 +294,16 @@ pub fn apply(
             continue; // unreachable: validated above
         };
         blessed += 1;
-        let moved = pin.expected != Some(stamp.disposition)
+        // The whole stamp, so an attribution-only correction is a change.
+        let moved = pin.expectation() != Some(stamp.verdict)
+            || pin.attribution != stamp.attribution
             || stamp
                 .ratchets
                 .iter()
                 .any(|(kind, counts)| pin.ratchet(*kind) != counts.as_ref());
         if moved {
             changed += 1;
-            pin.expected = Some(stamp.disposition);
+            pin.set_expectation(stamp.verdict, stamp.attribution.clone());
             for (kind, counts) in &stamp.ratchets {
                 *pin.ratchet_mut(*kind) = counts.clone();
             }
@@ -267,6 +358,118 @@ mod tests {
 
     fn report(lines: &str) -> HarnessReport {
         crate::piners::report::parse(lines.as_bytes())
+    }
+
+    /// A bless with no `--attribute`.
+    fn apply(
+        pins_path: &Path,
+        registry: &mut Registry,
+        report: &HarnessReport,
+        scope_ids: &[String],
+    ) -> Result<(), DevError> {
+        super::apply(pins_path, registry, report, scope_ids, &BTreeMap::new())
+    }
+
+    fn attributed(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
+    const SEGV: &str =
+        r#"{"probe":"a","outcome":"harness_abort","error":"signal 11","death":{"kind":"signal","number":11}}"#;
+    const OOM: &str =
+        r#"{"probe":"a","outcome":"harness_abort","error":"signal 9","death":{"kind":"signal","number":9}}"#;
+
+    #[test]
+    fn an_abort_needs_an_attribution_to_enter_or_move_and_keeps_it_otherwise() {
+        let dir = crate::test_scratch::scratch("piners_bless", "abort_attribution");
+        let pins_path = dir.join("pins.toml");
+        let mut pins = BTreeMap::new();
+        pins.insert("a".to_owned(), pin(Some("accepted")));
+        let mut reg = registry_of(pins);
+        let ids = ["a".to_owned()];
+        // A new abort without --attribute: refused, nothing written.
+        let err = apply(&pins_path, &mut reg, &report(SEGV), &ids).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("needs `--attribute PROBE=TEXT` saying what died, for a (harness_abort (signal 11))"),
+            "{err}"
+        );
+        assert!(!pins_path.exists());
+        // With one: death and attribution stamped together.
+        let flag = attributed(&[("a", "engine recursion overflows the stack")]);
+        super::apply(&pins_path, &mut reg, &report(SEGV), &ids, &flag).unwrap();
+        let written = std::fs::read_to_string(&pins_path).unwrap();
+        assert!(
+            written.contains("death = { kind = \"signal\", number = 11 }"),
+            "{written}"
+        );
+        let on_disk = registry::parse_pins(&written, &pins_path).unwrap();
+        assert_eq!(
+            on_disk.probes["a"].expectation(),
+            Some(Verdict::HarnessAbort(registry::Death::Signal(11)))
+        );
+        // The same death again keeps the attribution without a flag.
+        apply(&pins_path, &mut reg, &report(SEGV), &ids).unwrap();
+        assert_eq!(std::fs::read_to_string(&pins_path).unwrap(), written);
+        // An attribution-only correction is a change.
+        let fixed = attributed(&[("a", "deep recursion in ta.pivothigh")]);
+        super::apply(&pins_path, &mut reg, &report(SEGV), &ids, &fixed).unwrap();
+        assert!(
+            std::fs::read_to_string(&pins_path)
+                .unwrap()
+                .contains("deep recursion in ta.pivothigh")
+        );
+        // A moved death needs a fresh statement.
+        let err = apply(&pins_path, &mut reg, &report(OOM), &ids).unwrap_err();
+        assert!(err.to_string().contains("for a (harness_abort (signal 9))"), "{err}");
+        // Recovery clears both.
+        let ok = report(r#"{"probe":"a","outcome":"runtime_fail","error":"x"}"#);
+        apply(&pins_path, &mut reg, &ok, &ids).unwrap();
+        let written = std::fs::read_to_string(&pins_path).unwrap();
+        assert!(!written.contains("death"), "{written}");
+        assert!(!written.contains("attribution"), "{written}");
+    }
+
+    #[test]
+    fn attribute_flags_split_at_the_first_equals_and_name_a_probe_once() {
+        let flags = |f: &[&str]| parse_attributions(&f.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());
+        assert_eq!(
+            flags(&["a=x = y", "b=z"]).unwrap(),
+            attributed(&[("a", "x = y"), ("b", "z")])
+        );
+        assert!(flags(&["a"]).unwrap_err().to_string().contains("expected PROBE=TEXT"));
+        assert!(flags(&["=x"]).unwrap_err().to_string().contains("expected PROBE=TEXT"));
+        assert!(
+            flags(&["a=x", "a=y"])
+                .unwrap_err()
+                .to_string()
+                .contains("a is attributed twice")
+        );
+    }
+
+    #[test]
+    fn refuses_an_attribute_that_cannot_apply() {
+        let dir = crate::test_scratch::scratch("piners_bless", "misattributed");
+        let pins_path = dir.join("pins.toml");
+        let mut pins = BTreeMap::new();
+        pins.insert("a".to_owned(), pin(None));
+        let mut reg = registry_of(pins);
+        let ids = ["a".to_owned()];
+        let parity = report(r#"{"probe":"a","outcome":"parity","acceptance":{"tier":"accepted"}}"#);
+        let segv = report(SEGV);
+        for (flags, why) in [
+            (attributed(&[("a", "x")]), "a did not report a harness_abort"),
+            (attributed(&[("zz", "x")]), "zz is not selected"),
+            (attributed(&[("a", "  ")]), "a's text is not one nonblank line"),
+        ] {
+            let rep = if why.starts_with("a did") { &parity } else { &segv };
+            let err = super::apply(&pins_path, &mut reg, rep, &ids, &flags).unwrap_err();
+            assert!(err.to_string().contains(why), "{err}");
+        }
+        assert!(!pins_path.exists());
     }
 
     #[test]

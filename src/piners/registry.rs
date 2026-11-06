@@ -178,6 +178,203 @@ pub(crate) const ALL_PINNED: [PinnedDisposition; 7] = [
     PinnedDisposition::HarnessAbort,
 ];
 
+/// How a probe process that owes a `harness_abort` died, as the piners
+/// supervisor observed it: the closed `death` its abort line carries and a
+/// pinned abort holds. An observation, never a cause - a Rust stack overflow
+/// is usually a `SIGABRT` after the overflow handler, and a supervisor
+/// refusal outranks whatever wait status its cleanup kill left - so holding
+/// one holds the death class, not the explanation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Death {
+    /// Killed by signal `number` (1 to 64), as the reaped status gives it.
+    Signal(i32),
+    /// Exited with nonzero `code` (1 to 255).
+    Exit(i32),
+    /// The reply was unusable, short, or refused by the supervisor.
+    ReplyFailure,
+}
+
+/// The wire and `pins.toml` shape of a [`Death`], before [`Death::from_raw`]
+/// holds it to one closed variant.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDeath {
+    kind: String,
+    #[serde(default)]
+    number: Option<i64>,
+    #[serde(default)]
+    code: Option<i64>,
+}
+
+impl Death {
+    fn from_raw(raw: &RawDeath) -> Result<Self, String> {
+        match (raw.kind.as_str(), raw.number, raw.code) {
+            ("signal", Some(n), None) => i32::try_from(n)
+                .ok()
+                .filter(|n| (1..=64).contains(n))
+                .map(Self::Signal)
+                .ok_or_else(|| format!("a signal death's number {n} is not a signal (1 to 64)")),
+            ("exit", None, Some(c)) => i32::try_from(c)
+                .ok()
+                .filter(|c| (1..=255).contains(c))
+                .map(Self::Exit)
+                .ok_or_else(|| format!("an exit death's code {c} is not a nonzero exit (1 to 255)")),
+            ("reply_failure", None, None) => Ok(Self::ReplyFailure),
+            ("signal", ..) => Err("a signal death carries exactly a `number`".to_owned()),
+            ("exit", ..) => Err("an exit death carries exactly a `code`".to_owned()),
+            ("reply_failure", ..) => Err("a reply_failure death carries no number".to_owned()),
+            (other, ..) => Err(format!(
+                "death kind `{other}` is not one of signal, exit, reply_failure"
+            )),
+        }
+    }
+
+    /// Parse a harness line's `death` value: closed, as [`RawDeath`] and
+    /// [`Death::from_raw`] hold it.
+    pub fn from_json(value: &serde_json::Value) -> Result<Self, String> {
+        // `RawDeath`'s optional fields read a present null as absent, so a
+        // null member is refused here, where presence is still visible.
+        if let Some(object) = value.as_object()
+            && let Some((key, _)) = object.iter().find(|(_, v)| v.is_null())
+        {
+            return Err(format!("its death {value}: `{key}` is null"));
+        }
+        let raw: RawDeath =
+            serde_json::from_value(value.clone()).map_err(|e| format!("its death {value}: {e}"))?;
+        Self::from_raw(&raw).map_err(|e| format!("its death {value}: {e}"))
+    }
+
+    /// The `pins.toml` inline-table spelling.
+    pub fn toml(self) -> String {
+        match self {
+            Self::Signal(n) => format!("{{ kind = \"signal\", number = {n} }}"),
+            Self::Exit(c) => format!("{{ kind = \"exit\", code = {c} }}"),
+            Self::ReplyFailure => "{ kind = \"reply_failure\" }".to_owned(),
+        }
+    }
+
+    /// The compact JSON spelling the run store keeps, the harness's shape.
+    pub fn json(self) -> String {
+        match self {
+            Self::Signal(n) => format!("{{\"kind\":\"signal\",\"number\":{n}}}"),
+            Self::Exit(c) => format!("{{\"kind\":\"exit\",\"code\":{c}}}"),
+            Self::ReplyFailure => "{\"kind\":\"reply_failure\"}".to_owned(),
+        }
+    }
+}
+
+impl std::fmt::Display for Death {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Signal(n) => write!(f, "signal {n}"),
+            Self::Exit(c) => write!(f, "exit {c}"),
+            Self::ReplyFailure => f.write_str("reply failure"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Death {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawDeath::deserialize(deserializer)?;
+        Self::from_raw(&raw).map_err(serde::de::Error::custom)
+    }
+}
+
+/// What the gate compares: an evaluated probe's disposition with the payload
+/// that disposition carries. A [`PinnedDisposition`] is the label vocabulary;
+/// a verdict is the value a pin holds and a line delivers, so a pinned abort
+/// matches only an abort with the same [`Death`], by plain equality, in every
+/// comparison that holds a probe to its pin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    ByteExact,
+    Accepted,
+    ActionableDrift,
+    CountDivergent,
+    CompileFail,
+    RuntimeFail,
+    HarnessAbort(Death),
+}
+
+impl Verdict {
+    /// The verdict a label and its payload stand for: `None` when they do not
+    /// fit, an abort without a death or a death on anything else.
+    pub const fn new(label: PinnedDisposition, death: Option<Death>) -> Option<Self> {
+        Some(match (label, death) {
+            (PinnedDisposition::ByteExact, None) => Self::ByteExact,
+            (PinnedDisposition::Accepted, None) => Self::Accepted,
+            (PinnedDisposition::ActionableDrift, None) => Self::ActionableDrift,
+            (PinnedDisposition::CountDivergent, None) => Self::CountDivergent,
+            (PinnedDisposition::CompileFail, None) => Self::CompileFail,
+            (PinnedDisposition::RuntimeFail, None) => Self::RuntimeFail,
+            (PinnedDisposition::HarnessAbort, Some(d)) => Self::HarnessAbort(d),
+            _ => return None,
+        })
+    }
+
+    /// The label, for classification, storage and the summary.
+    pub const fn label(self) -> PinnedDisposition {
+        match self {
+            Self::ByteExact => PinnedDisposition::ByteExact,
+            Self::Accepted => PinnedDisposition::Accepted,
+            Self::ActionableDrift => PinnedDisposition::ActionableDrift,
+            Self::CountDivergent => PinnedDisposition::CountDivergent,
+            Self::CompileFail => PinnedDisposition::CompileFail,
+            Self::RuntimeFail => PinnedDisposition::RuntimeFail,
+            Self::HarnessAbort(_) => PinnedDisposition::HarnessAbort,
+        }
+    }
+
+    /// The death of an abort.
+    pub const fn death(self) -> Option<Death> {
+        match self {
+            Self::HarnessAbort(d) => Some(d),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for Verdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.death() {
+            Some(d) => write!(f, "{} ({d})", self.label().as_str()),
+            None => f.write_str(self.label().as_str()),
+        }
+    }
+}
+
+/// A selected probe's blessed contract as a run judged it, snapshotted at
+/// run time for the run store: the verdict and, on an abort, the
+/// attribution it was accepted with. Taken before any bless, so history
+/// keeps the statement a later `--attribute` replaces.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Expectation {
+    pub verdict: Option<Verdict>,
+    pub attribution: Option<String>,
+}
+
+impl Expectation {
+    pub fn of(pin: Option<&Pin>) -> Self {
+        Self {
+            verdict: pin.and_then(Pin::expectation),
+            attribution: pin.and_then(|p| p.attribution.clone()),
+        }
+    }
+
+    /// The bare label, as `expected` stores it.
+    pub fn label(&self) -> Option<&'static str> {
+        self.verdict.map(|v| v.label().as_str())
+    }
+
+    /// An abort's death as the run store keeps it.
+    pub fn death_json(&self) -> Option<String> {
+        self.verdict.and_then(Verdict::death).map(Death::json)
+    }
+}
+
 /// One pinned file: a path relative to the corpus root plus its xxh128.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -542,6 +739,17 @@ pub struct Pin {
     /// and the retired labels fail to deserialize, naming why.
     #[serde(default)]
     pub expected: Option<PinnedDisposition>,
+    /// The death a pinned `harness_abort` was blessed on, and the human's
+    /// one-line attribution of it: both present exactly when `expected` is
+    /// `harness_abort` ([`check_pins`]). The death is compared ([`Verdict`]);
+    /// the attribution is the statement the pin was accepted with, since the
+    /// harness cannot say whether the engine or the harness died. Stamped,
+    /// cleared and carried with `expected`. Read through
+    /// [`Pin::expectation`].
+    #[serde(default)]
+    pub death: Option<Death>,
+    #[serde(default)]
+    pub attribution: Option<String>,
     /// The blessed per-leg mismatch counts of the three ratchets
     /// (`ratchet.rs`): the displayed-label census (`entry`, `exit`, both
     /// required), the performance census (`equity`, `scalars`) and the
@@ -584,6 +792,8 @@ impl Pin {
     pub fn content(files: ProbeFiles) -> Self {
         Self {
             expected: None,
+            death: None,
+            attribution: None,
             labels: None,
             performance: None,
             excursions: None,
@@ -603,6 +813,23 @@ impl Pin {
             csv: Some(csv),
             record: None,
         })
+    }
+
+    /// The blessed verdict, `None` when never blessed. [`check_pins`] refuses
+    /// a pin whose `expected` and `death` do not fit, so on a loaded pin
+    /// `None` only ever means unblessed.
+    pub const fn expectation(&self) -> Option<Verdict> {
+        match self.expected {
+            Some(label) => Verdict::new(label, self.death),
+            None => None,
+        }
+    }
+
+    /// Set the blessed contract's verdict and attribution together.
+    pub fn set_expectation(&mut self, verdict: Verdict, attribution: Option<String>) {
+        self.expected = Some(verdict.label());
+        self.death = verdict.death();
+        self.attribution = attribution;
     }
 
     /// The pinned counts of one ratchet kind.
@@ -737,6 +964,39 @@ pub fn parse_pins_unchecked(text: &str, origin: &Path) -> Result<PinsData, DevEr
     toml::from_str(text).map_err(|e| DevError::Config(format!("piners: {}: {e}", origin.display())))
 }
 
+/// Whether an attribution is usable: nonblank and one line.
+pub fn valid_attribution(text: &str) -> bool {
+    !text.trim().is_empty() && !text.contains(['\n', '\r'])
+}
+
+/// Why a pin's abort contract does not hold, `None` when it does: `death`
+/// and `attribution` are present exactly when `expected` is `harness_abort`,
+/// and the attribution is nonblank and one line. A partial pin is refused
+/// rather than read as unblessed.
+fn abort_contract(pin: &Pin) -> Option<String> {
+    let abort = pin.expected == Some(PinnedDisposition::HarnessAbort);
+    match (abort, pin.death.is_some(), pin.attribution.as_deref()) {
+        (true, false, _) => Some(
+            "expects harness_abort without the `death` it was blessed on - re-bless it with \
+             `--attribute`"
+                .to_owned(),
+        ),
+        (true, true, None) => Some(
+            "expects harness_abort without an `attribution` - the harness cannot say whether \
+             the engine or the harness died, so a pinned abort carries the human's statement"
+                .to_owned(),
+        ),
+        (true, true, Some(text)) if !valid_attribution(text) => {
+            Some("its `attribution` is not a nonblank single line".to_owned())
+        }
+        (false, true, _) | (false, _, Some(_)) => Some(
+            "carries a `death` or `attribution`, which only a pin expecting harness_abort holds"
+                .to_owned(),
+        ),
+        _ => None,
+    }
+}
+
 /// The structural rules every pin obeys: at least one oracle, a probe dir
 /// below the corpus root, and every pinned file in that dir under its fixed
 /// name. Returns every violation, one per line. (An unpinnable `expected`
@@ -749,6 +1009,9 @@ fn check_pins(probes: &BTreeMap<String, Pin>) -> Vec<String> {
                 "{id}: pins no oracle - needs `csv` ({CSV_FILE}), `record` ({RECORD_FILE}), \
                  or both"
             ));
+        }
+        if let Some(why) = abort_contract(pin) {
+            problems.push(format!("{id}: {why}"));
         }
         for kind in RatchetKind::ALL {
             if let Some(why) = pin.ratchet(kind).and_then(|p| ratchet::check_pin(kind, p)) {
@@ -1616,7 +1879,7 @@ csv = { path = \"p/old/tv_trades.csv\", xxh128 = \"bb\" }
                  csv = {{ path = \"d/p/tv_trades.csv\", xxh128 = \"bb\" }}\n"
             )
         };
-        for ok in ["accepted", "compile_fail", "harness_abort"] {
+        for ok in ["accepted", "compile_fail"] {
             let data = parse_pins(&text(ok), Path::new("pins.toml")).unwrap();
             assert_eq!(
                 data.probes["p"].expected.map(PinnedDisposition::as_str),
@@ -1630,6 +1893,65 @@ csv = { path = \"p/old/tv_trades.csv\", xxh128 = \"bb\" }
         ] {
             let err = parse_pins(&text(bad), Path::new("pins.toml")).unwrap_err();
             assert!(format!("{err}").contains(says), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_pinned_abort_holds_its_death_and_attribution_and_nothing_else_may() {
+        let text = |extra: &str| {
+            format!(
+                "[probes.p]\n{extra}\
+                 pine = {{ path = \"d/p/strategy.pine\", xxh128 = \"aa\" }}\n\
+                 csv = {{ path = \"d/p/tv_trades.csv\", xxh128 = \"bb\" }}\n"
+            )
+        };
+        let load = |extra: &str| parse_pins(&text(extra), Path::new("pins.toml"));
+        let whole = "expected = \"harness_abort\"\n\
+                     death = { kind = \"signal\", number = 6 }\n\
+                     attribution = \"stack overflow in engine recursion\"\n";
+        let data = load(whole).unwrap();
+        assert_eq!(
+            data.probes["p"].expectation(),
+            Some(Verdict::HarnessAbort(Death::Signal(6)))
+        );
+        for (extra, says) in [
+            ("expected = \"harness_abort\"\n", "without the `death`"),
+            (
+                "expected = \"harness_abort\"\ndeath = { kind = \"reply_failure\" }\n",
+                "without an `attribution`",
+            ),
+            (
+                "expected = \"harness_abort\"\ndeath = { kind = \"exit\", code = 4 }\n\
+                 attribution = \"  \"\n",
+                "not a nonblank single line",
+            ),
+            (
+                "expected = \"accepted\"\ndeath = { kind = \"exit\", code = 4 }\n",
+                "only a pin expecting harness_abort",
+            ),
+            ("attribution = \"x\"\n", "only a pin expecting harness_abort"),
+            (
+                "expected = \"harness_abort\"\ndeath = { kind = \"signal\", number = 0 }\n\
+                 attribution = \"x\"\n",
+                "is not a signal",
+            ),
+            (
+                "expected = \"harness_abort\"\ndeath = { kind = \"exit\", code = 0 }\n\
+                 attribution = \"x\"\n",
+                "is not a nonzero exit",
+            ),
+            (
+                "expected = \"harness_abort\"\ndeath = { kind = \"reply_failure\", number = 1 }\n\
+                 attribution = \"x\"\n",
+                "carries no number",
+            ),
+            (
+                "expected = \"harness_abort\"\ndeath = { kind = \"oom\" }\nattribution = \"x\"\n",
+                "is not one of",
+            ),
+        ] {
+            let err = load(extra).unwrap_err();
+            assert!(format!("{err}").contains(says), "{extra}: {err}");
         }
     }
 

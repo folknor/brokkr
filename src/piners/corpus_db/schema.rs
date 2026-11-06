@@ -34,6 +34,10 @@
 //! row of it was scored - and NULL, not recorded, otherwise),
 //! `defect` (v17: why an unscored row's record was not usable, the record's
 //! own defect or the occurrence that tainted its probe; NULL otherwise),
+//! `expected_death` and `expected_attribution` (v20: a pinned abort's death
+//! as JSON and its attribution, beside the bare `expected` label; NULL on
+//! every other pin and on every older row; `gate_miss` carries the same
+//! pair, so an abort probe that emitted no line keeps them too),
 //! and `raw_source`. `raw_source` is `harness` for a parsed harness line and
 //! `reconstructed` for a row migrated from the typed schema (v4 and older),
 //! whose record was rebuilt from exactly the columns it kept - so on such a
@@ -68,6 +72,8 @@ pub(super) enum Projection {
     NonEmpty(&'static str),
     /// A JSON array, as its JSON text.
     Array(&'static str),
+    /// A JSON object, as its JSON text.
+    Object(&'static str),
     /// A JSON number, as a real.
     Real(&'static str),
     /// A JSON integer, exact and signed - a timestamp, a delta, a bar index.
@@ -108,6 +114,7 @@ impl Projection {
             Projection::Text(p) => when(p, "'text'", at(p)),
             Projection::NonEmpty(p) => when(p, "'text'", format!("NULLIF({}, '')", at(p))),
             Projection::Array(p) => when(p, "'array'", at(p)),
+            Projection::Object(p) => when(p, "'object'", at(p)),
             Projection::Real(p) => when(p, "'integer', 'real'", at(p)),
             // JSON calls one past i64::MAX an integer, but `json_extract`
             // returns it as a REAL no typed read accepts: NULL, not cast.
@@ -140,6 +147,7 @@ impl Projection {
             Projection::Text(_)
             | Projection::NonEmpty(_)
             | Projection::Array(_)
+            | Projection::Object(_)
             | Projection::Failing => "TEXT",
             Projection::Real(_) => "REAL",
             _ => "INTEGER",
@@ -154,7 +162,7 @@ impl Projection {
 /// NULL, `acc_failing` is `'[]'` when absent, and `sig_breaches` is present
 /// exactly when a signature object is. Declared types give the projections
 /// their affinity, so an integral p90 reads back REAL as it was stored.
-const PROJECTIONS: [(&str, Projection); 39] = [
+const PROJECTIONS: [(&str, Projection); 40] = [
     ("outcome", Projection::Text("$.outcome")),
     ("matched", Projection::CountOr0("$.matched")),
     ("ours_only", Projection::CountOr0("$.ours_only")),
@@ -231,6 +239,10 @@ const PROJECTIONS: [(&str, Projection); 39] = [
     ("window_sensitive", Projection::Array("$.window_sensitive")),
     // Why an `unevaluated` probe could not be evaluated (v16).
     ("reason", Projection::Text("$.reason")),
+    // How an aborted probe died, as the line sent it (v20): its JSON text,
+    // NULL on a line that carried none, so a row from before piners sent
+    // it reads unknown, never some death.
+    ("death", Projection::Object("$.death")),
 ];
 
 /// One ratchet census projection: its kind, column name, JSON path, and
@@ -336,6 +348,8 @@ pub(super) fn disposition_ddl(name: &str) -> String {
     performance_gate TEXT,
     expected_excursions TEXT,
     excursion_gate TEXT,
+    expected_death TEXT,
+    expected_attribution TEXT,
 {},
     PRIMARY KEY (run_id, probe)
 );
@@ -517,6 +531,8 @@ CREATE TABLE IF NOT EXISTS gate_miss (
     probe    TEXT NOT NULL,
     expected TEXT,
     actual   TEXT,
+    expected_death TEXT,
+    expected_attribution TEXT,
     PRIMARY KEY (run_id, probe)
 );
 

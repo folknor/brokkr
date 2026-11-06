@@ -2939,12 +2939,24 @@ In depth: `brokkr man nidhogg`."
         /// ratchets). Sibling to `--reseed`: reseed adopts new corpus
         /// content, bless adopts new dispositions. Records reality, including
         /// `compile_fail`/`runtime_fail`/`harness_abort` outcomes, and refuses
-        /// the whole write when any selected probe is `unevaluated`.
+        /// the whole write when any selected probe is `unevaluated`. A
+        /// `harness_abort` is stamped with the death it reported, and one new
+        /// to its pin or on a moved death needs `--attribute`.
         /// Prints `blessed N (changed M)`; review with `git diff pins.toml`.
         /// Combine with `--all`/`--keyword`/`--probe` to scope what is
         /// blessed. Not usable with `--verify-only` or `--reseed`.
         #[arg(long, conflicts_with_all = ["verify_only", "reseed"])]
         bless: bool,
+
+        /// With `--bless`, the attribution a blessed `harness_abort` pins
+        /// beside its death: what the human judges died, since the harness
+        /// cannot say whether the engine or the harness did. PROBE=TEXT,
+        /// split at the first `=`, one nonblank line; repeatable, once per
+        /// probe. Required for an abort new to its pin or on a moved death;
+        /// on an unchanged one it replaces the pinned text. Refused for a
+        /// probe not selected or not reporting an abort.
+        #[arg(long, value_name = "PROBE=TEXT", requires = "bless")]
+        attribute: Vec<String>,
 
         /// Run, aggregate, and report the per-probe expected-disposition gate
         /// diff, but do not fail on it. The harness exit and report
