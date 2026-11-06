@@ -219,18 +219,22 @@ pub(super) fn run_manifest(
     )
 }
 
-/// The `bench` phase: read and compile every `[bench.*]` script, running
-/// none of it. Inert when the config declares no bench. Every bench is
-/// checked, so one run names every broken script.
+/// The `bench` phase: read and compile every `[bench.*]` script and resolve
+/// its global names, running none of it. Inert when the config declares no
+/// bench. Every bench is checked, so one run names every broken script.
 pub(super) fn run_bench(benches: &super::Benches) -> Result<(), DevError> {
     if benches.is_empty() {
         phase_inert(Phase::Bench);
         return Ok(());
     }
-    let findings: Vec<crate::bench::ScriptFinding> = benches
-        .values()
-        .filter_map(|bench| crate::bench::check_script(bench).err())
-        .collect();
+    let mut findings: Vec<crate::bench::ScriptFinding> = Vec::new();
+    for bench in benches.values() {
+        let checked = crate::bench::check_script(bench);
+        if let Some(why) = checked.unchecked {
+            output::warn(&why);
+        }
+        findings.extend(checked.findings);
+    }
     if findings.is_empty() {
         phase_ok(
             Phase::Bench.label(),
@@ -240,7 +244,7 @@ pub(super) fn run_bench(benches: &super::Benches) -> Result<(), DevError> {
     }
     report_findings(
         "bench",
-        "bench scripts failed to compile",
+        "bench scripts failed the check",
         &findings,
         ToString::to_string,
     )

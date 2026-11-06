@@ -70,10 +70,12 @@ owo-colors = "4"
 elivagar = "0.1.0"
 protohoggr = "0.5.0"
 # Script benches (`[bench.*]` in brokkr.toml) are Lua run by dellingr, a pure
-# Rust VM; `brokkr check` compiles every bench's script with it. Reached only
+# Rust VM; `brokkr check` compiles every bench's script with it and resolves
+# the script's global names from the ones dellingr records while compiling it.
+# Reached only
 # through src/bench/lua.rs (the seam), since brokkr's own `dellingr` module
 # shares the name.
-dellingr = "0.7.0"
+dellingr = "0.7.1"
 # `brokkr regress`: the three-pass engine fans the raw/canonical/detail passes
 # over blob pairs, and the matcher/grouping code is keyed by hash maps hot enough
 # that SipHash showed up in the original. Both were elivagar's dependencies

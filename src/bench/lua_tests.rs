@@ -211,23 +211,27 @@ fn reason(sample: &Sample) -> &str {
 fn a_valid_chunk_compiles_and_runs_nothing() {
     // `error()` at top level would fail if the chunk ran.
     assert_eq!(
-        compile(b"function bench()\n  return nil\nend\nerror('ran')\n", None),
-        Ok(())
+        check(b"function bench()\n  return nil\nend\nerror('ran')\n", None),
+        Ok(NameCheck::default())
     );
 }
 
 #[test]
 fn a_syntax_error_names_its_line() {
-    let err = compile(b"function bench()\n  return (\nend\n", None).unwrap_err();
+    let err = check(b"function bench()\n  return (\nend\n", None).unwrap_err();
     assert_eq!(err.line, 3, "{err}");
     assert!(!err.message.is_empty());
 }
 
 #[test]
-fn a_misspelt_builtin_still_compiles() {
-    assert_eq!(
-        compile(b"function bench() return binray('x') end\n", None),
-        Ok(())
+fn a_misspelt_builtin_is_a_problem_at_its_line() {
+    let checked = check(b"function bench()\n  return binray('x')\nend\n", None).unwrap();
+    assert_eq!(checked.problems.len(), 1, "{checked:?}");
+    assert_eq!(checked.problems[0].line, 2);
+    assert!(
+        checked.problems[0]
+            .message
+            .starts_with("binray is not defined")
     );
 }
 
@@ -249,7 +253,7 @@ fn mapped_lines() -> crate::bench::script_lines::LineMap {
 #[test]
 fn errors_name_the_config_files_lines() {
     let lines = mapped_lines();
-    let err = compile(b"function bench()\n  return (\nend\n", Some(&lines)).unwrap_err();
+    let err = check(b"function bench()\n  return (\nend\n", Some(&lines)).unwrap_err();
     assert_eq!(err.line, 5, "{err}");
 
     let source = "function bench()\n  local x = nil\n  x()\nend\n";

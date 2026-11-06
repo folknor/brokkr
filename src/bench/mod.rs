@@ -107,35 +107,77 @@ impl InlineLines {
     }
 }
 
-/// Read and compile one bench's script. An inline script's line numbers are
-/// its config file's when they can be mapped, else the string's own.
-pub(crate) fn check_script(bench: &Bench) -> Result<(), ScriptFinding> {
-    let finding = |file: PathBuf, problem: String| ScriptFinding {
+/// What the static check found in one bench's script.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct ScriptCheck {
+    /// Every problem: a compile failure alone, or every unresolved name.
+    pub(crate) findings: Vec<ScriptFinding>,
+    /// Set when the script reads `_G`, so its names went unchecked: why, as
+    /// a line for the operator.
+    pub(crate) unchecked: Option<String>,
+}
+
+/// Read and compile one bench's script and resolve its global names
+/// (`lua::check`). An inline script's line numbers are its config file's
+/// when they can be mapped, else the string's own.
+pub(crate) fn check_script(bench: &Bench) -> ScriptCheck {
+    let finding = |file: &Path, problem: String| ScriptFinding {
         bench: bench.name.clone(),
-        file,
+        file: file.to_path_buf(),
         problem,
     };
-    match &bench.script {
+    let (file, checked, inline): (&Path, _, Option<InlineLines>) = match &bench.script {
         BenchScript::Inline {
             source,
             declared_in,
         } => {
             let lines = InlineLines::of(&bench.name, source, declared_in);
-            lua::compile(source.as_bytes(), lines.lines.as_ref())
-                .map_err(|e| finding(declared_in.clone(), lines.problem(&e)))
+            let checked = lua::check(source.as_bytes(), lines.lines.as_ref());
+            (declared_in, checked, Some(lines))
         }
-        BenchScript::File { path, declared_in } => {
-            let source = std::fs::read(path).map_err(|e| {
-                finding(
-                    path.clone(),
-                    format!(
-                        "script_file (set in {}) cannot be read: {e}",
-                        declared_in.display()
-                    ),
-                )
-            })?;
-            lua::compile(&source, None).map_err(|e| finding(path.clone(), e.to_string()))
-        }
+        BenchScript::File { path, declared_in } => match std::fs::read(path) {
+            Ok(source) => (path, lua::check(&source, None), None),
+            Err(e) => {
+                return ScriptCheck {
+                    findings: vec![finding(
+                        path,
+                        format!(
+                            "script_file (set in {}) cannot be read: {e}",
+                            declared_in.display()
+                        ),
+                    )],
+                    unchecked: None,
+                };
+            }
+        },
+    };
+    let describe = |e: &lua::CompileError| match &inline {
+        Some(lines) => lines.problem(e),
+        None => e.to_string(),
+    };
+    match checked {
+        Err(error) => ScriptCheck {
+            findings: vec![finding(file, describe(&error))],
+            unchecked: None,
+        },
+        Ok(names) => ScriptCheck {
+            findings: names
+                .problems
+                .iter()
+                .map(|problem| finding(file, describe(problem)))
+                .collect(),
+            // Worded as a finding is, so an inline script's line says whose
+            // it is the same way.
+            unchecked: names.unchecked_at.map(|line| {
+                let why = lua::CompileError {
+                    line,
+                    message: "reads _G, so its global names are not checked: a script \
+                              holding the global table can define any name"
+                        .to_owned(),
+                };
+                finding(file, describe(&why)).to_string()
+            }),
+        },
     }
 }
 
@@ -159,13 +201,22 @@ mod tests {
         }
     }
 
-    #[test]
-    fn an_inline_failure_names_the_config_file_and_the_script_line() {
-        let finding = check_script(&bench(BenchScript::Inline {
-            source: "x = 1\nfunction bench(\n".into(),
+    /// The one finding a script that should fail exactly once produces.
+    fn only(checked: ScriptCheck) -> ScriptFinding {
+        assert_eq!(checked.findings.len(), 1, "{:?}", checked.findings);
+        checked.findings.into_iter().next().unwrap()
+    }
+
+    fn inline(source: &str) -> ScriptCheck {
+        check_script(&bench(BenchScript::Inline {
+            source: source.into(),
             declared_in: PathBuf::from("brokkr.toml"),
         }))
-        .unwrap_err();
+    }
+
+    #[test]
+    fn an_inline_failure_names_the_config_file_and_the_script_line() {
+        let finding = only(inline("x = 1\nfunction bench(\n"));
         let shown = finding.to_string();
         assert!(
             shown.starts_with("[bench.cat] brokkr.toml: inline script, line "),
@@ -189,15 +240,13 @@ mod tests {
             source: source.into(),
             declared_in: file.clone(),
         };
-        let shown = check_script(&bench(inline.clone()))
-            .unwrap_err()
-            .to_string();
+        let shown = only(check_script(&bench(inline.clone()))).to_string();
         assert!(
             shown.starts_with(&format!("[bench.cat] {}: line 7: ", file.display())),
             "{shown}"
         );
         std::fs::write(&file, "[bench.cat]\nscript = \"edited\"\n").unwrap();
-        let shown = check_script(&bench(inline)).unwrap_err().to_string();
+        let shown = only(check_script(&bench(inline))).to_string();
         assert!(shown.contains("inline script, line 3: "), "{shown}");
         assert!(shown.contains("has changed since it was loaded"), "{shown}");
     }
@@ -205,11 +254,10 @@ mod tests {
     #[test]
     fn a_missing_script_file_is_a_finding_naming_where_it_was_set() {
         let dir = crate::test_scratch::scratch("bench_check", "missing");
-        let finding = check_script(&bench(BenchScript::File {
+        let finding = only(check_script(&bench(BenchScript::File {
             path: dir.join("cat.lua"),
             declared_in: dir.join("benches.toml"),
-        }))
-        .unwrap_err();
+        })));
         assert_eq!(finding.file, dir.join("cat.lua"));
         assert!(
             finding.problem.contains("benches.toml"),
@@ -218,10 +266,72 @@ mod tests {
         );
 
         std::fs::write(dir.join("ok.lua"), "function bench() end\n").unwrap();
-        check_script(&bench(BenchScript::File {
+        let checked = check_script(&bench(BenchScript::File {
             path: dir.join("ok.lua"),
             declared_in: dir.join("benches.toml"),
-        }))
-        .unwrap();
+        }));
+        assert_eq!(checked, ScriptCheck::default());
+    }
+
+    #[test]
+    fn every_unresolved_name_is_a_finding_at_its_first_read() {
+        let checked = inline(
+            "local n = 1\nfunction bench()\n  binray_with({}, \"x\")\n  helpr()\n  helpr()\nend\n",
+        );
+        let shown: Vec<String> = checked.findings.iter().map(|f| f.problem.clone()).collect();
+        assert_eq!(shown.len(), 2, "{shown:?}");
+        assert!(
+            shown[0].contains("line 3: binray_with is not defined"),
+            "{shown:?}"
+        );
+        assert!(
+            shown[1].contains("line 4: helpr is not defined"),
+            "{shown:?}"
+        );
+    }
+
+    #[test]
+    fn builtins_library_globals_and_assigned_names_resolve() {
+        let checked = inline(
+            "helper = function() return 1 end\nfunction bench(params)\n  \
+             local r = binary_with({}, \"x\")\n  print(tostring(error), json.encode({}), \
+             string.rep(\"a\", 2), record, config, helper())\n  late()\nend\n\
+             function late() end\n",
+        );
+        assert_eq!(checked, ScriptCheck::default());
+    }
+
+    #[test]
+    fn a_script_that_never_assigns_bench_is_a_finding() {
+        let finding = only(inline("local function bench() end\n"));
+        assert!(
+            finding.problem.contains("never assigns bench"),
+            "{}",
+            finding.problem
+        );
+    }
+
+    #[test]
+    fn reading_the_global_table_leaves_names_unchecked_and_says_so() {
+        let checked = inline("_G[\"bench\"] = function() undefined() end\n");
+        assert!(checked.findings.is_empty(), "{:?}", checked.findings);
+        // brokkr.toml does not exist, so the lines are the string's, and the
+        // warning says so as a finding would.
+        let why = checked.unchecked.unwrap();
+        assert!(why.contains("inline script, line 1: reads _G"), "{why}");
+        assert!(why.contains("lines count from the script string"), "{why}");
+    }
+
+    #[test]
+    fn a_name_is_reported_at_its_first_line_in_the_source() {
+        // The walk lists the main chunk's `local unused = typo` (line 4)
+        // before bench's body (line 2).
+        let checked = inline("function bench()\n  typo()\nend\nlocal unused = typo\n");
+        let finding = only(checked);
+        assert!(
+            finding.problem.contains("line 2: typo"),
+            "{}",
+            finding.problem
+        );
     }
 }

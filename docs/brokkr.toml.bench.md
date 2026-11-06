@@ -7,7 +7,7 @@ dellingr, a pure Rust Lua VM linked into brokkr; they are dellingr Lua, not Lua
 
 What brokkr does with them: it loads and validates every table below when it
 reads the config, `brokkr check`'s `bench` phase compiles every bench's script
-without running any of it, `brokkr bench NAME` runs one and stores the run
+and resolves its global names without running any of it, `brokkr bench NAME` runs one and stores the run
 (`brokkr man bench`), and `brokkr results` reads the stored runs (`brokkr man
 results`, Script benches).
 
@@ -21,16 +21,37 @@ it fails `brokkr check`.
 ## Validating a script
 
 Run `brokkr check`. Its `bench` phase reads every bench's script (the inline
-string, or the `script_file` from disk) and compiles it with dellingr, running
-none of it, and the config load before it validates every bench table. One run
-names every broken script, each with the bench, the file to open, and the
-line; an inline script's line is the config file's (Inline line numbers).
+string, or the `script_file` from disk), compiles it with dellingr and
+resolves its global names, running none of it, and the config load before it
+validates every bench table. One run names every problem in every script,
+each with the bench, the file to open, and the line; an inline script's line
+is the config file's (Inline line numbers).
 
-That is a compile, not a lint: it catches what the parser rejects - a syntax
-error, an unreadable or missing file - and nothing else. A misspelt builtin, a
-wrong option key or a nil access compiles, and fails only when an iteration
-runs it, so the way to try a script's behaviour is `brokkr bench NAME` itself,
-on the smallest params it takes. There is no dry run.
+What it catches:
+
+- what the parser rejects: a syntax error, an unreadable or missing file;
+- every global the script reads that nothing defines, such as a misspelt
+  builtin (`binray_with`) or helper, named once at its first read, whether or
+  not that code would ever run;
+- a script that never assigns `bench` (a `local function bench` does not).
+
+A name is defined when the State a sample runs in already holds it (brokkr's
+builtins, `json`, `record`, and dellingr's library) or when the script
+assigns it anywhere, at the top level or inside a function. A script's
+globals are closed: nothing else can supply one, so any other name is nil in
+every run. Assigned anywhere is all it asks, so a helper read before the line
+that sets it still passes, and fails when it runs.
+
+A script that reads `_G` is the exception: holding the global table, it can
+define any name through it (`_G[k] = v`, `rawset(_G, k, v)`), so its names
+are not checked at all, and the phase warns which bench and line made it so.
+The compile still is.
+
+Not caught: a misspelt field (`json.encdoe`, `params.thread`), a wrong
+`binary_with` option key, a wrong argument type, a nil value. Those fail only
+when an iteration runs them, so the way to try a script's behaviour is
+`brokkr bench NAME` itself, on the smallest params it takes. There is no dry
+run.
 
 The phase is inert in a config without benches, is skipped by name as `bench`
 in a partial profile's `skip_phases`, and runs on a markdown-only tree too: a

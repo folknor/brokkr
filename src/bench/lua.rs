@@ -4,8 +4,8 @@
 //! textlint rule keeps every other file off it, and a change in the crate's
 //! API touches this file alone.
 //!
-//! Two uses: [`compile`] for `brokkr check`'s `bench` phase, which runs
-//! nothing, and [`run_sample`], one iteration of a script bench in a fresh
+//! Two uses: [`check`] for `brokkr check`'s `bench` phase, which compiles a
+//! script and resolves its global names, running nothing, and [`run_sample`], one iteration of a script bench in a fresh
 //! State. Every builtin the script sees is marshalled here and decided by the
 //! runner through [`Host`], whose types carry no dellingr value: Lua strings
 //! cross as bytes, text fields are checked from those exact bytes, and a
@@ -63,10 +63,141 @@ impl std::fmt::Display for CompileError {
     }
 }
 
-/// Compile `source` without running any of it. Only what the parser and
-/// code generator reject is caught: a call to a misspelt builtin compiles.
-pub(crate) fn compile(source: &[u8], lines: Option<&LineMap>) -> Result<(), CompileError> {
-    load_script(source, None, lines.cloned()).map(|_| ())
+/// What [`check`] found in a script that compiles.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct NameCheck {
+    /// Each global the script reads but nothing defines, once per name at
+    /// its first read, and a script that never assigns `bench`.
+    pub(crate) problems: Vec<CompileError>,
+    /// The line of the script's first read of `_G`, when it reads it: then
+    /// its names were not checked, since a script holding the global table
+    /// can define any name through it.
+    pub(crate) unchecked_at: Option<u32>,
+}
+
+/// Compile `source` without running any of it, then resolve its global
+/// names. A script's environment is closed: what a fresh State holds (the
+/// builtins and dellingr's library, set up as a sample sets them up) plus
+/// what the script assigns. So a bare read of any other name is nil in every
+/// run, and is a typo or dead code either way. A name assigned anywhere
+/// counts as defined, whether or not it is set by the time it is read. The
+/// one way to define a name without assigning it is through `_G`, the only
+/// door to the global table, so a script that reads `_G` is not checked.
+pub(crate) fn check(source: &[u8], lines: Option<&LineMap>) -> Result<NameCheck, CompileError> {
+    let script = load_script(source, None, lines.cloned())?;
+    let lines = script.lines.as_deref();
+    // In lexical source order, so a name's first read is its first in the
+    // script.
+    let accesses = script.program.globals();
+    let reads: Vec<_> = accesses
+        .iter()
+        .filter(|a| a.kind == ::dellingr::AccessKind::Read)
+        .collect();
+    if let Some(global) = reads.iter().find(|a| &*a.name == b"_G") {
+        return Ok(NameCheck {
+            problems: Vec::new(),
+            unchecked_at: Some(mapped(lines, global.line)),
+        });
+    }
+    let assigned: std::collections::HashSet<&[u8]> = accesses
+        .iter()
+        .filter(|a| a.kind == ::dellingr::AccessKind::Write)
+        .map(|a| &*a.name)
+        .collect();
+    let mut probe = match fresh_state::<Probe>(None) {
+        Ok((state, _, _)) => state,
+        Err(error) => {
+            return Err(CompileError {
+                line: 0,
+                message: format!("cannot set up the Lua state its names resolve in: {error}"),
+            });
+        }
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut problems = Vec::new();
+    for read in reads {
+        let name: &[u8] = &read.name;
+        if assigned.contains(name) || !seen.insert(name) {
+            continue;
+        }
+        if !provided(&mut probe, name) {
+            problems.push(CompileError {
+                line: mapped(lines, read.line),
+                message: format!(
+                    "{} is not defined: no builtin or library global has that name, and the \
+                     script never assigns it",
+                    String::from_utf8_lossy(name)
+                ),
+            });
+        }
+    }
+    if !assigned.contains(&b"bench"[..]) {
+        problems.push(CompileError {
+            line: 0,
+            message: "the script never assigns bench: define function bench() at its top level"
+                .to_owned(),
+        });
+    }
+    Ok(NameCheck {
+        problems,
+        unchecked_at: None,
+    })
+}
+
+/// Whether a fresh State holds a non-nil global `name`.
+fn provided(state: &mut State, name: &[u8]) -> bool {
+    let Ok(name) = std::str::from_utf8(name) else {
+        return false;
+    };
+    if state.get_global(name).is_err() {
+        return false;
+    }
+    let held = state.typ(-1) != LuaType::Nil;
+    // A failed pop leaves the probe one value deeper, which no later lookup
+    // reads past: the answer stands either way.
+    match state.pop(1) {
+        Ok(()) | Err(_) => held,
+    }
+}
+
+/// The host a name check's State is built for: it runs nothing, so no
+/// builtin is ever called on it.
+enum Probe {}
+
+impl Host for Probe {
+    fn stop(&mut self) -> Result<(), Abort> {
+        match *self {}
+    }
+    fn stop_requested() -> bool {
+        false
+    }
+    fn begin_block(&mut self, _at: Instant) {
+        match *self {}
+    }
+    fn binary(&mut self, _: Vec<Word>, _: CallOptions) -> Result<CallOutcome, Abort> {
+        match *self {}
+    }
+    fn since(&mut self, _: &str) -> Result<bool, Abort> {
+        match *self {}
+    }
+    fn output(&mut self, _: &str) -> Result<HandleRef, Abort> {
+        match *self {}
+    }
+    fn scratch(&mut self, _: &str) -> Result<HandleRef, Abort> {
+        match *self {}
+    }
+    fn config(&mut self) -> Result<Arc<Value>, Abort> {
+        match *self {}
+    }
+    fn read(&mut self, _: usize) -> Result<Vec<u8>, Abort> {
+        match *self {}
+    }
+    fn write(&mut self, _: usize, _: &[u8]) -> Result<(), Abort> {
+        match *self {}
+    }
+    fn filesize(&mut self, _: usize) -> Result<u64, Abort> {
+        match *self {}
+    }
 }
 
 /// A compiled script, run unchanged in every iteration of a run, with the
@@ -274,12 +405,8 @@ struct Marks {
 /// extracted. Returns the host for the next sample.
 pub(crate) fn run_sample<H: Host>(script: &Script, args: &Args, host: H) -> (Sample, H) {
     let interrupt = ::dellingr::Interrupt::new();
-    let mut state = State::builder()
-        .callbacks(Box::new(Console))
-        .interrupt(interrupt.clone())
-        .build();
-    let (ok, marks) = match install::<H>(&mut state) {
-        Ok(installed) => installed,
+    let (mut state, ok, marks) = match fresh_state::<H>(Some(interrupt.clone())) {
+        Ok(fresh) => fresh,
         Err(error) => {
             return (
                 failed(format!("cannot set up the Lua state: {error}"), None),
@@ -303,6 +430,20 @@ pub(crate) fn run_sample<H: Host>(script: &Script, args: &Args, host: H) -> (Sam
         // The context is set above and only taken here.
         None => unreachable!("the sample's host context went missing"),
     }
+}
+
+/// A State as every sample starts in, its builtins installed: the one setup
+/// a sample and a name check share, so they resolve the same names.
+fn fresh_state<H: Host>(
+    interrupt: Option<::dellingr::Interrupt>,
+) -> Result<(State, RustFnHandle, Marks), Error> {
+    let mut builder = State::builder().callbacks(Box::new(Console));
+    if let Some(interrupt) = interrupt {
+        builder = builder.interrupt(interrupt);
+    }
+    let mut state = builder.build();
+    let (ok, marks) = install::<H>(&mut state)?;
+    Ok((state, ok, marks))
 }
 
 /// How often the watcher asks the host for a pending stop.
@@ -1107,7 +1248,10 @@ fn stop_marker_at(state: &mut State, idx: isize) -> Result<String, Error> {
     if state.typ(idx) != LuaType::String {
         return Err(raise_failed(
             state,
-            format!("{what} is a {}: expected a marker name", state.typ(idx).as_str()),
+            format!(
+                "{what} is a {}: expected a marker name",
+                state.typ(idx).as_str()
+            ),
         ));
     }
     let marker = text_at(state, idx, what)?;
@@ -1115,7 +1259,9 @@ fn stop_marker_at(state: &mut State, idx: isize) -> Result<String, Error> {
     // counter or call-tag syntax, never a process-stream marker.
     let exact = marker.len() > "_END".len()
         && marker.ends_with("_END")
-        && marker.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+        && marker
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_');
     if !exact {
         return Err(raise_failed(
             state,

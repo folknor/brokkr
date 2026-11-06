@@ -4,8 +4,9 @@ Run a script bench, a `[bench.NAME]` table in brokkr.toml (`brokkr man
 bench-config`), and store the run in the per-user bench store, which `brokkr
 results` reads (`brokkr man results`, Script benches): the local file, or
 the results server your user-wide config names (`results_server`, `brokkr
-man config`). To check a script compiles without running it, run `brokkr
-check` (`brokkr man bench-config validating-a-script`).
+man config`). To check a script without running it (its syntax and that every
+global it reads is defined), run `brokkr check` (`brokkr man bench-config
+validating-a-script`).
 
 ```
 brokkr bench                          # the benches this project declares

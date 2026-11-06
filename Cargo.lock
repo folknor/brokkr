@@ -92,9 +92,9 @@ dependencies = [
 
 [[package]]
 name = "anstyle-progress"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "082ebe8b7607a68881fbcccc7b3a3e784aa58593ed4261df0679a803fdb80853"
+checksum = "e60b235e95c3a77be9c8854d91c048cbce276beb24df2b769970cbfd75540f69"
 
 [[package]]
 name = "anstyle-query"
@@ -417,9 +417,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.11.0"
+version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "375989decec1a0fa424442bed520fa12ede43a48475ce8c7417d2c69b32b5f6b"
+checksum = "4ff2a8126fff0f8c839080d619675a585e61720bb12d2baceae45769fd66f155"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -692,9 +692,9 @@ checksum = "ffe7ed1d93f4553003e20b629abe9085e1e81b1429520f897f8f8860bc6dfc21"
 
 [[package]]
 name = "dellingr"
-version = "0.7.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6dee15e61eb3fdb70c3c8dfe2e179c36fde1e677e2c708ad99885bb73c766f6a"
+checksum = "e26fc0ad8b893c441eea96b37e7cddd4f39d1f738f4216095ee5f18ea0fbc13d"
 dependencies = [
  "foldhash 0.2.0",
  "hashbrown 0.17.1",
