@@ -18,6 +18,25 @@ resolved config and happen when `brokkr bench` binds the bench's params,
 before anything is built. A broken *script* does not block other commands:
 it fails `brokkr check`.
 
+## Validating a script
+
+Run `brokkr check`. Its `bench` phase reads every bench's script (the inline
+string, or the `script_file` from disk) and compiles it with dellingr, running
+none of it, and the config load before it validates every bench table. One run
+names every broken script, each with the bench, the file to open, and the
+line; an inline script's line is the config file's (Inline line numbers).
+
+That is a compile, not a lint: it catches what the parser rejects - a syntax
+error, an unreadable or missing file - and nothing else. A misspelt builtin, a
+wrong option key or a nil access compiles, and fails only when an iteration
+runs it, so the way to try a script's behaviour is `brokkr bench NAME` itself,
+on the smallest params it takes. There is no dry run.
+
+The phase is inert in a config without benches, is skipped by name as `bench`
+in a partial profile's `skip_phases`, and runs on a markdown-only tree too: a
+`script_file` beside an included config file may live outside the checkout,
+where the tree's own status cannot vouch for it.
+
 ## `[bench.NAME]`
 
 ```toml
@@ -284,17 +303,6 @@ literally named one of them is written `[host.bench]`, `[host.bench_params]`
 or `[host.data]`. The user-wide `brokkr.toml` cannot hold any of the three:
 benches belong to one project.
 
-## The `bench` check phase
-
-`brokkr check` reads every bench's script (the inline string, or the
-`script_file` from disk) and compiles it with dellingr, running none of it.
-That catches what the parser rejects - a syntax error, an unreadable or
-missing file - and nothing else: a call to a misspelt function compiles.
-Every bench is checked, so one run names every broken script, each with the
-bench, the file to open, and the line. An inline script's line is the config
-file's (Inline line numbers, below). Running benches on a fixture is a
-project's option, as a `[[script_check]]`.
-
 ## Inline line numbers
 
 An inline `script` is a TOML string, so its Lua lines are not the file's:
@@ -317,8 +325,3 @@ phase, a compile failure when `brokkr bench` reads the script, and every
 failure of an iteration, a Lua error's traceback included, under the config
 file's path as the chunk's name (`/p/brokkr.toml:14: attempt to call a nil
 value`). A `script_file` is its own file, so its lines need no map.
-
-The phase is inert in a config without benches, is skipped by name as `bench`
-in a partial profile's `skip_phases`, and runs on a markdown-only tree too: a
-`script_file` beside an included config file may live outside the checkout,
-where the tree's own status cannot vouch for it.
