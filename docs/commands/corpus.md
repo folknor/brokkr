@@ -150,7 +150,6 @@ Probes are pinned in the registry (`registry_dir`), two file kinds:
 
   [probe_config."piners/some-tvr-capture"]
   feed = "eth-15m-live"          # this capture was taken on another feed
-  bar_budget = 21000
   ohlcv_start_ms = 1772323200000
 
   [probes.magnifier-tick-dist-endpoints-01]
@@ -217,7 +216,8 @@ Probes are pinned in the registry (`registry_dir`), two file kinds:
   **`[probe_config."<prefix>"]` - how each probe runs.** Four optional
   fields, each flowing into the probe's manifest entry: `feed` (the `[feeds]`
   group its oracle was taken against - every probe must resolve one),
-  `bar_budget` (the harness's scan cap, default 10,000), the execution start
+  `bar_budget` (the harness's scan cap on a CSV-oracle probe, default
+  10,000; a record sets its own probe's right edge), the execution start
   and `tv_trades_csv_tz` (the CSV oracle's timezone - the harness accepts
   `utc`, `utc_plus_N`, `utc_minus_N` or an IANA zone without DST, since it
   applies one constant offset).
@@ -240,7 +240,7 @@ Probes are pinned in the registry (`registry_dir`), two file kinds:
   `capture_origin_ms` equal to it, in manifest version 4.
   A key is a directory prefix relative to `corpus_root`, and a probe takes
   **each field independently** from the longest prefix covering its
-  directory that sets it: a root declares the shared feed and budget, one
+  directory that sets it: a root declares the shared feed, one
   probe dir beneath it declares only what it differs by. Coverage is by
   whole path components (`piners/a` does not cover `piners/ab`) and is
   structural - it reads the pinned and `[pending]` paths, never the
@@ -273,13 +273,18 @@ Probes are pinned in the registry (`registry_dir`), two file kinds:
     explicit value where no ancestor sets one is not a restatement, even if
     it equals the harness default: absent means "the harness default",
     whatever that becomes;
-  - no probe with a `record` resolves a `tv_trades_csv_tz` (the harness then
-    never reads the CSV, so the value is dead). There is no way to clear an
-    inherited field, so declare a timezone only on prefixes covering CSV
-    probes alone. A pending probe's oracle kind is unknown until it is
-    pinned, so for it this rule is enforced by the reseed that pins it.
+  - no probe with a `record`, a dual-oracle one included, resolves a
+    `tv_trades_csv_tz` (the harness then never reads the CSV) or a
+    `bar_budget` (the record sets the right edge, so the harness reads no
+    budget): either value would be dead. The rule is per probe, so a
+    declaration that also governs a CSV probe is still refused when it
+    reaches a record probe. There is no way to clear an inherited field, so
+    declare a timezone or a budget only on prefixes covering CSV probes
+    alone. A pending probe's oracle kind is unknown until it is pinned, so
+    for it this rule is enforced by the reseed that pins it, which names the
+    declaration to edit.
 
-  A prefix-level `bar_budget` can move many probes in a one-line diff. That
+  A prefix-level `bar_budget` can move many CSV probes in a one-line diff. That
   weakens only the review surface, not the gate: every run re-validates each
   selected probe's `expected` against what it actually did.
 

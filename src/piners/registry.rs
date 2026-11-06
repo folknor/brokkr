@@ -364,8 +364,10 @@ pub struct ProbeConfig {
     /// against. Every pinned probe must resolve one.
     #[serde(default)]
     pub feed: Option<String>,
-    /// The harness's scan bar cap (harness default 10,000). Changing it
-    /// changes the disposition contract, which the gate then enforces.
+    /// The harness's scan bar cap on a CSV-oracle probe (harness default
+    /// 10,000). Changing it changes the disposition contract, which the gate
+    /// then enforces. A probe with a `record` may not resolve one: the record
+    /// sets its right edge, so the harness never reads the budget.
     #[serde(default)]
     pub bar_budget: Option<u64>,
     /// The execution start (epoch ms). Outranks an `inputs.json` start.
@@ -393,6 +395,14 @@ const CONFIG_FIELDS: [&str; 4] = ["feed", "bar_budget", "ohlcv_start_ms", "tv_tr
 
 /// The start slot's index in [`CONFIG_FIELDS`].
 const START_SLOT: usize = 2;
+
+/// Whether the harness ignores slot `i` (an index into [`CONFIG_FIELDS`]) on
+/// a probe with a `record`, so no such probe may resolve it. A record fixes
+/// the right edge and is the only oracle read, which kills the bar budget and
+/// the CSV timezone; the feed and the start still choose what executes.
+const fn dead_beside_record(i: usize) -> bool {
+    matches!(i, 1 | 3)
+}
 
 /// One field's declared value, comparable across the field types.
 #[derive(Debug, PartialEq, Eq)]
@@ -939,9 +949,14 @@ pub fn check_pending_location(
 /// - No declared field equals what the prefix would inherit from its
 ///   ancestors. A redundant copy is not harmless: when the ancestor changes,
 ///   the copy silently keeps the old value.
-/// - No probe with a `record` resolves a `tv_trades_csv_tz`: the harness then
-///   judges against the record and never reads the CSV, so the value is dead.
-///   A pending probe's oracle kind is unknown until it is pinned, so this one
+/// - No probe with a `record` resolves a field dead beside one
+///   ([`dead_beside_record`]): a `tv_trades_csv_tz`, since the harness then
+///   judges against the record and never reads the CSV, or a `bar_budget`,
+///   since the record sets the right edge. This is per probe, apart from the
+///   governs rule: a declaration that also governs a CSV probe still may not
+///   reach a record probe, and nothing clears an inherited field, so such a
+///   field belongs only on prefixes covering CSV-oracle probes alone. A
+///   pending probe's oracle kind is unknown until it is pinned, so this one
 ///   is settled by the reseed that pins it (whose output passes through here).
 ///
 /// Whether every probe resolves a feed, and whether that feed exists, is
@@ -1011,14 +1026,22 @@ fn check_probe_config(
                 winners.insert((prefix, i));
             }
         }
-        if pin.record.is_some()
-            && let Some((prefix, _)) = chain.iter().find(|(_, c)| c.tv_trades_csv_tz.is_some())
-        {
-            problems.push(format!(
-                "{id}: resolves `tv_trades_csv_tz` from [probe_config.\"{prefix}\"], which is \
-                 dead beside its {RECORD_FILE} (the harness never reads {CSV_FILE} then); \
-                 declare it on prefixes covering only CSV-oracle probes"
-            ));
+        if pin.record.is_some() {
+            for i in (0..CONFIG_FIELDS.len()).filter(|&i| dead_beside_record(i)) {
+                if let Some((prefix, _)) = chain.iter().find(|(_, c)| c.setting(i).is_some()) {
+                    let why = if i == 1 {
+                        "the record sets the right edge, so the harness reads no budget"
+                    } else {
+                        "the harness never reads its tv_trades.csv then"
+                    };
+                    problems.push(format!(
+                        "{id}: resolves `{}` from [probe_config.\"{prefix}\"], which is dead \
+                         beside its {RECORD_FILE} ({why}); declare it on prefixes covering only \
+                         CSV-oracle probes",
+                        CONFIG_FIELDS[i]
+                    ));
+                }
+            }
         }
     }
     for dir in pending.values() {
@@ -1784,6 +1807,33 @@ csv = { path = \"p/old/tv_trades.csv\", xxh128 = \"bb\" }
                 ..ProbeConfig::default()
             },
         );
+        assert!(check_probe_config(&config, &pins, &BTreeMap::new()).is_empty());
+    }
+
+    #[test]
+    fn a_bar_budget_resolving_onto_a_record_probe_is_rejected() {
+        let mut pins = pins_of(&[("csv", "p/csv")]);
+        let mut rec = pin_in("p/rec");
+        rec.record = Some(file("p/rec/tv_record.json")); // dual oracle: still refused
+        pins.insert("rec".to_owned(), rec);
+        let budget = || ProbeConfig {
+            bar_budget: Some(21000),
+            ..ProbeConfig::default()
+        };
+        // The parent governs the CSV probe, yet still reaches the record one.
+        let mut config = BTreeMap::new();
+        config.insert("p".to_owned(), budget());
+        let problems = check_probe_config(&config, &pins, &BTreeMap::new());
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("rec: resolves `bar_budget` from [probe_config.\"p\"]"));
+        // On the record probe's own dir, too.
+        let mut config = BTreeMap::new();
+        config.insert("p/rec".to_owned(), budget());
+        let problems = check_probe_config(&config, &pins, &BTreeMap::new());
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        // Scoped to the CSV probe alone, it is fine.
+        let mut config = BTreeMap::new();
+        config.insert("p/csv".to_owned(), budget());
         assert!(check_probe_config(&config, &pins, &BTreeMap::new()).is_empty());
     }
 
