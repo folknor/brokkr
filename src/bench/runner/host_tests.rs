@@ -336,7 +336,11 @@ fn capture_failures_are_latched_for_hotpath_and_evidence_for_timing() {
     assert_eq!(shown["bad"], "invalid");
     assert_eq!(shown["bad_error"], true);
     assert_eq!(shown["late"], "captured", "a nonzero exit keeps its report");
-    let occurrences: Vec<u32> = timing.children.iter().map(|c| capture(c).occurrence).collect();
+    let occurrences: Vec<u32> = timing
+        .children
+        .iter()
+        .map(|c| capture(c).occurrence)
+        .collect();
     assert_eq!(occurrences, [1, 2, 3]);
 
     let mut profiled = setup(&script, &root, &container);

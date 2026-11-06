@@ -2568,7 +2568,6 @@ In depth: `brokkr man nidhogg`."
         target: String,
     },
 
-
     // ----- mogwai-only commands (display_order = 58) -----
     /// Benchmark a mogwai surface (CLI invocation or harness target)
     ///

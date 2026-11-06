@@ -195,7 +195,11 @@ fn result_captures(run: &StoredRun) -> BTreeMap<String, &serde_json::Value> {
 /// stage and occurrence, and a line naming those only one side holds. The
 /// correspondence is by name and count: a call one side made conditionally
 /// shifts the later occurrences of its stage.
-fn capture_diffs(a: &StoredRun, b: &StoredRun, top: usize) -> (Vec<(String, String)>, Option<String>) {
+fn capture_diffs(
+    a: &StoredRun,
+    b: &StoredRun,
+    top: usize,
+) -> (Vec<(String, String)>, Option<String>) {
     let (ca, cb) = (result_captures(a), result_captures(b));
     let mut diffs = Vec::new();
     let mut unmatched = Vec::new();
@@ -203,8 +207,8 @@ fn capture_diffs(a: &StoredRun, b: &StoredRun, top: usize) -> (Vec<(String, Stri
     for name in names {
         match (ca.get(name), cb.get(name)) {
             (Some(x), Some(y)) => {
-                let parsed = crate::db::hotpath_data_from_json(x)
-                    .zip(crate::db::hotpath_data_from_json(y));
+                let parsed =
+                    crate::db::hotpath_data_from_json(x).zip(crate::db::hotpath_data_from_json(y));
                 if let Some((hx, hy)) = parsed
                     && let Some(diff) = crate::hotpath_fmt::format_hotpath_diff(&hx, &hy, top)
                 {
@@ -503,7 +507,11 @@ pub(crate) fn format_compare(
                         .and_then(|r| r.get("hotpath"))
                         .and_then(crate::db::hotpath_data_from_json)
                 };
-                let heading = format!("{} {} - {commit_a} vs {commit_b}", x.doc.bench, params_summary(x));
+                let heading = format!(
+                    "{} {} - {commit_a} vs {commit_b}",
+                    x.doc.bench,
+                    params_summary(x)
+                );
                 if let (Some(ha), Some(hb)) = (parse(x), parse(y))
                     && let Some(diff) = crate::hotpath_fmt::format_hotpath_diff(&ha, &hb, top)
                 {

@@ -136,18 +136,17 @@ pub(super) fn run_iteration(setup: IterationSetup<'_>) -> (store::Iteration, Sin
     let mut profile_failed = false;
     let outcome = match sample.outcome {
         _ if crate::shutdown::should_unwind() => store::IterationOutcome::Interrupted,
-        lua::SampleOutcome::Completed(verdict) => match profile_failure(
-            setup.measurement,
-            &host.children,
-        ) {
-            // A completed sample under --hotpath fails here, its children
-            // and their captures stored as they came.
-            Some(reason) => {
-                profile_failed = true;
-                store::IterationOutcome::Failed { reason }
+        lua::SampleOutcome::Completed(verdict) => {
+            match profile_failure(setup.measurement, &host.children) {
+                // A completed sample under --hotpath fails here, its children
+                // and their captures stored as they came.
+                Some(reason) => {
+                    profile_failed = true;
+                    store::IterationOutcome::Failed { reason }
+                }
+                None => store::IterationOutcome::Completed { verdict },
             }
-            None => store::IterationOutcome::Completed { verdict },
-        },
+        }
         lua::SampleOutcome::Failed(reason) => store::IterationOutcome::Failed { reason },
         lua::SampleOutcome::Interrupted => store::IterationOutcome::Interrupted,
     };
@@ -178,7 +177,10 @@ fn profile_failure(measurement: store::Measurement, children: &[store::Child]) -
     if measurement != store::Measurement::Hotpath {
         return None;
     }
-    let mut marked = children.iter().filter_map(|c| c.hotpath.as_ref()).peekable();
+    let mut marked = children
+        .iter()
+        .filter_map(|c| c.hotpath.as_ref())
+        .peekable();
     if marked.peek().is_none() {
         return Some("--hotpath: no call of the iteration was marked hotpath".to_owned());
     }
@@ -501,12 +503,9 @@ fn stored_len(report: &serde_json::Value) -> usize {
 
 /// The report path as the child is told it.
 fn utf8_report(path: &Path) -> Result<String, Abort> {
-    path.to_str().map(str::to_owned).ok_or_else(|| {
-        Abort::Failed(format!(
-            "the report path {} is not UTF-8",
-            path.display()
-        ))
-    })
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| Abort::Failed(format!("the report path {} is not UTF-8", path.display())))
 }
 
 /// The variables a marked call's child gets, whatever the build: an

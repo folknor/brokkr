@@ -349,7 +349,9 @@ fn a_request_is_refused_from_its_head_before_its_body_is_read() {
     let header = protocol_header();
     let chunked = exchange(
         addr,
-        &format!("POST /bench HTTP/1.1\r\nHost: t\r\n{header}\r\nTransfer-Encoding: chunked\r\n\r\n"),
+        &format!(
+            "POST /bench HTTP/1.1\r\nHost: t\r\n{header}\r\nTransfer-Encoding: chunked\r\n\r\n"
+        ),
         b"2\r\n{}\r\n0\r\n\r\n",
     );
     assert_eq!(chunked.status, 411);

@@ -546,19 +546,23 @@ fn captures_and_the_measurement_read_back_as_published() {
 fn the_pairing_class_separates_profiled_and_incidental_runs() {
     let timing = document("0000000000000000000000000000000c");
     let key = timing.pairing_key();
-    assert!(key.starts_with("[\"bench-pair-v1\",\"pbfhogg\",\"cat\","), "{key}");
+    assert!(
+        key.starts_with("[\"bench-pair-v1\",\"pbfhogg\",\"cat\","),
+        "{key}"
+    );
 
     let mut uncaptured = timing.clone();
     uncaptured.iterations[0].children[0] = marked(10, 1, CaptureOutcome::Missing);
     assert_eq!(uncaptured.pairing_key(), key, "nothing captured is timing");
 
     let hotpath = profiled("0000000000000000000000000000000d").pairing_key();
-    assert!(hotpath.starts_with("[\"bench-pair-v2\",\"hotpath\","), "{hotpath}");
+    assert!(
+        hotpath.starts_with("[\"bench-pair-v2\",\"hotpath\","),
+        "{hotpath}"
+    );
 
     let mut incidental = timing.clone();
-    incidental.outcome = RunOutcome::Failed {
-        reason: "x".into(),
-    };
+    incidental.outcome = RunOutcome::Failed { reason: "x".into() };
     incidental.iterations[2].children[0] = marked(10, 1, captured());
     let incidental = incidental.pairing_key();
     assert!(
@@ -570,7 +574,9 @@ fn the_pairing_class_separates_profiled_and_incidental_runs() {
 
 #[test]
 fn a_profiled_run_must_capture_every_marked_call() {
-    profiled("0000000000000000000000000000000e").validate().unwrap();
+    profiled("0000000000000000000000000000000e")
+        .validate()
+        .unwrap();
 
     let mut none_marked = profiled("0000000000000000000000000000000e");
     none_marked.iterations[1].children[0].hotpath = None;
@@ -592,7 +598,11 @@ fn a_profiled_run_must_capture_every_marked_call() {
 
     let mut blank = document("0000000000000000000000000000000e");
     blank.iterations[0].children[0] = marked(10, 1, captured());
-    blank.iterations[0].children[0].hotpath.as_mut().unwrap().stage = String::new();
+    blank.iterations[0].children[0]
+        .hotpath
+        .as_mut()
+        .unwrap()
+        .stage = String::new();
     refused(&blank, "empty stage");
 
     let mut scalar = document("0000000000000000000000000000000e");

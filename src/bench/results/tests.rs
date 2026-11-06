@@ -519,11 +519,17 @@ fn captures_render_per_stage_and_compare_by_stage() {
     assert!(shown.contains("hotpath write #1 (iteration 0)"), "{shown}");
 
     let (sa, sb) = reader.compare_sides("a", "b", &filter()).unwrap();
-    assert!(sa[0].children_loaded, "a profiled run is read with its children");
+    assert!(
+        sa[0].children_loaded,
+        "a profiled run is read with its children"
+    );
     assert!(sb.iter().any(|r| !r.children_loaded), "a timing run is not");
     let out = format_compare("a", &sa, "b", &sb, 10, 20);
     assert!(out.contains("hotpath decode #1"), "{out}");
-    assert!(out.contains("hotpath captures unpaired: write #1 on A only"), "{out}");
+    assert!(
+        out.contains("hotpath captures unpaired: write #1 on A only"),
+        "{out}"
+    );
     assert!(out.contains("measured timing vs hotpath"), "{out}");
 }
 

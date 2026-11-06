@@ -351,7 +351,11 @@ mod tests {
             .finish()
             .unwrap();
         let spool = spool_handle(&spool);
-        assert!(resources.call(sh, &[], &[], &[&spool], None, false).is_err());
+        assert!(
+            resources
+                .call(sh, &[], &[], &[&spool], None, false)
+                .is_err()
+        );
         resources
             .call(sh, &[&spool], &[&out], &[], None, false)
             .unwrap()

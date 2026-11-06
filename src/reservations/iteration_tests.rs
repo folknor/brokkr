@@ -108,11 +108,21 @@ fn conflicting_declarations_are_refused_at_the_call() {
     );
 
     let err = iteration
-        .call(Path::new(SH), &[(input.clone(), Access::Write)], None, false)
+        .call(
+            Path::new(SH),
+            &[(input.clone(), Access::Write)],
+            None,
+            false,
+        )
         .unwrap_err();
     assert!(err.to_string().contains("read-only for the run"), "{err}");
     let err = iteration
-        .call(Path::new(SH), &[(outside.clone(), Access::Read)], None, false)
+        .call(
+            Path::new(SH),
+            &[(outside.clone(), Access::Read)],
+            None,
+            false,
+        )
         .unwrap_err();
     assert!(err.to_string().contains("not within"), "{err}");
 
@@ -189,7 +199,12 @@ fn the_veto_follows_an_input_spelling_retargeted_since_admission() {
     std::fs::remove_file(&link).unwrap();
     std::os::unix::fs::symlink(out.join("sub"), &link).unwrap();
     let err = iteration
-        .call(Path::new(SH), &[(out.join("in.txt"), Access::Write)], None, false)
+        .call(
+            Path::new(SH),
+            &[(out.join("in.txt"), Access::Write)],
+            None,
+            false,
+        )
         .unwrap_err();
     assert!(err.to_string().contains("read-only for the run"), "{err}");
     iteration.release().unwrap();
@@ -313,14 +328,18 @@ fn a_report_is_made_empty_reserved_and_read_back() {
     assert!(report.starts_with(dir.join("profile")));
     assert_eq!(std::fs::read(&report).unwrap(), b"");
     let err = iteration
-        .call(Path::new(SH), &[(report.clone(), Access::Read)], None, false)
+        .call(
+            Path::new(SH),
+            &[(report.clone(), Access::Read)],
+            None,
+            false,
+        )
         .unwrap_err();
     assert!(err.to_string().contains("overlaps"), "a held report: {err}");
     std::fs::write(&report, b"{}").unwrap();
     call.finish().unwrap();
     let mut read = String::new();
-    std::io::Read::read_to_string(&mut iteration.open_file(&report).unwrap(), &mut read)
-        .unwrap();
+    std::io::Read::read_to_string(&mut iteration.open_file(&report).unwrap(), &mut read).unwrap();
     assert_eq!(read, "{}");
     iteration.release().unwrap();
     assert!(!dir.exists());

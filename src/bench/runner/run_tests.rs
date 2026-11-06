@@ -620,12 +620,18 @@ fn hotpath_runs_profile_with_their_features_and_timing_runs_stay_clean() {
         assert_eq!(iteration.record.as_ref().unwrap()["status"], "captured");
         let capture = iteration.children[0].hotpath.as_ref().unwrap();
         assert_eq!((capture.stage.as_str(), capture.occurrence), ("main", 1));
-        assert!(matches!(capture.outcome, store::CaptureOutcome::Captured { .. }));
+        assert!(matches!(
+            capture.outcome,
+            store::CaptureOutcome::Captured { .. }
+        ));
     }
     assert!(profiled.pairing_key().contains("\"hotpath\""));
     assert_eq!(timing.measurement, store::Measurement::Timing);
     assert!(!timing.build.features.contains(&"profiled".to_owned()));
-    assert_eq!(timing.iterations[0].record.as_ref().unwrap()["status"], "missing");
+    assert_eq!(
+        timing.iterations[0].record.as_ref().unwrap()["status"],
+        "missing"
+    );
     assert!(timing.pairing_key().starts_with("[\"bench-pair-v1\""));
 
     let ran = fixture.bench("leaky", "leaky", 1, &[]);
@@ -633,7 +639,11 @@ fn hotpath_runs_profile_with_their_features_and_timing_runs_stay_clean() {
     ran.says("resolved hotpath feature \"profiled\"");
 
     let ran = fixture.bench_as("unprofilable", "probe", 1, true, &[]);
-    assert!(ran.error().contains("sets no hotpath_features"), "{}", ran.error());
+    assert!(
+        ran.error().contains("sets no hotpath_features"),
+        "{}",
+        ran.error()
+    );
 }
 
 /// A build failure is an arm's failure like any other: every arm builds,
