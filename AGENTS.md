@@ -4,55 +4,36 @@ Shared development tooling for pbfhogg, elivagar, nidhogg, litehtml-rs, sluggrs,
 
 ## How it works
 
-Invoked as `brokkr` from any project root. Reads `brokkr.toml` for project detection (`project = "foo"`). Commands are gated by project - running a pbfhogg-only command from elivagar's root produces an error.
-
-`brokkr.toml` is looked up in the working directory, or one level up (its immediate parent).
+Invoked as `brokkr` from any project root. Reads `brokkr.toml` for project detection (`project = "foo"`), looked up in the working directory or its immediate parent. Commands are gated by project: `brokkr --help` lists only the ones that apply, and a hidden subcommand still parses but is refused before its handler runs.
 
 ## Detailed docs
 
 These files are not auto-loaded - read them on demand based on what the user asks. Don't `wc` them before reading - just Read them.
 
-The `docs/` files are also compiled into the binary and readable as `brokkr man <topic>` (bare `brokkr man` lists the topics available in the current project); the `reference/` files are not. Topics are project-filtered by the same `Visibility` the CLI uses. When editing this list, update `TOPICS` to match.
+The `docs/` files are also compiled into the binary as `brokkr man <topic>` (bare `brokkr man` lists the current project's topics), project-filtered by the CLI's `Visibility`; the `reference/` files are not. When editing this list, update `TOPICS` to match. A doc with 8+ `##` sections is section-addressed (`brokkr man conventions script_check`; bare `brokkr man conventions` lists them), slugs derived from the headings (`src/man/sections.rs`), so keep one subject per `##`.
 
-A doc with 8+ `##` sections is **section-addressed**: `brokkr man conventions script_check` prints that section alone and bare `brokkr man conventions` lists the sections. Slugs derive from the headings (`src/man/sections.rs`), so a doc's `##` structure is its lookup surface - keep one subject per `##`, or it can't be reached.
-
-- `reference/architecture.md` - the full module map: what each source file owns and why. Read before changing a module you have not touched this session.
+- `reference/architecture.md` - the full module map. Read before changing a module you have not touched this session.
 - `reference/output.md` - operator output channel conventions.
-- `docs/brokkr.toml.md` - config core: where it lives, the user-wide layer and its user-only `results_server`, `include` composition, top-level shape and host sections, `worktree_keep`, `verify_reference_budget`, `disable_toolchain`, `strip_rustflags`, `[cargo_env]`, `[deps]`, `[bin]`, `[[install]]`, `[member_check]`, `[lints]`.
-- `docs/brokkr.toml.conventions.md` - convention gates: `[gremlins]`, shared path selectors, `[header]`, `[[textlint]]`, `[textlint_preset]`, `[[script_check]]`, `[manifest]`, `[rustdoc]`, `[[fixture_lint]]`, `[[dependency_rule]]`.
-- `docs/brokkr.toml.bench.md` - script benches: `[bench.*]` with `script` or `script_file` and its `hotpath_features`, annotations (`description`, `version`, `date`, `changelog`), params and their `from` paths, binding params on the command line (lists, ranges, `all`, collections and fan-out) and its run-time refusals, the resolved view `from` paths walk and `config()` returns, `[bench_params.*]` and `uses`, `[data]`, `bench_lib`, the reserved names, validating a script and the library (the `bench` check phase).
-- `docs/brokkr.toml.sweeps.md` - `[[check]]` sweeps, `[[lint_sweep]]` (linted, never tested), the `parallel` lane, `[test]` and its profiles, `[[quarantine]]`.
-- `docs/brokkr.toml.elivagar.md` - `[<host>.tilegen.*]` blocks (elivagar).
-- `docs/brokkr.toml.datasets.md` - `[<host>.datasets.*]` and the variant-selection CLI flags (pbfhogg/elivagar/nidhogg).
-- `docs/brokkr.toml.piners.md` - the `[piners]` config block.
-- `docs/commands/check.md` - using `brokkr check`: flags, output, invocation selection, feature projection, the markdown-only shortcut, the convention/clippy/rustdoc phases, `certifies` and exit codes, log lines, sweep selection.
-- `docs/commands/check.test-lanes.md` - check's test phase: serial/parallel/process-isolated/nextest/doctest lanes, the coverage audit, diagnostic continuation, feature unification, member-check, dead filters, `BROKKR_TEST_BIN_DIR`.
-- `docs/commands/test.md` - `brokkr test`: discovery, matching, `-N`, `--timeout`.
-- `docs/commands/check.hygiene.md` - time ceilings and the per-test cap, what `brokkr lock` shows about a holder, strays and orphan reaping, the rustc guard.
-- `reference/check-internals.md` - how the check/test pipeline is built: invocation selection, harness isolation and the failure roster, direct execution, the prepare plan, journal and execution accounting, diagnostic inventory, watchdog attribution, the stray/orphan reapers, the guard's lease protocol, rustflags sink selection. Read before changing any of them.
-- `docs/commands/clippy.md` - `brokkr clippy`.
-- `docs/commands/deps.md` - `brokkr deps`.
-- `docs/commands/bench.md` - `brokkr bench NAME`: the command line, the preflight, modules (`require` and `bench_lib`), arms, the build, an iteration, the script's builtins, `binary()`, `binary_with()`, hotpath capture and `--hotpath`, interrupting a run, where an iteration's files live, what a run stores.
-- `docs/commands/crit.md` - `brokkr crit` (criterion).
-- `docs/commands/run.md` - `brokkr run` / `brokkr build` / `brokkr install`.
-- `docs/commands/clean.md` - `brokkr clean`.
-- `docs/commands/results.md` - `brokkr results`.
-- `docs/commands/measure.md` - `--bench`/`--hotpath`/`--alloc`/`--stop`, the sidecar profiler, markers, `brokkr sidecar`.
-- `docs/commands/output-channels.md` - where a run's output goes (stdout/stderr/FIFO, results.db vs sidecar.db).
-- `docs/commands/library.md` - pbfhogg `brokkr library`, `[pbfhogg.library]`, the library harness protocol, `--bench`/`--hotpath`/`--alloc` measurement and `--all` certification.
-- `reference/library-internals.md` - how the library harness consumer is built and why: the strict reader, the run directory's reservation and serial launches, profiled runs, capture, refusal counterparts, seeds and publications, identity and recording, library against CLI timing. Read before changing `src/pbfhogg/library/`.
-- `reference/bench-store.md` - the per-user store of script-bench runs: the run document, what the store derives, publication with the run uuid as request id, reading (the open that never creates, the listing queries and their order), the wire contract a results server and its clients share (requests, answers, the failure envelope, one protocol version at a time, what a client owes it and how brokkr's client classifies and retries), the frozen migration chain, and why the module is self-contained. Read before changing `src/bench/store/`.
-- `reference/results-server.md` - how `brokkr-results-server` is built: owning the file, the single worker and its job races, admission and bounds, the HTTP layer. Read before changing `src/bin/results_server/`.
-- `docs/results-server.md` - running and deploying `brokkr-results-server`.
-- `reference/bench-resources.md` - what a script-bench iteration owns: the owner lease and the borrow each child launches with, pinning and crash reclamation, call admission (the read-only veto, authority, conflicts), creation without following substitutes, handles, stdout spools and hotpath reports, and placement: where iterations go and which removals the gate covers for them. Read before changing `src/reservations/iteration.rs` or `src/bench/resources.rs`.
-- `docs/commands/visual.md` - litehtml-rs/sluggrs visual commands.
-- `docs/commands/hotpath.md` - sluggrs `brokkr hotpath`.
-- `docs/commands/sync.md` - ratatoskr `sync` / `mock-serve`.
-- `docs/commands/ratatoskr-gate.md` - ratatoskr `--gate` and gate.db.
-- `docs/commands/service.md` - ratatoskr `service`.
-- `docs/commands/corpus.md` - piners `brokkr corpus`.
-- `docs/projects/pbfhogg-vs-elivagar.md` - how the two dispatch layers differ.
-- `docs/projects/pbfhogg.md`, `elivagar.md`, `nidhogg.md`, `mogwai.md`, `litehtml.md`, `sluggrs.md`, `ratatoskr.md`, `piners.md` - per-project commands and internals.
+- `docs/brokkr.toml.md` - config core: location, the user-wide layer, `include`, host sections and the top-level keys and tables.
+- `docs/brokkr.toml.conventions.md` - convention gates: gremlins, textlint, script checks, manifest, rustdoc, fixture lints, dependency rules.
+- `docs/brokkr.toml.bench.md` - script bench config: `[bench.*]`, params and binding, the resolved view, `[bench_params.*]`, `[data]`, `bench_lib`, the `bench` check phase.
+- `docs/brokkr.toml.sweeps.md` - `[[check]]` and `[[lint_sweep]]` sweeps, `[test]` profiles, `[[quarantine]]`.
+- `docs/brokkr.toml.elivagar.md`, `docs/brokkr.toml.datasets.md`, `docs/brokkr.toml.piners.md` - project config blocks.
+- `docs/commands/check.md` - using `brokkr check`.
+- `docs/commands/check.test-lanes.md` - check's test phase and its lanes.
+- `docs/commands/check.hygiene.md` - time ceilings, `brokkr lock`, strays and orphans, the rustc guard.
+- `reference/check-internals.md` - how the check/test pipeline is built. Read before changing it.
+- `docs/commands/test.md`, `clippy.md`, `deps.md`, `crit.md`, `run.md` (also `build`, `install`), `clean.md`, `results.md` - those commands.
+- `docs/commands/bench.md` - `brokkr bench NAME`: running a script bench, its builtins, what a run stores.
+- `docs/commands/measure.md` - `--bench`/`--hotpath`/`--alloc`/`--stop`, the sidecar profiler, `brokkr sidecar`.
+- `docs/commands/output-channels.md` - where a run's output goes.
+- `docs/commands/library.md` - pbfhogg `brokkr library`.
+- `reference/library-internals.md` - how the library harness consumer is built. Read before changing `src/pbfhogg/library/`.
+- `reference/bench-store.md` - the store of script-bench runs and the results server wire contract. Read before changing `src/bench/store/`.
+- `reference/results-server.md` - how `brokkr-results-server` is built. Read before changing `src/bin/results_server/`. Running it: `docs/results-server.md`.
+- `reference/bench-resources.md` - what a script-bench iteration owns: leases, admission, handles, placement. Read before changing `src/reservations/iteration.rs` or `src/bench/resources.rs`.
+- `docs/commands/visual.md`, `hotpath.md`, `sync.md`, `ratatoskr-gate.md`, `service.md`, `corpus.md` - project-specific commands.
+- `docs/projects/*.md` - per-project commands and internals; `pbfhogg-vs-elivagar.md` contrasts the two dispatch layers.
 
 ## Architecture
 
@@ -63,24 +44,20 @@ Single crate: the `brokkr` binary, plus the `brokkr-rustc-guard` and `brokkr-res
 - `src/config.rs`, `src/config_parts/` - config schema, composition, project sections.
 - `src/output/` - console and child-process runners; every spawn goes through `process/spawn.rs`'s `ChildPolicy`.
 - `src/lock/`, `src/hold.rs`, `src/guard.rs`, `src/stray.rs`, `src/test_orphans.rs` - the global lock, compile capability, rustc guard and reapers.
-- `src/measure/`, `src/harness.rs`, `src/db/`, `src/sidecar.rs` - measurement and result stores; `src/bench/store/` is the per-user store of script-bench runs, which `src/bin/results_server/` serves over HTTP and `src/bench/remote.rs` reaches when the user-wide config names a server.
+- `src/measure/`, `src/harness.rs`, `src/db/`, `src/sidecar.rs` - measurement and result stores; `src/bench/store/` is the per-user store of script-bench runs, served over HTTP by `src/bin/results_server/` and reached by `src/bench/remote.rs`.
 - `src/bench/` - script benches: `runner/` runs `brokkr bench NAME`, `lua.rs` is the only seam to the dellingr VM.
 - `src/<project>/` - project-specific commands.
 
-### Project-scoped help
-
-`brokkr --help` lists only the commands that apply to the detected project. A hidden subcommand still parses; dispatch checks its command specification and refuses an inapplicable project before entering its handler.
-
 ## Shared commands quick reference
 
-- `check` / `test` - the validation pipeline (see `docs/commands/check.md`). A markdown-only dirty tree runs the prose phases only.
+- `check` / `test` - the validation pipeline. A markdown-only dirty tree runs the prose phases only.
 - `bench`, `clippy`, `deps`, `crit`, `run` / `build` / `install`, `clean`, `results` - see their docs above.
 - `man [TOPIC] [SECTION...]` - read the bundled docs.
-- `env` - host facts, tool versions, dataset status and digests, and the sizes and free space of brokkr's own stores.
+- `env` - host facts, tool versions, datasets, and brokkr's own store sizes.
 - `wc [threshold]` - tracked `.rs` files over `threshold` lines (default 800).
 - `history` - global command history.
-- `lock`, `strays [--kill]`, `guard [--install|--remove]`, `kill [--hard]` - lock status and process hygiene (see `docs/commands/check.hygiene.md`).
-- `sidecar <uuid>` - sidecar profiler data, a typed run's or one script-bench child's (see `docs/commands/measure.md`).
+- `lock`, `strays [--kill]`, `guard [--install|--remove]`, `kill [--hard]` - lock status and process hygiene.
+- `sidecar <uuid>` - sidecar profiler data.
 - `fmt` - locked `cargo fmt` wrapper.
 - Project-specific: `corpus-results`, `mogwai`, `hotpath`, `library`, `pmtiles-stats`, `pmtiles-corpus`, `ocean-build` - see the project docs.
 
@@ -88,7 +65,6 @@ Single crate: the `brokkr` binary, plus the `brokkr-rustc-guard` and `brokkr-res
 
 - Operator messages go through `src/output.rs` (prefixes, run-log teeing, quiet behavior); see `reference/output.md`. Use `output::warn` for non-fatal bookkeeping failures and `output::format_duration` for human-facing durations.
 - `DevError` variants for structured error handling (no `.unwrap()`).
-- `CommandSpec` is the dispatch project gate and also drives visibility, help and worktree selection.
 - `cargo_build` refuses to run unless this process holds the brokkr lock.
 
 ## Rules
