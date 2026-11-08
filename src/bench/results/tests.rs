@@ -608,6 +608,63 @@ fn a_collapsed_arm_is_disclosed_and_an_equal_context_pair_pointed_at() {
     assert!(!out.contains("other runs"), "{out}");
 }
 
+/// Runs stored under an earlier name list, filter, pair and compare as the
+/// chain's end, each view disclosing the name it was stored as.
+#[test]
+fn a_renamed_bench_lists_filters_and_pairs_as_its_new_name() {
+    use super::super::store::{Mark, MarkRequest};
+    // Renaming onto a name with runs is refused, so `concat`'s run is
+    // published after the rename, joining the renamed history.
+    let path = scratch("renamed");
+    let old = run(1, "cat", 'a', 1_000, 100);
+    publish(&path, std::slice::from_ref(&old));
+    evidence::open_store(&path)
+        .unwrap()
+        .mark(&MarkRequest {
+            uuid: "e".repeat(32),
+            project: "pbfhogg".into(),
+            at_unix_ms: 1_762_000_000_000,
+            hostname: "bygg".into(),
+            mark: Mark::Rename {
+                from: "cat".into(),
+                to: "concat".into(),
+            },
+        })
+        .unwrap();
+    publish(&path, &[run(2, "concat", 'b', 2_000, 90)]);
+    let reader = reader(&path);
+
+    let listing = reader
+        .table(&BenchFilter {
+            bench: Some("concat".into()),
+            ..filter()
+        })
+        .unwrap();
+    assert_eq!(listing.runs.len(), 2);
+    let table = format_table(&listing.runs, &listing.marks);
+    assert!(table.contains("concat (as cat)"), "{table}");
+
+    let shown = single(&reader, &old.uuid);
+    assert!(
+        shown.contains("concat (stored as cat; project pbfhogg)"),
+        "{shown}"
+    );
+
+    let out = compare(
+        &reader.compare_sides("a", "b", &filter()).unwrap(),
+        "a",
+        "b",
+        20,
+    );
+    assert_eq!(
+        out.lines().filter(|l| l.starts_with("concat")).count(),
+        1,
+        "{out}"
+    );
+    assert!(out.contains("stored as: A cat, B concat"), "{out}");
+    assert!(out.contains("-10.0%"), "{out}");
+}
+
 /// A retired bench's runs leave the table and the comparison, come back
 /// marked under `--hidden`, and a uuid lookup shows one marked regardless.
 #[test]

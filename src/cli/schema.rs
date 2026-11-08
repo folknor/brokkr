@@ -1465,6 +1465,8 @@ Examples:
   brokkr results --unretire old-cat                 # show them again
   brokkr results --invalidate 3f2a --reason \"noisy host\"  # hide one run
   brokkr results --revalidate 3f2a                  # undo that
+  brokkr results --rename cat concat                # cat's runs list as concat
+  brokkr results --rename concat cat                # undo that
   brokkr results --hidden                           # list hidden runs too
 
 In a piners project this queries the same .brokkr/results.db (hotpath/alloc
@@ -1476,7 +1478,7 @@ In depth: `brokkr man results`."
     // to it.
     #[command(group(
         ArgGroup::new("mark")
-            .args(["retire", "unretire", "invalidate", "revalidate"])
+            .args(["retire", "unretire", "invalidate", "revalidate", "rename"])
             .multiple(false)
             .conflicts_with_all([
                 "query", "commit", "compare", "command", "mode", "dataset", "meta", "env",
@@ -1587,6 +1589,15 @@ In depth: `brokkr man results`."
         /// Undo --invalidate UUID.
         #[arg(long, value_name = "UUID")]
         revalidate: Option<String>,
+
+        /// Rename a script bench: runs stored under OLD, or under any name
+        /// renamed to it, list, filter, pair and compare as NEW, so the
+        /// bench's table may be renamed in brokkr.toml. OLD is the name
+        /// runs resolve to now, the end of its chain; NEW must be a name the
+        /// store does not know yet, or one renamed into OLD, which undoes
+        /// that path: renaming back is the undo.
+        #[arg(long, num_args = 2, value_names = ["OLD", "NEW"])]
+        rename: Option<Vec<String>>,
 
         /// Why, for --retire or --invalidate.
         #[arg(long, requires = "reasoned")]

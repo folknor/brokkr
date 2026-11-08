@@ -2,7 +2,8 @@
 
 use super::super::store::{MarkView, RunOutcome, StoredRun};
 use super::{
-    hidden_by, ms, params_summary, result_verdict, result_wall, short_commit, timestamp, verdict,
+    bench_name, hidden_by, ms, params_summary, result_verdict, result_wall, short_commit,
+    stored_as, timestamp, verdict,
 };
 
 /// Widest a params or env cell grows before it is cut with `…`.
@@ -71,7 +72,10 @@ pub(crate) fn format_table(runs: &[StoredRun], marks: &MarkView) -> String {
             run.doc.uuid.chars().take(8).collect(),
             timestamp(run.doc.started_unix_ms),
             short_commit(run),
-            run.doc.bench.clone(),
+            match stored_as(marks, run) {
+                Some(stored) => format!("{} (as {stored})", bench_name(marks, run)),
+                None => run.doc.bench.clone(),
+            },
             result_cell(run),
             cut(params_summary(run)),
         ];

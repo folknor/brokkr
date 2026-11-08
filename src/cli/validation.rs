@@ -343,6 +343,16 @@ mod tests {
         ] {
             assert!(parse(bad.iter().copied()).is_err(), "{bad:?}");
         }
+        assert!(parse(["brokkr", "results", "--rename", "a", "b"]).is_ok());
+        for bad in [
+            &["brokkr", "results", "--rename", "a"][..],
+            &["brokkr", "results", "--rename", "a", "b", "--reason", "r"],
+            &["brokkr", "results", "--rename", "a", "b", "--unretire", "x"],
+            &["brokkr", "results", "--rename", "a", "b", "--hidden"],
+            &["brokkr", "results", "--rename", "a", "b", "--command", "c"],
+        ] {
+            assert!(parse(bad.iter().copied()).is_err(), "{bad:?}");
+        }
     }
 
     /// `test` needs a name; its selection flags parse beside it.

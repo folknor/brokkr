@@ -279,10 +279,12 @@ fn differences(a: &Side, b: &Side) -> Vec<String> {
     parts
 }
 
-/// The line naming how bench `bench`'s annotations differ between two
-/// stored configs, or `None` when both read, agree and hold nothing invalid.
-pub(super) fn line(bench: &str, config_a: &str, config_b: &str) -> Option<String> {
-    let body = match (read_side(config_a, bench), read_side(config_b, bench)) {
+/// The line naming how a bench's annotations differ between two stored
+/// configs, each side given as the name it was stored under and its config
+/// (a rename may make the names differ), or `None` when both read, agree
+/// and hold nothing invalid.
+pub(super) fn line(a: (&str, &str), b: (&str, &str)) -> Option<String> {
+    let body = match (read_side(a.1, a.0), read_side(b.1, b.0)) {
         (Ok(a), Ok(b)) => {
             let parts = differences(&a, &b);
             if parts.is_empty() {
@@ -300,7 +302,24 @@ pub(super) fn line(bench: &str, config_a: &str, config_b: &str) -> Option<String
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-    use super::line;
+
+    /// Both sides stored under one name.
+    fn line(bench: &str, a: &str, b: &str) -> Option<String> {
+        super::line((bench, a), (bench, b))
+    }
+
+    /// Across a rename each side is read under its own stored name.
+    #[test]
+    fn each_side_reads_the_table_of_the_name_it_was_stored_under() {
+        let a = "[config.bench.cat]\nversion = 2\n";
+        let b = "[config.bench.concat]\nversion = 2\n";
+        assert_eq!(super::line(("cat", a), ("concat", b)), None);
+        let out = super::line(
+            ("cat", a),
+            ("concat", "[config.bench.concat]\nversion = 3\n"),
+        );
+        assert!(out.unwrap().contains("version 2 -> 3"));
+    }
 
     fn stored(bench_body: &str) -> String {
         format!("[run]\nroot = \"/p\"\n[config.bench.cat]\nscript = \"x\"\n{bench_body}")

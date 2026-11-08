@@ -19,6 +19,7 @@ pub(crate) enum MarkAction {
     Unretire { name: String },
     Invalidate { run: String, reason: String },
     Revalidate { run: String },
+    Rename { from: String, to: String },
 }
 
 impl MarkAction {
@@ -34,6 +35,10 @@ impl MarkAction {
                 reason: reason.clone(),
             },
             Self::Revalidate { run } => Mark::Revalidate { run: run.clone() },
+            Self::Rename { from, to } => Mark::Rename {
+                from: from.clone(),
+                to: to.clone(),
+            },
         }
     }
 
@@ -41,7 +46,7 @@ impl MarkAction {
     fn run_mut(&mut self) -> Option<&mut String> {
         match self {
             Self::Invalidate { run, .. } | Self::Revalidate { run } => Some(run),
-            Self::Retire { .. } | Self::Unretire { .. } => None,
+            Self::Retire { .. } | Self::Unretire { .. } | Self::Rename { .. } => None,
         }
     }
 
@@ -118,6 +123,7 @@ impl MarkAction {
             Self::Unretire { name } => format!("unretire {name}"),
             Self::Invalidate { run, .. } => format!("invalidate {}", crate::db::short_uuid(run)),
             Self::Revalidate { run } => format!("revalidate {}", crate::db::short_uuid(run)),
+            Self::Rename { from, to } => format!("rename {from} to {to}"),
         }
     }
 
@@ -144,6 +150,10 @@ impl MarkAction {
                 "recorded: revalidate {}, which no longer hides the run by invalidation (a retired bench's runs stay hidden)",
                 crate::db::short_uuid(run)
             ),
+            // Whether this extended a chain or cancelled a path is the
+            // fold's to say, and a replay may have been undone since, so the
+            // line names the request alone.
+            Self::Rename { from, to } => format!("recorded: rename {from} to {to}"),
         }
     }
 }

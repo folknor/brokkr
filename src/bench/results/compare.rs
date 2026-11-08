@@ -8,7 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 use super::super::store::{Build, CaptureOutcome, MarkView, StoredRun};
-use super::{config_diff, ms, params_summary, result_verdict, result_wall, verdict};
+use super::{
+    bench_name, config_diff, ms, params_summary, result_verdict, result_wall, stored_as, verdict,
+};
 
 /// The order "latest" means everywhere: start time, then uuid.
 fn order(run: &StoredRun) -> (i64, &str) {
@@ -382,12 +384,19 @@ fn pairing_class(run: &StoredRun) -> String {
 }
 
 /// Why a one-sided run may have no partner: every identity difference from
-/// the other side's latest run of the same bench. That run is a candidate,
-/// not proof of the cause.
-fn unpaired_line(run: &StoredRun, other: &[StoredRun], other_side: &str) -> Option<String> {
+/// the other side's latest run of the same bench, resolved through `marks`
+/// whatever name either was stored under. That run is a candidate, not
+/// proof of the cause.
+fn unpaired_line(
+    marks: &MarkView,
+    run: &StoredRun,
+    other: &[StoredRun],
+    other_side: &str,
+) -> Option<String> {
+    let name = bench_name(marks, run);
     let latest = other
         .iter()
-        .filter(|r| r.doc.bench == run.doc.bench)
+        .filter(|r| bench_name(marks, r) == name)
         .max_by(|x, y| order(x).cmp(&order(y)))?;
     let (tag, other_tag) = (run.pairing_algorithm(), latest.pairing_algorithm());
     let mut parts = Vec::new();
@@ -436,12 +445,27 @@ fn unpaired_line(run: &StoredRun, other: &[StoredRun], other_side: &str) -> Opti
     if parts.is_empty() && tag == other_tag && class == other_class {
         parts.push("equal identity but a different stored key (an inconsistent key)".to_owned());
     }
+    let stored = stored_as(marks, latest).map_or_else(String::new, |s| format!(" (stored as {s})"));
     Some(format!(
-        "  latest {} run on {other_side}, {}: {}",
-        run.doc.bench,
+        "  latest {name} run on {other_side}, {}{stored}: {}",
         short(latest),
         parts.join("; ")
     ))
+}
+
+/// The names the compared runs were stored under, when a rename makes
+/// either differ from the name the row shows: their configs, and so the
+/// annotations and config paths, are read under the stored names.
+fn stored_line(marks: &MarkView, a: Option<&StoredRun>, b: Option<&StoredRun>) -> Option<String> {
+    let renamed = |run: Option<&StoredRun>| run.is_some_and(|r| stored_as(marks, r).is_some());
+    if !renamed(a) && !renamed(b) {
+        return None;
+    }
+    let sides: Vec<String> = [("A", a), ("B", b)]
+        .into_iter()
+        .filter_map(|(side, run)| Some(format!("{side} {}", run?.doc.bench)))
+        .collect();
+    Some(format!("  stored as: {}", sides.join(", ")))
 }
 
 /// What hides the compared run on one side, one line per mark: only under
@@ -474,19 +498,24 @@ pub(crate) fn format_compare(
     limit: usize,
 ) -> String {
     let (runs_a, runs_b, marks) = (&comparison.a, &comparison.b, &comparison.marks);
-    let mut a: BTreeMap<(&str, &str), Vec<&StoredRun>> = BTreeMap::new();
-    let mut b: BTreeMap<(&str, &str), Vec<&StoredRun>> = BTreeMap::new();
+    // Grouped by resolved name and comparison key, so runs stored under any
+    // name of one rename chain pair; the stored key is never rewritten.
+    let mut a: BTreeMap<(&str, String), Vec<&StoredRun>> = BTreeMap::new();
+    let mut b: BTreeMap<(&str, String), Vec<&StoredRun>> = BTreeMap::new();
     for (runs, map) in [(runs_a, &mut a), (runs_b, &mut b)] {
         for run in runs {
-            map.entry((run.doc.bench.as_str(), run.pairing_key.as_str()))
-                .or_default()
-                .push(run);
+            map.entry((
+                bench_name(marks, run),
+                marks.comparison_key(&run.pairing_key),
+            ))
+            .or_default()
+            .push(run);
         }
         for list in map.values_mut() {
             list.sort_by(|x, y| order(y).cmp(&order(x)));
         }
     }
-    let keys: BTreeSet<(&str, &str)> = a.keys().chain(b.keys()).copied().collect();
+    let keys: BTreeSet<&(&str, String)> = a.keys().chain(b.keys()).collect();
     let total = keys.len();
     if total == 0 {
         return "(no results)".to_owned();
@@ -495,7 +524,7 @@ pub(crate) fn format_compare(
     let rows: Vec<(&Vec<&StoredRun>, &Vec<&StoredRun>)> = keys
         .iter()
         .take(limit)
-        .map(|k| (a.get(k).unwrap_or(&none), b.get(k).unwrap_or(&none)))
+        .map(|k| (a.get(*k).unwrap_or(&none), b.get(*k).unwrap_or(&none)))
         .collect();
 
     let mut table: Vec<[String; 5]> = vec![[
@@ -509,7 +538,7 @@ pub(crate) fn format_compare(
         let (x, y) = (ra.first().copied(), rb.first().copied());
         let any = x.or(y).expect("a key has a run on some side");
         table.push([
-            any.doc.bench.clone(),
+            bench_name(marks, any).to_owned(),
             params_summary(any),
             wall(x),
             wall(y),
@@ -552,6 +581,7 @@ pub(crate) fn format_compare(
         out.push('\n');
         let mut lines = hidden_lines(marks, ra.first().copied(), "A");
         lines.extend(hidden_lines(marks, rb.first().copied(), "B"));
+        lines.extend(stored_line(marks, ra.first().copied(), rb.first().copied()));
         match (ra.first().copied(), rb.first().copied()) {
             (Some(x), Some(y)) => {
                 lines.extend(config_diff::describe(
@@ -560,10 +590,11 @@ pub(crate) fn format_compare(
                     &y.config_digest,
                     &y.doc.config,
                 ));
+                // Each side's annotations sit under the name it was stored
+                // as, which a rename may make differ between them.
                 lines.extend(super::annotations::line(
-                    &x.doc.bench,
-                    &x.doc.config,
-                    &y.doc.config,
+                    (&x.doc.bench, &x.doc.config),
+                    (&y.doc.bench, &y.doc.config),
                 ));
                 lines.extend(build_line(&x.doc.build, &y.doc.build));
                 lines.extend(executables_line(x, y));
@@ -583,7 +614,7 @@ pub(crate) fn format_compare(
                 };
                 let heading = format!(
                     "{} {} - {commit_a} vs {commit_b}",
-                    x.doc.bench,
+                    bench_name(marks, x),
                     params_summary(x)
                 );
                 if let (Some(ha), Some(hb)) = (parse(x), parse(y))
@@ -599,8 +630,8 @@ pub(crate) fn format_compare(
                 );
                 lines.extend(unmatched);
             }
-            (Some(x), None) => lines.extend(unpaired_line(x, runs_b, "B")),
-            (None, Some(y)) => lines.extend(unpaired_line(y, runs_a, "A")),
+            (Some(x), None) => lines.extend(unpaired_line(marks, x, runs_b, "B")),
+            (None, Some(y)) => lines.extend(unpaired_line(marks, y, runs_a, "A")),
             (None, None) => {}
         }
         for line in lines {

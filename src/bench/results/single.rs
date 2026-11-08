@@ -9,7 +9,10 @@ use super::super::store::{
     CaptureOutcome, Child, ChildEnding, ExecutableIdentity, IterationOutcome, MarkView,
     Measurement, RunDocument, RunOutcome, StoredRun,
 };
-use super::{hidden_by, hidden_detail, hotpath_report, ms, short_commit, timestamp, verdict};
+use super::{
+    bench_name, hidden_by, hidden_detail, hotpath_report, ms, short_commit, stored_as, timestamp,
+    verdict,
+};
 
 type Record = serde_json::Map<String, serde_json::Value>;
 
@@ -76,7 +79,14 @@ fn identity(out: &mut String, run: &StoredRun, marks: &MarkView) {
     field(
         out,
         "bench",
-        &format!("{} (project {})", doc.bench, doc.project),
+        &match stored_as(marks, run) {
+            Some(stored) => format!(
+                "{} (stored as {stored}; project {})",
+                bench_name(marks, run),
+                doc.project
+            ),
+            None => format!("{} (project {})", doc.bench, doc.project),
+        },
     );
     for (i, (kind, origin)) in hidden_by(marks, run).into_iter().enumerate() {
         field(

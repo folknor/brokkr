@@ -453,6 +453,20 @@ fn hidden_by<'m>(
     by
 }
 
+/// The name a run lists, filters, pairs and compares under: the end of its
+/// stored bench's rename chain in `marks`.
+fn bench_name<'m>(marks: &'m store::MarkView, run: &'m StoredRun) -> &'m str {
+    marks.name(&run.doc.bench)
+}
+
+/// The run's stored bench name when a rename makes it differ from
+/// [`bench_name`]: the stored name is evidence (its config table is
+/// `config.bench.STORED`), so every view that shows the resolved name
+/// discloses it.
+fn stored_as<'r>(marks: &store::MarkView, run: &'r StoredRun) -> Option<&'r str> {
+    (bench_name(marks, run) != run.doc.bench).then_some(run.doc.bench.as_str())
+}
+
 /// A hiding mark as the single view and `--compare` word it: `retired at
 /// TIME on HOST: REASON (mark 8HEX)`.
 fn hidden_detail(kind: &str, origin: &store::MarkOrigin) -> String {

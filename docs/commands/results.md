@@ -424,7 +424,9 @@ long. Each run listed is one request to the server.
 row missing its key:
 
 - `--commit` is a prefix of the run's full commit sha, ASCII case ignored.
-- `--command` is a literal substring of the bench name, ASCII case ignored.
+- `--command` is a literal substring of the bench name, ASCII case ignored:
+  the name a rename resolves the run to (Marks, below), not the one it was
+  stored under.
 - `--env NAME=VALUE` matches a captured variable exactly.
 - `--grep` / `--grep-v` are literal substrings of the run's invocation:
   each element of brokkr's argv, each element of every child's argv, each
@@ -445,7 +447,7 @@ row missing its key:
 **The table** lists runs newest first by start time (then uuid, so the order
 is total whatever order runs were stored in), at most `-n`: uuid, start
 (UTC), the commit's first eight digits (`-dirty` for a run of a dirty tree),
-the bench, the result (the fastest iteration's wall at microsecond
+the bench (as renamed, `concat (as cat)` for a run stored as `cat`), the result (the fastest iteration's wall at microsecond
 precision, or `failed` / `interrupted` for a run without one), its params,
 then a verdict column when some run has a verdict other than nil and an env
 column when some run captured variables, and a `hidden` column when some
@@ -454,7 +456,8 @@ Every attempted run is listed, failed and interrupted ones included, unless
 a mark hides it.
 
 **A uuid prefix** matching exactly one run in any store prints that run as a
-labelled block: identity, a `hidden` field per mark hiding the run (what,
+labelled block: identity (the bench as renamed, with the name it was
+stored as when that differs), a `hidden` field per mark hiding the run (what,
 when, on which host, why, and the mark's uuid), params (with each value's `from` path and file
 digest), the outcome, the result's wall with every iteration's in execution
 order and its verdict (nil, or the string quoted, so `""` stays visible),
@@ -489,10 +492,14 @@ runs pair when their stored pairing keys are equal (`reference/bench-store.md`:
 project, bench and every bound param with its keys and file digests in bound
 order, and what was measured: timing, `--hotpath`, or incidental, a timing
 run that captured a report anyway), and the latest run per key on each side
-is compared. Pairs are
-ordered by bench, formed before `--limit` applies, and the cap is announced
-as for typed pairs. What the key leaves out is named under the pair rather
-than splitting it:
+is compared. Across a rename (Marks, below) runs pair under the name the
+chain resolves to: the stored key is compared with its bench replaced by
+that name, so runs stored as `cat` and as `concat` after `--rename cat
+concat` are one history, and a `stored as: A cat, B concat` line names the
+stored names whenever either compared run's differs from the one shown.
+Pairs are ordered by resolved bench, formed before `--limit` applies, and
+the cap is announced as for typed pairs. What the key leaves out is named
+under the pair rather than splitting it:
 
 - `config differs:` the dotted paths of the stored config added (`+`),
   removed (`-`) or changed, at most six, then counted; a config that reads
@@ -502,7 +509,8 @@ than splitting it:
   a moved project root as `run.project_root`.
 - `annotations:` how the bench's `description`, `version`, `date` and
   `changelog` (`brokkr man bench-config`, Annotations) differ, read from
-  each side's stored config on its own: `version 2 -> 3`, `date ... ->
+  each side's stored config on its own, under the name that side was
+  stored as: `version 2 -> 3`, `date ... ->
   ...`, a description added, removed or changed, and a changelog added,
   removed or changed with its entry counts, any edit to an entry counting.
   A field brokkr would refuse today is named `(invalid: why)` whenever
@@ -540,7 +548,7 @@ than splitting it:
   pair shown.
 
 A run on one side only gets a line naming the other side's latest run of the
-same bench and every identity difference from it (a param bound on one side
+same resolved bench (with the name it was stored as, when that differs) and every identity difference from it (a param bound on one side
 only, a collection against a scalar, values differing in key, order or
 digest, a different measurement class, or keys of different pairing
 algorithms): a candidate for why it has
@@ -566,6 +574,18 @@ results server alike:
   Refused for a run already invalidated.
 - `--revalidate UUID` undoes it; refused for a run not invalidated. A run of
   a retired bench stays hidden.
+- `--rename OLD NEW` renames a bench: runs stored under OLD, or under any
+  name renamed to it, list, filter, pair and compare as NEW, so the bench's
+  table may be renamed in `brokkr.toml` without orphaning its history. OLD
+  is the name its runs resolve to now (after `a -> b`, rename `b`, not
+  `a`); a name is renamed at most once. Refused for a name the store does
+  not know, and onto a name it knows (one with runs, or named by a mark) so
+  histories never merge silently, except onto a name renamed into OLD:
+  that is the undo, and it makes every name on the path its own bench
+  again, so renaming back undoes a rename and there is no `--unrename`. A
+  run published later under NEW joins the renamed history. A rename never
+  changes what is hidden: a retirement follows it, and an undo leaves each
+  name of the path retired as the end was. Takes no `--reason`.
 - `--hidden` lists and compares hidden runs too, each marked. It leaves typed
   rows as they are.
 

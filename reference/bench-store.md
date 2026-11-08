@@ -235,7 +235,10 @@ stored key with its bench element replaced by the resolved name, its tag
 and class kept, so two algorithms' keys still never meet; a key of a shape
 it does not know comes back unchanged. It is computed from the stored key,
 never from a summary's document, whose children are not there to give its
-class.
+class. `brokkr results --compare` groups a side's runs by resolved name and
+comparison key under its selection's one view; every view shows the
+resolved name and discloses a differing stored one, and anything read out of
+a run's stored config (its annotations) is read under the stored name.
 
 **Revisions.** Runs are inserted whole and never deleted and marks only
 appended, so a `Revision` (the highest mark row and the highest run row a

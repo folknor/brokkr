@@ -32,10 +32,8 @@ pub(crate) mod runner;
 mod script_lines;
 // The server's side of the wire (`wire::execute`, `wire::serve`) and the
 // readers of a whole stored document and of the transaction state are the
-// server's alone, and the marks no `brokkr results` flag makes yet
-// (rename) and their resolution helpers wait for
-// theirs: an expectation goes unfulfilled, and so fails the build, once
-// brokkr uses them all.
+// server's alone: an expectation goes unfulfilled, and so fails the build,
+// once brokkr uses them all.
 #[cfg_attr(
     not(test),
     expect(

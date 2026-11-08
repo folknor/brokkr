@@ -882,6 +882,7 @@ fn run_project(
             unretire,
             invalidate,
             revalidate,
+            rename,
             reason,
         } => {
             use crate::bench::marking::MarkAction;
@@ -894,8 +895,14 @@ fn run_project(
                 Some(MarkAction::Unretire { name })
             } else if let Some(run) = invalidate {
                 Some(MarkAction::Invalidate { run, reason })
+            } else if let Some(run) = revalidate {
+                Some(MarkAction::Revalidate { run })
             } else {
-                revalidate.map(|run| MarkAction::Revalidate { run })
+                // clap takes exactly two values for --rename.
+                rename.and_then(|names| match <[String; 2]>::try_from(names) {
+                    Ok([from, to]) => Some(MarkAction::Rename { from, to }),
+                    Err(_) => None,
+                })
             };
             if let Some(action) = action {
                 return crate::bench::marking::apply(
