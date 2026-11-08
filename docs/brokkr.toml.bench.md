@@ -346,7 +346,10 @@ itself is read when `brokkr bench` starts and when `brokkr check` runs in a
 project that declares a bench, and one that cannot be read refuses there.
 Every name in it is one file: no directory or stem with a dot is a module,
 and links are never followed, even one swapped in while the directory is
-read. A `[bench_lib]` table is not this key
+read. An entry whose name could not be a module (a `README`) is never
+opened, so it cannot fail the read. Keep the bench scripts themselves out
+of it: every `.lua` file there is a module, and a script assigns `bench`,
+which `brokkr check` refuses in a module. A `[bench_lib]` table is not this key
 but a hostname section, as it always was.
 
 ## Reserved names and the user-wide layer

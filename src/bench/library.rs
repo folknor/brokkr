@@ -115,6 +115,13 @@ fn collect(
         .collect();
     names.sort();
     for name in names {
+        // Judged by name before anything is opened: an entry that could be
+        // neither a module nor a directory of them (a README, a socket) is
+        // never touched, so it cannot fail the scan.
+        let stem = name.strip_suffix(".lua").filter(|stem| is_segment(stem));
+        if stem.is_none() && !is_segment(&name) {
+            continue;
+        }
         let path = shown.join(&name);
         let Some(file) = open_at(dir, &name).map_err(|e| unreadable(&path, e))? else {
             continue;
@@ -128,10 +135,10 @@ fn collect(
             }
             continue;
         }
-        let Some(stem) = name.strip_suffix(".lua") else {
+        let Some(stem) = stem.map(str::to_owned) else {
             continue;
         };
-        if !meta.is_file() || !is_segment(stem) {
+        if !meta.is_file() {
             continue;
         }
         let mut source = Vec::new();
@@ -139,7 +146,7 @@ fn collect(
             .read_to_end(&mut source)
             .map_err(|e| unreadable(&path, e))?;
         let mut segments = prefix.clone();
-        segments.push(stem.to_owned());
+        segments.push(stem);
         let compiled = lua::load_script(&source, Some(&path.display().to_string()), None);
         modules.insert(
             segments.join("."),
@@ -172,6 +179,15 @@ mod tests {
         std::fs::write(root.join("bad-dir/x.lua"), b"return {}").unwrap();
         std::fs::write(root.join("no-name.lua"), b"return {}").unwrap();
         std::fs::write(root.join("README.md"), b"no").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::write(root.join("secret.txt"), b"no").unwrap();
+            std::fs::set_permissions(
+                root.join("secret.txt"),
+                std::fs::Permissions::from_mode(0o000),
+            )
+            .unwrap();
+        }
         std::os::unix::fs::symlink(root.join("preflight.lua"), root.join("linked.lua")).unwrap();
         let library = Library::read(&root).unwrap();
         assert_eq!(

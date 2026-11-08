@@ -330,8 +330,12 @@ fn preflight_arms(
             lua::PreflightOutcome::Broken(why) => {
                 refusals.push(format!("{shown}: preflight script error: {why}"));
             }
+            // brokkr's own failure ends the preflights there: the next arm's
+            // would meet the same machinery.
             lua::PreflightOutcome::Failed(why) => {
-                refusals.push(format!("{shown}: preflight could not run: {why}"));
+                return Err(DevError::Preflight(vec![format!(
+                    "{shown}: preflight could not run: {why}"
+                )]));
             }
         }
     }

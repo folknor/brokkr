@@ -73,8 +73,9 @@ io_uring says so in Lua, with its own fix-it text:
 function preflight(params)
     if params.io ~= "uring" then return end
     local r = binary_with({program = "sh"}, "-c", "ulimit -l"):ok()
-    local kb = r.stdout:match("%S+")
-    if kb ~= "unlimited" and tonumber(kb) < 16384 then
+    local kb = r.stdout:match("%S+") or "unknown"
+    local have = tonumber(kb)
+    if kb ~= "unlimited" and (have == nil or have < 16384) then
         fail("io_uring needs RLIMIT_MEMLOCK of 16 MB or more, have " .. kb .. " KB\n"
             .. "Fix: sudo prlimit --pid=$$ --memlock=unlimited:unlimited")
     end
@@ -89,8 +90,8 @@ end
   output, and `r:ok()` fails naming it. Each child runs on a launch lease
   of its own that reserves nothing and is inherited by the child, so the
   call finishes only once nothing it started still holds it: a child that
-  leaves a descendant running fails the preflight two seconds after it
-  exits.
+  leaves a descendant running fails the preflight once the lease's release
+  window after its exit passes.
   Nothing a preflight launches is stored.
 - `params` is the bound structure `bench()` gets, every file entry's field
   the absolute path string, not a handle: nothing a preflight does with it
@@ -110,9 +111,11 @@ end
   failed `r:ok()`,
   `preflight script error` for a Lua error, a builtin the script may not
   call or called wrongly, a preflight that is no function or returned a
-  value (`return nil` included), and `preflight could not run` when
-  brokkr's own machinery failed, a lease it could not release (a child
-  that left a descendant holding it) among it. brokkr runs an external
+  value (`return nil` included) or a NUL byte in an argument, and
+  `preflight could not run` when brokkr's own machinery failed, a lease it
+  could not release (a child that left a descendant holding it) among it;
+  that one ends the preflights at the arm it happened in, since every later
+  arm would meet the same machinery. brokkr runs an external
   program by calling `execve` itself, never through libc's `/bin/sh`
   fallback for a file in no executable format, in `bench()` too, and tells
   the exec's own refusal (no such file, no permission, no format the kernel

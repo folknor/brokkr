@@ -42,6 +42,19 @@ impl std::fmt::Display for StartError {
 /// Resolve `name` for a child running in `cwd` with `path` as its `PATH`
 /// (`None` when it has none): the absolute path to execute.
 pub(crate) fn resolve(name: &str, cwd: &Path, path: Option<&str>) -> Result<PathBuf, StartError> {
+    resolve_spelled(name, cwd, path).map(|found| without_dots(&found))
+}
+
+/// `path` without its `.` components, so one file reached as `./tool` or
+/// `bin/./tool` is recorded, and compared, as one path. `..` stays: through
+/// a link it need not undo the component before it.
+fn without_dots(path: &Path) -> PathBuf {
+    path.components()
+        .filter(|c| *c != std::path::Component::CurDir)
+        .collect()
+}
+
+fn resolve_spelled(name: &str, cwd: &Path, path: Option<&str>) -> Result<PathBuf, StartError> {
     if name.contains('/') {
         let candidate = cwd.join(name);
         return match executable(&candidate) {
@@ -200,6 +213,11 @@ mod tests {
         assert_eq!(
             resolve("second/tool", &root, None).unwrap(),
             root.join("second/tool")
+        );
+        assert_eq!(
+            resolve("./second/./tool", &root, None).unwrap(),
+            root.join("second/tool"),
+            "one file, one recorded path"
         );
         assert!(
             resolve("first/dir", &root, None)

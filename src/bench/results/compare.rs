@@ -254,12 +254,23 @@ fn executables_line(a: &StoredRun, b: &StoredRun) -> Option<String> {
             |ids| ids.iter().cloned().collect::<Vec<_>>().join(" and "),
         )
     };
+    // An identity that was not read is no evidence the file stayed the same,
+    // so a path either side could not read is named even when both read
+    // the same failure.
+    let unread = |ids: Option<&BTreeSet<String>>| {
+        ids.is_some_and(|ids| ids.iter().any(|id| !id.starts_with("digest ")))
+    };
     let parts: Vec<String> = paths
         .into_iter()
-        .filter(|p| ea.get(**p) != eb.get(**p))
+        .filter(|p| ea.get(**p) != eb.get(**p) || unread(ea.get(**p)) || unread(eb.get(**p)))
         .map(|p| format!("{p} {} vs {}", shown(ea.get(*p)), shown(eb.get(*p))))
         .collect();
-    (!parts.is_empty()).then(|| format!("  executables differ: {}", parts.join(", ")))
+    (!parts.is_empty()).then(|| {
+        format!(
+            "  executables differ or were not read: {}",
+            parts.join(", ")
+        )
+    })
 }
 
 /// The result records' entries that moved, `hotpath` aside: what turns "12%

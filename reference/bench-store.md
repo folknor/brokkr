@@ -117,9 +117,13 @@ field is omitted when absent, so a document without one encodes as it did.
 It is not part of the pairing key; `brokkr results --compare` names the
 executables whose observed identities differ.
 
-Every struct refuses unknown fields and the document carries `format`, so a
-document a newer writer extended is refused rather than stored short of its
-new fields. The outcome and ending enums are externally tagged for the same
+Every struct refuses unknown fields, so a document a newer writer extended
+is refused rather than stored short of its new fields: that refusal, not
+`format`, is what keeps an older store from taking a newer document. The
+document also carries `format`, which moves only when what a document
+already says would read differently; an optional field added and omitted
+when absent (a child's `executable`) leaves it alone, since every document
+without it means what it always did. The outcome and ending enums are externally tagged for the same
 reason: an internally tagged unit variant would drop any field beside its
 tag.
 

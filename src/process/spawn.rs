@@ -413,3 +413,64 @@ fn launch_label(command: &Command) -> String {
 pub(crate) fn capture_stdio(command: &mut Command) {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
 }
+
+#[cfg(test)]
+mod exact_tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+    use super::*;
+
+    fn exact(program: &str, args: &[&str], cwd: &Path) -> ExactCommand {
+        let mut command = ChildPolicy::plain()
+            .exact(
+                program,
+                args,
+                Some(cwd),
+                &[("BROKKR_EXACT_TEST", "set")],
+                ChildIsolation::Inherit,
+            )
+            .unwrap();
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        command
+    }
+
+    /// The child gets the command's environment over the inherited one and
+    /// runs in its directory, its argv as given.
+    #[test]
+    fn the_exec_carries_the_commands_environment_and_argv() {
+        let dir = crate::test_scratch::scratch("spawn_exact", "env");
+        let command = exact(
+            "/bin/sh",
+            &["-c", "printf '%s|%s|%s' \"$BROKKR_EXACT_TEST\" \"$1\" \"$PWD\"", "sh", "arg"],
+            &dir,
+        );
+        let output = spawn_exact(command).unwrap().wait_with_output().unwrap();
+        let text = String::from_utf8(output.stdout).unwrap();
+        // $PWD is the directory as the kernel resolved it, through any link.
+        let canonical = std::fs::canonicalize(&dir).unwrap();
+        assert_eq!(text, format!("set|arg|{}", canonical.display()));
+    }
+
+    /// A file exec refuses is the exec's refusal, never run through a shell;
+    /// a working directory that is gone fails the setup before it.
+    #[test]
+    fn the_exec_stage_is_told_from_the_setup_before_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = crate::test_scratch::scratch("spawn_exact", "stages");
+        let junk = dir.join("junk");
+        std::fs::write(&junk, b"echo through a shell\n").unwrap();
+        std::fs::set_permissions(&junk, std::fs::Permissions::from_mode(0o755)).unwrap();
+        match spawn_exact(exact(&junk.display().to_string(), &[], &dir)) {
+            Err(ExactSpawnError::Exec(error)) => {
+                assert_eq!(error.raw_os_error(), Some(libc::ENOEXEC));
+            }
+            other => panic!("expected the exec's refusal: {other:?}"),
+        }
+        match spawn_exact(exact("/bin/sh", &["-c", "true"], &dir.join("gone"))) {
+            Err(ExactSpawnError::Setup(_)) => {}
+            other => panic!("expected a setup failure: {other:?}"),
+        }
+    }
+}

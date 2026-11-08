@@ -568,7 +568,7 @@ pub(crate) fn run_preflight<H: Host>(script: &Script, args: &Args, host: H) -> (
         Err(error) => {
             return (
                 Preflighted {
-                    outcome: PreflightOutcome::Broken(format!(
+                    outcome: PreflightOutcome::Failed(format!(
                         "cannot set up the Lua state: {error}"
                     )),
                     modules: std::collections::BTreeSet::new(),

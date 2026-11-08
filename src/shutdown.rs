@@ -620,8 +620,10 @@ pub fn die_with_parent(cmd: &mut std::process::Command) {
         cmd.pre_exec(move || {
             if libc::prctl(libc::PR_SET_PDEATHSIG, sig, 0, 0, 0) == 0 && libc::getppid() != parent {
                 // The parent died before the death signal was armed, so it
-                // will never fire: refuse to run an orphan.
-                return Err(std::io::Error::other("parent exited before exec"));
+                // will never fire: refuse to run an orphan. A raw errno, not
+                // a message: an io::Error with text allocates, which a child
+                // forked from a threaded process must never do.
+                return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
             }
             Ok(())
         });
@@ -645,7 +647,8 @@ pub fn die_with_parent_strict(cmd: &mut std::process::Command) {
                 return Err(std::io::Error::last_os_error());
             }
             if libc::getppid() != parent {
-                return Err(std::io::Error::other("parent exited before exec"));
+                // A raw errno: a message would allocate after the fork.
+                return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
             }
             Ok(())
         });
@@ -752,6 +755,29 @@ mod tests {
                 .iter()
                 .any(|identity| identity.pid().get() == me)
         );
+    }
+
+    /// `leave` answers whether a stop landed inside the window, read in the
+    /// transition that closes it, which clears it for whatever runs next; an
+    /// inner guard leaves the request to the outer one.
+    #[test]
+    fn leaving_a_guard_reports_the_stop_it_clears() {
+        let _lock = crate::test_scratch::process_global_lock();
+        let guard = SigtermGuard::install();
+        assert!(!guard.leave(), "no stop, none reported");
+
+        let guard = SigtermGuard::install();
+        request_shutdown();
+        assert!(guard.leave(), "the stop inside the window is reported");
+        assert!(!should_unwind(), "and cleared as the window closes");
+
+        let outer = SigtermGuard::install();
+        let inner = SigtermGuard::install();
+        request_shutdown();
+        assert!(inner.leave(), "an inner guard answers what is pending");
+        assert!(should_unwind(), "and leaves it to the outer window");
+        assert!(outer.leave());
+        assert!(!should_unwind());
     }
 
     /// A registration occupies a slot for exactly its guard's lifetime, and

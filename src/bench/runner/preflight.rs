@@ -47,6 +47,13 @@ impl PreflightHost {
         argv: &[String],
         env: &[(String, String)],
     ) -> Result<CallOutcome, Abort> {
+        // A NUL is the script's to answer for, never a failure of brokkr's
+        // spawn, which would refuse it the same way.
+        if argv.iter().any(|a| a.contains('\0')) {
+            return Err(Abort::Failed(format!(
+                "binary_with(): an argument to {name} holds a NUL byte"
+            )));
+        }
         let path = env
             .iter()
             .find(|(n, _)| n == "PATH")

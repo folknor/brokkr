@@ -499,11 +499,15 @@ than splitting it:
 - `build differs:` the requested target, profile, features and default
   features, and the resolved bin and features; never the artifact digest,
   which differs across commits by construction.
-- `executables differ:` each external program a `program` call ran
-  (`brokkr man bench`, `binary_with()`) whose observed digests differ
-  between the sides, by path, or that one side never ran: a system
-  `lua5.4` upgraded between the runs shows here. Every iteration's
-  observations count, so one that changed mid-run lists both.
+- `executables differ or were not read:` each external program a
+  `program` call ran (`brokkr man bench`, `binary_with()`) whose observed
+  digests differ between the sides, by path, that one side never ran, or
+  that either side could not read, since an unread file is no evidence it
+  stayed the same: a system `lua5.4` upgraded between the runs shows here.
+  Every iteration's observations count, so one that changed mid-run lists
+  both. A path is compared as resolved, its `.` components dropped, so a
+  program reached through a different directory on `PATH` is a different
+  path.
 - `host:` hostname, memory, governor and kernel, and `env:` the captured
   variables, as for typed pairs.
 - `verdict:` when the results' verdicts differ, nil against `""` included:
