@@ -1109,7 +1109,8 @@ pub(crate) const SECTIONS: &[&str] = &[
 /// always was - the kernel accepts any bytes as a hostname. An array of tables
 /// is not a table, so `[[lint_sweep]]` is claimed while a `[lint_sweep]`
 /// hostname section keeps loading.
-pub(crate) const VALUE_KEYS: &[&str] = &["strip_rustflags", "lint_sweep", "install"];
+pub(crate) const VALUE_KEYS: &[&str] =
+    &["strip_rustflags", "lint_sweep", "install", "bench_lib"];
 
 /// Every other top-level table is a hostname section. The table shape is
 /// ambiguous by design: hostnames are open-ended, so section-name typos are

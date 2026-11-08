@@ -49,6 +49,9 @@ pub struct Bench {
     /// The effective params: every used set's, then the bench's own, which
     /// replace a set's param of the same name whole.
     pub params: BTreeMap<String, Param>,
+    /// The top-level `bench_lib` directory every bench's `require` loads
+    /// modules from, `None` when unset ([`parse_lib`]).
+    pub library: Option<PathBuf>,
 }
 
 /// Where a bench's Lua lives.
@@ -213,6 +216,7 @@ pub(crate) fn parse(
         ));
     }
     let sets = parse_sets(table)?;
+    let library = parse_lib(table, sources)?;
     let Some(value) = table.get("bench") else {
         return Ok(BTreeMap::new());
     };
@@ -221,7 +225,9 @@ pub(crate) fn parse(
         .ok_or_else(|| DevError::Config("bench must be a table of [bench.NAME] tables".into()))?;
     let mut out = BTreeMap::new();
     for (name, value) in benches {
-        out.insert(name.clone(), parse_bench(name, value, &sets, sources)?);
+        let mut bench = parse_bench(name, value, &sets, sources)?;
+        bench.library.clone_from(&library);
+        out.insert(name.clone(), bench);
     }
     Ok(out)
 }
@@ -371,7 +377,34 @@ fn parse_bench(
         hotpath_features: raw.hotpath_features,
         uses: raw.uses,
         params,
+        library: None,
     })
+}
+
+/// Parse the optional top-level `bench_lib = "dir"`: the directory a bench
+/// script's `require(name)` loads modules from, resolved against the
+/// directory of the config file that set it, as `script_file` is. Claimed
+/// only as a string: a `[bench_lib]` table is a hostname section, as it
+/// always was (`parser::VALUE_KEYS`).
+pub(crate) fn parse_lib(
+    table: &toml::Table,
+    sources: &ConfigSources,
+) -> Result<Option<PathBuf>, DevError> {
+    let Some(value) = table.get("bench_lib").filter(|value| !value.is_table()) else {
+        return Ok(None);
+    };
+    let dir = value.as_str().ok_or_else(|| {
+        DevError::Config(
+            "bench_lib must be a string: the directory bench scripts require modules from".into(),
+        )
+    })?;
+    if dir.trim().is_empty() {
+        return Err(DevError::Config("bench_lib is blank".into()));
+    }
+    let origin = sources.value_origin(&["bench_lib"]).ok_or_else(|| {
+        DevError::Config("bench_lib: no config file is recorded as setting it".into())
+    })?;
+    Ok(Some(origin.base.join(dir)))
 }
 
 fn bench_script(
@@ -640,6 +673,58 @@ mod tests {
         let base = std::fs::canonicalize(dir.join("benches")).unwrap();
         assert_eq!(path, &base.join("cat.lua"));
         assert_eq!(declared_in, &base.join("benches.toml"));
+    }
+
+    /// `bench_lib` resolves beside the file that set it, reaches every
+    /// bench, and is claimed only as a string: a `[bench_lib]` table stays
+    /// the hostname section it always was.
+    #[test]
+    fn bench_lib_resolves_beside_its_file_and_a_table_stays_a_host() {
+        let dir = tree(
+            "bench_lib_base",
+            &[
+                (
+                    "brokkr.toml",
+                    "project = \"p\"\ninclude = [\"benches/benches.toml\"]\n",
+                ),
+                (
+                    "benches/benches.toml",
+                    "bench_lib = \"lib\"\n[bench.cat]\nscript = \"function bench() end\"\n\
+                     [bench.dog]\nscript = \"function bench() end\"\n",
+                ),
+            ],
+        );
+        let benches = benches_of(&dir).unwrap();
+        let base = std::fs::canonicalize(dir.join("benches")).unwrap();
+        for bench in benches.values() {
+            assert_eq!(bench.library.as_deref(), Some(base.join("lib").as_path()));
+        }
+        let host = tree(
+            "bench_lib_host",
+            &[(
+                "brokkr.toml",
+                "project = \"p\"\n[bench_lib]\nfeatures = [\"x\"]\n\
+                 [bench.cat]\nscript = \"function bench() end\"\n",
+            )],
+        );
+        assert_eq!(benches_of(&host).unwrap()["cat"].library, None);
+        for (name, value, needle) in [
+            ("bench_lib_number", "1", "must be a string"),
+            ("bench_lib_blank", "\" \"", "blank"),
+        ] {
+            let bad = tree(
+                name,
+                &[(
+                    "brokkr.toml",
+                    &format!(
+                        "project = \"p\"\nbench_lib = {value}\n\
+                         [bench.cat]\nscript = \"function bench() end\"\n"
+                    ),
+                )],
+            );
+            let err = benches_of(&bad).unwrap_err();
+            assert!(err.contains(needle), "{name}: {err}");
+        }
     }
 
     #[test]

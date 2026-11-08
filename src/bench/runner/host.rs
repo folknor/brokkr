@@ -1,7 +1,7 @@
 //! One iteration's host: what the script's builtins do, on the resource
 //! protocol, with each child's sidecar evidence kept for the document.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -79,9 +79,11 @@ pub(super) const REPORT_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const RUN_REPORT_BYTES: usize = 128 * 1024 * 1024;
 
 /// Run one iteration: its owner lease, a fresh Lua state, the sample, the
-/// release. Returns the document's iteration, the `since` answers and the
-/// report budget left.
-pub(super) fn run_iteration(setup: IterationSetup<'_>) -> (store::Iteration, Since, usize) {
+/// release. Returns the document's iteration, the `since` answers, the
+/// report budget left and the library modules the sample asked for.
+pub(super) fn run_iteration(
+    setup: IterationSetup<'_>,
+) -> (store::Iteration, Since, usize, BTreeSet<String>) {
     let since = setup.since;
     let report_budget = setup.report_budget;
     let resources = std::fs::create_dir_all(setup.container)
@@ -101,6 +103,7 @@ pub(super) fn run_iteration(setup: IterationSetup<'_>) -> (store::Iteration, Sin
                 },
                 since,
                 report_budget,
+                BTreeSet::new(),
             );
         }
     };
@@ -167,6 +170,7 @@ pub(super) fn run_iteration(setup: IterationSetup<'_>) -> (store::Iteration, Sin
         },
         host.since,
         host.report_budget,
+        sample.modules,
     )
 }
 

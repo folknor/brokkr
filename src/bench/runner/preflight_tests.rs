@@ -21,7 +21,7 @@ fn run(source: &str, params: &lua::Args) -> lua::PreflightOutcome {
         cwd: root.clone(),
         since: Since::new(&root, "0".repeat(40).parse().unwrap()),
     };
-    lua::run_preflight(&script(source), params, host).0
+    lua::run_preflight(&script(source), params, host).0.outcome
 }
 
 fn refused(outcome: lua::PreflightOutcome) -> String {

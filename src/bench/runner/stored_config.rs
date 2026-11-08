@@ -8,6 +8,9 @@
 //!   exact bytes that ran, as `source` when they are UTF-8 and `source_hex`
 //!   otherwise, since a script file's provenance (which file a `script_file`
 //!   resolved to, through which include) is not in the composed table.
+//! - `[modules.NAME]`: each `bench_lib` module the run's preflight or an
+//!   iteration asked `require` for, loaded or not: its file as `origin` and
+//!   its exact bytes, as the script's are. Absent when none was.
 //! - `[config]`: the composed table (includes folded, the user-wide layer
 //!   beneath, every host section), keys sorted at every level so equal
 //!   configs give equal text.
@@ -18,7 +21,12 @@
 use super::Frozen;
 use crate::project::Detection;
 
-pub(super) fn render(detection: &Detection, bench: &str, frozen: &Frozen) -> String {
+pub(super) fn render(
+    detection: &Detection,
+    bench: &str,
+    frozen: &Frozen,
+    modules: &std::collections::BTreeSet<String>,
+) -> String {
     let mut run = toml::Table::new();
     run.insert(
         "build_root".into(),
@@ -34,11 +42,26 @@ pub(super) fn render(detection: &Detection, bench: &str, frozen: &Frozen) -> Str
         "origin".into(),
         toml::Value::String(frozen.origin.display().to_string()),
     );
-    match std::str::from_utf8(&frozen.bytes) {
-        Ok(text) => script.insert("source".into(), toml::Value::String(text.to_owned())),
-        Err(_) => script.insert("source_hex".into(), toml::Value::String(hex(&frozen.bytes))),
-    };
+    insert_source(&mut script, &frozen.bytes);
     let mut document = toml::Table::new();
+    if let Some(library) = &frozen.library
+        && !modules.is_empty()
+    {
+        let mut table = toml::Table::new();
+        for name in modules {
+            let Some(module) = library.modules.get(name) else {
+                continue;
+            };
+            let mut entry = toml::Table::new();
+            entry.insert(
+                "origin".into(),
+                toml::Value::String(module.path.display().to_string()),
+            );
+            insert_source(&mut entry, &module.source);
+            table.insert(name.clone(), toml::Value::Table(entry));
+        }
+        document.insert("modules".into(), toml::Value::Table(table));
+    }
     document.insert(
         "config".into(),
         sorted(&toml::Value::Table(
@@ -55,6 +78,14 @@ pub(super) fn render(detection: &Detection, bench: &str, frozen: &Frozen) -> Str
         serde_json::to_string(&document)
             .unwrap_or_else(|e| serde_json::json!({ "unserializable": e.to_string() }).to_string())
     })
+}
+
+/// The exact bytes as `source` when they are UTF-8, else `source_hex`.
+fn insert_source(table: &mut toml::Table, bytes: &[u8]) {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => table.insert("source".into(), toml::Value::String(text.to_owned())),
+        Err(_) => table.insert("source_hex".into(), toml::Value::String(hex(bytes))),
+    };
 }
 
 /// `value` with every table's keys in sorted order: the composed table keeps

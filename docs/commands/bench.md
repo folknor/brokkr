@@ -122,6 +122,59 @@ end
   the message, `r.start_operation` is `resolve` or `execute`, and
   `r.start_errno` the OS error number when there was one.
 
+## Modules
+
+What fifty benches share lives once, in the project's `bench_lib`
+directory (`brokkr man bench-config`, `bench_lib`), and a script loads it
+with `require`:
+
+```lua
+-- bench/lib/preflight.lua
+local M = {}
+function M.io_uring(params)
+    if params.io ~= "uring" then return end
+    local r = binary_with({program = "sh"}, "-c", "ulimit -l"):ok()
+    -- ... fail() with the fix-it text
+end
+return M
+```
+
+```lua
+-- any bench
+local checks = require("preflight")
+function preflight(params) checks.io_uring(params) end
+function bench(params) ... end
+```
+
+Name the local something other than `preflight` or `bench`: with a local of
+that name in scope, `function preflight` assigns the local, so the script
+declares no preflight.
+
+- `require(name)` takes the module's path under `bench_lib` without `.lua`,
+  its directories joined by dots, every segment letters, digits and `_`
+  (`io/uring.lua` is `io.uring`). A file whose path makes no such name, and
+  a symbolic link, is not a module.
+- The whole directory is read once when the run starts, every module
+  compiled then, so an edit during a run changes nothing, as for the script;
+  a module that does not compile fails only the `require` that names it.
+- A module runs on its first `require` in a State, in the State the script
+  runs in and in the phase that asked for it (a module required at the top
+  level cannot launch a child; one required inside `bench()` can), and its
+  export is cached for every later `require` there. Each preflight and each
+  iteration is a fresh State, so each loads its modules afresh.
+- A module returns exactly one non-nil value, its export: anything else is
+  refused. A module requiring itself, directly or through others, is
+  refused naming the chain. A module's own error comes back as it is, at
+  the module's own file and line.
+- A module defines no global (`brokkr check` holds it to that, `brokkr man
+  bench-config`, Validating a script); what it shares is what it returns.
+  Mutating a shared table (`record`, `string`) is still possible and is the
+  module's own business.
+- Every module a run's preflight or an iteration asked for, loaded or not,
+  is stored with the run, with its file and exact source (What a run
+  stores), so `brokkr results --compare` names a changed helper as
+  `modules.<name>.source`. A module of the library never required is not.
+
 ## Arms
 
 A param that is not a collection, given several values, fans out: each
@@ -211,8 +264,12 @@ iteration; iterations that disagree on the verdict fail the run.
 
 ## The script's builtins
 
-Scripts are dellingr Lua (`brokkr man bench-config`): no `io`, `os`, `load`
-or `require`, so every child goes through brokkr.
+Scripts are dellingr Lua (`brokkr man bench-config`): no `io`, `os` or
+`load`, so every child goes through brokkr, and dellingr's own `require` is
+absent too; brokkr's loads `bench_lib` modules alone (Modules).
+
+- `require(name)` - the export of the `bench_lib` module `name` (Modules).
+  Allowed at top level too, and anywhere after it.
 
 - `binary(...)` - run the built executable once and wait for it. Only inside
   `bench()`. `binary_with`'s `program` runs another executable instead.
@@ -515,7 +572,9 @@ included.
 
 The stored config is one TOML document: `[run]` (the live project root and
 build root, under `--commit` too), `[script]` (the bench, the file its script came from and
-the exact source, as `source`, or `source_hex` when it is not UTF-8) and
+the exact source, as `source`, or `source_hex` when it is not UTF-8),
+`[modules.NAME]` (each `bench_lib` module the run asked for, its file as
+`origin` and its exact source the same way; absent when none was) and
 `[config]` (brokkr.toml as composed, includes folded and the user-wide layer
 beneath, every table's keys sorted). `brokkr results --compare` names what
 moved in it between two paired runs. The resolved view a script saw is not

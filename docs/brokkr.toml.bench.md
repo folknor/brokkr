@@ -7,7 +7,8 @@ dellingr, a pure Rust Lua VM linked into brokkr; they are dellingr Lua, not Lua
 
 What brokkr does with them: it loads and validates every table below when it
 reads the config, `brokkr check`'s `bench` phase compiles every bench's script
-and resolves its global names without running any of it, `brokkr bench NAME` runs one and stores the run
+and every `bench_lib` module and resolves their global names without running
+any of it, `brokkr bench NAME` runs one and stores the run
 (`brokkr man bench`), and `brokkr results` reads the stored runs (`brokkr man
 results`, Script benches).
 
@@ -46,6 +47,16 @@ A script that reads `_G` is the exception: holding the global table, it can
 define any name through it (`_G[k] = v`, `rawset(_G, k, v)`), so its names
 are not checked at all, and the phase warns which bench and line made it so.
 The compile still is.
+
+With `bench_lib` set and a bench declared (without one the phase is inert,
+library and all), the phase also checks every module in it, once, each
+finding naming the module's file: it compiles, it assigns no global (a
+module exports through what it returns, so `local function` and `local M =
+{}`), it reads no `_G`, and every other name it reads is a builtin or one of
+dellingr's library globals, since a module shares the requiring script's
+State but nothing in it is the module's to rely on. That one rule is what
+keeps each file's check sound on its own: no module can define a name the
+script then reads.
 
 Not caught: a misspelt field (`json.encdoe`, `params.thread`), a wrong
 `binary_with` option key, a wrong argument type, a nil value. Those fail only
@@ -313,15 +324,37 @@ scale outer and the workload inner, as above, a bench that must never run a
 seconds-scale file (one built with a profiler that backlogs on it) binds
 `workload = { from = "data.workloads.hotpath" }`, so that file is not a value
 it can take, while another bench binds `scale = { from = "data.workloads" }`
-and `workload = { from = "data.workloads.{scale}" }` over both. A refusal a
-script makes instead comes only once the build has run, and is stored as a
-failed run.
+and `workload = { from = "data.workloads.{scale}" }` over both. A refusal
+`bench()` makes instead comes only once the build has run, and is stored as a
+failed run; one a script's preflight makes (`brokkr man bench`, Preflight)
+comes before any build and stores nothing, but is still the script's code,
+not the shape of what it can be given.
+
+## `bench_lib`
+
+```toml
+bench_lib = "bench/lib"
+```
+
+The directory a bench script's `require(name)` loads modules from (`brokkr
+man bench`, Modules): `bench/lib/preflight.lua` is `require("preflight")`,
+`bench/lib/io/uring.lua` is `require("io.uring")`. Resolved against the
+directory of the config file that set it, as `script_file` is, so a shared
+include can carry its library beside it; every bench of the project shares
+it. A blank value or one that is not a string is refused; the directory
+itself is read when `brokkr bench` starts and when `brokkr check` runs in a
+project that declares a bench, and one that cannot be read refuses there.
+Every name in it is one file: no directory or stem with a dot is a module,
+and links are never followed, even one swapped in while the directory is
+read. A `[bench_lib]` table is not this key
+but a hostname section, as it always was.
 
 ## Reserved names and the user-wide layer
 
-`bench`, `bench_params` and `data` are reserved top-level names. A host
-literally named one of them is written `[host.bench]`, `[host.bench_params]`
-or `[host.data]`. The user-wide `brokkr.toml` cannot hold any of the three:
+`bench`, `bench_params` and `data` are reserved top-level names, and
+`bench_lib` is reserved as a string. A host literally named one of the
+first three is written `[host.bench]`, `[host.bench_params]` or
+`[host.data]`. The user-wide `brokkr.toml` cannot hold any of the four:
 benches belong to one project.
 
 ## Inline line numbers

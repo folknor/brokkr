@@ -293,10 +293,12 @@ Reserved top-level keys parsed as config sections, or consumed by composition:
 bench-config`) were hostname sections before brokkr claimed them; a host
 literally named one of them is written `[host.<name>]`.
 
-`strip_rustflags`, `lint_sweep` and `install` are also brokkr's, but only as
-non-table values: a `[strip_rustflags]`, `[lint_sweep]` or `[install]` table
-is still read as a hostname section, while the `strip_rustflags = [...]` array
-and the `[[lint_sweep]]` and `[[install]]` arrays of tables are brokkr's.
+`strip_rustflags`, `lint_sweep`, `install` and `bench_lib` are also brokkr's,
+but only as non-table values: a `[strip_rustflags]`, `[lint_sweep]`,
+`[install]` or `[bench_lib]` table is still read as a hostname section, while
+the `strip_rustflags = [...]` array, the `[[lint_sweep]]` and `[[install]]`
+arrays of tables and the `bench_lib = "dir"` string (`brokkr man
+bench-config`) are brokkr's.
 
 `pbfhogg` is brokkr's only as a table holding `library`: such a table, as the
 composed config has it, is the pbfhogg project section (belonging to

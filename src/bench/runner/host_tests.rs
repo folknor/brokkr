@@ -79,7 +79,7 @@ fn an_input_in_writes_is_refused_at_the_call() {
     let mut with_input = setup(&script, &root, &container);
     with_input.args = &args;
     with_input.inputs = &inputs;
-    let (iteration, _, _) = run_iteration(with_input);
+    let (iteration, _, _, _) = run_iteration(with_input);
     let reason = failure(&iteration);
     assert!(reason.contains("read-only for the run"), "{reason}");
     assert!(reason.starts_with("test:2: "), "{reason}");
@@ -110,7 +110,7 @@ fn a_substituted_output_never_lets_write_reach_an_input() {
         let mut with_input = setup(&linking, &root, &container);
         with_input.args = &args;
         with_input.inputs = &inputs;
-        let (iteration, _, _) = run_iteration(with_input);
+        let (iteration, _, _, _) = run_iteration(with_input);
         if expect_refusal {
             let reason = failure(&iteration);
             assert!(reason.contains("read-only for the run"), "{reason}");
@@ -144,7 +144,7 @@ fn spools_feed_onward_and_a_replaced_one_is_refused() {
            return 'ok'\n\
          end",
     );
-    let (iteration, _, _) = run_iteration(setup(&feeding, &root, &container));
+    let (iteration, _, _, _) = run_iteration(setup(&feeding, &root, &container));
     let found = record(&iteration);
     assert_eq!(found["size"], 5);
     assert_eq!(found["read"], "hello");
@@ -162,7 +162,7 @@ fn spools_feed_onward_and_a_replaced_one_is_refused() {
            read(r.stdout_file)\n\
          end",
     );
-    let (iteration, _, _) = run_iteration(setup(&replacing, &root, &container));
+    let (iteration, _, _, _) = run_iteration(setup(&replacing, &root, &container));
     let reason = failure(&iteration);
     assert!(reason.contains("no longer the spool"), "{reason}");
 
@@ -182,7 +182,7 @@ fn spools_feed_onward_and_a_replaced_one_is_refused() {
     let mut with_input = setup(&linking, &root, &container);
     with_input.args = &args;
     with_input.inputs = &inputs;
-    let (iteration, _, _) = run_iteration(with_input);
+    let (iteration, _, _, _) = run_iteration(with_input);
     let reason = failure(&iteration);
     assert!(
         reason.contains("is a link, which brokkr does not follow"),
@@ -206,7 +206,7 @@ fn a_child_runs_on_its_borrow_and_reaches_the_script() {
            return 'done'\n\
          end",
     );
-    let (iteration, _, _) = run_iteration(setup(&script, &root, &container));
+    let (iteration, _, _, _) = run_iteration(setup(&script, &root, &container));
     assert_eq!(
         iteration.outcome,
         store::IterationOutcome::Completed {
@@ -254,7 +254,7 @@ fn a_program_call_runs_the_external_program_and_stores_its_identity() {
         bin.display()
     );
     let running = script(&source);
-    let (iteration, _, _) = run_iteration(setup(&running, &root, &container));
+    let (iteration, _, _, _) = run_iteration(setup(&running, &root, &container));
     let found = record(&iteration);
     assert_eq!(found["out"], "tool x");
     assert_eq!(found["program"], "tool");
@@ -277,7 +277,7 @@ fn a_program_call_runs_the_external_program_and_stores_its_identity() {
            binary_with({program = 'brokkr-no-such-program'}, 'x')\n\
          end",
     );
-    let (iteration, _, _) = run_iteration(setup(&missing, &root, &container));
+    let (iteration, _, _, _) = run_iteration(setup(&missing, &root, &container));
     let reason = failure(&iteration);
     assert!(
         reason.contains("cannot start brokkr-no-such-program") && reason.contains("not on PATH"),
@@ -310,7 +310,7 @@ fn a_stop_marker_ends_the_child_and_is_its_ending() {
          end",
     );
     let started = std::time::Instant::now();
-    let (iteration, _, _) = run_iteration(setup(&script, &root, &container));
+    let (iteration, _, _, _) = run_iteration(setup(&script, &root, &container));
     assert!(started.elapsed() < std::time::Duration::from_secs(20));
     let shown = record(&iteration);
     assert_eq!(shown["at"], "SETUP_END");
@@ -349,7 +349,7 @@ fn a_marked_call_stores_its_report_on_the_child() {
     ));
     let mut with = setup(&script, &root, &container);
     with.measurement = store::Measurement::Hotpath;
-    let (iteration, _, left) = run_iteration(with);
+    let (iteration, _, left, _) = run_iteration(with);
     let shown = record(&iteration);
     assert_eq!(shown["calls"], 12);
     assert_eq!(shown["status"], "captured");
@@ -389,7 +389,7 @@ fn capture_failures_are_latched_for_hotpath_and_evidence_for_timing() {
          end"
     );
     let script = script(&source);
-    let (timing, _, _) = run_iteration(setup(&script, &root, &container));
+    let (timing, _, _, _) = run_iteration(setup(&script, &root, &container));
     let shown = record(&timing);
     assert_eq!(shown["bare"], "missing 4");
     assert_eq!(shown["bad"], "invalid");
@@ -404,7 +404,7 @@ fn capture_failures_are_latched_for_hotpath_and_evidence_for_timing() {
 
     let mut profiled = setup(&script, &root, &container);
     profiled.measurement = store::Measurement::Hotpath;
-    let (iteration, _, _) = run_iteration(profiled);
+    let (iteration, _, _, _) = run_iteration(profiled);
     let why = failure(&iteration);
     assert!(
         why.contains("stage stage occurrence 1: no report was written")
@@ -421,7 +421,7 @@ fn capture_failures_are_latched_for_hotpath_and_evidence_for_timing() {
     let unmarked = self::script("function bench() binary('-c', 'true') end");
     let mut profiled = setup(&unmarked, &root, &container);
     profiled.measurement = store::Measurement::Hotpath;
-    let (iteration, _, _) = run_iteration(profiled);
+    let (iteration, _, _, _) = run_iteration(profiled);
     assert!(failure(&iteration).contains("no call of the iteration was marked"));
 }
 
@@ -440,7 +440,7 @@ fn a_report_past_the_budget_is_over_budget() {
     ));
     let mut tight = setup(&script, &root, &container);
     tight.report_budget = 8;
-    let (iteration, _, left) = run_iteration(tight);
+    let (iteration, _, left, _) = run_iteration(tight);
     assert_eq!(record(&iteration)["status"], "over_budget");
     assert_eq!(
         capture(&iteration.children[0]).outcome,
@@ -461,7 +461,7 @@ fn a_descendants_late_markers_land_in_its_childs_evidence() {
            binary('-c', 'true'):ok()\n\
          end",
     );
-    let (iteration, _, _) = run_iteration(setup(&script, &root, &container));
+    let (iteration, _, _, _) = run_iteration(setup(&script, &root, &container));
     assert!(
         matches!(iteration.outcome, store::IterationOutcome::Completed { .. }),
         "{iteration:?}"
@@ -518,7 +518,7 @@ fn an_input_handle_reaches_the_child() {
     let mut with_input = setup(&script, &root, &container);
     with_input.args = &args;
     with_input.inputs = &inputs;
-    let (iteration, _, _) = run_iteration(with_input);
+    let (iteration, _, _, _) = run_iteration(with_input);
     assert!(
         matches!(iteration.outcome, store::IterationOutcome::Completed { .. }),
         "{iteration:?}"
@@ -535,7 +535,7 @@ fn a_failed_iteration_keeps_its_children_and_never_extracts_record() {
     let root = crate::test_scratch::scratch("bench_runner", "failed");
     let container = root.join("iterations");
     let script = script("function bench() record.x = 1; binary('-c', 'exit 1'):ok() end");
-    let (iteration, _, _) = run_iteration(setup(&script, &root, &container));
+    let (iteration, _, _, _) = run_iteration(setup(&script, &root, &container));
     let store::IterationOutcome::Failed { reason } = &iteration.outcome else {
         panic!("{iteration:?}");
     };

@@ -265,7 +265,11 @@ impl Fixture {
         )
         .unwrap();
         for (path, content) in files {
-            std::fs::write(root.join(path), content).unwrap();
+            let path = root.join(path);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, content).unwrap();
         }
         git(&root, &["init", "--quiet"]);
         git(&root, &["config", "user.name", "brokkr test"]);
@@ -701,6 +705,63 @@ fn a_preflight_refusal_refuses_every_arm_before_any_build() {
     for run in &runs {
         completed_once(run);
     }
+}
+
+/// `require` loads from `bench_lib` in the preflight and in every iteration,
+/// and the run's stored config holds every module asked for, with its
+/// source, as the script's own is held: a changed helper shows when two runs
+/// are compared.
+#[test]
+fn modules_from_bench_lib_are_required_and_stored_with_the_run() {
+    let _serial = crate::test_scratch::process_global_lock();
+    let config = "project = \"e2e-modules\"\n\
+                  bench_lib = \"lib\"\n\
+                  [bench.mods]\n\
+                  profile = \"dev\"\n\
+                  script = \"\"\"\n\
+                  local gate = require('gate')\n\
+                  function preflight() gate.check() end\n\
+                  function bench()\n\
+                  \x20   binary(require('io.word').word):ok()\n\
+                  \x20   record.word = require('io.word').word\n\
+                  end\"\"\"\n";
+    let fixture = Fixture::with_files(
+        "modules",
+        &[
+            ("brokkr.toml", config),
+            ("lib/gate.lua", "local M = {}\nfunction M.check() binary_with({program = 'sh'}, '-c', 'true'):ok() end\nreturn M\n"),
+            ("lib/io/word.lua", "return { word = 'plain' }\n"),
+            ("lib/unused.lua", "return {}\n"),
+        ],
+    );
+    let _hold = crate::lockfile::test_hold(
+        &fixture.detection.project_root,
+        &fixture.detection.build_root,
+    );
+    let ran = fixture.bench("modules", "mods", 1, &[]);
+    assert!(ran.result.is_ok(), "{}", ran.console);
+    let runs = fixture.stored();
+    let [run] = runs.as_slice() else {
+        panic!("{runs:?}");
+    };
+    assert_eq!(run.iterations[0].record.as_ref().unwrap()["word"], "plain");
+    let stored: toml::Table = run.config.parse().unwrap();
+    let modules = stored["modules"].as_table().unwrap();
+    assert_eq!(
+        modules.keys().cloned().collect::<Vec<_>>(),
+        ["gate", "io.word"],
+        "what was asked for, never the rest of the library"
+    );
+    assert_eq!(
+        modules["io.word"]["source"].as_str(),
+        Some("return { word = 'plain' }\n")
+    );
+    assert!(
+        modules["gate"]["origin"]
+            .as_str()
+            .unwrap()
+            .ends_with("lib/gate.lua")
+    );
 }
 
 fn completed_once(run: &store::RunDocument) {

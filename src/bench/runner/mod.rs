@@ -25,7 +25,7 @@ mod preflight;
 mod run_tests;
 mod stored_config;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -91,8 +91,12 @@ pub(crate) fn run(
     let _inputs_held = hold_inputs(&arms)?;
     let keep = crate::context::worktree_keep(&detection.config)?;
     let tree = crate::tree_policy::TreePolicy::of(&detection.config);
-    let (commit, config, labels) =
-        preflight_and_digest(name, args, detection, &view, &frozen, &mut arms)?;
+    let Prepared {
+        commit,
+        config,
+        labels,
+        modules,
+    } = preflight_and_digest(name, args, detection, &view, &frozen, &mut arms)?;
     // The whole invocation from here, worktree setup and publication
     // included: a stop that lands between two children, during the build or
     // while publishing is recorded rather than taking the default action, so
@@ -136,6 +140,7 @@ pub(crate) fn run(
             iterations: args.iterations.get(),
             argv: argv.clone(),
             measurement,
+            preflight_modules: &modules[index],
         };
         let started = Instant::now();
         let document = match attempt.run(&commit, &tree, keep) {
@@ -227,9 +232,20 @@ fn hold_inputs(arms: &[params::Bound]) -> Result<Option<crate::reservations::Rea
     Ok(Some(crate::reservations::hold_reads(&paths)?))
 }
 
-/// The invocation's commit, `config()`'s table and the arm labels, once
-/// every arm's preflight passed and its inputs are hashed. An unknown
-/// revision is refused before any project code runs.
+/// What every arm shares once its preflight passed and its inputs are
+/// hashed.
+struct Prepared {
+    commit: crate::git::Commit,
+    /// `config()`'s table.
+    config: std::sync::Arc<lua::Value>,
+    labels: Vec<String>,
+    /// Each arm's library modules its preflight asked for.
+    modules: Vec<BTreeSet<String>>,
+}
+
+/// The invocation's commit, `config()`'s table, the arm labels and each
+/// arm's preflight modules, once every arm's preflight passed and its inputs
+/// are hashed. An unknown revision is refused before any project code runs.
 fn preflight_and_digest(
     name: &str,
     args: &BenchArgs,
@@ -237,7 +253,7 @@ fn preflight_and_digest(
     view: &view::View,
     frozen: &Frozen,
     arms: &mut [params::Bound],
-) -> Result<(crate::git::Commit, std::sync::Arc<lua::Value>, Vec<String>), DevError> {
+) -> Result<Prepared, DevError> {
     let commit = crate::git::resolve_commit(
         detection.build_root.as_path(),
         args.commit.as_deref().unwrap_or("HEAD"),
@@ -252,7 +268,7 @@ fn preflight_and_digest(
     if guard.leave() {
         return Err(DevError::Interrupted);
     }
-    preflighted?;
+    let modules = preflighted?;
     // Hashed under the default action, as ever: a stop during it ends the
     // invocation at once, nothing stored.
     params::digest_arms(
@@ -260,14 +276,20 @@ fn preflight_and_digest(
         detection.project_root.as_path(),
         &detection.config_sources,
     )?;
-    Ok((commit, config, labels))
+    Ok(Prepared {
+        commit,
+        config,
+        labels,
+        modules,
+    })
 }
 
 /// Run the script's preflight, when it declares one, for every arm in a
 /// fresh State, before anything is built: each arm's refusal is collected,
 /// and any refuses the invocation whole, storing nothing. Passing means every
 /// arm passed before the build began, not that what it checked still holds
-/// when the arm runs.
+/// when the arm runs. Returns each arm's library modules its preflight asked
+/// for, which that arm's document records.
 fn preflight_arms(
     name: &str,
     frozen: &Frozen,
@@ -276,12 +298,13 @@ fn preflight_arms(
     config: &std::sync::Arc<lua::Value>,
     detection: &Detection,
     commit: &crate::git::Commit,
-) -> Result<(), DevError> {
+) -> Result<Vec<BTreeSet<String>>, DevError> {
     if !frozen.script.has_preflight() {
-        return Ok(());
+        return Ok(vec![BTreeSet::new(); arms.len()]);
     }
     let mut since = host::Since::new(detection.build_root.as_path(), commit.clone());
     let mut refusals = Vec::new();
+    let mut modules = Vec::with_capacity(arms.len());
     for (index, bound) in arms.iter().enumerate() {
         if crate::shutdown::should_unwind() {
             return Err(DevError::Interrupted);
@@ -295,9 +318,10 @@ fn preflight_arms(
             cwd: detection.project_root.as_path().to_path_buf(),
             since,
         };
-        let (outcome, host) = lua::run_preflight(&frozen.script, &bound.preflight_args(), host);
+        let (ran, host) = lua::run_preflight(&frozen.script, &bound.preflight_args(), host);
         since = host.since;
-        match outcome {
+        modules.push(ran.modules);
+        match ran.outcome {
             lua::PreflightOutcome::Passed => {}
             lua::PreflightOutcome::Interrupted => return Err(DevError::Interrupted),
             lua::PreflightOutcome::Refused(why) => {
@@ -316,7 +340,7 @@ fn preflight_arms(
         return Err(DevError::Interrupted);
     }
     if refusals.is_empty() {
-        Ok(())
+        Ok(modules)
     } else {
         Err(DevError::Preflight(refusals))
     }
@@ -472,6 +496,9 @@ pub(super) struct Frozen {
     /// The `.lua` file, or the config file holding the inline script.
     pub(super) origin: PathBuf,
     pub(super) script: lua::Script,
+    /// The `bench_lib` modules as read when the run began, which `require`
+    /// loads and the stored config records.
+    pub(super) library: Option<std::sync::Arc<super::library::Library>>,
 }
 
 fn freeze(bench: &Bench) -> Result<Frozen, DevError> {
@@ -524,10 +551,21 @@ fn freeze(bench: &Bench) -> Result<Frozen, DevError> {
             bench.name
         ));
     }
+    let library = bench
+        .library
+        .as_deref()
+        .map(super::library::Library::read)
+        .transpose()?
+        .map(std::sync::Arc::new);
+    let script = match &library {
+        Some(library) => script.with_library(std::sync::Arc::clone(library)),
+        None => script,
+    };
     Ok(Frozen {
         bytes,
         origin,
         script,
+        library,
     })
 }
 
@@ -552,6 +590,8 @@ struct Attempt<'a> {
     iterations: u32,
     argv: Vec<String>,
     measurement: store::Measurement,
+    /// The library modules this arm's preflight asked for.
+    preflight_modules: &'a BTreeSet<String>,
 }
 
 impl Attempt<'_> {
@@ -566,6 +606,9 @@ impl Attempt<'_> {
     ) -> Result<store::RunDocument, DevError> {
         let uuid = crate::db::generate_uuid()?;
         let mut document = self.document(commit, &uuid, unix_ms());
+        // Every module the preflight or an iteration asked for, loaded or
+        // not, is stored with its source once the attempt is decided.
+        let mut modules = self.preflight_modules.clone();
         let worktree = crate::context::with_worktree(
             Some(&self.detection.project),
             &self.detection.project_root,
@@ -577,10 +620,18 @@ impl Attempt<'_> {
             tree,
             keep,
             |build_root| {
-                self.execute(build_root.as_path(), commit, &mut document);
+                self.execute(build_root.as_path(), commit, &mut document, &mut modules);
                 Ok(())
             },
         );
+        if !modules.is_empty() {
+            document.config = stored_config::render(
+                self.detection,
+                &self.bench.name,
+                self.frozen,
+                &modules,
+            );
+        }
         if let Err(error) = worktree {
             // A git call cut short by the stop reports a spawn or subprocess
             // error, not an interrupt.
@@ -649,7 +700,12 @@ impl Attempt<'_> {
             },
             measurement: self.measurement,
             params: self.bound.document(),
-            config: stored_config::render(self.detection, &self.bench.name, self.frozen),
+            config: stored_config::render(
+                self.detection,
+                &self.bench.name,
+                self.frozen,
+                &BTreeSet::new(),
+            ),
             iterations_requested: self.iterations,
             outcome: store::RunOutcome::Interrupted,
             iterations: Vec::new(),
@@ -663,6 +719,7 @@ impl Attempt<'_> {
         build_root: &Path,
         commit: &crate::git::Commit,
         document: &mut store::RunDocument,
+        modules: &mut BTreeSet<String>,
     ) {
         let profile = self.profile();
         let features = document.build.features.clone();
@@ -683,7 +740,7 @@ impl Attempt<'_> {
         if !self.built_as_recorded(build_root, commit, document) {
             return;
         }
-        self.iterate(&program, commit, document);
+        self.iterate(&program, commit, document, modules);
     }
 
     /// Whether the build just made is still what the document records,
@@ -815,6 +872,7 @@ impl Attempt<'_> {
         program: &Path,
         commit: &crate::git::Commit,
         document: &mut store::RunDocument,
+        modules: &mut BTreeSet<String>,
     ) {
         let state = crate::clean::layout::ProjectState::new(self.detection.project_root.as_path());
         let mut since = host::Since::new(self.detection.build_root.as_path(), commit.clone());
@@ -825,7 +883,7 @@ impl Attempt<'_> {
                 document.outcome = store::RunOutcome::Interrupted;
                 return;
             }
-            let (iteration, returned, budget_left) = host::run_iteration(host::IterationSetup {
+            let (iteration, returned, budget_left, required) = host::run_iteration(host::IterationSetup {
                 script: &self.frozen.script,
                 args: &self.args,
                 inputs: &self.inputs,
@@ -841,6 +899,7 @@ impl Attempt<'_> {
             });
             since = returned;
             report_budget = budget_left;
+            modules.extend(required);
             let label = format!("iteration {}/{total}", index + 1);
             let outcome = iteration.outcome.clone();
             match (&outcome, iteration.wall_us) {

@@ -144,6 +144,57 @@ pub(crate) fn check(source: &[u8], lines: Option<&LineMap>) -> Result<NameCheck,
     })
 }
 
+/// Compile a library module without running it and check its globals. A
+/// module shares the State of the script that requires it, so the one rule
+/// that keeps every file's name check sound on its own is that a module
+/// defines no global: it exports through what it returns. So any bare
+/// global assignment is a finding, and so is a read of `_G`, the one door
+/// to defining a name without assigning it; every other bare read must be
+/// a builtin or a library global, since nothing else in the State is the
+/// module's to rely on. Returns every finding, in source order.
+pub(crate) fn check_module(source: &[u8], chunk: &str) -> Result<Vec<CompileError>, CompileError> {
+    let script = load_script(source, Some(chunk), None)?;
+    let mut probe = match fresh_state::<Probe>(None) {
+        Ok((state, _, _)) => state,
+        Err(error) => {
+            return Err(CompileError {
+                line: 0,
+                message: format!("cannot set up the Lua state its names resolve in: {error}"),
+            });
+        }
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut problems = Vec::new();
+    for access in script.program.globals() {
+        let name: &[u8] = &access.name;
+        let shown = String::from_utf8_lossy(name);
+        let problem = match access.kind {
+            ::dellingr::AccessKind::Write => format!(
+                "assigns the global {shown}: a module defines no global, it exports through \
+                 what it returns (make it local)"
+            ),
+            ::dellingr::AccessKind::Read if name == b"_G" => {
+                "reads _G: a module defines no global, so it has no use for the global table"
+                    .to_owned()
+            }
+            ::dellingr::AccessKind::Read if !provided(&mut probe, name) => format!(
+                "{shown} is not defined: no builtin or library global has that name, and a \
+                 module sees no other"
+            ),
+            // A read, or an access kind a later dellingr adds: neither
+            // defines a name.
+            _ => continue,
+        };
+        if seen.insert((name.to_vec(), access.kind == ::dellingr::AccessKind::Write)) {
+            problems.push(CompileError {
+                line: access.line,
+                message: problem,
+            });
+        }
+    }
+    Ok(problems)
+}
+
 /// Whether a fresh State holds a non-nil global `name`.
 fn provided(state: &mut State, name: &[u8]) -> bool {
     let Ok(name) = std::str::from_utf8(name) else {
@@ -210,6 +261,8 @@ pub(crate) struct Script {
     /// `preflight` anywhere in it, as dellingr records one while compiling.
     /// Decided here, once, from the source: never from what a run leaves.
     preflight: bool,
+    /// The modules `require` loads, frozen with the script.
+    library: Option<Arc<super::library::Library>>,
 }
 
 impl Script {
@@ -217,6 +270,18 @@ impl Script {
     /// every arm before anything is built.
     pub(crate) fn has_preflight(&self) -> bool {
         self.preflight
+    }
+
+    /// The script with the library its `require` loads from.
+    pub(crate) fn with_library(mut self, library: Arc<super::library::Library>) -> Self {
+        self.library = Some(library);
+        self
+    }
+
+    /// The chunk name the script compiled under: the one chunk its line map
+    /// applies to.
+    fn chunk(&self) -> Option<&[u8]> {
+        self.program.source_name()
     }
 }
 
@@ -235,6 +300,7 @@ pub(crate) fn load_script(
                 .any(|a| a.kind == ::dellingr::AccessKind::Write && &*a.name == b"preflight"),
             program,
             lines: lines.clone(),
+            library: None,
         })
         .map_err(|error| CompileError {
             line: mapped(lines.as_deref(), error.line_num()),
@@ -416,6 +482,8 @@ pub(crate) struct Sample {
     pub(crate) outcome: SampleOutcome,
     pub(crate) wall: Option<Duration>,
     pub(crate) record: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Every library module the sample asked `require` for, loaded or not.
+    pub(crate) modules: std::collections::BTreeSet<String>,
 }
 
 /// The metatable key a handle carries its index under.
@@ -427,6 +495,28 @@ struct Ctx<H> {
     phase: Phase,
     ok: RustFnHandle,
     marks: Marks,
+    modules: Modules,
+}
+
+/// What `require` has done in this State: each module loaded, its export
+/// anchored so it lives as long as the State; the chain being loaded, so a
+/// cycle is refused naming it; and every name it was asked for that the
+/// library holds, loaded or not, which the run records.
+#[derive(Default)]
+struct Modules {
+    library: Option<Arc<super::library::Library>>,
+    loaded: std::collections::HashMap<String, Arc<::dellingr::Anchor>>,
+    loading: Vec<String>,
+    attempted: std::collections::BTreeSet<String>,
+}
+
+impl Modules {
+    fn of(script: &Script) -> Self {
+        Self {
+            library: script.library.clone(),
+            ..Self::default()
+        }
+    }
 }
 
 /// Where the State is: what decides which builtins may run. A module a
@@ -460,20 +550,29 @@ pub(crate) enum PreflightOutcome {
     Interrupted,
 }
 
+/// What one preflight did: how it ended, and every library module it asked
+/// `require` for, loaded or not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Preflighted {
+    pub(crate) outcome: PreflightOutcome,
+    pub(crate) modules: std::collections::BTreeSet<String>,
+}
+
 /// Run a declared preflight in a fresh State: the chunk's top level, then
 /// `preflight(params, keys)`, which passes by returning nothing. Returns the
 /// host back.
-pub(crate) fn run_preflight<H: Host>(
-    script: &Script,
-    args: &Args,
-    host: H,
-) -> (PreflightOutcome, H) {
+pub(crate) fn run_preflight<H: Host>(script: &Script, args: &Args, host: H) -> (Preflighted, H) {
     let interrupt = ::dellingr::Interrupt::new();
     let (mut state, ok, marks) = match fresh_state::<H>(Some(interrupt.clone())) {
         Ok(fresh) => fresh,
         Err(error) => {
             return (
-                PreflightOutcome::Broken(format!("cannot set up the Lua state: {error}")),
+                Preflighted {
+                    outcome: PreflightOutcome::Broken(format!(
+                        "cannot set up the Lua state: {error}"
+                    )),
+                    modules: std::collections::BTreeSet::new(),
+                },
                 host,
             );
         }
@@ -483,16 +582,22 @@ pub(crate) fn run_preflight<H: Host>(
         phase: Phase::TopLevel,
         ok,
         marks: marks.clone(),
+        modules: Modules::of(script),
     }));
     let outcome = watched::<H, _>(&interrupt, || {
         preflight::<H>(&mut state, script, args, &marks)
     });
-    let host = state
+    let ctx = state
         .user_data_mut::<Option<Ctx<H>>>()
-        .and_then(Option::take)
-        .map(|ctx| ctx.host);
-    match host {
-        Some(host) => (outcome, host),
+        .and_then(Option::take);
+    match ctx {
+        Some(ctx) => (
+            Preflighted {
+                outcome,
+                modules: ctx.modules.attempted,
+            },
+            ctx.host,
+        ),
         // The context is set above and only taken here.
         None => unreachable!("the preflight's host context went missing"),
     }
@@ -504,7 +609,7 @@ fn preflight<H: Host>(
     args: &Args,
     marks: &Marks,
 ) -> PreflightOutcome {
-    let lines = script.lines.as_deref();
+    let lines = Lines::of(script);
     let broken = |error: Error| {
         if matches!(error.kind(), ErrorKind::Interrupted) {
             return PreflightOutcome::Interrupted;
@@ -591,14 +696,18 @@ pub(crate) fn run_sample<H: Host>(script: &Script, args: &Args, host: H) -> (Sam
         phase: Phase::TopLevel,
         ok,
         marks: marks.clone(),
+        modules: Modules::of(script),
     }));
-    let sample = watched::<H, _>(&interrupt, || sample::<H>(&mut state, script, args, &marks));
-    let host = state
+    let mut sample =
+        watched::<H, _>(&interrupt, || sample::<H>(&mut state, script, args, &marks));
+    let ctx = state
         .user_data_mut::<Option<Ctx<H>>>()
-        .and_then(Option::take)
-        .map(|ctx| ctx.host);
-    match host {
-        Some(host) => (sample, host),
+        .and_then(Option::take);
+    match ctx {
+        Some(ctx) => {
+            sample.modules = ctx.modules.attempted;
+            (sample, ctx.host)
+        }
         // The context is set above and only taken here.
         None => unreachable!("the sample's host context went missing"),
     }
@@ -647,11 +756,12 @@ fn failed(reason: String, wall: Option<Duration>) -> Sample {
         outcome: SampleOutcome::Failed(reason),
         wall,
         record: None,
+        modules: std::collections::BTreeSet::new(),
     }
 }
 
 fn sample<H: Host>(state: &mut State, script: &Script, args: &Args, marks: &Marks) -> Sample {
-    let lines = script.lines.as_deref();
+    let lines = Lines::of(script);
     if let Err(error) = state
         .load(&script.program)
         .and_then(|()| state.call(ArgCount::Fixed(0), RetCount::Fixed(0)))
@@ -712,16 +822,43 @@ fn sample<H: Host>(state: &mut State, script: &Script, args: &Args, marks: &Mark
             outcome: SampleOutcome::Completed(verdict),
             wall: Some(wall),
             record: Some(record),
+            modules: std::collections::BTreeSet::new(),
         },
         Err(why) => failed(format!("record {why}"), Some(wall)),
+    }
+}
+
+/// A script's line map and the one chunk it numbers: a module's frames,
+/// and any other chunk's, keep their own lines.
+#[derive(Clone, Copy)]
+struct Lines<'a> {
+    map: Option<&'a LineMap>,
+    chunk: Option<&'a [u8]>,
+}
+
+impl<'a> Lines<'a> {
+    fn of(script: &'a Script) -> Self {
+        Self {
+            map: script.lines.as_deref(),
+            chunk: script.chunk(),
+        }
+    }
+
+    /// `line` of `source` as the reader should see it.
+    fn at(self, source: Option<&[u8]>, line: u32) -> u32 {
+        if source.is_some() && source == self.chunk {
+            mapped(self.map, line)
+        } else {
+            line
+        }
     }
 }
 
 /// A sample ended by an error out of the chunk or `bench()`. A builtin's
 /// failure is its reason after the script line that called it; any other
 /// error is dellingr's own rendering, its traceback included, with every
-/// line mapped.
-fn ended(error: Error, lines: Option<&LineMap>, wall: Option<Duration>) -> Sample {
+/// line of the script's own chunk mapped.
+fn ended(error: Error, lines: Lines<'_>, wall: Option<Duration>) -> Sample {
     let outcome = match abort_of(&error) {
         _ if matches!(error.kind(), ErrorKind::Interrupted) => SampleOutcome::Interrupted,
         Some(Abort::Interrupted) => SampleOutcome::Interrupted,
@@ -741,12 +878,13 @@ fn ended(error: Error, lines: Option<&LineMap>, wall: Option<Duration>) -> Sampl
         outcome,
         wall,
         record: None,
+        modules: std::collections::BTreeSet::new(),
     }
 }
 
 /// `why` after `chunk:line:` of the innermost script frame, or alone when no
 /// frame knows its line.
-fn located(error: &Error, lines: Option<&LineMap>, why: &str) -> String {
+fn located(error: &Error, lines: Lines<'_>, why: &str) -> String {
     let frame = error
         .stack_trace()
         .iter()
@@ -755,20 +893,21 @@ fn located(error: &Error, lines: Option<&LineMap>, why: &str) -> String {
         Some((source, line)) => format!(
             "{}:{}: {why}",
             String::from_utf8_lossy(source),
-            mapped(lines, line)
+            lines.at(Some(source), line)
         ),
         None => why.to_owned(),
     }
 }
 
-/// dellingr's rendering of `error` with every frame's lines mapped.
-fn rendered(error: Error, lines: Option<&LineMap>) -> String {
-    let Some(lines) = lines else {
+/// dellingr's rendering of `error` with every line of the script's own chunk
+/// mapped.
+fn rendered(error: Error, lines: Lines<'_>) -> String {
+    if lines.map.is_none() {
         return error.to_string();
-    };
+    }
     if error.stack_trace().is_empty() {
         // Rendered from the error's own position, which no frame carries.
-        let at = mapped(Some(lines), error.line_num());
+        let at = lines.at(error.source_name(), error.line_num());
         return match error.source_name() {
             Some(source) if at != 0 => {
                 format!("{}:{at}: {}", String::from_utf8_lossy(source), error.kind())
@@ -780,8 +919,8 @@ fn rendered(error: Error, lines: Option<&LineMap>) -> String {
         .stack_trace()
         .iter()
         .map(|frame| StackFrame {
-            line: mapped(Some(lines), frame.line),
-            defined_line: mapped(Some(lines), frame.defined_line),
+            line: lines.at(frame.source.as_deref(), frame.line),
+            defined_line: lines.at(frame.source.as_deref(), frame.defined_line),
             ..frame.clone()
         })
         .collect();
@@ -799,7 +938,8 @@ fn abort_of(error: &Error) -> Option<&Abort> {
 /// table and the `record` table. Returns the handle of `result:ok` and the
 /// anchored marks.
 fn install<H: Host>(state: &mut State) -> Result<(RustFnHandle, Marks), Error> {
-    let builtins: [(&str, ::dellingr::RustFunc); 10] = [
+    let builtins: [(&str, ::dellingr::RustFunc); 11] = [
+        ("require", lua_require::<H>),
         ("binary", lua_binary::<H>),
         ("binary_with", lua_binary_with::<H>),
         ("since", lua_since::<H>),
@@ -983,6 +1123,105 @@ fn lua_since<H: Host>(state: &mut State) -> Result<u8, Error> {
             Ok(1)
         }
         Err(abort) => Err(raise(state, abort)),
+    }
+}
+
+/// `require(name)`: the export of the library module `name`, loaded on its
+/// first `require` in this State, in the phase that asked for it, and cached
+/// for every later one. A module returns exactly one non-nil value; a cycle
+/// is refused naming its chain; a module's own error comes back unchanged.
+fn lua_require<H: Host>(state: &mut State) -> Result<u8, Error> {
+    stop_first::<H>(state)?;
+    let name = string_arg(state, 1, "require")?;
+    if !super::library::is_module_name(&name) {
+        return Err(raise_failed(
+            state,
+            format!(
+                "require({name:?}): a module name is dot-separated segments of letters, digits \
+                 and _, the module's path under bench_lib without .lua"
+            ),
+        ));
+    }
+    let program = match find_module::<H>(state, &name) {
+        Ok(Found::Loaded(export)) => {
+            state.push_anchor(&export)?;
+            return Ok(1);
+        }
+        Ok(Found::Load(program)) => program,
+        Err(why) => return Err(raise_failed(state, why)),
+    };
+    let base = state.get_top();
+    let ran = state
+        .load(&program)
+        .and_then(|()| state.call(ArgCount::Fixed(0), RetCount::All));
+    if let Some(ctx) = ctx::<H>(state) {
+        ctx.modules.loading.pop();
+    }
+    ran?;
+    let returned = state.get_top().saturating_sub(base);
+    if returned != 1 || state.typ(-1) == LuaType::Nil {
+        return Err(raise_failed(
+            state,
+            format!(
+                "require({name:?}): the module returned {returned} value{}: a module returns \
+                 exactly one non-nil value, its export",
+                if returned == 1 { " (nil)" } else { "s" }
+            ),
+        ));
+    }
+    let export = Arc::new(state.anchor()?);
+    state.push_anchor(&export)?;
+    if let Some(ctx) = ctx::<H>(state) {
+        ctx.modules.loaded.insert(name, export);
+    }
+    Ok(1)
+}
+
+/// What `require(name)` finds in this State's context.
+enum Found {
+    /// Loaded before: its export.
+    Loaded(Arc<::dellingr::Anchor>),
+    /// To load now: its compiled chunk, the name recorded as attempted and
+    /// pushed on the loading chain.
+    Load(::dellingr::Program),
+}
+
+fn find_module<H: Host>(state: &mut State, name: &str) -> Result<Found, String> {
+    let Some(ctx) = ctx::<H>(state) else {
+        return Err("require(): no bench context".into());
+    };
+    let modules = &mut ctx.modules;
+    if let Some(export) = modules.loaded.get(name) {
+        return Ok(Found::Loaded(Arc::clone(export)));
+    }
+    if modules.loading.iter().any(|loading| loading == name) {
+        return Err(format!(
+            "require({name:?}): a cycle, {} -> {name}",
+            modules.loading.join(" -> ")
+        ));
+    }
+    let Some(library) = modules.library.clone() else {
+        return Err(format!(
+            "require({name:?}): no bench_lib is configured: set bench_lib = \"dir\" in \
+             brokkr.toml to the directory the modules live in"
+        ));
+    };
+    let Some(module) = library.modules.get(name) else {
+        return Err(format!(
+            "require({name:?}): bench_lib {} holds no module {name}",
+            library.dir.display()
+        ));
+    };
+    modules.attempted.insert(name.to_owned());
+    match &module.compiled {
+        Ok(script) => {
+            modules.loading.push(name.to_owned());
+            Ok(Found::Load(script.program.clone()))
+        }
+        Err(error) => Err(format!(
+            "require({name:?}): {} does not compile: {error}",
+            module.path.display()
+        )),
     }
 }
 

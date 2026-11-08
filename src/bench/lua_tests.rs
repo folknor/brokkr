@@ -237,8 +237,8 @@ fn a_misspelt_builtin_is_a_problem_at_its_line() {
 }
 
 /// The config file's lines: TOML whose script starts on line 3.
-fn mapped_lines() -> crate::bench::script_lines::LineMap {
-    let dir = crate::test_scratch::scratch("bench_lua", "lines");
+fn mapped_lines(name: &str) -> crate::bench::script_lines::LineMap {
+    let dir = crate::test_scratch::scratch("bench_lua", name);
     let file = dir.join("brokkr.toml");
     let source = "function bench()\n  local x = nil\n  x()\nend\n";
     std::fs::write(
@@ -249,11 +249,157 @@ fn mapped_lines() -> crate::bench::script_lines::LineMap {
     crate::bench::script_lines::locate(&file, "cat", source).unwrap()
 }
 
+/// A library of `modules` (name with `/`, source) in its own directory.
+fn library(name: &str, modules: &[(&str, &str)]) -> Arc<crate::bench::library::Library> {
+    let dir = crate::test_scratch::scratch("bench_lua_lib", name);
+    for (module, source) in modules {
+        let path = dir.join(format!("{module}.lua"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, source).unwrap();
+    }
+    Arc::new(crate::bench::library::Library::read(&dir).unwrap())
+}
+
+fn run_library(
+    source: &str,
+    library: &Arc<crate::bench::library::Library>,
+    host: Fake,
+) -> (Sample, Fake) {
+    let script = load_script(source.as_bytes(), Some("test.lua"), None)
+        .unwrap()
+        .with_library(Arc::clone(library));
+    run_sample(&script, &Args::default(), host)
+}
+
+/// `require` loads a module once per State and hands back the same export
+/// every time; a nested module runs in the phase that required it; every
+/// name asked for is recorded, a failed one too.
+#[test]
+fn require_loads_a_module_once_and_records_what_it_asked_for() {
+    let lib = library(
+        "loads",
+        &[
+            (
+                "count",
+                "local M = { n = 0 }\nfunction M.bump() M.n = M.n + 1 return M.n end\nreturn M",
+            ),
+            ("io/uring", "local c = require('count')\nreturn { bump = c.bump }"),
+            ("launches", "binary('x')\nreturn {}"),
+        ],
+    );
+    let (sample, _) = run_library(
+        "local count = require('count')\n\
+         function bench()\n\
+           require('io.uring').bump()\n\
+           record.n = count.bump()\n\
+           record.same = require('count') == count\n\
+         end",
+        &lib,
+        Fake::default(),
+    );
+    let found = completed(&sample);
+    assert_eq!(found["n"], 2, "one module, one state");
+    assert_eq!(found["same"], true);
+    assert_eq!(
+        sample.modules.iter().cloned().collect::<Vec<_>>(),
+        ["count", "io.uring"]
+    );
+
+    let (sample, _) = run_library(
+        "require('launches')\nfunction bench() end",
+        &lib,
+        Fake::default(),
+    );
+    let why = reason(&sample);
+    assert!(why.contains("not at the script's top level"), "{why}");
+    assert!(sample.modules.contains("launches"), "a failed load is recorded");
+    let (sample, host) = run_library(
+        "function bench() require('launches') end",
+        &lib,
+        Fake::default(),
+    );
+    assert!(matches!(sample.outcome, SampleOutcome::Completed(_)), "{sample:?}");
+    assert_eq!(host.calls.len(), 1, "inside bench() a module may launch");
+}
+
+/// A cycle, a missing module, one that does not compile, one that returns
+/// anything but one non-nil value, a malformed name and no library at all
+/// are each refused, naming why; a module's own error comes back as it is,
+/// at the module's own line even under the script's line map.
+#[test]
+fn require_refuses_what_is_not_one_clean_export() {
+    let lib = library(
+        "refuses",
+        &[
+            ("a", "return require('b')"),
+            ("b", "return require('a')"),
+            ("broken", "return ("),
+            ("none", "local x = 1"),
+            ("two", "return 1, 2"),
+            ("raises", "local t = nil\nlocal y = t.field\nreturn {}"),
+        ],
+    );
+    for (name, needle) in [
+        ("a", "a cycle, a -> b -> a"),
+        ("absent", "holds no module absent"),
+        ("broken", "does not compile"),
+        ("none", "returned 0 values"),
+        ("two", "returned 2 values"),
+        ("../x", "a module name is dot-separated"),
+    ] {
+        let (sample, _) = run_library(
+            &format!("function bench() require('{name}') end"),
+            &lib,
+            Fake::default(),
+        );
+        let why = reason(&sample);
+        assert!(why.contains(needle), "{name}: {why}");
+    }
+    let (sample, _) = run(
+        "function bench() require('a') end",
+        Fake::default(),
+    );
+    assert!(reason(&sample).contains("no bench_lib is configured"));
+
+    let lines = mapped_lines("module-lines");
+    let source = "function bench()\n  local x = nil\n  require('raises')\nend\n";
+    let script = load_script(source.as_bytes(), Some("brokkr.toml"), Some(lines))
+        .unwrap()
+        .with_library(Arc::clone(&lib));
+    let (sample, _) = run_sample(&script, &Args::default(), Fake::default());
+    let why = reason(&sample);
+    assert!(why.contains("raises.lua:2:"), "the module's own line: {why}");
+    assert!(why.contains("brokkr.toml:5:"), "the script's mapped line: {why}");
+}
+
+/// A module defines no global and reads no `_G` or unknown name; the
+/// builtins and dellingr's library are its to read.
+#[test]
+fn a_module_is_checked_against_the_builtins_alone() {
+    let problems = check_module(
+        b"helper = 1\nlocal x = _G\nlocal y = undefined_thing\nlocal z = string.len(fail and 'x')\nreturn {}",
+        "m.lua",
+    )
+    .unwrap();
+    let found: Vec<(u32, &str)> = problems
+        .iter()
+        .map(|p| (p.line, p.message.as_str()))
+        .collect();
+    assert_eq!(found.len(), 3, "{found:?}");
+    assert!(found[0].0 == 1 && found[0].1.contains("assigns the global helper"));
+    assert!(found[1].0 == 2 && found[1].1.contains("reads _G"));
+    assert!(found[2].0 == 3 && found[2].1.contains("undefined_thing is not defined"));
+    assert!(check_module(b"return (", "m.lua").is_err());
+    assert!(check_module(b"local M = {}\nfunction M.f() return require('x') end\nreturn M", "m.lua")
+        .unwrap()
+        .is_empty());
+}
+
 /// With a map, compile errors, a Lua error's traceback and a builtin's
 /// failure all name the config file's lines.
 #[test]
 fn errors_name_the_config_files_lines() {
-    let lines = mapped_lines();
+    let lines = mapped_lines("lines");
     let err = check(b"function bench()\n  return (\nend\n", Some(&lines)).unwrap_err();
     assert_eq!(err.line, 5, "{err}");
 

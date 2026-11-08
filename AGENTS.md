@@ -20,7 +20,7 @@ A doc with 8+ `##` sections is **section-addressed**: `brokkr man conventions sc
 - `reference/output.md` - operator output channel conventions.
 - `docs/brokkr.toml.md` - config core: where it lives, the user-wide layer and its user-only `results_server`, `include` composition, top-level shape and host sections, `worktree_keep`, `verify_reference_budget`, `disable_toolchain`, `strip_rustflags`, `[cargo_env]`, `[deps]`, `[bin]`, `[[install]]`, `[member_check]`, `[lints]`.
 - `docs/brokkr.toml.conventions.md` - convention gates: `[gremlins]`, shared path selectors, `[header]`, `[[textlint]]`, `[textlint_preset]`, `[[script_check]]`, `[manifest]`, `[rustdoc]`, `[[fixture_lint]]`, `[[dependency_rule]]`.
-- `docs/brokkr.toml.bench.md` - script benches: `[bench.*]` with `script` or `script_file` and its `hotpath_features`, params and their `from` paths, binding params on the command line (lists, ranges, `all`, collections and fan-out) and its run-time refusals, the resolved view `from` paths walk and `config()` returns, `[bench_params.*]` and `uses`, `[data]`, the reserved names, validating a script (the `bench` check phase).
+- `docs/brokkr.toml.bench.md` - script benches: `[bench.*]` with `script` or `script_file` and its `hotpath_features`, params and their `from` paths, binding params on the command line (lists, ranges, `all`, collections and fan-out) and its run-time refusals, the resolved view `from` paths walk and `config()` returns, `[bench_params.*]` and `uses`, `[data]`, `bench_lib`, the reserved names, validating a script and the library (the `bench` check phase).
 - `docs/brokkr.toml.sweeps.md` - `[[check]]` sweeps, `[[lint_sweep]]` (linted, never tested), the `parallel` lane, `[test]` and its profiles, `[[quarantine]]`.
 - `docs/brokkr.toml.elivagar.md` - `[<host>.tilegen.*]` blocks (elivagar).
 - `docs/brokkr.toml.datasets.md` - `[<host>.datasets.*]` and the variant-selection CLI flags (pbfhogg/elivagar/nidhogg).
@@ -32,7 +32,7 @@ A doc with 8+ `##` sections is **section-addressed**: `brokkr man conventions sc
 - `reference/check-internals.md` - how the check/test pipeline is built: invocation selection, harness isolation and the failure roster, direct execution, the prepare plan, journal and execution accounting, diagnostic inventory, watchdog attribution, the stray/orphan reapers, the guard's lease protocol, rustflags sink selection. Read before changing any of them.
 - `docs/commands/clippy.md` - `brokkr clippy`.
 - `docs/commands/deps.md` - `brokkr deps`.
-- `docs/commands/bench.md` - `brokkr bench NAME`: the command line, the preflight, arms, the build, an iteration, the script's builtins, `binary()`, `binary_with()`, hotpath capture and `--hotpath`, interrupting a run, where an iteration's files live, what a run stores.
+- `docs/commands/bench.md` - `brokkr bench NAME`: the command line, the preflight, modules (`require` and `bench_lib`), arms, the build, an iteration, the script's builtins, `binary()`, `binary_with()`, hotpath capture and `--hotpath`, interrupting a run, where an iteration's files live, what a run stores.
 - `docs/commands/crit.md` - `brokkr crit` (criterion).
 - `docs/commands/run.md` - `brokkr run` / `brokkr build` / `brokkr install`.
 - `docs/commands/clean.md` - `brokkr clean`.

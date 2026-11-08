@@ -235,11 +235,20 @@ pub(super) fn run_bench(benches: &super::Benches) -> Result<(), DevError> {
         }
         findings.extend(checked.findings);
     }
+    // Every bench shares the one `bench_lib`: checked once.
+    let libraries: std::collections::BTreeSet<&std::path::Path> = benches
+        .values()
+        .filter_map(|bench| bench.library.as_deref())
+        .collect();
+    for library in &libraries {
+        findings.extend(crate::bench::check_library(library));
+    }
     if findings.is_empty() {
-        phase_ok(
-            Phase::Bench.label(),
-            Some(output::count(benches.len(), "script")),
-        );
+        let mut checked = output::count(benches.len(), "script");
+        if !libraries.is_empty() {
+            checked.push_str(" and bench_lib");
+        }
+        phase_ok(Phase::Bench.label(), Some(checked));
         return Ok(());
     }
     report_findings(

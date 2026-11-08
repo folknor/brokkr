@@ -17,6 +17,7 @@
 pub(crate) mod evidence;
 mod external;
 mod json;
+mod library;
 mod lua;
 mod params;
 mod publication;
@@ -58,6 +59,10 @@ pub(crate) struct ScriptFinding {
 
 impl std::fmt::Display for ScriptFinding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // A library module's finding belongs to no one bench.
+        if self.bench.is_empty() {
+            return write!(f, "bench_lib {}: {}", self.file.display(), self.problem);
+        }
         write!(
             f,
             "[bench.{}] {}: {}",
@@ -66,6 +71,37 @@ impl std::fmt::Display for ScriptFinding {
             self.problem
         )
     }
+}
+
+/// Read the `bench_lib` directory `dir` and check every module in it: it
+/// compiles, defines no global, reads no `_G` and reads no name beyond the
+/// builtins and dellingr's library (`lua::check_module`). Runs none of it.
+pub(crate) fn check_library(dir: &Path) -> Vec<ScriptFinding> {
+    let finding = |file: &Path, problem: String| ScriptFinding {
+        bench: String::new(),
+        file: file.to_path_buf(),
+        problem,
+    };
+    let library = match library::Library::read(dir) {
+        Ok(library) => library,
+        Err(error) => return vec![finding(dir, error.to_string())],
+    };
+    let mut findings = Vec::new();
+    for module in library.modules.values() {
+        let checked = match &module.compiled {
+            Err(error) => Err(error.clone()),
+            Ok(_) => lua::check_module(&module.source, &module.path.display().to_string()),
+        };
+        match checked {
+            Err(error) => findings.push(finding(&module.path, error.to_string())),
+            Ok(problems) => findings.extend(
+                problems
+                    .iter()
+                    .map(|problem| finding(&module.path, problem.to_string())),
+            ),
+        }
+    }
+    findings
 }
 
 /// How an inline script's errors name it: by its config file and that file's
@@ -200,6 +236,7 @@ mod tests {
             hotpath_features: Vec::new(),
             uses: Vec::new(),
             params: BTreeMap::new(),
+            library: None,
         }
     }
 
@@ -214,6 +251,28 @@ mod tests {
             source: source.into(),
             declared_in: PathBuf::from("brokkr.toml"),
         }))
+    }
+
+    /// Every module of the library is checked, each finding naming the
+    /// module's file under `bench_lib`, not a bench; a clean one adds none.
+    #[test]
+    fn the_library_check_names_each_modules_file() {
+        let dir = crate::test_scratch::scratch("bench_check", "library");
+        std::fs::write(dir.join("ok.lua"), "local M = {}\nreturn M\n").unwrap();
+        std::fs::write(dir.join("leaky.lua"), "helper = 1\nreturn {}\n").unwrap();
+        std::fs::write(dir.join("broken.lua"), "return (\n").unwrap();
+        let findings = check_library(&dir);
+        let shown: Vec<String> = findings.iter().map(ToString::to_string).collect();
+        assert_eq!(shown.len(), 2, "{shown:?}");
+        assert!(
+            shown[0].starts_with("bench_lib ") && shown[0].contains("broken.lua"),
+            "{shown:?}"
+        );
+        assert!(
+            shown[1].contains("leaky.lua: line 1: assigns the global helper"),
+            "{shown:?}"
+        );
+        assert_eq!(check_library(&dir.join("absent")).len(), 1);
     }
 
     #[test]
