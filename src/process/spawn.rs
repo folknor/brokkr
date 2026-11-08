@@ -443,7 +443,12 @@ mod exact_tests {
         let dir = crate::test_scratch::scratch("spawn_exact", "env");
         let command = exact(
             "/bin/sh",
-            &["-c", "printf '%s|%s|%s' \"$BROKKR_EXACT_TEST\" \"$1\" \"$PWD\"", "sh", "arg"],
+            &[
+                "-c",
+                "printf '%s|%s|%s' \"$BROKKR_EXACT_TEST\" \"$1\" \"$PWD\"",
+                "sh",
+                "arg",
+            ],
             &dir,
         );
         let output = spawn_exact(command).unwrap().wait_with_output().unwrap();

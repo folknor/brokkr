@@ -215,8 +215,32 @@ CREATE TABLE child_executable (
 ) STRICT;
 ";
 
+/// Version 4: marks. One append-only log of mark requests per store, each
+/// row the exact request as submitted; what they mean is a fold over a
+/// project's rows in id order (`marks.rs`). No run row is touched.
+const V4: &str = "
+CREATE TABLE marks (
+    id         INTEGER PRIMARY KEY,
+    uuid       TEXT NOT NULL UNIQUE,
+    project    TEXT NOT NULL,
+    at_unix_ms INTEGER NOT NULL,
+    hostname   TEXT NOT NULL,
+    kind       TEXT NOT NULL CHECK (kind IN
+        ('retire', 'unretire', 'invalidate', 'revalidate', 'rename')),
+    name       TEXT,
+    target     TEXT,
+    run        TEXT REFERENCES runs(uuid),
+    reason     TEXT,
+    CHECK ((kind IN ('retire', 'unretire', 'rename')) = (name IS NOT NULL)),
+    CHECK ((kind = 'rename') = (target IS NOT NULL)),
+    CHECK ((kind IN ('invalidate', 'revalidate')) = (run IS NOT NULL)),
+    CHECK ((kind IN ('retire', 'invalidate')) = (reason IS NOT NULL))
+) STRICT;
+CREATE INDEX marks_by_project ON marks(project, id);
+";
+
 /// The chain. Shipped steps are frozen; append only.
-pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3];
+pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4];
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 

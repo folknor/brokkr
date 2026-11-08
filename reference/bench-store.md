@@ -181,6 +181,70 @@ version or the file) and `Conflict` and `Failed` (anything before the
 commit) are known unapplied; `CommitUncertain` (the commit itself errored)
 may have landed, and republishing the same document settles it.
 
+## Marks
+
+What a user says about stored runs afterwards lives beside them, never in
+them and never in `brokkr.toml`: a stored run is not edited or deleted, and
+a bench retired here stays hidden after its table is gone from the config.
+The code is `marks.rs`.
+
+**The log.** `Store::mark` appends one `MarkRequest` (a client uuid, the
+project, when and on which host it was made, and the mark) to the `marks`
+table, the exact request as submitted. The marks: `retire` a bench name and
+`unretire` it, `invalidate` a run (by its full uuid) and `revalidate` it,
+`rename` a bench name. `retire` and `invalidate` require a non-blank
+reason; the undos take none. The mark uuid is the request id, as a run's is
+its publication's, under one `BEGIN IMMEDIATE`: a uuid already stored is
+answered `AlreadyApplied` when the stored request is equal and refused as a
+conflict when not (an invalid one included), and that lookup comes before
+any check but the uuid's own shape, so a request a later mark undid still answers its replay
+rather than being refused or applied again. Errors read as in Publication.
+`Store::marks` gives a project's log back in apply order.
+
+**The fold.** What the marks mean is one fold over a project's log in row
+order (`MarkView`: the renames in effect, the retired end names, the
+invalidated runs, each retirement and invalidation with the request it came
+from). Admission checks a proposed mark against that fold and the runs
+stored at that moment, and refuses as `Refused`; the fold applies every
+accepted mark unconditionally and never consults runs, so a mark does on
+every later read what it did when admitted.
+
+- **Renames** form chains resolved to their end (`MarkView::name`). A name
+  is the source of at most one rename, and only a name the store knows (it
+  has runs, or a mark in effect names it) can be renamed. Renaming onto a
+  known name is refused, so histories never merge silently, except onto an
+  ancestor in the source's own chain: that is the undo, and it cancels
+  every rename on the path, so the view never holds a cycle. The no-merge
+  check sees the runs stored when the rename commits; a run of the new name
+  published afterwards (one already in flight included) joins the renamed
+  history, since a publication carries no identity but its name.
+- **Retirement** belongs to an end name, and a rename never changes any
+  run's visibility: a forward rename moves the retirement to the new end,
+  and an undo gives every name on the cancelled path a copy of it, each
+  then unretired on its own. Retiring or unretiring a renamed name acts on
+  its end. A run published later under a retired name is retired too.
+- A run is **hidden** when it is invalidated or its resolved name is
+  retired. Admission refuses a retirement of an unknown or retired name, an
+  unretire of one not retired, an invalidation of a run not in the project
+  or already invalidated, and a revalidation of one that is not.
+
+**Pairing across a rename.** The stored pairing key keeps the bench's
+literal name and its contract (Derived, not submitted).
+`MarkView::comparison_key` is a separate, view-dependent projection: the
+stored key with its bench element replaced by the resolved name, its tag
+and class kept, so two algorithms' keys still never meet; a key of a shape
+it does not know comes back unchanged. It is computed from the stored key,
+never from a summary's document, whose children are not there to give its
+class.
+
+**Revisions.** Runs are inserted whole and never deleted and marks only
+appended, so a `Revision` (the highest mark row and the highest run row a
+read sees, two bounds since neither orders the other's rows) fixes one
+history. A selection is made at one, in one read snapshot with the marks it
+folds, and answers it; a second selection pinned to it sees the same runs
+and marks whatever was written in between. A revision past the store's
+current one is refused, since it would admit rows written later.
+
 ## Reading
 
 `Store::open_read_only` opens an existing store and never creates its file:
@@ -199,7 +263,13 @@ selects by uuid prefix, commit prefix (of the full sha), bench substring,
 captured env, a bound param's value (its keys joined by `,` in bound order),
 literal invocation terms (brokkr's argv, every child's argv and environment
 additions, the captured env, each element matched as stored rather than as
-JSON text), and whether the run has a result or a clean tree. Every listing
+JSON text), and whether the run has a result or a clean tree. The bench
+substring matches the run's resolved name (Marks), and hidden runs are left
+out unless `hidden` is set; a uuid lookup sets it, so a hidden run is still
+found by its uuid. `Store::select` answers a `Selection`: the uuids, the
+revision it was made at and the `MarkView` in effect there, which a reader
+resolves every run it shows against. `has_runs` and `elsewhere` count every
+run, hidden or not. Every listing
 is in one total order, newest first by `started_unix_ms` then uuid, never by
 insertion: publication may arrive late or be replayed from another client.
 `Store::run` returns a run with what the store derived (config digest,
@@ -222,9 +292,12 @@ the server writes carries it back.
 **Requests and answers** are externally tagged, so a large document decodes
 in place rather than buffered to find its tag: `publish` (a whole
 `RunDocument`; its uuid is the request id, as in Publication above),
-`select` (a `RunFilter`, answered with uuids in the total order), `run` (a
+`select` (a `RunFilter` and an optional revision to pin it to, answered
+`selected` with a `Selection`), `run` (a
 uuid and whether to read children, answered with a `StoredRun` or null),
-`has_runs` and `elsewhere`, each answered by the variant of its name. A run
+`has_runs` and `elsewhere`, each answered by the variant of its name, `mark`
+(a `MarkRequest`; its uuid is the request id, as in Marks above, answered
+`marked`) and `marks` (a project, answered with its log). A run
 read without children (`children_loaded` false) is a summary: its
 iterations' children are empty because they were not read, so it is never a
 document to republish, and a client checks the flag is what it asked for.

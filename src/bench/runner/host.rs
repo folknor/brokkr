@@ -533,7 +533,8 @@ fn spawn_child(
     let isolation = crate::shutdown::ChildIsolation::ProcessGroup(launch.guard);
     let cwd = Some(launch.cwd);
     if !launch.external {
-        let mut command = policy.command(launch.program, launch.args, cwd, launch.env, isolation)?;
+        let mut command =
+            policy.command(launch.program, launch.args, cwd, launch.env, isolation)?;
         command
             .stdin(stdin)
             .stdout(stdout)

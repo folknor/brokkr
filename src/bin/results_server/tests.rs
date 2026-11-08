@@ -188,6 +188,68 @@ fn publish(document: &RunDocument) -> wire::Request {
     }
 }
 
+/// The default selection of project `demo`, as JSON.
+fn select_demo(addr: SocketAddr) -> serde_json::Value {
+    post(
+        addr,
+        &wire::Request::Select {
+            filter: crate::store::RunFilter {
+                project: "demo".into(),
+                ..crate::store::RunFilter::default()
+            },
+            at: None,
+        },
+    )
+    .json()
+}
+
+/// A mark is stored and served: the run it hides leaves the default
+/// selection, a replay of the request is answered rather than reapplied, and
+/// the log comes back as it was submitted.
+#[test]
+fn marks_are_stored_replayed_and_served_over_http() {
+    let server = server("marks", Limits::DEFAULT);
+    assert_eq!(
+        post(server.addr, &publish(&document(UUID, "demo"))).status,
+        200
+    );
+    let request = crate::store::MarkRequest {
+        uuid: "a".repeat(32),
+        project: "demo".into(),
+        at_unix_ms: 1,
+        hostname: "bygg".into(),
+        mark: crate::store::Mark::Invalidate {
+            run: UUID.into(),
+            reason: "broken".into(),
+        },
+    };
+    let invalidate = wire::Request::Mark {
+        request: request.clone(),
+    };
+    assert_eq!(
+        post(server.addr, &invalidate).json(),
+        serde_json::json!({"marked": "applied"})
+    );
+    assert_eq!(
+        post(server.addr, &invalidate).json(),
+        serde_json::json!({"marked": "already_applied"})
+    );
+    assert_eq!(
+        select_demo(server.addr)["selected"]["uuids"],
+        serde_json::json!([])
+    );
+    let log = post(
+        server.addr,
+        &wire::Request::Marks {
+            project: "demo".into(),
+        },
+    );
+    assert_eq!(
+        serde_json::from_slice::<wire::Answer>(&log.body).unwrap(),
+        wire::Answer::Marks(vec![request])
+    );
+}
+
 #[test]
 fn publication_replay_conflict_and_reads_answer_over_http() {
     let server = server("roundtrip", Limits::DEFAULT);
@@ -219,16 +281,14 @@ fn publication_replay_conflict_and_reads_answer_over_http() {
     other.started_unix_ms += 1;
     assert_eq!(post(server.addr, &publish(&other)).status, 200);
 
-    let select = post(
-        server.addr,
-        &wire::Request::Select {
-            filter: crate::store::RunFilter {
-                project: "demo".into(),
-                ..crate::store::RunFilter::default()
-            },
-        },
+    assert_eq!(
+        select_demo(server.addr),
+        serde_json::json!({"selected": {
+            "uuids": [UUID],
+            "revision": {"marks": 0, "runs": 2},
+            "marks": {"renames": {}, "retired": {}, "invalidated": {}},
+        }})
     );
-    assert_eq!(select.json(), serde_json::json!({"runs": [UUID]}));
 
     let run = post(
         server.addr,

@@ -966,7 +966,10 @@ mod tests {
             "annotations_quoted_date",
             "[bench.cat]\nscript = \"x = 1\"\ndate = \"2026-11-08\"\n",
         );
-        assert!(err.contains("[bench.cat]") && err.contains("local date"), "{err}");
+        assert!(
+            err.contains("[bench.cat]") && err.contains("local date"),
+            "{err}"
+        );
     }
 
     /// A layer setting a bench's changelog replaces the one beneath whole,

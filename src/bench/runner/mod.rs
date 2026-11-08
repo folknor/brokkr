@@ -640,12 +640,8 @@ impl Attempt<'_> {
             },
         );
         if !modules.is_empty() {
-            document.config = stored_config::render(
-                self.detection,
-                &self.bench.name,
-                self.frozen,
-                &modules,
-            );
+            document.config =
+                stored_config::render(self.detection, &self.bench.name, self.frozen, &modules);
         }
         if let Err(error) = worktree {
             // A git call cut short by the stop reports a spawn or subprocess
@@ -898,20 +894,21 @@ impl Attempt<'_> {
                 document.outcome = store::RunOutcome::Interrupted;
                 return;
             }
-            let (iteration, returned, budget_left, required) = host::run_iteration(host::IterationSetup {
-                script: &self.frozen.script,
-                args: &self.args,
-                inputs: &self.inputs,
-                config: std::sync::Arc::clone(&self.config),
-                program,
-                cwd: self.detection.project_root.as_path(),
-                state_root: state.root(),
-                container: &state.bench_iterations_dir(),
-                index: usize::try_from(index).unwrap_or(usize::MAX),
-                since,
-                measurement: self.measurement,
-                report_budget,
-            });
+            let (iteration, returned, budget_left, required) =
+                host::run_iteration(host::IterationSetup {
+                    script: &self.frozen.script,
+                    args: &self.args,
+                    inputs: &self.inputs,
+                    config: std::sync::Arc::clone(&self.config),
+                    program,
+                    cwd: self.detection.project_root.as_path(),
+                    state_root: state.root(),
+                    container: &state.bench_iterations_dir(),
+                    index: usize::try_from(index).unwrap_or(usize::MAX),
+                    since,
+                    measurement: self.measurement,
+                    report_budget,
+                });
             since = returned;
             report_budget = budget_left;
             modules.extend(required);

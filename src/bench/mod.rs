@@ -19,6 +19,8 @@ mod external;
 mod json;
 mod library;
 mod lua;
+#[cfg(test)]
+mod marks_tests;
 mod params;
 mod publication;
 mod remote;
@@ -28,8 +30,9 @@ pub(crate) mod runner;
 mod script_lines;
 // The server's side of the wire (`wire::execute`, `wire::serve`) and the
 // readers of a whole stored document and of the transaction state are the
-// server's alone: an expectation goes unfulfilled, and so fails the build,
-// once brokkr uses them all.
+// server's alone, and the mark writes and resolution helpers wait for
+// `brokkr results`' mark flags: an expectation goes unfulfilled, and so
+// fails the build, once brokkr uses them all.
 #[cfg_attr(
     not(test),
     expect(

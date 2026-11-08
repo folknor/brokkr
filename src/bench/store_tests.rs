@@ -183,7 +183,7 @@ fn param(many: bool, from: Option<&str>, values: &[(&str, Option<&str>)]) -> Bou
 }
 
 /// A completed run of three iterations, every shape the model holds.
-fn document(uuid: &str) -> RunDocument {
+pub(super) fn document(uuid: &str) -> RunDocument {
     RunDocument {
         format: DOCUMENT_FORMAT,
         uuid: uuid.into(),
@@ -633,7 +633,8 @@ fn a_version_one_store_upgrades_and_its_runs_read_as_timing() {
         store
             .conn()
             .execute_batch(
-                "DROP TABLE child_executable;
+                "DROP TABLE marks;
+                 DROP TABLE child_executable;
                  DROP TABLE child_hotpath;
                  ALTER TABLE runs DROP COLUMN measurement;
                  PRAGMA user_version = 1;",
@@ -645,7 +646,8 @@ fn a_version_one_store_upgrades_and_its_runs_read_as_timing() {
         .conn()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
+    assert!(store.marks(&doc.project).unwrap().is_empty());
     assert_eq!(store.load(&doc.uuid).unwrap(), Some(doc));
 }
 

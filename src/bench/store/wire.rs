@@ -13,11 +13,12 @@
 use serde::{Deserialize, Serialize};
 
 use super::document::RunDocument;
-use super::list::{RunFilter, StoredRun};
+use super::list::{RunFilter, Selection, StoredRun};
+use super::marks::{MarkRequest, Marked, Revision};
 use super::{Published, Store, StoreError};
 
 /// The protocol both sides speak. A request naming another is refused.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// The header carrying [`PROTOCOL_VERSION`], on every request and on every
 /// answer the server itself writes.
@@ -43,14 +44,23 @@ pub enum Request {
     /// Publish one run; its uuid is the request id, and a retry is answered
     /// from the stored run.
     Publish { document: Box<RunDocument> },
-    /// The uuids a filter selects, in the store's total order.
-    Select { filter: RunFilter },
+    /// The uuids a filter selects, in the store's total order, at revision
+    /// `at` (the current one when null), with the marks in effect at it.
+    Select {
+        filter: RunFilter,
+        at: Option<Revision>,
+    },
     /// One run with what the store derived, children on request.
     Run { uuid: String, children: bool },
     /// Whether a project has any run.
     HasRuns { project: String },
     /// Runs of other projects whose uuid starts with `prefix`.
     Elsewhere { project: String, prefix: String },
+    /// Append one mark; its uuid is the request id, and a retry is answered
+    /// from the stored request.
+    Mark { request: MarkRequest },
+    /// Every mark request of a project, in the order they applied.
+    Marks { project: String },
 }
 
 /// A successful answer, one variant per request kind.
@@ -58,25 +68,29 @@ pub enum Request {
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub enum Answer {
     Published(Published),
-    Runs(Vec<String>),
+    Selected(Selection),
     /// `children_loaded` says whether the iterations' children were read; a
     /// run without them is a summary, never a document to republish.
     Run(Option<Box<StoredRun>>),
     HasRuns(bool),
     /// `(uuid, project)`, newest first.
     Elsewhere(Vec<(String, String)>),
+    Marked(Marked),
+    Marks(Vec<MarkRequest>),
 }
 
 /// Run one decoded request against the store.
 pub fn execute(store: &mut Store, request: Request) -> Result<Answer, StoreError> {
     Ok(match request {
         Request::Publish { document } => Answer::Published(store.publish(&document)?),
-        Request::Select { filter } => Answer::Runs(store.select(&filter)?),
+        Request::Select { filter, at } => Answer::Selected(store.select(&filter, at)?),
         Request::Run { uuid, children } => Answer::Run(store.run(&uuid, children)?.map(Box::new)),
         Request::HasRuns { project } => Answer::HasRuns(store.has_runs(&project)?),
         Request::Elsewhere { project, prefix } => {
             Answer::Elsewhere(store.elsewhere(&project, &prefix)?)
         }
+        Request::Mark { request } => Answer::Marked(store.mark(&request)?),
+        Request::Marks { project } => Answer::Marks(store.marks(&project)?),
     })
 }
 
@@ -87,7 +101,8 @@ pub fn execute(store: &mut Store, request: Request) -> Result<Answer, StoreError
 pub enum Kind {
     /// The store refused the request (an invalid document). Final.
     Refused,
-    /// The run uuid is stored with different content. Final.
+    /// The request's uuid (a run's or a mark's) is stored with different
+    /// content. Final.
     Conflict,
     /// The store failed before any commit. Retryable.
     Failed,
@@ -345,4 +360,5 @@ pub(crate) const SHIPPED_PROTOCOLS: &[&str] = &[
     "79350d76b49bcb1a44e2d467a7cc838c",
     "84fb92d68285c0f19cfad661fa755ac3",
     "4ab725018fac45420ed6d582e73d0a89",
+    "3341f4cc40b72b5785abaf67f37cfceb",
 ];

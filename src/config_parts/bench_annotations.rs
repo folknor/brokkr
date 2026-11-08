@@ -91,7 +91,10 @@ fn invalid<T>(field: &Field<T>) -> Option<&str> {
     }
 }
 
-fn read_field<T>(value: Option<&toml::Value>, parse: impl Fn(&toml::Value) -> Result<T, String>) -> Field<T> {
+fn read_field<T>(
+    value: Option<&toml::Value>,
+    parse: impl Fn(&toml::Value) -> Result<T, String>,
+) -> Field<T> {
     match value {
         None => Field::Absent,
         Some(v) => match parse(v) {
@@ -128,7 +131,9 @@ fn positive(value: &toml::Value, key: &str) -> Result<i64, String> {
 /// not a quoted string.
 fn local_date(value: &toml::Value, key: &str) -> Result<Datetime, String> {
     match value {
-        toml::Value::Datetime(dt) if dt.date.is_some() && dt.time.is_none() && dt.offset.is_none() => {
+        toml::Value::Datetime(dt)
+            if dt.date.is_some() && dt.time.is_none() && dt.offset.is_none() =>
+        {
             Ok(*dt)
         }
         toml::Value::Datetime(dt) => Err(format!(
@@ -180,8 +185,14 @@ fn entry(item: &toml::Value) -> Result<Entry, String> {
         Some(v) => nonblank(v, "note")?,
     };
     Ok(Entry {
-        version: table.get("version").map(|v| positive(v, "version")).transpose()?,
-        date: table.get("date").map(|v| local_date(v, "date")).transpose()?,
+        version: table
+            .get("version")
+            .map(|v| positive(v, "version"))
+            .transpose()?,
+        date: table
+            .get("date")
+            .map(|v| local_date(v, "date"))
+            .transpose()?,
         note,
     })
 }
@@ -268,7 +279,14 @@ mod tests {
         assert_eq!(a.date.value().unwrap().to_string(), "2026-11-08");
         let log = a.changelog.value().unwrap();
         assert_eq!(log.len(), 2);
-        assert_eq!(log[1], Entry { version: None, date: None, note: "m".into() });
+        assert_eq!(
+            log[1],
+            Entry {
+                version: None,
+                date: None,
+                note: "m".into()
+            }
+        );
         assert!(a.problems().is_empty());
         assert_eq!(read("script = \"x\"\n"), Annotations::NONE);
     }
@@ -292,8 +310,14 @@ mod tests {
             ("date = 10:00:00", "not a local date"),
             ("changelog = 1", "array"),
             ("changelog = [{ version = 1 }]", "entry 0: needs a note"),
-            ("changelog = [{ note = \"a\" }, { note = \"b\", by = \"x\" }]", "entry 1: unknown key"),
-            ("changelog = [{ note = \"a\", version = -1 }]", "not a positive integer"),
+            (
+                "changelog = [{ note = \"a\" }, { note = \"b\", by = \"x\" }]",
+                "entry 1: unknown key",
+            ),
+            (
+                "changelog = [{ note = \"a\", version = -1 }]",
+                "not a positive integer",
+            ),
             ("changelog = [\"a\"]", "must be a table"),
         ] {
             let a = read(text);
@@ -324,7 +348,10 @@ mod tests {
             ]
         );
         assert!(read("").help_lines().is_empty());
-        assert_eq!(read("changelog = []").help_lines(), ["  changelog: (empty)"]);
+        assert_eq!(
+            read("changelog = []").help_lines(),
+            ["  changelog: (empty)"]
+        );
     }
 
     #[test]

@@ -12,8 +12,9 @@ use super::store::wire::{
 use super::store::{
     BoundParam, Build, CaptureOutcome, Child, ChildEnding, Clock, Conditions, DOCUMENT_FORMAT,
     Evidence, Executable, ExecutableIdentity, HotpathCapture, Iteration, IterationOutcome, Loss,
-    Measurement, ParamValue, Published, Record, ResolvedBuild, RunDocument, RunFilter, RunOutcome,
-    Sample, SinkEnd, Store, StoreError, StoredRun,
+    Mark, MarkOrigin, MarkRequest, MarkView, Marked, Measurement, ParamValue, Published, Record,
+    ResolvedBuild, Revision, RunDocument, RunFilter, RunOutcome, Sample, Selection, SinkEnd, Store,
+    StoreError, StoredRun,
 };
 
 /// The fixture's one child: every record kind and a deadline ending.
@@ -200,6 +201,50 @@ fn frozen_document() -> RunDocument {
     }
 }
 
+/// The protocol's mark fixtures: a view holding every map, and one request
+/// of every mark kind. Frozen with the protocol.
+fn frozen_marks() -> (MarkView, Vec<MarkRequest>) {
+    let origin = MarkOrigin {
+        uuid: "cd".repeat(16),
+        at_unix_ms: 1_762_000_000_001,
+        hostname: "bygg".into(),
+        reason: "superseded".into(),
+    };
+    let view = MarkView {
+        renames: BTreeMap::from([("cat-old".into(), "cat".into())]),
+        retired: BTreeMap::from([("inspect".into(), origin.clone())]),
+        invalidated: BTreeMap::from([("01".repeat(16), origin)]),
+    };
+    let mark = |mark: Mark| MarkRequest {
+        uuid: "cd".repeat(16),
+        project: "pbfhogg".into(),
+        at_unix_ms: 1_762_000_000_001,
+        hostname: "bygg".into(),
+        mark,
+    };
+    let marks = vec![
+        mark(Mark::Retire {
+            name: "inspect".into(),
+            reason: "superseded".into(),
+        }),
+        mark(Mark::Unretire {
+            name: "inspect".into(),
+        }),
+        mark(Mark::Invalidate {
+            run: "01".repeat(16),
+            reason: "noisy host".into(),
+        }),
+        mark(Mark::Revalidate {
+            run: "01".repeat(16),
+        }),
+        mark(Mark::Rename {
+            from: "cat-old".into(),
+            to: "cat".into(),
+        }),
+    ];
+    (view, marks)
+}
+
 /// Every request and answer kind, encoded canonically, one per line.
 fn frozen_encoding() -> String {
     let document = frozen_document();
@@ -214,7 +259,10 @@ fn frozen_encoding() -> String {
         grep_v: Vec::new(),
         with_result: true,
         clean: false,
+        hidden: true,
     };
+    let (view, marks) = frozen_marks();
+    let revision = Revision { marks: 3, runs: 7 };
     let stored = StoredRun {
         doc: document.clone(),
         config_digest: "ffeeddccbbaa99887766554433221100".into(),
@@ -226,7 +274,11 @@ fn frozen_encoding() -> String {
         Request::Publish {
             document: Box::new(document),
         },
-        Request::Select { filter },
+        Request::Select {
+            filter: filter.clone(),
+            at: Some(revision),
+        },
+        Request::Select { filter, at: None },
         Request::Run {
             uuid: "01".repeat(16),
             children: true,
@@ -238,15 +290,28 @@ fn frozen_encoding() -> String {
             project: "pbfhogg".into(),
             prefix: "ab".into(),
         },
+        Request::Mark {
+            request: marks[0].clone(),
+        },
+        Request::Marks {
+            project: "pbfhogg".into(),
+        },
     ];
     let answers = [
         Answer::Published(Published::Stored),
         Answer::Published(Published::AlreadyStored),
-        Answer::Runs(vec!["01".repeat(16)]),
+        Answer::Selected(Selection {
+            uuids: vec!["01".repeat(16)],
+            revision,
+            marks: view,
+        }),
         Answer::Run(Some(Box::new(stored))),
         Answer::Run(None),
         Answer::HasRuns(true),
         Answer::Elsewhere(vec![("ab".repeat(16), "elivagar".into())]),
+        Answer::Marked(Marked::Applied),
+        Answer::Marked(Marked::AlreadyApplied),
+        Answer::Marks(marks),
     ];
     let mut lines: Vec<String> = requests
         .iter()
@@ -301,11 +366,11 @@ fn the_shipped_protocol_encodes_as_it_was_frozen() {
          a shipped fingerprint never changes. Encoding:\n{encoding}"
     );
     // Every frozen line decodes back to what made it.
-    for line in encoding.lines().take(5) {
+    for line in encoding.lines().take(8) {
         let request: Request = serde_json::from_str(line).unwrap();
         assert_eq!(serde_json::to_string(&request).unwrap(), line);
     }
-    for line in encoding.lines().skip(5).take(7) {
+    for line in encoding.lines().skip(8).take(10) {
         let answer: Answer = serde_json::from_str(line).unwrap();
         assert_eq!(serde_json::to_string(&answer).unwrap(), line);
     }
@@ -352,6 +417,17 @@ fn the_protocol_refuses_what_it_does_not_define() {
     refuses::<Request>(r#"{"run": {"uuid": "ab"}}"#);
     refuses::<Request>(r#"{"run": {"uuid": "ab", "children": true, "deep": true}}"#);
     refuses::<Request>(r#"{"select": {"filter": {"project": "p"}}}"#);
+    let mark = |mark: &str| {
+        format!(
+            r#"{{"mark": {{"request": {{"uuid": "{}", "project": "p", "at_unix_ms": 1, "hostname": "h", "mark": {mark}}}}}}}"#,
+            "a".repeat(32)
+        )
+    };
+    assert!(serde_json::from_str::<Request>(&mark(r#"{"unretire": {"name": "x"}}"#)).is_ok());
+    refuses::<Request>(&mark(r#"{"unretire": {"name": "x", "reason": "r"}}"#));
+    refuses::<Request>(&mark(r#"{"retire": {"name": "x"}}"#));
+    refuses::<Request>(&mark(r#"{"unrename": {"from": "x"}}"#));
+    refuses::<Answer>(r#"{"marked": "maybe"}"#);
     refuses::<Answer>(r#"{"published": "maybe"}"#);
     refuses::<Answer>(r#"{"has_runs": true, "extra": 1}"#);
 }

@@ -13,7 +13,7 @@ use std::time::Duration;
 use super::super::publication::Policy;
 use super::super::results::BenchReader;
 use super::super::results::tests::{filter, run};
-use super::super::store::wire;
+use super::super::store::{self, wire};
 use super::{Client, refusal};
 use crate::config::ResultsServer;
 
@@ -289,8 +289,12 @@ fn the_probe_refuses_another_protocol_and_a_run_answer_must_load_what_was_asked(
         match request {
             wire::Request::Select { .. } => Reply::Answer(
                 200,
-                serde_json::to_vec(&wire::Answer::Runs(vec![run(7, "cat", 'a', 1, 2).uuid]))
-                    .unwrap(),
+                serde_json::to_vec(&wire::Answer::Selected(store::Selection {
+                    uuids: vec![run(7, "cat", 'a', 1, 2).uuid],
+                    revision: store::Revision::default(),
+                    marks: store::MarkView::default(),
+                }))
+                .unwrap(),
             ),
             wire::Request::Run { .. } => {
                 let run = stored.get_or_insert_with(|| {

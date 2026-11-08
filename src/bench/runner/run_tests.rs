@@ -342,8 +342,9 @@ fn documents(store: &store::Store, project: &str) -> Vec<store::RunDocument> {
         ..store::RunFilter::default()
     };
     let mut runs: Vec<store::RunDocument> = store
-        .select(&filter)
+        .select(&filter, None)
         .unwrap()
+        .uuids
         .iter()
         .map(|uuid| store.load(uuid).unwrap().unwrap())
         .collect();
@@ -729,7 +730,10 @@ fn modules_from_bench_lib_are_required_and_stored_with_the_run() {
         "modules",
         &[
             ("brokkr.toml", config),
-            ("lib/gate.lua", "local M = {}\nfunction M.check() binary_with({program = 'sh'}, '-c', 'true'):ok() end\nreturn M\n"),
+            (
+                "lib/gate.lua",
+                "local M = {}\nfunction M.check() binary_with({program = 'sh'}, '-c', 'true'):ok() end\nreturn M\n",
+            ),
             ("lib/io/word.lua", "return { word = 'plain' }\n"),
             ("lib/unused.lua", "return {}\n"),
         ],

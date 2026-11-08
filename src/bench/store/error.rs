@@ -9,8 +9,8 @@ pub enum StoreError {
     /// document, a store this code cannot open, a schema newer than it knows.
     /// Known unapplied.
     Refused(String),
-    /// The run uuid is already stored with different content. Known
-    /// unapplied.
+    /// The request's uuid (a run's or a mark's) is already stored with
+    /// different content. Known unapplied.
     Conflict { uuid: String },
     /// The store failed before the commit was attempted (an I/O or SQLite
     /// error, stored data that does not read back). Known unapplied.
@@ -34,7 +34,7 @@ impl std::fmt::Display for StoreError {
             Self::Refused(why) => write!(f, "bench store refused the request: {why}"),
             Self::Conflict { uuid } => write!(
                 f,
-                "bench store already holds run {uuid} with different content"
+                "bench store already holds request {uuid} with different content"
             ),
             Self::Failed(why) => write!(f, "bench store failed: {why}"),
             Self::CommitUncertain(why) => write!(

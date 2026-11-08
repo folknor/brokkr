@@ -248,7 +248,11 @@ fn differences(a: &Side, b: &Side) -> Vec<String> {
     let named = |key: &str, invalid: bool| invalid || a.raw.get(key) != b.raw.get(key);
     let mut parts = Vec::new();
     if named("version", is_invalid(&x.version) || is_invalid(&y.version)) {
-        parts.push(format!("version {} -> {}", shown(&x.version), shown(&y.version)));
+        parts.push(format!(
+            "version {} -> {}",
+            shown(&x.version),
+            shown(&y.version)
+        ));
     }
     if named("date", is_invalid(&x.date) || is_invalid(&y.date)) {
         parts.push(format!("date {} -> {}", shown(&x.date), shown(&y.date)));
@@ -308,7 +312,10 @@ mod tests {
         assert_eq!(line("cat", &a, &a), None);
         assert_eq!(line("cat", &stored(""), &stored("")), None);
         // Another key of the bench moving is config_diff's to name.
-        assert_eq!(line("cat", &stored("target = \"a\""), &stored("target = \"b\"")), None);
+        assert_eq!(
+            line("cat", &stored("target = \"a\""), &stored("target = \"b\"")),
+            None
+        );
     }
 
     #[test]
@@ -329,20 +336,32 @@ mod tests {
         let grown = stored("changelog = [{ note = \"one\" }]\n");
         let more = stored("changelog = [{ note = \"one\" }, { note = \"two\" }]\n");
         let out = line("cat", &grown, &more).unwrap();
-        assert!(out.contains("changelog changed (1 entry -> 2 entries)"), "{out}");
+        assert!(
+            out.contains("changelog changed (1 entry -> 2 entries)"),
+            "{out}"
+        );
         let added = line("cat", &stored(""), &stored("changelog = []\n")).unwrap();
         assert!(added.contains("changelog added (0 entries)"), "{added}");
         let removed = line("cat", &grown, &stored("")).unwrap();
-        assert!(removed.contains("changelog removed (had 1 entry)"), "{removed}");
+        assert!(
+            removed.contains("changelog removed (had 1 entry)"),
+            "{removed}"
+        );
     }
 
     #[test]
     fn an_invalid_field_is_named_with_its_reason_even_when_equal() {
         let zero = stored("version = 0\n");
         let out = line("cat", &zero, &zero).unwrap();
-        assert!(out.contains("version (invalid: version 0 is not a positive integer)"), "{out}");
+        assert!(
+            out.contains("version (invalid: version 0 is not a positive integer)"),
+            "{out}"
+        );
         let out = line("cat", &stored(""), &stored("description = 7\n")).unwrap();
-        assert!(out.contains("description (none) -> (invalid: description must be a string"), "{out}");
+        assert!(
+            out.contains("description (none) -> (invalid: description must be a string"),
+            "{out}"
+        );
         let bad_log = stored("changelog = [{ version = 1 }]\n");
         let out = line("cat", &bad_log, &bad_log).unwrap();
         assert!(out.contains("changelog entry 0: needs a note"), "{out}");
@@ -353,7 +372,10 @@ mod tests {
             &stored("version = 0\ndate = 2026-01-02\n"),
         )
         .unwrap();
-        assert!(out.contains("version (invalid") && out.contains("date 2026-01-01"), "{out}");
+        assert!(
+            out.contains("version (invalid") && out.contains("date 2026-01-01"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -366,10 +388,21 @@ mod tests {
         );
         let broken = "[config]\nbench = 7\n";
         let out = line("cat", &b, broken).unwrap();
-        assert!(out.contains("B unreadable") && out.contains("bench is not a table"), "{out}");
+        assert!(
+            out.contains("B unreadable") && out.contains("bench is not a table"),
+            "{out}"
+        );
         let wrong = "[config.bench]\ncat = \"broken\"\n";
-        assert!(line("cat", wrong, wrong).unwrap().contains("bench.cat is not a table"));
-        assert!(line("cat", "[run]\n", "[run]\n").unwrap().contains("no config table"));
+        assert!(
+            line("cat", wrong, wrong)
+                .unwrap()
+                .contains("bench.cat is not a table")
+        );
+        assert!(
+            line("cat", "[run]\n", "[run]\n")
+                .unwrap()
+                .contains("no config table")
+        );
     }
 
     #[test]
@@ -381,7 +414,10 @@ mod tests {
         // A plain string is not a date, whatever it spells.
         let plain = r#"{"config":{"bench":{"cat":{"version":3,"date":"2026-11-08"}}}}"#;
         let out = line("cat", &toml_side, plain).unwrap();
-        assert!(out.contains("date 2026-11-08 -> (invalid: date must be a local date"), "{out}");
+        assert!(
+            out.contains("date 2026-11-08 -> (invalid: date must be a local date"),
+            "{out}"
+        );
     }
 
     /// A null elsewhere in a JSON side spoils nothing, and one in an
@@ -392,25 +428,40 @@ mod tests {
         let toml_side = stored("version = 3\n");
         let elsewhere = r#"{"config":{"data":{"x":null},"bench":{"cat":{"version":3}}}}"#;
         assert_eq!(line("cat", &toml_side, elsewhere), None);
-        let in_field =
-            r#"{"config":{"bench":{"cat":{"version":null,"description":"kept"}}}}"#;
-        let out = line("cat", &stored("version = 3\ndescription = \"kept\"\n"), in_field).unwrap();
-        assert!(out.contains("version 3 -> (invalid: version holds a null"), "{out}");
+        let in_field = r#"{"config":{"bench":{"cat":{"version":null,"description":"kept"}}}}"#;
+        let out = line(
+            "cat",
+            &stored("version = 3\ndescription = \"kept\"\n"),
+            in_field,
+        )
+        .unwrap();
+        assert!(
+            out.contains("version 3 -> (invalid: version holds a null"),
+            "{out}"
+        );
         assert!(!out.contains("description"), "{out}");
         let wrapped = r#"{"config":{"bench":{"cat":{
             "changelog":[{"$__toml_private_datetime":"2026-11-08"}]}}}}"#;
         let out = line("cat", &stored(""), wrapped).unwrap();
         assert!(out.contains("unknown key"), "{out}");
-        let null_note = r#"{"config":{"bench":{"cat":{"changelog":[{"note":"v"},{"note":null}]}}}}"#;
+        let null_note =
+            r#"{"config":{"bench":{"cat":{"changelog":[{"note":"v"},{"note":null}]}}}}"#;
         let out = line("cat", &stored(""), null_note).unwrap();
-        assert!(out.contains("changelog entry 1: note holds a null"), "{out}");
+        assert!(
+            out.contains("changelog entry 1: note holds a null"),
+            "{out}"
+        );
         let null_entry = r#"{"config":{"bench":{"cat":{"changelog":[null]}}}}"#;
         let out = line("cat", &stored(""), null_entry).unwrap();
         assert!(out.contains("changelog entry 0 holds a null"), "{out}");
         let entry_date = r#"{"config":{"bench":{"cat":{
             "changelog":[{"note":"n","date":{"$__toml_private_datetime":"2026-11-08"}}]}}}}"#;
         assert_eq!(
-            line("cat", &stored("changelog = [{ note = \"n\", date = 2026-11-08 }]\n"), entry_date),
+            line(
+                "cat",
+                &stored("changelog = [{ note = \"n\", date = 2026-11-08 }]\n"),
+                entry_date
+            ),
             None
         );
     }

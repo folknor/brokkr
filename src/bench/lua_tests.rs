@@ -283,7 +283,10 @@ fn require_loads_a_module_once_and_records_what_it_asked_for() {
                 "count",
                 "local M = { n = 0 }\nfunction M.bump() M.n = M.n + 1 return M.n end\nreturn M",
             ),
-            ("io/uring", "local c = require('count')\nreturn { bump = c.bump }"),
+            (
+                "io/uring",
+                "local c = require('count')\nreturn { bump = c.bump }",
+            ),
             ("launches", "binary('x')\nreturn {}"),
         ],
     );
@@ -312,13 +315,19 @@ fn require_loads_a_module_once_and_records_what_it_asked_for() {
     );
     let why = reason(&sample);
     assert!(why.contains("not at the script's top level"), "{why}");
-    assert!(sample.modules.contains("launches"), "a failed load is recorded");
+    assert!(
+        sample.modules.contains("launches"),
+        "a failed load is recorded"
+    );
     let (sample, host) = run_library(
         "function bench() require('launches') end",
         &lib,
         Fake::default(),
     );
-    assert!(matches!(sample.outcome, SampleOutcome::Completed(_)), "{sample:?}");
+    assert!(
+        matches!(sample.outcome, SampleOutcome::Completed(_)),
+        "{sample:?}"
+    );
     assert_eq!(host.calls.len(), 1, "inside bench() a module may launch");
 }
 
@@ -355,10 +364,7 @@ fn require_refuses_what_is_not_one_clean_export() {
         let why = reason(&sample);
         assert!(why.contains(needle), "{name}: {why}");
     }
-    let (sample, _) = run(
-        "function bench() require('a') end",
-        Fake::default(),
-    );
+    let (sample, _) = run("function bench() require('a') end", Fake::default());
     assert!(reason(&sample).contains("no bench_lib is configured"));
 
     let lines = mapped_lines("module-lines");
@@ -368,8 +374,14 @@ fn require_refuses_what_is_not_one_clean_export() {
         .with_library(Arc::clone(&lib));
     let (sample, _) = run_sample(&script, &Args::default(), Fake::default());
     let why = reason(&sample);
-    assert!(why.contains("raises.lua:2:"), "the module's own line: {why}");
-    assert!(why.contains("brokkr.toml:5:"), "the script's mapped line: {why}");
+    assert!(
+        why.contains("raises.lua:2:"),
+        "the module's own line: {why}"
+    );
+    assert!(
+        why.contains("brokkr.toml:5:"),
+        "the script's mapped line: {why}"
+    );
 }
 
 /// A module defines no global and reads no `_G` or unknown name; the
@@ -390,9 +402,14 @@ fn a_module_is_checked_against_the_builtins_alone() {
     assert!(found[1].0 == 2 && found[1].1.contains("reads _G"));
     assert!(found[2].0 == 3 && found[2].1.contains("undefined_thing is not defined"));
     assert!(check_module(b"return (", "m.lua").is_err());
-    assert!(check_module(b"local M = {}\nfunction M.f() return require('x') end\nreturn M", "m.lua")
+    assert!(
+        check_module(
+            b"local M = {}\nfunction M.f() return require('x') end\nreturn M",
+            "m.lua"
+        )
         .unwrap()
-        .is_empty());
+        .is_empty()
+    );
 }
 
 /// With a map, compile errors, a Lua error's traceback and a builtin's

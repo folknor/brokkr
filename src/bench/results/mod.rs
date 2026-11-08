@@ -159,14 +159,26 @@ impl BenchReader {
         }
     }
 
+    /// The uuids `filter` selects now.
     fn select(&self, filter: &RunFilter) -> Result<Vec<String>, DevError> {
+        Ok(self.select_at(filter, None)?.uuids)
+    }
+
+    /// The runs `filter` selects at revision `at` (the current one when
+    /// `None`), with the revision and the marks in effect at it.
+    fn select_at(
+        &self,
+        filter: &RunFilter,
+        at: Option<store::Revision>,
+    ) -> Result<store::Selection, DevError> {
         match &self.backend {
-            Backend::Local { store, path } => store.select(filter).map_err(|e| named(path, &e)),
+            Backend::Local { store, path } => store.select(filter, at).map_err(|e| named(path, &e)),
             Backend::Remote(client) => {
                 match client.request(&wire::Request::Select {
                     filter: filter.clone(),
+                    at,
                 })? {
-                    wire::Answer::Runs(uuids) => Ok(uuids),
+                    wire::Answer::Selected(selection) => Ok(selection),
                     other => Err(mismatched(client, "select", &other)),
                 }
             }
@@ -270,19 +282,29 @@ impl BenchReader {
     /// The runs whose uuid starts with `prefix`, filtered and capped.
     pub(crate) fn lookup(&self, prefix: &str, filter: &BenchFilter) -> Result<Lookup, DevError> {
         require_prefix(prefix, "uuid")?;
+        // A uuid names a run whatever marks hide it.
         let unfiltered = RunFilter {
             project: self.project.clone(),
             uuid_prefix: Some(prefix.to_owned()),
+            hidden: true,
             ..RunFilter::default()
         };
-        let candidates = self.select(&unfiltered)?.len();
+        // The filtered selection is pinned to the candidates' revision, so a
+        // run published between the two is in neither.
+        let unfiltered = self.select_at(&unfiltered, None)?;
+        let candidates = unfiltered.uuids.len();
         let mut uuids = if filter.excluded {
             Vec::new()
         } else {
-            self.select(&RunFilter {
-                uuid_prefix: Some(prefix.to_owned()),
-                ..self.filter(filter)
-            })?
+            self.select_at(
+                &RunFilter {
+                    uuid_prefix: Some(prefix.to_owned()),
+                    hidden: true,
+                    ..self.filter(filter)
+                },
+                Some(unfiltered.revision),
+            )?
+            .uuids
         };
         let omitted = uuids.len().saturating_sub(filter.limit);
         uuids.truncate(filter.limit);
@@ -308,6 +330,7 @@ impl BenchReader {
         let mut uuids = self.select(&RunFilter {
             project: self.project.clone(),
             uuid_prefix: Some(prefix.to_owned()),
+            hidden: true,
             ..RunFilter::default()
         })?;
         match uuids.len() {
@@ -339,23 +362,32 @@ impl BenchReader {
         if filter.excluded {
             return Ok((Vec::new(), Vec::new()));
         }
-        let side = |commit: &str| -> Result<Vec<StoredRun>, DevError> {
-            let uuids = self.select(&RunFilter {
-                commit_prefix: Some(commit.to_owned()),
-                with_result: true,
-                clean: true,
-                ..self.filter(filter)
-            })?;
-            let mut runs = self.load(&uuids, false)?;
+        // The second side is pinned to the first's revision, so both see one
+        // history of runs and marks.
+        let side = |commit: &str,
+                    at: Option<store::Revision>|
+         -> Result<(Vec<StoredRun>, store::Revision), DevError> {
+            let selection = self.select_at(
+                &RunFilter {
+                    commit_prefix: Some(commit.to_owned()),
+                    with_result: true,
+                    clean: true,
+                    ..self.filter(filter)
+                },
+                at,
+            )?;
+            let mut runs = self.load(&selection.uuids, false)?;
             for run in &mut runs {
                 if run.pairing_algorithm().as_deref() != Some("bench-pair-v1") {
                     let uuid = run.doc.uuid.clone();
                     *run = self.load(std::slice::from_ref(&uuid), true)?.remove(0);
                 }
             }
-            Ok(runs)
+            Ok((runs, selection.revision))
         };
-        Ok((side(commit_a)?, side(commit_b)?))
+        let (a, revision) = side(commit_a, None)?;
+        let (b, _) = side(commit_b, Some(revision))?;
+        Ok((a, b))
     }
 }
 

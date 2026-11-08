@@ -434,7 +434,7 @@ fn refuse(message: impl Into<String>) -> StoreError {
     StoreError::Refused(message.into())
 }
 
-fn is_lower_hex(text: &str, lengths: &[usize]) -> bool {
+pub(super) fn is_lower_hex(text: &str, lengths: &[usize]) -> bool {
     lengths.contains(&text.len())
         && text
             .bytes()

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::StoreError;
 use super::document::RunDocument;
+use super::marks::{self, MarkView, Revision};
 
 /// Which runs a listing selects. Every condition ANDs; an empty filter
 /// selects every run of the project.
@@ -21,7 +22,8 @@ pub struct RunFilter {
     pub uuid_prefix: Option<String>,
     /// The full commit sha starts with this, ASCII case ignored.
     pub commit_prefix: Option<String>,
-    /// The bench name contains this literally, ASCII case ignored.
+    /// The bench's resolved name (the end of its rename chain) contains this
+    /// literally, ASCII case ignored.
     pub bench: Option<String>,
     /// A captured environment variable with exactly this value.
     pub env: Vec<(String, String)>,
@@ -38,6 +40,20 @@ pub struct RunFilter {
     pub with_result: bool,
     /// Only runs of a clean tree.
     pub clean: bool,
+    /// Hidden runs (invalidated, or under a retired name) too; without it
+    /// they are left out.
+    pub hidden: bool,
+}
+
+/// What a selection found, and the revision and marks it was made at: a
+/// reader resolves every run it shows against `marks`, and pins a second
+/// selection to `revision` so the two see one history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Selection {
+    pub uuids: Vec<String>,
+    pub revision: Revision,
+    pub marks: MarkView,
 }
 
 /// One stored run with what the store derived from it. A listing loads it
@@ -82,11 +98,53 @@ fn grep_expr(n: usize) -> String {
     )
 }
 
-/// The uuids `filter` selects, newest first: by start time, then uuid, one
-/// total order whatever order the runs were published in.
-pub(super) fn select(conn: &Connection, filter: &RunFilter) -> Result<Vec<String>, StoreError> {
-    let mut params: Vec<String> = vec![filter.project.clone()];
-    let mut clauses: Vec<String> = vec!["project = ?1".to_owned()];
+/// The uuids `filter` selects at revision `at` (the current one when
+/// `None`), newest first: by start time, then uuid, one total order whatever
+/// order the runs were published in. The revision, the marks and the runs
+/// are read in one snapshot.
+pub(super) fn select(
+    conn: &Connection,
+    filter: &RunFilter,
+    at: Option<Revision>,
+) -> Result<Selection, StoreError> {
+    // A deferred transaction: its first read fixes the snapshot every later
+    // read here shares. Dropped, it rolls back, on every path.
+    let tx = conn.unchecked_transaction()?;
+    let revision = marks::pinned(&tx, at)?;
+    let view = marks::view(&tx, &filter.project, revision.marks)?;
+    let candidates = candidates(&tx, filter, revision.runs)?;
+    drop(tx);
+    let needle = filter.bench.as_ref().map(|b| b.to_ascii_lowercase());
+    let uuids = candidates
+        .into_iter()
+        .filter(|(uuid, bench)| {
+            needle
+                .as_ref()
+                .is_none_or(|n| view.name(bench).to_ascii_lowercase().contains(n.as_str()))
+                && (filter.hidden || !view.hidden(uuid, bench))
+        })
+        .map(|(uuid, _)| uuid)
+        .collect();
+    Ok(Selection {
+        uuids,
+        revision,
+        marks: view,
+    })
+}
+
+/// The `(uuid, bench)` of every run up to row `through` the SQL clauses
+/// select, in the total order; the bench name and visibility are judged by
+/// the caller against the marks.
+fn candidates(
+    conn: &Connection,
+    filter: &RunFilter,
+    through: i64,
+) -> Result<Vec<(String, String)>, StoreError> {
+    let mut params: Vec<String> = vec![filter.project.clone(), through.to_string()];
+    let mut clauses: Vec<String> = vec![
+        "project = ?1".to_owned(),
+        "id <= CAST(?2 AS INTEGER)".to_owned(),
+    ];
     let bind = |params: &mut Vec<String>, value: String| {
         params.push(value);
         params.len()
@@ -98,10 +156,6 @@ pub(super) fn select(conn: &Connection, filter: &RunFilter) -> Result<Vec<String
     if let Some(prefix) = &filter.commit_prefix {
         let n = bind(&mut params, prefix.to_ascii_lowercase());
         clauses.push(format!("substr(git_commit, 1, length(?{n})) = ?{n}"));
-    }
-    if let Some(bench) = &filter.bench {
-        let n = bind(&mut params, bench.clone());
-        clauses.push(format!("instr(lower(bench), lower(?{n})) > 0"));
     }
     for (name, value) in &filter.env {
         let k = bind(&mut params, name.clone());
@@ -136,14 +190,16 @@ pub(super) fn select(conn: &Connection, filter: &RunFilter) -> Result<Vec<String
         clauses.push("dirty = 0".to_owned());
     }
     let sql = format!(
-        "SELECT uuid FROM runs WHERE {} ORDER BY started_unix_ms DESC, uuid DESC",
+        "SELECT uuid, bench FROM runs WHERE {} ORDER BY started_unix_ms DESC, uuid DESC",
         clauses.join(" AND ")
     );
     let mut stmt = conn.prepare(&sql)?;
-    let uuids = stmt
-        .query_map(rusqlite::params_from_iter(params.iter()), |row| row.get(0))?
-        .collect::<Result<Vec<String>, _>>()?;
-    Ok(uuids)
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?
+        .collect::<Result<Vec<(String, String)>, _>>()?;
+    Ok(rows)
 }
 
 /// Whether the project has any stored run, whatever its outcome.

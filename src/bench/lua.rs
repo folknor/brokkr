@@ -698,8 +698,7 @@ pub(crate) fn run_sample<H: Host>(script: &Script, args: &Args, host: H) -> (Sam
         marks: marks.clone(),
         modules: Modules::of(script),
     }));
-    let mut sample =
-        watched::<H, _>(&interrupt, || sample::<H>(&mut state, script, args, &marks));
+    let mut sample = watched::<H, _>(&interrupt, || sample::<H>(&mut state, script, args, &marks));
     let ctx = state
         .user_data_mut::<Option<Ctx<H>>>()
         .and_then(Option::take);

@@ -9,11 +9,13 @@
 //! resolution, directory creation and credential redaction stay with the
 //! caller.
 //!
-//! One write kind: [`Store::publish`] takes a whole [`RunDocument`] and
-//! applies it in one `BEGIN IMMEDIATE` transaction. The run uuid is the
-//! request id: a uuid already stored is answered from the stored run when
-//! the documents are equal and refused when they differ, and the lookup,
-//! comparison and insert share the transaction. Readers open the store
+//! Two write kinds, each in one `BEGIN IMMEDIATE` transaction whose request
+//! id is a client uuid: a uuid already stored is answered from what was
+//! stored when the requests are equal and refused when they differ, and the
+//! lookup, comparison and insert share the transaction. [`Store::publish`]
+//! takes a whole [`RunDocument`], its run uuid the request id;
+//! [`Store::mark`] appends a [`MarkRequest`] (a retirement, invalidation or
+//! rename, or an undo of one) beside the runs, never editing one. Readers open the store
 //! without creating it ([`Store::open_read_only`]) and list runs through
 //! [`RunFilter`]. A results server answers the same calls over HTTP through
 //! [`wire`]. `reference/bench-store.md` is the contract.
@@ -21,6 +23,7 @@
 mod document;
 mod error;
 mod list;
+mod marks;
 mod read;
 mod schema;
 pub mod wire;
@@ -36,7 +39,15 @@ pub use document::{
     Measurement, ParamValue, Record, ResolvedBuild, RunDocument, RunOutcome, Sample, SinkEnd,
 };
 pub use error::StoreError;
-pub use list::{RunFilter, StoredRun};
+pub use list::{RunFilter, Selection, StoredRun};
+pub use marks::{MarkRequest, Marked, Revision};
+// What a mark says and what is in effect: read by `brokkr results`' mark
+// flags and by the tests, and by neither binary's other code yet.
+#[allow(
+    unused_imports,
+    reason = "the mark vocabulary is consumed by the results mark flags, still to land"
+)]
+pub use marks::{Mark, MarkOrigin, MarkView};
 
 /// What a publication did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -111,9 +122,25 @@ impl Store {
         read::load_run(&self.conn, uuid, children)
     }
 
-    /// The uuids `filter` selects, newest first by start time, then uuid.
-    pub fn select(&self, filter: &RunFilter) -> Result<Vec<String>, StoreError> {
-        list::select(&self.conn, filter)
+    /// The uuids `filter` selects, newest first by start time, then uuid, at
+    /// revision `at` (the current one when `None`), with the revision and the
+    /// project's marks in effect at it.
+    pub fn select(
+        &self,
+        filter: &RunFilter,
+        at: Option<Revision>,
+    ) -> Result<Selection, StoreError> {
+        list::select(&self.conn, filter, at)
+    }
+
+    /// Append one mark request, or answer its replay.
+    pub fn mark(&mut self, request: &MarkRequest) -> Result<Marked, StoreError> {
+        marks::append(&mut self.conn, request)
+    }
+
+    /// Every mark request of `project`, in the order they applied.
+    pub fn marks(&self, project: &str) -> Result<Vec<MarkRequest>, StoreError> {
+        marks::log(&self.conn, project, i64::MAX)
     }
 
     /// Whether `project` has any stored run, whatever its outcome.
@@ -153,6 +180,7 @@ const SHIPPED_STEPS: &[&str] = &[
     "b9c408fb4eb3abd989cb949079736110",
     "b55bb417cdff92577ede441700a98333",
     "03cc48a74e55e5047728ea5f3bf15e06",
+    "ec1a827868cc9bd5b45b3e34d43f397d",
 ];
 
 #[cfg(test)]
