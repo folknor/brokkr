@@ -60,6 +60,7 @@ impl Host for Fake {
                 error: None,
             }),
             stopped_at: self.stopped_at.clone(),
+            start_error: None,
         })
     }
     fn read(&mut self, handle: usize) -> Result<Vec<u8>, Abort> {

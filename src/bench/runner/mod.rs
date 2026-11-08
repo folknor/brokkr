@@ -1,9 +1,10 @@
 //! `brokkr bench NAME`: a script bench's runs, one per arm, end to end.
 //!
 //! Before any attempt, the bench's params are bound against the resolved
-//! view (`super::params`, `super::view`) into every arm they fan out to, and
-//! every arm's bound files reserved for reading and digested; a refusal
-//! there stores nothing, for any arm.
+//! view (`super::params`, `super::view`) into every arm they fan out to,
+//! every arm's bound files reserved for reading, the script's `preflight`
+//! run for every arm when it declares one (`preflight`), and the bound files
+//! digested; a refusal there stores nothing, for any arm.
 //!
 //! Each arm is then one attempt with one document
 //! (`reference/bench-store.md`), run in order; one that fails does not stop
@@ -19,6 +20,7 @@
 //! interrupted iteration included; the command then fails if any arm did.
 
 mod host;
+mod preflight;
 #[cfg(test)]
 mod run_tests;
 mod stored_config;
@@ -86,23 +88,23 @@ pub(crate) fn run(
     // run and before a stop is caught: a run with nowhere to go is never
     // measured.
     let mut destination = Destination::open(&detection.config)?;
-    let _inputs_held = hold_and_digest(&mut arms, detection)?;
+    let _inputs_held = hold_inputs(&arms)?;
     let keep = crate::context::worktree_keep(&detection.config)?;
     let tree = crate::tree_policy::TreePolicy::of(&detection.config);
-    // The whole invocation, worktree setup and publication included: a stop
-    // that lands between two children, during the build or while publishing
-    // is recorded rather than taking the default action, so the attempt is
-    // still published (interrupted, unless something it observed decided it).
+    let (commit, config, labels) =
+        preflight_and_digest(name, args, detection, &view, &frozen, &mut arms)?;
+    // The whole invocation from here, worktree setup and publication
+    // included: a stop that lands between two children, during the build or
+    // while publishing is recorded rather than taking the default action, so
+    // the attempt is still published (interrupted, unless something it
+    // observed decided it).
     let _interrupts = crate::shutdown::SigtermGuard::install();
-    // An unknown revision is refused before anything is attempted; from here
-    // on every attempt's outcome is published.
-    let commit = crate::git::resolve_commit(
-        detection.build_root.as_path(),
-        args.commit.as_deref().unwrap_or("HEAD"),
-    )?;
-    let config = std::sync::Arc::new(view.lua());
+    // A preflight may have run anything: the first arm is admitted as every
+    // later one is.
+    if frozen.script.has_preflight() {
+        admit_next(name, args, detection, &commit)?;
+    }
     let argv = crate::history::redact_secret_argv(&invocation.argv);
-    let labels = params::arm_labels(&arms);
     let total = arms.len();
     let mut failed: Vec<&str> = Vec::new();
     for (index, bound) in arms.iter().enumerate() {
@@ -212,26 +214,112 @@ fn summary(name: &str, total: usize, failed: &[&str]) -> Result<(), DevError> {
     }
 }
 
-/// Reserve every arm's bound files for reading, then digest them: reserved
-/// before any is hashed and held until the last arm ends (the returned
-/// hold), so no lease writes one between its digest and the last iteration.
-fn hold_and_digest(
-    arms: &mut [params::Bound],
-    detection: &Detection,
-) -> Result<Option<crate::reservations::ReadHold>, DevError> {
+/// Reserve every arm's bound files for reading, before any preflight can
+/// look at them and before any is hashed, held until the last arm ends (the
+/// returned hold), so no lease writes one between its digest and the last
+/// iteration.
+fn hold_inputs(arms: &[params::Bound]) -> Result<Option<crate::reservations::ReadHold>, DevError> {
     let union = params::union_inputs(arms);
-    let held = if union.is_empty() {
-        None
-    } else {
-        let paths: Vec<&Path> = union.iter().map(PathBuf::as_path).collect();
-        Some(crate::reservations::hold_reads(&paths)?)
-    };
+    if union.is_empty() {
+        return Ok(None);
+    }
+    let paths: Vec<&Path> = union.iter().map(PathBuf::as_path).collect();
+    Ok(Some(crate::reservations::hold_reads(&paths)?))
+}
+
+/// The invocation's commit, `config()`'s table and the arm labels, once
+/// every arm's preflight passed and its inputs are hashed. An unknown
+/// revision is refused before any project code runs.
+fn preflight_and_digest(
+    name: &str,
+    args: &BenchArgs,
+    detection: &Detection,
+    view: &view::View,
+    frozen: &Frozen,
+    arms: &mut [params::Bound],
+) -> Result<(crate::git::Commit, std::sync::Arc<lua::Value>, Vec<String>), DevError> {
+    let commit = crate::git::resolve_commit(
+        detection.build_root.as_path(),
+        args.commit.as_deref().unwrap_or("HEAD"),
+    )?;
+    let config = std::sync::Arc::new(view.lua());
+    let labels = params::arm_labels(arms);
+    // A stop during a preflight is recorded, so its child is stopped with its
+    // process group and the Lua it runs sees it; one that lands as the
+    // window closes is read in the same step that closes it.
+    let guard = crate::shutdown::SigtermGuard::install();
+    let preflighted = preflight_arms(name, frozen, arms, &labels, &config, detection, &commit);
+    if guard.leave() {
+        return Err(DevError::Interrupted);
+    }
+    preflighted?;
+    // Hashed under the default action, as ever: a stop during it ends the
+    // invocation at once, nothing stored.
     params::digest_arms(
         arms,
         detection.project_root.as_path(),
         &detection.config_sources,
     )?;
-    Ok(held)
+    Ok((commit, config, labels))
+}
+
+/// Run the script's preflight, when it declares one, for every arm in a
+/// fresh State, before anything is built: each arm's refusal is collected,
+/// and any refuses the invocation whole, storing nothing. Passing means every
+/// arm passed before the build began, not that what it checked still holds
+/// when the arm runs.
+fn preflight_arms(
+    name: &str,
+    frozen: &Frozen,
+    arms: &[params::Bound],
+    labels: &[String],
+    config: &std::sync::Arc<lua::Value>,
+    detection: &Detection,
+    commit: &crate::git::Commit,
+) -> Result<(), DevError> {
+    if !frozen.script.has_preflight() {
+        return Ok(());
+    }
+    let mut since = host::Since::new(detection.build_root.as_path(), commit.clone());
+    let mut refusals = Vec::new();
+    for (index, bound) in arms.iter().enumerate() {
+        if crate::shutdown::should_unwind() {
+            return Err(DevError::Interrupted);
+        }
+        let shown = match labels[index].as_str() {
+            "" => format!("bench {name}"),
+            label => format!("bench {name} ({label})"),
+        };
+        let host = preflight::PreflightHost {
+            config: std::sync::Arc::clone(config),
+            cwd: detection.project_root.as_path().to_path_buf(),
+            since,
+        };
+        let (outcome, host) = lua::run_preflight(&frozen.script, &bound.preflight_args(), host);
+        since = host.since;
+        match outcome {
+            lua::PreflightOutcome::Passed => {}
+            lua::PreflightOutcome::Interrupted => return Err(DevError::Interrupted),
+            lua::PreflightOutcome::Refused(why) => {
+                refusals.push(format!("{shown}: preflight refused: {why}"));
+            }
+            lua::PreflightOutcome::Broken(why) => {
+                refusals.push(format!("{shown}: preflight script error: {why}"));
+            }
+            lua::PreflightOutcome::Failed(why) => {
+                refusals.push(format!("{shown}: preflight could not run: {why}"));
+            }
+        }
+    }
+    // A stop the last preflight did not see wins over its refusals.
+    if crate::shutdown::should_unwind() {
+        return Err(DevError::Interrupted);
+    }
+    if refusals.is_empty() {
+        Ok(())
+    } else {
+        Err(DevError::Preflight(refusals))
+    }
 }
 
 /// Whether the arm after a published one may start: not once a stop is

@@ -1676,7 +1676,9 @@ mod tests {
             assert_eq!(r.probes[0].refusal(), None, "{bad}");
         }
         // A `reason` on any other line is ignored, whatever its type.
-        let other = parse(br#"{"probe":"p","outcome":"compile_fail","cause":"script","error":"x","reason":3}"#);
+        let other = parse(
+            br#"{"probe":"p","outcome":"compile_fail","cause":"script","error":"x","reason":3}"#,
+        );
         assert!(other.invalid.is_empty());
         assert_eq!(other.probes[0].refusal(), None);
     }
@@ -2210,8 +2212,14 @@ mod tests {
             (r#"{"kind":"reply_failure","code":1}"#, "carries no number"),
             (r#"{"kind":"signal","number":9,"x":1}"#, "unknown field"),
             (r#"{"kind":"oom"}"#, "is not one of"),
-            (r#"{"kind":"signal","number":11,"code":null}"#, "`code` is null"),
-            (r#"{"kind":"reply_failure","number":null}"#, "`number` is null"),
+            (
+                r#"{"kind":"signal","number":11,"code":null}"#,
+                "`code` is null",
+            ),
+            (
+                r#"{"kind":"reply_failure","number":null}"#,
+                "`number` is null",
+            ),
         ] {
             let r = abort(bad);
             assert_eq!(r.probes[0].outcome(), None, "{bad}");
@@ -2223,9 +2231,16 @@ mod tests {
         }
         // Absent on an abort, present on anything else, a null included.
         let r = line("\"outcome\":\"harness_abort\"");
-        assert!(r.probes[0].record_defect().unwrap().contains("carries no death"));
+        assert!(
+            r.probes[0]
+                .record_defect()
+                .unwrap()
+                .contains("carries no death")
+        );
         for death in ["null", r#"{"kind":"reply_failure"}"#] {
-            let r = line(&format!("\"outcome\":\"runtime_fail\",\"cause\":\"script\",\"death\":{death}"));
+            let r = line(&format!(
+                "\"outcome\":\"runtime_fail\",\"cause\":\"script\",\"death\":{death}"
+            ));
             assert!(
                 r.probes[0]
                     .record_defect()
@@ -2247,9 +2262,21 @@ mod tests {
             parse(format!("{{\"probe\":\"a\",\"error\":\"e\",{fields}}}").as_bytes())
         };
         for (outcome, cause, want) in [
-            ("compile_fail", "script", Verdict::CompileFail(Cause::Script)),
-            ("compile_fail", "capability", Verdict::CompileFail(Cause::Capability)),
-            ("runtime_fail", "budget", Verdict::RuntimeFail(Cause::Budget)),
+            (
+                "compile_fail",
+                "script",
+                Verdict::CompileFail(Cause::Script),
+            ),
+            (
+                "compile_fail",
+                "capability",
+                Verdict::CompileFail(Cause::Capability),
+            ),
+            (
+                "runtime_fail",
+                "budget",
+                Verdict::RuntimeFail(Cause::Budget),
+            ),
             (
                 "runtime_fail",
                 "interpreter_fault",
@@ -2266,14 +2293,26 @@ mod tests {
             assert!(format_probe(&r.probes[0]).contains(&format!("{outcome} ({cause})")));
         }
         for (fields, says) in [
-            ("\"outcome\":\"compile_fail\"", "a compile_fail line carries no cause"),
-            ("\"outcome\":\"runtime_fail\"", "a runtime_fail line carries no cause"),
+            (
+                "\"outcome\":\"compile_fail\"",
+                "a compile_fail line carries no cause",
+            ),
+            (
+                "\"outcome\":\"runtime_fail\"",
+                "a runtime_fail line carries no cause",
+            ),
             (
                 "\"outcome\":\"compile_fail\",\"cause\":\"panic\"",
                 "which only a runtime_fail line has",
             ),
-            ("\"outcome\":\"runtime_fail\",\"cause\":\"oom\"", "is not one of"),
-            ("\"outcome\":\"runtime_fail\",\"cause\":null", "its cause null"),
+            (
+                "\"outcome\":\"runtime_fail\",\"cause\":\"oom\"",
+                "is not one of",
+            ),
+            (
+                "\"outcome\":\"runtime_fail\",\"cause\":null",
+                "its cause null",
+            ),
             ("\"outcome\":\"runtime_fail\",\"cause\":3", "its cause 3"),
             (
                 "\"outcome\":\"harness_abort\",\"death\":{\"kind\":\"reply_failure\"},\"cause\":\"script\"",
@@ -2307,7 +2346,9 @@ mod tests {
         assert_eq!(r.probes[0].declared, None);
         assert_eq!(
             r.probes[0].outcome(),
-            Some(&ProbeOutcome::Evaluated(Verdict::CompileFail(Cause::Script)))
+            Some(&ProbeOutcome::Evaluated(Verdict::CompileFail(
+                Cause::Script
+            )))
         );
         assert_eq!(r.probes[1].declared, Some(serde_json::Value::Null));
         assert_eq!(r.probes[1].outcome(), None);

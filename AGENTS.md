@@ -32,7 +32,7 @@ A doc with 8+ `##` sections is **section-addressed**: `brokkr man conventions sc
 - `reference/check-internals.md` - how the check/test pipeline is built: invocation selection, harness isolation and the failure roster, direct execution, the prepare plan, journal and execution accounting, diagnostic inventory, watchdog attribution, the stray/orphan reapers, the guard's lease protocol, rustflags sink selection. Read before changing any of them.
 - `docs/commands/clippy.md` - `brokkr clippy`.
 - `docs/commands/deps.md` - `brokkr deps`.
-- `docs/commands/bench.md` - `brokkr bench NAME`: the command line, arms, the build, an iteration, the script's builtins, `binary()`, `binary_with()`, hotpath capture and `--hotpath`, interrupting a run, where an iteration's files live, what a run stores.
+- `docs/commands/bench.md` - `brokkr bench NAME`: the command line, the preflight, arms, the build, an iteration, the script's builtins, `binary()`, `binary_with()`, hotpath capture and `--hotpath`, interrupting a run, where an iteration's files live, what a run stores.
 - `docs/commands/crit.md` - `brokkr crit` (criterion).
 - `docs/commands/run.md` - `brokkr run` / `brokkr build` / `brokkr install`.
 - `docs/commands/clean.md` - `brokkr clean`.

@@ -185,6 +185,22 @@ function bench(params)
     record.status = binary_with({hotpath = "main"}, params.mode):ok().hotpath_status
 end"""
 
+[bench.gated]
+profile = "dev"
+params.mode = { default = "plain" }
+script = """
+function preflight(params)
+    if params.mode == "refused" or params.mode == "also" then
+        local r = binary_with({program = "brokkr-no-such-program"}, "-v")
+        fail("needs brokkr-no-such-program: " .. r.start_error)
+    end
+    binary_with({program = "sh"}, "-c", "true"):ok()
+end
+function bench(params)
+    binary(params.mode):ok()
+    record.mode = params.mode
+end"""
+
 [bench.leaky]
 profile = "dev"
 features = ["instrumented"]
@@ -644,6 +660,52 @@ fn hotpath_runs_profile_with_their_features_and_timing_runs_stay_clean() {
         "{}",
         ran.error()
     );
+}
+
+/// A preflight runs for every arm before anything is built: one arm's
+/// refusal refuses the invocation whole, every refusing arm named, nothing
+/// built and nothing stored; when every arm passes, the arms run as ever.
+#[test]
+fn a_preflight_refusal_refuses_every_arm_before_any_build() {
+    let _serial = crate::test_scratch::process_global_lock();
+    let fixture = Fixture::new("preflight");
+    let _hold = crate::lockfile::test_hold(
+        &fixture.detection.project_root,
+        &fixture.detection.build_root,
+    );
+    let ran = fixture.bench("refused", "gated", 1, &["--mode", "a,refused,also"]);
+    let error = ran.error();
+    for arm in ["mode=refused", "mode=also"] {
+        let line = error
+            .lines()
+            .find(|l| l.contains(&format!("bench gated ({arm}): preflight refused: ")))
+            .unwrap_or_else(|| panic!("{arm} is not named: {error}"));
+        assert!(
+            line.contains("brokkr.toml:65: needs brokkr-no-such-program: resolve: ")
+                && line.contains("is not on PATH"),
+            "{line}"
+        );
+    }
+    assert!(
+        !error.contains("(mode=a)"),
+        "a passing arm is not named: {error}"
+    );
+    assert!(!ran.console.contains("cargo build"), "{}", ran.console);
+    assert!(!ran.console.contains("arm 1/3"), "{}", ran.console);
+    assert!(fixture.stored().is_empty(), "nothing is stored");
+
+    let ran = fixture.bench("passed", "gated", 1, &["--mode", "a,b"]);
+    assert!(ran.result.is_ok(), "{}", ran.console);
+    let runs = fixture.stored();
+    assert_eq!(runs.iter().map(mode).collect::<Vec<_>>(), ["a", "b"]);
+    for run in &runs {
+        completed_once(run);
+    }
+}
+
+fn completed_once(run: &store::RunDocument) {
+    assert_eq!(run.outcome, store::RunOutcome::Completed, "{run:?}");
+    assert_eq!(run.iterations.len(), 1);
 }
 
 /// A build failure is an arm's failure like any other: every arm builds,

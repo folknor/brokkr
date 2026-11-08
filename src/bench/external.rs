@@ -6,9 +6,11 @@
 //! directory when it is not absolute, an empty entry meaning that directory,
 //! as a shell's lookup goes; a name with a `/` is a path, relative to the
 //! working directory. The first regular file this process may execute wins,
-//! and the child is launched by that absolute path, so what is recorded is
-//! what is executed: no second lookup by the kernel, and no fallback to
-//! another program or a shell.
+//! and the child is launched by that absolute path through
+//! `crate::process::spawn::spawn_exact`, which calls `execve` itself, so what
+//! is recorded is what is executed: no second lookup, and no fallback to
+//! another program or to the `/bin/sh` libc hands a file in no executable
+//! format.
 //!
 //! Its identity is observed once resolved: the file's xxh3-128 digest as read
 //! then, or why it could not be read. Opened without blocking and refused
@@ -100,7 +102,8 @@ impl std::fmt::Display for Refusal {
 }
 
 /// Whether `candidate` is a regular file this process may execute, through
-/// any link, as exec would follow it.
+/// any link, as exec would follow it. Whether its format runs is the exec's
+/// to say (`crate::process::spawn::spawn_exact`).
 fn executable(candidate: &Path) -> Result<(), Refusal> {
     let meta = match std::fs::metadata(candidate) {
         Ok(meta) => meta,

@@ -206,6 +206,18 @@ impl Host for Probe {
 pub(crate) struct Script {
     program: ::dellingr::Program,
     lines: Option<Arc<LineMap>>,
+    /// Whether the script declares a preflight: a bare global assignment of
+    /// `preflight` anywhere in it, as dellingr records one while compiling.
+    /// Decided here, once, from the source: never from what a run leaves.
+    preflight: bool,
+}
+
+impl Script {
+    /// Whether the script declares `preflight`, so the runner calls it for
+    /// every arm before anything is built.
+    pub(crate) fn has_preflight(&self) -> bool {
+        self.preflight
+    }
 }
 
 /// Compile `source` under `chunk`, the name errors and tracebacks give it.
@@ -217,6 +229,10 @@ pub(crate) fn load_script(
     let lines = lines.map(Arc::new);
     ::dellingr::Program::compile(source, chunk.map(str::as_bytes))
         .map(|program| Script {
+            preflight: program
+                .globals()
+                .iter()
+                .any(|a| a.kind == ::dellingr::AccessKind::Write && &*a.name == b"preflight"),
             program,
             lines: lines.clone(),
         })
@@ -309,6 +325,18 @@ pub(crate) struct CallOutcome {
     /// The `stop_at` marker that ended the child; then `exit` and `signal`
     /// are absent, whatever the child did after it.
     pub(crate) stopped_at: Option<String>,
+    /// Why a preflight's program could not be started; then nothing ran, and
+    /// `exit`, `signal` and the streams are absent.
+    pub(crate) start_error: Option<StartFailure>,
+}
+
+/// A program that never started: what was being done (`resolve` or
+/// `execute`), the OS error number when there was one, and the message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StartFailure {
+    pub(crate) operation: &'static str,
+    pub(crate) errno: Option<i32>,
+    pub(crate) message: String,
 }
 
 /// What a marked call's result carries of its capture: `hotpath_status`
@@ -326,15 +354,21 @@ pub(crate) struct Capture {
 pub(crate) enum Abort {
     /// A stop was requested; the sample is interrupted.
     Interrupted,
-    /// The sample fails with this reason (never empty).
+    /// The sample fails with this reason (never empty): a builtin refused
+    /// what the script asked of it.
     Failed(String),
+    /// The script called `fail(reason)`, or `r:ok()` judged a child.
+    Fail(String),
+    /// brokkr's own machinery failed (an admission, a lease, a supervisor),
+    /// not the script and not what it checked.
+    Machinery(String),
 }
 
 impl std::fmt::Display for Abort {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Interrupted => f.write_str("interrupted"),
-            Self::Failed(why) => f.write_str(why),
+            Self::Failed(why) | Self::Fail(why) | Self::Machinery(why) => f.write_str(why),
         }
     }
 }
@@ -390,9 +424,144 @@ const HANDLE_MARK: &str = "__brokkr_handle";
 /// The per-State context a builtin reaches through the State's user data.
 struct Ctx<H> {
     host: H,
-    in_bench: bool,
+    phase: Phase,
     ok: RustFnHandle,
     marks: Marks,
+}
+
+/// Where the State is: what decides which builtins may run. A module a
+/// script requires runs in the phase it was required from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// The chunk's top level: nothing launches, no handle is made.
+    TopLevel,
+    /// Inside `preflight()`, before anything is built: external programs
+    /// only, no handle.
+    Preflight,
+    /// Inside `bench()`: everything.
+    Bench,
+}
+
+/// How a preflight ended. Every failure's reason follows the script line
+/// that raised it, when one did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PreflightOutcome {
+    /// `preflight()` returned nothing.
+    Passed,
+    /// The script refused: `fail(reason)` or a failed `r:ok()`, what it
+    /// checked is not there.
+    Refused(String),
+    /// The script itself is wrong: a Lua error, a builtin it may not call or
+    /// called wrongly, a preflight that is not a function or returned a
+    /// value.
+    Broken(String),
+    /// brokkr's own machinery failed while the preflight ran.
+    Failed(String),
+    Interrupted,
+}
+
+/// Run a declared preflight in a fresh State: the chunk's top level, then
+/// `preflight(params, keys)`, which passes by returning nothing. Returns the
+/// host back.
+pub(crate) fn run_preflight<H: Host>(
+    script: &Script,
+    args: &Args,
+    host: H,
+) -> (PreflightOutcome, H) {
+    let interrupt = ::dellingr::Interrupt::new();
+    let (mut state, ok, marks) = match fresh_state::<H>(Some(interrupt.clone())) {
+        Ok(fresh) => fresh,
+        Err(error) => {
+            return (
+                PreflightOutcome::Broken(format!("cannot set up the Lua state: {error}")),
+                host,
+            );
+        }
+    };
+    state.set_user_data(Some(Ctx {
+        host,
+        phase: Phase::TopLevel,
+        ok,
+        marks: marks.clone(),
+    }));
+    let outcome = watched::<H, _>(&interrupt, || {
+        preflight::<H>(&mut state, script, args, &marks)
+    });
+    let host = state
+        .user_data_mut::<Option<Ctx<H>>>()
+        .and_then(Option::take)
+        .map(|ctx| ctx.host);
+    match host {
+        Some(host) => (outcome, host),
+        // The context is set above and only taken here.
+        None => unreachable!("the preflight's host context went missing"),
+    }
+}
+
+fn preflight<H: Host>(
+    state: &mut State,
+    script: &Script,
+    args: &Args,
+    marks: &Marks,
+) -> PreflightOutcome {
+    let lines = script.lines.as_deref();
+    let broken = |error: Error| {
+        if matches!(error.kind(), ErrorKind::Interrupted) {
+            return PreflightOutcome::Interrupted;
+        }
+        match abort_of(&error) {
+            Some(Abort::Interrupted) => PreflightOutcome::Interrupted,
+            Some(Abort::Fail(why)) => PreflightOutcome::Refused(located(&error, lines, why)),
+            Some(Abort::Failed(why)) => PreflightOutcome::Broken(located(&error, lines, why)),
+            Some(Abort::Machinery(why)) => PreflightOutcome::Failed(located(&error, lines, why)),
+            None => PreflightOutcome::Broken(rendered(error, lines)),
+        }
+    };
+    if let Err(error) = state
+        .load(&script.program)
+        .and_then(|()| state.call(ArgCount::Fixed(0), RetCount::Fixed(0)))
+    {
+        return broken(error);
+    }
+    if let Err(error) = state.get_global("preflight") {
+        return PreflightOutcome::Broken(format!("cannot read preflight: {error}"));
+    }
+    if state.typ(-1) != LuaType::Function {
+        return PreflightOutcome::Broken(format!(
+            "the script assigns preflight, but its top level left it a {}: define function \
+             preflight(params, keys) unconditionally and branch inside it",
+            state.typ(-1).as_str()
+        ));
+    }
+    if let Err(error) = push_value(state, &Value::Table(args.params.clone()), marks) {
+        return PreflightOutcome::Broken(format!("cannot make the params table: {error}"));
+    }
+    if let Err(error) = push_value(state, &Value::Table(args.keys.clone()), marks) {
+        return PreflightOutcome::Broken(format!("cannot make the keys table: {error}"));
+    }
+    if let Some(ctx) = ctx::<H>(state) {
+        ctx.phase = Phase::Preflight;
+    }
+    // Every value it returns is counted: the function and its two arguments
+    // sit at the top, and what is left above their base after the call is
+    // what it returned, a `return nil` among them.
+    let base = state.get_top().saturating_sub(3);
+    let called = state.call(ArgCount::Fixed(2), RetCount::All);
+    if let Some(ctx) = ctx::<H>(state) {
+        ctx.phase = Phase::TopLevel;
+    }
+    if let Err(error) = called {
+        return broken(error);
+    }
+    match state.get_top().saturating_sub(base) {
+        0 => PreflightOutcome::Passed,
+        n => PreflightOutcome::Broken(format!(
+            "preflight() returned {n} value{} (the first a {}): it passes by returning nothing \
+             and refuses with fail()",
+            if n == 1 { "" } else { "s" },
+            state.typ(-isize::try_from(n).unwrap_or(1)).as_str()
+        )),
+    }
 }
 
 /// The values brokkr recognises by identity, held in the State's registry:
@@ -419,7 +588,7 @@ pub(crate) fn run_sample<H: Host>(script: &Script, args: &Args, host: H) -> (Sam
     };
     state.set_user_data(Some(Ctx {
         host,
-        in_bench: false,
+        phase: Phase::TopLevel,
         ok,
         marks: marks.clone(),
     }));
@@ -506,13 +675,13 @@ fn sample<H: Host>(state: &mut State, script: &Script, args: &Args, marks: &Mark
     }
     let start = Instant::now();
     if let Some(ctx) = ctx::<H>(state) {
-        ctx.in_bench = true;
+        ctx.phase = Phase::Bench;
         ctx.host.begin_block(start);
     }
     let called = state.call(ArgCount::Fixed(2), RetCount::Fixed(1));
     let wall = start.elapsed();
     if let Some(ctx) = ctx::<H>(state) {
-        ctx.in_bench = false;
+        ctx.phase = Phase::TopLevel;
     }
     if let Err(error) = called {
         return ended(error, lines, Some(wall));
@@ -556,7 +725,9 @@ fn ended(error: Error, lines: Option<&LineMap>, wall: Option<Duration>) -> Sampl
     let outcome = match abort_of(&error) {
         _ if matches!(error.kind(), ErrorKind::Interrupted) => SampleOutcome::Interrupted,
         Some(Abort::Interrupted) => SampleOutcome::Interrupted,
-        Some(Abort::Failed(why)) => SampleOutcome::Failed(located(&error, lines, why)),
+        Some(Abort::Failed(why) | Abort::Fail(why) | Abort::Machinery(why)) => {
+            SampleOutcome::Failed(located(&error, lines, why))
+        }
         None => {
             let shown = rendered(error, lines);
             SampleOutcome::Failed(if shown.trim().is_empty() {
@@ -713,12 +884,53 @@ fn stop_first<H: Host>(state: &mut State) -> Result<(), Error> {
 
 /// The host, for a builtin only `bench()` may call.
 fn bench_host<'a, H: Host>(state: &'a mut State, name: &str) -> Result<&'a mut H, Error> {
-    let in_bench = ctx::<H>(state).is_some_and(|c| c.in_bench);
-    if !in_bench {
+    let phase = ctx::<H>(state).map(|c| c.phase);
+    if phase != Some(Phase::Bench) {
+        let place = if phase == Some(Phase::Preflight) {
+            "inside preflight(), before anything is built"
+        } else {
+            "at the script's top level"
+        };
         return Err(raise_failed(
             state,
-            format!("{name}() is only available inside bench(), not at the script's top level"),
+            format!("{name}() is only available inside bench(), not {place}"),
         ));
+    }
+    match ctx::<H>(state) {
+        Some(ctx) => Ok(&mut ctx.host),
+        None => Err(raise_failed(state, format!("{name}(): no bench context"))),
+    }
+}
+
+/// The host, for a call: inside `bench()` any, inside `preflight()` only an
+/// external program's, since the build does not exist yet.
+fn launch_host<'a, H: Host>(
+    state: &'a mut State,
+    name: &str,
+    external: bool,
+) -> Result<&'a mut H, Error> {
+    let phase = ctx::<H>(state).map(|c| c.phase);
+    match phase {
+        Some(Phase::Bench) => {}
+        Some(Phase::Preflight) if external => {}
+        Some(Phase::Preflight) => {
+            return Err(raise_failed(
+                state,
+                format!(
+                    "{name}() runs the build, which does not exist yet inside preflight(): run \
+                     an external program with binary_with({{program = ...}})"
+                ),
+            ));
+        }
+        _ => {
+            return Err(raise_failed(
+                state,
+                format!(
+                    "{name}() is only available inside bench() and preflight(), not at the \
+                     script's top level"
+                ),
+            ));
+        }
     }
     match ctx::<H>(state) {
         Some(ctx) => Ok(&mut ctx.host),
@@ -788,7 +1000,7 @@ fn lua_fail<H: Host>(state: &mut State) -> Result<u8, Error> {
     } else {
         reason
     };
-    Err(raise_failed(state, reason))
+    Err(raise(state, Abort::Fail(reason)))
 }
 
 fn lua_output<H: Host>(state: &mut State) -> Result<u8, Error> {
@@ -1120,15 +1332,16 @@ fn words_from(state: &mut State, first: isize) -> Result<Vec<Word>, Error> {
 
 fn lua_binary<H: Host>(state: &mut State) -> Result<u8, Error> {
     stop_first::<H>(state)?;
-    bench_host::<H>(state, "binary")?;
+    launch_host::<H>(state, "binary", false)?;
     let words = words_from(state, 1)?;
     call_binary::<H>(state, "binary", words, CallOptions::default())
 }
 
 fn lua_binary_with<H: Host>(state: &mut State) -> Result<u8, Error> {
     stop_first::<H>(state)?;
-    bench_host::<H>(state, "binary_with")?;
+    launch_host::<H>(state, "binary_with", true)?;
     let options = options_at(state, 1)?;
+    launch_host::<H>(state, "binary_with", options.program.is_some())?;
     let words = words_from(state, 2)?;
     call_binary::<H>(state, "binary_with", words, options)
 }
@@ -1391,21 +1604,36 @@ fn call_binary<H: Host>(
     options: CallOptions,
 ) -> Result<u8, Error> {
     let ok = ctx::<H>(state).map(|c| c.ok);
-    let outcome = bench_host::<H>(state, function)?.binary(words, options);
+    let external = options.program.is_some();
+    let outcome = launch_host::<H>(state, function, external)?.binary(words, options);
     let outcome = outcome.map_err(|abort| raise(state, abort))?;
     state.new_table()?;
     let table = top(state);
     set_str(state, table, "program", outcome.program.as_bytes())?;
+    if let Some(failure) = &outcome.start_error {
+        set_str(state, table, "start_error", failure.message.as_bytes())?;
+        set_str(
+            state,
+            table,
+            "start_operation",
+            failure.operation.as_bytes(),
+        )?;
+        if let Some(errno) = failure.errno {
+            set_number(state, table, "start_errno", f64::from(errno))?;
+        }
+    }
     if let Some(code) = outcome.exit {
         set_number(state, table, "exit", f64::from(code))?;
     }
     if let Some(signal) = outcome.signal {
         set_number(state, table, "signal", f64::from(signal))?;
     }
-    set_str(state, table, "stdout", &outcome.stdout)?;
-    set_bool(state, table, "stdout_truncated", outcome.stdout_truncated)?;
-    set_str(state, table, "stderr", &outcome.stderr)?;
-    set_bool(state, table, "stderr_truncated", outcome.stderr_truncated)?;
+    if outcome.start_error.is_none() {
+        set_str(state, table, "stdout", &outcome.stdout)?;
+        set_bool(state, table, "stdout_truncated", outcome.stdout_truncated)?;
+        set_str(state, table, "stderr", &outcome.stderr)?;
+        set_bool(state, table, "stderr_truncated", outcome.stderr_truncated)?;
+    }
     if let Some(spool) = &outcome.stdout_file {
         state.push_string("stdout_file")?;
         push_handle(state, spool)?;
@@ -1713,6 +1941,17 @@ fn lua_result_ok<H: Host>(state: &mut State) -> Result<u8, Error> {
         "the child".to_owned()
     };
     state.pop(1)?;
+    field(state, "start_error")?;
+    if state.typ(-1) == LuaType::String {
+        // The message names the operation already (`resolve: ...`).
+        let why = String::from_utf8_lossy(state.to_bytes(-1)?).into_owned();
+        state.pop(1)?;
+        return Err(raise(
+            state,
+            Abort::Fail(format!("{program} could not start: {why}")),
+        ));
+    }
+    state.pop(1)?;
     field(state, "signal")?;
     let signal = (state.typ(-1) == LuaType::Number)
         .then(|| state.to_number(-1))
@@ -1735,7 +1974,8 @@ fn lua_result_ok<H: Host>(state: &mut State) -> Result<u8, Error> {
         why.push_str(": ");
         why.push_str(line.trim());
     }
-    Err(raise_failed(state, why))
+    // The script's own verdict on what the child did, as `fail()` is.
+    Err(raise(state, Abort::Fail(why)))
 }
 
 /// `print`, routed through brokkr's console channel rather than straight to

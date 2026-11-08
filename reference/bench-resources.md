@@ -213,6 +213,25 @@ dataset's `path` naming a directory) records internal links by their
 target text, so a file reached through a link out of the tree is neither
 reserved nor digested by naming the tree.
 
+The read hold is taken before a script's preflight runs
+(`docs/commands/bench.md`, Preflight), so a preflight child that looks at
+an input's path finds it held against writers. It does not stop the child
+from writing it: a preflight holds no handle, so whatever it does with a
+path is undeclared, as a literal path is in an iteration.
+
+## Preflight children
+
+A preflight runs before any build and outside any iteration, so its
+children have no owner and no borrow. Each launches on a lease of its own
+(`LaunchSpec` with nothing declared) that reserves no resource and is
+armed for that one spawn, so the child inherits it, dies with brokkr and
+carries the orphan token as any armed launch does. Its release after the
+child is reaped is the call's completion, as a borrow's is: a descendant
+still holding the lease past the release window fails the call. That is
+cooperative, as a borrow is: a child that closes the descriptor escapes it.
+A preflight child's output is captured through pipes, bounded as a result's
+preview is, and nothing of it is stored.
+
 ## Stdout spools
 
 Each call's stdout goes to its spool, a file brokkr creates under `stdout/`

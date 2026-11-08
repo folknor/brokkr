@@ -368,7 +368,9 @@ fn record_inner(
     // its disposition row.
     for d in &gate.dispositions {
         if d.actual.is_none() {
-            let attribution = expected.get(&d.probe).and_then(|e| e.attribution.as_deref());
+            let attribution = expected
+                .get(&d.probe)
+                .and_then(|e| e.attribution.as_deref());
             insert_gate_miss(conn, run_id, d, attribution)?;
         }
     }
@@ -521,11 +523,8 @@ mod tests {
                 let verdict = e.map(|label| {
                     let d = crate::piners::registry::PinnedDisposition::from_label(label)
                         .expect("test label");
-                    let cause = matches!(
-                        label,
-                        "compile_fail" | "runtime_fail"
-                    )
-                    .then_some(Cause::Script);
+                    let cause =
+                        matches!(label, "compile_fail" | "runtime_fail").then_some(Cause::Script);
                     Verdict::new(d, None, cause).expect("a non-abort test label")
                 });
                 (
@@ -585,7 +584,13 @@ mod tests {
             run_error: None,
         };
         let run_id = db
-            .record_run(&run, &report, &reconciled(&expected, &report), &expected, &gate)
+            .record_run(
+                &run,
+                &report,
+                &reconciled(&expected, &report),
+                &expected,
+                &gate,
+            )
             .unwrap();
         let row = db.disposition_for_probe(run_id, "ran").unwrap().unwrap();
         assert_eq!(row.expected.as_deref(), Some("harness_abort"));
@@ -593,8 +598,16 @@ mod tests {
             row.expected_death.as_deref(),
             Some("{\"kind\":\"signal\",\"number\":6}")
         );
-        assert_eq!(row.death.as_deref(), Some("{\"kind\":\"signal\",\"number\":9}"));
-        let attribution: (Option<String>, Option<String>, Option<String>, Option<String>) = db
+        assert_eq!(
+            row.death.as_deref(),
+            Some("{\"kind\":\"signal\",\"number\":9}")
+        );
+        let attribution: (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = db
             .conn()
             .query_row(
                 "SELECT d.expected_attribution, g.expected, g.expected_death, \
@@ -623,15 +636,12 @@ mod tests {
             verdict: Some(Verdict::RuntimeFail(Cause::Script)),
             attribution: None,
         };
-        let expected: BTreeMap<String, Expectation> = [
-            ("ran".to_owned(), fail.clone()),
-            ("gone".to_owned(), fail),
-        ]
-        .into_iter()
-        .collect();
-        let report = parse(
-            br#"{"probe":"ran","outcome":"runtime_fail","cause":"panic","error":"e"}"#,
-        );
+        let expected: BTreeMap<String, Expectation> =
+            [("ran".to_owned(), fail.clone()), ("gone".to_owned(), fail)]
+                .into_iter()
+                .collect();
+        let report =
+            parse(br#"{"probe":"ran","outcome":"runtime_fail","cause":"panic","error":"e"}"#);
         let gate = GateVerdict::from(vec![
             GateDiff {
                 probe: "ran".to_owned(),
@@ -661,7 +671,13 @@ mod tests {
             run_error: None,
         };
         let run_id = db
-            .record_run(&run, &report, &reconciled(&expected, &report), &expected, &gate)
+            .record_run(
+                &run,
+                &report,
+                &reconciled(&expected, &report),
+                &expected,
+                &gate,
+            )
             .unwrap();
         let row = db.disposition_for_probe(run_id, "ran").unwrap().unwrap();
         assert_eq!(row.expected.as_deref(), Some("runtime_fail"));

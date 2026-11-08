@@ -410,7 +410,9 @@ mod tests {
     #[test]
     fn a_contradictory_disposition_field_never_satisfies_a_pin_or_explains_a_break() {
         // Pinned to the field's claim, and to the derived label: neither passes.
-        let rep = report(r#"{"probe":"a","outcome":"compile_fail","cause":"script","disposition":"accepted"}"#);
+        let rep = report(
+            r#"{"probe":"a","outcome":"compile_fail","cause":"script","disposition":"accepted"}"#,
+        );
         let ids = ["a".to_owned()];
         for pin in ["accepted", "compile_fail"] {
             let reg = registry(&[("a", Some(pin))]);

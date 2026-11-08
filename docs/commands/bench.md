@@ -51,9 +51,76 @@ Refused before anything runs, and not stored: a param refusal in any arm (a
 `required` param not given among them), a
 bound input another reservation writes or whose pin does not match (every
 arm's inputs are reserved for reading, then hashed, after the script is
-read and the store opened, before any build), and a `--commit` that names
-no commit; from there on every attempt is stored, a worktree that could not
-be set up included.
+read and the store opened, before any build), a `--commit` that names
+no commit, and a preflight that refuses any arm (Preflight); from there on
+every attempt is stored, a worktree that could not be set up included.
+
+## Preflight
+
+A script that assigns the global `preflight` anywhere (`function
+preflight(params, keys) ... end`, the way it assigns `bench`) declares a
+preflight: what the host must provide before the bench can run, checked by
+the script itself. It runs for every arm, before anything is built, after
+the inputs are reserved and the commit resolved, before the inputs are
+hashed: a fresh Lua state, the chunk's top level, then `preflight(params,
+keys)`. Returning nothing passes. Anything else refuses the invocation
+whole: no arm is built, nothing is stored, and every refusing arm is named
+with its reason. A stop during a preflight stops its child, and the
+invocation ends as an interrupt. So a bench that needs
+io_uring says so in Lua, with its own fix-it text:
+
+```lua
+function preflight(params)
+    if params.io ~= "uring" then return end
+    local r = binary_with({program = "sh"}, "-c", "ulimit -l"):ok()
+    local kb = r.stdout:match("%S+")
+    if kb ~= "unlimited" and tonumber(kb) < 16384 then
+        fail("io_uring needs RLIMIT_MEMLOCK of 16 MB or more, have " .. kb .. " KB\n"
+            .. "Fix: sudo prlimit --pid=$$ --memlock=unlimited:unlimited")
+    end
+end
+```
+
+- Its children are external programs only: `binary_with({program = ...})`
+  (`binary_with()`), since the build does not exist yet; `binary()` and a
+  call without `program` are refused, and so are `hotpath`, `stop_at` and
+  every handle. A program that cannot be found or executed is a result,
+  not a failure: `r.start_error` says why, with no `exit`, `signal` or
+  output, and `r:ok()` fails naming it. Each child runs on a launch lease
+  of its own that reserves nothing and is inherited by the child, so the
+  call finishes only once nothing it started still holds it: a child that
+  leaves a descendant running fails the preflight two seconds after it
+  exits.
+  Nothing a preflight launches is stored.
+- `params` is the bound structure `bench()` gets, every file entry's field
+  the absolute path string, not a handle: nothing a preflight does with it
+  is declared. `keys` is the same. `since()`, `config()`, `json`, `fail()`
+  and `print` work as in `bench()`; `output()`, `scratch()`, `read()`,
+  `write()` and `filesize()` do not.
+- The declaration is the source, not the run: a `local function
+  preflight` or one made only through `_G` declares nothing, and a script
+  that assigns `preflight` but whose top level leaves no function there
+  (inside an `if`, say) is refused. Define it unconditionally and branch
+  inside it. Returning a value is refused too.
+- Passing means every arm passed before the build began, not that what it
+  checked still holds when the arm runs. Without `--commit`, HEAD is read
+  again once every preflight has run and the inputs are hashed, before the
+  first arm, as before each later one (Arms).
+- A refusal says which kind it is: `preflight refused` for `fail()` and a
+  failed `r:ok()`,
+  `preflight script error` for a Lua error, a builtin the script may not
+  call or called wrongly, a preflight that is no function or returned a
+  value (`return nil` included), and `preflight could not run` when
+  brokkr's own machinery failed, a lease it could not release (a child
+  that left a descendant holding it) among it. brokkr runs an external
+  program by calling `execve` itself, never through libc's `/bin/sh`
+  fallback for a file in no executable format, in `bench()` too, and tells
+  the exec's own refusal (no such file, no permission, no format the kernel
+  runs, a `#!` interpreter that is missing) from a failure of its own setup
+  before it: only the first is a `start_error`. An exec that fails for want
+  of resources (memory, argument space, descriptors) is brokkr's too. `r.start_error` is
+  the message, `r.start_operation` is `resolve` or `execute`, and
+  `r.start_errno` the OS error number when there was one.
 
 ## Arms
 
@@ -150,7 +217,7 @@ or `require`, so every child goes through brokkr.
 - `binary(...)` - run the built executable once and wait for it. Only inside
   `bench()`. `binary_with`'s `program` runs another executable instead.
 - `binary_with(options, ...)` - `binary()` with call options (below). Only
-  inside `bench()`.
+  inside `bench()`, and inside `preflight()` with `program` (Preflight).
 - `output(name)` - a handle on a fresh path under the iteration's `out/`,
   not created. Only inside `bench()`.
 - `scratch(name)` - a handle on a fresh empty directory under the
@@ -291,7 +358,8 @@ local r = binary_with({
   `brokkr results --compare` names a `lua5.4` that changed between two
   runs. A program that cannot be found or started fails the iteration
   naming it: a measured block whose program is missing is a failed
-  measurement. Comparing against a reference implementation is the case:
+  measurement; a preflight checks presence beforehand (Preflight).
+  Comparing against a reference implementation is the case:
   `binary_with({program = "lua5.4"}, script)` beside `binary(script)`.
 
 Any other key is refused, so a misspelt `writes` never runs a call with
@@ -384,6 +452,8 @@ finite numbers, UTF-8 strings, no handle or function.
 
 ## Interrupting a run
 
+Ctrl-C during a preflight stops its child and ends the invocation as an
+interrupt, with nothing stored, since no arm was attempted.
 Ctrl-C during a child stops the child and ends the iteration interrupted;
 the run is then stored as interrupted and the command exits as an
 interrupt. During Lua, at the top level or in `bench()`, it is seen

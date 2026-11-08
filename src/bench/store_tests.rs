@@ -11,7 +11,8 @@ use super::evidence;
 use super::store::{
     BoundParam, Build, CaptureOutcome, Child, ChildEnding, Clock, Conditions, DOCUMENT_FORMAT,
     Evidence, Executable, ExecutableIdentity, HotpathCapture, Iteration, IterationOutcome, Loss,
-    Measurement, ParamValue, Published, Record, ResolvedBuild, RunDocument, RunOutcome, Sample, SinkEnd, Store, StoreError,
+    Measurement, ParamValue, Published, Record, ResolvedBuild, RunDocument, RunOutcome, Sample,
+    SinkEnd, Store, StoreError,
 };
 
 fn store(name: &str) -> Store {

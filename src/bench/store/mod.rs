@@ -32,8 +32,8 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 pub use document::{
     BoundParam, Build, CaptureOutcome, Child, ChildEnding, Clock, Conditions, DOCUMENT_FORMAT,
-    Evidence, Executable, ExecutableIdentity, HotpathCapture, Iteration, IterationOutcome, Loss, Measurement, ParamValue, Record,
-    ResolvedBuild, RunDocument, RunOutcome, Sample, SinkEnd,
+    Evidence, Executable, ExecutableIdentity, HotpathCapture, Iteration, IterationOutcome, Loss,
+    Measurement, ParamValue, Record, ResolvedBuild, RunDocument, RunOutcome, Sample, SinkEnd,
 };
 pub use error::StoreError;
 pub use list::{RunFilter, StoredRun};

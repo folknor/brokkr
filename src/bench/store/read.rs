@@ -6,9 +6,9 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::StoreError;
 use super::document::{
-    BoundParam, Build, CaptureOutcome, Child, ChildEnding, Clock, Conditions, Evidence,
-    Executable, ExecutableIdentity, HotpathCapture, Iteration, IterationOutcome, Loss, Measurement, ParamValue, Record,
-    ResolvedBuild, RunDocument, RunOutcome, Sample, SinkEnd,
+    BoundParam, Build, CaptureOutcome, Child, ChildEnding, Clock, Conditions, Evidence, Executable,
+    ExecutableIdentity, HotpathCapture, Iteration, IterationOutcome, Loss, Measurement, ParamValue,
+    Record, ResolvedBuild, RunDocument, RunOutcome, Sample, SinkEnd,
 };
 use super::list::StoredRun;
 

@@ -33,7 +33,7 @@ impl Since {
 
     /// Whether the commit under test descends from `sha` (or is it). The sha
     /// is resolved first, so one git cannot name is an error, never a no.
-    fn ask(&mut self, sha: &str) -> Result<bool, Abort> {
+    pub(super) fn ask(&mut self, sha: &str) -> Result<bool, Abort> {
         if let Some(answer) = self.answers.get(sha) {
             return Ok(*answer);
         }
@@ -232,8 +232,8 @@ impl IterationHost {
         let limit = REPORT_BYTES.min(self.report_budget);
         let read = match self.resources() {
             Ok(resources) => resources.read_report(path, limit),
-            Err(Abort::Failed(why)) => Err(DevError::Internal(why)),
             Err(Abort::Interrupted) => Err(DevError::Interrupted),
+            Err(other) => Err(DevError::Internal(other.to_string())),
         };
         let outcome = match read {
             Err(error) => store::CaptureOutcome::Unreadable {
@@ -369,21 +369,19 @@ impl IterationHost {
         env.extend(report_str.as_deref().map(hotpath_env).into_iter().flatten());
         let arg_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
         let guard = crate::shutdown::SigtermGuard::install();
-        let command = crate::process::spawn::ChildPolicy::plain().command(
-            &program_str,
-            &arg_refs,
-            Some(&self.cwd),
-            &env,
-            crate::shutdown::ChildIsolation::ProcessGroup(&guard),
-        );
         let start = Instant::now();
-        let child = command.and_then(|mut command| {
-            command
-                .stdin(stdin.map_or_else(std::process::Stdio::null, std::process::Stdio::from))
-                .stdout(std::process::Stdio::from(call_stdout))
-                .stderr(std::process::Stdio::piped());
-            crate::process::spawn::spawn(command, None)
-        });
+        let child = spawn_child(
+            &Launch {
+                program: &program_str,
+                args: &arg_refs,
+                cwd: &self.cwd,
+                env: &env,
+                guard: &guard,
+                external: executable.is_some(),
+            },
+            stdin.map_or_else(std::process::Stdio::null, std::process::Stdio::from),
+            std::process::Stdio::from(call_stdout),
+        );
         let child = match child {
             Ok(child) => child,
             Err(error) => {
@@ -508,6 +506,50 @@ impl IterationHost {
     }
 }
 
+/// One call's child as it is launched.
+struct Launch<'a> {
+    program: &'a str,
+    args: &'a [&'a str],
+    cwd: &'a Path,
+    env: &'a [(&'a str, &'a str)],
+    guard: &'a crate::shutdown::SigtermGuard,
+    /// An external program, run exactly as resolved and recorded.
+    external: bool,
+}
+
+/// Spawn a call's child in its own process group, stderr piped: the
+/// snapshot through the choke point, an external program never through
+/// libc's `/bin/sh` fallback (`crate::process::spawn::spawn_exact`).
+fn spawn_child(
+    launch: &Launch<'_>,
+    stdin: std::process::Stdio,
+    stdout: std::process::Stdio,
+) -> Result<std::process::Child, DevError> {
+    let policy = crate::process::spawn::ChildPolicy::plain();
+    let isolation = crate::shutdown::ChildIsolation::ProcessGroup(launch.guard);
+    let cwd = Some(launch.cwd);
+    if !launch.external {
+        let mut command = policy.command(launch.program, launch.args, cwd, launch.env, isolation)?;
+        command
+            .stdin(stdin)
+            .stdout(stdout)
+            .stderr(std::process::Stdio::piped());
+        return crate::process::spawn::spawn(command, None);
+    }
+    let mut command = policy.exact(launch.program, launch.args, cwd, launch.env, isolation)?;
+    command
+        .stdin(stdin)
+        .stdout(stdout)
+        .stderr(std::process::Stdio::piped());
+    crate::process::spawn::spawn_exact(command).map_err(|error| match error {
+        crate::process::spawn::ExactSpawnError::Setup(error) => error,
+        crate::process::spawn::ExactSpawnError::Exec(error) => DevError::Spawn {
+            program: format!("{} (execute)", launch.program),
+            error,
+        },
+    })
+}
+
 /// The external program `name` names for a child in `cwd` whose call adds
 /// `env`: resolved on the child's own `PATH` (`crate::bench::external`), and
 /// its file observed. A program that cannot be resolved fails the call, so
@@ -625,16 +667,17 @@ fn call_outcome(
         stdout_file: None,
         hotpath: None,
         stopped_at,
+        start_error: None,
     })
 }
 
 /// Whether a stop is pending: Ctrl-C, `brokkr kill`, or a committed stop.
-fn stop_pending() -> bool {
+pub(super) fn stop_pending() -> bool {
     crate::shutdown::should_unwind() || !crate::shutdown::admits_new_work()
 }
 
 /// Every builtin's first step: a pending stop ends the sample here.
-fn stopping() -> Result<(), Abort> {
+pub(super) fn stopping() -> Result<(), Abort> {
     if stop_pending() {
         Err(Abort::Interrupted)
     } else {

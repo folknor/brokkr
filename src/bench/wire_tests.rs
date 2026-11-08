@@ -12,9 +12,8 @@ use super::store::wire::{
 use super::store::{
     BoundParam, Build, CaptureOutcome, Child, ChildEnding, Clock, Conditions, DOCUMENT_FORMAT,
     Evidence, Executable, ExecutableIdentity, HotpathCapture, Iteration, IterationOutcome, Loss,
-    Measurement, ParamValue,
-    Published, Record, ResolvedBuild, RunDocument, RunFilter, RunOutcome, Sample, SinkEnd, Store,
-    StoreError, StoredRun,
+    Measurement, ParamValue, Published, Record, ResolvedBuild, RunDocument, RunFilter, RunOutcome,
+    Sample, SinkEnd, Store, StoreError, StoredRun,
 };
 
 /// The fixture's one child: every record kind and a deadline ending.

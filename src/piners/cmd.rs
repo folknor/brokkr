@@ -606,13 +606,7 @@ pub fn corpus(
             return Err(DevError::ExitCode(1));
         }
         let pins_path = registry_dir.join(registry::PINS_FILE);
-        crate::piners::bless::apply(
-            &pins_path,
-            &mut registry,
-            report,
-            &ids,
-            &args.attributions,
-        )?;
+        crate::piners::bless::apply(&pins_path, &mut registry, report, &ids, &args.attributions)?;
         finish(artefacts)?;
         return Ok(());
     }
@@ -1419,8 +1413,9 @@ mod tests {
         // Complete coverage with an extra line is not a completed attempt, and
         // a broken report is protocol-invalid even on an abnormal end - never
         // classified as a crash first.
-        let extra =
-            format!("{A_OK}{{\"probe\":\"zz\",\"outcome\":\"compile_fail\",\"cause\":\"script\",\"error\":\"x\"}}\n");
+        let extra = format!(
+            "{A_OK}{{\"probe\":\"zz\",\"outcome\":\"compile_fail\",\"cause\":\"script\",\"error\":\"x\"}}\n"
+        );
         assert!(matches!(
             classify(&["a"], &extra, HarnessEnd::Code(0), false),
             isolate::AttemptVerdict::Failed(isolate::Failure::ProtocolInvalid(_))

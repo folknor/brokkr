@@ -218,7 +218,9 @@ impl Death {
                 .ok()
                 .filter(|c| (1..=255).contains(c))
                 .map(Self::Exit)
-                .ok_or_else(|| format!("an exit death's code {c} is not a nonzero exit (1 to 255)")),
+                .ok_or_else(|| {
+                    format!("an exit death's code {c} is not a nonzero exit (1 to 255)")
+                }),
             ("reply_failure", None, None) => Ok(Self::ReplyFailure),
             ("signal", ..) => Err("a signal death carries exactly a `number`".to_owned()),
             ("exit", ..) => Err("an exit death carries exactly a `code`".to_owned()),
@@ -2078,7 +2080,10 @@ csv = { path = \"p/old/tv_trades.csv\", xxh128 = \"bb\" }
                 "expected = \"accepted\"\ndeath = { kind = \"exit\", code = 4 }\n",
                 "only a pin expecting harness_abort",
             ),
-            ("attribution = \"x\"\n", "only a pin expecting harness_abort"),
+            (
+                "attribution = \"x\"\n",
+                "only a pin expecting harness_abort",
+            ),
             (
                 "expected = \"harness_abort\"\ndeath = { kind = \"signal\", number = 0 }\n\
                  attribution = \"x\"\n",
@@ -2132,8 +2137,15 @@ csv = { path = \"p/old/tv_trades.csv\", xxh128 = \"bb\" }
         }
         // A failure pin blessed before piners sent a cause loads, unblessed,
         // so a bless can adopt the line's cause.
-        for extra in ["expected = \"compile_fail\"\n", "expected = \"runtime_fail\"\n"] {
-            assert_eq!(load(extra).unwrap().probes["p"].expectation(), None, "{extra}");
+        for extra in [
+            "expected = \"compile_fail\"\n",
+            "expected = \"runtime_fail\"\n",
+        ] {
+            assert_eq!(
+                load(extra).unwrap().probes["p"].expectation(),
+                None,
+                "{extra}"
+            );
         }
         for (extra, says) in [
             (

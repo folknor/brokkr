@@ -378,10 +378,8 @@ mod tests {
             .collect()
     }
 
-    const SEGV: &str =
-        r#"{"probe":"a","outcome":"harness_abort","error":"signal 11","death":{"kind":"signal","number":11}}"#;
-    const OOM: &str =
-        r#"{"probe":"a","outcome":"harness_abort","error":"signal 9","death":{"kind":"signal","number":9}}"#;
+    const SEGV: &str = r#"{"probe":"a","outcome":"harness_abort","error":"signal 11","death":{"kind":"signal","number":11}}"#;
+    const OOM: &str = r#"{"probe":"a","outcome":"harness_abort","error":"signal 9","death":{"kind":"signal","number":9}}"#;
 
     #[test]
     fn an_abort_needs_an_attribution_to_enter_or_move_and_keeps_it_otherwise() {
@@ -394,8 +392,9 @@ mod tests {
         // A new abort without --attribute: refused, nothing written.
         let err = apply(&pins_path, &mut reg, &report(SEGV), &ids).unwrap_err();
         assert!(
-            err.to_string()
-                .contains("needs `--attribute PROBE=TEXT` saying what died, for a (harness_abort (signal 11))"),
+            err.to_string().contains(
+                "needs `--attribute PROBE=TEXT` saying what died, for a (harness_abort (signal 11))"
+            ),
             "{err}"
         );
         assert!(!pins_path.exists());
@@ -425,7 +424,10 @@ mod tests {
         );
         // A moved death needs a fresh statement.
         let err = apply(&pins_path, &mut reg, &report(OOM), &ids).unwrap_err();
-        assert!(err.to_string().contains("for a (harness_abort (signal 9))"), "{err}");
+        assert!(
+            err.to_string().contains("for a (harness_abort (signal 9))"),
+            "{err}"
+        );
         // Recovery clears both.
         let ok = report(r#"{"probe":"a","outcome":"runtime_fail","cause":"script","error":"x"}"#);
         apply(&pins_path, &mut reg, &ok, &ids).unwrap();
@@ -448,7 +450,8 @@ mod tests {
         assert_eq!(loaded.probes["a"].expectation(), None);
         let mut reg = registry_of(loaded.probes);
         let ids = ["a".to_owned()];
-        let line = report(r#"{"probe":"a","outcome":"runtime_fail","cause":"capability","error":"x"}"#);
+        let line =
+            report(r#"{"probe":"a","outcome":"runtime_fail","cause":"capability","error":"x"}"#);
         apply(&pins_path, &mut reg, &line, &ids).unwrap();
         let written = std::fs::read_to_string(&pins_path).unwrap();
         assert!(written.contains("cause = \"capability\""), "{written}");
@@ -460,13 +463,24 @@ mod tests {
 
     #[test]
     fn attribute_flags_split_at_the_first_equals_and_name_a_probe_once() {
-        let flags = |f: &[&str]| parse_attributions(&f.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());
+        let flags =
+            |f: &[&str]| parse_attributions(&f.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());
         assert_eq!(
             flags(&["a=x = y", "b=z"]).unwrap(),
             attributed(&[("a", "x = y"), ("b", "z")])
         );
-        assert!(flags(&["a"]).unwrap_err().to_string().contains("expected PROBE=TEXT"));
-        assert!(flags(&["=x"]).unwrap_err().to_string().contains("expected PROBE=TEXT"));
+        assert!(
+            flags(&["a"])
+                .unwrap_err()
+                .to_string()
+                .contains("expected PROBE=TEXT")
+        );
+        assert!(
+            flags(&["=x"])
+                .unwrap_err()
+                .to_string()
+                .contains("expected PROBE=TEXT")
+        );
         assert!(
             flags(&["a=x", "a=y"])
                 .unwrap_err()
@@ -486,11 +500,21 @@ mod tests {
         let parity = report(r#"{"probe":"a","outcome":"parity","acceptance":{"tier":"accepted"}}"#);
         let segv = report(SEGV);
         for (flags, why) in [
-            (attributed(&[("a", "x")]), "a did not report a harness_abort"),
+            (
+                attributed(&[("a", "x")]),
+                "a did not report a harness_abort",
+            ),
             (attributed(&[("zz", "x")]), "zz is not selected"),
-            (attributed(&[("a", "  ")]), "a's text is not one nonblank line"),
+            (
+                attributed(&[("a", "  ")]),
+                "a's text is not one nonblank line",
+            ),
         ] {
-            let rep = if why.starts_with("a did") { &parity } else { &segv };
+            let rep = if why.starts_with("a did") {
+                &parity
+            } else {
+                &segv
+            };
             let err = super::apply(&pins_path, &mut reg, rep, &ids, &flags).unwrap_err();
             assert!(err.to_string().contains(why), "{err}");
         }
@@ -670,7 +694,8 @@ mod tests {
             written.contains("excursions = { run_up = 4, drawdown = 1 }"),
             "{written}"
         );
-        let broke = report(r#"{"probe":"a","outcome":"runtime_fail","cause":"script","error":"x"}"#);
+        let broke =
+            report(r#"{"probe":"a","outcome":"runtime_fail","cause":"script","error":"x"}"#);
         apply(&pins_path, &mut reg, &broke, &["a".to_owned()]).unwrap();
         let written = std::fs::read_to_string(&pins_path).unwrap();
         assert!(!written.contains("excursions"), "{written}");

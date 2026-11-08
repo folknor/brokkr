@@ -840,6 +840,17 @@ impl Bound {
     /// `bench(params, keys)`'s arguments: each file entry's path replaced by
     /// its input handle, numbered as [`Bound::inputs`] lists them.
     pub(crate) fn args(&self) -> lua::Args {
+        self.args_with(true)
+    }
+
+    /// `preflight(params, keys)`'s arguments: [`Bound::args`]'s shape, each
+    /// file entry's field the path string a handle's `path` would hold.
+    /// Preflight holds no handle: nothing it does with the path is declared.
+    pub(crate) fn preflight_args(&self) -> lua::Args {
+        self.args_with(false)
+    }
+
+    fn args_with(&self, handles: bool) -> lua::Args {
         let mut next = 0;
         let mut args = lua::Args::default();
         for (name, binding) in &self.params {
@@ -856,7 +867,11 @@ impl Bound {
                     if let lua::Value::Table(fields) = &mut entry {
                         for (key, field) in fields.iter_mut() {
                             if key == file.field {
-                                *field = lua::Value::Handle(handle.clone());
+                                *field = if handles {
+                                    lua::Value::Handle(handle.clone())
+                                } else {
+                                    lua::Value::Text(handle.path.clone())
+                                };
                             }
                         }
                     }

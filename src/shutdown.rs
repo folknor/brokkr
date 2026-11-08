@@ -359,23 +359,42 @@ impl SigtermGuard {
     }
 }
 
-impl Drop for SigtermGuard {
-    fn drop(&mut self) {
+impl SigtermGuard {
+    /// Drop the guard, answering whether a stop was pending as its window
+    /// closed: read in the same transition that leaves the window, so a
+    /// request that landed inside it is never lost to the drop clearing it.
+    /// Once the handlers are back to the default, a later signal takes the
+    /// default action. An inner guard leaves the window to the outer one and
+    /// answers what `should_unwind` does.
+    pub fn leave(self) -> bool {
+        let stopped = Self::release();
+        std::mem::forget(self);
+        stopped
+    }
+
+    fn release() -> bool {
         let mut depth = guard_depth();
         *depth = depth.saturating_sub(1);
         if *depth > 0 {
             // An outer guard still owns the window, and any pending request
             // is still its to act on.
-            return;
+            return should_unwind();
         }
         set_handler(libc::SIGTERM, libc::SIG_DFL);
         set_handler(libc::SIGINT, libc::SIG_DFL);
-        transition(ShutdownState::leave_guard);
+        let before = transition(ShutdownState::leave_guard);
         // A test process group registered inside this guard's window must stay
         // covered once the guard's cooperative handler is gone.
         reinstall_reaper_if_needed();
         // `leave_guard` cleared a scoped request so a captured subprocess
         // invoked after this window does not spuriously receive SIGTERM.
+        before.should_unwind()
+    }
+}
+
+impl Drop for SigtermGuard {
+    fn drop(&mut self) {
+        Self::release();
     }
 }
 
