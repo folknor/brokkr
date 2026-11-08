@@ -1463,6 +1463,8 @@ Examples:
   brokkr results --param dataset=denmark            # script-bench runs with that param
   brokkr results --retire old-cat --reason \"replaced by cat\"  # hide a bench's runs
   brokkr results --unretire old-cat                 # show them again
+  brokkr results --invalidate 3f2a --reason \"noisy host\"  # hide one run
+  brokkr results --revalidate 3f2a                  # undo that
   brokkr results --hidden                           # list hidden runs too
 
 In a piners project this queries the same .brokkr/results.db (hotpath/alloc
@@ -1474,13 +1476,15 @@ In depth: `brokkr man results`."
     // to it.
     #[command(group(
         ArgGroup::new("mark")
-            .args(["retire", "unretire"])
+            .args(["retire", "unretire", "invalidate", "revalidate"])
             .multiple(false)
             .conflicts_with_all([
                 "query", "commit", "compare", "command", "mode", "dataset", "meta", "env",
                 "param", "grep", "grep_v", "limit", "top", "hidden",
             ])
     ))]
+    // The marks that carry a reason.
+    #[command(group(ArgGroup::new("reasoned").args(["retire", "invalidate"])))]
     Results {
         /// UUID prefix to look up specific result(s)
         #[arg(conflicts_with_all = ["commit", "compare"])]
@@ -1574,8 +1578,18 @@ In depth: `brokkr man results`."
         #[arg(long, value_name = "NAME")]
         unretire: Option<String>,
 
-        /// Why, for --retire.
-        #[arg(long, requires = "retire", conflicts_with = "unretire")]
+        /// Invalidate one script-bench run, named by a uuid prefix that
+        /// names exactly one run of this project: it is left out of listings
+        /// and --compare. Needs --reason.
+        #[arg(long, value_name = "UUID", requires = "reason")]
+        invalidate: Option<String>,
+
+        /// Undo --invalidate UUID.
+        #[arg(long, value_name = "UUID")]
+        revalidate: Option<String>,
+
+        /// Why, for --retire or --invalidate.
+        #[arg(long, requires = "reasoned")]
         reason: Option<String>,
     },
     /// Query sidecar /proc timelines, markers, and phase summaries

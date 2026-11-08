@@ -293,6 +293,35 @@ mod tests {
         assert!(parse(["brokkr", "results", "--retire", "x", "--reason", "r"]).is_ok());
         assert!(parse(["brokkr", "results", "--unretire", "x"]).is_ok());
         assert!(parse(["brokkr", "results", "--hidden"]).is_ok());
+        assert!(parse(["brokkr", "results", "--invalidate", "ab", "--reason", "r"]).is_ok());
+        assert!(parse(["brokkr", "results", "--revalidate", "ab"]).is_ok());
+        for bad in [
+            &["brokkr", "results", "--invalidate", "ab"][..],
+            &["brokkr", "results", "--revalidate", "ab", "--reason", "r"],
+            &[
+                "brokkr",
+                "results",
+                "--invalidate",
+                "ab",
+                "--reason",
+                "r",
+                "--retire",
+                "x",
+            ],
+            &[
+                "brokkr",
+                "results",
+                "--invalidate",
+                "ab",
+                "--reason",
+                "r",
+                "--hidden",
+            ],
+            &["brokkr", "results", "--revalidate", "ab", "--unretire", "x"],
+            &["brokkr", "results", "abcd", "--revalidate", "ab"],
+        ] {
+            assert!(parse(bad.iter().copied()).is_err(), "{bad:?}");
+        }
         for bad in [
             &["brokkr", "results", "--retire", "x"][..],
             &["brokkr", "results", "--reason", "r"],

@@ -880,16 +880,22 @@ fn run_project(
             hidden,
             retire,
             unretire,
+            invalidate,
+            revalidate,
             reason,
         } => {
-            let action = match (retire, unretire) {
-                (Some(name), _) => Some(crate::bench::marking::MarkAction::Retire {
-                    name,
-                    // clap requires --reason with --retire.
-                    reason: reason.unwrap_or_default(),
-                }),
-                (None, Some(name)) => Some(crate::bench::marking::MarkAction::Unretire { name }),
-                (None, None) => None,
+            use crate::bench::marking::MarkAction;
+            // clap requires --reason with --retire and --invalidate, and
+            // allows one mark flag at most.
+            let reason = reason.unwrap_or_default();
+            let action = if let Some(name) = retire {
+                Some(MarkAction::Retire { name, reason })
+            } else if let Some(name) = unretire {
+                Some(MarkAction::Unretire { name })
+            } else if let Some(run) = invalidate {
+                Some(MarkAction::Invalidate { run, reason })
+            } else {
+                revalidate.map(|run| MarkAction::Revalidate { run })
             };
             if let Some(action) = action {
                 return crate::bench::marking::apply(

@@ -236,7 +236,8 @@ impl BenchReader {
         }
     }
 
-    fn elsewhere(&self, prefix: &str) -> Result<Vec<(String, String)>, DevError> {
+    /// Other projects' runs `prefix` names, as `(uuid, project)`.
+    pub(crate) fn elsewhere(&self, prefix: &str) -> Result<Vec<(String, String)>, DevError> {
         match &self.backend {
             Backend::Local { store, path } => store
                 .elsewhere(&self.project, prefix)
@@ -351,18 +352,25 @@ impl BenchReader {
         })
     }
 
+    /// Every run of the project whose uuid starts with `prefix`, hidden or
+    /// not, in the store's order: the identity a uuid prefix names, read
+    /// from the selection alone, no run loaded.
+    pub(crate) fn named_by(&self, prefix: &str) -> Result<Vec<String>, DevError> {
+        require_prefix(prefix, "uuid")?;
+        self.select(&RunFilter {
+            project: self.project.clone(),
+            uuid_prefix: Some(prefix.to_owned()),
+            hidden: true,
+            ..RunFilter::default()
+        })
+    }
+
     /// What `prefix` names among the project's runs, for a command that reads
     /// one run's evidence (`brokkr sidecar`): the run with its children when
     /// it names exactly one, the candidates when several, and otherwise the
     /// other projects' runs it names. Only one run is ever read whole.
     pub(crate) fn resolve(&self, prefix: &str) -> Result<Resolved, DevError> {
-        require_prefix(prefix, "uuid")?;
-        let mut uuids = self.select(&RunFilter {
-            project: self.project.clone(),
-            uuid_prefix: Some(prefix.to_owned()),
-            hidden: true,
-            ..RunFilter::default()
-        })?;
+        let mut uuids = self.named_by(prefix)?;
         match uuids.len() {
             0 => Ok(Resolved::Missing {
                 elsewhere: self.elsewhere(prefix)?,

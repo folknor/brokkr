@@ -10,11 +10,15 @@ use super::publication::{self, Subject};
 use super::store::{self, Mark, MarkRequest, Marked};
 use crate::error::DevError;
 
-/// A mark as `brokkr results` was asked for it.
+/// A mark as `brokkr results` was asked for it. A run is named as the user
+/// gave it, a uuid prefix, until [`MarkAction::resolved`] replaces it with
+/// the full uuid the store's mark carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MarkAction {
     Retire { name: String, reason: String },
     Unretire { name: String },
+    Invalidate { run: String, reason: String },
+    Revalidate { run: String },
 }
 
 impl MarkAction {
@@ -25,6 +29,85 @@ impl MarkAction {
                 reason: reason.clone(),
             },
             Self::Unretire { name } => Mark::Unretire { name: name.clone() },
+            Self::Invalidate { run, reason } => Mark::Invalidate {
+                run: run.clone(),
+                reason: reason.clone(),
+            },
+            Self::Revalidate { run } => Mark::Revalidate { run: run.clone() },
+        }
+    }
+
+    /// The run this action names, if it names one.
+    fn run_mut(&mut self) -> Option<&mut String> {
+        match self {
+            Self::Invalidate { run, .. } | Self::Revalidate { run } => Some(run),
+            Self::Retire { .. } | Self::Unretire { .. } => None,
+        }
+    }
+
+    /// This action with the run it names, a uuid prefix, replaced by the full
+    /// uuid of the one run of `project` it starts, hidden or not. Every run
+    /// counts whatever the action, so a prefix names the same run for
+    /// invalidate and revalidate alike, and whether that run may take the
+    /// mark is admission's to say. Resolution is not part of the request:
+    /// a run uuid never changes, so a run published after this read cannot
+    /// retarget it.
+    fn resolved(
+        self,
+        project: &str,
+        server: Option<&crate::config::ResultsServer>,
+    ) -> Result<Self, DevError> {
+        let mut action = self;
+        if action.run_mut().is_none() {
+            return Ok(action);
+        }
+        let reader = super::results::BenchReader::open(project, server)?;
+        action.resolved_by(project, reader.as_ref())?;
+        Ok(action)
+    }
+
+    /// [`Self::resolved`] against `reader`, `None` when there is no store.
+    fn resolved_by(
+        &mut self,
+        project: &str,
+        reader: Option<&super::results::BenchReader>,
+    ) -> Result<(), DevError> {
+        let Some(run) = self.run_mut() else {
+            return Ok(());
+        };
+        let Some(reader) = reader else {
+            return Err(DevError::Database(
+                "no bench store yet: nothing has been published to mark".into(),
+            ));
+        };
+        let mut uuids = reader.named_by(run)?;
+        match uuids.len() {
+            1 => {
+                *run = uuids.remove(0);
+                Ok(())
+            }
+            0 => {
+                let elsewhere = reader.elsewhere(run)?;
+                let mut message = format!(
+                    "no script-bench run of project {project} starts with {run}; invalidate and revalidate apply to script-bench runs only"
+                );
+                for (uuid, other) in elsewhere {
+                    for piece in ["\n  ", &uuid, " is a run of project ", &other] {
+                        message.push_str(piece);
+                    }
+                }
+                Err(DevError::Usage(message))
+            }
+            n => {
+                // Full uuids: two runs may share every digit a view shows.
+                let mut message =
+                    format!("{run} starts {n} runs of project {project}; give more digits:");
+                for uuid in uuids {
+                    message.push_str("\n  ");
+                    message.push_str(&uuid);
+                }
+                Err(DevError::Usage(message))
+            }
         }
     }
 
@@ -33,6 +116,8 @@ impl MarkAction {
         match self {
             Self::Retire { name, .. } => format!("retire {name}"),
             Self::Unretire { name } => format!("unretire {name}"),
+            Self::Invalidate { run, .. } => format!("invalidate {}", crate::db::short_uuid(run)),
+            Self::Revalidate { run } => format!("revalidate {}", crate::db::short_uuid(run)),
         }
     }
 
@@ -45,8 +130,20 @@ impl MarkAction {
                 "recorded: retire {name}, which leaves its runs, and any published under it later, out of listings and --compare (--hidden shows them, --unretire {name} undoes it)"
             ),
             Self::Unretire { name } => {
-                format!("recorded: unretire {name}, which lists its runs again")
+                format!(
+                    "recorded: unretire {name}, which no longer hides its runs by retirement (invalidated runs stay hidden)"
+                )
             }
+            Self::Invalidate { run, .. } => {
+                let short = crate::db::short_uuid(run);
+                format!(
+                    "recorded: invalidate {short}, which leaves the run out of listings and --compare (--hidden shows it, --revalidate {short} undoes it)"
+                )
+            }
+            Self::Revalidate { run } => format!(
+                "recorded: revalidate {}, which no longer hides the run by invalidation (a retired bench's runs stay hidden)",
+                crate::db::short_uuid(run)
+            ),
         }
     }
 }
@@ -72,6 +169,7 @@ pub(crate) fn apply(
     project: &str,
     server: Option<&crate::config::ResultsServer>,
 ) -> Result<(), DevError> {
+    let action = &action.clone().resolved(project, server)?;
     let request = mint(action, project)?;
     let named = format!(
         "mark {} ({})",

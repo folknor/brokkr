@@ -561,6 +561,11 @@ results server alike:
   bench may then be deleted from `brokkr.toml` and its runs stay hidden.
   Refused for a name the store does not know or one already retired.
 - `--unretire NAME` undoes it; refused for a name not retired.
+- `--invalidate UUID --reason TEXT` invalidates one run: it is left out of
+  the table and `--compare`, and a uuid lookup still shows it, marked.
+  Refused for a run already invalidated.
+- `--revalidate UUID` undoes it; refused for a run not invalidated. A run of
+  a retired bench stays hidden.
 - `--hidden` lists and compares hidden runs too, each marked. It leaves typed
   rows as they are.
 
@@ -569,3 +574,11 @@ is visible now (an unretired bench's invalidated runs stay hidden). It is retrie
 publication is; one whose outcome stays unknown says so, and running the
 command again is a new request rather than a retry of it. A local mark needs
 a bench store to exist and never creates one.
+
+The UUID of `--invalidate` and `--revalidate` is a prefix, as for a lookup,
+that must name exactly one script-bench run of this project, hidden or not,
+whichever flag it is given to; a prefix naming several is refused with every
+full uuid it names, and one naming none says so (typed rows are not marked).
+The run it names is fixed before the request is minted, and the stored mark
+carries its full uuid, so a run published later never changes what the
+request names.
