@@ -227,6 +227,65 @@ fn a_child_runs_on_its_borrow_and_reaches_the_script() {
     assert_eq!(std::fs::read_dir(&container).unwrap().count(), 0);
 }
 
+/// A `program` call runs the external program, found on the child's own
+/// PATH, by the absolute path it resolved to, on its own borrow, and the
+/// child stores that path and the file's digest; a program that is not there
+/// fails the iteration, naming it, with nothing launched for it.
+#[test]
+fn a_program_call_runs_the_external_program_and_stores_its_identity() {
+    let _lock = crate::test_scratch::process_global_lock();
+    let root = crate::test_scratch::scratch("bench_runner", "program");
+    let container = root.join("iterations");
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let tool = bin.join("tool");
+    std::fs::write(&tool, b"#!/bin/sh\nprintf 'tool %s' \"$1\"\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let source = format!(
+        "function bench()\n\
+           local r = binary_with({{program = 'tool', env = {{PATH = '{}'}}}}, 'x'):ok()\n\
+           record.out = r.stdout\n\
+           record.program = r.program\n\
+           binary('-c', 'true'):ok()\n\
+         end",
+        bin.display()
+    );
+    let running = script(&source);
+    let (iteration, _, _) = run_iteration(setup(&running, &root, &container));
+    let found = record(&iteration);
+    assert_eq!(found["out"], "tool x");
+    assert_eq!(found["program"], "tool");
+    let child = &iteration.children[0];
+    assert_eq!(child.program, tool.display().to_string());
+    let executable = child.executable.as_ref().unwrap();
+    assert_eq!(executable.path, tool.display().to_string());
+    assert_eq!(
+        executable.identity,
+        crate::bench::external::observe(&tool),
+        "the digest of the file as it stands"
+    );
+    assert!(
+        iteration.children[1].executable.is_none(),
+        "the snapshot child makes no separate observation"
+    );
+
+    let missing = script(
+        "function bench()\n\
+           binary_with({program = 'brokkr-no-such-program'}, 'x')\n\
+         end",
+    );
+    let (iteration, _, _) = run_iteration(setup(&missing, &root, &container));
+    let reason = failure(&iteration);
+    assert!(
+        reason.contains("cannot start brokkr-no-such-program") && reason.contains("not on PATH"),
+        "{reason}"
+    );
+    assert!(iteration.children.is_empty());
+}
+
 /// A hotpath report as the crate writes one, as a shell `printf` argument.
 const REPORT: &str = r#"{"functions_timing":{"data":[{"name":"decode","calls":12,"avg":"2 ms","total":"24 ms","percent_total":"40%","p50":"1.8 ms","p95":"3.0 ms","p99":"3.8 ms"}]}}"#;
 

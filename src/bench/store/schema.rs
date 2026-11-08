@@ -201,8 +201,22 @@ CREATE TABLE child_hotpath (
 ) STRICT;
 ";
 
+/// Version 3: external executables. A `program` call's child, with the
+/// absolute path it ran and that file's digest as read at launch, or why it
+/// could not be read. A child without a row made no separate observation.
+const V3: &str = "
+CREATE TABLE child_executable (
+    child_id     INTEGER PRIMARY KEY REFERENCES children(id) ON DELETE CASCADE,
+    path         TEXT NOT NULL CHECK (substr(path, 1, 1) = '/'),
+    digest       TEXT,
+    digest_error TEXT,
+    CHECK ((digest IS NOT NULL) <> (digest_error IS NOT NULL)),
+    CHECK (digest_error IS NULL OR digest_error <> '')
+) STRICT;
+";
+
 /// The chain. Shipped steps are frozen; append only.
-pub(super) const MIGRATIONS: &[&str] = &[V1, V2];
+pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3];
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 

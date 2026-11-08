@@ -32,7 +32,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 pub use document::{
     BoundParam, Build, CaptureOutcome, Child, ChildEnding, Clock, Conditions, DOCUMENT_FORMAT,
-    Evidence, HotpathCapture, Iteration, IterationOutcome, Loss, Measurement, ParamValue, Record,
+    Evidence, Executable, ExecutableIdentity, HotpathCapture, Iteration, IterationOutcome, Loss, Measurement, ParamValue, Record,
     ResolvedBuild, RunDocument, RunOutcome, Sample, SinkEnd,
 };
 pub use error::StoreError;
@@ -152,6 +152,7 @@ impl Store {
 const SHIPPED_STEPS: &[&str] = &[
     "b9c408fb4eb3abd989cb949079736110",
     "b55bb417cdff92577ede441700a98333",
+    "03cc48a74e55e5047728ea5f3bf15e06",
 ];
 
 #[cfg(test)]

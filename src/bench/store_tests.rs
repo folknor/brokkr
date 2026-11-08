@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::evidence;
 use super::store::{
     BoundParam, Build, CaptureOutcome, Child, ChildEnding, Clock, Conditions, DOCUMENT_FORMAT,
-    Evidence, HotpathCapture, Iteration, IterationOutcome, Loss, Measurement, ParamValue,
-    Published, Record, ResolvedBuild, RunDocument, RunOutcome, Sample, SinkEnd, Store, StoreError,
+    Evidence, Executable, ExecutableIdentity, HotpathCapture, Iteration, IterationOutcome, Loss,
+    Measurement, ParamValue, Published, Record, ResolvedBuild, RunDocument, RunOutcome, Sample, SinkEnd, Store, StoreError,
 };
 
 fn store(name: &str) -> Store {
@@ -123,6 +123,7 @@ fn child(offset: i64, ending: ChildEnding) -> Child {
             calls_overflowed: true,
         },
         hotpath: None,
+        executable: None,
     }
 }
 
@@ -626,11 +627,13 @@ fn a_version_one_store_upgrades_and_its_runs_read_as_timing() {
     {
         let mut store = Store::open(&path).unwrap();
         store.publish(&doc).unwrap();
-        // Back to version 1 as it shipped: neither the column nor the table.
+        // Back to version 1 as it shipped: none of the later tables or the
+        // column.
         store
             .conn()
             .execute_batch(
-                "DROP TABLE child_hotpath;
+                "DROP TABLE child_executable;
+                 DROP TABLE child_hotpath;
                  ALTER TABLE runs DROP COLUMN measurement;
                  PRAGMA user_version = 1;",
             )
@@ -641,8 +644,68 @@ fn a_version_one_store_upgrades_and_its_runs_read_as_timing() {
         .conn()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
     assert_eq!(store.load(&doc.uuid).unwrap(), Some(doc));
+}
+
+/// A `program` child's executable reads back as published, a digest and an
+/// unread one alike; one that names no absolute path, a malformed digest or
+/// an empty reason is refused. A document without the field encodes without
+/// it, as it did before the field existed.
+#[test]
+fn an_external_executable_reads_back_and_a_malformed_one_is_refused() {
+    let mut store = store("executables");
+    let mut doc = document("00000000000000000000000000000010");
+    doc.iterations[0].children[0].executable = Some(Executable {
+        path: "/usr/bin/lua5.4".into(),
+        identity: ExecutableIdentity::Digest {
+            digest: "00112233445566778899aabbccddeeff".into(),
+        },
+    });
+    doc.iterations[0].children[1].executable = Some(Executable {
+        path: "/opt/x".into(),
+        identity: ExecutableIdentity::Unread {
+            reason: "permission denied".into(),
+        },
+    });
+    store.publish(&doc).unwrap();
+    assert_eq!(store.load(&doc.uuid).unwrap().as_ref(), Some(&doc));
+
+    let plain = serde_json::to_string(&document("00000000000000000000000000000011")).unwrap();
+    assert!(!plain.contains("executable"), "{plain}");
+
+    let with = |executable: Executable| {
+        let mut doc = document("00000000000000000000000000000012");
+        doc.iterations[0].children[0].executable = Some(executable);
+        doc
+    };
+    refused(
+        &with(Executable {
+            path: "lua5.4".into(),
+            identity: ExecutableIdentity::Digest {
+                digest: "00112233445566778899aabbccddeeff".into(),
+            },
+        }),
+        "not absolute",
+    );
+    refused(
+        &with(Executable {
+            path: "/x".into(),
+            identity: ExecutableIdentity::Digest {
+                digest: "XY".into(),
+            },
+        }),
+        "not 32 lowercase hex",
+    );
+    refused(
+        &with(Executable {
+            path: "/x".into(),
+            identity: ExecutableIdentity::Unread {
+                reason: String::new(),
+            },
+        }),
+        "empty reason",
+    );
 }
 
 #[test]

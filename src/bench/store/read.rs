@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use super::StoreError;
 use super::document::{
     BoundParam, Build, CaptureOutcome, Child, ChildEnding, Clock, Conditions, Evidence,
-    HotpathCapture, Iteration, IterationOutcome, Loss, Measurement, ParamValue, Record,
+    Executable, ExecutableIdentity, HotpathCapture, Iteration, IterationOutcome, Loss, Measurement, ParamValue, Record,
     ResolvedBuild, RunDocument, RunOutcome, Sample, SinkEnd,
 };
 use super::list::StoredRun;
@@ -353,9 +353,34 @@ fn load_children(conn: &Connection, run_id: i64, iteration: i64) -> Result<Vec<C
                 calls_overflowed: row.calls_overflowed,
             },
             hotpath: load_capture(conn, row.id)?,
+            executable: load_executable(conn, row.id)?,
         });
     }
     Ok(children)
+}
+
+fn load_executable(conn: &Connection, child_id: i64) -> Result<Option<Executable>, StoreError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT path, digest, digest_error FROM child_executable WHERE child_id = ?1",
+    )?;
+    let row = stmt
+        .query_row([child_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })
+        .optional()?;
+    let Some((path, digest, error)) = row else {
+        return Ok(None);
+    };
+    let identity = match (digest, error) {
+        (Some(digest), None) => ExecutableIdentity::Digest { digest },
+        (None, Some(reason)) => ExecutableIdentity::Unread { reason },
+        _ => return Err(unreadable("child executable")),
+    };
+    Ok(Some(Executable { path, identity }))
 }
 
 fn load_capture(conn: &Connection, child_id: i64) -> Result<Option<HotpathCapture>, StoreError> {

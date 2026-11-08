@@ -7,13 +7,15 @@
 //! store with brokkr's adapter to it (`store`, `evidence`), `brokkr results`'
 //! reading of that store (`results`), the resolved config a script sees
 //! (`view`), the params bound against it (`params`), and the handles a
-//! script's paths reach its children through (`resources`). The store's wire contract
+//! script's paths reach its children through (`resources`), and the external
+//! programs a call may run in place of the built one (`external`). The store's wire contract
 //! (`store::wire`) is served by the `brokkr-results-server` binary, and
 //! `remote` is brokkr's client of it, used in place of the local store when
 //! the user-wide config names a server; `publication` is the retry and
 //! uncertainty latch both share.
 
 pub(crate) mod evidence;
+mod external;
 mod json;
 mod lua;
 mod params;

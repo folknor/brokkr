@@ -6,8 +6,8 @@
 use std::fmt::Write;
 
 use super::super::store::{
-    CaptureOutcome, Child, ChildEnding, IterationOutcome, Measurement, RunDocument, RunOutcome,
-    StoredRun,
+    CaptureOutcome, Child, ChildEnding, ExecutableIdentity, IterationOutcome, Measurement,
+    RunDocument, RunOutcome, StoredRun,
 };
 use super::{hotpath_report, ms, short_commit, timestamp, verdict};
 
@@ -231,6 +231,15 @@ fn child(out: &mut String, idx: usize, child: &Child) {
         e.records.len()
     )
     .expect("write to String is infallible");
+    if let Some(executable) = &child.executable {
+        writeln!(
+            out,
+            "           executable {}: {}",
+            executable.path,
+            executable_identity(&executable.identity)
+        )
+        .expect("write to String is infallible");
+    }
     if let Some(capture) = &child.hotpath {
         let status = match &capture.outcome {
             CaptureOutcome::Captured { .. } => "captured".to_owned(),
@@ -245,6 +254,14 @@ fn child(out: &mut String, idx: usize, child: &Child) {
             capture.stage, capture.occurrence
         )
         .expect("write to String is infallible");
+    }
+}
+
+/// An external executable's identity as observed at launch.
+pub(super) fn executable_identity(identity: &ExecutableIdentity) -> String {
+    match identity {
+        ExecutableIdentity::Digest { digest } => format!("digest {digest}"),
+        ExecutableIdentity::Unread { reason } => format!("not read ({reason})"),
     }
 }
 

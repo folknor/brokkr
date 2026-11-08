@@ -5,8 +5,8 @@ use rusqlite::{Connection, params};
 
 use super::StoreError;
 use super::document::{
-    CaptureOutcome, Child, ChildEnding, Evidence, HotpathCapture, Iteration, IterationOutcome,
-    Record, RunDocument, RunOutcome, Sample,
+    CaptureOutcome, Child, ChildEnding, Evidence, Executable, ExecutableIdentity, HotpathCapture,
+    Iteration, IterationOutcome, Record, RunDocument, RunOutcome, Sample,
 };
 
 /// A count or index in SQLite's integer domain.
@@ -160,7 +160,27 @@ fn insert_iteration(
         if let Some(capture) = &child.hotpath {
             insert_capture(tx, child_id, capture)?;
         }
+        if let Some(executable) = &child.executable {
+            insert_executable(tx, child_id, executable)?;
+        }
     }
+    Ok(())
+}
+
+fn insert_executable(
+    tx: &Connection,
+    child_id: i64,
+    executable: &Executable,
+) -> Result<(), StoreError> {
+    let (digest, error) = match &executable.identity {
+        ExecutableIdentity::Digest { digest } => (Some(digest.as_str()), None),
+        ExecutableIdentity::Unread { reason } => (None, Some(reason.as_str())),
+    };
+    tx.execute(
+        "INSERT INTO child_executable (child_id, path, digest, digest_error)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![child_id, executable.path, digest, error],
+    )?;
     Ok(())
 }
 

@@ -11,7 +11,8 @@ use super::store::wire::{
 };
 use super::store::{
     BoundParam, Build, CaptureOutcome, Child, ChildEnding, Clock, Conditions, DOCUMENT_FORMAT,
-    Evidence, HotpathCapture, Iteration, IterationOutcome, Loss, Measurement, ParamValue,
+    Evidence, Executable, ExecutableIdentity, HotpathCapture, Iteration, IterationOutcome, Loss,
+    Measurement, ParamValue,
     Published, Record, ResolvedBuild, RunDocument, RunFilter, RunOutcome, Sample, SinkEnd, Store,
     StoreError, StoredRun,
 };
@@ -101,7 +102,21 @@ fn frozen_child() -> Child {
                 report: serde_json::json!({"functions_timing": {"data": []}}),
             },
         }),
+        executable: Some(Executable {
+            path: "/usr/bin/lua5.4".into(),
+            identity: ExecutableIdentity::Digest {
+                digest: "00112233445566778899aabbccddeeff".into(),
+            },
+        }),
     }
+}
+
+/// Every executable identity but the fixture child's, frozen with the
+/// protocol.
+fn frozen_executable_identities() -> Vec<ExecutableIdentity> {
+    vec![ExecutableIdentity::Unread {
+        reason: "permission denied".into(),
+    }]
 }
 
 /// Every capture outcome but the fixture child's, frozen with the protocol.
@@ -240,6 +255,7 @@ fn frozen_encoding() -> String {
         .collect();
     lines.extend(answers.iter().map(|a| serde_json::to_string(a).unwrap()));
     lines.push(serde_json::to_string(&frozen_capture_outcomes()).unwrap());
+    lines.push(serde_json::to_string(&frozen_executable_identities()).unwrap());
     lines.push(serde_json::to_string(&[Measurement::Timing, Measurement::Hotpath]).unwrap());
     lines.extend(
         [
@@ -318,6 +334,13 @@ fn the_protocol_refuses_what_it_does_not_define() {
     let mut nested = document.clone();
     nested["iterations"][0]["children"][0]["evidence"]["loss"]["novel"] = serde_json::json!(true);
     refuses::<Request>(&request(nested));
+    let mut executable = document.clone();
+    executable["iterations"][0]["children"][0]["executable"]["novel"] = serde_json::json!(1);
+    refuses::<Request>(&request(executable));
+    let mut identity = document.clone();
+    identity["iterations"][0]["children"][0]["executable"]["identity"]["digest"]["novel"] =
+        serde_json::json!(1);
+    refuses::<Request>(&request(identity));
     let mut missing = document.clone();
     missing.as_object_mut().unwrap().remove("project");
     refuses::<Request>(&request(missing));

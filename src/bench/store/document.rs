@@ -217,6 +217,31 @@ pub struct Child {
     /// A call marked `hotpath = STAGE`: what became of its report. Absent
     /// for an unmarked call.
     pub hotpath: Option<HotpathCapture>,
+    /// The executable a `program` call ran, as observed at its launch.
+    /// Absent means no separate observation: the snapshot child, whose
+    /// identity is the build's artifact, and every child stored before the
+    /// field existed. Omitted when absent, so such a document encodes as
+    /// it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<Executable>,
+}
+
+/// An external executable a child ran: the absolute path brokkr resolved
+/// and executed, and its xxh3-128 digest as read at launch, or why it could
+/// not be read. Evidence of what was there: a file replaced between the
+/// digest and the exec is not seen.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Executable {
+    pub path: String,
+    pub identity: ExecutableIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub enum ExecutableIdentity {
+    Digest { digest: String },
+    Unread { reason: String },
 }
 
 /// One marked call's hotpath capture.
@@ -742,6 +767,25 @@ impl Child {
         }
         if let Some(capture) = &self.hotpath {
             capture.validate()?;
+        }
+        if let Some(executable) = &self.executable {
+            if !executable.path.starts_with('/') {
+                return Err(format!(
+                    "executable path {:?} is not absolute",
+                    executable.path
+                ));
+            }
+            match &executable.identity {
+                ExecutableIdentity::Digest { digest } if !is_lower_hex(digest, &[32]) => {
+                    return Err(format!(
+                        "executable digest {digest:?} is not 32 lowercase hex digits"
+                    ));
+                }
+                ExecutableIdentity::Unread { reason } if reason.is_empty() => {
+                    return Err("an unread executable with an empty reason".to_owned());
+                }
+                _ => {}
+            }
         }
         Ok(())
     }

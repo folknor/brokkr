@@ -225,6 +225,43 @@ fn capture_diffs(
     (diffs, line)
 }
 
+/// Every external executable a run's children ran, by path, with each
+/// identity observed for it across every iteration: one path observed twice
+/// differently keeps both.
+fn executables(run: &StoredRun) -> BTreeMap<&str, BTreeSet<String>> {
+    let mut seen: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
+    for iteration in &run.doc.iterations {
+        for child in &iteration.children {
+            if let Some(executable) = &child.executable {
+                seen.entry(executable.path.as_str())
+                    .or_default()
+                    .insert(super::single::executable_identity(&executable.identity));
+            }
+        }
+    }
+    seen
+}
+
+/// The external executables whose observed identities differ between the
+/// sides, or that only one side ran: provenance the pairing key leaves out,
+/// as it leaves out the build.
+fn executables_line(a: &StoredRun, b: &StoredRun) -> Option<String> {
+    let (ea, eb) = (executables(a), executables(b));
+    let paths: BTreeSet<&&str> = ea.keys().chain(eb.keys()).collect();
+    let shown = |ids: Option<&BTreeSet<String>>| {
+        ids.map_or_else(
+            || "(not run)".to_owned(),
+            |ids| ids.iter().cloned().collect::<Vec<_>>().join(" and "),
+        )
+    };
+    let parts: Vec<String> = paths
+        .into_iter()
+        .filter(|p| ea.get(**p) != eb.get(**p))
+        .map(|p| format!("{p} {} vs {}", shown(ea.get(*p)), shown(eb.get(*p))))
+        .collect();
+    (!parts.is_empty()).then(|| format!("  executables differ: {}", parts.join(", ")))
+}
+
 /// The result records' entries that moved, `hotpath` aside: what turns "12%
 /// faster" into "12% faster on 8% less work".
 fn record_line(a: &StoredRun, b: &StoredRun) -> Option<String> {
@@ -493,6 +530,7 @@ pub(crate) fn format_compare(
                     &y.doc.config,
                 ));
                 lines.extend(build_line(&x.doc.build, &y.doc.build));
+                lines.extend(executables_line(x, y));
                 lines.extend(host_line(x, y));
                 lines.extend(env_line(
                     &x.doc.conditions.captured_env,

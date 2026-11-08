@@ -286,6 +286,9 @@ pub(crate) struct CallOptions {
     /// `stop_at = NAME_END`: end the child once that process-stream marker
     /// is seen.
     pub(crate) stop_at: Option<String>,
+    /// `program = NAME`: run this external program instead of the built
+    /// snapshot, a name looked up on the child's `PATH` or a path.
+    pub(crate) program: Option<String>,
 }
 
 /// What one `binary()` call hands back to the script.
@@ -1138,7 +1141,7 @@ fn options_at(state: &mut State, idx: isize) -> Result<CallOptions, Error> {
             state,
             format!(
                 "binary_with()'s first argument is a {}: expected a table of options \
-                 (env, reads, writes, stdin, hotpath, stop_at)",
+                 (env, reads, writes, stdin, hotpath, stop_at, program)",
                 state.typ(idx).as_str()
             ),
         ));
@@ -1174,6 +1177,7 @@ fn options_at(state: &mut State, idx: isize) -> Result<CallOptions, Error> {
             }
             "hotpath" => options.hotpath = Some(stage_at(state, value_idx)?),
             "stop_at" => options.stop_at = Some(stop_marker_at(state, value_idx)?),
+            "program" => options.program = Some(program_at(state, value_idx)?),
             _ => {
                 let shown = if key.is_empty() {
                     format!("a {} key", state.typ(key_idx).as_str())
@@ -1184,7 +1188,7 @@ fn options_at(state: &mut State, idx: isize) -> Result<CallOptions, Error> {
                     state,
                     format!(
                         "binary_with(): unknown option {shown}: options are env, reads, writes, \
-                         stdin, hotpath and stop_at"
+                         stdin, hotpath, stop_at and program"
                     ),
                 ));
             }
@@ -1272,6 +1276,29 @@ fn stop_marker_at(state: &mut State, idx: isize) -> Result<String, Error> {
         ));
     }
     Ok(marker)
+}
+
+/// `program`: a program name or a path, a non-empty string without NUL.
+/// Where it resolves is the host's to decide.
+fn program_at(state: &mut State, idx: isize) -> Result<String, Error> {
+    let what = "binary_with(): program";
+    if state.typ(idx) != LuaType::String {
+        return Err(raise_failed(
+            state,
+            format!(
+                "{what} is a {}: expected a program name or a path",
+                state.typ(idx).as_str()
+            ),
+        ));
+    }
+    let program = text_at(state, idx, what)?;
+    if program.is_empty() || program.contains('\0') {
+        return Err(raise_failed(
+            state,
+            format!("{what} {program:?} is empty or holds a NUL byte"),
+        ));
+    }
+    Ok(program)
 }
 
 /// A handle in an option, refused when it is anything else (a path string

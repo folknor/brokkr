@@ -459,8 +459,9 @@ config digest, brokkr's argv, a `sidecar` field naming the `brokkr sidecar`
 invocation that reads a child's samples, markers and counters (`brokkr man
 measure`, Script-bench children) when some iteration launched one, then
 each iteration with its outcome and each child with its start offset, wall,
-ending, argv and what its capture kept and lost, and for a call marked
-`hotpath` its stage, occurrence and capture status; a `--hotpath` run says
+ending, argv and what its capture kept and lost, for a `program` call the
+executable it ran and that file's digest (or why it was not read), and for
+a call marked `hotpath` its stage, occurrence and capture status; a `--hotpath` run says
 `measured hotpath`. Then the result's `record`
 (for a run without a result, each iteration's that was extracted), one
 entry per line as compact JSON. A prefix matching several runs prints the
@@ -498,6 +499,11 @@ than splitting it:
 - `build differs:` the requested target, profile, features and default
   features, and the resolved bin and features; never the artifact digest,
   which differs across commits by construction.
+- `executables differ:` each external program a `program` call ran
+  (`brokkr man bench`, `binary_with()`) whose observed digests differ
+  between the sides, by path, or that one side never ran: a system
+  `lua5.4` upgraded between the runs shows here. Every iteration's
+  observations count, so one that changed mid-run lists both.
 - `host:` hostname, memory, governor and kernel, and `env:` the captured
   variables, as for typed pairs.
 - `verdict:` when the results' verdicts differ, nil against `""` included:

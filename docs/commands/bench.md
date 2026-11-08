@@ -98,7 +98,8 @@ default or through another feature does: that build is instrumented. The
 built executable is snapshotted into
 `.brokkr/artifacts/<xxh128>/<name>` as `brokkr build` does, and every child
 runs that snapshot. The run records what was asked for, the bin and the
-features cargo resolved for it, and the snapshot's digest.
+features cargo resolved for it, and the snapshot's digest. A `program` call
+(`binary_with()`) runs another executable in its place.
 
 Once the build and its snapshot have succeeded, and unless a stop is
 already pending (the arm is then interrupted with no iteration), the tree
@@ -147,7 +148,7 @@ Scripts are dellingr Lua (`brokkr man bench-config`): no `io`, `os`, `load`
 or `require`, so every child goes through brokkr.
 
 - `binary(...)` - run the built executable once and wait for it. Only inside
-  `bench()`.
+  `bench()`. `binary_with`'s `program` runs another executable instead.
 - `binary_with(options, ...)` - `binary()` with call options (below). Only
   inside `bench()`.
 - `output(name)` - a handle on a fresh path under the iteration's `out/`,
@@ -278,6 +279,20 @@ local r = binary_with({
   it; the marker's stamp in the child's evidence is the precise end of the
   phase (`brokkr sidecar`). Refused beside `hotpath`: a child stopped at a
   marker is killed and writes no report.
+- `program` - an external program to run in place of the built
+  executable, everything else about the call unchanged (its borrow, spool,
+  marker FIFO, sidecar and options): a name without `/` is looked up on
+  the child's own `PATH` (the call's `env` override, else brokkr's), a
+  relative entry or an empty one meaning the project root; a name with `/`
+  is a path from the project root. The first regular file this user may
+  execute wins, and the child is launched by that absolute path, never
+  looked up again and never through a shell. The child stores that path and
+  the file's digest as read at launch (or why it could not be read), so
+  `brokkr results --compare` names a `lua5.4` that changed between two
+  runs. A program that cannot be found or started fails the iteration
+  naming it: a measured block whose program is missing is a failed
+  measurement. Comparing against a reference implementation is the case:
+  `binary_with({program = "lua5.4"}, script)` beside `binary(script)`.
 
 Any other key is refused, so a misspelt `writes` never runs a call with
 less declared than meant.
@@ -394,8 +409,9 @@ project's disk, not the host's scratch disk.
 Every attempted run is stored, a failed build or an interrupted iteration
 included, one per arm, with its bound params (each key, its `from` path and
 a file's digest), what it measured (timing, or `--hotpath`), every child's
-argv, ending, `/proc` samples, marker FIFO records and capture losses, and a
-marked child's hotpath capture; `brokkr sidecar <uuid>` reads one child's
+argv, ending, `/proc` samples, marker FIFO records and capture losses, a
+marked child's hotpath capture, and a `program` child's executable path and
+digest; `brokkr sidecar <uuid>` reads one child's
 through the sidecar views (`brokkr man measure`, Script-bench children).
 Runs pair in three classes that never pair with each other: timing,
 `--hotpath`, and incidental, a timing run any of whose children captured a

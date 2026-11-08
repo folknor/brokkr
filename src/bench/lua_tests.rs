@@ -490,7 +490,7 @@ fn binary_with_takes_options_then_binarys_arguments() {
            local out = output('o')\n\
            local r = binary('x')\n\
            binary_with({env = {B = 2, A = 'one'}, reads = {r.stdout_file}, writes = {out},\n\
-                        stdin = r.stdout_file}, 'cat', {env = 'flag'})\n\
+                        stdin = r.stdout_file, program = 'lua5.4'}, 'cat', {env = 'flag'})\n\
          end",
         Fake::default(),
     );
@@ -506,6 +506,7 @@ fn binary_with_takes_options_then_binarys_arguments() {
             stdin: Some(9),
             hotpath: None,
             stop_at: None,
+            program: Some("lua5.4".into()),
         }
     );
     assert_eq!(host.options[0], CallOptions::default());
@@ -527,6 +528,8 @@ fn binary_with_takes_options_then_binarys_arguments() {
         ("{stop_at = '@SETUP_END'}", "not an exact span-end marker"),
         ("{stop_at = '%SETUP_END'}", "not an exact span-end marker"),
         ("{stop_at = 1}", "expected a marker name"),
+        ("{program = 1}", "expected a program name or a path"),
+        ("{program = ''}", "empty or holds a NUL"),
         (
             "{stop_at = 'SETUP_END', hotpath = 's'}",
             "hotpath and stop_at exclude each other",

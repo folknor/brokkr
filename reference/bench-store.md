@@ -106,6 +106,17 @@ none. A `completed` run measured `hotpath` holds a capture in every
 iteration, and every capture it holds is `captured`; any other run may hold
 any outcome.
 
+A child of a `program` call, which ran an external program in place of the
+built snapshot, also holds its **executable**: the absolute path brokkr
+resolved and launched, and either that file's xxh3-128 digest as read at
+launch or why it could not be read. It is evidence of what was there, not a
+pin: a file replaced between the digest and the exec is not seen. Absent
+means no separate observation: the snapshot child, whose identity is the
+build's artifact, and every child stored before the field existed. The
+field is omitted when absent, so a document without one encodes as it did.
+It is not part of the pairing key; `brokkr results --compare` names the
+executables whose observed identities differ.
+
 Every struct refuses unknown fields and the document carries `format`, so a
 document a newer writer extended is refused rather than stored short of its
 new fields. The outcome and ending enums are externally tagged for the same

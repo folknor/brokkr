@@ -324,11 +324,20 @@ impl IterationHost {
         Ok((fifo, path))
     }
 
+    /// What a call launches: the snapshot, or its `program` resolved, with
+    /// that executable as observed.
+    fn target(&self, call: &Declared) -> Result<(PathBuf, Option<store::Executable>), Abort> {
+        match &call.program {
+            None => Ok((self.program.clone(), None)),
+            Some(name) => external_program(name, &self.cwd, &call.env).map(|(p, e)| (p, Some(e))),
+        }
+    }
+
     /// Launch one child and wait for it and its borrow; its evidence is kept
     /// whatever happens after the spawn.
     fn launch(&mut self, argv: &[String], call: &Declared) -> Result<CallOutcome, Abort> {
         let failed = |what: &str, e: &dyn std::fmt::Display| Abort::Failed(format!("{what}: {e}"));
-        let program = self.program.clone();
+        let (program, executable) = self.target(call)?;
         let program_str = program.display().to_string();
         let short = program
             .file_name()
@@ -413,7 +422,7 @@ impl IterationHost {
         let mut open = open;
         let finished = admitted.finish_observed(&mut || open.pump(&mut fifo));
         let run = open.finish(&mut fifo, finished.is_ok());
-        self.keep_child(program_str, argv, &env, pid, start, &run);
+        self.keep_child(program_str, argv, &env, pid, start, &run, executable);
         // Judged after every launch that was reaped, whatever its exit, and
         // stored on the child before anything below can end the call.
         let projection = match (&call.hotpath, &report) {
@@ -466,6 +475,7 @@ impl IterationHost {
     }
 
     /// A spawned child's evidence, for the document.
+    #[allow(clippy::too_many_arguments)] // One child's whole evidence, each part its own.
     fn keep_child(
         &mut self,
         program: String,
@@ -474,6 +484,7 @@ impl IterationHost {
         pid: u32,
         start: Instant,
         run: &crate::sidecar::SidecarRunResult,
+        executable: Option<store::Executable>,
     ) {
         let origin = self.block_start.map_or(0, |at| {
             i64::try_from(start.saturating_duration_since(at).as_micros()).unwrap_or(i64::MAX)
@@ -492,8 +503,39 @@ impl IterationHost {
             ending: evidence::child_ending(&run.data.ending),
             evidence: evidence::evidence(&run.data),
             hotpath: None,
+            executable,
         });
     }
+}
+
+/// The external program `name` names for a child in `cwd` whose call adds
+/// `env`: resolved on the child's own `PATH` (`crate::bench::external`), and
+/// its file observed. A program that cannot be resolved fails the call, so
+/// the iteration: a measured block whose program is missing is a failed
+/// measurement, and presence is the preflight's to decide.
+pub(super) fn external_program(
+    name: &str,
+    cwd: &Path,
+    env: &[(String, String)],
+) -> Result<(PathBuf, store::Executable), Abort> {
+    let path = env
+        .iter()
+        .find(|(n, _)| n == "PATH")
+        .map(|(_, v)| v.clone())
+        .or_else(|| std::env::var("PATH").ok());
+    let resolved = crate::bench::external::resolve(name, cwd, path.as_deref())
+        .map_err(|e| Abort::Failed(format!("cannot start {name}: {e}")))?;
+    let shown = resolved.to_str().ok_or_else(|| {
+        Abort::Failed(format!(
+            "cannot start {name}: {} is not UTF-8",
+            resolved.display()
+        ))
+    })?;
+    let executable = store::Executable {
+        path: shown.to_owned(),
+        identity: crate::bench::external::observe(&resolved),
+    };
+    Ok((resolved, executable))
 }
 
 /// A report's length as the store serializes it.
@@ -543,6 +585,8 @@ struct Declared {
     hotpath: Option<String>,
     /// The exact span-end marker that ends the child.
     stop_at: Option<String>,
+    /// The external program the call runs in place of the snapshot.
+    program: Option<String>,
 }
 
 /// What the script sees of a finished child, or why the sample ends.
@@ -622,6 +666,7 @@ impl lua::Host for IterationHost {
             env: options.env,
             hotpath: options.hotpath,
             stop_at: options.stop_at,
+            program: options.program,
         };
         for word in words {
             match word {
