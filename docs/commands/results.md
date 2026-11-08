@@ -496,6 +496,16 @@ than splitting it:
   run was made from (`brokkr man bench`, What a run stores), so a moved
   setting shows as `config.<path>`, an edited script as `script.source` and
   a moved project root as `run.project_root`.
+- `annotations:` how the bench's `description`, `version`, `date` and
+  `changelog` (`brokkr man bench-config`, Annotations) differ, read from
+  each side's stored config on its own: `version 2 -> 3`, `date ... ->
+  ...`, a description added, removed or changed, and a changelog added,
+  removed or changed with its entry counts, any edit to an entry counting.
+  A field brokkr would refuse today is named `(invalid: why)` whenever
+  either side holds one, the same on both sides or not; a side whose stored config cannot be read is named
+  unreadable, with what the other side holds. Descriptive only: brokkr
+  claims no cause for the numbers from it. The same changes still count
+  among `config differs:` paths.
 - `build differs:` the requested target, profile, features and default
   features, and the resolved bin and features; never the artifact digest,
   which differs across commits by construction.

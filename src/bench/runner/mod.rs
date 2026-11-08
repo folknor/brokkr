@@ -400,8 +400,16 @@ fn list(benches: &BTreeMap<String, Bench>) {
         output::count(benches.len(), "bench")
     )];
     for bench in benches.values() {
+        let notes = &bench.annotations;
+        let version = notes
+            .version
+            .value()
+            .map_or_else(String::new, |v| format!(" v{v}"));
+        let description = notes.description.value().map_or_else(String::new, |d| {
+            format!(": {}", crate::config::bench_annotations::first_line(d))
+        });
         lines.push(format!(
-            "  {} (target {}, {})",
+            "  {}{version} (target {}, {}){description}",
             bench.name,
             bench.target.as_deref().unwrap_or("[bin] default"),
             script_origin(bench)
@@ -434,6 +442,9 @@ fn describe(bench: &Bench, detection: &Detection, given: &params::Given, view: &
             }
         ),
     ];
+    // The devs' notes under the bench's name, before its build settings.
+    let notes = bench.annotations.help_lines();
+    lines.splice(1..1, notes);
     if !bench.hotpath_features.is_empty() {
         lines.push(format!(
             "  profiled with --hotpath: features [{}] added",

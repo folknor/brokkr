@@ -1,5 +1,7 @@
 #[path = "config_parts/bench.rs"]
 pub mod bench;
+#[path = "config_parts/bench_annotations.rs"]
+pub mod bench_annotations;
 #[path = "config_parts/check.rs"]
 pub mod check;
 #[path = "config_parts/project_config/mod.rs"]

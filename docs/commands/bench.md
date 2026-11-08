@@ -14,7 +14,7 @@ brokkr bench NAME                     # run one, three iterations
 brokkr bench --iterations 10 NAME
 brokkr bench --commit v0.5.0 NAME     # build and run that commit
 brokkr bench --hotpath NAME           # profile: its marked calls' reports
-brokkr bench NAME --help              # its build settings and params
+brokkr bench NAME --help              # its annotations, build settings and params
 brokkr bench NAME --dataset denmark   # bind a param
 brokkr bench NAME --osc 4705..4710    # a collection: one run over all six
 brokkr bench NAME --dataset all       # fan out: one run per dataset
@@ -40,7 +40,11 @@ collide with a param. brokkr's options:
 After NAME come the bench's params, `--NAME VALUE` or `--NAME=VALUE`, and
 `--help` or `-h` where a param's name could stand. How they bind against
 the resolved config, and what is refused, is `brokkr man bench-config`
-(Binding params), including lists, ranges and `all`. `NAME --help` lists
+(Binding params), including lists, ranges and `all`. Bare `brokkr bench`
+lists each bench with its version and the first non-blank line of its
+description, when it has them (`brokkr man bench-config`, Annotations).
+`NAME --help` shows the bench's annotations under its name, multi-line
+text indented under its field, then its build settings, and lists
 each param with its `from` path, its default or `(required)` and, for a
 `from` param, the keys it takes on this host, in key order, the parents it
 depends on chosen

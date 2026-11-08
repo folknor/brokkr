@@ -113,11 +113,50 @@ params.jobs = { help = "worker threads" }
   bench`, The build).
 - `uses` - `[bench_params]` sets whose params the bench takes (below).
 - `params` - the bench's own params (below).
+- `description`, `version`, `date`, `changelog` - the devs' notes on the
+  bench (Annotations, below).
 
 Any other key is refused. A bench name is letters, digits, `_` and `-`, and
 does not start with `-`, since it is the argument `brokkr bench` takes. It
 names the bench, not the subcommand it drives: `[bench.cat]` is a fine name
 for a bench of pbfhogg's `cat`.
+
+## Annotations
+
+```toml
+[bench.cat]
+script_file = "benches/cat.lua"
+description = "Full-file decode, single pass"
+version = 3
+date = 2026-11-08
+changelog = [
+  { version = 3, date = 2026-11-08, note = "Read through the io_uring preflight" },
+  { version = 2, date = 2026-09-14, note = "Drop the warmup iteration" },
+]
+```
+
+Notes devs keep for each other about a bench, every one optional. brokkr
+reads nothing into them: no version is ordered, paired on or compared with a
+changelog, and no date is checked against another.
+
+- `description` - what the bench measures, a non-blank string.
+- `version` - a positive integer, the bench's revision as its devs number it.
+- `date` - when the current version was set, a TOML local date written bare
+  (`2026-11-08`); a quoted date, a time or an offset is refused.
+- `changelog` - an array of tables, in the order written, each with a
+  non-blank `note` and optionally a `version` and a `date` taking the same
+  values as above; any other key in an entry is refused. `changelog = []`
+  is allowed and is not the same as no changelog. Under `include`, the layer
+  that sets `changelog` replaces it whole, unlike other arrays of tables,
+  which join: two histories never interleave.
+
+A wrong type or a blank text is refused when the config loads, like any
+bench key. `brokkr bench` lists each bench's version and the first
+non-blank line of its description, and `brokkr bench NAME --help` shows them all (`brokkr man
+bench`). Every run stores them with the rest of the config, so `brokkr
+results --compare` names a bench whose annotations differ between the sides
+(`brokkr man results`). They are config like any other: a script can read
+them through `config()`.
 
 ## Params
 

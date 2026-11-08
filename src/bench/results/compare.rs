@@ -540,6 +540,11 @@ pub(crate) fn format_compare(
                     &y.config_digest,
                     &y.doc.config,
                 ));
+                lines.extend(super::annotations::line(
+                    &x.doc.bench,
+                    &x.doc.config,
+                    &y.doc.config,
+                ));
                 lines.extend(build_line(&x.doc.build, &y.doc.build));
                 lines.extend(executables_line(x, y));
                 lines.extend(host_line(x, y));

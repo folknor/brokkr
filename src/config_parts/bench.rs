@@ -52,6 +52,9 @@ pub struct Bench {
     /// The top-level `bench_lib` directory every bench's `require` loads
     /// modules from, `None` when unset ([`parse_lib`]).
     pub library: Option<PathBuf>,
+    /// The devs' notes on the bench: description, version, date and
+    /// changelog, every one valid when the config loaded.
+    pub annotations: super::bench_annotations::Annotations,
 }
 
 /// Where a bench's Lua lives.
@@ -327,11 +330,18 @@ fn parse_bench(
             "a bench name is letters, digits, '_' and '-', not starting with '-'".into(),
         ));
     }
-    if !value.is_table() {
+    let Some(table) = value.as_table() else {
         return Err(DevError::Config(format!("{at} must be a table")));
+    };
+    let annotations = super::bench_annotations::Annotations::read(table);
+    if let Some(problem) = annotations.problems().first() {
+        return Err(err(problem.clone()));
     }
-    let raw: RawBench = value
-        .clone()
+    let mut rest = table.clone();
+    for key in super::bench_annotations::KEYS {
+        rest.remove(key);
+    }
+    let raw: RawBench = toml::Value::Table(rest)
         .try_into()
         .map_err(|e: toml::de::Error| err(e.to_string()))?;
     let script = bench_script(name, raw.script, raw.script_file, sources).map_err(err)?;
@@ -378,6 +388,7 @@ fn parse_bench(
         uses: raw.uses,
         params,
         library: None,
+        annotations,
     })
 }
 
@@ -937,6 +948,71 @@ mod tests {
             "[bench.c]\nscript = \"x = 1\"\nparams.osc-range = { many = true }\n",
         )
         .unwrap();
+    }
+
+    #[test]
+    fn annotations_load_and_an_invalid_one_refuses() {
+        let benches = single(
+            "annotations",
+            "[bench.cat]\nscript = \"x = 1\"\ndescription = \"d\"\nversion = 2\n\
+             date = 2026-11-08\nchangelog = [{ note = \"n\" }]\nparams.changelog = {}\n",
+        )
+        .unwrap();
+        let notes = &benches["cat"].annotations;
+        assert_eq!(notes.version.value(), Some(&2));
+        assert_eq!(notes.changelog.value().map(Vec::len), Some(1));
+        assert!(benches["cat"].params.contains_key("changelog"));
+        let err = err_of(
+            "annotations_quoted_date",
+            "[bench.cat]\nscript = \"x = 1\"\ndate = \"2026-11-08\"\n",
+        );
+        assert!(err.contains("[bench.cat]") && err.contains("local date"), "{err}");
+    }
+
+    /// A layer setting a bench's changelog replaces the one beneath whole,
+    /// empty or not, and is recorded as the value's origin; a `[[check]]`
+    /// style join is left to every other array of tables.
+    #[test]
+    fn a_changelog_is_replaced_whole_across_layers() {
+        let log = |body: &str| -> (Vec<String>, Option<PathBuf>) {
+            let dir = tree(
+                &format!("changelog_layers_{}", body.len()),
+                &[
+                    (
+                        "brokkr.toml",
+                        &format!("project = \"p\"\ninclude = [\"a.toml\"]\n[bench.cat]\n{body}"),
+                    ),
+                    (
+                        "a.toml",
+                        "include = [\"b.toml\"]\n[bench.cat]\n\
+                         changelog = [{ note = \"a2\" }, { note = \"a1\" }]\n",
+                    ),
+                    (
+                        "b.toml",
+                        "[bench.cat]\nscript = \"x = 1\"\nchangelog = [{ note = \"b\" }]\n",
+                    ),
+                ],
+            );
+            let (_, cfg, _, sources) = super::super::load_with_sources(&dir).unwrap();
+            let notes: Vec<String> = cfg.benches["cat"]
+                .annotations
+                .changelog
+                .value()
+                .map(|l| l.iter().map(|e| e.note.clone()).collect())
+                .unwrap_or_default();
+            let origin = sources
+                .value_origin(&["bench", "cat", "changelog"])
+                .map(|o| o.file.to_path_buf());
+            (notes, origin)
+        };
+        let (notes, origin) = log("changelog = [{ note = \"top\" }]\n");
+        assert_eq!(notes, ["top"]);
+        assert!(origin.unwrap().ends_with("brokkr.toml"));
+        let (notes, origin) = log("");
+        assert_eq!(notes, ["a2", "a1"]);
+        assert!(origin.unwrap().ends_with("a.toml"));
+        let (notes, _) = log("changelog = []\n");
+        assert!(notes.is_empty());
     }
 
     #[test]

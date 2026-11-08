@@ -5,6 +5,7 @@
 //! on the results server the user-wide config names (`super::remote`); this
 //! module maps `results`' filters onto them and renders what comes back.
 
+mod annotations;
 mod compare;
 mod config_diff;
 mod single;

@@ -237,6 +237,7 @@ mod tests {
             uses: Vec::new(),
             params: BTreeMap::new(),
             library: None,
+            annotations: crate::config::bench_annotations::Annotations::NONE,
         }
     }
 

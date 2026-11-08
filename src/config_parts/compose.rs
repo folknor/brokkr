@@ -18,7 +18,8 @@
 // - array of tables + array of tables (`[[check]]`, `[[textlint]]`, ...):
 //   joined, lower-precedence entries first, and an entry whose `name` the
 //   higher-precedence side reuses is dropped - a higher layer can redefine
-//   a shared entry to replace it.
+//   a shared entry to replace it. A bench's `changelog` is the exception: the
+//   layer that sets it replaces it whole, so two histories never interleave.
 // - anything else: the higher-precedence value replaces the lower one.
 //
 // The composition is resolved here, before any section parser runs, so every
@@ -27,7 +28,7 @@
 // which files define every table, so the one place brokkr *writes* its config
 // (dataset registration) can edit the file that actually holds the entry, and
 // which file supplied every other value (an array of tables aside, whose
-// entries join across files), so a bench's script is located and
+// entries join across files, unless it is a bench's `changelog`), so a bench's script is located and
 // named by the file that set it.
 //
 // Paths *inside* an included file (dataset files, script commands, globs) mean
@@ -55,7 +56,8 @@ pub struct ConfigSources {
     tables: BTreeMap<Vec<String>, BTreeSet<usize>>,
     /// Value path -> the file that supplied the value the composition kept,
     /// for every value that is not a table. A plain array is one value; an
-    /// array of tables is not tracked, since its entries join across files.
+    /// array of tables is not tracked, since its entries join across files,
+    /// except one replaced whole (`is_whole_value`), which is one value.
     values: BTreeMap<Vec<String>, usize>,
     /// The user layer's effective contribution after higher layers shadow
     /// named entries.
@@ -458,7 +460,7 @@ fn merge_into(
                 merge_into(b, o, idx, path, sources);
             }
             (Some(toml::Value::Array(b)), toml::Value::Array(o))
-                if is_table_array(b) && is_table_array(&o) =>
+                if is_table_array(b) && is_table_array(&o) && !is_whole_value(path) =>
             {
                 merge_entries(b, o);
             }
@@ -473,7 +475,8 @@ fn merge_into(
                     other => {
                         // An array of tables may later join entries from
                         // several files, so no one file supplied it.
-                        let joinable = other.as_array().is_some_and(|items| is_table_array(items));
+                        let joinable = !is_whole_value(path)
+                            && other.as_array().is_some_and(|items| is_table_array(items));
                         if !joinable {
                             sources.values.insert(path.clone(), idx);
                         }
@@ -518,6 +521,12 @@ fn clear_replaced_alternatives(
 /// inherit a guard written for another one.
 fn is_atomic(path: &[String]) -> bool {
     matches!(path, [table, _] if table == "cargo_env")
+}
+
+/// An array of tables one layer replaces whole rather than joining: a
+/// bench's `changelog`, exactly, so a param named `changelog` is untouched.
+fn is_whole_value(path: &[String]) -> bool {
+    matches!(path, [table, _, key] if table == "bench" && key == "changelog")
 }
 
 /// An array whose every element is a table - a TOML `[[array]]`. An empty
