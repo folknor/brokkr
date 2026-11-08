@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
-use super::super::store::{Build, CaptureOutcome, StoredRun};
+use super::super::store::{Build, CaptureOutcome, MarkView, StoredRun};
 use super::{config_diff, ms, params_summary, result_verdict, result_wall, verdict};
 
 /// The order "latest" means everywhere: start time, then uuid.
@@ -444,17 +444,36 @@ fn unpaired_line(run: &StoredRun, other: &[StoredRun], other_side: &str) -> Opti
     ))
 }
 
+/// What hides the compared run on one side, one line per mark: only under
+/// `--hidden` does a selection hold such a run.
+fn hidden_lines(marks: &MarkView, run: Option<&StoredRun>, side: &str) -> Vec<String> {
+    run.map(|run| {
+        super::hidden_by(marks, run)
+            .into_iter()
+            .map(|(kind, origin)| {
+                format!(
+                    "  hidden on {side}, {}: {}",
+                    short(run),
+                    super::hidden_detail(kind, origin)
+                )
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
 /// Render the comparison of two commits' runs, capped at `limit` pairs after
-/// pairing. Both sides hold completed runs of a clean tree, newest first.
+/// pairing. Both sides hold completed runs of a clean tree, newest first,
+/// selected under the comparison's one set of marks.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn format_compare(
     commit_a: &str,
-    runs_a: &[StoredRun],
     commit_b: &str,
-    runs_b: &[StoredRun],
+    comparison: &super::Comparison,
     top: usize,
     limit: usize,
 ) -> String {
+    let (runs_a, runs_b, marks) = (&comparison.a, &comparison.b, &comparison.marks);
     let mut a: BTreeMap<(&str, &str), Vec<&StoredRun>> = BTreeMap::new();
     let mut b: BTreeMap<(&str, &str), Vec<&StoredRun>> = BTreeMap::new();
     for (runs, map) in [(runs_a, &mut a), (runs_b, &mut b)] {
@@ -531,7 +550,8 @@ pub(crate) fn format_compare(
     for (i, (ra, rb)) in rows.iter().enumerate() {
         out.push_str(render(&table[i + 1]).trim_end());
         out.push('\n');
-        let mut lines = Vec::new();
+        let mut lines = hidden_lines(marks, ra.first().copied(), "A");
+        lines.extend(hidden_lines(marks, rb.first().copied(), "B"));
         match (ra.first().copied(), rb.first().copied()) {
             (Some(x), Some(y)) => {
                 lines.extend(config_diff::describe(

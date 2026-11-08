@@ -258,6 +258,27 @@ pub(super) fn open(path: &Path) -> Result<Connection, StoreError> {
     open_writable(path, true)
 }
 
+/// Open an existing store for writing, never creating its file: `None` only
+/// when opening failed and the file is confirmed missing. A failure after
+/// the file opened (a newer stamp, a migration) is that failure, whatever
+/// became of the file since.
+pub(super) fn open_existing(path: &Path) -> Result<Option<Connection>, StoreError> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+        | OpenFlags::SQLITE_OPEN_URI
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    if let Err(error) = Connection::open_with_flags(path, flags) {
+        return match std::fs::metadata(path) {
+            Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(other) => Err(StoreError::Failed(format!(
+                "{} cannot be read: {other}",
+                path.display()
+            ))),
+            Ok(_) => Err(error.into()),
+        };
+    }
+    open_writable(path, false).map(Some)
+}
+
 /// [`open`], creating the file only when `create` is set: a reader's
 /// migration opens without it, so a file removed since the reader found it
 /// is an error rather than a fresh store.

@@ -147,14 +147,57 @@ pub(crate) enum Attempt {
     },
 }
 
+/// What a latched write is, as its messages name it.
+pub(crate) struct Subject<'a> {
+    /// `run UUID`, `mark UUID (retire NAME)`.
+    pub(crate) named: &'a str,
+    /// What to do once its outcome is unknown.
+    pub(crate) uncertain_hint: &'a str,
+}
+
+impl Subject<'_> {
+    /// A run's publication.
+    pub(crate) fn run(uuid: &str) -> (String, String) {
+        (
+            format!("run {uuid}"),
+            format!(
+                "`brokkr results {}` shows whether it landed",
+                crate::db::short_uuid(uuid)
+            ),
+        )
+    }
+}
+
 /// Publish run `uuid` to the store `place` names, one `attempt` at a time,
 /// under `policy`, latching uncertainty.
 pub(crate) fn publish(
     uuid: &str,
     place: &str,
     policy: Policy,
+    attempt: impl FnMut() -> Attempt,
+) -> Result<(), DevError> {
+    let (named, uncertain_hint) = Subject::run(uuid);
+    write(
+        &Subject {
+            named: &named,
+            uncertain_hint: &uncertain_hint,
+        },
+        place,
+        policy,
+        attempt,
+    )
+}
+
+/// Make one write request to the store `place` names, one `attempt` at a
+/// time, under `policy`, latching uncertainty: the same request every time,
+/// its request id included.
+pub(crate) fn write(
+    subject: &Subject<'_>,
+    place: &str,
+    policy: Policy,
     mut attempt: impl FnMut() -> Attempt,
 ) -> Result<(), DevError> {
+    let named = subject.named;
     let mut admission = Admission::new(policy);
     let mut uncertain: Option<String> = None;
     let last = loop {
@@ -163,7 +206,7 @@ pub(crate) fn publish(
             Attempt::Settled => {
                 if let Some(why) = &uncertain {
                     crate::output::bench_msg(&format!(
-                        "run {uuid} stored at {place} on attempt {}, after an attempt whose outcome was unknown ({why})",
+                        "{named} stored at {place} on attempt {}, after an attempt whose outcome was unknown ({why})",
                         admission.made()
                     ));
                 }
@@ -189,10 +232,10 @@ pub(crate) fn publish(
     );
     Err(DevError::Database(match uncertain {
         Some(why) => format!(
-            "run {uuid} may or may not have been stored at {place} (outcome unknown after {attempts}): {why}; `brokkr results {}` shows whether it landed",
-            crate::db::short_uuid(uuid)
+            "{named} may or may not have been stored at {place} (outcome unknown after {attempts}): {why}; {}",
+            subject.uncertain_hint
         ),
-        None => format!("run {uuid} was not stored at {place} ({attempts}): {last}"),
+        None => format!("{named} was not stored at {place} ({attempts}): {last}"),
     }))
 }
 

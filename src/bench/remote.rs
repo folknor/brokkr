@@ -207,6 +207,49 @@ impl Client {
             },
         )
     }
+
+    /// Append the mark `request`, retried and latched as a publication is,
+    /// its conflict read under the mark's own uuid. A 200 settles it; its
+    /// answer is `None` when the body does not read as a mark's, which is
+    /// warned.
+    pub(crate) fn mark(
+        &self,
+        request: &super::store::MarkRequest,
+        subject: &publication::Subject<'_>,
+    ) -> Result<Option<super::store::Marked>, DevError> {
+        let body = serde_json::to_vec(&wire::Request::Mark {
+            request: request.clone(),
+        })
+        .map_err(|e| DevError::Database(format!("{} cannot be encoded: {e}", subject.named)))?;
+        let mut marked = None;
+        publication::write(subject, &self.server.shown, self.publish, || {
+            match self.post(&body, Some(&request.uuid)) {
+                Exchange::Answered(answer) => {
+                    match serde_json::from_slice::<wire::Answer>(&answer) {
+                        Ok(wire::Answer::Marked(m)) => marked = Some(m),
+                        _ => crate::output::warn(&format!(
+                            "results server {} acknowledged {} with an answer that does not read as a mark's",
+                            self.server.shown, subject.named
+                        )),
+                    }
+                    Attempt::Settled
+                }
+                Exchange::Unreadable(why) => {
+                    crate::output::warn(&format!(
+                        "results server {} acknowledged {}, but its answer could not be read: {why}",
+                        self.server.shown, subject.named
+                    ));
+                    Attempt::Settled
+                }
+                Exchange::Failed(failure) => Attempt::Failed {
+                    unapplied: failure.unapplied,
+                    retry: failure.retry,
+                    message: failure.message,
+                },
+            }
+        })?;
+        Ok(marked)
+    }
 }
 
 /// Read what one exchange came to.

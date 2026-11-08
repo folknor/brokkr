@@ -1461,12 +1461,26 @@ Examples:
   brokkr results --compare a65a 911c                # compare two commits
   brokkr results --compare a65a 911c --mode bench   # compare, filtered
   brokkr results --param dataset=denmark            # script-bench runs with that param
+  brokkr results --retire old-cat --reason \"replaced by cat\"  # hide a bench's runs
+  brokkr results --unretire old-cat                 # show them again
+  brokkr results --hidden                           # list hidden runs too
 
 In a piners project this queries the same .brokkr/results.db (hotpath/alloc
 runs). The corpus run store has its own command - see `brokkr corpus-results`.
 
 In depth: `brokkr man results`."
     )]
+    // A mark is a write, one per command, and no query option means anything
+    // to it.
+    #[command(group(
+        ArgGroup::new("mark")
+            .args(["retire", "unretire"])
+            .multiple(false)
+            .conflicts_with_all([
+                "query", "commit", "compare", "command", "mode", "dataset", "meta", "env",
+                "param", "grep", "grep_v", "limit", "top", "hidden",
+            ])
+    ))]
     Results {
         /// UUID prefix to look up specific result(s)
         #[arg(conflicts_with_all = ["commit", "compare"])]
@@ -1543,6 +1557,26 @@ In depth: `brokkr man results`."
         /// Maximum number of functions shown in hotpath reports (0 = all)
         #[arg(long, default_value_t = crate::hotpath_fmt::DEFAULT_TOP)]
         top: usize,
+
+        /// List and compare script-bench runs that marks hide (a retired
+        /// bench's) too, each marked. A uuid lookup shows them regardless.
+        #[arg(long)]
+        hidden: bool,
+
+        /// Retire a script bench: its runs, and any published under the
+        /// name later, are left out of listings and --compare. Stored in the
+        /// bench store, so the bench may then leave brokkr.toml. Needs
+        /// --reason.
+        #[arg(long, value_name = "NAME", requires = "reason")]
+        retire: Option<String>,
+
+        /// Undo --retire NAME.
+        #[arg(long, value_name = "NAME")]
+        unretire: Option<String>,
+
+        /// Why, for --retire.
+        #[arg(long, requires = "retire", conflicts_with = "unretire")]
+        reason: Option<String>,
     },
     /// Query sidecar /proc timelines, markers, and phase summaries
     #[command(

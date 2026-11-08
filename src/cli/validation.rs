@@ -285,6 +285,37 @@ mod tests {
         assert!(parsed.is_err());
     }
 
+    /// A mark is one write per command: retire needs a reason, a reason needs
+    /// retire, and no query option rides along, though the defaulted ones
+    /// left unset do not count.
+    #[test]
+    fn results_marks_stand_alone() {
+        assert!(parse(["brokkr", "results", "--retire", "x", "--reason", "r"]).is_ok());
+        assert!(parse(["brokkr", "results", "--unretire", "x"]).is_ok());
+        assert!(parse(["brokkr", "results", "--hidden"]).is_ok());
+        for bad in [
+            &["brokkr", "results", "--retire", "x"][..],
+            &["brokkr", "results", "--reason", "r"],
+            &["brokkr", "results", "--unretire", "x", "--reason", "r"],
+            &[
+                "brokkr",
+                "results",
+                "--retire",
+                "x",
+                "--reason",
+                "r",
+                "--unretire",
+                "y",
+            ],
+            &["brokkr", "results", "--unretire", "x", "--hidden"],
+            &["brokkr", "results", "--unretire", "x", "--limit", "20"],
+            &["brokkr", "results", "--unretire", "x", "--command", "c"],
+            &["brokkr", "results", "abcd", "--unretire", "x"],
+        ] {
+            assert!(parse(bad.iter().copied()).is_err(), "{bad:?}");
+        }
+    }
+
     /// `test` needs a name; its selection flags parse beside it.
     #[test]
     fn test_requires_a_name() {

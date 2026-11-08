@@ -40,14 +40,7 @@ pub use document::{
 };
 pub use error::StoreError;
 pub use list::{RunFilter, Selection, StoredRun};
-pub use marks::{MarkRequest, Marked, Revision};
-// What a mark says and what is in effect: read by `brokkr results`' mark
-// flags and by the tests, and by neither binary's other code yet.
-#[allow(
-    unused_imports,
-    reason = "the mark vocabulary is consumed by the results mark flags, still to land"
-)]
-pub use marks::{Mark, MarkOrigin, MarkView};
+pub use marks::{Mark, MarkOrigin, MarkRequest, MarkView, Marked, Revision};
 
 /// What a publication did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -73,6 +66,12 @@ impl Store {
         Ok(Self {
             conn: schema::open(path)?,
         })
+    }
+
+    /// Open an existing store for writing without creating it: `None` when
+    /// there is no file at `path`. Migrated and refused as by [`Store::open`].
+    pub fn open_existing(path: &Path) -> Result<Option<Self>, StoreError> {
+        Ok(schema::open_existing(path)?.map(|conn| Self { conn }))
     }
 
     /// Publish one attempted run, whole or not at all.

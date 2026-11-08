@@ -143,6 +143,16 @@ fn reader(path: &std::path::Path) -> BenchReader {
     BenchReader::at(path, "pbfhogg").unwrap().unwrap()
 }
 
+/// The single view of the run `uuid` names, under its lookup's marks.
+fn single(reader: &BenchReader, uuid: &str) -> String {
+    let lookup = reader.lookup(uuid, &filter()).unwrap();
+    format_single(&lookup.runs[0], &lookup.marks, 10)
+}
+
+fn compare(c: &super::Comparison, a: &str, b: &str, limit: usize) -> String {
+    format_compare(a, b, c, 10, limit)
+}
+
 fn benches(runs: &[super::StoredRun]) -> Vec<(String, i64)> {
     runs.iter()
         .map(|r| (r.doc.bench.clone(), r.doc.started_unix_ms))
@@ -208,7 +218,7 @@ fn the_listing_is_one_project_newest_first_by_start_whatever_the_publication_ord
         ],
     );
     let reader = reader(&path);
-    let all = reader.table(&filter()).unwrap();
+    let all = reader.table(&filter()).unwrap().runs;
     assert_eq!(
         benches(&all),
         vec![
@@ -223,9 +233,9 @@ fn the_listing_is_one_project_newest_first_by_start_whatever_the_publication_ord
             ..filter()
         })
         .unwrap();
-    assert_eq!(capped.len(), 1);
+    assert_eq!(capped.runs.len(), 1);
 
-    let by = |f: BenchFilter| benches(&reader.table(&f).unwrap());
+    let by = |f: BenchFilter| benches(&reader.table(&f).unwrap().runs);
     assert_eq!(
         by(BenchFilter {
             commit: Some("BBBB".into()),
@@ -273,7 +283,7 @@ fn env_param_and_grep_filters_reach_every_invocation_source() {
     many.params.insert("none".into(), param(true, &[]));
     publish(&path, &[env, many]);
     let reader = reader(&path);
-    let by = |f: BenchFilter| benches(&reader.table(&f).unwrap());
+    let by = |f: BenchFilter| benches(&reader.table(&f).unwrap().runs);
 
     assert_eq!(
         by(BenchFilter {
@@ -382,7 +392,7 @@ fn the_single_view_shows_verdicts_children_records_and_the_hotpath_report() {
     publish(&path, &[doc.clone(), failed.clone()]);
     let reader = reader(&path);
 
-    let shown = format_single(&reader.lookup(&doc.uuid, &filter()).unwrap().runs[0], 10);
+    let shown = single(&reader, &doc.uuid);
     assert!(shown.contains("2025-11-01 12:26:40"), "{shown}");
     assert!(shown.contains("verdict     \"\""), "{shown}");
     assert!(
@@ -398,15 +408,17 @@ fn the_single_view_shows_verdicts_children_records_and_the_hotpath_report() {
     assert!(shown.contains("record      nodes = 10"), "{shown}");
     assert!(shown.contains("decode"), "{shown}");
 
-    let shown = format_single(&reader.lookup(&failed.uuid, &filter()).unwrap().runs[0], 10);
+    let shown = single(&reader, &failed.uuid);
     assert!(shown.contains("outcome     failed: exit 2"), "{shown}");
     assert!(
         shown.contains("hotpath = {\"nope\":1} (not a hotpath report brokkr can read)"),
         "{shown}"
     );
 
-    let table = format_table(&reader.table(&filter()).unwrap());
+    let listing = reader.table(&filter()).unwrap();
+    let table = format_table(&listing.runs, &listing.marks);
     assert!(table.contains("failed"), "{table}");
+    assert!(!table.contains("hidden"), "{table}");
     assert!(table.contains("2.000 ms"), "{table}");
     assert!(table.contains("verdict"), "{table}");
 }
@@ -436,13 +448,13 @@ fn compare_pairs_the_latest_result_per_key_and_names_what_the_key_leaves_out() {
         &[a_new, a_old, b, dirty, failed, scalar_vs_many, inspect_b],
     );
     let reader = reader(&path);
-    let (sa, sb) = reader.compare_sides("aaaa", "bbbb", &filter()).unwrap();
+    let c = reader.compare_sides("aaaa", "bbbb", &filter()).unwrap();
     assert_eq!(
-        sb.len(),
+        c.b.len(),
         2,
         "dirty and failed runs never stand for a commit"
     );
-    let out = format_compare("aaaa", &sa, "bbbb", &sb, 10, 20);
+    let out = compare(&c, "aaaa", "bbbb", 20);
     assert!(out.contains("1.000 ms  0.900 ms  -10.0%"), "{out}");
     assert!(
         out.contains("config differs: datasets.denmark.bbox \"1,2,3,4\" -> \"1,2,3,5\""),
@@ -460,7 +472,7 @@ fn compare_pairs_the_latest_result_per_key_and_names_what_the_key_leaves_out() {
         "{out}"
     );
 
-    let capped = format_compare("aaaa", &sa, "bbbb", &sb, 10, 1);
+    let capped = compare(&c, "aaaa", "bbbb", 1);
     assert!(
         capped.contains("(2 more pairs not shown - raise --limit)"),
         "{capped}"
@@ -514,18 +526,21 @@ fn captures_render_per_stage_and_compare_by_stage() {
     publish(&path, &[a.clone(), b, timing_b]);
     let reader = reader(&path);
 
-    let shown = format_single(&reader.lookup(&a.uuid, &filter()).unwrap().runs[0], 10);
+    let shown = single(&reader, &a.uuid);
     assert!(shown.contains("measured    hotpath (--hotpath)"), "{shown}");
     assert!(shown.contains("hotpath decode #1: captured"), "{shown}");
     assert!(shown.contains("hotpath write #1 (iteration 0)"), "{shown}");
 
-    let (sa, sb) = reader.compare_sides("a", "b", &filter()).unwrap();
+    let c = reader.compare_sides("a", "b", &filter()).unwrap();
     assert!(
-        sa[0].children_loaded,
+        c.a[0].children_loaded,
         "a profiled run is read with its children"
     );
-    assert!(sb.iter().any(|r| !r.children_loaded), "a timing run is not");
-    let out = format_compare("a", &sa, "b", &sb, 10, 20);
+    assert!(
+        c.b.iter().any(|r| !r.children_loaded),
+        "a timing run is not"
+    );
+    let out = compare(&c, "a", "b", 20);
     assert!(out.contains("hotpath decode #1"), "{out}");
     assert!(
         out.contains("hotpath captures unpaired: write #1 on A only"),
@@ -553,8 +568,12 @@ fn a_collapsed_arm_is_disclosed_and_an_equal_context_pair_pointed_at() {
         ],
     );
     let reader = reader(&path);
-    let (sa, sb) = reader.compare_sides("a", "b", &filter()).unwrap();
-    let out = format_compare("a", &sa, "b", &sb, 10, 20);
+    let out = compare(
+        &reader.compare_sides("a", "b", &filter()).unwrap(),
+        "a",
+        "b",
+        20,
+    );
     assert!(out.contains("env: FEATURE=1 vs 0"), "{out}");
     assert!(
         out.contains("other runs under this key with a different env or build: A 1 (newest"),
@@ -574,7 +593,7 @@ fn a_collapsed_arm_is_disclosed_and_an_equal_context_pair_pointed_at() {
     );
 
     // Within the query: --env FEATURE=0 leaves only the off arm on both sides.
-    let (fa, fb) = reader
+    let filtered = reader
         .compare_sides(
             "a",
             "b",
@@ -584,7 +603,70 @@ fn a_collapsed_arm_is_disclosed_and_an_equal_context_pair_pointed_at() {
             },
         )
         .unwrap();
-    let out = format_compare("a", &fa, "b", &fb, 10, 20);
+    let out = compare(&filtered, "a", "b", 20);
     assert!(!out.contains("older pair"), "{out}");
     assert!(!out.contains("other runs"), "{out}");
+}
+
+/// A retired bench's runs leave the table and the comparison, come back
+/// marked under `--hidden`, and a uuid lookup shows one marked regardless.
+#[test]
+fn a_retired_bench_is_hidden_until_asked_for_and_marked_when_shown() {
+    use super::super::store::{Mark, MarkRequest};
+    let path = scratch("retired");
+    let old = run(1, "old", 'a', 1_000, 100);
+    publish(
+        &path,
+        &[
+            old.clone(),
+            run(2, "old", 'b', 2_000, 90),
+            run(3, "cat", 'a', 3_000, 100),
+        ],
+    );
+    evidence::open_store(&path)
+        .unwrap()
+        .mark(&MarkRequest {
+            uuid: "e".repeat(32),
+            project: "pbfhogg".into(),
+            at_unix_ms: 1_762_000_000_000,
+            hostname: "bygg".into(),
+            mark: Mark::Retire {
+                name: "old".into(),
+                reason: "replaced by cat".into(),
+            },
+        })
+        .unwrap();
+    let reader = reader(&path);
+    let hidden = BenchFilter {
+        hidden: true,
+        ..filter()
+    };
+
+    let listing = reader.table(&filter()).unwrap();
+    assert_eq!(benches(&listing.runs), vec![("cat".into(), 3_000)]);
+    let listing = reader.table(&hidden).unwrap();
+    assert_eq!(listing.runs.len(), 3);
+    let table = format_table(&listing.runs, &listing.marks);
+    assert!(table.lines().next().unwrap().ends_with("hidden"), "{table}");
+    assert!(table.contains("retired"), "{table}");
+
+    let c = reader.compare_sides("a", "b", &filter()).unwrap();
+    assert!(c.a.iter().chain(&c.b).all(|r| r.doc.bench == "cat"));
+    let out = compare(
+        &reader.compare_sides("a", "b", &hidden).unwrap(),
+        "a",
+        "b",
+        20,
+    );
+    assert!(
+        out.contains("hidden on A, 00000000: retired at 2025-11-01 12:26:40 on bygg: replaced by cat (mark eeeeeeee)"),
+        "{out}"
+    );
+    assert!(out.contains("hidden on B"), "{out}");
+
+    let shown = single(&reader, &old.uuid);
+    assert!(
+        shown.contains("hidden      retired at 2025-11-01 12:26:40 on bygg: replaced by cat"),
+        "{shown}"
+    );
 }

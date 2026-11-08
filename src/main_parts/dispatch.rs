@@ -877,7 +877,27 @@ fn run_project(
             grep_v,
             limit,
             top,
+            hidden,
+            retire,
+            unretire,
+            reason,
         } => {
+            let action = match (retire, unretire) {
+                (Some(name), _) => Some(crate::bench::marking::MarkAction::Retire {
+                    name,
+                    // clap requires --reason with --retire.
+                    reason: reason.unwrap_or_default(),
+                }),
+                (None, Some(name)) => Some(crate::bench::marking::MarkAction::Unretire { name }),
+                (None, None) => None,
+            };
+            if let Some(action) = action {
+                return crate::bench::marking::apply(
+                    &action,
+                    project.name(),
+                    dev_config.results_server.as_ref(),
+                );
+            }
             let params = param
                 .iter()
                 .filter_map(|s| {
@@ -922,6 +942,7 @@ fn run_project(
                 filter,
                 params,
                 top,
+                hidden,
                 project: project.name().to_owned(),
             };
             results_cmd::cmd_results(dev_config, project_root, &rq)

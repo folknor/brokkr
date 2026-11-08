@@ -1,7 +1,9 @@
 //! The script-bench table: one line per run, newest first.
 
-use super::super::store::{RunOutcome, StoredRun};
-use super::{ms, params_summary, result_verdict, result_wall, short_commit, timestamp, verdict};
+use super::super::store::{MarkView, RunOutcome, StoredRun};
+use super::{
+    hidden_by, ms, params_summary, result_verdict, result_wall, short_commit, timestamp, verdict,
+};
 
 /// Widest a params or env cell grows before it is cut with `…`.
 const CELL_MAX: usize = 40;
@@ -34,9 +36,19 @@ fn env_cell(run: &StoredRun) -> String {
         .join(","))
 }
 
-/// Render runs as an aligned table. The verdict and env columns appear only
-/// when some row has a verdict other than nil or a captured variable.
-pub(crate) fn format_table(runs: &[StoredRun]) -> String {
+/// Render runs as an aligned table, resolved against `marks`, the marks
+/// they were selected under. The verdict, env and hidden columns appear only
+/// when some row has a verdict other than nil, a captured variable, or a
+/// mark hiding it.
+pub(crate) fn format_table(runs: &[StoredRun], marks: &MarkView) -> String {
+    let hidden = |run: &StoredRun| {
+        hidden_by(marks, run)
+            .iter()
+            .map(|(kind, _)| *kind)
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let with_hidden = runs.iter().any(|r| !hidden(r).is_empty());
     let with_verdict = runs
         .iter()
         .any(|r| result_verdict(r).is_some_and(|v| v.is_some()));
@@ -49,6 +61,9 @@ pub(crate) fn format_table(runs: &[StoredRun]) -> String {
     }
     if with_env {
         header.push("env");
+    }
+    if with_hidden {
+        header.push("hidden");
     }
     let mut rows: Vec<Vec<String>> = vec![header.iter().map(|h| (*h).to_owned()).collect()];
     for run in runs {
@@ -65,6 +80,9 @@ pub(crate) fn format_table(runs: &[StoredRun]) -> String {
         }
         if with_env {
             row.push(env_cell(run));
+        }
+        if with_hidden {
+            row.push(hidden(run));
         }
         rows.push(row);
     }

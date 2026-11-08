@@ -8,7 +8,8 @@ The current project's script-bench runs, kept in the per-user bench store,
 are listed after these rows (Script benches, below).
 
 `results` and `sidecar` open existing stores read-only and do not create
-databases. A store on an older schema is migrated first (the same transactional
+databases; `results`' mark flags (Marks, below) are its one write, to an
+existing bench store. A store on an older schema is migrated first (the same transactional
 migrations a measured write applies, then the query proceeds read-only), so an
 upgrade never makes existing history unreadable. A store stamped with a newer
 schema version than this brokkr knows is refused, by queries and writes alike;
@@ -447,11 +448,14 @@ is total whatever order runs were stored in), at most `-n`: uuid, start
 the bench, the result (the fastest iteration's wall at microsecond
 precision, or `failed` / `interrupted` for a run without one), its params,
 then a verdict column when some run has a verdict other than nil and an env
-column when some run captured variables. Every attempted run is listed,
-failed and interrupted ones included.
+column when some run captured variables, and a `hidden` column when some
+run listed is hidden (`retired`, `invalidated`, or both; Marks, below).
+Every attempted run is listed, failed and interrupted ones included, unless
+a mark hides it.
 
 **A uuid prefix** matching exactly one run in any store prints that run as a
-labelled block: identity and params (with each value's `from` path and file
+labelled block: identity, a `hidden` field per mark hiding the run (what,
+when, on which host, why, and the mark's uuid), params (with each value's `from` path and file
 digest), the outcome, the result's wall with every iteration's in execution
 order and its verdict (nil, or the string quoted, so `""` stays visible),
 host, conditions, captured env, the build asked for and as resolved, the
@@ -465,7 +469,7 @@ a call marked `hotpath` its stage, occurrence and capture status; a `--hotpath` 
 `measured hotpath`. Then the result's `record`
 (for a run without a result, each iteration's that was extracted), one
 entry per line as compact JSON. A prefix matching several runs prints the
-table. A prefix that names no run of this project but names
+table. A uuid finds a hidden run without `--hidden`. A prefix that names no run of this project but names
 another project's says which project it belongs to.
 
 **Hotpath reports.** Each report a marked call captured (`brokkr man bench`,
@@ -541,3 +545,27 @@ only, a collection against a scalar, values differing in key, order or
 digest, a different measurement class, or keys of different pairing
 algorithms): a candidate for why it has
 no partner, not proof.
+
+Under `--hidden`, a hidden run takes part as any other: the newest run per
+key is compared whether hidden or not, so a hidden run can stand in for an
+older visible one, and a `hidden on A` or `hidden on B` line names the
+compared run and the mark hiding it.
+
+**Marks.** What is said about runs after the fact is stored in the bench
+store beside them (`reference/bench-store.md`, Marks), never in
+`brokkr.toml` and never by editing a run, so it holds locally and through a
+results server alike:
+
+- `--retire NAME --reason TEXT` retires a bench name: its runs, and any
+  published under it later, are left out of the table and `--compare`. The
+  bench may then be deleted from `brokkr.toml` and its runs stay hidden.
+  Refused for a name the store does not know or one already retired.
+- `--unretire NAME` undoes it; refused for a name not retired.
+- `--hidden` lists and compares hidden runs too, each marked. It leaves typed
+  rows as they are.
+
+A mark flag takes no other option and prints the mark it recorded, not what
+is visible now (an unretired bench's invalidated runs stay hidden). It is retried as a
+publication is; one whose outcome stays unknown says so, and running the
+command again is a new request rather than a retry of it. A local mark needs
+a bench store to exist and never creates one.

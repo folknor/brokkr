@@ -32,7 +32,27 @@ pub(crate) struct BenchFilter {
     /// A filter no bench run can answer (`--mode`, `--dataset`, `--meta`)
     /// was given, so every bench run is excluded.
     pub(crate) excluded: bool,
+    /// `--hidden`: retired and invalidated runs are listed and compared too.
+    pub(crate) hidden: bool,
     pub(crate) limit: usize,
+}
+
+/// Runs selected together, with the marks they were selected under: every
+/// run shown is rendered against those marks, never a later read's. The
+/// default is no runs and no marks.
+#[derive(Default)]
+pub(crate) struct Listing {
+    pub(crate) runs: Vec<StoredRun>,
+    pub(crate) marks: store::MarkView,
+}
+
+/// Both sides of a comparison, the second pinned to the first's revision,
+/// and the one set of marks both were selected under.
+#[derive(Default)]
+pub(crate) struct Comparison {
+    pub(crate) a: Vec<StoredRun>,
+    pub(crate) b: Vec<StoredRun>,
+    pub(crate) marks: store::MarkView,
 }
 
 /// The per-user bench store, opened for reading on behalf of one project:
@@ -61,6 +81,8 @@ pub(crate) struct Lookup {
     pub(crate) candidates: usize,
     /// Runs of other projects the prefix names, as `(uuid, project)`.
     pub(crate) elsewhere: Vec<(String, String)>,
+    /// The marks the runs were selected under, which say which are hidden.
+    pub(crate) marks: store::MarkView,
 }
 
 /// What a uuid prefix names among the project's runs ([`BenchReader::resolve`]).
@@ -248,6 +270,7 @@ impl BenchReader {
             params: filter.params.clone(),
             grep: filter.grep.clone(),
             grep_v: filter.grep_v.clone(),
+            hidden: filter.hidden,
             ..RunFilter::default()
         }
     }
@@ -267,16 +290,22 @@ impl BenchReader {
     }
 
     /// The newest runs the filter selects, at most `filter.limit`.
-    pub(crate) fn table(&self, filter: &BenchFilter) -> Result<Vec<StoredRun>, DevError> {
+    pub(crate) fn table(&self, filter: &BenchFilter) -> Result<Listing, DevError> {
         if filter.excluded {
-            return Ok(Vec::new());
+            return Ok(Listing {
+                runs: Vec::new(),
+                marks: store::MarkView::default(),
+            });
         }
         if let Some(commit) = &filter.commit {
             require_prefix(commit, "commit")?;
         }
-        let mut uuids = self.select(&self.filter(filter))?;
-        uuids.truncate(filter.limit);
-        self.load(&uuids, false)
+        let mut selection = self.select_at(&self.filter(filter), None)?;
+        selection.uuids.truncate(filter.limit);
+        Ok(Listing {
+            runs: self.load(&selection.uuids, false)?,
+            marks: selection.marks,
+        })
     }
 
     /// The runs whose uuid starts with `prefix`, filtered and capped.
@@ -318,6 +347,7 @@ impl BenchReader {
             omitted,
             candidates,
             elsewhere,
+            marks: unfiltered.marks,
         })
     }
 
@@ -356,17 +386,21 @@ impl BenchReader {
         commit_a: &str,
         commit_b: &str,
         filter: &BenchFilter,
-    ) -> Result<(Vec<StoredRun>, Vec<StoredRun>), DevError> {
+    ) -> Result<Comparison, DevError> {
         require_prefix(commit_a, "commit")?;
         require_prefix(commit_b, "commit")?;
         if filter.excluded {
-            return Ok((Vec::new(), Vec::new()));
+            return Ok(Comparison {
+                a: Vec::new(),
+                b: Vec::new(),
+                marks: store::MarkView::default(),
+            });
         }
         // The second side is pinned to the first's revision, so both see one
         // history of runs and marks.
         let side = |commit: &str,
                     at: Option<store::Revision>|
-         -> Result<(Vec<StoredRun>, store::Revision), DevError> {
+         -> Result<(Vec<StoredRun>, store::Selection), DevError> {
             let selection = self.select_at(
                 &RunFilter {
                     commit_prefix: Some(commit.to_owned()),
@@ -383,12 +417,44 @@ impl BenchReader {
                     *run = self.load(std::slice::from_ref(&uuid), true)?.remove(0);
                 }
             }
-            Ok((runs, selection.revision))
+            Ok((runs, selection))
         };
-        let (a, revision) = side(commit_a, None)?;
-        let (b, _) = side(commit_b, Some(revision))?;
-        Ok((a, b))
+        let (a, first) = side(commit_a, None)?;
+        let (b, _) = side(commit_b, Some(first.revision))?;
+        Ok(Comparison {
+            a,
+            b,
+            marks: first.marks,
+        })
     }
+}
+
+/// Why `marks` hide a run, each mark with what it came from: `retired` and
+/// `invalidated`, in that order, empty for a visible run.
+fn hidden_by<'m>(
+    marks: &'m store::MarkView,
+    run: &StoredRun,
+) -> Vec<(&'static str, &'m store::MarkOrigin)> {
+    let mut by = Vec::new();
+    if let Some(origin) = marks.retired(&run.doc.bench) {
+        by.push(("retired", origin));
+    }
+    if let Some(origin) = marks.invalidated(&run.doc.uuid) {
+        by.push(("invalidated", origin));
+    }
+    by
+}
+
+/// A hiding mark as the single view and `--compare` word it: `retired at
+/// TIME on HOST: REASON (mark 8HEX)`.
+fn hidden_detail(kind: &str, origin: &store::MarkOrigin) -> String {
+    format!(
+        "{kind} at {} on {}: {} (mark {})",
+        timestamp(origin.at_unix_ms),
+        origin.hostname,
+        origin.reason,
+        crate::db::short_uuid(&origin.uuid)
+    )
 }
 
 /// A param's value as the table lists it and `--param` matches it: its keys

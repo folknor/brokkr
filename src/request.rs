@@ -19,6 +19,9 @@ pub(crate) struct ResultsQuery {
     /// excludes every typed row.
     pub(crate) params: Vec<(String, String)>,
     pub(crate) top: usize,
+    /// `--hidden`: script-bench runs that marks hide are listed and compared
+    /// too. Typed rows are not marked, so it leaves them as they are.
+    pub(crate) hidden: bool,
     /// The detected project's name, which selects its runs in the per-user
     /// bench store.
     pub(crate) project: String,

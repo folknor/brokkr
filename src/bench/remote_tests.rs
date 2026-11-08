@@ -170,7 +170,7 @@ fn a_run_publishes_and_reads_back_through_the_wire_with_the_protocol_on_every_re
 
     let reader = BenchReader::remote(Client::with_policies(&server, QUICK, QUICK), "pbfhogg");
     assert!(reader.has_runs().unwrap());
-    let table = reader.table(&filter()).unwrap();
+    let table = reader.table(&filter()).unwrap().runs;
     assert_eq!(
         table.iter().map(|r| r.doc.uuid.clone()).collect::<Vec<_>>(),
         [documents[1].uuid.clone(), documents[0].uuid.clone()]
@@ -180,8 +180,47 @@ fn a_run_publishes_and_reads_back_through_the_wire_with_the_protocol_on_every_re
     assert_eq!(found.runs.len(), 1);
     assert!(found.runs[0].children_loaded);
     assert_eq!(found.runs[0].doc, documents[0]);
-    let (a, b) = reader.compare_sides("a", "b", &filter()).unwrap();
-    assert_eq!((a.len(), b.len()), (1, 1));
+    let c = reader.compare_sides("a", "b", &filter()).unwrap();
+    assert_eq!((c.a.len(), c.b.len()), (1, 1));
+
+    // A mark goes through the same wire, its replay answered already applied
+    // and a refusal final, and the reader's marks then hide the bench.
+    let retire = crate::bench::store::MarkRequest {
+        uuid: "d".repeat(32),
+        project: "pbfhogg".into(),
+        at_unix_ms: 1,
+        hostname: "bygg".into(),
+        mark: crate::bench::store::Mark::Retire {
+            name: "cat".into(),
+            reason: "gone".into(),
+        },
+    };
+    let subject = super::publication::Subject {
+        named: "mark d (retire cat)",
+        uncertain_hint: "look",
+    };
+    assert_eq!(
+        client.mark(&retire, &subject).unwrap(),
+        Some(crate::bench::store::Marked::Applied)
+    );
+    assert_eq!(
+        client.mark(&retire, &subject).unwrap(),
+        Some(crate::bench::store::Marked::AlreadyApplied)
+    );
+    let again = crate::bench::store::MarkRequest {
+        uuid: "c".repeat(32),
+        ..retire.clone()
+    };
+    let error = client.mark(&again, &subject).unwrap_err().to_string();
+    assert!(error.contains("already retired"), "{error}");
+    let conflict = crate::bench::store::MarkRequest {
+        at_unix_ms: 2,
+        ..retire
+    };
+    let error = client.mark(&conflict, &subject).unwrap_err().to_string();
+    assert!(error.contains("conflict"), "{error}");
+    assert!(reader.table(&filter()).unwrap().runs.is_empty());
+
     let elsewhere = BenchReader::remote(client, "dellingr")
         .lookup(&documents[0].uuid[..], &filter())
         .unwrap();

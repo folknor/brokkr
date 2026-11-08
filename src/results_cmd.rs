@@ -173,11 +173,11 @@ pub(crate) fn cmd_results(
         ResultsView::Compare {
             commits: (commit_a, commit_b),
         } => {
-            let (bench_a, bench_b) = match &bench {
+            let comparison = match &bench {
                 Some(bench) => bench.compare_sides(commit_a, commit_b, &bench_filter)?,
-                None => (Vec::new(), Vec::new()),
+                None => crate::bench::results::Comparison::default(),
             };
-            let bench_empty = bench_a.is_empty() && bench_b.is_empty();
+            let bench_empty = comparison.a.is_empty() && comparison.b.is_empty();
             let typed_shown =
                 typed && show_typed_compare(&store, commit_a, commit_b, q, &matcher, bench_empty)?;
             if !bench_empty {
@@ -188,9 +188,8 @@ pub(crate) fn cmd_results(
                     "{}",
                     crate::bench::results::format_compare(
                         commit_a,
-                        &bench_a,
                         commit_b,
-                        &bench_b,
+                        &comparison,
                         q.top,
                         q.filter.limit,
                     )
@@ -202,7 +201,7 @@ pub(crate) fn cmd_results(
         ResultsView::Table => {
             let bench_rows = match &bench {
                 Some(bench) => bench.table(&bench_filter)?,
-                None => Vec::new(),
+                None => crate::bench::results::Listing::default(),
             };
             show_table(&store, typed, &q.filter, &matcher, &bench_rows)?;
         }
@@ -219,8 +218,9 @@ fn show_table(
     typed: bool,
     filter: &db::QueryFilter,
     matcher: &DatasetMatcher,
-    bench_rows: &[crate::bench::store::StoredRun],
+    bench: &crate::bench::results::Listing,
 ) -> Result<(), DevError> {
+    let bench_rows = &bench.runs;
     let typed_rows = if typed {
         let results_db = store
             .results_db()
@@ -236,7 +236,10 @@ fn show_table(
         if !typed_rows.is_empty() {
             println!();
         }
-        println!("{}", crate::bench::results::format_table(bench_rows));
+        println!(
+            "{}",
+            crate::bench::results::format_table(bench_rows, &bench.marks)
+        );
     }
     if typed_rows.is_empty() && bench_rows.is_empty() {
         output::result_msg("no matching results");
@@ -257,6 +260,7 @@ fn bench_filter(q: &ResultsQuery) -> BenchFilter {
         grep: f.grep.clone(),
         grep_v: f.grep_v.clone(),
         excluded: f.mode.is_some() || f.dataset.is_some() || !f.meta.is_empty(),
+        hidden: q.hidden,
         limit: f.limit,
     }
 }
@@ -272,10 +276,13 @@ fn show_bench_uuid(lookup: &Lookup, typed: bool, typed_candidates: usize, top: u
         if lookup.runs.len() == 1 && lookup.candidates + typed_candidates == 1 {
             println!(
                 "{}",
-                crate::bench::results::format_single(&lookup.runs[0], top)
+                crate::bench::results::format_single(&lookup.runs[0], &lookup.marks, top)
             );
         } else {
-            println!("{}", crate::bench::results::format_table(&lookup.runs));
+            println!(
+                "{}",
+                crate::bench::results::format_table(&lookup.runs, &lookup.marks)
+            );
         }
     }
     if lookup.omitted > 0 {

@@ -6,10 +6,10 @@
 use std::fmt::Write;
 
 use super::super::store::{
-    CaptureOutcome, Child, ChildEnding, ExecutableIdentity, IterationOutcome, Measurement,
-    RunDocument, RunOutcome, StoredRun,
+    CaptureOutcome, Child, ChildEnding, ExecutableIdentity, IterationOutcome, MarkView,
+    Measurement, RunDocument, RunOutcome, StoredRun,
 };
-use super::{hotpath_report, ms, short_commit, timestamp, verdict};
+use super::{hidden_by, hidden_detail, hotpath_report, ms, short_commit, timestamp, verdict};
 
 type Record = serde_json::Map<String, serde_json::Value>;
 
@@ -62,9 +62,9 @@ fn params(out: &mut String, doc: &RunDocument) {
     }
 }
 
-/// Uuid, start, commit, bench, params, outcome, the result's wall and
-/// verdict.
-fn identity(out: &mut String, run: &StoredRun) {
+/// Uuid, start, commit, bench, what hides it, params, outcome, the result's
+/// wall and verdict.
+fn identity(out: &mut String, run: &StoredRun, marks: &MarkView) {
     let doc = &run.doc;
     field(out, "uuid", &doc.uuid.chars().take(8).collect::<String>());
     field(out, "started", &timestamp(doc.started_unix_ms));
@@ -78,6 +78,13 @@ fn identity(out: &mut String, run: &StoredRun) {
         "bench",
         &format!("{} (project {})", doc.bench, doc.project),
     );
+    for (i, (kind, origin)) in hidden_by(marks, run).into_iter().enumerate() {
+        field(
+            out,
+            if i == 0 { "hidden" } else { "" },
+            &hidden_detail(kind, origin),
+        );
+    }
     params(out, doc);
     let outcome = match &doc.outcome {
         RunOutcome::Completed => "completed".to_owned(),
@@ -338,11 +345,12 @@ fn record(out: &mut String, label: &str, record: &Record, top: usize, reports: &
     }
 }
 
-/// Render one run in full. Its children must be loaded to be shown.
-pub(crate) fn format_single(run: &StoredRun, top: usize) -> String {
+/// Render one run in full, resolved against `marks`, the marks it was
+/// selected under. Its children must be loaded to be shown.
+pub(crate) fn format_single(run: &StoredRun, marks: &MarkView, top: usize) -> String {
     let doc = &run.doc;
     let mut out = String::new();
-    identity(&mut out, run);
+    identity(&mut out, run, marks);
     out.push('\n');
     context(&mut out, run);
     out.push('\n');

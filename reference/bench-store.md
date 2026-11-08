@@ -411,6 +411,17 @@ The same latch serves the local store: a `StoreError` is classified by the
 kind it would travel as (`Kind::of`), so a local `Failed` is retried and a
 final error after an uncertain attempt ends the publication uncertain.
 
+**Marks** (`src/bench/marking.rs`) are written under the same latch and the
+publication policy, as one request minted once per command: the same uuid,
+time, host and encoded bytes on every attempt, a conflict read under the
+mark's uuid, and only a success settling it: locally `Applied` or
+`AlreadyApplied`, remotely any HTTP 200, whatever its body. A
+command run again is a new request with a new uuid, never a replay, so an
+uncertain end is answered by reading the current state, which proves nothing
+about whether the uncertain attempt may still commit. A local mark needs an
+existing store (`Store::open_existing`, which never creates the file): with
+none, nothing has been published to mark and the command fails.
+
 ## The migration chain
 
 `schema.rs`'s `MIGRATIONS` owns the schema: step N takes `user_version` N to

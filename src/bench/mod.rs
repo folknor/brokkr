@@ -12,13 +12,15 @@
 //! (`store::wire`) is served by the `brokkr-results-server` binary, and
 //! `remote` is brokkr's client of it, used in place of the local store when
 //! the user-wide config names a server; `publication` is the retry and
-//! uncertainty latch both share.
+//! uncertainty latch both share, and `marking` appends the marks `brokkr
+//! results`' flags make through it.
 
 pub(crate) mod evidence;
 mod external;
 mod json;
 mod library;
 mod lua;
+pub(crate) mod marking;
 #[cfg(test)]
 mod marks_tests;
 mod params;
@@ -30,9 +32,10 @@ pub(crate) mod runner;
 mod script_lines;
 // The server's side of the wire (`wire::execute`, `wire::serve`) and the
 // readers of a whole stored document and of the transaction state are the
-// server's alone, and the mark writes and resolution helpers wait for
-// `brokkr results`' mark flags: an expectation goes unfulfilled, and so
-// fails the build, once brokkr uses them all.
+// server's alone, and the marks no `brokkr results` flag makes yet
+// (invalidate, revalidate, rename) and their resolution helpers wait for
+// theirs: an expectation goes unfulfilled, and so fails the build, once
+// brokkr uses them all.
 #[cfg_attr(
     not(test),
     expect(
