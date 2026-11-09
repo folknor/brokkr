@@ -59,7 +59,8 @@ pub(super) fn run(
             crate::clean::layout::PROJECT_STATE_DIR
         ));
     }
-    let _log = spec.run_log.map(|kind| {
+    let lock_policy = spec.lock_for(&cli.command);
+    let _log = spec.run_log_for(&cli.command).map(|kind| {
         crate::run_log::RunLog::begin(
             state_root
                 .expect("logging commands resolve a state root")
@@ -67,7 +68,7 @@ pub(super) fn run(
             kind,
         )
     });
-    let _lock = match spec.lock {
+    let _lock = match lock_policy {
         cli::LockPolicy::None => None,
         cli::LockPolicy::Blocking | cli::LockPolicy::NonBlocking => {
             let ctx = lockfile::LockContext {
@@ -84,7 +85,7 @@ pub(super) fn run(
             };
             Some(lockfile::acquire_for_command(
                 &ctx,
-                spec.lock == cli::LockPolicy::NonBlocking,
+                lock_policy == cli::LockPolicy::NonBlocking,
             )?)
         }
     };
@@ -112,7 +113,9 @@ pub(super) fn run(
     // Every detected tree is carried, active policy or not: activation also
     // recovers a cargo config a crashed run left filtered, which must happen
     // even after the policy that filtered it is gone.
-    context::set_configured_tree(detection.map(|d| {
+    // A read-only invocation carries no tree, so nothing it reaches can
+    // activate a policy on it.
+    context::set_configured_tree(detection.filter(|_| !cli::CommandSpec::reads_only(&cli.command)).map(|d| {
         (
             d.build_root.as_path().to_path_buf(),
             crate::tree_policy::TreePolicy::of(&d.config),
@@ -253,6 +256,7 @@ pub(super) fn run(
             commit,
             iterations,
             hotpath,
+            dry_run,
             bench,
         } => crate::bench::runner::run(
             &crate::bench::runner::BenchArgs {
@@ -261,6 +265,7 @@ pub(super) fn run(
                 iterations: *iterations,
                 hotpath: *hotpath,
                 params: bench.iter().skip(1).cloned().collect(),
+                dry_run: *dry_run,
             },
             require_detection(detection)?,
             invocation,
@@ -1181,6 +1186,7 @@ fn run_project(
             release,
             profile,
             commit,
+            dry_run,
         } => {
             use crate::measure::MeasureMode;
             use crate::pbfhogg::library::Target;
@@ -1244,6 +1250,7 @@ fn run_project(
                             build_root,
                             invocation,
                         }),
+                        dry_run,
                     })
                 },
             )

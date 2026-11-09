@@ -569,11 +569,44 @@ fn hash_file_cached(
     {
         return Ok(hit);
     }
-    let digest = hash_file(path)?;
+    let (digest, stamp) = hash_file_stable(path)?;
     if let Some(key) = key {
         cache.record(key, stamp, digest);
     }
     Ok(digest)
+}
+
+/// Hash `path` through one open descriptor, refusing a file that changed
+/// while it was read: its stamp read from the descriptor before and after
+/// must agree, and the path must still name that file. Nothing a refused
+/// read saw is returned or cached. This catches a write or a replacement
+/// that overlaps the read, not one after it, and is no snapshot.
+fn hash_file_stable(path: &Path) -> Result<(Xxh128, FileStamp), DevError> {
+    use std::os::unix::fs::MetadataExt;
+    let mut file = std::fs::File::open(path)?;
+    let opened = file.metadata()?;
+    let before = FileStamp::of(&opened);
+    let mut hasher = Xxh3::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let after = FileStamp::of(&file.metadata()?);
+    // An inode number is unique on its device alone: the path must name the
+    // same (device, inode) the descriptor reads.
+    let named = std::fs::metadata(path)?;
+    if before != after || (named.dev(), named.ino()) != (opened.dev(), opened.ino()) {
+        return Err(DevError::Preflight(vec![format!(
+            "{} changed while it was hashed: something wrote or replaced it during the read, \
+             so no digest describes it; run again once nothing writes it",
+            path.display()
+        )]));
+    }
+    Ok((Xxh128(hasher.digest128().to_be_bytes()), after))
 }
 
 /// Compute XXH128 of a file, reading in 64 KB chunks.

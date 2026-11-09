@@ -84,6 +84,9 @@ pub(crate) struct LibraryArgs<'a> {
     /// `--bench N`, `--hotpath N` or `--alloc N`: measure the one scenario
     /// `run` names.
     pub(crate) measure: Option<MeasureArgs<'a>>,
+    /// `--dry-run`: build the harness and read its describe document as the
+    /// run would, check what `run` asks of it, and stop before any scenario.
+    pub(crate) dry_run: bool,
 }
 
 /// A measurement and what its session is made from.
@@ -117,27 +120,7 @@ pub(crate) struct RunArgs<'a> {
 /// `brokkr library [SCENARIO | --all]`: build the harness, read its describe
 /// document, then list the scenarios, run one, or certify them all.
 pub(crate) fn library(args: &LibraryArgs<'_>) -> Result<(), DevError> {
-    // The requirement list is taken once, before anything is built: what is
-    // printed, classified, hashed and stored is this one value.
-    let require = match &args.run {
-        Some(RunArgs {
-            target: Target::All,
-            ..
-        }) => Some(certify::Requirements::new(
-            args.require
-                .ok_or_else(|| {
-                    DevError::Config(
-                        "brokkr library --all certifies against [pbfhogg.library.require], \
-                         which brokkr.toml does not have: list each required capability id \
-                         with its meaning there, or leave the table empty to require none \
-                         (see `brokkr man library`, Certification)"
-                            .into(),
-                    )
-                })?
-                .clone(),
-        )),
-        _ => None,
-    };
+    let require = requirements(args)?;
     let _lock = crate::context::reenter_command_lock()?;
     // One window for the whole command: the build, describe and run guards
     // nest inside it, so a stop between them or during parsing is seen, not
@@ -146,8 +129,9 @@ pub(crate) fn library(args: &LibraryArgs<'_>) -> Result<(), DevError> {
     // A measurement's session first: a dirty tree is refused (or, with
     // `--force`, unstored) before anything is built, as for every measured
     // command.
+    // No session for a dry run: `profiled` below still picks its build.
     let session = match (&args.measure, &args.run) {
-        (Some(measure), Some(run)) => Some(session(measure, run.paths)?),
+        (Some(measure), Some(run)) if !args.dry_run => Some(session(measure, run.paths)?),
         _ => None,
     };
     let profiled = args.measure.as_ref().and_then(|m| m.mode.profiled());
@@ -166,7 +150,7 @@ pub(crate) fn library(args: &LibraryArgs<'_>) -> Result<(), DevError> {
         args.harness,
         profile.clone(),
         profiled,
-        args.run.is_some(),
+        args.run.is_some() && !args.dry_run,
         args.build_root,
         args.project_root,
     )?;
@@ -180,6 +164,9 @@ pub(crate) fn library(args: &LibraryArgs<'_>) -> Result<(), DevError> {
     let Some(run) = &args.run else {
         return list(&doc);
     };
+    if args.dry_run {
+        return dry_run(&doc, run, profiled, args.project_root);
+    }
     let cli = cli
         .as_ref()
         .ok_or_else(|| DevError::Internal("a library run was built without its CLI".into()))?;
@@ -225,6 +212,81 @@ pub(crate) fn library(args: &LibraryArgs<'_>) -> Result<(), DevError> {
         (Target::All, None) => Err(DevError::Internal(
             "a library certification lost its requirement list".into(),
         )),
+    }
+}
+
+/// `--all`'s requirement list, taken once, before anything is built: what is
+/// printed, classified, hashed and stored is this one value. `None` for any
+/// other invocation.
+fn requirements(args: &LibraryArgs<'_>) -> Result<Option<certify::Requirements>, DevError> {
+    let Some(RunArgs {
+        target: Target::All,
+        ..
+    }) = &args.run
+    else {
+        return Ok(None);
+    };
+    let require = args.require.ok_or_else(|| {
+        DevError::Config(
+            "brokkr library --all certifies against [pbfhogg.library.require], which brokkr.toml \
+             does not have: list each required capability id with its meaning there, or leave \
+             the table empty to require none (see `brokkr man library`, Certification)"
+                .into(),
+        )
+    })?;
+    Ok(Some(certify::Requirements::new(require.clone())))
+}
+
+/// `brokkr library SCENARIO|--all --dry-run`, once the harness described
+/// itself: the scenario found and, when profiled, allowed; every dataset role
+/// of it (of every scenario for `--all`) bound, its pin checked, every
+/// scenario's refusals collected so the whole invocation is judged at once.
+/// No scenario runs, no run directory is made.
+fn dry_run(
+    doc: &describe::Describe,
+    run: &RunArgs<'_>,
+    profiled: Option<crate::measure::ProfiledMode>,
+    project_root: &Path,
+) -> Result<(), DevError> {
+    let scenarios: Vec<&describe::Scenario> = match run.target {
+        Target::One(id) => {
+            let scenario = find_scenario(doc, id)?;
+            if let Some(mode) = profiled {
+                profiling_allowed(doc, scenario, mode)?;
+            }
+            vec![scenario]
+        }
+        Target::All => doc.scenarios.iter().collect(),
+    };
+    let mut refusals = Vec::new();
+    for scenario in scenarios {
+        match bind_datasets(scenario, run, project_root) {
+            Ok((_, bindings)) => {
+                let roles: Vec<String> = bindings
+                    .iter()
+                    .map(|b| format!("{} = {}", b.role, output::path(&b.path)))
+                    .collect();
+                output::dry_run_msg(&format!(
+                    "library {}: {}, {}",
+                    scenario.id,
+                    output::count(scenario.calls.len(), "call"),
+                    if roles.is_empty() {
+                        "no dataset roles".to_owned()
+                    } else {
+                        roles.join(", ")
+                    }
+                ));
+            }
+            Err(error) => refusals.push(error.to_string()),
+        }
+    }
+    match refusals.len() {
+        0 => {
+            output::dry_run_msg("ok");
+            Ok(())
+        }
+        1 => Err(DevError::Config(refusals.remove(0))),
+        _ => Err(DevError::Preflight(refusals)),
     }
 }
 

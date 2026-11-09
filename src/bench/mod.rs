@@ -207,6 +207,9 @@ pub(crate) fn check_script(bench: &Bench) -> ScriptCheck {
                 .problems
                 .iter()
                 .map(|problem| finding(file, describe(problem)))
+                .chain(
+                    unvalidated(bench, names.validate).map(|problem| finding(file, problem)),
+                )
                 .collect(),
             // Worded as a finding is, so an inline script's line says whose
             // it is the same way.
@@ -221,6 +224,30 @@ pub(crate) fn check_script(bench: &Bench) -> ScriptCheck {
             }),
         },
     }
+}
+
+/// The refusal of a bench whose params leave their checking to
+/// `validate()` while its script declares none, naming them; `None` when the
+/// script declares one or no param is `validated`.
+pub(crate) fn unvalidated(bench: &Bench, declares_validate: bool) -> Option<String> {
+    if declares_validate {
+        return None;
+    }
+    let names: Vec<String> = bench
+        .params
+        .iter()
+        .filter(|(_, p)| p.domain == crate::config::bench::Domain::Validated)
+        .map(|(name, _)| format!("--{name}"))
+        .collect();
+    (!names.is_empty()).then(|| {
+        format!(
+            "{} {} validated = true, but the script declares no validate(): define function \
+             validate(params, keys) at its top level to check {}",
+            names.join(", "),
+            if names.len() == 1 { "is" } else { "are" },
+            if names.len() == 1 { "it" } else { "them" }
+        )
+    })
 }
 
 #[cfg(test)]

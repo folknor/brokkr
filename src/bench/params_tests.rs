@@ -64,7 +64,7 @@ params.dataset = { from = "datasets", default = "denmark" }
 params.snapshot = { from = "datasets.{dataset}.snapshot", default = "base" }
 params.variant = { from = "datasets.{dataset}.snapshot.{snapshot}.pbf", default = "indexed" }
 params.osc = { from = "datasets.{dataset}.osc", many = true }
-params.jobs = { help = "threads" }
+params.jobs = { free = true, help = "threads" }
 
 [box.datasets.denmark.pbf.indexed]
 file = "dk.pbf"
@@ -210,7 +210,7 @@ script = "function bench() end"
 params.scale = { from = "data.workloads", default = "bench" }
 params.workload = { from = "data.workloads.{scale}", required = true }
 params.field = { from = "data.workloads.{scale}.{workload}", default = "nope" }
-params.mode = { required = true }
+params.mode = { free = true, required = true }
 params.tags = { from = "data.tags", many = true, required = true }
 
 [data.workloads.bench.a]
@@ -362,7 +362,7 @@ const COLLECTIONS: &str = r#"
 script = "function bench() end"
 params.dataset = { from = "datasets", default = "denmark" }
 params.osc = { from = "datasets.{dataset}.osc", many = true }
-params.words = { many = true }
+params.words = { free = true, many = true }
 
 [box.datasets.denmark.pbf.raw]
 file = "dk.pbf"
@@ -494,7 +494,7 @@ fn a_fan_out_over_no_keys_is_refused_and_defaults_may_fan_out() {
 script = "function bench() end"
 params.group = { from = "data.groups" }
 params.item = { from = "data.groups.{group}.items" }
-params.n = { default = "1,2" }
+params.n = { free = true, default = "1,2" }
 params.coll = { from = "data.groups.{group}.items", many = true }
 
 [data.groups.a.items.x]
@@ -541,7 +541,7 @@ file = "gone.bin"
     let given = parse(&f.bench, &tokens(&["--w", "x,y"])).unwrap();
     let mut bound = bind(&f.bench, &given, &f.view).unwrap();
     assert_eq!(union_inputs(&bound), [f.dir.join("f.bin")]);
-    let err = digest_arms(&mut bound, &f.dir, &f.sources)
+    let err = digest_arms(&mut bound, Depth::Every, &f.dir, &f.sources)
         .unwrap_err()
         .to_string();
     assert!(
@@ -550,11 +550,11 @@ file = "gone.bin"
     );
     let given = parse(&f.bench, &tokens(&["--w", "x"])).unwrap();
     let mut bound = bind(&f.bench, &given, &f.view).unwrap();
-    digest_arms(&mut bound, &f.dir, &f.sources).unwrap();
+    digest_arms(&mut bound, Depth::Every, &f.dir, &f.sources).unwrap();
     // Within one arm too, a refused file does not hide the next.
     let given = parse(&f.bench, &tokens(&["--c", "z,q"])).unwrap();
     let mut bound = bind(&f.bench, &given, &f.view).unwrap();
-    let err = digest_arms(&mut bound, &f.dir, &f.sources)
+    let err = digest_arms(&mut bound, Depth::Every, &f.dir, &f.sources)
         .unwrap_err()
         .to_string();
     assert!(
@@ -568,7 +568,7 @@ fn a_dotted_key_is_refused_only_where_it_is_substituted() {
     let body = r#"
 [bench.b]
 script = "function bench() end"
-params.group = {}
+params.group = { free = true }
 params.case = { from = "data.{group}" }
 params.leaf = { from = "data.cases" }
 

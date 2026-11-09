@@ -552,6 +552,13 @@ In depth: `brokkr man clippy`."
         #[arg(long)]
         hotpath: bool,
 
+        /// Check the invocation and stop: bind and validate every arm,
+        /// resolve the commit, check the inputs and their pins, then print
+        /// each arm. Builds, preflights, holds and stores nothing, and takes
+        /// no lock, so a queue of benches can be checked while one runs.
+        #[arg(long)]
+        dry_run: bool,
+
         /// The bench to run, then its own params; clap reads nothing after
         /// NAME, `--help` included. Omit for the index.
         #[arg(value_name = "NAME [PARAMS]", trailing_var_arg = true)]
@@ -2116,6 +2123,15 @@ Examples:
         /// current tree. Config still comes from the current tree.
         #[arg(long, value_name = "REF")]
         commit: Option<String>,
+
+        /// Check the invocation and stop before any scenario runs. The
+        /// scenarios are the harness's to declare, so this builds the harness
+        /// as the run would (in the --commit worktree, with the profile and
+        /// any profiling feature) and reads its describe document; it then
+        /// finds the scenario, checks profiling, binds every dataset role and
+        /// for --all the requirement list. Builds no CLI, stores nothing.
+        #[arg(long, requires = "library_run")]
+        dry_run: bool,
     },
     /// Download a dataset from Geofabrik or planet.openstreetmap.org
     #[command(display_order = 20)]

@@ -31,6 +31,7 @@ brokkr library SCENARIO [--dataset NAME] [--snapshot KEY] [--commit REF] [...]
 brokkr library SCENARIO --bench [N] [--force] [...]
 brokkr library SCENARIO --hotpath [N] | --alloc [N] [--force] [...]
 brokkr library --all [--dataset NAME] [--snapshot KEY] [--commit REF] [...]
+brokkr library SCENARIO|--all --dry-run [...]
 ```
 
 Bare, builds the harness and lists the scenarios it declares: per scenario
@@ -79,6 +80,18 @@ Certification). It never measures. `--all` and `SCENARIO` exclude each other.
   `--variant`: each dataset role names its own variant, resolved in the
   chosen dataset and snapshot as `brokkr man datasets` describes, its
   `xxhash` checked when one is configured. Both need `SCENARIO` or `--all`.
+- `--dry-run` checks an invocation and stops before any scenario runs.
+  The scenarios are the harness's to declare, so unlike a typed command's
+  dry run it builds the harness as the run would (in the `--commit`
+  worktree, with the chosen profile, and with `--hotpath` or `--alloc` its
+  feature) and runs it once for its describe document; then it finds the
+  scenario, refuses profiling one not declared `hotpath`, binds every
+  dataset role of it (of every scenario under `--all`, every refusal named
+  at once) with its `xxhash` checked, and for `--all` reads
+  `[pbfhogg.library.require]`, printing one line per scenario and `ok`. It
+  builds no CLI, makes no run directory, opens no measurement session and
+  writes no record. It takes the lock, since it builds. Needs `SCENARIO` or
+  `--all`.
 
 ## `[pbfhogg.library]`
 

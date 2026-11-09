@@ -73,6 +73,8 @@ pub(crate) struct NameCheck {
     /// its names were not checked, since a script holding the global table
     /// can define any name through it.
     pub(crate) unchecked_at: Option<u32>,
+    /// Whether the script declares `validate`.
+    pub(crate) validate: bool,
 }
 
 /// Compile `source` without running any of it, then resolve its global
@@ -97,6 +99,7 @@ pub(crate) fn check(source: &[u8], lines: Option<&LineMap>) -> Result<NameCheck,
         return Ok(NameCheck {
             problems: Vec::new(),
             unchecked_at: Some(mapped(lines, global.line)),
+            validate: script.validate,
         });
     }
     let assigned: std::collections::HashSet<&[u8]> = accesses
@@ -141,6 +144,7 @@ pub(crate) fn check(source: &[u8], lines: Option<&LineMap>) -> Result<NameCheck,
     Ok(NameCheck {
         problems,
         unchecked_at: None,
+        validate: script.validate,
     })
 }
 
@@ -261,6 +265,8 @@ pub(crate) struct Script {
     /// `preflight` anywhere in it, as dellingr records one while compiling.
     /// Decided here, once, from the source: never from what a run leaves.
     preflight: bool,
+    /// Whether the script declares `validate`, decided as `preflight` is.
+    validate: bool,
     /// The modules `require` loads, frozen with the script.
     library: Option<Arc<super::library::Library>>,
 }
@@ -270,6 +276,12 @@ impl Script {
     /// every arm before anything is built.
     pub(crate) fn has_preflight(&self) -> bool {
         self.preflight
+    }
+
+    /// Whether the script declares `validate`, so the runner calls it for
+    /// every arm as soon as the params bind.
+    pub(crate) fn has_validate(&self) -> bool {
+        self.validate
     }
 
     /// The script with the library its `require` loads from.
@@ -294,10 +306,8 @@ pub(crate) fn load_script(
     let lines = lines.map(Arc::new);
     ::dellingr::Program::compile(source, chunk.map(str::as_bytes))
         .map(|program| Script {
-            preflight: program
-                .globals()
-                .iter()
-                .any(|a| a.kind == ::dellingr::AccessKind::Write && &*a.name == b"preflight"),
+            preflight: assigns(&program, b"preflight"),
+            validate: assigns(&program, b"validate"),
             program,
             lines: lines.clone(),
             library: None,
@@ -306,6 +316,15 @@ pub(crate) fn load_script(
             line: mapped(lines.as_deref(), error.line_num()),
             message: error.kind().to_string(),
         })
+}
+
+/// Whether `program` makes a bare global assignment of `name` anywhere: how
+/// a script declares `preflight` and `validate`.
+fn assigns(program: &::dellingr::Program, name: &[u8]) -> bool {
+    program
+        .globals()
+        .iter()
+        .any(|a| a.kind == ::dellingr::AccessKind::Write && &*a.name == name)
 }
 
 /// `line` in the config file, or as it is without a map (0 stays 0).
@@ -523,8 +542,13 @@ impl Modules {
 /// script requires runs in the phase it was required from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
-    /// The chunk's top level: nothing launches, no handle is made.
+    /// A chunk's top level, the script's or a module's as `require` runs it:
+    /// nothing launches, no handle is made, `since()` is refused. What runs
+    /// there is declarations and computation over `config()` and `json`.
     TopLevel,
+    /// Inside `validate()`, as soon as the params bind: what the top level
+    /// may do, and no more.
+    Validate,
     /// Inside `preflight()`, before anything is built: external programs
     /// only, no handle.
     Preflight,
@@ -532,45 +556,77 @@ enum Phase {
     Bench,
 }
 
-/// How a preflight ended. Every failure's reason follows the script line
-/// that raised it, when one did.
+/// A function a script may declare beside `bench`, which the runner calls
+/// for every arm before anything is built: each in a fresh State, the
+/// chunk's top level first, passing by returning nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Hook {
+    /// `validate(params, keys)`: are these params ones the bench can run?
+    /// Pure: no child, no handle, no `since()`.
+    Validate,
+    /// `preflight(params, keys)`: does the host provide what the bench
+    /// needs? External programs only.
+    Preflight,
+}
+
+impl Hook {
+    /// The global the script declares it as.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Validate => "validate",
+            Self::Preflight => "preflight",
+        }
+    }
+
+    fn phase(self) -> Phase {
+        match self {
+            Self::Validate => Phase::Validate,
+            Self::Preflight => Phase::Preflight,
+        }
+    }
+}
+
+/// How a hook ended. Every failure's reason follows the script line that
+/// raised it, when one did.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PreflightOutcome {
-    /// `preflight()` returned nothing.
+pub(crate) enum HookOutcome {
+    /// The hook returned nothing.
     Passed,
     /// The script refused: `fail(reason)` or a failed `r:ok()`, what it
     /// checked is not there.
     Refused(String),
     /// The script itself is wrong: a Lua error, a builtin it may not call or
-    /// called wrongly, a preflight that is not a function or returned a
-    /// value.
+    /// called wrongly, a hook that is not a function or returned a value.
     Broken(String),
-    /// brokkr's own machinery failed while the preflight ran.
+    /// brokkr's own machinery failed while the hook ran.
     Failed(String),
     Interrupted,
 }
 
-/// What one preflight did: how it ended, and every library module it asked
+/// What one hook did: how it ended, and every library module it asked
 /// `require` for, loaded or not.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Preflighted {
-    pub(crate) outcome: PreflightOutcome,
+pub(crate) struct Hooked {
+    pub(crate) outcome: HookOutcome,
     pub(crate) modules: std::collections::BTreeSet<String>,
 }
 
-/// Run a declared preflight in a fresh State: the chunk's top level, then
-/// `preflight(params, keys)`, which passes by returning nothing. Returns the
-/// host back.
-pub(crate) fn run_preflight<H: Host>(script: &Script, args: &Args, host: H) -> (Preflighted, H) {
+/// Run a declared hook in a fresh State: the chunk's top level, then
+/// `hook(params, keys)`, which passes by returning nothing. Returns the host
+/// back.
+pub(crate) fn run_hook<H: Host>(
+    hook: Hook,
+    script: &Script,
+    args: &Args,
+    host: H,
+) -> (Hooked, H) {
     let interrupt = ::dellingr::Interrupt::new();
     let (mut state, ok, marks) = match fresh_state::<H>(Some(interrupt.clone())) {
         Ok(fresh) => fresh,
         Err(error) => {
             return (
-                Preflighted {
-                    outcome: PreflightOutcome::Failed(format!(
-                        "cannot set up the Lua state: {error}"
-                    )),
+                Hooked {
+                    outcome: HookOutcome::Failed(format!("cannot set up the Lua state: {error}")),
                     modules: std::collections::BTreeSet::new(),
                 },
                 host,
@@ -585,41 +641,43 @@ pub(crate) fn run_preflight<H: Host>(script: &Script, args: &Args, host: H) -> (
         modules: Modules::of(script),
     }));
     let outcome = watched::<H, _>(&interrupt, || {
-        preflight::<H>(&mut state, script, args, &marks)
+        call_hook::<H>(hook, &mut state, script, args, &marks)
     });
     let ctx = state
         .user_data_mut::<Option<Ctx<H>>>()
         .and_then(Option::take);
     match ctx {
         Some(ctx) => (
-            Preflighted {
+            Hooked {
                 outcome,
                 modules: ctx.modules.attempted,
             },
             ctx.host,
         ),
         // The context is set above and only taken here.
-        None => unreachable!("the preflight's host context went missing"),
+        None => unreachable!("the hook's host context went missing"),
     }
 }
 
-fn preflight<H: Host>(
+fn call_hook<H: Host>(
+    hook: Hook,
     state: &mut State,
     script: &Script,
     args: &Args,
     marks: &Marks,
-) -> PreflightOutcome {
+) -> HookOutcome {
+    let name = hook.name();
     let lines = Lines::of(script);
     let broken = |error: Error| {
         if matches!(error.kind(), ErrorKind::Interrupted) {
-            return PreflightOutcome::Interrupted;
+            return HookOutcome::Interrupted;
         }
         match abort_of(&error) {
-            Some(Abort::Interrupted) => PreflightOutcome::Interrupted,
-            Some(Abort::Fail(why)) => PreflightOutcome::Refused(located(&error, lines, why)),
-            Some(Abort::Failed(why)) => PreflightOutcome::Broken(located(&error, lines, why)),
-            Some(Abort::Machinery(why)) => PreflightOutcome::Failed(located(&error, lines, why)),
-            None => PreflightOutcome::Broken(rendered(error, lines)),
+            Some(Abort::Interrupted) => HookOutcome::Interrupted,
+            Some(Abort::Fail(why)) => HookOutcome::Refused(located(&error, lines, why)),
+            Some(Abort::Failed(why)) => HookOutcome::Broken(located(&error, lines, why)),
+            Some(Abort::Machinery(why)) => HookOutcome::Failed(located(&error, lines, why)),
+            None => HookOutcome::Broken(rendered(error, lines)),
         }
     };
     if let Err(error) = state
@@ -628,24 +686,24 @@ fn preflight<H: Host>(
     {
         return broken(error);
     }
-    if let Err(error) = state.get_global("preflight") {
-        return PreflightOutcome::Broken(format!("cannot read preflight: {error}"));
+    if let Err(error) = state.get_global(name) {
+        return HookOutcome::Broken(format!("cannot read {name}: {error}"));
     }
     if state.typ(-1) != LuaType::Function {
-        return PreflightOutcome::Broken(format!(
-            "the script assigns preflight, but its top level left it a {}: define function \
-             preflight(params, keys) unconditionally and branch inside it",
+        return HookOutcome::Broken(format!(
+            "the script assigns {name}, but its top level left it a {}: define function \
+             {name}(params, keys) unconditionally and branch inside it",
             state.typ(-1).as_str()
         ));
     }
     if let Err(error) = push_value(state, &Value::Table(args.params.clone()), marks) {
-        return PreflightOutcome::Broken(format!("cannot make the params table: {error}"));
+        return HookOutcome::Broken(format!("cannot make the params table: {error}"));
     }
     if let Err(error) = push_value(state, &Value::Table(args.keys.clone()), marks) {
-        return PreflightOutcome::Broken(format!("cannot make the keys table: {error}"));
+        return HookOutcome::Broken(format!("cannot make the keys table: {error}"));
     }
     if let Some(ctx) = ctx::<H>(state) {
-        ctx.phase = Phase::Preflight;
+        ctx.phase = hook.phase();
     }
     // Every value it returns is counted: the function and its two arguments
     // sit at the top, and what is left above their base after the call is
@@ -659,9 +717,9 @@ fn preflight<H: Host>(
         return broken(error);
     }
     match state.get_top().saturating_sub(base) {
-        0 => PreflightOutcome::Passed,
-        n => PreflightOutcome::Broken(format!(
-            "preflight() returned {n} value{} (the first a {}): it passes by returning nothing \
+        0 => HookOutcome::Passed,
+        n => HookOutcome::Broken(format!(
+            "{name}() returned {n} value{} (the first a {}): it passes by returning nothing \
              and refuses with fail()",
             if n == 1 { "" } else { "s" },
             state.typ(-isize::try_from(n).unwrap_or(1)).as_str()
@@ -1025,11 +1083,7 @@ fn stop_first<H: Host>(state: &mut State) -> Result<(), Error> {
 fn bench_host<'a, H: Host>(state: &'a mut State, name: &str) -> Result<&'a mut H, Error> {
     let phase = ctx::<H>(state).map(|c| c.phase);
     if phase != Some(Phase::Bench) {
-        let place = if phase == Some(Phase::Preflight) {
-            "inside preflight(), before anything is built"
-        } else {
-            "at the script's top level"
-        };
+        let place = phase.map_or("at a chunk's top level", Phase::place);
         return Err(raise_failed(
             state,
             format!("{name}() is only available inside bench(), not {place}"),
@@ -1061,19 +1115,46 @@ fn launch_host<'a, H: Host>(
                 ),
             ));
         }
-        _ => {
+        other => {
+            let place = other.map_or("at a chunk's top level", Phase::place);
             return Err(raise_failed(
                 state,
-                format!(
-                    "{name}() is only available inside bench() and preflight(), not at the \
-                     script's top level"
-                ),
+                format!("{name}() is only available inside bench() and preflight(), not {place}"),
             ));
         }
     }
     match ctx::<H>(state) {
         Some(ctx) => Ok(&mut ctx.host),
         None => Err(raise_failed(state, format!("{name}(): no bench context"))),
+    }
+}
+
+/// The host, for `since()`: a git question, asked inside `bench()` and
+/// `preflight()` only, so a chunk's top level and `validate()` stay pure.
+fn git_host<'a, H: Host>(state: &'a mut State, name: &str) -> Result<&'a mut H, Error> {
+    let phase = ctx::<H>(state).map(|c| c.phase);
+    if !matches!(phase, Some(Phase::Bench | Phase::Preflight)) {
+        let place = phase.map_or("at a chunk's top level", Phase::place);
+        return Err(raise_failed(
+            state,
+            format!("{name}() is only available inside bench() and preflight(), not {place}"),
+        ));
+    }
+    match ctx::<H>(state) {
+        Some(ctx) => Ok(&mut ctx.host),
+        None => Err(raise_failed(state, format!("{name}(): no bench context"))),
+    }
+}
+
+impl Phase {
+    /// Where a refused builtin was called, for its message.
+    fn place(self) -> &'static str {
+        match self {
+            Self::TopLevel => "at a chunk's top level (the script's, or a module's as require runs it)",
+            Self::Validate => "inside validate(), which only judges the params",
+            Self::Preflight => "inside preflight(), before anything is built",
+            Self::Bench => "inside bench()",
+        }
     }
 }
 
@@ -1115,7 +1196,7 @@ fn string_arg(state: &mut State, idx: isize, function: &str) -> Result<String, E
 fn lua_since<H: Host>(state: &mut State) -> Result<u8, Error> {
     stop_first::<H>(state)?;
     let sha = string_arg(state, 1, "since")?;
-    let answer = any_host::<H>(state, "since")?.since(&sha);
+    let answer = git_host::<H>(state, "since")?.since(&sha);
     match answer {
         Ok(yes) => {
             state.push_boolean(yes)?;
@@ -1126,7 +1207,7 @@ fn lua_since<H: Host>(state: &mut State) -> Result<u8, Error> {
 }
 
 /// `require(name)`: the export of the library module `name`, loaded on its
-/// first `require` in this State, in the phase that asked for it, and cached
+/// first `require` in this State, its chunk at top level, and cached
 /// for every later one. A module returns exactly one non-nil value; a cycle
 /// is refused naming its chain; a module's own error comes back unchanged.
 fn lua_require<H: Host>(state: &mut State) -> Result<u8, Error> {
@@ -1149,12 +1230,19 @@ fn lua_require<H: Host>(state: &mut State) -> Result<u8, Error> {
         Ok(Found::Load(program)) => program,
         Err(why) => return Err(raise_failed(state, why)),
     };
+    // A module's chunk runs at top level whatever phase asked for it, so its
+    // initialization is the same in every phase; its exported functions run
+    // in the phase that later calls them.
+    let caller = ctx::<H>(state).map(|c| std::mem::replace(&mut c.phase, Phase::TopLevel));
     let base = state.get_top();
     let ran = state
         .load(&program)
         .and_then(|()| state.call(ArgCount::Fixed(0), RetCount::All));
     if let Some(ctx) = ctx::<H>(state) {
         ctx.modules.loading.pop();
+        if let Some(caller) = caller {
+            ctx.phase = caller;
+        }
     }
     ran?;
     let returned = state.get_top().saturating_sub(base);

@@ -18,6 +18,7 @@ brokkr bench NAME --help              # its annotations, build settings and para
 brokkr bench NAME --dataset denmark   # bind a param
 brokkr bench NAME --osc 4705..4710    # a collection: one run over all six
 brokkr bench NAME --dataset all       # fan out: one run per dataset
+brokkr bench --dry-run NAME --row x   # check the invocation, build nothing
 ```
 
 ## The command line
@@ -36,6 +37,8 @@ collide with a param. brokkr's options:
   (`binary_with()`, below) to capture its report. Refused, before anything
   runs, for a bench that sets no `hotpath_features`. A profiled run pairs
   only with profiled runs (What a run stores).
+- `--dry-run` - check the invocation and stop before anything is built
+  (Dry run).
 
 After NAME come the bench's params, `--NAME VALUE` or `--NAME=VALUE`, and
 `--help` or `-h` where a param's name could stand. How they bind against
@@ -51,27 +54,64 @@ depends on chosen
 from the same command line, else their defaults; a parent given several
 values lists the keys under each path they lead to.
 
-Refused before anything runs, and not stored: a param refusal in any arm (a
-`required` param not given among them), a
+Refused before anything runs, and not stored, in this order: a param
+refusal in any arm (a `required` param not given among them, a value not
+among its `choices`), a bench whose `validated` params have no `validate()`
+to check them, a `validate()` that refuses any arm (Validate), a
 bound input another reservation writes or whose pin does not match (every
 arm's inputs are reserved for reading, then hashed, after the script is
 read and the store opened, before any build), a `--commit` that names
 no commit, and a preflight that refuses any arm (Preflight); from there on
 every attempt is stored, a worktree that could not be set up included.
 
+## Validate
+
+A script that assigns the global `validate` anywhere (`function
+validate(params, keys) ... end`) declares a validate: whether these params
+are ones the bench can run, judged by the script itself. It is where a
+param declared `validated = true` (`brokkr man bench-config`, Params) is
+checked, and where a rule between params goes (`--osc` only for one row,
+say). It runs for every arm as soon as the params bind, before anything
+else the invocation does, on every run and under `--dry-run`: a fresh Lua
+state, the chunk's top level, then `validate(params, keys)`. Returning
+nothing passes; `fail(reason)` refuses the invocation whole, every refusing
+arm named, before anything is opened, reserved, preflighted, built or
+stored. So a typo in a queued invocation is refused at once, not hours in
+as a failed run:
+
+```lua
+local ROWS = { inspect = true, sort = true }
+function validate(params)
+    if not ROWS[params.row] then fail("unknown --row " .. params.row) end
+end
+```
+
+- It is pure: it may not launch a child, make a handle, read a file or call
+  `since()`. `config()`, `json`, `fail()`, `require` and `print` work.
+  `params` and `keys` are as `preflight()` gets them, every file entry's
+  field its path string.
+- Its declaration, return and refusal rules are preflight's (below), each
+  refusal worded `validate refused` or `validate script error`.
+- A module it asks `require` for is stored with the run, as a preflight's
+  is.
+
 ## Preflight
 
 A script that assigns the global `preflight` anywhere (`function
 preflight(params, keys) ... end`, the way it assigns `bench`) declares a
 preflight: what the host must provide before the bench can run, checked by
-the script itself. It runs for every arm, before anything is built, after
+the script itself. It is a check, not a preparation: what a measured child
+needs of the page cache, a file or the host's state is set up inside
+`bench()`, just before that child, since a preflight runs before the build
+and before every other arm, and nothing it leaves is still true when the
+child starts. Whether the params make sense is `validate()`'s (Validate). It runs for every arm, before anything is built, after
 the inputs are reserved and the commit resolved, before the inputs are
 hashed: a fresh Lua state, the chunk's top level, then `preflight(params,
 keys)`. Returning nothing passes. Anything else refuses the invocation
 whole: no arm is built, nothing is stored, and every refusing arm is named
 with its reason. A stop during a preflight stops its child, and the
-invocation ends as an interrupt. So a bench that needs
-io_uring says so in Lua, with its own fix-it text:
+invocation ends as an interrupt. `--dry-run` does not run it. So a bench
+that needs io_uring says so in Lua, with its own fix-it text:
 
 ```lua
 function preflight(params)
@@ -165,10 +205,12 @@ declares no preflight.
   compiled then, so an edit during a run changes nothing, as for the script;
   a module that does not compile fails only the `require` that names it.
 - A module runs on its first `require` in a State, in the State the script
-  runs in and in the phase that asked for it (a module required at the top
-  level cannot launch a child; one required inside `bench()` can), and its
-  export is cached for every later `require` there. Each preflight and each
-  iteration is a fresh State, so each loads its modules afresh.
+  runs in, its chunk at top level whatever phase asked for it, so loading
+  it launches nothing and makes no handle even inside `bench()` (The
+  script's builtins); a function it exports runs in the phase that calls
+  it. Its export is cached for every later `require` there. Each validate,
+  each preflight and each iteration is a fresh State, so each loads its
+  modules afresh.
 - A module returns exactly one non-nil value, its export: anything else is
   refused. A module requiring itself, directly or through others, is
   refused naming the chain. A module's own error comes back as it is, at
@@ -177,10 +219,25 @@ declares no preflight.
   bench-config`, Validating a script); what it shares is what it returns.
   Mutating a shared table (`record`, `string`) is still possible and is the
   module's own business.
-- Every module a run's preflight or an iteration asked for, loaded or not,
+- Every module a run's validate, preflight or an iteration asked for, loaded or not,
   is stored with the run, with its file and exact source (What a run
   stores), so `brokkr results --compare` names a changed helper as
   `modules.<name>.source`. A module of the library never required is not.
+
+## Dry run
+
+`brokkr bench --dry-run NAME PARAMS` checks an invocation the way a run
+would, up to the build, and stops: every arm bound (Binding params,
+`brokkr man bench-config`) and validated (Validate), the commit resolved,
+every bound input's shape checked and every pinned one hashed against its
+pin, then one line naming what each arm would build and one per arm naming
+its params, and `ok`. It opens no store, reserves no input, runs no
+preflight (which may launch programs, so it is the run's to make, and a
+`preflight not run` line says one was skipped), builds and stores nothing,
+and takes no lock, so a queue of invocations can be checked while a bench
+runs. A dry run that passes says the invocation is one the bench takes;
+the host, the build and the inputs as they are when it runs are the run's
+to find out.
 
 ## Arms
 
@@ -275,6 +332,12 @@ Scripts are dellingr Lua (`brokkr man bench-config`): no `io`, `os` or
 `load`, so every child goes through brokkr, and dellingr's own `require` is
 absent too; brokkr's loads `bench_lib` modules alone (Modules).
 
+A chunk's top level, the script's and every module's, is declarations and
+computation: no builtin there launches a child, makes or reads a handle, or
+asks git (`since()`). What it may call is `require`, `config()`, `json`,
+`fail()` and `print`, the same in every phase, so loading a script or a
+module does the same thing whichever phase it is loaded for.
+
 - `require(name)` - the export of the `bench_lib` module `name` (Modules).
   Allowed at top level too, and anywhere after it.
 
@@ -292,9 +355,9 @@ absent too; brokkr's loads `bench_lib` modules alone (Modules).
   top level too.
 - `since(sha)` - whether the commit under test (the `--commit` one, else the
   checkout's HEAD) is `sha` or descends from it. A sha git cannot resolve
-  fails the iteration. Allowed at top level too, and each sha is asked once
-  per run; asked first inside `bench()`, the git call falls in the first
-  iteration's wall, so prefer the top level.
+  fails the iteration. Inside `bench()` and `preflight()` only, never at
+  top level or in `validate()`. Each sha is asked of git once per run, so
+  inside `bench()` the git call falls in the first iteration's wall only.
 - `config()` - a fresh copy of the resolved config (`brokkr man
   bench-config`, The resolved view): this host's datasets, `data`, `host`
   and every other table as composed, file paths absolute. Allowed at top

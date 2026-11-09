@@ -24,6 +24,7 @@ mod preflight;
 #[cfg(test)]
 mod run_tests;
 mod stored_config;
+mod validate;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -33,7 +34,7 @@ use super::lua;
 use super::params;
 use super::store;
 use super::view;
-use crate::config::bench::{Bench, BenchScript};
+use crate::config::bench::{Bench, BenchScript, Domain};
 use crate::error::DevError;
 use crate::output;
 use crate::project::Detection;
@@ -50,6 +51,9 @@ pub(crate) struct BenchArgs {
     pub(crate) hotpath: bool,
     /// Everything after NAME, unparsed: the bench's own params.
     pub(crate) params: Vec<String>,
+    /// `--dry-run`: bind and validate every arm, resolve the commit, check
+    /// the inputs and their pins, then stop before anything is built.
+    pub(crate) dry_run: bool,
 }
 
 /// The stdout and stderr preview a script sees of each child, in bytes.
@@ -84,6 +88,10 @@ pub(crate) fn run(
     // stored, and covers every arm: an invocation is refused whole.
     let mut arms = params::bind(bench, &given, &view)?;
     let frozen = freeze(bench)?;
+    let (config, labels, validated) = validate(name, bench, &view, &frozen, &arms)?;
+    if args.dry_run {
+        return dry_run(name, args, bench, &frozen, detection, &mut arms, &labels);
+    }
     // Opened, or for a results server probed, before anything is built or
     // run and before a stop is caught: a run with nowhere to go is never
     // measured.
@@ -91,12 +99,9 @@ pub(crate) fn run(
     let _inputs_held = hold_inputs(&arms)?;
     let keep = crate::context::worktree_keep(&detection.config)?;
     let tree = crate::tree_policy::TreePolicy::of(&detection.config);
-    let Prepared {
-        commit,
-        config,
-        labels,
-        modules,
-    } = preflight_and_digest(name, args, detection, &view, &frozen, &mut arms)?;
+    let Prepared { commit, modules } = preflight_and_digest(
+        name, args, detection, &frozen, &mut arms, &labels, &config, validated,
+    )?;
     // The whole invocation from here, worktree setup and publication
     // included: a stop that lands between two children, during the build or
     // while publishing is recorded rather than taking the default action, so
@@ -236,52 +241,240 @@ fn hold_inputs(arms: &[params::Bound]) -> Result<Option<crate::reservations::Rea
 /// hashed.
 struct Prepared {
     commit: crate::git::Commit,
-    /// `config()`'s table.
-    config: std::sync::Arc<lua::Value>,
-    labels: Vec<String>,
     /// Each arm's library modules its preflight asked for.
     modules: Vec<BTreeSet<String>>,
 }
 
-/// The invocation's commit, `config()`'s table, the arm labels and each
-/// arm's preflight modules, once every arm's preflight passed and its inputs
-/// are hashed. An unknown revision is refused before any project code runs.
+/// The invocation's commit and each arm's modules, those its `validate()`
+/// asked for (`validated`) joined by its preflight's, once every arm's
+/// preflight passed and its inputs are hashed. An unknown revision is
+/// refused before any project code runs.
+#[allow(clippy::too_many_arguments)]
 fn preflight_and_digest(
     name: &str,
     args: &BenchArgs,
     detection: &Detection,
-    view: &view::View,
     frozen: &Frozen,
     arms: &mut [params::Bound],
+    labels: &[String],
+    config: &std::sync::Arc<lua::Value>,
+    validated: Vec<BTreeSet<String>>,
 ) -> Result<Prepared, DevError> {
     let commit = crate::git::resolve_commit(
         detection.build_root.as_path(),
         args.commit.as_deref().unwrap_or("HEAD"),
     )?;
-    let config = std::sync::Arc::new(view.lua());
-    let labels = params::arm_labels(arms);
     // A stop during a preflight is recorded, so its child is stopped with its
     // process group and the Lua it runs sees it; one that lands as the
     // window closes is read in the same step that closes it.
     let guard = crate::shutdown::SigtermGuard::install();
-    let preflighted = preflight_arms(name, frozen, arms, &labels, &config, detection, &commit);
+    let preflighted = preflight_arms(name, frozen, arms, labels, config, detection, &commit);
     if guard.leave() {
         return Err(DevError::Interrupted);
     }
-    let modules = preflighted?;
+    let modules = preflighted?
+        .into_iter()
+        .zip(validated)
+        .map(|(mut preflight, validate)| {
+            preflight.extend(validate);
+            preflight
+        })
+        .collect();
     // Hashed under the default action, as ever: a stop during it ends the
     // invocation at once, nothing stored.
     params::digest_arms(
         arms,
+        params::Depth::Every,
         detection.project_root.as_path(),
         &detection.config_sources,
     )?;
-    Ok(Prepared {
-        commit,
-        config,
-        labels,
-        modules,
-    })
+    Ok(Prepared { commit, modules })
+}
+
+/// `config()`'s table, the arm labels and each arm's `validate()` modules,
+/// once every arm validated: a bench whose `validated` params have no
+/// `validate()` to check them is refused first.
+type Validated = (std::sync::Arc<lua::Value>, Vec<String>, Vec<BTreeSet<String>>);
+
+fn validate(
+    name: &str,
+    bench: &Bench,
+    view: &view::View,
+    frozen: &Frozen,
+    arms: &[params::Bound],
+) -> Result<Validated, DevError> {
+    if let Some(why) = super::unvalidated(bench, frozen.script.has_validate()) {
+        return Err(DevError::Config(format!("[bench.{name}] {why}")));
+    }
+    let config = std::sync::Arc::new(view.lua());
+    let labels = params::arm_labels(arms);
+    let modules = validate_arms(name, frozen, arms, &labels, &config)?;
+    Ok((config, labels, modules))
+}
+
+/// Run the script's `validate()`, when it declares one, for every arm in a
+/// fresh State, as soon as the params bound: each arm's refusal collected,
+/// and any refuses the invocation whole, before anything is opened, held,
+/// built or stored. Returns each arm's library modules it asked for.
+fn validate_arms(
+    name: &str,
+    frozen: &Frozen,
+    arms: &[params::Bound],
+    labels: &[String],
+    config: &std::sync::Arc<lua::Value>,
+) -> Result<Vec<BTreeSet<String>>, DevError> {
+    if !frozen.script.has_validate() {
+        return Ok(vec![BTreeSet::new(); arms.len()]);
+    }
+    // Pure Lua can spin: a stop is recorded, so the watcher interrupts it.
+    let guard = crate::shutdown::SigtermGuard::install();
+    let ran = (|| {
+        let mut refusals = Vec::new();
+        let mut modules = Vec::with_capacity(arms.len());
+        for (index, bound) in arms.iter().enumerate() {
+            if crate::shutdown::should_unwind() {
+                return Err(DevError::Interrupted);
+            }
+            let host = validate::ValidateHost {
+                config: std::sync::Arc::clone(config),
+            };
+            let (ran, _) =
+                lua::run_hook(lua::Hook::Validate, &frozen.script, &bound.preflight_args(), host);
+            modules.push(ran.modules);
+            judge(lua::Hook::Validate, &shown(name, &labels[index]), ran.outcome, &mut refusals)?;
+        }
+        settle(modules, refusals)
+    })();
+    if guard.leave() {
+        return Err(DevError::Interrupted);
+    }
+    ran
+}
+
+/// How one arm is named in a hook's refusal.
+fn shown(name: &str, label: &str) -> String {
+    match label {
+        "" => format!("bench {name}"),
+        label => format!("bench {name} ({label})"),
+    }
+}
+
+/// One arm's hook outcome: a refusal or a script error joins `refusals`, so
+/// every arm is judged; an interrupt or brokkr's own failure ends the hooks
+/// there, since every later arm would meet the same machinery.
+fn judge(
+    hook: lua::Hook,
+    shown: &str,
+    outcome: lua::HookOutcome,
+    refusals: &mut Vec<String>,
+) -> Result<(), DevError> {
+    let name = hook.name();
+    match outcome {
+        lua::HookOutcome::Passed => Ok(()),
+        lua::HookOutcome::Interrupted => Err(DevError::Interrupted),
+        lua::HookOutcome::Refused(why) => {
+            refusals.push(format!("{shown}: {name} refused: {why}"));
+            Ok(())
+        }
+        lua::HookOutcome::Broken(why) => {
+            refusals.push(format!("{shown}: {name} script error: {why}"));
+            Ok(())
+        }
+        lua::HookOutcome::Failed(why) => Err(DevError::Preflight(vec![format!(
+            "{shown}: {name} could not run: {why}"
+        )])),
+    }
+}
+
+/// Every arm's hook run: a stop the last one did not see wins over its
+/// refusals, and any refusal refuses the invocation whole.
+fn settle(
+    modules: Vec<BTreeSet<String>>,
+    refusals: Vec<String>,
+) -> Result<Vec<BTreeSet<String>>, DevError> {
+    if crate::shutdown::should_unwind() {
+        return Err(DevError::Interrupted);
+    }
+    if refusals.is_empty() {
+        Ok(modules)
+    } else {
+        Err(DevError::Preflight(refusals))
+    }
+}
+
+/// `brokkr bench NAME --dry-run`, once every arm bound and validated: the
+/// commit resolved, every bound file's shape checked and a pinned one held
+/// to its pin, each arm and what it would build named. Nothing is opened,
+/// held, preflighted, built or stored: the preflight may launch programs, so
+/// it is the run's to make.
+fn dry_run(
+    name: &str,
+    args: &BenchArgs,
+    bench: &Bench,
+    frozen: &Frozen,
+    detection: &Detection,
+    arms: &mut [params::Bound],
+    labels: &[String],
+) -> Result<(), DevError> {
+    let commit = crate::git::resolve_commit(
+        detection.build_root.as_path(),
+        args.commit.as_deref().unwrap_or("HEAD"),
+    )?;
+    params::digest_arms(
+        arms,
+        params::Depth::PinsOnly,
+        detection.project_root.as_path(),
+        &detection.config_sources,
+    )?;
+    let profile = bench.profile.clone().unwrap_or_else(|| {
+        crate::runnables::build_profile(detection.config.bin.as_ref(), None)
+    });
+    let mut features = crate::command_args::resolve_features(&detection.config, &bench.features);
+    if args.hotpath {
+        for feature in &bench.hotpath_features {
+            if !features.contains(feature) {
+                features.push(feature.clone());
+            }
+        }
+    }
+    output::dry_run_msg(&format!(
+        "bench {name}: would build {} ({profile}, features [{}]) at {}{}, {} of {}",
+        bench.target.as_deref().unwrap_or("[bin] default"),
+        features.join(", "),
+        crate::db::short_uuid(commit.as_str()),
+        if args.commit.is_some() { " in a worktree" } else { "" },
+        output::count(usize::try_from(args.iterations.get()).unwrap_or(usize::MAX), "iteration"),
+        output::count(arms.len(), "arm"),
+    ));
+    if frozen.script.has_preflight() {
+        output::dry_run_msg("preflight not run: it may launch programs, so the run makes it");
+    }
+    for (index, arm) in arms.iter().enumerate() {
+        let shown: Vec<String> = arm
+            .document()
+            .into_iter()
+            .map(|(param, bound)| {
+                let keys: Vec<String> = bound.values.into_iter().map(|v| v.key).collect();
+                format!("--{param} {}", keys.join(","))
+            })
+            .collect();
+        let label = match labels.get(index).map(String::as_str) {
+            None | Some("") => String::new(),
+            Some(label) => format!(" ({label})"),
+        };
+        output::dry_run_msg(&format!(
+            "arm {}/{}{label}: {}",
+            index + 1,
+            arms.len(),
+            if shown.is_empty() {
+                "no params".to_owned()
+            } else {
+                shown.join(" ")
+            }
+        ));
+    }
+    output::dry_run_msg("ok");
+    Ok(())
 }
 
 /// Run the script's preflight, when it declares one, for every arm in a
@@ -309,45 +502,18 @@ fn preflight_arms(
         if crate::shutdown::should_unwind() {
             return Err(DevError::Interrupted);
         }
-        let shown = match labels[index].as_str() {
-            "" => format!("bench {name}"),
-            label => format!("bench {name} ({label})"),
-        };
         let host = preflight::PreflightHost {
             config: std::sync::Arc::clone(config),
             cwd: detection.project_root.as_path().to_path_buf(),
             since,
         };
-        let (ran, host) = lua::run_preflight(&frozen.script, &bound.preflight_args(), host);
+        let (ran, host) =
+            lua::run_hook(lua::Hook::Preflight, &frozen.script, &bound.preflight_args(), host);
         since = host.since;
         modules.push(ran.modules);
-        match ran.outcome {
-            lua::PreflightOutcome::Passed => {}
-            lua::PreflightOutcome::Interrupted => return Err(DevError::Interrupted),
-            lua::PreflightOutcome::Refused(why) => {
-                refusals.push(format!("{shown}: preflight refused: {why}"));
-            }
-            lua::PreflightOutcome::Broken(why) => {
-                refusals.push(format!("{shown}: preflight script error: {why}"));
-            }
-            // brokkr's own failure ends the preflights there: the next arm's
-            // would meet the same machinery.
-            lua::PreflightOutcome::Failed(why) => {
-                return Err(DevError::Preflight(vec![format!(
-                    "{shown}: preflight could not run: {why}"
-                )]));
-            }
-        }
+        judge(lua::Hook::Preflight, &shown(name, &labels[index]), ran.outcome, &mut refusals)?;
     }
-    // A stop the last preflight did not see wins over its refusals.
-    if crate::shutdown::should_unwind() {
-        return Err(DevError::Interrupted);
-    }
-    if refusals.is_empty() {
-        Ok(modules)
-    } else {
-        Err(DevError::Preflight(refusals))
-    }
+    settle(modules, refusals)
 }
 
 /// Whether the arm after a published one may start: not once a stop is
@@ -456,8 +622,11 @@ fn describe(bench: &Bench, detection: &Detection, given: &params::Given, view: &
     }
     for (name, param) in &bench.params {
         let mut line = format!("  --{name}");
-        if let Some(from) = &param.from {
-            line.push_str(&format!(" (a key under {})", from.as_str()));
+        match &param.domain {
+            Domain::From(from) => line.push_str(&format!(" (a key under {})", from.as_str())),
+            Domain::Choices(choices) => line.push_str(&format!(" ({})", choices.join(" | "))),
+            Domain::Validated => line.push_str(" (checked by the script's validate())"),
+            Domain::Free => line.push_str(" (any value)"),
         }
         if let Some(default) = &param.default {
             line.push_str(&format!(" [default {default}]"));

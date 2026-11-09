@@ -11,7 +11,7 @@ fn script(source: &str) -> lua::Script {
     lua::load_script(source.as_bytes(), Some("test"), None).unwrap()
 }
 
-fn run(source: &str, params: &lua::Args) -> lua::PreflightOutcome {
+fn run(source: &str, params: &lua::Args) -> lua::HookOutcome {
     // A scratch name is one test's alone: each run takes the next.
     static RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -21,19 +21,19 @@ fn run(source: &str, params: &lua::Args) -> lua::PreflightOutcome {
         cwd: root.clone(),
         since: Since::new(&root, "0".repeat(40).parse().unwrap()),
     };
-    lua::run_preflight(&script(source), params, host).0.outcome
+    lua::run_hook(lua::Hook::Preflight, &script(source), params, host).0.outcome
 }
 
-fn refused(outcome: lua::PreflightOutcome) -> String {
+fn refused(outcome: lua::HookOutcome) -> String {
     match outcome {
-        lua::PreflightOutcome::Refused(why) => why,
+        lua::HookOutcome::Refused(why) => why,
         other => panic!("expected a refusal, got {other:?}"),
     }
 }
 
-fn broken(outcome: lua::PreflightOutcome) -> String {
+fn broken(outcome: lua::HookOutcome) -> String {
     match outcome {
-        lua::PreflightOutcome::Broken(why) => why,
+        lua::HookOutcome::Broken(why) => why,
         other => panic!("expected a broken preflight, got {other:?}"),
     }
 }
@@ -55,7 +55,7 @@ fn a_preflight_runs_external_programs_and_passes_by_returning_nothing() {
          function bench() end",
         &params,
     );
-    assert_eq!(outcome, lua::PreflightOutcome::Passed);
+    assert_eq!(outcome, lua::HookOutcome::Passed);
 }
 
 #[test]
@@ -148,7 +148,7 @@ fn an_exec_failure_is_the_programs_only_when_the_program_is_at_fault() {
          function bench() end",
         &lua::Args::default(),
     );
-    let lua::PreflightOutcome::Failed(why) = outcome else {
+    let lua::HookOutcome::Failed(why) = outcome else {
         panic!("a setup failure is brokkr's: {outcome:?}");
     };
     assert!(why.contains("cannot start /bin/sh"), "{why}");
@@ -192,7 +192,7 @@ fn the_build_handles_and_measurement_are_out_of_reach() {
          function bench() end",
         &lua::Args::default(),
     ));
-    assert!(why.contains("not at the script's top level"), "{why}");
+    assert!(why.contains("not at a chunk's top level"), "{why}");
 }
 
 #[test]
@@ -219,7 +219,7 @@ fn a_preflight_that_is_no_function_or_returns_a_value_is_broken() {
             "function preflight() return end\nfunction bench() end",
             &lua::Args::default()
         ),
-        lua::PreflightOutcome::Passed
+        lua::HookOutcome::Passed
     );
     let why = broken(run(
         "function preflight() local x = nil; x.y = 1 end\nfunction bench() end",
@@ -240,7 +240,7 @@ fn a_descendant_still_holding_the_lease_fails_the_call() {
          function bench() end",
         &lua::Args::default(),
     );
-    let lua::PreflightOutcome::Failed(why) = outcome else {
+    let lua::HookOutcome::Failed(why) = outcome else {
         panic!("a lease brokkr could not release is its own failure: {outcome:?}");
     };
     assert!(why.contains("still holds its lease"), "{why}");

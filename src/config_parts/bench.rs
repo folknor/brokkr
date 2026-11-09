@@ -74,9 +74,8 @@ pub enum BenchScript {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Param {
     pub help: Option<String>,
-    /// The config table whose keys are the param's values; `None` makes the
-    /// param a plain string.
-    pub from: Option<FromPath>,
+    /// What values the param takes: exactly one declaration says so.
+    pub domain: Domain,
     /// The value used when the command line gives none, in the syntax the
     /// command line takes.
     pub default: Option<String>,
@@ -87,6 +86,32 @@ pub struct Param {
     pub required: bool,
     /// Where the declaration came from.
     pub origin: ParamOrigin,
+}
+
+/// A param's value domain. Every param declares one, so no value reaches a
+/// script unchecked by accident: `free` is the deliberate opt-out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Domain {
+    /// `from = "..."`: the keys of a config table.
+    From(FromPath),
+    /// `choices = [...]`: one of these strings, checked when the bench binds.
+    Choices(Vec<String>),
+    /// `validated = true`: a plain string the script's `validate()` checks,
+    /// which the script must then declare.
+    Validated,
+    /// `free = true`: a plain string brokkr deliberately does not check.
+    Free,
+}
+
+impl Param {
+    /// The config table whose keys are the param's values; `None` for a
+    /// plain param.
+    pub fn from(&self) -> Option<&FromPath> {
+        match &self.domain {
+            Domain::From(path) => Some(path),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,6 +204,11 @@ fn is_bench_name(name: &str) -> bool {
 struct RawParam {
     help: Option<String>,
     from: Option<String>,
+    choices: Option<Vec<String>>,
+    #[serde(default)]
+    validated: bool,
+    #[serde(default)]
+    free: bool,
     default: Option<String>,
     #[serde(default)]
     many: bool,
@@ -291,11 +321,56 @@ fn parse_param(
         .clone()
         .try_into()
         .map_err(|e: toml::de::Error| format!("{at}: {e}"))?;
-    let from = raw
-        .from
-        .as_deref()
-        .map(|text| FromPath::parse(text).map_err(|e| format!("{at}: from {text:?} {e}")))
-        .transpose()?;
+    let declared = [
+        raw.from.is_some().then_some("from"),
+        raw.choices.is_some().then_some("choices"),
+        raw.validated.then_some("validated"),
+        raw.free.then_some("free"),
+    ];
+    let declared: Vec<&str> = declared.into_iter().flatten().collect();
+    match declared.as_slice() {
+        [] => {
+            return Err(format!(
+                "{at}: declares no domain - give from (a config table's keys), choices (a list \
+                 of values), validated = true (the script's validate() checks it) or free = true \
+                 (any value, unchecked)"
+            ));
+        }
+        [_] => {}
+        several => {
+            return Err(format!(
+                "{at}: declares {}, which exclude each other - a param has one domain",
+                several.join(" and ")
+            ));
+        }
+    }
+    let domain = if let Some(text) = raw.from.as_deref() {
+        Domain::From(FromPath::parse(text).map_err(|e| format!("{at}: from {text:?} {e}"))?)
+    } else if let Some(choices) = raw.choices {
+        check_choices(at, &choices, raw.many)?;
+        Domain::Choices(choices)
+    } else if raw.validated {
+        Domain::Validated
+    } else {
+        Domain::Free
+    };
+    // A choices default is judged here as binding would judge it, so one
+    // that loads binds: every item a choice, none twice.
+    if let (Domain::Choices(choices), Some(default)) = (&domain, raw.default.as_deref()) {
+        let mut seen = BTreeSet::new();
+        for item in default.split(',') {
+            if !choices.iter().any(|c| c == item) {
+                return Err(format!(
+                    "{at}: default {default:?} holds {item:?}, which is not among its choices \
+                     ({})",
+                    choices.join(", ")
+                ));
+            }
+            if !seen.insert(item) {
+                return Err(format!("{at}: default {default:?} gives {item:?} twice"));
+            }
+        }
+    }
     if raw.default.as_deref().is_some_and(|d| d.trim().is_empty()) {
         return Err(format!(
             "{at}: default is blank - give a value or remove the key"
@@ -309,12 +384,46 @@ fn parse_param(
     }
     Ok(Param {
         help: raw.help,
-        from,
+        domain,
         default: raw.default,
         many: raw.many,
         required: raw.required,
         origin,
     })
+}
+
+/// A `choices` list every value of which the command line can give: not
+/// empty, no value blank, repeated or holding the `,` the command line
+/// splits values on, and for a collection (`many`) none holding the `..`
+/// that binding reads there as a range.
+fn check_choices(at: &str, choices: &[String], many: bool) -> Result<(), String> {
+    if choices.is_empty() {
+        return Err(format!(
+            "{at}: choices is empty - list the values it takes"
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    for choice in choices {
+        if choice.trim().is_empty() {
+            return Err(format!("{at}: choices has a blank value"));
+        }
+        if choice.contains(',') {
+            return Err(format!(
+                "{at}: choice {choice:?} holds a ',', which the command line splits values on, \
+                 so it could never be given"
+            ));
+        }
+        if many && choice.contains("..") {
+            return Err(format!(
+                "{at}: choice {choice:?} holds '..', which a collection reads as a range, so it \
+                 could never be given"
+            ));
+        }
+        if !seen.insert(choice.as_str()) {
+            return Err(format!("{at}: choices lists {choice:?} twice"));
+        }
+    }
+    Ok(())
 }
 
 fn parse_bench(
@@ -525,7 +634,7 @@ fn effective_params(
 /// references form no cycle.
 fn check_references(params: &BTreeMap<String, Param>) -> Result<(), String> {
     for (name, param) in params {
-        let Some(from) = &param.from else { continue };
+        let Some(from) = param.from() else { continue };
         for reference in from.references() {
             let Some(target) = params.get(reference) else {
                 return Err(format!(
@@ -571,7 +680,7 @@ fn visit<'a>(
         ));
     }
     path.push(name);
-    if let Some(from) = params.get(name).and_then(|p| p.from.as_ref()) {
+    if let Some(from) = params.get(name).and_then(Param::from) {
         for reference in from.references() {
             if let Some((key, _)) = params.get_key_value(reference) {
                 visit(key, params, path, done)?;
@@ -849,7 +958,7 @@ mod tests {
              variant = { from = \"datasets.{dataset}.pbf\", help = \"set\" }\n\
              [bench.cat]\nscript = \"x = 1\"\nuses = [\"data\"]\n\
              params.variant = { from = \"datasets.{dataset}.pbf\", default = \"indexed\" }\n\
-             params.jobs = { help = \"threads\" }\n",
+             params.jobs = { free = true, help = \"threads\" }\n",
         )
         .unwrap();
         let params = &benches["cat"].params;
@@ -863,8 +972,7 @@ mod tests {
         assert_eq!(params["variant"].help, None);
         assert_eq!(params["variant"].default.as_deref(), Some("indexed"));
         let refs: Vec<&str> = params["variant"]
-            .from
-            .as_ref()
+            .from()
             .unwrap()
             .references()
             .collect();
@@ -873,7 +981,7 @@ mod tests {
 
     #[test]
     fn uses_must_name_distinct_sets_that_do_not_overlap() {
-        let sets = "[bench_params.a]\nx = {}\n[bench_params.b]\nx = {}\n";
+        let sets = "[bench_params.a]\nx = { free = true }\n[bench_params.b]\nx = { free = true }\n";
         let err = err_of(
             "uses_unknown",
             &format!("{sets}[bench.c]\nscript = \"x = 1\"\nuses = [\"z\"]\n"),
@@ -896,7 +1004,7 @@ mod tests {
         single(
             "uses_overlap_settled",
             &format!(
-                "{sets}[bench.c]\nscript = \"x = 1\"\nuses = [\"a\", \"b\"]\nparams.x = {{}}\n"
+                "{sets}[bench.c]\nscript = \"x = 1\"\nuses = [\"a\", \"b\"]\nparams.x = {{ free = true }}\n"
             ),
         )
         .unwrap();
@@ -965,27 +1073,91 @@ mod tests {
         assert!(err.contains("flag"), "{err}");
         let err = err_of(
             "param_required_default",
-            "[bench.c]\nscript = \"x = 1\"\nparams.j = { required = true, default = \"1\" }\n",
+            "[bench.c]\nscript = \"x = 1\"\nparams.j = { free = true, required = true, default = \"1\" }\n",
         );
         assert!(err.contains("required and default"), "{err}");
         // Judged on the declaration, so in a set no bench uses too.
         let err = err_of(
             "set_required_default",
-            "[bench_params.s]\nj = { required = true, default = \"1\" }\n",
+            "[bench_params.s]\nj = { free = true, required = true, default = \"1\" }\n",
         );
         assert!(err.contains("required and default"), "{err}");
         let benches = single(
             "param_required",
-            "[bench.c]\nscript = \"x = 1\"\nparams.j = { required = true }\nparams.k = {}\n",
+            "[bench.c]\nscript = \"x = 1\"\nparams.j = { free = true, required = true }\n\
+             params.k = { free = true }\n",
         )
         .unwrap();
         assert!(benches["c"].params["j"].required);
         assert!(!benches["c"].params["k"].required, "absent means optional");
         single(
             "param_kebab",
-            "[bench.c]\nscript = \"x = 1\"\nparams.osc-range = { many = true }\n",
+            "[bench.c]\nscript = \"x = 1\"\nparams.osc-range = { free = true, many = true }\n",
         )
         .unwrap();
+    }
+
+    /// Every param declares exactly one domain; `choices` lists values the
+    /// command line can give, and a default is one of them.
+    #[test]
+    fn every_param_declares_one_domain() {
+        let benches = single(
+            "domains",
+            "[bench.c]\nscript = \"x = 1\"\nparams.cache = { choices = [\"cold\", \"warm\"] }\n\
+             params.row = { validated = true }\nparams.label = { free = true }\n\
+             params.dataset = { from = \"datasets\" }\n",
+        )
+        .unwrap();
+        let params = &benches["c"].params;
+        assert_eq!(
+            params["cache"].domain,
+            Domain::Choices(vec!["cold".into(), "warm".into()])
+        );
+        assert_eq!(params["row"].domain, Domain::Validated);
+        assert_eq!(params["label"].domain, Domain::Free);
+        assert!(params["dataset"].from().is_some());
+        for (name, decl, needle) in [
+            ("domain_none", "{}", "declares no domain"),
+            ("domain_help_only", "{ help = \"h\" }", "declares no domain"),
+            (
+                "domain_two",
+                "{ free = true, choices = [\"a\"] }",
+                "choices and free, which exclude each other",
+            ),
+            (
+                "domain_from_choices",
+                "{ from = \"datasets\", choices = [\"a\"] }",
+                "from and choices",
+            ),
+            ("choices_empty", "{ choices = [] }", "choices is empty"),
+            ("choices_blank", "{ choices = [\" \"] }", "blank value"),
+            ("choices_twice", "{ choices = [\"a\", \"a\"] }", "lists \"a\" twice"),
+            ("choices_comma", "{ choices = [\"a,b\"] }", "holds a ','"),
+            (
+                "choices_default",
+                "{ choices = [\"a\", \"b\"], default = \"a,c\" }",
+                "holds \"c\", which is not among its choices",
+            ),
+            (
+                "choices_default_twice",
+                "{ choices = [\"a\"], default = \"a,a\" }",
+                "gives \"a\" twice",
+            ),
+            (
+                "choices_many_range",
+                "{ choices = [\"a..b\"], many = true }",
+                "a collection reads as a range",
+            ),
+        ] {
+            let err = err_of(name, &format!("[bench.c]\nscript = \"x = 1\"\nparams.p = {decl}\n"));
+            assert!(err.contains(needle), "{name}: {err}");
+        }
+        // `false` is no declaration.
+        let err = err_of(
+            "domain_false",
+            "[bench.c]\nscript = \"x = 1\"\nparams.p = { free = false }\n",
+        );
+        assert!(err.contains("declares no domain"), "{err}");
     }
 
     #[test]
@@ -993,7 +1165,7 @@ mod tests {
         let benches = single(
             "annotations",
             "[bench.cat]\nscript = \"x = 1\"\ndescription = \"d\"\nversion = 2\n\
-             date = 2026-11-08\nchangelog = [{ note = \"n\" }]\nparams.changelog = {}\n",
+             date = 2026-11-08\nchangelog = [{ note = \"n\" }]\nparams.changelog = { free = true }\n",
         )
         .unwrap();
         let notes = &benches["cat"].annotations;

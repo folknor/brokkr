@@ -34,7 +34,9 @@ What it catches:
 - every global the script reads that nothing defines, such as a misspelt
   builtin (`binray_with`) or helper, named once at its first read, whether or
   not that code would ever run;
-- a script that never assigns `bench` (a `local function bench` does not).
+- a script that never assigns `bench` (a `local function bench` does not);
+- a bench with a `validated = true` param whose script declares no
+  `validate()` (Params).
 
 A name is defined when the State a sample runs in already holds it (brokkr's
 builtins, `json`, `record`, and dellingr's library) or when the script
@@ -60,9 +62,11 @@ script then reads.
 
 Not caught: a misspelt field (`json.encdoe`, `params.thread`), a wrong
 `binary_with` option key, a wrong argument type, a nil value. Those fail only
-when an iteration runs them, so the way to try a script's behaviour is
-`brokkr bench NAME` itself, on the smallest params it takes. There is no dry
-run.
+when the code holding them runs. `brokkr bench --dry-run NAME PARAMS`
+binds an invocation and runs its `validate()` (`brokkr man bench`, Dry
+run), so the checks a script puts there are tried without a build; for
+the rest, the way to try a script's behaviour is `brokkr bench NAME`
+itself, on the smallest params it takes.
 
 The phase is inert in a config without benches, is skipped by name as `bench`
 in a partial profile's `skip_phases`, and runs on a markdown-only tree too: a
@@ -82,7 +86,7 @@ profile = "release"
 features = ["zlib-ng"]
 default_features = true
 uses = ["dataset"]
-params.jobs = { help = "worker threads" }
+params.jobs = { free = true, help = "worker threads" }
 ```
 
 - `script` - the Lua, inline. Or:
@@ -170,15 +174,34 @@ param is declared as a table:
 params.dataset = { from = "datasets", default = "denmark" }
 params.variant = { from = "datasets.{dataset}.pbf", default = "indexed" }
 params.osc     = { from = "datasets.{dataset}.osc", many = true }
-params.jobs    = { help = "worker threads" }
-params.mode    = { required = true }
+params.cache   = { choices = ["cold", "warm"], required = true }
+params.row     = { validated = true, required = true }
+params.label   = { free = true, help = "a tag stored with the run" }
 ```
 
-- `help` - the text the bench's `--help` shows.
+Every param declares its **domain**, the values it takes, in exactly one
+of four ways, so no value reaches a script unchecked by oversight:
+
 - `from` - a dot-separated path into the resolved config (The resolved
   view, below) whose keys are the param's valid values. A segment is a key,
   or `{NAME}`, which stands for the key another param of the same bench
-  chose. A param without `from` takes any string.
+  chose.
+- `choices` - a list of the strings it takes, checked when the bench
+  binds, every item of every value and a `default` alike, and listed by the
+  bench's `--help`. Refused at load: an empty list, a blank or repeated
+  choice, a choice holding `,`, which the command line splits values on,
+  and for a `many` param a choice holding `..`, which binding reads there
+  as a range, so neither could ever be given.
+- `validated = true` - any string, which the script's `validate()` checks
+  (`brokkr man bench`, Validate): for a domain the script owns, such as
+  one row of a table the Lua holds, or a rule between params. A bench whose
+  script declares no `validate()` is refused when it runs and by check's
+  `bench` phase.
+- `free = true` - any string, deliberately unchecked.
+
+A param with none of them, or with two, is refused at load. The rest:
+
+- `help` - the text the bench's `--help` shows.
 - `default` - the value when the command line gives none, written as the
   command line would write it, so a list, a range or `all` too (Binding
   params, below).
@@ -191,7 +214,10 @@ params.mode    = { required = true }
   come only after the build, as a failed run. Absent or `false`, a param
   the command line does not give is unbound or takes its `default`.
 
-Refused at load: an unknown key; a blank `default`; `required = true`
+Refused at load: an unknown key; no domain or two; a `choices` list as
+above, and a `default` holding a value not among its choices or one twice,
+so a default that loads binds; a blank
+`default`; `required = true`
 beside a `default`, which would never be used; a `from` path with an
 empty segment, or with `{` or `}` anywhere but around a whole segment; a
 `{NAME}` that is not a param of the bench; params whose `from` paths reference
@@ -250,7 +276,9 @@ What the values do depends on the param:
 
 Params bind in dependency order, so a `{NAME}` in a `from` path stands for a
 key already chosen. A `from` param's value must be a key of the table its
-path names in the resolved view; a plain param's value is taken as it is.
+path names in the resolved view, and a `choices` param's one of its
+choices; a `validated` or `free` param's value is taken as it is, the
+script's `validate()` judging a `validated` one next.
 Every arm is bound before anything runs, and a refusal in any arm refuses
 the whole invocation, before anything is built and without storing a run;
 every refusal is named, each with what it found (a refused param's
@@ -266,6 +294,8 @@ dependents are not judged under it):
 - a `from` path that does not lead to a table (a missing key on the way, or
   a value that is not a table), and a bound param whose path needs a param
   that has no value;
+- a `choices` value not among its choices, with them listed, and for a
+  `required` one absent, its choices listed;
 - a value that is not a key under its path, with the valid keys listed; for
   a `default`, the refusal says so. A default is judged only when it is
   used, so a dependent default (`indexed`) may be missing under some
@@ -290,7 +320,11 @@ or the invocation is refused naming the file, both digests and where the pin
 was set; an unpinned one is hashed and its digest recorded. Two entries
 naming one file are each judged against their own pin. A `file` must be a
 regular file; a plain dataset's `path` may be a directory, digested as a
-tree, and neither may be a FIFO, device or socket.
+tree, and neither may be a FIFO, device or socket. A file that changes
+while it is hashed (its stamp moves, or its path comes to name another
+file) is refused and its digest not cached. `--dry-run` checks every
+input's shape and hashes only the pinned ones, against their pins, since it
+records nothing; it reserves none.
 
 What each run stores (`reference/bench-store.md`, The run document): each
 bound param with its `from` path, `{NAME}` references substituted, and its

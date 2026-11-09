@@ -288,6 +288,7 @@ fn require_loads_a_module_once_and_records_what_it_asked_for() {
                 "local c = require('count')\nreturn { bump = c.bump }",
             ),
             ("launches", "binary('x')\nreturn {}"),
+            ("runner", "local M = {}\nfunction M.go() binary('x') end\nreturn M"),
         ],
     );
     let (sample, _) = run_library(
@@ -314,13 +315,24 @@ fn require_loads_a_module_once_and_records_what_it_asked_for() {
         Fake::default(),
     );
     let why = reason(&sample);
-    assert!(why.contains("not at the script's top level"), "{why}");
+    assert!(why.contains("not at a chunk's top level"), "{why}");
     assert!(
         sample.modules.contains("launches"),
         "a failed load is recorded"
     );
+    // A module's chunk runs at top level whatever phase required it, so it
+    // cannot launch even when bench() asks for it.
     let (sample, host) = run_library(
         "function bench() require('launches') end",
+        &lib,
+        Fake::default(),
+    );
+    let why = reason(&sample);
+    assert!(why.contains("a module's as require runs it"), "{why}");
+    assert!(host.calls.is_empty(), "a module's chunk launches nothing");
+    // What it exports runs in the phase that calls it.
+    let (sample, host) = run_library(
+        "local runner = require('runner')\nfunction bench() runner.go() end",
         &lib,
         Fake::default(),
     );
@@ -328,7 +340,7 @@ fn require_loads_a_module_once_and_records_what_it_asked_for() {
         matches!(sample.outcome, SampleOutcome::Completed(_)),
         "{sample:?}"
     );
-    assert_eq!(host.calls.len(), 1, "inside bench() a module may launch");
+    assert_eq!(host.calls.len(), 1, "an export called inside bench() may launch");
 }
 
 /// A cycle, a missing module, one that does not compile, one that returns
@@ -468,7 +480,7 @@ fn a_script_without_bench_or_failing_at_top_level_never_starts_the_block() {
 }
 
 #[test]
-fn resource_builtins_raise_at_top_level_and_since_does_not() {
+fn resource_builtins_and_since_raise_at_top_level() {
     let (sample, host) = run(
         "local _ = binary('x')\nfunction bench() end",
         Fake::default(),
@@ -485,15 +497,68 @@ fn resource_builtins_raise_at_top_level_and_since_does_not() {
     );
     assert!(reason(&sample).contains("only available inside bench()"));
 
+    // A git question is the run's, never a chunk's top level: there it is
+    // refused before the host is asked.
     let (sample, host) = run(
         "NEW = since('old')\nfunction bench() if NEW then return 'new' end end",
+        Fake::default(),
+    );
+    assert!(
+        reason(&sample).contains("since() is only available inside bench() and preflight()"),
+        "{sample:?}"
+    );
+    assert!(host.since.is_empty());
+
+    let (sample, host) = run(
+        "function bench() if since('old') then return 'new' end end",
         Fake::default(),
     );
     assert_eq!(sample.outcome, SampleOutcome::Completed(Some("new".into())));
     assert_eq!(host.since, ["old"]);
 
-    let (sample, _) = run("since('bad')\nfunction bench() end", Fake::default());
+    let (sample, _) = run("function bench() since('bad') end", Fake::default());
     assert!(reason(&sample).contains("no such commit"), "{sample:?}");
+}
+
+/// `validate()` judges the params alone: every launch, handle and `since()`
+/// is refused by the seam even on a host that would allow them, `config()`
+/// and `fail()` work, and it passes by returning nothing.
+#[test]
+fn validate_is_pure_and_passes_by_returning_nothing() {
+    let hook = |source: &str| {
+        let script = load_script(source.as_bytes(), Some("test.lua"), None).unwrap();
+        assert!(script.has_validate());
+        run_hook(Hook::Validate, &script, &Args::default(), Fake::default())
+    };
+    for call in [
+        "binary('x')",
+        "binary_with({program = 'sh'}, 'x')",
+        "since('old')",
+        "output('o')",
+        "scratch('s')",
+    ] {
+        let (ran, host) = hook(&format!(
+            "function validate()\n  {call}\nend\nfunction bench() end"
+        ));
+        let HookOutcome::Broken(why) = ran.outcome else {
+            panic!("{call}: {:?}", ran.outcome);
+        };
+        assert!(why.contains("not inside validate()"), "{call}: {why}");
+        assert!(host.calls.is_empty() && host.since.is_empty(), "{call}");
+    }
+    let (ran, _) = hook("function validate() local _ = config() end\nfunction bench() end");
+    assert_eq!(ran.outcome, HookOutcome::Passed);
+    let (ran, _) = hook("function validate() fail('no such row') end\nfunction bench() end");
+    let HookOutcome::Refused(why) = ran.outcome else {
+        panic!("{:?}", ran.outcome);
+    };
+    assert!(why.contains("no such row"), "{why}");
+    let (ran, _) = hook("function validate() return true end\nfunction bench() end");
+    assert!(
+        matches!(&ran.outcome, HookOutcome::Broken(why) if why.contains("validate() returned 1 value")),
+        "{:?}",
+        ran.outcome
+    );
 }
 
 #[test]

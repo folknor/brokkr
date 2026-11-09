@@ -132,7 +132,7 @@ const GITIGNORE: &str = "target\nCargo.lock\n.brokkr\n";
 const BENCHES: &str = r#"
 [bench.probe]
 profile = "dev"
-params.mode = { default = "plain" }
+params.mode = { free = true, default = "plain" }
 script = """
 function bench(params)
     binary(params.mode):ok()
@@ -143,7 +143,7 @@ end"""
 [bench.broken]
 profile = "dev"
 features = ["broken"]
-params.mode = { default = "plain" }
+params.mode = { free = true, default = "plain" }
 script = """
 function bench(params)
     binary(params.mode):ok()
@@ -152,7 +152,7 @@ end"""
 [bench.moves]
 profile = "dev"
 features = ["moves"]
-params.mode = { default = "plain" }
+params.mode = { free = true, default = "plain" }
 script = """
 function bench(params)
     binary(params.mode):ok()
@@ -161,7 +161,7 @@ end"""
 [bench.dirties]
 profile = "dev"
 features = ["dirties"]
-params.mode = { default = "plain" }
+params.mode = { free = true, default = "plain" }
 script = """
 function bench(params)
     binary(params.mode):ok()
@@ -170,7 +170,7 @@ end"""
 [bench.cleans]
 profile = "dev"
 features = ["cleans"]
-params.mode = { default = "plain" }
+params.mode = { free = true, default = "plain" }
 script = """
 function bench(params)
     binary(params.mode):ok()
@@ -179,7 +179,7 @@ end"""
 [bench.profiled]
 profile = "dev"
 hotpath_features = ["profiled"]
-params.mode = { default = "plain" }
+params.mode = { free = true, default = "plain" }
 script = """
 function bench(params)
     record.status = binary_with({hotpath = "main"}, params.mode):ok().hotpath_status
@@ -187,7 +187,7 @@ end"""
 
 [bench.gated]
 profile = "dev"
-params.mode = { default = "plain" }
+params.mode = { free = true, default = "plain" }
 script = """
 function preflight(params)
     if params.mode == "refused" or params.mode == "also" then
@@ -205,7 +205,30 @@ end"""
 profile = "dev"
 features = ["instrumented"]
 hotpath_features = ["profiled"]
-params.mode = { default = "plain" }
+params.mode = { free = true, default = "plain" }
+script = """
+function bench(params)
+    binary(params.mode):ok()
+end"""
+
+[bench.checked]
+profile = "dev"
+params.mode = { validated = true, default = "plain" }
+params.cache = { choices = ["cold", "warm"], default = "cold" }
+script = """
+function validate(params)
+    if params.mode == "typo" then fail("--mode typo is not a mode") end
+end
+function preflight(params)
+    binary_with({program = "brokkr-no-such-program"}, "-v"):ok()
+end
+function bench(params)
+    binary(params.mode):ok()
+end"""
+
+[bench.unchecked]
+profile = "dev"
+params.mode = { validated = true, default = "plain" }
 script = """
 function bench(params)
     binary(params.mode):ok()
@@ -299,6 +322,23 @@ impl Fixture {
         hotpath: bool,
         params: &[&str],
     ) -> Ran {
+        self.invoke(log, bench, iterations, hotpath, false, params)
+    }
+
+    /// `brokkr bench --dry-run BENCH PARAMS...`.
+    fn dry(&self, log: &str, bench: &str, params: &[&str]) -> Ran {
+        self.invoke(log, bench, 1, false, true, params)
+    }
+
+    fn invoke(
+        &self,
+        log: &str,
+        bench: &str,
+        iterations: u32,
+        hotpath: bool,
+        dry_run: bool,
+        params: &[&str],
+    ) -> Ran {
         let console = Console::open(log);
         let args = BenchArgs {
             name: Some(bench.to_owned()),
@@ -306,6 +346,7 @@ impl Fixture {
             iterations: std::num::NonZeroU32::new(iterations).unwrap(),
             hotpath,
             params: params.iter().map(|p| (*p).to_owned()).collect(),
+            dry_run,
         };
         let mut argv = vec!["brokkr".to_owned(), "bench".to_owned(), bench.to_owned()];
         argv.extend(args.params.iter().cloned());
@@ -708,8 +749,56 @@ fn a_preflight_refusal_refuses_every_arm_before_any_build() {
     }
 }
 
-/// `require` loads from `bench_lib` in the preflight and in every iteration,
-/// and the run's stored config holds every module asked for, with its
+/// `validate()` and `choices` refuse a value before anything is opened,
+/// preflighted, built or stored, in every arm; `--dry-run` binds, validates
+/// and names every arm, never reaching the preflight, which a run then meets;
+/// a `validated` param with no `validate()` to check it is refused.
+#[test]
+fn validate_and_dry_run_judge_the_invocation_before_anything_is_built() {
+    let _serial = crate::test_scratch::process_global_lock();
+    let fixture = Fixture::new("validate");
+    let _hold = crate::lockfile::test_hold(
+        &fixture.detection.project_root,
+        &fixture.detection.build_root,
+    );
+    let ran = fixture.bench("typo", "checked", 1, &["--mode", "a,typo"]);
+    let error = ran.error();
+    assert!(
+        error.contains("bench checked (mode=typo): validate refused: ")
+            && error.contains("--mode typo is not a mode"),
+        "{error}"
+    );
+    assert!(!error.contains("preflight refused"), "validate runs first: {error}");
+    assert!(!ran.console.contains("cargo build"), "{}", ran.console);
+
+    let error = fixture.bench("choice", "checked", 1, &["--cache", "tepid"]).error();
+    assert!(
+        error.contains("holds \"tepid\", not among its choices: cold, warm"),
+        "{error}"
+    );
+
+    let ran = fixture.dry("dry", "checked", &["--mode", "a,b"]);
+    assert!(ran.result.is_ok(), "{}", ran.console);
+    ran.says("arm 1/2 (mode=a): --cache cold --mode a");
+    ran.says("arm 2/2 (mode=b): --cache cold --mode b");
+    ran.says("preflight not run");
+    assert!(!ran.console.contains("cargo build"), "{}", ran.console);
+    let error = fixture.dry("dry-typo", "checked", &["--mode", "typo"]).error();
+    assert!(error.contains("validate refused"), "{error}");
+
+    let error = fixture.bench("real", "checked", 1, &["--mode", "a"]).error();
+    assert!(error.contains("preflight refused"), "{error}");
+    assert!(fixture.stored().is_empty(), "nothing is stored");
+
+    let error = fixture.bench("unvalidated", "unchecked", 1, &[]).error();
+    assert!(
+        error.contains("--mode is validated = true, but the script declares no validate()"),
+        "{error}"
+    );
+}
+
+/// `require` loads from `bench_lib` in the validate, the preflight and every
+/// iteration, and the run's stored config holds every module asked for, with its
 /// source, as the script's own is held: a changed helper shows when two runs
 /// are compared.
 #[test]
@@ -721,6 +810,7 @@ fn modules_from_bench_lib_are_required_and_stored_with_the_run() {
                   profile = \"dev\"\n\
                   script = \"\"\"\n\
                   local gate = require('gate')\n\
+                  function validate() require('rules').check() end\n\
                   function preflight() gate.check() end\n\
                   function bench()\n\
                   \x20   binary(require('io.word').word):ok()\n\
@@ -735,6 +825,7 @@ fn modules_from_bench_lib_are_required_and_stored_with_the_run() {
                 "local M = {}\nfunction M.check() binary_with({program = 'sh'}, '-c', 'true'):ok() end\nreturn M\n",
             ),
             ("lib/io/word.lua", "return { word = 'plain' }\n"),
+            ("lib/rules.lua", "local M = {}\nfunction M.check() end\nreturn M\n"),
             ("lib/unused.lua", "return {}\n"),
         ],
     );
@@ -753,8 +844,8 @@ fn modules_from_bench_lib_are_required_and_stored_with_the_run() {
     let modules = stored["modules"].as_table().unwrap();
     assert_eq!(
         modules.keys().cloned().collect::<Vec<_>>(),
-        ["gate", "io.word"],
-        "what was asked for, never the rest of the library"
+        ["gate", "io.word", "rules"],
+        "what was asked for, a validate's module too, never the rest of the library"
     );
     assert_eq!(
         modules["io.word"]["source"].as_str(),

@@ -22,7 +22,7 @@ use super::lua;
 use super::store;
 use super::view::{self, FileNode, Segments, View};
 use crate::config::ConfigSources;
-use crate::config::bench::{Bench, FromSegment, Param};
+use crate::config::bench::{Bench, Domain, FromSegment, Param};
 use crate::error::DevError;
 
 /// What the command line gave after NAME.
@@ -138,10 +138,10 @@ fn items(param: &Param, raw: &[String]) -> Result<Vec<Item>, String> {
             if item.trim().is_empty() {
                 return Err("has a blank item: every value between commas must be given".into());
             }
-            if param.from.is_some() && item == "all" {
+            if param.from().is_some() && item == "all" {
                 items.push(Item::All);
             } else if param.many && item.contains("..") {
-                if param.from.is_none() {
+                if param.from().is_none() {
                     return Err(format!(
                         "holds the range {item:?}, which only a collection with a `from` path \
                          takes: a plain collection has no keys to range over"
@@ -263,7 +263,7 @@ fn order(bench: &Bench) -> Vec<&str> {
         if !done.insert(name) {
             return;
         }
-        if let Some(from) = params.get(name).and_then(|p| p.from.as_ref()) {
+        if let Some(from) = params.get(name).and_then(Param::from) {
             for reference in from.references() {
                 if let Some((key, _)) = params.get_key_value(reference) {
                     visit(key, params, done, out);
@@ -405,8 +405,7 @@ fn expand(
         let mut next = Vec::with_capacity(partials.len());
         for mut partial in partials {
             let blocked = param
-                .from
-                .as_ref()
+                .from()
                 .is_some_and(|from| from.references().any(|p| partial.unavailable.contains(p)));
             if blocked {
                 // Its parent was refused in this arm: judging it there would
@@ -496,7 +495,10 @@ fn absence(bench: &Bench, name: &str, param: &Param, partials: &[Partial], view:
         "bench {}: --{name} is required: give it on the command line",
         bench.name
     );
-    if let Some(from) = &param.from {
+    if let Domain::Choices(choices) = &param.domain {
+        message.push_str(&format!("\n  choices: {}", choices.join(", ")));
+    }
+    if let Some(from) = param.from() {
         let mut listed: Vec<String> = Vec::new();
         for partial in partials {
             if from.references().any(|p| partial.unavailable.contains(p)) {
@@ -540,7 +542,7 @@ fn resolve(
     bound: &Bound,
     view: &View,
 ) -> Result<(Option<Segments>, Vec<BoundValue>), String> {
-    let Some(from) = &param.from else {
+    let Some(from) = param.from() else {
         let keys: Vec<String> = items
             .iter()
             .map(|item| match item {
@@ -552,6 +554,20 @@ fn resolve(
             })
             .collect();
         refuse_duplicates(&keys)?;
+        if let Domain::Choices(choices) = &param.domain {
+            let wrong: Vec<String> = keys
+                .iter()
+                .filter(|key| !choices.contains(key))
+                .map(|key| format!("{key:?}"))
+                .collect();
+            if !wrong.is_empty() {
+                return Err(format!(
+                    "holds {}, not among its choices: {}",
+                    wrong.join(", "),
+                    choices.join(", ")
+                ));
+            }
+        }
         return Ok((
             None,
             keys.into_iter()
@@ -694,13 +710,14 @@ pub(crate) fn union_inputs(arms: &[Bound]) -> Vec<PathBuf> {
 /// computed once.
 pub(crate) fn digest_arms(
     arms: &mut [Bound],
+    depth: Depth,
     project_root: &Path,
     sources: &ConfigSources,
 ) -> Result<(), DevError> {
     let mut hashed = HashMap::new();
     let mut errors = Vec::new();
     for arm in arms {
-        arm.digest_with(project_root, sources, &mut hashed, &mut errors);
+        arm.digest_with(depth, project_root, sources, &mut hashed, &mut errors);
     }
     digest_refused(errors)
 }
@@ -787,7 +804,13 @@ impl Bound {
         sources: &ConfigSources,
     ) -> Result<(), DevError> {
         let mut errors = Vec::new();
-        self.digest_with(project_root, sources, &mut HashMap::new(), &mut errors);
+        self.digest_with(
+            Depth::Every,
+            project_root,
+            sources,
+            &mut HashMap::new(),
+            &mut errors,
+        );
         digest_refused(errors)
     }
 
@@ -797,6 +820,7 @@ impl Bound {
     /// the remaining files still judged.
     fn digest_with(
         &mut self,
+        depth: Depth,
         project_root: &Path,
         sources: &ConfigSources,
         hashed: &mut HashMap<PathBuf, crate::preflight::Xxh128>,
@@ -805,8 +829,8 @@ impl Bound {
         for (name, binding) in &mut self.params {
             for value in &mut binding.values {
                 let Some(file) = &value.file else { continue };
-                match digest_one(name, &value.key, file, project_root, sources, hashed) {
-                    Ok(digest) => value.digest = Some(digest),
+                match digest_one(name, &value.key, file, depth, project_root, sources, hashed) {
+                    Ok(digest) => value.digest = digest,
                     Err(error) => errors.push(error),
                 }
             }
@@ -894,16 +918,30 @@ impl Bound {
     }
 }
 
+/// How far [`digest_arms`] reads the bound files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Depth {
+    /// Every file hashed, its digest recorded: a run.
+    Every,
+    /// Every file's shape checked, only a pinned one hashed against its pin:
+    /// a dry run, which records nothing.
+    PinsOnly,
+}
+
+/// One bound file's shape checked and, unless `depth` skips it, its content
+/// hashed and held to its pin; the digest, when hashed.
 fn digest_one(
     name: &str,
     key: &str,
     file: &FileNode,
+    depth: Depth,
     project_root: &Path,
     sources: &ConfigSources,
     hashed: &mut HashMap<PathBuf, crate::preflight::Xxh128>,
-) -> Result<String, DevError> {
+) -> Result<Option<String>, DevError> {
     let what = format!("--{name} {key}");
     let pin_at = view::shown(&file.pin_at);
+    let pins_only = matches!(depth, Depth::PinsOnly);
     let meta = std::fs::metadata(&file.path).map_err(|e| {
         DevError::Preflight(vec![format!(
             "{what}: {} cannot be read: {e}",
@@ -923,6 +961,11 @@ fn digest_one(
             }
         )]));
     }
+    // A dry run records nothing, so an unpinned file's digest serves no one:
+    // its shape is checked, its content left unread.
+    if pins_only && file.pin.is_none() {
+        return Ok(None);
+    }
     // The shape was judged above for this entry; only the content is shared.
     let digest = match hashed.get(&file.path) {
         Some(digest) => *digest,
@@ -933,7 +976,7 @@ fn digest_one(
         }
     };
     let Some(pin) = &file.pin else {
-        return Ok(digest.to_string());
+        return Ok(Some(digest.to_string()));
     };
     let expected: crate::preflight::Xxh128 = pin.parse().map_err(|e| {
         DevError::Config(format!(
@@ -952,7 +995,7 @@ fn digest_one(
             file.path.display()
         )]));
     }
-    Ok(digest.to_string())
+    Ok(Some(digest.to_string()))
 }
 
 /// Each distinct `from` path a param's parents lead to, shown, with its keys
@@ -970,12 +1013,12 @@ pub(crate) fn values_for(
     view: &View,
     name: &str,
 ) -> Option<Result<KeysByPath, String>> {
-    let from = bench.params.get(name)?.from.as_ref()?;
+    let from = bench.params.get(name)?.from()?;
     let mut ancestors = BTreeSet::new();
     let mut pending: Vec<&str> = from.references().collect();
     while let Some(p) = pending.pop() {
         if ancestors.insert(p.to_owned())
-            && let Some(parent) = bench.params.get(p).and_then(|p| p.from.as_ref())
+            && let Some(parent) = bench.params.get(p).and_then(Param::from)
         {
             pending.extend(parent.references());
         }
