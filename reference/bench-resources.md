@@ -272,12 +272,20 @@ a record lands in the evidence of the child whose borrow wrote it.
 
 ## Placement and cleanup
 
-The runner places every iteration directory in `<project root>/.brokkr/bench-iterations/`,
-the project's state root (`ProjectState::bench_iterations_dir`). The
-iteration directory is removed by its lease alone, at the owner's release or
-by a later scan; `brokkr clean` has no name for it and reclaims free leases
-in every project. The location is on the project's disk, not the host's
-scratch disk.
+The runner places every iteration directory in `<scratch>/bench-iterations/`,
+`scratch` the host's resolved scratch directory
+(`layout::bench_iterations_container`), so a script bench writes to the
+drive the typed commands do. The iteration directory is removed by its
+lease alone, at the owner's release or by a later scan; `brokkr clean` has
+no name for it and reclaims free leases in every project, by the path each
+lease recorded.
+
+Before any attempt the runner refuses a container strictly inside the
+project state root (`.brokkr/`) other than `<state root>/bench-iterations`,
+the place a `scratch = ".brokkr"` gives: every other directory there is one
+brokkr removes or prunes by fixed name outside the gate. The comparison is
+lexical, `..` folded, so it is a diagnostic for that one misplacement, not
+the guarantee.
 
 The obligation the placement meets: every brokkr operation whose operand
 names the container, or one of its ancestors, by path, as brokkr spells it
@@ -299,7 +307,12 @@ gate or cannot name it.
   staging directories, test-hung snapshots, the artifact store, litehtml
   caches) target a fixed name under a fixed or configured directory, which
   equals the container or an ancestor only if that fixed name is a
-  checkout's ancestor's; such a collision is outside the guarantee.
+  checkout's ancestor's, or a configured scratch puts the container inside
+  such a target (a scratch equal to or beneath a tool install or cache
+  under the data dir, such as `planetiler-bench-classes`, whose pruning
+  removes every entry but one); such a collision is outside the guarantee.
+  A container beside such a target, the default `data/scratch` or a
+  scratch of `data` included, is covered.
   Worktree removal, whose target is a checkout, is gated already.
 - An alias, a symlink or a bind mount, that leads an ungated operation into
   the container is outside the guarantee. A gated operation resolves its

@@ -87,7 +87,7 @@ No flag removes these either. What keeps each in check, where anything does:
 | `.brokkr/verify-reference/` | `verify_reference_budget` per host (`brokkr man config`), applied when each verify ends; absent, nothing; `--verify-reference` removes it whole |
 | `$XDG_DATA_HOME/brokkr/history.db` | nothing: every invocation, never pruned |
 | `$XDG_DATA_HOME/brokkr/bench.db` | nothing: every attempted run with its evidence, never pruned |
-| `.brokkr/bench-iterations/` | each script-bench iteration's directory goes with its lease, at its end or, after a crash, once nothing holding its reservation runs; the empty container stays |
+| `<scratch>/bench-iterations/` | each script-bench iteration's directory goes with its lease, at its end or, after a crash, once nothing holding its reservation runs; the empty container stays |
 | `$XDG_DATA_HOME/brokkr/sidecar-backups/` | nothing: three whole copies of each project root's sidecar.db, in a directory per root whose `origin` file names it, never pruned; a moved checkout starts a new one. The kind-keyed `<kind>-sidecar.db`, `.1`, `.2` an earlier brokkr wrote at the top level stay too, never written again; delete either by hand |
 | `.brokkr/hash_cache`, `hash_cache.lock` | a save drops entries for files that no longer exist; a run that only hits the cache does not save |
 | `.brokkr/pbfhogg-capabilities` | capped at 512 lines |
@@ -141,7 +141,9 @@ Bare `brokkr clean`, in order:
   script-bench iteration's included unless a borrow of it is still held,
   and each lease kept is named with why (see "Launch reservations" in
   `docs/projects/pbfhogg.md`). Script-bench iterations live under
-  `.brokkr/bench-iterations/`, which clean never removes by name.
+  `bench-iterations/` under the host's scratch, which clean never removes
+  by name; elivagar's scratch wipe goes through the reservation gate, so a
+  live iteration there keeps it.
 - **Scratch**, whose shape differs per project: elivagar's scratch dir (the
   host `scratch`, where tilegen writes before the rename into the durable
   store) is wiped and recreated, and `<data>/tilegen_tmp` (the `--tmp-dir`

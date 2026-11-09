@@ -98,6 +98,7 @@ pub(crate) fn run(
     // Opened, or for a results server probed, before anything is built or
     // run and before a stop is caught: a run with nowhere to go is never
     // measured.
+    let container = iteration_container(detection, &hostname)?;
     let mut destination = Destination::open(&detection.config)?;
     let _inputs_held = hold_inputs(&arms)?;
     let keep = crate::context::worktree_keep(&detection.config)?;
@@ -145,6 +146,7 @@ pub(crate) fn run(
             config: std::sync::Arc::clone(&config),
             committed: args.commit.is_some(),
             hostname: &hostname,
+            container: &container,
             iterations: args.iterations.get(),
             argv: argv.clone(),
             measurement,
@@ -182,6 +184,49 @@ pub(crate) fn run(
         }
     }
     summary(name, total, &failed)
+}
+
+/// Where this host's iterations make their directories:
+/// `<scratch>/bench-iterations`, on the drive the typed commands write to.
+/// Refused when it lies strictly inside the project state root anywhere but
+/// the state root's own `bench-iterations` (a scratch of `.brokkr` itself):
+/// every other directory there is one brokkr wipes or prunes by fixed name,
+/// outside the reservation gate (`reference/bench-resources.md`, Placement
+/// and cleanup). Compared lexically, `..` folded: a diagnostic for the one
+/// misplacement cheap to detect exactly, not the placement guarantee.
+fn iteration_container(detection: &Detection, hostname: &str) -> Result<PathBuf, DevError> {
+    let root = detection.project_root.as_path();
+    let scratch = crate::config::resolve_paths(&detection.config, hostname, root).scratch_dir;
+    let container = fold(&crate::clean::layout::bench_iterations_container(&scratch));
+    let state = crate::clean::layout::ProjectState::new(root);
+    let (state_root, allowed) = (fold(state.root()), fold(&state.bench_iterations_dir()));
+    if container != allowed && container.starts_with(&state_root) {
+        return Err(DevError::Config(format!(
+            "host {hostname}'s scratch {} puts bench iterations at {}, inside brokkr's state \
+             root {}, where brokkr removes directories by fixed name: point scratch elsewhere, \
+             or at {} itself",
+            scratch.display(),
+            container.display(),
+            state_root.display(),
+            state_root.display()
+        )));
+    }
+    Ok(container)
+}
+
+/// `path` with `.` and `..` folded lexically.
+fn fold(path: &Path) -> PathBuf {
+    let mut folded = PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                folded.pop();
+            }
+            other => folded.push(other),
+        }
+    }
+    folded
 }
 
 /// The bench named `name`, or a refusal naming the ones declared.
@@ -808,6 +853,8 @@ struct Attempt<'a> {
     config: std::sync::Arc<lua::Value>,
     committed: bool,
     hostname: &'a str,
+    /// Where the iterations make their directories: under the host's scratch.
+    container: &'a Path,
     iterations: u32,
     argv: Vec<String>,
     measurement: store::Measurement,
@@ -1116,7 +1163,7 @@ impl Attempt<'_> {
                     program,
                     cwd: self.detection.project_root.as_path(),
                     state_root: state.root(),
-                    container: &state.bench_iterations_dir(),
+                    container: self.container,
                     index: usize::try_from(index).unwrap_or(usize::MAX),
                     since,
                     measurement: self.measurement,

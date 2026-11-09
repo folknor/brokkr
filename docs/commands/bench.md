@@ -611,12 +611,17 @@ clean` or lease scan.
 
 ## Where an iteration's files live
 
-Each iteration owns one directory, `.brokkr/bench-iterations/.brokkr-iteration-<token>`
-under the project root, holding `out/`, `scratch/`, the children's stdout
+Each iteration owns one directory, `bench-iterations/.brokkr-iteration-<token>`
+under the host's resolved `scratch` (by default `data/scratch` under the
+project root), holding `out/`, `scratch/`, the children's stdout
 spools and the marked calls' hotpath reports, on the resource protocol `reference/bench-resources.md` describes: it
 is removed when the iteration ends, and one a crash left behind goes once
-nothing that inherited its reservation is still running. It sits on the
-project's disk, not the host's scratch disk.
+nothing that inherited its reservation is still running. Its outputs and
+scratch so land on the drive the typed commands write to. A `scratch`
+inside the project's `.brokkr/` is refused unless it is `.brokkr` itself,
+and a `scratch` inside a directory brokkr installs, prunes or removes by
+fixed name (a tool install or cache under the data dir) is a misplacement
+the protections do not cover.
 
 ## What a run stores
 

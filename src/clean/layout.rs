@@ -17,6 +17,13 @@ pub(crate) const PROJECT_STATE_DIR: &str = ".brokkr";
 /// The state directory's own `.gitignore`: everything in it, itself included.
 const SELF_IGNORE: &[u8] = b"# Written by brokkr: per-host state.\n*\n";
 
+/// Where script-bench iterations make their directories under a host's
+/// resolved scratch `scratch_dir` (`reference/bench-resources.md`, Placement
+/// and cleanup).
+pub(crate) fn bench_iterations_container(scratch_dir: &Path) -> PathBuf {
+    scratch_dir.join("bench-iterations")
+}
+
 /// The project-local `.brokkr` root and its named stores.
 #[derive(Debug, Clone)]
 pub(crate) struct ProjectState {
@@ -76,11 +83,12 @@ impl ProjectState {
         self.root.join("bench")
     }
 
-    /// Where script-bench iterations make their directories
+    /// The one place inside the state root a script-bench iteration container
+    /// may sit, when the host's scratch is the state root itself
     /// (`reference/bench-resources.md`, Placement and cleanup). Removed by
     /// nothing but the leases: `brokkr clean` has no name for it.
     pub(crate) fn bench_iterations_dir(&self) -> PathBuf {
-        self.root.join("bench-iterations")
+        bench_iterations_container(&self.root)
     }
 
     pub(crate) fn check_logs_dir(&self) -> PathBuf {
