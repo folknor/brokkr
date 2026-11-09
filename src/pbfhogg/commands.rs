@@ -2631,16 +2631,18 @@ mod tests {
     }
 
     #[test]
-    fn add_locations_to_ways_force_altw_composes_with_inject_prepass() {
+    fn add_locations_to_ways_force_altw_composes_with_sparse_index() {
         // The intended verdict cell: raw input reaches the decode-all
-        // fallback (--force) while emitting the injected-prepass extensions.
+        // fallback (--force) under the sparse index. pbfhogg refuses --force
+        // with --inject-prepass and with an explicit --index-type external.
         let mut ctx = test_ctx();
-        ctx.params.inject_prepass = true;
+        ctx.params.index_type = Some("sparse".into());
         ctx.params.force_unindexed = true;
         let cmd = PbfhoggCommand::AddLocationsToWays;
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
-        assert!(args.contains(&String::from("--inject-prepass")));
         assert!(args.contains(&String::from("--force")));
+        let at = args.iter().position(|a| a == "--index-type").unwrap();
+        assert_eq!(args[at + 1], "sparse");
     }
 
     #[test]

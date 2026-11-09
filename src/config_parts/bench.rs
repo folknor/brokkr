@@ -415,7 +415,24 @@ pub(crate) fn parse_lib(
     let origin = sources.value_origin(&["bench_lib"]).ok_or_else(|| {
         DevError::Config("bench_lib: no config file is recorded as setting it".into())
     })?;
-    Ok(Some(origin.base.join(dir)))
+    Ok(Some(resolved_beside(&origin.base.join(dir))))
+}
+
+/// `path` with its directory resolved on disk, so a `script_file` or
+/// `bench_lib` spelled through `..` (`brokkr.d/../benches/x.lua`) records as
+/// the one file it names. `..` is resolved by the filesystem, never dropped
+/// textually: through a linked directory it need not undo the component
+/// before it. The last component is kept as spelled, so a linked script is
+/// named as itself. A directory that cannot be resolved leaves the path as
+/// joined, for the read to report.
+fn resolved_beside(path: &std::path::Path) -> PathBuf {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return path.to_path_buf();
+    };
+    match std::fs::canonicalize(dir) {
+        Ok(dir) => dir.join(name),
+        Err(_) => path.to_path_buf(),
+    }
 }
 
 fn bench_script(
@@ -451,7 +468,7 @@ fn bench_script(
             }
             let origin = declaring("script_file")?;
             Ok(BenchScript::File {
-                path: origin.base.join(file),
+                path: resolved_beside(&origin.base.join(file)),
                 declared_in: origin.file.to_path_buf(),
             })
         }
@@ -684,6 +701,27 @@ mod tests {
         let base = std::fs::canonicalize(dir.join("benches")).unwrap();
         assert_eq!(path, &base.join("cat.lua"));
         assert_eq!(declared_in, &base.join("benches.toml"));
+    }
+
+    #[test]
+    fn a_script_file_through_dot_dot_records_as_the_file_it_names() {
+        let dir = tree(
+            "script_file_dotdot",
+            &[
+                ("brokkr.toml", "project = \"p\"\ninclude = [\"brokkr.d/benches.toml\"]\n"),
+                (
+                    "brokkr.d/benches.toml",
+                    "[bench.cat]\nscript_file = \"../benches/./cat.lua\"\n",
+                ),
+                ("benches/cat.lua", "function bench() end\n"),
+            ],
+        );
+        let benches = benches_of(&dir).unwrap();
+        let BenchScript::File { path, .. } = &benches["cat"].script else {
+            panic!("expected a script file");
+        };
+        let root = std::fs::canonicalize(&dir).unwrap();
+        assert_eq!(path, &root.join("benches/cat.lua"));
     }
 
     /// `bench_lib` resolves beside the file that set it, reaches every

@@ -88,8 +88,10 @@ params.jobs = { help = "worker threads" }
 - `script` - the Lua, inline. Or:
 - `script_file` - a `.lua` file holding it, resolved against the directory of
   the config file that set `script_file` (the same base `include` paths use,
-  and the real directory when that file is reached through a symlink). A
-  bench gives exactly one of the two; both, neither, or a blank one is a load
+  and the real directory when that file is reached through a symlink). The
+  script's own directory is resolved on disk too, so
+  `../benches/cat.lua` is shown and stored without its dot components; the
+  file name stays as spelled, a linked script named as itself. A bench gives exactly one of the two; both, neither, or a blank one is a load
   error. Under `include`, the two are one setting: a layer giving either
   replaces whichever a layer beneath it gave, so an including file can swap
   an included inline script for a file. Every other bench field merges key by
