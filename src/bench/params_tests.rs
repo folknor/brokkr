@@ -723,3 +723,63 @@ fn help_lists_keys_under_the_parents_given_or_default() {
         .unwrap_err();
     assert!(err.contains("norway"), "{err}");
 }
+
+/// `split = false` takes each occurrence, and the default, whole: a value
+/// may hold a `,`, repeats still fan out or fill a collection, and `all` and
+/// ranges keep their meaning (brokkr#141).
+#[test]
+fn an_unsplit_param_takes_each_value_whole() {
+    let f = fixture(
+        "unsplit",
+        r#"
+[bench.b]
+script = "function bench() end"
+params.expr = { free = true, split = false, default = "w/highway=primary,secondary" }
+params.exprs = { free = true, many = true, split = false }
+params.mode = { choices = ["a,b", "c"], split = false, default = "a,b" }
+params.key = { from = "data.keys", split = false, default = "x,y" }
+params.nums = { from = "data.nums", many = true, split = false }
+params.sub = { from = "data.keys.{key}", split = false }
+
+[data.nums.1]
+[data.nums.2]
+[data.nums.4]
+
+[data.keys."x,y"]
+v = 1
+[data.keys.z]
+v = 2
+"#,
+    );
+    let arm = arms(&f, &[]).remove(0);
+    assert_eq!(arm["expr"], ["w/highway=primary,secondary"]);
+    assert_eq!(arm["mode"], ["a,b"]);
+    assert_eq!(arm["key"], ["x,y"], "a key holding a comma is reachable");
+    assert_eq!(
+        arms(&f, &["--exprs", "n/a=1,2", "--exprs", "w/b"]).remove(0)["exprs"],
+        ["n/a=1,2", "w/b"],
+        "a collection fills from repeats"
+    );
+    let fanned: Vec<Vec<String>> = arms(&f, &["--expr", "a,b", "--expr", "c"])
+        .into_iter()
+        .map(|arm| arm["expr"].clone())
+        .collect();
+    assert_eq!(fanned, [["a,b"], ["c"]], "repeats fan out, commas kept");
+    assert_eq!(arms(&f, &["--key", "all"]).len(), 2, "all still expands");
+    assert_eq!(
+        arms(&f, &["--nums", "1..2", "--nums", "4"]).remove(0)["nums"],
+        ["1", "2", "4"],
+        "a range still expands"
+    );
+    assert!(refusal(&f, &["--nums", "1..2", "--nums", "2"]).contains("twice"));
+    assert!(refusal(&f, &["--nums", "1,2"]).contains("not a key"));
+    assert_eq!(
+        arms(&f, &["--sub", "v"]).remove(0)["sub"],
+        ["v"],
+        "a comma-bearing parent key resolves a dependent path"
+    );
+    let err = refusal(&f, &["--mode", "c,a,b"]);
+    assert!(err.contains("--mode c,a,b"), "{err}");
+    let err = refusal(&f, &["--expr", "x", "--expr", " "]);
+    assert!(err.contains("--expr x --expr  "), "{err}");
+}

@@ -531,7 +531,16 @@ fn dry_run(
             .into_iter()
             .map(|(param, bound)| {
                 let keys: Vec<String> = bound.values.into_iter().map(|v| v.key).collect();
-                format!("--{param} {}", keys.join(","))
+                // An unsplit param's commas are its values' own, so each
+                // value is its own flag.
+                if !keys.is_empty() && bench.params.get(param.as_str()).is_some_and(|p| !p.split) {
+                    keys.iter()
+                        .map(|key| format!("--{param} {key}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                } else {
+                    format!("--{param} {}", keys.join(","))
+                }
             })
             .collect();
         let label = match labels.get(index).map(String::as_str) {
@@ -718,6 +727,9 @@ fn describe(bench: &Bench, detection: &Detection, given: &params::Given, view: &
         }
         if param.many {
             line.push_str(" (a collection)");
+        }
+        if !param.split {
+            line.push_str(" (one value per flag, commas included)");
         }
         if let Some(help) = &param.help {
             line.push_str(&format!(": {help}"));

@@ -195,8 +195,8 @@ of four ways, so no value reaches a script unchecked by oversight:
 - `choices` - a list of the strings it takes, checked when the bench
   binds, every item of every value and a `default` alike, and listed by the
   bench's `--help`. Refused at load: an empty list, a blank or repeated
-  choice, a choice holding `,`, which the command line splits values on,
-  and for a `many` param a choice holding `..`, which binding reads there
+  choice, a choice holding `,`, which the command line splits values on
+  (unless the param sets `split = false`), and for a `many` param a choice holding `..`, which binding reads there
   as a range, so neither could ever be given.
 - `validated = true` - any string, which the script's `validate()` checks
   (`brokkr man bench`, Validate): for a domain the script owns, such as
@@ -214,6 +214,9 @@ A param with none of them, or with two, is refused at load. The rest:
 - `many` - `true` makes the param a collection, binding a list of values to
   one sample; any other param given several values fans out, one run per
   value.
+- `split` - `false` takes each value whole instead of splitting it on `,`
+  (Binding params, below), so a value such as `w/highway=primary,secondary`
+  reaches the script as one string. Absent or `true`, values split.
 - `required` - `true` makes the command line give the param: its absence
   is refused when the bench binds (Binding params, below), before anything
   is built and without storing a run, where a script's own refusal would
@@ -254,9 +257,18 @@ a collection's `all` over an empty table binds an empty collection.
 **Several values.** A param may be given more than once, and a value is a
 list: it is split on every `,`, and the param's values are every item of
 every occurrence, in command-line order (`--osc 4705,4706 --osc 4710`). A
-`default` is read the same way. No value can hold a `,` as part of a key; a
-table key holding one is reached only through `all`. Two more spellings
-have a meaning for some params:
+`default` is read the same way. A value of a param that splits cannot hold
+a `,`; a table key holding one is reached there only through `all`.
+
+A param with `split = false` is not split: each occurrence, and the
+`default`, is exactly one item, commas included, so several values come
+only from repeating the flag (`--expr a,b --expr c` is two values), and a
+`default` is one. Only the comma splitting changes: `all` and `LO..HI`
+below still mean what they mean, an item at a time, and a blank or repeated
+item is refused as before. Its `--help` line says it takes one value per
+flag.
+
+Two more spellings have a meaning for some params:
 
 - `all`, for a `from` param, is every key of its table, in key order:
   numeric when every key is a canonical decimal (digits, no sign, no
@@ -290,7 +302,8 @@ the whole invocation, before anything is built and without storing a run;
 every refusal is named, each with what it found (a refused param's
 dependents are not judged under it):
 
-- an unknown param, a missing or blank value, a blank item between commas,
+- an unknown param, a missing or blank value, a blank item between commas
+  (of a param that splits),
   or a token that is not `--NAME`;
 - a `required` param the command line does not give, refused once however
   many arms there are, even in an arm whose parent was refused, and its

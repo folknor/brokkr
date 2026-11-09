@@ -239,6 +239,16 @@ would churn every litehtml/sluggrs invocation in CI and docs.
 
 ## Backlog
 
+### A results param filter cannot tell collections apart by comma (2026-11-09)
+
+`src/bench/store/list.rs` matches a param filter against the run's keys
+joined with `,`, so a collection `["a,b", "c"]` and `["a", "b,c"]` match the
+same filter. Rare until `split = false` made comma-bearing values ordinary;
+scalar values still match exactly. The results tables and compare
+explanations join collection keys with `,` too, so they display the two
+identically. Pairing is unaffected (it compares the JSON arrays). Wanted: an
+exact collection selector, additive, and quoted keys in collection displays.
+
 ### `brokkr env` never lists a dataset's snapshot files (2026-11-04)
 
 `src/datasets/status.rs` inventories each dataset's primary `pbf`, `osc`,

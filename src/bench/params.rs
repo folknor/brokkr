@@ -9,7 +9,7 @@
 //! refuse was refused when the config loaded.
 //!
 //! A param's values are every occurrence on the command line (else its
-//! `default`), each split on `,`. A `many` param binds them all as one
+//! `default`), each split on `,` unless the param sets `split = false`. A `many` param binds them all as one
 //! collection; any other param given several fans out, one arm per value,
 //! and [`bind`] returns every arm, dependents resolved per parent binding.
 //! Every refusal across every arm is collected before any is returned, so
@@ -134,7 +134,13 @@ fn items(param: &Param, raw: &[String]) -> Result<Vec<Item>, String> {
         if occurrence.trim().is_empty() {
             return Err("is blank: give a value".into());
         }
-        for item in occurrence.split(',') {
+        // An unsplit param takes the occurrence whole, commas and all.
+        let pieces: Vec<&str> = if param.split {
+            occurrence.split(',').collect()
+        } else {
+            vec![occurrence.as_str()]
+        };
+        for item in pieces {
             if item.trim().is_empty() {
                 return Err("has a blank item: every value between commas must be given".into());
             }
@@ -313,6 +319,16 @@ enum Source {
     Default,
 }
 
+/// A param's occurrences as the command line would spell them: an unsplit
+/// param's commas are its own, so its occurrences stay separate flags.
+fn spelled(name: &str, param: &Param, raw: &[String]) -> String {
+    if param.split {
+        raw.join(",")
+    } else {
+        raw.join(&format!(" --{name} "))
+    }
+}
+
 /// A refusal, with whether it came from the command line or a default.
 struct Refusal {
     message: String,
@@ -380,7 +396,7 @@ fn expand(
             }
             (None, None) => continue,
         };
-        let value = raw.join(",");
+        let value = spelled(name, param, &raw);
         let refuse = |why: String| Refusal {
             message: match source {
                 Source::Given => format!("bench {}: --{name} {value} {why}", bench.name),

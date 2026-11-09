@@ -86,6 +86,11 @@ pub struct Param {
     pub default: Option<String>,
     /// A collection: one sample binds the whole list of values.
     pub many: bool,
+    /// Whether a value is a list split on `,` (the default). `split = false`
+    /// takes each occurrence, and the default, as one item, so a value may
+    /// hold a `,`; only the comma tokenizing changes, so `all` and a range
+    /// keep their meaning per item.
+    pub split: bool,
     /// The command line must give it: its absence is refused when the bench
     /// binds, before anything is built. Never beside a `default`.
     pub required: bool,
@@ -217,6 +222,7 @@ struct RawParam {
     default: Option<String>,
     #[serde(default)]
     many: bool,
+    split: Option<bool>,
     #[serde(default)]
     required: bool,
 }
@@ -351,10 +357,11 @@ fn parse_param(
             ));
         }
     }
+    let split = raw.split.unwrap_or(true);
     let domain = if let Some(text) = raw.from.as_deref() {
         Domain::From(FromPath::parse(text).map_err(|e| format!("{at}: from {text:?} {e}"))?)
     } else if let Some(choices) = raw.choices {
-        check_choices(at, &choices, raw.many)?;
+        check_choices(at, &choices, raw.many, split)?;
         Domain::Choices(choices)
     } else if raw.validated {
         Domain::Validated
@@ -362,10 +369,16 @@ fn parse_param(
         Domain::Free
     };
     // A choices default is judged here as binding would judge it, so one
-    // that loads binds: every item a choice, none twice.
+    // that loads binds: every item a choice, none twice. An unsplit default
+    // is one item.
     if let (Domain::Choices(choices), Some(default)) = (&domain, raw.default.as_deref()) {
         let mut seen = BTreeSet::new();
-        for item in default.split(',') {
+        let items: Vec<&str> = if split {
+            default.split(',').collect()
+        } else {
+            vec![default]
+        };
+        for item in items {
             if !choices.iter().any(|c| c == item) {
                 return Err(format!(
                     "{at}: default {default:?} holds {item:?}, which is not among its choices \
@@ -394,30 +407,29 @@ fn parse_param(
         domain,
         default: raw.default,
         many: raw.many,
+        split,
         required: raw.required,
         origin,
     })
 }
 
 /// A `choices` list every value of which the command line can give: not
-/// empty, no value blank, repeated or holding the `,` the command line
-/// splits values on, and for a collection (`many`) none holding the `..`
-/// that binding reads there as a range.
-fn check_choices(at: &str, choices: &[String], many: bool) -> Result<(), String> {
+/// empty, no value blank, repeated or, unless the param is unsplit, holding
+/// the `,` the command line splits values on, and for a collection (`many`)
+/// none holding the `..` that binding reads there as a range.
+fn check_choices(at: &str, choices: &[String], many: bool, split: bool) -> Result<(), String> {
     if choices.is_empty() {
-        return Err(format!(
-            "{at}: choices is empty - list the values it takes"
-        ));
+        return Err(format!("{at}: choices is empty - list the values it takes"));
     }
     let mut seen = BTreeSet::new();
     for choice in choices {
         if choice.trim().is_empty() {
             return Err(format!("{at}: choices has a blank value"));
         }
-        if choice.contains(',') {
+        if split && choice.contains(',') {
             return Err(format!(
                 "{at}: choice {choice:?} holds a ',', which the command line splits values on, \
-                 so it could never be given"
+                 so it could never be given; split = false takes each value whole"
             ));
         }
         if many && choice.contains("..") {
@@ -844,7 +856,10 @@ mod tests {
         let dir = tree(
             "script_file_dotdot",
             &[
-                ("brokkr.toml", "project = \"p\"\ninclude = [\"brokkr.d/benches.toml\"]\n"),
+                (
+                    "brokkr.toml",
+                    "project = \"p\"\ninclude = [\"brokkr.d/benches.toml\"]\n",
+                ),
                 (
                     "brokkr.d/benches.toml",
                     "[bench.cat]\nscript_file = \"../benches/./cat.lua\"\n",
@@ -998,11 +1013,7 @@ mod tests {
         assert_eq!(params["variant"].origin, ParamOrigin::Bench);
         assert_eq!(params["variant"].help, None);
         assert_eq!(params["variant"].default.as_deref(), Some("indexed"));
-        let refs: Vec<&str> = params["variant"]
-            .from()
-            .unwrap()
-            .references()
-            .collect();
+        let refs: Vec<&str> = params["variant"].from().unwrap().references().collect();
         assert_eq!(refs, ["dataset"]);
     }
 
@@ -1158,7 +1169,11 @@ mod tests {
             ),
             ("choices_empty", "{ choices = [] }", "choices is empty"),
             ("choices_blank", "{ choices = [\" \"] }", "blank value"),
-            ("choices_twice", "{ choices = [\"a\", \"a\"] }", "lists \"a\" twice"),
+            (
+                "choices_twice",
+                "{ choices = [\"a\", \"a\"] }",
+                "lists \"a\" twice",
+            ),
             ("choices_comma", "{ choices = [\"a,b\"] }", "holds a ','"),
             (
                 "choices_default",
@@ -1171,14 +1186,30 @@ mod tests {
                 "gives \"a\" twice",
             ),
             (
+                "choices_unsplit_default",
+                "{ choices = [\"a,b\"], split = false, default = \"a\" }",
+                "holds \"a\", which is not among its choices",
+            ),
+            (
                 "choices_many_range",
                 "{ choices = [\"a..b\"], many = true }",
                 "a collection reads as a range",
             ),
         ] {
-            let err = err_of(name, &format!("[bench.c]\nscript = \"x = 1\"\nparams.p = {decl}\n"));
+            let err = err_of(
+                name,
+                &format!("[bench.c]\nscript = \"x = 1\"\nparams.p = {decl}\n"),
+            );
             assert!(err.contains(needle), "{name}: {err}");
         }
+        // Under `split = false` a choice may hold a `,`.
+        let benches = single(
+            "choices_unsplit",
+            "[bench.c]\nscript = \"x = 1\"\nparams.p = { choices = [\"a,b\"], split = false, \
+             default = \"a,b\" }\n",
+        )
+        .unwrap();
+        assert!(!benches["c"].params["p"].split);
         // `false` is no declaration.
         let err = err_of(
             "domain_false",
