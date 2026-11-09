@@ -972,7 +972,7 @@ once the command line was parsed and accepted, immediately before the
 subcommand is dispatched, and `CLI_COMMAND_END` when the dispatch returns,
 before its end-of-run counters. The interval also holds what a library
 call does not: the CLI's option handling, its output and scratch setup,
-its process policy (the raised descriptor limit, the capped malloc arenas,
+its process policy (the raised descriptor limit and
 input page-cache eviction, applied inside it), its publication and the
 summary it prints. A timed replay's interval is valid only as exactly one
 `CLI_COMMAND_START` and one `CLI_COMMAND_END`, `0 <= START <= END`, `END`
