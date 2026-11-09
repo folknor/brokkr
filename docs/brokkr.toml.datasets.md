@@ -54,6 +54,15 @@ paths still resolve against each including project's root.
   `repack --as-snapshot` writes its `same` entry here.
 - `osc.<seq>` - OSC diff file entries keyed by sequence number. Each has
   `file`, optional `xxhash` (XXH128).
+- `snapshot.<key>` - another point-in-time capture of the dataset, with its
+  own `pbf.<variant>` and `osc.<seq>` tables shaped like the top-level ones
+  and resolved under the same data directory; the top-level tables are the
+  `base` snapshot.
+- `brokkr env` lists every `pbf`, `osc`, `pmtiles` and `polygon` entry, and
+  every `snapshot.<key>.pbf.<variant>` and `snapshot.<key>.osc.<seq>` entry
+  (as `<dataset>/snapshot.<key>.pbf.<variant>`), with a presence mark and the
+  pin check; an existing file with no `xxhash` prints the computed digest
+  (`no hash configured, actual: ...`) to copy into the config.
 - `pmtiles.<variant>` - PMTiles archive entries keyed by variant name (e.g.
   `elivagar`). Each has `file`, optional `xxhash` (XXH128).
   Used by nidhogg `serve` and `tiles`.

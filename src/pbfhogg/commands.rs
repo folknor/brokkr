@@ -991,6 +991,13 @@ impl PbfhoggCommand {
                         }
                     }
                 }
+                // A base without indexdata is merged with `apply-changes
+                // --force`, which indexes every blob, so the pair measured is
+                // raw vs indexed. Absent for an indexed base, as on every row
+                // stored before the key existed.
+                if observations.merged_from_unindexed {
+                    meta.push(KvPair::text("meta.diff_pair", "raw-vs-indexed"));
+                }
                 meta
             }
             Self::DiffSnapshots { .. } => {
@@ -1159,9 +1166,10 @@ impl PbfhoggCommand {
             }
             Self::Sort => {
                 let output = scratch_output_path(ctx, self, mode)?;
-                CommandArgv::new("sort")
+                Ok(CommandArgv::new("sort")
                     .input(ctx.pbf_str()?)?
-                    .output(&output)
+                    .output(&output)?
+                    .arg_if(ctx.params.force_unindexed, "--force"))
             }
             Self::Cat(cat) => {
                 let output = scratch_output_path(ctx, self, mode)?;
@@ -1277,6 +1285,7 @@ impl PbfhoggCommand {
                     Path::new(ctx.osc_str()?),
                     &output,
                     ctx.params.locations_on_ways,
+                    false,
                 )
             }
             Self::AddLocationsToWays => {
@@ -1291,8 +1300,11 @@ impl PbfhoggCommand {
                 if ctx.params.inject_prepass {
                     argv = argv.arg("--inject-prepass");
                 }
-                if ctx.params.force_altw {
+                if ctx.params.force_unindexed {
                     argv = argv.arg("--force");
+                }
+                if ctx.params.keep_untagged_nodes {
+                    argv = argv.arg("--keep-untagged-nodes");
                 }
                 Ok(argv)
             }
@@ -1329,7 +1341,10 @@ impl PbfhoggCommand {
                             .scratch(&ctx.scratch_dir)
                     }
                 };
-                Ok(argv)
+                Ok(match &ctx.params.diff_type {
+                    Some(kind) => argv.arg("--type").arg(kind.clone()),
+                    None => argv,
+                })
             }
 
             Self::Repack {
@@ -1420,17 +1435,22 @@ impl PbfhoggCommand {
     /// builds its cache input with pbfhogg's defaults (no transform, no
     /// axis flag); measured apply-changes passes its `--locations-on-ways`
     /// here and gets its axis flags from [`build_args`](Self::build_args).
+    /// `force` appends pbfhogg's own `--force`, which a base without
+    /// blob-level indexdata needs; `ensure_merged_pbf` sets it for such a
+    /// base, and measured apply-changes never does.
     pub(crate) fn apply_changes_args(
         pbf: &Path,
         osc: &Path,
         output: &Path,
         locations_on_ways: bool,
+        force: bool,
     ) -> Result<CommandArgv, DevError> {
         CommandArgv::new("apply-changes")
             .input(pbf)?
             .input(osc)?
             .arg_if(locations_on_ways, "--locations-on-ways")
             .output(output)
+            .map(|argv| argv.arg_if(force, "--force"))
     }
 
     /// Materialise the on-disk inputs `build_args` only names.
@@ -2596,7 +2616,7 @@ mod tests {
     #[test]
     fn add_locations_to_ways_forwards_force_altw() {
         let mut ctx = test_ctx();
-        ctx.params.force_altw = true;
+        ctx.params.force_unindexed = true;
         let cmd = PbfhoggCommand::AddLocationsToWays;
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         assert!(args.contains(&String::from("--force")));
@@ -2616,11 +2636,93 @@ mod tests {
         // fallback (--force) while emitting the injected-prepass extensions.
         let mut ctx = test_ctx();
         ctx.params.inject_prepass = true;
-        ctx.params.force_altw = true;
+        ctx.params.force_unindexed = true;
         let cmd = PbfhoggCommand::AddLocationsToWays;
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
         assert!(args.contains(&String::from("--inject-prepass")));
         assert!(args.contains(&String::from("--force")));
+    }
+
+    #[test]
+    fn add_locations_to_ways_forwards_keep_untagged_nodes() {
+        let mut ctx = test_ctx();
+        let cmd = PbfhoggCommand::AddLocationsToWays;
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
+        assert!(!args.contains(&String::from("--keep-untagged-nodes")));
+        ctx.params.keep_untagged_nodes = true;
+        ctx.params.index_type = Some("external".into());
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
+        assert!(args.contains(&String::from("--keep-untagged-nodes")));
+        assert!(args.contains(&String::from("--index-type")));
+    }
+
+    #[test]
+    fn sort_forwards_force_only_when_asked() {
+        let mut ctx = test_ctx();
+        let cmd = PbfhoggCommand::Sort;
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
+        assert!(!args.contains(&String::from("--force")));
+        ctx.params.force_unindexed = true;
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
+        assert!(args.contains(&String::from("--force")));
+    }
+
+    #[test]
+    fn diff_forwards_type_verbatim() {
+        let mut ctx = test_ctx();
+        ctx.inputs = ResolvedInputs::TwoPbfs {
+            a: PathBuf::from("/data/denmark.osm.pbf"),
+            b: PathBuf::from("/scratch/denmark-merged.osm.pbf"),
+            origin: TwoPbfOrigin::Merged,
+        };
+        for format in [DiffFormat::Default, DiffFormat::Osc] {
+            let cmd = PbfhoggCommand::Diff { format };
+            let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
+            assert!(!args.contains(&String::from("--type")));
+        }
+        ctx.params.diff_type = Some("way".into());
+        for format in [DiffFormat::Default, DiffFormat::Osc] {
+            let cmd = PbfhoggCommand::Diff { format };
+            let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap().into_args();
+            let pos = args.iter().position(|a| a == "--type").expect("--type");
+            assert_eq!(args[pos + 1], "way");
+        }
+    }
+
+    #[test]
+    fn apply_changes_args_force_is_opt_in() {
+        let plain = PbfhoggCommand::apply_changes_args(
+            Path::new("/data/a.osm.pbf"),
+            Path::new("/data/a.osc.gz"),
+            Path::new("/scratch/out.osm.pbf"),
+            false,
+            false,
+        )
+        .unwrap()
+        .into_args();
+        assert!(!plain.contains(&String::from("--force")));
+        let forced = PbfhoggCommand::apply_changes_args(
+            Path::new("/data/a.osm.pbf"),
+            Path::new("/data/a.osc.gz"),
+            Path::new("/scratch/out.osm.pbf"),
+            false,
+            true,
+        )
+        .unwrap()
+        .into_args();
+        assert!(forced.contains(&String::from("--force")));
+    }
+
+    #[test]
+    fn diff_metadata_records_a_mixed_pair_only_when_forced() {
+        let mut observations = CommandObservations::default();
+        let cmd = PbfhoggCommand::Diff {
+            format: DiffFormat::Default,
+        };
+        assert!(cmd.metadata(&observations).is_empty());
+        observations.merged_from_unindexed = true;
+        let meta = cmd.metadata(&observations);
+        assert_eq!(meta.len(), 1);
     }
 
     #[test]

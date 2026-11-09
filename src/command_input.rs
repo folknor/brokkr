@@ -157,9 +157,11 @@ impl Command {
                 mode,
                 pbf,
                 snapshot,
+                force_sort,
             } => {
                 let params = CommandParams {
                     snapshot,
+                    force_unindexed: force_sort,
                     ..Default::default()
                 };
                 RoutedCommand::Pbf {
@@ -406,11 +408,13 @@ impl Command {
                 keep_cache,
                 snapshot,
                 jobs,
+                diff_type,
             } => {
                 let params = CommandParams {
                     keep_cache,
                     snapshot,
                     jobs,
+                    diff_type,
                     ..Default::default()
                 };
                 RoutedCommand::Pbf {
@@ -429,12 +433,14 @@ impl Command {
                 index_type,
                 inject_prepass,
                 force_altw,
+                keep_untagged_nodes,
                 snapshot,
             } => {
                 let params = CommandParams {
                     index_type,
                     inject_prepass,
-                    force_altw,
+                    force_unindexed: force_altw,
+                    keep_untagged_nodes,
                     snapshot,
                     ..Default::default()
                 };

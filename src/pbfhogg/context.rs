@@ -53,8 +53,16 @@ pub struct CommandParams {
     pub index_type: Option<String>,
     /// Forward the pbfhogg injected-prepass wire-format option.
     pub inject_prepass: bool,
-    /// Forward pbfhogg's `--force` option for add-locations-to-ways.
-    pub force_altw: bool,
+    /// Forward pbfhogg's own `--force` (proceed on input without blob-level
+    /// indexdata) to the measured command: `add-locations-to-ways`
+    /// (`--force-altw`) and `sort` (`--force-sort`). brokkr's `--force` is
+    /// the dirty-tree override, so each command spells it `--force-<cmd>`,
+    /// as `repack` does with `--force-repack`.
+    pub force_unindexed: bool,
+    /// Forward pbfhogg's `add-locations-to-ways --keep-untagged-nodes`.
+    pub keep_untagged_nodes: bool,
+    /// Forward pbfhogg's `diff --type VALUE`, verbatim; pbfhogg validates it.
+    pub diff_type: Option<String>,
     pub locations_on_ways: bool,
     pub snapshot: Option<crate::datasets::resolve::SnapshotRef>,
     pub from_snapshot: Option<crate::datasets::resolve::SnapshotRef>,
@@ -214,6 +222,11 @@ pub struct SnapshotSide {
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct CommandObservations {
     pub merged_cache: Option<MergedCacheState>,
+    /// The diff base carried no blob-level indexdata, so its merged side was
+    /// built with `apply-changes --force`, whose output is indexed on every
+    /// blob: the measured pair is raw vs indexed, a mixed pair. `false` for
+    /// an indexed base and every other command.
+    pub merged_from_unindexed: bool,
     pub snapshot_to: Option<SnapshotSide>,
     /// Whether the built pbfhogg's `digest` accepts `--form`, asked of the
     /// executable at planning (`None` for a dry run and every other

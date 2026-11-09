@@ -455,6 +455,36 @@ fn result_input_metadata(cmd_ctx: &CommandContext) -> Result<(String, f64), DevE
     }
 }
 
+/// The OSC inputs a command's setup needs: the `osc_range` expansion, or the
+/// one selected seq with its key for the merged cache.
+fn resolve_setup_oscs(
+    req: &MeasureRequest,
+    snapshot_ref: &resolve::SnapshotRef,
+    osc_seq: Option<&str>,
+    paths: &config::ResolvedPaths,
+    extra_params: &CommandParams,
+) -> Result<(Vec<std::path::PathBuf>, Option<String>), DevError> {
+    if let Some(range) = &extra_params.osc_range {
+        let paths_vec = resolve::resolve_osc_range(
+            req.dataset,
+            snapshot_ref,
+            range,
+            paths,
+            req.project_root.as_path(),
+        )?;
+        Ok((paths_vec, None))
+    } else {
+        let (path, seq_key) = resolve::resolve_single_osc(
+            req.dataset,
+            snapshot_ref,
+            osc_seq,
+            paths,
+            req.project_root.as_path(),
+        )?;
+        Ok((vec![path], Some(seq_key)))
+    }
+}
+
 /// Build the `CommandContext` for a pbfhogg command, resolving all input paths.
 /// `binary` is `None` for a dry run, which builds nothing it could run.
 /// `expected` says the input declares its answer, so a `diff`'s merged input
@@ -499,31 +529,13 @@ fn build_pbfhogg_context(
     // Both resolution paths are snapshot-scoped: when --snapshot is set, OSCs
     // come from the snapshot's osc table, not the legacy top-level.
     let (osc_paths, single_osc_seq) = if command.needs_osc_for_setup() {
-        if let Some(range) = &extra_params.osc_range {
-            let paths_vec = resolve::resolve_osc_range(
-                req.dataset,
-                &snapshot_ref,
-                range,
-                paths,
-                req.project_root.as_path(),
-            )?;
-            (paths_vec, None)
-        } else {
-            let (path, seq_key) = resolve::resolve_single_osc(
-                req.dataset,
-                &snapshot_ref,
-                osc_seq,
-                paths,
-                req.project_root.as_path(),
-            )?;
-            (vec![path], Some(seq_key))
-        }
+        resolve_setup_oscs(req, &snapshot_ref, osc_seq, paths, extra_params)?
     } else {
         (Vec::new(), None)
     };
 
     let osc_path = osc_paths.first().map(std::path::PathBuf::as_path);
-    let (merged_pbf, merged_cache) = resolve_merged_pbf(
+    let merged = resolve_merged_pbf(
         req,
         command,
         binary,
@@ -535,6 +547,10 @@ fn build_pbfhogg_context(
         extra_params,
         expected,
     )?;
+    let built = merged.as_ref().and_then(|side| side.built.as_ref());
+    let merged_cache = built.map(|b| b.cache);
+    let merged_from_unindexed = built.is_some_and(|b| b.from_unindexed);
+    let merged_pbf = merged.map(|side| side.path);
 
     let inputs = match command {
         PbfhoggCommand::MergeChanges { .. }
@@ -571,6 +587,7 @@ fn build_pbfhogg_context(
 
     let observations = CommandObservations {
         merged_cache,
+        merged_from_unindexed,
         snapshot_to: None,
         digest_takes_form: digest_takes_form(command, binary)?,
     };
@@ -666,9 +683,9 @@ fn resolve_merged_pbf(
     paths: &config::ResolvedPaths,
     extra_params: &CommandParams,
     expected: bool,
-) -> Result<(Option<std::path::PathBuf>, Option<MergedCacheState>), DevError> {
+) -> Result<Option<MergedSide>, DevError> {
     if !command.needs_merged_pbf() {
-        return Ok((None, None));
+        return Ok(None);
     }
     let pbf_path =
         pbf_path.ok_or_else(|| DevError::Internal("diff requires a primary PBF".into()))?;
@@ -681,15 +698,10 @@ fn resolve_merged_pbf(
     };
 
     let Some(binary) = binary else {
-        return Ok((
-            Some(merged_pbf_path(
-                &paths.scratch_dir,
-                pbf_path,
-                snapshot_key,
-                osc_seq_str,
-            )),
-            None,
-        ));
+        return Ok(Some(MergedSide {
+            path: merged_pbf_path(&paths.scratch_dir, pbf_path, snapshot_key, osc_seq_str),
+            built: None,
+        }));
     };
 
     let reuse = matches!(req.mode, MeasureMode::Run) || extra_params.keep_cache;
@@ -702,7 +714,7 @@ fn resolve_merged_pbf(
         );
     }
     let force_rebuild = expected || !reuse;
-    let (merged, state) = ensure_merged_pbf(
+    let merged = ensure_merged_pbf(
         binary,
         pbf_path,
         osc,
@@ -712,7 +724,17 @@ fn resolve_merged_pbf(
         req.project_root.as_path(),
         force_rebuild,
     )?;
-    Ok((Some(merged), Some(state)))
+    Ok(Some(MergedSide {
+        path: merged.path.clone(),
+        built: Some(merged),
+    }))
+}
+
+/// A diff's merged-side path, and what building it observed (`None` for a
+/// dry run, which only names the path).
+struct MergedSide {
+    path: std::path::PathBuf,
+    built: Option<MergedPbf>,
 }
 
 /// Resolve both snapshot paths and retain typed metadata for the `--to` side.
@@ -760,6 +782,7 @@ fn build_diff_snapshots_context(
         params: extra_params.clone(),
         observations: CommandObservations {
             merged_cache: None,
+            merged_from_unindexed: false,
             snapshot_to: Some(snapshot_to),
             digest_takes_form: None,
         },
@@ -884,8 +907,42 @@ pub(crate) fn merged_pbf_path(
     )
 }
 
-/// Ensure a merged PBF exists in the scratch directory. Returns the path and
-/// the cache state (hit/miss + age on hit).
+/// The merged side of a `diff`, as [`ensure_merged_pbf`] left it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MergedPbf {
+    pub path: std::path::PathBuf,
+    pub cache: MergedCacheState,
+    /// The base carries no blob-level indexdata, so the merge is (or, on a
+    /// cache hit, was) built with `apply-changes --force`, whose output is
+    /// indexed on every blob: the diff measures a raw vs indexed pair.
+    pub from_unindexed: bool,
+}
+
+/// Whether `pbf`'s first data blob carries blob-level indexdata, the
+/// requirement pbfhogg's `apply-changes` refuses a base without unless given
+/// `--force`. A header-only read of the leading frames. A file this walk
+/// cannot read is answered indexed with a warning, which is what the merge
+/// assumed before it asked: pbfhogg itself then decides.
+fn base_has_indexdata(pbf: &Path) -> bool {
+    let probe = super::pbf_frames::Claims::open(pbf).and_then(|mut claims| claims.next_blob());
+    match probe {
+        Ok(Some(blob)) => blob.claim.is_some(),
+        // No data blob at all: nothing for the indexdata check to refuse.
+        Ok(None) => true,
+        Err(error) => {
+            output::warn(&format!(
+                "could not read the diff base's blob indexdata ({error}); merging without --force"
+            ));
+            true
+        }
+    }
+}
+
+/// Ensure a merged PBF exists in the scratch directory. Returns the path,
+/// the cache state (hit/miss + age on hit) and whether the base was
+/// unindexed. A base without blob-level indexdata ([`base_has_indexdata`])
+/// is merged with pbfhogg's `apply-changes --force`; the cache key needs no
+/// mark of it, since whether to force is a property of the base it names.
 ///
 /// Keyed by [`merged_pbf_path`]. If `force_rebuild` is set, any existing
 /// cached file is deleted before checking - used by measured modes
@@ -903,8 +960,15 @@ pub(crate) fn ensure_merged_pbf(
     scratch_dir: &Path,
     project_root: &Path,
     force_rebuild: bool,
-) -> Result<(std::path::PathBuf, MergedCacheState), DevError> {
+) -> Result<MergedPbf, DevError> {
     let merged_path = merged_pbf_path(scratch_dir, pbf_path, snapshot_key, osc_seq);
+    let from_unindexed = !base_has_indexdata(pbf_path);
+    if from_unindexed {
+        output::bench_msg(
+            "diff base has no blob-level indexdata: merging with apply-changes --force, \
+             whose output is indexed, so this diff is a raw vs indexed pair",
+        );
+    }
     let merged_name = crate::utf8_path::file_name_str(&merged_path)
         .unwrap_or("merged.osm.pbf")
         .to_owned();
@@ -927,7 +991,11 @@ pub(crate) fn ensure_merged_pbf(
         output::bench_msg(&format!(
             "using cached merged PBF: {merged_name} (age: {age_secs}s)"
         ));
-        return Ok((merged_path, MergedCacheState::Hit { age_secs }));
+        return Ok(MergedPbf {
+            path: merged_path,
+            cache: MergedCacheState::Hit { age_secs },
+            from_unindexed,
+        });
     }
 
     std::fs::create_dir_all(scratch_dir)
@@ -945,7 +1013,8 @@ pub(crate) fn ensure_merged_pbf(
     let start = std::time::Instant::now();
     // The merged cache is the default apply-changes output for this PBF/OSC
     // pair. Its argv shares the command's builder, with no optional transform,
-    // job, compression or I/O parameters inherited from the diff invocation.
+    // job, compression or I/O parameters inherited from the diff invocation;
+    // `--force` only where the base lacks the indexdata pbfhogg requires.
     // The partial name is owned: a killed run leaves it for the retry to
     // replace.
     let invocation = binary.invocation(PbfhoggCommand::apply_changes_args(
@@ -953,6 +1022,7 @@ pub(crate) fn ensure_merged_pbf(
         osc_path,
         staged.tmp_path(),
         false,
+        from_unindexed,
     )?)?;
     let captured = invocation.capture_in(project_root)?;
     invocation.check(&captured)?;
@@ -965,7 +1035,11 @@ pub(crate) fn ensure_merged_pbf(
     let elapsed_s = start.elapsed().as_secs();
     output::bench_msg(&format!("merged PBF ready in {elapsed_s}s"));
 
-    Ok((merged_path, MergedCacheState::Miss))
+    Ok(MergedPbf {
+        path: merged_path,
+        cache: MergedCacheState::Miss,
+        from_unindexed,
+    })
 }
 
 #[cfg(test)]

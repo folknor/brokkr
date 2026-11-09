@@ -65,6 +65,24 @@ impl config::ResolvedPaths {
                 &self.data_dir,
                 project_root,
             );
+            for (key, snap) in &dataset.snapshot {
+                check_file_entries(
+                    &mut out,
+                    name,
+                    &snap.pbf,
+                    &format!("snapshot.{key}.pbf."),
+                    &self.data_dir,
+                    project_root,
+                );
+                check_file_entries(
+                    &mut out,
+                    name,
+                    &snap.osc,
+                    &format!("snapshot.{key}.osc."),
+                    &self.data_dir,
+                    project_root,
+                );
+            }
 
             // Plain out-of-git inputs have one configured path and digest.
             // Reporting the computed digest lets the user register the pin.
@@ -78,7 +96,12 @@ impl config::ResolvedPaths {
                 continue;
             }
 
-            if dataset.pbf.is_empty() && dataset.osc.is_empty() && dataset.pmtiles.is_empty() {
+            if dataset.pbf.is_empty()
+                && dataset.osc.is_empty()
+                && dataset.pmtiles.is_empty()
+                && dataset.polygon.is_empty()
+                && dataset.snapshot.is_empty()
+            {
                 out.push((name.clone(), DatasetStatus::NoFiles));
             }
         }

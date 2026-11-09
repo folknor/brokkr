@@ -759,6 +759,12 @@ In depth: `brokkr man clippy`."
         /// produced by `brokkr degrade --unsort --as-snapshot ...`).
         #[arg(long)]
         snapshot: Option<crate::datasets::resolve::SnapshotRef>,
+        /// Pass `--force` through to pbfhogg sort (proceeds on input without
+        /// blob-level indexdata, such as a `pbf.raw` variant). Named
+        /// `--force-sort` to disambiguate from brokkr's own dirty-tree
+        /// `--force`, mirroring `--force-altw` and `--force-repack`.
+        #[arg(long)]
+        force_sort: bool,
     },
     /// Run pbfhogg cat:
     ///   `--type way|relation` restricts output to one object kind;
@@ -986,6 +992,12 @@ In depth: `brokkr man clippy`."
         /// dirty-tree override, mirroring `--force-repack`.
         #[arg(long)]
         force_altw: bool,
+        /// Pass `--keep-untagged-nodes` through to pbfhogg's
+        /// `add-locations-to-ways` (keep untagged nodes in the output,
+        /// osmium's flag of the same name). pbfhogg refuses combinations it
+        /// does not support.
+        #[arg(long)]
+        keep_untagged_nodes: bool,
         /// Snapshot key to read input from. Use `base` (or omit) for the
         /// dataset's primary data; pass a key registered under
         /// `[dataset.snapshot.<key>]` for a historical snapshot (e.g. one
@@ -1117,7 +1129,10 @@ In depth: `brokkr man clippy`."
     /// Diff base PBF against the applied-changes merged PBF.
     /// `--format osc` switches output from summary (stdout) to an OSC
     /// file. The brokkr runner generates the merged PBF from base +
-    /// OSC before diffing.
+    /// OSC before diffing; a base without blob-level indexdata (a
+    /// `pbf.raw` variant) is merged with `apply-changes --force`, whose
+    /// output is indexed, so that pair is raw vs indexed and the row
+    /// records `meta.diff_pair=raw-vs-indexed`.
     #[command(name = "diff", display_order = 2)]
     Diff {
         #[command(flatten)]
@@ -1145,6 +1160,10 @@ In depth: `brokkr man clippy`."
         /// `--jobs`; omit to use pbfhogg's default (`0`, one shard per core).
         #[arg(short = 'j', long)]
         jobs: Option<usize>,
+        /// Element kind filter, forwarded verbatim to pbfhogg diff's
+        /// `--type`; pbfhogg validates the value. Omit for every kind.
+        #[arg(long = "type", value_name = "KIND")]
+        diff_type: Option<String>,
     },
     /// Diff two snapshots of the same dataset
     #[command(

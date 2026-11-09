@@ -376,6 +376,18 @@ they did not pay for staging, sync and publication of the file; only
 `cli_args`, which gains `--output`, tells the two apart. The planet rows of the
 stdout era never completed.
 
+`brokkr diff` builds its merged side with `pbfhogg apply-changes`
+(`ensure_merged_pbf`, `src/pbfhogg/plan.rs`), which refuses a base without
+blob-level indexdata. brokkr reads the base's leading blob header, and when
+it carries no indexdata it passes `apply-changes --force`, so `--variant raw`
+runs. That merge writes indexdata on every blob, so the pair diffed is raw
+vs indexed, a mixed pair pbfhogg sends down its sequential path: the row
+records `meta.diff_pair=raw-vs-indexed`, absent on an indexed pair as on
+every row stored before the key. `--variant raw` is already in the argv, so
+the arm key separates the two without the key. A base whose header the probe
+cannot read is merged without `--force`, with a warning. The suite's
+`diff` presets share the probe.
+
 ## Digest
 
 `brokkr digest` measures `pbfhogg digest` on the dataset PBF like any other
@@ -1521,6 +1533,23 @@ revision built answers. The table lives in `PbfhoggCommand::axis_has_effect`
   brokkr does no validation of its own - pbfhogg owns the semantics. The
   intended cell: `brokkr add-locations-to-ways --dataset europe --variant raw
   --index-type sparse --compression zstd:1 --force-altw --bench 3`.
+- `--force-sort` - (`sort` only) the same pass-through for `pbfhogg sort
+  --force`, which an input without blob-level indexdata (a `pbf.raw`
+  variant) needs: `brokkr sort --dataset europe --variant raw --force-sort
+  --bench 3`. Named like `--force-altw` and `--force-repack`. `--force-altw`
+  and `--force-sort` set one pass-through, `CommandParams.force_unindexed`;
+  `--force-repack` rides repack's command variant.
+- `--keep-untagged-nodes` - (`add-locations-to-ways` only) forwarded
+  verbatim to the pbfhogg child, keeping untagged nodes in the output. It
+  takes the pbfhogg name since brokkr has no flag it collides with. Composes
+  with `--index-type`, `--force-altw` and the measurement modes; pbfhogg
+  judges the combinations.
+- `--type KIND` - (`diff` only) forwarded verbatim to `pbfhogg diff --type`;
+  pbfhogg validates the value.
+- These pass-throughs are brokkr flags, so they are in `brokkr_args` and the
+  `arm_key` like every axis above: a cell with one pairs only with cells
+  that have it, and a row stored before the flag existed keeps the key it
+  had, since its argv never carried it.
 - `--locations-on-ways` - (`apply-changes` only) passes through to the child
   pbfhogg invocation. Like `verify merge --locations-on-ways`, it needs a
   LocationsOnWays base that keeps its untagged nodes; a default altw variant

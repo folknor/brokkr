@@ -243,6 +243,37 @@ fn plan_answers<'n>(
 /// PBF comes from the same `plan::ensure_merged_pbf` the single-command
 /// path uses, and is always rebuilt: the suite is a measured mode, and the
 /// cache key cannot see a primary PBF refreshed in place under the same stem.
+/// The suite's merged PBF, built from the base and its one OSC.
+fn suite_merged_pbf(
+    binary: &crate::pbfhogg::binary::PbfhoggBinary,
+    pbf_path: &Path,
+    osc_path: Option<&Path>,
+    osc_seq: Option<&str>,
+    scratch_dir: &Path,
+    project_root: &Path,
+) -> Result<crate::pbfhogg::plan::MergedPbf, DevError> {
+    let osc = osc_path.ok_or_else(|| {
+        DevError::Config(
+            "diff/diff-osc require an OSC file (dataset must have osc configured)".into(),
+        )
+    })?;
+    let seq = osc_seq.ok_or_else(|| {
+        DevError::Config(
+            "diff/diff-osc require the OSC file's replication seq (dataset osc entry)".into(),
+        )
+    })?;
+    crate::pbfhogg::plan::ensure_merged_pbf(
+        binary,
+        pbf_path,
+        osc,
+        "base",
+        seq,
+        scratch_dir,
+        project_root,
+        true,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     harness: &BenchHarness,
@@ -275,30 +306,12 @@ pub fn run(
     };
 
     // Generate merged PBF if any requested command needs it.
-    let (merged_pbf, merged_cache) = if suite_needs_merged_pbf(commands)? {
-        let osc = osc_path.ok_or_else(|| {
-            DevError::Config(
-                "diff/diff-osc require an OSC file (dataset must have osc configured)".into(),
-            )
-        })?;
-        let seq = osc_seq.ok_or_else(|| {
-            DevError::Config(
-                "diff/diff-osc require the OSC file's replication seq (dataset osc entry)".into(),
-            )
-        })?;
-        let (merged, state) = crate::pbfhogg::plan::ensure_merged_pbf(
-            binary,
-            pbf_path,
-            osc,
-            "base",
-            seq,
-            scratch_dir,
-            project_root,
-            true,
-        )?;
-        (Some(merged), Some(state))
+    let (merged_pbf, merged_cache, merged_from_unindexed) = if suite_needs_merged_pbf(commands)? {
+        let merged =
+            suite_merged_pbf(binary, pbf_path, osc_path, osc_seq, scratch_dir, project_root)?;
+        (Some(merged.path), Some(merged.cache), merged.from_unindexed)
     } else {
-        (None, None)
+        (None, None, false)
     };
 
     // Ensure scratch dir exists up front so per-preset contexts can reference it.
@@ -345,6 +358,7 @@ pub fn run(
             params,
             observations: CommandObservations {
                 merged_cache,
+                merged_from_unindexed,
                 snapshot_to: None,
                 digest_takes_form: None,
             },
