@@ -4,7 +4,7 @@ use super::archive_store::ArchiveStore;
 use crate::clean::layout::ElivagarLayout;
 use crate::cli::{CorpusArchiveArgs, PmtilesCorpusCommand};
 use crate::config;
-use crate::context::{MeasurementSession, bootstrap, bootstrap_config};
+use crate::context::{MeasurementSession, bootstrap_config};
 use crate::error::DevError;
 use crate::measure::MeasureRequest;
 
@@ -51,20 +51,16 @@ pub(crate) fn compare_tiles(
 pub(crate) fn download_ocean(
     dev_config: &config::DevConfig,
     project_root: &crate::project::ProjectRoot,
-    build_root: &crate::project::BuildRoot,
 ) -> Result<(), DevError> {
-    let pi = bootstrap(build_root)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let paths = bootstrap_config(dev_config, project_root)?;
     super::download_ocean::run(&paths.data_dir)
 }
 
 pub(crate) fn download_natural_earth(
     dev_config: &config::DevConfig,
     project_root: &crate::project::ProjectRoot,
-    build_root: &crate::project::BuildRoot,
 ) -> Result<(), DevError> {
-    let pi = bootstrap(build_root)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let paths = bootstrap_config(dev_config, project_root)?;
     super::download_natural_earth::run(&paths.data_dir)
 }
 
@@ -82,8 +78,7 @@ pub(crate) fn verify(
     geometry_stats: bool,
     unique_payloads: bool,
 ) -> Result<(), DevError> {
-    let pi = bootstrap(build_root)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let paths = bootstrap_config(dev_config, project_root)?;
     let build_root = build_root.as_path();
     let pmtiles_path = ArchiveStore::new(paths.output_dir.as_path())
         .resolve(
@@ -115,8 +110,7 @@ pub(crate) fn inspect(
     commit: Option<&str>,
     file: Option<&str>,
 ) -> Result<(), DevError> {
-    let pi = bootstrap(build_root)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let paths = bootstrap_config(dev_config, project_root)?;
     let build_root = build_root.as_path();
     let pmtiles_path = ArchiveStore::new(paths.output_dir.as_path())
         .resolve(
@@ -145,8 +139,7 @@ pub(crate) fn diag(
     x: u32,
     y: u32,
 ) -> Result<(), DevError> {
-    let pi = bootstrap(build_root)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let paths = bootstrap_config(dev_config, project_root)?;
     let build_root = build_root.as_path();
     let pmtiles_path = ArchiveStore::new(paths.output_dir.as_path())
         .resolve(
@@ -179,8 +172,7 @@ pub(crate) fn svg(
     layers: Option<&str>,
     output_path: Option<&Path>,
 ) -> Result<(), DevError> {
-    let pi = bootstrap(build_root)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let paths = bootstrap_config(dev_config, project_root)?;
     let build_root = build_root.as_path();
     let pmtiles_path = ArchiveStore::new(paths.output_dir.as_path())
         .resolve(
@@ -235,8 +227,7 @@ pub(crate) fn regress(
     overlay_max: Option<usize>,
     json: bool,
 ) -> Result<(), DevError> {
-    let pi = bootstrap(build_root)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let paths = bootstrap_config(dev_config, project_root)?;
     let build_root = build_root.as_path();
     let current = ArchiveStore::new(paths.output_dir.as_path())
         .resolve(
@@ -334,8 +325,7 @@ pub(crate) fn corpus(
 ) -> Result<(), DevError> {
     use super::corpus as gate;
 
-    let pi = bootstrap(build_root)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let paths = bootstrap_config(dev_config, project_root)?;
     let build_root = build_root.as_path();
 
     // Resolve an archive through the same commit/file resolver as

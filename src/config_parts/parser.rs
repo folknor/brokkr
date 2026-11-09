@@ -2846,15 +2846,9 @@ pub fn hostname() -> Result<String, DevError> {
 // ---------------------------------------------------------------------------
 
 /// Resolve host-specific paths from config, with defaults for unknown hosts.
-///
-/// - `project_root`: the root of the project
-/// - `target_dir`: from cargo metadata (resolved elsewhere)
-pub fn resolve_paths(
-    config: &DevConfig,
-    hostname: &str,
-    project_root: &Path,
-    target_dir: &Path,
-) -> ResolvedPaths {
+/// Config alone: no cargo query, so it holds whatever state the code tree is
+/// in. The cargo target dir is not among them ([`host_target_dir`]).
+pub fn resolve_paths(config: &DevConfig, hostname: &str, project_root: &Path) -> ResolvedPaths {
     let host = config.hosts.get(hostname);
 
     let data_rel = host.and_then(|h| h.data.as_deref()).unwrap_or("data");
@@ -2871,11 +2865,6 @@ pub fn resolve_paths(
     let scratch_dir = resolve_relative(project_root, scratch_rel);
     let output_dir = resolve_relative(project_root, output_rel);
 
-    let target_dir = match host.and_then(|h| h.target.as_deref()) {
-        Some(t) => resolve_relative(project_root, t),
-        None => target_dir.to_path_buf(),
-    };
-
     let drives = host.and_then(|h| h.drives.clone());
 
     let features = host.map(|h| h.features.clone()).unwrap_or_default();
@@ -2887,10 +2876,25 @@ pub fn resolve_paths(
         data_dir,
         scratch_dir,
         output_dir,
-        target_dir,
         drives,
         features,
         datasets,
+    }
+}
+
+/// The host section's `target` (relative to `project_root`), else `cargo`,
+/// the target dir cargo metadata reports for the tree acted on. What `brokkr
+/// env` reports and where clean looks for pbfhogg's verify output; builds
+/// themselves use cargo's.
+pub fn host_target_dir(
+    config: &DevConfig,
+    hostname: &str,
+    project_root: &Path,
+    cargo: &Path,
+) -> PathBuf {
+    match config.hosts.get(hostname).and_then(|h| h.target.as_deref()) {
+        Some(t) => resolve_relative(project_root, t),
+        None => cargo.to_path_buf(),
     }
 }
 

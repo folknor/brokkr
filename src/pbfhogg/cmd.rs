@@ -411,8 +411,7 @@ fn resolve_bench_osc(
 
 /// Resolve host paths without building the binary, for dry-run validation.
 fn dry_run_paths(req: &MeasureRequest) -> Result<config::ResolvedPaths, DevError> {
-    let pi = bootstrap(req.build_root)?;
-    bootstrap_config(req.dev_config, req.project_root, &pi.target_dir)
+    bootstrap_config(req.dev_config, req.project_root)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -434,8 +433,10 @@ pub(crate) fn verify(
     ) {
         return Err(not_a_pbfhogg_verify());
     }
+    // The cargo target dir of the tree verify builds in, which its harness
+    // places its outputs under; the host paths need no cargo.
     let pi = bootstrap(build_root)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let paths = bootstrap_config(dev_config, project_root)?;
     let (project_root, build_root) = (project_root.as_path(), build_root.as_path());
 
     let harness =
@@ -805,8 +806,7 @@ pub(crate) fn download(
     refresh: bool,
     force: bool,
 ) -> Result<(), DevError> {
-    let pi = bootstrap(build_root)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let paths = bootstrap_config(dev_config, project_root)?;
     let (project_root, build_root) = (project_root.as_path(), build_root.as_path());
 
     super::download::run(

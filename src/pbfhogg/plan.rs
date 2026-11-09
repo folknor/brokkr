@@ -353,8 +353,7 @@ fn preflight_as_snapshot(
 
     require_snapshot_output(command)?;
 
-    let pi = crate::context::bootstrap(req.build_root)?;
-    let paths = crate::context::bootstrap_config(req.dev_config, req.project_root, &pi.target_dir)?;
+    let paths = crate::context::bootstrap_config(req.dev_config, req.project_root)?;
 
     crate::pbfhogg::download::preflight_snapshot_collision(
         snap_key,

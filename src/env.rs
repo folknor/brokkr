@@ -42,6 +42,7 @@ pub struct UserConfigStatus {
 /// Collect all environment information.
 pub fn collect(
     paths: &ResolvedPaths,
+    target_dir: &Path,
     project: &Project,
     project_root: &Path,
     sources: &crate::config::ConfigSources,
@@ -49,7 +50,7 @@ pub fn collect(
     let storage_paths: [(&str, &Path); 3] = [
         ("data", &paths.data_dir),
         ("scratch", &paths.scratch_dir),
-        ("target", &paths.target_dir),
+        ("target", target_dir),
     ];
     let probed = crate::host::storage::probe_paths(&storage_paths);
     let storage = storage_paths
@@ -99,9 +100,15 @@ pub(crate) fn cmd_env(
         None
     };
     let pi = bootstrap(build_root)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let paths = bootstrap_config(dev_config, project_root)?;
+    let target_dir = crate::config::host_target_dir(
+        dev_config,
+        &paths.hostname,
+        project_root.as_path(),
+        &pi.target_dir,
+    );
 
-    let info = collect(&paths, project, project_root.as_path(), sources);
+    let info = collect(&paths, &target_dir, project, project_root.as_path(), sources);
     print(&info);
     crate::health::print_env(project_root.as_path());
     if let Some(note) = crate::config::unmatched_host_note(dev_config, &paths.hostname) {

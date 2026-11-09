@@ -45,8 +45,8 @@
 //!
 //! Every command that runs cargo/rustup against a pinned tree therefore takes
 //! the lock so this activation fires - including the ones that aren't builds in
-//! the timing sense: `deps` (`cargo metadata` + `ccu`), `compare-tiles`
-//! (`cargo metadata`), and `fmt` (rustfmt is toolchain-pinned). `fmt` used to
+//! the timing sense: `deps` (`cargo metadata` + `ccu`), `env` (its target
+//! report's `cargo metadata`), and `fmt` (rustfmt is toolchain-pinned). `fmt` used to
 //! construct a [`DisabledToolchain`] guard directly, but a bare guard races a
 //! concurrent locked build that already moved the same file aside - it would
 //! adopt that build's sidecar and restore it mid-command - so it now rides the

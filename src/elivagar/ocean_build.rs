@@ -16,7 +16,7 @@
 
 use crate::build;
 use crate::config::{self, OceanSpec};
-use crate::context::{bootstrap, bootstrap_config};
+use crate::context::bootstrap_config;
 use crate::error::DevError;
 use crate::lockfile::LockGuard;
 use crate::output;
@@ -33,8 +33,7 @@ pub fn run(
     lock: Option<&LockGuard>,
 ) -> Result<(), DevError> {
     project::require(project, &Project::Elivagar, "ocean-build")?;
-    let pi = bootstrap(build_root)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let paths = bootstrap_config(dev_config, project_root)?;
     let build_root = build_root.as_path();
 
     let tg = resolve_tilegen(dev_config, DEFAULT_TILEGEN)?;

@@ -1,7 +1,7 @@
 //! Executable passthrough and timing statistics.
 use crate::{
     build, config,
-    context::{bootstrap, bootstrap_config},
+    context::bootstrap_config,
     error::DevError,
     lockfile, output,
     project::{self, Project},
@@ -152,8 +152,7 @@ pub(crate) fn cmd_run(
     };
 
     // Ensure scratch dir exists - binary commands often write output there.
-    let pi = bootstrap(build_root)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let paths = bootstrap_config(dev_config, project_root)?;
     std::fs::create_dir_all(&paths.scratch_dir)?;
 
     let mut run_total = Duration::ZERO;

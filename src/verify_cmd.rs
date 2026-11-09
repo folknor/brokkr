@@ -62,7 +62,7 @@ pub(crate) fn cmd_verify(
         VerifyCommand::Batch { dataset } => {
             project::require(project, &Project::Nidhogg, "verify batch")?;
             let _interrupts = crate::shutdown::SigtermGuard::install();
-            nidhogg::cmd::verify_batch(dev_config, project_root, build_root, &dataset)
+            nidhogg::cmd::verify_batch(dev_config, project_root, &dataset)
         }
         VerifyCommand::NidGeocode { queries } => {
             project::require(project, &Project::Nidhogg, "verify geocode")?;

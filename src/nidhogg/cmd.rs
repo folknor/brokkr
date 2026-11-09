@@ -3,7 +3,7 @@ use std::path::Path;
 use super::data_dir::resolve_nidhogg_data_dir;
 use crate::build;
 use crate::config;
-use crate::context::{bootstrap, bootstrap_config};
+use crate::context::bootstrap_config;
 use crate::datasets::resolve::{self, resolve_bbox, resolve_pbf_path};
 use crate::error::DevError;
 use crate::output;
@@ -47,8 +47,7 @@ pub(crate) fn serve(
     tiles_variant: Option<&str>,
     features: &[String],
 ) -> Result<(), DevError> {
-    let pi = bootstrap(build_root)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let paths = bootstrap_config(dev_config, project_root)?;
     let (project_root, build_root) = (project_root.as_path(), build_root.as_path());
 
     // Resolve a configured data directory strictly. A missing `data_dir`
@@ -153,8 +152,7 @@ pub(crate) fn ingest(
     dataset: &str,
     features: &[String],
 ) -> Result<(), DevError> {
-    let pi = bootstrap(build_root)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let paths = bootstrap_config(dev_config, project_root)?;
     let (project_root, build_root) = (project_root.as_path(), build_root.as_path());
     let pbf_path = resolve_pbf_path(dataset, variant, &paths, project_root)?;
 
@@ -192,11 +190,9 @@ pub(crate) fn geocode(dev_config: &config::DevConfig, term: &str) -> Result<(), 
 pub(crate) fn verify_batch(
     dev_config: &config::DevConfig,
     project_root: &crate::project::ProjectRoot,
-    build_root: &crate::project::BuildRoot,
     dataset: &str,
 ) -> Result<(), DevError> {
-    let pi = bootstrap(build_root)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let paths = bootstrap_config(dev_config, project_root)?;
     let port = resolve_port(dev_config)?;
     let bbox = resolve_bbox(None, dataset, &paths)?;
     super::verify_batch::run(port, &bbox)
@@ -218,8 +214,7 @@ pub(crate) fn verify_readonly(
     dataset: &str,
     features: &[String],
 ) -> Result<(), DevError> {
-    let pi = bootstrap(build_root)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let paths = bootstrap_config(dev_config, project_root)?;
     let (project_root, build_root) = (project_root.as_path(), build_root.as_path());
     let port = resolve_port(dev_config)?;
 

@@ -38,7 +38,6 @@ mod tests {
             data_dir: data_dir.to_path_buf(),
             scratch_dir: data_dir.join("scratch"),
             output_dir: data_dir.join("tilegen"),
-            target_dir: data_dir.join("target"),
             drives: None,
             features: Vec::new(),
             datasets,

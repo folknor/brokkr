@@ -249,7 +249,10 @@ where a misspelled hostname shows up. Since legacy hostnames are open-ended, a t
 valid host shape is necessarily interpreted as a host even if its name
 resembles a misspelled section. Datasets are host-scoped (no global
 `[datasets]` section). Path resolution: host config -> defaults (`data/`,
-`data/scratch/`, `data/tilegen/`, cargo target dir). `output` is the durable
+`data/scratch/`, `data/tilegen/`), from the config alone. `target` is read by
+`brokkr env`'s storage report and by `brokkr clean`, which looks for pbfhogg's
+verify output under it; absent, both use cargo's target dir. Builds always
+use cargo's. `output` is the durable
 tilegen output store (map-data projects): `ArchiveStore` admits each successful
 tilegen archive as `<output>/<dataset>-<variant>-<commit>.pmtiles` (the
 latest one: a rerun at the same commit replaces it, whatever tilegen block
@@ -431,10 +434,11 @@ you don't have or don't want.
 Suppression is tied to the lock, not to the whole command: the file is moved
 aside the moment brokkr takes the global lock and restored just before it is
 released. Every command that runs cargo or rustup against the tree therefore
-takes the lock so the pin is disabled while it works - including `deps` and
-`compare-tiles` (which shell out to `cargo metadata`) and `fmt` (rustfmt is
-toolchain-pinned), none of which are builds in the timing sense. A command that
-touches neither cargo nor rustup takes no lock and leaves the file alone.
+takes the lock so the pin is disabled while it works - including `deps`
+(which shells out to `cargo metadata`), `env` (whose target report does) and
+`fmt` (rustfmt is toolchain-pinned), none of which are builds in the timing
+sense. Resolving a host's data, scratch and output paths is config alone and
+asks cargo nothing. A command that takes no lock leaves the file alone.
 
 **When the host toolchain is newer than the pin,** brokkr builds with lints the
 pinned toolchain does not have. That is often the point - it lints ahead of the

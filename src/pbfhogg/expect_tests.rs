@@ -18,7 +18,6 @@ fn paths(dataset: &str) -> ResolvedPaths {
         data_dir: root.to_path_buf(),
         scratch_dir: root.join("scratch"),
         output_dir: root.join("out"),
-        target_dir: root.join("target"),
         drives: None,
         features: Vec::new(),
         datasets: HashMap::from([("d".to_owned(), ds)]),

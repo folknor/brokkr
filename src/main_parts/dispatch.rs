@@ -1202,16 +1202,10 @@ fn run_project(
                 None if all => Some(Target::All),
                 None => None,
             };
-            // Host paths come from the live tree, also under `--commit`.
+            // Host paths are config alone, so a `--commit` run asks the live
+            // tree nothing before its worktree exists.
             let paths = match &target {
-                Some(_) => {
-                    let pi = context::bootstrap(&detection.build_root)?;
-                    Some(context::bootstrap_config(
-                        dev_config,
-                        &detection.project_root,
-                        &pi.target_dir,
-                    )?)
-                }
+                Some(_) => Some(context::bootstrap_config(dev_config, &detection.project_root)?),
                 None => None,
             };
             let dataset = dataset.as_deref().unwrap_or(crate::cli::DEFAULT_DATASET);
@@ -1293,10 +1287,8 @@ fn run_project(
             commit,
             file,
         } => {
-            // The lock serializes this with builds: its bootstrap runs
-            // `cargo metadata` against the build tree, which must not run
-            // beside another holder's compile, and the archive read must not
-            // race a `tilegen` mid-write.
+            // The lock serializes this with builds: it builds elivagar with
+            // cargo in the build tree.
             let _lock = context::reenter_command_lock()?;
             let _interrupts = crate::shutdown::SigtermGuard::install();
             elivagar::cmd::inspect(
@@ -1383,10 +1375,10 @@ fn run_project(
             overlay_max,
             json,
         } => {
-            // The archive resolver still bootstraps through `cargo metadata`,
-            // so the lock is still held; the diff itself is in-process.
-            // `operational`: a failure before any verdict (lock, bootstrap,
-            // resolution) exits regress's "could not complete" code, not 1.
+            // Regress takes the command lock its spec gives it, though neither
+            // the archive resolution nor the in-process diff runs cargo.
+            // `operational`: a failure before any verdict (lock, resolution)
+            // exits regress's "could not complete" code, not 1.
             elivagar::cmd::operational(elivagar::regress::INCOMPLETE_EXIT, || {
                 let _lock = context::reenter_command_lock()?;
                 elivagar::cmd::regress(
@@ -1425,11 +1417,7 @@ fn run_project(
         Command::DownloadOcean => {
             let _lock = context::reenter_command_lock()?;
             let _interrupts = crate::shutdown::SigtermGuard::install();
-            elivagar::cmd::download_ocean(
-                dev_config,
-                &detection.project_root,
-                &detection.build_root,
-            )
+            elivagar::cmd::download_ocean(dev_config, &detection.project_root)
         }
         Command::OceanBuild { dry_run } => {
             let _lock = context::reenter_command_lock()?;
@@ -1446,11 +1434,7 @@ fn run_project(
         Command::DownloadNaturalEarth => {
             let _lock = context::reenter_command_lock()?;
             let _interrupts = crate::shutdown::SigtermGuard::install();
-            elivagar::cmd::download_natural_earth(
-                dev_config,
-                &detection.project_root,
-                &detection.build_root,
-            )
+            elivagar::cmd::download_natural_earth(dev_config, &detection.project_root)
         }
         Command::PmtilesStats { files } => cmd_pmtiles_stats(project, &files),
         Command::Serve {

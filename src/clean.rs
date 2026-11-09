@@ -234,7 +234,9 @@ pub(crate) fn cmd_clean(
     // independently recomputed and hoped to match.
     let worktree_root = build_root.as_path();
     let pi = bootstrap(build_root)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let paths = bootstrap_config(dev_config, project_root)?;
+    let host_target =
+        crate::config::host_target_dir(dev_config, &paths.hostname, project_root.as_path(), &pi.target_dir);
     let project_root = project_root.as_path();
     let state = layout::ProjectState::new(project_root);
 
@@ -246,7 +248,7 @@ pub(crate) fn cmd_clean(
     }
     // The verify harness writes only under target/verify.
     if *project == Project::Pbfhogg {
-        let verify_dir = layout::PbfhoggLayout::new(&paths).verify_output();
+        let verify_dir = layout::PbfhoggLayout::verify_output(&host_target);
         if c.guarded_dir(&verify_dir)? {
             output::run_msg(&format!("{} verify output", c.verb()));
         }

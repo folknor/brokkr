@@ -82,15 +82,15 @@ pub(crate) fn bootstrap(build_root: &BuildRoot) -> Result<build::ProjectInfo, De
     build::project_info(Some(build_root.as_path()))
 }
 
-/// Resolve paths for the current host from an already-loaded config.
+/// Resolve paths for the current host from an already-loaded config: config
+/// alone, no cargo query, so no code tree's state can fail it. A command
+/// that needs the cargo target dir asks [`bootstrap`] of the tree it acts on.
 pub(crate) fn bootstrap_config(
     dev_config: &config::DevConfig,
     project_root: &ProjectRoot,
-    target_dir: &Path,
 ) -> Result<config::ResolvedPaths, DevError> {
     let hostname = config::hostname()?;
-    let paths = config::resolve_paths(dev_config, &hostname, project_root.as_path(), target_dir);
-    Ok(paths)
+    Ok(config::resolve_paths(dev_config, &hostname, project_root.as_path()))
 }
 
 /// One lock, path resolution and measurement provenance for a command.
@@ -133,16 +133,6 @@ impl DirtyPolicy {
     }
 }
 
-/// Resolve host paths without losing the distinction between state and code.
-fn resolve_bootstrap_paths(
-    dev_config: &config::DevConfig,
-    project_root: &ProjectRoot,
-    build_root: &BuildRoot,
-) -> Result<config::ResolvedPaths, DevError> {
-    let pi = bootstrap(build_root)?;
-    bootstrap_config(dev_config, project_root, &pi.target_dir)
-}
-
 /// Resolve the worktree retention value for this machine at the shared
 /// context boundary.
 pub(crate) fn worktree_keep(dev_config: &config::DevConfig) -> Result<usize, DevError> {
@@ -177,11 +167,9 @@ impl MeasurementSession {
         force: bool,
         stop_marker: Option<String>,
     ) -> Result<Self, DevError> {
-        // Take the lock before resolving paths, for the same reason as
-        // `MeasurementSession::with_build_config`: `resolve_bootstrap_paths` runs
-        // `cargo metadata`, and the lock activates the configured tree policy.
-        // Acquiring first keeps a worktree's committed pin from being live
-        // during that metadata call. The harness is handed the held lock.
+        // The lock first, which activates the configured tree policy before
+        // anything the session does with the tree; the harness is handed the
+        // held lock. Path resolution is config alone and asks cargo nothing.
         let lock = lockfile::acquire(&lockfile::LockContext {
             project: project.name(),
             command: crate::cli::invocation(),
@@ -189,7 +177,7 @@ impl MeasurementSession {
             build_root,
             tree: configured_tree(),
         })?;
-        let paths = resolve_bootstrap_paths(dev_config, project_root, build_root)?;
+        let paths = bootstrap_config(dev_config, project_root)?;
         let harness = harness::BenchHarness::new_with_lock(
             lock,
             &paths,

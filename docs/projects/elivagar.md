@@ -197,9 +197,9 @@ store survives a routine `brokkr clean`; only the deep clean (`brokkr clean
 release binary can inspect output built by any commit, so `--commit` picks
 which file to open, not which binary to build (no historical worktree rebuild,
 unlike `brokkr verify --commit` on the pbfhogg cross-validators). All four
-acquire the brokkr lock (non-blocking `acquire_cmd_lock`, like `regress`)
-because each wrapper builds elivagar with Cargo and the lock serializes those
-build shapes. Tilegen writes to scratch and then promotes its finished archive,
+take the blocking brokkr command lock, as `regress` does, because each
+wrapper builds elivagar with Cargo and the lock serializes those build
+shapes. Tilegen writes to scratch and then promotes its finished archive,
 so the lock does not protect readers from a mid-write archive.
 
 ### verify pmtiles
@@ -250,15 +250,13 @@ usage error at clap's exit **2** - never colliding with regress's own verdict
 codes. Exit 0 is no accountable diff, exit 1 a regression or budget overrun, and
 exit **3** means the run could not be completed at all (an unreadable archive, a
 tile that will not decode, an overlay that will not write - and equally a failure
-before the diff starts: the lock is held, `cargo metadata` fails, an archive does
-not resolve; the dispatch wraps the whole command in `cmd::operational`, so no
+before the diff starts: the lock is held, an archive does not resolve; the dispatch wraps the whole command in `cmd::operational`, so no
 error path falls through to `main`'s generic 1). 3 is separate from 1
 on purpose: exit 1 is the *verdict*, so a caller that could not tell it from an
 operational failure would read a truncated archive as a regression, with nothing
 but stderr to say otherwise.
-Like the inspection subcommands, it takes the non-blocking brokkr lock first -
-the diff itself needs no lock, but the archive resolver still bootstraps through
-`cargo metadata`.
+Like the inspection subcommands, it takes the blocking brokkr command lock
+first, though it builds nothing and asks Cargo nothing.
 
 ### The engine
 
@@ -447,7 +445,7 @@ the step-4 staleness scan, in `render-manifest`, or in `bless`'s
 rotation-refusal path. The fold is deliberately narrow: a genuine IO failure
 (permissions, a bad disk) is not a verdict about anything and still propagates
 as an error - which the dispatch, like every other non-verdict failure (lock,
-`cargo metadata`, archive resolution), turns into exit **4** through
+archive resolution), turns into exit **4** through
 `cmd::operational` rather than `main`'s generic 1. Baseline *staleness* (step 4)
 shares exit 3 with baseline damage and stays strictly subordinate to the content
 walk, so it can never mask a mismatch.

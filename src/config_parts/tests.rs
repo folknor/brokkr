@@ -1309,7 +1309,7 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
             },
         );
         let config = make_config(hosts);
-        let resolved = resolve_paths(&config, "myhost", Path::new("/proj"), Path::new("/target"));
+        let resolved = resolve_paths(&config, "myhost", Path::new("/proj"));
         let dk = resolved.datasets.get("dk").unwrap();
         assert_eq!(dk.pbf.get("indexed").unwrap().file, "dk-indexed.osm.pbf");
         assert_eq!(
@@ -1321,8 +1321,46 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
     #[test]
     fn unknown_host_gets_empty_datasets() {
         let config = make_config(HashMap::new());
-        let resolved = resolve_paths(&config, "unknown", Path::new("/proj"), Path::new("/target"));
+        let resolved = resolve_paths(&config, "unknown", Path::new("/proj"));
         assert!(resolved.datasets.is_empty());
+    }
+
+    /// The host section's `target`, relative to the project root, else the
+    /// cargo target dir handed in: what env reports and clean looks under.
+    #[test]
+    fn host_target_dir_is_the_host_override_else_cargos() {
+        let cargo = Path::new("/cargo-target");
+        let none = make_config(HashMap::new());
+        assert_eq!(
+            host_target_dir(&none, "myhost", Path::new("/proj"), cargo),
+            cargo
+        );
+        let mut hosts = HashMap::new();
+        hosts.insert(
+            "myhost".into(),
+            HostConfig {
+                data: None,
+                scratch: None,
+                output: None,
+                target: Some("fast/target".into()),
+                port: None,
+                drives: None,
+                features: Vec::new(),
+                datasets: HashMap::new(),
+                tilegen: HashMap::new(),
+                worktree_keep: None,
+                verify_reference_budget: None,
+            },
+        );
+        let config = make_config(hosts);
+        assert_eq!(
+            host_target_dir(&config, "myhost", Path::new("/proj"), cargo),
+            Path::new("/proj/fast/target")
+        );
+        assert_eq!(
+            host_target_dir(&config, "otherhost", Path::new("/proj"), cargo),
+            cargo
+        );
     }
 
     #[test]
@@ -1378,7 +1416,7 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
             },
         );
         let config = make_config(hosts);
-        let resolved = resolve_paths(&config, "myhost", Path::new("/proj"), Path::new("/target"));
+        let resolved = resolve_paths(&config, "myhost", Path::new("/proj"));
         let dk = resolved.datasets.get("dk").unwrap();
         assert_eq!(dk.pbf.len(), 3);
         assert_eq!(dk.pbf.get("raw").unwrap().xxhash, Some(pin('a')));
@@ -1428,7 +1466,7 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
             },
         );
         let config = make_config(hosts);
-        let resolved = resolve_paths(&config, "myhost", Path::new("/proj"), Path::new("/target"));
+        let resolved = resolve_paths(&config, "myhost", Path::new("/proj"));
         let dk = resolved.datasets.get("dk").unwrap();
         assert_eq!(dk.osc.len(), 2);
         assert_eq!(dk.osc.get("4705").unwrap().file, "dk-4705.osc.gz");

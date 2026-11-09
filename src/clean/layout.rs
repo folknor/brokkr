@@ -390,8 +390,10 @@ impl<'a> PbfhoggLayout<'a> {
         Self { paths }
     }
 
-    pub(crate) fn verify_output(&self) -> PathBuf {
-        self.paths.target_dir.join(crate::target_namespace::VERIFY)
+    /// Where clean looks for pbfhogg's verify output: under `target_dir`,
+    /// the host section's `target` else cargo's (`config::host_target_dir`).
+    pub(crate) fn verify_output(target_dir: &Path) -> PathBuf {
+        target_dir.join(crate::target_namespace::VERIFY)
     }
 
     pub(crate) fn scratch(&self) -> &Path {

@@ -2302,7 +2302,6 @@ pub struct ResolvedPaths {
     /// from `scratch_dir` so run-to-run tmp wipes never destroy archives that
     /// `--commit` resolution and `regress`/`bless` depend on.
     pub output_dir: PathBuf,
-    pub target_dir: PathBuf,
     pub drives: Option<DriveConfig>,
     pub features: Vec<String>,
     pub datasets: HashMap<String, Dataset>,

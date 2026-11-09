@@ -213,9 +213,7 @@ pub(crate) fn run(req: &MeasureRequest<'_>, command: &impl PlannedCommand) -> Re
         )));
     }
     if req.dry_run {
-        let pi = crate::context::bootstrap(req.build_root)?;
-        let paths =
-            crate::context::bootstrap_config(req.dev_config, req.project_root, &pi.target_dir)?;
+        let paths = crate::context::bootstrap_config(req.dev_config, req.project_root)?;
         let plan = command.plan(req, &paths, PlanTarget::DryRun)?;
         for line in command.describe(req, &plan)? {
             output::dry_run_msg(&line);
