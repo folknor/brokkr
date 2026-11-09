@@ -3435,7 +3435,7 @@ pub(crate) enum VerifyCommand {
     },
     /// Cross-validate getid, getid --invert and getid --add-referenced
     /// (plain and --remove-tags) against osmium getid
-    #[command(display_order = 4)]
+    #[command(display_order = 4, visible_alias = "getid")]
     GetidRemoveid {
         #[command(flatten)]
         pbf: VerifyPbfArgs,

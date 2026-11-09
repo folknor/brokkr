@@ -1064,8 +1064,8 @@ the listing must number exactly `different` (pbfhogg writes one per modified
 element), so a listing the classifier does not fully read fails rather than
 passing node or way differences as tolerated relation ones.
 
-`verify getid-removeid` chooses its IDs from the input, not from a fixed
-list. The include and `--invert` IDs come from a header-only walk of the
+`verify getid-removeid` (alias `verify getid`) chooses its IDs from the
+input, not from a fixed list. The include and `--invert` IDs come from a header-only walk of the
 PBF's blob framing (`pbf_frames`), which reads each `BlobHeader` and its
 indexdata and seeks past every data payload, so that choice costs the blob
 count, never the data, at any scale (the `--add-referenced` request below
