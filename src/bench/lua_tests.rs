@@ -47,10 +47,12 @@ impl Host for Fake {
             stdout_truncated: false,
             stderr: b"line one\nlast words\n".to_vec(),
             stderr_truncated: false,
+            stderr_tail: Some(b"line one\nlast words\n".to_vec()),
             stdout_file: Some(HandleRef {
                 index: 9,
                 path: "/it/stdout/0".into(),
             }),
+            stderr_file: None,
             hotpath: options_hotpath.then(|| Capture {
                 status: "captured",
                 report: Some(Value::Table(vec![(

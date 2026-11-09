@@ -6,7 +6,8 @@ use rusqlite::{Connection, params};
 use super::StoreError;
 use super::document::{
     CaptureOutcome, Child, ChildEnding, Evidence, Executable, ExecutableIdentity, HotpathCapture,
-    Iteration, IterationOutcome, Record, RunDocument, RunOutcome, Sample,
+    Iteration, IterationOutcome, Record, RunDocument, RunOutcome, Sample, StderrCapture,
+    StderrTail,
 };
 
 /// A count or index in SQLite's integer domain.
@@ -164,7 +165,42 @@ fn insert_iteration(
         if let Some(executable) = &child.executable {
             insert_executable(tx, child_id, executable)?;
         }
+        if let Some(stderr) = &child.stderr {
+            insert_stderr(tx, child_id, stderr)?;
+        }
     }
+    Ok(())
+}
+
+fn insert_stderr(tx: &Connection, child_id: i64, stderr: &StderrCapture) -> Result<(), StoreError> {
+    let int64 = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
+    let (status, text, raw, cut, reason) = match &stderr.tail {
+        StderrTail::Kept { text, raw, cut } => (
+            "kept",
+            Some(text.as_str()),
+            Some(int64(*raw)),
+            Some(*cut),
+            None,
+        ),
+        StderrTail::OverBudget => ("over_budget", None, None, None, None),
+        StderrTail::Unreadable { reason } => {
+            ("unreadable", None, None, None, Some(reason.as_str()))
+        }
+    };
+    tx.execute(
+        "INSERT INTO child_stderr (child_id, released, bytes, status, text, raw, cut, reason)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            child_id,
+            stderr.released,
+            stderr.bytes.map(int64),
+            status,
+            text,
+            raw,
+            cut,
+            reason
+        ],
+    )?;
     Ok(())
 }
 

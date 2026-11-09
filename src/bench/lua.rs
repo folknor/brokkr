@@ -403,8 +403,13 @@ pub(crate) struct CallOutcome {
     pub(crate) stdout_truncated: bool,
     pub(crate) stderr: Vec<u8>,
     pub(crate) stderr_truncated: bool,
+    /// The last MiB of stderr, exact bytes; absent for a preflight, whose
+    /// stderr is piped and only its first MiB kept.
+    pub(crate) stderr_tail: Option<Vec<u8>>,
     /// The child's whole stdout, its spool, as a handle.
     pub(crate) stdout_file: Option<HandleRef>,
+    /// The child's whole stderr, its spool, as a handle.
+    pub(crate) stderr_file: Option<HandleRef>,
     /// A marked call's capture, as the script sees it.
     pub(crate) hotpath: Option<Capture>,
     /// The `stop_at` marker that ended the child; then `exit` and `signal`
@@ -1951,11 +1956,19 @@ fn call_binary<H: Host>(
         set_bool(state, table, "stdout_truncated", outcome.stdout_truncated)?;
         set_str(state, table, "stderr", &outcome.stderr)?;
         set_bool(state, table, "stderr_truncated", outcome.stderr_truncated)?;
+        if let Some(tail) = &outcome.stderr_tail {
+            set_str(state, table, "stderr_tail", tail)?;
+        }
     }
-    if let Some(spool) = &outcome.stdout_file {
-        state.push_string("stdout_file")?;
-        push_handle(state, spool)?;
-        state.set_table_raw(table)?;
+    for (key, spool) in [
+        ("stdout_file", &outcome.stdout_file),
+        ("stderr_file", &outcome.stderr_file),
+    ] {
+        if let Some(spool) = spool {
+            state.push_string(key)?;
+            push_handle(state, spool)?;
+            state.set_table_raw(table)?;
+        }
     }
     if let Some(marker) = &outcome.stopped_at {
         set_str(state, table, "stopped_at", marker.as_bytes())?;
@@ -2225,6 +2238,9 @@ fn table_value(
     Ok(Value::List(array.into_iter().map(|(_, v)| v).collect()))
 }
 
+/// The most of a stderr line `result:ok()` quotes.
+const MAX_OK_LINE_CHARS: usize = 2000;
+
 /// `result:ok()`: the result itself when the child exited 0 or was stopped
 /// at its `stop_at` marker; otherwise the
 /// sample fails, naming how the child ended and its last stderr line.
@@ -2275,7 +2291,13 @@ fn lua_result_ok<H: Host>(state: &mut State) -> Result<u8, Error> {
         .then(|| state.to_number(-1))
         .transpose()?;
     state.pop(1)?;
-    field(state, "stderr")?;
+    // The end of stderr when brokkr kept it, so a long stderr still names
+    // its last line; a preflight's result has only the start.
+    field(state, "stderr_tail")?;
+    if state.typ(-1) != LuaType::String {
+        state.pop(1)?;
+        field(state, "stderr")?;
+    }
     let stderr = if state.typ(-1) == LuaType::String {
         String::from_utf8_lossy(state.to_bytes(-1)?).into_owned()
     } else {
@@ -2289,8 +2311,15 @@ fn lua_result_ok<H: Host>(state: &mut State) -> Result<u8, Error> {
     };
     let mut why = format!("{program} {ending}");
     if let Some(line) = stderr.lines().rev().find(|l| !l.trim().is_empty()) {
+        let line = line.trim();
         why.push_str(": ");
-        why.push_str(line.trim());
+        match line.char_indices().nth(MAX_OK_LINE_CHARS) {
+            Some((cut, _)) => {
+                why.push_str(&line[..cut]);
+                why.push_str("...");
+            }
+            None => why.push_str(line),
+        }
     }
     // The script's own verdict on what the child did, as `fail()` is.
     Err(raise(state, Abort::Fail(why)))

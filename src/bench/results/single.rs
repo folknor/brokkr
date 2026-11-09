@@ -7,7 +7,7 @@ use std::fmt::Write;
 
 use super::super::store::{
     CaptureOutcome, Child, ChildEnding, ExecutableIdentity, IterationOutcome, MarkView,
-    Measurement, RunDocument, RunOutcome, StoredRun,
+    Measurement, RunDocument, RunOutcome, StderrCapture, StderrTail, StoredRun,
 };
 use super::{
     bench_name, hidden_by, hidden_detail, hotpath_report, ms, short_commit, stored_as, timestamp,
@@ -273,6 +273,62 @@ fn child(out: &mut String, idx: usize, child: &Child) {
             capture.stage, capture.occurrence
         )
         .expect("write to String is infallible");
+    }
+    if let Some(stderr) = &child.stderr {
+        stderr_lines(out, stderr);
+    }
+}
+
+/// The stderr tail lines a child's view shows at most, and their characters
+/// together, escapes and omission markers included.
+const STDERR_SHOWN_LINES: usize = 10;
+const STDERR_SHOWN_CHARS: usize = 2000;
+
+/// A child's stderr capture: its size and state, then the last few lines of
+/// its kept tail, bounded and with control characters escaped.
+fn stderr_lines(out: &mut String, stderr: &StderrCapture) {
+    let size = stderr
+        .bytes
+        .map_or_else(|| "size unknown".to_owned(), |b| format!("{b} bytes"));
+    let unreleased = if stderr.released {
+        ""
+    } else {
+        ", snapshotted while its call was still held"
+    };
+    let (state, text) = match &stderr.tail {
+        StderrTail::Kept { text, cut, .. } => (
+            if *cut { "; its tail kept" } else { "" }.to_owned(),
+            Some(text),
+        ),
+        StderrTail::OverBudget => ("; over the run's budget, not kept".to_owned(), None),
+        StderrTail::Unreadable { reason } => (format!("; unreadable: {reason}"), None),
+    };
+    writeln!(out, "           stderr {size}{unreleased}{state}")
+        .expect("write to String is infallible");
+    let Some(text) = text else { return };
+    let lines: Vec<&str> = text.lines().collect();
+    let mut shown: Vec<String> = Vec::new();
+    let mut budget = STDERR_SHOWN_CHARS;
+    for line in lines.iter().rev().take(STDERR_SHOWN_LINES) {
+        let escaped: Vec<char> = line.chars().flat_map(char::escape_debug).collect();
+        if escaped.len() > budget && budget < 3 {
+            break;
+        }
+        let line: String = if escaped.len() > budget {
+            // Room for the marker, so the lines shown stay within the bound.
+            let keep = budget.saturating_sub(3);
+            escaped[..keep].iter().chain(['.'; 3].iter()).collect()
+        } else {
+            escaped.iter().collect()
+        };
+        budget = budget.saturating_sub(line.chars().count());
+        shown.push(line);
+        if budget == 0 {
+            break;
+        }
+    }
+    for line in shown.iter().rev() {
+        writeln!(out, "           | {line}").expect("write to String is infallible");
     }
 }
 

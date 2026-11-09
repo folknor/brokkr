@@ -468,7 +468,10 @@ measure`, Script-bench children) when some iteration launched one, then
 each iteration with its outcome and each child with its start offset, wall,
 ending, argv and what its capture kept and lost, for a `program` call the
 executable it ran and that file's digest (or why it was not read), and for
-a call marked `hotpath` its stage, occurrence and capture status; a `--hotpath` run says
+a call marked `hotpath` its stage, occurrence and capture status, then, for
+a child whose stderr was kept, its size and state and the last lines of
+its stored tail (at most 10 lines and 2000 characters, control characters
+escaped); a `--hotpath` run says
 `measured hotpath`, an `--alloc` run `measured alloc`. Then the result's `record`
 (for a run without a result, each iteration's that was extracted), one
 entry per line as compact JSON. A prefix matching several runs prints the

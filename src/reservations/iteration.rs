@@ -3,7 +3,8 @@
 //!
 //! The iteration holds an owner lease, never lent to a child: its record
 //! names the run's inputs for reading and one private iteration directory,
-//! with `out/`, `scratch/` and `stdout/` inside it, for writing. Each child
+//! with `out/`, `scratch/`, `stdout/`, `stderr/` and `profile/` inside it,
+//! for writing. Each child
 //! launches with a borrow of its own, a lease whose record names the owner
 //! and the call's declared resources, and inherits that one descriptor as a
 //! pbfhogg child inherits its launch lease. A held borrow pins its owner: a
@@ -11,7 +12,9 @@
 //! dies under a running child never has the iteration reclaimed under it,
 //! and the scan after the last holder is gone reclaims both. A borrow's
 //! release, which tests that no process holds it any more, is the call's
-//! completion: only then is its stdout spool handed back for reading.
+//! completion: only then is its stdout spool handed back for reading. Its
+//! stderr spool the caller keeps apart, so what it holds can be snapshotted
+//! even when the release fails.
 //!
 //! A borrow is admitted in three steps, each handle spelled afresh at the
 //! call: a declared write overlapping an input or an earlier call's spool is
@@ -51,18 +54,32 @@ enum Area {
     Out,
     Scratch,
     Stdout,
+    /// Stderr spools, one per call, named as its stdout spool is.
+    Stderr,
     /// Hotpath reports, one per marked call; brokkr's own, never a handle.
     Profile,
 }
 
 impl Area {
-    const ALL: [Self; 4] = [Self::Out, Self::Scratch, Self::Stdout, Self::Profile];
+    const ALL: [Self; 5] = [
+        Self::Out,
+        Self::Scratch,
+        Self::Stdout,
+        Self::Stderr,
+        Self::Profile,
+    ];
+
+    /// The areas whose entries are spools, pinned at their making.
+    fn spools(self) -> bool {
+        matches!(self, Self::Stdout | Self::Stderr)
+    }
 
     fn name(self) -> &'static str {
         match self {
             Self::Out => "out",
             Self::Scratch => "scratch",
             Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
             Self::Profile => "profile",
         }
     }
@@ -94,6 +111,9 @@ pub(crate) struct Iteration {
     /// the identity a later open of the spool is checked against cannot be
     /// reused by a file a child put in its place.
     spools: Vec<PinnedSpool>,
+    /// The calls admitted so far: the next call's spools and report are
+    /// named by it.
+    calls: usize,
 }
 
 #[derive(Debug)]
@@ -146,6 +166,7 @@ impl Iteration {
                 inputs: inputs.to_vec(),
                 given: BTreeSet::new(),
                 spools: Vec::new(),
+                calls: 0,
             }),
             Err(e) => {
                 // The directory is the lease's: the release removes it.
@@ -226,11 +247,13 @@ impl Iteration {
         let owner = self
             .lease
             .as_ref()
-            .ok_or_else(|| DevError::Internal("a call on a released iteration".into()))?;
+            .ok_or_else(|| DevError::Internal("a call on a released iteration".into()))?
+            .id()
+            .to_owned();
         let _serial = super::serialize().map_err(|e| io_error("cannot admit a call", e))?;
-        let stdout = self.verified(Area::Stdout)?;
-        let name = self.spools.len().to_string();
+        let name = self.calls.to_string();
         let spool_path = self.dir.join(Area::Stdout.name()).join(&name);
+        let stderr_path = self.dir.join(Area::Stderr.name()).join(&name);
         // Spelled once: the admission judges stdin as this, and it is opened
         // as this.
         let stdin = match stdin {
@@ -256,12 +279,15 @@ impl Iteration {
             };
             declared.push(Resource::new(&spelled, *access, Disposition::Reserve));
         }
-        // The child writes its spool through stdout: an implicit write.
-        declared.push(Resource::new(
-            &spell(&spool_path)?,
-            Access::Write,
-            Disposition::Reserve,
-        ));
+        // The child writes its spools through stdout and stderr: implicit
+        // writes.
+        for path in [&spool_path, &stderr_path] {
+            declared.push(Resource::new(
+                &spell(path)?,
+                Access::Write,
+                Disposition::Reserve,
+            ));
+        }
         let report_path = if report {
             let path = self.dir.join(Area::Profile.name()).join(&name);
             declared.push(Resource::new(
@@ -278,21 +304,9 @@ impl Iteration {
             Some((path, spelled)) => Some(self.open_admitted(path, spelled)?),
             None => None,
         };
-        let file = open_at(
-            &stdout.file,
-            &name,
-            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
-        )
-        .map_err(|e| io_error(&format!("cannot make spool {}", spool_path.display()), e))?;
-        // It exists now: read-only to every later call, admitted or not.
-        let pin = file
-            .try_clone()
-            .map_err(|e| io_error(&format!("cannot pin spool {}", spool_path.display()), e))?;
-        self.spools.push(PinnedSpool {
-            path: spool_path.clone(),
-            file: pin,
-        });
-        names_inode(&spool_path, &file)?;
+        self.calls += 1;
+        let file = self.make_spool(Area::Stdout, &name, &spool_path)?;
+        let stderr = self.make_spool(Area::Stderr, &name, &stderr_path)?;
         if let Some(path) = &report_path {
             // Made empty and closed: the child writes it by path, and a
             // report still empty after the call is one nothing wrote.
@@ -306,7 +320,7 @@ impl Iteration {
             names_inode(path, &made)?;
         }
         let borrow = store
-            .create_tied(declared, Tie::Borrow(owner.id().to_owned()))
+            .create_tied(declared, Tie::Borrow(owner))
             .map_err(|e| io_error("cannot create a borrow lease", e))?;
         if let Some(fd) = borrow.fd() {
             arm(fd, program);
@@ -317,9 +331,34 @@ impl Iteration {
                 path: spool_path,
                 file,
             }),
+            stderr: Some(Spool {
+                path: stderr_path,
+                file: stderr,
+            }),
             stdin,
             report: report_path,
         })
+    }
+
+    /// Make the spool `name` in `area` at `path`, exclusively through the
+    /// area's descriptor, and pin it: from now on it is read-only to every
+    /// later call, admitted or not.
+    fn make_spool(&mut self, area: Area, name: &str, path: &Path) -> Result<File, DevError> {
+        let file = open_at(
+            &self.verified(area)?.file,
+            name,
+            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+        )
+        .map_err(|e| io_error(&format!("cannot make spool {}", path.display()), e))?;
+        let pin = file
+            .try_clone()
+            .map_err(|e| io_error(&format!("cannot pin spool {}", path.display()), e))?;
+        self.spools.push(PinnedSpool {
+            path: path.to_path_buf(),
+            file: pin,
+        });
+        names_inode(path, &file)?;
+        Ok(file)
     }
 
     /// Open the file at `path` for brokkr's own reading (`read()`,
@@ -430,7 +469,7 @@ impl Iteration {
             Some((area, name)) => {
                 let dir = self.verified(area)?;
                 let file = open_at(&dir.file, name, flags).map_err(failed)?;
-                if area == Area::Stdout {
+                if area.spools() {
                     self.check_spool(path, &file)?;
                 }
                 // After the open too: an area moved since it was verified
@@ -580,11 +619,27 @@ impl Drop for Iteration {
 pub(crate) struct Call {
     lease: Option<Lease>,
     spool: Option<Spool>,
+    stderr: Option<Spool>,
     stdin: Option<File>,
     report: Option<PathBuf>,
 }
 
 impl Call {
+    /// A descriptor on the spool for the child's stderr.
+    pub(crate) fn stderr(&self) -> io::Result<File> {
+        match &self.stderr {
+            Some(spool) => spool.file.try_clone(),
+            None => Err(io::Error::other("the call's stderr spool was taken")),
+        }
+    }
+
+    /// The stderr spool, kept by the caller apart from the call so it can be
+    /// read whether or not the release succeeds. Take it after
+    /// [`stderr`](Self::stderr) gave the child its descriptor.
+    pub(crate) fn take_stderr_spool(&mut self) -> Option<Spool> {
+        self.stderr.take()
+    }
+
     /// The call's hotpath report path under `profile/`, when it asked for
     /// one: read it back with [`Iteration::open_file`] once the call is
     /// finished.
@@ -678,6 +733,11 @@ impl Spool {
         &self.path
     }
 
+    /// The spool's size now, through its own descriptor.
+    pub(crate) fn size(&self) -> io::Result<u64> {
+        Ok(self.file.metadata()?.len())
+    }
+
     /// The first `limit` bytes, read through the spool's own descriptor
     /// (never the path, which a child may have replaced), and whether the
     /// spool holds more. Truncation is a fact about the preview, not a
@@ -701,6 +761,43 @@ impl Spool {
             bytes,
         })
     }
+
+    /// The last `limit` bytes as of one observation of the spool's size,
+    /// read through its own descriptor. A writer that only appends gives a
+    /// coherent snapshot; a file that shrank before the range was read is an
+    /// error, never a shorter tail passed off as the end.
+    pub(crate) fn tail(&self, limit: usize) -> io::Result<Tail> {
+        let size = self.file.metadata()?.len();
+        let take = usize::try_from(size).unwrap_or(usize::MAX).min(limit);
+        let start = size - u64::try_from(take).unwrap_or(size);
+        let mut bytes = vec![0; take];
+        let mut at = 0;
+        while at < take {
+            let offset = start + u64::try_from(at).unwrap_or(u64::MAX);
+            let n = self.file.read_at(&mut bytes[at..], offset)?;
+            if n == 0 {
+                return Err(io::Error::other(format!(
+                    "the spool shrank below the {size} bytes observed while its end was read"
+                )));
+            }
+            at += n;
+        }
+        Ok(Tail {
+            bytes,
+            size,
+            cut: start > 0,
+        })
+    }
+}
+
+/// The end of a spool as observed once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Tail {
+    pub(crate) bytes: Vec<u8>,
+    /// The size observed.
+    pub(crate) size: u64,
+    /// Whether bytes before the tail were not read.
+    pub(crate) cut: bool,
 }
 
 /// Spell an absolute path.

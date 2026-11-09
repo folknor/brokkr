@@ -36,7 +36,8 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 pub use document::{
     BoundParam, Build, CaptureOutcome, Child, ChildEnding, Clock, Conditions, DOCUMENT_FORMAT,
     Evidence, Executable, ExecutableIdentity, HotpathCapture, Iteration, IterationOutcome, Loss,
-    Measurement, ParamValue, Record, ResolvedBuild, RunDocument, RunOutcome, Sample, SinkEnd,
+    Measurement, ParamValue, Record, ResolvedBuild, RunDocument, RunOutcome, STDERR_RUN_BYTES,
+    STDERR_TAIL_BYTES, Sample, SinkEnd, StderrCapture, StderrTail,
 };
 pub use error::StoreError;
 pub use list::{RunFilter, Selection, StoredRun};
@@ -181,6 +182,7 @@ const SHIPPED_STEPS: &[&str] = &[
     "03cc48a74e55e5047728ea5f3bf15e06",
     "ec1a827868cc9bd5b45b3e34d43f397d",
     "bddf3dd75a32b844ae1d0325e4e864fd",
+    "7b89417927c1c50bf88fd689361526d5",
 ];
 
 #[cfg(test)]

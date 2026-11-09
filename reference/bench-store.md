@@ -121,6 +121,23 @@ field is omitted when absent, so a document without one encodes as it did.
 It is not part of the pairing key; `brokkr results --compare` names the
 executables whose observed identities differ.
 
+A child brokkr spooled stderr for also holds its **stderr**: whether its
+call's borrow was released before the snapshot (without it, something the
+child started may still have been writing, so what follows is what the
+spool held then), the spool's size as observed (absent when it could not
+be), and its tail: `kept` with the count of raw bytes kept (the last 64 KiB
+at most), their text with each invalid UTF-8 sequence replaced, and `cut`
+when earlier bytes were not kept, so the text may open mid-line;
+`over_budget` when the run's 16 MiB of raw tail bytes had run out (an
+empty stderr is always kept); or `unreadable` with its reason. It is
+evidence of how a child's stderr ended, never its whole log. Absent means
+not observed: every child stored before the field existed. Omitted when
+absent, as `executable` is. Publication refuses a kept tail without a size,
+one whose raw count is past 64 KiB or the size, a `cut` that is not exactly
+"fewer raw bytes than the size", a text shorter than its raw count or over
+three times it (the most replacement expands to), and a run whose kept raw
+bytes pass 16 MiB.
+
 Every struct refuses unknown fields, so a document a newer writer extended
 is refused rather than stored short of its new fields: that refusal, not
 `format`, is what keeps an older store from taking a newer document. The

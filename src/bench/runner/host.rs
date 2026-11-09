@@ -66,8 +66,26 @@ pub(super) struct IterationSetup<'a> {
     pub(super) index: usize,
     pub(super) since: Since,
     pub(super) measurement: store::Measurement,
-    /// The report bytes the run may still capture.
-    pub(super) report_budget: usize,
+    /// What the run may still keep.
+    pub(super) budget: Budget,
+}
+
+/// What a run may still keep of its children's output, spent across its
+/// iterations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Budget {
+    /// Hotpath report bytes, as the store serializes them.
+    pub(super) reports: usize,
+    /// Raw stderr tail bytes.
+    pub(super) stderr: usize,
+}
+
+impl Budget {
+    /// A whole run's.
+    pub(super) const RUN: Self = Self {
+        reports: RUN_REPORT_BYTES,
+        stderr: store::STDERR_RUN_BYTES,
+    };
 }
 
 /// How long a call marked `hotpath` and stopped at its `stop_at` marker has,
@@ -85,12 +103,12 @@ pub(super) const RUN_REPORT_BYTES: usize = 128 * 1024 * 1024;
 
 /// Run one iteration: its owner lease, a fresh Lua state, the sample, the
 /// release. Returns the document's iteration, the `since` answers, the
-/// report budget left and the library modules the sample asked for.
+/// budget left and the library modules the sample asked for.
 pub(super) fn run_iteration(
     setup: IterationSetup<'_>,
-) -> (store::Iteration, Since, usize, BTreeSet<String>) {
+) -> (store::Iteration, Since, Budget, BTreeSet<String>) {
     let since = setup.since;
-    let report_budget = setup.report_budget;
+    let budget = setup.budget;
     let resources = std::fs::create_dir_all(setup.container)
         .map_err(DevError::from)
         .and_then(|()| Resources::open(setup.container, setup.inputs));
@@ -107,7 +125,7 @@ pub(super) fn run_iteration(
                     children: Vec::new(),
                 },
                 since,
-                report_budget,
+                budget,
                 BTreeSet::new(),
             );
         }
@@ -125,7 +143,7 @@ pub(super) fn run_iteration(
         block_start: None,
         children: Vec::new(),
         stages: BTreeMap::new(),
-        report_budget,
+        budget,
         since,
     };
     let (sample, mut host) = lua::run_sample(setup.script, setup.args, host);
@@ -174,7 +192,7 @@ pub(super) fn run_iteration(
             children: host.children,
         },
         host.since,
-        host.report_budget,
+        host.budget,
         sample.modules,
     )
 }
@@ -226,8 +244,8 @@ struct IterationHost {
     children: Vec<store::Child>,
     /// Each stage's marked calls so far, whatever became of them.
     stages: BTreeMap<String, u32>,
-    /// The report bytes the run may still capture.
-    report_budget: usize,
+    /// What the run may still keep.
+    budget: Budget,
     since: Since,
 }
 
@@ -236,7 +254,7 @@ impl IterationHost {
     /// nothing holds the call's borrow, and its projection for the script.
     /// Never an error: a failure is the capture's outcome.
     fn capture(&mut self, path: &Path) -> (store::CaptureOutcome, lua::Capture) {
-        let limit = REPORT_BYTES.min(self.report_budget);
+        let limit = REPORT_BYTES.min(self.budget.reports);
         let read = match self.resources() {
             Ok(resources) => resources.read_report(path, limit),
             Err(Abort::Interrupted) => Err(DevError::Interrupted),
@@ -252,11 +270,11 @@ impl IterationHost {
                 Err(reason) => store::CaptureOutcome::Invalid { reason },
                 // Charged as the store will hold it, which may be longer
                 // than the file (`1e9` reserialized as `1000000000.0`).
-                Ok((report, _)) if stored_len(&report) > self.report_budget => {
+                Ok((report, _)) if stored_len(&report) > self.budget.reports => {
                     store::CaptureOutcome::OverBudget
                 }
                 Ok((report, projection)) => {
-                    self.report_budget = self.report_budget.saturating_sub(stored_len(&report));
+                    self.budget.reports = self.budget.reports.saturating_sub(stored_len(&report));
                     return (
                         store::CaptureOutcome::Captured { report },
                         lua::Capture {
@@ -365,9 +383,7 @@ impl IterationHost {
             )
             .map_err(|e| failed("the call was refused", &e))?;
         let stdin = admitted.take_stdin();
-        let call_stdout = admitted
-            .stdout()
-            .map_err(|e| failed("cannot open the stdout spool", &e))?;
+        let (call_stdout, call_stderr, stderr_spool) = child_streams(&mut admitted)?;
         let report = admitted.report().map(Path::to_path_buf);
         let report_str = report.as_deref().map(utf8_report).transpose()?;
         let mut env: Vec<(&str, &str)> =
@@ -388,6 +404,7 @@ impl IterationHost {
             },
             stdin.map_or_else(std::process::Stdio::null, std::process::Stdio::from),
             std::process::Stdio::from(call_stdout),
+            std::process::Stdio::from(call_stderr),
         );
         let child = match child {
             Ok(child) => child,
@@ -414,6 +431,8 @@ impl IterationHost {
             call.hotpath.is_some().then_some(STOP_REPORT_GRACE),
             None,
             &crate::sidecar::DEFAULT_MEASUREMENT_TUNABLES,
+            // Neither stream is piped: both go to their spools, so nothing
+            // is drained and the cap binds nothing.
             crate::output::child::CaptureCap {
                 stdout: PREVIEW_BYTES,
                 stderr: PREVIEW_BYTES,
@@ -431,6 +450,7 @@ impl IterationHost {
         let finished = admitted.finish_observed(&mut || open.pump(&mut fifo));
         let run = open.finish(&mut fifo, finished.is_ok());
         self.keep_child(program_str, argv, &env, pid, start, &run, executable);
+        let stderr = self.keep_stderr(&stderr_spool, finished.is_ok());
         // Judged after every launch that was reaped, whatever its exit, and
         // stored on the child before anything below can end the call.
         let projection = match (&call.hotpath, &report) {
@@ -443,8 +463,9 @@ impl IterationHost {
                 &e,
             )
         })?;
-        let mut outcome = call_outcome(short, &run, &spool)?;
+        let mut outcome = call_outcome(short, &run, &spool, stderr)?;
         outcome.stdout_file = Some(self.give(resources::spool_handle(&spool))?);
+        outcome.stderr_file = Some(self.give(resources::spool_handle(&stderr_spool))?);
         outcome.hotpath = projection;
         Ok(outcome)
     }
@@ -482,6 +503,53 @@ impl IterationHost {
         shown
     }
 
+    /// The last child's stderr, snapshotted from its spool: what the store
+    /// keeps, set on the child whatever is read, and what the script sees,
+    /// its first and last MiB, or why they could not be read. `released`
+    /// is whether the call's borrow was released first.
+    fn keep_stderr(
+        &mut self,
+        spool: &crate::reservations::Spool,
+        released: bool,
+    ) -> Result<(crate::reservations::Preview, Vec<u8>), String> {
+        let tail = spool.tail(PREVIEW_BYTES);
+        let capture = match &tail {
+            Err(error) => store::StderrCapture {
+                released,
+                bytes: spool.size().ok(),
+                tail: store::StderrTail::Unreadable {
+                    reason: error.to_string(),
+                },
+            },
+            Ok(tail) => {
+                let keep = tail.bytes.len().min(store::STDERR_TAIL_BYTES);
+                let kept = &tail.bytes[tail.bytes.len() - keep..];
+                let stored = if keep > self.budget.stderr {
+                    store::StderrTail::OverBudget
+                } else {
+                    self.budget.stderr -= keep;
+                    let raw = u64::try_from(keep).unwrap_or(u64::MAX);
+                    store::StderrTail::Kept {
+                        text: String::from_utf8_lossy(kept).into_owned(),
+                        raw,
+                        cut: raw < tail.size,
+                    }
+                };
+                store::StderrCapture {
+                    released,
+                    bytes: Some(tail.size),
+                    tail: stored,
+                }
+            }
+        };
+        if let Some(child) = self.children.last_mut() {
+            child.stderr = Some(capture);
+        }
+        let tail = tail.map_err(|e| e.to_string())?;
+        let head = spool.preview(PREVIEW_BYTES).map_err(|e| e.to_string())?;
+        Ok((head, tail.bytes))
+    }
+
     /// A spawned child's evidence, for the document.
     #[allow(clippy::too_many_arguments)] // One child's whole evidence, each part its own.
     fn keep_child(
@@ -512,8 +580,28 @@ impl IterationHost {
             evidence: evidence::evidence(&run.data),
             hotpath: None,
             executable,
+            stderr: None,
         });
     }
+}
+
+/// The descriptors a call's child writes its stdout and stderr through, and
+/// its stderr spool, kept apart from the call so it is read whether or not
+/// the borrow's release succeeds.
+fn child_streams(
+    call: &mut crate::reservations::Call,
+) -> Result<(std::fs::File, std::fs::File, crate::reservations::Spool), Abort> {
+    let failed = |what: &str, e: &std::io::Error| Abort::Failed(format!("{what}: {e}"));
+    let stdout = call
+        .stdout()
+        .map_err(|e| failed("cannot open the stdout spool", &e))?;
+    let stderr = call
+        .stderr()
+        .map_err(|e| failed("cannot open the stderr spool", &e))?;
+    let spool = call
+        .take_stderr_spool()
+        .ok_or_else(|| Abort::Failed("the call's stderr spool is gone".into()))?;
+    Ok((stdout, stderr, spool))
 }
 
 /// One call's child as it is launched.
@@ -527,13 +615,15 @@ struct Launch<'a> {
     external: bool,
 }
 
-/// Spawn a call's child in its own process group, stderr piped: the
-/// snapshot through the choke point, an external program never through
-/// libc's `/bin/sh` fallback (`crate::process::spawn::spawn_exact`).
+/// Spawn a call's child in its own process group, stdout and stderr each to
+/// its spool: the snapshot through the choke point, an external program
+/// never through libc's `/bin/sh` fallback
+/// (`crate::process::spawn::spawn_exact`).
 fn spawn_child(
     launch: &Launch<'_>,
     stdin: std::process::Stdio,
     stdout: std::process::Stdio,
+    stderr: std::process::Stdio,
 ) -> Result<std::process::Child, DevError> {
     let policy = crate::process::spawn::ChildPolicy::plain();
     let isolation = crate::shutdown::ChildIsolation::ProcessGroup(launch.guard);
@@ -541,17 +631,11 @@ fn spawn_child(
     if !launch.external {
         let mut command =
             policy.command(launch.program, launch.args, cwd, launch.env, isolation)?;
-        command
-            .stdin(stdin)
-            .stdout(stdout)
-            .stderr(std::process::Stdio::piped());
+        command.stdin(stdin).stdout(stdout).stderr(stderr);
         return crate::process::spawn::spawn(command, None);
     }
     let mut command = policy.exact(launch.program, launch.args, cwd, launch.env, isolation)?;
-    command
-        .stdin(stdin)
-        .stdout(stdout)
-        .stderr(std::process::Stdio::piped());
+    command.stdin(stdin).stdout(stdout).stderr(stderr);
     crate::process::spawn::spawn_exact(command).map_err(|error| match error {
         crate::process::spawn::ExactSpawnError::Setup(error) => error,
         crate::process::spawn::ExactSpawnError::Exec(error) => DevError::Spawn {
@@ -647,6 +731,7 @@ fn call_outcome(
     short: String,
     run: &crate::sidecar::SidecarRunResult,
     spool: &crate::reservations::Spool,
+    stderr: Result<(crate::reservations::Preview, Vec<u8>), String>,
 ) -> Result<CallOutcome, Abort> {
     // A stop marker wins over whatever the child did after it: the phase it
     // ends was complete, and the rest is what the stop cuts short.
@@ -667,15 +752,19 @@ fn call_outcome(
     let preview = spool
         .preview(PREVIEW_BYTES)
         .map_err(|e| Abort::Failed(format!("cannot read {short}'s stdout spool: {e}")))?;
+    let (stderr, stderr_tail) =
+        stderr.map_err(|e| Abort::Failed(format!("cannot read {short}'s stderr spool: {e}")))?;
     Ok(CallOutcome {
         program: short,
         exit,
         signal,
         stdout: preview.bytes,
         stdout_truncated: preview.truncated,
-        stderr: run.stderr.clone(),
-        stderr_truncated: run.stderr_truncated || run.output_cut,
+        stderr: stderr.bytes,
+        stderr_truncated: stderr.truncated,
+        stderr_tail: Some(stderr_tail),
         stdout_file: None,
+        stderr_file: None,
         hotpath: None,
         stopped_at,
         start_error: None,

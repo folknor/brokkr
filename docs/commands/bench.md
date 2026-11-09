@@ -141,7 +141,10 @@ end
   of its own that reserves nothing and is inherited by the child, so the
   call finishes only once nothing it started still holds it: a child that
   leaves a descendant running fails the preflight once the lease's release
-  window after its exit passes.
+  window after its exit passes. Its output is piped rather than spooled:
+  the result has the first MiB of stdout and stderr and no `stderr_tail`,
+  `stdout_file` or `stderr_file`, so `r:ok()` names the last stderr line
+  of that first MiB.
   Nothing a preflight launches is stored.
 - `params` is the bound structure `bench()` gets, every file entry's field
   the absolute path string, not a handle: nothing a preflight does with it
@@ -379,7 +382,8 @@ module does the same thing whichever phase it is loaded for.
 A handle is a table; its `path` field is the path as a string. Passing the
 handle itself to `binary()` reserves what it names for that call; passing
 the string does not. An input handle (a bound file) is read for the call;
-an output or scratch handle written; a result's `stdout_file` read. What
+an output or scratch handle written; a result's `stdout_file` or
+`stderr_file` read. What
 makes a table a handle is a metatable brokkr made and protected
 (`getmetatable` answers `false`, `setmetatable` refuses), never a key, so
 no table of config data or decoded JSON is ever taken for one. `record` and
@@ -406,23 +410,33 @@ local r = binary("cat", input, { jobs = 4, output = output("out.pbf") })
 ```
 
 The child runs in the live project root, under `--commit` too, with stdin
-empty (unless `binary_with` gives one), stdout written in full to a spool in the iteration directory, stderr
-captured, and the marker FIFO (`BROKKR_MARKER_FIFO`) and sidecar wired in,
-one FIFO per child. The result is a table:
+empty (unless `binary_with` gives one), stdout and stderr each written in
+full to a spool in the iteration directory, and the marker FIFO
+(`BROKKR_MARKER_FIFO`) and sidecar wired in, one FIFO per child. The result
+is a table:
 
 - `exit` - the exit code, or nil when a signal ended it; `signal` - that
   signal.
 - `stdout`, `stderr` - the first MiB of each, exact bytes;
   `stdout_truncated`, `stderr_truncated` - whether there was more. A
   truncated preview fails nothing.
+- `stderr_tail` - the last MiB of stderr, exact bytes; the whole of it, as
+  `stderr` is, when there was no more.
 - `program` - the executable's file name.
-- `stdout_file` - a handle on the spool holding the child's whole stdout:
-  pass it to another call (read), as its `stdin`, or to `read()` and
-  `filesize()`. Pipelines run eagerly: one call's output reaches the next
-  through this file, never a pipe between two running children.
+- `stdout_file`, `stderr_file` - handles on the spools holding the child's
+  whole stdout and stderr: pass one to another call (read), as its `stdin`,
+  or to `read()` and `filesize()`. Pipelines run eagerly: one call's output
+  reaches the next through this file, never a pipe between two running
+  children.
 - `r:ok()` - returns `r` when the child exited 0 or was stopped at its
   `stop_at` marker (`binary_with()`), and otherwise fails the iteration
-  naming how it ended and its last stderr line.
+  naming how it ended and its last non-empty stderr line within
+  `stderr_tail` (`stderr` for a preflight's result, Preflight), cut at
+  2000 characters and marked `...` when longer. That is the last line written, which cleanup after an error
+  may follow.
+
+The spools go with the iteration. What the store keeps of a child's stderr
+is its size and its last 64 KiB (What a run stores).
 
 An exit code is the script's to judge, so a nonzero exit fails nothing by
 itself. These end the iteration before the script sees a result: Ctrl-C or
@@ -455,9 +469,10 @@ local r = binary_with({
   what passing a handle gives it and declaring a handle the argv does not
   show (a path inside a file the script wrote, a `--output=PATH`
   spelling). Handles only: a path string declares nothing. A handle in
-  both is refused, and so is an input or a `stdout_file` in `writes`: both
-  are read-only for the run.
-- `stdin` - a file handle (an input, an output or a `stdout_file`) the child
+  both is refused, and so is an input or a `stdout_file` or `stderr_file`
+  in `writes`: all are read-only for the run.
+- `stdin` - a file handle (an input, an output, a `stdout_file` or a
+  `stderr_file`) the child
   reads as its stdin, from its start, opened by brokkr as `read()` opens a
   file and declared read for the call (over an output's default write; in
   `writes` too it is refused).
@@ -563,11 +578,11 @@ Each is admitted as a call reading (writing) the handle would be
 holds, or onto an input for `write`, is refused, and the file is opened
 without following a link.
 
-- `read` and `filesize` take an input, an output or a `stdout_file`; a
-  `stdout_file` reads as the bytes its call wrote, and one a later child
-  replaced is refused. `read` refuses a file past 16 MiB, the most a
-  script's string holds, and `filesize` a size past 2^53.
-- `write` takes an output only: an input and a `stdout_file` are read-only
+- `read` and `filesize` take an input, an output, a `stdout_file` or a
+  `stderr_file`; a spool's handle reads as the bytes its call wrote, and
+  one a later child replaced is refused. `read` refuses a file past 16 MiB,
+  the most a script's string holds, and `filesize` a size past 2^53.
+- `write` takes an output only: an input and a spool's handle are read-only
   for the run. It removes whatever the name holds (a directory refused) and
   creates the file afresh, so an output a child hard-linked to another file
   is cut, never written through.
@@ -613,8 +628,8 @@ clean` or lease scan.
 
 Each iteration owns one directory, `bench-iterations/.brokkr-iteration-<token>`
 under the host's resolved `scratch` (by default `data/scratch` under the
-project root), holding `out/`, `scratch/`, the children's stdout
-spools and the marked calls' hotpath reports, on the resource protocol `reference/bench-resources.md` describes: it
+project root), holding `out/`, `scratch/`, the children's stdout and
+stderr spools and the marked calls' hotpath reports, on the resource protocol `reference/bench-resources.md` describes: it
 is removed when the iteration ends, and one a crash left behind goes once
 nothing that inherited its reservation is still running. Its outputs and
 scratch so land on the drive the typed commands write to. A `scratch`
@@ -629,9 +644,14 @@ Every attempted run is stored, a failed build or an interrupted iteration
 included, one per arm, with its bound params (each key, its `from` path and
 a file's digest), what it measured (timing, `--hotpath` or `--alloc`), every child's
 argv, ending, `/proc` samples, marker FIFO records and capture losses, a
-marked child's hotpath capture, and a `program` child's executable path and
-digest; `brokkr sidecar <uuid>` reads one child's
+marked child's hotpath capture, a `program` child's executable path and
+digest, and its stderr's size and last 64 KiB as text (each byte that is
+not UTF-8 replaced, marked when earlier bytes were dropped, and noted when
+the call was still held as it was read); `brokkr sidecar <uuid>` reads one child's
 through the sidecar views (`brokkr man measure`, Script-bench children).
+Stderr tails share a run budget of 16 MiB of raw bytes: past it a child
+keeps its size and no tail. The whole stderr is never stored; a script that
+needs more reads `stderr_file` while its iteration lives.
 Runs pair in classes that never pair with each other: timing,
 `--hotpath`, `--alloc`, and incidental, a timing run any of whose children captured a
 report, since its build was instrumented by other means. A

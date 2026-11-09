@@ -1159,7 +1159,7 @@ impl Attempt<'_> {
     ) {
         let state = crate::clean::layout::ProjectState::new(self.detection.project_root.as_path());
         let mut since = host::Since::new(self.detection.build_root.as_path(), commit.clone());
-        let mut report_budget = host::RUN_REPORT_BYTES;
+        let mut budget = host::Budget::RUN;
         let total = self.iterations;
         for index in 0..total {
             if crate::shutdown::should_unwind() {
@@ -1179,10 +1179,10 @@ impl Attempt<'_> {
                     index: usize::try_from(index).unwrap_or(usize::MAX),
                     since,
                     measurement: self.measurement,
-                    report_budget,
+                    budget,
                 });
             since = returned;
-            report_budget = budget_left;
+            budget = budget_left;
             modules.extend(required);
             let label = format!("iteration {}/{total}", index + 1);
             let outcome = iteration.outcome.clone();

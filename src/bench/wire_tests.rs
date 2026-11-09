@@ -13,8 +13,8 @@ use super::store::{
     BoundParam, Build, CaptureOutcome, Child, ChildEnding, Clock, Conditions, DOCUMENT_FORMAT,
     Evidence, Executable, ExecutableIdentity, HotpathCapture, Iteration, IterationOutcome, Loss,
     Mark, MarkOrigin, MarkRequest, MarkView, Marked, Measurement, ParamValue, Published, Record,
-    ResolvedBuild, Revision, RunDocument, RunFilter, RunOutcome, Sample, Selection, SinkEnd, Store,
-    StoreError, StoredRun,
+    ResolvedBuild, Revision, RunDocument, RunFilter, RunOutcome, Sample, Selection, SinkEnd,
+    StderrCapture, StderrTail, Store, StoreError, StoredRun,
 };
 
 /// The fixture's one child: every record kind and a deadline ending.
@@ -108,7 +108,34 @@ fn frozen_child() -> Child {
                 digest: "00112233445566778899aabbccddeeff".into(),
             },
         }),
+        stderr: Some(StderrCapture {
+            released: true,
+            bytes: Some(u64::MAX >> 1),
+            tail: StderrTail::Kept {
+                text: "line\nerror: \u{fffd}\n".into(),
+                raw: 14,
+                cut: true,
+            },
+        }),
     }
+}
+
+/// Every stderr capture but the fixture child's, frozen with the protocol.
+fn frozen_stderr_captures() -> Vec<StderrCapture> {
+    vec![
+        StderrCapture {
+            released: false,
+            bytes: None,
+            tail: StderrTail::Unreadable {
+                reason: "gone".into(),
+            },
+        },
+        StderrCapture {
+            released: true,
+            bytes: Some(0),
+            tail: StderrTail::OverBudget,
+        },
+    ]
 }
 
 /// Every executable identity but the fixture child's, frozen with the
@@ -320,6 +347,7 @@ fn frozen_encoding() -> String {
     lines.extend(answers.iter().map(|a| serde_json::to_string(a).unwrap()));
     lines.push(serde_json::to_string(&frozen_capture_outcomes()).unwrap());
     lines.push(serde_json::to_string(&frozen_executable_identities()).unwrap());
+    lines.push(serde_json::to_string(&frozen_stderr_captures()).unwrap());
     lines.push(
         serde_json::to_string(&[
             Measurement::Timing,
@@ -412,6 +440,10 @@ fn the_protocol_refuses_what_it_does_not_define() {
     identity["iterations"][0]["children"][0]["executable"]["identity"]["digest"]["novel"] =
         serde_json::json!(1);
     refuses::<Request>(&request(identity));
+    let mut stderr = document.clone();
+    stderr["iterations"][0]["children"][0]["stderr"]["tail"]["kept"]["novel"] =
+        serde_json::json!(1);
+    refuses::<Request>(&request(stderr));
     let mut missing = document.clone();
     missing.as_object_mut().unwrap().remove("project");
     refuses::<Request>(&request(missing));

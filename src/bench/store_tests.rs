@@ -11,8 +11,9 @@ use super::evidence;
 use super::store::{
     BoundParam, Build, CaptureOutcome, Child, ChildEnding, Clock, Conditions, DOCUMENT_FORMAT,
     Evidence, Executable, ExecutableIdentity, HotpathCapture, Iteration, IterationOutcome, Loss,
-    Measurement, ParamValue, Published, Record, ResolvedBuild, RunDocument, RunOutcome, Sample,
-    SinkEnd, Store, StoreError,
+    Measurement, ParamValue, Published, Record, ResolvedBuild, RunDocument, RunOutcome,
+    STDERR_RUN_BYTES, STDERR_TAIL_BYTES, Sample, SinkEnd, StderrCapture, StderrTail, Store,
+    StoreError,
 };
 
 fn store(name: &str) -> Store {
@@ -125,6 +126,15 @@ fn child(offset: i64, ending: ChildEnding) -> Child {
         },
         hotpath: None,
         executable: None,
+        stderr: Some(StderrCapture {
+            released: true,
+            bytes: Some(70_000),
+            tail: StderrTail::Kept {
+                text: "partial\nerror: out of space\n".into(),
+                raw: 28,
+                cut: true,
+            },
+        }),
     }
 }
 
@@ -335,6 +345,70 @@ fn refused(doc: &RunDocument, needle: &str) {
         Err(StoreError::Refused(why)) => assert!(why.contains(needle), "{why}"),
         other => panic!("expected a refusal naming {needle:?}, got {other:?}"),
     }
+}
+
+/// A stderr capture whose tail, size and cut disagree, or that keeps more
+/// than a tail or a run may, is refused; one with none of that publishes and
+/// reads back.
+#[test]
+fn a_stderr_capture_must_be_consistent_and_within_bounds() {
+    let base = document("00000000000000000000000000000010");
+    let mut store_ = store("stderr-capture");
+    store_.publish(&base).unwrap();
+    assert_eq!(store_.load(&base.uuid).unwrap(), Some(base.clone()));
+    let with = |tail: StderrTail, bytes: Option<u64>| {
+        let mut doc = base.clone();
+        doc.iterations[0].children[0].stderr = Some(StderrCapture {
+            released: true,
+            bytes,
+            tail,
+        });
+        doc
+    };
+    let kept = |text: &str, raw: u64, cut: bool| StderrTail::Kept {
+        text: text.into(),
+        raw,
+        cut,
+    };
+    refused(&with(kept("x", 1, false), None), "no observed size");
+    refused(&with(kept("x", 1, false), Some(0)), "disagrees");
+    refused(&with(kept("x", 1, false), Some(5)), "disagrees");
+    refused(&with(kept("xxxx", 1, true), Some(5)), "cannot hold");
+    let big = STDERR_TAIL_BYTES as u64 + 1;
+    refused(
+        &with(
+            kept(&"x".repeat(STDERR_TAIL_BYTES + 1), big, true),
+            Some(big + 1),
+        ),
+        "past the",
+    );
+    refused(
+        &with(
+            StderrTail::Unreadable {
+                reason: String::new(),
+            },
+            None,
+        ),
+        "empty reason",
+    );
+    with(StderrTail::OverBudget, None).validate().unwrap();
+    // Past the run's budget across children.
+    let mut wide = base.clone();
+    let tail = "x".repeat(STDERR_TAIL_BYTES);
+    let raw = STDERR_TAIL_BYTES as u64;
+    let one = wide.iterations[0].children[0].clone();
+    wide.iterations[0].children = (0..=STDERR_RUN_BYTES / STDERR_TAIL_BYTES)
+        .map(|_| {
+            let mut child = one.clone();
+            child.stderr = Some(StderrCapture {
+                released: true,
+                bytes: Some(raw),
+                tail: kept(&tail, raw, false),
+            });
+            child
+        })
+        .collect();
+    refused(&wide, "a run keeps");
 }
 
 #[test]
@@ -656,7 +730,11 @@ fn a_profiled_run_must_capture_every_marked_call() {
 fn a_version_one_store_upgrades_and_its_runs_read_as_timing() {
     let dir = crate::test_scratch::scratch("bench_store", "upgrade");
     let path = dir.join("bench.db");
-    let doc = document("0000000000000000000000000000000f");
+    let mut doc = document("0000000000000000000000000000000f");
+    // A version one store held no stderr.
+    for child in doc.iterations.iter_mut().flat_map(|i| &mut i.children) {
+        child.stderr = None;
+    }
     {
         let mut store = Store::open(&path).unwrap();
         store.publish(&doc).unwrap();
@@ -665,7 +743,8 @@ fn a_version_one_store_upgrades_and_its_runs_read_as_timing() {
         store
             .conn()
             .execute_batch(
-                "DROP TABLE marks;
+                "DROP TABLE child_stderr;
+                 DROP TABLE marks;
                  DROP TABLE child_executable;
                  DROP TABLE child_hotpath;
                  ALTER TABLE runs DROP COLUMN alloc;
@@ -679,7 +758,7 @@ fn a_version_one_store_upgrades_and_its_runs_read_as_timing() {
         .conn()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 5);
+    assert_eq!(version, 6);
     assert!(store.marks(&doc.project).unwrap().is_empty());
     assert_eq!(store.load(&doc.uuid).unwrap(), Some(doc));
 }

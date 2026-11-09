@@ -248,6 +248,51 @@ pub struct Child {
     /// it did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executable: Option<Executable>,
+    /// The child's stderr as brokkr spooled it: its size and a bounded
+    /// tail. Absent means not observed: a child stored before the field
+    /// existed. Omitted when absent, so such a document encodes as it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr: Option<StderrCapture>,
+}
+
+/// The most raw stderr bytes one child's stored tail holds.
+pub const STDERR_TAIL_BYTES: usize = 64 * 1024;
+
+/// The most raw stderr bytes the tails of one run hold together.
+pub const STDERR_RUN_BYTES: usize = 16 * 1024 * 1024;
+
+/// A tail's text may be longer than its raw bytes, never shorter: each
+/// invalid sequence, one to three bytes, becomes U+FFFD, three bytes.
+const STDERR_TEXT_EXPANSION: u64 = 3;
+
+/// A child's stderr, spooled in full to a file in its iteration while it ran
+/// and snapshotted once its call ended: evidence of the end of what it wrote,
+/// never the whole log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StderrCapture {
+    /// Whether the call's borrow was released before the snapshot. Without
+    /// it something the child started may still have been writing, so the
+    /// size and tail are what the spool held then, not its final contents.
+    pub released: bool,
+    /// The spool's size as observed for the snapshot; absent when it could
+    /// not be observed.
+    pub bytes: Option<u64>,
+    pub tail: StderrTail,
+}
+
+/// What was kept of a child's stderr.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub enum StderrTail {
+    /// The last `raw` bytes, [`STDERR_TAIL_BYTES`] at most, as UTF-8 with
+    /// each invalid sequence replaced; `cut` when bytes before them were
+    /// not kept, so the text may open mid-line.
+    Kept { text: String, raw: u64, cut: bool },
+    /// Past what was left of the run's [`STDERR_RUN_BYTES`]: not kept.
+    OverBudget,
+    /// The spool could not be read.
+    Unreadable { reason: String },
 }
 
 /// An external executable a child ran: the absolute path brokkr resolved
@@ -516,6 +561,18 @@ impl RunDocument {
             iteration
                 .validate()
                 .map_err(|e| refuse(format!("iteration {idx}: {e}")))?;
+        }
+        let tails: u64 = self
+            .iterations
+            .iter()
+            .flat_map(|i| &i.children)
+            .filter_map(|c| c.stderr.as_ref())
+            .map(StderrCapture::kept_raw)
+            .fold(0, u64::saturating_add);
+        if tails > STDERR_RUN_BYTES as u64 {
+            return Err(refuse(format!(
+                "stderr tails of {tails} raw bytes, past the {STDERR_RUN_BYTES} a run keeps"
+            )));
         }
         self.validate_outcome()
     }
@@ -816,7 +873,54 @@ impl Child {
                 _ => {}
             }
         }
+        if let Some(stderr) = &self.stderr {
+            stderr.validate()?;
+        }
         Ok(())
+    }
+}
+
+impl StderrCapture {
+    fn validate(&self) -> Result<(), String> {
+        if self.bytes.is_some_and(|b| i64::try_from(b).is_err()) {
+            return Err("a stderr size past the store's range".to_owned());
+        }
+        match &self.tail {
+            StderrTail::Kept { text, raw, cut } => {
+                let Some(bytes) = self.bytes else {
+                    return Err("a kept stderr tail with no observed size".to_owned());
+                };
+                if *raw > STDERR_TAIL_BYTES as u64 {
+                    return Err(format!(
+                        "a stderr tail of {raw} raw bytes, past the {STDERR_TAIL_BYTES} a tail keeps"
+                    ));
+                }
+                if *raw > bytes || *cut != (*raw < bytes) {
+                    return Err(format!(
+                        "a stderr tail of {raw} raw bytes disagrees with its size {bytes} and cut {cut}"
+                    ));
+                }
+                let len = text.len() as u64;
+                if len < *raw || len > raw * STDERR_TEXT_EXPANSION {
+                    return Err(format!(
+                        "a stderr tail text of {len} bytes cannot hold {raw} raw bytes"
+                    ));
+                }
+                Ok(())
+            }
+            StderrTail::Unreadable { reason } if reason.is_empty() => {
+                Err("an unreadable stderr with an empty reason".to_owned())
+            }
+            StderrTail::OverBudget | StderrTail::Unreadable { .. } => Ok(()),
+        }
+    }
+
+    /// The raw bytes the tail keeps, for the run's budget.
+    fn kept_raw(&self) -> u64 {
+        match &self.tail {
+            StderrTail::Kept { raw, .. } => *raw,
+            StderrTail::OverBudget | StderrTail::Unreadable { .. } => 0,
+        }
     }
 }
 

@@ -248,8 +248,28 @@ ALTER TABLE runs ADD COLUMN alloc INTEGER NOT NULL DEFAULT 0
     CHECK (alloc IN (0, 1) AND (alloc = 0 OR measurement = 'hotpath'));
 ";
 
+/// Version 6: stderr tails. Each child brokkr spooled stderr for, with
+/// whether its call's borrow was released before the snapshot, the size
+/// observed and what was kept of the end. A child without a row was not
+/// observed.
+const V6: &str = "
+CREATE TABLE child_stderr (
+    child_id INTEGER PRIMARY KEY REFERENCES children(id) ON DELETE CASCADE,
+    released INTEGER NOT NULL CHECK (released IN (0, 1)),
+    bytes    INTEGER CHECK (bytes IS NULL OR bytes >= 0),
+    status   TEXT NOT NULL CHECK (status IN ('kept', 'over_budget', 'unreadable')),
+    text     TEXT,
+    raw      INTEGER CHECK (raw IS NULL OR raw >= 0),
+    cut      INTEGER CHECK (cut IS NULL OR cut IN (0, 1)),
+    reason   TEXT,
+    CHECK ((status = 'kept') = (text IS NOT NULL AND raw IS NOT NULL AND cut IS NOT NULL)),
+    CHECK ((status = 'kept') OR (text IS NULL AND raw IS NULL AND cut IS NULL)),
+    CHECK ((status = 'unreadable') = (reason IS NOT NULL))
+) STRICT;
+";
+
 /// The chain. Shipped steps are frozen; append only.
-pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5];
+pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6];
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 

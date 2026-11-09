@@ -14,7 +14,7 @@ the one spawn choke point.
 An iteration holds an **owner lease**: a lease in the per-user store whose
 record names every input the run reads (read) and one private **iteration
 directory** (write), `.brokkr-iteration-<128-bit token>` in a location the
-caller names, holding `out/`, `scratch/`, `stdout/` and `profile/`. brokkr alone holds
+caller names, holding `out/`, `scratch/`, `stdout/`, `stderr/` and `profile/`. brokkr alone holds
 the owner's descriptor; it is never lent to a child.
 
 Each child launches with a **borrow**: a lease of its own whose record names
@@ -79,7 +79,7 @@ the split, is read, pins its owner and is reclaimed as an ordinary lease is.
 ## Admitting a call
 
 A call declares resources, absolute paths each with the access the call
-needs, plus, implicitly, its own stdout spool for writing and, for a call
+needs, plus, implicitly, its own stdout and stderr spools for writing and, for a call
 marked `hotpath`, its report (Hotpath reports, below). Every path is
 spelled as it resolves at the call, never as an earlier resolution recorded
 it, and admission runs inside the store's critical section:
@@ -108,7 +108,7 @@ directory descriptors it opened when it laid the iteration out, never
 following a link, and before each creation checks that the iteration
 directory and the area still name the directories it made (by identity,
 without following a link); after it, that the advertised path names what it
-made. A child that displaced `stdout/` or `scratch/`, by a link or by a
+made. A child that displaced `stdout/`, `stderr/` or `scratch/`, by a link or by a
 plain directory, makes the next creation there fail rather than land
 somewhere the reservations do not name. A spool, and a scratch directory,
 is admitted as a write through the same three steps before it is created,
@@ -171,7 +171,7 @@ that passes it:
 | input | a bound file-valued param, the first handles an iteration holds | read | no |
 | output | the iteration, a path under `out/`, not created | write | yes |
 | scratch | the iteration, an empty directory under `scratch/` | write | yes |
-| spool | a finished call's stdout, under `stdout/` (a result's `stdout_file`) | read | no |
+| spool | a finished call's stdout or stderr, under `stdout/` or `stderr/` (a result's `stdout_file`, `stderr_file`) | read | no |
 
 A call's `reads` and `writes` lists override the default and also declare
 handles the argv does not show (a path inside a file the script wrote, a
@@ -232,27 +232,37 @@ cooperative, as a borrow is: a child that closes the descriptor escapes it.
 A preflight child's output is captured through pipes, bounded as a result's
 preview is, and nothing of it is stored.
 
-## Stdout spools
+## Spools
 
-Each call's stdout goes to its spool, a file brokkr creates under `stdout/`
-and hands the child as its stdout descriptor: no pipe and no drain thread,
-so nothing about it is bounded. The spool comes back from the call only when
-its borrow's release succeeded; a preview reads its first bytes through the
-spool's own descriptor, never its path, with a flag saying whether there was
-more. Truncating the preview fails nothing. Feeding a result onward passes
-the spool, a read-only handle, as an argument or as the next call's stdin.
+Each call's stdout and stderr go to its two spools, files brokkr creates
+under `stdout/` and `stderr/`, both named by the call's index in the
+iteration, and hands the child as those descriptors: no pipe and no drain
+thread, so nothing about either is bounded, and the scratch drive holds
+both whole until the iteration ends. Both are pinned and read-only from
+their making, as every spool is. The stdout spool comes back from the call
+only when its borrow's release succeeded; the stderr spool the runner keeps
+apart from the call, so its end is snapshotted even when the release failed
+(the stored capture then says the call was still held, so what it holds is
+what was there, not the final contents). A preview reads a spool's first
+bytes, and a tail its last as of one observation of its size, through the
+spool's own descriptor, never its path; a file that shrank before the
+range was read fails the read (the stored tail is then unreadable), never
+passing a shorter range off as the end. Truncating a preview fails
+nothing. Feeding a result onward passes a spool, a read-only handle, as an
+argument or as the next call's stdin.
 
-The runner previews the first MiB. A child's stderr is not spooled: it is a
-pipe the supervisor drains, keeping the first MiB with a truncated flag and
-reading the rest to its end so the child never blocks, which fails nothing
-either. The script sees both previews, and the whole stdout through the
-spool's handle; of stderr, never more than its preview.
+The runner previews the first MiB of each and, of stderr, the last MiB as
+well; the script sees those and both spools' handles. The store keeps of
+each child's stderr its observed size and its last 64 KiB as text, within a
+run budget of 16 MiB of raw tail bytes (`reference/bench-store.md`, The run
+document). A child's whole stderr is never stored: the spool goes with its
+iteration.
 
 ## Hotpath reports
 
 A call marked `hotpath` (`docs/commands/bench.md`, Hotpath capture) gets a
-report file under `profile/`, named as its spool is, declared written by its
-borrow beside the spool inside the same admission, and created empty with
+report file under `profile/`, named as its spools are, declared written by its
+borrow beside the spools inside the same admission, and created empty with
 `O_CREAT | O_EXCL | O_NOFOLLOW` through the area's held descriptor once
 admitted; the child is told its path in `HOTPATH_OUTPUT_PATH` and writes it
 by that path. No handle ever names it, so no script output or call can

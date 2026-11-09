@@ -20,7 +20,7 @@ fn setup<'a>(script: &'a lua::Script, root: &'a Path, container: &'a Path) -> It
         index: 0,
         since: Since::new(root, "0".repeat(40).parse().unwrap()),
         measurement: store::Measurement::Timing,
-        report_budget: RUN_REPORT_BYTES,
+        budget: super::Budget::RUN,
     }
 }
 
@@ -227,6 +227,89 @@ fn a_child_runs_on_its_borrow_and_reaches_the_script() {
     assert_eq!(std::fs::read_dir(&container).unwrap().count(), 0);
 }
 
+/// A stderr past a MiB is spooled whole: the script sees its first and last
+/// MiB and its file, `r:ok()` names its real last line, and the store keeps
+/// its size and a tail.
+#[test]
+fn a_long_stderr_is_spooled_and_its_end_kept() {
+    let _lock = crate::test_scratch::process_global_lock();
+    let root = crate::test_scratch::scratch("bench_runner", "long-stderr");
+    let container = root.join("iterations");
+    // 1.5 MiB of filler lines, then the failing line.
+    let child = "binary('-c', 'head -c 1572864 /dev/zero | tr \"\\\\0\" x | fold -w 63 >&2; \
+                 echo >&2; echo \"error: the real cause\" >&2; exit 1')";
+    let failing = script(&format!("function bench()\n {child}:ok()\n end"));
+    let (failed, _, _, _) = run_iteration(setup(&failing, &root, &container));
+    let reason = failure(&failed);
+    assert!(
+        reason.contains("exited 1: error: the real cause"),
+        "{reason}"
+    );
+    let script = script(&format!(
+        "function bench()\n\
+           local r = {child}\n\
+           record.truncated = r.stderr_truncated\n\
+           record.head = #r.stderr\n\
+           record.tail = #r.stderr_tail\n\
+           record.size = filesize(r.stderr_file)\n\
+         end"
+    ));
+    let (iteration, _, left, _) = run_iteration(setup(&script, &root, &container));
+    let record = record(&iteration);
+    assert_eq!(record["truncated"], true);
+    assert_eq!(record["head"], PREVIEW_BYTES);
+    assert_eq!(record["tail"], PREVIEW_BYTES);
+    let size = record["size"].as_u64().unwrap();
+    assert!(size > 1_572_864, "{size}");
+    let stderr = iteration.children[0].stderr.clone().unwrap();
+    assert!(stderr.released);
+    assert_eq!(stderr.bytes, Some(size));
+    match stderr.tail {
+        store::StderrTail::Kept { text, raw, cut } => {
+            assert!(cut);
+            assert_eq!(raw, store::STDERR_TAIL_BYTES as u64);
+            assert_eq!(text.len(), store::STDERR_TAIL_BYTES);
+            assert!(text.ends_with("error: the real cause\n"), "{text:?}");
+        }
+        other => panic!("expected a kept tail, got {other:?}"),
+    }
+    assert_eq!(
+        left.stderr,
+        store::STDERR_RUN_BYTES - store::STDERR_TAIL_BYTES
+    );
+}
+
+/// Past the run's stderr budget a child's tail is not kept, its size still
+/// is, and an empty stderr is kept whatever is left.
+#[test]
+fn a_stderr_tail_past_the_runs_budget_is_not_kept() {
+    let _lock = crate::test_scratch::process_global_lock();
+    let root = crate::test_scratch::scratch("bench_runner", "stderr-budget");
+    let container = root.join("iterations");
+    let script = script(
+        "function bench()\n\
+           binary('-c', 'echo too long >&2')\n\
+           binary('-c', 'true')\n\
+         end",
+    );
+    let mut tight = setup(&script, &root, &container);
+    tight.budget.stderr = 4;
+    let (iteration, _, left, _) = run_iteration(tight);
+    let first = iteration.children[0].stderr.clone().unwrap();
+    assert_eq!(first.bytes, Some(9));
+    assert_eq!(first.tail, store::StderrTail::OverBudget);
+    let second = iteration.children[1].stderr.clone().unwrap();
+    assert_eq!(
+        second.tail,
+        store::StderrTail::Kept {
+            text: String::new(),
+            raw: 0,
+            cut: false
+        }
+    );
+    assert_eq!(left.stderr, 4);
+}
+
 /// A `program` call runs the external program, found on the child's own
 /// PATH, by the absolute path it resolved to, on its own borrow, and the
 /// child stores that path and the file's digest; a program that is not there
@@ -364,7 +447,7 @@ fn a_marked_call_stores_its_report_on_the_child() {
     );
     assert!(iteration.children[0].env["HOTPATH_OUTPUT_PATH"].contains("/profile/"));
     assert!(iteration.children[1].hotpath.is_none());
-    assert_eq!(left, RUN_REPORT_BYTES - REPORT.len());
+    assert_eq!(left.reports, RUN_REPORT_BYTES - REPORT.len());
 }
 
 /// A marked call stopped at its marker gets one SIGTERM before any SIGKILL,
@@ -473,8 +556,9 @@ fn a_report_past_the_budget_is_over_budget() {
          end"
     ));
     let mut tight = setup(&script, &root, &container);
-    tight.report_budget = 8;
+    tight.budget.reports = 8;
     let (iteration, _, left, _) = run_iteration(tight);
+    let left = left.reports;
     assert_eq!(record(&iteration)["status"], "over_budget");
     assert_eq!(
         capture(&iteration.children[0]).outcome,

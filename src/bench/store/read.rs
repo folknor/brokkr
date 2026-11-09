@@ -8,7 +8,7 @@ use super::StoreError;
 use super::document::{
     BoundParam, Build, CaptureOutcome, Child, ChildEnding, Clock, Conditions, Evidence, Executable,
     ExecutableIdentity, HotpathCapture, Iteration, IterationOutcome, Loss, Measurement, ParamValue,
-    Record, ResolvedBuild, RunDocument, RunOutcome, Sample, SinkEnd,
+    Record, ResolvedBuild, RunDocument, RunOutcome, Sample, SinkEnd, StderrCapture, StderrTail,
 };
 use super::list::StoredRun;
 
@@ -356,6 +356,7 @@ fn load_children(conn: &Connection, run_id: i64, iteration: i64) -> Result<Vec<C
             },
             hotpath: load_capture(conn, row.id)?,
             executable: load_executable(conn, row.id)?,
+            stderr: load_stderr(conn, row.id)?,
         });
     }
     Ok(children)
@@ -383,6 +384,46 @@ fn load_executable(conn: &Connection, child_id: i64) -> Result<Option<Executable
         _ => return Err(unreadable("child executable")),
     };
     Ok(Some(Executable { path, identity }))
+}
+
+fn load_stderr(conn: &Connection, child_id: i64) -> Result<Option<StderrCapture>, StoreError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT released, bytes, status, text, raw, cut, reason FROM child_stderr
+         WHERE child_id = ?1",
+    )?;
+    let row = stmt
+        .query_row([child_id], |row| {
+            Ok((
+                row.get::<_, bool>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<bool>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+            ))
+        })
+        .optional()?;
+    let Some((released, bytes, status, text, raw, cut, reason)) = row else {
+        return Ok(None);
+    };
+    let count = |n: Option<i64>| {
+        n.map(u64::try_from)
+            .transpose()
+            .map_err(|_| unreadable("child stderr"))
+    };
+    let tail = match (status.as_str(), text, count(raw)?, cut, reason) {
+        ("kept", Some(text), Some(raw), Some(cut), None) => StderrTail::Kept { text, raw, cut },
+        ("over_budget", None, None, None, None) => StderrTail::OverBudget,
+        ("unreadable", None, None, None, Some(reason)) => StderrTail::Unreadable { reason },
+        _ => return Err(unreadable("child stderr")),
+    };
+    let bytes = count(bytes)?;
+    Ok(Some(StderrCapture {
+        released,
+        bytes,
+        tail,
+    }))
 }
 
 fn load_capture(conn: &Connection, child_id: i64) -> Result<Option<HotpathCapture>, StoreError> {
