@@ -759,10 +759,6 @@ fn binary_with_takes_options_then_binarys_arguments() {
         ("{stop_at = 1}", "expected a marker name"),
         ("{program = 1}", "expected a program name or a path"),
         ("{program = ''}", "empty or holds a NUL"),
-        (
-            "{stop_at = 'SETUP_END', hotpath = 's'}",
-            "hotpath and stop_at exclude each other",
-        ),
         ("{hotpath = 'Decode'}", "is not a name"),
         (
             "{hotpath = 'decode', env = {HOTPATH_OUTPUT_PATH = 'x'}}",

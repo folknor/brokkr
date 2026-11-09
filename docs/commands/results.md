@@ -469,7 +469,7 @@ each iteration with its outcome and each child with its start offset, wall,
 ending, argv and what its capture kept and lost, for a `program` call the
 executable it ran and that file's digest (or why it was not read), and for
 a call marked `hotpath` its stage, occurrence and capture status; a `--hotpath` run says
-`measured hotpath`. Then the result's `record`
+`measured hotpath`, an `--alloc` run `measured alloc`. Then the result's `record`
 (for a run without a result, each iteration's that was extracted), one
 entry per line as compact JSON. A prefix matching several runs prints the
 table. A uuid finds a hidden run without `--hidden`. A prefix that names no run of this project but names
@@ -490,7 +490,7 @@ commit starts with that prefix and that pass the filters; a dirty run never
 stands for a commit, and a run without a result never pairs or compares. Two
 runs pair when their stored pairing keys are equal (`reference/bench-store.md`:
 project, bench and every bound param with its keys and file digests in bound
-order, and what was measured: timing, `--hotpath`, or incidental, a timing
+order, and what was measured: timing, `--hotpath`, `--alloc`, or incidental, a timing
 run that captured a report anyway), and the latest run per key on each side
 is compared. Across a rename (Marks, below) runs pair under the name the
 chain resolves to: the stored key is compared with its bench replaced by

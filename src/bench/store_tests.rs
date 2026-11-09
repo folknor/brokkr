@@ -540,6 +540,32 @@ fn captures_and_the_measurement_read_back_as_published() {
     ];
     store.publish(&timing).unwrap();
     assert_eq!(store.load(&timing.uuid).unwrap().as_ref(), Some(&timing));
+
+    // An alloc run is stored as a hotpath run flagged alloc, and reads back
+    // as alloc.
+    let mut alloc = profiled("00000000000000000000000000000011");
+    alloc.measurement = Measurement::Alloc;
+    store.publish(&alloc).unwrap();
+    assert_eq!(store.load(&alloc.uuid).unwrap().as_ref(), Some(&alloc));
+    let columns: (String, bool) = store
+        .conn()
+        .query_row(
+            "SELECT measurement, alloc FROM runs WHERE uuid = ?1",
+            [&alloc.uuid],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(columns, ("hotpath".to_owned(), true));
+    assert!(
+        store
+            .conn()
+            .execute(
+                "UPDATE runs SET measurement = 'timing' WHERE uuid = ?1",
+                [&alloc.uuid]
+            )
+            .is_err(),
+        "an alloc timing run is refused"
+    );
 }
 
 /// Timing keeps `bench-pair-v1` as it was; a profiled run and a timing run
@@ -572,6 +598,12 @@ fn the_pairing_class_separates_profiled_and_incidental_runs() {
         "{incidental}"
     );
     assert_ne!(incidental, hotpath);
+
+    let mut alloc = profiled("0000000000000000000000000000000d");
+    alloc.measurement = Measurement::Alloc;
+    let alloc = alloc.pairing_key();
+    assert!(alloc.starts_with("[\"bench-pair-v2\",\"alloc\","), "{alloc}");
+    assert_ne!(alloc, hotpath);
 }
 
 #[test]
@@ -636,6 +668,7 @@ fn a_version_one_store_upgrades_and_its_runs_read_as_timing() {
                 "DROP TABLE marks;
                  DROP TABLE child_executable;
                  DROP TABLE child_hotpath;
+                 ALTER TABLE runs DROP COLUMN alloc;
                  ALTER TABLE runs DROP COLUMN measurement;
                  PRAGMA user_version = 1;",
             )
@@ -646,7 +679,7 @@ fn a_version_one_store_upgrades_and_its_runs_read_as_timing() {
         .conn()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     assert!(store.marks(&doc.project).unwrap().is_empty());
     assert_eq!(store.load(&doc.uuid).unwrap(), Some(doc));
 }

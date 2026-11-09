@@ -44,6 +44,11 @@ pub struct Bench {
     /// the build under `brokkr bench --hotpath`, and refused in a timing
     /// run's resolved features. Empty means the bench cannot be profiled.
     pub hotpath_features: Vec<String>,
+    /// The package's own features that instrument it for hotpath's
+    /// allocation tracking: added to the build under `brokkr bench --alloc`,
+    /// and refused in a timing run's resolved features. Empty means the bench
+    /// cannot be alloc-profiled.
+    pub alloc_features: Vec<String>,
     /// The `[bench_params]` sets this bench pulled in, in the order given.
     pub uses: Vec<String>,
     /// The effective params: every used set's, then the bench's own, which
@@ -228,6 +233,8 @@ struct RawBench {
     default_features: Option<bool>,
     #[serde(default)]
     hotpath_features: Vec<String>,
+    #[serde(default)]
+    alloc_features: Vec<String>,
     #[serde(default)]
     uses: Vec<String>,
     #[serde(default)]
@@ -465,24 +472,22 @@ fn parse_bench(
     // The package's own feature names, as cargo reports the package's
     // resolved features: a dependency's (`dep/feat`) or an optional
     // dependency (`dep:name`) is not one brokkr can find in that list.
-    if let Some(bad) = raw
-        .hotpath_features
-        .iter()
-        .find(|f| f.trim().is_empty() || f.contains(['/', ':']) || f.contains(char::is_whitespace))
-    {
-        return Err(err(format!(
-            "hotpath_features entry {bad:?} is not one of the package's own feature names"
-        )));
-    }
-    if let Some(both) = raw
-        .hotpath_features
-        .iter()
-        .find(|f| raw.features.contains(f))
-    {
-        return Err(err(format!(
-            "{both:?} is in both features and hotpath_features: a timing run would be \
-             instrumented"
-        )));
+    for (key, list) in [
+        ("hotpath_features", &raw.hotpath_features),
+        ("alloc_features", &raw.alloc_features),
+    ] {
+        if let Some(bad) = list.iter().find(|f| {
+            f.trim().is_empty() || f.contains(['/', ':']) || f.contains(char::is_whitespace)
+        }) {
+            return Err(err(format!(
+                "{key} entry {bad:?} is not one of the package's own feature names"
+            )));
+        }
+        if let Some(both) = list.iter().find(|f| raw.features.contains(f)) {
+            return Err(err(format!(
+                "{both:?} is in both features and {key}: a timing run would be instrumented"
+            )));
+        }
     }
     let params = effective_params(&raw.uses, raw.params, sets).map_err(err)?;
     check_references(&params).map_err(err)?;
@@ -494,6 +499,7 @@ fn parse_bench(
         features: raw.features,
         default_features: raw.default_features.unwrap_or(true),
         hotpath_features: raw.hotpath_features,
+        alloc_features: raw.alloc_features,
         uses: raw.uses,
         params,
         library: None,
@@ -785,6 +791,27 @@ mod tests {
              hotpath_features = [\"hotpath\"]\n",
         );
         assert!(err.contains("both features and hotpath_features"), "{err}");
+    }
+
+    #[test]
+    fn alloc_features_are_held_to_the_same_rules() {
+        let benches = single(
+            "alloc_features",
+            "[bench.cat]\nscript = \"x = 1\"\nalloc_features = [\"hotpath-alloc\"]\n",
+        )
+        .unwrap();
+        assert_eq!(benches["cat"].alloc_features, ["hotpath-alloc"]);
+        assert!(benches["cat"].hotpath_features.is_empty());
+        let err = err_of(
+            "alloc_dep",
+            "[bench.cat]\nscript = \"x = 1\"\nalloc_features = [\"dep/hotpath-alloc\"]\n",
+        );
+        assert!(err.contains("alloc_features entry"), "{err}");
+        let err = err_of(
+            "alloc_both",
+            "[bench.cat]\nscript = \"x = 1\"\nfeatures = [\"a\"]\nalloc_features = [\"a\"]\n",
+        );
+        assert!(err.contains("both features and alloc_features"), "{err}");
     }
 
     #[test]

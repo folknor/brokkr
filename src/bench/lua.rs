@@ -1735,14 +1735,6 @@ fn options_at(state: &mut State, idx: isize) -> Result<CallOptions, Error> {
         state.pop(1)?;
     }
     state.pop(1)?;
-    if options.hotpath.is_some() && options.stop_at.is_some() {
-        return Err(raise_failed(
-            state,
-            "binary_with(): hotpath and stop_at exclude each other: a child stopped at a \
-             marker is killed and writes no report"
-                .into(),
-        ));
-    }
     if options.hotpath.is_some()
         && let Some((name, _)) = options.env.iter().find(|(n, _)| n.starts_with("HOTPATH_"))
     {

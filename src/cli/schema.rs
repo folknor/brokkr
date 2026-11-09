@@ -549,8 +549,13 @@ In depth: `brokkr man clippy`."
 
         /// Profile: build with the bench's hotpath_features and require
         /// every call marked hotpath to capture its report.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "alloc")]
         hotpath: bool,
+
+        /// Profile allocations: build with the bench's alloc_features and
+        /// require every call marked hotpath to capture its report.
+        #[arg(long)]
+        alloc: bool,
 
         /// Check the invocation and stop: bind and validate every arm,
         /// resolve the commit, check the inputs and their pins, then print

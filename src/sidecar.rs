@@ -1736,6 +1736,7 @@ pub(crate) fn run_sidecar_with_deadline(
         run_idx,
         start,
         stop_marker,
+        None,
         deadline,
         tunables,
         capture_cap,
@@ -1833,7 +1834,8 @@ impl OpenCapture {
 }
 
 /// The supervision half of [`run_sidecar_with_deadline`]: sample and drain
-/// until the child ends, and hand back the open capture.
+/// until the child ends, and hand back the open capture. `stop_grace` is
+/// how the stop marker ends the child (`child::ChildOptions::stop_grace`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn supervise_sidecar(
     child_process: Child,
@@ -1841,6 +1843,7 @@ pub(crate) fn supervise_sidecar(
     run_idx: usize,
     start: Instant,
     stop_marker: Option<&str>,
+    stop_grace: Option<Duration>,
     deadline: Option<Duration>,
     tunables: &MeasurementTunables,
     capture_cap: child::CaptureCap,
@@ -1871,6 +1874,7 @@ pub(crate) fn supervise_sidecar(
     let options = child::ChildOptions {
         poll_interval: tick_interval,
         capture_cap,
+        stop_grace,
         ..child::ChildOptions::MEASUREMENT
     };
     let run = child::supervise_child(

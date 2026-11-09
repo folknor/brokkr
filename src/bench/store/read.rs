@@ -43,7 +43,7 @@ pub(super) fn load_run(
                     r.cpu_governor, r.avail_memory_mb, r.captured_env, r.target, r.profile,
                     r.features, r.default_features, r.resolved_bin, r.resolved_features,
                     r.artifact, c.text, r.iterations_requested, r.outcome, r.failure,
-                    r.config_digest, r.pairing_key, r.best_iteration, r.measurement
+                    r.config_digest, r.pairing_key, r.best_iteration, r.measurement, r.alloc
              FROM runs r JOIN configs c ON c.digest = r.config_digest
              WHERE r.uuid = ?1",
             [uuid],
@@ -68,8 +68,8 @@ pub(super) fn load_run(
         json: cols,
     } = columns.ok_or_else(|| unreadable("run outcome"))?;
     doc.uuid = uuid.to_owned();
-    doc.measurement =
-        Measurement::parse(&cols.measurement).ok_or_else(|| unreadable("run measurement"))?;
+    doc.measurement = Measurement::from_columns(&cols.measurement, cols.alloc)
+        .ok_or_else(|| unreadable("run measurement"))?;
     doc.argv = json(&cols.argv)?;
     doc.conditions.captured_env = json(&cols.captured_env)?;
     doc.build.features = json(&cols.features)?;
@@ -104,6 +104,7 @@ struct RunJson {
     resolved_bin: Option<String>,
     resolved_features: Option<String>,
     measurement: String,
+    alloc: bool,
 }
 
 struct RunColumns {
@@ -163,6 +164,7 @@ fn run_columns(row: &Row<'_>) -> rusqlite::Result<Option<RunColumns>> {
             resolved_bin: row.get(20)?,
             resolved_features: row.get(21)?,
             measurement: row.get(30)?,
+            alloc: row.get(31)?,
         },
     }))
 }

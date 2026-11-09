@@ -367,6 +367,40 @@ fn a_marked_call_stores_its_report_on_the_child() {
     assert_eq!(left, RUN_REPORT_BYTES - REPORT.len());
 }
 
+/// A marked call stopped at its marker gets one SIGTERM before any SIGKILL,
+/// so a child that writes its report on the way out is captured, and the
+/// marker stays its ending.
+#[test]
+fn a_marked_call_stopped_at_a_marker_writes_its_report() {
+    let _lock = crate::test_scratch::process_global_lock();
+    let root = crate::test_scratch::scratch("bench_runner", "hotpath-stop-at");
+    let container = root.join("iterations");
+    let script = script(&format!(
+        "function bench()\n\
+           local r = binary_with({{hotpath = 'decode', stop_at = 'SETUP_END', \
+             env = {{R = '{REPORT}'}}}}, '-c',\n\
+             'w() {{ printf %s \"$R\" > \"$HOTPATH_OUTPUT_PATH\"; exit 143; }}; trap w TERM; \
+              echo \"1 SETUP_END\" > \"$BROKKR_MARKER_FIFO\"; sleep 30 & wait'):ok()\n\
+           record.at = r.stopped_at\n\
+           record.status = r.hotpath_status\n\
+         end"
+    ));
+    let mut with = setup(&script, &root, &container);
+    with.measurement = store::Measurement::Hotpath;
+    let started = std::time::Instant::now();
+    let (iteration, _, _, _) = run_iteration(with);
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    let shown = record(&iteration);
+    assert_eq!(shown["at"], "SETUP_END");
+    assert_eq!(shown["status"], "captured");
+    assert_eq!(
+        iteration.children[0].ending,
+        store::ChildEnding::StopMarker {
+            marker: "SETUP_END".into()
+        }
+    );
+}
+
 /// Whatever the exit, the capture is judged and stored and the script sees
 /// its status; under timing nothing fails, under --hotpath an iteration
 /// with a capture that failed, or with no marked call, does. Occurrences

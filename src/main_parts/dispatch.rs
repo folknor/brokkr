@@ -256,6 +256,7 @@ pub(super) fn run(
             commit,
             iterations,
             hotpath,
+            alloc,
             dry_run,
             bench,
         } => crate::bench::runner::run(
@@ -264,6 +265,7 @@ pub(super) fn run(
                 commit: commit.clone(),
                 iterations: *iterations,
                 hotpath: *hotpath,
+                alloc: *alloc,
                 params: bench.iter().skip(1).cloned().collect(),
                 dry_run: *dry_run,
             },

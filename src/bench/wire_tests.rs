@@ -320,7 +320,14 @@ fn frozen_encoding() -> String {
     lines.extend(answers.iter().map(|a| serde_json::to_string(a).unwrap()));
     lines.push(serde_json::to_string(&frozen_capture_outcomes()).unwrap());
     lines.push(serde_json::to_string(&frozen_executable_identities()).unwrap());
-    lines.push(serde_json::to_string(&[Measurement::Timing, Measurement::Hotpath]).unwrap());
+    lines.push(
+        serde_json::to_string(&[
+            Measurement::Timing,
+            Measurement::Hotpath,
+            Measurement::Alloc,
+        ])
+        .unwrap(),
+    );
     lines.extend(
         [
             Kind::Refused,

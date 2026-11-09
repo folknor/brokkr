@@ -70,6 +70,11 @@ pub(super) struct IterationSetup<'a> {
     pub(super) report_budget: usize,
 }
 
+/// How long a call marked `hotpath` and stopped at its `stop_at` marker has,
+/// from the one SIGTERM, to exit and write its report before its process
+/// group is SIGKILLed.
+const STOP_REPORT_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The most one hotpath report may hold.
 pub(super) const REPORT_BYTES: usize = 16 * 1024 * 1024;
 
@@ -174,19 +179,17 @@ pub(super) fn run_iteration(
     )
 }
 
-/// Why a completed sample of a `--hotpath` run fails: no call was marked,
-/// or a marked one did not capture. `None` for a timing run, whose
-/// captures are evidence only.
+/// Why a completed sample of a `--hotpath` or `--alloc` run fails: no call
+/// was marked, or a marked one did not capture. `None` for a timing run,
+/// whose captures are evidence only.
 fn profile_failure(measurement: store::Measurement, children: &[store::Child]) -> Option<String> {
-    if measurement != store::Measurement::Hotpath {
-        return None;
-    }
+    let flag = measurement.flag()?;
     let mut marked = children
         .iter()
         .filter_map(|c| c.hotpath.as_ref())
         .peekable();
     if marked.peek().is_none() {
-        return Some("--hotpath: no call of the iteration was marked hotpath".to_owned());
+        return Some(format!("{flag}: no call of the iteration was marked hotpath"));
     }
     let failed: Vec<String> = marked
         .filter_map(|capture| {
@@ -207,7 +210,7 @@ fn profile_failure(measurement: store::Measurement, children: &[store::Child]) -
             ))
         })
         .collect();
-    (!failed.is_empty()).then(|| format!("--hotpath: {}", failed.join("; ")))
+    (!failed.is_empty()).then(|| format!("{flag}: {}", failed.join("; ")))
 }
 
 /// The builtins' side for one iteration.
@@ -406,6 +409,9 @@ impl IterationHost {
             self.children.len(),
             start,
             call.stop_at.as_deref(),
+            // A marked call stopped at a marker is asked to stop, so an
+            // instrumented build unwinds and writes its report.
+            call.hotpath.is_some().then_some(STOP_REPORT_GRACE),
             None,
             &crate::sidecar::DEFAULT_MEASUREMENT_TUNABLES,
             crate::output::child::CaptureCap {

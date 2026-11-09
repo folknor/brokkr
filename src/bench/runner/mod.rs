@@ -49,6 +49,9 @@ pub(crate) struct BenchArgs {
     /// `--hotpath`: build with the bench's `hotpath_features` and require
     /// every marked call to capture.
     pub(crate) hotpath: bool,
+    /// `--alloc`: build with the bench's `alloc_features` and require every
+    /// marked call to capture. Exclusive with `hotpath`.
+    pub(crate) alloc: bool,
     /// Everything after NAME, unparsed: the bench's own params.
     pub(crate) params: Vec<String>,
     /// `--dry-run`: bind and validate every arm, resolve the commit, check
@@ -90,7 +93,7 @@ pub(crate) fn run(
     let frozen = freeze(bench)?;
     let (config, labels, validated) = validate(name, bench, &view, &frozen, &arms)?;
     if args.dry_run {
-        return dry_run(name, args, bench, &frozen, detection, &mut arms, &labels);
+        return dry_run(name, args, measurement, bench, &frozen, detection, &mut arms, &labels);
     }
     // Opened, or for a results server probed, before anything is built or
     // run and before a stop is caught: a run with nowhere to go is never
@@ -195,20 +198,53 @@ fn find<'a>(benches: &'a BTreeMap<String, Bench>, name: &str) -> Result<&'a Benc
     })
 }
 
-/// What the invocation measures: `--hotpath` only for a bench that names
-/// the features instrumenting its build.
+/// What the invocation measures: `--hotpath` (`--alloc`) only for a bench
+/// that names the features instrumenting its build for it.
 fn measurement_of(args: &BenchArgs, bench: &Bench) -> Result<store::Measurement, DevError> {
-    if !args.hotpath {
-        return Ok(store::Measurement::Timing);
-    }
-    if bench.hotpath_features.is_empty() {
+    let (measurement, key) = match (args.hotpath, args.alloc) {
+        (false, false) => return Ok(store::Measurement::Timing),
+        (true, true) => {
+            return Err(DevError::Refused(
+                "--hotpath and --alloc exclude each other: a run measures one".into(),
+            ));
+        }
+        (true, false) => (store::Measurement::Hotpath, "hotpath_features"),
+        (false, true) => (store::Measurement::Alloc, "alloc_features"),
+    };
+    if profile_features(bench, measurement).is_empty() {
         return Err(DevError::Refused(format!(
-            "bench {0} cannot be profiled: [bench.{0}] sets no hotpath_features, the features \
+            "bench {0} cannot be profiled with {1}: [bench.{0}] sets no {key}, the features \
              that instrument its build",
-            bench.name
+            bench.name,
+            measurement.flag().unwrap_or_default()
         )));
     }
-    Ok(store::Measurement::Hotpath)
+    Ok(measurement)
+}
+
+/// The features `measurement` adds to the bench's build: none for timing.
+fn profile_features(bench: &Bench, measurement: store::Measurement) -> &[String] {
+    match measurement {
+        store::Measurement::Timing => &[],
+        store::Measurement::Hotpath => &bench.hotpath_features,
+        store::Measurement::Alloc => &bench.alloc_features,
+    }
+}
+
+/// The features a `measurement` build of `bench` asks cargo for: the
+/// bench's, then the ones `measurement` adds.
+fn build_features(
+    config: &crate::config::DevConfig,
+    bench: &Bench,
+    measurement: store::Measurement,
+) -> Vec<String> {
+    let mut features = crate::command_args::resolve_features(config, &bench.features);
+    for feature in profile_features(bench, measurement) {
+        if !features.contains(feature) {
+            features.push(feature.clone());
+        }
+    }
+    features
 }
 
 /// How the invocation ends once every arm ran: each failed arm's cause was
@@ -407,9 +443,11 @@ fn settle(
 /// to its pin, each arm and what it would build named. Nothing is opened,
 /// held, preflighted, built or stored: the preflight may launch programs, so
 /// it is the run's to make.
+#[allow(clippy::too_many_arguments)] // the bound invocation, each part its own
 fn dry_run(
     name: &str,
     args: &BenchArgs,
+    measurement: store::Measurement,
     bench: &Bench,
     frozen: &Frozen,
     detection: &Detection,
@@ -429,14 +467,7 @@ fn dry_run(
     let profile = bench.profile.clone().unwrap_or_else(|| {
         crate::runnables::build_profile(detection.config.bin.as_ref(), None)
     });
-    let mut features = crate::command_args::resolve_features(&detection.config, &bench.features);
-    if args.hotpath {
-        for feature in &bench.hotpath_features {
-            if !features.contains(feature) {
-                features.push(feature.clone());
-            }
-        }
-    }
+    let features = build_features(&detection.config, bench, measurement);
     output::dry_run_msg(&format!(
         "bench {name}: would build {} ({profile}, features [{}]) at {}{}, {} of {}",
         bench.target.as_deref().unwrap_or("[bin] default"),
@@ -615,6 +646,12 @@ fn describe(bench: &Bench, detection: &Detection, given: &params::Given, view: &
         lines.push(format!(
             "  profiled with --hotpath: features [{}] added",
             bench.hotpath_features.join(", ")
+        ));
+    }
+    if !bench.alloc_features.is_empty() {
+        lines.push(format!(
+            "  profiled with --alloc: features [{}] added",
+            bench.alloc_features.join(", ")
         ));
     }
     if bench.params.is_empty() {
@@ -842,14 +879,7 @@ impl Attempt<'_> {
         let dirty = !self.committed && self.live_dirty();
         let config = &self.detection.config;
         let profile = self.profile();
-        let mut features = crate::command_args::resolve_features(config, &self.bench.features);
-        if self.measurement == store::Measurement::Hotpath {
-            for feature in &self.bench.hotpath_features {
-                if !features.contains(feature) {
-                    features.push(feature.clone());
-                }
-            }
-        }
+        let features = build_features(config, self.bench, self.measurement);
         let captured_env = config_env(config);
         store::RunDocument {
             format: store::DOCUMENT_FORMAT,
@@ -1022,19 +1052,33 @@ impl Attempt<'_> {
             bin: built.target.clone(),
             features: built.unit_features.clone(),
         });
-        // The timing recipe is the bench's features without its hotpath
-        // ones, judged on what cargo resolved in the tree built: a default
-        // or another feature that enables one is caught here.
-        if self.measurement == store::Measurement::Timing
-            && let Some(on) = self
+        // The timing recipe is the bench's features without its hotpath or
+        // alloc ones, and the hotpath recipe without the alloc ones it does
+        // not share, judged on what cargo resolved in the tree built: a
+        // default or another feature that enables one is caught here.
+        let barred: Vec<&String> = match self.measurement {
+            store::Measurement::Timing => self
                 .bench
                 .hotpath_features
                 .iter()
-                .find(|f| built.unit_features.contains(f))
-        {
+                .chain(&self.bench.alloc_features)
+                .collect(),
+            store::Measurement::Hotpath => self
+                .bench
+                .alloc_features
+                .iter()
+                .filter(|f| !self.bench.hotpath_features.contains(f))
+                .collect(),
+            store::Measurement::Alloc => Vec::new(),
+        };
+        if let Some(on) = barred.into_iter().find(|f| built.unit_features.contains(f)) {
+            let (build, fix) = match self.measurement {
+                store::Measurement::Hotpath => ("hotpath", "with --alloc"),
+                _ => ("timing", "with --hotpath or --alloc"),
+            };
             return Err(DevError::Refused(format!(
-                "the timing build resolved hotpath feature {on:?}, which instruments it: run \
-                 with --hotpath, or keep {on:?} out of the bench's features and their defaults"
+                "the {build} build resolved profiling feature {on:?}, which instruments it: run \
+                 {fix}, or keep {on:?} out of the bench's features and their defaults"
             )));
         }
         let artifacts =

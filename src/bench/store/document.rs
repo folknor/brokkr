@@ -94,28 +94,50 @@ pub struct ResolvedBuild {
     pub features: Vec<String>,
 }
 
-/// What a run was asked to measure: `brokkr bench` plain, or `brokkr bench
-/// --hotpath`, built with the bench's `hotpath_features`.
+/// What a run was asked to measure: `brokkr bench` plain, `brokkr bench
+/// --hotpath`, built with the bench's `hotpath_features`, or `brokkr bench
+/// --alloc`, built with its `alloc_features`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Measurement {
     Timing,
     Hotpath,
+    Alloc,
 }
 
 impl Measurement {
-    pub(super) fn name(self) -> &'static str {
+    /// The `runs` columns it is stored as, `measurement` and `alloc`: the
+    /// first column's CHECK predates alloc and cannot be widened in place,
+    /// so an alloc run is a hotpath run flagged alloc (schema V5).
+    pub(super) fn columns(self) -> (&'static str, bool) {
         match self {
-            Self::Timing => "timing",
-            Self::Hotpath => "hotpath",
+            Self::Timing => ("timing", false),
+            Self::Hotpath => ("hotpath", false),
+            Self::Alloc => ("hotpath", true),
         }
     }
 
-    pub(super) fn parse(name: &str) -> Option<Self> {
-        match name {
-            "timing" => Some(Self::Timing),
-            "hotpath" => Some(Self::Hotpath),
+    pub(super) fn from_columns(name: &str, alloc: bool) -> Option<Self> {
+        match (name, alloc) {
+            ("timing", false) => Some(Self::Timing),
+            ("hotpath", false) => Some(Self::Hotpath),
+            ("hotpath", true) => Some(Self::Alloc),
             _ => None,
+        }
+    }
+
+    /// A profiled run: every iteration that completed must capture every
+    /// call it marked, and mark at least one.
+    pub fn profiled(self) -> bool {
+        self != Self::Timing
+    }
+
+    /// The `brokkr bench` flag that asks for it, `None` for timing.
+    pub fn flag(self) -> Option<&'static str> {
+        match self {
+            Self::Timing => None,
+            Self::Hotpath => Some("--hotpath"),
+            Self::Alloc => Some("--alloc"),
         }
     }
 }
@@ -127,6 +149,8 @@ pub enum PairingClass {
     Timing,
     /// Asked for a hotpath profile.
     Hotpath,
+    /// Asked for an allocation profile.
+    Alloc,
     /// Asked for timing, but some child captured a profile: the build was
     /// instrumented by other means.
     Incidental,
@@ -572,7 +596,7 @@ impl RunDocument {
                         ));
                     }
                 }
-                if self.measurement == Measurement::Hotpath {
+                if self.measurement.profiled() {
                     for (idx, iteration) in self.iterations.iter().enumerate() {
                         let captures: Vec<&HotpathCapture> = iteration
                             .children
@@ -585,7 +609,7 @@ impl RunDocument {
                                 .any(|c| !matches!(c.outcome, CaptureOutcome::Captured { .. }))
                         {
                             return Err(refuse(format!(
-                                "a completed hotpath run whose iteration {idx} did not capture \
+                                "a completed profiled run whose iteration {idx} did not capture \
                                  every marked call, or marked none"
                             )));
                         }
@@ -612,7 +636,8 @@ impl RunDocument {
         best.map(|(idx, _)| idx)
     }
 
-    /// The class the run pairs in: [`Measurement::Hotpath`] as asked; a
+    /// The class the run pairs in: [`Measurement::Hotpath`] and
+    /// [`Measurement::Alloc`] as asked; a
     /// timing run any of whose children, in any iteration, captured a
     /// report is incidental; any other is timing.
     pub fn pairing_class(&self) -> PairingClass {
@@ -626,6 +651,7 @@ impl RunDocument {
         });
         match (self.measurement, captured) {
             (Measurement::Hotpath, _) => PairingClass::Hotpath,
+            (Measurement::Alloc, _) => PairingClass::Alloc,
             (Measurement::Timing, true) => PairingClass::Incidental,
             (Measurement::Timing, false) => PairingClass::Timing,
         }
@@ -656,6 +682,9 @@ impl RunDocument {
             }
             PairingClass::Hotpath => {
                 serde_json::json!(["bench-pair-v2", "hotpath", self.project, self.bench, params])
+            }
+            PairingClass::Alloc => {
+                serde_json::json!(["bench-pair-v2", "alloc", self.project, self.bench, params])
             }
             PairingClass::Incidental => serde_json::json!([
                 "bench-pair-v2",

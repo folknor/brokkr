@@ -239,8 +239,17 @@ CREATE TABLE marks (
 CREATE INDEX marks_by_project ON marks(project, id);
 ";
 
+/// Version 5: alloc profiling. V2's CHECK on `measurement` cannot be widened
+/// in place, and rebuilding `runs` would cascade through every table that
+/// references it, so an alloc run is stored as `measurement = 'hotpath'`
+/// with `alloc` set; every earlier run is not alloc.
+const V5: &str = "
+ALTER TABLE runs ADD COLUMN alloc INTEGER NOT NULL DEFAULT 0
+    CHECK (alloc IN (0, 1) AND (alloc = 0 OR measurement = 'hotpath'));
+";
+
 /// The chain. Shipped steps are frozen; append only.
-pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4];
+pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5];
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 

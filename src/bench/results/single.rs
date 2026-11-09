@@ -102,8 +102,10 @@ fn identity(out: &mut String, run: &StoredRun, marks: &MarkView) {
         RunOutcome::Interrupted => "interrupted".to_owned(),
     };
     field(out, "outcome", &outcome);
-    if doc.measurement == Measurement::Hotpath {
-        field(out, "measured", "hotpath (--hotpath)");
+    match doc.measurement {
+        Measurement::Timing => {}
+        Measurement::Hotpath => field(out, "measured", "hotpath (--hotpath)"),
+        Measurement::Alloc => field(out, "measured", "alloc (--alloc)"),
     }
     if let Some(best) = run.best_iteration {
         let wall = |w: Option<i64>| w.map_or_else(|| "--".to_owned(), ms);

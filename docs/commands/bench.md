@@ -14,6 +14,7 @@ brokkr bench NAME                     # run one, three iterations
 brokkr bench --iterations 10 NAME
 brokkr bench --commit v0.5.0 NAME     # build and run that commit
 brokkr bench --hotpath NAME           # profile: its marked calls' reports
+brokkr bench --alloc NAME             # profile allocations the same way
 brokkr bench NAME --help              # its annotations, build settings and params
 brokkr bench NAME --dataset denmark   # bind a param
 brokkr bench NAME --osc 4705..4710    # a collection: one run over all six
@@ -37,6 +38,11 @@ collide with a param. brokkr's options:
   (`binary_with()`, below) to capture its report. Refused, before anything
   runs, for a bench that sets no `hotpath_features`. A profiled run pairs
   only with profiled runs (What a run stores).
+- `--alloc` - profile allocations: `--hotpath` with the bench's
+  `alloc_features` added in place of its `hotpath_features`, the calls
+  marked and captured the same way. Refused for a bench that sets no
+  `alloc_features`, and beside `--hotpath`. An alloc run pairs only with
+  alloc runs.
 - `--dry-run` - check the invocation and stop before anything is built
   (Dry run).
 
@@ -275,10 +281,12 @@ runnable) is resolved by cargo metadata in the tree being built, under
 name on both sides. The profile is the bench's `profile`, else `[bin]
 profile` / `[bin] debug`, else release. Features are the host section's `features`
 (`brokkr man config`) followed by the bench's, and under `--hotpath` its
-`hotpath_features`; `default_features = false`
-drops the package's defaults. A timing run (no `--hotpath`) of a bench that
-sets `hotpath_features` fails its arm when cargo resolved any of them, as a
-default or through another feature does: that build is instrumented. The
+`hotpath_features`, under `--alloc` its `alloc_features`; `default_features = false`
+drops the package's defaults. A timing run (no `--hotpath` or `--alloc`)
+fails its arm when cargo resolved any of the bench's `hotpath_features` or
+`alloc_features`, as a default or through another feature does: that build
+is instrumented. A `--hotpath` run fails the same way on an
+`alloc_features` entry its `hotpath_features` does not share. The
 built executable is snapshotted into
 `.brokkr/artifacts/<xxh128>/<name>` as `brokkr build` does, and every child
 runs that snapshot. The run records what was asked for, the bin and the
@@ -471,8 +479,10 @@ local r = binary_with({
   read on the supervisor's ticks and when the child exits, so the child is
   stopped once the marker is recognized, with no bound on how long after
   it; the marker's stamp in the child's evidence is the precise end of the
-  phase (`brokkr sidecar`). Refused beside `hotpath`: a child stopped at a
-  marker is killed and writes no report.
+  phase (`brokkr sidecar`). Beside `hotpath`, the child is asked to stop
+  rather than killed: brokkr sends its process group one SIGTERM and waits
+  up to 30 seconds for it to exit before the SIGKILL, so a build that
+  cancels on SIGTERM unwinds and writes its report (Hotpath capture).
 - `program` - an external program to run in place of the built
   executable, everything else about the call unchanged (its borrow, spool,
   marker FIFO, sidecar and options): a name without `/` is looked up on
@@ -522,9 +532,16 @@ marked calls so far in the iteration counted from 1 whatever became of
 them; `brokkr results` shows and compares captures by both, so a call one
 side makes only conditionally shifts the later occurrences of its stage.
 
-Under `--hotpath` an iteration that completed fails if any marked call did
+A marked call with `stop_at` is stopped by one SIGTERM when its marker
+arrives, then SIGKILLed if it has not exited within 30 seconds. A program
+that treats SIGTERM as cancellation and drops its hotpath guard on the way
+out (pbfhogg's CLI does) writes a report covering its run up to the marker
+plus the unwinding; one killed by the SIGTERM, or still running at the
+SIGKILL, writes none and its capture is `missing`.
+
+Under `--hotpath` or `--alloc` an iteration that completed fails if any marked call did
 not capture, naming each, or if no call was marked; its children,
-captures and record are stored as they came. Without `--hotpath` nothing is required:
+captures and record are stored as they came. Without either nothing is required:
 a capture is evidence only, and a run that captured anything pairs as
 incidental, never with clean timing runs (What a run stores).
 
@@ -605,13 +622,13 @@ project's disk, not the host's scratch disk.
 
 Every attempted run is stored, a failed build or an interrupted iteration
 included, one per arm, with its bound params (each key, its `from` path and
-a file's digest), what it measured (timing, or `--hotpath`), every child's
+a file's digest), what it measured (timing, `--hotpath` or `--alloc`), every child's
 argv, ending, `/proc` samples, marker FIFO records and capture losses, a
 marked child's hotpath capture, and a `program` child's executable path and
 digest; `brokkr sidecar <uuid>` reads one child's
 through the sidecar views (`brokkr man measure`, Script-bench children).
-Runs pair in three classes that never pair with each other: timing,
-`--hotpath`, and incidental, a timing run any of whose children captured a
+Runs pair in classes that never pair with each other: timing,
+`--hotpath`, `--alloc`, and incidental, a timing run any of whose children captured a
 report, since its build was instrumented by other means. A
 run of a dirty tree, dirty as its attempt starts or after its build (The
 build), is stored and marked dirty: `brokkr results` lists it with `-dirty`

@@ -233,6 +233,25 @@ script = """
 function bench(params)
     binary(params.mode):ok()
 end"""
+
+[bench.allocs]
+profile = "dev"
+alloc_features = ["profiled"]
+params.mode = { free = true, default = "plain" }
+script = """
+function bench(params)
+    record.status = binary_with({hotpath = "main"}, params.mode):ok().hotpath_status
+end"""
+
+[bench.allocleaky]
+profile = "dev"
+features = ["instrumented"]
+alloc_features = ["profiled"]
+params.mode = { free = true, default = "plain" }
+script = """
+function bench(params)
+    binary(params.mode):ok()
+end"""
 "#;
 
 /// Environment that would point a git call of this test, brokkr's own
@@ -310,24 +329,24 @@ impl Fixture {
     /// `brokkr bench --iterations N BENCH PARAMS...`, its console lines
     /// captured from the run log.
     fn bench(&self, log: &str, bench: &str, iterations: u32, params: &[&str]) -> Ran {
-        self.bench_as(log, bench, iterations, false, params)
+        self.bench_as(log, bench, iterations, store::Measurement::Timing, params)
     }
 
-    /// [`Fixture::bench`], with `--hotpath` when `hotpath` is set.
+    /// [`Fixture::bench`], with the flag that asks for `measurement`.
     fn bench_as(
         &self,
         log: &str,
         bench: &str,
         iterations: u32,
-        hotpath: bool,
+        measurement: store::Measurement,
         params: &[&str],
     ) -> Ran {
-        self.invoke(log, bench, iterations, hotpath, false, params)
+        self.invoke(log, bench, iterations, measurement, false, params)
     }
 
     /// `brokkr bench --dry-run BENCH PARAMS...`.
     fn dry(&self, log: &str, bench: &str, params: &[&str]) -> Ran {
-        self.invoke(log, bench, 1, false, true, params)
+        self.invoke(log, bench, 1, store::Measurement::Timing, true, params)
     }
 
     fn invoke(
@@ -335,7 +354,7 @@ impl Fixture {
         log: &str,
         bench: &str,
         iterations: u32,
-        hotpath: bool,
+        measurement: store::Measurement,
         dry_run: bool,
         params: &[&str],
     ) -> Ran {
@@ -344,7 +363,8 @@ impl Fixture {
             name: Some(bench.to_owned()),
             commit: None,
             iterations: std::num::NonZeroU32::new(iterations).unwrap(),
-            hotpath,
+            hotpath: measurement == store::Measurement::Hotpath,
+            alloc: measurement == store::Measurement::Alloc,
             params: params.iter().map(|p| (*p).to_owned()).collect(),
             dry_run,
         };
@@ -664,9 +684,11 @@ fn hotpath_runs_profile_with_their_features_and_timing_runs_stay_clean() {
         &fixture.detection.project_root,
         &fixture.detection.build_root,
     );
-    let ran = fixture.bench_as("hotpath", "profiled", 2, true, &["--mode", "p"]);
+    let hotpath = store::Measurement::Hotpath;
+    let ran = fixture.bench_as("hotpath", "profiled", 2, hotpath, &["--mode", "p"]);
     assert!(ran.result.is_ok(), "{}", ran.console);
-    let ran = fixture.bench_as("timing", "profiled", 1, false, &["--mode", "t"]);
+    let timing = store::Measurement::Timing;
+    let ran = fixture.bench_as("timing", "profiled", 1, timing, &["--mode", "t"]);
     assert!(ran.result.is_ok(), "{}", ran.console);
     let runs: Vec<_> = fixture
         .stored()
@@ -698,14 +720,50 @@ fn hotpath_runs_profile_with_their_features_and_timing_runs_stay_clean() {
 
     let ran = fixture.bench("leaky", "leaky", 1, &[]);
     ran.error();
-    ran.says("resolved hotpath feature \"profiled\"");
+    ran.says("resolved profiling feature \"profiled\"");
 
-    let ran = fixture.bench_as("unprofilable", "probe", 1, true, &[]);
+    let ran = fixture.bench_as("unprofilable", "probe", 1, hotpath, &[]);
     assert!(
         ran.error().contains("sets no hotpath_features"),
         "{}",
         ran.error()
     );
+}
+
+/// `--alloc` builds with the bench's alloc features, requires and stores
+/// each marked child's report, and pairs apart from `--hotpath`; a timing
+/// build that resolves an alloc feature is refused, and `--alloc` on a
+/// bench with no alloc features is refused before anything is stored.
+#[test]
+fn alloc_runs_profile_with_their_alloc_features() {
+    let _serial = crate::test_scratch::process_global_lock();
+    let fixture = Fixture::new("alloc");
+    let _hold = crate::lockfile::test_hold(
+        &fixture.detection.project_root,
+        &fixture.detection.build_root,
+    );
+    let alloc = store::Measurement::Alloc;
+    let ran = fixture.bench_as("alloc", "allocs", 1, alloc, &["--mode", "a"]);
+    assert!(ran.result.is_ok(), "{}", ran.console);
+    let runs: Vec<_> = fixture
+        .stored()
+        .into_iter()
+        .filter(|run| run.bench == "allocs")
+        .collect();
+    let [run] = runs.as_slice() else {
+        panic!("{runs:?}");
+    };
+    assert_eq!(run.measurement, store::Measurement::Alloc);
+    assert!(run.build.features.contains(&"profiled".to_owned()));
+    assert_eq!(run.iterations[0].record.as_ref().unwrap()["status"], "captured");
+    assert!(run.pairing_key().contains("\"alloc\""));
+
+    let ran = fixture.bench("alloc-leaky", "allocleaky", 1, &[]);
+    ran.error();
+    ran.says("resolved profiling feature \"profiled\"");
+
+    let ran = fixture.bench_as("unallocable", "profiled", 1, alloc, &[]);
+    assert!(ran.error().contains("sets no alloc_features"), "{}", ran.error());
 }
 
 /// A preflight runs for every arm before anything is built: one arm's

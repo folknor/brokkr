@@ -747,6 +747,11 @@ pub(crate) struct ChildOptions {
     pub poll_interval: Duration,
     pub sigterm_grace: Duration,
     pub drain_grace: Duration,
+    /// How a stop marker ends the child: `None` SIGKILLs its group at once;
+    /// `Some(grace)` sends one SIGTERM first and waits up to `grace` for it
+    /// to exit, so a child that cancels on SIGTERM unwinds and writes what
+    /// it writes on the way out (a hotpath report) before the SIGKILL.
+    pub stop_grace: Option<Duration>,
 }
 
 impl ChildOptions {
@@ -756,6 +761,7 @@ impl ChildOptions {
         poll_interval: DEADLINE_POLL_INTERVAL,
         sigterm_grace: SIGTERM_FORWARD_BUDGET,
         drain_grace: DRAIN_SETTLE,
+        stop_grace: None,
     };
 
     pub(crate) const CARGO: Self = Self {
@@ -881,11 +887,15 @@ fn supervise_child_capped(
             Wake::Tick
         };
         if let Some(marker) = observe(wake) {
+            let stop_options = ChildOptions {
+                sigterm_grace: options.stop_grace.unwrap_or(options.sigterm_grace),
+                ..options
+            };
             let ending = terminate_and_wait(
                 &mut child,
                 isolation,
-                false,
-                &options,
+                options.stop_grace.is_some(),
+                &stop_options,
                 Ending::StopMarker(marker),
             );
             child_elapsed = Some(start.elapsed());

@@ -60,8 +60,12 @@ iteration and a run whose iterations disagreed are all stored. It holds:
   features folded in, default features), always; what resolution produced
   (the bin and cargo's resolved features) and the artifact digest, each
   only as far as the build got;
-- what was asked to be measured: `timing`, or `hotpath` for `brokkr bench
-  --hotpath`. A run stored before the field existed reads as `timing`;
+- what was asked to be measured: `timing`, `hotpath` for `brokkr bench
+  --hotpath`, or `alloc` for `brokkr bench --alloc`. A run stored before the
+  field existed reads as `timing`. The `runs` table keeps `alloc` as
+  `measurement = 'hotpath'` with its `alloc` column set, since the
+  measurement column's CHECK cannot be widened in place and rebuilding the
+  table would cascade through every table that references it;
 - params by name, each with `many`, its resolved `from` path (`None` for a
   plain string; otherwise the path into the run's resolved view,
   `docs/brokkr.toml.bench.md`, with `{param}` references substituted, its
@@ -102,7 +106,7 @@ occurrences run 1..n in launch order) and the outcome: `captured` with the
 report, a JSON object as the child wrote it and the reader's parser takes
 it (nested at most 64 deep, as a record), `missing`, `invalid` or
 `unreadable` each with its reason, or `over_budget`. An unmarked child has
-none. A `completed` run measured `hotpath` holds a capture in every
+none. A `completed` run measured `hotpath` or `alloc` holds a capture in every
 iteration, and every capture it holds is `captured`; any other run may hold
 any outcome.
 
@@ -153,9 +157,9 @@ and a replayed document compares equal to the stored one:
   any iteration, captured a report is keyed `bench-pair-v1`, exactly as
   every run was before captures existed, so that history keeps pairing. A
   run measured `hotpath` is keyed `bench-pair-v2` with the class `hotpath`,
-  and a `timing` run that captured anyway, its build instrumented by other
-  means, `bench-pair-v2` with `incidental`: the three never pair with each
-  other. Collection order, a digest change, a param bound or not and the
+  one measured `alloc` with the class `alloc`, and a `timing` run that
+  captured anyway, its build instrumented by other means, `bench-pair-v2`
+  with `incidental`: no two classes ever pair. Collection order, a digest change, a param bound or not and the
   class all split it; the commit, the config text, the build and the record
   do not. The key is a projection of the stored params and children: a
   later algorithm is a new projection computed from them, and two rows
