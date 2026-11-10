@@ -427,7 +427,9 @@ impl IterationHost {
             &mut fifo,
             self.children.len(),
             start,
-            call.stop_at.as_deref(),
+            call.stop_at
+                .as_deref()
+                .map(crate::sidecar::StopRequest::exact),
             // A marked call stopped at a marker is asked to stop, so an
             // instrumented build unwinds and writes its report.
             call.hotpath.is_some().then_some(STOP_REPORT_GRACE),
@@ -452,9 +454,7 @@ impl IterationHost {
         let finished = admitted.finish_observed(&mut || open.pump(&mut fifo));
         let run = open.finish(&mut fifo, finished.is_ok());
         self.keep_child(program_str, argv, &env, pid, start, &run, executable);
-        if let Some(child) = self.children.last_mut() {
-            child.measured = call.measured;
-        }
+        self.mark_measured(call.measured);
         let stderr = self.keep_stderr(&stderr_spool, finished.is_ok());
         // Judged after every launch that was reaped, whatever its exit, and
         // stored on the child before anything below can end the call.
@@ -553,6 +553,13 @@ impl IterationHost {
         let tail = tail.map_err(|e| e.to_string())?;
         let head = spool.preview(PREVIEW_BYTES).map_err(|e| e.to_string())?;
         Ok((head, tail.bytes))
+    }
+
+    /// Mark the last child as the iteration's measured call.
+    fn mark_measured(&mut self, measured: bool) {
+        if let Some(child) = self.children.last_mut() {
+            child.measured = measured;
+        }
     }
 
     /// A spawned child's evidence, for the document.
@@ -726,7 +733,7 @@ struct Declared {
     env: Vec<(String, String)>,
     /// The stage a `hotpath` call is marked with.
     hotpath: Option<String>,
-    /// The exact span-end marker that ends the child.
+    /// The exact marker that ends the child.
     stop_at: Option<String>,
     /// The external program the call runs in place of the snapshot.
     program: Option<String>,

@@ -390,6 +390,10 @@ fn a_stop_marker_ends_the_child_and_is_its_ending() {
            local n = binary_with({stop_at = 'SETUP_END'}, '-c', 'exit 3')\n\
            record.natural = n.exit\n\
            record.unstopped = n.stopped_at == nil\n\
+           local p = binary_with({stop_at = 'LOADED'}, '-c',\n\
+             'echo \"1 LOADED_END\" > \"$BROKKR_MARKER_FIFO\"; \
+              echo \"2 LOADED\" > \"$BROKKR_MARKER_FIFO\"; exec sleep 30'):ok()\n\
+           record.point = p.stopped_at\n\
          end",
     );
     let started = std::time::Instant::now();
@@ -400,6 +404,7 @@ fn a_stop_marker_ends_the_child_and_is_its_ending() {
     assert_eq!(shown["exited"], false);
     assert_eq!(shown["natural"], 3);
     assert_eq!(shown["unstopped"], true);
+    assert_eq!(shown["point"], "LOADED", "a point marker, matched verbatim");
     assert_eq!(
         iteration.children[0].ending,
         store::ChildEnding::StopMarker {

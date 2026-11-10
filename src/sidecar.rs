@@ -1643,6 +1643,32 @@ enum StopSpec {
     Lenient { exact: String, span_end: String },
 }
 
+/// What ends a supervised child at a marker: the name as asked for, for
+/// messages, and how it matches.
+pub(crate) struct StopRequest {
+    requested: String,
+    spec: StopSpec,
+}
+
+impl StopRequest {
+    /// `--stop`'s spellings: `FOO_END`, `-FOO`, or a bare `FOO` that prefers
+    /// a verbatim marker and falls back to `FOO_END`.
+    pub(crate) fn spelled(raw: &str) -> Self {
+        Self {
+            requested: raw.to_owned(),
+            spec: StopSpec::parse(raw),
+        }
+    }
+
+    /// Exactly the marker `name`, a span end or a point marker alike.
+    pub(crate) fn exact(name: &str) -> Self {
+        Self {
+            requested: name.to_owned(),
+            spec: StopSpec::Exact(name.to_owned()),
+        }
+    }
+}
+
 impl StopSpec {
     fn parse(raw: &str) -> Self {
         if let Some(suffix) = raw.strip_prefix('-') {
@@ -1735,7 +1761,7 @@ pub(crate) fn run_sidecar_with_deadline(
         fifo,
         run_idx,
         start,
-        stop_marker,
+        stop_marker.map(StopRequest::spelled),
         None,
         deadline,
         tunables,
@@ -1842,7 +1868,7 @@ pub(crate) fn supervise_sidecar(
     fifo: &mut SidecarFifo,
     run_idx: usize,
     start: Instant,
-    stop_marker: Option<&str>,
+    stop_marker: Option<StopRequest>,
     stop_grace: Option<Duration>,
     deadline: Option<Duration>,
     tunables: &MeasurementTunables,
@@ -1859,8 +1885,10 @@ pub(crate) fn supervise_sidecar(
     let mut capture = FifoCapture::default();
     let mut last_hwm = 0;
     let mut sample_idx = 0;
-    let requested_stop = stop_marker.unwrap_or_default().to_owned();
-    let stop_spec = stop_marker.map(StopSpec::parse);
+    let (requested_stop, stop_spec) = match stop_marker {
+        Some(StopRequest { requested, spec }) => (requested, Some(spec)),
+        None => (String::new(), None),
+    };
     let mut fired_stop_marker = None;
 
     console::detail(&format!(

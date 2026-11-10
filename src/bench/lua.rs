@@ -384,8 +384,8 @@ pub(crate) struct CallOptions {
     /// `hotpath = STAGE`: capture the child's hotpath report under this
     /// stage name.
     pub(crate) hotpath: Option<String>,
-    /// `stop_at = NAME_END`: end the child once that process-stream marker
-    /// is seen.
+    /// `stop_at = NAME`: end the child once that exact process-stream
+    /// marker is seen.
     pub(crate) stop_at: Option<String>,
     /// `program = NAME`: run this external program instead of the built
     /// snapshot, a name looked up on the child's `PATH` or a path.
@@ -1790,10 +1790,10 @@ fn stage_at(state: &mut State, idx: isize) -> Result<String, Error> {
     Ok(stage)
 }
 
-/// `stop_at`: an exact span-end marker name, `FOO_END`. The lenient `FOO`
-/// and the `-FOO` shorthand `--stop` takes are refused: a bare name matches
-/// two markers, and which one ends the child would depend on how the FIFO
-/// was drained.
+/// `stop_at`: an exact marker name, a span end (`FOO_END`) or a point marker
+/// alike, matched verbatim. `--stop`'s lenient fallback from `FOO` to
+/// `FOO_END` is not offered, so a name matches one marker; the `-FOO`
+/// shorthand is refused, a leading `-` being outside the grammar.
 fn stop_marker_at(state: &mut State, idx: isize) -> Result<String, Error> {
     let what = "binary_with(): stop_at";
     if state.typ(idx) != LuaType::String {
@@ -1808,8 +1808,7 @@ fn stop_marker_at(state: &mut State, idx: isize) -> Result<String, Error> {
     let marker = text_at(state, idx, what)?;
     // Letters, digits and `_` only: a leading `@` or `%` is the FIFO's
     // counter or call-tag syntax, never a process-stream marker.
-    let exact = marker.len() > "_END".len()
-        && marker.ends_with("_END")
+    let exact = !marker.is_empty()
         && marker
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_');
@@ -1817,8 +1816,8 @@ fn stop_marker_at(state: &mut State, idx: isize) -> Result<String, Error> {
         return Err(raise_failed(
             state,
             format!(
-                "{what} {marker:?} is not an exact span-end marker: name the one that ends the \
-                 phase, as FOO_END"
+                "{what} {marker:?} is not a marker name: letters, digits and _, matched exactly, \
+                 as PASS1_END or PASS1_DONE"
             ),
         ));
     }

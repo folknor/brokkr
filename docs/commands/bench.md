@@ -490,12 +490,13 @@ local r = binary_with({
   first, then letters, digits, `_` or `-`) marking the call as an
   instrumented stage whose hotpath report brokkr captures (Hotpath capture,
   below). Any `HOTPATH_*` in `env` beside it is refused.
-- `stop_at` - an exact span-end marker name, `FOO_END`, of letters, digits
-  and `_` (so never the FIFO's `@` counter or `%` call-tag form): brokkr ends the
+- `stop_at` - a marker name of letters, digits and `_` (so never the
+  FIFO's `@` counter or `%` call-tag form), a span end such as `PASS1_END`
+  or a point marker such as `LOADED` alike, matched exactly: brokkr ends the
   child, its whole process group, once it sees the first marker of that
   name on the child's own marker stream (a call-tagged marker never stops
-  it). The lenient `FOO` and the `-FOO` shorthand `--stop` takes are
-  refused, since a bare name matches two markers. The result then carries
+  it). Unlike `--stop`, a bare `FOO` never falls back to `FOO_END`, so a
+  name matches one marker; the `-FOO` shorthand is refused. The result then carries
   `stopped_at`, that name, and no `exit` or `signal`: the marker wins over
   whatever the child did after it, a nonzero exit included, since the
   phase it ends was complete; `r:ok()` passes it, and the child is stored
