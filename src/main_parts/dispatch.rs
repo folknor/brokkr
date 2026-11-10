@@ -115,12 +115,16 @@ pub(super) fn run(
     // even after the policy that filtered it is gone.
     // A read-only invocation carries no tree, so nothing it reaches can
     // activate a policy on it.
-    context::set_configured_tree(detection.filter(|_| !cli::CommandSpec::reads_only(&cli.command)).map(|d| {
-        (
-            d.build_root.as_path().to_path_buf(),
-            crate::tree_policy::TreePolicy::of(&d.config),
-        )
-    }));
+    context::set_configured_tree(
+        detection
+            .filter(|_| !cli::CommandSpec::reads_only(&cli.command))
+            .map(|d| {
+                (
+                    d.build_root.as_path().to_path_buf(),
+                    crate::tree_policy::TreePolicy::of(&d.config),
+                )
+            }),
+    );
     let historical = spec.uses_worktree(&cli.command)?;
     // Registered before activation, so the watchdog sees every applied edit;
     // declared first, so it is dropped after the edits are undone.
@@ -1207,7 +1211,10 @@ fn run_project(
             // Host paths are config alone, so a `--commit` run asks the live
             // tree nothing before its worktree exists.
             let paths = match &target {
-                Some(_) => Some(context::bootstrap_config(dev_config, &detection.project_root)?),
+                Some(_) => Some(context::bootstrap_config(
+                    dev_config,
+                    &detection.project_root,
+                )?),
                 None => None,
             };
             let dataset = dataset.as_deref().unwrap_or(crate::cli::DEFAULT_DATASET);

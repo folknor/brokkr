@@ -93,7 +93,16 @@ pub(crate) fn run(
     let frozen = freeze(bench)?;
     let (config, labels, validated) = validate(name, bench, &view, &frozen, &arms)?;
     if args.dry_run {
-        return dry_run(name, args, measurement, bench, &frozen, detection, &mut arms, &labels);
+        return dry_run(
+            name,
+            args,
+            measurement,
+            bench,
+            &frozen,
+            detection,
+            &mut arms,
+            &labels,
+        );
     }
     // Opened, or for a results server probed, before anything is built or
     // run and before a stop is caught: a run with nowhere to go is never
@@ -160,30 +169,42 @@ pub(crate) fn run(
                 return Err(error);
             }
         };
-        if let Err(error) = destination.publish(&document) {
-            // The cause may then be stored nowhere: say it here.
-            if let store::RunOutcome::Failed { reason } = &document.outcome {
-                output::error(&format!("bench {shown} failed: {reason}"));
-            }
+        if let Err(error) = publish_arm(&mut destination, &document, &shown, started) {
             not_run(name, &labels[index + 1..]);
             return Err(error);
         }
-        report(&document, &shown, &destination.shown(), started);
-        match &document.outcome {
-            store::RunOutcome::Completed => {}
-            store::RunOutcome::Interrupted => {
-                not_run(name, &labels[index + 1..]);
-                return Err(DevError::Interrupted);
-            }
-            // An arm that failed, its build or worktree included, does not
-            // stop the rest.
-            store::RunOutcome::Failed { reason } => {
-                output::error(&format!("bench {shown} failed: {reason}"));
-                failed.push(label);
-            }
+        if matches!(document.outcome, store::RunOutcome::Failed { .. }) {
+            failed.push(label);
         }
     }
     summary(name, total, &failed)
+}
+
+/// Publish one arm's run and report it. An error stops the invocation: a
+/// publish that failed, or an interrupted arm. An arm that failed, its build
+/// or worktree included, is reported and does not stop the rest.
+fn publish_arm(
+    destination: &mut Destination,
+    document: &store::RunDocument,
+    shown: &str,
+    started: Instant,
+) -> Result<(), DevError> {
+    if let Err(error) = destination.publish(document) {
+        // The cause may then be stored nowhere: say it here.
+        if let store::RunOutcome::Failed { reason } = &document.outcome {
+            output::error(&format!("bench {shown} failed: {reason}"));
+        }
+        return Err(error);
+    }
+    report(document, shown, &destination.shown(), started);
+    match &document.outcome {
+        store::RunOutcome::Completed => Ok(()),
+        store::RunOutcome::Interrupted => Err(DevError::Interrupted),
+        store::RunOutcome::Failed { reason } => {
+            output::error(&format!("bench {shown} failed: {reason}"));
+            Ok(())
+        }
+    }
 }
 
 /// Where this host's iterations make their directories:
@@ -375,7 +396,11 @@ fn preflight_and_digest(
 /// `config()`'s table, the arm labels and each arm's `validate()` modules,
 /// once every arm validated: a bench whose `validated` params have no
 /// `validate()` to check them is refused first.
-type Validated = (std::sync::Arc<lua::Value>, Vec<String>, Vec<BTreeSet<String>>);
+type Validated = (
+    std::sync::Arc<lua::Value>,
+    Vec<String>,
+    Vec<BTreeSet<String>>,
+);
 
 fn validate(
     name: &str,
@@ -419,10 +444,19 @@ fn validate_arms(
             let host = validate::ValidateHost {
                 config: std::sync::Arc::clone(config),
             };
-            let (ran, _) =
-                lua::run_hook(lua::Hook::Validate, &frozen.script, &bound.preflight_args(), host);
+            let (ran, _) = lua::run_hook(
+                lua::Hook::Validate,
+                &frozen.script,
+                &bound.preflight_args(),
+                host,
+            );
             modules.push(ran.modules);
-            judge(lua::Hook::Validate, &shown(name, &labels[index]), ran.outcome, &mut refusals)?;
+            judge(
+                lua::Hook::Validate,
+                &shown(name, &labels[index]),
+                ran.outcome,
+                &mut refusals,
+            )?;
         }
         settle(modules, refusals)
     })();
@@ -509,17 +543,25 @@ fn dry_run(
         detection.project_root.as_path(),
         &detection.config_sources,
     )?;
-    let profile = bench.profile.clone().unwrap_or_else(|| {
-        crate::runnables::build_profile(detection.config.bin.as_ref(), None)
-    });
+    let profile = bench
+        .profile
+        .clone()
+        .unwrap_or_else(|| crate::runnables::build_profile(detection.config.bin.as_ref(), None));
     let features = build_features(&detection.config, bench, measurement);
     output::dry_run_msg(&format!(
         "bench {name}: would build {} ({profile}, features [{}]) at {}{}, {} of {}",
         bench.target.as_deref().unwrap_or("[bin] default"),
         features.join(", "),
         crate::db::short_uuid(commit.as_str()),
-        if args.commit.is_some() { " in a worktree" } else { "" },
-        output::count(usize::try_from(args.iterations.get()).unwrap_or(usize::MAX), "iteration"),
+        if args.commit.is_some() {
+            " in a worktree"
+        } else {
+            ""
+        },
+        output::count(
+            usize::try_from(args.iterations.get()).unwrap_or(usize::MAX),
+            "iteration"
+        ),
         output::count(arms.len(), "arm"),
     ));
     if frozen.script.has_preflight() {
@@ -592,11 +634,20 @@ fn preflight_arms(
             cwd: detection.project_root.as_path().to_path_buf(),
             since,
         };
-        let (ran, host) =
-            lua::run_hook(lua::Hook::Preflight, &frozen.script, &bound.preflight_args(), host);
+        let (ran, host) = lua::run_hook(
+            lua::Hook::Preflight,
+            &frozen.script,
+            &bound.preflight_args(),
+            host,
+        );
         since = host.since;
         modules.push(ran.modules);
-        judge(lua::Hook::Preflight, &shown(name, &labels[index]), ran.outcome, &mut refusals)?;
+        judge(
+            lua::Hook::Preflight,
+            &shown(name, &labels[index]),
+            ran.outcome,
+            &mut refusals,
+        )?;
     }
     settle(modules, refusals)
 }

@@ -207,7 +207,9 @@ fn profile_failure(measurement: store::Measurement, children: &[store::Child]) -
         .filter_map(|c| c.hotpath.as_ref())
         .peekable();
     if marked.peek().is_none() {
-        return Some(format!("{flag}: no call of the iteration was marked hotpath"));
+        return Some(format!(
+            "{flag}: no call of the iteration was marked hotpath"
+        ));
     }
     let failed: Vec<String> = marked
         .filter_map(|capture| {

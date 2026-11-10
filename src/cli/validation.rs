@@ -194,9 +194,15 @@ mod tests {
             assert!(bench.run_log_for(&run.command).is_some());
         }
         let library = parse(["brokkr", "library", "cat", "--dry-run"]).unwrap();
-        assert!(matches!(library.command, Command::Library { dry_run: true, .. }));
+        assert!(matches!(
+            library.command,
+            Command::Library { dry_run: true, .. }
+        ));
         assert!(CommandId::Library.spec().lock_for(&library.command) == LockPolicy::Blocking);
-        assert!(parse(["brokkr", "library", "--dry-run"]).is_err(), "it needs a scenario");
+        assert!(
+            parse(["brokkr", "library", "--dry-run"]).is_err(),
+            "it needs a scenario"
+        );
     }
 
     /// `brokkr bench`: brokkr's options before NAME, and nothing after NAME

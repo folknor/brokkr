@@ -676,7 +676,10 @@ fn the_pairing_class_separates_profiled_and_incidental_runs() {
     let mut alloc = profiled("0000000000000000000000000000000d");
     alloc.measurement = Measurement::Alloc;
     let alloc = alloc.pairing_key();
-    assert!(alloc.starts_with("[\"bench-pair-v2\",\"alloc\","), "{alloc}");
+    assert!(
+        alloc.starts_with("[\"bench-pair-v2\",\"alloc\","),
+        "{alloc}"
+    );
     assert_ne!(alloc, hotpath);
 }
 

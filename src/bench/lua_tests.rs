@@ -290,7 +290,10 @@ fn require_loads_a_module_once_and_records_what_it_asked_for() {
                 "local c = require('count')\nreturn { bump = c.bump }",
             ),
             ("launches", "binary('x')\nreturn {}"),
-            ("runner", "local M = {}\nfunction M.go() binary('x') end\nreturn M"),
+            (
+                "runner",
+                "local M = {}\nfunction M.go() binary('x') end\nreturn M",
+            ),
         ],
     );
     let (sample, _) = run_library(
@@ -342,7 +345,11 @@ fn require_loads_a_module_once_and_records_what_it_asked_for() {
         matches!(sample.outcome, SampleOutcome::Completed(_)),
         "{sample:?}"
     );
-    assert_eq!(host.calls.len(), 1, "an export called inside bench() may launch");
+    assert_eq!(
+        host.calls.len(),
+        1,
+        "an export called inside bench() may launch"
+    );
 }
 
 /// A cycle, a missing module, one that does not compile, one that returns

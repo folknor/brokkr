@@ -619,12 +619,7 @@ pub(crate) struct Hooked {
 /// Run a declared hook in a fresh State: the chunk's top level, then
 /// `hook(params, keys)`, which passes by returning nothing. Returns the host
 /// back.
-pub(crate) fn run_hook<H: Host>(
-    hook: Hook,
-    script: &Script,
-    args: &Args,
-    host: H,
-) -> (Hooked, H) {
+pub(crate) fn run_hook<H: Host>(hook: Hook, script: &Script, args: &Args, host: H) -> (Hooked, H) {
     let interrupt = ::dellingr::Interrupt::new();
     let (mut state, ok, marks) = match fresh_state::<H>(Some(interrupt.clone())) {
         Ok(fresh) => fresh,
@@ -1155,7 +1150,9 @@ impl Phase {
     /// Where a refused builtin was called, for its message.
     fn place(self) -> &'static str {
         match self {
-            Self::TopLevel => "at a chunk's top level (the script's, or a module's as require runs it)",
+            Self::TopLevel => {
+                "at a chunk's top level (the script's, or a module's as require runs it)"
+            }
             Self::Validate => "inside validate(), which only judges the params",
             Self::Preflight => "inside preflight(), before anything is built",
             Self::Bench => "inside bench()",

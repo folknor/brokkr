@@ -239,17 +239,6 @@ would churn every litehtml/sluggrs invocation in CI and docs.
 
 ## Backlog
 
-### `brokkr fmt` disagrees with the committed format (2026-11-09)
-
-The tree has no `rustfmt.toml`, yet much of it is formatted wider than
-rustfmt's default 100-column heuristics allow (single-line calls, one-line
-`if` expressions, long tuple types), so every `brokkr fmt` reflows a dozen
-untouched files (`src/clean.rs`, `src/env.rs`, `src/bench/runner/mod.rs`,
-...) and lines in touched ones, which then have to be hand-reverted before a
-commit. Seen on three consecutive landings. Wanted: either a `rustfmt.toml`
-that reproduces the committed style, or one `brokkr fmt` commit that settles
-the tree on the default.
-
 ### A results param filter cannot tell collections apart by comma (2026-11-09)
 
 `src/bench/store/list.rs` matches a param filter against the run's keys

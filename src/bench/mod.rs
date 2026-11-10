@@ -207,9 +207,7 @@ pub(crate) fn check_script(bench: &Bench) -> ScriptCheck {
                 .problems
                 .iter()
                 .map(|problem| finding(file, describe(problem)))
-                .chain(
-                    unvalidated(bench, names.validate).map(|problem| finding(file, problem)),
-                )
+                .chain(unvalidated(bench, names.validate).map(|problem| finding(file, problem)))
                 .collect(),
             // Worded as a finding is, so an inline script's line says whose
             // it is the same way.

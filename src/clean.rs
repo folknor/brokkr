@@ -235,8 +235,12 @@ pub(crate) fn cmd_clean(
     let worktree_root = build_root.as_path();
     let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root)?;
-    let host_target =
-        crate::config::host_target_dir(dev_config, &paths.hostname, project_root.as_path(), &pi.target_dir);
+    let host_target = crate::config::host_target_dir(
+        dev_config,
+        &paths.hostname,
+        project_root.as_path(),
+        &pi.target_dir,
+    );
     let project_root = project_root.as_path();
     let state = layout::ProjectState::new(project_root);
 

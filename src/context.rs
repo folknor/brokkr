@@ -90,7 +90,11 @@ pub(crate) fn bootstrap_config(
     project_root: &ProjectRoot,
 ) -> Result<config::ResolvedPaths, DevError> {
     let hostname = config::hostname()?;
-    Ok(config::resolve_paths(dev_config, &hostname, project_root.as_path()))
+    Ok(config::resolve_paths(
+        dev_config,
+        &hostname,
+        project_root.as_path(),
+    ))
 }
 
 /// One lock, path resolution and measurement provenance for a command.

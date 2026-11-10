@@ -108,7 +108,13 @@ pub(crate) fn cmd_env(
         &pi.target_dir,
     );
 
-    let info = collect(&paths, &target_dir, project, project_root.as_path(), sources);
+    let info = collect(
+        &paths,
+        &target_dir,
+        project,
+        project_root.as_path(),
+        sources,
+    );
     print(&info);
     crate::health::print_env(project_root.as_path());
     if let Some(note) = crate::config::unmatched_host_note(dev_config, &paths.hostname) {

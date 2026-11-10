@@ -307,8 +307,14 @@ pub fn run(
 
     // Generate merged PBF if any requested command needs it.
     let (merged_pbf, merged_cache, merged_from_unindexed) = if suite_needs_merged_pbf(commands)? {
-        let merged =
-            suite_merged_pbf(binary, pbf_path, osc_path, osc_seq, scratch_dir, project_root)?;
+        let merged = suite_merged_pbf(
+            binary,
+            pbf_path,
+            osc_path,
+            osc_seq,
+            scratch_dir,
+            project_root,
+        )?;
         (Some(merged.path), Some(merged.cache), merged.from_unindexed)
     } else {
         (None, None, false)

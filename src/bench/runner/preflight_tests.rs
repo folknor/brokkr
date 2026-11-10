@@ -21,7 +21,9 @@ fn run(source: &str, params: &lua::Args) -> lua::HookOutcome {
         cwd: root.clone(),
         since: Since::new(&root, "0".repeat(40).parse().unwrap()),
     };
-    lua::run_hook(lua::Hook::Preflight, &script(source), params, host).0.outcome
+    lua::run_hook(lua::Hook::Preflight, &script(source), params, host)
+        .0
+        .outcome
 }
 
 fn refused(outcome: lua::HookOutcome) -> String {

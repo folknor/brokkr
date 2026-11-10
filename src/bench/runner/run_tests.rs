@@ -755,7 +755,10 @@ fn alloc_runs_profile_with_their_alloc_features() {
     };
     assert_eq!(run.measurement, store::Measurement::Alloc);
     assert!(run.build.features.contains(&"profiled".to_owned()));
-    assert_eq!(run.iterations[0].record.as_ref().unwrap()["status"], "captured");
+    assert_eq!(
+        run.iterations[0].record.as_ref().unwrap()["status"],
+        "captured"
+    );
     assert!(run.pairing_key().contains("\"alloc\""));
 
     let ran = fixture.bench("alloc-leaky", "allocleaky", 1, &[]);
@@ -763,7 +766,11 @@ fn alloc_runs_profile_with_their_alloc_features() {
     ran.says("resolved profiling feature \"profiled\"");
 
     let ran = fixture.bench_as("unallocable", "profiled", 1, alloc, &[]);
-    assert!(ran.error().contains("sets no alloc_features"), "{}", ran.error());
+    assert!(
+        ran.error().contains("sets no alloc_features"),
+        "{}",
+        ran.error()
+    );
 }
 
 /// A preflight runs for every arm before anything is built: one arm's
@@ -826,10 +833,15 @@ fn validate_and_dry_run_judge_the_invocation_before_anything_is_built() {
             && error.contains("--mode typo is not a mode"),
         "{error}"
     );
-    assert!(!error.contains("preflight refused"), "validate runs first: {error}");
+    assert!(
+        !error.contains("preflight refused"),
+        "validate runs first: {error}"
+    );
     assert!(!ran.console.contains("cargo build"), "{}", ran.console);
 
-    let error = fixture.bench("choice", "checked", 1, &["--cache", "tepid"]).error();
+    let error = fixture
+        .bench("choice", "checked", 1, &["--cache", "tepid"])
+        .error();
     assert!(
         error.contains("holds \"tepid\", not among its choices: cold, warm"),
         "{error}"
@@ -841,10 +853,14 @@ fn validate_and_dry_run_judge_the_invocation_before_anything_is_built() {
     ran.says("arm 2/2 (mode=b): --cache cold --mode b");
     ran.says("preflight not run");
     assert!(!ran.console.contains("cargo build"), "{}", ran.console);
-    let error = fixture.dry("dry-typo", "checked", &["--mode", "typo"]).error();
+    let error = fixture
+        .dry("dry-typo", "checked", &["--mode", "typo"])
+        .error();
     assert!(error.contains("validate refused"), "{error}");
 
-    let error = fixture.bench("real", "checked", 1, &["--mode", "a"]).error();
+    let error = fixture
+        .bench("real", "checked", 1, &["--mode", "a"])
+        .error();
     assert!(error.contains("preflight refused"), "{error}");
     assert!(fixture.stored().is_empty(), "nothing is stored");
 
@@ -883,7 +899,10 @@ fn modules_from_bench_lib_are_required_and_stored_with_the_run() {
                 "local M = {}\nfunction M.check() binary_with({program = 'sh'}, '-c', 'true'):ok() end\nreturn M\n",
             ),
             ("lib/io/word.lua", "return { word = 'plain' }\n"),
-            ("lib/rules.lua", "local M = {}\nfunction M.check() end\nreturn M\n"),
+            (
+                "lib/rules.lua",
+                "local M = {}\nfunction M.check() end\nreturn M\n",
+            ),
             ("lib/unused.lua", "return {}\n"),
         ],
     );
