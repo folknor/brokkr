@@ -34,8 +34,13 @@
 //!   changes with and without one, so the cross-check runs only when no
 //!   object does.
 //!
-//! A delete is held to its identity and metadata with no body, which is how
-//! pbfhogg writes one; an empty metadata attribute is held to be omitted.
+//! A delete is held to its input body (tags, coordinates, refs, members)
+//! like any other change, as pbfhogg and osmium write one; a deleted node
+//! with no location is held to none, never 0 0; an empty metadata attribute
+//! is held to be omitted. pbfhogg refuses a deleted node with half a
+//! location or an unusable coordinate: such an input fails the arm on
+//! pbfhogg's exit, and no case here asserts the refusal, which pbfhogg's
+//! own tests cover.
 //! Section boundaries are not compared. Cases: the inputs, the inputs
 //! twice over (several inputs, the run that can spill), and fixtures brokkr
 //! writes that make the precedence rules observable, each required to show
@@ -204,9 +209,13 @@ struct Model {
     divergent: u64,
     /// Objects mixing changes with and without a timestamp.
     unordered: u64,
-    /// Input deletes, and surviving deletes, whose body pbfhogg drops.
+    /// Input deletes carrying a body, each compared in default mode.
     deletes_with_body: u64,
+    /// Surviving deletes: with a body, relations with members, and nodes
+    /// with no location.
     surviving_deletes_with_body: u64,
+    surviving_relation_deletes_with_members: u64,
+    surviving_unlocated_node_deletes: u64,
 }
 
 /// One object's history, folded change by change.
@@ -374,11 +383,18 @@ fn model(concatenated: &Path, dir: &Path) -> Result<Model, DevError> {
     let simplified = dir.join("expected-simplify.changes");
     let mut out = std::io::BufWriter::new(std::fs::File::create(&simplified)?);
     let mut surviving_deletes_with_body = 0;
+    let mut surviving_relation_deletes_with_members = 0;
+    let mut surviving_unlocated_node_deletes = 0;
     let mut sorted = emitted.finish()?;
     while let Some(survivor) = sorted.next_record()? {
         let change = records.at(survivor.offset)?;
-        if change.action == OscAction::Delete && change.has_body() {
-            surviving_deletes_with_body += 1;
+        if change.action == OscAction::Delete {
+            surviving_deletes_with_body += u64::from(change.has_body());
+            surviving_relation_deletes_with_members +=
+                u64::from(change.kind == OscKind::Relation && change.has_field('M'));
+            surviving_unlocated_node_deletes += u64::from(
+                change.kind == OscKind::Node && !change.has_field('x') && !change.has_field('y'),
+            );
         }
         std::io::Write::write_all(&mut out, change.record().as_bytes())?;
     }
@@ -395,6 +411,8 @@ fn model(concatenated: &Path, dir: &Path) -> Result<Model, DevError> {
         unordered,
         deletes_with_body,
         surviving_deletes_with_body,
+        surviving_relation_deletes_with_members,
+        surviving_unlocated_node_deletes,
     })
 }
 
@@ -621,7 +639,9 @@ struct Fixture {
     files: &'static [&'static str],
     regression: Option<(&'static str, i64, i64, i64)>,
     divergent: bool,
-    surviving_delete_body: bool,
+    /// Surviving deletes with a body, a relation's with members among
+    /// them, and a deleted node with no location.
+    delete_bodies: bool,
 }
 
 const HEAD: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<osmChange version=\"0.6\" generator=\"brokkr verify\">\n";
@@ -649,11 +669,13 @@ const FIXTURES: &[Fixture] = &[
              <node id=\"8\" version=\"3\" timestamp=\"2024-01-03T00:00:00Z\" changeset=\"4\" uid=\"3\" user=\"late\" lat=\"1.5\" lon=\"1\"><tag k=\"x\" v=\"2\"/></node>\n\
              </modify>\n<delete>\n\
              <node id=\"12\" version=\"3\" timestamp=\"2024-01-01T00:00:00Z\" lat=\"3\" lon=\"3\"><tag k=\"amenity\" v=\"bench\"/></node>\n\
+             <node id=\"13\" version=\"2\" timestamp=\"2024-01-01T00:00:00Z\"/>\n\
+             <relation id=\"21\" version=\"4\" timestamp=\"2024-01-01T00:00:00Z\"><member type=\"way\" ref=\"6\" role=\"outer\"/><member type=\"node\" ref=\"12\" role=\"\"/><member type=\"relation\" ref=\"20\" role=\"sub\"/><tag k=\"type\" v=\"multipolygon\"/></relation>\n\
              </delete>\n",
         ],
         regression: None,
         divergent: true,
-        surviving_delete_body: true,
+        delete_bodies: true,
     },
     Fixture {
         name: "backward",
@@ -663,7 +685,7 @@ const FIXTURES: &[Fixture] = &[
         ],
         regression: Some(("node", 1, 1, 2)),
         divergent: true,
-        surviving_delete_body: false,
+        delete_bodies: false,
     },
     Fixture {
         name: "unversioned",
@@ -674,7 +696,7 @@ const FIXTURES: &[Fixture] = &[
              </modify>\n"],
         regression: Some(("node", 1, 8, 9)),
         divergent: true,
-        surviving_delete_body: false,
+        delete_bodies: false,
     },
     Fixture {
         name: "first-regression",
@@ -690,7 +712,7 @@ const FIXTURES: &[Fixture] = &[
         ],
         regression: Some(("node", 9, 1, 2)),
         divergent: true,
-        surviving_delete_body: false,
+        delete_bodies: false,
     },
 ];
 
@@ -707,8 +729,16 @@ fn fixture_shows(fixture: &Fixture, model: &Model) -> Result<(), DevError> {
     if fixture.divergent && model.divergent == 0 {
         lacks.push("no object where osmium -s keeps another change".to_owned());
     }
-    if fixture.surviving_delete_body && model.surviving_deletes_with_body == 0 {
-        lacks.push("no surviving delete with a body".to_owned());
+    if fixture.delete_bodies {
+        if model.surviving_deletes_with_body == 0 {
+            lacks.push("no surviving delete with a body".to_owned());
+        }
+        if model.surviving_relation_deletes_with_members == 0 {
+            lacks.push("no surviving relation delete with members".to_owned());
+        }
+        if model.surviving_unlocated_node_deletes == 0 {
+            lacks.push("no surviving node delete without a location".to_owned());
+        }
     }
     if lacks.is_empty() {
         Ok(())
@@ -836,8 +866,8 @@ pub fn run(harness: &VerifyHarness, oscs: &[PathBuf]) -> Result<Findings, DevErr
          inputs concatenated and --simplify as the last change per object by input position, \
          grouped create, modify, delete in (kind, ID) order, comparing action labels, metadata \
          attributes (an empty one held to be omitted) and osmium's decoding record for record, \
-         a delete held to its identity and metadata with no body ({} input deletes carried \
-         one), section boundaries not compared, --jobs 1 as the automatic workers; on fixtures, \
+         a delete held to its input body ({} bodied input deletes checked, a deleted node \
+         without a location held to none), section boundaries not compared, --jobs 1 as the automatic workers; on fixtures, \
          version regressions refused naming the first by position, unversioned changes \
          claiming nothing, --allow-version-regression and equal versions decided by position; \
          {cross}",

@@ -1329,12 +1329,17 @@ on either side. The XML side carries what osmium cannot: the container's
 action (libosmium's writer derives create or modify from the version) and
 the metadata attributes as written. Comparisons are record for record: the
 action, the metadata attributes, and osmium's decoding of the object. The
-expected side is read as pbfhogg writes a change, a delete as its identity
-and metadata with no body (tags, coordinates, refs or members) and an empty
-attribute as none, and the actual side is held to that, so pbfhogg's output
-must carry no delete body and no empty attribute. pbfhogg's user
-documentation does not say it drops a delete's body, which osmium keeps;
-each PASS line counts the deletes concerned. Section boundaries are not
+expected side is read as pbfhogg writes a change, an empty attribute as
+none, and the actual side is held to that, so pbfhogg's output must carry no
+empty attribute. A delete keeps its body (tags, coordinates, refs and
+members), as pbfhogg and osmium write it, and is compared like any change;
+both sides being osmium's decoding, pbfhogg's normal form (attribute order,
+coordinate spelling, children before tags) is not compared, while tag,
+way-ref and member order are, and a deleted node with no location must come
+out with none, not 0 0. Each PASS line counts the bodied deletes checked.
+pbfhogg refuses a deleted node with half a location or an unusable
+coordinate; an input carrying one fails the arm on pbfhogg's exit, and no
+case asserts the refusal. Section boundaries are not
 compared. Each command also runs with `--jobs 1` to a plain `.osc`, whose
 decompressed content must equal the automatic run's `.osc.gz`, which
 pbfhogg promises for default `merge-changes` and an OSC `tags-filter`.
@@ -1367,7 +1372,8 @@ command), whose replay is a regression wherever an object's version
 advances within the inputs; and fixtures brokkr writes: equal-version
 changes decided by position (modify then delete, delete then modify, two
 modifies whose bodies, metadata and timestamps oppose their order), a create
-at version 5 and deletes with bodies; a backward pair, refused and then
+at version 5 and surviving deletes with bodies, a relation's members among
+them, beside a deleted node with no location; a backward pair, refused and then
 allowed; a v9, unversioned, v8 history, refused on the v8; and two objects
 regressing in the opposite order to their IDs, refused on the earlier. Each
 fixture's model must show what the fixture exists for, or the check errors.

@@ -23,11 +23,14 @@
 //! so a record is one line and a position is its line number.
 //!
 //! [`compare`] reads the expected side as pbfhogg's OSC writers render an
-//! input change: a delete is written as its identity and metadata only, so
-//! the expected record drops its body (tags, coordinates, refs, members),
-//! and an empty metadata string is written as no attribute. The projection
-//! is applied to the expected side only: the actual output must then carry
-//! no delete body and no empty attribute.
+//! input change: an empty metadata string is written as no attribute, and
+//! the projection is applied to the expected side only, so the actual output
+//! must carry no empty attribute. Every change keeps its body, a delete's
+//! included (tags, coordinates, refs, members, as osmium keeps them), and
+//! both sides are osmium's decoding, so pbfhogg's normal form (attribute
+//! order, coordinate spelling, tags written after children) is not compared
+//! while tag, way-ref and member order are. A deleted node with no location
+//! has empty `x` and `y` on both sides; one written as 0 0 differs.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
@@ -50,12 +53,17 @@ pub(super) struct Change {
 }
 
 impl Change {
-    /// Whether the OPL line carries any of the body fields pbfhogg drops
-    /// from a delete.
+    /// Whether the OPL line carries any body field (tags, coordinates, way
+    /// refs, members) with a value.
     pub(super) fn has_body(&self) -> bool {
         opl_fields(&self.opl)
             .skip(1)
             .any(|field| is_body_field(field) && field.len() > 1)
+    }
+
+    /// Whether the OPL line carries the body field `letter` with a value.
+    pub(super) fn has_field(&self, letter: char) -> bool {
+        opl_field(&self.opl, letter).is_some_and(|v| !v.is_empty())
     }
 
     /// The OPL `v` field (`0` when OPL prints none).
@@ -92,27 +100,12 @@ impl Change {
             user: empty_is_absent(&self.meta.user),
             visible: empty_is_absent(&self.meta.visible),
         };
-        let opl = if self.action == OscAction::Delete {
-            opl_fields(&self.opl)
-                .enumerate()
-                .map(|(i, field)| {
-                    if i > 0 && is_body_field(field) {
-                        &field[..1]
-                    } else {
-                        field
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(" ")
-        } else {
-            self.opl.clone()
-        };
         Self {
             action: self.action,
             kind: self.kind,
             id: self.id,
             meta,
-            opl,
+            opl: self.opl.clone(),
         }
     }
 
@@ -638,15 +631,15 @@ mod tests {
     }
 
     #[test]
-    fn pbfhogg_writes_a_delete_without_its_body_and_an_empty_string_as_absent() {
+    fn pbfhogg_writes_a_delete_with_its_body_and_an_empty_string_as_absent() {
         let d = change(
             OscAction::Delete,
             "w9 v2 dD c0 t2020-01-01T00:00:00Z i0 u Ta=b Nn1,n2",
         );
         assert!(d.has_body());
+        assert!(d.has_field('N') && !d.has_field('M'));
         let written = d.as_pbfhogg_writes();
-        assert_eq!(written.opl, "w9 v2 dD c0 t2020-01-01T00:00:00Z i0 u T N");
-        assert!(!written.has_body());
+        assert_eq!(written.opl, d.opl);
         assert_eq!(written.meta.changeset, None);
         assert_eq!(written.meta.user, d.meta.user);
         let m = change(OscAction::Modify, "n1 v2 dV c0 t i0 u Ta=b x1 y2");
@@ -678,10 +671,18 @@ mod tests {
         std::fs::write(&expected, a.record()).unwrap();
         std::fs::write(&actual, b.record()).unwrap();
         assert!(compare(&expected, &actual).unwrap().is_equal());
-        // The projection is the expected side's only: an actual delete that
-        // kept its body differs.
+        // The projection is the expected side's only: an actual empty
+        // attribute differs.
         std::fs::write(&actual, a.record()).unwrap();
         assert!(!compare(&expected, &actual).unwrap().is_equal());
+        // A delete that lost its body, or a missing location written as
+        // 0 0, differs.
+        for opl in ["n1 v2 dD c0 t i0 u T x y", "n1 v2 dD c0 t i0 u Tx=y x0 y0"] {
+            let mut lost = b.clone();
+            lost.opl = opl.into();
+            std::fs::write(&actual, lost.record()).unwrap();
+            assert!(!compare(&expected, &actual).unwrap().is_equal());
+        }
         b.action = OscAction::Modify;
         std::fs::write(&actual, format!("{}{}", b.record(), b.record())).unwrap();
         let cmp = compare(&expected, &actual).unwrap();

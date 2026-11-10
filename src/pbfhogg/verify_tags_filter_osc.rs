@@ -15,7 +15,9 @@
 //! output must then be those changes in one create, one modify and one
 //! delete section, each holding its node, way and relation changes in that
 //! order, each kind in input order, compared record for record with a
-//! delete held to its identity and metadata, as pbfhogg writes it. A
+//! delete held to its input body, as pbfhogg and osmium write it. The
+//! cases are the given change file's, so how many bodied deletes are
+//! checked depends on it. A
 //! `--jobs 1` run must write the same content as the automatic one, which
 //! pbfhogg promises at any `-j`.
 
@@ -189,10 +191,10 @@ pub fn run(harness: &VerifyHarness, osc: &Path) -> Result<Findings, DevError> {
          tags-filter -R keeps it from osmium's reading of the change file, in create, modify \
          and delete sections of node, way and relation changes in input order, comparing action \
          labels, metadata attributes (an empty one held to be omitted) and osmium's decoding \
-         record for record, a delete held to its identity and metadata with no body, section \
-         boundaries not compared, --jobs 1 as the automatic workers; over the cases {} creates, \
-         {} modifies and {} deletes kept, {} of the deletes matched by osmium's filter and {} \
-         carrying a body",
+         record for record, a delete held to its input body, section boundaries not compared, \
+         --jobs 1 as the automatic workers; over the cases {} creates, {} modifies and {} \
+         deletes kept, {} of the deletes matched by osmium's filter and {} bodied deletes \
+         checked",
         kept.creates, kept.modifies, kept.deletes, kept.matched_deletes, kept.deletes_with_body
     )))
 }
