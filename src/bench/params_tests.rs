@@ -724,6 +724,75 @@ fn help_lists_keys_under_the_parents_given_or_default() {
     assert!(err.contains("norway"), "{err}");
 }
 
+/// `default_only` binds the one key its table holds in each arm, recorded
+/// as any bound key; a table with none or several is refused naming its
+/// keys, and the command line still chooses (brokkr#144).
+#[test]
+fn default_only_binds_the_sole_key_or_refuses() {
+    let f = fixture(
+        "default-only",
+        r#"
+[bench.b]
+script = "function bench() end"
+params.dataset = { from = "data.sets", default = "dk" }
+params.osc = { from = "data.sets.{dataset}", default_only = true }
+
+[data.sets.dk.4705]
+[data.sets.se.1]
+[data.sets.se.2]
+[data.sets.no]
+"#,
+    );
+    assert_eq!(arms(&f, &[]).remove(0)["osc"], ["4705"]);
+    let err = refusal(&f, &["--dataset", "se"]);
+    assert!(
+        err.contains("--osc defaults to the only key of data.sets.se, which holds 2 (1, 2)"),
+        "{err}"
+    );
+    let err = refusal(&f, &["--dataset", "no"]);
+    assert!(err.contains("which holds 0 (none)"), "{err}");
+    assert_eq!(
+        arms(&f, &["--dataset", "se", "--osc", "2"]).remove(0)["osc"],
+        ["2"]
+    );
+    // Fanned over parents, each arm is judged on its own.
+    let err = refusal(&f, &["--dataset", "dk,se"]);
+    assert!(
+        err.contains("data.sets.se") && !err.contains("data.sets.dk"),
+        "{err}"
+    );
+
+    let dir = crate::test_scratch::scratch("bench_params", "default-only-load");
+    for (decl, needle) in [
+        ("{ free = true, default_only = true }", "has no from"),
+        (
+            "{ from = \"data.sets\", many = true, default_only = true }",
+            "binds a collection",
+        ),
+        (
+            "{ from = \"data.sets\", default = \"dk\", default_only = true }",
+            "default_only and default exclude each other",
+        ),
+        (
+            "{ from = \"data.sets\", required = true, default_only = true }",
+            "default_only and required exclude each other",
+        ),
+    ] {
+        std::fs::write(
+            dir.join("brokkr.toml"),
+            format!(
+                "project = \"p\"\n[bench.b]\nscript = \"function bench() end\"\nparams.x = {decl}\n"
+            ),
+        )
+        .unwrap();
+        let err = crate::config::load_with_sources(&dir)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains(needle), "{decl}: {err}");
+    }
+}
+
 /// `split = false` takes each occurrence, and the default, whole: a value
 /// may hold a `,`, repeats still fan out or fill a collection, and `all` and
 /// ranges keep their meaning (brokkr#141).

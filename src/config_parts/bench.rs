@@ -84,6 +84,10 @@ pub struct Param {
     /// The value used when the command line gives none, in the syntax the
     /// command line takes.
     pub default: Option<String>,
+    /// `default_only = true`: absent from the command line, a `from` param
+    /// binds the one key its table holds, and is refused, naming the keys,
+    /// when it holds none or several. Never beside `default` or `required`.
+    pub default_only: bool,
     /// A collection: one sample binds the whole list of values.
     pub many: bool,
     /// Whether a value is a list split on `,` (the default). `split = false`
@@ -220,6 +224,8 @@ struct RawParam {
     #[serde(default)]
     free: bool,
     default: Option<String>,
+    #[serde(default)]
+    default_only: bool,
     #[serde(default)]
     many: bool,
     split: Option<bool>,
@@ -402,15 +408,42 @@ fn parse_param(
              absent; remove one"
         ));
     }
+    if raw.default_only {
+        check_default_only(at, &domain, raw.many, raw.default.is_some(), raw.required)?;
+    }
     Ok(Param {
         help: raw.help,
         domain,
         default: raw.default,
+        default_only: raw.default_only,
         many: raw.many,
         split,
         required: raw.required,
         origin,
     })
+}
+
+/// `default_only` on a scalar `from` param with neither `default` nor
+/// `required`, the only shape whose absence it can fill with one key.
+fn check_default_only(
+    at: &str,
+    domain: &Domain,
+    many: bool,
+    default: bool,
+    required: bool,
+) -> Result<(), String> {
+    let clash = if !matches!(domain, Domain::From(_)) {
+        "default_only takes the one key of a `from` table; this param has no from"
+    } else if many {
+        "default_only binds one key, and a `many` param binds a collection"
+    } else if default {
+        "default_only and default exclude each other - remove one"
+    } else if required {
+        "default_only and required exclude each other - a defaulted param is never absent"
+    } else {
+        return Ok(());
+    };
+    Err(format!("{at}: {clash}"))
 }
 
 /// A `choices` list every value of which the command line can give: not

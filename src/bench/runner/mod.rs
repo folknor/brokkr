@@ -773,6 +773,9 @@ fn describe(bench: &Bench, detection: &Detection, given: &params::Given, view: &
         if let Some(default) = &param.default {
             line.push_str(&format!(" [default {default}]"));
         }
+        if param.default_only {
+            line.push_str(" [default the only key]");
+        }
         if param.required {
             line.push_str(" (required)");
         }

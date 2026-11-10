@@ -211,6 +211,12 @@ A param with none of them, or with two, is refused at load. The rest:
 - `default` - the value when the command line gives none, written as the
   command line would write it, so a list, a range or `all` too (Binding
   params, below).
+- `default_only` - `true`, on a `from` param that is not `many`: the
+  command line giving none, the param binds the one key its table holds, in
+  each arm under that arm's parents, recorded as any bound key. A table
+  holding no key or several is refused, naming them, so a second key added
+  later never silently changes what a run binds. Beside `default` or
+  `required` it is refused at load.
 - `many` - `true` makes the param a collection, binding a list of values to
   one sample; any other param given several values fans out, one run per
   value.
@@ -227,7 +233,8 @@ Refused at load: an unknown key; no domain or two; a `choices` list as
 above, and a `default` holding a value not among its choices or one twice,
 so a default that loads binds; a blank
 `default`; `required = true`
-beside a `default`, which would never be used; a `from` path with an
+beside a `default`, which would never be used; `default_only` on a param
+without `from`, on a `many` one, or beside `default` or `required`; a `from` path with an
 empty segment, or with `{` or `}` anywhere but around a whole segment; a
 `{NAME}` that is not a param of the bench; params whose `from` paths reference
 each other in a cycle; and a `{NAME}` naming a `many` param, since a path takes
@@ -320,6 +327,8 @@ dependents are not judged under it):
   used, so a dependent default (`indexed`) may be missing under some
   parents as long as the command line then gives the param, and is refused
   when it is used under any parent that lacks it;
+- a `default_only` param the command line does not give whose table, in
+  some arm, holds no key or several, with the keys it holds listed;
 - a key given twice, after lists, repeats, ranges and `all` are expanded;
   a range end that is not a canonical decimal, a range running backwards, a
   range with keys missing (the first few named, and how many more), and

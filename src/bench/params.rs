@@ -387,9 +387,13 @@ fn expand(
             continue;
         }
         let param = &bench.params[name];
+        // `default_only`: absent from the command line, the param binds the
+        // one key its table holds in each arm, judged there below.
+        let sole = param.default_only && !given.values.contains_key(name);
         let (raw, source): (Vec<String>, Source) = match (given.values.get(name), &param.default) {
             (Some(values), _) => (values.clone(), Source::Given),
             (None, Some(default)) => (vec![default.clone()], Source::Default),
+            (None, None) if sole => (vec!["all".to_owned()], Source::Default),
             (None, None) if param.required => {
                 refusals.push(absent(bench, name, param, &mut partials, view));
                 continue;
@@ -397,17 +401,7 @@ fn expand(
             (None, None) => continue,
         };
         let value = spelled(name, param, &raw);
-        let refuse = |why: String| Refusal {
-            message: match source {
-                Source::Given => format!("bench {}: --{name} {value} {why}", bench.name),
-                Source::Default => format!(
-                    "bench {}: --{name}'s default {value:?} {why}; give --{name} on the command \
-                     line or fix the default",
-                    bench.name
-                ),
-            },
-            source,
-        };
+        let refuse = |why: String| refusal(&bench.name, name, &value, source, &why);
         let items = match items(param, &raw) {
             Ok(items) => items,
             Err(why) => {
@@ -430,9 +424,18 @@ fn expand(
                 next.push(partial);
                 continue;
             }
-            match resolve(name, param, &items, &partial.bound, view) {
-                Err(why) => {
-                    refusals.push(refuse(why));
+            let resolved = resolve(name, param, &items, &partial.bound, view)
+                .map_err(refuse)
+                .and_then(|(from, values)| {
+                    if sole && values.len() != 1 {
+                        Err(not_sole(bench, name, from.as_deref(), &values))
+                    } else {
+                        Ok((from, values))
+                    }
+                });
+            match resolved {
+                Err(refusal) => {
+                    refusals.push(refusal);
                     partial.unavailable.insert(name.to_owned());
                     next.push(partial);
                 }
@@ -477,6 +480,41 @@ fn expand(
         Ok(partials.into_iter().map(|p| p.bound).collect())
     } else {
         Err(refusals)
+    }
+}
+
+/// `--name value` refused for `why`, worded for where the value came from.
+fn refusal(bench: &str, name: &str, value: &str, source: Source, why: &str) -> Refusal {
+    Refusal {
+        message: match source {
+            Source::Given => format!("bench {bench}: --{name} {value} {why}"),
+            Source::Default => format!(
+                "bench {bench}: --{name}'s default {value:?} {why}; give --{name} on the command \
+                 line or fix the default"
+            ),
+        },
+        source,
+    }
+}
+
+/// A `default_only` param whose table, in one arm, holds no key or several:
+/// the command line must choose, and the keys are named.
+fn not_sole(bench: &Bench, name: &str, from: Option<&[String]>, values: &[BoundValue]) -> Refusal {
+    let keys: Vec<&str> = values.iter().map(|v| v.key.as_str()).collect();
+    let held = if keys.is_empty() {
+        "none".to_owned()
+    } else {
+        keys.join(", ")
+    };
+    Refusal {
+        message: format!(
+            "bench {}: --{name} defaults to the only key of {}, which holds {} ({held}); give \
+             --{name} on the command line",
+            bench.name,
+            from.map_or_else(String::new, view::shown),
+            keys.len(),
+        ),
+        source: Source::Given,
     }
 }
 
