@@ -408,6 +408,52 @@ fn a_stop_marker_ends_the_child_and_is_its_ending() {
     );
 }
 
+/// `measured = true` marks the one child whose wall is the iteration's
+/// result; an unmarked call stays unmarked, and a second marked call fails
+/// the iteration before it launches.
+#[test]
+fn a_measured_call_marks_its_child_and_a_second_fails() {
+    let _lock = crate::test_scratch::process_global_lock();
+    let root = crate::test_scratch::scratch("bench_runner", "measured");
+    let container = root.join("iterations");
+    let once = script(
+        "function bench()\n\
+           binary('-c', 'true')\n\
+           binary_with({measured = true}, '-c', 'true'):ok()\n\
+         end",
+    );
+    let (iteration, _, _, _) = run_iteration(setup(&once, &root, &container));
+    let marks: Vec<bool> = iteration.children.iter().map(|c| c.measured).collect();
+    assert_eq!(marks, [false, true]);
+    assert_eq!(
+        iteration.result_wall_us(),
+        Some(iteration.children[1].wall_us)
+    );
+
+    let twice = script(
+        "function bench()\n\
+           binary_with({measured = true}, '-c', 'true')\n\
+           binary_with({measured = true}, '-c', 'true')\n\
+         end",
+    );
+    let (iteration, _, _, _) = run_iteration(setup(&twice, &root, &container));
+    let reason = failure(&iteration);
+    assert!(reason.contains("a second call marked measured"), "{reason}");
+    assert_eq!(iteration.children.len(), 1, "the second never launched");
+
+    let typo = script(
+        "function bench()\n\
+           binary_with({measured = 'yes'}, '-c', 'true')\n\
+         end",
+    );
+    let (iteration, _, _, _) = run_iteration(setup(&typo, &root, &container));
+    assert!(
+        failure(&iteration).contains("measured is a string: expected a boolean"),
+        "{}",
+        failure(&iteration)
+    );
+}
+
 fn capture(child: &store::Child) -> &store::HotpathCapture {
     child.hotpath.as_ref().unwrap()
 }

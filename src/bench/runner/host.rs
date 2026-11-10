@@ -452,6 +452,9 @@ impl IterationHost {
         let finished = admitted.finish_observed(&mut || open.pump(&mut fifo));
         let run = open.finish(&mut fifo, finished.is_ok());
         self.keep_child(program_str, argv, &env, pid, start, &run, executable);
+        if let Some(child) = self.children.last_mut() {
+            child.measured = call.measured;
+        }
         let stderr = self.keep_stderr(&stderr_spool, finished.is_ok());
         // Judged after every launch that was reaped, whatever its exit, and
         // stored on the child before anything below can end the call.
@@ -583,6 +586,7 @@ impl IterationHost {
             hotpath: None,
             executable,
             stderr: None,
+            measured: false,
         });
     }
 }
@@ -726,6 +730,8 @@ struct Declared {
     stop_at: Option<String>,
     /// The external program the call runs in place of the snapshot.
     program: Option<String>,
+    /// The call whose child's wall is the iteration's result.
+    measured: bool,
 }
 
 /// What the script sees of a finished child, or why the sample ends.
@@ -802,6 +808,13 @@ impl lua::Host for IterationHost {
 
     fn binary(&mut self, words: Vec<Word>, options: CallOptions) -> Result<CallOutcome, Abort> {
         stopping()?;
+        if options.measured && self.children.iter().any(|c| c.measured) {
+            return Err(Abort::Failed(
+                "binary_with(): a second call marked measured: an iteration's result is one \
+                 child's wall"
+                    .into(),
+            ));
+        }
         let mut argv = Vec::with_capacity(words.len());
         let mut declared = Declared {
             argv: Vec::new(),
@@ -812,6 +825,7 @@ impl lua::Host for IterationHost {
             hotpath: options.hotpath,
             stop_at: options.stop_at,
             program: options.program,
+            measured: options.measured,
         };
         for word in words {
             match word {

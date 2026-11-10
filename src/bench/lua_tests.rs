@@ -745,6 +745,7 @@ fn binary_with_takes_options_then_binarys_arguments() {
             hotpath: None,
             stop_at: None,
             program: Some("lua5.4".into()),
+            measured: false,
         }
     );
     assert_eq!(host.options[0], CallOptions::default());

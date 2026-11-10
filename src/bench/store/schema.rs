@@ -268,8 +268,15 @@ CREATE TABLE child_stderr (
 ) STRICT;
 ";
 
+/// Version 7: the measured child. A child marked `measured` is the one whose
+/// wall is its iteration's result; every child stored before is unmarked.
+const V7: &str = "
+ALTER TABLE children ADD COLUMN measured INTEGER NOT NULL DEFAULT 0
+    CHECK (measured IN (0, 1));
+";
+
 /// The chain. Shipped steps are frozen; append only.
-pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6];
+pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7];
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 

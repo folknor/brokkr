@@ -448,7 +448,7 @@ row missing its key:
 is total whatever order runs were stored in), at most `-n`: uuid, start
 (UTC), the commit's first eight digits (`-dirty` for a run of a dirty tree),
 the bench (as renamed, `concat (as cat)` for a run stored as `cat`), the result (the fastest iteration's wall at microsecond
-precision, or `failed` / `interrupted` for a run without one), its params,
+precision, a marked `measured` call's wall for a run that marked one, or `failed` / `interrupted` for a run without one), its params,
 then a verdict column when some run has a verdict other than nil and an env
 column when some run captured variables, and a `hidden` column when some
 run listed is hidden (`retired`, `invalidated`, or both; Marks, below).
@@ -460,7 +460,9 @@ labelled block: identity (the bench as renamed, with the name it was
 stored as when that differs), a `hidden` field per mark hiding the run (what,
 when, on which host, why, and the mark's uuid), params (with each value's `from` path and file
 digest), the outcome, the result's wall with every iteration's in execution
-order and its verdict (nil, or the string quoted, so `""` stays visible),
+order (each the measured call's wall when the run marked one, said so, with
+the block's wall beside it in the iteration lines and the child flagged
+`(measured)`) and its verdict (nil, or the string quoted, so `""` stays visible),
 host, conditions, captured env, the build asked for and as resolved, the
 config digest, brokkr's argv, a `sidecar` field naming the `brokkr sidecar`
 invocation that reads a child's samples, markers and counters (`brokkr man

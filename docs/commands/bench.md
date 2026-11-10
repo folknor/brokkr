@@ -134,8 +134,8 @@ end
 
 - Its children are external programs only: `binary_with({program = ...})`
   (`binary_with()`), since the build does not exist yet; `binary()` and a
-  call without `program` are refused, and so are `hotpath`, `stop_at` and
-  every handle. A program that cannot be found or executed is a result,
+  call without `program` are refused, and so are `hotpath`, `stop_at`,
+  `measured` and every handle. A program that cannot be found or executed is a result,
   not a failure: `r.start_error` says why, with no `exit`, `signal` or
   output, and `r:ok()` fails naming it. Each child runs on a launch lease
   of its own that reserves nothing and is inherited by the child, so the
@@ -327,6 +327,13 @@ measured: brokkr's own work for each `binary()` call (admitting it,
 preparing its spool and marker FIFO, releasing it) is inside the wall, and
 each child's own wall and start offset are recorded beside it.
 
+An iteration is ranked on that block wall unless one of its calls is marked
+`measured = true` (`binary_with()`): then its result is that child's wall,
+from launch to reap, so setup children, cache preparation and Lua
+bookkeeping fall outside it. Process startup is still inside: a workload
+that must leave it out reports its own figure in `record`, which is shown,
+never ranked on. At most one call per iteration may be marked.
+
 `bench()` returning nothing completes the iteration with a nil verdict, a
 string completes it with that verdict, anything else fails it. Then `record`
 is read: a table with string keys, below it tables (string keys, or a list
@@ -335,7 +342,10 @@ deep; anything else, a handle included, fails the iteration (JSON, below). `reco
 
 The run stops at the first iteration that does not complete. All completed
 with one verdict, the run completed and its result is the first fastest
-iteration; iterations that disagree on the verdict fail the run.
+iteration; iterations that disagree on the verdict fail the run, and so do
+iterations of which some marked a `measured` call and others did not. A run
+ranked on a measured call pairs only with runs ranked the same way, so
+`brokkr results --compare` never sets a child's wall against a block's.
 
 ## The script's builtins
 
@@ -513,6 +523,9 @@ local r = binary_with({
   measurement; a preflight checks presence beforehand (Preflight).
   Comparing against a reference implementation is the case:
   `binary_with({program = "lua5.4"}, script)` beside `binary(script)`.
+- `measured` - a boolean; `true` makes this child's wall the iteration's
+  result (An iteration). A second marked call in one iteration fails it
+  before launching, and the child is stored with the mark.
 
 Any other key is refused, so a misspelt `writes` never runs a call with
 less declared than meant.

@@ -516,9 +516,13 @@ fn result_verdict(run: &StoredRun) -> Option<Option<&String>> {
     }
 }
 
-/// The result's wall in microseconds.
+/// The result's wall in microseconds: the measured child's when the run
+/// marked one, else the block's.
 fn result_wall(run: &StoredRun) -> Option<i64> {
-    run.doc.iterations.get(run.best_iteration?)?.wall_us
+    run.doc
+        .iterations
+        .get(run.best_iteration?)?
+        .result_wall_us()
 }
 
 /// Microseconds as milliseconds with three decimals, the precision every

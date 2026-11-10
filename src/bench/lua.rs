@@ -390,6 +390,8 @@ pub(crate) struct CallOptions {
     /// `program = NAME`: run this external program instead of the built
     /// snapshot, a name looked up on the child's `PATH` or a path.
     pub(crate) program: Option<String>,
+    /// `measured = true`: this child's wall is the iteration's result.
+    pub(crate) measured: bool,
 }
 
 /// What one `binary()` call hands back to the script.
@@ -1682,7 +1684,7 @@ fn options_at(state: &mut State, idx: isize) -> Result<CallOptions, Error> {
             state,
             format!(
                 "binary_with()'s first argument is a {}: expected a table of options \
-                 (env, reads, writes, stdin, hotpath, stop_at, program)",
+                 (env, reads, writes, stdin, hotpath, stop_at, program, measured)",
                 state.typ(idx).as_str()
             ),
         ));
@@ -1719,6 +1721,18 @@ fn options_at(state: &mut State, idx: isize) -> Result<CallOptions, Error> {
             "hotpath" => options.hotpath = Some(stage_at(state, value_idx)?),
             "stop_at" => options.stop_at = Some(stop_marker_at(state, value_idx)?),
             "program" => options.program = Some(program_at(state, value_idx)?),
+            "measured" => {
+                if state.typ(value_idx) != LuaType::Boolean {
+                    return Err(raise_failed(
+                        state,
+                        format!(
+                            "binary_with(): measured is a {}: expected a boolean",
+                            state.typ(value_idx).as_str()
+                        ),
+                    ));
+                }
+                options.measured = state.to_boolean(value_idx);
+            }
             _ => {
                 let shown = if key.is_empty() {
                     format!("a {} key", state.typ(key_idx).as_str())
@@ -1729,7 +1743,7 @@ fn options_at(state: &mut State, idx: isize) -> Result<CallOptions, Error> {
                     state,
                     format!(
                         "binary_with(): unknown option {shown}: options are env, reads, writes, \
-                         stdin, hotpath, stop_at and program"
+                         stdin, hotpath, stop_at, program and measured"
                     ),
                 ));
             }

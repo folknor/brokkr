@@ -183,6 +183,7 @@ const SHIPPED_STEPS: &[&str] = &[
     "ec1a827868cc9bd5b45b3e34d43f397d",
     "bddf3dd75a32b844ae1d0325e4e864fd",
     "7b89417927c1c50bf88fd689361526d5",
+    "daddc35349945664a22f0326bfbdecf2",
 ];
 
 #[cfg(test)]

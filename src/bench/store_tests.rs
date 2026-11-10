@@ -135,6 +135,7 @@ fn child(offset: i64, ending: ChildEnding) -> Child {
                 cut: true,
             },
         }),
+        measured: false,
     }
 }
 
@@ -683,6 +684,58 @@ fn the_pairing_class_separates_profiled_and_incidental_runs() {
     assert_ne!(alloc, hotpath);
 }
 
+/// `document` with child 1 of each iteration marked measured, at these walls.
+fn child_measured(uuid: &str, walls: [i64; 3]) -> RunDocument {
+    let mut doc = document(uuid);
+    for (iteration, wall) in doc.iterations.iter_mut().zip(walls) {
+        iteration.children[1].measured = true;
+        iteration.children[1].wall_us = wall;
+    }
+    doc
+}
+
+/// A run that marked a measured call ranks on that child's wall, reads back
+/// with its marks, and pairs apart from one ranked on the block's wall.
+#[test]
+fn a_measured_child_is_the_result_and_pairs_apart() {
+    let mut store = store("measured_child");
+    let doc = child_measured("0000000000000000000000000000001a", [500, 900, 400]);
+    assert_eq!(document(&doc.uuid).best_iteration(), Some(1));
+    assert_eq!(doc.best_iteration(), Some(2), "ranked on the child's wall");
+    assert_eq!(doc.result_wall_us(), Some(400));
+    assert!(doc.child_measured());
+    assert_eq!(store.publish(&doc).unwrap(), Published::Stored);
+    assert_eq!(store.load(&doc.uuid).unwrap().as_ref(), Some(&doc));
+    let best: i64 = store
+        .conn()
+        .query_row("SELECT best_iteration FROM runs", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(best, 2);
+
+    let key = doc.pairing_key();
+    assert!(
+        key.starts_with("[\"bench-pair-v3\",\"timing\",\"measured-child\","),
+        "{key}"
+    );
+    assert_ne!(key, document(&doc.uuid).pairing_key());
+}
+
+/// Two measured children in one iteration, or a completed run whose
+/// iterations disagree on marking one, are refused; a failed run may stop
+/// before its later iterations mark theirs.
+#[test]
+fn a_measured_child_must_be_one_and_agreed_on() {
+    let mut twice = child_measured("0000000000000000000000000000001b", [1, 2, 3]);
+    twice.iterations[0].children[0].measured = true;
+    refused(&twice, "more than one measured child");
+
+    let mut partial = child_measured("0000000000000000000000000000001c", [1, 2, 3]);
+    partial.iterations[2].children[1].measured = false;
+    refused(&partial, "disagree on a measured call");
+    partial.outcome = RunOutcome::Failed { reason: "x".into() };
+    partial.validate().unwrap();
+}
+
 #[test]
 fn a_profiled_run_must_capture_every_marked_call() {
     profiled("0000000000000000000000000000000e")
@@ -746,7 +799,8 @@ fn a_version_one_store_upgrades_and_its_runs_read_as_timing() {
         store
             .conn()
             .execute_batch(
-                "DROP TABLE child_stderr;
+                "ALTER TABLE children DROP COLUMN measured;
+                 DROP TABLE child_stderr;
                  DROP TABLE marks;
                  DROP TABLE child_executable;
                  DROP TABLE child_hotpath;
@@ -761,7 +815,7 @@ fn a_version_one_store_upgrades_and_its_runs_read_as_timing() {
         .conn()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
     assert!(store.marks(&doc.project).unwrap().is_empty());
     assert_eq!(store.load(&doc.uuid).unwrap(), Some(doc));
 }

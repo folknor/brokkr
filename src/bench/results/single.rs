@@ -109,7 +109,16 @@ fn identity(out: &mut String, run: &StoredRun, marks: &MarkView) {
     }
     if let Some(best) = run.best_iteration {
         let wall = |w: Option<i64>| w.map_or_else(|| "--".to_owned(), ms);
-        let walls: Vec<String> = doc.iterations.iter().map(|i| wall(i.wall_us)).collect();
+        let walls: Vec<String> = doc
+            .iterations
+            .iter()
+            .map(|i| wall(i.result_wall_us()))
+            .collect();
+        let basis = if doc.child_measured() {
+            ", the measured call's wall"
+        } else {
+            ""
+        };
         let detail = if walls.len() > 1 {
             format!(
                 " (iteration {best}, best of {}: {})",
@@ -122,7 +131,10 @@ fn identity(out: &mut String, run: &StoredRun, marks: &MarkView) {
         field(
             out,
             "elapsed",
-            &format!("{}{detail}", wall(doc.iterations[best].wall_us)),
+            &format!(
+                "{}{detail}{basis}",
+                wall(doc.iterations[best].result_wall_us())
+            ),
         );
         if let IterationOutcome::Completed { verdict: v } = &doc.iterations[best].outcome {
             field(out, "verdict", &verdict(v.as_ref()));
@@ -235,7 +247,8 @@ fn child(out: &mut String, idx: usize, child: &Child) {
     };
     writeln!(
         out,
-        "  child {idx}  at +{}  {}  {}  {} {}",
+        "  child {idx}{}  at +{}  {}  {}  {} {}",
+        if child.measured { " (measured)" } else { "" },
         ms(child.origin_offset_us),
         ms(child.wall_us),
         ending(&child.ending),
@@ -373,7 +386,11 @@ fn iterations(out: &mut String, run: &StoredRun) {
         } else {
             ""
         };
-        let wall = iteration.wall_us.map_or_else(|| "no wall".to_owned(), ms);
+        let wall = match (iteration.wall_us, iteration.measured_child()) {
+            (None, _) => "no wall".to_owned(),
+            (Some(block), None) => ms(block),
+            (Some(block), Some(child)) => format!("{} (block {})", ms(child.wall_us), ms(block)),
+        };
         writeln!(
             out,
             "iteration {idx}{result}  {wall}  {}",

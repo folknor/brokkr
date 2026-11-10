@@ -69,6 +69,7 @@ fn iteration(wall_us: i64, verdict: Option<&str>, record: &serde_json::Value) ->
             hotpath: None,
             executable: None,
             stderr: None,
+            measured: false,
         }],
     }
 }

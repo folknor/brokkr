@@ -1274,7 +1274,25 @@ impl Attempt<'_> {
             _ => None,
         };
         let first = document.iterations.first().and_then(verdict_of);
-        document.outcome = if document.iterations.iter().all(|i| verdict_of(i) == first) {
+        let marked: Vec<bool> = document
+            .iterations
+            .iter()
+            .map(|i| i.measured_child().is_some())
+            .collect();
+        document.outcome = if marked.contains(&true) && marked.contains(&false) {
+            let without: Vec<String> = marked
+                .iter()
+                .enumerate()
+                .filter(|(_, m)| !**m)
+                .map(|(i, _)| (i + 1).to_string())
+                .collect();
+            store::RunOutcome::Failed {
+                reason: format!(
+                    "the iterations disagree on a measured call: iteration {} marked none",
+                    without.join(", ")
+                ),
+            }
+        } else if document.iterations.iter().all(|i| verdict_of(i) == first) {
             store::RunOutcome::Completed
         } else {
             let seen: Vec<String> = document
@@ -1361,18 +1379,20 @@ impl Destination {
 fn report(document: &store::RunDocument, shown: &str, place: &str, started: Instant) {
     let outcome = match &document.outcome {
         store::RunOutcome::Completed => {
-            let best = document
-                .best_iteration()
-                .and_then(|i| document.iterations[i].wall_us)
-                .map_or_else(String::new, |us| {
-                    format!(
-                        ", best {} of {}",
-                        output::format_duration(std::time::Duration::from_micros(
-                            u64::try_from(us).unwrap_or(0)
-                        )),
-                        document.iterations.len()
-                    )
-                });
+            let best = document.result_wall_us().map_or_else(String::new, |us| {
+                format!(
+                    ", best {} of {}{}",
+                    output::format_duration(std::time::Duration::from_micros(
+                        u64::try_from(us).unwrap_or(0)
+                    )),
+                    document.iterations.len(),
+                    if document.child_measured() {
+                        " (measured call)"
+                    } else {
+                        ""
+                    }
+                )
+            });
             format!("completed{best}")
         }
         store::RunOutcome::Failed { .. } => "failed".to_owned(),

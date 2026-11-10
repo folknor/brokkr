@@ -278,6 +278,9 @@ impl lua::Host for PreflightHost {
         if options.stop_at.is_some() {
             return Err(refused("stop_at"));
         }
+        if options.measured {
+            return Err(refused("measured"));
+        }
         let mut argv = Vec::with_capacity(words.len());
         for word in words {
             match word {

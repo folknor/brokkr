@@ -138,6 +138,14 @@ one whose raw count is past 64 KiB or the size, a `cut` that is not exactly
 three times it (the most replacement expands to), and a run whose kept raw
 bytes pass 16 MiB.
 
+A child of a call marked `measured` also holds the **measured** flag: its
+wall is its iteration's result (Derived, not submitted). An iteration holds
+at most one, and a `completed` run's iterations either all hold one or none
+does; a `failed` or `interrupted` run may stop before a later iteration
+reached its marked call. Omitted when unset, so every child stored before
+the flag existed, and every unmarked one, encodes as it did; the `children`
+table keeps it as a `measured` column (schema step 7) defaulting to unset.
+
 Every struct refuses unknown fields, so a document a newer writer extended
 is refused rather than stored short of its new fields: that refusal, not
 `format`, is what keeps an older store from taking a newer document. The
@@ -158,7 +166,8 @@ The store computes what follows from the document, so every writer agrees
 and a replayed document compares equal to the stored one:
 
 - **The result.** A run has one exactly when its outcome is `completed`, and
-  then it is the first iteration with the smallest wall. Publication refuses
+  then it is the first iteration with the smallest result wall: its measured
+  child's wall when it marked one, else its block wall. Publication refuses
   a `completed` run unless it holds every requested iteration, each
   completed with a wall and an extracted record, all with one verdict, and
   a built artifact. A `failed` run may hold only completed iterations (a
@@ -176,7 +185,10 @@ and a replayed document compares equal to the stored one:
   run measured `hotpath` is keyed `bench-pair-v2` with the class `hotpath`,
   one measured `alloc` with the class `alloc`, and a `timing` run that
   captured anyway, its build instrumented by other means, `bench-pair-v2`
-  with `incidental`: no two classes ever pair. Collection order, a digest change, a param bound or not and the
+  with `incidental`: no two classes ever pair. A run any of whose
+  iterations marked a measured child is keyed `bench-pair-v3` with its class
+  and `measured-child`, so a run ranked on a child's wall never pairs with
+  one ranked on the block's. Collection order, a digest change, a param bound or not and the
   class all split it; the commit, the config text, the build and the record
   do not. The key is a projection of the stored params and children: a
   later algorithm is a new projection computed from them, and two rows

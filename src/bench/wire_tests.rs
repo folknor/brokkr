@@ -117,6 +117,7 @@ fn frozen_child() -> Child {
                 cut: true,
             },
         }),
+        measured: true,
     }
 }
 

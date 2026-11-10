@@ -253,6 +253,10 @@ pub struct Child {
     /// existed. Omitted when absent, so such a document encodes as it did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stderr: Option<StderrCapture>,
+    /// A call marked `measured`: this child's wall is its iteration's
+    /// result. Omitted when unmarked, so such a document encodes as it did.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub measured: bool,
 }
 
 /// The most raw stderr bytes one child's stored tail holds.
@@ -653,6 +657,12 @@ impl RunDocument {
                         ));
                     }
                 }
+                let measured = self.iterations.iter().map(|i| i.measured_child().is_some());
+                if measured.clone().any(|m| m) && !measured.clone().all(|m| m) {
+                    return Err(refuse(
+                        "a completed run whose iterations disagree on a measured call",
+                    ));
+                }
                 if self.measurement.profiled() {
                     for (idx, iteration) in self.iterations.iter().enumerate() {
                         let captures: Vec<&HotpathCapture> = iteration
@@ -677,20 +687,34 @@ impl RunDocument {
         }
     }
 
-    /// The result's iteration: the first fastest. `None` unless the run
-    /// completed.
+    /// The result's iteration: the first fastest, by each iteration's
+    /// [`Iteration::result_wall_us`]. `None` unless the run completed.
     pub fn best_iteration(&self) -> Option<usize> {
         if self.outcome != RunOutcome::Completed {
             return None;
         }
         let mut best: Option<(usize, i64)> = None;
         for (idx, iteration) in self.iterations.iter().enumerate() {
-            let wall = iteration.wall_us?;
+            let wall = iteration.result_wall_us()?;
             if best.is_none_or(|(_, fastest)| wall < fastest) {
                 best = Some((idx, wall));
             }
         }
         best.map(|(idx, _)| idx)
+    }
+
+    /// Whether the run's result is a measured child's wall rather than the
+    /// block's: some iteration marked a call `measured`.
+    pub fn child_measured(&self) -> bool {
+        self.iterations.iter().any(|i| i.measured_child().is_some())
+    }
+
+    /// The result's wall in microseconds: the best iteration's
+    /// [`Iteration::result_wall_us`].
+    pub fn result_wall_us(&self) -> Option<i64> {
+        self.iterations
+            .get(self.best_iteration()?)?
+            .result_wall_us()
     }
 
     /// The class the run pairs in: [`Measurement::Hotpath`] and
@@ -719,7 +743,9 @@ impl RunDocument {
     /// later algorithm is a new projection and never a silent rewrite;
     /// rows compare only under one algorithm. A timing run's key is
     /// `bench-pair-v1`, unchanged; a profiled or incidental run's is
-    /// `bench-pair-v2` with its class, so neither ever pairs with timing.
+    /// `bench-pair-v2` with its class, so neither ever pairs with timing. A
+    /// run whose result is a measured child's wall is `bench-pair-v3` with
+    /// its class, so it never pairs with one ranked on the block's wall.
     pub fn pairing_key(&self) -> String {
         let params: Vec<serde_json::Value> = self
             .params
@@ -733,6 +759,23 @@ impl RunDocument {
                 serde_json::json!([name, param.many, values])
             })
             .collect();
+        if self.child_measured() {
+            let class = match self.pairing_class() {
+                PairingClass::Timing => "timing",
+                PairingClass::Hotpath => "hotpath",
+                PairingClass::Alloc => "alloc",
+                PairingClass::Incidental => "incidental",
+            };
+            return serde_json::json!([
+                "bench-pair-v3",
+                class,
+                "measured-child",
+                self.project,
+                self.bench,
+                params
+            ])
+            .to_string();
+        }
         match self.pairing_class() {
             PairingClass::Timing => {
                 serde_json::json!(["bench-pair-v1", self.project, self.bench, params])
@@ -756,9 +799,26 @@ impl RunDocument {
 }
 
 impl Iteration {
+    /// The child marked `measured`, if any; at most one is valid.
+    pub fn measured_child(&self) -> Option<&Child> {
+        self.children.iter().find(|c| c.measured)
+    }
+
+    /// What the iteration is ranked on: its measured child's wall when it
+    /// marked one, else the block's wall.
+    pub fn result_wall_us(&self) -> Option<i64> {
+        match self.measured_child() {
+            Some(child) => Some(child.wall_us),
+            None => self.wall_us,
+        }
+    }
+
     fn validate(&self) -> Result<(), String> {
         if self.wall_us.is_some_and(|w| w < 0) {
             return Err("negative wall".to_owned());
+        }
+        if self.children.iter().filter(|c| c.measured).count() > 1 {
+            return Err("more than one measured child".to_owned());
         }
         match &self.outcome {
             IterationOutcome::Completed { .. } => {

@@ -265,6 +265,7 @@ struct ChildRow {
     clock: Clock,
     calls_seen: String,
     calls_overflowed: bool,
+    measured: bool,
 }
 
 /// A non-negative count column; a negative one does not read back.
@@ -299,6 +300,7 @@ fn child_row(row: &Row<'_>) -> rusqlite::Result<ChildRow> {
         },
         calls_seen: row.get(18)?,
         calls_overflowed: row.get(19)?,
+        measured: row.get(20)?,
     })
 }
 
@@ -327,7 +329,7 @@ fn load_children(conn: &Connection, run_id: i64, iteration: i64) -> Result<Vec<C
         "SELECT id, idx, program, argv, env, pid, origin_offset_us, wall_us, ending_kind,
                 ending_value, ending_text, rejected_lines, fifo_unread, records_capped,
                 samples_capped, output_truncated, clock_outliers, clock_outlier_min_us,
-                calls_seen, calls_overflowed
+                calls_seen, calls_overflowed, measured
          FROM children WHERE run_id = ?1 AND iteration = ?2 ORDER BY idx",
     )?;
     let rows = stmt
@@ -357,6 +359,7 @@ fn load_children(conn: &Connection, run_id: i64, iteration: i64) -> Result<Vec<C
             hotpath: load_capture(conn, row.id)?,
             executable: load_executable(conn, row.id)?,
             stderr: load_stderr(conn, row.id)?,
+            measured: row.measured,
         });
     }
     Ok(children)
