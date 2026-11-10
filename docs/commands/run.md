@@ -16,7 +16,9 @@ leaves ambiguous - see `docs/brokkr.toml.md` (`brokkr man config bin`).
 
 ```
 brokkr run [NAME] [--debug|--release|--profile NAME] [--features LIST]
-           [--all-features] [--no-default-features] [--commit REF] [-- ARGS...]
+           [--all-features] [--no-default-features] [--commit REF]
+           [--with TARGET [--with-commit REF] [--with-features LIST]
+            [--with-all-features] [--with-no-default-features]] [-- ARGS...]
 ```
 
 Resolves `NAME` to a discovered target and runs
@@ -117,6 +119,39 @@ over. Targets are discovered in the worktree, since the commit may predate a
 target or carry one the live tree has dropped. The cargo build's output is
 captured and printed only on failure.
 
+## `--with`: handing the program another target's path
+
+```
+brokkr run --with pbfhogg pbfhogg-verify -- all denmark
+brokkr run --with pbfhogg --with-commit a5cc1f8 --with-features zlib-ng pbfhogg-verify -- all denmark
+```
+
+is for a program that drives another workspace binary as a subprocess - a
+verifier against the build under test - and cannot build it itself, since a
+locked brokkr beneath `run` refuses. `--with TARGET` builds `TARGET` exactly
+as `brokkr build TARGET` would, snapshot included, then builds and runs the
+program with the snapshot's absolute path in **`BROKKR_WITH_EXE`**. One
+invocation, one lock hold across both builds and the run.
+
+The program's own flags keep meaning the program: `--commit`, `--features`,
+`--all-features` and `--no-default-features` choose what the program is built
+from. The `--with` target has its own: `--with-commit REF`,
+`--with-features LIST` (repeatable), `--with-all-features` and
+`--with-no-default-features`, each refused without `--with`. The profile is
+shared: one `--debug`/`--release`/`--profile` (or `[bin]` default) builds both.
+The `--with` target is built first, and its worktree stage finished, before
+the program's build begins; its path is the snapshot, so nothing the program's
+build does can change what it runs.
+
+With `--with`, the program is always built and executed directly - the shape
+`--commit` uses - never through `cargo run`, so `BROKKR_WITH_EXE` reaches the
+program alone and is never a build input of the program (an `env!` or a build
+script reading it would otherwise see it on a live run and not on a
+`--commit` one). The program therefore gets none of cargo's launch
+environment, as under `--commit`, and runs from the directory `brokkr run`
+was invoked in. brokkr only sets the variable for execution; one already
+exported in your shell is inherited by builds as any other variable is.
+
 ## Target discovery
 
 `cargo metadata --format-version 1 --no-deps` yields every workspace member;
@@ -166,7 +201,8 @@ target name can collide with it. `brokkr run NAME -- ARGS` is left untouched,
 as is every other command's argv.
 
 Walking past the leading flags means the pre-pass has to know which of them
-take a **separate value** (`--features` / `-F`, `--profile`, `--commit`), so
+take a **separate value** (`--features` / `-F`, `--profile`, `--commit`, the
+`--with` family), so
 `brokkr run --features a,b -- --help` skips the `a,b` and still finds the
 `--`. The set is read from `run`'s clap definition rather than kept by hand,
 so a value-taking flag added to `run` is covered without anyone remembering

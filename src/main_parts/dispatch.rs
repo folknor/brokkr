@@ -1,8 +1,8 @@
 //! Top-level and project command dispatch.
 
 use super::bootstrap::{
-    require_detection, run_build, run_check, run_clippy, run_deps, run_fmt, run_install, run_man,
-    run_measured, run_program, run_sync, run_wc,
+    WithTarget, require_detection, run_build, run_check, run_clippy, run_deps, run_fmt,
+    run_install, run_man, run_measured, run_program, run_sync, run_wc,
 };
 use crate::clean::CleanOpts;
 use crate::clean::{cargo_clean_package, cmd_clean};
@@ -183,6 +183,11 @@ pub(super) fn run(
             all_features,
             no_default_features,
             commit,
+            with,
+            with_commit,
+            with_features,
+            with_all_features,
+            with_no_default_features,
             args,
         } => {
             let feat = runnables::FeatureArgs {
@@ -190,11 +195,21 @@ pub(super) fn run(
                 all: *all_features,
                 no_default: *no_default_features,
             };
+            let with = with.as_deref().map(|name| WithTarget {
+                name,
+                commit: with_commit.as_deref(),
+                feat: runnables::FeatureArgs {
+                    features: with_features,
+                    all: *with_all_features,
+                    no_default: *with_no_default_features,
+                },
+            });
             run_program(
                 name.as_deref(),
                 profile_choice(*debug, *release, profile.as_ref()),
                 &feat,
                 commit.as_deref(),
+                with.as_ref(),
                 args,
                 detection,
             )

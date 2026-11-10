@@ -368,15 +368,49 @@ pub(super) fn run_program(
     choice: Option<crate::build::RustProfile>,
     feat: &runnables::FeatureArgs<'_>,
     commit: Option<&str>,
+    with: Option<&WithTarget<'_>>,
     args: &[String],
     detection: Option<&project::Detection>,
 ) -> Result<(), DevError> {
+    // The `--with` target is built and snapshotted first, its worktree stage
+    // (if any) finished before the program's begins, so the program's build
+    // can neither replace it nor evict anything it still needs.
+    let with_exe = match with {
+        Some(w) => Some(build_snapshot(
+            Some(w.name),
+            choice.clone(),
+            &w.feat,
+            w.commit,
+            detection,
+        )?),
+        None => None,
+    };
+    let with_env: Vec<(&str, String)> = with_exe
+        .iter()
+        .map(|p| (WITH_EXE_VAR, p.display().to_string()))
+        .collect();
+    let env: Vec<(&str, &str)> = with_env.iter().map(|(k, v)| (*k, v.as_str())).collect();
     let Some(commit) = commit else {
         let (bin_cfg, project_root) = match detection {
             Some(d) => (d.config.bin.as_ref(), d.build_root.as_path().to_path_buf()),
             None => (None, std::env::current_dir()?),
         };
         let lock = context::reenter_command_lock()?;
+        if with.is_some() {
+            // Built and executed directly, so the path is in the program's
+            // environment only, never in cargo's or a build script's.
+            return runnables::cmd_run_built(
+                &project_root,
+                &project_root,
+                bin_cfg,
+                name,
+                choice,
+                feat,
+                args,
+                &env,
+                &lock,
+            );
+        }
         return runnables::cmd_run(
             &project_root,
             bin_cfg,
@@ -424,7 +458,7 @@ pub(super) fn run_program(
         |wt| {
             let worktree = wt.as_path();
             let lock = context::reenter_command_lock()?;
-            runnables::cmd_run_commit(
+            runnables::cmd_run_built(
                 worktree,
                 build_root.as_path(),
                 bin_cfg,
@@ -432,10 +466,23 @@ pub(super) fn run_program(
                 choice,
                 feat,
                 args,
+                &env,
                 &lock,
             )
         },
     )
+}
+
+/// The environment variable `run --with` hands the program the `--with`
+/// target's snapshot path in.
+const WITH_EXE_VAR: &str = "BROKKR_WITH_EXE";
+
+/// `run --with TARGET`: the second target, built as `brokkr build` builds it,
+/// with its own commit and features and the program's profile.
+pub(super) struct WithTarget<'a> {
+    pub(super) name: &'a str,
+    pub(super) commit: Option<&'a str>,
+    pub(super) feat: runnables::FeatureArgs<'a>,
 }
 
 /// `build` builds the code tree (cwd), or a `--commit` worktree of it, and
@@ -449,6 +496,21 @@ pub(super) fn run_build(
     commit: Option<&str>,
     detection: Option<&project::Detection>,
 ) -> Result<(), DevError> {
+    let path = build_snapshot(name, choice, feat, commit, detection)?;
+    output::data_stdout(&path.display().to_string());
+    Ok(())
+}
+
+/// `build`'s work without the stdout line: build the live tree or a
+/// `--commit` worktree and return the snapshot's path. `run --with` builds
+/// its second target through this too.
+fn build_snapshot(
+    name: Option<&str>,
+    choice: Option<crate::build::RustProfile>,
+    feat: &runnables::FeatureArgs<'_>,
+    commit: Option<&str>,
+    detection: Option<&project::Detection>,
+) -> Result<std::path::PathBuf, DevError> {
     let fallback_roots = project::detect_roots()?;
     let (project, bin_cfg, project_root, build_root, tree, keep) = match detection {
         Some(d) => (
@@ -469,10 +531,10 @@ pub(super) fn run_build(
         ),
     };
     let store = crate::clean::layout::ProjectState::new(project_root.as_path()).artifacts_dir();
-    let path = match commit {
+    match commit {
         None => {
             let _lock = context::reenter_command_lock()?;
-            runnables::cmd_build(build_root.as_path(), &store, bin_cfg, name, choice, feat)?
+            runnables::cmd_build(build_root.as_path(), &store, bin_cfg, name, choice, feat)
         }
         Some(commit) => context::with_worktree(
             project,
@@ -486,10 +548,8 @@ pub(super) fn run_build(
                 let _lock = context::reenter_command_lock()?;
                 runnables::cmd_build(wt.as_path(), &store, bin_cfg, name, choice, feat)
             },
-        )?,
-    };
-    output::data_stdout(&path.display().to_string());
-    Ok(())
+        ),
+    }
 }
 
 /// `sync`: bare lists, a script runs, `--bench` measures, `--all` and

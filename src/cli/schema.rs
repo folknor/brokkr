@@ -371,6 +371,29 @@ In depth: `brokkr man clippy`."
         #[arg(long, value_name = "REF")]
         commit: Option<String>,
 
+        /// Also build this target, as `brokkr build` does, and hand the
+        /// program its snapshot's path in `BROKKR_WITH_EXE`. The program is
+        /// then built and executed directly, as under `--commit`.
+        #[arg(long, value_name = "TARGET")]
+        with: Option<String>,
+
+        /// Build the `--with` target at this commit (the program's own
+        /// `--commit` is separate)
+        #[arg(long, value_name = "REF", requires = "with")]
+        with_commit: Option<String>,
+
+        /// Cargo features for the `--with` target, forwarded verbatim
+        #[arg(long, value_name = "LIST", requires = "with")]
+        with_features: Vec<String>,
+
+        /// Enable all Cargo features of the `--with` target
+        #[arg(long, requires = "with", conflicts_with = "with_features")]
+        with_all_features: bool,
+
+        /// Disable default Cargo features of the `--with` target
+        #[arg(long, requires = "with")]
+        with_no_default_features: bool,
+
         /// Raw arguments forwarded to the program (after `--`)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,

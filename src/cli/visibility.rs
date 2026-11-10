@@ -277,8 +277,16 @@ impl CommandSpec {
                 })
             }
             WorktreePolicy::Direct => match command {
-                super::Command::Run { commit, .. }
-                | super::Command::Build { commit, .. }
+                // Historical only when no stage builds the live tree: a
+                // `--with` target built from the live tree needs the live
+                // tree's policy even when the program itself is `--commit`.
+                super::Command::Run {
+                    commit,
+                    with,
+                    with_commit,
+                    ..
+                } => Ok(commit.is_some() && (with.is_none() || with_commit.is_some())),
+                super::Command::Build { commit, .. }
                 | super::Command::Crit { commit, .. }
                 | super::Command::Bench { commit, .. }
                 | super::Command::Verify { commit, .. }

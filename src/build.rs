@@ -247,8 +247,8 @@ pub struct BuildConfig {
     pub example: Option<String>,
     pub features: Vec<String>,
     pub default_features: bool,
-    /// `--all-features`. Only `brokkr run --commit` sets it, forwarding the
-    /// flag a plain `run` hands to `cargo run`.
+    /// `--all-features`, set from the `--all-features` of `brokkr run` and
+    /// `brokkr build` (and `run --with-all-features`).
     pub all_features: bool,
     pub profile: RustProfile,
 }

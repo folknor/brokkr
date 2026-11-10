@@ -319,8 +319,12 @@ pub fn cmd_run(
 ///
 /// Targets are discovered in the worktree: the commit may predate a target, or
 /// carry one the live tree has since dropped.
+///
+/// `run --with` takes this shape for the live tree too (`worktree` is then
+/// the build root), so `env` - the `--with` path - reaches the program alone
+/// and never cargo or a build script, whichever tree the program came from.
 #[allow(clippy::too_many_arguments)]
-pub fn cmd_run_commit(
+pub fn cmd_run_built(
     worktree: &Path,
     run_dir: &Path,
     cfg: Option<&BinConfig>,
@@ -328,6 +332,7 @@ pub fn cmd_run_commit(
     choice: Option<crate::build::RustProfile>,
     feat: &FeatureArgs<'_>,
     args: &[String],
+    env: &[(&str, &str)],
     lock: &crate::lockfile::LockGuard,
 ) -> Result<(), DevError> {
     let runnables = discover(worktree)?;
@@ -350,7 +355,7 @@ pub fn cmd_run_commit(
         &exe_str,
         &arg_refs,
         Some(run_dir),
-        &[],
+        env,
         output::SpawnProfile::Plain,
         Some(lock),
     )?;
@@ -777,6 +782,36 @@ mod tests {
             ]),
             vec![
                 "brokkr", "run", "--commit", "a5cc1f8", NO_NAME, "--preset", "mtf"
+            ]
+        );
+    }
+
+    #[test]
+    fn with_values_do_not_end_the_scan() {
+        assert_eq!(
+            rewrite(&[
+                "brokkr",
+                "run",
+                "--with",
+                "pbfhogg",
+                "--with-commit",
+                "a5cc1f8",
+                "--with-features",
+                "zlib",
+                "--",
+                "--help"
+            ]),
+            vec![
+                "brokkr",
+                "run",
+                "--with",
+                "pbfhogg",
+                "--with-commit",
+                "a5cc1f8",
+                "--with-features",
+                "zlib",
+                NO_NAME,
+                "--help"
             ]
         );
     }
