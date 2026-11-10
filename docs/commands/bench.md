@@ -52,7 +52,9 @@ the resolved config, and what is refused, is `brokkr man bench-config`
 (Binding params), including lists, ranges and `all`. Bare `brokkr bench`
 lists each bench with its version and the first non-blank line of its
 description, when it has them (`brokkr man bench-config`, Annotations).
-`NAME --help` shows the bench's annotations under its name, multi-line
+Neither the listing, `NAME --help` nor a refused NAME or param takes the
+brokkr lock or writes a run log, so they answer while a check or bench
+runs. `NAME --help` shows the bench's annotations under its name, multi-line
 text indented under its field, then its build settings, and lists
 each param with its `from` path, its default or `(required)` and, for a
 `from` param, the keys it takes on this host, in key order, the parents it

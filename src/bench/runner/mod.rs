@@ -251,6 +251,21 @@ fn fold(path: &Path) -> PathBuf {
 }
 
 /// The bench named `name`, or a refusal naming the ones declared.
+/// Whether `brokkr bench` given `tokens` (NAME and its params) would run the
+/// bench rather than only print: bare lists, `NAME --help` describes, and an
+/// unknown NAME or unreadable params is refused, all before anything is
+/// built or stored. Decided from the same tokens and table [`run`] reads, so
+/// the two agree; dispatch takes no lock, run log or tree for an invocation
+/// this says will not run.
+pub(crate) fn runs(benches: &BTreeMap<String, Bench>, tokens: &[String]) -> bool {
+    let Some((name, params)) = tokens.split_first() else {
+        return false;
+    };
+    benches
+        .get(name)
+        .is_some_and(|bench| params::parse(bench, params).is_ok_and(|given| !given.help))
+}
+
 fn find<'a>(benches: &'a BTreeMap<String, Bench>, name: &str) -> Result<&'a Bench, DevError> {
     benches.get(name).ok_or_else(|| {
         DevError::Refused(if benches.is_empty() {
@@ -692,6 +707,9 @@ fn not_run(name: &str, labels: &[String]) {
 }
 
 /// The bare index: every bench, its target and where its script lives.
+///
+/// Bare is the listing's one spelling: a `--list` option was weighed and
+/// declined, being this index under a second name with nothing new to show.
 fn list(benches: &BTreeMap<String, Bench>) {
     if benches.is_empty() {
         output::bench_msg("this project's brokkr.toml declares no [bench.*] tables");

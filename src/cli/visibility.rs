@@ -196,11 +196,13 @@ pub(crate) fn visible_to(vis: &Visibility, project: &Project) -> bool {
 }
 impl CommandSpec {
     /// The lock this invocation takes: the command's, except where the
-    /// invocation only reads config and inputs, which no lock protects. A
+    /// invocation only reads config and inputs, which no lock protects
+    /// ([`Self::reads_only`] decides, once per invocation). A
     /// `brokkr bench --dry-run` builds and stores nothing, so a queue of them
-    /// can be checked while a bench holds the lock.
-    pub(crate) fn lock_for(&self, command: &super::Command) -> LockPolicy {
-        if Self::reads_only(command) {
+    /// can be checked while a bench holds the lock, and listing or describing
+    /// the benches never waits behind a running check.
+    pub(crate) fn lock_for(&self, reads_only: bool) -> LockPolicy {
+        if reads_only {
             return LockPolicy::None;
         }
         self.lock
@@ -209,17 +211,29 @@ impl CommandSpec {
     /// The run log this invocation writes: none where it takes no lock for
     /// [`Self::lock_for`]'s reason, since a log is activated and pruned under
     /// the lock.
-    pub(crate) fn run_log_for(&self, command: &super::Command) -> Option<&'static str> {
-        if Self::reads_only(command) {
+    pub(crate) fn run_log_for(&self, reads_only: bool) -> Option<&'static str> {
+        if reads_only {
             return None;
         }
         self.run_log
     }
 
     /// Whether the invocation reads config and inputs alone, never building,
-    /// launching or storing.
-    pub(crate) fn reads_only(command: &super::Command) -> bool {
-        matches!(command, super::Command::Bench { dry_run: true, .. })
+    /// launching or storing: `brokkr bench --dry-run`, and any `brokkr bench`
+    /// that only lists, describes or refuses, decided against the declared
+    /// `benches` (`None` before a config is detected, when a bench is
+    /// refused anyway).
+    pub(crate) fn reads_only(
+        command: &super::Command,
+        benches: Option<&std::collections::BTreeMap<String, crate::config::bench::Bench>>,
+    ) -> bool {
+        match command {
+            super::Command::Bench { dry_run: true, .. } => true,
+            super::Command::Bench { bench, .. } => {
+                benches.is_none_or(|benches| !crate::bench::runner::runs(benches, bench))
+            }
+            _ => false,
+        }
     }
 
     pub(crate) fn uses_worktree(

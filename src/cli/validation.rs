@@ -174,31 +174,59 @@ mod tests {
     }
 
     /// `brokkr bench --dry-run` reads only, so it takes no lock and writes no
-    /// run log, and `--dry-run` after NAME is the bench's own param; a run,
-    /// and `brokkr library --dry-run`, which builds, keep the command's lock.
+    /// run log, and `--dry-run` after NAME is no option of brokkr's; so do
+    /// listing, `NAME --help` and a refused NAME or param. A run, and
+    /// `brokkr library --dry-run`, which builds, keep the command's lock.
     #[test]
     fn a_bench_dry_run_takes_no_lock_and_a_library_one_does() {
-        use crate::cli::{CommandId, LockPolicy};
+        use crate::cli::{CommandId, CommandSpec, LockPolicy};
+        let dir = crate::test_scratch::scratch("cli_validation", "bench_reads_only");
+        std::fs::write(
+            dir.join("brokkr.toml"),
+            "project = \"p\"\n[bench.cat]\nscript = \"function bench() end\"\n\
+             params.n = { free = true }\n",
+        )
+        .unwrap();
+        let (_, config, _, _) = crate::config::load_with_sources(&dir).unwrap();
+        let benches = Some(&config.benches);
         let bench = CommandId::Bench.spec();
+        let reads = |argv: Vec<&'static str>| {
+            CommandSpec::reads_only(&parse(argv).unwrap().command, benches)
+        };
         let dry = parse(["brokkr", "bench", "--dry-run", "cat", "--row", "x"]).unwrap();
         assert!(matches!(dry.command, Command::Bench { dry_run: true, .. }));
-        assert!(bench.lock_for(&dry.command) == LockPolicy::None);
-        assert_eq!(bench.run_log_for(&dry.command), None);
+        assert!(CommandSpec::reads_only(&dry.command, benches));
+        assert!(bench.lock_for(true) == LockPolicy::None);
+        assert_eq!(bench.run_log_for(true), None);
+        assert!(bench.lock_for(false) == LockPolicy::Blocking);
+        assert!(bench.run_log_for(false).is_some());
+        for argv in [
+            vec!["brokkr", "bench"],
+            vec!["brokkr", "bench", "cat", "--help"],
+            vec!["brokkr", "bench", "dog"],
+            vec!["brokkr", "bench", "cat", "--row", "x"],
+        ] {
+            assert!(reads(argv.clone()), "{argv:?} only prints");
+        }
         for argv in [
             vec!["brokkr", "bench", "cat"],
-            vec!["brokkr", "bench", "cat", "--dry-run", "x"],
+            vec!["brokkr", "bench", "cat", "--n", "x"],
+            vec!["brokkr", "bench", "cat", "--n", "--help"],
         ] {
-            let run = parse(argv).unwrap();
+            let run = parse(argv.clone()).unwrap();
             assert!(matches!(run.command, Command::Bench { dry_run: false, .. }));
-            assert!(bench.lock_for(&run.command) == LockPolicy::Blocking);
-            assert!(bench.run_log_for(&run.command).is_some());
+            assert!(
+                !CommandSpec::reads_only(&run.command, benches),
+                "{argv:?} runs"
+            );
         }
         let library = parse(["brokkr", "library", "cat", "--dry-run"]).unwrap();
         assert!(matches!(
             library.command,
             Command::Library { dry_run: true, .. }
         ));
-        assert!(CommandId::Library.spec().lock_for(&library.command) == LockPolicy::Blocking);
+        assert!(!CommandSpec::reads_only(&library.command, benches));
+        assert!(CommandId::Library.spec().lock_for(false) == LockPolicy::Blocking);
         assert!(
             parse(["brokkr", "library", "--dry-run"]).is_err(),
             "it needs a scenario"

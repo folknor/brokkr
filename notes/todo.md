@@ -398,14 +398,6 @@ race script benches now catch (`docs/commands/bench.md`, The build). Its doc
 comment's "lock -> cargo_build -> BenchHarness lifecycle" also names the
 order backwards. The script runner's two-observation check is the model.
 
-### `brokkr bench` takes the global lock to list or describe (2026-11-05)
-
-Found while declaring the first real benches. Bare `brokkr bench` and
-`brokkr bench NAME --help` wait for the global brokkr lock like a run,
-though both only read the config (and `--help` the resolved view), so
-either blocks behind any running check or bench. The lock policy is the
-verb's `CommandSpec`; a listing could take none, as `results` does.
-
 ### A typed call stream's sink ends without boundaries render nothing (2026-11-05)
 
 Found while landing the script-bench evidence views. `print_call_timelines`

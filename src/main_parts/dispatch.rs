@@ -59,8 +59,11 @@ pub(super) fn run(
             crate::clean::layout::PROJECT_STATE_DIR
         ));
     }
-    let lock_policy = spec.lock_for(&cli.command);
-    let _log = spec.run_log_for(&cli.command).map(|kind| {
+    // One answer for the lock, the run log and the tree below.
+    let reads_only =
+        cli::CommandSpec::reads_only(&cli.command, detection.map(|d| &d.config.benches));
+    let lock_policy = spec.lock_for(reads_only);
+    let _log = spec.run_log_for(reads_only).map(|kind| {
         crate::run_log::RunLog::begin(
             state_root
                 .expect("logging commands resolve a state root")
@@ -115,16 +118,12 @@ pub(super) fn run(
     // even after the policy that filtered it is gone.
     // A read-only invocation carries no tree, so nothing it reaches can
     // activate a policy on it.
-    context::set_configured_tree(
-        detection
-            .filter(|_| !cli::CommandSpec::reads_only(&cli.command))
-            .map(|d| {
-                (
-                    d.build_root.as_path().to_path_buf(),
-                    crate::tree_policy::TreePolicy::of(&d.config),
-                )
-            }),
-    );
+    context::set_configured_tree(detection.filter(|_| !reads_only).map(|d| {
+        (
+            d.build_root.as_path().to_path_buf(),
+            crate::tree_policy::TreePolicy::of(&d.config),
+        )
+    }));
     let historical = spec.uses_worktree(&cli.command)?;
     // Registered before activation, so the watchdog sees every applied edit;
     // declared first, so it is dropped after the edits are undone.
