@@ -102,7 +102,10 @@ A running binary can hand data to brokkr three ways:
    their fields by the same field-name rule, and only that: their block
    framing and integer `elapsed_ms` are their own, and the timing rules
    below do not apply to them. On every scraping path, `elapsed_ms` and
-   `total_ms` are reserved timing names and never stored as counters. On the
+   `total_ms` are reserved timing names and never stored as counters, and a
+   field in one of brokkr's own namespaces (`meta.`, `env.`, `prev.`,
+   `threads.`, `sidecar.`, `provenance.`) is dropped, warned once per key: those
+   keys record what brokkr observed, so a child cannot write them. On the
    self-reported paths an `elapsed_ms=` (or its alias `total_ms=`) line is
    **mandatory** - its absence errors the whole run; if both appear, the
    last valid timing line wins. This is the subprocess's **self-reported**

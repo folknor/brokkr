@@ -369,7 +369,8 @@ the build it measured - pbfhogg's osmpbf baseline is its own crate and records
 its own - and a row measuring an installed tool (osmium, planetiler,
 tilemaker) or a binary brokkr did not build records none. The namespace is
 brokkr's alone: a `provenance.*` pair the measured program prints is dropped
-with a warning. `brokkr results <uuid>` lists the pairs as `build ...` fields.
+with a warning, as is one in any other brokkr namespace (`brokkr man
+output-channels`). `brokkr results <uuid>` lists the pairs as `build ...` fields.
 
 Differing provenance never splits a pair: what it covers is exactly what a
 legitimate A/B varies (a toolchain-bump commit, a commit adding

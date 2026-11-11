@@ -588,16 +588,10 @@ impl BenchHarness {
         kv.extend(previous_run_kv(&self.db, self.measure_start_epoch.get())?);
         let mut peak_rss_mb: Option<f64> = None;
         for pair in &result.kv {
-            // The provenance namespace is the harness's alone: a measured
-            // program printing `provenance.rustflags=...` must not overwrite
-            // or impersonate what brokkr recorded about the build.
-            if is_harness_owned(pair) {
-                console::warn(&format!(
-                    "dropped `{}` from the run's output: the provenance namespace is brokkr's own",
-                    pair.key.as_str()
-                ));
-                continue;
-            }
+            // A measured program cannot write brokkr's namespaces: the
+            // stderr scrape (`super::kv::kv_line`) drops them. The check
+            // cannot live here, because `result.kv` also holds the `meta.*`
+            // pairs brokkr appended after the scrape.
             if pair.key == "peak_rss_kb" {
                 if let KvValue::Int(kb) = &pair.value {
                     #[allow(clippy::cast_precision_loss)]
@@ -693,14 +687,6 @@ impl BenchHarness {
     }
 }
 
-/// Whether a pair the measured program printed falls in a namespace only the
-/// harness writes. The provenance namespace is the one: a program printing
-/// `provenance.rustflags=...` must not overwrite or impersonate what brokkr
-/// recorded about the build.
-fn is_harness_owned(pair: &KvPair) -> bool {
-    pair.class() == crate::db::KvClass::Provenance
-}
-
 /// The provenance a row carries: its session build's, when the session built
 /// the binary and the row is not an external tool's; none otherwise - an
 /// installed tool, or a binary brokkr did not build, is not this build.
@@ -789,18 +775,5 @@ mod provenance_tests {
         // none rather than a build it did not run.
         assert!(row_provenance(Some(&crate::build::BuildKind::Java), Some(&id)).is_empty());
         assert!(row_provenance(None, None).is_empty());
-    }
-
-    #[test]
-    fn a_program_cannot_write_into_the_provenance_namespace() {
-        assert!(is_harness_owned(&KvPair::text(
-            "provenance.rustflags",
-            "-Cforged"
-        )));
-        assert!(!is_harness_owned(&KvPair::text("cells", "4")));
-        assert!(!is_harness_owned(&KvPair::text(
-            KvKey::metadata("build"),
-            "x"
-        )));
     }
 }

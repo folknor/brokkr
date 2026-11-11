@@ -441,22 +441,6 @@ other's slots. Taking the name from the canonical path fixes it, at the cost
 of re-keying any existing slot whose two spellings differ. The sidecar backup
 key deliberately does not share this function.
 
-### A child's stderr can write harness namespaces other than provenance (2026-11-03)
-
-Found while giving the stderr kv scrape a field-name grammar (brokkr bz
-110). `is_harness_owned` in `src/measure/record.rs` drops only `provenance.*`
-pairs a measured program prints. A child printing `env.FOO=x` stores a pair
-that `load_children` (`src/db/query.rs`) promotes into `captured_env`, which
-feeds compare pairing and filters. `meta.exit_code=0` cannot replace the
-harness's own exit-code pair on an answer-bearing command (capture appends
-the real one after the scraped pairs and the last value is kept), but on any
-other command it fabricates one that `src/db/format/compare.rs` reads.
-`prev.*`, `threads.*` and other `meta.*` keys can likewise impersonate what
-brokkr records. No producer is known to do this (the bz 110 survey of the sibling
-trees found none), so it is latent. Decide whether every `KvClass` prefix
-except plain counters is harness-owned for scraped pairs, and whether a
-dropped one should warn.
-
 ### Inter-suite gap on the unisolated serial path
 
 When harness isolation cannot be installed (a configured host runner or

@@ -493,6 +493,17 @@ mod persistence {
     }
 
     #[test]
+    fn a_child_cannot_write_brokkrs_namespaces() {
+        // Every KvClass prefix is brokkr's; a lookalike that is only a
+        // counter with a dot (`metadata.x`, `snapshot.meta.x`) still counts.
+        let stderr = b"env.FOO=x\nmeta.exit_code=0\nprev.uuid=abc\nthreads.rss_bytes=1\n\
+            sidecar.x=1\nprovenance.rustflags=-Cforged\nmetadata.x=1\nsnapshot.meta.x=2\nrows=3\n";
+        let (_, kv) = parse_kv_lines_us(stderr);
+        let keys: Vec<&str> = kv.iter().map(|p| p.key.as_str()).collect();
+        assert_eq!(keys, ["metadata.x", "snapshot.meta.x", "rows"]);
+    }
+
+    #[test]
     fn parse_kv_lines_skips_prose_whose_key_is_not_a_field_name() {
         // The two pbfhogg lines brokkr#110 named, a bracketed diagnostic, a
         // leading digit, a banner with an empty key, and three that conform:

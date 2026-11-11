@@ -192,8 +192,9 @@ draw moved - that owes a `TAPE_PROTOCOL_VERSION` bump, which is unconditional
 and cannot be waived per comparison.
 
 Counters from the winning run only: averaging across iterations would hide an
-iteration that differed rather than surface it. `meta.`, `env.` and `prev.`
-pairs are excluded as provenance.
+iteration that differed rather than surface it. Only unprefixed counters
+count; `meta.`, `env.`, `prev.` and brokkr's other namespaced pairs are
+excluded as provenance.
 
 ## Deferred
 
