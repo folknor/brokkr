@@ -668,7 +668,9 @@ local r = binary_with({
   phase (`brokkr sidecar`). Beside `hotpath`, the child is asked to stop
   rather than killed: brokkr sends its process group one SIGTERM and waits
   up to 30 seconds for it to exit before the SIGKILL, so a build that
-  cancels on SIGTERM unwinds and writes its report (Hotpath capture).
+  cancels on SIGTERM unwinds and writes its report (Hotpath capture). The
+  group is SIGKILLed once the child exits too, so the report is the child's
+  to write before it exits; a helper of its that is still running is ended.
 - `program` - an external program to run in place of the built
   executable, everything else about the call unchanged (its borrow, spool,
   marker FIFO, sidecar and options): a name without `/` is looked up on

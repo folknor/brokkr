@@ -429,15 +429,6 @@ for an isolated build root would, once someone confirms cargo's fingerprints
 there reproduce the stale-binary case. The runner tests' fixture sets its own
 `build.build-dir` and refuses an inherited `CARGO_BUILD_BUILD_DIR` instead.
 
-### Captured-child termination may leave group members alive (2026-11-02, unverified)
-
-Raised in the spar on brokkr bz 101, not traced here: the captured runner's
-terminate path (`terminate_and_wait` in `src/output/child.rs`) may return
-once the group leader exits during the SIGTERM grace period without killing
-surviving group members. If so, a helper of a stopped tool can still be
-writing scratch when the measured runner discards the attempt's paths, or
-after a by-hand clean removes them. Verify before acting.
-
 ### A worktree checkout key names the path as spelled (2026-11-02)
 
 Found while keying sidecar backups per project root (brokkr bz 102).

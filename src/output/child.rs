@@ -1234,7 +1234,6 @@ fn deadline_capture_without_incomplete_output(
     Ok(capture)
 }
 
-/// End a child with SIGKILL, optionally forwarding SIGTERM first.
 /// Terminate the child, wait for it, and report `ending` unless the wait
 /// itself failed.
 fn terminate_and_wait(
@@ -1256,6 +1255,18 @@ fn terminate_and_wait(
         .map_or_else(|error| Ending::WaitFailed(error.to_string()), |_| ending)
 }
 
+/// End a child with SIGKILL to its group (when it has one), optionally
+/// forwarding SIGTERM first and giving it `sigterm_grace` to exit.
+///
+/// The grace is the leader's: once the leader exits, the group is SIGKILLed
+/// at once, so a member that outlived the SIGTERM does not outlive the stop.
+/// The leader's exit is observed without reaping it (`leader_exited`), so the
+/// zombie leader keeps the pgid allocated until the group SIGKILL is sent and
+/// the number cannot name a recycled group. That is escalation before
+/// reaping, not a barrier: `wait` does not wait for the killed members, and
+/// one that left the group is out of reach; reservation-gated removal stays
+/// what keeps a lease holder's paths. When the leader's state cannot be
+/// read, no group signal is sent.
 fn terminate_child(
     child: &mut std::process::Child,
     isolation: ChildIsolation<'_>,
@@ -1272,10 +1283,13 @@ fn terminate_child(
         }
         let term_sent = Instant::now();
         while term_sent.elapsed() < sigterm_grace {
-            match child.try_wait() {
-                Ok(Some(_)) => return,
-                Ok(None) => std::thread::sleep(poll_interval),
-                Err(_) => break,
+            match leader_exited(pid) {
+                Ok(true) => break,
+                Ok(false) => std::thread::sleep(poll_interval),
+                Err(()) => {
+                    child.kill().ok();
+                    return;
+                }
             }
         }
     }
@@ -1283,6 +1297,34 @@ fn terminate_child(
         crate::process::signal_process_group(pid, libc::SIGKILL).ok();
     }
     child.kill().ok();
+}
+
+/// Whether the child `pid` has exited, observed with `WNOWAIT` so it stays
+/// an unreaped zombie for the caller's later `wait`. `Err` means its state
+/// could not be read (it is no longer this process's child to wait on).
+fn leader_exited(pid: u32) -> Result<bool, ()> {
+    let id = libc::id_t::from(pid);
+    loop {
+        // SAFETY: an all-zero siginfo_t is a valid value; waitid writes into it.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `info` is a valid, writable siginfo_t for the call.
+        let ret = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                id,
+                &raw mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if ret == 0 {
+            // SAFETY: waitid succeeded, so si_pid is initialised (zero when
+            // WNOHANG found no state change).
+            return Ok(unsafe { info.si_pid() } != 0);
+        }
+        if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return Err(());
+        }
+    }
 }
 
 /// Default time to give a captured child to honour SIGTERM after `brokkr kill`
@@ -1526,6 +1568,51 @@ mod tests {
             "removed from the inherited environment"
         );
         assert_eq!(run(&[("PATH", "/x")]), ["PATH=/x"]);
+    }
+
+    /// A leader that dies of the forwarded SIGTERM does not end the stop:
+    /// a group member that ignores SIGTERM is SIGKILLed before the leader is
+    /// reaped, rather than left running.
+    #[test]
+    fn a_leader_exiting_in_the_grace_takes_its_group_with_it() {
+        let signal_guard = crate::shutdown::SigtermGuard::install();
+        let isolation = ChildIsolation::ProcessGroup(&signal_guard);
+        let mut child = spawn_captured_unsetting(
+            "sh",
+            &["-c", "(trap '' TERM; exec sleep 30) & wait"],
+            cwd(),
+            &[],
+            &[],
+            isolation,
+            SpawnProfile::Plain,
+        )
+        .unwrap();
+        let pgid = child.id();
+        std::thread::sleep(Duration::from_millis(300));
+        let started = Instant::now();
+        let ending = terminate_and_wait(
+            &mut child,
+            isolation,
+            true,
+            &ChildOptions {
+                sigterm_grace: Duration::from_secs(20),
+                ..ChildOptions::DEFAULT
+            },
+            Ending::Interrupted,
+        );
+        assert_eq!(ending, Ending::Interrupted);
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the leader's exit ends the grace"
+        );
+        let gone = Instant::now();
+        while crate::process::signal_process_group(pgid, 0).unwrap_or(false) {
+            assert!(
+                gone.elapsed() < Duration::from_secs(5),
+                "the member that ignored SIGTERM is still alive"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// A child that keeps printing outlives a wall time several idle windows
