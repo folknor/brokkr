@@ -53,9 +53,34 @@ pub(crate) struct FileNode {
 pub(crate) struct View {
     table: toml::Table,
     files: BTreeMap<Segments, FileNode>,
+    /// The host the view was built for.
+    hostname: String,
+    /// Whether the composed config holds a section for it.
+    has_section: bool,
 }
 
 impl View {
+    /// The host whose section a resolved `path` lies in, worded for a
+    /// refusal: `Some` when the path's first segment is `datasets` or `host`,
+    /// the two tables that differ from host to host. It says only that this
+    /// host's view has no such key, never why: a typo is absent too.
+    pub(crate) fn host_of(&self, path: &[String]) -> Option<String> {
+        match path.first().map(String::as_str) {
+            Some("datasets" | "host") => Some(format!("host {}", self.hostname)),
+            _ => None,
+        }
+    }
+
+    /// The keys under a host-scoped table, or, when the host has no section
+    /// at all, that context instead of an empty list.
+    pub(crate) fn host_keys(&self, keys: &str) -> String {
+        if self.has_section {
+            format!("keys: {keys}")
+        } else {
+            format!("host {} has no section in the config", self.hostname)
+        }
+    }
+
     pub(crate) fn table(&self) -> &toml::Table {
         &self.table
     }
@@ -82,6 +107,7 @@ pub(crate) fn build(composed: &toml::Table, hostname: &str, project_root: &Path)
     }
     let mut files = BTreeMap::new();
     let (prefix, section) = selected_host(composed, hostname);
+    let has_section = section.is_some();
     let section = section.cloned().unwrap_or_default();
     let dir = |key: &str, default: &str| {
         resolve(
@@ -121,7 +147,12 @@ pub(crate) fn build(composed: &toml::Table, hostname: &str, project_root: &Path)
         let at = vec!["data".to_owned()];
         walk_files(data, Some(&at), &at, project_root, &mut files);
     }
-    View { table, files }
+    View {
+        table,
+        files,
+        hostname: hostname.to_owned(),
+        has_section,
+    }
 }
 
 /// The host section for `hostname` and its path in the composed table.

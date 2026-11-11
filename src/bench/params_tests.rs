@@ -178,21 +178,45 @@ fn params_bind_in_dependency_order_into_the_document() {
 fn the_dynamic_refusals_name_the_valid_keys() {
     let f = fixture("refusals", DATASETS);
     let refused = |words: &[&str]| refusal(&f, words);
+    // A key this host's view lacks says so, naming the bench, the key and
+    // the host.
     let err = refused(&["--variant", "locations"]);
-    assert!(
-        err.contains("not a key under datasets.denmark.snapshot.base.pbf")
-            && err.contains("indexed, raw"),
-        "{err}"
+    assert_eq!(
+        err,
+        "usage: bench b: --variant locations selects \"locations\", but host box has no such key \
+         under datasets.denmark.snapshot.base.pbf (keys: indexed, raw)"
     );
-    // A default that is not under its table, judged only when used.
+    // A default that is not under its table, judged only when used; no
+    // advice, since the host's keys are named.
     let err = refused(&["--dataset", "sweden"]);
-    assert!(
-        err.contains("default \"indexed\"") && err.contains("raw"),
-        "{err}"
+    assert_eq!(
+        err,
+        "config: bench b: --variant's default \"indexed\" selects \"indexed\", but host box has \
+         no such key under datasets.sweden.snapshot.base.pbf (keys: raw)"
     );
     one(&f, &["--dataset", "sweden", "--variant", "raw"]);
     let err = refused(&["--dataset", "norway"]);
-    assert!(err.contains("denmark, sweden"), "{err}");
+    assert_eq!(
+        err,
+        "usage: bench b: --dataset norway selects \"norway\", but host box has no such key under \
+         datasets (keys: denmark, sweden)"
+    );
+    // A missing table on the way is the first one missing.
+    let err = refused(&["--dataset", "sweden", "--variant", "raw", "--osc", "1"]);
+    assert_eq!(
+        err,
+        "usage: bench b: --osc 1 selects under datasets.sweden.osc, but the config view for host \
+         box has no key \"osc\" under datasets.sweden (keys: pbf, snapshot)"
+    );
+    // A host with no section says so.
+    let bare = view::build(f.sources.composed(), "elsewhere", &f.dir);
+    let given = parse(&f.bench, &tokens(&[])).unwrap();
+    let err = bind(&f.bench, &given, &bare).unwrap_err().to_string();
+    assert_eq!(
+        err,
+        "config: bench b: --dataset's default \"denmark\" selects \"denmark\", but host \
+         elsewhere has no such key under datasets (host elsewhere has no section in the config)"
+    );
     assert!(
         !err.contains("--variant") && !err.contains("--snapshot"),
         "dependents of a refused parent are not judged: {err}"
@@ -250,8 +274,8 @@ fn a_required_param_absent_is_one_refusal_whatever_its_arms() {
     );
     assert_eq!(
         lines[2],
-        "bench b: --tags is required: give it on the command line\n  no keys under data.tags \
-         on this host"
+        "bench b: --tags is required: give it on the command line\n  no keys under data.tags",
+        "data is the project's, not the host's"
     );
 
     // One absence under several paths is still one refusal, a usage error,
@@ -271,7 +295,7 @@ fn a_required_param_absent_is_one_refusal_whatever_its_arms() {
         message,
         "bench b: --workload is required: give it on the command line\n  valid under \
          data.workloads.hotpath: a\n  valid under data.workloads.bench: a, b\n  no keys \
-         under data.workloads.empty on this host"
+         under data.workloads.empty"
     );
 
     // A refused parent adds no detail and does not hide the absence.
@@ -340,7 +364,7 @@ fn help_names_a_required_absence_once() {
     let Some(Ok(paths)) = values_for(&f.bench, &help, &f.view, "workload") else {
         panic!("workload's own keys are listed");
     };
-    assert_eq!(paths[0].1, ["a", "b"]);
+    assert_eq!(paths[0].keys, ["a", "b"]);
     // Said once under several arms too.
     let help = parse(
         &f.bench,
@@ -419,7 +443,7 @@ fn a_collection_binds_lists_ranges_repeats_and_all_in_order() {
     assert!(refused(&["--osc", "4705,"]).contains("blank item"));
     let err = refused(&["--osc", "4705,4799"]);
     assert!(
-        err.contains("\"4799\", not a key under datasets.denmark.osc"),
+        err.contains("\"4799\", but host box has no such key under datasets.denmark.osc"),
         "{err}"
     );
     // A plain collection takes lists and repeats; it has no keys, so `all`
@@ -694,7 +718,7 @@ fn help_lists_keys_under_the_parents_given_or_default() {
             .unwrap()
             .unwrap()
             .into_iter()
-            .map(|(path, keys)| format!("{path}: {}", keys.join(",")))
+            .map(|l| format!("{}: {}", l.path, l.keys.join(",")))
             .collect::<Vec<_>>()
     };
     assert_eq!(
@@ -722,6 +746,40 @@ fn help_lists_keys_under_the_parents_given_or_default() {
         .unwrap()
         .unwrap_err();
     assert!(err.contains("norway"), "{err}");
+}
+
+/// An empty table under this host's datasets names the host, and offers no
+/// flag to fix what the host's config does not hold (brokkr#162).
+#[test]
+fn an_empty_host_table_names_the_host() {
+    let f = fixture(
+        "host-empty",
+        r#"
+[bench.b]
+script = "function bench() end"
+params.dataset = { from = "datasets", default = "dk" }
+params.osc = { from = "datasets.{dataset}.osc", default_only = true }
+params.seq = { from = "datasets.{dataset}.osc" }
+
+[box.datasets.dk.pbf.raw]
+file = "dk.pbf"
+[box.datasets.dk.osc]
+"#,
+    );
+    let err = refusal(&f, &[]);
+    assert_eq!(
+        err,
+        "usage: bench b: --osc defaults to the only key of datasets.dk.osc, which holds 0 (none) \
+         on host box"
+    );
+    let err = refusal(&f, &["--osc", "x", "--seq", "all"]);
+    assert!(
+        err.contains(
+            "bench b: --seq all selects no key: host box has none under datasets.dk.osc, so \
+             there is nothing to run"
+        ),
+        "{err}"
+    );
 }
 
 /// `default_only` binds the one key its table holds in each arm, recorded

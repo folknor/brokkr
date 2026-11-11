@@ -354,7 +354,8 @@ dependents are not judged under it):
   many arms there are, even in an arm whose parent was refused, and its
   dependents not judged; for a `from` param the refusal lists the keys
   under each distinct path the arms' bound parents lead to, where that path
-  is a table;
+  is a table, and where a path under `datasets` or `host` leads nowhere,
+  the key this host's view lacks;
 - a `from` path that does not lead to a table (a missing key on the way, or
   a value that is not a table), and a bound param whose path needs a param
   that has no value;
@@ -378,6 +379,17 @@ dependents are not judged under it):
 - a key holding a `.` where it is substituted into another param's path,
   since the stored path is its segments joined by dots; a key selected at
   the end of a path may hold one.
+
+`datasets` and `host` are the two tables that differ from host to host
+(The resolved view), so where a missing key, a missing table on the way, an
+empty table under a fan-out or an empty `default_only` table lies in one of
+them, the refusal names the host: `--dataset norway selects "norway", but
+host bygg has no such key under datasets (keys: denmark, sweden)`, or, for a
+host with no section, says that instead of listing keys. It states only what
+this host's view of the config holds, never why a key is absent (a
+misspelling is absent too), and a default's refusal there carries no advice
+to fix the default, since the default may be right and the host the one
+lacking it. Anywhere else the wording names no host.
 
 A selected entry that is a file entry (The resolved view) is the run's
 input. Before any build, brokkr reserves every arm's bound inputs for

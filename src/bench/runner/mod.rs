@@ -879,16 +879,16 @@ fn describe(bench: &Bench, detection: &Detection, given: &params::Given, view: &
             None => {}
             Some(Ok(paths)) => {
                 let several = paths.len() > 1;
-                for (path, keys) in paths {
+                for listed in paths {
                     let under = if several {
-                        format!(" under {path}")
+                        format!(" under {}", listed.path)
                     } else {
                         String::new()
                     };
-                    lines.push(if keys.is_empty() {
-                        format!("      no keys{under} on this host")
-                    } else {
-                        format!("      keys{under}: {}", keys.join(", "))
+                    lines.push(match (listed.keys.is_empty(), &listed.host) {
+                        (true, Some(host)) => format!("      no keys{under} on {host}"),
+                        (true, None) => format!("      no keys{under}"),
+                        (false, _) => format!("      keys{under}: {}", listed.keys.join(", ")),
                     });
                 }
             }

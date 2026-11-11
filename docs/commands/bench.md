@@ -63,7 +63,9 @@ each param with its `from` path, its default or `(required)` and, for a
 `from` param, the keys it takes on this host, in key order, the parents it
 depends on chosen
 from the same command line, else their defaults; a parent given several
-values lists the keys under each path they lead to.
+values lists the keys under each path they lead to. A path with no keys
+names the host only when it lies under `datasets` or `host`, the tables that
+differ by host (`docs/brokkr.toml.bench.md`, Binding params).
 
 Refused before anything runs, and not stored, in this order: a param
 refusal in any arm (a `required` param not given among them, a value not

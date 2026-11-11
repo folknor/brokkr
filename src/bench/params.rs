@@ -184,7 +184,12 @@ fn items(param: &Param, raw: &[String]) -> Result<Vec<Item>, String> {
 /// The keys `items` select from `table` (at `path`), in item order, ranges
 /// ascending in place and `all` in key order; a key that is not there is
 /// refused, every missing one named.
-fn select(table: &toml::Table, path: &[String], items: &[Item]) -> Result<Vec<String>, String> {
+fn select(
+    table: &toml::Table,
+    path: &[String],
+    items: &[Item],
+    view: &View,
+) -> Result<Vec<String>, Why> {
     let mut keys = Vec::new();
     let mut missing: Vec<String> = Vec::new();
     for item in items {
@@ -235,16 +240,47 @@ fn select(table: &toml::Table, path: &[String], items: &[Item]) -> Result<Vec<St
         }
     }
     if !missing.is_empty() {
-        return Err(format!(
-            "selects {}, not {} under {} (valid: {})",
-            missing.join(", "),
-            if missing.len() == 1 { "a key" } else { "keys" },
-            view::shown(path),
-            keys_of(table)
-        ));
+        let one = missing.len() == 1;
+        return Err(match view.host_of(path) {
+            Some(host) => Why::host(format!(
+                "selects {}, but {host} has no such {} under {} ({})",
+                missing.join(", "),
+                if one { "key" } else { "keys" },
+                view::shown(path),
+                view.host_keys(&keys_of(table))
+            )),
+            None => Why::from(format!(
+                "selects {}, not {} under {} (valid: {})",
+                missing.join(", "),
+                if one { "a key" } else { "keys" },
+                view::shown(path),
+                keys_of(table)
+            )),
+        });
     }
     refuse_duplicates(&keys)?;
     Ok(keys)
+}
+
+/// Why a value was refused, and whether the refusal is that this host's view
+/// has no such key or table: then a default's refusal carries no advice, as
+/// neither giving the flag nor fixing the default is sure to help where the
+/// host's config holds nothing to select (the keys it does hold are named).
+struct Why {
+    text: String,
+    host: bool,
+}
+
+impl Why {
+    fn host(text: String) -> Self {
+        Why { text, host: true }
+    }
+}
+
+impl From<String> for Why {
+    fn from(text: String) -> Self {
+        Why { text, host: false }
+    }
 }
 
 fn refuse_duplicates(keys: &[String]) -> Result<(), String> {
@@ -401,11 +437,11 @@ fn expand(
             (None, None) => continue,
         };
         let value = spelled(name, param, &raw);
-        let refuse = |why: String| refusal(&bench.name, name, &value, source, &why);
+        let refuse = |why: Why| refusal(&bench.name, name, &value, source, &why);
         let items = match items(param, &raw) {
             Ok(items) => items,
             Err(why) => {
-                refusals.push(refuse(why));
+                refusals.push(refuse(why.into()));
                 for partial in &mut partials {
                     partial.unavailable.insert(name.to_owned());
                 }
@@ -428,7 +464,7 @@ fn expand(
                 .map_err(refuse)
                 .and_then(|(from, values)| {
                     if sole && values.len() != 1 {
-                        Err(not_sole(bench, name, from.as_deref(), &values))
+                        Err(not_sole(bench, name, from.as_deref(), &values, view))
                     } else {
                         Ok((from, values))
                     }
@@ -451,9 +487,9 @@ fn expand(
                     next.push(partial);
                 }
                 Ok((from, values)) if values.is_empty() => {
-                    refusals.push(refuse(format!(
-                        "selects no key: {} has none, so there is nothing to run",
-                        from.as_deref().map_or_else(String::new, view::shown)
+                    refusals.push(refuse(nothing_to_run(
+                        view,
+                        from.as_deref().unwrap_or_default(),
                     )));
                     partial.unavailable.insert(name.to_owned());
                     next.push(partial);
@@ -483,11 +519,29 @@ fn expand(
     }
 }
 
+/// A fanned param whose values select no key: the table at `path` is empty.
+fn nothing_to_run(view: &View, path: &[String]) -> Why {
+    match view.host_of(path) {
+        Some(host) => Why::host(format!(
+            "selects no key: {host} has none under {}, so there is nothing to run",
+            view::shown(path)
+        )),
+        None => Why::from(format!(
+            "selects no key: {} has none, so there is nothing to run",
+            view::shown(path)
+        )),
+    }
+}
+
 /// `--name value` refused for `why`, worded for where the value came from.
-fn refusal(bench: &str, name: &str, value: &str, source: Source, why: &str) -> Refusal {
+fn refusal(bench: &str, name: &str, value: &str, source: Source, why: &Why) -> Refusal {
+    let Why { text: why, host } = why;
     Refusal {
         message: match source {
             Source::Given => format!("bench {bench}: --{name} {value} {why}"),
+            Source::Default if *host => {
+                format!("bench {bench}: --{name}'s default {value:?} {why}")
+            }
             Source::Default => format!(
                 "bench {bench}: --{name}'s default {value:?} {why}; give --{name} on the command \
                  line or fix the default"
@@ -499,19 +553,36 @@ fn refusal(bench: &str, name: &str, value: &str, source: Source, why: &str) -> R
 
 /// A `default_only` param whose table, in one arm, holds no key or several:
 /// the command line must choose, and the keys are named.
-fn not_sole(bench: &Bench, name: &str, from: Option<&[String]>, values: &[BoundValue]) -> Refusal {
+/// On a host-scoped path the host is named, and a table holding none gets no
+/// advice: no flag selects a key this host's config does not hold.
+fn not_sole(
+    bench: &Bench,
+    name: &str,
+    from: Option<&[String]>,
+    values: &[BoundValue],
+    view: &View,
+) -> Refusal {
     let keys: Vec<&str> = values.iter().map(|v| v.key.as_str()).collect();
+    let path = from.unwrap_or_default();
     let held = if keys.is_empty() {
         "none".to_owned()
     } else {
         keys.join(", ")
     };
+    let host = view.host_of(path);
+    let on = host
+        .as_ref()
+        .map_or_else(String::new, |host| format!(" on {host}"));
+    let advice = if keys.is_empty() && host.is_some() {
+        String::new()
+    } else {
+        format!("; give --{name} on the command line")
+    };
     Refusal {
         message: format!(
-            "bench {}: --{name} defaults to the only key of {}, which holds {} ({held}); give \
-             --{name} on the command line",
+            "bench {}: --{name} defaults to the only key of {}, which holds {} ({held}){on}{advice}",
             bench.name,
-            from.map_or_else(String::new, view::shown),
+            view::shown(path),
             keys.len(),
         ),
         source: Source::Given,
@@ -569,15 +640,27 @@ fn absence(bench: &Bench, name: &str, param: &Param, partials: &[Partial], view:
             let Ok(path) = substitute(name, &from.segments, chosen) else {
                 continue;
             };
-            let Ok(table) = walk(view.table(), &path) else {
-                continue;
-            };
             let shown = view::shown(&path);
             if listed.contains(&shown) {
                 continue;
             }
+            let table = match walk(view, &path) {
+                Ok(table) => table,
+                // Where this host's view has no such table, that is said, as
+                // the walk words it; elsewhere a failed lookup adds nothing.
+                Err(Missing { gap, host: true }) => {
+                    message.push_str(&format!("\n  no {shown}: {gap}"));
+                    listed.push(shown);
+                    continue;
+                }
+                Err(_) => continue,
+            };
+            let host = view.host_of(&path);
             message.push_str(&if table.is_empty() {
-                format!("\n  no keys under {shown} on this host")
+                match host {
+                    Some(host) => format!("\n  no keys under {shown} on {host}"),
+                    None => format!("\n  no keys under {shown}"),
+                }
             } else {
                 format!("\n  valid under {shown}: {}", keys_of(table))
             });
@@ -595,7 +678,7 @@ fn resolve(
     items: &[Item],
     bound: &Bound,
     view: &View,
-) -> Result<(Option<Segments>, Vec<BoundValue>), String> {
+) -> Result<(Option<Segments>, Vec<BoundValue>), Why> {
     let Some(from) = param.from() else {
         let keys: Vec<String> = items
             .iter()
@@ -627,7 +710,8 @@ fn resolve(
                     "holds {}, not among its choices: {}",
                     wrong.join(", "),
                     choices.join(", ")
-                ));
+                )
+                .into());
             }
         }
         return Ok((
@@ -649,9 +733,9 @@ fn resolve(
             .and_then(|b| b.values.first())
             .map(|v| v.key.clone())
     })?;
-    let table = walk(view.table(), &path)?;
+    let table = walk(view, &path).map_err(|missing| missing.under(&path))?;
     let mut values = Vec::new();
-    for key in select(table, &path, items)? {
+    for key in select(table, &path, items, view)? {
         let at: Segments = [path.clone(), vec![key.clone()]].concat();
         let file = view.file(&at).cloned();
         if let Some(file) = &file
@@ -660,11 +744,12 @@ fn resolve(
             return Err(format!(
                 "names {}, which is not UTF-8 and a script cannot pass on",
                 file.path.display()
-            ));
+            )
+            .into());
         }
         // `select` returns only keys of this table.
         let Some(entry) = table.get(&key) else {
-            return Err(format!("lost the key {key:?} it selected"));
+            return Err(format!("lost the key {key:?} it selected").into());
         };
         values.push(BoundValue {
             entry: view::value(entry),
@@ -713,34 +798,66 @@ fn substitute(
         .collect()
 }
 
-/// The table at `path` in the view.
-fn walk<'a>(table: &'a toml::Table, path: &[String]) -> Result<&'a toml::Table, String> {
-    let mut current = table;
+/// Why `walk` found no table at a path: what is in the way, worded to follow
+/// "but", and whether that is a key this host's view lacks.
+struct Missing {
+    gap: String,
+    host: bool,
+}
+
+impl Missing {
+    /// The refusal of a value selected under `path`.
+    fn under(self, path: &[String]) -> Why {
+        Why {
+            text: format!("selects under {}, but {}", view::shown(path), self.gap),
+            host: self.host,
+        }
+    }
+}
+
+/// The table at `path` in the view. A key missing on the way is the first
+/// one missing, and under `datasets` or `host` is said to be missing from
+/// this host's view of the config.
+fn walk<'a>(view: &'a View, path: &[String]) -> Result<&'a toml::Table, Missing> {
+    let mut current = view.table();
     for (i, segment) in path.iter().enumerate() {
-        let here = || {
-            if i == 0 {
-                "the config".to_owned()
-            } else {
-                view::shown(&path[..i])
-            }
-        };
         match current.get(segment) {
             Some(toml::Value::Table(inner)) => current = inner,
             Some(other) => {
-                return Err(format!(
-                    "selects under {}, but {} is a {}, not a table of values",
-                    view::shown(path),
-                    view::shown(&path[..=i]),
-                    other.type_str()
-                ));
+                return Err(Missing {
+                    gap: format!(
+                        "{} is a {}, not a table of values",
+                        view::shown(&path[..=i]),
+                        other.type_str()
+                    ),
+                    host: false,
+                });
             }
             None => {
-                return Err(format!(
-                    "selects under {}, but {} has no key {segment:?} (keys: {})",
-                    view::shown(path),
-                    here(),
-                    keys_of(current)
-                ));
+                // `datasets` and `host` are always in the view, so a
+                // host-scoped miss has a parent path to name.
+                return Err(match view.host_of(path).filter(|_| i > 0) {
+                    Some(host) => Missing {
+                        gap: format!(
+                            "the config view for {host} has no key {segment:?} under {} ({})",
+                            view::shown(&path[..i]),
+                            view.host_keys(&keys_of(current))
+                        ),
+                        host: true,
+                    },
+                    None => Missing {
+                        gap: format!(
+                            "{} has no key {segment:?} (keys: {})",
+                            if i == 0 {
+                                "the config".to_owned()
+                            } else {
+                                view::shown(&path[..i])
+                            },
+                            keys_of(current)
+                        ),
+                        host: false,
+                    },
+                });
             }
         }
     }
@@ -1060,9 +1177,18 @@ fn digest_one(
     Ok(Some(digest.to_string()))
 }
 
-/// Each distinct `from` path a param's parents lead to, shown, with its keys
-/// in key order.
-pub(crate) type KeysByPath = Vec<(String, Vec<String>)>;
+/// One distinct `from` path a param's parents lead to.
+#[derive(Debug)]
+pub(crate) struct Listed {
+    /// The path, shown.
+    pub(crate) path: String,
+    /// Its keys, in key order.
+    pub(crate) keys: Vec<String>,
+    /// The host whose section the path lies in ([`View::host_of`]).
+    pub(crate) host: Option<String>,
+}
+
+pub(crate) type KeysByPath = Vec<Listed>;
 
 /// For `--help`: the keys `name` takes under its `from` path, in key order,
 /// per distinct path its parents lead to: the parents bound as a run would
@@ -1095,7 +1221,7 @@ pub(crate) fn values_for(
                 .join("; ")));
         }
     };
-    let mut paths: Vec<(String, Vec<String>)> = Vec::new();
+    let mut paths: KeysByPath = Vec::new();
     for arm in &arms {
         let chosen = |p: &str| {
             arm.params
@@ -1104,10 +1230,16 @@ pub(crate) fn values_for(
                 .map(|v| v.key.clone())
         };
         let listed = substitute(name, &from.segments, chosen).and_then(|path| {
-            walk(view.table(), &path).map(|table| (view::shown(&path), key_order(table)))
+            walk(view, &path)
+                .map(|table| Listed {
+                    path: view::shown(&path),
+                    keys: key_order(table),
+                    host: view.host_of(&path),
+                })
+                .map_err(|missing| missing.under(&path).text)
         });
         match listed {
-            Ok(listed) if paths.iter().any(|(path, _)| *path == listed.0) => {}
+            Ok(listed) if paths.iter().any(|p| p.path == listed.path) => {}
             Ok(listed) => paths.push(listed),
             Err(why) => return Some(Err(format!("it {why}"))),
         }
