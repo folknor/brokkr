@@ -20,6 +20,7 @@ brokkr bench NAME --dataset denmark   # bind a param
 brokkr bench NAME --osc 4705..4710    # a collection: one run over all six
 brokkr bench NAME --dataset all       # fan out: one run per dataset
 brokkr bench --dry-run NAME --row x   # check the invocation, build nothing
+brokkr bench --test                   # run the contract tests under bench_tests
 ```
 
 ## The command line
@@ -45,6 +46,8 @@ collide with a param. brokkr's options:
   alloc runs.
 - `--dry-run` - check the invocation and stop before anything is built
   (Dry run).
+- `--test` - run the project's contract tests (Contract tests) instead of a
+  bench. It takes no NAME, params or other option, and no lock.
 
 After NAME come the bench's params, `--NAME VALUE` or `--NAME=VALUE`, and
 `--help` or `-h` where a param's name could stand. How they bind against
@@ -252,6 +255,139 @@ and takes no lock, so a queue of invocations can be checked while a bench
 runs. A dry run that passes says the invocation is one the bench takes;
 the host, the build and the inputs as they are when it runs are the run's
 to find out.
+
+## Contract tests
+
+A contract test runs a bench's real script against scripted fixtures and
+asserts what it did: the argv it built, which config key it read, that it
+honours a stop marker, what record and verdict it leaves, why it fails. No
+build, no data, no child process and no store. The test files are Lua, every
+regular `.lua` file under the directory `bench_tests` names (`brokkr man
+bench-config`, `bench_tests`); `brokkr check`'s `bench` phase runs them all,
+and so does `brokkr bench --test`, which takes no lock.
+
+```lua
+test("a relations run reads the relations declaration", function()
+  local r = run {
+    bench = "check-refs",
+    params = {"--dataset", "denmark", "--check-relations", "yes"},
+    host = { datasets = { denmark = { pbf = { indexed = {
+      file = "denmark.pbf",
+      expect = { ["check-refs"] = "violations", ["check-refs-relations"] = "clean" },
+    } } } } },
+    calls = { { exit = 0, stdout = "violations: 3\n" } },
+    files = { [project_root .. "/data/denmark.pbf"] = "" },
+  }
+  assert(r.outcome == "failed", r.outcome)
+  assert(string.find(r.reason, "declares clean"), r.reason)
+  assert(r.calls[1].argv[2] == "--check-relations")
+end)
+```
+
+A test file runs top to bottom in a Lua state of its own holding dellingr's
+library, `json`, `print`, `project_root` (the project root's path, which a
+dataset's `path` and a `[data]` file resolve against, and the default host
+data directory below it), and three functions:
+
+- `test(name, fn)` - one case: `fn` runs at once, and a failure inside it is
+  that case's, the file going on to the next. A file that declares no case,
+  or fails outside one, is a failure itself; a case inside a case is
+  refused. Every case shares the file's state, so what one changes in a
+  shared table stays changed. A stop (Ctrl-C, `brokkr kill`) ends the file.
+- `assert(v [, message])` - `v`, or the case fails with `message`. dellingr
+  has none of its own, nor `pcall`.
+- `run(spec)` - one arm of a bench, through the lifecycle a run takes up to
+  the build, and its result as a table.
+
+None of a bench script's own builtins (`binary`, `output`, `config`, `fail`,
+`record`, ...) is in a test file's state: a test reaches them only through
+`run`.
+
+`run` takes a table of fixtures, every key known and every value its shape,
+so a misspelt one fails the case rather than testing less:
+
+- `bench` - the `[bench.NAME]` to run. Required.
+- `params` - the words after NAME on a command line (`{"--dataset",
+  "denmark"}`). They bind with the real binder against the real resolved view
+  (`brokkr man bench-config`, The resolved view) of this project's config,
+  every host section replaced by `host`, so the defaults, `from` paths and
+  refusals are a run's. They must bind to one arm: a test runs one, and a
+  fan-out fails the case.
+- `program` - the build's file name, as a `binary()` result names it.
+  Needed only for a bench without a `target` whose script calls the build
+  (a test runs no cargo to find it); beside a `target` it must equal it.
+- `host` - the selected host's section, a table as the TOML would hold it
+  (`datasets`, `data`, ...), held to the schema a config load holds a host
+  section to. A number with an integral value within 2^53 is a TOML integer,
+  any other a float. Absent, the host has no section. Its name in the view
+  is `contract-test`.
+- `calls` - one response per call `bench()` makes, in order: `exit`,
+  `signal` or `stopped_at` (at most one; `exit = 0` when none is given),
+  `stdout`, `stderr`, `outputs` (contents of files the child writes, by the
+  name the script gave `output()`) and `hotpath` (the report a marked call
+  captured; a marked call without one captured nothing, `missing`).
+- `preflight_calls` - one response per call `preflight()` makes: `exit` or
+  `signal`, `stdout`, `stderr`, or `start_error = {operation = "resolve" |
+  "execute", message = ...}` for a program that never started.
+- `since` - `since(sha)`'s answer for each sha, `true` or `false`.
+- `files` - each input's contents, by its path as the script sees it. Only
+  a bound input may be given: outputs, scratch and spools start empty, made
+  by the iteration.
+- `page_cache` - `page_cache(path, mode)`'s reason for each input that
+  cannot be prepared; an input absent from it can.
+
+Every string a fixture holds is UTF-8, as a Lua string handed to brokkr
+always is.
+
+The result's fields:
+
+- `stage` - how far it got: `bind`, `validate`, `preflight` or `bench`.
+- `outcome` - at `bind`, `validate` or `preflight`: `refused` (a param or
+  default the binder refuses, a `validated` param with no `validate()`, a
+  `fail()` or failed `r:ok()`) or `broken` (a script error in a hook); at
+  `bench`: `completed` or `failed`.
+- `reason` - why, when it did not complete.
+- `verdict` - what `bench()` returned, when it completed and returned one.
+- `record` - `record` as a run would store it, when it completed.
+- `calls` - every call `bench()` made, each with `argv` (the words, a handle
+  as its path), `origins` (per word: `text`, `input`, `output`, `scratch`
+  or `spool`), `env`, `reads`, `writes`, `cold`, `warm` (paths), `measured`,
+  and `stdin`, `stop_at`, `hotpath` and `program` when it gave them.
+- `preflight_calls` - every call `preflight()` made: `program`, `argv`,
+  `env`.
+- `modules` - every `bench_lib` module the run asked `require` for.
+
+A refusal or a failure is the script's, and is a result the test asserts.
+A fixture the script's behaviour contradicts is the test's, and fails the
+case at its `run`: a call with no response left, a declared response no
+call asked for (the script skipped what its test meant to exercise), a
+`stopped_at` the call did not name as its `stop_at`, an `outputs` name that
+is no `output()` name or that the call does not declare written, a `hotpath`
+report for a call not marked, a `since()` with no answer, an input read,
+sized or given as stdin without contents in `files`, a `files` path that is
+no bound input, an input under `/brokkr-contract/iteration` (below), a bench
+or host the config would not have, a build call with no `program` to name it
+by.
+
+What the virtual hosts decide, they decide as a run's hosts do: the same
+call rules (a second `measured` call, a `cold` or `warm` input the call does
+not pass, an input in `writes`, a handle never given out, an argument
+holding a NUL, a refused preflight option), the same output and scratch name
+rules, a `write()` only to an output, an output never written that does not
+exist, not even as a call's stdin. A call's result is shaped as a run's:
+`stdout` and `stderr` cut at their first MiB with `stdout_truncated` and
+`stderr_truncated`, `stderr_tail` their last, `stdout_file` and
+`stderr_file` readable handles; its `program` is the external program's file
+name, or the build's: the bench's `target`, or for a bench without one, whose
+build a run finds by cargo's runnable discovery, the spec's `program`. Outputs, scratch and spools live under `/brokkr-contract/iteration`.
+
+What a test proves is the script's behaviour given what the fixtures say the
+world did. It does not prove that a program exists or starts, that an input
+is a file brokkr may read, that a call would be admitted beside other
+reservations, that page-cache preparation would succeed (two paths that are
+one file are caught only by a run), or anything about a real child's
+markers and timing: those are a run's, and brokkr's own tests cover them
+against real children.
 
 ## Arms
 

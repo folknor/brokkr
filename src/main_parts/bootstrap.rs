@@ -730,6 +730,14 @@ pub(super) fn run_check(
             check_cmd::Benches {
                 benches: &d.config.benches,
                 registry: d.config.bench_registry.as_ref(),
+                tests: d.config.bench_tests.as_deref(),
+                composed: Some(d.config_sources.composed()),
+                project_root: d.project_root.as_path(),
+                library: d
+                    .config
+                    .bench_registry
+                    .as_ref()
+                    .and_then(|registry| registry.library.as_deref()),
             },
             d.config.rustdoc.as_ref(),
             d.config.lints.as_ref(),
@@ -756,6 +764,10 @@ pub(super) fn run_check(
             check_cmd::Benches {
                 benches: &user.benches,
                 registry: user.bench_registry.as_ref(),
+                tests: user.bench_tests.as_deref(),
+                composed: None,
+                project_root: no_config_roots.0.as_path(),
+                library: None,
             },
             None,
             None,

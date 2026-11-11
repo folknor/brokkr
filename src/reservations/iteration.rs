@@ -93,6 +93,53 @@ struct AreaDir {
     identity: (u64, u64),
 }
 
+/// The areas a script names entries in: `output()` and `scratch()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum NameArea {
+    Out,
+    Scratch,
+}
+
+impl NameArea {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Out => Area::Out.name(),
+            Self::Scratch => Area::Scratch.name(),
+        }
+    }
+}
+
+/// The output and scratch names one iteration gave out: each is one path
+/// component, given once per area. The one rule a real iteration and the
+/// virtual one a contract test runs (`crate::bench::contract`) both apply.
+#[derive(Debug, Default)]
+pub(crate) struct Names {
+    given: BTreeSet<(NameArea, String)>,
+}
+
+impl Names {
+    pub(crate) fn claim(&mut self, area: NameArea, name: &str) -> Result<(), DevError> {
+        let one_component = !name.is_empty()
+            && name != "."
+            && name != ".."
+            && !name.contains('/')
+            && !name.contains('\0');
+        if !one_component {
+            return Err(DevError::Config(format!(
+                "{name:?} is not a name for an iteration's {}: it must be one path component",
+                area.name()
+            )));
+        }
+        if !self.given.insert((area, name.to_owned())) {
+            return Err(DevError::Config(format!(
+                "{}/{name} was already given out in this iteration",
+                area.name()
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// One iteration's owner lease and its directory. Release it with
 /// [`Iteration::release`] once the run published or failed.
 #[derive(Debug)]
@@ -105,7 +152,7 @@ pub(crate) struct Iteration {
     /// admission (a recorded lexical form has its `..` folded already).
     inputs: Vec<PathBuf>,
     /// The output and scratch names given out, so none is given twice.
-    given: BTreeSet<(Area, String)>,
+    given: Names,
     /// Every spool made, read-only to every later call, each with a
     /// descriptor kept open until the iteration ends: it pins the inode, so
     /// the identity a later open of the spool is checked against cannot be
@@ -164,7 +211,7 @@ impl Iteration {
                 identity,
                 areas,
                 inputs: inputs.to_vec(),
-                given: BTreeSet::new(),
+                given: Names::default(),
                 spools: Vec::new(),
                 calls: 0,
             }),
@@ -561,24 +608,17 @@ impl Iteration {
     }
 
     fn claim(&mut self, area: Area, name: &str) -> Result<(), DevError> {
-        let one_component = !name.is_empty()
-            && name != "."
-            && name != ".."
-            && !name.contains('/')
-            && !name.contains('\0');
-        if !one_component {
-            return Err(DevError::Config(format!(
-                "{name:?} is not a name for an iteration's {}: it must be one path component",
-                area.name()
-            )));
-        }
-        if !self.given.insert((area, name.to_owned())) {
-            return Err(DevError::Config(format!(
-                "{}/{name} was already given out in this iteration",
-                area.name()
-            )));
-        }
-        Ok(())
+        let named = match area {
+            Area::Out => NameArea::Out,
+            Area::Scratch => NameArea::Scratch,
+            other => {
+                return Err(DevError::Internal(format!(
+                    "{} names are brokkr's own, never claimed",
+                    other.name()
+                )));
+            }
+        };
+        self.given.claim(named, name)
     }
 
     /// The area's descriptor, once the iteration directory and the area are

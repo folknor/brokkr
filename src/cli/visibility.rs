@@ -219,8 +219,9 @@ impl CommandSpec {
     }
 
     /// Whether the invocation reads config and inputs alone, never building,
-    /// launching or storing: `brokkr bench --dry-run`, and any `brokkr bench`
-    /// that only lists, describes or refuses, decided against the declared
+    /// launching or storing: `brokkr bench --dry-run`, `brokkr bench --test`
+    /// (whose hosts are virtual), and any `brokkr bench` that only lists,
+    /// describes or refuses, decided against the declared
     /// `benches` (`None` before a config is detected, when a bench is
     /// refused anyway).
     pub(crate) fn reads_only(
@@ -228,7 +229,8 @@ impl CommandSpec {
         benches: Option<&std::collections::BTreeMap<String, crate::config::bench::Bench>>,
     ) -> bool {
         match command {
-            super::Command::Bench { dry_run: true, .. } => true,
+            super::Command::Bench { dry_run: true, .. }
+            | super::Command::Bench { test: true, .. } => true,
             super::Command::Bench { bench, .. } => {
                 benches.is_none_or(|benches| !crate::bench::runner::runs(benches, bench))
             }

@@ -122,6 +122,7 @@ fn parse_dev_config(table: &toml::Table, sources: &ConfigSources) -> Result<DevC
     let cargo_env = parse_cargo_env(table, &capture_env)?;
     let benches = bench::parse(table, sources)?;
     let bench_registry = bench::parse_registry(table, sources)?;
+    let bench_tests = bench::parse_tests(table, sources)?;
     refuse_retired_sha256(table)?;
     let hosts = parse_hosts(table)?;
     validate_datasets(&hosts)?;
@@ -152,6 +153,7 @@ fn parse_dev_config(table: &toml::Table, sources: &ConfigSources) -> Result<DevC
         cargo_env,
         benches,
         bench_registry,
+        bench_tests,
         included_config_files: Vec::new(),
         results_server: sources
             .user_layer()
@@ -1118,6 +1120,7 @@ pub(crate) const VALUE_KEYS: &[&str] = &[
     "bench_lib",
     "bench_scripts",
     "bench_scripts_exempt",
+    "bench_tests",
 ];
 
 /// Every other top-level table is a hostname section. The table shape is
@@ -1184,6 +1187,17 @@ pub(crate) fn is_host_key(key: &str, value: &toml::Value) -> bool {
     // A `[pbfhogg]` table holding `library` is the pbfhogg project section;
     // without it the name stays the hostname it always was.
     !(key == project_config::pbfhogg::SECTION && project_config::pbfhogg::claims(value))
+}
+
+/// Judge one host section as a config load judges `[host.<name>]`: its
+/// schema, then its datasets and tilegen tables. How a contract test's
+/// synthetic host is held to what a real one may declare.
+pub(crate) fn check_host_section(name: &str, value: &toml::Value) -> Result<(), DevError> {
+    let section = format!("host.{name}");
+    let host = parse_host_config(&section, value)?;
+    let hosts: HashMap<String, HostConfig> = std::iter::once((section, host)).collect();
+    validate_datasets(&hosts)?;
+    validate_tilegen(&hosts)
 }
 
 fn parse_host_config(section: &str, value: &toml::Value) -> Result<HostConfig, DevError> {

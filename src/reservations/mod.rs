@@ -73,7 +73,7 @@ pub(crate) use guard::{
     check_unreserved, is_refusal, mutate, remove_dir_all, remove_file, remove_reserved_tree,
     rename, write,
 };
-pub(crate) use iteration::{Call, Iteration, Preview, Spool, open_input};
+pub(crate) use iteration::{Call, Iteration, NameArea, Names, Preview, Spool, open_input};
 pub(crate) use launch::{
     Hold, LaunchSpec, Launched, PRIVATE_DIR_PLACEHOLDER, ReadHold, hold, hold_reads,
     inherit_in_child, take_armed,

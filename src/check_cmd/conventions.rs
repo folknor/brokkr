@@ -220,10 +220,11 @@ pub(super) fn run_manifest(
 }
 
 /// The `bench` phase: read and compile every `[bench.*]` script and resolve
-/// its global names, running none of it, and with `bench_scripts` set refuse
-/// every `.lua` under it no bench names. Inert when the config declares
-/// neither a bench nor the registry. Every bench is checked, so one run names
-/// every broken script.
+/// its global names, running none of it, with `bench_scripts` set refuse
+/// every `.lua` under it no bench names, and with `bench_tests` set run every
+/// contract test. Inert when the config declares none of a bench, the
+/// registry or the tests. Every bench is checked, so one run names every
+/// broken script.
 pub(super) fn run_bench(set: super::Benches<'_>) -> Result<(), DevError> {
     if !set.active() {
         phase_inert(Phase::Bench);
@@ -252,8 +253,30 @@ pub(super) fn run_bench(set: super::Benches<'_>) -> Result<(), DevError> {
     for library in &libraries {
         findings.extend(crate::bench::check_library(library));
     }
+    // Discovered once: the registry excuses exactly the files that run.
+    let tests = match set.tests {
+        Some(dir) => {
+            let (files, found) = crate::bench::discover_tests(dir);
+            findings.extend(found);
+            Some(files)
+        }
+        None => None,
+    };
     if let Some(registry) = set.registry {
-        findings.extend(crate::bench::check_registry(registry, benches));
+        findings.extend(crate::bench::check_registry(
+            registry,
+            benches,
+            tests.as_deref().unwrap_or_default(),
+        ));
+    }
+    if let Some(files) = &tests {
+        let context = crate::bench::runner::contract::Context {
+            benches: benches.clone(),
+            composed: set.composed.cloned().unwrap_or_default(),
+            project_root: set.project_root.to_path_buf(),
+            library: set.library.map(std::path::Path::to_path_buf),
+        };
+        findings.extend(crate::bench::runner::contract::run_files(context, files)?);
     }
     if findings.is_empty() {
         let mut checked = output::count(benches.len(), "script");
@@ -262,6 +285,12 @@ pub(super) fn run_bench(set: super::Benches<'_>) -> Result<(), DevError> {
         }
         if set.registry.is_some() {
             checked.push_str(", none unregistered");
+        }
+        if let Some(files) = &tests {
+            checked.push_str(&format!(
+                ", {} passed",
+                output::count(files.len(), "contract-test file")
+            ));
         }
         phase_ok(Phase::Bench.label(), Some(checked));
         return Ok(());

@@ -815,6 +815,31 @@ pub(crate) fn parse_lib(
     Ok(Some(resolved_beside(&origin.base.join(dir))))
 }
 
+/// Parse the optional top-level `bench_tests = "dir"`: the directory of
+/// contract-test files (`brokkr man bench`, Contract tests), resolved
+/// beside the config file that set it. Claimed only as a string, like
+/// `bench_lib`.
+pub(crate) fn parse_tests(
+    table: &toml::Table,
+    sources: &ConfigSources,
+) -> Result<Option<PathBuf>, DevError> {
+    let Some(value) = table.get("bench_tests").filter(|value| !value.is_table()) else {
+        return Ok(None);
+    };
+    let dir = value.as_str().ok_or_else(|| {
+        DevError::Config(
+            "bench_tests must be a string: the directory of bench contract-test files".into(),
+        )
+    })?;
+    if dir.trim().is_empty() {
+        return Err(DevError::Config("bench_tests is blank".into()));
+    }
+    let origin = sources.value_origin(&["bench_tests"]).ok_or_else(|| {
+        DevError::Config("bench_tests: no config file is recorded as setting it".into())
+    })?;
+    Ok(Some(resolved_beside(&origin.base.join(dir))))
+}
+
 /// The optional bench-script registry: `bench_scripts = "dir"` and
 /// `bench_scripts_exempt = ["path", ...]`. With it set, `brokkr check`'s
 /// `bench` phase refuses every `.lua` entry under `dir` that no bench's

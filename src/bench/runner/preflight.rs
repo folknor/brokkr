@@ -49,13 +49,6 @@ impl PreflightHost {
         argv: &[String],
         env: &[(String, String)],
     ) -> Result<CallOutcome, Abort> {
-        // A NUL is the script's to answer for, never a failure of brokkr's
-        // spawn, which would refuse it the same way.
-        if argv.iter().any(|a| a.contains('\0')) {
-            return Err(Abort::Failed(format!(
-                "binary_with(): an argument to {name} holds a NUL byte"
-            )));
-        }
         let path = env
             .iter()
             .find(|(n, _)| n == "PATH")
@@ -260,40 +253,8 @@ impl lua::Host for PreflightHost {
 
     fn binary(&mut self, words: Vec<Word>, options: CallOptions) -> Result<CallOutcome, Abort> {
         stopping()?;
-        let Some(name) = options.program else {
-            return Err(Abort::Failed(
-                "binary() runs the build, which does not exist yet inside preflight()".into(),
-            ));
-        };
-        let refused = |what: &str| {
-            Abort::Failed(format!(
-                "binary_with(): {what} is not available inside preflight(), which holds no handle \
-                 and measures nothing"
-            ))
-        };
-        if !options.reads.is_empty() || !options.writes.is_empty() || options.stdin.is_some() {
-            return Err(refused("a handle"));
-        }
-        if options.hotpath.is_some() {
-            return Err(refused("hotpath"));
-        }
-        if options.stop_at.is_some() {
-            return Err(refused("stop_at"));
-        }
-        if options.measured {
-            return Err(refused("measured"));
-        }
-        if !options.cold.is_empty() || !options.warm.is_empty() {
-            return Err(refused("cold and warm"));
-        }
-        let mut argv = Vec::with_capacity(words.len());
-        for word in words {
-            match word {
-                Word::Text(text) => argv.push(text),
-                Word::Handle(_) => return Err(refused("a handle")),
-            }
-        }
-        self.launch(&name, &argv, &options.env)
+        let call = crate::bench::policy::declare_preflight(words, options)?;
+        self.launch(&call.program, &call.argv, &call.env)
     }
 
     fn since(&mut self, sha: &str) -> Result<bool, Abort> {
@@ -328,12 +289,7 @@ impl lua::Host for PreflightHost {
 
     fn page_cache(&mut self, path: &str, mode: lua::CacheMode) -> Result<Option<String>, Abort> {
         stopping()?;
-        if !self.inputs.iter().any(|input| input.as_os_str() == path) {
-            return Err(Abort::Failed(format!(
-                "page_cache(): {path} is not a bound input of this arm: only an input's path, as \
-                 params gives it, is checked"
-            )));
-        }
+        crate::bench::policy::page_cache_input(&self.inputs, path)?;
         let file = match crate::reservations::open_input(Path::new(path)) {
             Ok(file) => file,
             Err(e) => return Ok(Some(format!("{path}: {e}"))),

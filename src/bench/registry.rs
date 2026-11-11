@@ -2,7 +2,9 @@
 //! entry under that directory must be a script some `[bench.NAME]`
 //! `script_file` names, a module `bench_lib` loads, or covered by
 //! `bench_scripts_exempt`, so a new script cannot exist unregistered
-//! (`docs/brokkr.toml.bench.md`, `bench_scripts`).
+//! (`docs/brokkr.toml.bench.md`, `bench_scripts`). A contract-test file
+//! under `bench_tests` needs no bench: the registry excuses exactly the
+//! files [`discover_tests`] found, the same walk deciding both.
 //!
 //! An entry is its location, the canonical directory it sits in plus its
 //! name as spelled, never what it links to: a link `alias.lua` to a
@@ -31,50 +33,64 @@ enum Kind {
     Other,
 }
 
-pub(super) fn check(registry: &Registry, benches: &BTreeMap<String, Bench>) -> Vec<ScriptFinding> {
+/// The contract-test files under `dir` (`bench_tests`): every regular
+/// `.lua` file below it, found by the walk the registry uses, and every
+/// `.lua` entry that is not a regular file, or that the walk could not
+/// judge, as a finding. The one discovery both running the tests and the
+/// registry's accounting of them use.
+pub(super) fn discover_tests(dir: &Path) -> (Vec<PathBuf>, Vec<ScriptFinding>) {
+    let (entries, mut findings) = walk(dir, &FindingOwner::Test);
+    let mut tests = Vec::new();
+    for (path, kind) in entries {
+        if !path.as_os_str().as_bytes().ends_with(b".lua") {
+            continue;
+        }
+        match kind {
+            Kind::Regular => tests.push(path),
+            _ => findings.push(ScriptFinding {
+                owner: FindingOwner::Test,
+                file: path,
+                problem: "is not a regular file: a test file is one, never a link".into(),
+            }),
+        }
+    }
+    tests.sort();
+    (tests, findings)
+}
+
+/// Every entry below `dir` that is not a directory, by its location and
+/// no-follow type, and every failure to resolve, list or inspect one as a
+/// finding owned by `owner`.
+fn walk(dir: &Path, owner: &FindingOwner) -> (Vec<(PathBuf, Kind)>, Vec<ScriptFinding>) {
     let mut findings = Vec::new();
+    let mut found = Vec::new();
     let finding = |file: &Path, problem: String| ScriptFinding {
-        owner: FindingOwner::Registry,
+        owner: owner.clone(),
         file: file.to_path_buf(),
         problem,
     };
     // The root itself is resolved fully: the walk's paths start from it.
-    let root = match std::fs::canonicalize(&registry.dir) {
+    let root = match std::fs::canonicalize(dir) {
         Ok(root) => root,
-        Err(e) => return vec![finding(&registry.dir, format!("cannot be resolved: {e}"))],
+        Err(e) => {
+            return (
+                found,
+                vec![finding(dir, format!("cannot be resolved: {e}"))],
+            );
+        }
     };
     let held = match open_dir(None, root.as_os_str()) {
         Ok(Some(held)) => held,
-        Ok(None) => return vec![finding(&root, "is not a directory".into())],
+        Ok(None) => return (found, vec![finding(&root, "is not a directory".into())]),
         Err(e) => {
-            return vec![finding(
-                &root,
-                format!("cannot be read as a directory: {e}"),
-            )];
+            return (
+                found,
+                vec![finding(
+                    &root,
+                    format!("cannot be read as a directory: {e}"),
+                )],
+            );
         }
-    };
-    let registered: BTreeSet<&Path> = benches
-        .values()
-        .filter_map(|bench| match &bench.script {
-            BenchScript::File { path, .. } => Some(path.as_path()),
-            BenchScript::Inline { .. } => None,
-        })
-        .collect();
-    let library = registry
-        .library
-        .as_deref()
-        .and_then(|dir| std::fs::canonicalize(dir).ok());
-    let excused = |path: &Path, kind: &Kind| {
-        registered.contains(path)
-            || registry
-                .exempt
-                .iter()
-                .any(|exempt| path.starts_with(exempt))
-            || (matches!(kind, Kind::Regular)
-                && library.as_deref().is_some_and(|lib| {
-                    path.strip_prefix(lib)
-                        .is_ok_and(|relative| library::module_name(relative).is_some())
-                }))
     };
     let mut stack = vec![(held, root)];
     while let Some((dir, shown)) = stack.pop() {
@@ -114,16 +130,54 @@ pub(super) fn check(registry: &Registry, benches: &BTreeMap<String, Bench>) -> V
                 }
                 continue;
             }
-            if !name.as_bytes().ends_with(b".lua") || excused(&path, &kind) {
-                continue;
-            }
-            findings.push(finding(
-                &path,
-                "no [bench.NAME] script_file names it: register it as a bench, or list it in \
-                 bench_scripts_exempt"
-                    .into(),
-            ));
+            found.push((path, kind));
         }
+    }
+    (found, findings)
+}
+
+/// `tests` are the contract-test files discovery found, which need no bench.
+pub(super) fn check(
+    registry: &Registry,
+    benches: &BTreeMap<String, Bench>,
+    tests: &[PathBuf],
+) -> Vec<ScriptFinding> {
+    let (entries, mut findings) = walk(&registry.dir, &FindingOwner::Registry);
+    let registered: BTreeSet<&Path> = benches
+        .values()
+        .filter_map(|bench| match &bench.script {
+            BenchScript::File { path, .. } => Some(path.as_path()),
+            BenchScript::Inline { .. } => None,
+        })
+        .collect();
+    let library = registry
+        .library
+        .as_deref()
+        .and_then(|dir| std::fs::canonicalize(dir).ok());
+    let excused = |path: &Path, kind: &Kind| {
+        registered.contains(path)
+            || tests.iter().any(|test| test == path)
+            || registry
+                .exempt
+                .iter()
+                .any(|exempt| path.starts_with(exempt))
+            || (matches!(kind, Kind::Regular)
+                && library.as_deref().is_some_and(|lib| {
+                    path.strip_prefix(lib)
+                        .is_ok_and(|relative| library::module_name(relative).is_some())
+                }))
+    };
+    for (path, kind) in entries {
+        if !path.as_os_str().as_bytes().ends_with(b".lua") || excused(&path, &kind) {
+            continue;
+        }
+        findings.push(ScriptFinding {
+            owner: FindingOwner::Registry,
+            file: path,
+            problem: "no [bench.NAME] script_file names it: register it as a bench, list it in \
+                      bench_scripts_exempt, or put it under bench_tests as a contract test"
+                .into(),
+        });
     }
     findings.sort_by(|a, b| a.file.cmp(&b.file));
     findings
@@ -220,6 +274,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One tree, every way an entry is judged.
     fn every_unnamed_lua_entry_is_a_finding_and_nothing_else_is() {
         let scratch =
             std::fs::canonicalize(crate::test_scratch::scratch("bench_registry", "walk")).unwrap();
@@ -261,7 +316,7 @@ mod tests {
             exempt: vec![root.join("scratch")],
             library: Some(root.join("lib")),
         };
-        let found: Vec<String> = check(&registry, &benches)
+        let found: Vec<String> = check(&registry, &benches, &[root.join("scratch/try.lua")])
             .iter()
             .map(|f| f.file.strip_prefix(&root).unwrap().display().to_string())
             .collect();
@@ -278,12 +333,43 @@ mod tests {
             "an entry is its location: links and loader-refused library files need a bench"
         );
         assert_eq!(
-            check(&registry, &benches)[0].to_string(),
+            check(&registry, &benches, &[])[0].to_string(),
             format!(
                 "bench_scripts {}: no [bench.NAME] script_file names it: register it as a bench, \
-                 or list it in bench_scripts_exempt",
+                 list it in bench_scripts_exempt, or put it under bench_tests as a contract test",
                 root.join("fam/alias.lua").display()
             )
+        );
+        // A test file discovery found needs no bench; one it did not find
+        // (here the same name, unexempted) does.
+        let unexempt = Registry {
+            dir: root.clone(),
+            exempt: Vec::new(),
+            library: None,
+        };
+        let shown = |tests: &[PathBuf]| -> Vec<PathBuf> {
+            check(&unexempt, &benches, tests)
+                .into_iter()
+                .map(|f| f.file)
+                .collect()
+        };
+        assert!(shown(&[]).contains(&root.join("scratch/try.lua")));
+        assert!(!shown(&[root.join("scratch/try.lua")]).contains(&root.join("scratch/try.lua")));
+        let (tests, findings) = discover_tests(&root.join("fam"));
+        assert_eq!(
+            tests,
+            [root.join("fam/named.lua"), root.join("fam/new.lua")],
+            "only regular .lua files are tests"
+        );
+        let refused: Vec<&Path> = findings.iter().map(|f| f.file.as_path()).collect();
+        assert_eq!(
+            refused,
+            [
+                root.join("fam/alias.lua"),
+                root.join("fam/reg_link.lua"),
+                root.join("fam/via.lua")
+            ],
+            "a linked .lua under bench_tests is a finding, never a test"
         );
         let absent = Registry {
             dir: root.join("absent"),
@@ -291,7 +377,7 @@ mod tests {
             library: None,
         };
         assert_eq!(
-            check(&absent, &benches).len(),
+            check(&absent, &benches, &[]).len(),
             1,
             "a missing directory is a finding"
         );

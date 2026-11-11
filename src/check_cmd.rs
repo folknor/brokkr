@@ -12,18 +12,26 @@ use conventions::{
     run_manifest, run_publish_cycle, run_script_checks, run_textlint, scope_order,
 };
 /// What the `bench` phase checks: every `[bench.*]` by name, as config
-/// loading leaves them, and the `bench_scripts` registry when set.
+/// loading leaves them, the `bench_scripts` registry when set, and the
+/// `bench_tests` contract tests when set, which run against the composed
+/// config and project root a run's view derives from.
 #[derive(Clone, Copy)]
 pub(crate) struct Benches<'a> {
     pub(crate) benches: &'a std::collections::BTreeMap<String, crate::config::bench::Bench>,
     pub(crate) registry: Option<&'a crate::config::bench::Registry>,
+    pub(crate) tests: Option<&'a std::path::Path>,
+    pub(crate) composed: Option<&'a toml::Table>,
+    pub(crate) project_root: &'a std::path::Path,
+    /// `bench_lib`, which a config with no bench carries on none of them.
+    pub(crate) library: Option<&'a std::path::Path>,
 }
 
 impl Benches<'_> {
-    /// Whether the phase has anything to check: a bench, or a registry,
-    /// which refuses an unregistered script even with no bench declared.
+    /// Whether the phase has anything to check: a bench, a registry, which
+    /// refuses an unregistered script even with no bench declared, or
+    /// contract tests.
     pub(crate) fn active(&self) -> bool {
-        !self.benches.is_empty() || self.registry.is_some()
+        !self.benches.is_empty() || self.registry.is_some() || self.tests.is_some()
     }
 }
 use reporter::Reporter;

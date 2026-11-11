@@ -382,6 +382,9 @@ fn phase_disposition(phase: Phase, plan: &CheckPlan<'_>, i: &PlanInputs<'_>, a: 
             if a.benches.registry.is_some() {
                 what.push_str(" and the bench_scripts registry");
             }
+            if a.benches.tests.is_some() {
+                what.push_str(", with the bench_tests contract tests");
+            }
             planned(what)
         }
         Phase::ScriptCheck if i.script_checks.is_empty() => "not configured".to_owned(),

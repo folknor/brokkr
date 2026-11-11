@@ -367,6 +367,7 @@ impl Fixture {
             alloc: measurement == store::Measurement::Alloc,
             params: params.iter().map(|p| (*p).to_owned()).collect(),
             dry_run,
+            test: false,
         };
         let mut argv = vec!["brokkr".to_owned(), "bench".to_owned(), bench.to_owned()];
         argv.extend(args.params.iter().cloned());

@@ -4,9 +4,11 @@
 //! textlint rule keeps every other file off it, and a change in the crate's
 //! API touches this file alone.
 //!
-//! Two uses: [`check`] for `brokkr check`'s `bench` phase, which compiles a
-//! script and resolves its global names, running nothing, and [`run_sample`], one iteration of a script bench in a fresh
-//! State. Every builtin the script sees is marshalled here and decided by the
+//! Three uses: [`check`] for `brokkr check`'s `bench` phase, which compiles a
+//! script and resolves its global names, running nothing; [`run_sample`]
+//! (and [`run_hook`]), one iteration of a script bench in a fresh State; and
+//! [`run_suite`], one contract-test file, whose `run(spec)` reaches a
+//! [`Driver`] that runs a bench's script on virtual hosts. Every builtin the script sees is marshalled here and decided by the
 //! runner through [`Host`], whose types carry no dellingr value: Lua strings
 //! cross as bytes, text fields are checked from those exact bytes, and a
 //! builtin's failure travels back through Lua as an [`Abort`] inside a host
@@ -2398,6 +2400,296 @@ fn lua_result_ok<H: Host>(state: &mut State) -> Result<u8, Error> {
     }
     // The script's own verdict on what the child did, as `fail()` is.
     Err(raise(state, Abort::Fail(why)))
+}
+
+/// What a contract-test file's `run(spec)` reaches: the runner's side of a
+/// test (`super::runner::contract`), which runs one arm of a bench against
+/// virtual hosts and answers the result table.
+pub(crate) trait Driver: Send + 'static {
+    /// A pending stop: a test file is interrupted as a sample is.
+    fn stop(&mut self) -> Result<(), Abort>;
+    fn stop_requested() -> bool;
+    /// `run(spec)`: the result, or why the test itself fails (a fixture the
+    /// script could never have been given, a response it never asked for).
+    fn run(&mut self, spec: Value) -> Result<Value, Abort>;
+}
+
+/// How one `test(name, fn)` case ended: `None` when it passed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Case {
+    pub(crate) name: String,
+    pub(crate) failure: Option<String>,
+}
+
+/// One test file's run: every case it declared, in order, and how the file
+/// itself ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SuiteOutcome {
+    pub(crate) cases: Vec<Case>,
+    pub(crate) ended: SuiteEnd,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SuiteEnd {
+    /// The file ran to its end.
+    Done,
+    /// The file failed outside any case: its own error, or a case it
+    /// declared wrongly.
+    Failed(String),
+    Interrupted,
+}
+
+/// A suite's State host: the driver, and the cases so far. Every bench
+/// builtin is removed from the State, so none of these is reached but the
+/// stop checks.
+struct Suite<D> {
+    driver: D,
+    cases: Vec<Case>,
+    in_case: bool,
+}
+
+impl<D: Driver> Host for Suite<D> {
+    fn stop(&mut self) -> Result<(), Abort> {
+        self.driver.stop()
+    }
+    fn stop_requested() -> bool {
+        D::stop_requested()
+    }
+    fn begin_block(&mut self, _at: Instant) {}
+    fn binary(&mut self, _: Vec<Word>, _: CallOptions) -> Result<CallOutcome, Abort> {
+        Err(suite_refused("binary"))
+    }
+    fn since(&mut self, _: &str) -> Result<bool, Abort> {
+        Err(suite_refused("since"))
+    }
+    fn output(&mut self, _: &str) -> Result<HandleRef, Abort> {
+        Err(suite_refused("output"))
+    }
+    fn scratch(&mut self, _: &str) -> Result<HandleRef, Abort> {
+        Err(suite_refused("scratch"))
+    }
+    fn config(&mut self) -> Result<Arc<Value>, Abort> {
+        Err(suite_refused("config"))
+    }
+    fn read(&mut self, _: usize) -> Result<Vec<u8>, Abort> {
+        Err(suite_refused("read"))
+    }
+    fn write(&mut self, _: usize, _: &[u8]) -> Result<(), Abort> {
+        Err(suite_refused("write"))
+    }
+    fn filesize(&mut self, _: usize) -> Result<u64, Abort> {
+        Err(suite_refused("filesize"))
+    }
+    fn page_cache(&mut self, _: &str, _: CacheMode) -> Result<Option<String>, Abort> {
+        Err(suite_refused("page_cache"))
+    }
+}
+
+fn suite_refused(name: &str) -> Abort {
+    Abort::Failed(format!(
+        "{name}() is a bench script's builtin, not a test file's: run the bench with run(spec)"
+    ))
+}
+
+/// The bench builtins a test file's State does not hold: a test drives a
+/// script through `run()`, never the builtins themselves.
+const NOT_IN_SUITE: [&str; 13] = [
+    "page_cache",
+    "require",
+    "binary",
+    "binary_with",
+    "since",
+    "fail",
+    "output",
+    "scratch",
+    "config",
+    "read",
+    "write",
+    "filesize",
+    "record",
+];
+
+/// Run one contract-test file: its chunk, top to bottom, in one State that
+/// holds `json`, `print`, dellingr's library, `globals` (each a string), and
+/// `run(spec)` and `test(name, fn)`. A case is one call of `test`: `fn` runs
+/// at once, its failure recorded and the file going on, since dellingr has no
+/// `pcall`; a stop ends the file. Every case shares the file's State, so a
+/// failed case's writes to shared tables survive it.
+pub(crate) fn run_suite<D: Driver>(
+    script: &Script,
+    globals: &[(&str, String)],
+    driver: D,
+) -> SuiteOutcome {
+    let interrupt = ::dellingr::Interrupt::new();
+    let failed = |why: String| SuiteOutcome {
+        cases: Vec::new(),
+        ended: SuiteEnd::Failed(why),
+    };
+    let (mut state, ok, marks) = match fresh_state::<Suite<D>>(Some(interrupt.clone())) {
+        Ok(fresh) => fresh,
+        Err(error) => return failed(format!("cannot set up the Lua state: {error}")),
+    };
+    let setup = (|| -> Result<(), Error> {
+        for name in NOT_IN_SUITE {
+            state.push_nil()?;
+            state.set_global(name)?;
+        }
+        for (name, function) in [
+            ("run", lua_suite_run::<D> as ::dellingr::RustFunc),
+            ("test", lua_suite_test::<D>),
+            ("assert", lua_suite_assert::<D>),
+        ] {
+            let handle = state.add_rust_fn(name, function)?;
+            state.push_rust_fn(handle)?;
+            state.set_global(name)?;
+        }
+        for (name, value) in globals {
+            state.push_string(value)?;
+            state.set_global(name)?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = setup {
+        return failed(format!("cannot set up the Lua state: {error}"));
+    }
+    state.set_user_data(Some(Ctx {
+        host: Suite {
+            driver,
+            cases: Vec::new(),
+            in_case: false,
+        },
+        phase: Phase::TopLevel,
+        ok,
+        marks,
+        modules: Modules::default(),
+    }));
+    let lines = Lines::of(script);
+    let ran = watched::<Suite<D>, _>(&interrupt, || {
+        state
+            .load(&script.program)
+            .and_then(|()| state.call(ArgCount::Fixed(0), RetCount::Fixed(0)))
+    });
+    let ended = match ran {
+        Ok(()) => SuiteEnd::Done,
+        Err(error) if interrupted(&error) => SuiteEnd::Interrupted,
+        Err(error) => SuiteEnd::Failed(failure_text(error, lines)),
+    };
+    let cases = state
+        .user_data_mut::<Option<Ctx<Suite<D>>>>()
+        .and_then(Option::take)
+        .map(|ctx| ctx.host.cases)
+        .unwrap_or_default();
+    SuiteOutcome { cases, ended }
+}
+
+/// Whether `error` is a stop: the watcher's interrupt or a builtin's.
+fn interrupted(error: &Error) -> bool {
+    matches!(error.kind(), ErrorKind::Interrupted)
+        || matches!(abort_of(error), Some(Abort::Interrupted))
+}
+
+/// A failure as the reader of a test's report sees it: a builtin's reason
+/// after its line, any other error as dellingr renders it.
+fn failure_text(error: Error, lines: Lines<'_>) -> String {
+    if let Some(Abort::Failed(why) | Abort::Fail(why) | Abort::Machinery(why)) = abort_of(&error) {
+        return located(&error, lines, why);
+    }
+    rendered(error, lines)
+}
+
+/// `run(spec)`: one arm of a bench run against virtual hosts, its result as
+/// a table (`super::runner::contract`).
+fn lua_suite_run<D: Driver>(state: &mut State) -> Result<u8, Error> {
+    stop_first::<Suite<D>>(state)?;
+    if state.typ(1) != LuaType::Table {
+        return Err(raise_failed(
+            state,
+            format!(
+                "run()'s argument is a {}: expected the spec table",
+                state.typ(1).as_str()
+            ),
+        ));
+    }
+    let marks = marks::<Suite<D>>(state)?;
+    let spec = value_at(state, 1, 1, &marks)
+        .map_err(|why| raise_failed(state, format!("run(): the spec {why}")))?;
+    let answer = match ctx::<Suite<D>>(state) {
+        Some(ctx) => ctx.host.driver.run(spec),
+        None => Err(Abort::Failed("run(): no test context".into())),
+    };
+    let result = answer.map_err(|abort| raise(state, abort))?;
+    push_value(state, &result, &marks)?;
+    Ok(1)
+}
+
+/// `assert(v [, message])`: `v` when it is neither nil nor false, else the
+/// case fails with `message` (or "assertion failed!"). dellingr has no
+/// `assert` of its own; a test file is where one is wanted.
+fn lua_suite_assert<D: Driver>(state: &mut State) -> Result<u8, Error> {
+    stop_first::<Suite<D>>(state)?;
+    let held = top(state) >= 1
+        && !matches!(state.typ(1), LuaType::Nil)
+        && !(state.typ(1) == LuaType::Boolean && !state.to_boolean(1));
+    if held {
+        state.push_value(1)?;
+        return Ok(1);
+    }
+    let message = if top(state) >= 2 && matches!(state.typ(2), LuaType::String | LuaType::Number) {
+        String::from_utf8_lossy(&state.tostring_bytes(2)?).into_owned()
+    } else {
+        "assertion failed!".to_owned()
+    };
+    Err(raise(state, Abort::Fail(message)))
+}
+
+/// `test(name, fn)`: run `fn` now as one case, recording whether it passed.
+/// A stop is not a case's failure: it ends the file.
+fn lua_suite_test<D: Driver>(state: &mut State) -> Result<u8, Error> {
+    stop_first::<Suite<D>>(state)?;
+    let name = string_arg(state, 1, "test")?;
+    if state.typ(2) != LuaType::Function {
+        return Err(raise_failed(
+            state,
+            format!(
+                "test()'s argument 2 is a {}: expected the case's function",
+                state.typ(2).as_str()
+            ),
+        ));
+    }
+    let nested = ctx::<Suite<D>>(state).is_none_or(|ctx| ctx.host.in_case);
+    if nested {
+        return Err(raise_failed(
+            state,
+            format!("test({name:?}) inside another case: a case holds no cases"),
+        ));
+    }
+    if let Some(ctx) = ctx::<Suite<D>>(state) {
+        ctx.host.in_case = true;
+    }
+    state.push_value(2)?;
+    let ran = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
+    let failure = match ran {
+        Ok(()) => None,
+        Err(error) if interrupted(&error) => {
+            if let Some(ctx) = ctx::<Suite<D>>(state) {
+                ctx.host.in_case = false;
+            }
+            return Err(error);
+        }
+        // The case's own frames are the file's, numbered as it is.
+        Err(error) => Some(failure_text(
+            error,
+            Lines {
+                map: None,
+                chunk: None,
+            },
+        )),
+    };
+    if let Some(ctx) = ctx::<Suite<D>>(state) {
+        ctx.host.in_case = false;
+        ctx.host.cases.push(Case { name, failure });
+    }
+    Ok(0)
 }
 
 /// `print`, routed through brokkr's console channel rather than straight to

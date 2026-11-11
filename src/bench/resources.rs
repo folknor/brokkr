@@ -36,6 +36,17 @@ pub(crate) enum Origin {
 }
 
 impl Origin {
+    /// The origin as one word, as a contract test's call observation names
+    /// it.
+    pub(crate) fn word(self) -> &'static str {
+        match self {
+            Self::Input => "input",
+            Self::Output => "output",
+            Self::Scratch => "scratch",
+            Self::Spool => "spool",
+        }
+    }
+
     fn named(self) -> &'static str {
         match self {
             Self::Input => "an input",
@@ -53,8 +64,60 @@ pub(crate) struct Handle {
 }
 
 impl Handle {
+    /// A handle a virtual iteration makes (`crate::bench::contract`), whose
+    /// path names nothing on disk.
+    pub(crate) fn new(path: PathBuf, origin: Origin) -> Self {
+        Self { path, origin }
+    }
+
     pub(crate) fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub(crate) fn origin(&self) -> Origin {
+        self.origin
+    }
+
+    /// Refused unless it names a file brokkr itself may open (`read()`,
+    /// `filesize()`): every origin but scratch.
+    pub(crate) fn openable(&self) -> Result<(), DevError> {
+        if self.is_file() {
+            return Ok(());
+        }
+        Err(DevError::Config(format!(
+            "{} is {}, not a file",
+            self.path.display(),
+            self.origin.named()
+        )))
+    }
+
+    /// Refused unless `write()` may replace it: an output's file alone.
+    pub(crate) fn rewritable(&self) -> Result<(), DevError> {
+        if self.origin == Origin::Output {
+            return Ok(());
+        }
+        let why = match self.origin {
+            Origin::Input | Origin::Spool => "read-only for the run",
+            _ => "a directory",
+        };
+        Err(DevError::Config(format!(
+            "{} is {}, which is {why}: write() writes an output's file",
+            self.path.display(),
+            self.origin.named()
+        )))
+    }
+
+    /// Refused unless it is an input, the one origin page-cache preparation
+    /// takes.
+    pub(crate) fn preparable(&self) -> Result<(), DevError> {
+        if self.is_input() {
+            return Ok(());
+        }
+        Err(DevError::Config(format!(
+            "{} is {}: only an input is prepared",
+            self.path.display(),
+            self.origin.named()
+        )))
     }
 
     /// The access a call that passes this handle gets unless its lists say
@@ -125,21 +188,18 @@ impl Resources {
         })
     }
 
-    /// Admit one call of `program` passing `argv` handles, with `reads` and
-    /// `writes` overriding and adding, and `stdin` read; with `report`, an
-    /// empty hotpath report made for it (`Call::report`).
+    /// Admit one call of `program` declaring `access` ([`call_access`]'s
+    /// answer for the call), with `stdin` read; with `report`, an empty
+    /// hotpath report made for it (`Call::report`).
     pub(crate) fn call(
         &mut self,
         program: &Path,
-        argv: &[&Handle],
-        reads: &[&Handle],
-        writes: &[&Handle],
+        access: &[(PathBuf, Access)],
         stdin: Option<&Handle>,
         report: bool,
     ) -> Result<Call, DevError> {
-        let declared = call_access(argv, reads, writes, stdin)?;
         self.iteration
-            .call(program, &declared, stdin.map(Handle::path), report)
+            .call(program, access, stdin.map(Handle::path), report)
     }
 
     /// A finished call's hotpath report, `None` when it holds more than
@@ -185,40 +245,18 @@ impl Resources {
     /// An input opened for page-cache preparation, admitted as `read()`
     /// admits it: every later step acts on this descriptor.
     pub(crate) fn open_input(&mut self, handle: &Handle) -> Result<std::fs::File, DevError> {
-        if !handle.is_input() {
-            return Err(DevError::Config(format!(
-                "{} is {}: only an input is prepared",
-                handle.path.display(),
-                handle.origin.named()
-            )));
-        }
+        handle.preparable()?;
         self.open_file(handle)
     }
 
     fn open_file(&mut self, handle: &Handle) -> Result<std::fs::File, DevError> {
-        if !handle.is_file() {
-            return Err(DevError::Config(format!(
-                "{} is {}, not a file",
-                handle.path.display(),
-                handle.origin.named()
-            )));
-        }
+        handle.openable()?;
         self.iteration.open_file(&handle.path)
     }
 
     /// Replace the file an output handle names with `contents`.
     pub(crate) fn write(&mut self, handle: &Handle, contents: &[u8]) -> Result<(), DevError> {
-        if handle.origin != Origin::Output {
-            let why = match handle.origin {
-                Origin::Input | Origin::Spool => "read-only for the run",
-                _ => "a directory",
-            };
-            return Err(DevError::Config(format!(
-                "{} is {}, which is {why}: write() writes an output's file",
-                handle.path.display(),
-                handle.origin.named()
-            )));
-        }
+        handle.rewritable()?;
         self.iteration.write_file(&handle.path, contents)
     }
 
@@ -364,19 +402,17 @@ mod tests {
         assert!(scratch.path().is_dir() && !out.path().exists());
         assert_eq!(scratch.default_access(), Access::Write);
         let sh = Path::new("/bin/true");
+        let access = call_access(&[&input, &out], &[], &[], None).unwrap();
         let spool = resources
-            .call(sh, &[&input, &out], &[], &[], None, false)
+            .call(sh, &access, None, false)
             .unwrap()
             .finish()
             .unwrap();
         let spool = spool_handle(&spool);
-        assert!(
-            resources
-                .call(sh, &[], &[], &[&spool], None, false)
-                .is_err()
-        );
+        assert!(call_access(&[], &[], &[&spool], None).is_err());
+        let access = call_access(&[&spool], &[&out], &[], None).unwrap();
         resources
-            .call(sh, &[&spool], &[&out], &[], None, false)
+            .call(sh, &access, None, false)
             .unwrap()
             .finish()
             .unwrap();

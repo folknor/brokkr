@@ -205,9 +205,14 @@ mod tests {
             vec!["brokkr", "bench", "cat", "--help"],
             vec!["brokkr", "bench", "dog"],
             vec!["brokkr", "bench", "cat", "--row", "x"],
+            vec!["brokkr", "bench", "--test"],
         ] {
             assert!(reads(argv.clone()), "{argv:?} only prints");
         }
+        assert!(
+            parse(["brokkr", "bench", "--test", "--dry-run"]).is_err(),
+            "--test runs the tests alone"
+        );
         for argv in [
             vec!["brokkr", "bench", "cat"],
             vec!["brokkr", "bench", "cat", "--n", "x"],

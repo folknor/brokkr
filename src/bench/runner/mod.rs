@@ -19,6 +19,7 @@
 //! Whatever the attempt reached is published, a failed build or an
 //! interrupted iteration included; the command then fails if any arm did.
 
+pub(crate) mod contract;
 mod host;
 mod preflight;
 #[cfg(test)]
@@ -57,6 +58,55 @@ pub(crate) struct BenchArgs {
     /// `--dry-run`: bind and validate every arm, resolve the commit, check
     /// the inputs and their pins, then stop before anything is built.
     pub(crate) dry_run: bool,
+    /// `--test`: run the project's contract tests (`bench_tests`) instead.
+    pub(crate) test: bool,
+}
+
+/// `brokkr bench --test`: every contract-test file under `bench_tests`,
+/// run as `brokkr check`'s `bench` phase runs them, each failure printed.
+fn run_tests(args: &BenchArgs, detection: &Detection) -> Result<(), DevError> {
+    if args.name.is_some() || args.commit.is_some() || args.hotpath || args.alloc || args.dry_run {
+        return Err(DevError::Usage(
+            "--test runs every contract test under bench_tests and takes no bench, params or \
+             other option"
+                .into(),
+        ));
+    }
+    let Some(dir) = detection.config.bench_tests.as_deref() else {
+        return Err(DevError::Config(
+            "brokkr bench --test: this project's brokkr.toml sets no bench_tests, the \
+             directory its contract tests live in"
+                .into(),
+        ));
+    };
+    let (files, mut findings) = super::discover_tests(dir);
+    findings.extend(contract::run_files(
+        contract::Context {
+            benches: detection.config.benches.clone(),
+            composed: detection.config_sources.composed().clone(),
+            project_root: detection.project_root.as_path().to_path_buf(),
+            library: detection
+                .config
+                .bench_registry
+                .as_ref()
+                .and_then(|registry| registry.library.clone()),
+        },
+        &files,
+    )?);
+    if findings.is_empty() {
+        output::bench_msg(&format!(
+            "{} passed",
+            output::count(files.len(), "contract-test file")
+        ));
+        return Ok(());
+    }
+    for finding in &findings {
+        output::error(&finding.to_string());
+    }
+    Err(DevError::Reported(format!(
+        "{} failed",
+        output::count(findings.len(), "contract test")
+    )))
 }
 
 /// The stdout and stderr preview a script sees of each child, in bytes.
@@ -67,6 +117,9 @@ pub(crate) fn run(
     detection: &Detection,
     invocation: &crate::db::RunInvocation,
 ) -> Result<(), DevError> {
+    if args.test {
+        return run_tests(args, detection);
+    }
     let benches = &detection.config.benches;
     let Some(name) = args.name.as_deref() else {
         list(benches);

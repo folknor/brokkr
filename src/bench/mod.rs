@@ -25,6 +25,7 @@ pub(crate) mod marking;
 #[cfg(test)]
 mod marks_tests;
 mod params;
+mod policy;
 mod publication;
 mod registry;
 mod remote;
@@ -62,6 +63,8 @@ pub(crate) enum FindingOwner {
     Library,
     /// A `.lua` entry under `bench_scripts` no bench names.
     Registry,
+    /// A contract-test file under `bench_tests`, or a case in one.
+    Test,
 }
 
 /// Why a script, a module or a scripts-directory entry failed the static
@@ -81,6 +84,7 @@ impl std::fmt::Display for ScriptFinding {
             FindingOwner::Bench(bench) => write!(f, "[bench.{bench}] ")?,
             FindingOwner::Library => f.write_str("bench_lib ")?,
             FindingOwner::Registry => f.write_str("bench_scripts ")?,
+            FindingOwner::Test => f.write_str("bench_tests ")?,
         }
         write!(f, "{}: {}", self.file.display(), self.problem)
     }
@@ -88,12 +92,60 @@ impl std::fmt::Display for ScriptFinding {
 
 /// Walk the `bench_scripts` directory and name every `.lua` entry in it
 /// that no bench's `script_file` names, that is not a module `bench_lib`
-/// loads, and that no exemption covers (`registry`).
+/// loads, that is not one of the contract-test files `tests`, and that no
+/// exemption covers (`registry`).
 pub(crate) fn check_registry(
     registry: &crate::config::bench::Registry,
     benches: &std::collections::BTreeMap<String, Bench>,
+    tests: &[PathBuf],
 ) -> Vec<ScriptFinding> {
-    registry::check(registry, benches)
+    registry::check(registry, benches, tests)
+}
+
+/// The contract-test files under `bench_tests`, and every `.lua` entry
+/// there that cannot be one, as findings (`registry::discover_tests`).
+pub(crate) fn discover_tests(dir: &Path) -> (Vec<PathBuf>, Vec<ScriptFinding>) {
+    registry::discover_tests(dir)
+}
+
+/// Every contract-test file that is also a bench's `script_file` or a module
+/// one of `libraries` loads: one file cannot be both a test and what it
+/// tests, each run in a different State by different rules.
+pub(crate) fn test_overlaps(
+    tests: &[PathBuf],
+    benches: &std::collections::BTreeMap<String, Bench>,
+    libraries: &std::collections::BTreeSet<&Path>,
+) -> Vec<ScriptFinding> {
+    let libraries: Vec<PathBuf> = libraries
+        .iter()
+        .filter_map(|dir| std::fs::canonicalize(dir).ok())
+        .collect();
+    let mut findings = Vec::new();
+    for test in tests {
+        let finding = |problem: String| ScriptFinding {
+            owner: FindingOwner::Test,
+            file: test.clone(),
+            problem,
+        };
+        if let Some(bench) = benches
+            .values()
+            .find(|bench| matches!(&bench.script, BenchScript::File { path, .. } if path == test))
+        {
+            findings.push(finding(format!(
+                "is [bench.{}]'s script_file: a test file is never a bench script",
+                bench.name
+            )));
+        }
+        if libraries.iter().any(|lib| {
+            test.strip_prefix(lib)
+                .is_ok_and(|relative| library::module_name(relative).is_some())
+        }) {
+            findings.push(finding(
+                "is a bench_lib module: keep test files out of the library".into(),
+            ));
+        }
+    }
+    findings
 }
 
 /// Read the `bench_lib` directory `dir` and check every module in it: it

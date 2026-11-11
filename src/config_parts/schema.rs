@@ -214,6 +214,10 @@ pub struct DevConfig {
     /// under which a bench must name, `None` when unset. See
     /// [`bench::Registry`].
     pub bench_registry: Option<bench::Registry>,
+    /// `bench_tests`: the directory of contract-test files `brokkr check`'s
+    /// `bench` phase and `brokkr bench --test` run, resolved beside the file
+    /// that set it; `None` when unset.
+    pub bench_tests: Option<std::path::PathBuf>,
     /// Absolute paths of the files this config's `include` graph pulled in
     /// (composition provenance, not a TOML key). Measurement provenance
     /// exempts them from the dirty-tree policy exactly as `brokkr.toml`

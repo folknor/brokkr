@@ -276,6 +276,7 @@ pub(super) fn run(
             hotpath,
             alloc,
             dry_run,
+            test,
             bench,
         } => crate::bench::runner::run(
             &crate::bench::runner::BenchArgs {
@@ -286,6 +287,7 @@ pub(super) fn run(
                 alloc: *alloc,
                 params: bench.iter().skip(1).cloned().collect(),
                 dry_run: *dry_run,
+                test: *test,
             },
             require_detection(detection)?,
             invocation,

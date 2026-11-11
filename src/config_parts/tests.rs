@@ -64,6 +64,7 @@ mod tests {
             cargo_env: std::collections::BTreeMap::new(),
             benches: BTreeMap::new(),
             bench_registry: None,
+            bench_tests: None,
             included_config_files: Vec::new(),
             results_server: None,
         }

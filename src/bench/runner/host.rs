@@ -9,6 +9,7 @@ use std::time::Instant;
 use super::PREVIEW_BYTES;
 use crate::bench::evidence;
 use crate::bench::lua::{self, Abort, CallOptions, CallOutcome, HandleRef, Word};
+use crate::bench::policy::{Calls, Declared};
 use crate::bench::resources::{self, Handle, Resources};
 use crate::bench::store;
 use crate::error::DevError;
@@ -132,10 +133,10 @@ pub(super) fn run_iteration(
     };
     // The inputs are the first handles, in order, as the args' handles
     // index them.
-    let handles = resources.inputs().to_vec();
+    let calls = Calls::new(resources.inputs().to_vec());
     let host = IterationHost {
         resources: Some(resources),
-        handles,
+        calls,
         config: setup.config,
         program: setup.program.to_path_buf(),
         cwd: setup.cwd.to_path_buf(),
@@ -236,8 +237,8 @@ fn profile_failure(measurement: store::Measurement, children: &[store::Child]) -
 /// The builtins' side for one iteration.
 struct IterationHost {
     resources: Option<Resources>,
-    /// Every handle given out, by the index the script's table carries.
-    handles: Vec<Handle>,
+    /// Every handle given out, and the call policy's state.
+    calls: Calls,
     config: Arc<lua::Value>,
     program: PathBuf,
     cwd: PathBuf,
@@ -312,29 +313,12 @@ impl IterationHost {
     }
 
     fn give(&mut self, handle: Handle) -> Result<HandleRef, Abort> {
-        let path = handle
-            .path()
-            .to_str()
-            .ok_or_else(|| {
-                Abort::Failed(format!(
-                    "{} is not UTF-8, which a script cannot pass on",
-                    handle.path().display()
-                ))
-            })?
-            .to_owned();
-        self.handles.push(handle);
-        Ok(HandleRef {
-            index: self.handles.len() - 1,
-            path,
-        })
+        self.calls.handles.give(handle)
     }
 
     /// The handle the script's table carries `index` of.
     fn handle(&self, index: usize, function: &str) -> Result<Handle, Abort> {
-        self.handles
-            .get(index)
-            .cloned()
-            .ok_or_else(|| Abort::Failed(format!("{function}: handle {index} was never given out")))
+        self.calls.handles.get(index, function)
     }
 
     /// A fresh marker FIFO for one child, and its path.
@@ -363,7 +347,8 @@ impl IterationHost {
     /// Launch one child and wait for it and its borrow; its evidence is kept
     /// whatever happens after the spawn.
     #[allow(clippy::too_many_lines)] // One launch in its order: admit, prepare, spawn, keep.
-    fn launch(&mut self, argv: &[String], call: &Declared) -> Result<CallOutcome, Abort> {
+    fn launch(&mut self, call: &Declared) -> Result<CallOutcome, Abort> {
+        let argv = call.words.as_slice();
         let failed = |what: &str, e: &dyn std::fmt::Display| Abort::Failed(format!("{what}: {e}"));
         let (program, executable) = self.target(call)?;
         let program_str = program.display().to_string();
@@ -371,16 +356,11 @@ impl IterationHost {
             .file_name()
             .map_or_else(|| program_str.clone(), |n| n.to_string_lossy().into_owned());
         let (mut fifo, fifo_path) = self.marker_fifo()?;
-        let argv_handles: Vec<&Handle> = call.argv.iter().collect();
-        let reads: Vec<&Handle> = call.reads.iter().collect();
-        let writes: Vec<&Handle> = call.writes.iter().collect();
         let mut admitted = self
             .resources()?
             .call(
                 &program,
-                &argv_handles,
-                &reads,
-                &writes,
+                &call.access,
                 call.stdin.as_ref(),
                 call.hotpath.is_some(),
             )
@@ -621,9 +601,10 @@ impl IterationHost {
     }
 
     /// Prepare the call's `cold` and `warm` inputs, admitted and about to be
-    /// launched: `None` when it lists none. Each must be an input the call
-    /// passes (argv, `reads` or `stdin`), opened as `read()` opens one and
-    /// prepared through that descriptor; listings of one inode in one mode
+    /// launched: `None` when it lists none. Policy already judged each an
+    /// input the call passes (`crate::bench::policy`); each is opened as
+    /// `read()` opens one and prepared through that descriptor; listings of
+    /// one inode in one mode
     /// share an account and in both modes are refused, as is a prepared
     /// inode that a file the call declares written already names, and a
     /// stdin that is not the inode prepared for it.
@@ -640,15 +621,6 @@ impl IterationHost {
         for (mode, handle) in &call.cache {
             let shown = handle.path().display().to_string();
             let what = format!("binary_with(): {} {shown}", mode.name());
-            let passed = call.argv.contains(handle)
-                || call.reads.contains(handle)
-                || call.stdin.as_ref() == Some(handle);
-            if !passed {
-                return Err(Abort::Failed(format!(
-                    "{what}: the call does not pass it (argv, reads or stdin): only a file the \
-                     child is given is prepared"
-                )));
-            }
             let file = self
                 .resources()?
                 .open_input(handle)
@@ -715,17 +687,11 @@ fn no_written_alias(
     call: &Declared,
     targets: &[(crate::bench::cache::Target, (u64, u64))],
 ) -> Result<(), Abort> {
-    let argv: Vec<&Handle> = call.argv.iter().collect();
-    let reads: Vec<&Handle> = call.reads.iter().collect();
-    let writes: Vec<&Handle> = call.writes.iter().collect();
-    let declared =
-        crate::bench::resources::call_access(&argv, &reads, &writes, call.stdin.as_ref())
-            .map_err(|e| Abort::Failed(format!("the call was refused: {e}")))?;
-    for (path, access) in declared {
-        if access != crate::reservations::Access::Write {
+    for (path, access) in &call.access {
+        if *access != crate::reservations::Access::Write {
             continue;
         }
-        let meta = match std::fs::metadata(&path) {
+        let meta = match std::fs::metadata(path) {
             Ok(meta) => meta,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
@@ -878,26 +844,6 @@ fn decode_report(bytes: &[u8]) -> Result<(serde_json::Value, lua::Value), String
     Ok((report, projection))
 }
 
-/// One call's handles as declared: those in its argv, its `reads`, `writes`
-/// and `stdin`, and its environment additions.
-struct Declared {
-    argv: Vec<Handle>,
-    reads: Vec<Handle>,
-    writes: Vec<Handle>,
-    stdin: Option<Handle>,
-    env: Vec<(String, String)>,
-    /// The stage a `hotpath` call is marked with.
-    hotpath: Option<String>,
-    /// The exact marker that ends the child.
-    stop_at: Option<String>,
-    /// The external program the call runs in place of the snapshot.
-    program: Option<String>,
-    /// The call whose child's wall is the iteration's result.
-    measured: bool,
-    /// Inputs prepared before launch, each with its mode, as listed.
-    cache: Vec<(store::CacheMode, Handle)>,
-}
-
 /// What the script sees of a finished child, or why the sample ends.
 fn call_outcome(
     short: String,
@@ -972,59 +918,8 @@ impl lua::Host for IterationHost {
 
     fn binary(&mut self, words: Vec<Word>, options: CallOptions) -> Result<CallOutcome, Abort> {
         stopping()?;
-        if options.measured && self.children.iter().any(|c| c.measured) {
-            return Err(Abort::Failed(
-                "binary_with(): a second call marked measured: an iteration's result is one \
-                 child's wall"
-                    .into(),
-            ));
-        }
-        let mut argv = Vec::with_capacity(words.len());
-        let mut declared = Declared {
-            argv: Vec::new(),
-            reads: Vec::new(),
-            writes: Vec::new(),
-            stdin: None,
-            env: options.env,
-            hotpath: options.hotpath,
-            stop_at: options.stop_at,
-            program: options.program,
-            measured: options.measured,
-            cache: Vec::new(),
-        };
-        for (mode, list) in [
-            (store::CacheMode::Cold, &options.cold),
-            (store::CacheMode::Warm, &options.warm),
-        ] {
-            for index in list {
-                let what = format!("binary_with(): {}", mode.name());
-                declared.cache.push((mode, self.handle(*index, &what)?));
-            }
-        }
-        for word in words {
-            match word {
-                Word::Text(text) => argv.push(text),
-                Word::Handle(index) => {
-                    let handle = self.handle(index, "binary()")?;
-                    argv.push(handle.path().display().to_string());
-                    declared.argv.push(handle);
-                }
-            }
-        }
-        for index in options.reads {
-            declared
-                .reads
-                .push(self.handle(index, "binary_with(): reads")?);
-        }
-        for index in options.writes {
-            declared
-                .writes
-                .push(self.handle(index, "binary_with(): writes")?);
-        }
-        if let Some(index) = options.stdin {
-            declared.stdin = Some(self.handle(index, "binary_with(): stdin")?);
-        }
-        self.launch(&argv, &declared)
+        let declared = self.calls.declare(words, options)?;
+        self.launch(&declared)
     }
 
     fn since(&mut self, sha: &str) -> Result<bool, Abort> {

@@ -587,6 +587,12 @@ In depth: `brokkr man clippy`."
         #[arg(long)]
         dry_run: bool,
 
+        /// Run the project's contract tests, the Lua files under
+        /// bench_tests, against scripted fixtures: no build, no data, no
+        /// lock. `brokkr check`'s bench phase runs them too.
+        #[arg(long, conflicts_with_all = ["dry_run", "hotpath", "alloc", "commit"])]
+        test: bool,
+
         /// The bench to run, then its own params; clap reads nothing after
         /// NAME, `--help` included. Omit for the index.
         #[arg(value_name = "NAME [PARAMS]", trailing_var_arg = true)]

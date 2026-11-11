@@ -8,7 +8,8 @@ dellingr, a pure Rust Lua VM linked into brokkr; they are dellingr Lua, not Lua
 What brokkr does with them: it loads and validates every table below when it
 reads the config, `brokkr check`'s `bench` phase compiles every bench's script
 and every `bench_lib` module and resolves their global names without running
-any of it, `brokkr bench NAME` runs one and stores the run
+any of it, and runs the contract tests `bench_tests` holds against virtual
+hosts, `brokkr bench NAME` runs one and stores the run
 (`brokkr man bench`), and `brokkr results` reads the stored runs (`brokkr man
 results`, Script benches).
 
@@ -63,15 +64,19 @@ State but nothing in it is the module's to rely on. That one rule is what
 keeps each file's check sound on its own: no module can define a name the
 script then reads.
 
-Not caught: a misspelt field (`json.encdoe`, `params.thread`), a wrong
-`binary_with` option key, a wrong argument type, a nil value. Those fail only
-when the code holding them runs. `brokkr bench --dry-run NAME PARAMS`
-binds an invocation and runs its `validate()` (`brokkr man bench`, Dry
-run), so the checks a script puts there are tried without a build; for
-the rest, the way to try a script's behaviour is `brokkr bench NAME`
-itself, on the smallest params it takes.
+Not caught by the compile: a misspelt field (`json.encdoe`, `params.thread`),
+a wrong `binary_with` option key, a wrong argument type, a nil value. Those
+fail only when the code holding them runs. `brokkr bench --dry-run NAME
+PARAMS` binds an invocation and runs its `validate()` (`brokkr man bench`,
+Dry run), so the checks a script puts there are tried without a build. The
+rest of a script's behaviour is what contract tests run: with `bench_tests`
+set, the phase runs every test file under it, each driving the real script
+against scripted fixtures (`brokkr man bench`, Contract tests), so the code
+a test reaches runs on every check, and each failed case is a finding
+naming its file.
 
-The phase is inert in a config without benches or `bench_scripts`, is skipped by name as `bench`
+The phase is inert in a config without benches, `bench_scripts` or
+`bench_tests`, is skipped by name as `bench`
 in a partial profile's `skip_phases`, and runs on a markdown-only tree too: a
 `script_file` beside an included config file may live outside the checkout,
 where the tree's own status cannot vouch for it.
@@ -501,7 +506,9 @@ bench_scripts_exempt = ["../benches/scratch", "../benches/old/probe.lua"]
 The directory every bench script lives under, so that `brokkr check`'s
 `bench` phase can refuse one no bench registers: each `.lua` file below it
 must be the `script_file` of some `[bench.NAME]`, a module `bench_lib`
-loads, or covered by `bench_scripts_exempt`. Each finding names the file.
+loads, a contract-test file `bench_tests` holds (exactly the files the
+tests run, found by the same walk), or covered by `bench_scripts_exempt`.
+Each finding names the file.
 With it set the phase runs even with no bench declared, and then checks
 `bench_lib` too. Unset, nothing is discovered.
 
@@ -528,11 +535,33 @@ inspected is a finding rather than skipped.
 A `[bench_scripts]` or `[bench_scripts_exempt]` table is not this key but a
 hostname section, as it always was.
 
+## `bench_tests`
+
+```toml
+bench_tests = "../benches/tests"
+```
+
+The directory of the project's contract tests (`brokkr man bench`,
+Contract tests): every regular `.lua` file below it is a test file, which
+`brokkr check`'s `bench` phase runs (with it set the phase runs even with no
+bench declared) and `brokkr bench --test` runs alone. Resolved against the
+directory of the config file that set it, as `bench_lib` is. A blank value or
+one that is not a string is refused. The directory is read when the tests
+run, the walk `bench_scripts` uses: untracked files included, a linked
+directory not descended, and a `.lua` entry that is not a regular file (a
+link included) or that cannot be inspected is a finding rather than a test.
+A test file that is also a bench's `script_file` or a `bench_lib` module is
+a finding: each runs in a different Lua state by different rules. Unset,
+nothing is tested.
+
+A `[bench_tests]` table is not this key but a hostname section, as it
+always was.
+
 ## Reserved names and the user-wide layer
 
 `bench`, `bench_params` and `data` are reserved top-level names, and
-`bench_lib`, `bench_scripts` and `bench_scripts_exempt` are reserved as
-values. A host literally named one of the first three is written
+`bench_lib`, `bench_scripts`, `bench_scripts_exempt` and `bench_tests` are
+reserved as values. A host literally named one of the first three is written
 `[host.bench]`, `[host.bench_params]` or `[host.data]`. The user-wide
 `brokkr.toml` cannot hold any of them: benches belong to one project.
 
