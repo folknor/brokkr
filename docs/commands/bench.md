@@ -559,6 +559,11 @@ is a bare flag, `false` is dropped, a string, number or handle is a separate
 following argument (`--jobs 4`, never `--jobs=4`), and a list repeats the
 flag once per element.
 
+An integral finite number within +/-2^53 is written as exact decimal text
+(with zero written as `0`). Other numbers keep Lua's `%.14g` spelling. This
+also applies to numeric environment values. Script-side `tostring` and
+concatenation keep Lua's formatting.
+
 ```lua
 local r = binary("cat", input, { jobs = 4, output = output("out.pbf") })
 ```

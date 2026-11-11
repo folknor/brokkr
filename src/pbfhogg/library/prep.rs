@@ -15,9 +15,6 @@ use std::path::{Path, PathBuf};
 /// The preparation this brokkr performs, as stored rows name it.
 pub(crate) const PROCEDURE: &str = "dataset-page-cache-v1";
 
-/// Bytes of a file one scan window maps.
-const WINDOW_BYTES: u64 = 1 << 30;
-
 /// Why a preparation did not establish its state.
 #[derive(Debug)]
 pub(crate) enum NotEstablished {
@@ -44,38 +41,30 @@ impl std::fmt::Display for NotEstablished {
 pub(crate) fn prepare(datasets: &[PathBuf], retained: &[PathBuf]) -> Result<(), NotEstablished> {
     // SAFETY: sync takes no arguments and cannot fail.
     unsafe { libc::sync() };
-    let mut files: Vec<PathBuf> = datasets.to_vec();
+    let targets = datasets
+        .iter()
+        .map(|path| {
+            open(path).map(|file| crate::bench::cache::Target {
+                paths: vec![path.display().to_string()],
+                mode: crate::bench::store::CacheMode::Cold,
+                file,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(NotEstablished::Residency)?;
+    let mut files = Vec::new();
     for path in retained {
         collect_files(path, &mut files).map_err(NotEstablished::Residency)?;
     }
     for file in &files {
         evict(file).map_err(NotEstablished::Residency)?;
     }
-    for file in datasets {
-        if crate::shutdown::should_unwind() {
-            return Err(NotEstablished::Interrupted);
+    crate::bench::cache::prepare(&targets, &crate::shutdown::should_unwind).map_err(|failure| {
+        match failure {
+            crate::bench::cache::Failure::Interrupted => NotEstablished::Interrupted,
+            crate::bench::cache::Failure::Failed(why) => NotEstablished::Residency(why),
         }
-        let resident = resident_pages(file)?;
-        if resident > 0 {
-            let why = if observable(file) {
-                format!(
-                    "{} still has {} in the page cache after eviction",
-                    file.display(),
-                    crate::output::count(
-                        usize::try_from(resident).unwrap_or(usize::MAX),
-                        "resident page"
-                    )
-                )
-            } else {
-                format!(
-                    "the page-cache residency of {} is not observable: brokkr neither owns it \
-                     nor may write it, and the kernel then reports every page resident",
-                    file.display()
-                )
-            };
-            return Err(NotEstablished::Residency(why));
-        }
-    }
+    })?;
     Ok(())
 }
 
@@ -126,132 +115,67 @@ fn evict(path: &Path) -> Result<(), String> {
     }
 }
 
-/// The pages of `path` the page cache holds, scanned in bounded windows of
-/// an untouched read-only mapping, interruptible between windows.
-fn resident_pages(path: &Path) -> Result<u64, NotEstablished> {
-    use std::os::fd::AsRawFd as _;
-    let fail = |why: String| NotEstablished::Residency(why);
-    let file = open(path).map_err(fail)?;
-    let len = file
-        .metadata()
-        .map_err(|e| fail(format!("{}: cannot inspect: {e}", path.display())))?
-        .len();
-    // SAFETY: sysconf with a valid name.
-    let page = u64::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) })
-        .ok()
-        .filter(|p| *p > 0)
-        .ok_or_else(|| fail("the page size is unknown".to_owned()))?;
-    let window = WINDOW_BYTES - WINDOW_BYTES % page;
-    let mut resident = 0u64;
-    let mut offset = 0u64;
-    while offset < len {
-        if crate::shutdown::should_unwind() {
-            return Err(NotEstablished::Interrupted);
-        }
-        let span = (len - offset).min(window);
-        let map_len = usize::try_from(span)
-            .map_err(|_| fail(format!("{}: a window does not fit memory", path.display())))?;
-        let pages = usize::try_from(span.div_ceil(page))
-            .map_err(|_| fail(format!("{}: a window does not fit memory", path.display())))?;
-        let map_offset = libc::off_t::try_from(offset).map_err(|_| {
-            fail(format!(
-                "{}: offset {offset} is out of range",
-                path.display()
-            ))
-        })?;
-        // SAFETY: a read-only shared mapping of a range inside the file,
-        // never touched, unmapped below.
-        let addr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                map_len,
-                libc::PROT_READ,
-                libc::MAP_SHARED,
-                file.as_raw_fd(),
-                map_offset,
-            )
-        };
-        if addr == libc::MAP_FAILED {
-            return Err(fail(format!(
-                "{}: cannot map it to scan: {}",
-                path.display(),
-                std::io::Error::last_os_error()
-            )));
-        }
-        let mut vec = vec![0u8; pages];
-        // SAFETY: `addr` maps `map_len` bytes and `vec` holds one byte per
-        // page of it.
-        let rc = unsafe { libc::mincore(addr, map_len, vec.as_mut_ptr()) };
-        let error = std::io::Error::last_os_error();
-        // SAFETY: the mapping made above, unmapped once.
-        unsafe { libc::munmap(addr, map_len) };
-        if rc != 0 {
-            return Err(fail(format!(
-                "{}: cannot read its page-cache residency: {error}",
-                path.display()
-            )));
-        }
-        resident += vec.iter().filter(|b| **b & 1 == 1).count() as u64;
-        offset += span;
-    }
-    Ok(resident)
-}
-
-/// Whether the kernel reports the true residency of `path` to brokkr: it
-/// does to the owner, to a process that may write the file and to a
-/// privileged one, and reports every page resident to anyone else.
-fn observable(path: &Path) -> bool {
-    use std::os::unix::ffi::OsStrExt as _;
-    use std::os::unix::fs::MetadataExt as _;
-    // SAFETY: geteuid cannot fail.
-    let euid = unsafe { libc::geteuid() };
-    if euid == 0 {
-        return true;
-    }
-    if std::fs::metadata(path).is_ok_and(|m| m.uid() == euid) {
-        return true;
-    }
-    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
-        return false;
-    };
-    // SAFETY: a NUL-terminated path.
-    unsafe { libc::access(c_path.as_ptr(), libc::W_OK) == 0 }
-}
-
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
-
     use super::*;
 
     #[test]
-    fn a_prepared_file_has_no_resident_page() {
+    fn a_prepared_file_has_no_resident_byte() -> Result<(), Box<dyn std::error::Error>> {
         let dir = crate::test_scratch::scratch("pbfhogg-library-prep", "evict");
         let file = dir.join("input.osm.pbf");
-        std::fs::write(&file, vec![7u8; 3 * 4096 + 17]).unwrap();
-        // Read it so its pages are cached, then prepare.
-        assert_eq!(std::fs::read(&file).unwrap().len(), 3 * 4096 + 17);
+        std::fs::write(&file, vec![7u8; 3 * 4096 + 17])?;
+        assert_eq!(std::fs::read(&file)?.len(), 3 * 4096 + 17);
         match prepare(std::slice::from_ref(&file), &[dir.join("absent")]) {
-            Ok(()) => assert_eq!(resident_pages(&file).unwrap(), 0),
-            // A filesystem that keeps file pages in memory (tmpfs) cannot be
-            // prepared; the refusal must say so with its evidence.
+            Ok(()) => {}
+            // Filesystems whose pages are their storage cannot be made cold.
             Err(NotEstablished::Residency(why)) => {
-                assert!(why.contains("resident page"), "{why}");
+                assert!(why.contains("stayed resident"), "{why}");
+                assert!(why.contains(&file.display().to_string()), "{why}");
             }
             Err(NotEstablished::Interrupted) => panic!("interrupted"),
         }
+        Ok(())
     }
 
     #[test]
-    fn an_empty_file_scans_clear_and_retained_directories_are_walked() {
+    fn an_empty_file_scans_clear_and_retained_directories_are_walked()
+    -> Result<(), Box<dyn std::error::Error>> {
         let dir = crate::test_scratch::scratch("pbfhogg-library-prep", "walk");
         let empty = dir.join("empty");
-        std::fs::write(&empty, b"").unwrap();
-        assert_eq!(resident_pages(&empty).unwrap(), 0);
-        std::fs::create_dir_all(dir.join("out/sub")).unwrap();
-        std::fs::write(dir.join("out/sub/a"), b"x").unwrap();
+        std::fs::write(&empty, b"")?;
+        assert!(prepare(&[empty], &[]).is_ok());
+        std::fs::create_dir_all(dir.join("out/sub"))?;
+        std::fs::write(dir.join("out/sub/a"), b"x")?;
         let mut files = Vec::new();
-        collect_files(&dir.join("out"), &mut files).unwrap();
+        collect_files(&dir.join("out"), &mut files)?;
         assert_eq!(files, [dir.join("out/sub/a")]);
+        Ok(())
+    }
+
+    #[test]
+    fn ownership_does_not_establish_observability() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = crate::test_scratch::scratch("pbfhogg-library-prep", "readonly");
+        let file = dir.join("input");
+        std::fs::write(&file, b"x")?;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444))?;
+        // Effective credentials with DAC override can still write this file.
+        // Ask the same descriptor predicate rather than guessing from a uid.
+        let descriptor = open(&file)?;
+        if crate::bench::cache::prerequisites(&descriptor, crate::bench::store::CacheMode::Warm)
+            .is_ok()
+        {
+            return Ok(());
+        }
+        match prepare(std::slice::from_ref(&file), &[]) {
+            Err(NotEstablished::Residency(why)) => {
+                assert!(why.contains("residency is observable"), "{why}");
+                assert!(why.contains(&file.display().to_string()), "{why}");
+                assert!(!why.contains("stayed resident"), "{why}");
+            }
+            other => panic!("expected an observability refusal, got {other:?}"),
+        }
+        Ok(())
     }
 }

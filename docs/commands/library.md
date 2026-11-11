@@ -1009,10 +1009,16 @@ every filesystem; `posix_fadvise(DONTNEED)` on the arm's dataset files and,
 before the CLI arm, on the library outputs the call left in `roles/`
 (which stay for the digests); then a scan of every dataset file, in bounded
 windows of an untouched read-only mapping with `mincore`, for resident
-pages. A resident page fails the process as preparation not established,
-naming the file and the count; a file whose residency brokkr may not
-observe (the kernel reports every page resident to a process that neither
-owns the file nor may write it) is reported as such. What this establishes
+bytes. Resident bytes fail the process as preparation not established,
+naming the files and their state. Dataset preparation shares the script-bench
+implementation: every dataset stays open through eviction and scanning,
+and its size and observability are checked again after all scans. brokkr
+establishes observability conservatively with `faccessat2(W_OK, AT_EACCESS)`
+on the descriptor: its effective credentials must be allowed to write the
+file, even for an owner of a read-only file. A refusal to establish this is
+reported before scanning. The kernel reports every page resident when the
+process neither owns the inode, is capable over it nor may write it.
+What this establishes
 is input page-cache residency checked clear before launch, assuming no
 competing reader. It does not prove that no read is in flight (the kernel
 reports a page under read as not resident), and it resets no device,

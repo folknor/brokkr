@@ -722,6 +722,67 @@ fn a_fresh_state_each_sample_forgets_the_last_one() {
     assert_eq!(second.record.unwrap()["n"], 1);
 }
 
+/// Config numbers retain their exact integer spelling across every child seam.
+#[test]
+fn child_numbers_preserve_exact_integers() {
+    for (number, expected) in [
+        (0.0, "0"),
+        (-0.0, "0"),
+        (99_999_999_999_999.0, "99999999999999"),
+        (100_000_000_000_000.0, "100000000000000"),
+        (1_125_899_906_842_624.0, "1125899906842624"),
+        (-1_125_899_906_842_624.0, "-1125899906842624"),
+        (9_007_199_254_740_991.0, "9007199254740991"),
+        (9_007_199_254_740_992.0, "9007199254740992"),
+        (-9_007_199_254_740_992.0, "-9007199254740992"),
+        (1.25, "1.25"),
+        (9_007_199_254_740_994.0, "9.007199254741e+15"),
+    ] {
+        let (sample, host) = run(
+            "function bench() local n = config().n; \
+             binary_with({env = {N = n}}, n, {n = n, repeated = {n, n}}) end",
+            Fake {
+                config: Some(Value::Table(vec![("n".into(), Value::Number(number))])),
+                ..Fake::default()
+            },
+        );
+        assert_eq!(sample.outcome, SampleOutcome::Completed(None), "{sample:?}");
+        let text = |s: &str| Word::Text(s.into());
+        assert_eq!(
+            host.calls[0],
+            [
+                text(expected),
+                text("-n"),
+                text(expected),
+                text("--repeated"),
+                text(expected),
+                text("--repeated"),
+                text(expected)
+            ],
+            "{number:?}"
+        );
+        assert_eq!(host.options[0].env, [("N".into(), expected.into())]);
+    }
+}
+
+#[test]
+fn script_number_coercion_keeps_lua_spelling() {
+    let (sample, host) = run(
+        "function bench() local n = 2^50; binary(n, tostring(n), '' .. n) end",
+        Fake::default(),
+    );
+    assert_eq!(sample.outcome, SampleOutcome::Completed(None), "{sample:?}");
+    let text = |s: &str| Word::Text(s.into());
+    assert_eq!(
+        host.calls[0],
+        [
+            text("1125899906842624"),
+            text("1.1258999068426e+15"),
+            text("1.1258999068426e+15")
+        ]
+    );
+}
+
 /// `binary_with`'s options reach the host as handles and sorted env; the
 /// rest of its arguments are `binary()`'s grammar.
 #[test]

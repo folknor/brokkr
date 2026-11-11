@@ -1550,8 +1550,15 @@ fn word_at(state: &mut State, idx: isize, what: &str) -> Result<Word, Error> {
     }
 }
 
-/// A number as Lua writes it, the spelling argv and env values take.
+/// Exact decimal for integral values within 2^53; otherwise Lua spelling.
 fn number_text(state: &mut State, idx: isize) -> Result<String, Error> {
+    let number = state.to_number(idx)?;
+    if number.is_finite() && number.fract() == 0.0 && number.abs() <= 9_007_199_254_740_992.0 {
+        // The range is exact in both f64 and i64; also normalise negative zero.
+        #[allow(clippy::cast_possible_truncation)]
+        let integer = number as i64;
+        return Ok(integer.to_string());
+    }
     let rendered = state.tostring_bytes(idx)?;
     Ok(String::from_utf8_lossy(&rendered).into_owned())
 }

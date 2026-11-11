@@ -218,7 +218,10 @@ dropped and checked, while warming needs the file to fit memory. The
 preparation evicts the library's retained outputs before the CLI arm, since
 the CLI otherwise starts under memory the library arm never faced, and
 syncs every filesystem, brokkr's own stores included, so neither arm meets
-the other's writeback. Generated roles are refused in isolation scenarios
+the other's writeback. Dataset preparation shares `src/bench/cache.rs`: open
+descriptors cover eviction and scanning, effective writability establishes
+observability conservatively before preparation and after scanning, and
+sizes are checked again. Generated roles are refused in isolation scenarios
 because setup writes them, dirty and resident, inside the library process,
 a state brokkr could only give the CLI with a separate materialization
 stage. The claim is kept to what is observed: a clear scan does not exclude
