@@ -438,7 +438,9 @@ impl lua::Host for VirtualIteration {
         let tail = response.stderr[response.stderr.len().saturating_sub(PREVIEW_BYTES)..].to_vec();
         let stdout_file = self.spool("stdout", n - 1, &response.stdout)?;
         let stderr_file = self.spool("stderr", n - 1, &response.stderr)?;
-        Ok(CallOutcome {
+        // Judged after the response's effects are checked, so a malformed
+        // fixture is still a fault rather than hidden behind the failure.
+        let outcome = CallOutcome {
             program,
             exit,
             signal,
@@ -452,7 +454,9 @@ impl lua::Host for VirtualIteration {
             hotpath,
             stopped_at,
             start_error: None,
-        })
+        };
+        declared.ended(&outcome.program, &outcome)?;
+        Ok(outcome)
     }
 
     fn since(&mut self, sha: &str) -> Result<bool, Abort> {

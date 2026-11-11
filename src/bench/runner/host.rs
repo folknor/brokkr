@@ -466,6 +466,7 @@ impl IterationHost {
             )
         })?;
         let mut outcome = call_outcome(short, &run, &spool, stderr)?;
+        call.ended(&outcome.program, &outcome)?;
         outcome.stdout_file = Some(self.give(resources::spool_handle(&spool))?);
         outcome.stderr_file = Some(self.give(resources::spool_handle(&stderr_spool))?);
         outcome.hotpath = projection;

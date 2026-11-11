@@ -649,8 +649,15 @@ local r = binary_with({
   `stopped_at`, that name, and no `exit` or `signal`: the marker wins over
   whatever the child did after it, a nonzero exit included, since the
   phase it ends was complete; `r:ok()` passes it, and the child is stored
-  with that marker as its ending. A child that never emits the marker ends
-  on its own and has no `stopped_at`; the script judges that. The FIFO is
+  with that marker as its ending. The marker is a required boundary: a
+  child that ends any other way, an exit 0 included, fails the iteration
+  naming the marker and how the child ended, so a renamed marker never
+  turns a phase run into a full one; the child is stored as it came.
+  What counts is that the stop fired, not that the marker text appears in
+  the evidence (a marker a descendant writes after the child exited stops
+  nothing). A script that wants no stop passes no `stop_at`. Runs pair on
+  params, never call options, so a stopped run and a full one are
+  different arms only when the stop is a bound param. The FIFO is
   read on the supervisor's ticks and when the child exits, so the child is
   stopped once the marker is recognized, with no bound on how long after
   it; the marker's stamp in the child's evidence is the precise end of the

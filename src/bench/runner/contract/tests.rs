@@ -99,6 +99,13 @@ test(\"stops where it asked to\", function()
   assert(r.verdict == \"stopped at LOADED\", r.reason)
   assert(r.calls[1].stop_at == \"LOADED\")
 end)
+test(\"a stop that never fires fails\", function()
+  local s = spec({{params = {{\"--stop\", \"LOADED\"}}}})
+  s.calls = {{ {{ exit = 0 }} }}
+  local r = run(s)
+  assert(r.outcome == \"failed\", r.outcome)
+  assert(string.find(r.reason, \"exited 0 before its stop_at marker LOADED\", 1, true), r.reason)
+end)
 test(\"a wrong count is the script's failure\", function()
   local s = spec()
   s.calls[1].outputs[\"counts.json\"] = \"{{\\\"n\\\":2}}\"

@@ -9,10 +9,13 @@
 //! (`resources::call_access`), the page-cache options' handle rules, and a
 //! preflight's refusals. What needs the disk stays with the real host:
 //! admission against other leases, program resolution, inode identity.
+//!
+//! One rule is judged after a call: `Declared::ended`, the postcondition a
+//! `stop_at` call holds its child to, on the ending either host reports.
 
 use std::path::PathBuf;
 
-use super::lua::{Abort, CallOptions, HandleRef, Word};
+use super::lua::{Abort, CallOptions, CallOutcome, HandleRef, Word};
 use super::resources::{self, Handle};
 use super::store::CacheMode;
 use crate::reservations::Access;
@@ -82,6 +85,38 @@ pub(crate) struct Declared {
     pub(crate) cache: Vec<(CacheMode, Handle)>,
     /// What the call declares of each path: what admission is asked for.
     pub(crate) access: Vec<(PathBuf, Access)>,
+}
+
+impl Declared {
+    /// The call's postcondition on how its child ended: a call naming
+    /// `stop_at` declares a required measurement boundary, so its child must
+    /// have been stopped there. Ending any other way, an exit of any code or
+    /// a signal, fails the iteration, since the run went past the phase the
+    /// call measures; a renamed marker never turns a phase run into a full
+    /// one. What is judged is whether the requested stop fired, never
+    /// whether the marker text appears in the evidence: a marker a
+    /// descendant writes after the child exited is drained into the
+    /// evidence without stopping anything. An interrupted call never gets
+    /// here. A stop that may or may not fire is not offered; it would be an
+    /// option of its own.
+    pub(crate) fn ended(&self, program: &str, outcome: &CallOutcome) -> Result<(), Abort> {
+        let Some(marker) = &self.stop_at else {
+            return Ok(());
+        };
+        if outcome.stopped_at.as_deref() == Some(marker.as_str()) {
+            return Ok(());
+        }
+        let how = match (outcome.exit, outcome.signal, &outcome.stopped_at) {
+            (Some(code), _, _) => format!("exited {code}"),
+            (None, Some(signal), _) => format!("was killed by signal {signal}"),
+            (None, None, Some(other)) => format!("stopped at {other}"),
+            (None, None, None) => "ended".to_owned(),
+        };
+        Err(Abort::Failed(format!(
+            "{program} {how} before its stop_at marker {marker} stopped it: the call \
+             measures up to {marker}, and the run went past it"
+        )))
+    }
 }
 
 /// The calls of one iteration: its handles and whether a call was marked

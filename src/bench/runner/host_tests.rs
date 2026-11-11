@@ -373,8 +373,7 @@ fn a_program_call_runs_the_external_program_and_stores_its_identity() {
 const REPORT: &str = r#"{"functions_timing":{"data":[{"name":"decode","calls":12,"avg":"2 ms","total":"24 ms","percent_total":"40%","p50":"1.8 ms","p95":"3.0 ms","p99":"3.8 ms"}]}}"#;
 
 /// `stop_at` ends a child once its marker arrives: the result says where,
-/// with no exit, the stored ending is that marker, and a child that never
-/// emits it ends on its own.
+/// with no exit, and the stored ending is that marker.
 #[test]
 fn a_stop_marker_ends_the_child_and_is_its_ending() {
     let _lock = crate::test_scratch::process_global_lock();
@@ -387,9 +386,6 @@ fn a_stop_marker_ends_the_child_and_is_its_ending() {
               echo \"2 SETUP_END\" > \"$BROKKR_MARKER_FIFO\"; exec sleep 30'):ok()\n\
            record.at = r.stopped_at\n\
            record.exited = r.exit ~= nil\n\
-           local n = binary_with({stop_at = 'SETUP_END'}, '-c', 'exit 3')\n\
-           record.natural = n.exit\n\
-           record.unstopped = n.stopped_at == nil\n\
            local p = binary_with({stop_at = 'LOADED'}, '-c',\n\
              'echo \"1 LOADED_END\" > \"$BROKKR_MARKER_FIFO\"; \
               echo \"2 LOADED\" > \"$BROKKR_MARKER_FIFO\"; exec sleep 30'):ok()\n\
@@ -402,14 +398,38 @@ fn a_stop_marker_ends_the_child_and_is_its_ending() {
     let shown = record(&iteration);
     assert_eq!(shown["at"], "SETUP_END");
     assert_eq!(shown["exited"], false);
-    assert_eq!(shown["natural"], 3);
-    assert_eq!(shown["unstopped"], true);
     assert_eq!(shown["point"], "LOADED", "a point marker, matched verbatim");
     assert_eq!(
         iteration.children[0].ending,
         store::ChildEnding::StopMarker {
             marker: "SETUP_END".into()
         }
+    );
+}
+
+/// A `stop_at` call whose child ends before the stop fires fails the
+/// iteration, an exit 0 included, naming the marker and how it ended; the
+/// child is still stored as it came.
+#[test]
+fn a_stop_that_never_fires_fails_the_iteration() {
+    let _lock = crate::test_scratch::process_global_lock();
+    let root = crate::test_scratch::scratch("bench_runner", "stop-unreached");
+    let container = root.join("iterations");
+    let script = script(
+        "function bench()\n\
+           binary_with({stop_at = 'SETUP_END'}, '-c',\n\
+             'echo \"1 SETUP\" > \"$BROKKR_MARKER_FIFO\"; exit 0')\n\
+           record.after = true\n\
+         end",
+    );
+    let (iteration, _, _, _) = run_iteration(setup(&script, &root, &container));
+    let reason = failure(&iteration);
+    assert!(reason.contains("exited 0"), "{reason}");
+    assert!(reason.contains("stop_at marker SETUP_END"), "{reason}");
+    assert_eq!(iteration.children.len(), 1);
+    assert_eq!(
+        iteration.children[0].ending,
+        store::ChildEnding::Exited { code: 0 }
     );
 }
 
