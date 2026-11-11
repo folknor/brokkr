@@ -727,7 +727,10 @@ pub(super) fn run_check(
             d.config.textlint.as_slice(),
             d.config.script_checks.as_slice(),
             d.config.manifest.as_ref(),
-            &d.config.benches,
+            check_cmd::Benches {
+                benches: &d.config.benches,
+                registry: d.config.bench_registry.as_ref(),
+            },
             d.config.rustdoc.as_ref(),
             d.config.lints.as_ref(),
         )
@@ -750,7 +753,10 @@ pub(super) fn run_check(
             user.textlint.as_slice(),
             user.script_checks.as_slice(),
             None,
-            &user.benches,
+            check_cmd::Benches {
+                benches: &user.benches,
+                registry: user.bench_registry.as_ref(),
+            },
             None,
             None,
         )

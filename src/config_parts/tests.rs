@@ -63,6 +63,7 @@ mod tests {
             strip_rustflags: Vec::new(),
             cargo_env: std::collections::BTreeMap::new(),
             benches: BTreeMap::new(),
+            bench_registry: None,
             included_config_files: Vec::new(),
             results_server: None,
         }

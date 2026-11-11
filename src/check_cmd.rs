@@ -11,8 +11,21 @@ use conventions::{
     LazyTree, report_script_stage, run_bench, run_dependency_rules, run_gremlins, run_header,
     run_manifest, run_publish_cycle, run_script_checks, run_textlint, scope_order,
 };
-/// Every `[bench.*]` by name, as config loading leaves them.
-pub(crate) type Benches = std::collections::BTreeMap<String, crate::config::bench::Bench>;
+/// What the `bench` phase checks: every `[bench.*]` by name, as config
+/// loading leaves them, and the `bench_scripts` registry when set.
+#[derive(Clone, Copy)]
+pub(crate) struct Benches<'a> {
+    pub(crate) benches: &'a std::collections::BTreeMap<String, crate::config::bench::Bench>,
+    pub(crate) registry: Option<&'a crate::config::bench::Registry>,
+}
+
+impl Benches<'_> {
+    /// Whether the phase has anything to check: a bench, or a registry,
+    /// which refuses an unregistered script even with no bench declared.
+    pub(crate) fn active(&self) -> bool {
+        !self.benches.is_empty() || self.registry.is_some()
+    }
+}
 use reporter::Reporter;
 
 use crate::test_runner::hash_file;

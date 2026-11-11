@@ -210,6 +210,10 @@ pub struct DevConfig {
     /// `[bench_params]` sets they use. Empty when none are declared. See
     /// [`bench`](mod@bench).
     pub benches: BTreeMap<String, bench::Bench>,
+    /// `bench_scripts` and `bench_scripts_exempt`: the directory every `.lua`
+    /// under which a bench must name, `None` when unset. See
+    /// [`bench::Registry`].
+    pub bench_registry: Option<bench::Registry>,
     /// Absolute paths of the files this config's `include` graph pulled in
     /// (composition provenance, not a TOML key). Measurement provenance
     /// exempts them from the dirty-tree policy exactly as `brokkr.toml`

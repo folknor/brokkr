@@ -220,13 +220,16 @@ pub(super) fn run_manifest(
 }
 
 /// The `bench` phase: read and compile every `[bench.*]` script and resolve
-/// its global names, running none of it. Inert when the config declares no
-/// bench. Every bench is checked, so one run names every broken script.
-pub(super) fn run_bench(benches: &super::Benches) -> Result<(), DevError> {
-    if benches.is_empty() {
+/// its global names, running none of it, and with `bench_scripts` set refuse
+/// every `.lua` under it no bench names. Inert when the config declares
+/// neither a bench nor the registry. Every bench is checked, so one run names
+/// every broken script.
+pub(super) fn run_bench(set: super::Benches<'_>) -> Result<(), DevError> {
+    if !set.active() {
         phase_inert(Phase::Bench);
         return Ok(());
     }
+    let benches = set.benches;
     let mut findings: Vec<crate::bench::ScriptFinding> = Vec::new();
     for bench in benches.values() {
         let checked = crate::bench::check_script(bench);
@@ -235,18 +238,30 @@ pub(super) fn run_bench(benches: &super::Benches) -> Result<(), DevError> {
         }
         findings.extend(checked.findings);
     }
-    // Every bench shares the one `bench_lib`: checked once.
+    // Every bench shares the one `bench_lib`: checked once. The registry
+    // carries it too, so with no bench its modules, which the registry
+    // excuses, are still checked.
     let libraries: std::collections::BTreeSet<&std::path::Path> = benches
         .values()
         .filter_map(|bench| bench.library.as_deref())
+        .chain(
+            set.registry
+                .and_then(|registry| registry.library.as_deref()),
+        )
         .collect();
     for library in &libraries {
         findings.extend(crate::bench::check_library(library));
+    }
+    if let Some(registry) = set.registry {
+        findings.extend(crate::bench::check_registry(registry, benches));
     }
     if findings.is_empty() {
         let mut checked = output::count(benches.len(), "script");
         if !libraries.is_empty() {
             checked.push_str(" and bench_lib");
+        }
+        if set.registry.is_some() {
+            checked.push_str(", none unregistered");
         }
         phase_ok(Phase::Bench.label(), Some(checked));
         return Ok(());

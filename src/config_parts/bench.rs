@@ -815,6 +815,96 @@ pub(crate) fn parse_lib(
     Ok(Some(resolved_beside(&origin.base.join(dir))))
 }
 
+/// The optional bench-script registry: `bench_scripts = "dir"` and
+/// `bench_scripts_exempt = ["path", ...]`. With it set, `brokkr check`'s
+/// `bench` phase refuses every `.lua` entry under `dir` that no bench's
+/// `script_file` names, that is not a module `bench_lib` loads, and that no
+/// exemption covers (`crate::bench::check_registry`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Registry {
+    /// The scripts directory, resolved beside the file that set it.
+    pub(crate) dir: PathBuf,
+    /// Each a file or a directory covering everything below it, resolved
+    /// beside the file that set the list. Matched by the location of the
+    /// entry, never what a link names.
+    pub(crate) exempt: Vec<PathBuf>,
+    /// `bench_lib`, carried here because a config with no bench has none
+    /// on any [`Bench`].
+    pub(crate) library: Option<PathBuf>,
+}
+
+/// Parse `bench_scripts` and `bench_scripts_exempt`. Both are claimed only
+/// as non-table values, like `bench_lib` (`parser::VALUE_KEYS`).
+pub(crate) fn parse_registry(
+    table: &toml::Table,
+    sources: &ConfigSources,
+) -> Result<Option<Registry>, DevError> {
+    let value_of = |key: &str| table.get(key).filter(|value| !value.is_table());
+    let base_of = |key: &str| {
+        sources
+            .value_origin(&[key])
+            .map(|origin| origin.base.to_path_buf())
+            .ok_or_else(|| {
+                DevError::Config(format!("{key}: no config file is recorded as setting it"))
+            })
+    };
+    let exempt = match value_of("bench_scripts_exempt") {
+        None => None,
+        Some(value) => {
+            let shape = || {
+                DevError::Config(
+                    "bench_scripts_exempt must be a list of strings: the files and directories \
+                     under bench_scripts no bench need name"
+                        .into(),
+                )
+            };
+            let items = value.as_array().ok_or_else(shape)?;
+            let base = base_of("bench_scripts_exempt")?;
+            let mut out = Vec::new();
+            for item in items {
+                let path = item.as_str().ok_or_else(shape)?;
+                if path.trim().is_empty() {
+                    return Err(DevError::Config(
+                        "bench_scripts_exempt holds a blank path".into(),
+                    ));
+                }
+                let joined = base.join(path);
+                // A path ending in `..` has no name to keep as spelled: it
+                // is a directory, resolved whole, so it can contain the
+                // walk's canonical paths.
+                out.push(if joined.file_name().is_none() {
+                    std::fs::canonicalize(&joined).unwrap_or(joined)
+                } else {
+                    resolved_beside(&joined)
+                });
+            }
+            Some(out)
+        }
+    };
+    let Some(value) = value_of("bench_scripts") else {
+        if exempt.is_some() {
+            return Err(DevError::Config(
+                "bench_scripts_exempt is set without bench_scripts, the directory it exempts from"
+                    .into(),
+            ));
+        }
+        return Ok(None);
+    };
+    let dir = value.as_str().ok_or_else(|| {
+        DevError::Config(
+            "bench_scripts must be a string: the directory every bench script lives under".into(),
+        )
+    })?;
+    if dir.trim().is_empty() {
+        return Err(DevError::Config("bench_scripts is blank".into()));
+    }
+    Ok(Some(Registry {
+        dir: resolved_beside(&base_of("bench_scripts")?.join(dir)),
+        exempt: exempt.unwrap_or_default(),
+        library: parse_lib(table, sources)?,
+    }))
+}
+
 /// `path` with its directory resolved on disk, so a `script_file` or
 /// `bench_lib` spelled through `..` (`brokkr.d/../benches/x.lua`) records as
 /// the one file it names. `..` is resolved by the filesystem, never dropped
@@ -1193,6 +1283,72 @@ mod tests {
                 )],
             );
             let err = benches_of(&bad).unwrap_err();
+            assert!(err.contains(needle), "{name}: {err}");
+        }
+    }
+
+    #[test]
+    fn bench_scripts_and_its_exemptions_resolve_beside_their_files() {
+        let registry_of = |dir: &Path| {
+            super::super::load(dir)
+                .map(|(_, cfg, _)| cfg.bench_registry)
+                .map_err(|e| e.to_string())
+        };
+        let dir = tree(
+            "bench_scripts_base",
+            &[
+                (
+                    "brokkr.toml",
+                    "project = \"p\"\ninclude = [\"brokkr.d/benches.toml\"]\nbench_lib = \"benches/lib\"\n",
+                ),
+                (
+                    "brokkr.d/benches.toml",
+                    "bench_scripts = \"../benches\"\nbench_scripts_exempt = [\"../benches/scratch\", \"../benches/scratch/..\"]\n",
+                ),
+                ("benches/scratch/x.lua", ""),
+                ("benches/lib/m.lua", ""),
+            ],
+        );
+        let root = std::fs::canonicalize(&dir).unwrap();
+        let registry = registry_of(&dir).unwrap().unwrap();
+        assert_eq!(registry.dir, root.join("benches"));
+        assert_eq!(
+            registry.exempt,
+            [root.join("benches/scratch"), root.join("benches")],
+            "a trailing .. is resolved, so it contains the walk's canonical paths"
+        );
+        assert_eq!(registry.library, Some(root.join("benches/lib")));
+        let host = tree(
+            "bench_scripts_host",
+            &[(
+                "brokkr.toml",
+                "project = \"p\"\n[bench_scripts]\nfeatures = [\"x\"]\n",
+            )],
+        );
+        assert_eq!(registry_of(&host).unwrap(), None);
+        for (name, body, needle) in [
+            (
+                "bench_scripts_number",
+                "bench_scripts = 1",
+                "must be a string",
+            ),
+            ("bench_scripts_blank", "bench_scripts = \" \"", "blank"),
+            (
+                "bench_scripts_exempt_alone",
+                "bench_scripts_exempt = [\"x\"]",
+                "without bench_scripts",
+            ),
+            (
+                "bench_scripts_exempt_shape",
+                "bench_scripts = \"b\"\nbench_scripts_exempt = \"x\"",
+                "list of strings",
+            ),
+        ] {
+            let bad = tree(
+                name,
+                &[("brokkr.toml", &format!("project = \"p\"\n{body}\n"))],
+            );
+            let err = registry_of(&bad).unwrap_err();
             assert!(err.contains(needle), "{name}: {err}");
         }
     }

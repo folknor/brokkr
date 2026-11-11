@@ -26,6 +26,7 @@ pub(crate) mod marking;
 mod marks_tests;
 mod params;
 mod publication;
+mod registry;
 mod remote;
 mod resources;
 pub(crate) mod results;
@@ -52,10 +53,22 @@ mod wire_tests;
 use crate::config::bench::{Bench, BenchScript};
 use std::path::{Path, PathBuf};
 
-/// Why one bench's script failed the static check.
+/// What a static-check finding belongs to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FindingOwner {
+    /// One bench's script, by the bench's name.
+    Bench(String),
+    /// A `bench_lib` module, which belongs to no one bench.
+    Library,
+    /// A `.lua` entry under `bench_scripts` no bench names.
+    Registry,
+}
+
+/// Why a script, a module or a scripts-directory entry failed the static
+/// check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ScriptFinding {
-    pub(crate) bench: String,
+    pub(crate) owner: FindingOwner,
     /// The file the reader should open: the `.lua` file, or the config file
     /// holding an inline script.
     pub(crate) file: PathBuf,
@@ -64,18 +77,23 @@ pub(crate) struct ScriptFinding {
 
 impl std::fmt::Display for ScriptFinding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // A library module's finding belongs to no one bench.
-        if self.bench.is_empty() {
-            return write!(f, "bench_lib {}: {}", self.file.display(), self.problem);
+        match &self.owner {
+            FindingOwner::Bench(bench) => write!(f, "[bench.{bench}] ")?,
+            FindingOwner::Library => f.write_str("bench_lib ")?,
+            FindingOwner::Registry => f.write_str("bench_scripts ")?,
         }
-        write!(
-            f,
-            "[bench.{}] {}: {}",
-            self.bench,
-            self.file.display(),
-            self.problem
-        )
+        write!(f, "{}: {}", self.file.display(), self.problem)
     }
+}
+
+/// Walk the `bench_scripts` directory and name every `.lua` entry in it
+/// that no bench's `script_file` names, that is not a module `bench_lib`
+/// loads, and that no exemption covers (`registry`).
+pub(crate) fn check_registry(
+    registry: &crate::config::bench::Registry,
+    benches: &std::collections::BTreeMap<String, Bench>,
+) -> Vec<ScriptFinding> {
+    registry::check(registry, benches)
 }
 
 /// Read the `bench_lib` directory `dir` and check every module in it: it
@@ -83,7 +101,7 @@ impl std::fmt::Display for ScriptFinding {
 /// builtins and dellingr's library (`lua::check_module`). Runs none of it.
 pub(crate) fn check_library(dir: &Path) -> Vec<ScriptFinding> {
     let finding = |file: &Path, problem: String| ScriptFinding {
-        bench: String::new(),
+        owner: FindingOwner::Library,
         file: file.to_path_buf(),
         problem,
     };
@@ -165,7 +183,7 @@ pub(crate) struct ScriptCheck {
 /// when they can be mapped, else the string's own.
 pub(crate) fn check_script(bench: &Bench) -> ScriptCheck {
     let finding = |file: &Path, problem: String| ScriptFinding {
-        bench: bench.name.clone(),
+        owner: FindingOwner::Bench(bench.name.clone()),
         file: file.to_path_buf(),
         problem,
     };
@@ -255,7 +273,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    fn bench(script: BenchScript) -> Bench {
+    pub(super) fn bench(script: BenchScript) -> Bench {
         Bench {
             name: "cat".into(),
             script,

@@ -47,6 +47,31 @@ pub(crate) fn is_module_name(name: &str) -> bool {
     name.split('.').all(is_segment)
 }
 
+/// The module name the file at `relative` (below the library directory)
+/// loads as, or `None` when its path makes no module name. The name half of
+/// what the scan admits; the other half, a regular file reached through
+/// real directories and no link, is the walker's, as in [`collect`].
+pub(crate) fn module_name(relative: &Path) -> Option<String> {
+    let mut segments = Vec::new();
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        let std::path::Component::Normal(name) = component else {
+            return None;
+        };
+        let name = name.to_str()?;
+        let segment = if components.peek().is_some() {
+            name
+        } else {
+            name.strip_suffix(".lua")?
+        };
+        if !is_segment(segment) {
+            return None;
+        }
+        segments.push(segment);
+    }
+    (!segments.is_empty()).then(|| segments.join("."))
+}
+
 impl Library {
     /// Read and compile every module under `dir`, through directory
     /// descriptors held open and opens that follow no link, so a path
@@ -135,21 +160,25 @@ fn collect(
             }
             continue;
         }
-        let Some(stem) = stem.map(str::to_owned) else {
-            continue;
-        };
-        if !meta.is_file() {
+        if stem.is_none() || !meta.is_file() {
             continue;
         }
+        let relative: PathBuf = prefix
+            .iter()
+            .map(String::as_str)
+            .chain([name.as_str()])
+            .collect();
+        // The one name rule `check_registry` also excuses a module by.
+        let Some(module) = module_name(&relative) else {
+            continue;
+        };
         let mut source = Vec::new();
         (&file)
             .read_to_end(&mut source)
             .map_err(|e| unreadable(&path, e))?;
-        let mut segments = prefix.clone();
-        segments.push(stem);
         let compiled = lua::load_script(&source, Some(&path.display().to_string()), None);
         modules.insert(
-            segments.join("."),
+            module,
             Module {
                 path,
                 source,

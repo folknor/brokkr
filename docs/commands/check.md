@@ -613,8 +613,8 @@ the inline table, are their own group and never ordered against it.
 
 ## `bench` phase
 
-Runs next, only when the config declares `[bench.*]` script benches (inert
-otherwise). It reads every bench's Lua - the inline `script`, or the
+Runs next, only when the config declares `[bench.*]` script benches or sets
+`bench_scripts` (inert otherwise). It reads every bench's Lua - the inline `script`, or the
 `script_file` from disk - compiles it with dellingr and resolves its global
 names without running any of it, so it catches syntax errors, unreadable
 files, a read of a global nothing defines (a misspelt builtin or helper) and a
@@ -622,7 +622,10 @@ script that never assigns `bench`; a script that reads `_G` gets a warning
 that its names went unchecked. What a name check can and cannot see is in
 `brokkr man bench-config validating-a-script`. Every bench is checked; each
 finding names the bench, the file to open and the line, and a clean run
-counts the scripts on the conventions line (`bench (3 scripts)`). It also runs
+counts the scripts on the conventions line (`bench (3 scripts)`). With
+`bench_scripts` set it also refuses every `.lua` file under that directory
+that no bench registers, a module or an exemption aside, each finding naming
+the file (`brokkr man bench-config bench_scripts`). It also runs
 on a markdown-only tree. Skippable as `bench` in a partial profile's
 `skip_phases`. The schema is in `brokkr man bench-config`.
 

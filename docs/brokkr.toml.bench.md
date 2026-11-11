@@ -50,8 +50,11 @@ define any name through it (`_G[k] = v`, `rawset(_G, k, v)`), so its names
 are not checked at all, and the phase warns which bench and line made it so.
 The compile still is.
 
-With `bench_lib` set and a bench declared (without one the phase is inert,
-library and all), the phase also checks every module in it, once, each
+With `bench_scripts` set, the phase also refuses every `.lua` file under
+that directory no bench registers (`bench_scripts`).
+
+With `bench_lib` set and a bench declared or `bench_scripts` set (without
+either the phase is inert, library and all), the phase also checks every module in it, once, each
 finding naming the module's file: it compiles, it assigns no global (a
 module exports through what it returns, so `local function` and `local M =
 {}`), it reads no `_G`, and every other name it reads is a builtin or one of
@@ -68,7 +71,7 @@ run), so the checks a script puts there are tried without a build; for
 the rest, the way to try a script's behaviour is `brokkr bench NAME`
 itself, on the smallest params it takes.
 
-The phase is inert in a config without benches, is skipped by name as `bench`
+The phase is inert in a config without benches or `bench_scripts`, is skipped by name as `bench`
 in a partial profile's `skip_phases`, and runs on a markdown-only tree too: a
 `script_file` beside an included config file may live outside the checkout,
 where the tree's own status cannot vouch for it.
@@ -478,7 +481,8 @@ directory of the config file that set it, as `script_file` is, so a shared
 include can carry its library beside it; every bench of the project shares
 it. A blank value or one that is not a string is refused; the directory
 itself is read when `brokkr bench` starts and when `brokkr check` runs in a
-project that declares a bench, and one that cannot be read refuses there.
+project that declares a bench or sets `bench_scripts`, and one that cannot
+be read refuses there.
 Every name in it is one file: no directory or stem with a dot is a module,
 and links are never followed, even one swapped in while the directory is
 read. An entry whose name could not be a module (a `README`) is never
@@ -487,13 +491,50 @@ of it: every `.lua` file there is a module, and a script assigns `bench`,
 which `brokkr check` refuses in a module. A `[bench_lib]` table is not this key
 but a hostname section, as it always was.
 
+## `bench_scripts`
+
+```toml
+bench_scripts = "../benches"
+bench_scripts_exempt = ["../benches/scratch", "../benches/old/probe.lua"]
+```
+
+The directory every bench script lives under, so that `brokkr check`'s
+`bench` phase can refuse one no bench registers: each `.lua` file below it
+must be the `script_file` of some `[bench.NAME]`, a module `bench_lib`
+loads, or covered by `bench_scripts_exempt`. Each finding names the file.
+With it set the phase runs even with no bench declared, and then checks
+`bench_lib` too. Unset, nothing is discovered.
+
+Both keys resolve against the directory of the config file that set them,
+as `script_file` does; the exemptions resolve beside the file that set the
+list, which replaces whole across layers, so an inherited list keeps naming
+paths beside its own file even where a later layer moves `bench_scripts`.
+An exemption is a file, or a directory covering everything below it; one
+that names nothing is not an error. `bench_scripts_exempt` without
+`bench_scripts` is refused, as is a blank path or a value of another shape.
+
+The directory is read from disk when the check runs, untracked files
+included, since a new script is exactly what it is for. A file is its
+location, the real directory it sits in plus its name, never what it
+links to: a link `alias.lua` to a registered script needs a bench of its
+own, and a link sitting outside an exempt directory is not exempt for
+pointing into it. Only a regular file whose path makes a module name is a
+`bench_lib` module here, the files `require` can load; anything else in
+the library ending `.lua` needs a bench or an exemption. A linked directory
+is not descended, so a script reached only through one is not discovered;
+nothing found is opened. A directory that cannot be resolved, listed or
+inspected is a finding rather than skipped.
+
+A `[bench_scripts]` or `[bench_scripts_exempt]` table is not this key but a
+hostname section, as it always was.
+
 ## Reserved names and the user-wide layer
 
 `bench`, `bench_params` and `data` are reserved top-level names, and
-`bench_lib` is reserved as a string. A host literally named one of the
-first three is written `[host.bench]`, `[host.bench_params]` or
-`[host.data]`. The user-wide `brokkr.toml` cannot hold any of the four:
-benches belong to one project.
+`bench_lib`, `bench_scripts` and `bench_scripts_exempt` are reserved as
+values. A host literally named one of the first three is written
+`[host.bench]`, `[host.bench_params]` or `[host.data]`. The user-wide
+`brokkr.toml` cannot hold any of them: benches belong to one project.
 
 ## Inline line numbers
 

@@ -121,6 +121,7 @@ fn parse_dev_config(table: &toml::Table, sources: &ConfigSources) -> Result<DevC
     let strip_rustflags = parse_strip_rustflags(table)?;
     let cargo_env = parse_cargo_env(table, &capture_env)?;
     let benches = bench::parse(table, sources)?;
+    let bench_registry = bench::parse_registry(table, sources)?;
     refuse_retired_sha256(table)?;
     let hosts = parse_hosts(table)?;
     validate_datasets(&hosts)?;
@@ -150,6 +151,7 @@ fn parse_dev_config(table: &toml::Table, sources: &ConfigSources) -> Result<DevC
         strip_rustflags,
         cargo_env,
         benches,
+        bench_registry,
         included_config_files: Vec::new(),
         results_server: sources
             .user_layer()
@@ -1109,8 +1111,14 @@ pub(crate) const SECTIONS: &[&str] = &[
 /// always was - the kernel accepts any bytes as a hostname. An array of tables
 /// is not a table, so `[[lint_sweep]]` is claimed while a `[lint_sweep]`
 /// hostname section keeps loading.
-pub(crate) const VALUE_KEYS: &[&str] =
-    &["strip_rustflags", "lint_sweep", "install", "bench_lib"];
+pub(crate) const VALUE_KEYS: &[&str] = &[
+    "strip_rustflags",
+    "lint_sweep",
+    "install",
+    "bench_lib",
+    "bench_scripts",
+    "bench_scripts_exempt",
+];
 
 /// Every other top-level table is a hostname section. The table shape is
 /// ambiguous by design: hostnames are open-ended, so section-name typos are
