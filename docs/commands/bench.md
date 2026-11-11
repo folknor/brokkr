@@ -319,7 +319,8 @@ then `bench(params, keys)` is called, and the iteration's wall runs from
 that call to its return. `params.NAME` is each bound param's entry: the
 value at its chosen key in the resolved config (a table, string or number,
 a fresh copy each iteration), with a bound file entry's `file` (or a plain
-dataset's `path`) replaced by an input handle; a plain param's string; a
+dataset's `path`) replaced by an input handle; a plain param's string (an `integer`,
+`number` or `bbox` one's too, as given, once binding has checked it); a
 `many` param's list of entries, in bound order. `keys.NAME` is the chosen
 key (a list for a `many` param), since an entry has no room for its own. A
 fanned param holds the arm's one value. An unbound param is

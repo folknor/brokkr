@@ -787,6 +787,20 @@ fn describe(bench: &Bench, detection: &Detection, given: &params::Given, view: &
             Domain::Choices(choices) => line.push_str(&format!(" ({})", choices.join(" | "))),
             Domain::Validated => line.push_str(" (checked by the script's validate())"),
             Domain::Free => line.push_str(" (any value)"),
+            Domain::Integer(int) => {
+                line.push_str(&format!(
+                    " (an integer {}..{}, {})",
+                    int.min, int.max, int.width
+                ));
+            }
+            Domain::Number { min, max } => line.push_str(&match (min, max) {
+                (None, None) => " (a finite number)".to_owned(),
+                _ => format!(
+                    " (a finite number {})",
+                    crate::config::bench::number_range(*min, *max)
+                ),
+            }),
+            Domain::Bbox => line.push_str(" (a bbox lon_min,lat_min,lon_max,lat_max)"),
         }
         if let Some(default) = &param.default {
             line.push_str(&format!(" [default {default}]"));

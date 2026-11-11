@@ -852,3 +852,46 @@ v = 2
     let err = refusal(&f, &["--expr", "x", "--expr", " "]);
     assert!(err.contains("--expr x --expr  "), "{err}");
 }
+
+#[test]
+fn typed_params_are_judged_at_bind_and_delivered_as_given() {
+    let f = fixture(
+        "typed",
+        r#"
+[bench.b]
+script = "function bench() end"
+params.jobs = { integer = "u32", min = 1 }
+params.box = { bbox = true }
+params.ratio = { number = true, max = 1 }
+"#,
+    );
+    let fanned: Vec<Vec<String>> = arms(&f, &["--jobs", "1,4"])
+        .into_iter()
+        .map(|arm| arm["jobs"].clone())
+        .collect();
+    assert_eq!(fanned, [["1"], ["4"]], "an integer list fans out");
+    let given = parse(
+        &f.bench,
+        &tokens(&["--box", "9.5, 54.5,10,55", "--jobs", "4294967295"]),
+    )
+    .unwrap();
+    let bound = bind(&f.bench, &given, &f.view).unwrap().remove(0);
+    let args = bound.args();
+    for (name, text) in [("box", "9.5, 54.5,10,55"), ("jobs", "4294967295")] {
+        let (_, value) = args.params.iter().find(|(n, _)| n == name).unwrap();
+        assert_eq!(
+            *value,
+            lua::Value::Text(text.into()),
+            "{name} arrives as given"
+        );
+    }
+    let err = refusal(&f, &["--jobs", "4294967296"]);
+    assert!(
+        err.contains("--jobs 4294967296 holds \"4294967296\", which is outside 1..4294967295"),
+        "{err}"
+    );
+    assert!(refusal(&f, &["--jobs", "0"]).contains("outside"));
+    assert!(refusal(&f, &["--jobs", "+2"]).contains("not a u32 integer"));
+    assert!(refusal(&f, &["--box", "0,0,200,1"]).contains("longitude"));
+    assert!(refusal(&f, &["--ratio", "1.5"]).contains("outside"));
+}

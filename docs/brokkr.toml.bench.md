@@ -183,10 +183,12 @@ params.osc     = { from = "datasets.{dataset}.osc", many = true }
 params.cache   = { choices = ["cold", "warm"], required = true }
 params.row     = { validated = true, required = true }
 params.label   = { free = true, help = "a tag stored with the run" }
+params.jobs    = { integer = "u32", min = 1, default = "4" }
+params.region  = { bbox = true }
 ```
 
 Every param declares its **domain**, the values it takes, in exactly one
-of four ways, so no value reaches a script unchecked by oversight:
+of these ways, so no value reaches a script unchecked by oversight:
 
 - `from` - a dot-separated path into the resolved config (The resolved
   view, below) whose keys are the param's valid values. A segment is a key,
@@ -204,6 +206,30 @@ of four ways, so no value reaches a script unchecked by oversight:
   script declares no `validate()` is refused when it runs and by check's
   `bench` phase.
 - `free = true` - any string, deliberately unchecked.
+- `integer = "WIDTH"` - a canonical decimal (digits only, no `+`, no
+  leading zero, a `-` only on a nonzero value of a signed width) within
+  `WIDTH`, one of `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64`,
+  and within the optional inclusive `min` and `max`, TOML integers inside
+  the width (so a `u64` bound above 2^63 - 1 cannot be written; the width's
+  own maximum needs none). A spelling Rust's parser would also take, such
+  as `+5` or `007`, is refused: one value, one stored key.
+- `number = true` - text Rust parses as a finite f64 (exponents and a
+  leading `+` included, `inf` and `NaN` not), within the optional inclusive
+  `min` and `max`, a finite float or an integer within 2^53. It is judged on
+  its parsed f64, so a value a hair past a bound can round onto it, and
+  `1`, `1.0` and `1e0` are three keys.
+- `bbox = true` - `lon_min,lat_min,lon_max,lat_max` under the dataset bbox
+  rules (`brokkr man datasets`): four finite coordinates, longitude within
+  -180..180, latitude within -90..90, each minimum not above its maximum.
+  Its own commas separate the coordinates, so a bbox param is never split:
+  each occurrence is one value, and `split = true` beside it is refused.
+
+`integer`, `number` and `bbox` are checked when the bench binds, every item
+of every value and a `default` alike (a default at load, as a `choices` one
+is), and the value still reaches the script as the string given, like any
+plain param's: they decide what is refused, not what a script receives.
+Lua compares such strings as strings (`"10" < "2"`), so a script doing
+arithmetic on one converts it with `tonumber`.
 
 A param with none of them, or with two, is refused at load. The rest:
 
@@ -231,7 +257,10 @@ A param with none of them, or with two, is refused at load. The rest:
 
 Refused at load: an unknown key; no domain or two; a `choices` list as
 above, and a `default` holding a value not among its choices or one twice,
-so a default that loads binds; a blank
+so a default that loads binds, and the same for an `integer`, `number` or
+`bbox` default's items; `min` or `max` on a param that is neither
+`integer` nor `number`, outside the width, not a number or above the other;
+an `integer` width not listed above; a blank
 `default`; `required = true`
 beside a `default`, which would never be used; `default_only` on a param
 without `from`, on a `many` one, or beside `default` or `required`; a `from` path with an
@@ -301,8 +330,9 @@ What the values do depends on the param:
 
 Params bind in dependency order, so a `{NAME}` in a `from` path stands for a
 key already chosen. A `from` param's value must be a key of the table its
-path names in the resolved view, and a `choices` param's one of its
-choices; a `validated` or `free` param's value is taken as it is, the
+path names in the resolved view, a `choices` param's one of its
+choices, and an `integer`, `number` or `bbox` param's inside its domain
+(Params, above); a `validated` or `free` param's value is taken as it is, the
 script's `validate()` judging a `validated` one next.
 Every arm is bound before anything runs, and a refusal in any arm refuses
 the whole invocation, before anything is built and without storing a run;
@@ -322,6 +352,8 @@ dependents are not judged under it):
   that has no value;
 - a `choices` value not among its choices, with them listed, and for a
   `required` one absent, its choices listed;
+- an `integer`, `number` or `bbox` item outside its domain, naming the
+  item and why (the width, the bounds, or the bbox rule it breaks);
 - a value that is not a key under its path, with the valid keys listed; for
   a `default`, the refusal says so. A default is judged only when it is
   used, so a dependent default (`indexed`) may be missing under some

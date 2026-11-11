@@ -239,6 +239,10 @@ would churn every litehtml/sluggrs invocation in CI and docs.
 
 ## Backlog
 
+### A Lua number of 10^14 or more reaches argv in `%.14g` (2026-11-11)
+
+`src/bench/lua.rs` `number_text` renders an argv or env number with dellingr's `tostring`, which is `%.14g` (dellingr 0.7.1 `vm/lua_val.rs` `number_to_string`). A config integer the resolved view delivers as a number (anything within 2^53) of 10^14 or more, forwarded straight into `run{}` argv, becomes `1.1258999068426e+15` for 2^50: precision lost and a spelling an integer parser refuses. Fix in the seam: render an integral finite number within 2^53 as its exact decimal. Script-side `tostring` and `..` keep `%.14g`, which is dellingr's. Found while landing typed param domains (brokkr#165), which deliver their values as text partly for this reason.
+
 ### A results param filter cannot tell collections apart by comma (2026-11-09)
 
 `src/bench/store/list.rs` matches a param filter against the run's keys

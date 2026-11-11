@@ -115,6 +115,120 @@ pub enum Domain {
     Validated,
     /// `free = true`: a plain string brokkr deliberately does not check.
     Free,
+    /// `integer = "u32"` (a width, `min`, `max`): a canonical decimal within
+    /// the bounds, checked when the bench binds and delivered as its text.
+    Integer(IntegerDomain),
+    /// `number = true` (`min`, `max`): text that parses as a finite f64
+    /// within the bounds, delivered as its text.
+    Number {
+        min: Option<FloatBound>,
+        max: Option<FloatBound>,
+    },
+    /// `bbox = true`: `lon_min,lat_min,lon_max,lat_max` by the dataset bbox
+    /// rules, each occurrence taken whole and delivered as given.
+    Bbox,
+}
+
+/// A `number` bound: always finite (load refuses any other), so equality by
+/// bits is equality by value and `Eq` holds.
+#[derive(Debug, Clone, Copy)]
+pub struct FloatBound(pub f64);
+
+impl PartialEq for FloatBound {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bits() == other.0.to_bits()
+    }
+}
+
+impl Eq for FloatBound {}
+
+/// An `integer` domain's width and inclusive bounds, the bounds already
+/// narrowed to the width.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntegerDomain {
+    /// The width as declared (`u32`, `i64`, ...).
+    pub width: String,
+    pub signed: bool,
+    pub min: i128,
+    pub max: i128,
+}
+
+/// The widths `integer` names, with their ranges.
+const WIDTHS: &[(&str, i128, i128)] = &[
+    ("u8", 0, u8::MAX as i128),
+    ("u16", 0, u16::MAX as i128),
+    ("u32", 0, u32::MAX as i128),
+    ("u64", 0, u64::MAX as i128),
+    ("i8", i8::MIN as i128, i8::MAX as i128),
+    ("i16", i16::MIN as i128, i16::MAX as i128),
+    ("i32", i32::MIN as i128, i32::MAX as i128),
+    ("i64", i64::MIN as i128, i64::MAX as i128),
+];
+
+impl Domain {
+    /// Whether this domain checks a plain param's value itself, so binding
+    /// judges each item with [`Domain::admit`].
+    pub fn typed(&self) -> bool {
+        matches!(self, Self::Integer(_) | Self::Number { .. } | Self::Bbox)
+    }
+
+    /// Judge one item of a typed domain: `Err` says why it is refused, in
+    /// the words a refusal follows the param and value with. Any other
+    /// domain admits everything here.
+    pub fn admit(&self, item: &str) -> Result<(), String> {
+        match self {
+            Self::Integer(domain) => {
+                // Canonical decimal: one spelling per value, so the stored
+                // key pairs; no sign but a `-` on a nonzero signed value.
+                let (negative, digits) = match item.strip_prefix('-') {
+                    Some(rest) if domain.signed => (true, rest),
+                    _ => (false, item),
+                };
+                let canonical = !digits.is_empty()
+                    && digits.bytes().all(|b| b.is_ascii_digit())
+                    && (digits == "0" || !digits.starts_with('0'))
+                    && !(negative && digits == "0");
+                if !canonical {
+                    return Err(format!(
+                        "is not a {} integer: digits only, {}no '+', no leading zero",
+                        domain.width,
+                        if domain.signed {
+                            "a '-' for a negative value, "
+                        } else {
+                            "no sign, "
+                        }
+                    ));
+                }
+                let value = digits
+                    .parse::<i128>()
+                    .ok()
+                    .map(|v| if negative { -v } else { v });
+                match value {
+                    Some(v) if (domain.min..=domain.max).contains(&v) => Ok(()),
+                    _ => Err(format!(
+                        "is outside {}..{} ({})",
+                        domain.min, domain.max, domain.width
+                    )),
+                }
+            }
+            Self::Number { min, max } => {
+                let value = item
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|v| v.is_finite())
+                    .ok_or_else(|| "is not a finite number".to_owned())?;
+                if min.is_some_and(|m| value < m.0) || max.is_some_and(|m| value > m.0) {
+                    return Err(format!("is outside {}", number_range(*min, *max)));
+                }
+                Ok(())
+            }
+            Self::Bbox => item
+                .parse::<crate::datasets::Bbox>()
+                .map(|_| ())
+                .map_err(|e| format!("is not a bbox lon_min,lat_min,lon_max,lat_max: {e}")),
+            Self::From(_) | Self::Choices(_) | Self::Validated | Self::Free => Ok(()),
+        }
+    }
 }
 
 impl Param {
@@ -223,6 +337,13 @@ struct RawParam {
     validated: bool,
     #[serde(default)]
     free: bool,
+    integer: Option<String>,
+    #[serde(default)]
+    number: bool,
+    #[serde(default)]
+    bbox: bool,
+    min: Option<toml::Value>,
+    max: Option<toml::Value>,
     default: Option<String>,
     #[serde(default)]
     default_only: bool,
@@ -345,14 +466,18 @@ fn parse_param(
         raw.choices.is_some().then_some("choices"),
         raw.validated.then_some("validated"),
         raw.free.then_some("free"),
+        raw.integer.is_some().then_some("integer"),
+        raw.number.then_some("number"),
+        raw.bbox.then_some("bbox"),
     ];
     let declared: Vec<&str> = declared.into_iter().flatten().collect();
     match declared.as_slice() {
         [] => {
             return Err(format!(
                 "{at}: declares no domain - give from (a config table's keys), choices (a list \
-                 of values), validated = true (the script's validate() checks it) or free = true \
-                 (any value, unchecked)"
+                 of values), integer = \"u32\" (or another width), number = true, bbox = true, \
+                 validated = true (the script's validate() checks it) or free = true (any \
+                 value, unchecked)"
             ));
         }
         [_] => {}
@@ -363,8 +488,19 @@ fn parse_param(
             ));
         }
     }
-    let split = raw.split.unwrap_or(true);
-    let domain = if let Some(text) = raw.from.as_deref() {
+    let split = typed_shape(at, &raw)?;
+    let domain = if let Some(width) = raw.integer.as_deref() {
+        Domain::Integer(integer_domain(
+            at,
+            width,
+            raw.min.as_ref(),
+            raw.max.as_ref(),
+        )?)
+    } else if raw.number {
+        number_domain(at, raw.min.as_ref(), raw.max.as_ref())?
+    } else if raw.bbox {
+        Domain::Bbox
+    } else if let Some(text) = raw.from.as_deref() {
         Domain::From(FromPath::parse(text).map_err(|e| format!("{at}: from {text:?} {e}"))?)
     } else if let Some(choices) = raw.choices {
         check_choices(at, &choices, raw.many, split)?;
@@ -374,28 +510,8 @@ fn parse_param(
     } else {
         Domain::Free
     };
-    // A choices default is judged here as binding would judge it, so one
-    // that loads binds: every item a choice, none twice. An unsplit default
-    // is one item.
-    if let (Domain::Choices(choices), Some(default)) = (&domain, raw.default.as_deref()) {
-        let mut seen = BTreeSet::new();
-        let items: Vec<&str> = if split {
-            default.split(',').collect()
-        } else {
-            vec![default]
-        };
-        for item in items {
-            if !choices.iter().any(|c| c == item) {
-                return Err(format!(
-                    "{at}: default {default:?} holds {item:?}, which is not among its choices \
-                     ({})",
-                    choices.join(", ")
-                ));
-            }
-            if !seen.insert(item) {
-                return Err(format!("{at}: default {default:?} gives {item:?} twice"));
-            }
-        }
+    if let Some(default) = raw.default.as_deref().filter(|d| !d.trim().is_empty()) {
+        check_default(at, &domain, default, split)?;
     }
     if raw.default.as_deref().is_some_and(|d| d.trim().is_empty()) {
         return Err(format!(
@@ -420,6 +536,127 @@ fn parse_param(
         split,
         required: raw.required,
         origin,
+    })
+}
+
+/// Whether the param splits its values, and the typed keys' placement: a
+/// bbox's own commas separate its coordinates, so it takes each occurrence
+/// whole and refuses `split = true`; `min` and `max` only on `integer` or
+/// `number`, never silently ignored.
+fn typed_shape(at: &str, raw: &RawParam) -> Result<bool, String> {
+    if raw.bbox && raw.split == Some(true) {
+        return Err(format!(
+            "{at}: a bbox holds commas, so it is never split; remove split = true"
+        ));
+    }
+    if (raw.min.is_some() || raw.max.is_some()) && raw.integer.is_none() && !raw.number {
+        return Err(format!(
+            "{at}: min and max bound an integer or number param; this one is neither"
+        ));
+    }
+    Ok(raw.split.unwrap_or(!raw.bbox))
+}
+
+/// A `choices` or typed default judged here as binding would judge it, so
+/// one that loads binds: every item in the domain, none twice. An unsplit
+/// default is one item. Any other domain's default is judged at bind.
+fn check_default(at: &str, domain: &Domain, default: &str, split: bool) -> Result<(), String> {
+    if !matches!(domain, Domain::Choices(_)) && !domain.typed() {
+        return Ok(());
+    }
+    let mut seen = BTreeSet::new();
+    let items: Vec<&str> = if split {
+        default.split(',').collect()
+    } else {
+        vec![default]
+    };
+    for item in items {
+        let why = match domain {
+            Domain::Choices(choices) if !choices.iter().any(|c| c == item) => {
+                Some(format!("is not among its choices ({})", choices.join(", ")))
+            }
+            Domain::Choices(_) => None,
+            typed => typed.admit(item).err(),
+        };
+        if let Some(why) = why {
+            return Err(format!(
+                "{at}: default {default:?} holds {item:?}, which {why}"
+            ));
+        }
+        if !seen.insert(item) {
+            return Err(format!("{at}: default {default:?} gives {item:?} twice"));
+        }
+    }
+    Ok(())
+}
+
+/// A `number = true` domain, its `min` and `max` finite and in order. An
+/// integer bound is refused past 2^53, where an f64 would silently move it.
+fn number_domain(
+    at: &str,
+    min: Option<&toml::Value>,
+    max: Option<&toml::Value>,
+) -> Result<Domain, String> {
+    let bound = |key: &str, value: Option<&toml::Value>| match value {
+        None => Ok(None),
+        Some(toml::Value::Float(f)) if f.is_finite() => Ok(Some(FloatBound(*f))),
+        Some(toml::Value::Integer(i)) if i.unsigned_abs() <= 1 << 53 => {
+            Ok(Some(FloatBound(*i as f64)))
+        }
+        Some(other) => Err(format!(
+            "{at}: {key} {other} is not a finite number an f64 holds exactly"
+        )),
+    };
+    let (min, max) = (bound("min", min)?, bound("max", max)?);
+    if let (Some(lo), Some(hi)) = (min, max)
+        && lo.0 > hi.0
+    {
+        return Err(format!("{at}: min {} is above max {}", lo.0, hi.0));
+    }
+    Ok(Domain::Number { min, max })
+}
+
+/// A `number` domain's bounds as `MIN..MAX`, an absent end left empty.
+pub fn number_range(min: Option<FloatBound>, max: Option<FloatBound>) -> String {
+    let end = |b: Option<FloatBound>| b.map_or_else(String::new, |b| b.0.to_string());
+    format!("{}..{}", end(min), end(max))
+}
+
+/// An `integer = WIDTH` domain, its `min` and `max` TOML integers within the
+/// width and in order. A bound is a TOML integer, so a u64 bound above
+/// `i64::MAX` cannot be written; the width's own maximum needs none.
+fn integer_domain(
+    at: &str,
+    width: &str,
+    min: Option<&toml::Value>,
+    max: Option<&toml::Value>,
+) -> Result<IntegerDomain, String> {
+    let Some(&(_, lo, hi)) = WIDTHS.iter().find(|(name, _, _)| *name == width) else {
+        return Err(format!(
+            "{at}: integer {width:?} is not a width - give one of {}",
+            WIDTHS
+                .iter()
+                .map(|(n, _, _)| *n)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    };
+    let bound = |key: &str, value: Option<&toml::Value>, or: i128| match value {
+        None => Ok(or),
+        Some(toml::Value::Integer(i)) if (lo..=hi).contains(&i128::from(*i)) => Ok(i128::from(*i)),
+        Some(other) => Err(format!(
+            "{at}: {key} {other} is not an integer within {width} ({lo}..{hi})"
+        )),
+    };
+    let (min, max) = (bound("min", min, lo)?, bound("max", max, hi)?);
+    if min > max {
+        return Err(format!("{at}: min {min} is above max {max}"));
+    }
+    Ok(IntegerDomain {
+        width: width.to_owned(),
+        signed: lo < 0,
+        min,
+        max,
     })
 }
 
@@ -1249,6 +1486,120 @@ mod tests {
             "[bench.c]\nscript = \"x = 1\"\nparams.p = { free = false }\n",
         );
         assert!(err.contains("declares no domain"), "{err}");
+    }
+
+    #[test]
+    fn typed_domains_parse_their_bounds_and_judge_their_defaults() {
+        let benches = single(
+            "typed",
+            "[bench.c]\nscript = \"x = 1\"\n\
+             params.jobs = { integer = \"u32\", min = 1, default = \"1,2,4\" }\n\
+             params.seq = { integer = \"u64\" }\n\
+             params.scale = { number = true, min = 0, max = 1.5 }\n\
+             params.box = { bbox = true, default = \"9.5,54.5,10,55\" }\n",
+        )
+        .unwrap();
+        let params = &benches["c"].params;
+        let Domain::Integer(jobs) = &params["jobs"].domain else {
+            panic!("{:?}", params["jobs"].domain)
+        };
+        assert_eq!(
+            (jobs.min, jobs.max, jobs.signed),
+            (1, i128::from(u32::MAX), false)
+        );
+        assert!(params["jobs"].split);
+        assert!(!params["box"].split, "a bbox takes each occurrence whole");
+        let seq = &params["seq"].domain;
+        assert!(seq.admit("18446744073709551615").is_ok());
+        assert!(
+            seq.admit("18446744073709551616")
+                .unwrap_err()
+                .contains("outside")
+        );
+        for spelling in ["+1", "01", "-1", " 1", "", "1.0"] {
+            assert!(seq.admit(spelling).is_err(), "{spelling:?}");
+        }
+        let signed = integer_domain("x", "i8", None, None)
+            .map(Domain::Integer)
+            .unwrap();
+        assert!(signed.admit("-128").is_ok());
+        assert!(signed.admit("-0").is_err());
+        assert!(signed.admit("-129").is_err());
+        let scale = &params["scale"].domain;
+        assert!(scale.admit("1.5").is_ok());
+        assert!(scale.admit("1e0").is_ok());
+        for bad in ["1.6", "-0.1", "inf", "NaN", "x"] {
+            assert!(scale.admit(bad).is_err(), "{bad:?}");
+        }
+        let bbox = &params["box"].domain;
+        for bad in ["1,2,3", "200,0,201,1", "10,0,9,1", "0,0,nan,1"] {
+            assert!(bbox.admit(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn typed_declarations_are_refused_at_load() {
+        for (name, decl, needle) in [
+            ("int_width", "{ integer = \"u128\" }", "is not a width"),
+            (
+                "int_min_neg",
+                "{ integer = \"u8\", min = -1 }",
+                "not an integer within u8",
+            ),
+            (
+                "int_max_wide",
+                "{ integer = \"u8\", max = 256 }",
+                "not an integer within u8",
+            ),
+            (
+                "int_order",
+                "{ integer = \"u8\", min = 5, max = 4 }",
+                "above max",
+            ),
+            (
+                "int_float_bound",
+                "{ integer = \"u8\", max = 1.5 }",
+                "not an integer",
+            ),
+            (
+                "int_default",
+                "{ integer = \"u8\", default = \"1,300\" }",
+                "holds \"300\"",
+            ),
+            (
+                "int_default_twice",
+                "{ integer = \"u8\", default = \"1,1\" }",
+                "twice",
+            ),
+            (
+                "num_bound",
+                "{ number = true, max = 9007199254740993 }",
+                "exactly",
+            ),
+            (
+                "num_order",
+                "{ number = true, min = 2, max = 1 }",
+                "above max",
+            ),
+            ("bounds_free", "{ free = true, min = 1 }", "neither"),
+            ("bbox_split", "{ bbox = true, split = true }", "never split"),
+            (
+                "bbox_default",
+                "{ bbox = true, default = \"1,2,3\" }",
+                "is not a bbox",
+            ),
+            (
+                "typed_two",
+                "{ bbox = true, number = true }",
+                "exclude each other",
+            ),
+        ] {
+            let err = err_of(
+                name,
+                &format!("[bench.c]\nscript = \"x = 1\"\nparams.p = {decl}\n"),
+            );
+            assert!(err.contains(needle), "{name}: {err}");
+        }
     }
 
     #[test]

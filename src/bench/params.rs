@@ -608,6 +608,14 @@ fn resolve(
             })
             .collect();
         refuse_duplicates(&keys)?;
+        // A typed domain judges each item; the value still reaches the
+        // script as the text given.
+        for key in &keys {
+            param
+                .domain
+                .admit(key)
+                .map_err(|why| format!("holds {key:?}, which {why}"))?;
+        }
         if let Domain::Choices(choices) = &param.domain {
             let wrong: Vec<String> = keys
                 .iter()
