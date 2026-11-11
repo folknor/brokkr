@@ -9,11 +9,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::evidence;
 use super::store::{
-    BoundParam, Build, CaptureOutcome, Child, ChildEnding, Clock, Conditions, DOCUMENT_FORMAT,
-    Evidence, Executable, ExecutableIdentity, HotpathCapture, Iteration, IterationOutcome, Loss,
-    Measurement, ParamValue, Published, Record, ResolvedBuild, RunDocument, RunOutcome,
-    STDERR_RUN_BYTES, STDERR_TAIL_BYTES, Sample, SinkEnd, StderrCapture, StderrTail, Store,
-    StoreError,
+    BoundParam, Build, CacheFile, CacheMode, CachePreparation, CaptureOutcome, Child, ChildEnding,
+    Clock, Conditions, DOCUMENT_FORMAT, Evidence, Executable, ExecutableIdentity, HotpathCapture,
+    Iteration, IterationOutcome, Loss, Measurement, ParamValue, Published, Record, ResolvedBuild,
+    RunDocument, RunOutcome, STDERR_RUN_BYTES, STDERR_TAIL_BYTES, Sample, SinkEnd, StderrCapture,
+    StderrTail, Store, StoreError,
 };
 
 fn store(name: &str) -> Store {
@@ -136,6 +136,7 @@ fn child(offset: i64, ending: ChildEnding) -> Child {
             },
         }),
         measured: false,
+        cache: None,
     }
 }
 
@@ -799,7 +800,10 @@ fn a_version_one_store_upgrades_and_its_runs_read_as_timing() {
         store
             .conn()
             .execute_batch(
-                "ALTER TABLE children DROP COLUMN measured;
+                "DROP TABLE child_cache_path;
+                 DROP TABLE child_cache_file;
+                 DROP TABLE child_cache;
+                 ALTER TABLE children DROP COLUMN measured;
                  DROP TABLE child_stderr;
                  DROP TABLE marks;
                  DROP TABLE child_executable;
@@ -815,7 +819,7 @@ fn a_version_one_store_upgrades_and_its_runs_read_as_timing() {
         .conn()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     assert!(store.marks(&doc.project).unwrap().is_empty());
     assert_eq!(store.load(&doc.uuid).unwrap(), Some(doc));
 }
@@ -878,6 +882,61 @@ fn an_external_executable_reads_back_and_a_malformed_one_is_refused() {
         }),
         "empty reason",
     );
+}
+
+#[test]
+fn a_cache_preparation_reads_back_and_an_unestablished_one_is_refused() {
+    let file = |mode, bytes, resident, paths: &[&str]| CacheFile {
+        paths: paths.iter().map(|p| (*p).to_owned()).collect(),
+        mode,
+        bytes,
+        resident,
+    };
+    let prepared = |files: Vec<CacheFile>| CachePreparation {
+        procedure: "page-cache-v1".into(),
+        scan_from_us: 0,
+        scan_to_us: 0,
+        files,
+    };
+    let mut store = store("cache");
+    let mut doc = document("00000000000000000000000000000020");
+    doc.iterations[0].children[0].cache = Some(prepared(vec![
+        file(CacheMode::Cold, 10, 0, &["/d/a", "/d/alias"]),
+        file(CacheMode::Warm, 4097, 4097, &["/d/b"]),
+    ]));
+    store.publish(&doc).unwrap();
+    assert_eq!(store.load(&doc.uuid).unwrap().as_ref(), Some(&doc));
+    // A stored account its mode rules out never reads as established.
+    store
+        .conn()
+        .execute_batch("UPDATE child_cache_file SET resident = 1 WHERE mode = 'cold'")
+        .unwrap();
+    assert!(store.load(&doc.uuid).is_err());
+
+    let plain = serde_json::to_string(&document("00000000000000000000000000000021")).unwrap();
+    assert!(!plain.contains("cache"), "{plain}");
+
+    let with = |cache: CachePreparation| {
+        let mut doc = document("00000000000000000000000000000022");
+        doc.iterations[0].children[0].cache = Some(cache);
+        doc
+    };
+    refused(
+        &with(prepared(vec![file(CacheMode::Cold, 10, 1, &["/d/a"])])),
+        "with 1 resident",
+    );
+    refused(
+        &with(prepared(vec![file(CacheMode::Warm, 10, 9, &["/d/a"])])),
+        "with 9 resident",
+    );
+    refused(
+        &with(prepared(vec![file(CacheMode::Cold, 1, 0, &["d/a"])])),
+        "absolute path",
+    );
+    refused(&with(prepared(Vec::new())), "no file");
+    let mut late = prepared(vec![file(CacheMode::Cold, 1, 0, &["/d/a"])]);
+    late.scan_to_us = i64::MAX;
+    refused(&with(late), "does not end by the launch");
 }
 
 #[test]

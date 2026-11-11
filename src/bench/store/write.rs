@@ -5,9 +5,9 @@ use rusqlite::{Connection, params};
 
 use super::StoreError;
 use super::document::{
-    CaptureOutcome, Child, ChildEnding, Evidence, Executable, ExecutableIdentity, HotpathCapture,
-    Iteration, IterationOutcome, Record, RunDocument, RunOutcome, Sample, StderrCapture,
-    StderrTail,
+    CachePreparation, CaptureOutcome, Child, ChildEnding, Evidence, Executable, ExecutableIdentity,
+    HotpathCapture, Iteration, IterationOutcome, Record, RunDocument, RunOutcome, Sample,
+    StderrCapture, StderrTail,
 };
 
 /// A count or index in SQLite's integer domain.
@@ -167,6 +167,48 @@ fn insert_iteration(
         }
         if let Some(stderr) = &child.stderr {
             insert_stderr(tx, child_id, stderr)?;
+        }
+        if let Some(cache) = &child.cache {
+            insert_cache(tx, child_id, cache)?;
+        }
+    }
+    Ok(())
+}
+
+fn insert_cache(
+    tx: &Connection,
+    child_id: i64,
+    cache: &CachePreparation,
+) -> Result<(), StoreError> {
+    let int64 = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
+    tx.execute(
+        "INSERT INTO child_cache (child_id, procedure, scan_from_us, scan_to_us)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            child_id,
+            cache.procedure,
+            cache.scan_from_us,
+            cache.scan_to_us
+        ],
+    )?;
+    for (ordinal, file) in cache.files.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO child_cache_file (child_id, ordinal, mode, bytes, resident)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                child_id,
+                int(ordinal),
+                file.mode.name(),
+                int64(file.bytes),
+                int64(file.resident)
+            ],
+        )?;
+        for (at, path) in file.paths.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO child_cache_path (child_id, file, ordinal, path)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![child_id, int(ordinal), int(at), path],
+            )?;
         }
     }
     Ok(())

@@ -6,9 +6,10 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::StoreError;
 use super::document::{
-    BoundParam, Build, CaptureOutcome, Child, ChildEnding, Clock, Conditions, Evidence, Executable,
-    ExecutableIdentity, HotpathCapture, Iteration, IterationOutcome, Loss, Measurement, ParamValue,
-    Record, ResolvedBuild, RunDocument, RunOutcome, Sample, SinkEnd, StderrCapture, StderrTail,
+    BoundParam, Build, CacheFile, CacheMode, CachePreparation, CaptureOutcome, Child, ChildEnding,
+    Clock, Conditions, Evidence, Executable, ExecutableIdentity, HotpathCapture, Iteration,
+    IterationOutcome, Loss, Measurement, ParamValue, Record, ResolvedBuild, RunDocument,
+    RunOutcome, Sample, SinkEnd, StderrCapture, StderrTail,
 };
 use super::list::StoredRun;
 
@@ -360,9 +361,80 @@ fn load_children(conn: &Connection, run_id: i64, iteration: i64) -> Result<Vec<C
             executable: load_executable(conn, row.id)?,
             stderr: load_stderr(conn, row.id)?,
             measured: row.measured,
+            cache: load_cache(conn, row.id, row.origin_offset_us)?,
         });
     }
     Ok(children)
+}
+
+fn load_cache(
+    conn: &Connection,
+    child_id: i64,
+    origin_offset_us: i64,
+) -> Result<Option<CachePreparation>, StoreError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT procedure, scan_from_us, scan_to_us FROM child_cache WHERE child_id = ?1",
+    )?;
+    let Some((procedure, scan_from_us, scan_to_us)) = stmt
+        .query_row([child_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    let mut files_stmt = conn.prepare_cached(
+        "SELECT ordinal, mode, bytes, resident FROM child_cache_file
+         WHERE child_id = ?1 ORDER BY ordinal",
+    )?;
+    let rows = files_stmt
+        .query_map([child_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut paths_stmt = conn.prepare_cached(
+        "SELECT path FROM child_cache_path WHERE child_id = ?1 AND file = ?2 ORDER BY ordinal",
+    )?;
+    let count = |n: i64| u64::try_from(n).map_err(|_| unreadable("child cache"));
+    let mut files = Vec::with_capacity(rows.len());
+    for (ordinal, mode, bytes, resident) in rows {
+        if index(ordinal)? != files.len() {
+            return Err(unreadable("child cache order"));
+        }
+        let mode = match mode.as_str() {
+            "cold" => CacheMode::Cold,
+            "warm" => CacheMode::Warm,
+            _ => return Err(unreadable("child cache mode")),
+        };
+        let paths = paths_stmt
+            .query_map(params![child_id, ordinal], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        files.push(CacheFile {
+            paths,
+            mode,
+            bytes: count(bytes)?,
+            resident: count(resident)?,
+        });
+    }
+    let cache = CachePreparation {
+        procedure,
+        scan_from_us,
+        scan_to_us,
+        files,
+    };
+    cache
+        .validate(origin_offset_us)
+        .map_err(|_| unreadable("child cache"))?;
+    Ok(Some(cache))
 }
 
 fn load_executable(conn: &Connection, child_id: i64) -> Result<Option<Executable>, StoreError> {

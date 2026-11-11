@@ -31,6 +31,8 @@ pub(super) struct PreflightHost {
     /// The live project root, every child's working directory.
     pub(super) cwd: PathBuf,
     pub(super) since: Since,
+    /// The arm's bound inputs, the only paths `page_cache()` takes.
+    pub(super) inputs: Vec<PathBuf>,
 }
 
 /// A builtin `bench()` alone may call, reached from a preflight: the Lua
@@ -281,6 +283,9 @@ impl lua::Host for PreflightHost {
         if options.measured {
             return Err(refused("measured"));
         }
+        if !options.cold.is_empty() || !options.warm.is_empty() {
+            return Err(refused("cold and warm"));
+        }
         let mut argv = Vec::with_capacity(words.len());
         for word in words {
             match word {
@@ -319,6 +324,23 @@ impl lua::Host for PreflightHost {
 
     fn filesize(&mut self, _: usize) -> Result<u64, Abort> {
         Err(bench_only("filesize"))
+    }
+
+    fn page_cache(&mut self, path: &str, mode: lua::CacheMode) -> Result<Option<String>, Abort> {
+        stopping()?;
+        if !self.inputs.iter().any(|input| input.as_os_str() == path) {
+            return Err(Abort::Failed(format!(
+                "page_cache(): {path} is not a bound input of this arm: only an input's path, as \
+                 params gives it, is checked"
+            )));
+        }
+        let file = match crate::reservations::open_input(Path::new(path)) {
+            Ok(file) => file,
+            Err(e) => return Ok(Some(format!("{path}: {e}"))),
+        };
+        Ok(crate::bench::cache::prerequisites(&file, mode)
+            .err()
+            .map(|why| format!("{path} cannot be prepared {}: {why}", mode.name())))
     }
 }
 

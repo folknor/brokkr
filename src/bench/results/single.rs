@@ -272,6 +272,29 @@ fn child(out: &mut String, idx: usize, child: &Child) {
         )
         .expect("write to String is infallible");
     }
+    if let Some(cache) = &child.cache {
+        // Counts accumulated over the scan interval before launch, not one
+        // snapshot, and nothing about the cache once the child ran.
+        writeln!(
+            out,
+            "           page cache ({}), scanned +{} to +{} before launch:",
+            cache.procedure,
+            ms(cache.scan_from_us),
+            ms(cache.scan_to_us)
+        )
+        .expect("write to String is infallible");
+        for file in &cache.files {
+            writeln!(
+                out,
+                "             {} {}: {} of {} bytes resident",
+                file.mode.name(),
+                file.paths.join(", "),
+                file.resident,
+                file.bytes
+            )
+            .expect("write to String is infallible");
+        }
+    }
     if let Some(capture) = &child.hotpath {
         let status = match &capture.outcome {
             CaptureOutcome::Captured { .. } => "captured".to_owned(),

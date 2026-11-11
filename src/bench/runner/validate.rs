@@ -68,4 +68,8 @@ impl lua::Host for ValidateHost {
     fn filesize(&mut self, _: usize) -> Result<u64, Abort> {
         Err(refused("filesize"))
     }
+
+    fn page_cache(&mut self, _: &str, _: lua::CacheMode) -> Result<Option<String>, Abort> {
+        Err(refused("page_cache"))
+    }
 }

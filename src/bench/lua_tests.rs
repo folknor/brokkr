@@ -78,6 +78,9 @@ impl Host for Fake {
     fn filesize(&mut self, handle: usize) -> Result<u64, Abort> {
         Ok(self.files.get(&handle).map_or(0, |f| f.len() as u64))
     }
+    fn page_cache(&mut self, path: &str, mode: CacheMode) -> Result<Option<String>, Abort> {
+        Ok((path != "/ok").then(|| format!("{path} cannot be {}", mode.name())))
+    }
     fn since(&mut self, sha: &str) -> Result<bool, Abort> {
         self.since.push(sha.to_owned());
         if sha == "bad" {
@@ -746,6 +749,8 @@ fn binary_with_takes_options_then_binarys_arguments() {
             stop_at: None,
             program: Some("lua5.4".into()),
             measured: false,
+            cold: Vec::new(),
+            warm: Vec::new(),
         }
     );
     assert_eq!(host.options[0], CallOptions::default());
@@ -860,6 +865,70 @@ fn file_builtins_take_handles_inside_bench() {
     assert!(
         reason(&sample).contains("only available inside bench()"),
         "{sample:?}"
+    );
+}
+
+/// cold and warm are lists of handles on a call; page_cache() is a
+/// preflight's, which answers nil or a reason.
+#[test]
+fn cache_options_are_handle_lists_and_page_cache_is_a_preflights() {
+    let (sample, host) = run(
+        "function bench()\n\
+           local a, b = output('a'), output('b')\n\
+           binary_with({cold = {a}, warm = {b}}, a, b)\n\
+         end",
+        Fake::default(),
+    );
+    completed(&sample);
+    assert_eq!(
+        (host.options[0].cold.clone(), host.options[0].warm.clone()),
+        (vec![7], vec![7])
+    );
+    let (sample, _) = run(
+        "function bench() binary_with({cold = 'x'}) end",
+        Fake::default(),
+    );
+    assert!(
+        reason(&sample).contains("cold is a list of handles"),
+        "{sample:?}"
+    );
+    let (sample, _) = run(
+        "function bench() page_cache('/ok', 'cold') end",
+        Fake::default(),
+    );
+    assert!(
+        reason(&sample).contains("only available inside preflight()"),
+        "{sample:?}"
+    );
+
+    let script = load_script(
+        b"function preflight()\n\
+            if page_cache('/ok', 'cold') ~= nil then fail('ok refused') end\n\
+            local why = page_cache('/no', 'warm')\n\
+            if why then fail(why) end\n\
+          end\n\
+          function bench() end",
+        None,
+        None,
+    )
+    .unwrap();
+    let (ran, _) = run_hook(Hook::Preflight, &script, &Args::default(), Fake::default());
+    assert!(
+        matches!(ran.outcome, HookOutcome::Refused(ref why) if why.contains("/no cannot be warm")),
+        "{:?}",
+        ran.outcome
+    );
+    let script = load_script(
+        b"function preflight() page_cache('/ok', 'lukewarm') end\nfunction bench() end",
+        None,
+        None,
+    )
+    .unwrap();
+    let (ran, _) = run_hook(Hook::Preflight, &script, &Args::default(), Fake::default());
+    assert!(
+        matches!(ran.outcome, HookOutcome::Broken(ref why) if why.contains("\"cold\" or \"warm\"")),
+        "{:?}",
+        ran.outcome
     );
 }
 
@@ -998,6 +1067,7 @@ fn every_builtin_but_print_meets_a_pending_stop() {
         "read(nil)",
         "write(nil)",
         "filesize(nil)",
+        "page_cache(nil)",
         "json.encode(nil)",
         "json.decode(nil)",
     ] {
@@ -1062,6 +1132,9 @@ impl Host for Spinner {
     }
     fn filesize(&mut self, _: usize) -> Result<u64, Abort> {
         Ok(0)
+    }
+    fn page_cache(&mut self, _: &str, _: CacheMode) -> Result<Option<String>, Abort> {
+        Ok(None)
     }
 }
 

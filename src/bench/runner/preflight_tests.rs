@@ -20,10 +20,61 @@ fn run(source: &str, params: &lua::Args) -> lua::HookOutcome {
         config: Arc::new(lua::Value::Table(Vec::new())),
         cwd: root.clone(),
         since: Since::new(&root, "0".repeat(40).parse().unwrap()),
+        inputs: Vec::new(),
     };
     lua::run_hook(lua::Hook::Preflight, &script(source), params, host)
         .0
         .outcome
+}
+
+/// page_cache() answers for a bound input alone: nil where the
+/// prerequisites hold, the reason where the input is gone.
+#[test]
+fn page_cache_checks_a_bound_input_and_refuses_any_other_path() {
+    let root = crate::test_scratch::scratch("bench_preflight", "page-cache");
+    let (input, gone) = (root.join("in.pbf"), root.join("gone.pbf"));
+    std::fs::write(&input, b"data").unwrap();
+    let host = || PreflightHost {
+        config: Arc::new(lua::Value::Table(Vec::new())),
+        cwd: root.clone(),
+        since: Since::new(&root, "0".repeat(40).parse().unwrap()),
+        inputs: vec![input.clone(), gone.clone()],
+    };
+    let source = format!(
+        "function preflight()\n\
+           local why = page_cache({input:?}, 'warm')\n\
+           if why then fail('warm: ' .. why) end\n\
+           why = page_cache({gone:?}, 'cold')\n\
+           if why then fail(why) end\n\
+         end\n\
+         function bench() end",
+        input = input.display().to_string(),
+        gone = gone.display().to_string(),
+    );
+    let why = refused(
+        lua::run_hook(
+            lua::Hook::Preflight,
+            &script(&source),
+            &lua::Args::default(),
+            host(),
+        )
+        .0
+        .outcome,
+    );
+    assert!(why.contains("gone.pbf") && !why.contains("warm: "), "{why}");
+    let other =
+        "function preflight() page_cache('/etc/hostname', 'warm') end\nfunction bench() end";
+    let why = broken(
+        lua::run_hook(
+            lua::Hook::Preflight,
+            &script(other),
+            &lua::Args::default(),
+            host(),
+        )
+        .0
+        .outcome,
+    );
+    assert!(why.contains("not a bound input"), "{why}");
 }
 
 fn refused(outcome: lua::HookOutcome) -> String {

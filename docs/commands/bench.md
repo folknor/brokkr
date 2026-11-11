@@ -110,9 +110,11 @@ preflight(params, keys) ... end`, the way it assigns `bench`) declares a
 preflight: what the host must provide before the bench can run, checked by
 the script itself. It is a check, not a preparation: what a measured child
 needs of the page cache, a file or the host's state is set up inside
-`bench()`, just before that child, since a preflight runs before the build
+`bench()`, just before that child (a call's `cold` and `warm`, Page cache),
+since a preflight runs before the build
 and before every other arm, and nothing it leaves is still true when the
-child starts. Whether the params make sense is `validate()`'s (Validate). It runs for every arm, before anything is built, after
+child starts; what a preflight checks of the page cache is
+`page_cache(path, mode)`'s. Whether the params make sense is `validate()`'s (Validate). It runs for every arm, before anything is built, after
 the inputs are reserved and the commit resolved, before the inputs are
 hashed: a fresh Lua state, the chunk's top level, then `preflight(params,
 keys)`. Returning nothing passes. Anything else refuses the invocation
@@ -137,7 +139,7 @@ end
 - Its children are external programs only: `binary_with({program = ...})`
   (`binary_with()`), since the build does not exist yet; `binary()` and a
   call without `program` are refused, and so are `hotpath`, `stop_at`,
-  `measured` and every handle. A program that cannot be found or executed is a result,
+  `measured`, `cold`, `warm` and every handle. A program that cannot be found or executed is a result,
   not a failure: `r.start_error` says why, with no `exit`, `signal` or
   output, and `r:ok()` fails naming it. Each child runs on a launch lease
   of its own that reserves nothing and is inherited by the child, so the
@@ -152,7 +154,8 @@ end
   the absolute path string, not a handle: nothing a preflight does with it
   is declared. `keys` is the same. `since()`, `config()`, `json`, `fail()`
   and `print` work as in `bench()`; `output()`, `scratch()`, `read()`,
-  `write()` and `filesize()` do not.
+  `write()` and `filesize()` do not, and `page_cache()` works here alone
+  (Page cache).
 - The declaration is the source, not the run: a `local function
   preflight` or one made only through `_G` declares nothing, and a script
   that assigns `preflight` but whose top level leaves no function there
@@ -375,6 +378,8 @@ module does the same thing whichever phase it is loaded for.
   iteration's `scratch/`. Only inside `bench()`.
 - `read(h)`, `write(h, data)`, `filesize(h)` - brokkr's own file access
   through a handle (Files, below). Only inside `bench()`.
+- `page_cache(path, mode)` - whether a bound input can be prepared `"cold"`
+  or `"warm"` (Page cache, below). Only inside `preflight()`.
 - `json.encode(v)`, `json.decode(s)`, `json.null` - JSON (below). Allowed at
   top level too.
 - `since(sha)` - whether the commit under test (the `--commit` one, else the
@@ -530,6 +535,9 @@ local r = binary_with({
 - `measured` - a boolean; `true` makes this child's wall the iteration's
   result (An iteration). A second marked call in one iteration fails it
   before launching, and the child is stored with the mark.
+- `cold`, `warm` - lists of input handles brokkr advises out of the page
+  cache, or reads through into it, after admitting the call and before
+  launching it, then checks and stores (Page cache, below).
 
 Any other key is refused, so a misspelt `writes` never runs a call with
 less declared than meant.
@@ -605,6 +613,78 @@ without following a link.
   is cut, never written through.
 - A scratch handle names a directory, which none of them takes.
 
+## Page cache
+
+A call prepares its inputs' page-cache state itself, with no `dd` or
+`fincore` from the child's `PATH`:
+
+```lua
+binary_with({ cold = { params.input.file }, measured = true }, "cat", params.input.file)
+```
+
+- `cold` and `warm` each take a list of input handles (bound file params),
+  each one the call passes: in its argv, `reads` or `stdin`. An output, a
+  spool or an input the call does not pass is refused, so what is prepared
+  is always a file the child is given.
+- After the call is admitted, each is opened as `read()` opens it, and
+  everything after acts on that descriptor. Two listings of one file (one
+  inode) in one mode are one account naming both paths; in both modes the
+  call is refused. So is a call one of whose declared writes, by its own
+  path, already names a prepared file when brokkr looks; a directory the
+  call writes is not searched, and a link a child makes later is its own.
+  When a prepared input is the call's `stdin`, the file opened as its stdin
+  must be the one prepared.
+- Every file is prepared before any is scanned, so preparing one never
+  silently undoes another's observation: `cold` writes back what is dirty,
+  then advises the whole file out (`posix_fadvise` `DONTNEED`); `warm` reads
+  it through in bounded positional reads, a file ending early refused. Then
+  each is scanned with `mincore` in bounded windows, its resident bytes
+  counted up to its end, and its size and observability are checked again.
+  `cold` must find none resident, `warm` every byte: anything else fails the
+  iteration before the child launches, naming what was seen and what can
+  cause it. A sparse file or a memory limit gets no allowance. A stop is
+  met between windows and again before the launch.
+- Residency is believed only where the kernel reports it truthfully, which
+  it does to a process that owns the file or is capable over it or may
+  write it, and to anyone else reports every page resident. brokkr asks the
+  one condition it can establish on the descriptor: that its effective
+  credentials may write the file. An owner of a read-only file is refused
+  though the kernel would answer it; making the file writable by brokkr's
+  user is the fix. It is asked before and after the scan; that permissions
+  stay as they are in between is assumed.
+- The preparation runs after the call's admission and before its launch,
+  so it is inside the block's wall and outside the child's: with
+  `measured = true` it is outside the result.
+- The child stores its account (What a run stores): the procedure, the scan
+  interval from the block's start, and per file its paths, mode, size and
+  resident bytes. A failed preparation stores no child; the iteration's
+  reason accounts for every file: scanned with its count, prepared and not
+  scanned, failed with why, or not attempted.
+
+What this establishes is narrow: the counts are what brokkr accumulated
+while it queried every page during the scan interval, not one snapshot of
+every file at once; the kernel reports a page under read as not resident;
+and nothing keeps the cache as it was found once the child runs, a page
+another reader or memory pressure moves included. The state of device,
+controller and metadata caches is neither reset nor established, though the
+write-back and reads may change it.
+
+`page_cache(path, mode)`, inside `preflight()` alone, checks what brokkr can
+detect beforehand of a bound input (`path` the string `params` gives; any
+other path is a script error): it opens the file as an iteration would,
+asks the same observability condition, maps and queries it once, and for
+`"cold"` refuses tmpfs and ramfs, whose pages are their storage. It returns
+nil when they hold and the reason otherwise, for the script to `fail()`
+with. It prepares and reads nothing, and passing it is not support: the
+call establishes and checks everything again.
+
+```lua
+function preflight(params)
+    local why = page_cache(params.input.file, "cold")
+    if why then fail(why) end
+end
+```
+
 ## JSON
 
 `json.encode(v)` returns compact JSON text, object keys sorted;
@@ -664,7 +744,8 @@ argv, ending, `/proc` samples, marker FIFO records and capture losses, a
 marked child's hotpath capture, a `program` child's executable path and
 digest, and its stderr's size and last 64 KiB as text (each byte that is
 not UTF-8 replaced, marked when earlier bytes were dropped, and noted when
-the call was still held as it was read); `brokkr sidecar <uuid>` reads one child's
+the call was still held as it was read), and a call that prepared inputs
+`cold` or `warm` its page-cache account (Page cache); `brokkr sidecar <uuid>` reads one child's
 through the sidecar views (`brokkr man measure`, Script-bench children).
 Stderr tails share a run budget of 16 MiB of raw bytes: past it a child
 keeps its size and no tail. The whole stderr is never stored; a script that

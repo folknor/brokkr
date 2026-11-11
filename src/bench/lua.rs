@@ -38,6 +38,7 @@ use ::dellingr::{ArgCount, LuaType, RetCount, RustFnHandle, State};
 
 use super::json;
 use super::script_lines::LineMap;
+pub(crate) use super::store::CacheMode;
 
 /// The longest string a script can hold, dellingr's limit: `read()` refuses
 /// a file past it.
@@ -253,6 +254,9 @@ impl Host for Probe {
     fn filesize(&mut self, _: usize) -> Result<u64, Abort> {
         match *self {}
     }
+    fn page_cache(&mut self, _: &str, _: CacheMode) -> Result<Option<String>, Abort> {
+        match *self {}
+    }
 }
 
 /// A compiled script, run unchanged in every iteration of a run, with the
@@ -392,6 +396,10 @@ pub(crate) struct CallOptions {
     pub(crate) program: Option<String>,
     /// `measured = true`: this child's wall is the iteration's result.
     pub(crate) measured: bool,
+    /// `cold = {h, ...}`: inputs advised out of the page cache before launch.
+    pub(crate) cold: Vec<usize>,
+    /// `warm = {h, ...}`: inputs read through into it before launch.
+    pub(crate) warm: Vec<usize>,
 }
 
 /// What one `binary()` call hands back to the script.
@@ -490,6 +498,10 @@ pub(crate) trait Host: Send + 'static {
     /// Replace the file an output handle names with `contents`.
     fn write(&mut self, handle: usize, contents: &[u8]) -> Result<(), Abort>;
     fn filesize(&mut self, handle: usize) -> Result<u64, Abort>;
+    /// `page_cache(path, mode)`, inside `preflight()` alone: `None` when
+    /// the detectable prerequisites of preparing that bound input in `mode`
+    /// hold, else why not.
+    fn page_cache(&mut self, path: &str, mode: CacheMode) -> Result<Option<String>, Abort>;
 }
 
 /// How one sample ended.
@@ -997,7 +1009,8 @@ fn abort_of(error: &Error) -> Option<&Abort> {
 /// table and the `record` table. Returns the handle of `result:ok` and the
 /// anchored marks.
 fn install<H: Host>(state: &mut State) -> Result<(RustFnHandle, Marks), Error> {
-    let builtins: [(&str, ::dellingr::RustFunc); 11] = [
+    let builtins: [(&str, ::dellingr::RustFunc); 12] = [
+        ("page_cache", lua_page_cache::<H>),
         ("require", lua_require::<H>),
         ("binary", lua_binary::<H>),
         ("binary_with", lua_binary_with::<H>),
@@ -1684,7 +1697,7 @@ fn options_at(state: &mut State, idx: isize) -> Result<CallOptions, Error> {
             state,
             format!(
                 "binary_with()'s first argument is a {}: expected a table of options \
-                 (env, reads, writes, stdin, hotpath, stop_at, program, measured)",
+                 (env, reads, writes, stdin, hotpath, stop_at, program, measured, cold, warm)",
                 state.typ(idx).as_str()
             ),
         ));
@@ -1701,7 +1714,7 @@ fn options_at(state: &mut State, idx: isize) -> Result<CallOptions, Error> {
         };
         match key.as_str() {
             "env" => options.env = env_at(state, value_idx)?,
-            "reads" | "writes" => {
+            "reads" | "writes" | "cold" | "warm" => {
                 let what = format!("binary_with(): {key}");
                 if state.typ(value_idx) != LuaType::Table
                     || handle_index(state, value_idx)?.is_some()
@@ -1709,10 +1722,11 @@ fn options_at(state: &mut State, idx: isize) -> Result<CallOptions, Error> {
                     return Err(raise_failed(state, format!("{what} is a list of handles")));
                 }
                 let handles = list_at(state, value_idx, &what, listed_handle)?;
-                if key == "reads" {
-                    options.reads = handles;
-                } else {
-                    options.writes = handles;
+                match key.as_str() {
+                    "reads" => options.reads = handles,
+                    "writes" => options.writes = handles,
+                    "cold" => options.cold = handles,
+                    _ => options.warm = handles,
                 }
             }
             "stdin" => {
@@ -1743,7 +1757,7 @@ fn options_at(state: &mut State, idx: isize) -> Result<CallOptions, Error> {
                     state,
                     format!(
                         "binary_with(): unknown option {shown}: options are env, reads, writes, \
-                         stdin, hotpath, stop_at, program and measured"
+                         stdin, hotpath, stop_at, program, measured, cold and warm"
                     ),
                 ));
             }
@@ -2069,6 +2083,57 @@ fn lua_filesize<H: Host>(state: &mut State) -> Result<u8, Error> {
     }
     #[allow(clippy::cast_precision_loss)] // At most 2^53, exact.
     state.push_number(size as f64)?;
+    Ok(1)
+}
+
+/// `page_cache(path, mode)`: nil when a bound input's detectable
+/// prerequisites for preparing it `"cold"` or `"warm"` hold, else why not.
+/// Inside `preflight()` alone, which has paths, not handles.
+fn lua_page_cache<H: Host>(state: &mut State) -> Result<u8, Error> {
+    stop_first::<H>(state)?;
+    let phase = ctx::<H>(state).map(|c| c.phase);
+    if phase != Some(Phase::Preflight) {
+        let place = phase.map_or("at a chunk's top level", Phase::place);
+        return Err(raise_failed(
+            state,
+            format!(
+                "page_cache() is only available inside preflight(), not {place}: inside bench() \
+                 a call prepares its inputs with cold = {{...}} and warm = {{...}}"
+            ),
+        ));
+    }
+    if state.typ(1) != LuaType::String {
+        return Err(raise_failed(
+            state,
+            format!(
+                "page_cache()'s argument 1 is a {}: expected a bound input's path",
+                state.typ(1).as_str()
+            ),
+        ));
+    }
+    let path = text_at(state, 1, "page_cache()'s path")?;
+    let mode = match (state.typ(2) == LuaType::String)
+        .then(|| text_at(state, 2, "page_cache()'s mode"))
+        .transpose()?
+        .as_deref()
+    {
+        Some("cold") => CacheMode::Cold,
+        Some("warm") => CacheMode::Warm,
+        _ => {
+            return Err(raise_failed(
+                state,
+                "page_cache()'s argument 2 is the mode: \"cold\" or \"warm\"".to_owned(),
+            ));
+        }
+    };
+    let answer = match ctx::<H>(state) {
+        Some(ctx) => ctx.host.page_cache(&path, mode),
+        None => Err(Abort::Failed("page_cache(): no bench context".into())),
+    };
+    match answer.map_err(|abort| raise(state, abort))? {
+        None => state.push_nil()?,
+        Some(why) => state.push_bytes(why.as_bytes())?,
+    }
     Ok(1)
 }
 

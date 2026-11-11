@@ -146,6 +146,25 @@ reached its marked call. Omitted when unset, so every child stored before
 the flag existed, and every unmarked one, encodes as it did; the `children`
 table keeps it as a `measured` column (schema step 7) defaulting to unset.
 
+A child of a call that prepared inputs `cold` or `warm`
+(`docs/commands/bench.md`, Page cache) also holds its **cache** account:
+the `procedure` it followed (`page-cache-v1`, so a later procedure's counts
+are never read as this one's), the scan's start and end from the block's
+start, and per prepared inode, in the order the call listed them, every
+path listed for it, its mode, its size and the bytes the scan found
+resident. The counts are accumulated over the scan interval, not one
+snapshot. Absent means no brokkr preparation was recorded, never a
+residency: a call that asked none, and every child stored before the field
+existed. Omitted when absent, as `executable` is. Publication refuses an
+empty procedure or file list, a scan that does not end by the child's
+launch, a path that is not absolute, a size past SQLite's range, and a
+count the mode rules out (`cold` with any byte resident, `warm` with fewer
+than all), since a preparation that did not establish its mode fails its
+iteration and stores no child. Schema step 8 keeps it as `child_cache`,
+`child_cache_file` and `child_cache_path`. It is not part of the pairing
+key; `brokkr results --compare` names it when the sides' sequences of
+preparations differ.
+
 Every struct refuses unknown fields, so a document a newer writer extended
 is refused rather than stored short of its new fields: that refusal, not
 `format`, is what keeps an older store from taking a newer document. The

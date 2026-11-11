@@ -418,13 +418,10 @@ impl BenchReader {
                 },
                 at,
             )?;
-            let mut runs = self.load(&selection.uuids, false)?;
-            for run in &mut runs {
-                if run.pairing_algorithm().as_deref() != Some("bench-pair-v1") {
-                    let uuid = run.doc.uuid.clone();
-                    *run = self.load(std::slice::from_ref(&uuid), true)?.remove(0);
-                }
-            }
+            // With children, every run: what the pairing key leaves out and
+            // a pair names (each child's executable and page-cache
+            // preparation) lives on them, whatever the run's class.
+            let runs = self.load(&selection.uuids, true)?;
             Ok((runs, selection))
         };
         let (a, first) = side(commit_a, None)?;

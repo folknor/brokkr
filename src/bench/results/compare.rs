@@ -275,6 +275,91 @@ fn executables_line(a: &StoredRun, b: &StoredRun) -> Option<String> {
     })
 }
 
+/// Each distinct sequence of page-cache preparations a run's iterations
+/// made: per child in launch order, the measured mark and each file's mode
+/// and paths, or nothing for a child brokkr prepared none for. Counts and
+/// times are observations, never compared.
+fn preparations(run: &StoredRun) -> BTreeSet<Vec<ChildPreparation>> {
+    run.doc
+        .iterations
+        .iter()
+        .map(|iteration| {
+            iteration
+                .children
+                .iter()
+                .map(|child| {
+                    let files = child.cache.as_ref().map(|cache| {
+                        cache
+                            .files
+                            .iter()
+                            .map(|f| (f.mode, f.paths.clone()))
+                            .collect()
+                    });
+                    (child.measured, files)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// One child's part of a sequence: its measured mark and each prepared
+/// file's mode and paths, `None` for no preparation. Compared as values,
+/// so no path spelling can make two different preparations read alike.
+type ChildPreparation = (
+    bool,
+    Option<Vec<(crate::bench::store::CacheMode, Vec<String>)>>,
+);
+
+/// A sequence as shown: each child by launch position.
+fn shown_sequence(sequence: &[ChildPreparation]) -> String {
+    sequence
+        .iter()
+        .enumerate()
+        .map(|(idx, (measured, files))| {
+            let mark = if *measured { " (measured)" } else { "" };
+            let prepared = files.as_ref().map_or_else(
+                || "none".to_owned(),
+                |files| {
+                    files
+                        .iter()
+                        .map(|(mode, paths)| format!("{} {:?}", mode.name(), paths))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                },
+            );
+            format!("child {idx}{mark} {prepared}")
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// The page-cache preparations, when the sides made different ones:
+/// provenance the pairing key leaves out, as it leaves out each call's argv.
+fn preparations_line(a: &StoredRun, b: &StoredRun) -> Option<String> {
+    let (pa, pb) = (preparations(a), preparations(b));
+    let any = |run: &StoredRun| {
+        run.doc
+            .iterations
+            .iter()
+            .flat_map(|i| &i.children)
+            .any(|c| c.cache.is_some())
+    };
+    if pa == pb || !(any(a) || any(b)) {
+        return None;
+    }
+    let shown = |p: &BTreeSet<Vec<ChildPreparation>>| {
+        p.iter()
+            .map(|s| shown_sequence(s))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    Some(format!(
+        "  page-cache preparations differ: [{}] vs [{}]",
+        shown(&pa),
+        shown(&pb)
+    ))
+}
+
 /// The result records' entries that moved, `hotpath` aside: what turns "12%
 /// faster" into "12% faster on 8% less work".
 fn record_line(a: &StoredRun, b: &StoredRun) -> Option<String> {
@@ -598,6 +683,7 @@ pub(crate) fn format_compare(
                 ));
                 lines.extend(build_line(&x.doc.build, &y.doc.build));
                 lines.extend(executables_line(x, y));
+                lines.extend(preparations_line(x, y));
                 lines.extend(host_line(x, y));
                 lines.extend(env_line(
                     &x.doc.conditions.captured_env,

@@ -648,6 +648,7 @@ fn preflight_arms(
             config: std::sync::Arc::clone(config),
             cwd: detection.project_root.as_path().to_path_buf(),
             since,
+            inputs: bound.inputs(),
         };
         let (ran, host) = lua::run_hook(
             lua::Hook::Preflight,

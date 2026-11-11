@@ -136,6 +136,17 @@ resolved it:
   regular one. A spool opens only as the inode its call wrote: the
   iteration keeps a descriptor on every spool until it ends, so the
   identity it checks cannot be reused by a file a child put in its place.
+- **Preparing the page cache** (a call's `cold` and `warm`, inputs only):
+  after the call is admitted, each input opened as `read()` opens it, and
+  every write-back, advice, read and residency scan done through that one
+  descriptor. A prepared input that is also the call's stdin must be the
+  same inode as the descriptor admission opened for it. Each existing
+  file the call declares written is looked at by its own path and refused
+  when it is a prepared inode; a declared directory is not searched, and a
+  link a child makes afterwards is outside the guarantee as any child's
+  namespace work is. A preflight's `page_cache()` opens a bound input the
+  same way, resolved as admission resolves it and walked without following
+  a link, with no admission: the read hold already covers it.
 - **Writing** (`write()`, an output only): admitted as a write, so the
   read-only veto refuses a name a child turned into a link onto an input;
   then through `out/`'s held descriptor, whatever entry the name holds is

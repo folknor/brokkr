@@ -698,6 +698,88 @@ fn an_input_handle_reaches_the_child() {
     assert_eq!(iteration.children[0].argv[3], input.display().to_string());
 }
 
+/// A call's warm and cold inputs are prepared before its launch and the
+/// account stored on its child; an input the call does not pass, or one
+/// inode in both modes, fails the iteration before anything launches.
+#[test]
+fn a_call_prepares_its_inputs_and_stores_the_account() {
+    let _lock = crate::test_scratch::process_global_lock();
+    let root = crate::test_scratch::scratch("bench_runner", "cache");
+    let container = root.join("iterations");
+    let (a, b) = (root.join("a.txt"), root.join("b.txt"));
+    std::fs::write(&a, vec![3u8; 9000]).unwrap();
+    std::fs::write(&b, b"bee").unwrap();
+    let handle = |index, path: &std::path::Path| {
+        lua::Value::Table(vec![(
+            "file".into(),
+            lua::Value::Handle(lua::HandleRef {
+                index,
+                path: path.display().to_string(),
+            }),
+        )])
+    };
+    let args = lua::Args {
+        params: vec![("a".into(), handle(0, &a)), ("b".into(), handle(1, &b))],
+        keys: vec![
+            ("a".into(), lua::Value::Text("a".into())),
+            ("b".into(), lua::Value::Text("b".into())),
+        ],
+    };
+    let inputs = [a.clone(), b.clone()];
+    let run = |source: &str| {
+        let script = script(source);
+        let mut with = setup(&script, &root, &container);
+        with.args = &args;
+        with.inputs = &inputs;
+        run_iteration(with).0
+    };
+    let iteration = run("function bench(params)\n\
+           binary_with({warm = {params.a.file, params.a.file}}, '-c', 'true', 'sh', params.a.file):ok()\n\
+         end");
+    assert!(
+        matches!(iteration.outcome, store::IterationOutcome::Completed { .. }),
+        "{iteration:?}"
+    );
+    let cache = iteration.children[0].cache.as_ref().unwrap();
+    assert_eq!(cache.procedure, store::CACHE_PROCEDURE);
+    assert!(cache.scan_to_us <= iteration.children[0].origin_offset_us);
+    assert_eq!(cache.files.len(), 1);
+    assert_eq!(cache.files[0].paths, [a.display().to_string()]);
+    assert_eq!(
+        (cache.files[0].bytes, cache.files[0].resident),
+        (9000, 9000)
+    );
+
+    let failed = |source: &str, needle: &str| {
+        let iteration = run(source);
+        match &iteration.outcome {
+            store::IterationOutcome::Failed { reason } => {
+                assert!(reason.contains(needle), "{reason}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(iteration.children.is_empty(), "{iteration:?}");
+    };
+    failed(
+        "function bench(params) binary_with({cold = {params.b.file}}, '-c', 'true', 'sh', params.a.file) end",
+        "does not pass it",
+    );
+    failed(
+        "function bench(params)\n\
+           binary_with({reads = {params.b.file}, cold = {params.a.file}, warm = {params.a.file}}, \
+             '-c', 'true', 'sh', params.a.file)\n\
+         end",
+        "also listed cold",
+    );
+    failed(
+        "function bench(params)\n\
+           local o = output('o')\n\
+           binary_with({warm = {o}}, '-c', 'true', 'sh', o)\n\
+         end",
+        "only an input is prepared",
+    );
+}
+
 #[test]
 fn a_failed_iteration_keeps_its_children_and_never_extracts_record() {
     let _lock = crate::test_scratch::process_global_lock();

@@ -71,6 +71,12 @@ impl Handle {
         matches!(self.origin, Origin::Output | Origin::Scratch)
     }
 
+    /// Whether it is an input, a bound file param: the one origin a call's
+    /// `cold` and `warm` take.
+    pub(crate) fn is_input(&self) -> bool {
+        self.origin == Origin::Input
+    }
+
     /// Whether it names a file brokkr itself may open (`read()`,
     /// `filesize()`, a call's stdin): every origin but scratch.
     fn is_file(&self) -> bool {
@@ -174,6 +180,19 @@ impl Resources {
     pub(crate) fn filesize(&mut self, handle: &Handle) -> Result<u64, DevError> {
         let file = self.open_file(handle)?;
         Ok(file.metadata()?.len())
+    }
+
+    /// An input opened for page-cache preparation, admitted as `read()`
+    /// admits it: every later step acts on this descriptor.
+    pub(crate) fn open_input(&mut self, handle: &Handle) -> Result<std::fs::File, DevError> {
+        if !handle.is_input() {
+            return Err(DevError::Config(format!(
+                "{} is {}: only an input is prepared",
+                handle.path.display(),
+                handle.origin.named()
+            )));
+        }
+        self.open_file(handle)
     }
 
     fn open_file(&mut self, handle: &Handle) -> Result<std::fs::File, DevError> {

@@ -275,8 +275,40 @@ ALTER TABLE children ADD COLUMN measured INTEGER NOT NULL DEFAULT 0
     CHECK (measured IN (0, 1));
 ";
 
+/// Version 8: page-cache preparation. A call that prepared its inputs
+/// `cold` or `warm`, with the procedure, the scan interval and each file
+/// it prepared, by inode, with every path listed for it. A child without a
+/// row recorded no preparation.
+const V8: &str = "
+CREATE TABLE child_cache (
+    child_id     INTEGER PRIMARY KEY REFERENCES children(id) ON DELETE CASCADE,
+    procedure    TEXT NOT NULL CHECK (procedure <> ''),
+    scan_from_us INTEGER NOT NULL CHECK (scan_from_us >= 0),
+    scan_to_us   INTEGER NOT NULL CHECK (scan_to_us >= scan_from_us)
+) STRICT;
+
+CREATE TABLE child_cache_file (
+    child_id INTEGER NOT NULL REFERENCES child_cache(child_id) ON DELETE CASCADE,
+    ordinal  INTEGER NOT NULL CHECK (ordinal >= 0),
+    mode     TEXT NOT NULL CHECK (mode IN ('cold', 'warm')),
+    bytes    INTEGER NOT NULL CHECK (bytes >= 0),
+    resident INTEGER NOT NULL CHECK (resident >= 0 AND resident <= bytes),
+    PRIMARY KEY (child_id, ordinal)
+) STRICT;
+
+CREATE TABLE child_cache_path (
+    child_id INTEGER NOT NULL,
+    file     INTEGER NOT NULL,
+    ordinal  INTEGER NOT NULL CHECK (ordinal >= 0),
+    path     TEXT NOT NULL CHECK (substr(path, 1, 1) = '/'),
+    PRIMARY KEY (child_id, file, ordinal),
+    FOREIGN KEY (child_id, file) REFERENCES child_cache_file(child_id, ordinal)
+        ON DELETE CASCADE
+) STRICT;
+";
+
 /// The chain. Shipped steps are frozen; append only.
-pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7];
+pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8];
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 

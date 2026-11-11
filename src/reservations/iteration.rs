@@ -800,6 +800,34 @@ pub(crate) struct Tail {
     pub(crate) cut: bool,
 }
 
+/// Open a bound input outside any iteration (a preflight's `page_cache()`)
+/// as an iteration opens one: resolved as admission resolves it, then that
+/// resolved form walked without following a link, and refused unless it is
+/// a regular file. Nothing is admitted: the run already holds its read hold
+/// on every bound input.
+pub(crate) fn open_input(path: &Path) -> Result<File, DevError> {
+    let spelled = spell(path)?;
+    let file =
+        open_resolved(&spelled.resolved, libc::O_RDONLY | libc::O_NONBLOCK).map_err(|e| {
+            if e.raw_os_error() == Some(libc::ELOOP) {
+                DevError::Config(format!(
+                    "{} is a link, which brokkr does not follow",
+                    path.display()
+                ))
+            } else {
+                io_error(&format!("cannot open {}", path.display()), e)
+            }
+        })?;
+    still_names(&spelled.resolved, &file)?;
+    if !file.metadata()?.is_file() {
+        return Err(DevError::Config(format!(
+            "{} is not a regular file",
+            path.display()
+        )));
+    }
+    Ok(file)
+}
+
 /// Spell an absolute path.
 fn spell(path: &Path) -> Result<Spelled, DevError> {
     if !path.is_absolute() {

@@ -70,6 +70,7 @@ fn iteration(wall_us: i64, verdict: Option<&str>, record: &serde_json::Value) ->
             executable: None,
             stderr: None,
             measured: false,
+            cache: None,
         }],
     }
 }
@@ -518,7 +519,8 @@ fn profiled(uuid_tail: u8, commit: char, started: i64, calls: u64, extra: bool) 
 
 /// A capture is shown on its child and rendered under its stage; a compare
 /// of two profiled runs diffs the stage both hold and names the one only
-/// one side holds; profiled and timing runs never pair.
+/// one side holds; profiled and timing runs never pair. Every compared run
+/// is read with its children.
 #[test]
 fn captures_render_per_stage_and_compare_by_stage() {
     let path = scratch("captures");
@@ -539,8 +541,8 @@ fn captures_render_per_stage_and_compare_by_stage() {
         "a profiled run is read with its children"
     );
     assert!(
-        c.b.iter().any(|r| !r.children_loaded),
-        "a timing run is not"
+        c.b.iter().all(|r| r.children_loaded),
+        "a timing run too: its children's executables and page-cache preparations are named"
     );
     let out = compare(&c, "a", "b", 20);
     assert!(out.contains("hotpath decode #1"), "{out}");

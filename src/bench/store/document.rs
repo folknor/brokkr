@@ -257,6 +257,108 @@ pub struct Child {
     /// result. Omitted when unmarked, so such a document encodes as it did.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub measured: bool,
+    /// The page-cache preparation brokkr made of the call's inputs before
+    /// launching it (`cold` and `warm`). Absent means no brokkr preparation
+    /// was recorded, never a residency: a call that asked none, and every
+    /// child stored before the field existed. Omitted when absent, so such a
+    /// document encodes as it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<CachePreparation>,
+}
+
+/// The page-cache procedure a preparation followed, as stored accounts name
+/// it.
+pub const CACHE_PROCEDURE: &str = "page-cache-v1";
+
+/// One call's page-cache preparation, established before its launch: every
+/// file prepared, then every file scanned. The counts are what brokkr
+/// accumulated while it queried every page of each file during the scan
+/// interval, not one simultaneous snapshot, and a page under read is
+/// reported not resident.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CachePreparation {
+    pub procedure: String,
+    /// When the scan began and ended, from the start of the iteration's
+    /// block, as `origin_offset_us` is.
+    pub scan_from_us: i64,
+    pub scan_to_us: i64,
+    /// Each prepared file, one per inode, in the order the call listed them.
+    pub files: Vec<CacheFile>,
+}
+
+/// One prepared file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheFile {
+    /// Every input path the call listed for this inode.
+    pub paths: Vec<String>,
+    pub mode: CacheMode,
+    /// The file's size when it was prepared.
+    pub bytes: u64,
+    /// The bytes of it the scan found resident, clipped at its end.
+    pub resident: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheMode {
+    /// Advised out of the page cache: none of it resident.
+    Cold,
+    /// Read through: all of it resident.
+    Warm,
+}
+
+impl CacheMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Cold => "cold",
+            Self::Warm => "warm",
+        }
+    }
+}
+
+impl CachePreparation {
+    /// The account publication admits, and reading checks again, so a
+    /// store holding anything else never presents it as established.
+    pub(super) fn validate(&self, origin_offset_us: i64) -> Result<(), String> {
+        if self.procedure.is_empty() {
+            return Err("a cache preparation with an empty procedure".to_owned());
+        }
+        if self.scan_from_us < 0
+            || self.scan_from_us > self.scan_to_us
+            || self.scan_to_us > origin_offset_us
+        {
+            return Err(format!(
+                "a cache scan from {} to {} does not end by the launch at {origin_offset_us}",
+                self.scan_from_us, self.scan_to_us
+            ));
+        }
+        if self.files.is_empty() {
+            return Err("a cache preparation of no file".to_owned());
+        }
+        for file in &self.files {
+            if file.paths.is_empty() || file.paths.iter().any(|p| !p.starts_with('/')) {
+                return Err("a prepared file without an absolute path".to_owned());
+            }
+            if i64::try_from(file.bytes).is_err() {
+                return Err("a prepared file's size past the store's range".to_owned());
+            }
+            let established = match file.mode {
+                CacheMode::Cold => file.resident == 0,
+                CacheMode::Warm => file.resident == file.bytes,
+            };
+            if !established {
+                return Err(format!(
+                    "a {} file of {} bytes with {} resident",
+                    file.mode.name(),
+                    file.bytes,
+                    file.resident
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The most raw stderr bytes one child's stored tail holds.
@@ -935,6 +1037,9 @@ impl Child {
         }
         if let Some(stderr) = &self.stderr {
             stderr.validate()?;
+        }
+        if let Some(cache) = &self.cache {
+            cache.validate(self.origin_offset_us)?;
         }
         Ok(())
     }

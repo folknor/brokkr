@@ -473,7 +473,9 @@ executable it ran and that file's digest (or why it was not read), and for
 a call marked `hotpath` its stage, occurrence and capture status, then, for
 a child whose stderr was kept, its size and state and the last lines of
 its stored tail (at most 10 lines and 2000 characters, control characters
-escaped); a `--hotpath` run says
+escaped), and for a call that prepared inputs its page-cache account: the
+procedure, the scan interval before launch, and each file's mode, paths
+and resident bytes of its size; a `--hotpath` run says
 `measured hotpath`, an `--alloc` run `measured alloc`. Then the result's `record`
 (for a run without a result, each iteration's that was extracted), one
 entry per line as compact JSON. A prefix matching several runs prints the
@@ -535,6 +537,12 @@ under the pair rather than splitting it:
   both. A path is compared as resolved, its `.` components dropped, so a
   program reached through a different directory on `PATH` is a different
   path.
+- `page-cache preparations differ:` when either side prepared inputs `cold`
+  or `warm` (`brokkr man bench`, Page cache) and the sides' sequences
+  differ: per iteration, each child in launch order with its measured mark
+  and each prepared file's mode and paths, or `none`; each side shows its
+  distinct sequences. Resident counts and scan times are observations and
+  never compared.
 - `host:` hostname, memory, governor and kernel, and `env:` the captured
   variables, as for typed pairs.
 - `verdict:` when the results' verdicts differ, nil against `""` included:

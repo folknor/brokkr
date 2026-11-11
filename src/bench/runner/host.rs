@@ -362,6 +362,7 @@ impl IterationHost {
 
     /// Launch one child and wait for it and its borrow; its evidence is kept
     /// whatever happens after the spawn.
+    #[allow(clippy::too_many_lines)] // One launch in its order: admit, prepare, spawn, keep.
     fn launch(&mut self, argv: &[String], call: &Declared) -> Result<CallOutcome, Abort> {
         let failed = |what: &str, e: &dyn std::fmt::Display| Abort::Failed(format!("{what}: {e}"));
         let (program, executable) = self.target(call)?;
@@ -393,6 +394,19 @@ impl IterationHost {
         env.extend(call.env.iter().map(|(n, v)| (n.as_str(), v.as_str())));
         env.extend(report_str.as_deref().map(hotpath_env).into_iter().flatten());
         let arg_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        // Prepared after admission and before the launch instant, so its
+        // cost is inside the block but outside the child's wall.
+        let prepared = self
+            .prepare_cache(call, stdin.as_ref())
+            .and_then(|prepared| stopping().map(|()| prepared));
+        let cache = match prepared {
+            Ok(cache) => cache,
+            Err(abort) => {
+                // Never spawned: the borrow has no holder to wait for.
+                drop(admitted.finish());
+                return Err(abort);
+            }
+        };
         let guard = crate::shutdown::SigtermGuard::install();
         let start = Instant::now();
         let child = spawn_child(
@@ -454,6 +468,9 @@ impl IterationHost {
         let finished = admitted.finish_observed(&mut || open.pump(&mut fifo));
         let run = open.finish(&mut fifo, finished.is_ok());
         self.keep_child(program_str, argv, &env, pid, start, &run, executable);
+        if let Some(child) = self.children.last_mut() {
+            child.cache = cache;
+        }
         self.mark_measured(call.measured);
         let stderr = self.keep_stderr(&stderr_spool, finished.is_ok());
         // Judged after every launch that was reaped, whatever its exit, and
@@ -574,9 +591,7 @@ impl IterationHost {
         run: &crate::sidecar::SidecarRunResult,
         executable: Option<store::Executable>,
     ) {
-        let origin = self.block_start.map_or(0, |at| {
-            i64::try_from(start.saturating_duration_since(at).as_micros()).unwrap_or(i64::MAX)
-        });
+        let origin = self.offset(start);
         let added: BTreeMap<String, String> = env
             .iter()
             .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
@@ -594,8 +609,148 @@ impl IterationHost {
             executable,
             stderr: None,
             measured: false,
+            cache: None,
         });
     }
+
+    /// `at` from the start of the block, in microseconds.
+    fn offset(&self, at: Instant) -> i64 {
+        self.block_start.map_or(0, |start| {
+            i64::try_from(at.saturating_duration_since(start).as_micros()).unwrap_or(i64::MAX)
+        })
+    }
+
+    /// Prepare the call's `cold` and `warm` inputs, admitted and about to be
+    /// launched: `None` when it lists none. Each must be an input the call
+    /// passes (argv, `reads` or `stdin`), opened as `read()` opens one and
+    /// prepared through that descriptor; listings of one inode in one mode
+    /// share an account and in both modes are refused, as is a prepared
+    /// inode that a file the call declares written already names, and a
+    /// stdin that is not the inode prepared for it.
+    fn prepare_cache(
+        &mut self,
+        call: &Declared,
+        stdin: Option<&std::fs::File>,
+    ) -> Result<Option<store::CachePreparation>, Abort> {
+        if call.cache.is_empty() {
+            return Ok(None);
+        }
+        let mut targets: Vec<(crate::bench::cache::Target, (u64, u64))> = Vec::new();
+        let mut stdin_inode = None;
+        for (mode, handle) in &call.cache {
+            let shown = handle.path().display().to_string();
+            let what = format!("binary_with(): {} {shown}", mode.name());
+            let passed = call.argv.contains(handle)
+                || call.reads.contains(handle)
+                || call.stdin.as_ref() == Some(handle);
+            if !passed {
+                return Err(Abort::Failed(format!(
+                    "{what}: the call does not pass it (argv, reads or stdin): only a file the \
+                     child is given is prepared"
+                )));
+            }
+            let file = self
+                .resources()?
+                .open_input(handle)
+                .map_err(|e| Abort::Failed(format!("{what}: {e}")))?;
+            let inode = crate::bench::cache::inode(&file)
+                .map_err(|e| Abort::Failed(format!("{what}: cannot inspect it: {e}")))?;
+            if call.stdin.as_ref() == Some(handle) {
+                stdin_inode = Some((inode, shown.clone()));
+            }
+            match targets.iter_mut().find(|(_, seen)| *seen == inode) {
+                Some((target, _)) if target.mode != *mode => {
+                    return Err(Abort::Failed(format!(
+                        "{what}: the same file is also listed {} ({})",
+                        target.mode.name(),
+                        target.paths.join(", ")
+                    )));
+                }
+                Some((target, _)) => {
+                    if !target.paths.contains(&shown) {
+                        target.paths.push(shown);
+                    }
+                }
+                None => targets.push((
+                    crate::bench::cache::Target {
+                        paths: vec![shown],
+                        mode: *mode,
+                        file,
+                    },
+                    inode,
+                )),
+            }
+        }
+        if let (Some((inode, shown)), Some(stdin)) = (stdin_inode, stdin) {
+            let given = crate::bench::cache::inode(stdin)
+                .map_err(|e| Abort::Failed(format!("cannot inspect the call's stdin: {e}")))?;
+            if given != inode {
+                return Err(Abort::Failed(format!(
+                    "binary_with(): {shown} is the call's stdin, but the file opened as its stdin \
+                     is not the one prepared: something replaced it"
+                )));
+            }
+        }
+        no_written_alias(call, &targets)?;
+        let targets: Vec<crate::bench::cache::Target> =
+            targets.into_iter().map(|(target, _)| target).collect();
+        match crate::bench::cache::prepare(&targets, &stop_pending) {
+            Ok((files, from, to)) => Ok(Some(store::CachePreparation {
+                procedure: store::CACHE_PROCEDURE.to_owned(),
+                scan_from_us: self.offset(from),
+                scan_to_us: self.offset(to),
+                files,
+            })),
+            Err(crate::bench::cache::Failure::Interrupted) => Err(Abort::Interrupted),
+            Err(crate::bench::cache::Failure::Failed(why)) => Err(Abort::Failed(why)),
+        }
+    }
+}
+
+/// Refuse a call one of whose declared writes, by its own path, already
+/// names an inode it prepares. Only an existing file is inspected: a
+/// directory written is not searched, and what a child links afterwards is
+/// its own, which handles never confine.
+fn no_written_alias(
+    call: &Declared,
+    targets: &[(crate::bench::cache::Target, (u64, u64))],
+) -> Result<(), Abort> {
+    let argv: Vec<&Handle> = call.argv.iter().collect();
+    let reads: Vec<&Handle> = call.reads.iter().collect();
+    let writes: Vec<&Handle> = call.writes.iter().collect();
+    let declared =
+        crate::bench::resources::call_access(&argv, &reads, &writes, call.stdin.as_ref())
+            .map_err(|e| Abort::Failed(format!("the call was refused: {e}")))?;
+    for (path, access) in declared {
+        if access != crate::reservations::Access::Write {
+            continue;
+        }
+        let meta = match std::fs::metadata(&path) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(Abort::Failed(format!(
+                    "binary_with(): cannot inspect {}, which the call writes, against the files \
+                     it prepares: {e}",
+                    path.display()
+                )));
+            }
+        };
+        let written = (
+            std::os::unix::fs::MetadataExt::dev(&meta),
+            std::os::unix::fs::MetadataExt::ino(&meta),
+        );
+        if let Some((target, _)) = targets.iter().find(|(_, inode)| *inode == written) {
+            return Err(Abort::Failed(format!(
+                "binary_with(): {}, which the call writes, is the same file as {}, which it \
+                 prepares {}",
+                path.display(),
+                target.paths.join(", "),
+                target.mode.name()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// The descriptors a call's child writes its stdout and stderr through, and
@@ -739,6 +894,8 @@ struct Declared {
     program: Option<String>,
     /// The call whose child's wall is the iteration's result.
     measured: bool,
+    /// Inputs prepared before launch, each with its mode, as listed.
+    cache: Vec<(store::CacheMode, Handle)>,
 }
 
 /// What the script sees of a finished child, or why the sample ends.
@@ -833,7 +990,17 @@ impl lua::Host for IterationHost {
             stop_at: options.stop_at,
             program: options.program,
             measured: options.measured,
+            cache: Vec::new(),
         };
+        for (mode, list) in [
+            (store::CacheMode::Cold, &options.cold),
+            (store::CacheMode::Warm, &options.warm),
+        ] {
+            for index in list {
+                let what = format!("binary_with(): {}", mode.name());
+                declared.cache.push((mode, self.handle(*index, &what)?));
+            }
+        }
         for word in words {
             match word {
                 Word::Text(text) => argv.push(text),
@@ -887,6 +1054,13 @@ impl lua::Host for IterationHost {
         self.resources()?
             .filesize(&handle)
             .map_err(|e| Abort::Failed(format!("filesize(): {e}")))
+    }
+
+    fn page_cache(&mut self, _: &str, _: lua::CacheMode) -> Result<Option<String>, Abort> {
+        // The seam refuses it inside bench() first.
+        Err(Abort::Failed(
+            "page_cache() is only available inside preflight()".into(),
+        ))
     }
 
     fn output(&mut self, name: &str) -> Result<HandleRef, Abort> {

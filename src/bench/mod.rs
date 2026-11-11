@@ -15,6 +15,7 @@
 //! uncertainty latch both share, and `marking` appends the marks `brokkr
 //! results`' flags make through it.
 
+pub(crate) mod cache;
 pub(crate) mod evidence;
 mod external;
 mod json;

@@ -10,16 +10,17 @@ use super::store::wire::{
     self, Answer, Failure, Kind, PROTOCOL_VERSION, Request, SHIPPED_PROTOCOLS,
 };
 use super::store::{
-    BoundParam, Build, CaptureOutcome, Child, ChildEnding, Clock, Conditions, DOCUMENT_FORMAT,
-    Evidence, Executable, ExecutableIdentity, HotpathCapture, Iteration, IterationOutcome, Loss,
-    Mark, MarkOrigin, MarkRequest, MarkView, Marked, Measurement, ParamValue, Published, Record,
-    ResolvedBuild, Revision, RunDocument, RunFilter, RunOutcome, Sample, Selection, SinkEnd,
-    StderrCapture, StderrTail, Store, StoreError, StoredRun,
+    BoundParam, Build, CacheFile, CacheMode, CachePreparation, CaptureOutcome, Child, ChildEnding,
+    Clock, Conditions, DOCUMENT_FORMAT, Evidence, Executable, ExecutableIdentity, HotpathCapture,
+    Iteration, IterationOutcome, Loss, Mark, MarkOrigin, MarkRequest, MarkView, Marked,
+    Measurement, ParamValue, Published, Record, ResolvedBuild, Revision, RunDocument, RunFilter,
+    RunOutcome, Sample, Selection, SinkEnd, StderrCapture, StderrTail, Store, StoreError,
+    StoredRun,
 };
 
-/// The fixture's one child: every record kind and a deadline ending.
-fn frozen_child() -> Child {
-    let sample = Sample {
+/// The fixture child's one sample, every field distinct.
+fn frozen_sample() -> Sample {
+    Sample {
         timestamp_us: 100,
         rss_kb: 1,
         anon_kb: 2,
@@ -42,7 +43,12 @@ fn frozen_child() -> Child {
         syscw: 19,
         vol_cs: 20,
         nonvol_cs: i64::MAX,
-    };
+    }
+}
+
+/// The fixture's one child: every record kind and a deadline ending.
+fn frozen_child() -> Child {
+    let sample = frozen_sample();
     Child {
         program: "pbfhogg".into(),
         argv: vec!["cat".into(), "--jobs".into(), "4".into()],
@@ -118,6 +124,30 @@ fn frozen_child() -> Child {
             },
         }),
         measured: true,
+        cache: Some(frozen_cache()),
+    }
+}
+
+/// The fixture child's page-cache preparation: both modes, an alias.
+fn frozen_cache() -> CachePreparation {
+    CachePreparation {
+        procedure: "page-cache-v1".into(),
+        scan_from_us: 2,
+        scan_to_us: 9,
+        files: vec![
+            CacheFile {
+                paths: vec!["/data/a.osm.pbf".into(), "/data/same.osm.pbf".into()],
+                mode: CacheMode::Cold,
+                bytes: u64::MAX >> 1,
+                resident: 0,
+            },
+            CacheFile {
+                paths: vec!["/data/b.osm.pbf".into()],
+                mode: CacheMode::Warm,
+                bytes: 4097,
+                resident: 4097,
+            },
+        ],
     }
 }
 
