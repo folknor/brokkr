@@ -151,6 +151,13 @@ fn discover(project_root: &Path) -> Result<Vec<Runnable>, DevError> {
 /// `Cargo.lock` from for every member, wherever the invocation started.
 fn discover_workspace(project_root: &Path) -> Result<(Vec<Runnable>, PathBuf), DevError> {
     let metadata = metadata::load(project_root, Query::workspace(), &[], None)?;
+    runnables_of(&metadata)
+}
+
+/// Every bin and example target, and the workspace root, of one snapshot.
+fn runnables_of(
+    metadata: &crate::cargo::metadata::CargoMetadata,
+) -> Result<(Vec<Runnable>, PathBuf), DevError> {
     let workspace_root = PathBuf::from(&metadata.workspace_root);
 
     let mut out = Vec::new();
@@ -404,12 +411,20 @@ pub fn cmd_build(
 /// A script bench's build target, resolved as `brokkr build` resolves NAME
 /// (`name` > `[bin] default` > the sole runnable) in `build_root`: its
 /// package, target name and whether it is an example.
+///
+/// Read fresh rather than through the invocation's metadata cache: a bench
+/// resolves once per arm, and the cache would hand every later arm the first
+/// arm's answer - a failed query (a spawn or resource failure the next arm
+/// might not meet) failing them all, and a live-tree edit between arms (a
+/// second package gaining the same target name, which must refuse) unseen,
+/// even by an arm whose own tree reads clean.
 pub(crate) fn resolve_build_target(
     build_root: &Path,
     cfg: Option<&BinConfig>,
     name: Option<&str>,
 ) -> Result<(String, String, bool), DevError> {
-    let runnables = discover(build_root)?;
+    let metadata = metadata::load_fresh(build_root, &Query::workspace(), &[], None)?;
+    let (runnables, _) = runnables_of(&metadata)?;
     let Some(target) = resolve_target(&runnables, cfg, name)? else {
         return Err(DevError::Refused(
             "no target chosen: name one in the bench's `target` or set [bin] default".into(),

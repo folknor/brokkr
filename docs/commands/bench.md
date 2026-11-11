@@ -424,7 +424,9 @@ stored ends nothing: every arm ran and was stored.
 The bench's `target` (else `[bin] default`, else the workspace's only
 runnable) is resolved by cargo metadata in the tree being built, under
 `--commit` the worktree, so a target that moved between crates is found by
-name on both sides. The profile is the bench's `profile`, else `[bin]
+name on both sides. Each arm resolves afresh, so a failed resolution fails
+only its arm and every arm resolves against the tree as it then stands.
+The profile is the bench's `profile`, else `[bin]
 profile` / `[bin] debug`, else release. Features are the host section's `features`
 (`brokkr man config`) followed by the bench's, and under `--hotpath` its
 `hotpath_features`, under `--alloc` its `alloc_features`; `default_features = false`

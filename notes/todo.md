@@ -375,40 +375,21 @@ config, a build script reading it) can embed an edit while the run stays
 clean, and the stored config holds the contents loaded at invocation start,
 not what the build read.
 
-### A bench invocation's arms share one cached cargo metadata answer (2026-11-05)
+### A `--commit` arm's worktree furnish reads the cached live-root metadata (2026-11-11)
 
-Found landing the check after the build. `resolve_build_target` reads
-`cargo::metadata::load`, which caches per invocation by root, query and
-environment, with no tree identity, and caches a failed query too. So a
-target resolution that fails once (a transient cargo error) fails every
-later arm without being retried, against slice 7's rule that a build can
-fail transiently and the rest still run, and an edit between arms that
-moves the bench's target to another package is not seen, the later arms
-building the package the first resolution named. A fix would key the cache
-on the tree (or bypass it per arm) and not cache failures for the runner.
+A script bench's target resolution reads cargo metadata fresh per arm, but
+`worktree::furnish` still calls the cached `build::project_info` of the live
+root when the slot has no target link. If that query fails in the first
+arm (a spawn or resource failure), the link is never made and every later
+`--commit` arm meets the same cached failure at worktree setup. Narrow: only
+a fresh slot whose first furnish fails. A fix would read fresh there too, or
+stop caching spawn failures in `metadata::load`.
 
-### Typed measured commands read git before their build and never again (2026-11-05)
+### `cargo::metadata::load` holds its cache mutex across the subprocess (2026-11-11)
 
-Found landing the check after a script bench's build. `MeasurementSession::
-with_build_config` builds the session, which collects the commit and
-cleanliness (`BenchHarness::new_with_lock`), before `cargo_build`, and
-nothing re-reads them, so a typed row whose checkout moves or dirties
-during the build is stored under the earlier commit and cleanliness, the
-race script benches now catch (`docs/commands/bench.md`, The build). Its doc
-comment's "lock -> cargo_build -> BenchHarness lifecycle" also names the
-order backwards. The script runner's two-observation check is the model.
-
-### A typed call stream's sink ends without boundaries render nothing (2026-11-05)
-
-Found while landing the script-bench evidence views. `print_call_timelines`
-reports a call's terminal record and sealing count only inside the record a
-`CallSpan` (a library call document) gives it, so a typed run whose child
-wrote tagged `!sealed drops=N` lines with no call document stored shows the
-call's heading (human) or nothing (JSONL), its drop account hidden. A
-script-bench child gets a `call_sink` record for exactly this (`brokkr man
-measure`, Script-bench children); it was kept off typed runs only because
-their output was not to change in that slice. Turning it on for typed runs
-is one condition in `print_call_timelines`.
+Every `load` caller, whatever its key, waits behind a running `cargo
+metadata`. Harmless while callers are sequential; a per-key slot would let
+distinct queries run concurrently.
 
 ### The sidecar views print no direct test output (2026-11-05)
 

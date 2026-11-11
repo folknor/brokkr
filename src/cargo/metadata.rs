@@ -12,7 +12,7 @@ use crate::output;
 
 /// The Cargo metadata query whose result a caller needs. Results are memoized
 /// for this root, query, and explicit environment for the life of this brokkr
-/// invocation.
+/// invocation, except through [`load_fresh`].
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub(crate) struct Query {
     pub(crate) no_deps: bool,
@@ -111,6 +111,18 @@ pub(crate) fn load(
     };
     cache.insert(key, cached_result);
     result
+}
+
+/// Run the query now, neither reading nor filling the cache, for a caller
+/// that asks the same question repeatedly within one invocation and needs
+/// each answer to reflect the tree at that moment.
+pub(crate) fn load_fresh(
+    root: &Path,
+    query: &Query,
+    env: &[(&str, &str)],
+    phase: Option<crate::cargo_env::Phase>,
+) -> Result<CargoMetadata, DevError> {
+    load_uncached(root, query, env, phase)
 }
 
 pub(crate) fn clone_error(error: &DevError) -> DevError {
