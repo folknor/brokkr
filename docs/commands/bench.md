@@ -144,7 +144,9 @@ end
 - Its children are external programs only: `binary_with({program = ...})`
   (`binary_with()`), since the build does not exist yet; `binary()` and a
   call without `program` are refused, and so are `hotpath`, `stop_at`,
-  `measured`, `cold`, `warm` and every handle. A program that cannot be found or executed is a result,
+  `measured`, `cold`, `warm` and every handle; `deadline` bounds a probe as
+  it bounds a bench's child, and a probe that outlives it refuses the
+  invocation naming it, as a failed `r:ok()` does. A program that cannot be found or executed is a result,
   not a failure: `r.start_error` says why, with no `exit`, `signal` or
   output, and `r:ok()` fails naming it. Each child runs on a launch lease
   of its own that reserves nothing and is inherited by the child, so the
@@ -354,9 +356,10 @@ The result's fields:
 - `calls` - every call `bench()` made, each with `argv` (the words, a handle
   as its path), `origins` (per word: `text`, `input`, `output`, `scratch`
   or `spool`), `env`, `reads`, `writes`, `cold`, `warm` (paths), `measured`,
-  and `stdin`, `stop_at`, `hotpath` and `program` when it gave them.
+  and `stdin`, `stop_at`, `hotpath`, `program` and `deadline` (seconds)
+  when it gave them.
 - `preflight_calls` - every call `preflight()` made: `program`, `argv`,
-  `env`.
+  `env`, and `deadline` (seconds) when it gave one.
 - `modules` - every `bench_lib` module the run asked `require` for.
 
 A refusal or a failure is the script's, and is a result the test asserts.
@@ -604,8 +607,10 @@ is its size and its last 64 KiB (What a run stores).
 An exit code is the script's to judge, so a nonzero exit fails nothing by
 itself. These end the iteration before the script sees a result: Ctrl-C or
 `brokkr kill` (the child's process group is stopped; the iteration is
-interrupted), a child that could not start or be waited for, and a child
-whose descendants still hold its reservation two seconds after it exited.
+interrupted), a child that could not start or be waited for, a child that
+outlived its call's `deadline` (`binary_with()`), and a child whose
+descendants still hold its reservation once the release window after its
+exit has passed.
 
 ## `binary_with()`
 
@@ -667,7 +672,7 @@ local r = binary_with({
   it; the marker's stamp in the child's evidence is the precise end of the
   phase (`brokkr sidecar`). Beside `hotpath`, the child is asked to stop
   rather than killed: brokkr sends its process group one SIGTERM and waits
-  up to 30 seconds for it to exit before the SIGKILL, so a build that
+  up to 30 seconds (never past the call's `deadline`) for it to exit before the SIGKILL, so a build that
   cancels on SIGTERM unwinds and writes its report (Hotpath capture). The
   group is SIGKILLed once the child exits too, so the report is the child's
   to write before it exits; a helper of its that is still running is ended.
@@ -692,6 +697,20 @@ local r = binary_with({
 - `cold`, `warm` - lists of input handles brokkr advises out of the page
   cache, or reads through into it, after admitting the call and before
   launching it, then checks and stores (Page cache, below).
+- `deadline` - a number of seconds above zero, fractions allowed, that the
+  child may live, counted from its launch (after admission and any `cold`
+  or `warm` preparation). A child still running once it passes is killed,
+  its whole process group at once, and the iteration fails naming the call
+  and the bound; the child is stored with its deadline as its ending, and
+  a hotpath report it wrote before the kill is still kept. The bound is a
+  ceiling on the child's whole life, not on reaching a marker: beside
+  `stop_at` and `hotpath`, the stop's SIGTERM grace ends at the deadline,
+  and a child still running then is overdue, not stopped; a marker
+  recognized after the deadline passed stops the child only when it had
+  already exited. The deadline is observed on the supervisor's ticks: a
+  child found exited after it keeps its own ending, since it may have
+  exited before. A descendant that left the group is out of reach, as
+  always, and still holding the borrow it fails the call as well.
 
 Any other key is refused, so a misspelt `writes` never runs a call with
 less declared than meant.
@@ -727,7 +746,8 @@ them; `brokkr results` shows and compares captures by both, so a call one
 side makes only conditionally shifts the later occurrences of its stage.
 
 A marked call with `stop_at` is stopped by one SIGTERM when its marker
-arrives, then SIGKILLed if it has not exited within 30 seconds. A program
+arrives, then SIGKILLed if it has not exited within 30 seconds or by its
+call's `deadline`, whichever comes first. A program
 that treats SIGTERM as cancellation and drops its hotpath guard on the way
 out (pbfhogg's CLI does) writes a report covering its run up to the marker
 plus the unwinding; one killed by the SIGTERM, or still running at the

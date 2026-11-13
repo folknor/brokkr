@@ -427,7 +427,9 @@ impl IterationHost {
             // A marked call stopped at a marker is asked to stop, so an
             // instrumented build unwinds and writes its report.
             call.hotpath.is_some().then_some(STOP_REPORT_GRACE),
-            None,
+            // A ceiling on the child's lifetime from `start`, the stop's
+            // grace included.
+            call.deadline,
             &crate::sidecar::DEFAULT_MEASUREMENT_TUNABLES,
             // Neither stream is piped: both go to their spools, so nothing
             // is drained and the cap binds nothing.
@@ -460,8 +462,13 @@ impl IterationHost {
             _ => None,
         };
         let spool = finished.map_err(|e| {
+            // An overdue child's kill explains the rest, so it is named first.
+            let how = match &run.data.ending {
+                Ending::Deadline(limit) => format!("{}, and", overdue(&short, *limit)),
+                _ => format!("{short} exited but"),
+            };
             failed(
-                &format!("{short} exited but something it started still holds its borrow"),
+                &format!("{how} something it started still holds its borrow"),
                 &e,
             )
         })?;
@@ -845,6 +852,16 @@ fn decode_report(bytes: &[u8]) -> Result<(serde_json::Value, lua::Value), String
     Ok((report, projection))
 }
 
+/// Why a call whose child outlived its `deadline` ends its sample or its
+/// preflight: the call's declared bound passed, as a failed `r:ok()` is a
+/// failure rather than a script error.
+pub(super) fn overdue(short: &str, limit: std::time::Duration) -> String {
+    format!(
+        "{short} passed its deadline of {}: brokkr killed its process group",
+        crate::output::format_duration(limit)
+    )
+}
+
 /// What the script sees of a finished child, or why the sample ends.
 fn call_outcome(
     short: String,
@@ -859,13 +876,9 @@ fn call_outcome(
         Ending::Signalled(signal) => (None, Some(*signal), None),
         Ending::StopMarker(marker) => (None, None, Some(marker.clone())),
         Ending::Interrupted => return Err(Abort::Interrupted),
+        Ending::Deadline(limit) => return Err(Abort::Fail(overdue(&short, *limit))),
         Ending::WaitFailed(why) => {
             return Err(Abort::Failed(format!("waiting for {short} failed: {why}")));
-        }
-        other => {
-            return Err(Abort::Failed(format!(
-                "{short} ended unexpectedly: {other:?}"
-            )));
         }
     };
     let preview = spool

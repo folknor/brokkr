@@ -48,6 +48,7 @@ impl PreflightHost {
         name: &str,
         argv: &[String],
         env: &[(String, String)],
+        deadline: Option<std::time::Duration>,
     ) -> Result<CallOutcome, Abort> {
         let path = env
             .iter()
@@ -124,7 +125,10 @@ impl PreflightHost {
             child,
             name,
             start,
-            crate::output::child::ChildLimit::None,
+            deadline.map_or(
+                crate::output::child::ChildLimit::None,
+                crate::output::child::ChildLimit::Wall,
+            ),
             crate::shutdown::ChildIsolation::ProcessGroup(&guard),
             crate::output::child::ChildOptions {
                 capture_cap: crate::output::child::CaptureCap {
@@ -155,6 +159,17 @@ fn finished(
         Ending::Exited(code) => (Some(*code), None),
         Ending::Signalled(signal) => (None, Some(*signal)),
         Ending::Interrupted => return Err(Abort::Interrupted),
+        // The probe's declared bound passed: the preflight refuses, as a
+        // failed `r:ok()` does, rather than reading as a script error.
+        Ending::Deadline(limit) => {
+            let mut why = super::host::overdue(&short(program), *limit);
+            if let Err(e) = &released {
+                why.push_str(&format!(
+                    ", and something it started still holds its lease: {e}"
+                ));
+            }
+            return Err(Abort::Fail(why));
+        }
         other => {
             return Err(Abort::Machinery(format!(
                 "{name} ended unexpectedly: {other:?}"
@@ -254,7 +269,7 @@ impl lua::Host for PreflightHost {
     fn binary(&mut self, words: Vec<Word>, options: CallOptions) -> Result<CallOutcome, Abort> {
         stopping()?;
         let call = crate::bench::policy::declare_preflight(words, options)?;
-        self.launch(&call.program, &call.argv, &call.env)
+        self.launch(&call.program, &call.argv, &call.env, call.deadline)
     }
 
     fn since(&mut self, sha: &str) -> Result<bool, Abort> {

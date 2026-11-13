@@ -433,6 +433,72 @@ fn a_stop_that_never_fires_fails_the_iteration() {
     );
 }
 
+/// A call's `deadline` kills a child that outlives it, its group with it,
+/// and fails the iteration naming the bound; the child is stored with its
+/// deadline ending, and a child inside its bound runs as any other.
+#[test]
+fn a_child_past_its_deadline_fails_the_iteration() {
+    let _lock = crate::test_scratch::process_global_lock();
+    let root = crate::test_scratch::scratch("bench_runner", "deadline");
+    let container = root.join("iterations");
+    let script = script(
+        "function bench()\n\
+           binary_with({deadline = 30}, '-c', 'true'):ok()\n\
+           binary_with({deadline = 0.3}, '-c', 'sleep 30 & wait')\n\
+           record.after = true\n\
+         end",
+    );
+    let started = std::time::Instant::now();
+    let (iteration, _, _, _) = run_iteration(setup(&script, &root, &container));
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    let reason = failure(&iteration);
+    assert!(reason.contains("passed its deadline of 300ms"), "{reason}");
+    assert_eq!(iteration.children.len(), 2);
+    assert_eq!(
+        iteration.children[0].ending,
+        store::ChildEnding::Exited { code: 0 }
+    );
+    assert_eq!(
+        iteration.children[1].ending,
+        store::ChildEnding::Deadline {
+            secs: 0,
+            nanos: 300_000_000
+        }
+    );
+}
+
+/// A stop's SIGTERM grace ends at the call's deadline: a marked child that
+/// reaches its marker but ignores the SIGTERM is killed at the bound and
+/// ends as overdue, not at the marker.
+#[test]
+fn a_deadline_cuts_a_stops_grace_short() {
+    let _lock = crate::test_scratch::process_global_lock();
+    let root = crate::test_scratch::scratch("bench_runner", "deadline-grace");
+    let container = root.join("iterations");
+    let script = script(
+        "function bench()\n\
+           binary_with({hotpath = 'decode', stop_at = 'SETUP_END', deadline = 1}, '-c',\n\
+             'trap \"echo GOT_TERM >&2\" TERM; echo \"1 SETUP_END\" > \"$BROKKR_MARKER_FIFO\"; \
+              while :; do sleep 30 & wait; done')\n\
+           record.after = true\n\
+         end",
+    );
+    let mut with = setup(&script, &root, &container);
+    with.measurement = store::Measurement::Hotpath;
+    let started = std::time::Instant::now();
+    let (iteration, _, _, _) = run_iteration(with);
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    let reason = failure(&iteration);
+    assert!(reason.contains("passed its deadline"), "{reason}");
+    assert_eq!(
+        iteration.children[0].ending,
+        store::ChildEnding::Deadline { secs: 1, nanos: 0 }
+    );
+    // The marker fired the stop: the SIGTERM came before the deadline's kill.
+    let stderr = format!("{:?}", iteration.children[0].stderr);
+    assert!(stderr.contains("GOT_TERM"), "{stderr}");
+}
+
 /// `measured = true` marks the one child whose wall is the iteration's
 /// result; an unmarked call stays unmarked, and a second marked call fails
 /// the iteration before it launches.

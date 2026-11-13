@@ -402,6 +402,8 @@ pub(crate) struct CallOptions {
     pub(crate) cold: Vec<usize>,
     /// `warm = {h, ...}`: inputs read through into it before launch.
     pub(crate) warm: Vec<usize>,
+    /// `deadline = SECONDS`: the most the child may live, from its launch.
+    pub(crate) deadline: Option<Duration>,
 }
 
 /// What one `binary()` call hands back to the script.
@@ -1706,7 +1708,8 @@ fn options_at(state: &mut State, idx: isize) -> Result<CallOptions, Error> {
             state,
             format!(
                 "binary_with()'s first argument is a {}: expected a table of options \
-                 (env, reads, writes, stdin, hotpath, stop_at, program, measured, cold, warm)",
+                 (env, reads, writes, stdin, hotpath, stop_at, program, measured, cold, warm, \
+                 deadline)",
                 state.typ(idx).as_str()
             ),
         ));
@@ -1756,6 +1759,7 @@ fn options_at(state: &mut State, idx: isize) -> Result<CallOptions, Error> {
                 }
                 options.measured = state.to_boolean(value_idx);
             }
+            "deadline" => options.deadline = Some(deadline_at(state, value_idx)?),
             _ => {
                 let shown = if key.is_empty() {
                     format!("a {} key", state.typ(key_idx).as_str())
@@ -1766,7 +1770,7 @@ fn options_at(state: &mut State, idx: isize) -> Result<CallOptions, Error> {
                     state,
                     format!(
                         "binary_with(): unknown option {shown}: options are env, reads, writes, \
-                         stdin, hotpath, stop_at, program, measured, cold and warm"
+                         stdin, hotpath, stop_at, program, measured, cold, warm and deadline"
                     ),
                 ));
             }
@@ -1845,6 +1849,30 @@ fn stop_marker_at(state: &mut State, idx: isize) -> Result<String, Error> {
         ));
     }
     Ok(marker)
+}
+
+/// `deadline`: seconds, a finite number above zero, fractions allowed, that
+/// a `Duration` holds and that is not below its nanosecond resolution, so a
+/// positive bound never becomes zero or saturates.
+fn deadline_at(state: &mut State, idx: isize) -> Result<Duration, Error> {
+    let what = "binary_with(): deadline";
+    if state.typ(idx) != LuaType::Number {
+        return Err(raise_failed(
+            state,
+            format!(
+                "{what} is a {}: expected a number of seconds",
+                state.typ(idx).as_str()
+            ),
+        ));
+    }
+    let seconds = state.to_number(idx)?;
+    match Duration::try_from_secs_f64(seconds) {
+        Ok(bound) if seconds > 0.0 && !bound.is_zero() => Ok(bound),
+        _ => Err(raise_failed(
+            state,
+            format!("{what} {seconds} is not a number of seconds above zero that brokkr can hold"),
+        )),
+    }
 }
 
 /// `program`: a program name or a path, a non-empty string without NUL.

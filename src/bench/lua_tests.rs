@@ -812,6 +812,7 @@ fn binary_with_takes_options_then_binarys_arguments() {
             measured: false,
             cold: Vec::new(),
             warm: Vec::new(),
+            deadline: None,
         }
     );
     assert_eq!(host.options[0], CallOptions::default());
@@ -836,6 +837,12 @@ fn binary_with_takes_options_then_binarys_arguments() {
         ("{program = 1}", "expected a program name or a path"),
         ("{program = ''}", "empty or holds a NUL"),
         ("{hotpath = 'Decode'}", "is not a name"),
+        ("{deadline = '5'}", "expected a number of seconds"),
+        ("{deadline = 0}", "above zero"),
+        ("{deadline = -1}", "above zero"),
+        ("{deadline = 0/0}", "above zero"),
+        ("{deadline = 1/0}", "above zero"),
+        ("{deadline = 1e-12}", "above zero"),
         (
             "{hotpath = 'decode', env = {HOTPATH_OUTPUT_PATH = 'x'}}",
             "beside hotpath",
@@ -848,6 +855,16 @@ fn binary_with_takes_options_then_binarys_arguments() {
         assert!(reason(&sample).contains(needle), "{options}: {sample:?}");
         assert!(host.calls.is_empty(), "{options}: refused before the call");
     }
+
+    let (sample, host) = run(
+        "function bench() binary_with({deadline = 2.5}, 'x') end",
+        Fake::default(),
+    );
+    assert_eq!(sample.outcome, SampleOutcome::Completed(None), "{sample:?}");
+    assert_eq!(
+        host.options[0].deadline,
+        Some(std::time::Duration::from_millis(2500))
+    );
 }
 
 /// `hotpath = STAGE` reaches the host, and the capture comes back as the

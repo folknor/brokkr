@@ -681,6 +681,9 @@ switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`, `--comp
 - **Deadlines**: a caller may bound each child's wall time
   (`run_sidecar_with_deadline`, which the capture helpers pass through). Past it the child's process
   group is SIGKILLed, `stopped_by_deadline` is set, and the run fails. The
+  deadline bounds the child's whole life, a stop marker included: a child
+  still running when it passes is killed as overdue even with a stop marker
+  queued, and a stop's SIGTERM grace ends at it. The
   ratatoskr sync bench uses the script's `ceiling:`. Paths with no deadline
   run until the child
   exits or `brokkr kill`.

@@ -14,6 +14,7 @@
 //! `stop_at` call holds its child to, on the ending either host reports.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use super::lua::{Abort, CallOptions, CallOutcome, HandleRef, Word};
 use super::resources::{self, Handle};
@@ -83,6 +84,8 @@ pub(crate) struct Declared {
     pub(crate) measured: bool,
     /// Inputs prepared before launch, each with its mode, as listed.
     pub(crate) cache: Vec<(CacheMode, Handle)>,
+    /// The most the child may live, from its launch.
+    pub(crate) deadline: Option<Duration>,
     /// What the call declares of each path: what admission is asked for.
     pub(crate) access: Vec<(PathBuf, Access)>,
 }
@@ -248,6 +251,7 @@ impl Calls {
             program: options.program,
             measured: options.measured,
             cache,
+            deadline: options.deadline,
             access,
         })
     }
@@ -261,6 +265,9 @@ pub(crate) struct PreflightCall {
     pub(crate) program: String,
     pub(crate) argv: Vec<String>,
     pub(crate) env: Vec<(String, String)>,
+    /// The most the child may live, from its launch: a probe that hangs is
+    /// bounded as a bench's child is.
+    pub(crate) deadline: Option<Duration>,
 }
 
 /// Judge one call of `preflight()`: an external program only, no handle, no
@@ -313,6 +320,7 @@ pub(crate) fn declare_preflight(
         program,
         argv,
         env: options.env,
+        deadline: options.deadline,
     })
 }
 

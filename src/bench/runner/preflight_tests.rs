@@ -111,6 +111,23 @@ fn a_preflight_runs_external_programs_and_passes_by_returning_nothing() {
     assert_eq!(outcome, lua::HookOutcome::Passed);
 }
 
+/// A probe past its `deadline` is killed and refuses the preflight, as a
+/// failed `r:ok()` does, rather than reading as a script error.
+#[test]
+fn a_probe_past_its_deadline_refuses_the_preflight() {
+    let _lock = crate::test_scratch::process_global_lock();
+    let started = std::time::Instant::now();
+    let why = refused(run(
+        "function preflight()\n\
+           binary_with({program = 'sh', deadline = 0.3}, '-c', 'sleep 30 & wait')\n\
+         end\n\
+         function bench() end",
+        &lua::Args::default(),
+    ));
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    assert!(why.contains("sh passed its deadline of 300ms"), "{why}");
+}
+
 #[test]
 fn a_program_that_cannot_start_is_a_result_the_script_reads() {
     let _lock = crate::test_scratch::process_global_lock();

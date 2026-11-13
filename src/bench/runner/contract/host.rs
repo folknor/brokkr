@@ -70,14 +70,18 @@ fn preview(bytes: &[u8]) -> (Vec<u8>, bool) {
 
 /// One `preflight()` call as observed.
 fn observed_preflight(call: &policy::PreflightCall) -> Value {
-    Value::Table(vec![
+    let mut fields = vec![
         ("program".into(), Value::Text(call.program.clone())),
         (
             "argv".into(),
             Value::List(call.argv.iter().cloned().map(Value::Text).collect()),
         ),
         ("env".into(), env_table(&call.env)),
-    ])
+    ];
+    if let Some(deadline) = call.deadline {
+        fields.push(("deadline".into(), Value::Number(deadline.as_secs_f64())));
+    }
+    Value::Table(fields)
 }
 
 fn env_table(env: &[(String, String)]) -> Value {
@@ -309,6 +313,9 @@ impl VirtualIteration {
         };
         fields.push(("cold".into(), cache(crate::bench::store::CacheMode::Cold)));
         fields.push(("warm".into(), cache(crate::bench::store::CacheMode::Warm)));
+        if let Some(deadline) = declared.deadline {
+            fields.push(("deadline".into(), Value::Number(deadline.as_secs_f64())));
+        }
         for (key, value) in [
             (
                 "stdin",

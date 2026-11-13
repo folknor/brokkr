@@ -750,7 +750,9 @@ pub(crate) struct ChildOptions {
     /// How a stop marker ends the child: `None` SIGKILLs its group at once;
     /// `Some(grace)` sends one SIGTERM first and waits up to `grace` for it
     /// to exit, so a child that cancels on SIGTERM unwinds and writes what
-    /// it writes on the way out (a hotpath report) before the SIGKILL.
+    /// it writes on the way out (a hotpath report) before the SIGKILL. A
+    /// wall limit cuts the grace short, and a leader still running when it
+    /// does ends as `Ending::Deadline`, not at the marker.
     pub stop_grace: Option<Duration>,
 }
 
@@ -887,16 +889,14 @@ fn supervise_child_capped(
             Wake::Tick
         };
         if let Some(marker) = observe(wake) {
-            let stop_options = ChildOptions {
-                sigterm_grace: options.stop_grace.unwrap_or(options.sigterm_grace),
-                ..options
-            };
-            let ending = terminate_and_wait(
+            let ending = stop_at_marker(
                 &mut child,
                 isolation,
-                options.stop_grace.is_some(),
-                &stop_options,
-                Ending::StopMarker(marker),
+                &options,
+                start,
+                limit,
+                expired(),
+                marker,
             );
             child_elapsed = Some(start.elapsed());
             break ending;
@@ -940,6 +940,7 @@ fn supervise_child_capped(
                     false,
                     options.sigterm_grace,
                     options.poll_interval,
+                    None,
                 );
                 child.wait().ok();
                 child_elapsed = Some(start.elapsed());
@@ -1234,6 +1235,61 @@ fn deadline_capture_without_incomplete_output(
     Ok(capture)
 }
 
+/// End a child whose stop marker was recognised, and say how it ended.
+///
+/// The limit is a ceiling on the child's lifetime, and a marker does not
+/// discharge it. A marker recognised once the limit has passed (`expired`;
+/// the FIFO is read on ticks, so it may have been written before) keeps its
+/// phase evidence only when the leader is already gone, as an exit found
+/// after the limit stands; a leader still running past the limit is killed
+/// as overdue. A leader whose state cannot be read takes the stop's path,
+/// which kills it without a group signal. A stop with a grace
+/// (`ChildOptions::stop_grace`) has that grace end at a wall limit too,
+/// measured from the launch, so the unwinding a report needs never outlives
+/// the child's ceiling; a leader still running when the limit cuts it is
+/// overdue.
+fn stop_at_marker(
+    child: &mut std::process::Child,
+    isolation: ChildIsolation<'_>,
+    options: &ChildOptions,
+    start: Instant,
+    limit: ChildLimit,
+    expired: Option<Duration>,
+    marker: String,
+) -> Ending {
+    if let Some(duration) = expired
+        && leader_exited(child.id()) == Ok(false)
+    {
+        return terminate_and_wait(child, isolation, false, options, Ending::Deadline(duration));
+    }
+    let Some(grace) = options.stop_grace else {
+        return terminate_and_wait(child, isolation, false, options, Ending::StopMarker(marker));
+    };
+    let ceiling = match limit {
+        ChildLimit::Wall(duration) => Some((start, duration)),
+        ChildLimit::None | ChildLimit::Idle(_) => None,
+    };
+    let grace_ended = terminate_child(
+        child,
+        isolation,
+        true,
+        grace,
+        options.poll_interval,
+        ceiling,
+    );
+    let ending = match (grace_ended, limit) {
+        (Grace::Ceiling, ChildLimit::Wall(duration)) => Ending::Deadline(duration),
+        (Grace::Unknown, _) => Ending::WaitFailed(
+            "the leader's state could not be read during the stop's grace".to_owned(),
+        ),
+        _ => Ending::StopMarker(marker),
+    };
+    match child.wait() {
+        Ok(_) => ending,
+        Err(error) => Ending::WaitFailed(error.to_string()),
+    }
+}
+
 /// Terminate the child, wait for it, and report `ending` unless the wait
 /// itself failed.
 fn terminate_and_wait(
@@ -1249,6 +1305,7 @@ fn terminate_and_wait(
         forward_term,
         options.sigterm_grace,
         options.poll_interval,
+        None,
     );
     child
         .wait()
@@ -1267,14 +1324,21 @@ fn terminate_and_wait(
 /// one that left the group is out of reach; reservation-gated removal stays
 /// what keeps a lease holder's paths. When the leader's state cannot be
 /// read, no group signal is sent.
+///
+/// `ceiling`, a launch instant and the wall limit from it, cuts the grace
+/// short where it would run past the limit. The return says how the grace
+/// ended, read once more at its end so a leader exiting between two polls
+/// is not taken for one still running.
 fn terminate_child(
     child: &mut std::process::Child,
     isolation: ChildIsolation<'_>,
     forward_term: bool,
     sigterm_grace: Duration,
     poll_interval: Duration,
-) {
+    ceiling: Option<(Instant, Duration)>,
+) -> Grace {
     let pid = child.id();
+    let mut ended = Grace::Elapsed;
     if forward_term {
         if isolation.is_process_group() {
             crate::process::signal_process_group(pid, libc::SIGTERM).ok();
@@ -1282,21 +1346,61 @@ fn terminate_child(
             crate::process::signal_pid(pid, libc::SIGTERM).ok();
         }
         let term_sent = Instant::now();
-        while term_sent.elapsed() < sigterm_grace {
-            match leader_exited(pid) {
-                Ok(true) => break,
-                Ok(false) => std::thread::sleep(poll_interval),
-                Err(()) => {
-                    child.kill().ok();
-                    return;
+        // Which bound ends the grace is settled once, at the SIGTERM, before
+        // a late wake could saturate both to zero and lose their order.
+        let (bound, at_ceiling) = match ceiling {
+            Some((start, limit)) => {
+                let room = limit.saturating_sub(term_sent.saturating_duration_since(start));
+                if room <= sigterm_grace {
+                    (room, true)
+                } else {
+                    (sigterm_grace, false)
                 }
             }
+            None => (sigterm_grace, false),
+        };
+        let left = || (bound.saturating_sub(term_sent.elapsed()), at_ceiling);
+        loop {
+            match leader_exited(pid) {
+                Ok(true) => {
+                    ended = Grace::Exited;
+                    break;
+                }
+                Ok(false) => {}
+                Err(()) => {
+                    child.kill().ok();
+                    return Grace::Unknown;
+                }
+            }
+            let (room, at_ceiling) = left();
+            if room.is_zero() {
+                if at_ceiling {
+                    ended = Grace::Ceiling;
+                }
+                break;
+            }
+            std::thread::sleep(poll_interval.min(room));
         }
     }
     if isolation.is_process_group() {
         crate::process::signal_process_group(pid, libc::SIGKILL).ok();
     }
     child.kill().ok();
+    ended
+}
+
+/// How a stop's SIGTERM grace ended (`terminate_child`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Grace {
+    /// The leader exited inside it.
+    Exited,
+    /// It ran out, or there was none.
+    Elapsed,
+    /// The wall limit cut it short with the leader still running.
+    Ceiling,
+    /// The leader's state could not be read; it was killed without a group
+    /// signal.
+    Unknown,
 }
 
 /// Whether the child `pid` has exited, observed with `WNOWAIT` so it stays
@@ -1738,6 +1842,39 @@ mod tests {
             elapsed < Duration::from_secs(5),
             "deadline kill took too long: {elapsed:?}"
         );
+    }
+
+    /// A stop marker first recognised after the wall limit, with the child
+    /// still running, does not discharge the limit: the child is overdue.
+    #[test]
+    fn a_marker_recognised_past_the_limit_leaves_a_live_child_overdue() {
+        let start = Instant::now();
+        let child = spawn_captured(
+            "/bin/sleep",
+            &["30"],
+            cwd(),
+            &[],
+            ChildIsolation::Inherit,
+            SpawnProfile::Plain,
+        )
+        .unwrap();
+        let limit = Duration::from_millis(200);
+        let run = supervise_child_capped(
+            child,
+            "sleep",
+            start,
+            ChildLimit::Wall(limit),
+            ChildIsolation::Inherit,
+            ChildOptions::DEFAULT,
+            |_| {
+                // Hold the tick past the limit, then hand over a marker, as
+                // a late FIFO read would.
+                std::thread::sleep(Duration::from_millis(300));
+                Some("M".to_owned())
+            },
+        );
+        assert_eq!(run.ending, Ending::Deadline(limit));
+        assert!(start.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
