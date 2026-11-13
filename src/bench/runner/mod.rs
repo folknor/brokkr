@@ -334,6 +334,18 @@ fn find<'a>(benches: &'a BTreeMap<String, Bench>, name: &str) -> Result<&'a Benc
 
 /// What the invocation measures: `--hotpath` (`--alloc`) only for a bench
 /// that names the features instrumenting its build for it.
+///
+/// That is the only up-front refusal of a profiled run. The mode is never
+/// shown to a script, not even to `validate()`: a profile and a timing must
+/// describe the same workload, and whether a bench's workload is profilable
+/// is usually known only to the built program (pbfhogg's library harness
+/// says so in its describe document), which `validate()` and `preflight()`
+/// cannot run. A mode-reading `validate()` would make the script duplicate
+/// that declaration, and a refusal after the build (a post-build hook, or a
+/// builtin aborting the iteration once the script knows) saves only one
+/// iteration per arm on an operator error that already fails safely:
+/// `host::profile_failure` fails the first iteration that marked no call,
+/// the arm stops there, and a failed run never pairs.
 fn measurement_of(args: &BenchArgs, bench: &Bench) -> Result<store::Measurement, DevError> {
     let (measurement, key) = match (args.hotpath, args.alloc) {
         (false, false) => return Ok(store::Measurement::Timing),
