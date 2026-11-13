@@ -1290,6 +1290,18 @@ impl Attempt<'_> {
 
     /// Every iteration, stopping at the first that does not complete, and
     /// the run's outcome from them.
+    ///
+    /// Nothing here re-verifies, between iterations, what the arm holds
+    /// fixed, and nothing needs to: the script, bench_lib, args and config
+    /// are in-memory values each iteration copies from; `program` is one
+    /// content-addressed snapshot nothing in brokkr writes after publication,
+    /// and `brokkr clean`, its only remover, waits on the global lock this
+    /// run holds; bound inputs sit under the run-level read hold. A re-digest
+    /// per launch, a read-only snapshot or a final input digest would guard
+    /// only against ungated outside writers, which the guarantee disclaims.
+    /// Nor does the arm compare what scripts record across iterations: an
+    /// identity a harness reports about its own choices is the harness's to
+    /// keep deterministic, or to bind as a param.
     fn iterate(
         &self,
         program: &Path,
