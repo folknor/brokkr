@@ -612,7 +612,6 @@ impl BenchHarness {
     where
         F: Fn() -> Result<(), DevError>,
     {
-        invocation.require_no_env("the external runner")?;
         let config = config_for(config, invocation);
         let mut measurement =
             self.measure_invocation(&config, invocation, cwd, exits, source, prepare)?;

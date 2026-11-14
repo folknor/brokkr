@@ -96,7 +96,6 @@ impl std::fmt::Debug for ResolvedExecutable {
 pub(crate) struct Invocation<'a> {
     program: &'a Path,
     args: Vec<String>,
-    env: Vec<(String, String)>,
     /// What each launch reserves (`crate::reservations`); `None` runs the
     /// argv as given.
     spec: Option<crate::reservations::LaunchSpec>,
@@ -107,7 +106,6 @@ impl<'a> Invocation<'a> {
         Self {
             program,
             args,
-            env: Vec::new(),
             spec: None,
         }
     }
@@ -185,16 +183,7 @@ impl<'a> Invocation<'a> {
         let program = self.program_string();
         let launched = self.launch(cwd)?;
         let args = launched.arg_refs();
-        let captured = if self.env.is_empty() {
-            output::run_captured(&program, &args, cwd)
-        } else {
-            let env: Vec<(&str, &str)> = self
-                .env
-                .iter()
-                .map(|(k, v)| (k.as_str(), v.as_str()))
-                .collect();
-            output::run_captured_with_env(&program, &args, cwd, &env)
-        };
+        let captured = output::run_captured(&program, &args, cwd);
         // The child has been reaped (or never spawned); a lease it left held
         // is this run's failure even when the run itself succeeded.
         let finished = launched.finish();
@@ -228,18 +217,6 @@ impl<'a> Invocation<'a> {
 
     pub(in crate::measure) fn program_string(&self) -> String {
         self.program.display().to_string()
-    }
-
-    /// Refuse to run this invocation on a path that cannot pass its
-    /// environment, rather than silently running a different command.
-    pub(in crate::measure) fn require_no_env(&self, path: &str) -> Result<(), DevError> {
-        if self.env.is_empty() {
-            Ok(())
-        } else {
-            Err(DevError::Internal(format!(
-                "{path} cannot pass an invocation's environment; run it with capture_in"
-            )))
-        }
     }
 
     pub(in crate::measure) fn arg_refs(&self) -> Vec<&str> {

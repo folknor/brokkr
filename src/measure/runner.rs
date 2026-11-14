@@ -414,7 +414,6 @@ pub(crate) fn execute_cell(
     hooks: &CellHooks<'_>,
 ) -> Result<(), DevError> {
     let invocation = cell.invocation;
-    invocation.require_no_env("the measure runner")?;
     let binary = invocation.program();
     let program = invocation.program_string();
     let mut config = cell.config.clone();
